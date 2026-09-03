@@ -14,6 +14,13 @@ use super::config::{
     probability, token_ids,
 };
 
+mod model;
+
+pub use model::{
+    T5Attention, T5Block, T5ForConditionalGeneration, T5LayerCrossAttention, T5LayerFeedForward,
+    T5LayerSelfAttention, T5Stack,
+};
+
 /// Feed-forward projection layout and activation stored by T5 checkpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum T5FeedForwardProjection {
@@ -23,10 +30,10 @@ pub enum T5FeedForwardProjection {
     /// Single GELU branch supported by compatible T5 checkpoints.
     #[serde(rename = "gelu")]
     Gelu,
-    /// Two input projections multiplied after GELU activation (GEGLU).
+    /// Two input projections using T5's historical `gelu_new` approximation.
     #[serde(rename = "gated-gelu")]
     GatedGelu,
-    /// GEGLU using the historical `gelu_new` approximation.
+    /// Explicit gated-`gelu_new` spelling used by compatible custom configs.
     #[serde(rename = "gated-gelu_new")]
     GatedGeluNew,
     /// Two input projections multiplied after SiLU, as used by UL2.
@@ -44,8 +51,8 @@ impl T5FeedForwardProjection {
     pub fn activation(self) -> &'static str {
         match self {
             Self::Relu => "relu",
-            Self::Gelu | Self::GatedGelu => "gelu",
-            Self::GatedGeluNew => "gelu_new",
+            Self::Gelu => "gelu",
+            Self::GatedGelu | Self::GatedGeluNew => "gelu_new",
             Self::GatedSilu => "silu",
         }
     }
@@ -96,7 +103,10 @@ pub struct T5Config {
     pub is_encoder_decoder: bool,
     /// Whether autoregressive decoder attention returns/accepts a KV cache.
     pub use_cache: bool,
-    /// Legacy flag controlling decoder-output scaling in released T5 checkpoints.
+    /// Whether the vocabulary head shares the embedding and uses T5 output scaling.
+    ///
+    /// Original T5 sets this to true. T5 v1.1, FLAN, and UL2 checkpoints set it
+    /// to false and store an independent `lm_head.weight`.
     pub tie_word_embeddings: bool,
     /// First decoder token, conventionally the padding token zero.
     pub decoder_start_token_id: Option<usize>,
@@ -153,7 +163,7 @@ impl T5Config {
 
     /// Returns the projected Q/K/V width `num_heads * d_kv`.
     pub fn attention_inner_dim(&self) -> usize {
-        self.num_heads * self.d_kv
+        self.num_heads.saturating_mul(self.d_kv)
     }
 }
 
@@ -181,6 +191,13 @@ impl Validate for T5Config {
         ] {
             nonzero(FAMILY, field, value)?;
         }
+        if self.relative_attention_num_buckets < 4 {
+            return Err(ConfigError::new(
+                FAMILY,
+                "relative_attention_num_buckets",
+                "must contain at least four buckets for bidirectional encoder attention",
+            ));
+        }
         if !self.relative_attention_num_buckets.is_multiple_of(2) {
             return Err(ConfigError::new(
                 FAMILY,
@@ -202,6 +219,32 @@ impl Validate for T5Config {
                 "is_encoder_decoder",
                 "must be true because T5 decoder blocks contain cross-attention",
             ));
+        }
+        let attention_inner_dim = self.num_heads.checked_mul(self.d_kv);
+        for (field, product) in [
+            ("attention_inner_dim", attention_inner_dim),
+            (
+                "attention_projection_elements",
+                attention_inner_dim.and_then(|inner| inner.checked_mul(self.d_model)),
+            ),
+            (
+                "embedding_elements",
+                self.vocab_size.checked_mul(self.d_model),
+            ),
+            ("feed_forward_elements", self.d_model.checked_mul(self.d_ff)),
+            (
+                "relative_attention_bias_elements",
+                self.relative_attention_num_buckets
+                    .checked_mul(self.num_heads),
+            ),
+        ] {
+            if product.is_none() {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    field,
+                    "dimension product overflows usize",
+                ));
+            }
         }
         positive_finite(FAMILY, "layer_norm_epsilon", self.layer_norm_epsilon)?;
         positive_finite(FAMILY, "initializer_factor", self.initializer_factor)?;
@@ -297,5 +340,52 @@ mod tests {
             ..T5Config::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn gated_gelu_uses_t5s_historical_gelu_new_activation() {
+        assert_eq!(T5FeedForwardProjection::GatedGelu.activation(), "gelu_new");
+        let config = T5Config {
+            feed_forward_proj: T5FeedForwardProjection::GatedGelu,
+            dense_act_fn: Some("gelu_new".into()),
+            is_gated_act: Some(true),
+            ..T5Config::default()
+        };
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn allocation_products_are_checked_before_backend_initialization() {
+        let attention_overflow = T5Config {
+            d_model: usize::MAX,
+            d_kv: 2,
+            d_ff: 1,
+            vocab_size: 1,
+            num_heads: 1,
+            ..T5Config::default()
+        };
+        assert!(
+            attention_overflow
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("attention_projection_elements")
+        );
+
+        let bias_overflow = T5Config {
+            d_model: 1,
+            d_kv: 1,
+            d_ff: 1,
+            vocab_size: 1,
+            num_heads: usize::MAX,
+            ..T5Config::default()
+        };
+        assert!(
+            bias_overflow
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("relative_attention_bias_elements")
+        );
     }
 }

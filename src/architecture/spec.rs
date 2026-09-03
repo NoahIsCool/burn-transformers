@@ -11,6 +11,8 @@ use crate::{Error, Result};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Activation {
+    /// Rectified linear unit `max(0, x)`, used by original T5 feed-forwards.
+    Relu,
     /// The SiLU function `x * sigmoid(x)` used by SwiGLU.
     Silu,
     /// The exact Gaussian error linear unit.

@@ -111,7 +111,11 @@ impl<B: Backend> RmsNorm<B> {
 
 #[cfg(test)]
 mod tests {
-    use burn::{backend::Flex, tensor::Tensor};
+    use burn::{
+        backend::Flex,
+        module::Param,
+        tensor::{Tensor, TensorData, Tolerance},
+    };
 
     use super::RmsNormConfig;
 
@@ -158,6 +162,23 @@ mod tests {
         let input = Tensor::<Flex, 2>::ones([2, 4], (&device, DType::F16));
         let output = norm.forward(input);
         assert_eq!(output.dtype(), DType::F16);
+    }
+
+    /// T5 normalization divides by RMS without subtracting the feature mean.
+    #[test]
+    fn t5_scale_only_norm_matches_closed_form() {
+        let device = Default::default();
+        let mut norm = RmsNormConfig::new(2)
+            .with_epsilon(1e-6)
+            .init::<Flex>(&device)
+            .expect("valid T5 norm");
+        norm.weight = Param::from_tensor(Tensor::from_floats([2.0, 0.5], &device));
+        let input = Tensor::<Flex, 2>::from_floats([[3.0, 4.0]], &device);
+        let denominator = (12.5_f32 + 1e-6).sqrt();
+        norm.forward(input).into_data().assert_approx_eq::<f32>(
+            &TensorData::from([[6.0 / denominator, 2.0 / denominator]]),
+            Tolerance::absolute(1e-6),
+        );
     }
 
     /// Invalid dimensions fail before an initializer reaches the backend.

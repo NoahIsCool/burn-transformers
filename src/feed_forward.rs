@@ -1,9 +1,9 @@
-//! Dense gated feed-forward blocks shared by transformer families.
+//! Dense and gated feed-forward blocks shared by transformer families.
 //!
-//! A gated MLP computes `down(phi(gate(x)) * up(x))`. Unlike an ordinary
-//! two-layer MLP, the second input projection acts as a multiplicative content
-//! path. SwiGLU chooses `phi = SiLU`; T5 and Nemotron checkpoints select other
-//! activations while retaining the same projection topology.
+//! A dense MLP computes `down(phi(up(x)))`, while a gated MLP computes
+//! `down(phi(gate(x)) * up(x))`. The second gated input projection acts as a
+//! multiplicative content path. SwiGLU chooses `phi = SiLU`; T5 checkpoints use
+//! either a dense ReLU path or gated GELU/SiLU variants.
 
 use burn::{
     module::Module,
@@ -12,6 +12,85 @@ use burn::{
 };
 
 use crate::{Error, Result, architecture::Activation};
+
+/// Configuration for an ordinary two-projection transformer feed-forward block.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DenseFeedForwardConfig {
+    /// Residual-stream width accepted and returned by the block.
+    pub hidden_size: usize,
+    /// Width of the intermediate activation.
+    pub intermediate_size: usize,
+    /// Nonlinearity applied between the two projections.
+    pub activation: Activation,
+    /// Whether both projections have learned additive biases.
+    pub bias: bool,
+}
+
+impl DenseFeedForwardConfig {
+    /// Creates a bias-free dense ReLU block matching original T5.
+    pub fn new(hidden_size: usize, intermediate_size: usize) -> Self {
+        Self {
+            hidden_size,
+            intermediate_size,
+            activation: Activation::Relu,
+            bias: false,
+        }
+    }
+
+    /// Selects the nonlinearity between the input and output projections.
+    pub fn with_activation(mut self, activation: Activation) -> Self {
+        self.activation = activation;
+        self
+    }
+
+    /// Enables or disables projection biases.
+    pub fn with_bias(mut self, bias: bool) -> Self {
+        self.bias = bias;
+        self
+    }
+
+    /// Validates projection extents before parameter allocation.
+    pub fn validate(&self) -> Result<()> {
+        validate_projection_widths(self.hidden_size, self.intermediate_size)
+    }
+
+    /// Initializes checkpoint-native `[out, in]` projection records.
+    pub fn init<B: Backend>(&self, device: &B::Device) -> Result<DenseFeedForward<B>> {
+        self.validate()?;
+        Ok(DenseFeedForward {
+            up_proj: LinearConfig::new(self.hidden_size, self.intermediate_size)
+                .with_bias(self.bias)
+                .with_layout(LinearLayout::Col)
+                .init(device),
+            down_proj: LinearConfig::new(self.intermediate_size, self.hidden_size)
+                .with_bias(self.bias)
+                .with_layout(LinearLayout::Col)
+                .init(device),
+            activation: self.activation,
+        })
+    }
+}
+
+/// Trainable ordinary transformer feed-forward block.
+#[derive(Module, Debug)]
+pub struct DenseFeedForward<B: Backend> {
+    /// Projection from the residual stream into intermediate channels.
+    pub up_proj: Linear<B>,
+    /// Projection from intermediate channels back into the residual stream.
+    pub down_proj: Linear<B>,
+    /// Nonlinearity applied to the intermediate tensor.
+    pub activation: Activation,
+}
+
+impl<B: Backend> DenseFeedForward<B> {
+    /// Evaluates `down(activation(up(input)))` over an arbitrary leading shape.
+    pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
+        self.down_proj.forward(apply_activation(
+            self.up_proj.forward(input),
+            self.activation,
+        ))
+    }
+}
 
 /// Configuration for a checkpoint-oriented gated feed-forward block.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -51,19 +130,7 @@ impl GatedFeedForwardConfig {
 
     /// Validates all projection extents before parameter allocation.
     pub fn validate(&self) -> Result<()> {
-        if self.hidden_size == 0 {
-            return Err(Error::configuration(
-                "feed_forward.hidden_size",
-                "must be non-zero",
-            ));
-        }
-        if self.intermediate_size == 0 {
-            return Err(Error::configuration(
-                "feed_forward.intermediate_size",
-                "must be non-zero",
-            ));
-        }
-        Ok(())
+        validate_projection_widths(self.hidden_size, self.intermediate_size)
     }
 
     /// Initializes three Burn linear maps using checkpoint-native `[out, in]` storage.
@@ -111,6 +178,7 @@ pub fn apply_activation<B: Backend, const D: usize>(
     activation_kind: Activation,
 ) -> Tensor<B, D> {
     match activation_kind {
+        Activation::Relu => activation::relu(input),
         Activation::Silu => activation::silu(input),
         Activation::Gelu => activation::gelu(input),
         Activation::GeluTanh => {
@@ -122,19 +190,39 @@ pub fn apply_activation<B: Backend, const D: usize>(
     }
 }
 
+/// Checks dimensions shared by dense and gated feed-forward layouts.
+fn validate_projection_widths(hidden_size: usize, intermediate_size: usize) -> Result<()> {
+    if hidden_size == 0 {
+        return Err(Error::configuration(
+            "feed_forward.hidden_size",
+            "must be non-zero",
+        ));
+    }
+    if intermediate_size == 0 {
+        return Err(Error::configuration(
+            "feed_forward.intermediate_size",
+            "must be non-zero",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use burn::{backend::Flex, tensor::Tensor};
 
     use crate::architecture::Activation;
 
-    use super::{GatedFeedForwardConfig, apply_activation};
+    use burn::{module::Param, tensor::TensorData};
+
+    use super::{DenseFeedForwardConfig, GatedFeedForwardConfig, apply_activation};
 
     /// Every activation preserves shape and finite values on representative inputs.
     #[test]
     fn activations_are_finite_and_shape_preserving() {
         let device = Default::default();
         for activation in [
+            Activation::Relu,
             Activation::Silu,
             Activation::Gelu,
             Activation::GeluTanh,
@@ -171,6 +259,11 @@ mod tests {
     /// Gated MLP configuration rejects zero-width projections before initialization.
     #[test]
     fn invalid_projection_width_is_rejected() {
+        let error = DenseFeedForwardConfig::new(0, 8)
+            .validate()
+            .expect_err("zero residual width must fail");
+        assert!(error.to_string().contains("hidden_size"));
+
         let error = GatedFeedForwardConfig::new(8, 0)
             .validate()
             .expect_err("zero intermediate width must fail");
@@ -186,5 +279,24 @@ mod tests {
             .expect("valid block should initialize");
         let output = module.forward(Tensor::<Flex, 3>::zeros([2, 3, 4], &device));
         assert_eq!(output.dims(), [2, 3, 4]);
+    }
+
+    /// Dense ReLU uses one input branch and zeros negative activations exactly.
+    #[test]
+    fn dense_relu_matches_two_projection_definition() {
+        let device = Default::default();
+        let mut module = DenseFeedForwardConfig::new(2, 2)
+            .init::<Flex>(&device)
+            .expect("valid dense block");
+        module.up_proj.weight = Param::from_tensor(Tensor::eye(2, &device));
+        module.down_proj.weight = Param::from_tensor(Tensor::eye(2, &device));
+
+        let output = module
+            .forward(Tensor::<Flex, 2>::from_floats([[-2.0, 3.0]], &device))
+            .into_data();
+        output.assert_approx_eq::<f32>(
+            &TensorData::from([[0.0, 3.0]]),
+            burn::tensor::Tolerance::absolute(1e-6),
+        );
     }
 }
