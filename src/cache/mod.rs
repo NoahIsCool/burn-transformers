@@ -32,7 +32,7 @@ pub use ring::{
 pub use state::{DecodeState, DecodeStateError, LengthTransition};
 pub use tensor::{
     KvCacheRead, KvCacheReadSegment, KvCacheStorage, NativeKvCache, NativeKvCacheSpec,
-    RecurrentStateCache, RecurrentStateSpec, TensorCacheBank, TensorCacheError, TensorCacheMark,
-    TensorCacheResult, TensorDecodeState,
+    RecurrentBatchStateRead, RecurrentStateCache, RecurrentStateRead, RecurrentStateSpec,
+    TensorCacheBank, TensorCacheError, TensorCacheMark, TensorCacheResult, TensorDecodeState,
 };
 pub use transaction::{CacheMark, TransactionError, TransactionalCache};

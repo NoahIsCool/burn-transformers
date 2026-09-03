@@ -13,10 +13,11 @@ use core::ops::Range;
 use burn::tensor::{DType, Int, Tensor, TensorData, backend::Backend};
 
 use crate::cache::{
-    CacheConfig, plan_mirrored_ring_read, plan_mirrored_ring_write, plan_ring_read,
-    plan_ring_write, plan_staged_ring_transaction,
+    CacheConfig, DecodeStateError, plan_mirrored_ring_read, plan_mirrored_ring_write,
+    plan_ring_read, plan_ring_write, plan_staged_ring_transaction,
 };
 
+use super::allocation::{validate_repeated_allocation, validate_tensor_shape};
 use super::{TensorCacheError, TensorCacheResult};
 
 /// Physical time-axis strategy used by a native key/value cache.
@@ -157,7 +158,7 @@ impl<B: Backend> KvCacheReadSegment<B> {
     }
 }
 
-/// Chronological native-KV read, possibly split at one ring boundary.
+/// Chronological native-KV read split across committed and staged storage.
 #[derive(Debug, Clone)]
 pub struct KvCacheRead<B: Backend> {
     retained_positions: Range<usize>,
@@ -171,7 +172,10 @@ impl<B: Backend> KvCacheRead<B> {
         self.retained_positions.clone()
     }
 
-    /// Returns zero, one, or two chronological tensor segments.
+    /// Returns chronological tensor segments.
+    ///
+    /// A committed standard ring contributes at most two segments and an
+    /// active proposal contributes one more linear staging segment.
     #[must_use]
     pub fn segments(&self) -> &[KvCacheReadSegment<B>] {
         &self.segments
@@ -216,6 +220,29 @@ struct KvLayer<B: Backend> {
     staged_values: Option<Tensor<B, 4>>,
 }
 
+/// Fully validated physical writes for one sequence's accepted prefix.
+#[derive(Debug)]
+struct KvSequenceCommitPlan {
+    segments: Vec<KvCommitSegment>,
+}
+
+/// One staging interval and its one or two committed destinations.
+#[derive(Debug)]
+struct KvCommitSegment {
+    input: Range<usize>,
+    destinations: Vec<Range<usize>>,
+}
+
+/// Opaque, prevalidated commit capability consumed by the cache coordinator.
+///
+/// Construction checks every logical count, layer staging length, and ring
+/// index before any committed tensor is mutated. Its private fields prevent a
+/// caller from fabricating a partially valid commit.
+#[derive(Debug)]
+pub(super) struct KvCommitPlan {
+    sequences: Vec<KvSequenceCommitPlan>,
+}
+
 /// Preallocated native key/value cache for one homogeneous layer group.
 ///
 /// This type contains runtime state and intentionally does not implement
@@ -254,6 +281,48 @@ impl<B: Backend> NativeKvCache<B> {
             });
         }
         let committed_time_slots = committed_time_slots(config, spec.storage())?;
+        let committed_shape = [
+            batch_size,
+            spec.key_value_heads(),
+            committed_time_slots,
+            spec.head_dimension(),
+        ];
+        let committed_elements =
+            validate_tensor_shape("committed KV tensor", &committed_shape, spec.dtype())?;
+        validate_repeated_allocation(
+            "committed KV keys",
+            committed_elements,
+            spec.layers(),
+            spec.dtype(),
+        )?;
+        validate_repeated_allocation(
+            "committed KV values",
+            committed_elements,
+            spec.layers(),
+            spec.dtype(),
+        )?;
+        if spec.staging_capacity() > 0 {
+            let staging_shape = [
+                batch_size,
+                spec.key_value_heads(),
+                spec.staging_capacity(),
+                spec.head_dimension(),
+            ];
+            let staging_elements =
+                validate_tensor_shape("staged KV tensor", &staging_shape, spec.dtype())?;
+            validate_repeated_allocation(
+                "staged KV keys",
+                staging_elements,
+                spec.layers(),
+                spec.dtype(),
+            )?;
+            validate_repeated_allocation(
+                "staged KV values",
+                staging_elements,
+                spec.layers(),
+                spec.dtype(),
+            )?;
+        }
         let layers = B::memory_persistent_allocations(
             device,
             (spec, batch_size, committed_time_slots, device.clone()),
@@ -272,14 +341,8 @@ impl<B: Backend> NativeKvCache<B> {
                 ];
                 (0..spec.layers())
                     .map(|_| KvLayer {
-                        keys: Tensor::zeros(
-                            committed_shape,
-                            (&allocation_device, spec.dtype()),
-                        ),
-                        values: Tensor::zeros(
-                            committed_shape,
-                            (&allocation_device, spec.dtype()),
-                        ),
+                        keys: Tensor::zeros(committed_shape, (&allocation_device, spec.dtype())),
+                        values: Tensor::zeros(committed_shape, (&allocation_device, spec.dtype())),
                         staged_keys: (spec.staging_capacity() > 0).then(|| {
                             Tensor::zeros(staging_shape, (&allocation_device, spec.dtype()))
                         }),
@@ -453,6 +516,101 @@ impl<B: Backend> NativeKvCache<B> {
         }
     }
 
+    /// Reads committed history followed by the physically staged proposal.
+    ///
+    /// `committed_length` is the stable transaction baseline for this row. For
+    /// a window `W` and staged suffix `P`, the visible interval is
+    /// `[max(0, committed_length + P - W), committed_length + P)`. The method
+    /// trims older committed ring entries before appending the linear staging
+    /// segment, so iterative drafting observes every earlier proposal token.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid indices, capacity overflow, or inconsistent
+    /// staging allocation. Outside a transaction this is identical to
+    /// [`read_sequence`](Self::read_sequence).
+    pub fn read_working_sequence(
+        &self,
+        layer: usize,
+        sequence: usize,
+        committed_length: usize,
+    ) -> TensorCacheResult<KvCacheRead<B>> {
+        let cache_layer = self.layer(layer)?;
+        validate_sequence(sequence, self.config.sequence_count())?;
+        let staged = self.staged_lengths[layer][sequence];
+        if !self.staging_active || staged == 0 {
+            return self.read_sequence(layer, sequence, committed_length);
+        }
+        let working_length = validate_write_end(committed_length, staged, self.config.capacity())?;
+        let (committed_keep, staged_start, retained_start) = match self.spec.storage() {
+            KvCacheStorage::Full => (committed_length, 0, 0),
+            KvCacheStorage::SlidingRing | KvCacheStorage::MirroredSlidingRing => {
+                let window = self.window()?.get();
+                let staged_keep = staged.min(window);
+                let committed_keep = committed_length.min(window - staged_keep);
+                (
+                    committed_keep,
+                    staged - staged_keep,
+                    working_length - committed_keep - staged_keep,
+                )
+            }
+        };
+
+        let mut segments = Vec::with_capacity(3);
+        if committed_keep > 0 {
+            let absolute_start = committed_length - committed_keep;
+            match self.spec.storage() {
+                KvCacheStorage::Full => segments.push(read_segment(
+                    cache_layer,
+                    sequence,
+                    absolute_start..committed_length,
+                    absolute_start..committed_length,
+                    self.spec,
+                )),
+                KvCacheStorage::SlidingRing => {
+                    let keep = NonZeroUsize::new(committed_keep)
+                        .expect("committed_keep was checked as non-zero");
+                    let window = self.window()?;
+                    let plan = plan_ring_read(committed_length, keep, window)?;
+                    segments.extend(plan.segments().iter().map(|segment| {
+                        read_segment(
+                            cache_layer,
+                            sequence,
+                            segment.absolute(),
+                            segment.physical(),
+                            self.spec,
+                        )
+                    }));
+                }
+                KvCacheStorage::MirroredSlidingRing => {
+                    let window = self.window()?.get();
+                    let physical_start = absolute_start % window;
+                    segments.push(read_segment(
+                        cache_layer,
+                        sequence,
+                        absolute_start..committed_length,
+                        physical_start..physical_start + committed_keep,
+                        self.spec,
+                    ));
+                }
+            }
+        }
+        let staged_kept = staged - staged_start;
+        if staged_kept > 0 {
+            segments.push(read_staged_segment(
+                cache_layer,
+                sequence,
+                committed_length + staged_start..working_length,
+                staged_start..staged,
+                self.spec,
+            )?);
+        }
+        Ok(KvCacheRead {
+            retained_positions: retained_start..working_length,
+            segments,
+        })
+    }
+
     /// Appends one sequence's proposal values to preallocated staging storage.
     ///
     /// Staging uses linear proposal offsets independent of ring slots. This is
@@ -590,16 +748,17 @@ impl<B: Backend> NativeKvCache<B> {
         Ok(())
     }
 
-    /// Checks a staged proposal and accepted prefix without mutating tensors.
-    pub(crate) fn validate_staging_commit(
+    /// Builds an opaque commit plan after validating every layer and row.
+    pub(super) fn prepare_staging_commit(
         &self,
         baseline: &[usize],
         proposed: &[usize],
         accepted: &[usize],
-    ) -> TensorCacheResult<()> {
+    ) -> TensorCacheResult<KvCommitPlan> {
         if !self.staging_active {
             return Err(TensorCacheError::TransactionNotActive);
         }
+        validate_commit_vector_lengths(self.config.sequence_count(), baseline, proposed, accepted)?;
         for layer in 0..self.spec.layers() {
             for sequence in 0..self.config.sequence_count() {
                 let actual = self.staged_lengths[layer][sequence];
@@ -612,7 +771,6 @@ impl<B: Backend> NativeKvCache<B> {
                         actual,
                     });
                 }
-                let staging = plan_staged_ring_transaction(baseline[sequence], actual)?;
                 if accepted[sequence] > proposed[sequence] {
                     return Err(TensorCacheError::AcceptedPrefixExceedsProposal {
                         sequence,
@@ -620,78 +778,102 @@ impl<B: Backend> NativeKvCache<B> {
                         proposed: proposed[sequence],
                     });
                 }
-                match self.spec.storage() {
-                    KvCacheStorage::Full => {
-                        validate_write_end(
-                            baseline[sequence],
-                            accepted[sequence],
-                            self.config.capacity(),
-                        )?;
-                    }
-                    KvCacheStorage::SlidingRing => {
-                        staging.commit_prefix(accepted[sequence], self.window()?)?;
-                    }
-                    KvCacheStorage::MirroredSlidingRing => {
-                        staging.commit_prefix(accepted[sequence], self.window()?)?;
-                        plan_mirrored_ring_write(
-                            baseline[sequence],
-                            accepted[sequence],
-                            self.window()?,
-                        )?;
-                    }
-                }
             }
         }
-        Ok(())
+
+        let mut sequences = Vec::with_capacity(self.config.sequence_count());
+        for sequence in 0..self.config.sequence_count() {
+            let count = accepted[sequence];
+            let staging = plan_staged_ring_transaction(baseline[sequence], proposed[sequence])?;
+            let segments = match self.spec.storage() {
+                KvCacheStorage::Full => {
+                    let end =
+                        validate_write_end(baseline[sequence], count, self.config.capacity())?;
+                    (count > 0)
+                        .then(|| KvCommitSegment {
+                            input: 0..count,
+                            destinations: core::iter::once(baseline[sequence]..end).collect(),
+                        })
+                        .into_iter()
+                        .collect()
+                }
+                KvCacheStorage::SlidingRing => staging
+                    .commit_prefix(count, self.window()?)?
+                    .segments()
+                    .iter()
+                    .map(|segment| KvCommitSegment {
+                        input: segment.input(),
+                        destinations: core::iter::once(segment.physical()).collect(),
+                    })
+                    .collect(),
+                KvCacheStorage::MirroredSlidingRing => {
+                    staging.commit_prefix(count, self.window()?)?;
+                    plan_mirrored_ring_write(baseline[sequence], count, self.window()?)?
+                        .iter()
+                        .map(|segment| KvCommitSegment {
+                            input: segment.input(),
+                            destinations: vec![segment.primary(), segment.mirror()],
+                        })
+                        .collect()
+                }
+            };
+            sequences.push(KvSequenceCommitPlan { segments });
+        }
+        Ok(KvCommitPlan { sequences })
     }
 
-    /// Copies each accepted staging prefix into committed storage.
-    pub(crate) fn commit_staging(
-        &mut self,
-        baseline: &[usize],
-        accepted: &[usize],
-    ) -> TensorCacheResult<()> {
+    /// Applies a previously validated plan without any fallible index planning.
+    pub(super) fn apply_staging_commit(&mut self, plan: KvCommitPlan) {
+        let spec = self.spec;
         for layer_index in 0..self.spec.layers() {
-            for sequence in 0..self.config.sequence_count() {
-                let count = accepted[sequence];
-                if count == 0 {
-                    continue;
+            for (sequence, sequence_plan) in plan.sequences.iter().enumerate() {
+                for segment in &sequence_plan.segments {
+                    let layer = &self.layers[layer_index];
+                    let staged_keys = layer
+                        .staged_keys
+                        .as_ref()
+                        .expect("commit plan requires allocated KV staging")
+                        .clone()
+                        .slice([
+                            sequence..sequence + 1,
+                            0..spec.key_value_heads(),
+                            segment.input.clone(),
+                            0..spec.head_dimension(),
+                        ]);
+                    let staged_values = layer
+                        .staged_values
+                        .as_ref()
+                        .expect("commit plan requires allocated KV staging")
+                        .clone()
+                        .slice([
+                            sequence..sequence + 1,
+                            0..spec.key_value_heads(),
+                            segment.input.clone(),
+                            0..spec.head_dimension(),
+                        ]);
+                    let layer = &mut self.layers[layer_index];
+                    for destination in &segment.destinations {
+                        assign_segment(
+                            &mut layer.keys,
+                            &staged_keys,
+                            sequence,
+                            0..segment.input.len(),
+                            destination.clone(),
+                            spec,
+                        );
+                        assign_segment(
+                            &mut layer.values,
+                            &staged_values,
+                            sequence,
+                            0..segment.input.len(),
+                            destination.clone(),
+                            spec,
+                        );
+                    }
                 }
-                let layer = self.layer(layer_index)?;
-                let staged_keys = layer
-                    .staged_keys
-                    .as_ref()
-                    .ok_or(TensorCacheError::StagingDisabled)?
-                    .clone()
-                    .slice([
-                        sequence..sequence + 1,
-                        0..self.spec.key_value_heads(),
-                        0..count,
-                        0..self.spec.head_dimension(),
-                    ]);
-                let staged_values = layer
-                    .staged_values
-                    .as_ref()
-                    .ok_or(TensorCacheError::StagingDisabled)?
-                    .clone()
-                    .slice([
-                        sequence..sequence + 1,
-                        0..self.spec.key_value_heads(),
-                        0..count,
-                        0..self.spec.head_dimension(),
-                    ]);
-                self.write_pair(
-                    layer_index,
-                    sequence,
-                    baseline[sequence],
-                    count,
-                    &staged_keys,
-                    &staged_values,
-                )?;
             }
         }
         self.finish_staging();
-        Ok(())
     }
 
     /// Discards all staged lengths without touching committed ring slots.
@@ -1087,6 +1269,54 @@ fn read_segment<B: Backend>(
         keys: layer.keys.clone().slice(slices.clone()),
         values: layer.values.clone().slice(slices),
     }
+}
+
+/// Constructs one read segment from linear proposal staging storage.
+fn read_staged_segment<B: Backend>(
+    layer: &KvLayer<B>,
+    sequence: usize,
+    absolute_positions: Range<usize>,
+    staged: Range<usize>,
+    spec: NativeKvCacheSpec,
+) -> TensorCacheResult<KvCacheReadSegment<B>> {
+    let slices = [
+        sequence..sequence + 1,
+        0..spec.key_value_heads(),
+        staged,
+        0..spec.head_dimension(),
+    ];
+    let keys = layer
+        .staged_keys
+        .as_ref()
+        .ok_or(TensorCacheError::StagingDisabled)?
+        .clone()
+        .slice(slices.clone());
+    let values = layer
+        .staged_values
+        .as_ref()
+        .ok_or(TensorCacheError::StagingDisabled)?
+        .clone()
+        .slice(slices);
+    Ok(KvCacheReadSegment {
+        absolute_positions,
+        keys,
+        values,
+    })
+}
+
+/// Validates all per-sequence vectors before direct indexing during planning.
+fn validate_commit_vector_lengths(
+    expected: usize,
+    baseline: &[usize],
+    proposed: &[usize],
+    accepted: &[usize],
+) -> TensorCacheResult<()> {
+    for actual in [baseline.len(), proposed.len(), accepted.len()] {
+        if actual != expected {
+            return Err(DecodeStateError::SequenceCountMismatch { expected, actual }.into());
+        }
+    }
+    Ok(())
 }
 
 /// Validates fixed-size beam reordering indices.

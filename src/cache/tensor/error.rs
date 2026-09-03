@@ -55,6 +55,37 @@ pub enum TensorCacheError {
         window: usize,
     },
 
+    /// Multiplying tensor dimensions overflowed the host address space.
+    #[error("shape element count for {tensor} overflows usize")]
+    TensorShapeOverflow {
+        /// Semantic name of the tensor being validated.
+        tensor: &'static str,
+    },
+
+    /// A tensor exceeds the portable signed-index range used by Burn backends.
+    #[error("{tensor} requires {elements} elements, exceeding portable limit {limit}")]
+    TensorElementLimitExceeded {
+        /// Semantic name of the tensor being validated.
+        tensor: &'static str,
+        /// Requested scalar element count.
+        elements: usize,
+        /// Largest element count accepted before backend allocation.
+        limit: usize,
+    },
+
+    /// Computing the byte size of a cache allocation overflowed `usize`.
+    #[error(
+        "allocation byte count for {tensor} overflows usize ({elements} elements of {element_size} bytes)"
+    )]
+    AllocationSizeOverflow {
+        /// Semantic name of the allocation group.
+        tensor: &'static str,
+        /// Number of scalar elements in the allocation group.
+        elements: usize,
+        /// Bytes used by one scalar element.
+        element_size: usize,
+    },
+
     /// A layer index was outside a tensor bank.
     #[error("layer index {layer} is out of bounds for {layers} layers")]
     LayerOutOfBounds {
@@ -88,6 +119,15 @@ pub enum TensorCacheError {
     #[error("batch index {index} exceeds the i32 indexing range")]
     BatchIndexOverflow {
         /// Invalid source row index.
+        index: usize,
+    },
+
+    /// A runtime tensor index cannot be represented by Burn's portable i32 type.
+    #[error("{axis} index {index} exceeds the i32 indexing range")]
+    TensorIndexOverflow {
+        /// Logical axis being indexed.
+        axis: &'static str,
+        /// Invalid source index.
         index: usize,
     },
 
@@ -198,6 +238,21 @@ pub enum TensorCacheError {
         actual: usize,
     },
 
+    /// A whole-batch staging write encountered different row offsets.
+    #[error(
+        "cannot stage a uniform recurrent batch at layer {layer}: sequence {sequence} offset {actual} differs from {expected}"
+    )]
+    NonUniformStagingOffset {
+        /// Recurrent layer within the cache group.
+        layer: usize,
+        /// First row whose offset differs.
+        sequence: usize,
+        /// Uniform offset required by the batch assignment.
+        expected: usize,
+        /// Existing offset for the differing row.
+        actual: usize,
+    },
+
     /// A commit accepted more tokens than were proposed for one sequence.
     #[error("sequence {sequence} cannot accept {accepted} tokens from proposal length {proposed}")]
     AcceptedPrefixExceedsProposal {
@@ -250,6 +305,14 @@ pub enum TensorCacheError {
     #[error("MTP cache bank is already enabled")]
     MtpAlreadyEnabled,
 
+    /// An MTP-specific operation was requested without an auxiliary bank.
+    #[error("MTP cache bank is not enabled")]
+    MtpNotEnabled,
+
+    /// MTP staged tokens require an independent accepted-prefix vector.
+    #[error("MTP staged tokens require an explicit independent accepted prefix")]
+    MtpAcceptedPrefixRequired,
+
     /// Backend-independent logical metadata rejected a transition.
     #[error(transparent)]
     Metadata(#[from] DecodeStateError),
@@ -257,10 +320,4 @@ pub enum TensorCacheError {
     /// Ring-buffer index planning rejected a transition.
     #[error(transparent)]
     Ring(#[from] RingPlanError),
-}
-
-impl From<TensorCacheError> for crate::Error {
-    fn from(value: TensorCacheError) -> Self {
-        Self::Cache(value.to_string())
-    }
 }

@@ -37,6 +37,10 @@ pub enum Error {
     #[error("cache error: {0}")]
     Cache(String),
 
+    /// A typed tensor-cache validation or lifecycle error.
+    #[error("tensor cache error: {0}")]
+    TensorCache(#[from] crate::cache::TensorCacheError),
+
     /// A local model directory or one of its files is invalid.
     #[error("artifact error at {path}: {reason}")]
     Artifact {

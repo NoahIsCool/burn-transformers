@@ -5,9 +5,12 @@ use std::sync::Arc;
 use burn::tensor::backend::Backend;
 
 use crate::architecture::DecodeState as ArchitectureDecodeState;
-use crate::cache::{CacheConfig, DecodeState as DecodeMetadata, DecodeStateError};
+use crate::cache::{
+    CacheConfig, DecodeState as DecodeMetadata, DecodeStateError, TransactionalCache,
+};
 
-use super::kv::{validate_batch, validate_reorder_indices};
+use super::kv::{KvCommitPlan, validate_batch, validate_reorder_indices};
+use super::recurrent::RecurrentCommitPlan;
 use super::{
     NativeKvCache, NativeKvCacheSpec, RecurrentStateCache, RecurrentStateSpec, TensorCacheError,
     TensorCacheResult,
@@ -25,6 +28,7 @@ pub struct TensorCacheBank<B: Backend> {
     device: B::Device,
     native_kv: Vec<NativeKvCache<B>>,
     recurrent: Vec<RecurrentStateCache<B>>,
+    staging_active: bool,
 }
 
 impl<B: Backend> TensorCacheBank<B> {
@@ -46,6 +50,7 @@ impl<B: Backend> TensorCacheBank<B> {
             device: device.clone(),
             native_kv: Vec::new(),
             recurrent: Vec::new(),
+            staging_active: false,
         })
     }
 
@@ -172,14 +177,13 @@ impl<B: Backend> TensorCacheBank<B> {
             })
     }
 
-    /// Returns whether any cache group currently accepts staged values.
+    /// Returns whether this bank is locked for a model-level transaction.
+    ///
+    /// The marker is bank-owned rather than inferred from child caches, so an
+    /// empty bank is still topology-locked after a transaction begins.
     #[must_use]
-    pub fn has_active_staging(&self) -> bool {
-        self.native_kv.iter().any(NativeKvCache::has_active_staging)
-            || self
-                .recurrent
-                .iter()
-                .any(RecurrentStateCache::has_active_staging)
+    pub const fn has_active_staging(&self) -> bool {
+        self.staging_active
     }
 
     /// Verifies every populated group can begin a speculative transaction.
@@ -209,34 +213,45 @@ impl<B: Backend> TensorCacheBank<B> {
         for cache in &mut self.recurrent {
             cache.begin_staging()?;
         }
+        self.staging_active = true;
         Ok(())
     }
 
-    /// Checks complete physical staging before any bank mutates committed data.
-    fn validate_staging_commit(
+    /// Creates an all-cache commit plan before any committed tensor mutates.
+    fn prepare_staging_commit(
         &self,
         baseline: &[usize],
         proposed: &[usize],
         accepted: &[usize],
-    ) -> TensorCacheResult<()> {
-        for cache in &self.native_kv {
-            cache.validate_staging_commit(baseline, proposed, accepted)?;
+    ) -> TensorCacheResult<TensorBankCommitPlan> {
+        if !self.staging_active {
+            return Err(TensorCacheError::TransactionNotActive);
         }
-        for cache in &self.recurrent {
-            cache.validate_staging_commit(proposed, accepted)?;
-        }
-        Ok(())
+        let native_kv = self
+            .native_kv
+            .iter()
+            .map(|cache| cache.prepare_staging_commit(baseline, proposed, accepted))
+            .collect::<TensorCacheResult<_>>()?;
+        let recurrent = self
+            .recurrent
+            .iter()
+            .map(|cache| cache.prepare_staging_commit(proposed, accepted))
+            .collect::<TensorCacheResult<_>>()?;
+        Ok(TensorBankCommitPlan {
+            native_kv,
+            recurrent,
+        })
     }
 
-    /// Commits previously validated accepted prefixes in every cache group.
-    fn commit_staging(&mut self, baseline: &[usize], accepted: &[usize]) -> TensorCacheResult<()> {
-        for cache in &mut self.native_kv {
-            cache.commit_staging(baseline, accepted)?;
+    /// Consumes a fully validated plan using only infallible cache operations.
+    fn apply_staging_commit(&mut self, plan: TensorBankCommitPlan) {
+        for (cache, cache_plan) in self.native_kv.iter_mut().zip(plan.native_kv) {
+            cache.apply_staging_commit(cache_plan);
         }
-        for cache in &mut self.recurrent {
-            cache.commit_staging(accepted)?;
+        for (cache, cache_plan) in self.recurrent.iter_mut().zip(plan.recurrent) {
+            cache.apply_staging_commit(cache_plan);
         }
-        Ok(())
+        self.staging_active = false;
     }
 
     /// Discards all proposal storage without changing committed tensors.
@@ -247,6 +262,7 @@ impl<B: Backend> TensorCacheBank<B> {
         for cache in &mut self.recurrent {
             cache.rollback_staging();
         }
+        self.staging_active = false;
     }
 
     /// Clears every state tensor and transaction marker.
@@ -257,6 +273,7 @@ impl<B: Backend> TensorCacheBank<B> {
         for cache in &mut self.recurrent {
             cache.reset();
         }
+        self.staging_active = false;
     }
 
     /// Reorders or duplicates every tensor batch dimension.
@@ -301,6 +318,13 @@ impl<B: Backend> TensorCacheBank<B> {
     }
 }
 
+/// Commit capabilities prepared for every tensor cache in one bank.
+#[derive(Debug)]
+struct TensorBankCommitPlan {
+    native_kv: Vec<KvCommitPlan>,
+    recurrent: Vec<RecurrentCommitPlan>,
+}
+
 #[derive(Clone)]
 struct TensorTransactionToken(Arc<()>);
 
@@ -330,6 +354,7 @@ impl Eq for TensorTransactionToken {}
 pub struct TensorCacheMark {
     token: TensorTransactionToken,
     baseline_lengths: Vec<usize>,
+    mtp_baseline_lengths: Option<Vec<usize>>,
 }
 
 impl TensorCacheMark {
@@ -338,25 +363,42 @@ impl TensorCacheMark {
     pub fn baseline_lengths(&self) -> &[usize] {
         &self.baseline_lengths
     }
+
+    /// Returns independent MTP baselines when an auxiliary bank was enabled.
+    #[must_use]
+    pub fn mtp_baseline_lengths(&self) -> Option<&[usize]> {
+        self.mtp_baseline_lengths.as_deref()
+    }
 }
 
 #[derive(Debug)]
 struct ActiveTensorTransaction {
     token: TensorTransactionToken,
     baseline_lengths: Vec<usize>,
+    working_lengths: Vec<usize>,
+    mtp_baseline_lengths: Option<Vec<usize>>,
+    mtp_working_lengths: Option<Vec<usize>>,
 }
 
 /// External, composable model state implementing the architecture lifecycle.
 ///
 /// `main` contains the decoder's ordinary layer caches. `mtp`, when enabled,
-/// is a distinct bank for multi-token prediction layers: it shares lifecycle
-/// metadata and beam ordering but never aliases main-model tensors. Neither
-/// bank is a Burn module or checkpoint parameter.
+/// is a distinct bank for multi-token prediction layers: it shares batch-row
+/// ordering but owns an independent logical cursor and accepted-prefix policy.
+/// Neither bank is a Burn module or checkpoint parameter.
+///
+/// The crate-wide [`TransactionalCache`] implementation controls a uniform main
+/// prefix and is sufficient for generic speculative generation. A non-empty
+/// MTP proposal intentionally returns
+/// [`TensorCacheError::MtpAcceptedPrefixRequired`]; architecture-aware Qwen MTP
+/// code uses [`commit_prefixes`](Self::commit_prefixes) to provide both ragged
+/// prefix vectors without downcasting cache internals.
 #[derive(Debug)]
 pub struct TensorDecodeState<B: Backend> {
     metadata: DecodeMetadata,
     main: TensorCacheBank<B>,
     mtp: Option<TensorCacheBank<B>>,
+    mtp_metadata: Option<DecodeMetadata>,
     device: B::Device,
     active_transaction: Option<ActiveTensorTransaction>,
 }
@@ -378,6 +420,7 @@ impl<B: Backend> TensorDecodeState<B> {
             metadata: DecodeMetadata::new(config),
             main: TensorCacheBank::new(config, batch_size, device)?,
             mtp: None,
+            mtp_metadata: None,
             device: device.clone(),
             active_transaction: None,
         })
@@ -387,6 +430,57 @@ impl<B: Backend> TensorDecodeState<B> {
     #[must_use]
     pub const fn metadata(&self) -> &DecodeMetadata {
         &self.metadata
+    }
+
+    /// Returns the validated logical cache configuration.
+    #[must_use]
+    pub const fn config(&self) -> CacheConfig {
+        self.metadata.config()
+    }
+
+    /// Returns the fixed number of independent sequence rows.
+    #[must_use]
+    pub const fn batch_size(&self) -> usize {
+        self.main.batch_size()
+    }
+
+    /// Returns the maximum logical token count for every sequence.
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.metadata.config().capacity()
+    }
+
+    /// Returns each sequence's number of committed logical tokens.
+    #[must_use]
+    pub fn lengths(&self) -> &[usize] {
+        self.metadata.lengths()
+    }
+
+    /// Returns lengths visible to the next main-model speculative step.
+    ///
+    /// Outside a transaction these equal [`lengths`](Self::lengths). During a
+    /// transaction they include tentative proposal tokens while `lengths()`
+    /// remains the architecture contract's committed cursor.
+    #[must_use]
+    pub fn working_lengths(&self) -> &[usize] {
+        self.active_transaction
+            .as_ref()
+            .map_or_else(|| self.metadata.lengths(), |active| &active.working_lengths)
+    }
+
+    /// Returns committed MTP lengths when the auxiliary bank is enabled.
+    #[must_use]
+    pub fn mtp_lengths(&self) -> Option<&[usize]> {
+        self.mtp_metadata.as_ref().map(DecodeMetadata::lengths)
+    }
+
+    /// Returns MTP lengths visible to the next speculative MTP step.
+    #[must_use]
+    pub fn mtp_working_lengths(&self) -> Option<&[usize]> {
+        match &self.active_transaction {
+            Some(active) => active.mtp_working_lengths.as_deref(),
+            None => self.mtp_lengths(),
+        }
     }
 
     /// Borrows the main decoder cache bank.
@@ -425,6 +519,7 @@ impl<B: Backend> TensorDecodeState<B> {
         }
         let bank =
             TensorCacheBank::new(self.metadata.config(), self.main.batch_size(), &self.device)?;
+        self.mtp_metadata = Some(DecodeMetadata::new(self.metadata.config()));
         Ok(self.mtp.insert(bank))
     }
 
@@ -433,7 +528,7 @@ impl<B: Backend> TensorDecodeState<B> {
     /// # Errors
     ///
     /// Returns an error for an existing MTP bank, active transaction, different
-    /// cache config, batch size, or device.
+    /// cache config or device.
     pub fn attach_mtp(&mut self, bank: TensorCacheBank<B>) -> TensorCacheResult<()> {
         self.ensure_no_transaction("attach MTP")?;
         if self.mtp.is_some() {
@@ -445,12 +540,6 @@ impl<B: Backend> TensorDecodeState<B> {
                 reason: "cache configuration differs from main state",
             });
         }
-        if bank.batch_size() != self.main.batch_size() {
-            return Err(TensorCacheError::IncompatibleBank {
-                bank: "MTP",
-                reason: "batch size differs from main state",
-            });
-        }
         if bank.device() != &self.device {
             return Err(TensorCacheError::IncompatibleBank {
                 bank: "MTP",
@@ -458,6 +547,7 @@ impl<B: Backend> TensorDecodeState<B> {
             });
         }
         self.mtp = Some(bank);
+        self.mtp_metadata = Some(DecodeMetadata::new(self.metadata.config()));
         Ok(())
     }
 
@@ -471,7 +561,41 @@ impl<B: Backend> TensorDecodeState<B> {
     ///
     /// Returns metadata errors for count, integer, or capacity overflow.
     pub fn advance(&mut self, token_counts: &[usize]) -> TensorCacheResult<()> {
-        self.metadata.advance_all(token_counts)?;
+        if let Some(active) = &mut self.active_transaction {
+            advance_working_lengths(
+                &mut active.working_lengths,
+                token_counts,
+                self.metadata.config().capacity(),
+            )?;
+        } else {
+            self.metadata.advance_all(token_counts)?;
+        }
+        Ok(())
+    }
+
+    /// Atomically advances the independent MTP logical cursor.
+    ///
+    /// MTP may consume a shifted stream and therefore may lag or advance by a
+    /// different proposal count than the main decoder. During a transaction
+    /// only the MTP working cursor changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when MTP is disabled or for count/capacity overflow.
+    pub fn advance_mtp(&mut self, token_counts: &[usize]) -> TensorCacheResult<()> {
+        let metadata = self
+            .mtp_metadata
+            .as_mut()
+            .ok_or(TensorCacheError::MtpNotEnabled)?;
+        if let Some(active) = &mut self.active_transaction {
+            let working = active
+                .mtp_working_lengths
+                .as_mut()
+                .ok_or(TensorCacheError::MtpNotEnabled)?;
+            advance_working_lengths(working, token_counts, metadata.config().capacity())?;
+        } else {
+            metadata.advance_all(token_counts)?;
+        }
         Ok(())
     }
 
@@ -498,59 +622,151 @@ impl<B: Backend> TensorDecodeState<B> {
 
         let token = TensorTransactionToken::new();
         let baseline_lengths = self.metadata.lengths().to_vec();
+        let mtp_baseline_lengths = self
+            .mtp_metadata
+            .as_ref()
+            .map(|metadata| metadata.lengths().to_vec());
         self.active_transaction = Some(ActiveTensorTransaction {
             token: token.clone(),
             baseline_lengths: baseline_lengths.clone(),
+            working_lengths: baseline_lengths.clone(),
+            mtp_baseline_lengths: mtp_baseline_lengths.clone(),
+            mtp_working_lengths: mtp_baseline_lengths.clone(),
         });
         Ok(TensorCacheMark {
             token,
             baseline_lengths,
+            mtp_baseline_lengths,
         })
     }
 
-    /// Commits a possibly ragged accepted prefix from staged proposal tensors.
+    /// Commits a ragged main-model prefix when MTP staged no tokens.
     ///
-    /// Validation covers every cache group before any committed tensor changes.
+    /// Use [`commit_prefixes`](Self::commit_prefixes) when MTP has an
+    /// independent proposal. Validation covers every cache group before any
+    /// committed tensor changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale mark, invalid prefix, incomplete physical
+    /// staging, or an MTP proposal that needs its own accepted-prefix vector.
+    pub fn commit_prefix(
+        &mut self,
+        mark: TensorCacheMark,
+        accepted: &[usize],
+    ) -> TensorCacheResult<()> {
+        self.commit_prefixes(mark, accepted, None)
+    }
+
+    /// Commits independent main and MTP accepted prefixes atomically.
+    ///
     /// KV prefixes are copied from linear staging into full/ring storage;
     /// recurrent caches select snapshot `accepted - 1`. Rejected values never
-    /// touch committed wrapped-ring slots.
+    /// touch committed wrapped-ring slots. The main and MTP proposal lengths
+    /// may differ for every sequence because shifted MTP decoding has its own
+    /// cursor.
     ///
     /// # Errors
     ///
     /// Returns an error for a stale mark, count mismatch, over-acceptance, or
     /// physically incomplete staging. Validation failure leaves the transaction
     /// active and recoverable by [`rollback`](Self::rollback).
-    pub fn commit_prefix(
+    pub fn commit_prefixes(
         &mut self,
         mark: TensorCacheMark,
-        accepted: &[usize],
+        main_accepted: &[usize],
+        mtp_accepted: Option<&[usize]>,
     ) -> TensorCacheResult<()> {
         let active = self.validate_mark(&mark)?;
-        validate_count(self.main.batch_size(), accepted.len())?;
-        let baseline = active.baseline_lengths.clone();
-        let proposed = proposal_lengths(&baseline, self.metadata.lengths());
-        validate_accepted(&proposed, accepted)?;
-        self.main
-            .validate_staging_commit(&baseline, &proposed, accepted)?;
-        if let Some(mtp) = &self.mtp {
-            mtp.validate_staging_commit(&baseline, &proposed, accepted)?;
-        }
+        let main_baseline = active.baseline_lengths.clone();
+        let main_working = active.working_lengths.clone();
+        let mtp_baseline = active.mtp_baseline_lengths.clone();
+        let mtp_working = active.mtp_working_lengths.clone();
+        validate_count(self.main.batch_size(), main_accepted.len())?;
+        let main_proposed = proposal_lengths(&main_baseline, &main_working);
+        validate_accepted(&main_proposed, main_accepted)?;
 
-        self.main.commit_staging(&baseline, accepted)?;
-        if let Some(mtp) = &mut self.mtp {
-            mtp.commit_staging(&baseline, accepted)?;
+        let main_committed = committed_lengths(&main_baseline, main_accepted)?;
+        let next_main_metadata =
+            DecodeMetadata::from_lengths(self.metadata.config(), main_committed)?;
+        let main_plan =
+            self.main
+                .prepare_staging_commit(&main_baseline, &main_proposed, main_accepted)?;
+
+        let (mtp_plan, next_mtp_metadata) = match (
+            self.mtp.as_ref(),
+            self.mtp_metadata.as_ref(),
+            mtp_baseline.as_deref(),
+            mtp_working.as_deref(),
+        ) {
+            (Some(mtp), Some(metadata), Some(baseline), Some(working)) => {
+                let proposed = proposal_lengths(baseline, working);
+                let accepted = match mtp_accepted {
+                    Some(accepted) => accepted.to_vec(),
+                    None if proposed.iter().all(|&count| count == 0) => {
+                        // Empty MTP proposals have the unique valid zero prefix.
+                        vec![0; self.batch_size()]
+                    }
+                    None => return Err(TensorCacheError::MtpAcceptedPrefixRequired),
+                };
+                validate_count(self.batch_size(), accepted.len())?;
+                validate_accepted(&proposed, &accepted)?;
+                let committed = committed_lengths(baseline, &accepted)?;
+                let next = DecodeMetadata::from_lengths(metadata.config(), committed)?;
+                let plan = mtp.prepare_staging_commit(baseline, &proposed, &accepted)?;
+                (Some(plan), Some(next))
+            }
+            (None, None, None, None) => {
+                if mtp_accepted.is_some() {
+                    return Err(TensorCacheError::MtpNotEnabled);
+                }
+                (None, None)
+            }
+            _ => return Err(TensorCacheError::MtpNotEnabled),
+        };
+
+        self.main.apply_staging_commit(main_plan);
+        if let (Some(mtp), Some(plan)) = (&mut self.mtp, mtp_plan) {
+            mtp.apply_staging_commit(plan);
         }
-        let committed: Vec<usize> = baseline
-            .iter()
-            .zip(accepted)
-            .map(|(&start, &count)| start + count)
-            .collect();
-        self.metadata.truncate_all(&committed)?;
+        self.metadata = next_main_metadata;
+        self.mtp_metadata = next_mtp_metadata;
         self.active_transaction = None;
         Ok(())
     }
 
-    /// Discards staged tensors and restores the transaction's logical baseline.
+    /// Commits the same accepted proposal length for every sequence row.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same validation errors as [`commit_prefix`](Self::commit_prefix).
+    pub fn commit_uniform_prefix(
+        &mut self,
+        mark: TensorCacheMark,
+        accepted: usize,
+    ) -> TensorCacheResult<()> {
+        let counts = vec![accepted; self.batch_size()];
+        self.commit_prefix(mark, &counts)
+    }
+
+    /// Commits uniform but independent main and MTP proposal prefixes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same validation errors as
+    /// [`commit_prefixes`](Self::commit_prefixes).
+    pub fn commit_uniform_prefixes(
+        &mut self,
+        mark: TensorCacheMark,
+        main_accepted: usize,
+        mtp_accepted: Option<usize>,
+    ) -> TensorCacheResult<()> {
+        let main = vec![main_accepted; self.batch_size()];
+        let mtp = mtp_accepted.map(|count| vec![count; self.batch_size()]);
+        self.commit_prefixes(mark, &main, mtp.as_deref())
+    }
+
+    /// Discards staged tensors without changing committed logical metadata.
     ///
     /// Because proposals were never written into committed rings, rollback is
     /// exact even after a full sliding window has wrapped.
@@ -559,13 +775,11 @@ impl<B: Backend> TensorDecodeState<B> {
     ///
     /// Returns an error when the mark is stale or belongs to another state.
     pub fn rollback(&mut self, mark: TensorCacheMark) -> TensorCacheResult<()> {
-        let active = self.validate_mark(&mark)?;
-        let baseline = active.baseline_lengths.clone();
+        self.validate_mark(&mark)?;
         self.main.rollback_staging();
         if let Some(mtp) = &mut self.mtp {
             mtp.rollback_staging();
         }
-        self.metadata.truncate_all(&baseline)?;
         self.active_transaction = None;
         Ok(())
     }
@@ -581,7 +795,10 @@ impl<B: Backend> TensorDecodeState<B> {
         if let Some(mtp) = &mut self.mtp {
             mtp.reset();
         }
-        self.metadata.reset()?;
+        self.metadata = DecodeMetadata::new(self.metadata.config());
+        if let Some(metadata) = &mut self.mtp_metadata {
+            *metadata = DecodeMetadata::new(metadata.config());
+        }
         Ok(())
     }
 
@@ -596,15 +813,32 @@ impl<B: Backend> TensorDecodeState<B> {
     pub fn reorder(&mut self, indices: &[usize]) -> TensorCacheResult<()> {
         self.ensure_no_transaction("reorder")?;
         validate_reorder_indices(indices, self.main.batch_size())?;
+        let reordered_main: Vec<usize> = indices
+            .iter()
+            .map(|&index| self.metadata.lengths()[index])
+            .collect();
+        let next_main = DecodeMetadata::from_lengths(self.metadata.config(), reordered_main)?;
+        let next_mtp = self
+            .mtp_metadata
+            .as_ref()
+            .map(|metadata| {
+                let lengths = indices
+                    .iter()
+                    .map(|&index| metadata.lengths()[index])
+                    .collect::<Vec<_>>();
+                DecodeMetadata::from_lengths(metadata.config(), lengths)
+            })
+            .transpose()?;
         self.main.reorder(indices)?;
         if let Some(mtp) = &mut self.mtp {
             mtp.reorder(indices)?;
         }
-        self.metadata.reorder(indices)?;
+        self.metadata = next_main;
+        self.mtp_metadata = next_mtp;
         Ok(())
     }
 
-    /// Rewinds logical lengths when every physical representation can do so.
+    /// Rewinds main-model lengths when every physical representation can do so.
     ///
     /// Full KV caches can always rewind because their prefix remains stored.
     /// Wrapped rings reject non-zero rewinds after eviction, and recurrent
@@ -631,15 +865,47 @@ impl<B: Backend> TensorDecodeState<B> {
             }
         }
         self.main.validate_truncate(&current, lengths)?;
-        if let Some(mtp) = &self.mtp {
-            mtp.validate_truncate(&current, lengths)?;
-        }
-
+        let next = DecodeMetadata::from_lengths(self.metadata.config(), lengths.to_vec())?;
         self.main.apply_truncate(&current, lengths);
-        if let Some(mtp) = &mut self.mtp {
-            mtp.apply_truncate(&current, lengths);
+        self.metadata = next;
+        Ok(())
+    }
+
+    /// Rewinds independent MTP lengths when its representations support it.
+    ///
+    /// Keeping this operation separate prevents a target-model rewind from
+    /// silently moving a shifted MTP cursor to the same absolute position.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when MTP is disabled, a transaction is active, a length
+    /// extends the cursor, or a wrapped/recurrent representation cannot rewind.
+    pub fn truncate_mtp(&mut self, lengths: &[usize]) -> TensorCacheResult<()> {
+        self.ensure_no_transaction("truncate MTP")?;
+        validate_count(self.batch_size(), lengths.len())?;
+        let metadata = self
+            .mtp_metadata
+            .as_ref()
+            .ok_or(TensorCacheError::MtpNotEnabled)?;
+        let bank = self.mtp.as_ref().ok_or(TensorCacheError::MtpNotEnabled)?;
+        let current = metadata.lengths().to_vec();
+        for (sequence, (&from, &to)) in current.iter().zip(lengths).enumerate() {
+            if to > from {
+                return Err(DecodeStateError::CannotExtendByTruncation {
+                    sequence,
+                    current: from,
+                    requested: to,
+                }
+                .into());
+            }
         }
-        self.metadata.truncate_all(lengths)?;
+        bank.validate_truncate(&current, lengths)?;
+        let next = DecodeMetadata::from_lengths(metadata.config(), lengths.to_vec())?;
+        self.mtp
+            .as_mut()
+            .expect("MTP bank was validated as present")
+            .apply_truncate(&current, lengths);
+        self.mtp_metadata = Some(next);
         Ok(())
     }
 
@@ -661,7 +927,10 @@ impl<B: Backend> TensorDecodeState<B> {
             .active_transaction
             .as_ref()
             .ok_or(TensorCacheError::TransactionNotActive)?;
-        if active.token != mark.token || active.baseline_lengths != mark.baseline_lengths {
+        if active.token != mark.token
+            || active.baseline_lengths != mark.baseline_lengths
+            || active.mtp_baseline_lengths != mark.mtp_baseline_lengths
+        {
             return Err(TensorCacheError::StaleTransactionMark);
         }
         Ok(active)
@@ -677,17 +946,38 @@ impl<B: Backend> TensorDecodeState<B> {
     }
 }
 
+impl<B: Backend> TransactionalCache for TensorDecodeState<B> {
+    type Mark = TensorCacheMark;
+    type Error = TensorCacheError;
+
+    fn mark(&mut self) -> Result<Self::Mark, Self::Error> {
+        self.begin_transaction()
+    }
+
+    fn commit_prefix(
+        &mut self,
+        mark: Self::Mark,
+        accepted_tokens: usize,
+    ) -> Result<(), Self::Error> {
+        self.commit_uniform_prefix(mark, accepted_tokens)
+    }
+
+    fn rollback(&mut self, mark: Self::Mark) -> Result<(), Self::Error> {
+        TensorDecodeState::rollback(self, mark)
+    }
+}
+
 impl<B: Backend> ArchitectureDecodeState<B> for TensorDecodeState<B> {
     fn batch_size(&self) -> usize {
-        self.main.batch_size()
+        TensorDecodeState::batch_size(self)
     }
 
     fn capacity(&self) -> usize {
-        self.metadata.config().capacity()
+        TensorDecodeState::capacity(self)
     }
 
     fn lengths(&self) -> &[usize] {
-        self.metadata.lengths()
+        TensorDecodeState::lengths(self)
     }
 
     fn reset(&mut self) -> crate::Result<()> {
@@ -716,12 +1006,61 @@ fn validate_count(expected: usize, actual: usize) -> TensorCacheResult<()> {
     }
 }
 
+/// Advances a tentative cursor atomically without publishing it as committed.
+fn advance_working_lengths(
+    working: &mut Vec<usize>,
+    token_counts: &[usize],
+    capacity: usize,
+) -> TensorCacheResult<()> {
+    validate_count(working.len(), token_counts.len())?;
+    let mut next = Vec::with_capacity(working.len());
+    for (sequence, (&length, &additional)) in working.iter().zip(token_counts).enumerate() {
+        let requested = length
+            .checked_add(additional)
+            .ok_or(DecodeStateError::LengthOverflow {
+                sequence,
+                length,
+                additional,
+            })?;
+        if requested > capacity {
+            return Err(DecodeStateError::CapacityExceeded {
+                sequence,
+                requested,
+                capacity,
+            }
+            .into());
+        }
+        next.push(requested);
+    }
+    *working = next;
+    Ok(())
+}
+
 /// Computes each proposal suffix from current and baseline logical lengths.
 fn proposal_lengths(baseline: &[usize], current: &[usize]) -> Vec<usize> {
     baseline
         .iter()
         .zip(current)
         .map(|(&start, &end)| end - start)
+        .collect()
+}
+
+/// Computes committed endpoints with checked arithmetic for public inputs.
+fn committed_lengths(baseline: &[usize], accepted: &[usize]) -> TensorCacheResult<Vec<usize>> {
+    baseline
+        .iter()
+        .zip(accepted)
+        .enumerate()
+        .map(|(sequence, (&length, &additional))| {
+            length.checked_add(additional).ok_or_else(|| {
+                DecodeStateError::LengthOverflow {
+                    sequence,
+                    length,
+                    additional,
+                }
+                .into()
+            })
+        })
         .collect()
 }
 

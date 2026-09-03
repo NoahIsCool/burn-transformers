@@ -13,6 +13,7 @@
 //! "Preallocated" here therefore guarantees stable cache *capacity and shape*,
 //! while physical buffer reuse remains a backend optimization.
 
+mod allocation;
 mod error;
 mod kv;
 mod recurrent;
@@ -20,7 +21,9 @@ mod state;
 
 pub use error::{TensorCacheError, TensorCacheResult};
 pub use kv::{KvCacheRead, KvCacheReadSegment, KvCacheStorage, NativeKvCache, NativeKvCacheSpec};
-pub use recurrent::{RecurrentStateCache, RecurrentStateSpec};
+pub use recurrent::{
+    RecurrentBatchStateRead, RecurrentStateCache, RecurrentStateRead, RecurrentStateSpec,
+};
 pub use state::{TensorCacheBank, TensorCacheMark, TensorDecodeState};
 
 #[cfg(test)]

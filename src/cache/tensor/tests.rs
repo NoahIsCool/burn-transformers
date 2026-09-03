@@ -49,6 +49,23 @@ fn materialized_keys(
         .expect("f32 cache")
 }
 
+fn working_keys(
+    cache: &NativeKvCache<TestBackend>,
+    layer: usize,
+    sequence: usize,
+    committed_length: usize,
+) -> Vec<f32> {
+    cache
+        .read_working_sequence(layer, sequence, committed_length)
+        .expect("valid working cache read")
+        .materialize()
+        .expect("non-empty working cache read")
+        .0
+        .into_data()
+        .to_vec::<f32>()
+        .expect("f32 cache")
+}
+
 fn scalar_kv_spec(storage: KvCacheStorage, staging: usize) -> NativeKvCacheSpec {
     NativeKvCacheSpec::new(1, 1, 1, storage, DType::F32)
         .expect("valid KV spec")
@@ -106,7 +123,8 @@ fn specs_validate_dimensions_dtype_and_accessors() {
     assert_eq!(recurrent.state_columns(), 5);
     assert_eq!(recurrent.convolution_channels(), 6);
     assert_eq!(recurrent.convolution_width(), 7);
-    assert_eq!(recurrent.dtype(), DType::BF16);
+    assert_eq!(recurrent.matrix_dtype(), DType::BF16);
+    assert_eq!(recurrent.convolution_dtype(), DType::BF16);
     assert_eq!(recurrent.staging_capacity(), 8);
     assert_eq!(recurrent.matrix_shape(9), [9, 3, 4, 5]);
     assert_eq!(recurrent.convolution_shape(9), [9, 6, 7]);
@@ -204,6 +222,13 @@ fn full_cache_writes_reads_and_checks_every_tensor_boundary() {
         &device,
     )
     .expect("full cache");
+    assert!(
+        cache
+            .read_working_sequence(0, 0, 0)
+            .expect("committed fallback")
+            .materialize()
+            .is_none()
+    );
     let (keys, values) = scalar_kv(&[1.0, 2.0, 3.0]);
     cache
         .write_sequence(0, 0, 1, keys, values)
@@ -280,6 +305,8 @@ fn ring_and_mirrored_cache_reads_preserve_chronology() {
                 1
             }
         );
+        assert_eq!(read.segments()[0].keys().dims()[0], 1);
+        assert_eq!(read.segments()[0].values().dims()[0], 1);
         assert_eq!(
             read.segments()
                 .iter()
@@ -349,6 +376,20 @@ fn speculative_ring_rollback_never_overwrites_committed_slots() {
         state.rollback(stale),
         Err(TensorCacheError::TransactionNotActive)
     ));
+    state.truncate(&[0]).expect("clear wrapped staged cache");
+    assert!(
+        state
+            .main()
+            .native_kv(0)
+            .expect("cache")
+            .keys(0)
+            .expect("keys")
+            .to_data()
+            .to_vec::<f32>()
+            .expect("f32")
+            .iter()
+            .all(|&value| value == 0.0)
+    );
 }
 
 #[test]
@@ -564,6 +605,7 @@ fn reorder_duplicates_main_recurrent_and_separate_mtp_rows() {
     assert_eq!(state.device(), &device);
     assert_eq!(state.main().device(), &device);
     assert_eq!(state.mtp().expect("MTP").device(), &device);
+    state.reset().expect("reset recurrent bank");
 }
 
 #[test]
@@ -767,4 +809,1146 @@ fn active_transactions_block_topology_and_lifecycle_changes() {
         Err(TensorCacheError::TransactionActive { .. })
     ));
     state.rollback(mark).expect("rollback");
+}
+
+#[test]
+fn zero_length_and_arithmetic_edges_never_reach_invalid_backend_slices() {
+    let device = device();
+    let config = CacheConfig::new(1, 5).expect("config");
+    let mut cache = NativeKvCache::<TestBackend>::new(
+        config,
+        1,
+        scalar_kv_spec(KvCacheStorage::Full, 2),
+        &device,
+    )
+    .expect("cache");
+    let (keys, values) = scalar_kv(&[]);
+    cache
+        .write_sequence(0, 0, 5, keys, values)
+        .expect("empty write at exclusive capacity");
+    let (keys, values) = scalar_kv(&[1.0]);
+    assert!(matches!(
+        cache.write_sequence(0, 0, usize::MAX, keys, values),
+        Err(TensorCacheError::WritePositionOverflow {
+            start: usize::MAX,
+            tokens: 1
+        })
+    ));
+
+    cache.begin_staging().expect("staging");
+    let (keys, values) = scalar_kv(&[]);
+    cache
+        .stage_sequence(0, 0, keys, values)
+        .expect("empty proposal");
+    assert_eq!(cache.staged_length(0, 0).expect("staged length"), 0);
+    assert!(matches!(
+        cache.staged_length(1, 0),
+        Err(TensorCacheError::LayerOutOfBounds { .. })
+    ));
+    assert!(matches!(
+        cache.staged_length(0, 1),
+        Err(TensorCacheError::SequenceOutOfBounds { .. })
+    ));
+    cache.rollback_staging();
+
+    let enormous = CacheConfig::new(1, usize::MAX)
+        .expect("non-zero capacity")
+        .with_sliding_window(usize::MAX)
+        .expect("equal window");
+    assert!(matches!(
+        NativeKvCache::<TestBackend>::new(
+            enormous,
+            1,
+            scalar_kv_spec(KvCacheStorage::MirroredSlidingRing, 0),
+            &device
+        ),
+        Err(TensorCacheError::MirroredCapacityOverflow { window: usize::MAX })
+    ));
+    assert!(matches!(
+        super::kv::selection_tensor::<TestBackend>(&[usize::MAX], &device),
+        Err(TensorCacheError::BatchIndexOverflow { index: usize::MAX })
+    ));
+}
+
+#[test]
+fn recurrent_cache_validates_shapes_indices_and_staging_lifecycle() {
+    let device = device();
+    let config = CacheConfig::new(1, 5).expect("config");
+    let spec = scalar_recurrent_spec(2);
+    let mut cache =
+        RecurrentStateCache::<TestBackend>::new(config, 1, spec, &device).expect("recurrent cache");
+    assert_eq!(cache.config(), config);
+    assert_eq!(cache.spec(), spec);
+    assert_eq!(cache.device(), &device);
+    assert!(matches!(
+        cache.matrix(1),
+        Err(TensorCacheError::LayerOutOfBounds { .. })
+    ));
+    assert!(matches!(
+        cache.convolution(1),
+        Err(TensorCacheError::LayerOutOfBounds { .. })
+    ));
+
+    let matrix = tensor4(vec![1.0], [1, 1, 1, 1]);
+    let convolution = tensor3(vec![2.0, 3.0], [1, 1, 2]);
+    cache
+        .set_sequence_state(0, 0, matrix, convolution)
+        .expect("valid state");
+    assert!(matches!(
+        cache.set_sequence_state(
+            0,
+            1,
+            tensor4(vec![1.0], [1, 1, 1, 1]),
+            tensor3(vec![1.0, 1.0], [1, 1, 2])
+        ),
+        Err(TensorCacheError::SequenceOutOfBounds { .. })
+    ));
+    assert!(matches!(
+        cache.set_sequence_state(
+            0,
+            0,
+            tensor4(vec![1.0, 2.0], [1, 1, 1, 2]),
+            tensor3(vec![1.0, 1.0], [1, 1, 2])
+        ),
+        Err(TensorCacheError::ShapeMismatch {
+            tensor: "recurrent matrix",
+            ..
+        })
+    ));
+    assert!(matches!(
+        cache.set_sequence_state(
+            0,
+            0,
+            tensor4(vec![1.0], [1, 1, 1, 1]),
+            tensor3(vec![1.0], [1, 1, 1])
+        ),
+        Err(TensorCacheError::ShapeMismatch {
+            tensor: "convolution state",
+            ..
+        })
+    ));
+    assert!(matches!(
+        cache.set_sequence_state(
+            0,
+            0,
+            Tensor::zeros([1, 1, 1, 1], (&device, DType::F64)),
+            tensor3(vec![1.0, 1.0], [1, 1, 2])
+        ),
+        Err(TensorCacheError::DTypeMismatch {
+            tensor: "recurrent matrix",
+            ..
+        })
+    ));
+    assert!(matches!(
+        cache.stage_sequence_snapshots(
+            0,
+            0,
+            tensor5(vec![1.0], [1, 1, 1, 1, 1]),
+            tensor4(vec![1.0, 1.0], [1, 1, 1, 2])
+        ),
+        Err(TensorCacheError::TransactionNotActive)
+    ));
+
+    cache.begin_staging().expect("staging");
+    assert!(cache.has_active_staging());
+    assert!(matches!(
+        cache.begin_staging(),
+        Err(TensorCacheError::TransactionAlreadyActive)
+    ));
+    assert!(matches!(
+        cache.reorder(&[0]),
+        Err(TensorCacheError::TransactionActive { .. })
+    ));
+    assert!(matches!(
+        cache.set_sequence_state(
+            0,
+            0,
+            tensor4(vec![1.0], [1, 1, 1, 1]),
+            tensor3(vec![1.0, 1.0], [1, 1, 2])
+        ),
+        Err(TensorCacheError::TransactionActive { .. })
+    ));
+    cache
+        .stage_sequence_snapshots(
+            0,
+            0,
+            tensor5(vec![4.0], [1, 1, 1, 1, 1]),
+            tensor4(vec![5.0, 6.0], [1, 1, 1, 2]),
+        )
+        .expect("one snapshot");
+    assert_eq!(cache.staged_length(0, 0).expect("staged length"), 1);
+    assert!(matches!(
+        cache.staged_length(1, 0),
+        Err(TensorCacheError::LayerOutOfBounds { .. })
+    ));
+    assert!(matches!(
+        cache.staged_length(0, 1),
+        Err(TensorCacheError::SequenceOutOfBounds { .. })
+    ));
+    assert!(matches!(
+        cache.stage_sequence_snapshots(
+            0,
+            0,
+            tensor5(vec![7.0, 8.0], [1, 2, 1, 1, 1]),
+            tensor4(vec![7.0, 7.0, 8.0, 8.0], [1, 2, 1, 2])
+        ),
+        Err(TensorCacheError::StagingCapacityExceeded {
+            requested: 3,
+            capacity: 2
+        })
+    ));
+    assert!(matches!(
+        cache.prepare_staging_commit(&[2], &[1]),
+        Err(TensorCacheError::IncompleteStaging {
+            expected: 2,
+            actual: 1,
+            ..
+        })
+    ));
+    cache.rollback_staging();
+    assert!(!cache.has_active_staging());
+    assert!(matches!(
+        cache.prepare_staging_commit(&[0], &[0]),
+        Err(TensorCacheError::TransactionNotActive)
+    ));
+    cache.reorder(&[0]).expect("staging allocations reorder");
+    cache.reset();
+
+    let mut no_staging =
+        RecurrentStateCache::<TestBackend>::new(config, 1, scalar_recurrent_spec(0), &device)
+            .expect("cache");
+    assert!(matches!(
+        no_staging.begin_staging(),
+        Err(TensorCacheError::StagingDisabled)
+    ));
+}
+
+#[test]
+fn mtp_transactions_commit_and_rollback_without_aliasing_main_state() {
+    let device = device();
+    let config = CacheConfig::new(1, 6).expect("config");
+    let mut state = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+    state
+        .main_mut()
+        .add_native_kv(scalar_kv_spec(KvCacheStorage::Full, 2))
+        .expect("main cache");
+    state
+        .enable_mtp()
+        .expect("MTP")
+        .add_native_kv(scalar_kv_spec(KvCacheStorage::Full, 2))
+        .expect("MTP cache");
+    let (keys, values) = scalar_kv(&[1.0]);
+    state
+        .main_mut()
+        .native_kv_mut(0)
+        .expect("cache")
+        .write_sequence(0, 0, 0, keys, values)
+        .expect("main baseline");
+    let (keys, values) = scalar_kv(&[10.0]);
+    state
+        .mtp_mut()
+        .expect("MTP")
+        .native_kv_mut(0)
+        .expect("cache")
+        .write_sequence(0, 0, 0, keys, values)
+        .expect("MTP baseline");
+    state.advance(&[1]).expect("baseline");
+    state.advance_mtp(&[1]).expect("MTP baseline");
+
+    let mark = state.begin_transaction().expect("transaction");
+    let (keys, values) = scalar_kv(&[2.0, 3.0]);
+    state
+        .main_mut()
+        .native_kv_mut(0)
+        .expect("cache")
+        .stage_sequence(0, 0, keys, values)
+        .expect("main proposal");
+    let (keys, values) = scalar_kv(&[20.0, 30.0]);
+    state
+        .mtp_mut()
+        .expect("MTP")
+        .native_kv_mut(0)
+        .expect("cache")
+        .stage_sequence(0, 0, keys, values)
+        .expect("MTP proposal");
+    state.advance(&[2]).expect("proposal");
+    state.advance_mtp(&[2]).expect("MTP proposal");
+    state
+        .commit_uniform_prefixes(mark, 1, Some(1))
+        .expect("uniform prefix");
+    assert_eq!(state.lengths(), &[2]);
+    assert_eq!(state.mtp_lengths(), Some([2].as_slice()));
+    assert_eq!(
+        materialized_keys(state.main().native_kv(0).expect("cache"), 0, 0, 2),
+        [1.0, 2.0]
+    );
+    assert_eq!(
+        materialized_keys(
+            state.mtp().expect("MTP").native_kv(0).expect("cache"),
+            0,
+            0,
+            2
+        ),
+        [10.0, 20.0]
+    );
+
+    let mark = state.begin_transaction().expect("transaction");
+    for bank in [false, true] {
+        let (keys, values) = scalar_kv(&[if bank { 40.0 } else { 4.0 }]);
+        let target = if bank {
+            state.mtp_mut().expect("MTP")
+        } else {
+            state.main_mut()
+        };
+        target
+            .native_kv_mut(0)
+            .expect("cache")
+            .stage_sequence(0, 0, keys, values)
+            .expect("proposal");
+    }
+    state.advance(&[1]).expect("proposal");
+    state.advance_mtp(&[1]).expect("MTP proposal");
+    state.rollback(mark).expect("rollback");
+    assert_eq!(
+        materialized_keys(state.main().native_kv(0).expect("cache"), 0, 0, 2),
+        [1.0, 2.0]
+    );
+    state.reset().expect("reset main and MTP");
+    assert_eq!(state.lengths(), &[0]);
+    assert_eq!(state.mtp_lengths(), Some([0].as_slice()));
+    assert!(
+        state
+            .mtp()
+            .expect("MTP")
+            .native_kv(0)
+            .expect("cache")
+            .keys(0)
+            .expect("keys")
+            .to_data()
+            .to_vec::<f32>()
+            .expect("f32")
+            .iter()
+            .all(|&value| value == 0.0)
+    );
+}
+
+#[test]
+fn transaction_marks_and_accepted_counts_are_state_local_and_recoverable() {
+    let device = device();
+    let config = CacheConfig::new(2, 5).expect("config");
+    let mut first = TensorDecodeState::<TestBackend>::new(config, 2, &device).expect("state");
+    let mut second = TensorDecodeState::<TestBackend>::new(config, 2, &device).expect("state");
+    let first_mark = first.begin_transaction().expect("transaction");
+    assert!(format!("{first_mark:?}").contains("TensorTransactionToken"));
+    let rollback = first_mark.clone();
+    let foreign = second.begin_transaction().expect("transaction");
+    let second_rollback = foreign.clone();
+    assert!(matches!(
+        first.commit_prefix(foreign, &[0, 0]),
+        Err(TensorCacheError::StaleTransactionMark)
+    ));
+    assert!(matches!(
+        first.commit_prefix(first_mark, &[0]),
+        Err(TensorCacheError::Metadata(
+            crate::cache::DecodeStateError::SequenceCountMismatch { .. }
+        ))
+    ));
+    assert!(first.has_active_transaction());
+    first.advance(&[1, 0]).expect("proposal");
+    assert!(matches!(
+        first.commit_prefix(rollback.clone(), &[2, 0]),
+        Err(TensorCacheError::AcceptedPrefixExceedsProposal {
+            sequence: 0,
+            accepted: 2,
+            proposed: 1
+        })
+    ));
+    first.rollback(rollback).expect("rollback after errors");
+    second.rollback(second_rollback).expect("second rollback");
+}
+
+#[test]
+fn bank_attachment_accessors_and_errors_are_contextual() {
+    let device = device();
+    let config = CacheConfig::new(1, 3).expect("config");
+    assert!(matches!(
+        TensorCacheBank::<TestBackend>::new(config, 2, &device),
+        Err(TensorCacheError::BatchSizeMismatch { .. })
+    ));
+    let mut bank = TensorCacheBank::<TestBackend>::new(config, 1, &device).expect("bank");
+    assert_eq!(bank.config(), config);
+    assert_eq!(bank.batch_size(), 1);
+    assert_eq!(bank.native_kv_count(), 0);
+    assert_eq!(bank.recurrent_count(), 0);
+    bank.add_native_kv(scalar_kv_spec(KvCacheStorage::Full, 0))
+        .expect("KV");
+    bank.add_recurrent(scalar_recurrent_spec(0))
+        .expect("recurrent");
+    assert_eq!(bank.native_kv_count(), 1);
+    assert_eq!(bank.recurrent_count(), 1);
+    assert!(matches!(
+        bank.native_kv_mut(1),
+        Err(TensorCacheError::CacheOutOfBounds { .. })
+    ));
+    assert!(matches!(
+        bank.recurrent_mut(1),
+        Err(TensorCacheError::CacheOutOfBounds { .. })
+    ));
+
+    let mut state = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+    state.attach_mtp(bank).expect("compatible bank");
+    assert!(state.mtp().is_some());
+    assert_eq!(state.config(), config);
+    assert_eq!(state.batch_size(), 1);
+    assert_eq!(state.capacity(), 3);
+
+    let runtime: crate::Error = TensorCacheError::StagingDisabled.into();
+    assert_eq!(
+        runtime.to_string(),
+        "tensor cache error: speculative staging is disabled; configure a non-zero staging capacity"
+    );
+    assert!(matches!(
+        runtime,
+        crate::Error::TensorCache(TensorCacheError::StagingDisabled)
+    ));
+    assert!(
+        TensorCacheError::ShapeMismatch {
+            tensor: "keys",
+            expected: vec![1, 2],
+            actual: vec![2, 1],
+        }
+        .to_string()
+        .contains("expected [1, 2]")
+    );
+}
+
+#[test]
+fn low_level_commit_validation_covers_full_mirrored_and_zero_prefixes() {
+    let device = device();
+    let full_config = CacheConfig::new(1, 4).expect("config");
+    let mut full = NativeKvCache::<TestBackend>::new(
+        full_config,
+        1,
+        scalar_kv_spec(KvCacheStorage::Full, 2),
+        &device,
+    )
+    .expect("full cache");
+    let (keys, values) = scalar_kv(&[1.0]);
+    assert!(matches!(
+        full.stage_sequence(0, 0, keys, values),
+        Err(TensorCacheError::TransactionNotActive)
+    ));
+    full.begin_staging().expect("staging");
+    assert!(matches!(
+        full.begin_staging(),
+        Err(TensorCacheError::TransactionAlreadyActive)
+    ));
+    assert!(matches!(
+        full.reorder(&[0]),
+        Err(TensorCacheError::TransactionActive { .. })
+    ));
+    let (keys, values) = scalar_kv(&[1.0]);
+    full.stage_sequence(0, 0, keys, values).expect("proposal");
+    assert!(matches!(
+        full.prepare_staging_commit(&[], &[1], &[1]),
+        Err(TensorCacheError::Metadata(
+            crate::cache::DecodeStateError::SequenceCountMismatch { .. }
+        ))
+    ));
+    assert!(matches!(
+        full.prepare_staging_commit(&[0], &[1], &[2]),
+        Err(TensorCacheError::AcceptedPrefixExceedsProposal { .. })
+    ));
+    full.rollback_staging();
+
+    full.begin_staging().expect("empty proposal");
+    let plan = full
+        .prepare_staging_commit(&[0], &[0], &[0])
+        .expect("zero proposal valid");
+    full.apply_staging_commit(plan);
+    assert!(matches!(
+        full.prepare_staging_commit(&[0], &[0], &[0]),
+        Err(TensorCacheError::TransactionNotActive)
+    ));
+    full.reorder(&[0]).expect("reorder staging tensors");
+
+    let mut disabled = NativeKvCache::<TestBackend>::new(
+        full_config,
+        1,
+        scalar_kv_spec(KvCacheStorage::Full, 0),
+        &device,
+    )
+    .expect("cache");
+    assert!(matches!(
+        disabled.begin_staging(),
+        Err(TensorCacheError::StagingDisabled)
+    ));
+
+    let mirrored_config = CacheConfig::new(1, 8)
+        .expect("config")
+        .with_sliding_window(3)
+        .expect("window");
+    let mut state =
+        TensorDecodeState::<TestBackend>::new(mirrored_config, 1, &device).expect("state");
+    state
+        .main_mut()
+        .add_native_kv(scalar_kv_spec(KvCacheStorage::MirroredSlidingRing, 2))
+        .expect("mirrored cache");
+    let mark = state.begin_transaction().expect("transaction");
+    let (keys, values) = scalar_kv(&[6.0, 7.0]);
+    state
+        .main_mut()
+        .native_kv_mut(0)
+        .expect("cache")
+        .stage_sequence(0, 0, keys, values)
+        .expect("proposal");
+    state.advance(&[2]).expect("proposal length");
+    state.commit_prefix(mark, &[2]).expect("commit mirrored");
+    assert_eq!(
+        materialized_keys(state.main().native_kv(0).expect("cache"), 0, 0, 2),
+        [6.0, 7.0]
+    );
+}
+
+#[test]
+fn recurrent_zero_prefix_and_empty_snapshots_keep_terminal_state_exact() {
+    let device = device();
+    let config = CacheConfig::new(1, 4).expect("config");
+    let mut cache =
+        RecurrentStateCache::<TestBackend>::new(config, 1, scalar_recurrent_spec(2), &device)
+            .expect("cache");
+    cache.begin_staging().expect("transaction");
+    let plan = cache
+        .prepare_staging_commit(&[0], &[0])
+        .expect("empty staging");
+    cache.apply_staging_commit(plan);
+    assert_eq!(
+        cache
+            .matrix(0)
+            .expect("matrix")
+            .to_data()
+            .to_vec::<f32>()
+            .expect("f32"),
+        [0.0]
+    );
+
+    cache.begin_staging().expect("transaction");
+    cache
+        .stage_sequence_snapshots(
+            0,
+            0,
+            tensor5(vec![1.0], [1, 1, 1, 1, 1]),
+            tensor4(vec![1.0, 2.0], [1, 1, 1, 2]),
+        )
+        .expect("snapshot");
+    assert!(matches!(
+        cache.prepare_staging_commit(&[1], &[2]),
+        Err(TensorCacheError::AcceptedPrefixExceedsProposal { .. })
+    ));
+    cache.rollback_staging();
+
+    cache.begin_staging().expect("transaction");
+    cache
+        .stage_sequence_snapshots(
+            0,
+            0,
+            tensor5(Vec::new(), [1, 0, 1, 1, 1]),
+            tensor4(Vec::new(), [1, 0, 1, 2]),
+        )
+        .expect("empty snapshots");
+    cache.rollback_staging();
+}
+
+#[test]
+fn mtp_truncate_and_trait_lifecycle_apply_to_auxiliary_storage() {
+    let device = device();
+    let config = CacheConfig::new(1, 6)
+        .expect("config")
+        .with_sliding_window(2)
+        .expect("window");
+    let mut state = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+    state
+        .enable_mtp()
+        .expect("MTP")
+        .add_native_kv(scalar_kv_spec(KvCacheStorage::SlidingRing, 0))
+        .expect("MTP ring");
+    state.advance_mtp(&[3]).expect("wrapped MTP length");
+    assert!(matches!(
+        state.truncate_mtp(&[2]),
+        Err(TensorCacheError::UnsafeWrappedTruncate { .. })
+    ));
+    state.truncate_mtp(&[0]).expect("zero MTP rewind");
+    ArchitectureDecodeState::<TestBackend>::truncate(&mut state, &[0])
+        .expect("main cursor is independent");
+    ArchitectureDecodeState::<TestBackend>::reorder(&mut state, &[0]).expect("trait reorder");
+
+    let bank = TensorCacheBank::<TestBackend>::new(config, 1, &device).expect("bank");
+    assert!(matches!(
+        state.attach_mtp(bank),
+        Err(TensorCacheError::MtpAlreadyEnabled)
+    ));
+}
+
+#[test]
+fn ragged_batch_transactions_commit_independent_prefix_lengths() {
+    let device = device();
+    let config = CacheConfig::new(2, 6).expect("config");
+    let mut state = TensorDecodeState::<TestBackend>::new(config, 2, &device).expect("state");
+    state
+        .main_mut()
+        .add_native_kv(scalar_kv_spec(KvCacheStorage::Full, 3))
+        .expect("cache");
+    let mark = state.begin_transaction().expect("transaction");
+    for (sequence, proposal) in [(0, vec![1.0, 2.0]), (1, vec![10.0])] {
+        let (keys, values) = scalar_kv(&proposal);
+        state
+            .main_mut()
+            .native_kv_mut(0)
+            .expect("cache")
+            .stage_sequence(0, sequence, keys, values)
+            .expect("ragged proposal");
+    }
+    state.advance(&[2, 1]).expect("ragged lengths");
+    state.commit_prefix(mark, &[1, 0]).expect("ragged commit");
+    assert_eq!(state.lengths(), &[1, 0]);
+    assert_eq!(
+        materialized_keys(state.main().native_kv(0).expect("cache"), 0, 0, 1),
+        [1.0]
+    );
+    assert!(
+        state
+            .main()
+            .native_kv(0)
+            .expect("cache")
+            .read_sequence(0, 1, 0)
+            .expect("empty row")
+            .materialize()
+            .is_none()
+    );
+}
+
+#[test]
+fn committed_lengths_stay_stable_while_working_kv_grows_iteratively() {
+    let device = device();
+    let config = CacheConfig::new(1, 8).expect("config");
+    let mut state = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+    state
+        .main_mut()
+        .add_native_kv(scalar_kv_spec(KvCacheStorage::Full, 3))
+        .expect("cache");
+    let (keys, values) = scalar_kv(&[1.0]);
+    state
+        .main_mut()
+        .native_kv_mut(0)
+        .expect("cache")
+        .write_sequence(0, 0, 0, keys, values)
+        .expect("baseline");
+    state.advance(&[1]).expect("committed baseline");
+
+    let mark = state.begin_transaction().expect("transaction");
+    for value in [2.0, 3.0] {
+        let (keys, values) = scalar_kv(&[value]);
+        state
+            .main_mut()
+            .native_kv_mut(0)
+            .expect("cache")
+            .stage_sequence(0, 0, keys, values)
+            .expect("stage iterative token");
+        state.advance(&[1]).expect("working advance");
+        assert_eq!(state.lengths(), &[1]);
+        let expected = if value == 2.0 {
+            vec![1.0, 2.0]
+        } else {
+            vec![1.0, 2.0, 3.0]
+        };
+        assert_eq!(state.working_lengths(), &[expected.len()]);
+        assert_eq!(
+            working_keys(state.main().native_kv(0).expect("cache"), 0, 0, 1),
+            expected
+        );
+    }
+    state.rollback(mark).expect("rollback");
+    assert_eq!(state.lengths(), &[1]);
+    assert_eq!(state.working_lengths(), &[1]);
+}
+
+#[test]
+fn working_reads_trim_wrapped_history_and_support_proposals_larger_than_window() {
+    let device = device();
+    let config = CacheConfig::new(1, 12)
+        .expect("config")
+        .with_sliding_window(4)
+        .expect("window");
+    for storage in [
+        KvCacheStorage::SlidingRing,
+        KvCacheStorage::MirroredSlidingRing,
+    ] {
+        let mut state = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+        state
+            .main_mut()
+            .add_native_kv(scalar_kv_spec(storage, 5))
+            .expect("cache");
+        let (keys, values) = scalar_kv(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        state
+            .main_mut()
+            .native_kv_mut(0)
+            .expect("cache")
+            .write_sequence(0, 0, 0, keys, values)
+            .expect("wrapped baseline");
+        state.advance(&[5]).expect("baseline length");
+
+        let mark = state.begin_transaction().expect("transaction");
+        let (keys, values) = scalar_kv(&[6.0, 7.0]);
+        state
+            .main_mut()
+            .native_kv_mut(0)
+            .expect("cache")
+            .stage_sequence(0, 0, keys, values)
+            .expect("proposal");
+        state.advance(&[2]).expect("proposal length");
+        let read = state
+            .main()
+            .native_kv(0)
+            .expect("cache")
+            .read_working_sequence(0, 0, 5)
+            .expect("working read");
+        assert_eq!(read.retained_positions(), 3..7);
+        assert_eq!(
+            working_keys(state.main().native_kv(0).expect("cache"), 0, 0, 5),
+            [4.0, 5.0, 6.0, 7.0]
+        );
+        state.rollback(mark).expect("rollback");
+
+        let mark = state.begin_transaction().expect("transaction");
+        let (keys, values) = scalar_kv(&[6.0, 7.0, 8.0, 9.0, 10.0]);
+        state
+            .main_mut()
+            .native_kv_mut(0)
+            .expect("cache")
+            .stage_sequence(0, 0, keys, values)
+            .expect("large proposal");
+        state.advance(&[5]).expect("proposal length");
+        assert_eq!(
+            working_keys(state.main().native_kv(0).expect("cache"), 0, 0, 5),
+            [7.0, 8.0, 9.0, 10.0]
+        );
+        state.rollback(mark).expect("rollback");
+    }
+}
+
+#[test]
+fn recurrent_working_reads_and_whole_batch_io_preserve_split_dtypes() {
+    let device = device();
+    let config = CacheConfig::new(2, 8).expect("config");
+    let spec = RecurrentStateSpec::new_with_dtypes(1, 1, 1, 1, 1, 2, DType::F32, DType::F16)
+        .expect("mixed dtype spec")
+        .with_staging_capacity(2);
+    assert_eq!(spec.matrix_dtype(), DType::F32);
+    assert_eq!(spec.convolution_dtype(), DType::F16);
+    let mut cache =
+        RecurrentStateCache::<TestBackend>::new(config, 2, spec, &device).expect("cache");
+    let initial = cache.read_working_batch(0).expect("initial batch");
+    assert_eq!(initial.staged_rows(), &[false, false]);
+    assert!(matches!(
+        cache.stage_batch_snapshots(
+            0,
+            tensor5(vec![0.0, 0.0], [2, 1, 1, 1, 1]),
+            tensor4(vec![0.0; 4], [2, 1, 1, 2]).cast(DType::F16)
+        ),
+        Err(TensorCacheError::TransactionNotActive)
+    ));
+    assert!(matches!(
+        cache.set_batch_state(
+            0,
+            tensor4(vec![0.0], [1, 1, 1, 1]),
+            tensor3(vec![0.0; 4], [2, 1, 2]).cast(DType::F16)
+        ),
+        Err(TensorCacheError::ShapeMismatch { .. })
+    ));
+    let matrix = tensor4(vec![1.0, 2.0], [2, 1, 1, 1]);
+    let convolution = tensor3(vec![3.0, 4.0, 5.0, 6.0], [2, 1, 2]).cast(DType::F16);
+    cache
+        .set_batch_state(0, matrix, convolution)
+        .expect("whole-batch set");
+    let (matrix, convolution) = cache.batch_state(0).expect("whole-batch get");
+    assert_eq!(matrix.dims(), [2, 1, 1, 1]);
+    assert_eq!(matrix.dtype(), DType::F32);
+    assert_eq!(convolution.dims(), [2, 1, 2]);
+    assert_eq!(convolution.dtype(), DType::F16);
+    let committed = cache.read_working_sequence(0, 1).expect("committed row");
+    assert_eq!(committed.staged_snapshot(), None);
+    assert_eq!(committed.matrix().dims(), [1, 1, 1, 1]);
+
+    cache.begin_staging().expect("uniform batch transaction");
+    cache
+        .stage_batch_snapshots(
+            0,
+            tensor5(Vec::new(), [2, 0, 1, 1, 1]),
+            tensor4(Vec::new(), [2, 0, 1, 2]).cast(DType::F16),
+        )
+        .expect("empty batch snapshots");
+    assert!(matches!(
+        cache.set_batch_state(
+            0,
+            tensor4(vec![1.0, 2.0], [2, 1, 1, 1]),
+            tensor3(vec![3.0, 4.0, 5.0, 6.0], [2, 1, 2]).cast(DType::F16)
+        ),
+        Err(TensorCacheError::TransactionActive { .. })
+    ));
+    cache
+        .stage_batch_snapshots(
+            0,
+            tensor5(vec![7.0, 8.0], [2, 1, 1, 1, 1]),
+            tensor4(vec![9.0, 10.0, 11.0, 12.0], [2, 1, 1, 2]).cast(DType::F16),
+        )
+        .expect("whole-batch snapshots");
+    assert!(matches!(
+        cache.stage_batch_snapshots(
+            0,
+            tensor5(vec![1.0, 2.0, 3.0, 4.0], [2, 2, 1, 1, 1]),
+            tensor4(vec![1.0; 8], [2, 2, 1, 2]).cast(DType::F16)
+        ),
+        Err(TensorCacheError::StagingCapacityExceeded {
+            requested: 3,
+            capacity: 2
+        })
+    ));
+    let uniform = cache.read_working_batch(0).expect("uniform working batch");
+    assert_eq!(uniform.staged_rows(), &[true, true]);
+    assert_eq!(
+        uniform
+            .matrix()
+            .to_data()
+            .to_vec::<f32>()
+            .expect("matrix data"),
+        [7.0, 8.0]
+    );
+    cache.rollback_staging();
+
+    cache.begin_staging().expect("ragged transaction");
+    cache
+        .stage_sequence_snapshots(
+            0,
+            1,
+            tensor5(vec![7.0, 8.0], [1, 2, 1, 1, 1]),
+            tensor4(vec![9.0, 10.0, 11.0, 12.0], [1, 2, 1, 2]).cast(DType::F16),
+        )
+        .expect("snapshots");
+    assert!(matches!(
+        cache.stage_batch_snapshots(
+            0,
+            tensor5(vec![1.0, 2.0], [2, 1, 1, 1, 1]),
+            tensor4(vec![1.0, 1.0, 2.0, 2.0], [2, 1, 1, 2]).cast(DType::F16)
+        ),
+        Err(TensorCacheError::NonUniformStagingOffset { .. })
+    ));
+    let working = cache.read_working_sequence(0, 1).expect("working row");
+    assert_eq!(working.staged_snapshot(), Some(1));
+    assert_eq!(
+        working
+            .matrix()
+            .to_data()
+            .to_vec::<f32>()
+            .expect("matrix data"),
+        [8.0]
+    );
+    assert_eq!(working.convolution().dtype(), DType::F16);
+    let working_batch = cache.read_working_batch(0).expect("working batch");
+    assert_eq!(working_batch.staged_rows(), &[false, true]);
+    assert_eq!(working_batch.matrix().dims(), [2, 1, 1, 1]);
+    assert_eq!(
+        working_batch
+            .matrix()
+            .to_data()
+            .to_vec::<f32>()
+            .expect("matrix data"),
+        [1.0, 8.0]
+    );
+    assert_eq!(working_batch.convolution().dtype(), DType::F16);
+    cache.rollback_staging();
+
+    assert!(matches!(
+        RecurrentStateSpec::new_with_dtypes(1, 1, 1, 1, 1, 1, DType::F32, DType::I32),
+        Err(TensorCacheError::NonFloatDType { dtype: DType::I32 })
+    ));
+}
+
+#[test]
+fn main_and_mtp_proposals_have_independent_cursors_and_prefixes() {
+    let device = device();
+    let config = CacheConfig::new(1, 8).expect("config");
+    let mut state = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+    state
+        .main_mut()
+        .add_native_kv(scalar_kv_spec(KvCacheStorage::Full, 3))
+        .expect("main cache");
+    state
+        .enable_mtp()
+        .expect("MTP")
+        .add_native_kv(scalar_kv_spec(KvCacheStorage::Full, 3))
+        .expect("MTP cache");
+    let mark = state.begin_transaction().expect("transaction");
+    assert_eq!(mark.mtp_baseline_lengths(), Some([0].as_slice()));
+    let (keys, values) = scalar_kv(&[1.0, 2.0]);
+    state
+        .main_mut()
+        .native_kv_mut(0)
+        .expect("main")
+        .stage_sequence(0, 0, keys, values)
+        .expect("main proposal");
+    let (keys, values) = scalar_kv(&[10.0]);
+    state
+        .mtp_mut()
+        .expect("MTP")
+        .native_kv_mut(0)
+        .expect("cache")
+        .stage_sequence(0, 0, keys, values)
+        .expect("MTP proposal");
+    state.advance(&[2]).expect("main cursor");
+    state.advance_mtp(&[1]).expect("MTP cursor");
+    assert_eq!(state.lengths(), &[0]);
+    assert_eq!(state.working_lengths(), &[2]);
+    assert_eq!(state.mtp_lengths(), Some([0].as_slice()));
+    assert_eq!(state.mtp_working_lengths(), Some([1].as_slice()));
+    state
+        .commit_prefixes(mark, &[1], Some(&[0]))
+        .expect("independent commit");
+    assert_eq!(state.lengths(), &[1]);
+    assert_eq!(state.mtp_lengths(), Some([0].as_slice()));
+    assert_eq!(
+        materialized_keys(state.main().native_kv(0).expect("main"), 0, 0, 1),
+        [1.0]
+    );
+
+    let mark = state.begin_transaction().expect("transaction");
+    let (keys, values) = scalar_kv(&[20.0]);
+    state
+        .mtp_mut()
+        .expect("MTP")
+        .native_kv_mut(0)
+        .expect("cache")
+        .stage_sequence(0, 0, keys, values)
+        .expect("MTP proposal");
+    state.advance(&[0]).expect("empty main proposal");
+    state.advance_mtp(&[1]).expect("MTP proposal");
+    assert!(matches!(
+        state.commit_prefix(mark.clone(), &[0]),
+        Err(TensorCacheError::MtpAcceptedPrefixRequired)
+    ));
+    assert!(state.has_active_transaction());
+    state.rollback(mark).expect("recoverable rollback");
+}
+
+#[test]
+fn public_transaction_trait_drives_tensor_state_without_downcasting() {
+    use crate::cache::TransactionalCache;
+
+    let device = device();
+    let config = CacheConfig::new(1, 4).expect("config");
+    let mut state = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+    state
+        .main_mut()
+        .add_native_kv(scalar_kv_spec(KvCacheStorage::Full, 1))
+        .expect("cache");
+    let mark = TransactionalCache::mark(&mut state).expect("generic mark");
+    let (keys, values) = scalar_kv(&[4.0]);
+    state
+        .main_mut()
+        .native_kv_mut(0)
+        .expect("cache")
+        .stage_sequence(0, 0, keys, values)
+        .expect("proposal");
+    state.advance(&[1]).expect("working advance");
+    TransactionalCache::commit_prefix(&mut state, mark, 1).expect("generic commit");
+    assert_eq!(state.lengths(), &[1]);
+}
+
+#[test]
+fn empty_banks_are_topology_locked_for_the_entire_transaction() {
+    let device = device();
+    let config = CacheConfig::new(1, 4).expect("config");
+    let mut state = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+    state.enable_mtp().expect("empty MTP");
+    let mark = state.begin_transaction().expect("empty transaction");
+    assert!(state.main().has_active_staging());
+    assert!(state.mtp().expect("MTP").has_active_staging());
+    assert!(matches!(
+        state
+            .main_mut()
+            .add_native_kv(scalar_kv_spec(KvCacheStorage::Full, 1)),
+        Err(TensorCacheError::TransactionActive { .. })
+    ));
+    assert!(matches!(
+        state
+            .mtp_mut()
+            .expect("MTP")
+            .add_recurrent(scalar_recurrent_spec(1)),
+        Err(TensorCacheError::TransactionActive { .. })
+    ));
+    state.rollback(mark).expect("rollback");
+    state
+        .main_mut()
+        .add_native_kv(scalar_kv_spec(KvCacheStorage::Full, 1))
+        .expect("topology unlocked");
+}
+
+#[test]
+fn cross_bank_commit_validation_is_atomic_before_any_tensor_write() {
+    let device = device();
+    let config = CacheConfig::new(1, 8).expect("config");
+    let mut state = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+    state
+        .main_mut()
+        .add_native_kv(scalar_kv_spec(KvCacheStorage::Full, 2))
+        .expect("main cache");
+    state
+        .enable_mtp()
+        .expect("MTP")
+        .add_native_kv(scalar_kv_spec(KvCacheStorage::Full, 2))
+        .expect("MTP cache");
+    for (mtp, value) in [(false, 1.0), (true, 10.0)] {
+        let (keys, values) = scalar_kv(&[value]);
+        let bank = if mtp {
+            state.mtp_mut().expect("MTP")
+        } else {
+            state.main_mut()
+        };
+        bank.native_kv_mut(0)
+            .expect("cache")
+            .write_sequence(0, 0, 0, keys, values)
+            .expect("baseline");
+    }
+    state.advance(&[1]).expect("main baseline");
+    state.advance_mtp(&[1]).expect("MTP baseline");
+    let mark = state.begin_transaction().expect("transaction");
+    for (mtp, value) in [(false, 2.0), (true, 20.0)] {
+        let (keys, values) = scalar_kv(&[value]);
+        let bank = if mtp {
+            state.mtp_mut().expect("MTP")
+        } else {
+            state.main_mut()
+        };
+        bank.native_kv_mut(0)
+            .expect("cache")
+            .stage_sequence(0, 0, keys, values)
+            .expect("proposal");
+    }
+    state.advance(&[1]).expect("main proposal");
+    state
+        .advance_mtp(&[2])
+        .expect("intentionally incomplete MTP proposal");
+    assert!(matches!(
+        state.commit_prefixes(mark.clone(), &[1], Some(&[1])),
+        Err(TensorCacheError::IncompleteStaging {
+            kind: "native KV",
+            expected: 2,
+            actual: 1,
+            ..
+        })
+    ));
+    assert_eq!(
+        materialized_keys(state.main().native_kv(0).expect("main"), 0, 0, 1),
+        [1.0]
+    );
+    assert_eq!(
+        materialized_keys(
+            state.mtp().expect("MTP").native_kv(0).expect("cache"),
+            0,
+            0,
+            1
+        ),
+        [10.0]
+    );
+    state
+        .rollback(mark)
+        .expect("rollback after validation error");
+}
+
+#[test]
+fn allocation_arithmetic_is_rejected_before_backend_tensor_creation() {
+    let device = device();
+    let overflow_config = CacheConfig::new(1, usize::MAX).expect("config");
+    let overflow_spec =
+        NativeKvCacheSpec::new(1, 2, 2, KvCacheStorage::Full, DType::F32).expect("spec");
+    assert!(matches!(
+        NativeKvCache::<TestBackend>::new(overflow_config, 1, overflow_spec, &device),
+        Err(TensorCacheError::TensorShapeOverflow { .. })
+    ));
+
+    let too_large = (i32::MAX as usize) + 1;
+    let limit_config = CacheConfig::new(1, too_large).expect("config");
+    let limit_spec = scalar_kv_spec(KvCacheStorage::Full, 0);
+    assert!(matches!(
+        NativeKvCache::<TestBackend>::new(limit_config, 1, limit_spec, &device),
+        Err(TensorCacheError::TensorElementLimitExceeded {
+            elements,
+            limit,
+            ..
+        }) if elements == too_large && limit == i32::MAX as usize
+    ));
+
+    let repeated_spec =
+        NativeKvCacheSpec::new(usize::MAX, 1, 1, KvCacheStorage::Full, DType::F32).expect("spec");
+    let tiny_config = CacheConfig::new(1, 1).expect("config");
+    assert!(matches!(
+        NativeKvCache::<TestBackend>::new(tiny_config, 1, repeated_spec, &device),
+        Err(TensorCacheError::AllocationSizeOverflow { .. })
+            | Err(TensorCacheError::TensorShapeOverflow { .. })
+    ));
+
+    let recurrent_spec =
+        RecurrentStateSpec::new(1, 1, usize::MAX, 2, 1, 1, DType::F32).expect("spec");
+    assert!(matches!(
+        RecurrentStateCache::<TestBackend>::new(tiny_config, 1, recurrent_spec, &device),
+        Err(TensorCacheError::TensorShapeOverflow { .. })
+    ));
+}
+
+#[test]
+fn tensor_transaction_edge_contracts_remain_recoverable() {
+    use crate::cache::TransactionalCache;
+
+    let device = device();
+    let config = CacheConfig::new(1, 2).expect("config");
+    let mut state = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+    assert_eq!(state.mtp_lengths(), None);
+    assert_eq!(state.mtp_working_lengths(), None);
+    assert!(matches!(
+        state.advance_mtp(&[1]),
+        Err(TensorCacheError::MtpNotEnabled)
+    ));
+    assert!(matches!(
+        state.truncate_mtp(&[0]),
+        Err(TensorCacheError::MtpNotEnabled)
+    ));
+
+    let mark = TransactionalCache::mark(&mut state).expect("generic mark");
+    assert!(matches!(
+        state.advance(&[3]),
+        Err(TensorCacheError::Metadata(
+            crate::cache::DecodeStateError::CapacityExceeded { .. }
+        ))
+    ));
+    assert_eq!(state.working_lengths(), &[0]);
+    TransactionalCache::rollback(&mut state, mark).expect("generic rollback");
+
+    let mark = state.begin_transaction().expect("transaction");
+    assert!(matches!(
+        state.commit_prefixes(mark.clone(), &[0], Some(&[0])),
+        Err(TensorCacheError::MtpNotEnabled)
+    ));
+    state.rollback(mark).expect("rollback");
+
+    state.enable_mtp().expect("empty MTP");
+    let mark = state.begin_transaction().expect("transaction");
+    state
+        .commit_prefix(mark, &[0])
+        .expect("implicit zero MTP prefix");
+    state.advance_mtp(&[1]).expect("MTP length");
+    assert!(matches!(
+        state.truncate_mtp(&[2]),
+        Err(TensorCacheError::Metadata(
+            crate::cache::DecodeStateError::CannotExtendByTruncation { .. }
+        ))
+    ));
 }
