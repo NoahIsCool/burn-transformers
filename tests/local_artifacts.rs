@@ -6,6 +6,8 @@
 
 #![cfg(feature = "tokenizers")]
 
+#[cfg(feature = "metal")]
+use std::time::Instant;
 use std::{fs, path::PathBuf};
 
 #[cfg(feature = "chat-templates")]
@@ -13,7 +15,7 @@ use transformers::{ChatMessage, ChatTemplateOptions};
 use transformers::{
     EncodeOptions, LocalTokenizer,
     checkpoint::{
-        CheckpointManifest, LoadOptions,
+        ArtifactSource, CheckpointManifest, LoadOptions,
         quantization::{
             QuantizedBurnpackArtifact, QuantizedCheckpointOptions, SymmetricQuantization,
             WeightQuantizationConfig, quantize_local_checkpoint_to_burnpack,
@@ -21,7 +23,7 @@ use transformers::{
     },
     models::{
         config::ModelConfig,
-        qwen3_5::{Qwen3_5CheckpointOptions, Qwen3_5TextConfig},
+        qwen3_5::{Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5TextConfig},
     },
 };
 
@@ -32,20 +34,369 @@ use burn::{
 };
 #[cfg(all(feature = "metal", not(feature = "rocm")))]
 use burn::{module::Param, nn::Linear};
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
-use transformers::{
-    AutoCausalLm, AutoLoadOptions,
-    delta_net::{DeltaNetMode, GatedDeltaNetState},
-    operations,
-};
 #[cfg(feature = "metal")]
 use transformers::{
-    CausalLanguageModel, DecodeInput, DecodeState, ForwardOptions, LogitsSelection,
+    AutoCausalLm, AutoLoadOptions, CausalLanguageModel, DecodeInput, DecodeState, ForwardOptions,
+    LogitsSelection,
     architecture::CausalLmInput,
     cache::CacheConfig,
     checkpoint::{DTypePolicy, TensorDType, execute_local_load_plan},
     models::qwen3_5::Qwen3_5ForCausalLm,
 };
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+use transformers::{
+    delta_net::{DeltaNetMode, GatedDeltaNetState},
+    operations,
+};
+
+/// Immutable identity recorded alongside the committed Qwen3.8 header inventory.
+#[derive(Debug, serde::Deserialize)]
+struct PinnedQwen38Inventory {
+    checkpoint: String,
+    revision: String,
+    tensors: Vec<PinnedTensorInventory>,
+}
+
+/// One expected physical tensor from the pinned Qwen3.8 SafeTensors headers.
+#[derive(Debug, serde::Deserialize)]
+struct PinnedTensorInventory {
+    name: String,
+    shape: Vec<u64>,
+    dtype: String,
+}
+
+/// Resolves the opt-in Qwen3.8 artifact root without silently choosing mutable data.
+fn pinned_qwen38_root() -> PathBuf {
+    PathBuf::from(std::env::var_os("TRANSFORMERS_QWEN38_DIR").expect(
+        "set TRANSFORMERS_QWEN38_DIR to Qwen/Qwen3.8-27B revision \
+             1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    ))
+}
+
+/// Parses the checked-in tensor-level inventory for the immutable Qwen3.8 revision.
+fn pinned_qwen38_inventory() -> PinnedQwen38Inventory {
+    serde_json::from_str(include_str!(
+        "fixtures/qwen3_5_checkpoint/qwen3_8_27b_inventory.json"
+    ))
+    .expect("the committed Qwen3.8 tensor inventory must remain valid JSON")
+}
+
+/// Validates every pinned Qwen3.8 configuration field and physical tensor header.
+#[test]
+#[ignore = "requires Qwen/Qwen3.8-27B revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"]
+fn validates_pinned_qwen38_config_and_header_inventory() {
+    let root = pinned_qwen38_root();
+    let config_path = root.join("config.json");
+    let config_json = fs::read_to_string(&config_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", config_path.display()));
+    let observed_config = Qwen3_5TextConfig::from_json_str(&config_json)
+        .expect("the pinned nested Qwen3.8 text configuration must validate");
+    let mut expected_config =
+        Qwen3_5TextConfig::from_json_str(include_str!("fixtures/qwen3_8_27b.json"))
+            .expect("the committed Qwen3.8 configuration must validate");
+    expected_config.layer_types = expected_config.resolved_layer_types();
+    assert_eq!(observed_config, expected_config);
+    assert_eq!(observed_config.model_type, "qwen3_5_text");
+    assert_eq!(observed_config.num_hidden_layers, 64);
+    assert_eq!(observed_config.mtp_num_hidden_layers, 1);
+
+    let expected = pinned_qwen38_inventory();
+    assert_eq!(expected.checkpoint, "Qwen/Qwen3.8-27B");
+    assert_eq!(
+        expected.revision,
+        "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    );
+    let manifest = CheckpointManifest::discover(&root, &LoadOptions::default())
+        .expect("all 18 pinned SafeTensors shard headers must pass strict discovery");
+    assert_eq!(manifest.shards.len(), 18);
+    assert_eq!(manifest.tensors.len(), expected.tensors.len());
+    assert_eq!(manifest.tensors.len(), 1_199);
+    match &manifest.source {
+        ArtifactSource::Index {
+            relative_path,
+            declared_total_size,
+        } => {
+            assert_eq!(relative_path, "model.safetensors.index.json");
+            assert_eq!(*declared_total_size, Some(manifest.tensor_bytes));
+        }
+        ArtifactSource::Single { relative_path } => {
+            panic!("expected a sharded checkpoint index, found {relative_path}")
+        }
+        _ => panic!("expected the standard sharded checkpoint index"),
+    }
+
+    for tensor in &expected.tensors {
+        let observed = manifest
+            .tensor(&tensor.name)
+            .unwrap_or_else(|| panic!("pinned header is missing tensor `{}`", tensor.name));
+        assert_eq!(
+            observed.shape, tensor.shape,
+            "shape changed for `{}`",
+            tensor.name
+        );
+        assert_eq!(
+            observed.dtype.as_str(),
+            tensor.dtype,
+            "dtype changed for `{}`",
+            tensor.name
+        );
+    }
+
+    let language_tensors = manifest
+        .tensors
+        .keys()
+        .filter(|name| name.starts_with("model.language_model."))
+        .count();
+    let visual_tensors = manifest
+        .tensors
+        .keys()
+        .filter(|name| name.starts_with("model.visual."))
+        .count();
+    let mtp_tensors = manifest
+        .tensors
+        .keys()
+        .filter(|name| name.starts_with("mtp."))
+        .count();
+    assert_eq!(language_tensors, 850);
+    assert_eq!(usize::from(manifest.tensor("lm_head.weight").is_some()), 1);
+    assert_eq!(mtp_tensors, 15);
+    assert_eq!(visual_tensors, 333);
+    assert_eq!(language_tensors + 1 + mtp_tensors + visual_tensors, 1_199);
+}
+
+/// Proves the full 866-tensor text-plus-MTP graph consumes every non-visual key.
+#[test]
+#[ignore = "requires Qwen/Qwen3.8-27B revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"]
+fn strictly_maps_pinned_qwen38_text_and_mtp() {
+    let root = pinned_qwen38_root();
+    let config_path = root.join("config.json");
+    let config_json = fs::read_to_string(&config_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", config_path.display()));
+    let config = Qwen3_5TextConfig::from_json_str(&config_json)
+        .expect("the pinned nested Qwen3.8 text configuration must validate");
+    let manifest = CheckpointManifest::discover(&root, &LoadOptions::default())
+        .expect("the pinned SafeTensors inventory must pass strict discovery");
+    let contract = config
+        .checkpoint_contract(Qwen3_5CheckpointOptions {
+            source: Qwen3_5CheckpointSource::Multimodal,
+            include_mtp: true,
+        })
+        .expect("the pinned Qwen3.8 topology must produce a text-plus-MTP contract");
+    let plan = contract
+        .build_load_plan(&manifest, &LoadOptions::default())
+        .expect("every text and MTP tensor must map while visual tensors are allowlisted");
+
+    assert_eq!(contract.expected_tensors().len(), 866);
+    assert_eq!(plan.tensors.len(), 866);
+    assert!(plan.aliases.is_empty());
+    assert!(plan.report.is_strictly_valid());
+    assert_eq!(plan.report.allowlisted_ignored.len(), 333);
+    assert!(
+        plan.report
+            .allowlisted_ignored
+            .iter()
+            .all(|name| name.starts_with("model.visual."))
+    );
+    assert_eq!(
+        plan.tensors
+            .iter()
+            .filter(|tensor| tensor.target.starts_with("mtp."))
+            .count(),
+        15
+    );
+
+    let planned_sources = plan
+        .tensors
+        .iter()
+        .flat_map(|tensor| tensor.sources.iter().map(|source| source.name.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_sources = manifest
+        .tensors
+        .keys()
+        .filter(|name| !name.starts_with("model.visual."))
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(planned_sources, expected_sources);
+    eprintln!("Qwen3.8 pre-allocation memory estimate: {:?}", plan.memory);
+}
+
+/// Exercises the exact local Qwen3.8 tokenizer vocabulary without network access.
+#[test]
+#[ignore = "requires Qwen/Qwen3.8-27B revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"]
+fn validates_pinned_qwen38_tokenizer() {
+    let tokenizer = LocalTokenizer::from_directory(pinned_qwen38_root())
+        .expect("the pinned Qwen3.8 tokenizer artifacts must load locally");
+    let prompt = "Explain why cached decoding is faster in one sentence.";
+    let encoding = tokenizer
+        .encode(
+            prompt,
+            &EncodeOptions {
+                add_special_tokens: false,
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("the pinned tokenizer must encode ordinary text");
+    let token_ids = &encoding.token_ids()[0];
+    assert!(!token_ids.is_empty());
+    assert_eq!(encoding.valid_tokens()[0], vec![true; token_ids.len()]);
+    assert_eq!(
+        tokenizer
+            .decode(token_ids, true)
+            .expect("the pinned tokenizer must decode its own ordinary-text IDs"),
+        prompt
+    );
+}
+
+/// Validates the pinned Qwen3.8 no-thinking assistant-prefix chat rendering.
+#[cfg(feature = "chat-templates")]
+#[test]
+#[ignore = "requires Qwen/Qwen3.8-27B revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"]
+fn validates_pinned_qwen38_chat_template() {
+    let tokenizer = LocalTokenizer::from_directory(pinned_qwen38_root())
+        .expect("the pinned Qwen3.8 tokenizer artifacts must load locally");
+    let prompt = "Explain why cached decoding is faster in one sentence.";
+    let rendered = tokenizer
+        .render_chat(
+            &[ChatMessage::text("user", prompt)],
+            &ChatTemplateOptions {
+                add_generation_prompt: true,
+                enable_thinking: Some(false),
+                ..ChatTemplateOptions::default()
+            },
+        )
+        .expect("the pinned Qwen3.8 chat template must render a text-only request");
+    assert_eq!(
+        rendered,
+        format!(
+            "<|im_start|>user\n{prompt}<|im_end|>\n\
+             <|im_start|>assistant\n<think>\n\n</think>\n\n"
+        )
+    );
+}
+
+/// Loads Qwen3.8 in Metal F16 through the public registry and checks cached parity.
+#[cfg(feature = "metal")]
+#[test]
+#[ignore = "requires pinned Qwen3.8 weights, about 60 GiB of free unified memory, and Metal"]
+fn loads_pinned_qwen38_text_and_mtp_and_runs_metal() {
+    let root = pinned_qwen38_root();
+    let device = Default::default();
+    let load_started = Instant::now();
+    let loaded = AutoCausalLm::<Metal>::load_local(
+        &root,
+        &AutoLoadOptions {
+            checkpoint: LoadOptions {
+                dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+                ..LoadOptions::default()
+            },
+            load_tokenizer: true,
+            qwen_mtp: true,
+            repository: Some("Qwen/Qwen3.8-27B".into()),
+            revision: Some("1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0".into()),
+            ..AutoLoadOptions::default()
+        },
+        &device,
+    )
+    .expect("the public auto loader must stream the complete Qwen3.8 text-plus-MTP graph");
+    let load_seconds = load_started.elapsed().as_secs_f64();
+    assert!(loaded.load_report().is_strictly_valid());
+    assert_eq!(loaded.load_report().applied.len(), 866);
+    assert_eq!(loaded.load_report().allowlisted_ignored.len(), 333);
+    assert_eq!(loaded.source().repository(), Some("Qwen/Qwen3.8-27B"));
+    assert_eq!(
+        loaded.source().revision(),
+        Some("1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0")
+    );
+
+    let encoding = loaded
+        .tokenizer()
+        .expect("the public loaded-model bundle must retain the local tokenizer")
+        .encode(
+            "Hello",
+            &EncodeOptions {
+                add_special_tokens: false,
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("the smoke prompt must tokenize");
+    let sequence = encoding.token_ids()[0].len();
+    let input = encoding
+        .to_causal_input::<Metal>(&device)
+        .expect("the tokenizer batch must convert to a public causal input");
+    let stateless_started = Instant::now();
+    let stateless = loaded
+        .model()
+        .forward(input.clone(), &ForwardOptions::default())
+        .expect("the public auto model must execute stateless Qwen3.8 inference");
+    assert_eq!(stateless.logits.dims(), [1, 1, 248_320]);
+    let stateless_logits = metal_tensor_values("Qwen3.8 stateless logits", &stateless.logits);
+    let stateless_seconds = stateless_started.elapsed().as_secs_f64();
+    assert!(stateless_logits.iter().all(|value| value.is_finite()));
+
+    let mut state = loaded
+        .model()
+        .new_decode_state(
+            CacheConfig::new(1, sequence + 1).expect("the smoke cache geometry must validate"),
+            1,
+            &device,
+        )
+        .expect("the public auto model must allocate Qwen3.8 hybrid decode state");
+    let prefill_started = Instant::now();
+    let cached = loaded
+        .model()
+        .prefill(input, &mut state, &ForwardOptions::default())
+        .expect("the public auto model must execute cached Qwen3.8 prefill");
+    let cached_logits = metal_tensor_values("Qwen3.8 cached logits", &cached.logits);
+    let prefill_seconds = prefill_started.elapsed().as_secs_f64();
+    assert!(cached_logits.iter().all(|value| value.is_finite()));
+    let cached_cosine = cosine_similarity(&stateless_logits, &cached_logits);
+    assert!(
+        cached_cosine >= 0.999,
+        "Qwen3.8 cached/stateless cosine {cached_cosine} is below the acceptance gate"
+    );
+    let stateless_top = stateless
+        .logits
+        .argmax(2)
+        .to_data()
+        .to_vec::<i32>()
+        .expect("Metal top-1 token IDs must use i32 storage");
+    let cached_top = cached
+        .logits
+        .argmax(2)
+        .to_data()
+        .to_vec::<i32>()
+        .expect("cached Metal top-1 token IDs must use i32 storage");
+    assert_eq!(cached_top, stateless_top);
+
+    let next_token = i64::from(stateless_top[0]);
+    let decode_started = Instant::now();
+    let decoded = loaded
+        .model()
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(vec![next_token], [1, 1]),
+                    &device,
+                ),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .expect("the public auto model must execute one recurrent decode step");
+    assert_eq!(decoded.logits.dims(), [1, 1, 248_320]);
+    let decoded_logits = metal_tensor_values("Qwen3.8 decoded logits", &decoded.logits);
+    let decode_seconds = decode_started.elapsed().as_secs_f64();
+    assert!(decoded_logits.iter().all(|value| value.is_finite()));
+    assert_eq!(state.lengths(), &[sequence + 1]);
+    eprintln!(
+        "Qwen3.8 F16: prompt_tokens={sequence}, first_top1={next_token}, \
+         cached_cosine={cached_cosine:.9}, load_seconds={load_seconds:.3}, \
+         stateless_seconds={stateless_seconds:.3}, prefill_seconds={prefill_seconds:.3}, \
+         decode_seconds={decode_seconds:.3}"
+    );
+}
 
 /// Parses the official nested multimodal config and exercises text-only tokenization.
 #[test]
@@ -640,7 +991,7 @@ fn assert_metal_tensor_finite<const D: usize>(label: &str, tensor: &Tensor<Metal
 }
 
 /// Returns synchronized F32 values for quantitative Metal diagnostics.
-#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[cfg(feature = "metal")]
 fn metal_tensor_values<const D: usize>(label: &str, tensor: &Tensor<Metal, D>) -> Vec<f32> {
     tensor
         .clone()

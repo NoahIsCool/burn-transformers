@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "advertised_supported": false,
+  "phase": "strict_f32_load_reference_logits_cached_parity_and_beam_fixture_verified_pending_longer_generation_and_accelerator_acceptance",
+  "repository": "google/flan-t5-small",
+  "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
+  "artifact_layout": {
+    "shards": 1,
+    "tensors": 190,
+    "dtype_counts": {
+      "F32": 190
+    },
+    "checkpoint_tensor_bytes": 307844608,
+    "artifact_bytes": 307867048
+  },
+  "sha256": {
+    "config.json": "439aa0fecf5a5546a1def68b1fc45e538e2c94528ce805378daf091e2bf6e4de",
+    "generation_config.json": "f5a1c7e2be8092018d8835128987edf0111637dd98e90599cc80310fef75d95a",
+    "tokenizer.json": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+    "tokenizer_config.json": "fcde0f79bffda3688119c94330866a8fbf8de20ae65a8c492c9bd47c704655a0",
+    "spiece.model": "d60acb128cf7b7f2536e8f38a5b18a05535c9e14c7a355904270e15b0945ea86",
+    "model.safetensors": "495fa51e204676f1a857a9fc13c4c89f3f5ba9f480b898cebca02add25e6d749"
+  },
+  "checks": {
+    "config_parsed": true,
+    "tokenizer_loaded_through_auto_api": true,
+    "safetensors_header_strictly_validated": true,
+    "mapping_plan_strict": true,
+    "weights_applied": true,
+    "reference_f32_logits_compared": true,
+    "cached_prefill_matches_stateless": true,
+    "cached_decode_matches_stateless": true,
+    "reference_beam_tokens_compared": true,
+    "accelerator_inference_validated": false,
+    "reference_generation_32_tokens_compared": false,
+    "context_boundary_stress_validated": false
+  },
+  "reference_acceptance": {
+    "implementation": "transformers==5.2.0",
+    "backend": "torch_cpu_f32",
+    "burn_backend": "burn_flex_f32",
+    "logit_fixture": {
+      "encoder_token_ids": [71, 8, 57],
+      "decoder_token_ids": [0],
+      "top10_ids_identical": true,
+      "sampled_logit_absolute_tolerance": 0.001,
+      "cached_stateless_absolute_tolerance": 0.0001
+    },
+    "beam_fixture": {
+      "prompt": "translate English to German: The house is wonderful.",
+      "encoder_token_ids": [13959, 1566, 12, 2968, 10, 37, 629, 19, 1627, 5, 1],
+      "decoder_start_token_id": 0,
+      "num_beams": 4,
+      "max_new_tokens": 16,
+      "generated_token_ids": [644, 4598, 229, 9685, 5, 1],
+      "decoded_text": "Das Haus ist schön.",
+      "finish_reason": "eos:1",
+      "tokens_identical": true,
+      "burn_wall_seconds_including_load": 15.33
+    }
+  }
+}
