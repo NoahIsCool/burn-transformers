@@ -152,13 +152,37 @@ pub struct SparseMoe<B: Backend> {
 
 impl<B: Backend> SparseMoe<B> {
     /// Routes and dispatches `[batch, sequence, hidden]` states sparsely.
-    pub fn forward(&self, input: Tensor<B, 3>) -> SparseMoeOutput<B> {
+    ///
+    /// # Errors
+    ///
+    /// Returns a contextual configuration or shape error before top-k/indexing
+    /// kernels run when a manually assembled module violates its routing
+    /// invariants or the input is empty or has the wrong hidden width.
+    pub fn forward(&self, input: Tensor<B, 3>) -> Result<SparseMoeOutput<B>> {
         let [batch, sequence, hidden] = input.dims();
-        assert_eq!(
-            hidden, self.hidden_size,
-            "MoE hidden width must match config"
-        );
-        let tokens = batch * sequence;
+        if batch == 0 || sequence == 0 || hidden != self.hidden_size {
+            return Err(Error::shape(
+                "moe.input",
+                format!("[batch>0, sequence>0, {}]", self.hidden_size),
+                format!("[{batch}, {sequence}, {hidden}]"),
+            ));
+        }
+        if self.experts_per_token == 0 || self.experts_per_token > self.routed.len() {
+            return Err(Error::configuration(
+                "moe.experts_per_token",
+                format!(
+                    "must be in 1..={} for the instantiated expert set",
+                    self.routed.len()
+                ),
+            ));
+        }
+        let tokens = batch.checked_mul(sequence).ok_or_else(|| {
+            Error::shape(
+                "moe.input",
+                "a batch * sequence product representable by usize",
+                format!("{batch} * {sequence}"),
+            )
+        })?;
         let flat_input = input.clone().reshape([tokens, hidden]);
         let router_logits = self.router.forward(input);
         let router_dtype = router_logits.dtype();
@@ -202,12 +226,12 @@ impl<B: Backend> SparseMoe<B> {
             shared_output = shared_output + expert.forward(flat_input.clone());
         }
         let selected_weights = flat_weights.reshape([batch, sequence, self.experts_per_token]);
-        SparseMoeOutput {
+        Ok(SparseMoeOutput {
             hidden_state: (output + shared_output).reshape([batch, sequence, hidden]),
             router_logits,
             selected_experts,
             selected_weights,
-        }
+        })
     }
 }
 
@@ -233,7 +257,9 @@ mod tests {
         let module = SparseMoeConfig::new(4, 8, 3, 2)
             .init::<Flex>(&device)
             .expect("valid MoE should initialize");
-        let output = module.forward(Tensor::<Flex, 3>::zeros([2, 3, 4], &device));
+        let output = module
+            .forward(Tensor::<Flex, 3>::zeros([2, 3, 4], &device))
+            .expect("valid input must dispatch");
         assert_eq!(output.hidden_state.dims(), [2, 3, 4]);
         assert_eq!(output.router_logits.dims(), [2, 3, 3]);
         assert_eq!(output.selected_experts.dims(), [2, 3, 2]);
@@ -249,11 +275,26 @@ mod tests {
         let module = config
             .init::<Flex>(&device)
             .expect("valid MoE should initialize");
-        let output = module.forward(Tensor::<Flex, 3>::ones([1, 2, 4], &device));
+        let output = module
+            .forward(Tensor::<Flex, 3>::ones([1, 2, 4], &device))
+            .expect("valid input must dispatch");
         let sums = output.selected_weights.sum_dim(2).to_data();
         let values = sums
             .as_slice::<f32>()
             .expect("Flex f32 data should expose an f32 slice");
         assert!(values.iter().all(|value| (*value - 2.5).abs() < 1e-5));
+    }
+
+    /// Invalid shapes fail through the crate error taxonomy instead of tensor panics.
+    #[test]
+    fn invalid_runtime_shape_is_rejected() {
+        let device = Default::default();
+        let module = SparseMoeConfig::new(4, 8, 3, 2)
+            .init::<Flex>(&device)
+            .expect("valid MoE should initialize");
+        let error = module
+            .forward(Tensor::<Flex, 3>::zeros([2, 3, 5], &device))
+            .expect_err("wrong hidden width must fail");
+        assert!(error.to_string().contains("moe.input"));
     }
 }
