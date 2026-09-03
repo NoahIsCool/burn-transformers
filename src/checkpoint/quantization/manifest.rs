@@ -1,0 +1,398 @@
+//! Serializable metadata for the first Burnpack quantization format.
+
+use std::collections::BTreeMap;
+
+use burn::tensor::DType;
+use serde::{Deserialize, Serialize};
+
+use super::{
+    PackedValueLayout, QuantizationError, QuantizationGroupSize, QuantizedGroupLayout,
+    QuantizedPayloadLayout, Result, ScaleLayout, SymmetricQuantization, WeightQuantizationConfig,
+};
+
+/// Burnpack quantization format implemented by this module.
+pub const BURNPACK_QUANTIZATION_FORMAT_VERSION: u32 = 1;
+
+/// Byte order used by explicitly byte-encoded scalar fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BurnpackByteOrder {
+    /// Least-significant byte is written first.
+    LittleEndian,
+}
+
+/// Availability of direct backend execution for a packed format.
+///
+/// Version one only supports deterministic storage and reference dequantization.
+/// In particular, this enum must not be interpreted as a Burn `QFloat` scheme or
+/// as evidence that Metal can consume the packed payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackedExecutionSupport {
+    /// No native packed operator is implemented on any backend.
+    Unavailable,
+}
+
+impl PackedExecutionSupport {
+    /// Returns whether a backend can execute this packed representation directly.
+    #[must_use]
+    pub const fn is_available(self) -> bool {
+        false
+    }
+
+    /// Requires native packed execution, returning an explicit failure in v1.
+    pub fn require_available(self) -> Result<()> {
+        Err(QuantizationError::PackedExecutionUnavailable)
+    }
+}
+
+/// Floating-point representation of the checkpoint source tensor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceFloatDType {
+    /// IEEE-754 half precision.
+    F16,
+    /// Brain floating point half precision.
+    Bf16,
+    /// IEEE-754 single precision.
+    F32,
+    /// Burn's single-precision storage with flexible compute precision.
+    Flex32,
+    /// IEEE-754 double precision, rounded to `f32` before quantization.
+    F64,
+}
+
+impl SourceFloatDType {
+    /// Returns the number of bytes occupied by one unpacked source value.
+    #[must_use]
+    pub const fn byte_width(self) -> usize {
+        match self {
+            Self::F16 | Self::Bf16 => 2,
+            Self::F32 | Self::Flex32 => 4,
+            Self::F64 => 8,
+        }
+    }
+
+    /// Returns the corresponding Burn tensor dtype.
+    #[must_use]
+    pub const fn burn_dtype(self) -> DType {
+        match self {
+            Self::F16 => DType::F16,
+            Self::Bf16 => DType::BF16,
+            Self::F32 => DType::F32,
+            Self::Flex32 => DType::Flex32,
+            Self::F64 => DType::F64,
+        }
+    }
+}
+
+impl TryFrom<DType> for SourceFloatDType {
+    type Error = QuantizationError;
+
+    fn try_from(dtype: DType) -> Result<Self> {
+        match dtype {
+            DType::F16 => Ok(Self::F16),
+            DType::BF16 => Ok(Self::Bf16),
+            DType::F32 => Ok(Self::F32),
+            DType::Flex32 => Ok(Self::Flex32),
+            DType::F64 => Ok(Self::F64),
+            _ => Err(QuantizationError::UnsupportedInputDType { dtype }),
+        }
+    }
+}
+
+/// Complete, self-validating layout description for one packed tensor.
+///
+/// Group `g` owns flattened elements `[g * G, min((g + 1) * G, N))` and scale
+/// `g`. `packed_value_bytes` is `N` for Q8 and `ceil(N / 2)` for Q4;
+/// `scale_bytes` is exactly `4 * ceil(N / G)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuantizedTensorMetadata {
+    /// Logical row-major tensor shape.
+    pub shape: Vec<u64>,
+    /// Original floating-point storage representation.
+    pub source_dtype: SourceFloatDType,
+    /// Symmetric quantization precision.
+    pub scheme: SymmetricQuantization,
+    /// Number of flattened values sharing each scale.
+    pub group_size: QuantizationGroupSize,
+    /// Rule used to map logical dimensions into the group stream.
+    pub group_layout: QuantizedGroupLayout,
+    /// Bit-level value packing rule.
+    pub packed_value_layout: PackedValueLayout,
+    /// Scale encoding and ordering rule.
+    pub scale_layout: ScaleLayout,
+    /// Ordering of packed-value and scale regions in a tensor payload.
+    pub payload_layout: QuantizedPayloadLayout,
+    /// Product of all logical dimensions.
+    pub num_elements: u64,
+    /// Number of scales and contiguous flattened groups.
+    pub group_count: u64,
+    /// Exact byte length of the packed-value region.
+    pub packed_value_bytes: u64,
+    /// Exact byte length of the scale region.
+    pub scale_bytes: u64,
+}
+
+impl QuantizedTensorMetadata {
+    /// Derives canonical metadata from a source shape, dtype, and configuration.
+    pub fn new(
+        shape: &[usize],
+        source_dtype: SourceFloatDType,
+        config: WeightQuantizationConfig,
+    ) -> Result<Self> {
+        let mut shape_wire = Vec::new();
+        shape_wire.try_reserve_exact(shape.len()).map_err(|_| {
+            QuantizationError::AllocationFailed {
+                context: "quantized tensor shape",
+                requested: shape.len(),
+            }
+        })?;
+        for &dimension in shape {
+            shape_wire.push(
+                u64::try_from(dimension)
+                    .map_err(|_| QuantizationError::ShapeDimensionOverflow { dimension })?,
+            );
+        }
+
+        let num_elements = checked_num_elements_u64(&shape_wire)?;
+        let group_size = u64::try_from(config.group_size.get()).map_err(|_| {
+            QuantizationError::ByteLengthOverflow {
+                context: "group size conversion",
+            }
+        })?;
+        let group_count = ceil_div_u64(num_elements, group_size);
+        let packed_value_bytes = match config.scheme {
+            SymmetricQuantization::Q8 => num_elements,
+            SymmetricQuantization::Q4 => ceil_div_u64(num_elements, 2),
+        };
+        let scale_bytes =
+            group_count
+                .checked_mul(4)
+                .ok_or(QuantizationError::ByteLengthOverflow {
+                    context: "scale payload length",
+                })?;
+
+        Ok(Self {
+            shape: shape_wire,
+            source_dtype,
+            scheme: config.scheme,
+            group_size: config.group_size,
+            group_layout: QuantizedGroupLayout::FlatRowMajorContiguous,
+            packed_value_layout: packed_layout(config.scheme),
+            scale_layout: ScaleLayout::F32LittleEndianPerGroup,
+            payload_layout: QuantizedPayloadLayout::PackedValuesThenScales,
+            num_elements,
+            group_count,
+            packed_value_bytes,
+            scale_bytes,
+        })
+    }
+
+    /// Validates all redundant counts and fixed layout discriminants.
+    pub fn validate(&self) -> Result<()> {
+        let expected_elements = checked_num_elements_u64(&self.shape)?;
+        if self.num_elements != expected_elements {
+            return invalid_metadata(format!(
+                "num_elements {} does not match shape product {expected_elements}",
+                self.num_elements
+            ));
+        }
+
+        let group_size = u64::try_from(self.group_size.get()).map_err(|_| {
+            QuantizationError::ByteLengthOverflow {
+                context: "group size conversion",
+            }
+        })?;
+        let expected_groups = ceil_div_u64(expected_elements, group_size);
+        if self.group_count != expected_groups {
+            return invalid_metadata(format!(
+                "group_count {} does not match expected {expected_groups}",
+                self.group_count
+            ));
+        }
+
+        let expected_packed = match self.scheme {
+            SymmetricQuantization::Q8 => expected_elements,
+            SymmetricQuantization::Q4 => ceil_div_u64(expected_elements, 2),
+        };
+        if self.packed_value_bytes != expected_packed {
+            return invalid_metadata(format!(
+                "packed_value_bytes {} does not match expected {expected_packed}",
+                self.packed_value_bytes
+            ));
+        }
+
+        let expected_scale_bytes =
+            expected_groups
+                .checked_mul(4)
+                .ok_or(QuantizationError::ByteLengthOverflow {
+                    context: "scale payload length",
+                })?;
+        if self.scale_bytes != expected_scale_bytes {
+            return invalid_metadata(format!(
+                "scale_bytes {} does not match expected {expected_scale_bytes}",
+                self.scale_bytes
+            ));
+        }
+
+        if self.group_layout != QuantizedGroupLayout::FlatRowMajorContiguous {
+            return invalid_metadata("unsupported group layout");
+        }
+        if self.packed_value_layout != packed_layout(self.scheme) {
+            return invalid_metadata("packed-value layout does not match scheme");
+        }
+        if self.scale_layout != ScaleLayout::F32LittleEndianPerGroup {
+            return invalid_metadata("unsupported scale layout");
+        }
+        if self.payload_layout != QuantizedPayloadLayout::PackedValuesThenScales {
+            return invalid_metadata("unsupported payload layout");
+        }
+        Ok(())
+    }
+
+    /// Converts the logical shape into host dimensions after validation.
+    pub fn host_shape(&self) -> Result<Vec<usize>> {
+        self.validate()?;
+        let mut shape = Vec::new();
+        shape.try_reserve_exact(self.shape.len()).map_err(|_| {
+            QuantizationError::AllocationFailed {
+                context: "host tensor shape",
+                requested: self.shape.len(),
+            }
+        })?;
+        for &dimension in &self.shape {
+            shape.push(
+                usize::try_from(dimension)
+                    .map_err(|_| QuantizationError::PlatformDimensionOverflow { dimension })?,
+            );
+        }
+        Ok(shape)
+    }
+
+    pub(crate) fn host_counts(&self) -> Result<(usize, usize, usize)> {
+        self.validate()?;
+        let elements = usize::try_from(self.num_elements).map_err(|_| {
+            QuantizationError::ByteLengthOverflow {
+                context: "host element count conversion",
+            }
+        })?;
+        let groups = usize::try_from(self.group_count).map_err(|_| {
+            QuantizationError::ByteLengthOverflow {
+                context: "host group count conversion",
+            }
+        })?;
+        let packed = usize::try_from(self.packed_value_bytes).map_err(|_| {
+            QuantizationError::ByteLengthOverflow {
+                context: "host packed length conversion",
+            }
+        })?;
+        Ok((elements, groups, packed))
+    }
+}
+
+/// Deterministic manifest for all quantized tensors in a Burnpack artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BurnpackQuantizationManifest {
+    /// Schema and wire-layout version.
+    pub format_version: u32,
+    /// Byte order used for scale payloads.
+    pub byte_order: BurnpackByteOrder,
+    /// Direct backend execution availability.
+    pub packed_execution: PackedExecutionSupport,
+    /// Tensor metadata keyed by architecture-owned parameter name.
+    pub tensors: BTreeMap<String, QuantizedTensorMetadata>,
+}
+
+impl BurnpackQuantizationManifest {
+    /// Creates an empty version-one manifest.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            format_version: BURNPACK_QUANTIZATION_FORMAT_VERSION,
+            byte_order: BurnpackByteOrder::LittleEndian,
+            packed_execution: PackedExecutionSupport::Unavailable,
+            tensors: BTreeMap::new(),
+        }
+    }
+
+    /// Inserts one tensor, rejecting empty and duplicate architecture keys.
+    pub fn insert(
+        &mut self,
+        name: impl Into<String>,
+        metadata: QuantizedTensorMetadata,
+    ) -> Result<()> {
+        let name = name.into();
+        if name.is_empty() {
+            return Err(QuantizationError::EmptyTensorName);
+        }
+        metadata.validate()?;
+        if self.tensors.contains_key(&name) {
+            return Err(QuantizationError::DuplicateManifestTensor { name });
+        }
+        self.tensors.insert(name, metadata);
+        Ok(())
+    }
+
+    /// Validates the schema version and every tensor's redundant layout fields.
+    pub fn validate(&self) -> Result<()> {
+        if self.format_version != BURNPACK_QUANTIZATION_FORMAT_VERSION {
+            return Err(QuantizationError::UnsupportedFormatVersion {
+                version: self.format_version,
+            });
+        }
+        for (name, metadata) in &self.tensors {
+            if name.is_empty() {
+                return Err(QuantizationError::EmptyTensorName);
+            }
+            metadata.validate()?;
+        }
+        Ok(())
+    }
+
+    /// Serializes validated metadata as deterministic pretty JSON.
+    pub fn to_json_pretty(&self) -> Result<String> {
+        self.validate()?;
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    /// Parses JSON and validates every derived count before returning it.
+    pub fn from_json(json: &str) -> Result<Self> {
+        let manifest: Self = serde_json::from_str(json)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+}
+
+impl Default for BurnpackQuantizationManifest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn packed_layout(scheme: SymmetricQuantization) -> PackedValueLayout {
+    match scheme {
+        SymmetricQuantization::Q8 => PackedValueLayout::SignedI8TwosComplement,
+        SymmetricQuantization::Q4 => PackedValueLayout::SignedI4TwosComplementLowNibbleFirst,
+    }
+}
+
+fn checked_num_elements_u64(shape: &[u64]) -> Result<u64> {
+    shape.iter().try_fold(1_u64, |elements, &dimension| {
+        elements
+            .checked_mul(dimension)
+            .ok_or(QuantizationError::ShapeElementOverflow)
+    })
+}
+
+const fn ceil_div_u64(value: u64, divisor: u64) -> u64 {
+    value / divisor + if value.is_multiple_of(divisor) { 0 } else { 1 }
+}
+
+fn invalid_metadata<T>(reason: impl Into<String>) -> Result<T> {
+    Err(QuantizationError::InvalidMetadata {
+        reason: reason.into(),
+    })
+}

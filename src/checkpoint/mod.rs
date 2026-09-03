@@ -20,6 +20,7 @@ mod dtype;
 mod error;
 mod mapping;
 mod options;
+pub mod quantization;
 mod report;
 mod runtime;
 
