@@ -1,0 +1,1303 @@
+use std::{
+    collections::BTreeMap,
+    fs::{self, File},
+    io::Write,
+    path::Path,
+};
+
+use proptest::prelude::*;
+use serde_json::{Map, Value, json};
+use tempfile::TempDir;
+
+use super::*;
+
+#[derive(Clone)]
+struct FixtureTensor<'a> {
+    name: &'a str,
+    dtype: TensorDType,
+    shape: Vec<u64>,
+}
+
+impl<'a> FixtureTensor<'a> {
+    fn new(name: &'a str, dtype: TensorDType, shape: impl Into<Vec<u64>>) -> Self {
+        Self {
+            name,
+            dtype,
+            shape: shape.into(),
+        }
+    }
+
+    fn bytes(&self) -> u64 {
+        let elements = self.shape.iter().product();
+        self.dtype.storage_bytes(elements).unwrap()
+    }
+}
+
+fn write_shard(root: &Path, relative: &str, tensors: &[FixtureTensor<'_>]) {
+    write_shard_with_metadata(root, relative, tensors, BTreeMap::new());
+}
+
+fn write_shard_with_metadata(
+    root: &Path,
+    relative: &str,
+    tensors: &[FixtureTensor<'_>],
+    metadata: BTreeMap<String, String>,
+) {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let mut offset = 0_u64;
+    let mut object = Map::new();
+    if !metadata.is_empty() {
+        object.insert(
+            "__metadata__".into(),
+            serde_json::to_value(metadata).unwrap(),
+        );
+    }
+    for tensor in tensors {
+        let end = offset + tensor.bytes();
+        object.insert(
+            tensor.name.into(),
+            json!({
+                "dtype": tensor.dtype.as_str(),
+                "shape": tensor.shape,
+                "data_offsets": [offset, end]
+            }),
+        );
+        offset = end;
+    }
+    let mut header = serde_json::to_vec(&Value::Object(object)).unwrap();
+    while !header.len().is_multiple_of(8) {
+        header.push(b' ');
+    }
+    let mut file = File::create(path).unwrap();
+    file.write_all(&(header.len() as u64).to_le_bytes())
+        .unwrap();
+    file.write_all(&header).unwrap();
+    file.write_all(&vec![0_u8; offset as usize]).unwrap();
+}
+
+fn write_raw_shard(root: &Path, relative: &str, header: &[u8], data_bytes: usize) {
+    let path = root.join(relative);
+    let mut file = File::create(path).unwrap();
+    file.write_all(&(header.len() as u64).to_le_bytes())
+        .unwrap();
+    file.write_all(header).unwrap();
+    file.write_all(&vec![0_u8; data_bytes]).unwrap();
+}
+
+fn write_index(root: &Path, map: &[(&str, &str)], total_size: Option<u64>) {
+    let weight_map: BTreeMap<_, _> = map.iter().copied().collect();
+    let value = json!({
+        "metadata": { "total_size": total_size },
+        "weight_map": weight_map,
+    });
+    fs::write(
+        root.join("model.safetensors.index.json"),
+        serde_json::to_vec(&value).unwrap(),
+    )
+    .unwrap();
+}
+
+fn fixture_manifest(tensors: &[FixtureTensor<'_>]) -> (TempDir, CheckpointManifest) {
+    let temp = TempDir::new().unwrap();
+    write_shard(temp.path(), "model.safetensors", tensors);
+    let manifest = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap();
+    (temp, manifest)
+}
+
+#[test]
+fn discovers_unsharded_checkpoint_without_reading_payload_semantics() {
+    let temp = TempDir::new().unwrap();
+    let metadata = BTreeMap::from([("format".into(), "pt".into())]);
+    let tensors = [
+        FixtureTensor::new("empty", TensorDType::F16, [0, 7]),
+        FixtureTensor::new("weight", TensorDType::F32, [2, 3]),
+    ];
+    write_shard_with_metadata(temp.path(), "model.safetensors", &tensors, metadata);
+
+    let manifest = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap();
+    assert!(matches!(manifest.source, ArtifactSource::Single { .. }));
+    assert_eq!(manifest.tensors.len(), 2);
+    assert_eq!(manifest.tensor_bytes, 24);
+    assert_eq!(manifest.tensor("weight").unwrap().elements().unwrap(), 6);
+    let shard = manifest.shard("model.safetensors").unwrap();
+    assert_eq!(shard.metadata["format"], "pt");
+    assert_eq!(
+        shard
+            .tensor_file_offset(manifest.tensor("weight").unwrap())
+            .unwrap(),
+        8 + shard.header_bytes
+    );
+}
+
+#[test]
+fn discovers_shards_and_verifies_index_total_size() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "model-00001-of-00002.safetensors",
+        &[FixtureTensor::new("a", TensorDType::F16, [2, 2])],
+    );
+    write_shard(
+        temp.path(),
+        "model-00002-of-00002.safetensors",
+        &[FixtureTensor::new("b", TensorDType::BF16, [3])],
+    );
+    write_index(
+        temp.path(),
+        &[
+            ("b", "model-00002-of-00002.safetensors"),
+            ("a", "model-00001-of-00002.safetensors"),
+        ],
+        Some(14),
+    );
+
+    let manifest = CheckpointManifest::discover(temp.path(), &LoadOptions::default()).unwrap();
+    assert_eq!(manifest.shards.len(), 2);
+    assert_eq!(manifest.tensor_bytes, 14);
+    assert_eq!(manifest.tensors.keys().collect::<Vec<_>>(), [&"a", &"b"]);
+    assert!(matches!(
+        manifest.source,
+        ArtifactSource::Index {
+            declared_total_size: Some(14),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn explicit_nested_shard_path_is_allowed_when_contained() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "weights/part.safetensors",
+        &[FixtureTensor::new("a", TensorDType::F16, [1])],
+    );
+    write_index(temp.path(), &[("a", "weights/part.safetensors")], Some(2));
+    let manifest = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap();
+    assert_eq!(manifest.shards[0].relative_path, "weights/part.safetensors");
+}
+
+#[test]
+fn auto_discovery_accepts_one_nonstandard_artifact_and_rejects_ambiguity() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "weights.safetensors",
+        &[FixtureTensor::new("a", TensorDType::F16, [1])],
+    );
+    assert!(discover_checkpoint(temp.path(), &LoadOptions::default()).is_ok());
+    write_shard(
+        temp.path(),
+        "other.safetensors",
+        &[FixtureTensor::new("b", TensorDType::F16, [1])],
+    );
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::AmbiguousArtifacts { .. })
+    ));
+}
+
+#[test]
+fn missing_artifact_and_nondirectory_roots_are_contextual() {
+    let temp = TempDir::new().unwrap();
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::ArtifactNotFound { .. })
+    ));
+    let file = temp.path().join("ordinary-file");
+    fs::write(&file, b"x").unwrap();
+    assert!(matches!(
+        discover_checkpoint(file, &LoadOptions::default()),
+        Err(CheckpointError::RootNotDirectory { .. })
+    ));
+}
+
+#[test]
+fn hostile_relative_paths_are_rejected_portably() {
+    for path in [
+        "../outside.safetensors",
+        "./model.safetensors",
+        "/tmp/model.safetensors",
+        "C:/model.safetensors",
+        "dir\\model.safetensors",
+        "nul\0model.safetensors",
+        "",
+    ] {
+        let temp = TempDir::new().unwrap();
+        let options = LoadOptions {
+            artifact: ArtifactSelection::Single(path.into()),
+            ..LoadOptions::default()
+        };
+        assert!(
+            matches!(
+                discover_checkpoint(temp.path(), &options),
+                Err(CheckpointError::UnsafeRelativePath { .. })
+            ),
+            "path unexpectedly accepted: {path:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn shard_symlink_cannot_escape_canonical_root() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    write_shard(
+        outside.path(),
+        "outside.safetensors",
+        &[FixtureTensor::new("a", TensorDType::F16, [1])],
+    );
+    symlink(
+        outside.path().join("outside.safetensors"),
+        root.path().join("model.safetensors"),
+    )
+    .unwrap();
+    assert!(matches!(
+        discover_checkpoint(root.path(), &LoadOptions::default()),
+        Err(CheckpointError::PathEscapesRoot { .. })
+    ));
+}
+
+#[test]
+fn header_and_index_resource_limits_are_enforced_before_allocation() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "model.safetensors",
+        &[FixtureTensor::new("a", TensorDType::F16, [1])],
+    );
+    let mut options = LoadOptions::default();
+    options.limits.max_header_bytes = 1;
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &options),
+        Err(CheckpointError::LimitExceeded {
+            kind: "SafeTensors header byte",
+            ..
+        })
+    ));
+
+    fs::remove_file(temp.path().join("model.safetensors")).unwrap();
+    fs::write(temp.path().join("model.safetensors.index.json"), b"{}").unwrap();
+    options = LoadOptions::default();
+    options.limits.max_index_bytes = 1;
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &options),
+        Err(CheckpointError::LimitExceeded {
+            kind: "checkpoint index byte",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn truncated_and_impossible_header_lengths_are_rejected() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("model.safetensors"), b"tiny").unwrap();
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::TruncatedFile { .. })
+    ));
+
+    let mut bytes = 100_u64.to_le_bytes().to_vec();
+    bytes.extend_from_slice(b"{}");
+    fs::write(temp.path().join("model.safetensors"), bytes).unwrap();
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::InvalidHeaderLength { .. })
+    ));
+}
+
+#[test]
+fn malformed_dtype_shape_and_range_metadata_are_rejected() {
+    let cases = [
+        (
+            br#"{"a":{"dtype":"FP16","shape":[1],"data_offsets":[0,2]}}"#.as_slice(),
+            2,
+            "unsupported dtype",
+        ),
+        (
+            br#"{"a":{"dtype":"F32","shape":[2],"data_offsets":[0,4]}}"#.as_slice(),
+            4,
+            "byte mismatch",
+        ),
+        (
+            br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[1,3]}}"#.as_slice(),
+            3,
+            "leading hole",
+        ),
+        (
+            br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[0,2]}}"#.as_slice(),
+            3,
+            "trailing byte",
+        ),
+    ];
+    for (header, data_bytes, label) in cases {
+        let temp = TempDir::new().unwrap();
+        write_raw_shard(temp.path(), "model.safetensors", header, data_bytes);
+        assert!(
+            discover_checkpoint(temp.path(), &LoadOptions::default()).is_err(),
+            "malformed case accepted: {label}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_header_tensor_names_are_rejected() {
+    let temp = TempDir::new().unwrap();
+    let header = br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[0,2]},"a":{"dtype":"F16","shape":[1],"data_offsets":[0,2]}}"#;
+    write_raw_shard(temp.path(), "model.safetensors", header, 2);
+    let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
+    assert!(matches!(error, CheckpointError::InvalidJson { .. }));
+    assert!(error.to_string().contains("duplicate"));
+}
+
+#[test]
+fn index_must_match_headers_in_both_directions() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "part.safetensors",
+        &[FixtureTensor::new("actual", TensorDType::F16, [1])],
+    );
+    write_index(temp.path(), &[("declared", "part.safetensors")], Some(2));
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::IndexMismatch { .. })
+    ));
+}
+
+#[test]
+fn index_total_size_must_equal_validated_tensor_bytes() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "part.safetensors",
+        &[FixtureTensor::new("a", TensorDType::F16, [1])],
+    );
+    write_index(temp.path(), &[("a", "part.safetensors")], Some(99));
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::TotalSizeMismatch {
+            declared: 99,
+            observed: 2
+        })
+    ));
+}
+
+#[test]
+fn explicit_index_and_nonstandard_index_auto_discovery_work_without_total_size() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "part.safetensors",
+        &[FixtureTensor::new("a", TensorDType::F16, [1])],
+    );
+    let custom_index = temp.path().join("weights.safetensors.index.json");
+    fs::write(&custom_index, br#"{"weight_map":{"a":"part.safetensors"}}"#).unwrap();
+    let auto = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap();
+    assert!(matches!(
+        auto.source,
+        ArtifactSource::Index {
+            declared_total_size: None,
+            ..
+        }
+    ));
+
+    let explicit = LoadOptions {
+        artifact: ArtifactSelection::Index("weights.safetensors.index.json".into()),
+        ..LoadOptions::default()
+    };
+    assert!(discover_checkpoint(temp.path(), &explicit).is_ok());
+}
+
+#[test]
+fn index_limits_apply_before_any_shard_is_opened() {
+    let temp = TempDir::new().unwrap();
+    write_index(
+        temp.path(),
+        &[("a", "a.safetensors"), ("b", "b.safetensors")],
+        None,
+    );
+    let mut options = LoadOptions::default();
+    options.limits.max_shards = 1;
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &options),
+        Err(CheckpointError::LimitExceeded { kind: "shard", .. })
+    ));
+
+    options.limits.max_shards = 2;
+    options.limits.max_tensors = 1;
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &options),
+        Err(CheckpointError::LimitExceeded { kind: "tensor", .. })
+    ));
+}
+
+#[test]
+fn artifact_extensions_and_regular_file_types_are_enforced() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("weights.bin"), b"not tensors").unwrap();
+    let options = LoadOptions {
+        artifact: ArtifactSelection::Single("weights.bin".into()),
+        ..LoadOptions::default()
+    };
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &options),
+        Err(CheckpointError::UnsafeRelativePath { .. })
+    ));
+
+    fs::create_dir(temp.path().join("directory.safetensors")).unwrap();
+    let options = LoadOptions {
+        artifact: ArtifactSelection::Single("directory.safetensors".into()),
+        ..LoadOptions::default()
+    };
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &options),
+        Err(CheckpointError::UnsafeRelativePath { .. })
+    ));
+
+    write_index(temp.path(), &[("a", "not-a-shard.bin")], None);
+    let options = LoadOptions {
+        artifact: ArtifactSelection::Index("model.safetensors.index.json".into()),
+        ..LoadOptions::default()
+    };
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &options),
+        Err(CheckpointError::UnsafeRelativePath { .. })
+    ));
+
+    fs::create_dir(temp.path().join("directory-shard.safetensors")).unwrap();
+    write_index(temp.path(), &[("a", "directory-shard.safetensors")], None);
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::UnsafeRelativePath { .. })
+    ));
+}
+
+#[test]
+fn multiple_nonstandard_indexes_are_ambiguous() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("a.safetensors.index.json"), b"{}").unwrap();
+    fs::write(temp.path().join("b.safetensors.index.json"), b"{}").unwrap();
+    let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
+    let CheckpointError::AmbiguousArtifacts { candidates } = error else {
+        panic!("expected ambiguous indexes")
+    };
+    assert_eq!(
+        candidates,
+        ["a.safetensors.index.json", "b.safetensors.index.json"]
+    );
+}
+
+#[test]
+fn index_assignment_mismatch_and_declared_but_absent_tensor_are_rejected() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "one.safetensors",
+        &[
+            FixtureTensor::new("a", TensorDType::F16, [1]),
+            FixtureTensor::new("one", TensorDType::F16, [1]),
+        ],
+    );
+    write_shard(
+        temp.path(),
+        "two.safetensors",
+        &[FixtureTensor::new("two", TensorDType::F16, [1])],
+    );
+    write_index(
+        temp.path(),
+        &[
+            ("a", "two.safetensors"),
+            ("one", "one.safetensors"),
+            ("two", "two.safetensors"),
+        ],
+        None,
+    );
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::IndexMismatch { .. })
+    ));
+
+    let temp = TempDir::new().unwrap();
+    write_shard(temp.path(), "empty.safetensors", &[]);
+    write_index(temp.path(), &[("ghost", "empty.safetensors")], None);
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::IndexMismatch { tensor, .. }) if tensor == "ghost"
+    ));
+}
+
+#[test]
+fn tensor_cannot_appear_in_two_shards() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "one.safetensors",
+        &[
+            FixtureTensor::new("duplicate", TensorDType::F16, [1]),
+            FixtureTensor::new("one", TensorDType::F16, [1]),
+        ],
+    );
+    write_shard(
+        temp.path(),
+        "two.safetensors",
+        &[
+            FixtureTensor::new("duplicate", TensorDType::F16, [1]),
+            FixtureTensor::new("two", TensorDType::F16, [1]),
+        ],
+    );
+    write_index(
+        temp.path(),
+        &[
+            ("duplicate", "one.safetensors"),
+            ("one", "one.safetensors"),
+            ("two", "two.safetensors"),
+        ],
+        None,
+    );
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::DuplicateTensor { tensor, .. }) if tensor == "duplicate"
+    ));
+}
+
+#[test]
+fn malformed_index_json_and_duplicate_weight_keys_are_rejected() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("model.safetensors.index.json"), b"{").unwrap();
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::InvalidJson {
+            kind: "checkpoint index",
+            ..
+        })
+    ));
+
+    fs::write(
+        temp.path().join("model.safetensors.index.json"),
+        br#"{"weight_map":{"a":"one.safetensors","a":"two.safetensors"}}"#,
+    )
+    .unwrap();
+    let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
+    assert!(matches!(error, CheckpointError::InvalidJson { .. }));
+    assert!(error.to_string().contains("duplicate"));
+}
+
+#[test]
+fn all_header_count_rank_name_and_arithmetic_bounds_are_enforced() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "model.safetensors",
+        &[
+            FixtureTensor::new("a", TensorDType::F16, [1]),
+            FixtureTensor::new("b", TensorDType::F16, [1]),
+        ],
+    );
+    let mut options = LoadOptions::default();
+    options.limits.max_tensors = 1;
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &options),
+        Err(CheckpointError::LimitExceeded { kind: "tensor", .. })
+    ));
+
+    let temp = TempDir::new().unwrap();
+    write_shard_with_metadata(
+        temp.path(),
+        "model.safetensors",
+        &[],
+        BTreeMap::from([("a".into(), "1".into()), ("b".into(), "2".into())]),
+    );
+    options = LoadOptions::default();
+    options.limits.max_metadata_entries = 1;
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &options),
+        Err(CheckpointError::LimitExceeded {
+            kind: "SafeTensors metadata entry",
+            ..
+        })
+    ));
+
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "model.safetensors",
+        &[FixtureTensor::new("ranked", TensorDType::F16, [1, 1])],
+    );
+    options = LoadOptions::default();
+    options.limits.max_rank = 1;
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &options),
+        Err(CheckpointError::LimitExceeded {
+            kind: "tensor rank",
+            ..
+        })
+    ));
+
+    let temp = TempDir::new().unwrap();
+    write_raw_shard(
+        temp.path(),
+        "model.safetensors",
+        br#"{"":{"dtype":"F16","shape":[1],"data_offsets":[0,2]}}"#,
+        2,
+    );
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::InvalidMapping { .. })
+    ));
+
+    let temp = TempDir::new().unwrap();
+    write_raw_shard(
+        temp.path(),
+        "model.safetensors",
+        br#"{"huge":{"dtype":"F16","shape":[18446744073709551615,2],"data_offsets":[0,0]}}"#,
+        0,
+    );
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::ArithmeticOverflow { .. })
+    ));
+}
+
+#[test]
+fn reversed_and_out_of_file_ranges_are_distinguished() {
+    let temp = TempDir::new().unwrap();
+    write_raw_shard(
+        temp.path(),
+        "model.safetensors",
+        br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[2,0]}}"#,
+        2,
+    );
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::InvalidDataOffsets { .. })
+    ));
+
+    let temp = TempDir::new().unwrap();
+    write_raw_shard(
+        temp.path(),
+        "model.safetensors",
+        br#"{"a":{"dtype":"F16","shape":[2],"data_offsets":[0,4]}}"#,
+        2,
+    );
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::InvalidDataOffsets { .. })
+    ));
+}
+
+#[test]
+fn duplicate_metadata_keys_and_missing_roots_fail_cleanly() {
+    let temp = TempDir::new().unwrap();
+    write_raw_shard(
+        temp.path(),
+        "model.safetensors",
+        br#"{"__metadata__":{"format":"pt","format":"rust"}}"#,
+        0,
+    );
+    let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
+    assert!(matches!(error, CheckpointError::InvalidJson { .. }));
+    assert!(error.to_string().contains("duplicate"));
+
+    let absent = temp.path().join("does-not-exist");
+    assert!(matches!(
+        discover_checkpoint(absent, &LoadOptions::default()),
+        Err(CheckpointError::Io { .. })
+    ));
+}
+
+#[test]
+fn strict_identity_plan_and_memory_estimate_are_exact() {
+    let (_temp, manifest) = fixture_manifest(&[
+        FixtureTensor::new("a", TensorDType::F16, [2, 3]),
+        FixtureTensor::new("b", TensorDType::F32, [2]),
+    ]);
+    let expected = [
+        ExpectedTensor::new("a", [2, 3]).with_dtype(TensorDType::F16),
+        ExpectedTensor::new("b", [2]).with_dtype(TensorDType::F32),
+    ];
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &LoadOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(plan.parameter_count(), 2);
+    assert_eq!(plan.memory.checkpoint_tensor_bytes, 20);
+    assert_eq!(plan.memory.target_parameter_bytes, 20);
+    assert_eq!(plan.memory.logical_model_bytes, 20);
+    assert_eq!(plan.report.memory, Some(plan.memory));
+    assert!(plan.report.transformed.is_empty());
+}
+
+#[test]
+fn rename_transpose_split_concatenate_and_alias_are_explicit() {
+    let (_temp, manifest) = fixture_manifest(&[
+        FixtureTensor::new("matrix", TensorDType::F16, [2, 3]),
+        FixtureTensor::new("fused", TensorDType::F16, [6, 2]),
+        FixtureTensor::new("left", TensorDType::F16, [2, 2]),
+        FixtureTensor::new("right", TensorDType::F16, [1, 2]),
+    ]);
+    let expected = [
+        ExpectedTensor::new("renamed_transposed", [3, 2]),
+        ExpectedTensor::new("q", [2, 2]),
+        ExpectedTensor::new("k", [1, 2]),
+        ExpectedTensor::new("v", [3, 2]),
+        ExpectedTensor::new("joined", [3, 2]),
+        ExpectedTensor::new("joined_tied", [3, 2]),
+    ];
+    let mut mappings = MappingPlan::new();
+    mappings
+        .transpose_2d("matrix", "renamed_transposed")
+        .split(
+            "fused",
+            0,
+            [("q".into(), 2), ("k".into(), 1), ("v".into(), 3)],
+        )
+        .concatenate(["left".into(), "right".into()], "joined", 0)
+        .alias("joined", "joined_tied");
+    let plan = build_load_plan(&manifest, &expected, &mappings, &LoadOptions::default()).unwrap();
+
+    assert_eq!(plan.tensors.len(), 5);
+    assert_eq!(plan.aliases.len(), 1);
+    assert_eq!(plan.report.transformed.len(), 5);
+    assert_eq!(plan.report.aliased.len(), 1);
+    assert!(matches!(
+        plan.tensors
+            .iter()
+            .find(|item| item.target == "v")
+            .unwrap()
+            .transform,
+        PlannedTransform::Slice {
+            start: 3,
+            length: 3,
+            ..
+        }
+    ));
+    assert!(plan.memory.logical_model_bytes > plan.memory.target_parameter_bytes);
+}
+
+#[test]
+fn chained_aliases_resolve_to_the_storage_owner() {
+    let (_temp, manifest) =
+        fixture_manifest(&[FixtureTensor::new("shared", TensorDType::F16, [4, 2])]);
+    let expected = [
+        ExpectedTensor::new("embedding", [4, 2]),
+        ExpectedTensor::new("head", [4, 2]),
+        ExpectedTensor::new("decoder_head", [4, 2]),
+    ];
+    let mut mappings = MappingPlan::new();
+    mappings
+        .map("shared", "embedding")
+        .alias("embedding", "head")
+        .alias("head", "decoder_head");
+    let plan = build_load_plan(&manifest, &expected, &mappings, &LoadOptions::default()).unwrap();
+    for alias in &plan.aliases {
+        assert!(matches!(
+            &alias.transform,
+            PlannedTransform::Alias { source_target } if source_target == "embedding"
+        ));
+    }
+}
+
+#[test]
+fn auto_dtype_policy_plans_bf16_to_f16_conversion() {
+    let (_temp, manifest) =
+        fixture_manifest(&[FixtureTensor::new("weight", TensorDType::BF16, [2, 2])]);
+    let expected = [ExpectedTensor::new("weight", [2, 2]).with_dtype(TensorDType::F16)];
+    let mapping = MappingPlan::identity(&expected);
+    let plan = build_load_plan(&manifest, &expected, &mapping, &LoadOptions::default()).unwrap();
+    assert_eq!(plan.tensors[0].dtype, TensorDType::F16);
+    assert_eq!(plan.report.dtype_converted.len(), 1);
+}
+
+#[test]
+fn preserve_and_cast_dtype_policies_are_strict() {
+    let (_temp, manifest) = fixture_manifest(&[
+        FixtureTensor::new("float", TensorDType::BF16, [2]),
+        FixtureTensor::new("integer", TensorDType::I64, [1]),
+    ]);
+    let expected = [
+        ExpectedTensor::new("float", [2]).with_dtype(TensorDType::F16),
+        ExpectedTensor::new("integer", [1]).with_dtype(TensorDType::I64),
+    ];
+    let mappings = MappingPlan::identity(&expected);
+    let preserve = LoadOptions {
+        dtype_policy: DTypePolicy::Preserve,
+        ..LoadOptions::default()
+    };
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &mappings, &preserve),
+        Err(CheckpointError::DTypeMismatch { .. })
+    ));
+
+    let generic = [
+        ExpectedTensor::new("float", [2]),
+        ExpectedTensor::new("integer", [1]),
+    ];
+    let cast = LoadOptions {
+        dtype_policy: DTypePolicy::Cast(TensorDType::F32),
+        ..LoadOptions::default()
+    };
+    let plan =
+        build_load_plan(&manifest, &generic, &MappingPlan::identity(&generic), &cast).unwrap();
+    assert_eq!(
+        plan.tensors
+            .iter()
+            .find(|t| t.target == "float")
+            .unwrap()
+            .dtype,
+        TensorDType::F32
+    );
+    assert_eq!(
+        plan.tensors
+            .iter()
+            .find(|t| t.target == "integer")
+            .unwrap()
+            .dtype,
+        TensorDType::I64
+    );
+
+    let invalid_cast = LoadOptions {
+        dtype_policy: DTypePolicy::Cast(TensorDType::I8),
+        ..LoadOptions::default()
+    };
+    assert!(matches!(
+        build_load_plan(
+            &manifest,
+            &generic,
+            &MappingPlan::identity(&generic),
+            &invalid_cast
+        ),
+        Err(CheckpointError::InvalidMapping { .. })
+    ));
+}
+
+#[test]
+fn strict_mismatch_report_preserves_all_keys() {
+    let (_temp, manifest) = fixture_manifest(&[
+        FixtureTensor::new("used", TensorDType::F16, [1]),
+        FixtureTensor::new("vision.block", TensorDType::F16, [1]),
+        FixtureTensor::new("surprise", TensorDType::F16, [1]),
+    ]);
+    let expected = [
+        ExpectedTensor::new("used", [1]),
+        ExpectedTensor::new("optional", [1]),
+        ExpectedTensor::new("missing", [1]),
+    ];
+    let mut mappings = MappingPlan::new();
+    mappings.map("used", "used");
+    let options = LoadOptions {
+        allow_missing: vec![KeyMatcher::exact("optional")],
+        allow_unexpected: vec![KeyMatcher::prefix("vision.")],
+        ..LoadOptions::default()
+    };
+    let error = build_load_plan(&manifest, &expected, &mappings, &options).unwrap_err();
+    let CheckpointError::StrictValidation { report, .. } = error else {
+        panic!("unexpected error")
+    };
+    assert_eq!(report.allowlisted_missing, ["optional"]);
+    assert_eq!(report.allowlisted_ignored, ["vision.block"]);
+    assert_eq!(report.missing, ["missing"]);
+    assert_eq!(report.unexpected, ["surprise"]);
+}
+
+#[test]
+fn allowlists_can_make_an_intentionally_partial_text_load_strict() {
+    let (_temp, manifest) = fixture_manifest(&[
+        FixtureTensor::new("text.weight", TensorDType::F16, [1]),
+        FixtureTensor::new("visual.weight", TensorDType::F16, [1]),
+    ]);
+    let expected = [
+        ExpectedTensor::new("text.weight", [1]),
+        ExpectedTensor::new("optional.bias", [1]),
+    ];
+    let mut mappings = MappingPlan::new();
+    mappings.map("text.weight", "text.weight");
+    let options = LoadOptions {
+        allow_missing: vec![KeyMatcher::prefix("optional.")],
+        allow_unexpected: vec![KeyMatcher::prefix("visual.")],
+        ..LoadOptions::default()
+    };
+    let plan = build_load_plan(&manifest, &expected, &mappings, &options).unwrap();
+    assert!(plan.report.is_strictly_valid());
+}
+
+#[test]
+fn empty_allowlist_patterns_are_forbidden() {
+    let (_temp, manifest) = fixture_manifest(&[]);
+    let options = LoadOptions {
+        allow_unexpected: vec![KeyMatcher::prefix("")],
+        ..LoadOptions::default()
+    };
+    assert!(matches!(
+        build_load_plan(&manifest, &[], &MappingPlan::new(), &options),
+        Err(CheckpointError::InvalidMapping { .. })
+    ));
+}
+
+#[test]
+fn invalid_mapping_shapes_axes_and_consumption_are_rejected() {
+    let (_temp, manifest) = fixture_manifest(&[
+        FixtureTensor::new("rank1", TensorDType::F16, [6]),
+        FixtureTensor::new("matrix", TensorDType::F16, [2, 3]),
+    ]);
+
+    let expected = [ExpectedTensor::new("target", [3, 2])];
+    let mut wrong_rank = MappingPlan::new();
+    wrong_rank.transpose_2d("rank1", "target");
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &wrong_rank, &LoadOptions::default()),
+        Err(CheckpointError::InvalidMapping { .. })
+    ));
+
+    let expected = [ExpectedTensor::new("target", [1, 1])];
+    let mut mismatch = MappingPlan::new();
+    mismatch.map("matrix", "target");
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &mismatch, &LoadOptions::default()),
+        Err(CheckpointError::ShapeMismatch { .. })
+    ));
+
+    let expected = [ExpectedTensor::new("a", [6]), ExpectedTensor::new("b", [6])];
+    let mut reused = MappingPlan::new();
+    reused.map("rank1", "a").map("rank1", "b");
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &reused, &LoadOptions::default()),
+        Err(CheckpointError::MappingSourceCollision { .. })
+    ));
+}
+
+#[test]
+fn malformed_split_and_concatenate_operations_are_rejected() {
+    let (_temp, manifest) = fixture_manifest(&[
+        FixtureTensor::new("a", TensorDType::F16, [2, 3]),
+        FixtureTensor::new("b", TensorDType::F32, [2, 3]),
+        FixtureTensor::new("c", TensorDType::F16, [3, 4]),
+    ]);
+    let expected = [
+        ExpectedTensor::new("x", [1, 3]),
+        ExpectedTensor::new("y", [1, 3]),
+    ];
+    let mut bad_split = MappingPlan::new();
+    bad_split.split("a", 0, [("x".into(), 1), ("y".into(), 2)]);
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &bad_split, &LoadOptions::default()),
+        Err(CheckpointError::InvalidMapping { .. })
+    ));
+
+    let expected = [ExpectedTensor::new("joined", [4, 3])];
+    let mut mixed = MappingPlan::new();
+    mixed.concatenate(["a".into(), "b".into()], "joined", 0);
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &mixed, &LoadOptions::default()),
+        Err(CheckpointError::InvalidMapping { .. })
+    ));
+
+    let mut incompatible = MappingPlan::new();
+    incompatible.concatenate(["a".into(), "c".into()], "joined", 0);
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &incompatible, &LoadOptions::default()),
+        Err(CheckpointError::InvalidMapping { .. })
+    ));
+}
+
+#[test]
+fn alias_cycles_and_unknown_alias_sources_are_rejected() {
+    let (_temp, manifest) = fixture_manifest(&[]);
+    let expected = [ExpectedTensor::new("a", [1]), ExpectedTensor::new("b", [1])];
+    let mut cycle = MappingPlan::new();
+    cycle.alias("b", "a").alias("a", "b");
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &cycle, &LoadOptions::default()),
+        Err(CheckpointError::InvalidMapping { .. })
+    ));
+
+    let mut dangling = MappingPlan::new();
+    dangling.alias("nowhere", "a");
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &dangling, &LoadOptions::default()),
+        Err(CheckpointError::InvalidMapping { .. })
+    ));
+}
+
+#[test]
+fn missing_sources_unknown_targets_and_duplicate_expectations_fail_early() {
+    let (_temp, manifest) = fixture_manifest(&[]);
+    let expected = [ExpectedTensor::new("known", [1])];
+    let mut missing = MappingPlan::new();
+    missing.map("absent", "known");
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &missing, &LoadOptions::default()),
+        Err(CheckpointError::MissingMappingSource { .. })
+    ));
+
+    let (_temp, manifest) =
+        fixture_manifest(&[FixtureTensor::new("source", TensorDType::F16, [1])]);
+    let mut unknown = MappingPlan::new();
+    unknown.map("source", "unknown");
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &unknown, &LoadOptions::default()),
+        Err(CheckpointError::UnknownMappingTarget { .. })
+    ));
+
+    let duplicate = [
+        ExpectedTensor::new("same", [1]),
+        ExpectedTensor::new("same", [1]),
+    ];
+    assert!(matches!(
+        build_load_plan(
+            &manifest,
+            &duplicate,
+            &MappingPlan::new(),
+            &LoadOptions::default()
+        ),
+        Err(CheckpointError::MappingTargetCollision { .. })
+    ));
+}
+
+#[test]
+fn split_and_concatenate_validate_empty_inputs_and_axes() {
+    let (_temp, manifest) =
+        fixture_manifest(&[FixtureTensor::new("source", TensorDType::F16, [2, 3])]);
+    let expected = [ExpectedTensor::new("target", [2, 3])];
+
+    let mut split_axis = MappingPlan::new();
+    split_axis.split("source", 2, [("target".into(), 1)]);
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &split_axis, &LoadOptions::default()),
+        Err(CheckpointError::InvalidMapping { .. })
+    ));
+
+    let mut empty_split = MappingPlan::new();
+    empty_split.split("source", 0, Vec::<(String, u64)>::new());
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &empty_split, &LoadOptions::default()),
+        Err(CheckpointError::InvalidMapping { .. })
+    ));
+
+    let mut empty_concat = MappingPlan::new();
+    empty_concat.concatenate(Vec::<String>::new(), "target", 0);
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &empty_concat, &LoadOptions::default()),
+        Err(CheckpointError::InvalidMapping { .. })
+    ));
+
+    let mut concat_axis = MappingPlan::new();
+    concat_axis.concatenate(["source".into()], "target", 2);
+    assert!(matches!(
+        build_load_plan(&manifest, &expected, &concat_axis, &LoadOptions::default()),
+        Err(CheckpointError::InvalidMapping { .. })
+    ));
+}
+
+#[test]
+fn all_mapping_target_collision_paths_are_rejected() {
+    let (_temp, manifest) = fixture_manifest(&[
+        FixtureTensor::new("first", TensorDType::F16, [1]),
+        FixtureTensor::new("second", TensorDType::F16, [1]),
+    ]);
+    let expected = [ExpectedTensor::new("target", [1])];
+    let mut direct_collision = MappingPlan::new();
+    direct_collision
+        .map("first", "target")
+        .map("second", "target");
+    assert!(matches!(
+        build_load_plan(
+            &manifest,
+            &expected,
+            &direct_collision,
+            &LoadOptions::default()
+        ),
+        Err(CheckpointError::MappingTargetCollision { .. })
+    ));
+
+    let mut alias_collision = MappingPlan::new();
+    alias_collision
+        .map("first", "target")
+        .alias("target", "target");
+    assert!(matches!(
+        build_load_plan(
+            &manifest,
+            &expected,
+            &alias_collision,
+            &LoadOptions::default()
+        ),
+        Err(CheckpointError::MappingTargetCollision { .. })
+    ));
+
+    let mut unknown_alias = MappingPlan::new();
+    unknown_alias.alias("target", "not_expected");
+    assert!(matches!(
+        build_load_plan(
+            &manifest,
+            &expected,
+            &unknown_alias,
+            &LoadOptions::default()
+        ),
+        Err(CheckpointError::UnknownMappingTarget { .. })
+    ));
+}
+
+#[test]
+fn aliases_must_match_owner_shape_and_dtype() {
+    let (_temp, manifest) =
+        fixture_manifest(&[FixtureTensor::new("source", TensorDType::F16, [2])]);
+    let mut mappings = MappingPlan::new();
+    mappings.map("source", "owner").alias("owner", "alias");
+
+    let shape_mismatch = [
+        ExpectedTensor::new("owner", [2]),
+        ExpectedTensor::new("alias", [3]),
+    ];
+    assert!(matches!(
+        build_load_plan(
+            &manifest,
+            &shape_mismatch,
+            &mappings,
+            &LoadOptions::default()
+        ),
+        Err(CheckpointError::ShapeMismatch { .. })
+    ));
+
+    let dtype_mismatch = [
+        ExpectedTensor::new("owner", [2]).with_dtype(TensorDType::F16),
+        ExpectedTensor::new("alias", [2]).with_dtype(TensorDType::F32),
+    ];
+    let preserve = LoadOptions {
+        dtype_policy: DTypePolicy::Preserve,
+        ..LoadOptions::default()
+    };
+    assert!(matches!(
+        build_load_plan(&manifest, &dtype_mismatch, &mappings, &preserve),
+        Err(CheckpointError::DTypeMismatch { .. })
+    ));
+}
+
+#[test]
+fn expected_inventory_rejects_empty_names_and_shape_overflow() {
+    let (_temp, manifest) = fixture_manifest(&[]);
+    let empty = [ExpectedTensor::new("", [1])];
+    assert!(matches!(
+        build_load_plan(
+            &manifest,
+            &empty,
+            &MappingPlan::new(),
+            &LoadOptions::default()
+        ),
+        Err(CheckpointError::InvalidMapping { .. })
+    ));
+
+    let overflowing = [ExpectedTensor::new("huge", [u64::MAX, 2])];
+    assert!(matches!(
+        build_load_plan(
+            &manifest,
+            &overflowing,
+            &MappingPlan::new(),
+            &LoadOptions::default()
+        ),
+        Err(CheckpointError::ArithmeticOverflow { .. })
+    ));
+}
+
+#[test]
+fn explicit_operation_push_and_report_runtime_records_are_available() {
+    let (_temp, manifest) =
+        fixture_manifest(&[FixtureTensor::new("source", TensorDType::F16, [1])]);
+    let expected = [ExpectedTensor::new("target", [1])];
+    let mut mappings = MappingPlan::new();
+    mappings.push(TensorOperation::Map {
+        source: "source".into(),
+        target: "target".into(),
+        transform: TensorTransform::Identity,
+    });
+    assert_eq!(mappings.operations().len(), 1);
+    let mut plan =
+        build_load_plan(&manifest, &expected, &mappings, &LoadOptions::default()).unwrap();
+    plan.report.record_applied("target");
+    plan.report.record_applied("target");
+    plan.report.record_quantized(QuantizationRecord {
+        target: "target".into(),
+        scheme: "symmetric-q8".into(),
+        bytes: 1,
+    });
+    plan.report.finalize();
+    assert_eq!(plan.report.applied, ["target"]);
+    assert_eq!(plan.report.quantized.len(), 1);
+}
+
+proptest! {
+    #[test]
+    fn dtype_storage_bytes_scale_linearly(elements in 0_u64..1_000_000) {
+        prop_assert_eq!(TensorDType::F16.storage_bytes(elements).unwrap(), elements * 2);
+        prop_assert_eq!(TensorDType::F32.storage_bytes(elements).unwrap(), elements * 4);
+        prop_assert_eq!(TensorDType::I64.storage_bytes(elements).unwrap(), elements * 8);
+    }
+
+    #[test]
+    fn arbitrary_exhaustive_splits_preserve_shape_and_bytes(
+        left in 1_u64..32,
+        middle in 1_u64..32,
+        right in 1_u64..32,
+        width in 1_u64..32,
+    ) {
+        let total = left + middle + right;
+        let (_temp, manifest) = fixture_manifest(&[FixtureTensor::new(
+            "fused",
+            TensorDType::F16,
+            vec![total, width],
+        )]);
+        let expected = [
+            ExpectedTensor::new("left", vec![left, width]),
+            ExpectedTensor::new("middle", vec![middle, width]),
+            ExpectedTensor::new("right", vec![right, width]),
+        ];
+        let mut mappings = MappingPlan::new();
+        mappings.split(
+            "fused",
+            0,
+            [
+                ("left".into(), left),
+                ("middle".into(), middle),
+                ("right".into(), right),
+            ],
+        );
+        let plan = build_load_plan(&manifest, &expected, &mappings, &LoadOptions::default()).unwrap();
+        prop_assert_eq!(plan.memory.target_parameter_bytes, total * width * 2);
+        let starts: Vec<_> = plan
+            .tensors
+            .iter()
+            .map(|tensor| match tensor.transform {
+                PlannedTransform::Slice { start, .. } => start,
+                _ => unreachable!(),
+            })
+            .collect();
+        // Targets are sorted alphabetically after validation; inspect as a set.
+        prop_assert!(starts.contains(&0));
+        prop_assert!(starts.contains(&left));
+        prop_assert!(starts.contains(&(left + middle)));
+    }
+
+    #[test]
+    fn transpose_plans_swap_exactly_two_dimensions(rows in 1_u64..64, cols in 1_u64..64) {
+        let (_temp, manifest) = fixture_manifest(&[FixtureTensor::new(
+            "source",
+            TensorDType::F32,
+            vec![rows, cols],
+        )]);
+        let expected = [ExpectedTensor::new("target", vec![cols, rows])];
+        let mut mapping = MappingPlan::new();
+        mapping.transpose_2d("source", "target");
+        let plan = build_load_plan(&manifest, &expected, &mapping, &LoadOptions::default()).unwrap();
+        prop_assert_eq!(&plan.tensors[0].shape, &vec![cols, rows]);
+        prop_assert_eq!(plan.memory.target_parameter_bytes, rows * cols * 4);
+    }
+}

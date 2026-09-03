@@ -21,8 +21,10 @@ rocm = ["burn/rocm"]
 [dependencies]
 burn = { version = "=0.21.0", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
+serde_json = "1.0.149"
+safetensors = { version = "=0.7.0", default-features = false, features = ["std"] }
 thiserror = "2.0.18"
 
 [dev-dependencies]
 proptest = "1.9.0"
+tempfile = "3.27.0"

@@ -18,6 +18,7 @@
 
 pub mod architecture;
 pub mod attention;
+pub mod checkpoint;
 pub mod error;
 pub mod feed_forward;
 pub mod generation;
