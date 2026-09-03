@@ -263,6 +263,7 @@ impl Validate for T5Config {
 
 impl ModelConfig for T5Config {
     const FAMILY: &'static str = "t5";
+    const MODEL_TYPES: &'static [&'static str] = &["t5"];
 }
 
 /// FLAN changes instruction tuning, not T5's serialized transformer topology.

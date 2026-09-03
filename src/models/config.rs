@@ -101,10 +101,29 @@ pub trait Validate {
 pub trait ModelConfig: Validate + DeserializeOwned + Sized {
     /// Stable family name used in diagnostics and compatibility tables.
     const FAMILY: &'static str;
+    /// Hugging Face `model_type` values accepted by this topology.
+    const MODEL_TYPES: &'static [&'static str];
 
     /// Parses either a direct text config or a multimodal wrapper and validates it.
     fn from_json_str(json: &str) -> Result<Self, ConfigLoadError> {
         parse_text_config(json)
+    }
+}
+
+impl<T> crate::ArchitectureConfig for T
+where
+    T: ModelConfig + Clone + core::fmt::Debug + Send + Sync,
+{
+    const MODEL_TYPES: &'static [&'static str] = T::MODEL_TYPES;
+
+    /// Reuses the family schema's field-level validation in the runtime API.
+    fn validate(&self) -> crate::Result<()> {
+        Validate::validate(self).map_err(|error| {
+            crate::Error::configuration(
+                format!("{}.{}", error.architecture, error.field),
+                error.reason,
+            )
+        })
     }
 }
 

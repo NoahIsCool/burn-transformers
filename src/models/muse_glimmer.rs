@@ -283,6 +283,7 @@ impl Validate for MuseGlimmerTextConfig {
 
 impl ModelConfig for MuseGlimmerTextConfig {
     const FAMILY: &'static str = "muse_glimmer";
+    const MODEL_TYPES: &'static [&'static str] = &["muse_glimmer_text"];
 }
 
 #[cfg(test)]

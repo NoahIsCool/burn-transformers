@@ -263,6 +263,7 @@ impl Validate for Qwen3MoeConfig {
 
 impl ModelConfig for Qwen3MoeConfig {
     const FAMILY: &'static str = "qwen3_moe";
+    const MODEL_TYPES: &'static [&'static str] = &["qwen3_moe"];
 }
 
 #[cfg(test)]

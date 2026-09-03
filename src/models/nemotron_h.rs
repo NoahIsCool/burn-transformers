@@ -572,6 +572,7 @@ impl Validate for NemotronHConfig {
 
 impl ModelConfig for NemotronHConfig {
     const FAMILY: &'static str = "nemotron_h";
+    const MODEL_TYPES: &'static [&'static str] = &["nemotron_h"];
 }
 
 #[cfg(test)]

@@ -317,6 +317,7 @@ impl Validate for Qwen3_5TextConfig {
 
 impl ModelConfig for Qwen3_5TextConfig {
     const FAMILY: &'static str = "qwen3_5";
+    const MODEL_TYPES: &'static [&'static str] = &["qwen3_5_text"];
 }
 
 /// Source-compatible alias that makes Qwen3.8 intent explicit at call sites.

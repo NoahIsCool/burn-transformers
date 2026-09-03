@@ -346,6 +346,7 @@ impl Validate for DeepseekV2Config {
 
 impl ModelConfig for DeepseekV2Config {
     const FAMILY: &'static str = "deepseek_v2";
+    const MODEL_TYPES: &'static [&'static str] = &["deepseek_v2"];
 }
 
 #[cfg(test)]

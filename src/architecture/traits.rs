@@ -2,7 +2,7 @@
 
 use burn::{module::Module, tensor::backend::Backend};
 
-use crate::{Result, architecture::types::*};
+use crate::{Result, architecture::types::*, cache::CacheConfig};
 
 /// Configuration behavior shared by every supported architecture family.
 pub trait ArchitectureConfig: Clone + core::fmt::Debug + Send + Sync {
@@ -62,7 +62,7 @@ pub trait CausalLanguageModel<B: Backend>: Module<B> {
     /// Allocates external decode state for a known batch and capacity policy.
     fn new_decode_state(
         &self,
-        capacity: usize,
+        config: CacheConfig,
         batch_size: usize,
         device: &B::Device,
     ) -> Result<Self::State>;
@@ -108,7 +108,7 @@ pub trait Seq2SeqLanguageModel<B: Backend>: Module<B> {
     /// Allocates decoder state for a known batch and target capacity.
     fn new_decode_state(
         &self,
-        capacity: usize,
+        config: CacheConfig,
         batch_size: usize,
         device: &B::Device,
     ) -> Result<Self::State>;
