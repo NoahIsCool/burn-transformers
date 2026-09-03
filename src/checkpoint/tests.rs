@@ -348,12 +348,25 @@ fn malformed_dtype_shape_and_range_metadata_are_rejected() {
 }
 
 #[test]
+fn safetensors_header_must_start_with_an_object_byte() {
+    let temp = TempDir::new().unwrap();
+    write_raw_shard(temp.path(), "model.safetensors", b" {}", 0);
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::InvalidJson {
+            kind: "SafeTensors header",
+            ..
+        })
+    ));
+}
+
+#[test]
 fn duplicate_header_tensor_names_are_rejected() {
     let temp = TempDir::new().unwrap();
     let header = br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[0,2]},"a":{"dtype":"F16","shape":[1],"data_offsets":[0,2]}}"#;
     write_raw_shard(temp.path(), "model.safetensors", header, 2);
     let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
-    assert!(matches!(error, CheckpointError::InvalidJson { .. }));
+    assert!(matches!(error, CheckpointError::DuplicateJsonKey { .. }));
     assert!(error.to_string().contains("duplicate"));
 }
 
@@ -586,7 +599,7 @@ fn malformed_index_json_and_duplicate_weight_keys_are_rejected() {
     )
     .unwrap();
     let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
-    assert!(matches!(error, CheckpointError::InvalidJson { .. }));
+    assert!(matches!(error, CheckpointError::DuplicateJsonKey { .. }));
     assert!(error.to_string().contains("duplicate"));
 }
 
@@ -703,7 +716,7 @@ fn duplicate_metadata_keys_and_missing_roots_fail_cleanly() {
         0,
     );
     let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
-    assert!(matches!(error, CheckpointError::InvalidJson { .. }));
+    assert!(matches!(error, CheckpointError::DuplicateJsonKey { .. }));
     assert!(error.to_string().contains("duplicate"));
 
     let absent = temp.path().join("does-not-exist");

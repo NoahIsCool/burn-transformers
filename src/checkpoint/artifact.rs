@@ -458,12 +458,15 @@ fn inspect_shard(
     let mut bytes = vec![0_u8; header_len];
     file.read_exact(&mut bytes)
         .map_err(|error| CheckpointError::io("read SafeTensors JSON header", &path, error))?;
-    let raw: RawHeader =
-        serde_json::from_slice(&bytes).map_err(|error| CheckpointError::InvalidJson {
+    if bytes.first() != Some(&b'{') {
+        return Err(CheckpointError::InvalidJson {
             kind: "SafeTensors header",
-            path: path.clone(),
-            message: error.to_string(),
-        })?;
+            path,
+            message: "header must begin with `{`".to_owned(),
+        });
+    }
+    let raw: RawHeader = serde_json::from_slice(&bytes)
+        .map_err(|error| classify_json_error("SafeTensors header", &path, error))?;
     if raw.tensors.len() > options.limits.max_tensors {
         return Err(limit(
             "tensor",
@@ -556,12 +559,8 @@ fn inspect_shard(
     // Run the format owner's validator as an independent compatibility check.
     // We parse only the bounded header rather than mapping the multi-gigabyte data
     // region; `Metadata` validates ordering, alignment, dtype spelling, and shapes.
-    let official: safetensors::tensor::Metadata =
-        serde_json::from_slice(&bytes).map_err(|error| CheckpointError::InvalidJson {
-            kind: "SafeTensors header",
-            path: path.clone(),
-            message: error.to_string(),
-        })?;
+    let official: safetensors::tensor::Metadata = serde_json::from_slice(&bytes)
+        .map_err(|error| classify_json_error("SafeTensors header", &path, error))?;
     let official_data_bytes =
         u64::try_from(official.data_len()).map_err(|_| CheckpointError::ArithmeticOverflow {
             context: "converting SafeTensors metadata data length",
@@ -744,9 +743,28 @@ fn read_index(path: &Path, options: &LoadOptions) -> Result<RawIndex> {
             limit: options.limits.max_index_bytes,
         });
     }
-    serde_json::from_slice(&bytes).map_err(|error| CheckpointError::InvalidJson {
-        kind: "checkpoint index",
+    serde_json::from_slice(&bytes)
+        .map_err(|error| classify_json_error("checkpoint index", path, error))
+}
+
+fn classify_json_error(
+    kind: &'static str,
+    path: &Path,
+    error: serde_json::Error,
+) -> CheckpointError {
+    let message = error.to_string();
+    if message.contains("duplicate")
+        && let Some(key) = message.split('`').nth(1)
+    {
+        return CheckpointError::DuplicateJsonKey {
+            kind,
+            path: path.to_path_buf(),
+            key: key.to_owned(),
+        };
+    }
+    CheckpointError::InvalidJson {
+        kind,
         path: path.to_path_buf(),
-        message: error.to_string(),
-    })
+        message,
+    }
 }
