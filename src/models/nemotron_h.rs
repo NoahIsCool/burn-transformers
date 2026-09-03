@@ -9,6 +9,20 @@
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
+mod checkpoint;
+mod load;
+pub mod model;
+
+pub use checkpoint::{NemotronHCheckpointContract, NemotronHCheckpointOptions};
+pub use load::{NemotronHCheckpointLoadError, NemotronHLoadError};
+pub use model::mamba2::{
+    NemotronMamba2, NemotronMamba2Config, NemotronMamba2Mode, NemotronMamba2State,
+};
+pub use model::{
+    NemotronHBlock, NemotronHDecodeState, NemotronHForCausalLm, NemotronHModel,
+    NemotronHNextTokenHead,
+};
+
 use super::config::{
     ConfigError, ModelConfig, TokenIds, Validate, divisible, model_type, nonzero, positive_finite,
     probability, token_ids,
@@ -228,9 +242,9 @@ pub struct NemotronHConfig {
     pub hidden_dropout: f64,
     /// Whether initialization rescales pre-normalized residual branches by depth.
     pub rescale_prenorm_residual: bool,
-    /// Base RoPE theta for full-attention blocks.
+    /// Compatibility RoPE theta retained by NVIDIA configs; current attention is NoPE.
     pub rope_theta: Option<f64>,
-    /// Fraction of attention-head channels receiving RoPE.
+    /// Compatibility partial-RoPE fraction; current NVIDIA reference does not apply it.
     pub partial_rotary_factor: Option<f64>,
 }
 
@@ -346,14 +360,23 @@ impl Validate for NemotronHConfig {
                 "must match the authoritative block schedule length",
             ));
         }
+        let mtp_enabled = self.num_nextn_predict_layers > 0;
         let has_attention = self
             .layers_block_type
-            .contains(&NemotronHBlockType::FullAttention);
+            .contains(&NemotronHBlockType::FullAttention)
+            || (mtp_enabled
+                && self
+                    .mtp_layers_block_type
+                    .contains(&NemotronHBlockType::FullAttention));
         let has_mamba = self
             .layers_block_type
             .contains(&NemotronHBlockType::LinearAttention);
         let has_mlp = self.layers_block_type.contains(&NemotronHBlockType::Mlp);
-        let has_moe = self.layers_block_type.contains(&NemotronHBlockType::Moe);
+        let has_moe = self.layers_block_type.contains(&NemotronHBlockType::Moe)
+            || (mtp_enabled
+                && self
+                    .mtp_layers_block_type
+                    .contains(&NemotronHBlockType::Moe));
 
         if has_attention {
             nonzero(FAMILY, "head_dim", self.head_dim)?;
@@ -397,13 +420,13 @@ impl Validate for NemotronHConfig {
         }
         if has_mlp {
             nonzero(FAMILY, "intermediate_size", self.intermediate_size)?;
-            if self.mlp_hidden_act != "relu2" && self.mlp_hidden_act != "silu" {
-                return Err(ConfigError::new(
-                    FAMILY,
-                    "mlp_hidden_act",
-                    "must be `relu2` or `silu`",
-                ));
-            }
+        }
+        if (has_mlp || has_moe) && self.mlp_hidden_act != "relu2" && self.mlp_hidden_act != "silu" {
+            return Err(ConfigError::new(
+                FAMILY,
+                "mlp_hidden_act",
+                "must be `relu2` or `silu`",
+            ));
         }
         if has_mamba {
             for (field, value) in [
@@ -416,6 +439,13 @@ impl Validate for NemotronHConfig {
                 ("chunk_size", self.chunk_size),
             ] {
                 nonzero(FAMILY, field, value)?;
+            }
+            if self.conv_kernel < 2 {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    "conv_kernel",
+                    "must be at least two so the recurrent convolution has history",
+                ));
             }
             if !self.mamba_num_heads.is_multiple_of(self.n_groups) {
                 return Err(ConfigError::new(
@@ -494,6 +524,13 @@ impl Validate for NemotronHConfig {
             ] {
                 nonzero(FAMILY, field, value)?;
             }
+            if self.n_shared_experts != 1 {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    "n_shared_experts",
+                    "v1 supports the released single shared-expert topology",
+                ));
+            }
             if let Some(latent) = self.moe_latent_size {
                 nonzero(FAMILY, "moe_latent_size", latent)?;
             }
@@ -504,6 +541,13 @@ impl Validate for NemotronHConfig {
                 "n_group",
                 self.n_group,
             )?;
+            if self.n_routed_experts / self.n_group < 2 {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    "n_group",
+                    "each router group must contain at least two experts for top-2 group scoring",
+                ));
+            }
             let eligible_experts = (self.n_routed_experts / self.n_group)
                 .checked_mul(self.topk_group)
                 .ok_or_else(|| {
@@ -522,12 +566,24 @@ impl Validate for NemotronHConfig {
             }
             positive_finite(FAMILY, "routed_scaling_factor", self.routed_scaling_factor)?;
         }
-        if self.num_nextn_predict_layers > 0 && self.mtp_layers_block_type.is_empty() {
-            return Err(ConfigError::new(
-                FAMILY,
-                "mtp_layers_block_type",
-                "must be non-empty when MTP is enabled",
-            ));
+        if mtp_enabled {
+            if self.num_nextn_predict_layers != 1
+                || self.mtp_layers_block_type
+                    != [NemotronHBlockType::FullAttention, NemotronHBlockType::Moe]
+            {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    "mtp_layers_block_type",
+                    "v1 supports one checkpoint-declared [attention, moe] MTP stage",
+                ));
+            }
+            self.hidden_size.checked_mul(2).ok_or_else(|| {
+                ConfigError::new(
+                    FAMILY,
+                    "hidden_size",
+                    "MTP concatenation width overflows usize",
+                )
+            })?;
         }
         positive_finite(FAMILY, "initializer_range", self.initializer_range)?;
         positive_finite(FAMILY, "layer_norm_epsilon", self.layer_norm_epsilon)?;
@@ -579,6 +635,9 @@ impl ModelConfig for NemotronHConfig {
 mod tests {
     use super::*;
 
+    /// Published 52-block Nemotron 3/3.5 topology: 23 Mamba, 23 MoE, 6 GQA.
+    const OFFICIAL_30B_PATTERN: &str = "MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME";
+
     #[test]
     fn legacy_pattern_round_trips_to_normalized_blocks() {
         let json = r#"{
@@ -598,5 +657,134 @@ mod tests {
             ..NemotronHConfig::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    /// Runtime-specific recurrence and routing constraints fail during config validation.
+    #[test]
+    fn rejects_unsupported_recurrent_and_shared_expert_edges() {
+        let config = NemotronHConfig {
+            conv_kernel: 1,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = NemotronHConfig {
+            n_shared_experts: 2,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = NemotronHConfig {
+            n_routed_experts: 2,
+            n_group: 2,
+            topk_group: 2,
+            num_experts_per_tok: 2,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    /// The pinned Nemotron 3 Nano legacy-pattern config remains schema compatible.
+    #[test]
+    fn nemotron_3_nano_official_shape_config_is_compatible() {
+        let json = format!(
+            r#"{{
+                "model_type":"nemotron_h",
+                "vocab_size":131072,
+                "hidden_size":2688,
+                "hybrid_override_pattern":"{OFFICIAL_30B_PATTERN}",
+                "num_hidden_layers":52,
+                "num_attention_heads":32,
+                "num_key_value_heads":2,
+                "head_dim":128,
+                "max_position_embeddings":262144,
+                "intermediate_size":1856,
+                "ssm_state_size":128,
+                "mamba_num_heads":64,
+                "mamba_head_dim":64,
+                "n_groups":8,
+                "conv_kernel":4,
+                "chunk_size":128,
+                "n_routed_experts":128,
+                "n_shared_experts":1,
+                "moe_intermediate_size":1856,
+                "moe_shared_expert_intermediate_size":3712,
+                "num_experts_per_tok":6,
+                "routed_scaling_factor":2.5,
+                "n_group":1,
+                "topk_group":1,
+                "norm_eps":0.00001
+            }}"#
+        );
+        let config: NemotronHConfig = serde_json::from_str(&json).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.block_count(), 52);
+        assert_eq!(
+            config
+                .layers_block_type
+                .iter()
+                .filter(|&&kind| kind == NemotronHBlockType::LinearAttention)
+                .count(),
+            23
+        );
+        assert_eq!(
+            config
+                .layers_block_type
+                .iter()
+                .filter(|&&kind| kind == NemotronHBlockType::Moe)
+                .count(),
+            23
+        );
+    }
+
+    /// The 3.5 Lightning list-form schema and checkpoint-declared MTP schedule parse.
+    #[test]
+    fn nemotron_3_5_lightning_list_config_is_compatible() {
+        let layers = OFFICIAL_30B_PATTERN
+            .chars()
+            .map(|character| match character {
+                'M' => "mamba",
+                'E' => "moe",
+                '*' => "attention",
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        let config: NemotronHConfig = serde_json::from_value(serde_json::json!({
+            "model_type": "nemotron_h",
+            "vocab_size": 131072,
+            "hidden_size": 2688,
+            "layers_block_type": layers,
+            "num_hidden_layers": 52,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 2,
+            "head_dim": 128,
+            "max_position_embeddings": 262144,
+            "intermediate_size": 1856,
+            "ssm_state_size": 128,
+            "mamba_num_heads": 64,
+            "mamba_head_dim": 64,
+            "n_groups": 8,
+            "conv_kernel": 4,
+            "chunk_size": 128,
+            "n_routed_experts": 128,
+            "n_shared_experts": 1,
+            "moe_intermediate_size": 1856,
+            "moe_shared_expert_intermediate_size": 3712,
+            "num_experts_per_tok": 6,
+            "routed_scaling_factor": 2.5,
+            "n_group": 1,
+            "topk_group": 1,
+            "num_nextn_predict_layers": 1,
+            "mtp_layers_block_type": ["attention", "moe"],
+            "norm_eps": 0.00001
+        }))
+        .unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.block_count(), 52);
+        assert_eq!(config.num_nextn_predict_layers, 1);
+        assert_eq!(
+            config.mtp_layers_block_type,
+            [NemotronHBlockType::FullAttention, NemotronHBlockType::Moe]
+        );
     }
 }
