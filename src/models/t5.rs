@@ -14,8 +14,12 @@ use super::config::{
     probability, token_ids,
 };
 
+mod checkpoint;
+mod load;
 mod model;
 
+pub use checkpoint::{T5CheckpointContract, T5CheckpointPlan};
+pub use load::{T5CheckpointLoadError, T5LoadError};
 pub use model::{
     T5Attention, T5Block, T5ForConditionalGeneration, T5LayerCrossAttention, T5LayerFeedForward,
     T5LayerSelfAttention, T5Stack,
