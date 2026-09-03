@@ -39,8 +39,9 @@ pub use architecture::{
 };
 pub use error::{Error, Result};
 pub use generation::{
-    FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, SamplingStrategy,
-    TokenSelection,
+    CausalGenerationOutput, CausalGenerationRequest, FinishReason, GeneratedSequence,
+    GenerationConfig, GenerationToken, GenerationTracker, LogitsProcessor, SamplingStrategy,
+    TokenSelection, generate_causal, generate_causal_streaming,
 };
 pub use loaded::{LoadedModel, ModelSourceMetadata, ModelTokenizer};
 pub use models::{AutoCausalLm, AutoLoadOptions, AutoSeq2SeqLm};

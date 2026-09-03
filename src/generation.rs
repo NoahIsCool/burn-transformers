@@ -14,6 +14,13 @@
 //! happens before the final softmax, with rejected scores set to negative
 //! infinity.
 
+mod causal;
+
+pub use causal::{
+    CausalGenerationOutput, CausalGenerationRequest, GeneratedSequence, GenerationToken,
+    generate_causal, generate_causal_streaming,
+};
+
 use core::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -24,7 +31,7 @@ use burn::tensor::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result};
+use crate::{Error, Result, TokenMask};
 
 /// Selects deterministic greedy decoding or stochastic categorical sampling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -212,6 +219,20 @@ impl<B: Backend> LogitsProcessor<B> {
         logits: Tensor<B, 2>,
         history: Option<Tensor<B, 2, Int>>,
     ) -> Result<Tensor<B, 2>> {
+        self.process_with_mask(logits, history, None)
+    }
+
+    /// Processes logits while excluding padded history tokens from penalties.
+    ///
+    /// `history_mask` follows the crate-wide `true == valid` convention. Masked
+    /// token slots may contain arbitrary sentinel values: they are replaced
+    /// before one-hot indexing and cannot affect repetition or presence counts.
+    pub fn process_with_mask(
+        &self,
+        logits: Tensor<B, 2>,
+        history: Option<Tensor<B, 2, Int>>,
+        history_mask: Option<TokenMask<B>>,
+    ) -> Result<Tensor<B, 2>> {
         let batch = self.validate_logits_shape(&logits)?;
 
         let mut logits = if let Some(history) = history {
@@ -223,14 +244,36 @@ impl<B: Backend> LogitsProcessor<B> {
                     format!("[{history_batch}, sequence]"),
                 ));
             }
+            let history_mask = history_mask
+                .map(TokenMask::into_tensor)
+                .map(|mask| {
+                    let [mask_batch, mask_length] = mask.dims();
+                    if [mask_batch, mask_length] != [history_batch, history_length] {
+                        return Err(Error::shape(
+                            "generation.history_mask",
+                            format!("[{history_batch}, {history_length}]"),
+                            format!("[{mask_batch}, {mask_length}]"),
+                        ));
+                    }
+                    Ok(mask)
+                })
+                .transpose()?;
             if history_length == 0
                 || (self.config.repetition_penalty == 1.0 && self.config.presence_penalty == 0.0)
             {
                 logits
             } else {
+                let history = match &history_mask {
+                    Some(mask) => history.mask_fill(mask.clone().bool_not(), 0),
+                    None => history,
+                };
                 self.validate_history_values(&history)?;
-                self.apply_token_penalties(logits, history)
+                self.apply_token_penalties(logits, history, history_mask)
             }
+        } else if history_mask.is_some() {
+            return Err(Error::Generation(
+                "history_mask requires a corresponding history tensor".into(),
+            ));
         } else {
             logits
         };
@@ -333,6 +376,14 @@ impl<B: Backend> LogitsProcessor<B> {
         history: Option<Tensor<B, 2, Int>>,
     ) -> Result<TokenSelection<B>> {
         let logits = self.process(logits, history)?;
+        self.select_with_log_probs(logits)
+    }
+
+    /// Selects from processed logits and returns the sampled log probability.
+    ///
+    /// Callers using [`Self::process_with_mask`] can use this method to retain
+    /// the same probability semantics as [`Self::process_and_select_with_log_probs`].
+    pub fn select_with_log_probs(&self, logits: Tensor<B, 2>) -> Result<TokenSelection<B>> {
         let token_ids = self.select(logits.clone())?;
         let batch = token_ids.dims()[0];
         let selected = log_softmax(logits, 1)
@@ -394,12 +445,13 @@ impl<B: Backend> LogitsProcessor<B> {
         &self,
         logits: Tensor<B, 2>,
         history: Tensor<B, 2, Int>,
+        history_mask: Option<Tensor<B, 2, Bool>>,
     ) -> Tensor<B, 2> {
-        let observed = history
-            .one_hot::<3>(self.vocabulary_size)
-            .sum_dim(1)
-            .squeeze_dim::<2>(1)
-            .greater_elem(0);
+        let mut occurrences = history.one_hot::<3>(self.vocabulary_size);
+        if let Some(mask) = history_mask {
+            occurrences = occurrences * mask.unsqueeze_dim::<3>(2).int();
+        }
+        let observed = occurrences.sum_dim(1).squeeze_dim::<2>(1).greater_elem(0);
 
         let mut logits = logits;
         if self.config.repetition_penalty != 1.0 {
@@ -662,6 +714,7 @@ mod tests {
         FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, SamplingStrategy,
         splitmix64_uniform,
     };
+    use crate::TokenMask;
 
     type TestBackend = Flex<f32, i32>;
 
@@ -810,6 +863,45 @@ mod tests {
             .expect("an empty history applies no penalties")
             .into_data()
             .assert_eq(&logits.into_data(), false);
+    }
+
+    /// Padded sentinels neither reach one-hot indexing nor accrue token penalties.
+    #[test]
+    fn masked_history_ignores_sentinels_and_validates_mask_shape() {
+        let device = Default::default();
+        let config = GenerationConfig {
+            presence_penalty: 2.0,
+            ..Default::default()
+        };
+        let processor =
+            LogitsProcessor::<TestBackend>::new(config, 4, &device).expect("valid processor");
+        let logits = Tensor::from_floats([[0.0, 4.0, 3.0, 2.0]], &device);
+        let history = Tensor::<TestBackend, 2, Int>::from_ints([[99, 1]], &device);
+        let mask = TokenMask::new(Tensor::from_bool([[false, true]].into(), &device));
+        let processed = processor
+            .process_with_mask(logits, Some(history), Some(mask))
+            .expect("masked sentinel is never indexed")
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_eq!(processed, [0.0, 2.0, 3.0, 2.0]);
+
+        let history = Tensor::<TestBackend, 2, Int>::from_ints([[0, 1]], &device);
+        let wrong = TokenMask::new(Tensor::from_bool([[true]].into(), &device));
+        assert!(
+            processor
+                .process_with_mask(Tensor::zeros([1, 4], &device), Some(history), Some(wrong))
+                .is_err()
+        );
+        assert!(
+            processor
+                .process_with_mask(
+                    Tensor::zeros([1, 4], &device),
+                    None,
+                    Some(TokenMask::new(Tensor::from_bool([[true]].into(), &device)))
+                )
+                .is_err()
+        );
     }
 
     /// Independent processors reproduce the same multi-step stochastic stream.
