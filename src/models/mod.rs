@@ -15,8 +15,8 @@ pub mod qwen3_moe;
 pub mod t5;
 
 pub use auto::{
-    AutoCausalConfigRef, AutoCausalDecodeState, AutoCausalLm, AutoSeq2SeqConfigRef,
-    AutoSeq2SeqDecodeState, AutoSeq2SeqLm,
+    AutoCausalConfigRef, AutoCausalDecodeState, AutoCausalLm, AutoLoadOptions,
+    AutoSeq2SeqConfigRef, AutoSeq2SeqDecodeState, AutoSeq2SeqLm,
 };
 
 /// Qwen3.8 checkpoints intentionally retain Qwen3.5's `qwen3_5_text` model type.

@@ -43,7 +43,7 @@ pub use generation::{
     TokenSelection,
 };
 pub use loaded::{LoadedModel, ModelSourceMetadata, ModelTokenizer};
-pub use models::{AutoCausalLm, AutoSeq2SeqLm};
+pub use models::{AutoCausalLm, AutoLoadOptions, AutoSeq2SeqLm};
 #[cfg(feature = "tokenizers")]
 pub use tokenization::{
     BatchEncoding, ChatMessage, ChatTemplateOptions, EncodeOptions, LocalTokenizer, Padding,

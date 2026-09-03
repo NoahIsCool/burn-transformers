@@ -25,6 +25,10 @@ use super::{
 };
 use crate::models::config::ModelConfig;
 
+mod load;
+
+pub use load::AutoLoadOptions;
+
 /// Immutable architecture configuration borrowed from an automatic causal model.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
@@ -383,7 +387,7 @@ impl<B: Backend> From<T5ForConditionalGeneration<B>> for AutoSeq2SeqLm<B> {
 }
 
 /// Extracts the architecture discriminator from direct or text-wrapped JSON.
-fn detect_model_type(json: &str) -> Result<String> {
+pub(super) fn detect_model_type(json: &str) -> Result<String> {
     let value: serde_json::Value = serde_json::from_str(json).map_err(|error| {
         Error::configuration("auto.config_json", format!("invalid JSON: {error}"))
     })?;
