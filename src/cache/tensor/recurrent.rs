@@ -193,6 +193,19 @@ struct RecurrentLayer<B: Backend> {
     staged_convolution: Option<Tensor<B, 4>>,
 }
 
+/// One validated direct replacement of a sequence's terminal recurrent state.
+///
+/// Construction checks both matrix and convolution tensors before the opaque
+/// capability is returned. Applying a collection of capabilities therefore has
+/// no recoverable branch between its first and last tensor publication.
+#[derive(Debug)]
+pub(crate) struct PreparedRecurrentStateWrite<B: Backend> {
+    layer: usize,
+    sequence: usize,
+    matrix: Tensor<B, 4>,
+    convolution: Tensor<B, 3>,
+}
+
 /// One sequence's recurrent state selected for the next decode step.
 #[derive(Debug, Clone)]
 pub struct RecurrentStateRead<B: Backend> {
@@ -679,17 +692,59 @@ impl<B: Backend> RecurrentStateCache<B> {
         matrix: Tensor<B, 4>,
         convolution: Tensor<B, 3>,
     ) -> TensorCacheResult<()> {
+        let write = self.prepare_sequence_state(layer, sequence, matrix, convolution)?;
+        self.apply_prepared_state_writes(vec![write]);
+        Ok(())
+    }
+
+    /// Validates one direct terminal-state replacement without mutating storage.
+    ///
+    /// Models can prepare every layer and row first, then apply the opaque
+    /// writes only after their complete forward pass succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same validation errors as
+    /// [`set_sequence_state`](Self::set_sequence_state).
+    pub(crate) fn prepare_sequence_state(
+        &self,
+        layer: usize,
+        sequence: usize,
+        matrix: Tensor<B, 4>,
+        convolution: Tensor<B, 3>,
+    ) -> TensorCacheResult<PreparedRecurrentStateWrite<B>> {
         if self.staging_active {
             return Err(TensorCacheError::TransactionActive {
                 operation: "write committed recurrent state",
             });
         }
         self.validate_state_pair(layer, sequence, &matrix, &convolution)?;
-        let spec = self.spec;
-        let state = self.layer_mut(layer)?;
-        assign_matrix_row(&mut state.matrix, sequence, matrix, spec);
-        assign_convolution_row(&mut state.convolution, sequence, convolution, spec);
-        Ok(())
+        Ok(PreparedRecurrentStateWrite {
+            layer,
+            sequence,
+            matrix,
+            convolution,
+        })
+    }
+
+    /// Applies writes returned by [`prepare_sequence_state`](Self::prepare_sequence_state).
+    ///
+    /// All indexing and tensor compatibility checks happened during
+    /// preparation, leaving only infallible Burn tensor assignments here.
+    pub(crate) fn apply_prepared_state_writes(
+        &mut self,
+        writes: Vec<PreparedRecurrentStateWrite<B>>,
+    ) {
+        for write in writes {
+            let state = &mut self.layers[write.layer];
+            assign_matrix_row(&mut state.matrix, write.sequence, write.matrix, self.spec);
+            assign_convolution_row(
+                &mut state.convolution,
+                write.sequence,
+                write.convolution,
+                self.spec,
+            );
+        }
     }
 
     /// Appends post-token recurrent snapshots for one speculative sequence.

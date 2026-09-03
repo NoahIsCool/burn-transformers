@@ -12,6 +12,8 @@
 //! output positions are defined as zero; valid positions are scattered back to the
 //! caller's rectangular shape.
 
+use std::collections::BTreeSet;
+
 use burn::tensor::{Bool, DType, ElementConversion, Int, Tensor, TensorData, backend::Backend};
 
 use crate::{
@@ -27,12 +29,36 @@ use crate::{
 
 use super::{
     Qwen3_5DecoderLayer, Qwen3_5ForCausalLm, Qwen3_5TextModel, select_hidden,
-    validate_logits_selection, validate_mask, validate_token_ids,
+    validate_logits_selection, validate_token_ids,
 };
 use crate::models::qwen3_5::{Qwen3_5LayerType, Qwen3_5TextConfig};
 
 const NATIVE_KV_GROUP: usize = 0;
 const RECURRENT_GROUP: usize = 0;
+
+/// Public stateful operation whose empty-row semantics differ intentionally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatefulPhase {
+    /// Every prompt row must contain at least one token.
+    Prefill,
+    /// Finished rows may contribute zero new tokens while peers continue.
+    Decode,
+}
+
+impl StatefulPhase {
+    /// Returns the DeltaNet kernel appropriate for this operation.
+    const fn delta_mode(self) -> DeltaNetMode {
+        match self {
+            Self::Prefill => DeltaNetMode::ChunkedPrefill,
+            Self::Decode => DeltaNetMode::Recurrent,
+        }
+    }
+
+    /// Returns whether a semantic-mask row may contain no valid token.
+    const fn permits_inactive_rows(self) -> bool {
+        matches!(self, Self::Decode)
+    }
+}
 
 /// Physical cache slot used by one layer in the Qwen hybrid schedule.
 ///
@@ -257,7 +283,7 @@ impl<B: Backend> CausalLanguageModel<B> for Qwen3_5ForCausalLm<B> {
         state: &mut Self::State,
         options: &ForwardOptions,
     ) -> Result<CausalLmOutput<B>> {
-        self.forward_with_decode_state(input, state, options, DeltaNetMode::ChunkedPrefill)
+        self.forward_with_decode_state(input, state, options, StatefulPhase::Prefill)
     }
 
     fn decode(
@@ -274,7 +300,7 @@ impl<B: Backend> CausalLanguageModel<B> for Qwen3_5ForCausalLm<B> {
             },
             state,
             options,
-            DeltaNetMode::Recurrent,
+            StatefulPhase::Decode,
         )
     }
 }
@@ -291,7 +317,7 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
         input: CausalLmInput<B>,
         state: &mut Qwen3_5DecodeState<B>,
         options: &ForwardOptions,
-        delta_mode: DeltaNetMode,
+        phase: StatefulPhase,
     ) -> Result<CausalLmOutput<B>> {
         if options.attentions {
             return Err(Error::BackendCapability(
@@ -305,10 +331,11 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             }
             .into());
         }
-        let prepared = prepare_stateful_input(self, &input, state)?;
+        let prepared = prepare_stateful_input(self, &input, state, phase)?;
         validate_logits_selection(&options.logits, prepared.sequence)?;
         let device = input.token_ids.device();
         let diagnostic_count = self.model.layers.len() + 2;
+        let mut pending = PendingQwenCacheWrites::new();
         let mut final_rows = Vec::with_capacity(prepared.batch);
         let mut diagnostic_rows: Vec<Vec<Tensor<B, 3>>> = if options.hidden_states {
             (0..diagnostic_count)
@@ -320,6 +347,16 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
 
         for sequence_index in 0..prepared.batch {
             let valid = &prepared.valid_indices[sequence_index];
+            if valid.is_empty() {
+                let empty = empty_hidden_row(self, prepared.sequence, &device);
+                final_rows.push(empty.clone());
+                if options.hidden_states {
+                    for destination in &mut diagnostic_rows {
+                        destination.push(empty.clone());
+                    }
+                }
+                continue;
+            }
             let selector = selection_tensor::<B>(valid, &device)?;
             let tokens = input
                 .token_ids
@@ -341,9 +378,10 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
                 sequence_index,
                 baseline,
                 evaluated_context,
-                &mut state.tensors,
+                &state.tensors,
                 &state.layout.schedule,
-                delta_mode,
+                &mut pending,
+                phase.delta_mode(),
                 options.hidden_states,
             )?;
             final_rows.push(scatter_compact(compact, prepared.sequence, valid)?);
@@ -362,9 +400,6 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             }
         }
 
-        // Capacity was checked for every row before the first tensor mutation, so
-        // this metadata publication cannot fail unless an internal invariant changed.
-        state.tensors.advance(&prepared.token_counts)?;
         let hidden = Tensor::cat(final_rows, 0);
         let hidden_states = diagnostic_rows
             .into_iter()
@@ -379,6 +414,7 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
                 None,
             ),
         };
+        pending.commit(&mut state.tensors, &state.layout, &prepared.token_counts)?;
         Ok(CausalLmOutput {
             logits,
             final_hidden_state: options.hidden_states.then_some(hidden),
@@ -390,7 +426,7 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
 }
 
 impl<B: Backend> Qwen3_5TextModel<B> {
-    /// Evaluates one compacted batch row while mutating only that row's caches.
+    /// Evaluates one compacted row and records, but does not publish, its state.
     #[allow(clippy::too_many_arguments)]
     fn forward_compact_row(
         &self,
@@ -399,8 +435,9 @@ impl<B: Backend> Qwen3_5TextModel<B> {
         sequence_index: usize,
         baseline: usize,
         evaluated_context: usize,
-        state: &mut TensorDecodeState<B>,
+        state: &TensorDecodeState<B>,
         schedule: &[Qwen3_5LayerCache],
+        pending: &mut PendingQwenCacheWrites<B>,
         delta_mode: DeltaNetMode,
         retain_hidden_states: bool,
     ) -> Result<(Tensor<B, 3>, Vec<Tensor<B, 3>>)> {
@@ -434,8 +471,9 @@ impl<B: Backend> Qwen3_5TextModel<B> {
                 rotary.as_ref(),
                 sequence_index,
                 baseline,
-                state.main_mut(),
+                state.main(),
                 slot,
+                pending,
                 delta_mode,
             )?;
             if retain_hidden_states {
@@ -453,10 +491,10 @@ impl<B: Backend> Qwen3_5TextModel<B> {
 impl<B: Backend> Qwen3_5DecoderLayer<B> {
     /// Evaluates one residual block against its mapped external cache slot.
     ///
-    /// Native keys are rotated before being stored, so later decode calls never
-    /// need the old hidden states or old position IDs. DeltaNet stores its FP32
+    /// Native keys are rotated before being deferred, so later decode calls never
+    /// need the old hidden states or old position IDs. DeltaNet defers its FP32
     /// terminal matrix and activation-dtype convolution tail after the complete
-    /// compact segment.
+    /// compact segment. The caller publishes both only after the full operation.
     #[allow(clippy::too_many_arguments)]
     fn forward_cached(
         &self,
@@ -464,8 +502,9 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
         rotary: Option<&RotaryAngles<B>>,
         sequence_index: usize,
         baseline: usize,
-        bank: &mut TensorCacheBank<B>,
+        bank: &TensorCacheBank<B>,
         slot: Qwen3_5LayerCache,
+        pending: &mut PendingQwenCacheWrites<B>,
         delta_mode: DeltaNetMode,
     ) -> Result<Tensor<B, 3>> {
         if slot.layer_type() != self.layer_type {
@@ -490,7 +529,7 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
                 let new_keys = projection.key.clone();
                 let new_values = projection.value.clone();
                 let query_sequence = projection.query.dims()[2];
-                let cache = bank.native_kv_mut(NATIVE_KV_GROUP)?;
+                let cache = bank.native_kv(NATIVE_KV_GROUP)?;
                 let history = cache.read_sequence(cache_layer, sequence_index, baseline)?;
                 if history.retained_positions() != (0..baseline) {
                     return Err(Error::Cache(
@@ -509,34 +548,36 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
                 )?;
                 let mixed = attention.attend(projection, Some(mask), None, false)?;
                 let hidden = finish_residual(self, residual, mixed);
-                cache.write_sequence(
+                pending.native_kv.push(PendingNativeKvWrite {
                     cache_layer,
-                    sequence_index,
-                    baseline,
-                    new_keys,
-                    new_values,
-                )?;
+                    sequence: sequence_index,
+                    start: baseline,
+                    keys: new_keys,
+                    values: new_values,
+                });
                 Ok(hidden)
             }
             Qwen3_5LayerCache::DeltaNet(cache_layer) => {
                 let delta = self.linear_attn.as_ref().ok_or_else(|| {
                     Error::Checkpoint("Qwen linear layer has no DeltaNet module".into())
                 })?;
-                let cache = bank.recurrent_mut(RECURRENT_GROUP)?;
+                let cache = bank.recurrent(RECURRENT_GROUP)?;
                 let cached = cache.read_sequence(cache_layer, sequence_index)?;
                 let mut recurrent = GatedDeltaNetState {
                     convolution: cached.convolution().clone(),
                     recurrent: cached.matrix().clone(),
                 };
+                let token_count = normalized.dims()[1];
                 let mixed =
                     delta.forward_with_state(normalized, None, &mut recurrent, delta_mode)?;
                 let hidden = finish_residual(self, residual, mixed);
-                cache.set_sequence_state(
+                pending.recurrent.push(PendingRecurrentWrite {
                     cache_layer,
-                    sequence_index,
-                    recurrent.recurrent,
-                    recurrent.convolution,
-                )?;
+                    sequence: sequence_index,
+                    token_count,
+                    matrix: recurrent.recurrent,
+                    convolution: recurrent.convolution,
+                });
                 Ok(hidden)
             }
         }
@@ -632,6 +673,202 @@ fn cache_layout<B: Backend>(model: &Qwen3_5ForCausalLm<B>) -> Result<Qwen3_5Cach
     })
 }
 
+/// Deferred native-KV append produced by one successful attention layer.
+struct PendingNativeKvWrite<B: Backend> {
+    cache_layer: usize,
+    sequence: usize,
+    start: usize,
+    keys: Tensor<B, 4>,
+    values: Tensor<B, 4>,
+}
+
+/// Deferred terminal-state replacement produced by one DeltaNet layer.
+struct PendingRecurrentWrite<B: Backend> {
+    cache_layer: usize,
+    sequence: usize,
+    token_count: usize,
+    matrix: Tensor<B, 4>,
+    convolution: Tensor<B, 3>,
+}
+
+/// Scratch cache updates for one complete public prefill or decode operation.
+///
+/// Model computation may return recoverable errors after some earlier layers
+/// have succeeded. Holding their outputs here keeps the committed cache exactly
+/// unchanged until every layer and batch row has completed. The final commit is
+/// a two-phase operation: every tensor write is prepared first, then logical
+/// lengths advance and opaque write capabilities are applied without a further
+/// fallible branch.
+struct PendingQwenCacheWrites<B: Backend> {
+    native_kv: Vec<PendingNativeKvWrite<B>>,
+    recurrent: Vec<PendingRecurrentWrite<B>>,
+}
+
+impl<B: Backend> PendingQwenCacheWrites<B> {
+    /// Creates an empty operation-local write set.
+    fn new() -> Self {
+        Self {
+            native_kv: Vec::new(),
+            recurrent: Vec::new(),
+        }
+    }
+
+    /// Validates, atomically publishes metadata, and applies every cache write.
+    ///
+    /// For each active row `b` and physical layer slot `l`, exactly one update
+    /// must exist at the old cursor `L_b` and contain `N_b` new tokens. This
+    /// coverage invariant prevents an apparently successful call from advancing
+    /// metadata when one layer's physical state was omitted or duplicated.
+    fn commit(
+        self,
+        state: &mut TensorDecodeState<B>,
+        layout: &Qwen3_5CacheLayout,
+        token_counts: &[usize],
+    ) -> Result<()> {
+        self.validate_coverage(state, layout, token_counts)?;
+        let bank = state.main();
+        let native_kv = if self.native_kv.is_empty() {
+            None
+        } else {
+            let cache = bank.native_kv(NATIVE_KV_GROUP)?;
+            let writes = self
+                .native_kv
+                .into_iter()
+                .map(|write| {
+                    cache.prepare_sequence_write(
+                        write.cache_layer,
+                        write.sequence,
+                        write.start,
+                        write.keys,
+                        write.values,
+                    )
+                })
+                .collect::<core::result::Result<Vec<_>, _>>()?;
+            Some((NATIVE_KV_GROUP, writes))
+        };
+        let recurrent = if self.recurrent.is_empty() {
+            None
+        } else {
+            let cache = bank.recurrent(RECURRENT_GROUP)?;
+            let writes = self
+                .recurrent
+                .into_iter()
+                .map(|write| {
+                    cache.prepare_sequence_state(
+                        write.cache_layer,
+                        write.sequence,
+                        write.matrix,
+                        write.convolution,
+                    )
+                })
+                .collect::<core::result::Result<Vec<_>, _>>()?;
+            Some((RECURRENT_GROUP, writes))
+        };
+        let writes = bank.prepare_direct_writes(native_kv, recurrent)?;
+
+        // `advance` is the final recoverable step and is itself atomic across
+        // rows. Once it succeeds, applying the opaque bank capability contains
+        // only tensor assignments, so callers can never observe half-published
+        // Result-level state.
+        state.advance(token_counts)?;
+        state.main_mut().apply_prepared_direct_writes(writes);
+        Ok(())
+    }
+
+    /// Checks exact active-row/layer coverage before any tensor is consumed.
+    fn validate_coverage(
+        &self,
+        state: &TensorDecodeState<B>,
+        layout: &Qwen3_5CacheLayout,
+        token_counts: &[usize],
+    ) -> Result<()> {
+        let batch = state.batch_size();
+        if token_counts.len() != batch {
+            return Err(Error::Cache(format!(
+                "Qwen pending writes describe {} rows for batch {batch}",
+                token_counts.len()
+            )));
+        }
+        let active_rows = token_counts.iter().filter(|&&count| count > 0).count();
+        let full_layers = layout.native_kv.map_or(0, NativeKvCacheSpec::layers);
+        let recurrent_layers = layout.recurrent.map_or(0, RecurrentStateSpec::layers);
+        let expected_native = full_layers.checked_mul(active_rows).ok_or_else(|| {
+            Error::configuration("qwen.cache_commit", "native write count overflows usize")
+        })?;
+        let expected_recurrent = recurrent_layers.checked_mul(active_rows).ok_or_else(|| {
+            Error::configuration("qwen.cache_commit", "recurrent write count overflows usize")
+        })?;
+        if self.native_kv.len() != expected_native || self.recurrent.len() != expected_recurrent {
+            return Err(Error::Cache(format!(
+                "Qwen pending cache coverage mismatch: native {}/{expected_native}, recurrent {}/{expected_recurrent}",
+                self.native_kv.len(),
+                self.recurrent.len()
+            )));
+        }
+
+        let mut native_seen = BTreeSet::new();
+        for write in &self.native_kv {
+            let count = token_counts.get(write.sequence).copied().ok_or_else(|| {
+                Error::Cache(format!(
+                    "Qwen native write references batch row {} outside {batch}",
+                    write.sequence
+                ))
+            })?;
+            if count == 0
+                || write.cache_layer >= full_layers
+                || write.start != state.lengths()[write.sequence]
+                || write.keys.dims()[2] != count
+                || write.values.dims()[2] != count
+                || !native_seen.insert((write.cache_layer, write.sequence))
+            {
+                return Err(Error::Cache(format!(
+                    "invalid or duplicate Qwen native write for layer {}, row {}",
+                    write.cache_layer, write.sequence
+                )));
+            }
+        }
+        let mut recurrent_seen = BTreeSet::new();
+        for write in &self.recurrent {
+            let count = token_counts.get(write.sequence).copied().ok_or_else(|| {
+                Error::Cache(format!(
+                    "Qwen recurrent write references batch row {} outside {batch}",
+                    write.sequence
+                ))
+            })?;
+            if count == 0
+                || write.cache_layer >= recurrent_layers
+                || write.token_count != count
+                || !recurrent_seen.insert((write.cache_layer, write.sequence))
+            {
+                return Err(Error::Cache(format!(
+                    "invalid or duplicate Qwen recurrent write for layer {}, row {}",
+                    write.cache_layer, write.sequence
+                )));
+            }
+        }
+        for (sequence, &token_count) in token_counts.iter().enumerate() {
+            if token_count == 0 {
+                continue;
+            }
+            for layer in 0..full_layers {
+                if !native_seen.contains(&(layer, sequence)) {
+                    return Err(Error::Cache(format!(
+                        "missing Qwen native write for layer {layer}, row {sequence}"
+                    )));
+                }
+            }
+            for layer in 0..recurrent_layers {
+                if !recurrent_seen.contains(&(layer, sequence)) {
+                    return Err(Error::Cache(format!(
+                        "missing Qwen recurrent write for layer {layer}, row {sequence}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Validated rectangular input metadata needed before any cache mutation.
 struct PreparedStatefulInput {
     batch: usize,
@@ -646,6 +883,7 @@ fn prepare_stateful_input<B: Backend>(
     model: &Qwen3_5ForCausalLm<B>,
     input: &CausalLmInput<B>,
     state: &Qwen3_5DecodeState<B>,
+    phase: StatefulPhase,
 ) -> Result<PreparedStatefulInput> {
     let [batch, sequence] = input.token_ids.dims();
     if batch == 0 || sequence == 0 {
@@ -678,6 +916,7 @@ fn prepare_stateful_input<B: Backend>(
             &mask.as_tensor().device(),
             state.tensors.device(),
         )?;
+        validate_stateful_mask_shape(mask, batch, sequence)?;
     }
     if let Some(positions) = &input.position_ids {
         ensure_device(
@@ -692,11 +931,15 @@ fn prepare_stateful_input<B: Backend>(
                 format!("{:?}", positions.dims()),
             ));
         }
-        validate_position_range(positions.clone(), model.config().max_position_embeddings)?;
     }
-    validate_token_ids(input.token_ids.clone(), model.config().vocab_size)?;
-    validate_mask(input.token_mask.as_ref(), batch, sequence)?;
     let valid_indices = semantic_indices(input.token_mask.as_ref(), batch, sequence)?;
+    if !phase.permits_inactive_rows() && valid_indices.iter().any(Vec::is_empty) {
+        return Err(Error::shape(
+            "qwen.token_mask",
+            "at least one valid token in every prefill row",
+            "a fully masked prompt row",
+        ));
+    }
     let token_counts = valid_indices.iter().map(Vec::len).collect::<Vec<_>>();
     let mut implicit_contexts = Vec::with_capacity(batch);
     for (sequence_index, (&baseline, &additional)) in state
@@ -725,24 +968,32 @@ fn prepare_stateful_input<B: Backend>(
         }
         implicit_contexts.push(requested);
     }
-    let evaluated_contexts = match &input.position_ids {
-        Some(positions) => {
-            let device = positions.device();
-            let mut contexts = Vec::with_capacity(batch);
-            for (sequence_index, valid) in valid_indices.iter().enumerate() {
-                let selector = selection_tensor::<B>(valid, &device)?;
+    let mut evaluated_contexts = Vec::with_capacity(batch);
+    for (sequence_index, valid) in valid_indices.iter().enumerate() {
+        if valid.is_empty() {
+            evaluated_contexts.push(implicit_contexts[sequence_index]);
+            continue;
+        }
+        let selector = selection_tensor::<B>(valid, state.tensors.device())?;
+        let compact_tokens = input
+            .token_ids
+            .clone()
+            .slice([sequence_index..sequence_index + 1, 0..sequence])
+            .select(1, selector.clone());
+        validate_token_ids(compact_tokens, model.config().vocab_size)?;
+        let context = match &input.position_ids {
+            Some(positions) => {
                 let compact = positions
                     .clone()
                     .slice([sequence_index..sequence_index + 1, 0..sequence])
                     .select(1, selector);
-                contexts.push(evaluated_context(compact)?);
+                validate_position_range(compact.clone(), model.config().max_position_embeddings)?;
+                evaluated_context(compact)?
             }
-            contexts
-        }
-        None => implicit_contexts,
-    };
-    for &context in &evaluated_contexts {
+            None => implicit_contexts[sequence_index],
+        };
         validate_cached_rope_context(model.model.rope.scaling(), context)?;
+        evaluated_contexts.push(context);
     }
     Ok(PreparedStatefulInput {
         batch,
@@ -751,6 +1002,22 @@ fn prepare_stateful_input<B: Backend>(
         token_counts,
         evaluated_contexts,
     })
+}
+
+/// Validates only rectangular mask geometry, leaving empty-row policy to phase.
+fn validate_stateful_mask_shape<B: Backend>(
+    mask: &crate::architecture::TokenMask<B>,
+    batch: usize,
+    sequence: usize,
+) -> Result<()> {
+    if mask.as_tensor().dims() != [batch, sequence] {
+        return Err(Error::shape(
+            "qwen.token_mask",
+            format!("[{batch}, {sequence}]"),
+            format!("{:?}", mask.as_tensor().dims()),
+        ));
+    }
+    Ok(())
 }
 
 /// Converts a semantic mask into stable per-row source-column indices.
@@ -908,6 +1175,23 @@ fn cached_causal_mask<B: Backend>(
     Ok(key.greater(query))
 }
 
+/// Creates the defined output for a decode row containing zero valid tokens.
+///
+/// No layer is evaluated and no cache update is recorded. Returning zero hidden
+/// states preserves the rectangular batch shape; Qwen's bias-free vocabulary
+/// projection consequently also produces exact zero logits for this inactive
+/// row.
+fn empty_hidden_row<B: Backend>(
+    model: &Qwen3_5ForCausalLm<B>,
+    sequence: usize,
+    device: &B::Device,
+) -> Tensor<B, 3> {
+    Tensor::zeros(
+        [1, sequence, model.config().hidden_size],
+        (device, model.model.embed_tokens.weight.val().dtype()),
+    )
+}
+
 /// Scatters compact valid-token states back into a zeroed rectangular row.
 fn scatter_compact<B: Backend>(
     compact: Tensor<B, 3>,
@@ -1034,6 +1318,69 @@ mod tests {
         actual
             .into_data()
             .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::rel_abs(2e-4, 2e-5));
+    }
+
+    /// Verifies the exact zero-output contract for an inactive decode row.
+    fn assert_zero<const D: usize>(tensor: Tensor<TestBackend, D>) {
+        assert!(
+            tensor
+                .into_data()
+                .to_vec::<f32>()
+                .expect("test tensors use f32")
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+    }
+
+    /// Exact physical cache contents for one batch row across every group.
+    #[derive(Debug, PartialEq)]
+    struct CacheRowSnapshot {
+        tensors: Vec<TensorData>,
+    }
+
+    /// Materializes one row so failed/no-op calls can prove byte-exact isolation.
+    fn cache_row_snapshot(state: &Qwen3_5DecodeState<TestBackend>, row: usize) -> CacheRowSnapshot {
+        let bank = state.tensor_state().main();
+        let mut tensors = Vec::new();
+        for group in 0..bank.native_kv_count() {
+            let cache = bank.native_kv(group).expect("native group");
+            for layer in 0..cache.spec().layers() {
+                for tensor in [
+                    cache.keys(layer).expect("keys"),
+                    cache.values(layer).expect("values"),
+                ] {
+                    let [_, heads, time, width] = tensor.dims();
+                    tensors.push(
+                        tensor
+                            .clone()
+                            .slice([row..row + 1, 0..heads, 0..time, 0..width])
+                            .into_data(),
+                    );
+                }
+            }
+        }
+        for group in 0..bank.recurrent_count() {
+            let cache = bank.recurrent(group).expect("recurrent group");
+            for layer in 0..cache.spec().layers() {
+                let matrix = cache.matrix(layer).expect("matrix");
+                let [_, heads, rows, columns] = matrix.dims();
+                tensors.push(
+                    matrix
+                        .clone()
+                        .slice([row..row + 1, 0..heads, 0..rows, 0..columns])
+                        .into_data(),
+                );
+                let convolution = cache.convolution(layer).expect("convolution");
+                let [_, channels, width] = convolution.dims();
+                tensors.push(
+                    convolution
+                        .clone()
+                        .slice([row..row + 1, 0..channels, 0..width])
+                        .into_data(),
+                );
+            }
+        }
+        CacheRowSnapshot { tensors }
     }
 
     /// The hybrid schedule maps monotonically into exactly two homogeneous groups.
@@ -1250,6 +1597,213 @@ mod tests {
             .expect_err("empty selection must fail");
         assert!(matches!(invalid_selection, Error::Shape { .. }));
         assert_eq!(state.lengths(), &[0]);
+    }
+
+    /// A recoverable error in a later layer publishes none of the earlier work.
+    #[test]
+    fn later_layer_failure_preserves_every_cache_tensor() {
+        let device = Default::default();
+        let mut model = tiny_model(&device);
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 4).expect("cache config"), 1, &device)
+            .expect("decode state");
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .expect("baseline prefill");
+        let expected = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3, 4]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions {
+                    logits: LogitsSelection::All,
+                    ..Default::default()
+                },
+            )
+            .expect("retry reference")
+            .logits
+            .narrow(1, 2, 2);
+        let before = cache_row_snapshot(&state, 0);
+        let attention = model.model.layers[3]
+            .self_attn
+            .take()
+            .expect("final attention");
+
+        let error = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[3, 4]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .expect_err("missing final attention must fail");
+
+        assert!(matches!(error, Error::Checkpoint(_)));
+        assert_eq!(state.lengths(), &[2]);
+        assert_eq!(cache_row_snapshot(&state, 0), before);
+
+        model.model.layers[3].self_attn = Some(attention);
+        let retry = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[3, 4]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions {
+                    logits: LogitsSelection::All,
+                    ..Default::default()
+                },
+            )
+            .expect("retry from unchanged baseline")
+            .logits;
+        assert_close(retry, expected);
+        assert_eq!(state.lengths(), &[4]);
+    }
+
+    /// Finished rows remain exact no-ops while active peers reach capacity.
+    #[test]
+    fn decode_supports_mixed_active_and_inactive_rows() {
+        let device = Default::default();
+        let model = tiny_model(&device);
+        let mut state = model
+            .new_decode_state(CacheConfig::new(2, 4).expect("cache config"), 2, &device)
+            .expect("decode state");
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints(
+                        [[1, 2, 0, 0], [5, 6, 7, 8]],
+                        &device,
+                    ),
+                    token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                        [[true, true, false, false], [true, true, true, true]].into(),
+                        &device,
+                    ))),
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .expect("ragged prefill");
+        assert_eq!(state.lengths(), &[2, 4]);
+        let inactive_before = cache_row_snapshot(&state, 1);
+        let expected = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3, 4]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions {
+                    logits: LogitsSelection::All,
+                    ..Default::default()
+                },
+            )
+            .expect("active-row reference")
+            .logits
+            .narrow(1, 2, 2);
+        let output = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints(
+                        [[3, 4], [-1, -1]],
+                        &device,
+                    ),
+                    position_ids: Some(Tensor::<TestBackend, 2, Int>::from_ints(
+                        [[2, 3], [-1, -1]],
+                        &device,
+                    )),
+                    token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                        [[true, true], [false, false]].into(),
+                        &device,
+                    ))),
+                },
+                &mut state,
+                &diagnostic_options(),
+            )
+            .expect("mixed decode");
+
+        assert_close(output.logits.clone().slice([0..1, 0..2, 0..32]), expected);
+        assert_zero(output.logits.slice([1..2, 0..2, 0..32]));
+        let final_hidden = output.final_hidden_state.expect("requested hidden");
+        assert_zero(final_hidden.slice([1..2, 0..2, 0..8]));
+        for hidden in output.hidden_states {
+            assert_zero(hidden.slice([1..2, 0..2, 0..8]));
+        }
+        assert_eq!(state.lengths(), &[4, 4]);
+        assert_eq!(cache_row_snapshot(&state, 1), inactive_before);
+    }
+
+    /// An entirely inactive decode returns rectangular zeros and changes nothing.
+    #[test]
+    fn all_inactive_decode_is_an_exact_no_op() {
+        let device = Default::default();
+        let model = tiny_model(&device);
+        let mut state = model
+            .new_decode_state(CacheConfig::new(2, 2).expect("cache config"), 2, &device)
+            .expect("decode state");
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2], [3, 4]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .expect("capacity-filling prefill");
+        let before = [cache_row_snapshot(&state, 0), cache_row_snapshot(&state, 1)];
+        let output = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints(
+                        [[-1, -1], [-1, -1]],
+                        &device,
+                    ),
+                    position_ids: Some(Tensor::<TestBackend, 2, Int>::from_ints(
+                        [[-1, -1], [-1, -1]],
+                        &device,
+                    )),
+                    token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                        [[false, false], [false, false]].into(),
+                        &device,
+                    ))),
+                },
+                &mut state,
+                &ForwardOptions {
+                    hidden_states: true,
+                    ..Default::default()
+                },
+            )
+            .expect("inactive decode");
+
+        assert_eq!(output.logits.dims(), [2, 1, 32]);
+        assert_zero(output.logits);
+        assert_zero(output.final_hidden_state.expect("requested hidden"));
+        for hidden in output.hidden_states {
+            assert_zero(hidden);
+        }
+        assert_eq!(state.lengths(), &[2, 2]);
+        assert_eq!(
+            [cache_row_snapshot(&state, 0), cache_row_snapshot(&state, 1)],
+            before
+        );
     }
 
     /// Full forward and cache-filling prefill produce the same valid graph outputs.
@@ -1584,9 +2138,9 @@ mod tests {
         );
     }
 
-    /// Fully masked rows fail before cache mutation because they have no last logit.
+    /// Fully masked prompts remain invalid even though decode permits inactive rows.
     #[test]
-    fn fully_masked_row_is_rejected_without_advancing_state() {
+    fn fully_masked_prefill_is_rejected_without_advancing_state() {
         let device = Default::default();
         let model = tiny_model(&device);
         let mut state = model

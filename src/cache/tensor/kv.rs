@@ -220,6 +220,28 @@ struct KvLayer<B: Backend> {
     staged_values: Option<Tensor<B, 4>>,
 }
 
+/// One fully planned direct key/value append.
+///
+/// The fields are private so only [`NativeKvCache::prepare_sequence_write`] can
+/// construct this capability. Applying it performs tensor assignments only;
+/// every recoverable shape, device, capacity, and ring-planning error has
+/// already been returned to the caller.
+#[derive(Debug)]
+pub(crate) struct PreparedNativeKvWrite<B: Backend> {
+    layer: usize,
+    sequence: usize,
+    keys: Tensor<B, 4>,
+    values: Tensor<B, 4>,
+    segments: Vec<PreparedDirectSegment>,
+}
+
+/// Source slice and one or two committed destinations for a direct append.
+#[derive(Debug)]
+struct PreparedDirectSegment {
+    input: Range<usize>,
+    destinations: Vec<Range<usize>>,
+}
+
 /// Fully validated physical writes for one sequence's accepted prefix.
 #[derive(Debug)]
 struct KvSequenceCommitPlan {
@@ -426,6 +448,30 @@ impl<B: Backend> NativeKvCache<B> {
         keys: Tensor<B, 4>,
         values: Tensor<B, 4>,
     ) -> TensorCacheResult<()> {
+        let write = self.prepare_sequence_write(layer, sequence, start, keys, values)?;
+        self.apply_prepared_writes(vec![write]);
+        Ok(())
+    }
+
+    /// Validates and physically plans one direct committed append.
+    ///
+    /// Separating preparation from application lets a model validate every
+    /// layer and batch-row update before publishing any of them. This is the
+    /// tensor-cache analogue of a transaction prepare phase: ring arithmetic,
+    /// shapes, dtypes, devices, and capacity are all recoverable errors, while
+    /// applying the returned opaque value contains no fallible branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same validation errors as [`write_sequence`](Self::write_sequence).
+    pub(crate) fn prepare_sequence_write(
+        &self,
+        layer: usize,
+        sequence: usize,
+        start: usize,
+        keys: Tensor<B, 4>,
+        values: Tensor<B, 4>,
+    ) -> TensorCacheResult<PreparedNativeKvWrite<B>> {
         if self.staging_active {
             return Err(TensorCacheError::TransactionActive {
                 operation: "write committed KV",
@@ -433,7 +479,46 @@ impl<B: Backend> NativeKvCache<B> {
         }
         let token_count = self.validate_pair(layer, sequence, &keys, &values)?;
         validate_write_end(start, token_count, self.config.capacity())?;
-        self.write_pair(layer, sequence, start, token_count, &keys, &values)
+        let segments = self.prepare_direct_segments(start, token_count)?;
+        Ok(PreparedNativeKvWrite {
+            layer,
+            sequence,
+            keys,
+            values,
+            segments,
+        })
+    }
+
+    /// Applies one or more writes returned by [`prepare_sequence_write`](Self::prepare_sequence_write).
+    ///
+    /// This method is intentionally infallible: callers may prepare every
+    /// update in a public model invocation, perform the logical-length advance,
+    /// and then publish all tensor writes without exposing an intermediate
+    /// recoverable-error state.
+    pub(crate) fn apply_prepared_writes(&mut self, writes: Vec<PreparedNativeKvWrite<B>>) {
+        for write in writes {
+            let cache_layer = &mut self.layers[write.layer];
+            for segment in write.segments {
+                for destination in segment.destinations {
+                    assign_segment(
+                        &mut cache_layer.keys,
+                        &write.keys,
+                        write.sequence,
+                        segment.input.clone(),
+                        destination.clone(),
+                        self.spec,
+                    );
+                    assign_segment(
+                        &mut cache_layer.values,
+                        &write.values,
+                        write.sequence,
+                        segment.input.clone(),
+                        destination,
+                        self.spec,
+                    );
+                }
+            }
+        }
     }
 
     /// Reads one sequence's retained chronological key/value interval.
@@ -974,93 +1059,50 @@ impl<B: Backend> NativeKvCache<B> {
         Ok(token_count)
     }
 
-    /// Applies storage-specific index planning to one validated tensor pair.
-    fn write_pair(
-        &mut self,
-        layer: usize,
-        sequence: usize,
+    /// Computes every physical destination for a validated direct append.
+    fn prepare_direct_segments(
+        &self,
         start: usize,
         token_count: usize,
-        keys: &Tensor<B, 4>,
-        values: &Tensor<B, 4>,
-    ) -> TensorCacheResult<()> {
+    ) -> TensorCacheResult<Vec<PreparedDirectSegment>> {
         if token_count == 0 {
-            return Ok(());
+            return Ok(Vec::new());
         }
-        let spec = self.spec;
-        let window = self.config.sliding_window();
-        let cache_layer = self.layer_mut(layer)?;
-        match spec.storage() {
-            KvCacheStorage::Full => {
-                let target = start..start + token_count;
-                assign_segment(
-                    &mut cache_layer.keys,
-                    keys,
-                    sequence,
-                    0..token_count,
-                    target.clone(),
-                    spec,
-                );
-                assign_segment(
-                    &mut cache_layer.values,
-                    values,
-                    sequence,
-                    0..token_count,
-                    target,
-                    spec,
-                );
-            }
+        match self.spec.storage() {
+            KvCacheStorage::Full => Ok(vec![PreparedDirectSegment {
+                input: 0..token_count,
+                destinations: core::iter::once(start..start + token_count).collect(),
+            }]),
             KvCacheStorage::SlidingRing => {
-                let window = window.ok_or(TensorCacheError::SlidingWindowRequired {
-                    storage: spec.storage().as_str(),
-                })?;
-                let plan = plan_ring_write(start, token_count, window)?;
-                for segment in plan.segments() {
-                    assign_segment(
-                        &mut cache_layer.keys,
-                        keys,
-                        sequence,
-                        segment.input(),
-                        segment.physical(),
-                        spec,
-                    );
-                    assign_segment(
-                        &mut cache_layer.values,
-                        values,
-                        sequence,
-                        segment.input(),
-                        segment.physical(),
-                        spec,
-                    );
-                }
+                let window = self.config.sliding_window().ok_or(
+                    TensorCacheError::SlidingWindowRequired {
+                        storage: self.spec.storage().as_str(),
+                    },
+                )?;
+                Ok(plan_ring_write(start, token_count, window)?
+                    .segments()
+                    .iter()
+                    .map(|segment| PreparedDirectSegment {
+                        input: segment.input(),
+                        destinations: core::iter::once(segment.physical()).collect(),
+                    })
+                    .collect())
             }
             KvCacheStorage::MirroredSlidingRing => {
-                let window = window.ok_or(TensorCacheError::SlidingWindowRequired {
-                    storage: spec.storage().as_str(),
-                })?;
-                for segment in plan_mirrored_ring_write(start, token_count, window)? {
-                    for target in [segment.primary(), segment.mirror()] {
-                        assign_segment(
-                            &mut cache_layer.keys,
-                            keys,
-                            sequence,
-                            segment.input(),
-                            target.clone(),
-                            spec,
-                        );
-                        assign_segment(
-                            &mut cache_layer.values,
-                            values,
-                            sequence,
-                            segment.input(),
-                            target,
-                            spec,
-                        );
-                    }
-                }
+                let window = self.config.sliding_window().ok_or(
+                    TensorCacheError::SlidingWindowRequired {
+                        storage: self.spec.storage().as_str(),
+                    },
+                )?;
+                Ok(plan_mirrored_ring_write(start, token_count, window)?
+                    .into_iter()
+                    .map(|segment| PreparedDirectSegment {
+                        input: segment.input(),
+                        destinations: vec![segment.primary(), segment.mirror()],
+                    })
+                    .collect())
             }
         }
-        Ok(())
     }
 
     /// Clears one batch row in all committed and staging tensors.
