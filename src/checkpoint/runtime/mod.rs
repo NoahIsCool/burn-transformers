@@ -23,6 +23,10 @@ use std::{
 };
 
 use burn::tensor::TensorData;
+use burn::{
+    module::{Module, Param},
+    tensor::{Tensor, backend::Backend},
+};
 
 pub use source::{LocalShardSource, SourceStats, SourceTensor, TensorSource};
 
@@ -51,6 +55,103 @@ pub trait TensorSink {
 
     /// Installs one tied parameter alias to an already written storage owner.
     fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error>;
+}
+
+/// Failure to install checkpoint data into a statically ranked Burn parameter.
+///
+/// The generic checkpoint executor reasons about dynamic tensor metadata, while
+/// Burn model fields encode rank in `Tensor<B, D>`. This error reports a rank,
+/// shape, or element-kind disagreement before invoking a backend operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ParameterInstallError {
+    /// The dynamic checkpoint tensor has a different rank from the model field.
+    Rank {
+        /// Parameter rank encoded by its Rust field.
+        expected: usize,
+        /// Rank carried by the checkpoint tensor.
+        actual: usize,
+    },
+    /// The checkpoint shape differs from the parameter's lazy saved shape.
+    Shape {
+        /// Saved/checkpoint-facing shape declared by the Burn parameter.
+        expected: Vec<usize>,
+        /// Shape carried by the checkpoint tensor.
+        actual: Vec<usize>,
+    },
+    /// A floating-point parameter was given integer or Boolean data.
+    NonFloat {
+        /// Human-readable Burn dtype name.
+        dtype: String,
+    },
+}
+
+impl fmt::Display for ParameterInstallError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rank { expected, actual } => {
+                write!(
+                    formatter,
+                    "expected rank {expected}, received rank {actual}"
+                )
+            }
+            Self::Shape { expected, actual } => {
+                write!(
+                    formatter,
+                    "expected shape {expected:?}, received {actual:?}"
+                )
+            }
+            Self::NonFloat { dtype } => {
+                write!(formatter, "expected floating-point data, received {dtype}")
+            }
+        }
+    }
+}
+
+impl Error for ParameterInstallError {}
+
+/// Installs checkpoint-shaped data into a lazy Burn floating-point parameter.
+///
+/// Burn's parameter mapper is semantically important: for example, a
+/// `LinearLayout::Col` weight is serialized as `[out, in]`, then transposed to
+/// `[in, out]` when loaded for matrix multiplication. Replacing the field with
+/// `Param::from_tensor` would discard that mapper and produce a model with
+/// incorrectly oriented projections. This helper validates against
+/// [`Param::lazy_shape`], constructs the tensor at its checkpoint dtype, and
+/// delegates to Burn's ordinary record-loading path so device, gradient, and
+/// layout policies remain intact.
+///
+/// The temporary parameter clone shares the incoming backend allocation; it is
+/// used solely to move the existing parameter out of `&mut` safely and is
+/// released after the mapped parameter is installed.
+pub fn install_float_parameter<B: Backend, const D: usize>(
+    parameter: &mut Param<Tensor<B, D>>,
+    data: TensorData,
+) -> std::result::Result<(), ParameterInstallError> {
+    let actual = data.shape.to_vec();
+    if actual.len() != D {
+        return Err(ParameterInstallError::Rank {
+            expected: D,
+            actual: actual.len(),
+        });
+    }
+    let expected = parameter.lazy_shape().to_vec();
+    if actual != expected {
+        return Err(ParameterInstallError::Shape { expected, actual });
+    }
+    if !data.dtype.is_float() {
+        return Err(ParameterInstallError::NonFloat {
+            dtype: format!("{:?}", data.dtype),
+        });
+    }
+
+    let device = parameter.lazy_device();
+    let dtype = data.dtype;
+    let tensor = Tensor::<B, D>::from_data(data, (&device, dtype));
+    let record = Param::from_tensor(tensor);
+    let existing = std::mem::replace(parameter, record.clone());
+    *parameter = existing.load_record(record);
+    Ok(())
 }
 
 /// Runtime counters for one pass-two execution attempt.

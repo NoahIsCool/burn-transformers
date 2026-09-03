@@ -38,8 +38,8 @@ pub use report::{
 };
 pub use runtime::{
     ExecutionFailure, ExecutionFailureCause, ExecutionOutcome, ExecutionResult, ExecutionStats,
-    LocalShardSource, SourceStats, SourceTensor, TensorSink, TensorSource, execute_load_plan,
-    execute_local_load_plan,
+    LocalShardSource, ParameterInstallError, SourceStats, SourceTensor, TensorSink, TensorSource,
+    execute_load_plan, execute_local_load_plan, install_float_parameter,
 };
 
 #[cfg(test)]

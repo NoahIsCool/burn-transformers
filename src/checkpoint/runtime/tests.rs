@@ -12,6 +12,7 @@ use std::{
 use burn::{
     backend::Flex,
     module::Param,
+    nn::{LinearConfig, LinearLayout},
     tensor::{BoolStore, DType, Tensor, TensorData, bf16, f16},
 };
 use proptest::prelude::*;
@@ -1324,4 +1325,72 @@ fn dtype_policy_can_explicitly_cast_f64_to_bf16() {
         .map(|value| bf16::from_f64(*value).to_bits())
         .collect();
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn parameter_install_uses_burns_checkpoint_layout_mapper() {
+    let device = Default::default();
+    let mut linear = LinearConfig::new(2, 3)
+        .with_bias(false)
+        .with_layout(LinearLayout::Col)
+        .init::<Flex>(&device);
+    assert!(!linear.weight.is_initialized());
+
+    install_float_parameter(
+        &mut linear.weight,
+        TensorData::new(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], [3, 2]),
+    )
+    .unwrap();
+
+    assert!(linear.weight.is_initialized());
+    assert_eq!(linear.weight.val().dims(), [2, 3]);
+    let output = linear
+        .forward(Tensor::<Flex, 2>::from_floats([[10.0, 100.0]], &device))
+        .to_data();
+    assert_eq!(
+        output,
+        TensorData::from([[210.0_f32, 430.0_f32, 650.0_f32]])
+    );
+}
+
+#[test]
+fn parameter_install_rejects_bad_metadata_before_initialization() {
+    let device = Default::default();
+    let mut linear = LinearConfig::new(2, 3)
+        .with_bias(false)
+        .with_layout(LinearLayout::Col)
+        .init::<Flex>(&device);
+
+    let error = install_float_parameter(&mut linear.weight, TensorData::new(vec![0.0_f32; 6], [6]))
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ParameterInstallError::Rank {
+            expected: 2,
+            actual: 1,
+        }
+    );
+    assert!(!linear.weight.is_initialized());
+
+    let error = install_float_parameter(
+        &mut linear.weight,
+        TensorData::new(vec![0.0_f32; 8], [4, 2]),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        ParameterInstallError::Shape {
+            expected: vec![3, 2],
+            actual: vec![4, 2],
+        }
+    );
+    assert!(!linear.weight.is_initialized());
+
+    let error = install_float_parameter(
+        &mut linear.weight,
+        TensorData::new(vec![true, false, true, false, true, false], [3, 2]),
+    )
+    .unwrap_err();
+    assert!(matches!(error, ParameterInstallError::NonFloat { .. }));
+    assert!(!linear.weight.is_initialized());
 }
