@@ -15,9 +15,10 @@
 //! infinity.
 
 use core::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use burn::tensor::{
-    Bool, ElementConversion, IndexingUpdateOp, Int, Shape, Tensor,
+    Bool, ElementConversion, IndexingUpdateOp, Int, Shape, Tensor, TensorData,
     activation::{log_softmax, softmax},
     backend::Backend,
 };
@@ -54,7 +55,7 @@ pub struct GenerationConfig {
     pub repetition_penalty: f64,
     /// Additive penalty applied once to every previously observed token.
     pub presence_penalty: f64,
-    /// Backend random seed used to make sampling reproducible.
+    /// Per-processor random seed used to make sampling reproducible.
     pub seed: u64,
     /// Token IDs that terminate a sequence after being emitted.
     pub eos_token_ids: Vec<u32>,
@@ -145,11 +146,24 @@ impl GenerationConfig {
 }
 
 /// Applies penalties and probability truncation without leaving the backend.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct LogitsProcessor<B: Backend> {
     config: GenerationConfig,
     vocabulary_size: usize,
+    sample_counter: AtomicU64,
     _backend: PhantomData<B>,
+}
+
+impl<B: Backend> Clone for LogitsProcessor<B> {
+    /// Clones the configuration and the current position in its random stream.
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            vocabulary_size: self.vocabulary_size,
+            sample_counter: AtomicU64::new(self.sample_counter.load(Ordering::Relaxed)),
+            _backend: PhantomData,
+        }
+    }
 }
 
 /// Tokens selected for one generation step and their processed log probabilities.
@@ -162,17 +176,23 @@ pub struct TokenSelection<B: Backend> {
 }
 
 impl<B: Backend> LogitsProcessor<B> {
-    /// Creates a validated processor and seeds the backend random generator.
+    /// Creates a validated processor with an independent random stream.
+    ///
+    /// Burn's backend seed is process-global on several backends, so using it
+    /// here would let an unrelated model or concurrently running test perturb
+    /// this processor. Instead, each categorical draw consumes a counter from
+    /// a SplitMix64 stream and transfers only one uniform value per batch row
+    /// to the backend for inverse-CDF selection.
     pub fn new(
         config: GenerationConfig,
         vocabulary_size: usize,
-        device: &B::Device,
+        _device: &B::Device,
     ) -> Result<Self> {
         config.validate(vocabulary_size)?;
-        B::seed(device, config.seed);
         Ok(Self {
             config,
             vocabulary_size,
+            sample_counter: AtomicU64::new(0),
             _backend: PhantomData,
         })
     }
@@ -231,11 +251,65 @@ impl<B: Backend> LogitsProcessor<B> {
 
     /// Selects one token per row from already processed logits.
     pub fn select(&self, logits: Tensor<B, 2>) -> Result<Tensor<B, 1, Int>> {
-        self.validate_logits_shape(&logits)?;
-        Ok(match self.config.strategy {
-            SamplingStrategy::Greedy => logits.argmax(1).squeeze_dim::<1>(1),
-            SamplingStrategy::Sample => softmax(logits, 1).categorical(1).squeeze_dim::<1>(1),
-        })
+        let batch = self.validate_logits_shape(&logits)?;
+        match self.config.strategy {
+            SamplingStrategy::Greedy => Ok(logits.argmax(1).squeeze_dim::<1>(1)),
+            SamplingStrategy::Sample => self.sample_inverse_cdf(logits, batch),
+        }
+    }
+
+    /// Samples processed logits with per-instance uniforms and a backend CDF.
+    fn sample_inverse_cdf(&self, logits: Tensor<B, 2>, batch: usize) -> Result<Tensor<B, 1, Int>> {
+        let maximum_index = i64::try_from(self.vocabulary_size - 1).map_err(|_| {
+            Error::Generation(format!(
+                "vocabulary size {} cannot be represented by the backend index API",
+                self.vocabulary_size
+            ))
+        })?;
+        let uniforms = self.next_uniforms(batch)?;
+        let device = logits.device();
+        let thresholds = Tensor::<B, 2>::from_data(TensorData::new(uniforms, [batch, 1]), &device)
+            .expand([batch, self.vocabulary_size]);
+        let cumulative = softmax(logits, 1).cumsum(1);
+
+        // The number of CDF entries strictly below u is the first category
+        // whose inclusive cumulative mass reaches u. Clamp only protects
+        // against the final sum rounding microscopically below one.
+        Ok(cumulative
+            .lower(thresholds)
+            .int()
+            .sum_dim(1)
+            .squeeze_dim::<1>(1)
+            .clamp_max(maximum_index))
+    }
+
+    /// Reserves and evaluates one deterministic random value per batch row.
+    fn next_uniforms(&self, batch: usize) -> Result<Vec<f32>> {
+        let count = u64::try_from(batch).map_err(|_| {
+            Error::Generation(format!(
+                "sampling batch size {batch} does not fit the u64 random stream"
+            ))
+        })?;
+        let start = self
+            .sample_counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |position| {
+                position.checked_add(count)
+            })
+            .map_err(|position| {
+                Error::Generation(format!(
+                    "sampling random stream exhausted at position {position}"
+                ))
+            })?;
+        let mut uniforms = Vec::new();
+        uniforms.try_reserve_exact(batch).map_err(|_| {
+            Error::Generation(format!(
+                "failed to allocate {batch} categorical sampling thresholds"
+            ))
+        })?;
+        for offset in 0..count {
+            uniforms.push(splitmix64_uniform(self.config.seed, start + offset));
+        }
+        Ok(uniforms)
     }
 
     /// Processes logits and immediately selects the next token for each row.
@@ -347,6 +421,22 @@ impl<B: Backend> LogitsProcessor<B> {
         }
         logits
     }
+}
+
+/// Maps one SplitMix64 output to a strictly interior 23-bit uniform value.
+///
+/// SplitMix64 advances in the ring of integers modulo `2^64`; multiplying the
+/// stream index by its odd Weyl increment therefore visits every state exactly
+/// once. The upper 23 result bits are centered within equal-width intervals of
+/// `(0, 1)`, avoiding the CDF boundary values zero and one in F32.
+fn splitmix64_uniform(seed: u64, index: u64) -> f32 {
+    let mut value =
+        seed.wrapping_add(0x9e37_79b9_7f4a_7c15_u64.wrapping_mul(index.wrapping_add(1)));
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^= value >> 31;
+    let bucket = value >> 41;
+    ((bucket as f64 + 0.5) / ((1_u64 << 23) as f64)) as f32
 }
 
 /// Keeps exactly the requested greatest values in every batch row.
@@ -570,6 +660,7 @@ mod tests {
 
     use super::{
         FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, SamplingStrategy,
+        splitmix64_uniform,
     };
 
     type TestBackend = Flex<f32, i32>;
@@ -721,7 +812,7 @@ mod tests {
             .assert_eq(&logits.into_data(), false);
     }
 
-    /// Re-seeding produces identical stochastic selections for a fixed batch.
+    /// Independent processors reproduce the same multi-step stochastic stream.
     #[test]
     fn sampling_seed_is_deterministic() {
         let device = Default::default();
@@ -732,16 +823,57 @@ mod tests {
         };
         let logits = Tensor::<TestBackend, 2>::zeros([64, 4], &device);
         let first = LogitsProcessor::<TestBackend>::new(config.clone(), 4, &device)
-            .expect("valid processor")
-            .process_and_select(logits.clone(), None)
-            .expect("valid scores")
-            .into_data();
-        let second = LogitsProcessor::<TestBackend>::new(config, 4, &device)
-            .expect("valid processor")
-            .process_and_select(logits, None)
-            .expect("valid scores")
-            .into_data();
-        assert_eq!(first, second);
+            .expect("valid processor");
+        let second =
+            LogitsProcessor::<TestBackend>::new(config, 4, &device).expect("valid processor");
+        for _ in 0..4 {
+            let first_ids = first
+                .process_and_select(logits.clone(), None)
+                .expect("valid scores")
+                .into_data();
+            let second_ids = second
+                .process_and_select(logits.clone(), None)
+                .expect("valid scores")
+                .into_data();
+            assert_eq!(first_ids, second_ids);
+        }
+    }
+
+    /// Stream cloning snapshots state, uniforms stay interior, and exhaustion is safe.
+    #[test]
+    fn sampling_stream_boundaries_are_explicit() {
+        for (seed, index) in [(0, 0), (u64::MAX, 0), (0, u64::MAX), (u64::MAX, u64::MAX)] {
+            let uniform = splitmix64_uniform(seed, index);
+            assert!(uniform > 0.0 && uniform < 1.0);
+        }
+
+        let device = Default::default();
+        let config = GenerationConfig {
+            strategy: SamplingStrategy::Sample,
+            seed: 17,
+            ..Default::default()
+        };
+        let processor =
+            LogitsProcessor::<TestBackend>::new(config, 3, &device).expect("valid processor");
+        processor
+            .process_and_select(Tensor::zeros([1, 3], &device), None)
+            .expect("first draw");
+        let clone = processor.clone();
+        assert_eq!(
+            processor
+                .process_and_select(Tensor::zeros([8, 3], &device), None)
+                .expect("continued draw")
+                .into_data(),
+            clone
+                .process_and_select(Tensor::zeros([8, 3], &device), None)
+                .expect("cloned draw")
+                .into_data()
+        );
+
+        processor
+            .sample_counter
+            .store(u64::MAX - 1, std::sync::atomic::Ordering::Relaxed);
+        assert!(processor.select(Tensor::zeros([2, 3], &device)).is_err());
     }
 
     /// Top-k retains exactly k finite entries, including tied boundary values.
