@@ -22,6 +22,7 @@ pub mod checkpoint;
 pub mod error;
 pub mod feed_forward;
 pub mod generation;
+pub mod models;
 pub mod moe;
 pub mod normalization;
 
