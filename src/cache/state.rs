@@ -215,8 +215,11 @@ impl DecodeState {
 
     /// Truncates one sequence to an earlier logical length.
     ///
-    /// Stale tensor values beyond the returned `current` length may remain in
-    /// physical storage but are unreachable and may be overwritten.
+    /// This operation updates metadata only. An append-only tensor cache may
+    /// leave stale suffix values unreachable, but a wrapped sliding ring may
+    /// already have evicted positions made visible by the rewind. A physical
+    /// cache must restore those values from a checkpoint or journal, or reject
+    /// such a truncation.
     ///
     /// # Errors
     ///
@@ -245,6 +248,10 @@ impl DecodeState {
     }
 
     /// Atomically truncates all sequences to corresponding earlier lengths.
+    ///
+    /// Like [`truncate`](Self::truncate), this changes metadata only. Tensor
+    /// caches backed by wrapped rings must separately restore any history that
+    /// the new lengths make visible.
     ///
     /// # Errors
     ///
@@ -495,6 +502,7 @@ mod tests {
     #[test]
     fn constructs_empty_and_initialized_states() {
         let empty = DecodeState::new(config());
+        assert_eq!(empty.config(), config());
         assert_eq!(empty.lengths(), &[0, 0, 0]);
         assert_eq!(empty.remaining_capacity(1), Ok(8));
 
@@ -580,6 +588,15 @@ mod tests {
             })
         );
         assert_eq!(state.lengths(), &[1, 2, 3]);
+        assert_eq!(
+            state.advance(2, 6),
+            Err(DecodeStateError::CapacityExceeded {
+                sequence: 2,
+                requested: 9,
+                capacity: 8,
+            })
+        );
+        assert_eq!(state.lengths(), &[1, 2, 3]);
     }
 
     #[test]
@@ -589,6 +606,14 @@ mod tests {
         assert_eq!(transition.previous(), 6);
         assert_eq!(transition.current(), 2);
         assert_eq!(transition.appended_range(), 2..2);
+        assert_eq!(
+            state.truncate(1, 3),
+            Err(DecodeStateError::CannotExtendByTruncation {
+                sequence: 1,
+                current: 2,
+                requested: 3,
+            })
+        );
 
         let original = state.lengths().to_vec();
         assert_eq!(
@@ -649,6 +674,39 @@ mod tests {
 
     #[test]
     fn display_messages_are_actionable() {
+        let messages = [
+            DecodeStateError::SequenceCountMismatch {
+                expected: 2,
+                actual: 1,
+            }
+            .to_string(),
+            DecodeStateError::SequenceOutOfBounds {
+                sequence: 4,
+                sequence_count: 2,
+            }
+            .to_string(),
+            DecodeStateError::LengthOverflow {
+                sequence: 0,
+                length: usize::MAX,
+                additional: 1,
+            }
+            .to_string(),
+            DecodeStateError::CannotExtendByTruncation {
+                sequence: 1,
+                current: 2,
+                requested: 3,
+            }
+            .to_string(),
+            DecodeStateError::TransactionActive { operation: "reset" }.to_string(),
+        ];
+        assert_eq!(messages[0], "expected 2 per-sequence values, received 1");
+        assert!(messages[1].contains("sequence index 4"));
+        assert!(messages[2].contains("overflows when advanced"));
+        assert!(messages[3].contains("cannot truncate sequence 1"));
+        assert_eq!(
+            messages[4],
+            "cannot reset while a cache transaction is active"
+        );
         assert_eq!(
             DecodeStateError::CapacityExceeded {
                 sequence: 2,
@@ -657,6 +715,18 @@ mod tests {
             }
             .to_string(),
             "sequence 2 requested length 9 exceeds capacity 8"
+        );
+
+        let transaction = DecodeStateError::from(TransactionError::NoActiveTransaction);
+        assert_eq!(transaction.to_string(), "no cache transaction is active");
+        assert!(std::error::Error::source(&transaction).is_some());
+        assert!(
+            std::error::Error::source(&DecodeStateError::CapacityExceeded {
+                sequence: 0,
+                requested: 2,
+                capacity: 1,
+            })
+            .is_none()
         );
     }
 }

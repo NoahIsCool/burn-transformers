@@ -160,6 +160,18 @@ mod tests {
     #[test]
     fn error_messages_include_invalid_values() {
         assert_eq!(
+            CacheConfigError::ZeroSequences.to_string(),
+            "cache must track at least one sequence"
+        );
+        assert_eq!(
+            CacheConfigError::ZeroCapacity.to_string(),
+            "cache capacity must be non-zero"
+        );
+        assert_eq!(
+            CacheConfigError::ZeroSlidingWindow.to_string(),
+            "cache sliding window must be non-zero"
+        );
+        assert_eq!(
             CacheConfigError::SlidingWindowExceedsCapacity {
                 window: 17,
                 capacity: 16,

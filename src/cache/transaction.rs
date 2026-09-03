@@ -55,8 +55,14 @@ pub(crate) struct ActiveTransaction {
 ///
 /// A transaction consists only of appends after [`mark`](Self::mark). Calling
 /// [`commit_prefix`](Self::commit_prefix) retains the first `accepted_tokens`
-/// appended to every sequence and logically drops the remaining suffix.
-/// [`rollback`](Self::rollback) drops every append since the mark.
+/// appended to every sequence and drops the remaining suffix.
+/// [`rollback`](Self::rollback) restores the marked state.
+///
+/// Implementations owning physical storage must make those guarantees for both
+/// metadata and tensor values. In particular, a sliding ring must stage or
+/// journal proposals instead of overwriting committed slots. The pure
+/// [`DecodeState`] implementation tracks metadata only; tensor-backed callers
+/// can pair it with [`super::StagedRingTransactionPlan`].
 pub trait TransactionalCache {
     /// Opaque mark used to finish a transaction.
     type Mark;
@@ -67,13 +73,16 @@ pub trait TransactionalCache {
     fn mark(&mut self) -> Result<Self::Mark, Self::Error>;
 
     /// Keeps a uniform prefix of tokens appended after `mark`.
+    ///
+    /// Physical-cache implementations must also discard or restore every value
+    /// belonging to the rejected suffix.
     fn commit_prefix(
         &mut self,
         mark: Self::Mark,
         accepted_tokens: usize,
     ) -> Result<(), Self::Error>;
 
-    /// Restores all logical lengths captured by `mark`.
+    /// Restores all metadata and physical values captured by `mark`.
     fn rollback(&mut self, mark: Self::Mark) -> Result<(), Self::Error>;
 }
 
@@ -288,6 +297,25 @@ mod tests {
     }
 
     #[test]
+    fn uniform_commit_rejects_a_prefix_too_long_for_any_row() {
+        let mut state = state([3, 7]);
+        let mark = state.mark().expect("starts transaction");
+        let rollback_mark = mark.clone();
+        state.advance_all(&[2, 4]).expect("ragged append");
+        assert_eq!(
+            state.commit_prefix(mark, 3),
+            Err(DecodeStateError::Transaction(
+                TransactionError::PrefixExceedsAppended {
+                    sequence: 0,
+                    accepted: 3,
+                    appended: 2,
+                }
+            ))
+        );
+        state.rollback(rollback_mark).expect("still recoverable");
+    }
+
+    #[test]
     fn invalid_commit_is_atomic_and_can_be_rolled_back() {
         let mut state = state([3, 7]);
         let mark = state.mark().expect("starts transaction");
@@ -378,5 +406,35 @@ mod tests {
             ))
         );
         assert!(state.has_active_transaction());
+    }
+
+    #[test]
+    fn transaction_errors_have_actionable_messages() {
+        let messages = [
+            TransactionError::AlreadyActive.to_string(),
+            TransactionError::NoActiveTransaction.to_string(),
+            TransactionError::StaleOrForeignMark.to_string(),
+            TransactionError::SequenceCountMismatch {
+                expected: 2,
+                actual: 1,
+            }
+            .to_string(),
+            TransactionError::PrefixExceedsAppended {
+                sequence: 1,
+                accepted: 4,
+                appended: 2,
+            }
+            .to_string(),
+        ];
+        assert_eq!(messages[0], "a cache transaction is already active");
+        assert_eq!(messages[1], "no cache transaction is active");
+        assert!(messages[2].contains("stale"));
+        assert!(messages[3].contains("expected 2"));
+        assert!(messages[4].contains("cannot accept 4"));
+
+        let mut state = state([0, 0]);
+        let mark = state.mark().expect("starts transaction");
+        assert!(format!("{state:?}").contains("TransactionToken"));
+        state.rollback(mark).expect("valid rollback");
     }
 }

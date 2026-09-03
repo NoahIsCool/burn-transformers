@@ -9,9 +9,12 @@
 //!
 //! Speculative decoding adds a second distinction: some appended states are
 //! tentative. [`TransactionalCache`] records the logical lengths before a
-//! proposal, then either keeps an accepted prefix or restores the mark. Cache
-//! tensors may leave rejected bytes in memory because lengths are the source of
-//! truth; subsequent writes overwrite those unreachable slots.
+//! proposal, then either keeps an accepted prefix or restores the mark. Logical
+//! rollback alone is sufficient for append-only storage, but not for a wrapped
+//! ring: speculative writes could overwrite still-visible baseline slots.
+//! [`plan_staged_ring_transaction`] therefore models the safe policy of keeping
+//! proposals in separate linear storage and copying only the accepted prefix
+//! into the committed ring.
 
 mod config;
 mod ring;
@@ -21,8 +24,9 @@ mod transaction;
 pub use config::{CacheConfig, CacheConfigError};
 pub use ring::{
     MirroredRingReadPlan, MirroredRingWriteSegment, RingPlanError, RingReadPlan, RingReadSegment,
-    RingWritePlan, RingWriteSegment, plan_mirrored_ring_read, plan_mirrored_ring_write,
-    plan_ring_read, plan_ring_write, sliding_window_range,
+    RingWritePlan, RingWriteSegment, StagedRingTransactionPlan, plan_mirrored_ring_read,
+    plan_mirrored_ring_write, plan_ring_read, plan_ring_write, plan_staged_ring_transaction,
+    sliding_window_range,
 };
 pub use state::{DecodeState, DecodeStateError, LengthTransition};
 pub use transaction::{CacheMark, TransactionError, TransactionalCache};

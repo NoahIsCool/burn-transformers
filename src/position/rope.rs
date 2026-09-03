@@ -79,8 +79,11 @@ impl DynamicNtkScaling {
 ///
 /// YaRN interpolates low-frequency dimensions and extrapolates high-frequency
 /// dimensions. `beta_fast` and `beta_slow` specify the rotation-count bounds of
-/// the linear transition, with `beta_fast > beta_slow > 0`. The attention
-/// factor rescales attention logits to compensate for the changed phase range.
+/// the linear transition, with `beta_fast > beta_slow > 0`. Despite its
+/// checkpoint-compatible name, `attention_factor` is the amplitude multiplier
+/// applied to the computed cosine and sine tables—not directly to logits. If a
+/// model specifies `mscale`/`mscale_all_dim`, its config adapter must resolve
+/// those fields to this final amplitude before constructing [`YarnConfig`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct YarnConfig {
     factor: f64,
@@ -116,7 +119,7 @@ impl YarnConfig {
         })
     }
 
-    /// Replaces the attention-logit multiplier.
+    /// Replaces the cosine/sine amplitude multiplier named `attention_factor`.
     ///
     /// # Errors
     ///
@@ -160,7 +163,10 @@ impl YarnConfig {
         self.original_max_position_embeddings
     }
 
-    /// Returns the multiplicative correction applied to attention.
+    /// Returns the amplitude multiplier applied to both cosine and sine tables.
+    ///
+    /// For a fully rotated query and key, scaling both operands makes their
+    /// rotary dot-product contribution proportional to this value squared.
     #[must_use]
     pub const fn attention_factor(self) -> f64 {
         self.attention_factor
@@ -569,6 +575,8 @@ mod tests {
         let full = RopeConfig::new(128, 128, 10_000.0, RopeScaling::None).expect("valid full RoPE");
         assert_eq!(full.head_dimension(), 128);
         assert_eq!(full.rotary_dimension(), 128);
+        assert_eq!(full.theta(), 10_000.0);
+        assert_eq!(full.scaling(), RopeScaling::None);
         assert_eq!(full.partial_rotary_factor(), 1.0);
 
         let partial = RopeConfig::from_partial_factor(256, 0.25, 10_000.0, RopeScaling::None)
@@ -614,6 +622,10 @@ mod tests {
 
     #[test]
     fn fractional_dimension_rejects_invalid_or_ambiguous_products() {
+        assert_eq!(
+            rotary_dimension_from_partial_factor(0, 1.0),
+            Err(RopeConfigError::ZeroHeadDimension)
+        );
         for factor in [0.0, -0.5, 1.1, f64::INFINITY, f64::NAN] {
             assert!(matches!(
                 rotary_dimension_from_partial_factor(16, factor),
@@ -763,5 +775,58 @@ mod tests {
         assert!(DynamicNtkScaling::new(1.0, 1).is_ok());
         let yarn = YarnConfig::new(1.0, 1).expect("identity extension is valid");
         assert_eq!(yarn.attention_factor(), 1.0);
+    }
+
+    #[test]
+    fn validation_errors_have_actionable_messages() {
+        let errors = [
+            RopeConfigError::ZeroHeadDimension.to_string(),
+            RopeConfigError::ZeroRotaryDimension.to_string(),
+            RopeConfigError::RotaryDimensionExceedsHead {
+                rotary_dimension: 10,
+                head_dimension: 8,
+            }
+            .to_string(),
+            RopeConfigError::OddRotaryDimension {
+                rotary_dimension: 3,
+            }
+            .to_string(),
+            RopeConfigError::InvalidTheta { theta: 0.0 }.to_string(),
+            RopeConfigError::InvalidPartialRotaryFactor { factor: 2.0 }.to_string(),
+            RopeConfigError::NonIntegralPartialRotaryDimension {
+                head_dimension: 7,
+                factor: 0.5,
+                computed: 3.5,
+            }
+            .to_string(),
+            RopeConfigError::InvalidScalingFactor {
+                kind: "linear",
+                factor: 0.5,
+            }
+            .to_string(),
+            RopeConfigError::ZeroOriginalContext { kind: "YaRN" }.to_string(),
+            RopeConfigError::DynamicNtkDimensionTooSmall {
+                rotary_dimension: 2,
+            }
+            .to_string(),
+            RopeConfigError::YarnThetaTooSmall { theta: 1.0 }.to_string(),
+            RopeConfigError::InvalidYarnAttentionFactor {
+                attention_factor: 0.0,
+            }
+            .to_string(),
+            RopeConfigError::InvalidYarnBeta {
+                name: "beta_fast",
+                value: 0.0,
+            }
+            .to_string(),
+            RopeConfigError::InvalidYarnBetaOrder {
+                beta_fast: 1.0,
+                beta_slow: 2.0,
+            }
+            .to_string(),
+        ];
+        for message in errors {
+            assert!(!message.is_empty());
+        }
     }
 }

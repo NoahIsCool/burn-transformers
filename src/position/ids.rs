@@ -257,6 +257,38 @@ mod tests {
     }
 
     #[test]
+    fn errors_describe_shape_and_token_context() {
+        let messages = [
+            PositionIdError::ShapeOverflow {
+                batch_size: usize::MAX,
+                sequence_length: 2,
+            }
+            .to_string(),
+            PositionIdError::MaskLengthMismatch {
+                expected: 4,
+                actual: 3,
+            }
+            .to_string(),
+            PositionIdError::StartCountMismatch {
+                expected: 2,
+                actual: 1,
+            }
+            .to_string(),
+            PositionIdError::PositionOverflow {
+                sequence: 1,
+                token: 3,
+                start_position: usize::MAX,
+                valid_tokens_before: 1,
+            }
+            .to_string(),
+        ];
+        assert!(messages[0].contains("overflows usize"));
+        assert_eq!(messages[1], "position mask requires 4 elements, received 3");
+        assert_eq!(messages[2], "expected 2 position starts, received 1");
+        assert!(messages[3].contains("sequence 1, token 3"));
+    }
+
+    #[test]
     fn exhaustive_masks_preserve_contiguous_valid_positions() {
         for length in 0..=10 {
             for bits in 0usize..(1usize << length) {

@@ -361,4 +361,38 @@ mod tests {
         assert_eq!(buckets.max_distance(), 128);
         assert!(buckets.is_bidirectional());
     }
+
+    #[test]
+    fn validation_errors_explain_invalid_geometry() {
+        let messages = [
+            T5BucketError::TooFewBuckets {
+                num_buckets: 1,
+                bidirectional: false,
+                minimum: 2,
+            }
+            .to_string(),
+            T5BucketError::TooFewBuckets {
+                num_buckets: 2,
+                bidirectional: true,
+                minimum: 4,
+            }
+            .to_string(),
+            T5BucketError::OddBidirectionalBucketCount { num_buckets: 5 }.to_string(),
+            T5BucketError::MaxDistanceNotBeyondExact {
+                max_distance: 8,
+                max_exact: 8,
+            }
+            .to_string(),
+        ];
+        assert_eq!(
+            messages[0],
+            "T5 causal bucketing requires at least 2 buckets, got 1"
+        );
+        assert_eq!(
+            messages[1],
+            "T5 bidirectional bucketing requires at least 4 buckets, got 2"
+        );
+        assert!(messages[2].contains("must be even"));
+        assert!(messages[3].contains("must exceed exact-region boundary"));
+    }
 }

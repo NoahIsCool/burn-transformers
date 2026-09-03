@@ -35,6 +35,62 @@ pub struct RingWritePlan {
     segments: Vec<RingWriteSegment>,
 }
 
+/// Safe commit planning for speculative writes targeting a wrapped ring.
+///
+/// Proposed K/V tensors must first be written to separate, append-only staging
+/// storage indexed by [`staged_input`](Self::staged_input). After verification,
+/// [`commit_prefix`](Self::commit_prefix) returns the only writes that should
+/// touch the committed ring. Rolling back requires no ring write at all: the
+/// staging allocation is simply discarded.
+///
+/// This staging rule is necessary once a ring is full. Writing proposal
+/// position `p` directly to `p mod capacity` may destroy committed position
+/// `p - capacity`; restoring only a logical length cannot reconstruct it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedRingTransactionPlan {
+    staged_positions: Range<usize>,
+    staged_input: Range<usize>,
+}
+
+impl StagedRingTransactionPlan {
+    /// Returns the tentative absolute positions held outside the ring.
+    #[must_use]
+    pub fn staged_positions(&self) -> Range<usize> {
+        self.staged_positions.clone()
+    }
+
+    /// Returns the required linear staging-buffer range.
+    #[must_use]
+    pub fn staged_input(&self) -> Range<usize> {
+        self.staged_input.clone()
+    }
+
+    /// Plans copying an accepted staging prefix into the committed ring.
+    ///
+    /// The returned write segments address the staging buffer as their input.
+    /// An accepted prefix longer than the ring is valid: only its newest
+    /// `capacity` entries need to remain in the final physical state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RingPlanError::CommitPrefixExceedsStaged`] if `accepted_tokens`
+    /// is longer than the proposal, or propagates ring position errors.
+    pub fn commit_prefix(
+        &self,
+        accepted_tokens: usize,
+        capacity: NonZeroUsize,
+    ) -> Result<RingWritePlan, RingPlanError> {
+        let staged_tokens = self.staged_input.len();
+        if accepted_tokens > staged_tokens {
+            return Err(RingPlanError::CommitPrefixExceedsStaged {
+                accepted: accepted_tokens,
+                staged: staged_tokens,
+            });
+        }
+        plan_ring_write(self.staged_positions.start, accepted_tokens, capacity)
+    }
+}
+
 impl RingWritePlan {
     /// Returns the absolute positions represented by the full incoming chunk.
     #[must_use]
@@ -161,6 +217,10 @@ pub fn sliding_window_range(sequence_length: usize, window: NonZeroUsize) -> Ran
 
 /// Plans physical writes for an appended token chunk in a standard ring.
 ///
+/// Do not use this function to write uncommitted speculative tokens into an
+/// existing ring. Use [`plan_staged_ring_transaction`] and commit only the
+/// accepted prefix, otherwise wraparound can destroy data needed by rollback.
+///
 /// # Errors
 ///
 /// Returns [`RingPlanError::PositionOverflow`] when `start_position +
@@ -192,6 +252,34 @@ pub fn plan_ring_write(
         appended_positions: start_position..end_position,
         retained_input,
         segments,
+    })
+}
+
+/// Plans append-only staging for a speculative ring-cache transaction.
+///
+/// The plan itself never writes the committed ring. Store the proposed values
+/// in a separate linear tensor of `token_count` entries, then call
+/// [`StagedRingTransactionPlan::commit_prefix`] after verification. Dropping
+/// the staging tensor implements physical rollback exactly.
+///
+/// # Errors
+///
+/// Returns [`RingPlanError::PositionOverflow`] when the tentative absolute end
+/// cannot be represented by `usize`.
+pub fn plan_staged_ring_transaction(
+    start_position: usize,
+    token_count: usize,
+) -> Result<StagedRingTransactionPlan, RingPlanError> {
+    let end_position =
+        start_position
+            .checked_add(token_count)
+            .ok_or(RingPlanError::PositionOverflow {
+                start_position,
+                token_count,
+            })?;
+    Ok(StagedRingTransactionPlan {
+        staged_positions: start_position..end_position,
+        staged_input: 0..token_count,
     })
 }
 
@@ -348,6 +436,13 @@ pub enum RingPlanError {
         /// Undoubled ring capacity.
         capacity: usize,
     },
+    /// Verification attempted to accept more entries than were staged.
+    CommitPrefixExceedsStaged {
+        /// Invalid accepted-prefix length.
+        accepted: usize,
+        /// Available proposal length.
+        staged: usize,
+    },
 }
 
 impl fmt::Display for RingPlanError {
@@ -367,6 +462,10 @@ impl fmt::Display for RingPlanError {
             Self::DoubledCapacityOverflow { capacity } => write!(
                 formatter,
                 "mirrored ring capacity 2 * {capacity} overflows usize"
+            ),
+            Self::CommitPrefixExceedsStaged { accepted, staged } => write!(
+                formatter,
+                "cannot commit {accepted} ring entries from a staging buffer of length {staged}"
             ),
         }
     }
@@ -416,6 +515,27 @@ mod tests {
     }
 
     #[test]
+    fn staged_transaction_commits_only_an_accepted_prefix() {
+        let staged = plan_staged_ring_transaction(6, 4).expect("valid staging plan");
+        assert_eq!(staged.staged_positions(), 6..10);
+        assert_eq!(staged.staged_input(), 0..4);
+
+        let commit = staged
+            .commit_prefix(2, nonzero(4))
+            .expect("accepted prefix is staged");
+        assert_eq!(commit.appended_positions(), 6..8);
+        assert_eq!(commit.retained_input(), 0..2);
+        assert_eq!(commit.segments()[0].physical(), 2..4);
+        assert_eq!(
+            staged.commit_prefix(5, nonzero(4)),
+            Err(RingPlanError::CommitPrefixExceedsStaged {
+                accepted: 5,
+                staged: 4,
+            })
+        );
+    }
+
+    #[test]
     fn read_plan_returns_chronological_slices() {
         let plan = plan_ring_read(10, nonzero(4), nonzero(4)).expect("valid plan");
         assert_eq!(plan.retained_positions(), 6..10);
@@ -446,6 +566,7 @@ mod tests {
     fn mirrored_ring_writes_both_halves_and_reads_one_slice() {
         let writes = plan_mirrored_ring_write(3, 3, nonzero(4)).expect("valid plan");
         assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].input(), 0..1);
         assert_eq!(writes[0].primary(), 3..4);
         assert_eq!(writes[0].mirror(), 7..8);
         assert_eq!(writes[1].primary(), 0..2);
@@ -465,12 +586,57 @@ mod tests {
                 token_count: 1,
             })
         );
+        assert_eq!(
+            plan_staged_ring_transaction(usize::MAX, 1),
+            Err(RingPlanError::PositionOverflow {
+                start_position: usize::MAX,
+                token_count: 1,
+            })
+        );
         let too_large = nonzero(usize::MAX / 2 + 1);
         assert_eq!(
             plan_mirrored_ring_read(0, too_large),
             Err(RingPlanError::DoubledCapacityOverflow {
                 capacity: usize::MAX / 2 + 1,
             })
+        );
+        assert_eq!(
+            plan_mirrored_ring_write(0, 0, too_large),
+            Err(RingPlanError::DoubledCapacityOverflow {
+                capacity: usize::MAX / 2 + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn error_messages_include_planning_context() {
+        assert_eq!(
+            RingPlanError::PositionOverflow {
+                start_position: 10,
+                token_count: 4,
+            }
+            .to_string(),
+            "absolute position 10 overflows when appending 4 tokens"
+        );
+        assert_eq!(
+            RingPlanError::WindowExceedsCapacity {
+                window: 9,
+                capacity: 8,
+            }
+            .to_string(),
+            "sliding window 9 exceeds physical ring capacity 8"
+        );
+        assert_eq!(
+            RingPlanError::DoubledCapacityOverflow { capacity: 12 }.to_string(),
+            "mirrored ring capacity 2 * 12 overflows usize"
+        );
+        assert_eq!(
+            RingPlanError::CommitPrefixExceedsStaged {
+                accepted: 4,
+                staged: 2,
+            }
+            .to_string(),
+            "cannot commit 4 ring entries from a staging buffer of length 2"
         );
     }
 
@@ -538,6 +704,48 @@ mod tests {
                 );
                 for (absolute, physical) in plan.retained_positions().zip(plan.physical()) {
                     assert_eq!(physical % capacity, absolute % capacity);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exhaustive_staged_commits_preserve_rollback_and_visible_values() {
+        for capacity in 1..=8 {
+            for baseline_length in 0..=16 {
+                let mut committed_ring = vec![None; capacity];
+                for absolute in sliding_window_range(baseline_length, nonzero(capacity)) {
+                    committed_ring[absolute % capacity] = Some(absolute);
+                }
+                let unchanged_for_rollback = committed_ring.clone();
+
+                for proposed in 0..=10 {
+                    let staged = plan_staged_ring_transaction(baseline_length, proposed)
+                        .expect("small positions cannot overflow");
+                    // Proposals live outside the committed ring, so rollback is
+                    // exactly a drop and cannot corrupt wrapped baseline slots.
+                    assert_eq!(committed_ring, unchanged_for_rollback);
+
+                    for accepted in 0..=proposed {
+                        let mut after_commit = committed_ring.clone();
+                        let write = staged
+                            .commit_prefix(accepted, nonzero(capacity))
+                            .expect("accepted prefix is staged");
+                        for segment in write.segments() {
+                            for (input, slot) in segment.input().zip(segment.physical()) {
+                                after_commit[slot] = Some(baseline_length + input);
+                            }
+                        }
+
+                        let committed_length = baseline_length + accepted;
+                        for absolute in sliding_window_range(committed_length, nonzero(capacity)) {
+                            assert_eq!(
+                                after_commit[absolute % capacity],
+                                Some(absolute),
+                                "capacity={capacity}, baseline={baseline_length}, proposed={proposed}, accepted={accepted}"
+                            );
+                        }
+                    }
                 }
             }
         }
