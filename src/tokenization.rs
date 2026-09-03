@@ -20,7 +20,9 @@ use std::{
 
 use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+#[cfg(feature = "chat-templates")]
+use serde_json::Map;
+use serde_json::Value;
 use tokenizers::Tokenizer;
 
 use crate::{CausalLmInput, Error, Result, architecture::TokenMask};

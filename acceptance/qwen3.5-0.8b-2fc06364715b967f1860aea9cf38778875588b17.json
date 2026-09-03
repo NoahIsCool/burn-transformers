@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "weights_loaded_and_smoke_inference_verified",
+  "phase": "stateless_reference_logits_verified",
   "repository": "Qwen/Qwen3.5-0.8B",
   "revision": "2fc06364715b967f1860aea9cf38778875588b17",
   "artifact_layout": {
@@ -29,7 +29,7 @@
     "weights_applied": true,
     "metal_f16_smoke_inference": true,
     "reference_top10_and_sampled_logits_compared": true,
-    "reference_logits_compared": false,
+    "reference_logits_compared": true,
     "cached_generation_compared": false
   },
   "smoke_acceptance": {
@@ -46,7 +46,12 @@
       "backend": "torch_mps_f16",
       "top10_ids_identical": true,
       "sampled_logit_absolute_tolerance": 0.25,
-      "full_vector_cosine_pending": true
+      "full_vector_dtype": "little_endian_f32",
+      "full_vector_bytes": 993280,
+      "full_vector_sha256": "77437a78425515f8c7834791768344e821384f802c4ed7ec445581e59ab3648e",
+      "full_vector_cosine": 0.999998221,
+      "full_vector_cosine_gate": 0.999,
+      "full_vector_cosine_pending": false
     }
   }
 }

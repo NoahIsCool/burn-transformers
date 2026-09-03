@@ -8,8 +8,10 @@
 
 use std::{fs, path::PathBuf};
 
+#[cfg(feature = "chat-templates")]
+use transformers::{ChatMessage, ChatTemplateOptions};
 use transformers::{
-    ChatMessage, ChatTemplateOptions, EncodeOptions, LocalTokenizer,
+    EncodeOptions, LocalTokenizer,
     checkpoint::{CheckpointManifest, LoadOptions},
     models::{config::ModelConfig, qwen3_5::Qwen3_5TextConfig},
 };
@@ -201,6 +203,7 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
     );
     let sample_logits = output
         .logits
+        .clone()
         .select(2, sample_indices)
         .cast(DType::F32)
         .to_data()
@@ -216,6 +219,53 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         assert!(
             (actual - expected).abs() <= 0.25,
             "reference logit mismatch: expected {expected}, found {actual}"
+        );
+    }
+
+    if let Some(reference_path) = std::env::var_os("TRANSFORMERS_QWEN35_REFERENCE_LOGITS") {
+        let reference_path = PathBuf::from(reference_path);
+        let bytes = fs::read(&reference_path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read raw little-endian f32 reference logits from {}: {error}",
+                reference_path.display()
+            )
+        });
+        let expected_bytes = 248_320_usize
+            .checked_mul(size_of::<f32>())
+            .expect("the fixed reference vocabulary byte length must fit usize");
+        assert_eq!(
+            bytes.len(),
+            expected_bytes,
+            "reference logit file must contain exactly one little-endian f32 vocabulary vector"
+        );
+        let reference_logits = bytes
+            .chunks_exact(size_of::<f32>())
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        let actual_logits = output
+            .logits
+            .cast(DType::F32)
+            .to_data()
+            .to_vec::<f32>()
+            .expect("Metal logits must convert to an f32 host vector");
+        assert_eq!(actual_logits.len(), reference_logits.len());
+        let (dot, actual_square, reference_square) = actual_logits
+            .iter()
+            .zip(reference_logits)
+            .fold((0.0_f64, 0.0_f64, 0.0_f64), |acc, (actual, reference)| {
+                let actual = f64::from(*actual);
+                let reference = f64::from(reference);
+                (
+                    acc.0 + actual * reference,
+                    acc.1 + actual * actual,
+                    acc.2 + reference * reference,
+                )
+            });
+        let cosine = dot / (actual_square.sqrt() * reference_square.sqrt());
+        eprintln!("full-vocabulary reference-logit cosine similarity: {cosine:.9}");
+        assert!(
+            cosine >= 0.999,
+            "full-vocabulary cosine similarity {cosine} is below the 0.999 acceptance gate"
         );
     }
 
