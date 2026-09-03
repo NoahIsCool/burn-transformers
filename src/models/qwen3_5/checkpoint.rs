@@ -44,9 +44,10 @@ pub struct Qwen3_5CheckpointOptions {
     pub source: Qwen3_5CheckpointSource,
     /// Include declared multi-token-prediction tensors in the expected inventory.
     ///
-    /// This must be enabled only when the receiving model graph instantiates MTP
-    /// parameters. The current base causal-LM graph does not, so the safe default
-    /// reports them as an explicitly ignored optional subsystem.
+    /// Enable this when loading a model initialized with non-zero
+    /// `mtp_num_hidden_layers`.  Leaving it disabled is the explicit base-only
+    /// compatibility mode and reports MTP keys as an intentionally ignored
+    /// optional subsystem.
     pub include_mtp: bool,
 }
 
@@ -753,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn safe_default_classifies_uninstantiated_mtp_tensors_separately() {
+    fn safe_base_only_default_classifies_optional_mtp_tensors_separately() {
         let fixture = golden(QWEN_08_INVENTORY);
         let contract = config(QWEN_08_CONFIG)
             .checkpoint_contract(Qwen3_5CheckpointOptions::default())

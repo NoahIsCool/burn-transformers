@@ -94,12 +94,20 @@ mtp.norm.weight                       [H]
 Each `mtp.layers.i` is a full-attention decoder layer with the same attention,
 normalization, and SwiGLU dimensions as the base network. Thus the released
 single-layer MTP contributes 15 tensors in total. It has no dedicated embedding
-or output head. The safe default is `include_mtp = false`, because the base
-causal-LM graph does not instantiate an MTP parameter sink; this records `mtp.*`
-as an explicit optional omission. Setting it to true consumes all declared
-tensors and is valid only for an MTP-capable graph. A config that requests
+or output head. The causal-LM graph instantiates MTP whenever
+`mtp_num_hidden_layers > 0`; `include_mtp = true` then maps every declared tensor
+to a concrete sink. The safe checkpoint default remains `false` as an explicit
+base-only compatibility mode, recording `mtp.*` as an optional omission. A
+config that requests
 dedicated MTP embeddings is rejected until a released checkpoint establishes
 exact key names and sharing semantics.
+
+At inference, MTP fuses normalized `E[x_(t+1)]` and target final hidden `h_t`,
+applies the concatenation projection and one full-attention Qwen block, then
+uses the base LM head. Its native-KV bank is distinct from target attention and
+DeltaNet state. Speculative updates stage both banks and commit independent
+accepted prefixes; rollback never writes rejected values into committed cache
+storage.
 
 ## Golden acceptance counts
 

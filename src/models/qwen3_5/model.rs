@@ -37,8 +37,14 @@ use super::{Qwen3_5LayerType, Qwen3_5TextConfig};
 use crate::models::config::RopeType;
 
 mod decode;
+mod mtp;
+mod speculative;
 
 pub use decode::{Qwen3_5DecodeState, Qwen3_5LayerCache};
+pub use mtp::{Qwen3_5Mtp, Qwen3_5MtpOutput, Qwen3_5MtpPrediction};
+pub use speculative::{
+    Qwen3_5SpeculativeConfig, Qwen3_5SpeculativeDecoder, Qwen3_5SpeculativeOutput,
+};
 
 /// One Qwen decoder block with exactly one active sequence mixer.
 #[derive(Module, Debug)]
@@ -258,15 +264,21 @@ pub struct Qwen3_5ForCausalLm<B: Backend> {
     /// forward pass. Keeping that case parameter-free guarantees one physical
     /// allocation instead of relying on two differently mapped Burn parameters.
     pub lm_head: Option<Linear<B>>,
+    /// Optional official multi-token-prediction auxiliary graph.
+    pub mtp: Option<Qwen3_5Mtp<B>>,
 }
 
 impl<B: Backend> Qwen3_5ForCausalLm<B> {
     /// Initializes a validated inference/training graph with lazy parameters.
     pub fn init(config: Qwen3_5TextConfig, device: &B::Device) -> Result<Self> {
+        ArchitectureConfig::validate(&config)?;
         let hidden_size = config.hidden_size;
         let vocabulary_size = config.vocab_size;
         let tie_word_embeddings = config.tie_word_embeddings;
         Ok(Self {
+            mtp: (config.mtp_num_hidden_layers > 0)
+                .then(|| Qwen3_5Mtp::init(&config, device))
+                .transpose()?,
             model: Qwen3_5TextModel::init(config, device)?,
             lm_head: (!tie_word_embeddings).then(|| {
                 LinearConfig::new(hidden_size, vocabulary_size)
@@ -290,14 +302,7 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
         }
         let (hidden, hidden_states) = self.model.forward(&input, options.hidden_states)?;
         let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
-        let logits = match &self.lm_head {
-            Some(head) => head.forward(selected),
-            None => burn::tensor::module::linear(
-                selected,
-                self.model.embed_tokens.weight.val().transpose(),
-                None,
-            ),
-        };
+        let logits = self.project_hidden(selected);
         Ok(CausalLmOutput {
             logits,
             final_hidden_state: options.hidden_states.then_some(hidden),
@@ -310,6 +315,66 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
     /// Returns the exact validated checkpoint configuration.
     pub fn config(&self) -> &Qwen3_5TextConfig {
         &self.model.config
+    }
+
+    /// Runs the shifted MTP graph and the base model's shared LM head.
+    ///
+    /// `next_token_ids[b,t]` is paired with the target final hidden state at the
+    /// preceding autoregressive position: `x_(t+1)` combines with `h_t` to
+    /// predict `x_(t+2)`. Incremental callers must preserve this one-token shift.
+    pub fn forward_mtp(
+        &self,
+        next_token_ids: Tensor<B, 2, Int>,
+        target_hidden_state: Tensor<B, 3>,
+        position_ids: Tensor<B, 2, Int>,
+        step: usize,
+    ) -> Result<Qwen3_5MtpPrediction<B>> {
+        let mtp = self.mtp.as_ref().ok_or_else(|| {
+            Error::configuration(
+                "qwen3_5.mtp_num_hidden_layers",
+                "model was initialized without the MTP graph",
+            )
+        })?;
+        let [batch, sequence] = next_token_ids.dims();
+        if batch == 0 || sequence == 0 {
+            return Err(Error::shape(
+                "qwen.mtp.next_token_ids",
+                "non-empty [batch, sequence]",
+                format!("[{batch}, {sequence}]"),
+            ));
+        }
+        validate_token_ids(next_token_ids.clone(), self.config().vocab_size)?;
+        decode::validate_position_range(
+            position_ids.clone(),
+            self.config().max_position_embeddings,
+        )?;
+        let context = decode::evaluated_context(position_ids.clone())?;
+        let embedding = self.model.embed_tokens.forward(next_token_ids);
+        let output = mtp.forward(
+            embedding,
+            target_hidden_state,
+            position_ids,
+            step,
+            self.model.rope,
+            context,
+        )?;
+        let logits = self.project_hidden(output.hidden_state.clone());
+        Ok(Qwen3_5MtpPrediction {
+            logits,
+            hidden_state: output.hidden_state,
+        })
+    }
+
+    /// Projects normalized hidden states with the shared base-model LM head.
+    pub(crate) fn project_hidden(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+        match &self.lm_head {
+            Some(head) => head.forward(hidden),
+            None => burn::tensor::module::linear(
+                hidden,
+                self.model.embed_tokens.weight.val().transpose(),
+                None,
+            ),
+        }
     }
 }
 
@@ -667,6 +732,10 @@ mod tests {
         let model = Qwen3_5ForCausalLm::<TestBackend>::init(config, &device)
             .expect("official topology must initialize lazily");
         assert_eq!(model.model.layers.len(), 64);
+        assert_eq!(
+            model.mtp.as_ref().expect("official MTP graph").layers.len(),
+            1
+        );
         assert_eq!(model.config().vocab_size, 248_320);
         assert_eq!(model.model.rope.rotary_dimension(), 64);
     }

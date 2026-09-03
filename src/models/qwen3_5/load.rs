@@ -19,13 +19,13 @@ use crate::{
     normalization::RmsNorm,
 };
 
-use super::{Qwen3_5DecoderLayer, Qwen3_5ForCausalLm};
+use super::{Qwen3_5DecoderLayer, Qwen3_5ForCausalLm, Qwen3_5Mtp};
 
 /// Architecture-specific failure while applying a validated Qwen load plan.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Qwen3_5LoadError {
-    /// A target was not part of the executable base-language-model graph.
+    /// A target was not part of the executable base or optional MTP graph.
     #[error("unknown Qwen parameter target `{target}`")]
     UnknownTarget {
         /// Unrecognized internal parameter name.
@@ -71,7 +71,7 @@ pub enum Qwen3_5LoadError {
 impl<B: Backend> TensorSink for Qwen3_5ForCausalLm<B> {
     type Error = Qwen3_5LoadError;
 
-    /// Installs one storage-owning base-model tensor by its contract target.
+    /// Installs one storage-owning base-model or MTP tensor by its contract target.
     fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
         match target {
             "model.embed_tokens.weight" => {
@@ -87,6 +87,16 @@ impl<B: Backend> TensorSink for Qwen3_5ForCausalLm<B> {
                             component: "independent lm_head for an untied checkpoint",
                         })?;
                 install_linear_weight(target, head, data)
+            }
+            target if target.starts_with("mtp.") => {
+                let mtp = self
+                    .mtp
+                    .as_mut()
+                    .ok_or_else(|| Qwen3_5LoadError::MissingComponent {
+                        target: target.into(),
+                        component: "configured multi-token-prediction graph",
+                    })?;
+                install_mtp_tensor(mtp, target, data)
             }
             _ => {
                 let (index, suffix) = parse_layer_target(target)?;
@@ -134,6 +144,39 @@ impl<B: Backend> TensorSink for Qwen3_5ForCausalLm<B> {
     }
 }
 
+/// Dispatches one of the official `mtp.*` tensors into its concrete Burn field.
+fn install_mtp_tensor<B: Backend>(
+    mtp: &mut Qwen3_5Mtp<B>,
+    target: &str,
+    data: TensorData,
+) -> Result<(), Qwen3_5LoadError> {
+    let suffix = target
+        .strip_prefix("mtp.")
+        .ok_or_else(|| Qwen3_5LoadError::UnknownTarget {
+            target: target.into(),
+        })?;
+    match suffix {
+        "fc.weight" => install_linear_weight(target, &mut mtp.fc, data),
+        "norm.weight" => install_norm(target, &mut mtp.norm, data),
+        "pre_fc_norm_embedding.weight" => {
+            install_norm(target, &mut mtp.pre_fc_norm_embedding, data)
+        }
+        "pre_fc_norm_hidden.weight" => install_norm(target, &mut mtp.pre_fc_norm_hidden, data),
+        _ => {
+            let (index, layer_suffix) = parse_indexed_target(target, suffix, "layers.", "mtp")?;
+            let count = mtp.layers.len();
+            let layer =
+                mtp.layers
+                    .get_mut(index)
+                    .ok_or_else(|| Qwen3_5LoadError::InvalidLayer {
+                        target: target.into(),
+                        reason: format!("MTP index {index} is outside 0..{count}"),
+                    })?;
+            install_layer_tensor(layer, target, layer_suffix, data)
+        }
+    }
+}
+
 /// Parses `model.layers.<decimal>.<suffix>` without accepting empty segments.
 fn parse_layer_target(target: &str) -> Result<(usize, &str), Qwen3_5LoadError> {
     let remainder =
@@ -162,6 +205,41 @@ fn parse_layer_target(target: &str) -> Result<(usize, &str), Qwen3_5LoadError> {
             reason: format!("`{index}` is not a decimal usize: {error}"),
         })?;
     Ok((index, suffix))
+}
+
+/// Parses an indexed namespace after its architecture-specific prefix.
+fn parse_indexed_target<'a>(
+    target: &str,
+    suffix: &'a str,
+    indexed_prefix: &str,
+    namespace: &str,
+) -> Result<(usize, &'a str), Qwen3_5LoadError> {
+    let remainder =
+        suffix
+            .strip_prefix(indexed_prefix)
+            .ok_or_else(|| Qwen3_5LoadError::UnknownTarget {
+                target: target.into(),
+            })?;
+    let (index, parameter) =
+        remainder
+            .split_once('.')
+            .ok_or_else(|| Qwen3_5LoadError::InvalidLayer {
+                target: target.into(),
+                reason: format!("expected `{namespace}.layers.<index>.<parameter>`"),
+            })?;
+    if parameter.is_empty() {
+        return Err(Qwen3_5LoadError::InvalidLayer {
+            target: target.into(),
+            reason: "parameter suffix must not be empty".into(),
+        });
+    }
+    let index = index
+        .parse::<usize>()
+        .map_err(|error| Qwen3_5LoadError::InvalidLayer {
+            target: target.into(),
+            reason: format!("`{index}` is not a decimal usize: {error}"),
+        })?;
+    Ok((index, parameter))
 }
 
 /// Dispatches a target within one already-resolved hybrid decoder layer.
@@ -427,8 +505,61 @@ mod tests {
         ));
 
         let unknown = model
-            .write_tensor("mtp.fc.weight", TensorData::zeros::<f32, _>([8, 16]))
+            .write_tensor("mtp.not_a_parameter", TensorData::zeros::<f32, _>([8, 16]))
             .unwrap_err();
         assert!(matches!(unknown, Qwen3_5LoadError::UnknownTarget { .. }));
+    }
+
+    /// The strict MTP contract has a concrete sink for every declared tensor.
+    #[test]
+    fn mtp_contract_dispatches_all_fifteen_parameters() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/qwen3_5_checkpoint/tiny_text_inventory.json"
+        ))
+        .unwrap();
+        let config =
+            Qwen3_5TextConfig::from_json_str(&fixture.get("config").unwrap().to_string()).unwrap();
+        let contract = config
+            .checkpoint_contract(Qwen3_5CheckpointOptions {
+                source: Qwen3_5CheckpointSource::TextOnly,
+                include_mtp: true,
+            })
+            .unwrap();
+        let mtp = contract
+            .expected_tensors()
+            .iter()
+            .filter(|tensor| tensor.name.starts_with("mtp."))
+            .collect::<Vec<_>>();
+        assert_eq!(mtp.len(), 15);
+
+        let device = Default::default();
+        let mut model = Qwen3_5ForCausalLm::<TestBackend>::init(config, &device).unwrap();
+        for expected in contract.expected_tensors() {
+            if expected.name == "lm_head.weight" {
+                continue;
+            }
+            let shape = expected
+                .shape
+                .iter()
+                .map(|dimension| usize::try_from(*dimension).unwrap())
+                .collect::<Vec<_>>();
+            model
+                .write_tensor(&expected.name, TensorData::zeros::<f32, _>(shape))
+                .unwrap_or_else(|error| panic!("{}: {error}", expected.name));
+        }
+        model
+            .alias_tensor("lm_head.weight", "model.embed_tokens.weight")
+            .unwrap();
+
+        let prediction = model
+            .forward_mtp(
+                Tensor::<TestBackend, 2, Int>::from_ints([[2]], &device),
+                Tensor::zeros([1, 1, 8], &device),
+                Tensor::<TestBackend, 2, Int>::from_ints([[0]], &device),
+                0,
+            )
+            .expect("fully loaded MTP graph must execute");
+        assert_eq!(prediction.logits.dims(), [1, 1, 32]);
+        assert_eq!(prediction.hidden_state.dims(), [1, 1, 8]);
     }
 }

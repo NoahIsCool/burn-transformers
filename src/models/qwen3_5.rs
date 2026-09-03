@@ -10,8 +10,9 @@
 pub mod model;
 
 pub use model::{
-    Qwen3_5DecodeState, Qwen3_5DecoderLayer, Qwen3_5ForCausalLm, Qwen3_5LayerCache,
-    Qwen3_5TextModel,
+    Qwen3_5DecodeState, Qwen3_5DecoderLayer, Qwen3_5ForCausalLm, Qwen3_5LayerCache, Qwen3_5Mtp,
+    Qwen3_5MtpOutput, Qwen3_5MtpPrediction, Qwen3_5SpeculativeConfig, Qwen3_5SpeculativeDecoder,
+    Qwen3_5SpeculativeOutput, Qwen3_5TextModel,
 };
 
 use std::collections::HashSet;

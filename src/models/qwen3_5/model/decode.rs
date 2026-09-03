@@ -21,14 +21,14 @@ use crate::{
     architecture::DecodeState as ArchitectureDecodeState,
     cache::{
         CacheConfig, DecodeStateError, KvCacheStorage, NativeKvCacheSpec, RecurrentStateSpec,
-        TensorCacheBank, TensorCacheError, TensorDecodeState,
+        TensorCacheBank, TensorCacheError, TensorCacheMark, TensorDecodeState,
     },
     delta_net::{DeltaNetMode, GatedDeltaNetState},
     position::{RopeScaling, RotaryAngles, apply_rotary, derive_position_ids, rotary_angles},
 };
 
 use super::{
-    Qwen3_5DecoderLayer, Qwen3_5ForCausalLm, Qwen3_5TextModel, select_hidden,
+    Qwen3_5DecoderLayer, Qwen3_5ForCausalLm, Qwen3_5MtpPrediction, Qwen3_5TextModel, select_hidden,
     validate_logits_selection, validate_token_ids,
 };
 use crate::models::qwen3_5::{Qwen3_5LayerType, Qwen3_5TextConfig};
@@ -98,6 +98,8 @@ struct Qwen3_5CacheLayout {
     schedule: Vec<Qwen3_5LayerCache>,
     native_kv: Option<NativeKvCacheSpec>,
     recurrent: Option<RecurrentStateSpec>,
+    mtp_native_kv: Option<NativeKvCacheSpec>,
+    staging_capacity: usize,
 }
 
 /// Qwen-specific external inference state backed by shared Burn tensor caches.
@@ -141,7 +143,40 @@ impl<B: Backend> Qwen3_5DecodeState<B> {
             ));
         }
 
-        let layout = cache_layout(model)?;
+        Self::new_with_staging(model, config, batch_size, 0, device)
+    }
+
+    /// Allocates target and MTP banks with an equal bounded proposal suffix.
+    fn new_with_staging(
+        model: &Qwen3_5ForCausalLm<B>,
+        config: CacheConfig,
+        batch_size: usize,
+        staging_capacity: usize,
+        device: &B::Device,
+    ) -> Result<Self> {
+        if model.mtp.as_ref().is_some_and(|mtp| mtp.layers.len() != 1) {
+            return Err(Error::BackendCapability(
+                "cached Qwen MTP currently supports the released single-layer auxiliary graph"
+                    .into(),
+            ));
+        }
+        if config.capacity() > model.config().max_position_embeddings {
+            return Err(Error::configuration(
+                "qwen3_5.decode_state.capacity",
+                format!(
+                    "{} exceeds max_position_embeddings {}",
+                    config.capacity(),
+                    model.config().max_position_embeddings
+                ),
+            ));
+        }
+        if config.capacity() > i32::MAX as usize {
+            return Err(Error::configuration(
+                "qwen3_5.decode_state.capacity",
+                "must fit Burn's portable signed position-index range",
+            ));
+        }
+        let layout = cache_layout(model, staging_capacity)?;
         let mut tensors = TensorDecodeState::new(config, batch_size, device)?;
         if let Some(spec) = layout.native_kv {
             let group = tensors.main_mut().add_native_kv(spec)?;
@@ -156,6 +191,14 @@ impl<B: Backend> Qwen3_5DecodeState<B> {
             if group != RECURRENT_GROUP {
                 return Err(Error::Cache(format!(
                     "Qwen recurrent group index must be {RECURRENT_GROUP}, found {group}"
+                )));
+            }
+        }
+        if let Some(spec) = layout.mtp_native_kv {
+            let group = tensors.enable_mtp()?.add_native_kv(spec)?;
+            if group != NATIVE_KV_GROUP {
+                return Err(Error::Cache(format!(
+                    "Qwen MTP native-KV group index must be {NATIVE_KV_GROUP}, found {group}"
                 )));
             }
         }
@@ -186,9 +229,45 @@ impl<B: Backend> Qwen3_5DecodeState<B> {
         self.layout.recurrent.map_or(0, RecurrentStateSpec::layers)
     }
 
+    /// Returns the number of independently cached full-attention MTP layers.
+    #[must_use]
+    pub fn mtp_layer_count(&self) -> usize {
+        self.layout
+            .mtp_native_kv
+            .map_or(0, NativeKvCacheSpec::layers)
+    }
+
+    /// Returns the configured per-row speculative suffix capacity.
+    #[must_use]
+    pub const fn staging_capacity(&self) -> usize {
+        self.layout.staging_capacity
+    }
+
+    /// Begins an atomic target-plus-MTP proposal suffix.
+    pub fn mark(&mut self) -> Result<TensorCacheMark> {
+        self.tensors.begin_transaction().map_err(Into::into)
+    }
+
+    /// Atomically retains independent prefixes from the target and shifted MTP suffixes.
+    pub fn commit_prefixes(
+        &mut self,
+        mark: TensorCacheMark,
+        target_tokens: usize,
+        mtp_tokens: usize,
+    ) -> Result<()> {
+        self.tensors
+            .commit_uniform_prefixes(mark, target_tokens, Some(mtp_tokens))
+            .map_err(Into::into)
+    }
+
+    /// Discards all target and MTP tensors staged since `mark`.
+    pub fn rollback(&mut self, mark: TensorCacheMark) -> Result<()> {
+        self.tensors.rollback(mark).map_err(Into::into)
+    }
+
     /// Verifies that cached geometry and layer ordering belong to `model`.
-    fn validate_for_model(&self, model: &Qwen3_5ForCausalLm<B>) -> Result<()> {
-        let expected = cache_layout(model)?;
+    pub(super) fn validate_for_model(&self, model: &Qwen3_5ForCausalLm<B>) -> Result<()> {
+        let expected = cache_layout(model, self.layout.staging_capacity)?;
         if self.layout != expected {
             return Err(Error::Cache(
                 "Qwen decode state was created for an incompatible model layout".into(),
@@ -217,6 +296,18 @@ impl<B: Backend> Qwen3_5DecodeState<B> {
             return Err(Error::Cache(
                 "Qwen recurrent cache geometry differs from the model".into(),
             ));
+        }
+        match (expected.mtp_native_kv, self.tensors.mtp()) {
+            (None, None) => {}
+            (Some(spec), Some(bank))
+                if bank.native_kv_count() == 1
+                    && bank.recurrent_count() == 0
+                    && bank.native_kv(NATIVE_KV_GROUP)?.spec() == spec => {}
+            _ => {
+                return Err(Error::Cache(
+                    "Qwen MTP cache geometry differs from the model".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -306,6 +397,238 @@ impl<B: Backend> CausalLanguageModel<B> for Qwen3_5ForCausalLm<B> {
 }
 
 impl<B: Backend> Qwen3_5ForCausalLm<B> {
+    /// Allocates the batch-one transactional state required by MTP speculation.
+    ///
+    /// The target stages `K + 1` tokens (the guaranteed target lead plus as many
+    /// accepted drafts), while the shifted MTP bank stages at most `K + 1`
+    /// inputs. Both use independent logical cursors and an atomic prefix commit.
+    pub fn new_speculative_decode_state(
+        &self,
+        config: CacheConfig,
+        batch_size: usize,
+        max_draft_tokens: usize,
+        device: &B::Device,
+    ) -> Result<Qwen3_5DecodeState<B>> {
+        if batch_size != 1 {
+            return Err(Error::Generation(format!(
+                "Qwen MTP speculative decoding supports batch size one, found {batch_size}"
+            )));
+        }
+        if max_draft_tokens == 0 {
+            return Err(Error::Generation(
+                "Qwen MTP max_draft_tokens must be greater than zero".into(),
+            ));
+        }
+        if self.mtp.is_none() {
+            return Err(Error::Generation(
+                "Qwen model has no configured MTP prediction layer".into(),
+            ));
+        }
+        if self.mtp.as_ref().is_some_and(|mtp| mtp.layers.len() != 1) {
+            return Err(Error::BackendCapability(
+                "cached Qwen MTP currently supports the released single-layer auxiliary graph"
+                    .into(),
+            ));
+        }
+        let staging = max_draft_tokens
+            .checked_add(1)
+            .ok_or_else(|| Error::Generation("Qwen MTP staging capacity overflows usize".into()))?;
+        if staging > config.capacity() {
+            return Err(Error::Generation(format!(
+                "Qwen MTP needs staging capacity {staging}, exceeding cache capacity {}",
+                config.capacity()
+            )));
+        }
+        Qwen3_5DecodeState::new_with_staging(self, config, batch_size, staging, device)
+    }
+
+    /// Evaluates shifted MTP inputs against its independent incremental KV cache.
+    ///
+    /// Before the first call, callers prefill pairs `(x_(i+1), h_i)` for the
+    /// prompt. During speculation each call contains exactly one pair and is
+    /// staged transactionally. The returned hidden state is recurrently fed to
+    /// the next draft step, as prescribed by the released Qwen runtime.
+    pub fn forward_mtp_cached(
+        &self,
+        next_token_ids: Tensor<B, 2, Int>,
+        target_or_mtp_hidden: Tensor<B, 3>,
+        position_ids: Option<Tensor<B, 2, Int>>,
+        step: usize,
+        state: &mut Qwen3_5DecodeState<B>,
+    ) -> Result<Qwen3_5MtpPrediction<B>> {
+        state.validate_for_model(self)?;
+        let mtp = self.mtp.as_ref().ok_or_else(|| {
+            Error::Generation("Qwen model has no configured MTP prediction layer".into())
+        })?;
+        let [batch, sequence] = next_token_ids.dims();
+        if batch != 1 || batch != state.tensors.batch_size() || sequence == 0 {
+            return Err(Error::shape(
+                "qwen.mtp.next_token_ids",
+                "[1, nonzero_sequence] matching a batch-one decode state",
+                format!("[{batch}, {sequence}]"),
+            ));
+        }
+        if state.tensors.has_active_transaction() && sequence != 1 {
+            return Err(Error::Generation(
+                "transactional Qwen MTP decoding accepts exactly one token per call".into(),
+            ));
+        }
+        validate_token_ids(next_token_ids.clone(), self.config().vocab_size)?;
+        ensure_device(
+            "qwen.mtp.next_token_ids",
+            &next_token_ids.device(),
+            state.tensors.device(),
+        )?;
+        ensure_device(
+            "qwen.mtp.hidden_state",
+            &target_or_mtp_hidden.device(),
+            state.tensors.device(),
+        )?;
+        let committed = state
+            .tensors
+            .mtp_lengths()
+            .and_then(|lengths| lengths.first().copied())
+            .ok_or_else(|| Error::Cache("Qwen MTP metadata is not enabled".into()))?;
+        let baseline = state
+            .tensors
+            .mtp_working_lengths()
+            .and_then(|lengths| lengths.first().copied())
+            .ok_or_else(|| Error::Cache("Qwen MTP working metadata is not enabled".into()))?;
+        let end = baseline
+            .checked_add(sequence)
+            .ok_or_else(|| Error::Generation("Qwen MTP logical position overflows usize".into()))?;
+        if end > state.tensors.capacity() {
+            return Err(
+                TensorCacheError::Metadata(DecodeStateError::CapacityExceeded {
+                    sequence: 0,
+                    requested: end,
+                    capacity: state.tensors.capacity(),
+                })
+                .into(),
+            );
+        }
+        let positions = match position_ids {
+            Some(positions) => {
+                if positions.dims() != [1, sequence] {
+                    return Err(Error::shape(
+                        "qwen.mtp.position_ids",
+                        format!("[1, {sequence}]"),
+                        format!("{:?}", positions.dims()),
+                    ));
+                }
+                ensure_device(
+                    "qwen.mtp.position_ids",
+                    &positions.device(),
+                    state.tensors.device(),
+                )?;
+                validate_position_range(positions.clone(), self.config().max_position_embeddings)?;
+                positions
+            }
+            None => implicit_positions::<B>(baseline, sequence, state.tensors.device())?,
+        };
+        let evaluated_context = evaluated_context(positions.clone())?;
+        validate_cached_rope_context(self.model.rope.scaling(), evaluated_context)?;
+        let embedding = self.model.embed_tokens.forward(next_token_ids);
+        let mut hidden = mtp.fuse(embedding, target_or_mtp_hidden)?;
+        let layer_count = mtp.layers.len();
+        if layer_count == 0 {
+            return Err(Error::Cache("Qwen MTP graph contains no layer".into()));
+        }
+        let layer_index = step % layer_count;
+        let rotary = rotary_angles(self.model.rope, positions, evaluated_context)?;
+        let mut pending = PendingQwenCacheWrites::new();
+        let bank = state
+            .tensors
+            .mtp()
+            .ok_or_else(|| Error::Cache("Qwen MTP cache bank is not enabled".into()))?;
+        hidden = mtp.layers[layer_index].forward_cached(
+            hidden,
+            Some(&rotary),
+            0,
+            committed,
+            baseline,
+            bank,
+            Qwen3_5LayerCache::FullAttention(layer_index),
+            &mut pending,
+            DeltaNetMode::Recurrent,
+        )?;
+        hidden = mtp.norm.forward(hidden);
+        let write = match (
+            pending.native_kv.pop(),
+            pending.native_kv.is_empty(),
+            pending.recurrent.is_empty(),
+        ) {
+            (Some(write), true, true) => write,
+            _ => {
+                return Err(Error::Cache(
+                    "Qwen MTP layer produced an invalid cache write set".into(),
+                ));
+            }
+        };
+        commit_mtp_write(&mut state.tensors, write, sequence)?;
+        Ok(Qwen3_5MtpPrediction {
+            logits: self.project_hidden(hidden.clone()),
+            hidden_state: hidden,
+        })
+    }
+
+    /// Aligns a fresh MTP cache with an already-prefilled target prompt.
+    ///
+    /// For prompt tokens `x_0..x_(L-1)` and target states `h_0..h_(L-1)`, the
+    /// auxiliary cache receives exactly the shifted `L-1` pairs
+    /// `(x_(i+1), h_i)`. Therefore its committed cursor is one behind the target
+    /// cursor at every speculative-cycle boundary.
+    pub fn prefill_mtp_cache(
+        &self,
+        prompt_token_ids: Tensor<B, 2, Int>,
+        target_final_hidden_states: Tensor<B, 3>,
+        state: &mut Qwen3_5DecodeState<B>,
+    ) -> Result<()> {
+        state.validate_for_model(self)?;
+        if state.tensors.has_active_transaction() {
+            return Err(TensorCacheError::TransactionActive {
+                operation: "prefill Qwen MTP cache",
+            }
+            .into());
+        }
+        let [batch, sequence] = prompt_token_ids.dims();
+        if batch != 1
+            || sequence == 0
+            || target_final_hidden_states.dims() != [1, sequence, self.config().hidden_size]
+        {
+            return Err(Error::shape(
+                "qwen.mtp.prefill",
+                format!(
+                    "token IDs [1, L] and target hidden states [1, L, {}] for L > 0",
+                    self.config().hidden_size
+                ),
+                format!(
+                    "tokens={:?}, hidden={:?}",
+                    prompt_token_ids.dims(),
+                    target_final_hidden_states.dims()
+                ),
+            ));
+        }
+        if state.tensors.lengths() != [sequence] {
+            return Err(Error::Cache(format!(
+                "Qwen target cache length must equal MTP prefill prompt length {sequence}, found {:?}",
+                state.tensors.lengths()
+            )));
+        }
+        if state.tensors.mtp_lengths() != Some([0].as_slice()) {
+            return Err(Error::Cache(
+                "Qwen MTP prefill requires a fresh auxiliary cache".into(),
+            ));
+        }
+        if sequence == 1 {
+            return Ok(());
+        }
+        let shifted_tokens = prompt_token_ids.narrow(1, 1, sequence - 1);
+        let shifted_hidden = target_final_hidden_states.narrow(1, 0, sequence - 1);
+        self.forward_mtp_cached(shifted_tokens, shifted_hidden, None, 0, state)?;
+        Ok(())
+    }
+
     /// Evaluates a rectangular prompt/decode segment and appends only valid tokens.
     ///
     /// Each row is compacted according to `token_mask`, evaluated against its own
@@ -325,12 +648,6 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             ));
         }
         state.validate_for_model(self)?;
-        if state.tensors.has_active_transaction() {
-            return Err(TensorCacheError::TransactionActive {
-                operation: "run ordinary Qwen prefill/decode",
-            }
-            .into());
-        }
         let prepared = prepare_stateful_input(self, &input, state, phase)?;
         validate_logits_selection(&options.logits, prepared.sequence)?;
         let device = input.token_ids.device();
@@ -363,7 +680,8 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
                 .clone()
                 .slice([sequence_index..sequence_index + 1, 0..prepared.sequence])
                 .select(1, selector.clone());
-            let baseline = state.tensors.lengths()[sequence_index];
+            let committed_baseline = state.tensors.lengths()[sequence_index];
+            let baseline = state.tensors.working_lengths()[sequence_index];
             let positions = match &input.position_ids {
                 Some(position_ids) => position_ids
                     .clone()
@@ -376,6 +694,7 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
                 tokens,
                 positions,
                 sequence_index,
+                committed_baseline,
                 baseline,
                 evaluated_context,
                 &state.tensors,
@@ -406,14 +725,7 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             .map(|rows| Tensor::cat(rows, 0))
             .collect();
         let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
-        let logits = match &self.lm_head {
-            Some(head) => head.forward(selected),
-            None => burn::tensor::module::linear(
-                selected,
-                self.model.embed_tokens.weight.val().transpose(),
-                None,
-            ),
-        };
+        let logits = self.project_hidden(selected);
         pending.commit(&mut state.tensors, &state.layout, &prepared.token_counts)?;
         Ok(CausalLmOutput {
             logits,
@@ -433,6 +745,7 @@ impl<B: Backend> Qwen3_5TextModel<B> {
         token_ids: Tensor<B, 2, Int>,
         positions: Tensor<B, 2, Int>,
         sequence_index: usize,
+        committed_baseline: usize,
         baseline: usize,
         evaluated_context: usize,
         state: &TensorDecodeState<B>,
@@ -470,6 +783,7 @@ impl<B: Backend> Qwen3_5TextModel<B> {
                 hidden,
                 rotary.as_ref(),
                 sequence_index,
+                committed_baseline,
                 baseline,
                 state.main(),
                 slot,
@@ -501,6 +815,7 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
         hidden: Tensor<B, 3>,
         rotary: Option<&RotaryAngles<B>>,
         sequence_index: usize,
+        committed_baseline: usize,
         baseline: usize,
         bank: &TensorCacheBank<B>,
         slot: Qwen3_5LayerCache,
@@ -530,7 +845,11 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
                 let new_values = projection.value.clone();
                 let query_sequence = projection.query.dims()[2];
                 let cache = bank.native_kv(NATIVE_KV_GROUP)?;
-                let history = cache.read_sequence(cache_layer, sequence_index, baseline)?;
+                let history = if cache.has_active_staging() {
+                    cache.read_working_sequence(cache_layer, sequence_index, committed_baseline)?
+                } else {
+                    cache.read_sequence(cache_layer, sequence_index, baseline)?
+                };
                 if history.retained_positions() != (0..baseline) {
                     return Err(Error::Cache(
                         "Qwen full-attention cache evicted required global history".into(),
@@ -562,7 +881,11 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
                     Error::Checkpoint("Qwen linear layer has no DeltaNet module".into())
                 })?;
                 let cache = bank.recurrent(RECURRENT_GROUP)?;
-                let cached = cache.read_sequence(cache_layer, sequence_index)?;
+                let cached = if cache.has_active_staging() {
+                    cache.read_working_sequence(cache_layer, sequence_index)?
+                } else {
+                    cache.read_sequence(cache_layer, sequence_index)?
+                };
                 let mut recurrent = GatedDeltaNetState {
                     convolution: cached.convolution().clone(),
                     recurrent: cached.matrix().clone(),
@@ -599,7 +922,10 @@ fn finish_residual<B: Backend>(
 }
 
 /// Builds the model-layer mapping and homogeneous cache specifications.
-fn cache_layout<B: Backend>(model: &Qwen3_5ForCausalLm<B>) -> Result<Qwen3_5CacheLayout> {
+fn cache_layout<B: Backend>(
+    model: &Qwen3_5ForCausalLm<B>,
+    staging_capacity: usize,
+) -> Result<Qwen3_5CacheLayout> {
     let mut full_layers = 0usize;
     let mut delta_layers = 0usize;
     let schedule = model
@@ -629,6 +955,7 @@ fn cache_layout<B: Backend>(model: &Qwen3_5ForCausalLm<B>) -> Result<Qwen3_5Cach
                 KvCacheStorage::Full,
                 activation_dtype,
             )
+            .map(|spec| spec.with_staging_capacity(staging_capacity))
         })
         .transpose()?;
     let recurrent = if delta_layers == 0 {
@@ -655,21 +982,40 @@ fn cache_layout<B: Backend>(model: &Qwen3_5ForCausalLm<B>) -> Result<Qwen3_5Cach
                 "stateful decoding currently requires a kernel of at least two",
             ));
         }
-        Some(RecurrentStateSpec::new_with_dtypes(
-            delta_layers,
-            config.value_heads,
-            config.key_head_dim,
-            config.value_head_dim,
-            config.convolution_channels()?,
-            convolution_width,
-            DType::F32,
-            activation_dtype,
-        )?)
+        Some(
+            RecurrentStateSpec::new_with_dtypes(
+                delta_layers,
+                config.value_heads,
+                config.key_head_dim,
+                config.value_head_dim,
+                config.convolution_channels()?,
+                convolution_width,
+                DType::F32,
+                activation_dtype,
+            )?
+            .with_staging_capacity(staging_capacity),
+        )
     };
+    let mtp_native_kv = model
+        .mtp
+        .as_ref()
+        .map(|mtp| {
+            NativeKvCacheSpec::new(
+                mtp.layers.len(),
+                model.config().num_key_value_heads,
+                model.config().head_dim,
+                KvCacheStorage::Full,
+                activation_dtype,
+            )
+            .map(|spec| spec.with_staging_capacity(staging_capacity))
+        })
+        .transpose()?;
     Ok(Qwen3_5CacheLayout {
         schedule,
         native_kv,
         recurrent,
+        mtp_native_kv,
+        staging_capacity,
     })
 }
 
@@ -680,6 +1026,52 @@ struct PendingNativeKvWrite<B: Backend> {
     start: usize,
     keys: Tensor<B, 4>,
     values: Tensor<B, 4>,
+}
+
+/// Publishes one complete MTP-layer KV suffix and advances only its cursor.
+fn commit_mtp_write<B: Backend>(
+    state: &mut TensorDecodeState<B>,
+    write: PendingNativeKvWrite<B>,
+    token_count: usize,
+) -> Result<()> {
+    let PendingNativeKvWrite {
+        cache_layer,
+        sequence,
+        start,
+        keys,
+        values,
+    } = write;
+    let working = state
+        .mtp_working_lengths()
+        .and_then(|lengths| lengths.get(sequence).copied())
+        .ok_or_else(|| Error::Cache("Qwen MTP metadata is not enabled".into()))?;
+    if start != working || keys.dims()[2] != token_count || values.dims()[2] != token_count {
+        return Err(Error::Cache(
+            "Qwen MTP cache write does not cover its complete logical suffix".into(),
+        ));
+    }
+    if state.has_active_transaction() {
+        state
+            .mtp_mut()
+            .ok_or_else(|| Error::Cache("Qwen MTP cache bank is not enabled".into()))?
+            .native_kv_mut(NATIVE_KV_GROUP)?
+            .stage_sequence(cache_layer, sequence, keys, values)?;
+        state.advance_mtp(&[token_count])?;
+        return Ok(());
+    }
+
+    let bank = state
+        .mtp()
+        .ok_or_else(|| Error::Cache("Qwen MTP cache bank is not enabled".into()))?;
+    let cache = bank.native_kv(NATIVE_KV_GROUP)?;
+    let write = cache.prepare_sequence_write(cache_layer, sequence, start, keys, values)?;
+    let writes = bank.prepare_direct_writes(Some((NATIVE_KV_GROUP, vec![write])), None)?;
+    state.advance_mtp(&[token_count])?;
+    state
+        .mtp_mut()
+        .ok_or_else(|| Error::Cache("Qwen MTP cache bank is not enabled".into()))?
+        .apply_prepared_direct_writes(writes);
+    Ok(())
 }
 
 /// Deferred terminal-state replacement produced by one DeltaNet layer.
@@ -726,6 +1118,46 @@ impl<B: Backend> PendingQwenCacheWrites<B> {
         token_counts: &[usize],
     ) -> Result<()> {
         self.validate_coverage(state, layout, token_counts)?;
+        if state.has_active_transaction() {
+            // Speculative verification advances one target token at a time.
+            // That restriction is mathematically necessary for DeltaNet: its
+            // recurrence is not invertible, so every accepted prefix requires
+            // the post-token state snapshot at that exact boundary.
+            if layout.recurrent.is_some() && token_counts.iter().any(|&count| count > 1) {
+                return Err(Error::Cache(
+                    "transactional Qwen DeltaNet decode accepts at most one token per row and call"
+                        .into(),
+                ));
+            }
+            let PendingQwenCacheWrites {
+                native_kv,
+                recurrent,
+            } = self;
+            if !native_kv.is_empty() {
+                let cache = state.main_mut().native_kv_mut(NATIVE_KV_GROUP)?;
+                for write in native_kv {
+                    cache.stage_sequence(
+                        write.cache_layer,
+                        write.sequence,
+                        write.keys,
+                        write.values,
+                    )?;
+                }
+            }
+            if !recurrent.is_empty() {
+                let cache = state.main_mut().recurrent_mut(RECURRENT_GROUP)?;
+                for write in recurrent {
+                    cache.stage_sequence_snapshots(
+                        write.cache_layer,
+                        write.sequence,
+                        write.matrix.unsqueeze_dim::<5>(1),
+                        write.convolution.unsqueeze_dim::<4>(1),
+                    )?;
+                }
+            }
+            state.advance(token_counts)?;
+            return Ok(());
+        }
         let bank = state.main();
         let native_kv = if self.native_kv.is_empty() {
             None
@@ -816,7 +1248,7 @@ impl<B: Backend> PendingQwenCacheWrites<B> {
             })?;
             if count == 0
                 || write.cache_layer >= full_layers
-                || write.start != state.lengths()[write.sequence]
+                || write.start != state.working_lengths()[write.sequence]
                 || write.keys.dims()[2] != count
                 || write.values.dims()[2] != count
                 || !native_seen.insert((write.cache_layer, write.sequence))
@@ -944,7 +1376,7 @@ fn prepare_stateful_input<B: Backend>(
     let mut implicit_contexts = Vec::with_capacity(batch);
     for (sequence_index, (&baseline, &additional)) in state
         .tensors
-        .lengths()
+        .working_lengths()
         .iter()
         .zip(&token_counts)
         .enumerate()
@@ -1093,7 +1525,7 @@ fn implicit_positions<B: Backend>(
 }
 
 /// Returns one plus the largest explicit or derived position in a compact row.
-fn evaluated_context<B: Backend>(positions: Tensor<B, 2, Int>) -> Result<usize> {
+pub(super) fn evaluated_context<B: Backend>(positions: Tensor<B, 2, Int>) -> Result<usize> {
     let maximum = positions
         .max()
         .try_into_scalar()
@@ -1109,7 +1541,7 @@ fn evaluated_context<B: Backend>(positions: Tensor<B, 2, Int>) -> Result<usize> 
 }
 
 /// Validates every explicit position before a cache tensor is mutated.
-fn validate_position_range<B: Backend>(
+pub(super) fn validate_position_range<B: Backend>(
     positions: Tensor<B, 2, Int>,
     maximum_context: usize,
 ) -> Result<()> {
@@ -2195,6 +2627,206 @@ mod tests {
         assert_eq!(
             actual.as_slice::<f32>().expect("f32 output"),
             &[1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0]
+        );
+    }
+
+    /// Shifted MTP prefill and tokenwise cache updates match stateless attention.
+    #[test]
+    fn mtp_full_and_incremental_paths_are_equivalent() {
+        let device = Default::default();
+        let mut config = tiny_config();
+        config.mtp_num_hidden_layers = 1;
+        config.num_hidden_layers = 1;
+        config.layer_types = vec![Qwen3_5LayerType::FullAttention];
+        TestBackend::seed(&device, 991);
+        let model = Qwen3_5ForCausalLm::<TestBackend>::init(config, &device).unwrap();
+        let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device);
+
+        let mut full_state = model
+            .new_speculative_decode_state(CacheConfig::new(1, 12).unwrap(), 1, 2, &device)
+            .unwrap();
+        let target = model
+            .prefill(
+                CausalLmInput {
+                    token_ids: prompt.clone(),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut full_state,
+                &diagnostic_options(),
+            )
+            .unwrap()
+            .final_hidden_state
+            .unwrap();
+        let shifted_tokens = prompt.clone().narrow(1, 1, 2);
+        let shifted_hidden = target.clone().narrow(1, 0, 2);
+        let stateless = model
+            .forward_mtp(
+                shifted_tokens.clone(),
+                shifted_hidden.clone(),
+                Tensor::<TestBackend, 2, Int>::from_ints([[0, 1]], &device),
+                0,
+            )
+            .unwrap();
+        let cached = model
+            .forward_mtp_cached(
+                shifted_tokens.clone(),
+                shifted_hidden.clone(),
+                None,
+                0,
+                &mut full_state,
+            )
+            .unwrap();
+        assert_close(cached.hidden_state, stateless.hidden_state.clone());
+        assert_eq!(
+            full_state.tensor_state().mtp_lengths(),
+            Some([2].as_slice())
+        );
+
+        let mut incremental_state = model
+            .new_speculative_decode_state(CacheConfig::new(1, 12).unwrap(), 1, 2, &device)
+            .unwrap();
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids: prompt,
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut incremental_state,
+                &diagnostic_options(),
+            )
+            .unwrap();
+        let first = model
+            .forward_mtp_cached(
+                shifted_tokens.clone().narrow(1, 0, 1),
+                shifted_hidden.clone().narrow(1, 0, 1),
+                None,
+                0,
+                &mut incremental_state,
+            )
+            .unwrap();
+        let second = model
+            .forward_mtp_cached(
+                shifted_tokens.narrow(1, 1, 1),
+                shifted_hidden.narrow(1, 1, 1),
+                None,
+                0,
+                &mut incremental_state,
+            )
+            .unwrap();
+        assert_close(second.hidden_state, stateless.hidden_state.narrow(1, 1, 1));
+        assert_eq!(first.hidden_state.dims(), [1, 1, 8]);
+        assert_eq!(
+            incremental_state.tensor_state().mtp_lengths(),
+            Some([2].as_slice())
+        );
+    }
+
+    /// A rejected target/MTP suffix rolls both tensor banks back byte-exactly.
+    #[test]
+    fn speculative_transaction_restores_target_and_mtp_bytes() {
+        let device = Default::default();
+        let mut config = tiny_config();
+        config.mtp_num_hidden_layers = 1;
+        TestBackend::seed(&device, 992);
+        let model = Qwen3_5ForCausalLm::<TestBackend>::init(config, &device).unwrap();
+        let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device);
+        let mut state = model
+            .new_speculative_decode_state(CacheConfig::new(1, 12).unwrap(), 1, 2, &device)
+            .unwrap();
+        let target = model
+            .prefill(
+                CausalLmInput {
+                    token_ids: prompt.clone(),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &diagnostic_options(),
+            )
+            .unwrap()
+            .final_hidden_state
+            .unwrap();
+        model
+            .prefill_mtp_cache(prompt, target.clone(), &mut state)
+            .unwrap();
+        let main_before = cache_row_snapshot(&state, 0);
+        let mtp_before = state
+            .tensor_state()
+            .mtp()
+            .unwrap()
+            .native_kv(0)
+            .unwrap()
+            .keys(0)
+            .unwrap()
+            .clone()
+            .into_data();
+        let mtp_values_before = state
+            .tensor_state()
+            .mtp()
+            .unwrap()
+            .native_kv(0)
+            .unwrap()
+            .values(0)
+            .unwrap()
+            .clone()
+            .into_data();
+        let mark = state.mark().unwrap();
+        model
+            .forward_mtp_cached(
+                Tensor::<TestBackend, 2, Int>::from_ints([[3]], &device),
+                target.narrow(1, 1, 1),
+                None,
+                0,
+                &mut state,
+            )
+            .unwrap();
+        model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[3]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &diagnostic_options(),
+            )
+            .unwrap();
+        assert_eq!(state.tensor_state().working_lengths(), &[3]);
+        assert_eq!(
+            state.tensor_state().mtp_working_lengths(),
+            Some([2].as_slice())
+        );
+        state.rollback(mark).unwrap();
+        assert_eq!(state.tensor_state().lengths(), &[2]);
+        assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
+        assert_eq!(cache_row_snapshot(&state, 0), main_before);
+        assert_eq!(
+            state
+                .tensor_state()
+                .mtp()
+                .unwrap()
+                .native_kv(0)
+                .unwrap()
+                .keys(0)
+                .unwrap()
+                .clone()
+                .into_data(),
+            mtp_before
+        );
+        assert_eq!(
+            state
+                .tensor_state()
+                .mtp()
+                .unwrap()
+                .native_kv(0)
+                .unwrap()
+                .values(0)
+                .unwrap()
+                .clone()
+                .into_data(),
+            mtp_values_before
         );
     }
 }

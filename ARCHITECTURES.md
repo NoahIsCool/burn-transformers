@@ -17,7 +17,7 @@ semantics are cross-checked against vLLM revision
 
 | Family | Acceptance checkpoint | Immutable revision | Transformer features | Checkpoint handling |
 | --- | --- | --- | --- | --- |
-| Qwen3.5 text / Qwen3.8 | `Qwen/Qwen3.8-27B` | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | 64-layer 3:1 DeltaNet/full-attention schedule; zero-centered RMSNorm; partial MRoPE; gated GQA; SwiGLU; one MTP layer | Load `model.language_model.*`, `lm_head.*`, and eventually `mtp.*`; report `model.visual.*` as an explicitly ignored modality |
+| Qwen3.5 text / Qwen3.8 | `Qwen/Qwen3.8-27B` | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | 64-layer 3:1 DeltaNet/full-attention schedule; zero-centered RMSNorm; partial MRoPE; gated GQA; SwiGLU; one MTP layer | Load `model.language_model.*`, `lm_head.*`, and optionally all `mtp.*`; report `model.visual.*` as an explicitly ignored modality |
 | Qwen3.5 bring-up | `Qwen/Qwen3.5-0.8B` | `2fc06364715b967f1860aea9cf38778875588b17` | Same configuration family used to validate parsing, tokenizer integration, and checkpoint mapping before the 27B run | Strict sharded SafeTensors |
 | Qwen3 MoE | `Qwen/Qwen3-30B-A3B` | `ad44e777bcd18fa416d9da3bd8f70d33ebb85d39` | GQA and Q/K normalization; 128 routed experts; top-8 routing; no shared expert | Strict sharded SafeTensors; selected-expert dispatch must remain sparse |
 | DeepSeek V2 | `deepseek-ai/DeepSeek-V2-Lite` | `604d5664dddd88a0433dbae533b7fe9472482de0` | Multi-head latent attention; compressed latent decode cache; YaRN; top-6 routed and two shared experts | Strict sharded SafeTensors; remote Python is never executed |
@@ -64,6 +64,16 @@ convolution history and a recurrent key/value matrix. Full attention stores only
 native KV heads. MTP owns an independent one-layer KV cache and uses
 transactional target state so a rejected speculative suffix can be discarded
 without corrupting either form of state.
+
+The first runtime slice implements batch-one greedy verification and stochastic
+rejection sampling. `K` defaults to two. Prompt setup shifts `(x_(i+1), h_i)`
+into the MTP cache, accepted target and MTP prefixes commit atomically, and an
+all-accepted cycle performs one auxiliary catch-up step to preserve the invariant
+`target_length = mtp_length + 1`. The stochastic correction distribution is
+`normalize((p - q)_+)`, which preserves the target marginal. This is synthetic
+and reference-math validation only: support is not promoted to 27B acceptance
+until the pinned real checkpoint passes logits, token, memory, and throughput
+gates on target hardware.
 
 The exact namespace rewrites, tensor-shape equations, interleaved gated-query
 layout contract, MTP inventory, and metadata-only golden acceptance counts are

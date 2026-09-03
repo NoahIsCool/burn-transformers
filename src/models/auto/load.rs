@@ -41,6 +41,8 @@ pub struct AutoLoadOptions {
     pub generation: Option<GenerationConfig>,
     /// Load `tokenizer.json` when the crate feature and artifact are both present.
     pub load_tokenizer: bool,
+    /// Load Qwen's optional 15-tensor MTP graph instead of the base LM alone.
+    pub qwen_mtp: bool,
     /// Optional upstream repository recorded in [`ModelSourceMetadata`].
     pub repository: Option<String>,
     /// Optional immutable upstream revision recorded in source metadata.
@@ -53,6 +55,7 @@ impl Default for AutoLoadOptions {
             checkpoint: LoadOptions::default(),
             generation: None,
             load_tokenizer: true,
+            qwen_mtp: false,
             repository: None,
             revision: None,
         }
@@ -98,7 +101,7 @@ impl<B: Backend> AutoCausalLm<B> {
         let contract = config
             .checkpoint_contract(Qwen3_5CheckpointOptions {
                 source: source_layout,
-                include_mtp: false,
+                include_mtp: options.qwen_mtp,
             })
             .map_err(|error| {
                 Error::configuration(
@@ -109,7 +112,13 @@ impl<B: Backend> AutoCausalLm<B> {
         let plan = contract
             .build_load_plan(&manifest, &options.checkpoint)
             .map_err(|error| Error::Checkpoint(error.to_string()))?;
-        let mut model = Qwen3_5ForCausalLm::init(config, device)?;
+        let mut executable_config = config;
+        if !options.qwen_mtp {
+            // Base-only loading must not leave a randomly initialized MTP graph
+            // reachable through the public speculative API.
+            executable_config.mtp_num_hidden_layers = 0;
+        }
+        let mut model = Qwen3_5ForCausalLm::init(executable_config, device)?;
         let outcome = execute_local_load_plan(&manifest, &plan, &mut model)
             .map_err(|error| Error::Checkpoint(error.to_string()))?;
         LoadedModel::new(
@@ -442,6 +451,12 @@ mod tests {
     use crate::{CausalLmInput, ForwardOptions, Seq2SeqInput};
 
     type TestBackend = Flex<f32, i32>;
+
+    /// Automatic loading is base-only unless MTP consumption is explicit.
+    #[test]
+    fn automatic_options_keep_mtp_opt_in() {
+        assert!(!AutoLoadOptions::default().qwen_mtp);
+    }
 
     /// Model tokens provide defaults and local sampling metadata overrides them.
     #[test]
