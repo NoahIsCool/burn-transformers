@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "cached_and_burnpack_conversion_verified_pending_packed_kernel_and_32k_stress",
+  "phase": "full_precision_and_q4_packed_metal_smoke_verified_pending_quantized_quality_and_32k_stress",
   "repository": "Qwen/Qwen3.5-0.8B",
   "revision": "2fc06364715b967f1860aea9cf38778875588b17",
   "artifact_layout": {
@@ -37,7 +37,10 @@
     "inactive_decode_rows_supported": true,
     "q8_burnpack_conversion_validated": true,
     "q4_burnpack_conversion_validated": true,
-    "packed_kernel_execution_validated": false,
+    "packed_kernel_execution_validated": true,
+    "q4_packed_full_model_metal_validated": true,
+    "q8_packed_single_backend_metal_validated": false,
+    "quantized_quality_corpus_validated": false,
     "quantized_long_context_32k_validated": false
   },
   "smoke_acceptance": {
@@ -85,7 +88,20 @@
       "largest_materialized_tensor_bytes": 3538944
     },
     "combined_conversion_and_validation_wall_seconds": 153.55,
-    "artifacts_retained": false,
-    "packed_execution_support": "unavailable"
+    "artifacts_retained": {
+      "q8": false,
+      "q4": true
+    },
+    "packed_execution_support": "burn_qfloat_matmul",
+    "packed_metal_acceptance": {
+      "certified_features": "--no-default-features --features std,metal,tokenizers",
+      "q4_full_model_stateless_finite": true,
+      "q4_cached_finite": true,
+      "q4_stateless_cached_cosine": 1.0,
+      "q4_first_token_id": 13,
+      "f16_first_token_id": 11,
+      "quality_gate_pending": true,
+      "known_burn_0_21_limitation": "enabling rocm feature-unifies CubeCL autotuning into Metal; packed Q4/Q8 execution is rejected because quantized GEMV candidates use incompatible logical vector widths"
+    }
   }
 }

@@ -27,6 +27,7 @@ use crate::{
     delta_net::{GatedDeltaNet, GatedDeltaNetConfig},
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
     normalization::{RmsNorm, RmsNormConfig},
+    operations,
     position::{
         DynamicNtkScaling, LinearRopeScaling, RopeConfig, RopeScaling, YarnConfig, apply_rotary,
         rotary_angles,
@@ -164,7 +165,7 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
         Ok(residual
             + self
                 .mlp
-                .forward(self.post_attention_layernorm.forward(hidden)))
+                .forward(self.post_attention_layernorm.forward(hidden))?)
     }
 }
 
@@ -302,7 +303,7 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
         }
         let (hidden, hidden_states) = self.model.forward(&input, options.hidden_states)?;
         let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
-        let logits = self.project_hidden(selected);
+        let logits = self.project_hidden(selected)?;
         Ok(CausalLmOutput {
             logits,
             final_hidden_state: options.hidden_states.then_some(hidden),
@@ -358,7 +359,7 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             self.model.rope,
             context,
         )?;
-        let logits = self.project_hidden(output.hidden_state.clone());
+        let logits = self.project_hidden(output.hidden_state.clone())?;
         Ok(Qwen3_5MtpPrediction {
             logits,
             hidden_state: output.hidden_state,
@@ -366,14 +367,14 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
     }
 
     /// Projects normalized hidden states with the shared base-model LM head.
-    pub(crate) fn project_hidden(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub(crate) fn project_hidden(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         match &self.lm_head {
-            Some(head) => head.forward(hidden),
-            None => burn::tensor::module::linear(
+            Some(head) => operations::linear(hidden, head),
+            None => Ok(burn::tensor::module::linear(
                 hidden,
                 self.model.embed_tokens.weight.val().transpose(),
                 None,
-            ),
+            )),
         }
     }
 }

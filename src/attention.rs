@@ -24,7 +24,7 @@ use burn::{
 };
 
 use crate::normalization::RmsNorm;
-use crate::{Error, Result, architecture::TokenMask, normalization::RmsNormConfig};
+use crate::{Error, Result, architecture::TokenMask, normalization::RmsNormConfig, operations};
 
 /// Multiplicative gate emitted alongside Qwen/Muse query projections.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -277,7 +277,7 @@ impl<B: Backend> GroupedQueryAttention<B> {
             ));
         }
         let query_width = self.query_heads * self.head_dim;
-        let projected_query = self.q_proj.forward(query_hidden);
+        let projected_query = operations::linear(query_hidden, &self.q_proj)?;
         let (query, gate) = if self.output_gate == AttentionOutputGate::None {
             (
                 projected_query
@@ -306,14 +306,10 @@ impl<B: Backend> GroupedQueryAttention<B> {
                 ),
             )
         };
-        let key = self
-            .k_proj
-            .forward(key_value_hidden.clone())
+        let key = operations::linear(key_value_hidden.clone(), &self.k_proj)?
             .reshape([batch, key_sequence, self.key_value_heads, self.head_dim])
             .swap_dims(1, 2);
-        let value = self
-            .v_proj
-            .forward(key_value_hidden)
+        let value = operations::linear(key_value_hidden, &self.v_proj)?
             .reshape([batch, key_sequence, self.key_value_heads, self.head_dim])
             .swap_dims(1, 2);
         let query = self
@@ -373,7 +369,7 @@ impl<B: Backend> GroupedQueryAttention<B> {
                 ));
             }
         };
-        Ok(self.o_proj.forward(context))
+        operations::linear(context, &self.o_proj)
     }
 
     /// Evaluates attention without RoPE or relative-position bias.

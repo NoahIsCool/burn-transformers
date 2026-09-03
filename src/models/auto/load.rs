@@ -16,7 +16,10 @@ use serde::Deserialize;
 use crate::{
     Error, GenerationConfig, LoadedModel, ModelSourceMetadata, ModelTokenizer, Result,
     SamplingStrategy,
-    checkpoint::{CheckpointManifest, LoadOptions, execute_local_load_plan},
+    checkpoint::{
+        CheckpointManifest, LoadOptions, execute_local_load_plan,
+        quantization::{QuantizedBurnpackArtifact, execute_local_quantized_load_plan},
+    },
 };
 
 use super::{AutoCausalLm, AutoSeq2SeqLm, detect_model_type};
@@ -25,6 +28,7 @@ use crate::models::{
     qwen3_5::{
         Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5ForCausalLm, Qwen3_5TextConfig,
     },
+    qwen3_moe::{Qwen3MoeCheckpointOptions, Qwen3MoeConfig, Qwen3MoeForCausalLm},
     t5::{T5Config, T5ForConditionalGeneration},
 };
 use burn::tensor::backend::Backend;
@@ -43,6 +47,8 @@ pub struct AutoLoadOptions {
     pub load_tokenizer: bool,
     /// Load Qwen's optional 15-tensor MTP graph instead of the base LM alone.
     pub qwen_mtp: bool,
+    /// Optional packed weight sidecar; relative paths resolve below the model root.
+    pub quantized_burnpack: Option<PathBuf>,
     /// Optional upstream repository recorded in [`ModelSourceMetadata`].
     pub repository: Option<String>,
     /// Optional immutable upstream revision recorded in source metadata.
@@ -56,6 +62,7 @@ impl Default for AutoLoadOptions {
             generation: None,
             load_tokenizer: true,
             qwen_mtp: false,
+            quantized_burnpack: None,
             repository: None,
             revision: None,
         }
@@ -75,60 +82,136 @@ impl<B: Backend> AutoCausalLm<B> {
     ) -> Result<LoadedModel<Self>> {
         let (root, json) = read_required_config(root.as_ref())?;
         let model_type = detect_model_type(&json)?;
-        if model_type != "qwen3_5_text" {
-            return Err(Error::UnsupportedArchitecture(format!(
+        match model_type.as_str() {
+            "qwen3_5_text" => {
+                let config = Qwen3_5TextConfig::from_json_str(&json).map_err(|error| {
+                    Error::configuration("auto_causal.config", error.to_string())
+                })?;
+                let vocabulary_size = config.vocab_size;
+                let generation = normalize_generation_defaults(
+                    &root,
+                    config.eos_token_id.as_ref(),
+                    config.pad_token_id.as_ref(),
+                    vocabulary_size,
+                    options.generation.as_ref(),
+                )?;
+                let source = source_metadata(&root, &model_type, options)?;
+                let tokenizer = load_optional_tokenizer(&root, options.load_tokenizer)?;
+                let manifest = CheckpointManifest::discover(&root, &options.checkpoint)
+                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
+                let source_layout = qwen_source_layout(&manifest)?;
+                let contract = config
+                    .checkpoint_contract(Qwen3_5CheckpointOptions {
+                        source: source_layout,
+                        include_mtp: options.qwen_mtp,
+                    })
+                    .map_err(|error| {
+                        Error::configuration(
+                            format!("{}.{}", error.architecture, error.field),
+                            error.reason,
+                        )
+                    })?;
+                let plan = contract
+                    .build_load_plan(&manifest, &options.checkpoint)
+                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
+                let mut executable_config = config;
+                if !options.qwen_mtp {
+                    // Base-only loading must not leave a randomly initialized MTP graph
+                    // reachable through the public speculative API.
+                    executable_config.mtp_num_hidden_layers = 0;
+                }
+                let mut model = Qwen3_5ForCausalLm::init(executable_config, device)?;
+                let report = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
+                LoadedModel::new(
+                    Self::Qwen3_5(model),
+                    tokenizer,
+                    generation,
+                    source,
+                    report,
+                    vocabulary_size,
+                )
+            }
+            "qwen3_moe" => {
+                if options.qwen_mtp {
+                    return Err(Error::configuration(
+                        "auto_causal.qwen_mtp",
+                        "Qwen MTP is defined only for qwen3_5_text checkpoints",
+                    ));
+                }
+                let config = Qwen3MoeConfig::from_json_str(&json).map_err(|error| {
+                    Error::configuration("auto_causal.config", error.to_string())
+                })?;
+                let vocabulary_size = config.vocab_size;
+                let generation = normalize_generation_defaults(
+                    &root,
+                    config.eos_token_id.as_ref(),
+                    config.pad_token_id.as_ref(),
+                    vocabulary_size,
+                    options.generation.as_ref(),
+                )?;
+                let source = source_metadata(&root, &model_type, options)?;
+                let tokenizer = load_optional_tokenizer(&root, options.load_tokenizer)?;
+                let manifest = CheckpointManifest::discover(&root, &options.checkpoint)
+                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
+                let contract = config
+                    .checkpoint_contract(Qwen3MoeCheckpointOptions::default())
+                    .map_err(|error| {
+                        Error::configuration(
+                            format!("{}.{}", error.architecture, error.field),
+                            error.reason,
+                        )
+                    })?;
+                let plan = contract
+                    .build_load_plan(&manifest, &options.checkpoint)
+                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
+                let mut model = Qwen3MoeForCausalLm::init(config, device)?;
+                let report = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
+                LoadedModel::new(
+                    Self::Qwen3Moe(model),
+                    tokenizer,
+                    generation,
+                    source,
+                    report,
+                    vocabulary_size,
+                )
+            }
+            _ => Err(Error::UnsupportedArchitecture(format!(
                 "causal model_type `{model_type}` is not executable; supported values: {}",
                 Self::MODEL_TYPES.join(", ")
-            )));
+            ))),
         }
+    }
+}
 
-        let config = Qwen3_5TextConfig::from_json_str(&json)
-            .map_err(|error| Error::configuration("auto_causal.config", error.to_string()))?;
-        let vocabulary_size = config.vocab_size;
-        let generation = normalize_generation_defaults(
-            &root,
-            config.eos_token_id.as_ref(),
-            config.pad_token_id.as_ref(),
-            config.vocab_size,
-            options.generation.as_ref(),
-        )?;
-        let source = source_metadata(&root, &model_type, options)?;
-        let tokenizer = load_optional_tokenizer(&root, options.load_tokenizer)?;
-
-        let manifest = CheckpointManifest::discover(&root, &options.checkpoint)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
-        let source_layout = qwen_source_layout(&manifest)?;
-        let contract = config
-            .checkpoint_contract(Qwen3_5CheckpointOptions {
-                source: source_layout,
-                include_mtp: options.qwen_mtp,
-            })
-            .map_err(|error| {
-                Error::configuration(
-                    format!("{}.{}", error.architecture, error.field),
-                    error.reason,
-                )
+/// Executes a validated causal-family plan with an optional packed sidecar.
+fn execute_causal_plan<M: crate::checkpoint::TensorSink>(
+    root: &Path,
+    manifest: &CheckpointManifest,
+    plan: &crate::checkpoint::LoadPlan,
+    options: &AutoLoadOptions,
+    model: &mut M,
+) -> Result<crate::checkpoint::LoadReport>
+where
+    M::Error: core::fmt::Display,
+{
+    if let Some(path) = &options.quantized_burnpack {
+        let path = if path.is_absolute() {
+            path.clone()
+        } else {
+            root.join(path)
+        };
+        let mut artifact =
+            QuantizedBurnpackArtifact::open(&path).map_err(|error| Error::Artifact {
+                path: path.clone(),
+                reason: error.to_string(),
             })?;
-        let plan = contract
-            .build_load_plan(&manifest, &options.checkpoint)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
-        let mut executable_config = config;
-        if !options.qwen_mtp {
-            // Base-only loading must not leave a randomly initialized MTP graph
-            // reachable through the public speculative API.
-            executable_config.mtp_num_hidden_layers = 0;
-        }
-        let mut model = Qwen3_5ForCausalLm::init(executable_config, device)?;
-        let outcome = execute_local_load_plan(&manifest, &plan, &mut model)
-            .map_err(|error| Error::Checkpoint(error.to_string()))?;
-        LoadedModel::new(
-            Self::Qwen3_5(model),
-            tokenizer,
-            generation,
-            source,
-            outcome.report,
-            vocabulary_size,
-        )
+        execute_local_quantized_load_plan(manifest, plan, &mut artifact, model)
+            .map_err(|error| Error::Checkpoint(error.to_string()))
+            .map(|outcome| outcome.report)
+    } else {
+        execute_local_load_plan(manifest, plan, model)
+            .map_err(|error| Error::Checkpoint(error.to_string()))
+            .map(|outcome| outcome.report)
     }
 }
 
@@ -139,6 +222,11 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
         options: &AutoLoadOptions,
         device: &B::Device,
     ) -> Result<LoadedModel<Self>> {
+        if options.quantized_burnpack.is_some() {
+            return Err(Error::BackendCapability(
+                "packed Burnpack loading is currently certified only for Qwen causal models".into(),
+            ));
+        }
         let (root, json) = read_required_config(root.as_ref())?;
         let model_type = detect_model_type(&json)?;
         if model_type != "t5" {

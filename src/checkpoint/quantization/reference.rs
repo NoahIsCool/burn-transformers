@@ -151,6 +151,7 @@ impl QuantizedWeight {
     /// dequantizes weights, so callers must use a quantization-preserving matmul
     /// dispatch rather than treating this conversion alone as execution proof.
     pub fn into_burn_qfloat_data(self) -> Result<TensorData> {
+        self.metadata.validate_burn_qfloat_layout()?;
         let (metadata, mut packed_values, scales) = self.into_parts();
         let shape = metadata.host_shape()?;
         let [rows, columns] = shape.as_slice() else {
@@ -159,24 +160,11 @@ impl QuantizedWeight {
             });
         };
         let group_size = metadata.group_size.get();
-        if !columns.is_multiple_of(group_size) {
-            return Err(QuantizationError::BurnQFloatIncompatible {
-                reason: format!(
-                    "innermost dimension {columns} is not divisible by group size {group_size}"
-                ),
-            });
-        }
         let (value, values_per_u32) = match metadata.scheme {
             SymmetricQuantization::Q8 => (QuantValue::Q8S, 4),
             SymmetricQuantization::Q4 => (QuantValue::Q4S, 8),
         };
-        if !columns.is_multiple_of(values_per_u32) {
-            return Err(QuantizationError::BurnQFloatIncompatible {
-                reason: format!(
-                    "innermost dimension {columns} is not divisible by packed-u32 width {values_per_u32}"
-                ),
-            });
-        }
+        debug_assert!(columns.is_multiple_of(values_per_u32));
         let expected_scales = rows
             .checked_mul(columns / group_size)
             .ok_or(QuantizationError::ShapeElementOverflow)?;

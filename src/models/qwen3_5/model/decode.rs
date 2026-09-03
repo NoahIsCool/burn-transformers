@@ -565,9 +565,10 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
                 ));
             }
         };
+        let logits = self.project_hidden(hidden.clone())?;
         commit_mtp_write(&mut state.tensors, write, sequence)?;
         Ok(Qwen3_5MtpPrediction {
-            logits: self.project_hidden(hidden.clone()),
+            logits,
             hidden_state: hidden,
         })
     }
@@ -725,7 +726,7 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             .map(|rows| Tensor::cat(rows, 0))
             .collect();
         let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
-        let logits = self.project_hidden(selected);
+        let logits = self.project_hidden(selected)?;
         pending.commit(&mut state.tensors, &state.layout, &prepared.token_counts)?;
         Ok(CausalLmOutput {
             logits,
@@ -866,7 +867,7 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
                     &projection.query.device(),
                 )?;
                 let mixed = attention.attend(projection, Some(mask), None, false)?;
-                let hidden = finish_residual(self, residual, mixed);
+                let hidden = finish_residual(self, residual, mixed)?;
                 pending.native_kv.push(PendingNativeKvWrite {
                     cache_layer,
                     sequence: sequence_index,
@@ -893,7 +894,7 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
                 let token_count = normalized.dims()[1];
                 let mixed =
                     delta.forward_with_state(normalized, None, &mut recurrent, delta_mode)?;
-                let hidden = finish_residual(self, residual, mixed);
+                let hidden = finish_residual(self, residual, mixed)?;
                 pending.recurrent.push(PendingRecurrentWrite {
                     cache_layer,
                     sequence: sequence_index,
@@ -912,13 +913,13 @@ fn finish_residual<B: Backend>(
     layer: &Qwen3_5DecoderLayer<B>,
     residual: Tensor<B, 3>,
     mixed: Tensor<B, 3>,
-) -> Tensor<B, 3> {
+) -> Result<Tensor<B, 3>> {
     let hidden = residual + mixed;
     let residual = hidden.clone();
-    residual
+    Ok(residual
         + layer
             .mlp
-            .forward(layer.post_attention_layernorm.forward(hidden))
+            .forward(layer.post_attention_layernorm.forward(hidden))?)
 }
 
 /// Builds the model-layer mapping and homogeneous cache specifications.

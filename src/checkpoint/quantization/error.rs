@@ -113,6 +113,14 @@ pub enum QuantizationError {
         /// Exact rank, alignment, or grouping mismatch.
         reason: String,
     },
+    /// A packed sidecar disagreed with its architecture-owned load plan.
+    #[error("invalid quantized sidecar tensor `{name}`: {reason}")]
+    SidecarContract {
+        /// Architecture target or manifest pseudo-name being validated.
+        name: String,
+        /// Exact target, shape, dtype, or eligibility disagreement.
+        reason: String,
+    },
     /// The manifest format version is not implemented by this crate.
     #[error("unsupported Burnpack quantization format version {version}")]
     UnsupportedFormatVersion {

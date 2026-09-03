@@ -1,9 +1,11 @@
 //! Persistent quantized artifacts backed by Burn Store's official Burnpack format.
 //!
 //! Burnpack 0.21 does not expose its string metadata through [`BurnpackStore`],
-//! and this module's symmetric flat-group layout is intentionally distinct from
-//! Burn's `DType::QFloat` layouts. Each quantized payload is therefore stored as
-//! an ordinary U8 Burnpack tensor. A reserved U8 tensor contains the JSON
+//! while this module stores a portable flat-group wire layout rather than a
+//! backend tensor primitive. Each quantized payload is therefore stored as an
+//! ordinary U8 Burnpack tensor. When every matrix row is group-aligned, that
+//! wire layout maps exactly to Burn block-QFloat without repacking values. A
+//! reserved U8 tensor contains the JSON
 //! [`BurnpackQuantizationManifest`] that restores logical shapes, source dtypes,
 //! group boundaries, packing rules, and scale layout.
 //!
@@ -37,9 +39,10 @@ use burn::tensor::{DType, Shape, TensorData};
 use burn_store::{BurnpackStore, BurnpackWriter, ModuleStore, TensorSnapshot, TensorSnapshotError};
 
 use super::{
-    BurnpackQuantizationManifest, QuantizationEligibility, QuantizationError,
-    QuantizationExclusion, QuantizedTensorMetadata, QuantizedWeight, Result, SourceFloatDType,
-    WeightQuantizationConfig, classify_weight_for_quantization, quantize_tensor_data,
+    BurnpackQuantizationManifest, PackedExecutionSupport, QuantizationEligibility,
+    QuantizationError, QuantizationExclusion, QuantizedTensorMetadata, QuantizedWeight, Result,
+    SourceFloatDType, WeightQuantizationConfig, classify_weight_for_quantization,
+    quantize_tensor_data,
 };
 
 /// Reserved Burnpack U8 tensor containing the quantization manifest JSON.
@@ -347,6 +350,17 @@ impl QuantizedBurnpackSession {
                 path: self.output_path.clone(),
             });
         }
+
+        self.manifest.packed_execution = if self
+            .manifest
+            .tensors
+            .values()
+            .all(|metadata| metadata.validate_burn_qfloat_layout().is_ok())
+        {
+            PackedExecutionSupport::BurnQFloatMatmul
+        } else {
+            PackedExecutionSupport::Unavailable
+        };
 
         let manifest_bytes = self.manifest.to_json_pretty()?.into_bytes();
         self.check_manifest_size(manifest_bytes.len())?;

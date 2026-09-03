@@ -26,6 +26,7 @@ use crate::{
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
     moe::{SparseMoe, SparseMoeConfig, SparseMoeOutput},
     normalization::{RmsNorm, RmsNormConfig},
+    operations,
     position::{
         DynamicNtkScaling, LinearRopeScaling, RopeConfig, RopeScaling, YarnConfig, apply_rotary,
         rotary_angles,
@@ -130,7 +131,7 @@ impl<B: Backend> Qwen3MoeDecoderLayer<B> {
                 let output = moe.forward(normalized)?;
                 Ok((residual + output.hidden_state.clone(), Some(output)))
             }
-            (None, Some(mlp)) => Ok((residual + mlp.forward(normalized), None)),
+            (None, Some(mlp)) => Ok((residual + mlp.forward(normalized)?, None)),
             _ => Err(Error::Checkpoint(
                 "Qwen3 MoE layer has an invalid feed-forward topology".into(),
             )),
@@ -296,7 +297,7 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
         let backbone = self.model.forward(&input, options)?;
         let hidden = backbone.hidden;
         let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
-        let logits = self.project_logits(selected);
+        let logits = self.project_logits(selected)?;
         Ok(CausalLmOutput {
             logits,
             final_hidden_state: options.hidden_states.then_some(hidden),
@@ -313,14 +314,14 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
     }
 
     /// Applies the independent or tied vocabulary projection.
-    fn project_logits(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+    fn project_logits(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         match &self.lm_head {
-            Some(head) => head.forward(hidden),
-            None => burn::tensor::module::linear(
+            Some(head) => operations::linear(hidden, head),
+            None => Ok(burn::tensor::module::linear(
                 hidden,
                 self.model.embed_tokens.weight.val().transpose(),
                 None,
-            ),
+            )),
         }
     }
 }

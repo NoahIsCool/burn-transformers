@@ -21,28 +21,35 @@ pub enum BurnpackByteOrder {
     LittleEndian,
 }
 
-/// Availability of direct backend execution for a packed format.
+/// Availability of direct backend execution for every tensor in an artifact.
 ///
-/// Version one only supports deterministic storage and reference dequantization.
-/// In particular, this enum must not be interpreted as a Burn `QFloat` scheme or
-/// as evidence that Metal can consume the packed payload.
+/// The discriminator is persisted only after the writer has checked all tensor
+/// layouts. Readers must still verify their selected backend/device before
+/// constructing parameters: this field describes format compatibility, not the
+/// hardware available to the current process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PackedExecutionSupport {
     /// No native packed operator is implemented on any backend.
     Unavailable,
+    /// The payload maps exactly to Burn block-QFloat and packed matmul dispatch.
+    BurnQFloatMatmul,
 }
 
 impl PackedExecutionSupport {
     /// Returns whether a backend can execute this packed representation directly.
     #[must_use]
     pub const fn is_available(self) -> bool {
-        false
+        matches!(self, Self::BurnQFloatMatmul)
     }
 
-    /// Requires native packed execution, returning an explicit failure in v1.
+    /// Requires a format that can enter Burn's packed matmul dispatch.
     pub fn require_available(self) -> Result<()> {
-        Err(QuantizationError::PackedExecutionUnavailable)
+        if self.is_available() {
+            Ok(())
+        } else {
+            Err(QuantizationError::PackedExecutionUnavailable)
+        }
     }
 }
 
@@ -269,6 +276,56 @@ impl QuantizedTensorMetadata {
             );
         }
         Ok(shape)
+    }
+
+    /// Verifies that flattened groups are also exact Burn rectangular blocks.
+    ///
+    /// Version-one artifacts group the row-major stream contiguously. For a
+    /// matrix `[output, input]`, that stream is representable as Burn blocks
+    /// `[1, group_size]` exactly when every input row ends on a group boundary.
+    /// Packed-U32 storage additionally requires the input width to contain a
+    /// whole number of four Q8 or eight Q4 values.
+    pub fn validate_burn_qfloat_layout(&self) -> Result<()> {
+        let shape = self.host_shape()?;
+        let [rows, columns] = shape.as_slice() else {
+            return Err(QuantizationError::BurnQFloatIncompatible {
+                reason: format!("expected a rank-two matrix, found shape {shape:?}"),
+            });
+        };
+        let group_size = self.group_size.get();
+        if !columns.is_multiple_of(group_size) {
+            return Err(QuantizationError::BurnQFloatIncompatible {
+                reason: format!(
+                    "innermost dimension {columns} is not divisible by group size {group_size}"
+                ),
+            });
+        }
+        let values_per_u32 = match self.scheme {
+            SymmetricQuantization::Q8 => 4,
+            SymmetricQuantization::Q4 => 8,
+        };
+        if !columns.is_multiple_of(values_per_u32) {
+            return Err(QuantizationError::BurnQFloatIncompatible {
+                reason: format!(
+                    "innermost dimension {columns} is not divisible by packed-u32 width {values_per_u32}"
+                ),
+            });
+        }
+        let expected_scales = rows
+            .checked_mul(columns / group_size)
+            .ok_or(QuantizationError::ShapeElementOverflow)?;
+        let actual_scales = usize::try_from(self.group_count).map_err(|_| {
+            QuantizationError::ByteLengthOverflow {
+                context: "Burn QFloat scale count conversion",
+            }
+        })?;
+        if actual_scales != expected_scales {
+            return Err(QuantizationError::ScaleCountMismatch {
+                expected: expected_scales,
+                actual: actual_scales,
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn host_counts(&self) -> Result<(usize, usize, usize)> {

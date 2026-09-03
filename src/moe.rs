@@ -24,6 +24,7 @@ use crate::{
     Error, Result,
     architecture::{Activation, TokenMask},
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
+    operations,
 };
 
 /// Configuration for routed and optionally shared gated experts.
@@ -311,7 +312,7 @@ impl<B: Backend> SparseMoe<B> {
             )
         })?;
         let flat_input = input.clone().reshape([tokens, hidden]);
-        let router_logits = self.router.forward(input);
+        let router_logits = operations::linear(input, &self.router)?;
         // Qwen ranks the softmax probabilities in FP32.  Casting before top-k can
         // collapse nearby scores in F16/BF16 and silently route a token to a
         // different expert, so only the final selected mixture weights return
@@ -351,13 +352,13 @@ impl<B: Backend> SparseMoe<B> {
                 .gather_nd::<2, 1>(locations)
                 .unsqueeze_dim::<2>(1);
             let expert_input = flat_input.clone().select(0, token_indices.clone());
-            let contribution = expert.forward(expert_input) * weights;
+            let contribution = expert.forward(expert_input)? * weights;
             output = output.select_assign(0, token_indices, contribution, IndexingUpdateOp::Add);
         }
 
         let mut shared_output = Tensor::<B, 2>::zeros([tokens, hidden], &flat_input.device());
         for expert in &self.shared {
-            shared_output = shared_output + expert.forward(flat_input.clone());
+            shared_output = shared_output + expert.forward(flat_input.clone())?;
         }
         let selected_weights = flat_weights.reshape([batch, sequence, self.experts_per_token]);
         Ok(SparseMoeOutput {

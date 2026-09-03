@@ -88,6 +88,16 @@ recorded in [QWEN3_5_CHECKPOINT_MAPPING.md](QWEN3_5_CHECKPOINT_MAPPING.md).
   reference implementation.
 - Q8 and Q4 are weight-only, blockwise Burn formats. Embeddings, norms, biases,
   recurrent scalars/state, and first-generation MTP weights remain F16.
+- Burnpack matrices execute through Burn's native `QFloat` matmul without
+  whole-matrix dequantization. The certified Metal configuration is an exact
+  single-backend build: `--no-default-features --features std,metal`, plus
+  optional tokenizer features. Burn 0.21's ROCm dependency enables CubeCL
+  autotuning globally; when it is feature-unified into a Metal binary, invalid
+  packed Q4/Q8 GEMV candidates can be selected. The library rejects that known
+  combination before dispatch, and all-feature builds remain compile/test gates
+  rather than packed-Metal acceptance builds. A downstream crate can enable the
+  CubeCL autotune feature independently, so such builds are not certified until
+  Burn exposes a strategy selector or fixes the quantized tuner candidates.
 - Configuration parsing or successful tensor allocation alone never grants
   support status. The acceptance record must contain zero unexplained key
   mismatches, reference-logit metrics, cached/uncached parity, generated token

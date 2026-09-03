@@ -11,7 +11,7 @@ use burn::{
     tensor::{Tensor, activation, backend::Backend},
 };
 
-use crate::{Error, Result, architecture::Activation};
+use crate::{Error, Result, architecture::Activation, operations};
 
 /// Configuration for an ordinary two-projection transformer feed-forward block.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -84,11 +84,9 @@ pub struct DenseFeedForward<B: Backend> {
 
 impl<B: Backend> DenseFeedForward<B> {
     /// Evaluates `down(activation(up(input)))` over an arbitrary leading shape.
-    pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
-        self.down_proj.forward(apply_activation(
-            self.up_proj.forward(input),
-            self.activation,
-        ))
+    pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Result<Tensor<B, D>> {
+        let hidden = operations::linear(input, &self.up_proj)?;
+        operations::linear(apply_activation(hidden, self.activation), &self.down_proj)
     }
 }
 
@@ -166,9 +164,13 @@ pub struct GatedFeedForward<B: Backend> {
 
 impl<B: Backend> GatedFeedForward<B> {
     /// Evaluates the gated projection on states whose last axis is `hidden_size`.
-    pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
-        let gate = apply_activation(self.gate_proj.forward(input.clone()), self.activation);
-        self.down_proj.forward(gate * self.up_proj.forward(input))
+    pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Result<Tensor<B, D>> {
+        let gate = apply_activation(
+            operations::linear(input.clone(), &self.gate_proj)?,
+            self.activation,
+        );
+        let content = operations::linear(input, &self.up_proj)?;
+        operations::linear(gate * content, &self.down_proj)
     }
 }
 
@@ -277,7 +279,9 @@ mod tests {
         let module = GatedFeedForwardConfig::new(4, 8)
             .init::<Flex>(&device)
             .expect("valid block should initialize");
-        let output = module.forward(Tensor::<Flex, 3>::zeros([2, 3, 4], &device));
+        let output = module
+            .forward(Tensor::<Flex, 3>::zeros([2, 3, 4], &device))
+            .unwrap();
         assert_eq!(output.dims(), [2, 3, 4]);
     }
 
@@ -293,6 +297,7 @@ mod tests {
 
         let output = module
             .forward(Tensor::<Flex, 2>::from_floats([[-2.0, 3.0]], &device))
+            .unwrap()
             .into_data();
         output.assert_approx_eq::<f32>(
             &TensorData::from([[0.0, 3.0]]),

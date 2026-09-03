@@ -21,6 +21,7 @@ use crate::{
 
 use super::{
     qwen3_5::{Qwen3_5DecodeState, Qwen3_5ForCausalLm, Qwen3_5TextConfig},
+    qwen3_moe::{Qwen3MoeConfig, Qwen3MoeDecodeState, Qwen3MoeForCausalLm},
     t5::{T5Config, T5DecodeState, T5ForConditionalGeneration},
 };
 use crate::models::config::ModelConfig;
@@ -35,6 +36,8 @@ pub use load::AutoLoadOptions;
 pub enum AutoCausalConfigRef<'a> {
     /// Qwen3.5/Qwen3.8 hybrid text configuration.
     Qwen3_5(&'a Qwen3_5TextConfig),
+    /// Qwen3 sparse mixture-of-experts decoder configuration.
+    Qwen3Moe(&'a Qwen3MoeConfig),
 }
 
 impl AutoCausalConfigRef<'_> {
@@ -42,6 +45,7 @@ impl AutoCausalConfigRef<'_> {
     pub fn model_type(self) -> &'static str {
         match self {
             Self::Qwen3_5(_) => "qwen3_5_text",
+            Self::Qwen3Moe(_) => "qwen3_moe",
         }
     }
 
@@ -49,6 +53,7 @@ impl AutoCausalConfigRef<'_> {
     pub fn vocabulary_size(self) -> usize {
         match self {
             Self::Qwen3_5(config) => config.vocab_size,
+            Self::Qwen3Moe(config) => config.vocab_size,
         }
     }
 }
@@ -82,49 +87,58 @@ impl AutoSeq2SeqConfigRef<'_> {
 #[non_exhaustive]
 pub enum AutoCausalDecodeState<B: Backend> {
     /// Qwen native-KV and DeltaNet recurrent state.
-    Qwen3_5(Qwen3_5DecodeState<B>),
+    Qwen3_5(Box<Qwen3_5DecodeState<B>>),
+    /// Qwen3 MoE native grouped-query KV state.
+    Qwen3Moe(Box<Qwen3MoeDecodeState<B>>),
 }
 
 impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
     fn batch_size(&self) -> usize {
         match self {
             Self::Qwen3_5(state) => state.batch_size(),
+            Self::Qwen3Moe(state) => state.batch_size(),
         }
     }
 
     fn capacity(&self) -> usize {
         match self {
             Self::Qwen3_5(state) => state.capacity(),
+            Self::Qwen3Moe(state) => state.capacity(),
         }
     }
 
     fn lengths(&self) -> &[usize] {
         match self {
             Self::Qwen3_5(state) => state.lengths(),
+            Self::Qwen3Moe(state) => state.lengths(),
         }
     }
 
     fn reset(&mut self) -> Result<()> {
         match self {
             Self::Qwen3_5(state) => state.reset(),
+            Self::Qwen3Moe(state) => state.reset(),
         }
     }
 
     fn reorder(&mut self, indices: &[usize]) -> Result<()> {
         match self {
             Self::Qwen3_5(state) => state.reorder(indices),
+            Self::Qwen3Moe(state) => state.reorder(indices),
         }
     }
 
     fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
         match self {
             Self::Qwen3_5(state) => state.truncate(lengths),
+            Self::Qwen3Moe(state) => state.truncate(lengths),
         }
     }
 
     fn device(&self) -> &B::Device {
         match self {
             Self::Qwen3_5(state) => state.device(),
+            Self::Qwen3Moe(state) => state.device(),
         }
     }
 }
@@ -184,14 +198,19 @@ impl<B: Backend> DecodeState<B> for AutoSeq2SeqDecodeState<B> {
 /// Automatic dispatch over all causal architectures with executable graphs.
 #[derive(Module, Debug)]
 #[non_exhaustive]
+// Burn 0.21 does not implement `Module` for `Box<M>`, so boxing the parameter
+// graphs would prevent derive-generated device/dtype/parameter traversal.
+#[allow(clippy::large_enum_variant)]
 pub enum AutoCausalLm<B: Backend> {
     /// Qwen3.5/Qwen3.8 gated-DeltaNet and full-attention hybrid decoder.
     Qwen3_5(Qwen3_5ForCausalLm<B>),
+    /// Qwen3 decoder with token-routed sparse SwiGLU experts.
+    Qwen3Moe(Qwen3MoeForCausalLm<B>),
 }
 
 impl<B: Backend> AutoCausalLm<B> {
     /// Checkpoint model types currently accepted by this executable registry.
-    pub const MODEL_TYPES: &'static [&'static str] = &["qwen3_5_text"];
+    pub const MODEL_TYPES: &'static [&'static str] = &["qwen3_5_text", "qwen3_moe"];
 
     /// Parses a direct or wrapped configuration and initializes its lazy graph.
     pub fn from_config_json(json: &str, device: &B::Device) -> Result<Self> {
@@ -201,6 +220,12 @@ impl<B: Backend> AutoCausalLm<B> {
                     Error::configuration("auto_causal.config", error.to_string())
                 })?;
                 Qwen3_5ForCausalLm::init(config, device).map(Self::Qwen3_5)
+            }
+            "qwen3_moe" => {
+                let config = Qwen3MoeConfig::from_json_str(json).map_err(|error| {
+                    Error::configuration("auto_causal.config", error.to_string())
+                })?;
+                Qwen3MoeForCausalLm::init(config, device).map(Self::Qwen3Moe)
             }
             model_type => Err(Error::UnsupportedArchitecture(format!(
                 "causal model_type `{model_type}` is not executable; supported values: {}",
@@ -213,6 +238,7 @@ impl<B: Backend> AutoCausalLm<B> {
     pub fn config(&self) -> AutoCausalConfigRef<'_> {
         match self {
             Self::Qwen3_5(model) => AutoCausalConfigRef::Qwen3_5(model.config()),
+            Self::Qwen3Moe(model) => AutoCausalConfigRef::Qwen3Moe(model.config()),
         }
     }
 
@@ -224,6 +250,7 @@ impl<B: Backend> AutoCausalLm<B> {
     ) -> Result<CausalLmOutput<B>> {
         match self {
             Self::Qwen3_5(model) => CausalLanguageModel::forward(model, input, options),
+            Self::Qwen3Moe(model) => CausalLanguageModel::forward(model, input, options),
         }
     }
 
@@ -237,7 +264,13 @@ impl<B: Backend> AutoCausalLm<B> {
         match self {
             Self::Qwen3_5(model) => {
                 CausalLanguageModel::new_decode_state(model, config, batch_size, device)
+                    .map(Box::new)
                     .map(AutoCausalDecodeState::Qwen3_5)
+            }
+            Self::Qwen3Moe(model) => {
+                CausalLanguageModel::new_decode_state(model, config, batch_size, device)
+                    .map(Box::new)
+                    .map(AutoCausalDecodeState::Qwen3Moe)
             }
         }
     }
@@ -251,8 +284,14 @@ impl<B: Backend> AutoCausalLm<B> {
     ) -> Result<CausalLmOutput<B>> {
         match (self, state) {
             (Self::Qwen3_5(model), AutoCausalDecodeState::Qwen3_5(state)) => {
-                CausalLanguageModel::prefill(model, input, state, options)
+                CausalLanguageModel::prefill(model, input, state.as_mut(), options)
             }
+            (Self::Qwen3Moe(model), AutoCausalDecodeState::Qwen3Moe(state)) => {
+                CausalLanguageModel::prefill(model, input, state.as_mut(), options)
+            }
+            _ => Err(Error::Cache(
+                "automatic causal decode state belongs to a different architecture".into(),
+            )),
         }
     }
 
@@ -265,8 +304,14 @@ impl<B: Backend> AutoCausalLm<B> {
     ) -> Result<CausalLmOutput<B>> {
         match (self, state) {
             (Self::Qwen3_5(model), AutoCausalDecodeState::Qwen3_5(state)) => {
-                CausalLanguageModel::decode(model, input, state, options)
+                CausalLanguageModel::decode(model, input, state.as_mut(), options)
             }
+            (Self::Qwen3Moe(model), AutoCausalDecodeState::Qwen3Moe(state)) => {
+                CausalLanguageModel::decode(model, input, state.as_mut(), options)
+            }
+            _ => Err(Error::Cache(
+                "automatic causal decode state belongs to a different architecture".into(),
+            )),
         }
     }
 }
@@ -274,6 +319,12 @@ impl<B: Backend> AutoCausalLm<B> {
 impl<B: Backend> From<Qwen3_5ForCausalLm<B>> for AutoCausalLm<B> {
     fn from(model: Qwen3_5ForCausalLm<B>) -> Self {
         Self::Qwen3_5(model)
+    }
+}
+
+impl<B: Backend> From<Qwen3MoeForCausalLm<B>> for AutoCausalLm<B> {
+    fn from(model: Qwen3MoeForCausalLm<B>) -> Self {
+        Self::Qwen3Moe(model)
     }
 }
 
@@ -442,6 +493,26 @@ mod tests {
         }
     }
 
+    /// Constructs a tiny validated sparse Qwen configuration for registry tests.
+    fn tiny_qwen_moe() -> Qwen3MoeConfig {
+        Qwen3MoeConfig {
+            vocab_size: 32,
+            hidden_size: 8,
+            intermediate_size: 16,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 4,
+            max_position_embeddings: 64,
+            max_window_layers: 1,
+            decoder_sparse_step: 1,
+            moe_intermediate_size: 12,
+            num_experts: 4,
+            num_experts_per_tok: 2,
+            ..Qwen3MoeConfig::default()
+        }
+    }
+
     /// Constructs a tiny validated T5 configuration for registry tests.
     fn tiny_t5() -> T5Config {
         T5Config {
@@ -478,6 +549,23 @@ mod tests {
         assert_eq!(state.batch_size(), 1);
         assert_eq!(state.capacity(), 8);
         assert_eq!(state.lengths(), [0]);
+    }
+
+    /// Sparse Qwen config selection reaches its executable graph and cache variant.
+    #[test]
+    fn causal_registry_dispatches_qwen3_moe() {
+        let device = Default::default();
+        let json = serde_json::to_string(&tiny_qwen_moe()).expect("serializable config");
+        let model = AutoCausalLm::<TestBackend>::from_config_json(&json, &device)
+            .expect("registered Qwen3 MoE config");
+        assert_eq!(model.config().model_type(), "qwen3_moe");
+        assert_eq!(model.config().vocabulary_size(), 32);
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 8).expect("valid cache"), 1, &device)
+            .expect("registered state");
+        assert!(matches!(state, AutoCausalDecodeState::Qwen3Moe(_)));
+        assert_eq!(state.lengths(), [0]);
+        state.reset().expect("empty state reset");
     }
 
     /// T5 registry initializes the graph and allocates architecture-matched state.

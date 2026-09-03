@@ -356,7 +356,7 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
             })
             .collect::<Result<Vec<_>>>()?;
         let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
-        let logits = self.project_logits(selected);
+        let logits = self.project_logits(selected)?;
         pending.commit(
             &mut state.tensors,
             self.model.layers.len(),
@@ -485,7 +485,7 @@ impl<B: Backend> Qwen3MoeDecoderLayer<B> {
                 let output = moe.forward(normalized)?;
                 (residual + output.hidden_state.clone(), Some(output))
             }
-            (None, Some(mlp)) => (residual + mlp.forward(normalized), None),
+            (None, Some(mlp)) => (residual + mlp.forward(normalized)?, None),
             _ => {
                 return Err(Error::Checkpoint(
                     "Qwen3 MoE layer has an invalid feed-forward topology".into(),

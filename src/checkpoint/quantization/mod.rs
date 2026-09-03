@@ -15,15 +15,16 @@
 //!
 //! Conversion holds one source tensor and at most one group of decoded `f32`
 //! values at a time. It therefore composes with the checkpoint loader's
-//! one-tensor-at-a-time traversal without staging the whole model. The resulting
-//! packed representation deliberately has no Burn or Metal execution path yet:
-//! callers must dequantize through the reference implementation or persist it
-//! for a future real packed kernel.
+//! one-tensor-at-a-time traversal without staging the whole model. Matrices whose
+//! input width ends exactly on every group boundary map losslessly onto Burn's
+//! block-QFloat representation. Such artifacts are marked for packed matmul
+//! execution; incompatible layouts remain valid reference-only storage.
 
 mod burnpack;
 mod checkpoint;
 mod config;
 mod error;
+mod load;
 mod manifest;
 mod policy;
 mod reference;
@@ -43,6 +44,11 @@ pub use config::{
     ScaleLayout, SymmetricQuantization, WeightQuantizationConfig,
 };
 pub use error::{QuantizationError, Result};
+pub use load::{
+    PackedLoadStats, QuantizedExecutionFailure, QuantizedExecutionOutcome,
+    QuantizedExecutionResult, QuantizedSinkError, burn_qfloat_execution_support,
+    execute_local_quantized_load_plan, execute_quantized_load_plan, validate_sidecar_contract,
+};
 pub use manifest::{
     BURNPACK_QUANTIZATION_FORMAT_VERSION, BurnpackByteOrder, BurnpackQuantizationManifest,
     PackedExecutionSupport, QuantizedTensorMetadata, SourceFloatDType,

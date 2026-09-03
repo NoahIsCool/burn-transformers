@@ -34,7 +34,7 @@ use burn::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result, architecture::TokenMask, normalization::RmsNormConfig};
+use crate::{Error, Result, architecture::TokenMask, normalization::RmsNormConfig, operations};
 
 /// Numerically sensitive controls for both DeltaNet execution paths.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -392,10 +392,8 @@ impl<B: Backend> GatedDeltaNet<B> {
             Some(mask) => hidden * mask.as_tensor().clone().int().float().unsqueeze_dim::<3>(2),
             None => hidden,
         };
-        let projected = self
-            .in_proj_qkv
-            .forward(masked_hidden.clone())
-            .swap_dims(1, 2);
+        let projected =
+            operations::linear(masked_hidden.clone(), &self.in_proj_qkv)?.swap_dims(1, 2);
         let (convolved, convolution_state) =
             self.causal_convolution(projected, state.convolution.clone());
         let mixed = activation::silu(convolved).swap_dims(1, 2);
@@ -421,14 +419,14 @@ impl<B: Backend> GatedDeltaNet<B> {
         ]);
         let query = repeat_delta_heads(query, self.value_heads);
         let key = repeat_delta_heads(key, self.value_heads);
-        let z = self.in_proj_z.forward(masked_hidden.clone()).reshape([
+        let z = operations::linear(masked_hidden.clone(), &self.in_proj_z)?.reshape([
             batch,
             sequence,
             self.value_heads,
             self.value_head_dim,
         ]);
-        let beta = activation::sigmoid(self.in_proj_b.forward(masked_hidden.clone()));
-        let a = self.in_proj_a.forward(masked_hidden).cast(DType::F32);
+        let beta = activation::sigmoid(operations::linear(masked_hidden.clone(), &self.in_proj_b)?);
+        let a = operations::linear(masked_hidden, &self.in_proj_a)?.cast(DType::F32);
         let decay_rate = self
             .a_log
             .val()
@@ -457,9 +455,10 @@ impl<B: Backend> GatedDeltaNet<B> {
         let gated = gated_delta_norm(rule_output.values, z, &self.norm);
         state.convolution = convolution_state;
         state.recurrent = rule_output.final_state;
-        Ok(self
-            .out_proj
-            .forward(gated.reshape([batch, sequence, value_width])))
+        operations::linear(
+            gated.reshape([batch, sequence, value_width]),
+            &self.out_proj,
+        )
     }
 
     /// Reconstructs the allocation topology without inspecting parameter values.

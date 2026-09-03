@@ -28,6 +28,7 @@ use crate::{
         DenseFeedForward, DenseFeedForwardConfig, GatedFeedForward, GatedFeedForwardConfig,
     },
     normalization::{RmsNorm, RmsNormConfig},
+    operations,
     position::{T5RelativePositionBias, T5RelativePositionBiasConfig},
 };
 
@@ -357,8 +358,8 @@ impl<B: Backend> T5LayerFeedForward<B> {
         let residual = hidden.clone();
         let normalized = self.layer_norm.forward(hidden);
         let projected = match (&self.dense, &self.gated, self.projection.is_gated()) {
-            (Some(dense), None, false) => dense.forward(normalized),
-            (None, Some(gated), true) => gated.forward(normalized),
+            (Some(dense), None, false) => dense.forward(normalized)?,
+            (None, Some(gated), true) => gated.forward(normalized)?,
             _ => {
                 return Err(Error::configuration(
                     "t5.feed_forward",
@@ -730,7 +731,7 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
                     "untied checkpoints require a separate vocabulary projection",
                 )
             })
-            .map(|head| head.forward(hidden))
+            .and_then(|head| operations::linear(hidden, head))
     }
 }
 

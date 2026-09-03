@@ -24,6 +24,7 @@ use burn::{
 use crate::{
     Error, Result,
     normalization::{RmsNorm, RmsNormConfig},
+    operations,
 };
 
 use super::{Qwen3_5DecoderLayer, Qwen3_5LayerType, Qwen3_5TextConfig};
@@ -181,6 +182,6 @@ impl<B: Backend> Qwen3_5Mtp<B> {
         }
         let embedding = self.pre_fc_norm_embedding.forward(next_token_embeddings);
         let target = self.pre_fc_norm_hidden.forward(target_hidden_state);
-        Ok(self.fc.forward(Tensor::cat(vec![embedding, target], 2)))
+        operations::linear(Tensor::cat(vec![embedding, target], 2), &self.fc)
     }
 }

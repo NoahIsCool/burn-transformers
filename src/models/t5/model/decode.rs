@@ -45,6 +45,7 @@ use crate::{
         CacheConfig, DecodeStateError, KvCacheStorage, NativeKvCacheSpec, TensorCacheError,
         TensorDecodeState,
     },
+    operations,
 };
 
 use super::{
@@ -821,7 +822,7 @@ impl<B: Backend> T5Block<B> {
             cross_layer.layer_norm.forward(hidden),
             cross_attention.query_heads,
             cross_attention.head_dim,
-        );
+        )?;
         let (key, value) = cross.layer_row(layer_index, sequence_index)?;
         let source_mask = cross.mask_row(sequence_index);
         let cross_mask = padding_attention_mask(
@@ -854,12 +855,11 @@ fn project_query<B: Backend>(
     hidden: Tensor<B, 3>,
     heads: usize,
     head_dim: usize,
-) -> Tensor<B, 4> {
+) -> Result<Tensor<B, 4>> {
     let [batch, sequence, _] = hidden.dims();
-    projection
-        .forward(hidden)
+    Ok(operations::linear(hidden, projection)?
         .reshape([batch, sequence, heads, head_dim])
-        .swap_dims(1, 2)
+        .swap_dims(1, 2))
 }
 
 /// One operation-local self-attention append.

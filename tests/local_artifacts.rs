@@ -30,6 +30,14 @@ use burn::{
     backend::Metal,
     tensor::{DType, Int, Tensor, TensorData},
 };
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+use burn::{module::Param, nn::Linear};
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+use transformers::{
+    AutoCausalLm, AutoLoadOptions,
+    delta_net::{DeltaNetMode, GatedDeltaNetState},
+    operations,
+};
 #[cfg(feature = "metal")]
 use transformers::{
     CausalLanguageModel, DecodeInput, DecodeState, ForwardOptions, LogitsSelection,
@@ -136,19 +144,49 @@ fn quantizes_pinned_qwen35_weights_to_burnpack() {
     let plan = contract
         .build_load_plan(&manifest, &load_options)
         .expect("every language tensor must map strictly");
-    let output_parent = root
-        .parent()
-        .expect("pinned checkpoint must have a parent directory");
-    let outputs = tempfile::tempdir_in(output_parent)
-        .expect("create temporary quantized artifacts beside model storage");
+    let requested_output_root =
+        std::env::var_os("TRANSFORMERS_QUANTIZED_OUTPUT_DIR").map(PathBuf::from);
+    let temporary_outputs = requested_output_root.is_none().then(|| {
+        tempfile::tempdir_in(
+            root.parent()
+                .expect("pinned checkpoint must have a parent directory"),
+        )
+        .expect("create temporary quantized artifacts beside model storage")
+    });
+    let output_root = match &requested_output_root {
+        Some(path) => {
+            fs::create_dir_all(path).unwrap_or_else(|error| {
+                panic!(
+                    "create persistent quantized output {}: {error}",
+                    path.display()
+                )
+            });
+            path.clone()
+        }
+        None => temporary_outputs
+            .as_ref()
+            .expect("temporary output exists without an explicit path")
+            .path()
+            .to_path_buf(),
+    };
+
+    let schemes = match std::env::var("TRANSFORMERS_QUANT_SCHEME").as_deref() {
+        Ok("q8") => vec![SymmetricQuantization::Q8],
+        Ok("q4") => vec![SymmetricQuantization::Q4],
+        Ok(other) => panic!("unsupported TRANSFORMERS_QUANT_SCHEME `{other}`; use q8 or q4"),
+        Err(std::env::VarError::NotPresent) => {
+            vec![SymmetricQuantization::Q8, SymmetricQuantization::Q4]
+        }
+        Err(error) => panic!("invalid TRANSFORMERS_QUANT_SCHEME: {error}"),
+    };
 
     let mut summaries = Vec::new();
-    for scheme in [SymmetricQuantization::Q8, SymmetricQuantization::Q4] {
+    for scheme in schemes {
         let label = match scheme {
             SymmetricQuantization::Q8 => "q8",
             SymmetricQuantization::Q4 => "q4",
         };
-        let output = outputs.path().join(format!("qwen3.5-0.8b-{label}.bpk"));
+        let output = output_root.join(format!("qwen3.5-0.8b-{label}.bpk"));
         let outcome = quantize_local_checkpoint_to_burnpack(
             &manifest,
             &plan,
@@ -191,6 +229,132 @@ fn quantizes_pinned_qwen35_weights_to_burnpack() {
             outcome.artifact.quantized_payload_bytes
         );
         assert_eq!(artifact.manifest().tensors.len(), validation.tensor_count);
+        assert!(
+            artifact.manifest().packed_execution.is_available(),
+            "{label} writer must certify the native Burn QFloat layout"
+        );
+
+        #[cfg(all(feature = "metal", not(feature = "rocm")))]
+        {
+            let device = Default::default();
+            let loaded = AutoCausalLm::<Metal>::load_local(
+                &root,
+                &AutoLoadOptions {
+                    checkpoint: LoadOptions {
+                        dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+                        ..LoadOptions::default()
+                    },
+                    load_tokenizer: false,
+                    quantized_burnpack: Some(output.clone()),
+                    repository: Some("Qwen/Qwen3.5-0.8B".into()),
+                    revision: Some("2fc06364715b967f1860aea9cf38778875588b17".into()),
+                    ..AutoLoadOptions::default()
+                },
+                &device,
+            )
+            .unwrap_or_else(|error| panic!("load mixed-precision {label} model: {error}"));
+            assert_eq!(
+                loaded.load_report().quantized.len(),
+                outcome.artifact.tensor_count
+            );
+            let AutoCausalLm::Qwen3_5(model) = loaded.model() else {
+                panic!("Qwen3.5 config must select the hybrid decoder variant");
+            };
+            let first_packed_dtype = model.model.layers[0]
+                .linear_attn
+                .as_ref()
+                .expect("official first layer is DeltaNet")
+                .in_proj_qkv
+                .weight
+                .val()
+                .dtype();
+            assert!(
+                matches!(first_packed_dtype, DType::QFloat(_)),
+                "{label} parameter must remain QFloat after installation"
+            );
+
+            let input = CausalLmInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(vec![9_419_i64], [1, 1]),
+                    &device,
+                ),
+                token_mask: None,
+                position_ids: None,
+            };
+            let stateless = loaded
+                .model()
+                .forward(
+                    input.clone(),
+                    &ForwardOptions {
+                        hidden_states: true,
+                        ..ForwardOptions::default()
+                    },
+                )
+                .unwrap_or_else(|error| panic!("run stateless {label} inference: {error}"));
+            assert_eq!(stateless.logits.dims(), [1, 1, 248_320]);
+            for (index, hidden) in stateless.hidden_states.iter().enumerate() {
+                let values = hidden
+                    .clone()
+                    .cast(DType::F32)
+                    .to_data()
+                    .to_vec::<f32>()
+                    .expect("quantized hidden state must materialize as f32");
+                assert!(
+                    values.iter().all(|value| value.is_finite()),
+                    "{label} hidden-state checkpoint {index} is the first observed non-finite boundary"
+                );
+            }
+            let stateless_logits = stateless
+                .logits
+                .clone()
+                .cast(DType::F32)
+                .to_data()
+                .to_vec::<f32>()
+                .expect("quantized Metal logits must materialize as f32");
+            assert!(stateless_logits.iter().all(|value| value.is_finite()));
+            let stateless_top = stateless
+                .logits
+                .argmax(2)
+                .to_data()
+                .to_vec::<i32>()
+                .expect("quantized top-1 IDs must use i32 storage");
+
+            let mut state = loaded
+                .model()
+                .new_decode_state(
+                    CacheConfig::new(1, 2).expect("quantized smoke cache"),
+                    1,
+                    &device,
+                )
+                .expect("quantized model cache must initialize");
+            let cached = loaded
+                .model()
+                .prefill(input, &mut state, &ForwardOptions::default())
+                .unwrap_or_else(|error| panic!("run cached {label} prefill: {error}"));
+            let cached_logits = cached
+                .logits
+                .clone()
+                .cast(DType::F32)
+                .to_data()
+                .to_vec::<f32>()
+                .expect("cached quantized Metal logits must materialize as f32");
+            let cached_top = cached
+                .logits
+                .argmax(2)
+                .to_data()
+                .to_vec::<i32>()
+                .expect("cached quantized top-1 IDs must use i32 storage");
+            assert_eq!(cached_top, stateless_top);
+            let cached_cosine = cosine_similarity(&stateless_logits, &cached_logits);
+            assert!(
+                cached_cosine >= 0.999,
+                "{label} cached/stateless cosine {cached_cosine} is below the gate"
+            );
+            eprintln!(
+                "{label}: packed_dtype={first_packed_dtype:?}, top1={}, cached_cosine={cached_cosine:.9}",
+                stateless_top[0]
+            );
+        }
         eprintln!(
             "{label}: tensors={}, excluded={}, payload_bytes={}, artifact_bytes={}, largest_tensor_bytes={}",
             outcome.artifact.tensor_count,
@@ -207,20 +371,283 @@ fn quantizes_pinned_qwen35_weights_to_burnpack() {
         ));
     }
 
-    let [q8, q4] = summaries.as_slice() else {
-        panic!("both Q8 and Q4 summaries must be recorded");
-    };
-    assert!(q4.0 < q8.0);
-    assert!(q4.1 < q8.1);
-    assert_eq!(
-        q4.2.iter()
-            .map(|record| record.target.as_str())
-            .collect::<Vec<_>>(),
-        q8.2.iter()
-            .map(|record| record.target.as_str())
-            .collect::<Vec<_>>()
+    if let [q8, q4] = summaries.as_slice() {
+        assert!(q4.0 < q8.0);
+        assert!(q4.1 < q8.1);
+        assert_eq!(
+            q4.2.iter()
+                .map(|record| record.target.as_str())
+                .collect::<Vec<_>>(),
+            q8.2.iter()
+                .map(|record| record.target.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(q4.3, q8.3);
+    } else {
+        assert_eq!(summaries.len(), 1, "a filtered run must execute one scheme");
+    }
+}
+
+/// Replays the first real Qwen DeltaNet layer one packed projection at a time.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires pinned Qwen3.5 weights, a retained Burnpack, and Metal"]
+fn diagnoses_pinned_qwen35_packed_delta_layer_on_metal() {
+    let root = PathBuf::from(
+        std::env::var_os("TRANSFORMERS_QWEN35_DIR")
+            .expect("set TRANSFORMERS_QWEN35_DIR to the pinned local checkout"),
     );
-    assert_eq!(q4.3, q8.3);
+    let burnpack = PathBuf::from(
+        std::env::var_os("TRANSFORMERS_QWEN35_BURNPACK")
+            .expect("set TRANSFORMERS_QWEN35_BURNPACK to a retained Q4/Q8 sidecar"),
+    );
+    let mut artifact =
+        QuantizedBurnpackArtifact::open(&burnpack).expect("retained diagnostic Burnpack must open");
+    let device = Default::default();
+    let mut loaded = AutoCausalLm::<Metal>::load_local(
+        &root,
+        &AutoLoadOptions {
+            checkpoint: LoadOptions {
+                dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+                ..LoadOptions::default()
+            },
+            load_tokenizer: false,
+            quantized_burnpack: Some(burnpack.clone()),
+            ..AutoLoadOptions::default()
+        },
+        &device,
+    )
+    .expect("retained packed model must load");
+    let AutoCausalLm::Qwen3_5(model) = loaded.model_mut() else {
+        panic!("Qwen config must select the hybrid decoder");
+    };
+    let token_ids =
+        Tensor::<Metal, 2, Int>::from_data(TensorData::new(vec![9_419_i64], [1, 1]), &device);
+    let embedding = model.model.embed_tokens.forward(token_ids);
+    assert_metal_tensor_finite("embedding", &embedding);
+    let layer = &mut model.model.layers[0];
+    let normalized = layer.input_layernorm.forward(embedding.clone());
+    assert_metal_tensor_finite("input norm", &normalized);
+    let delta = layer
+        .linear_attn
+        .as_mut()
+        .expect("official first layer is DeltaNet");
+    for (name, target, projection) in [
+        (
+            "in_proj_qkv",
+            "model.layers.0.linear_attn.in_proj_qkv.weight",
+            &delta.in_proj_qkv,
+        ),
+        (
+            "in_proj_z",
+            "model.layers.0.linear_attn.in_proj_z.weight",
+            &delta.in_proj_z,
+        ),
+        (
+            "in_proj_b",
+            "model.layers.0.linear_attn.in_proj_b.weight",
+            &delta.in_proj_b,
+        ),
+        (
+            "in_proj_a",
+            "model.layers.0.linear_attn.in_proj_a.weight",
+            &delta.in_proj_a,
+        ),
+    ] {
+        let output = operations::linear(normalized.clone(), projection)
+            .unwrap_or_else(|error| panic!("{name} execution failed: {error}"));
+        assert_metal_tensor_finite(name, &output);
+        let reference_weight = Tensor::<Metal, 2>::from_data(
+            artifact
+                .read_weight(target)
+                .unwrap_or_else(|error| panic!("read {target}: {error}"))
+                .dequantize_f32()
+                .unwrap_or_else(|error| panic!("dequantize {target}: {error}")),
+            &device,
+        )
+        .transpose()
+        .cast(normalized.dtype());
+        let reference_projection = Linear {
+            weight: Param::from_tensor(reference_weight),
+            bias: None,
+        };
+        let reference = operations::linear(normalized.clone(), &reference_projection)
+            .unwrap_or_else(|error| panic!("{name} dequantized execution failed: {error}"));
+        let actual_values = metal_tensor_values(name, &output);
+        let reference_values = metal_tensor_values("dequantized projection", &reference);
+        let cosine = cosine_similarity(&actual_values, &reference_values);
+        let maximum = actual_values
+            .iter()
+            .fold(0.0_f32, |maximum, value| maximum.max(value.abs()));
+        eprintln!("{name}: packed/dequantized cosine={cosine:.9}, max_abs={maximum}");
+        assert!(
+            cosine >= 0.999,
+            "{name} packed/dequantized cosine {cosine} is below the dispatch gate"
+        );
+    }
+    let out_probe = operations::linear(
+        Tensor::<Metal, 3>::ones([1, 1, delta.value_heads * delta.value_head_dim], &device)
+            .cast(DType::F16),
+        &delta.out_proj,
+    )
+    .expect("standalone packed output projection must execute");
+    assert_metal_tensor_finite("standalone out_proj", &out_probe);
+    let packed_out = delta.out_proj.weight.val();
+    assert!(matches!(packed_out.dtype(), DType::QFloat(_)));
+    let delta_config = delta.config();
+    let mut recurrent_state =
+        GatedDeltaNetState::zeros(&delta_config, 1, &device).expect("recurrent diagnostic state");
+    let recurrent_mixed = delta
+        .forward_with_state(
+            normalized.clone(),
+            None,
+            &mut recurrent_state,
+            DeltaNetMode::Recurrent,
+        )
+        .expect("packed recurrent DeltaNet must execute");
+    assert_metal_tensor_finite("recurrent DeltaNet", &recurrent_mixed);
+    let mut chunked_state =
+        GatedDeltaNetState::zeros(&delta_config, 1, &device).expect("chunked diagnostic state");
+    let mixed = delta
+        .forward_with_state(
+            normalized,
+            None,
+            &mut chunked_state,
+            DeltaNetMode::ChunkedPrefill,
+        )
+        .expect("packed chunked DeltaNet must execute");
+    assert_metal_tensor_finite("chunked DeltaNet", &mixed);
+    let residual = embedding + mixed;
+    assert_metal_tensor_finite("post-DeltaNet residual", &residual);
+    let mlp = layer
+        .mlp
+        .forward(layer.post_attention_layernorm.forward(residual.clone()))
+        .expect("packed layer MLP must execute");
+    assert_metal_tensor_finite("layer MLP", &mlp);
+    assert_metal_tensor_finite("complete layer", &(residual + mlp));
+}
+
+/// Loads a retained Q4 sidecar and verifies complete stateless/cached Metal inference.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires pinned Qwen3.5 weights, a retained Q4 Burnpack, and Metal"]
+fn loads_pinned_qwen35_q4_burnpack_and_runs_metal() {
+    let root = PathBuf::from(
+        std::env::var_os("TRANSFORMERS_QWEN35_DIR")
+            .expect("set TRANSFORMERS_QWEN35_DIR to the pinned local checkout"),
+    );
+    let burnpack = PathBuf::from(
+        std::env::var_os("TRANSFORMERS_QWEN35_BURNPACK")
+            .expect("set TRANSFORMERS_QWEN35_BURNPACK to the retained Q4 sidecar"),
+    );
+    let artifact =
+        QuantizedBurnpackArtifact::open(&burnpack).expect("retained Q4 Burnpack must open");
+    let quantized_count = artifact.manifest().tensors.len();
+    assert!(
+        artifact
+            .manifest()
+            .tensors
+            .values()
+            .all(|tensor| tensor.scheme == SymmetricQuantization::Q4),
+        "the Q4 acceptance path must not silently consume a different precision"
+    );
+    drop(artifact);
+
+    let device = Default::default();
+    let loaded = AutoCausalLm::<Metal>::load_local(
+        &root,
+        &AutoLoadOptions {
+            checkpoint: LoadOptions {
+                dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+                ..LoadOptions::default()
+            },
+            load_tokenizer: false,
+            quantized_burnpack: Some(burnpack),
+            repository: Some("Qwen/Qwen3.5-0.8B".into()),
+            revision: Some("2fc06364715b967f1860aea9cf38778875588b17".into()),
+            ..AutoLoadOptions::default()
+        },
+        &device,
+    )
+    .expect("mixed F16/Q4 model must load transactionally");
+    assert_eq!(loaded.load_report().quantized.len(), quantized_count);
+
+    let input = CausalLmInput {
+        token_ids: Tensor::<Metal, 2, Int>::from_data(
+            TensorData::new(vec![9_419_i64], [1, 1]),
+            &device,
+        ),
+        token_mask: None,
+        position_ids: None,
+    };
+    let stateless = loaded
+        .model()
+        .forward(input.clone(), &ForwardOptions::default())
+        .expect("Q4 stateless inference must execute");
+    let stateless_values = stateless
+        .logits
+        .clone()
+        .cast(DType::F32)
+        .to_data()
+        .to_vec::<f32>()
+        .expect("Q4 logits must materialize as f32");
+    assert!(stateless_values.iter().all(|value| value.is_finite()));
+    let stateless_top = stateless
+        .logits
+        .argmax(2)
+        .to_data()
+        .to_vec::<i32>()
+        .expect("Q4 top-1 IDs must use i32 storage");
+
+    let mut state = loaded
+        .model()
+        .new_decode_state(CacheConfig::new(1, 2).expect("Q4 smoke cache"), 1, &device)
+        .expect("Q4 decode state must initialize");
+    let cached = loaded
+        .model()
+        .prefill(input, &mut state, &ForwardOptions::default())
+        .expect("Q4 cached prefill must execute");
+    let cached_values = cached
+        .logits
+        .clone()
+        .cast(DType::F32)
+        .to_data()
+        .to_vec::<f32>()
+        .expect("cached Q4 logits must materialize as f32");
+    let cached_top = cached
+        .logits
+        .argmax(2)
+        .to_data()
+        .to_vec::<i32>()
+        .expect("cached Q4 top-1 IDs must use i32 storage");
+    let cached_cosine = cosine_similarity(&stateless_values, &cached_values);
+    assert_eq!(cached_top, stateless_top);
+    assert!(cached_cosine >= 0.999);
+    eprintln!(
+        "q4: tensors={quantized_count}, top1={}, cached_cosine={cached_cosine:.9}",
+        stateless_top[0]
+    );
+}
+
+/// Synchronizes one Metal tensor and rejects the first non-finite component result.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn assert_metal_tensor_finite<const D: usize>(label: &str, tensor: &Tensor<Metal, D>) {
+    let values = metal_tensor_values(label, tensor);
+    assert!(
+        values.iter().all(|value| value.is_finite()),
+        "{label} produced non-finite values"
+    );
+}
+
+/// Returns synchronized F32 values for quantitative Metal diagnostics.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn metal_tensor_values<const D: usize>(label: &str, tensor: &Tensor<Metal, D>) -> Vec<f32> {
+    tensor
+        .clone()
+        .cast(DType::F32)
+        .to_data()
+        .to_vec::<f32>()
+        .unwrap_or_else(|error| panic!("materialize {label}: {error}"))
 }
 
 /// Streams the pinned language weights into Metal F16 and executes one prompt.

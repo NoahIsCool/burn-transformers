@@ -399,6 +399,10 @@ mod tests {
         tensor::{Int, Tensor, TensorData},
     };
 
+    use crate::checkpoint::quantization::{
+        QuantizationEligibility, QuantizationGroupSize, WeightQuantizationConfig,
+        classify_weight_for_quantization, quantize_tensor_data,
+    };
     use crate::{
         ForwardOptions, architecture::CausalLmInput, checkpoint::TensorSink,
         models::config::ModelConfig,
@@ -561,5 +565,134 @@ mod tests {
             .expect("fully loaded MTP graph must execute");
         assert_eq!(prediction.logits.dims(), [1, 1, 32]);
         assert_eq!(prediction.hidden_state.dims(), [1, 1, 8]);
+    }
+
+    /// Every eligible Qwen projection executes when installed as native QFloat.
+    #[test]
+    fn qfloat_qwen_graph_matches_its_full_precision_reference() {
+        let config = Qwen3_5TextConfig {
+            vocab_size: 32,
+            hidden_size: 32,
+            intermediate_size: 32,
+            num_hidden_layers: 2,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 16,
+            max_position_embeddings: 32,
+            partial_rotary_factor: Some(1.0),
+            layer_types: vec![
+                crate::models::qwen3_5::Qwen3_5LayerType::LinearAttention,
+                crate::models::qwen3_5::Qwen3_5LayerType::FullAttention,
+            ],
+            linear_conv_kernel_dim: 3,
+            linear_key_head_dim: 16,
+            linear_value_head_dim: 16,
+            linear_num_key_heads: 2,
+            linear_num_value_heads: 2,
+            mtp_num_hidden_layers: 0,
+            tie_word_embeddings: false,
+            attention_bias: false,
+            attn_output_gate: true,
+            ..Qwen3_5TextConfig::default()
+        };
+        let contract = config
+            .checkpoint_contract(Qwen3_5CheckpointOptions {
+                source: Qwen3_5CheckpointSource::TextOnly,
+                include_mtp: false,
+            })
+            .unwrap();
+        let device = Default::default();
+        let mut reference = Qwen3_5ForCausalLm::<TestBackend>::init(config.clone(), &device)
+            .expect("valid aligned reference graph");
+        let mut packed = Qwen3_5ForCausalLm::<TestBackend>::init(config, &device)
+            .expect("valid aligned packed graph");
+        let quantization = WeightQuantizationConfig {
+            group_size: QuantizationGroupSize::new(32).unwrap(),
+            ..WeightQuantizationConfig::default()
+        };
+        let mut packed_count = 0;
+
+        for expected in contract.expected_tensors() {
+            let shape = expected
+                .shape
+                .iter()
+                .map(|dimension| usize::try_from(*dimension).unwrap())
+                .collect::<Vec<_>>();
+            let elements = shape.iter().product::<usize>();
+            let seed = expected
+                .name
+                .bytes()
+                .fold(0_usize, |state, byte| state.wrapping_add(byte as usize));
+            let values = (0..elements)
+                .map(|index| (((index + seed) % 31) as f32 - 15.0) * 0.002)
+                .collect::<Vec<_>>();
+            let source = TensorData::new(values, shape.clone());
+            reference
+                .write_tensor(&expected.name, source.clone())
+                .unwrap_or_else(|error| panic!("reference {}: {error}", expected.name));
+            let packed_data = match classify_weight_for_quantization(&expected.name, &shape) {
+                QuantizationEligibility::Eligible => {
+                    packed_count += 1;
+                    quantize_tensor_data(&source, quantization)
+                        .unwrap_or_else(|error| panic!("quantize {}: {error}", expected.name))
+                        .into_burn_qfloat_data()
+                        .unwrap_or_else(|error| panic!("adapt {}: {error}", expected.name))
+                }
+                QuantizationEligibility::Excluded(_) => source,
+            };
+            packed
+                .write_tensor(&expected.name, packed_data)
+                .unwrap_or_else(|error| panic!("packed {}: {error}", expected.name));
+        }
+        assert_eq!(packed_count, 16);
+        assert!(matches!(
+            packed.model.layers[1]
+                .self_attn
+                .as_ref()
+                .unwrap()
+                .q_proj
+                .weight
+                .val()
+                .dtype(),
+            burn::tensor::DType::QFloat(_)
+        ));
+        assert!(matches!(
+            packed.lm_head.as_ref().unwrap().weight.val().dtype(),
+            burn::tensor::DType::QFloat(_)
+        ));
+
+        let input = CausalLmInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device),
+            token_mask: None,
+            position_ids: None,
+        };
+        let expected = reference
+            .forward(input.clone(), &ForwardOptions::default())
+            .expect("reference forward")
+            .logits
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        let actual = packed
+            .forward(input, &ForwardOptions::default())
+            .expect("packed forward")
+            .logits
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        assert!(actual.iter().all(|value| value.is_finite()));
+        let dot = expected
+            .iter()
+            .zip(&actual)
+            .map(|(left, right)| left * right)
+            .sum::<f32>();
+        let left_norm = expected
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        let right_norm = actual.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let cosine = dot / (left_norm * right_norm);
+        assert!(cosine >= 0.995, "Q8 cosine similarity was {cosine}");
     }
 }
