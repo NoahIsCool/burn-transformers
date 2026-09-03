@@ -5,10 +5,26 @@
 //! the router chooses `num_experts_per_tok` of `num_experts` matrices for every
 //! token; consequently routing counts are shape-bearing configuration, not sampling
 //! policy.
+//!
+//! # Automatic registry follow-up
+//!
+//! The executable model and strict local loader are available directly through
+//! [`Qwen3MoeForCausalLm`]. `AutoCausalLm` registration is intentionally left to
+//! the integration branch owner because that central enum and its loader are
+//! concurrently shared by other family slices; adding the variant is a small
+//! exhaustive-match follow-up after those branches merge.
 
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
+
+mod checkpoint;
+mod load;
+pub mod model;
+
+pub use checkpoint::{Qwen3MoeCheckpointContract, Qwen3MoeCheckpointOptions};
+pub use load::{Qwen3MoeCheckpointLoadError, Qwen3MoeLoadError};
+pub use model::{Qwen3MoeDecodeState, Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm, Qwen3MoeModel};
 
 use super::config::{
     ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, divisible, model_type, nonzero,
