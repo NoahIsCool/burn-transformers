@@ -20,6 +20,7 @@ pub mod architecture;
 pub mod attention;
 pub mod cache;
 pub mod checkpoint;
+pub mod delta_net;
 pub mod error;
 pub mod feed_forward;
 pub mod generation;
@@ -27,6 +28,8 @@ pub mod models;
 pub mod moe;
 pub mod normalization;
 pub mod position;
+#[cfg(feature = "tokenizers")]
+pub mod tokenization;
 
 pub use architecture::{
     ArchitectureConfig, CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput,
@@ -35,4 +38,9 @@ pub use architecture::{
 pub use error::{Error, Result};
 pub use generation::{
     FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, SamplingStrategy,
+};
+#[cfg(feature = "tokenizers")]
+pub use tokenization::{
+    BatchEncoding, ChatMessage, ChatTemplateOptions, EncodeOptions, LocalTokenizer, Padding,
+    PaddingSide, SpecialToken, SpecialTokens, TokenizerMetadata, TruncationSide,
 };

@@ -7,6 +7,10 @@
 //! equal `num_attention_heads * head_dim`: projections map between the residual
 //! stream and an independently sized attention space.
 
+pub mod model;
+
+pub use model::{Qwen3_5DecoderLayer, Qwen3_5ForCausalLm, Qwen3_5TextModel};
+
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};

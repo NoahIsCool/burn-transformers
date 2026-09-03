@@ -54,6 +54,8 @@ pub struct GroupedQueryAttentionConfig {
     pub bias: bool,
     /// Optional Q/K per-head RMS normalization epsilon.
     pub query_key_norm_epsilon: Option<f64>,
+    /// Whether Q/K norm checkpoints store `scale - 1` instead of `scale`.
+    pub query_key_norm_zero_centered: bool,
     /// Optional multiplicative output-gate convention.
     pub output_gate: AttentionOutputGate,
     /// Optional non-default score scale. `None` preserves fused-kernel eligibility.
@@ -77,6 +79,7 @@ impl GroupedQueryAttentionConfig {
             head_dim,
             bias: false,
             query_key_norm_epsilon: None,
+            query_key_norm_zero_centered: false,
             output_gate: AttentionOutputGate::None,
             scale: None,
             softcap: None,
@@ -150,6 +153,7 @@ impl GroupedQueryAttentionConfig {
         let query_key_norm = |epsilon| {
             RmsNormConfig::new(self.head_dim)
                 .with_epsilon(epsilon)
+                .with_zero_centered(self.query_key_norm_zero_centered)
                 .init(device)
         };
         let (query_norm, key_norm) = match self.query_key_norm_epsilon {
@@ -235,17 +239,34 @@ impl<B: Backend> GroupedQueryAttention<B> {
         debug_assert_eq!(batch, key_batch, "query and key/value batches must match");
         let query_width = self.query_heads * self.head_dim;
         let projected_query = self.q_proj.forward(query_hidden);
-        let (projected_query, gate) = if self.output_gate == AttentionOutputGate::None {
-            (projected_query, None)
-        } else {
+        let (query, gate) = if self.output_gate == AttentionOutputGate::None {
             (
-                projected_query.clone().narrow(2, 0, query_width),
-                Some(projected_query.narrow(2, query_width, query_width)),
+                projected_query
+                    .reshape([batch, query_sequence, self.query_heads, self.head_dim])
+                    .swap_dims(1, 2),
+                None,
+            )
+        } else {
+            // Qwen-family gated projections are interleaved by head:
+            // `[head_0.query, head_0.gate, head_1.query, ...]`.
+            let projected_query = projected_query.reshape([
+                batch,
+                query_sequence,
+                self.query_heads,
+                self.head_dim * 2,
+            ]);
+            (
+                projected_query
+                    .clone()
+                    .narrow(3, 0, self.head_dim)
+                    .swap_dims(1, 2),
+                Some(
+                    projected_query
+                        .narrow(3, self.head_dim, self.head_dim)
+                        .reshape([batch, query_sequence, query_width]),
+                ),
             )
         };
-        let query = projected_query
-            .reshape([batch, query_sequence, self.query_heads, self.head_dim])
-            .swap_dims(1, 2);
         let key = self
             .k_proj
             .forward(key_value_hidden.clone())
@@ -282,10 +303,11 @@ impl<B: Backend> GroupedQueryAttention<B> {
         mask: Option<Tensor<B, 4, Bool>>,
         bias: Option<Tensor<B, 4>>,
         causal: bool,
-    ) -> Tensor<B, 3> {
+    ) -> Result<Tensor<B, 3>> {
+        validate_projection(self, &projection, mask.as_ref(), bias.as_ref())?;
         let [batch, _, query_sequence, _] = projection.query.dims();
-        let key = repeat_key_value(projection.key, self.query_heads);
-        let value = repeat_key_value(projection.value, self.query_heads);
+        let key = repeat_key_value(projection.key, self.query_heads)?;
+        let value = repeat_key_value(projection.value, self.query_heads)?;
         let context = attention(
             projection.query,
             key,
@@ -304,9 +326,15 @@ impl<B: Backend> GroupedQueryAttention<B> {
             (AttentionOutputGate::None, None) => context,
             (AttentionOutputGate::Sigmoid, Some(gate)) => context * sigmoid(gate),
             (AttentionOutputGate::Silu, Some(gate)) => context * silu(gate),
-            _ => unreachable!("validated attention gate and projection must agree"),
+            _ => {
+                return Err(Error::shape(
+                    "attention.gate",
+                    format!("a gate matching {:?}", self.output_gate),
+                    "a mismatched gate payload",
+                ));
+            }
         };
-        self.o_proj.forward(context)
+        Ok(self.o_proj.forward(context))
     }
 
     /// Evaluates attention without RoPE or relative-position bias.
@@ -327,25 +355,141 @@ impl<B: Backend> GroupedQueryAttention<B> {
             query_sequence,
             key_sequence,
         )?;
-        Ok(self.attend(projection, mask, None, causal))
+        self.attend(projection, mask, None, causal)
     }
 }
 
 /// Repeats native KV heads into contiguous query-head groups for one attention call.
-pub fn repeat_key_value<B: Backend>(tensor: Tensor<B, 4>, query_heads: usize) -> Tensor<B, 4> {
+pub fn repeat_key_value<B: Backend>(
+    tensor: Tensor<B, 4>,
+    query_heads: usize,
+) -> Result<Tensor<B, 4>> {
     let [batch, key_value_heads, sequence, head_dim] = tensor.dims();
-    assert!(
-        query_heads.is_multiple_of(key_value_heads),
-        "query heads must be divisible by key/value heads"
-    );
+    if key_value_heads == 0 || query_heads == 0 || !query_heads.is_multiple_of(key_value_heads) {
+        return Err(Error::configuration(
+            "attention.head_grouping",
+            format!(
+                "query_heads ({query_heads}) must be non-zero and divisible by key_value_heads ({key_value_heads})"
+            ),
+        ));
+    }
     let groups = query_heads / key_value_heads;
     if groups == 1 {
-        return tensor;
+        return Ok(tensor);
     }
-    tensor
+    Ok(tensor
         .unsqueeze_dim::<5>(2)
         .expand([batch, key_value_heads, groups, sequence, head_dim])
-        .reshape([batch, query_heads, sequence, head_dim])
+        .reshape([batch, query_heads, sequence, head_dim]))
+}
+
+/// Validates projected tensor topology before dispatching a backend attention kernel.
+fn validate_projection<B: Backend>(
+    attention: &GroupedQueryAttention<B>,
+    projection: &AttentionProjection<B>,
+    mask: Option<&Tensor<B, 4, Bool>>,
+    bias: Option<&Tensor<B, 4>>,
+) -> Result<()> {
+    let [batch, query_heads, query_sequence, query_dim] = projection.query.dims();
+    let [key_batch, key_value_heads, key_sequence, key_dim] = projection.key.dims();
+    let [value_batch, value_heads, value_sequence, value_dim] = projection.value.dims();
+    let expected_query = [
+        batch,
+        attention.query_heads,
+        query_sequence,
+        attention.head_dim,
+    ];
+    if [batch, query_heads, query_sequence, query_dim] != expected_query {
+        return Err(Error::shape(
+            "attention.query",
+            format!("{:?}", expected_query),
+            format!("{:?}", projection.query.dims()),
+        ));
+    }
+    let expected_key = [
+        batch,
+        attention.key_value_heads,
+        key_sequence,
+        attention.head_dim,
+    ];
+    if [key_batch, key_value_heads, key_sequence, key_dim] != expected_key {
+        return Err(Error::shape(
+            "attention.key",
+            format!("{:?}", expected_key),
+            format!("{:?}", projection.key.dims()),
+        ));
+    }
+    let expected_value = [
+        batch,
+        attention.key_value_heads,
+        key_sequence,
+        attention.head_dim,
+    ];
+    if [value_batch, value_heads, value_sequence, value_dim] != expected_value {
+        return Err(Error::shape(
+            "attention.value",
+            format!("{:?}", expected_value),
+            format!("{:?}", projection.value.dims()),
+        ));
+    }
+    let expected_gate = [
+        batch,
+        query_sequence,
+        attention.query_heads * attention.head_dim,
+    ];
+    match (attention.output_gate, projection.gate.as_ref()) {
+        (AttentionOutputGate::None, None) => {}
+        (AttentionOutputGate::None, Some(_)) => {
+            return Err(Error::shape(
+                "attention.gate",
+                "no gate for ungated attention",
+                "a gate tensor",
+            ));
+        }
+        (_, Some(gate)) if gate.dims() == expected_gate => {}
+        (_, Some(gate)) => {
+            return Err(Error::shape(
+                "attention.gate",
+                format!("{:?}", expected_gate),
+                format!("{:?}", gate.dims()),
+            ));
+        }
+        (_, None) => {
+            return Err(Error::shape(
+                "attention.gate",
+                format!("{:?}", expected_gate),
+                "no gate tensor",
+            ));
+        }
+    }
+    let expected_additive = [batch, attention.query_heads, query_sequence, key_sequence];
+    if let Some(mask) = mask
+        && mask.dims() != expected_additive
+    {
+        return Err(Error::shape(
+            "attention.mask",
+            format!("{:?}", expected_additive),
+            format!("{:?}", mask.dims()),
+        ));
+    }
+    if let Some(bias) = bias {
+        let [bias_batch, bias_heads, bias_query, bias_key] = bias.dims();
+        if ![1, batch].contains(&bias_batch)
+            || bias_heads != attention.query_heads
+            || bias_query != query_sequence
+            || bias_key != key_sequence
+        {
+            return Err(Error::shape(
+                "attention.bias",
+                format!(
+                    "[batch in {{1, {batch}}}, {}, {query_sequence}, {key_sequence}]",
+                    attention.query_heads
+                ),
+                format!("{:?}", bias.dims()),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Converts semantic valid-token masks into Burn's `true == excluded` mask.
@@ -419,7 +563,8 @@ mod tests {
     use crate::architecture::TokenMask;
 
     use super::{
-        AttentionOutputGate, GroupedQueryAttentionConfig, padding_attention_mask, repeat_key_value,
+        AttentionOutputGate, AttentionProjection, GroupedQueryAttentionConfig,
+        padding_attention_mask, repeat_key_value,
     };
 
     /// Qwen's projected query width may exceed its residual width.
@@ -435,13 +580,43 @@ mod tests {
     fn key_value_repetition_preserves_group_order() {
         let device = Default::default();
         let tensor = Tensor::<Flex, 4>::from_floats([[[[1.0]], [[2.0]]]], &device);
-        let repeated = repeat_key_value(tensor, 4).to_data();
+        let repeated = repeat_key_value(tensor, 4)
+            .expect("four query heads group over two key/value heads")
+            .to_data();
         assert_eq!(
             repeated
                 .as_slice::<f32>()
                 .expect("Flex f32 data should expose an f32 slice"),
             &[1.0, 1.0, 2.0, 2.0]
         );
+    }
+
+    /// Invalid head ratios are reported instead of reaching a division or reshape panic.
+    #[test]
+    fn key_value_repetition_rejects_invalid_grouping() {
+        let device = Default::default();
+        let tensor = Tensor::<Flex, 4>::zeros([1, 2, 1, 3], &device);
+        let error = repeat_key_value(tensor, 3).expect_err("three heads cannot group over two");
+        assert!(error.to_string().contains("head_grouping"));
+    }
+
+    /// External projected-attention callers receive shape diagnostics before dispatch.
+    #[test]
+    fn attention_rejects_malformed_projection() {
+        let device = Default::default();
+        let module = GroupedQueryAttentionConfig::new(8, 4, 2, 3)
+            .init::<Flex>(&device)
+            .expect("valid attention should initialize");
+        let projection = AttentionProjection {
+            query: Tensor::zeros([1, 3, 2, 3], &device),
+            key: Tensor::zeros([1, 2, 2, 3], &device),
+            value: Tensor::zeros([1, 2, 2, 3], &device),
+            gate: None,
+        };
+        let error = module
+            .attend(projection, None, None, true)
+            .expect_err("wrong query-head count must fail");
+        assert!(error.to_string().contains("attention.query"));
     }
 
     /// Valid-token masks invert exactly once at the low-level attention boundary.

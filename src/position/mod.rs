@@ -12,6 +12,7 @@
 mod ids;
 mod rope;
 mod t5;
+mod tensor;
 
 pub use ids::{PositionIdError, derive_batched_position_ids, derive_position_ids};
 pub use rope::{
@@ -19,3 +20,4 @@ pub use rope::{
     rotary_dimension_from_partial_factor,
 };
 pub use t5::{T5BucketError, T5RelativePositionBuckets};
+pub use tensor::{RotaryAngles, apply_rotary, inverse_frequencies, mrope_angles, rotary_angles};

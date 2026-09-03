@@ -17,6 +17,8 @@ flex = ["burn/flex"]
 metal = ["burn/metal"]
 cuda = ["burn/cuda"]
 rocm = ["burn/rocm"]
+tokenizers = ["std", "dep:tokenizers"]
+chat-templates = ["tokenizers", "dep:minijinja"]
 
 [dependencies]
 burn = { version = "=0.21.0", default-features = false }
@@ -24,6 +26,8 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 safetensors = { version = "=0.7.0", default-features = false, features = ["std"] }
 thiserror = "2.0.18"
+tokenizers = { version = "=0.22.2", default-features = false, features = ["onig"], optional = true }
+minijinja = { version = "=2.19.0", default-features = false, features = ["builtins", "fuel", "json", "loop_controls", "macros", "multi_template", "serde", "std_collections"], optional = true }
 
 [dev-dependencies]
 proptest = "1.9.0"
