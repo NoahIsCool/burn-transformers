@@ -104,6 +104,21 @@ impl GroupedQueryAttentionConfig {
                 "must divide query_heads exactly",
             ));
         }
+        let query_width = self.query_heads.checked_mul(self.head_dim);
+        let key_value_width = self.key_value_heads.checked_mul(self.head_dim);
+        let query_output_width = query_width.and_then(|width| {
+            if self.output_gate == AttentionOutputGate::None {
+                Some(width)
+            } else {
+                width.checked_mul(2)
+            }
+        });
+        if query_output_width.is_none() || key_value_width.is_none() {
+            return Err(Error::configuration(
+                "attention",
+                "projected head dimensions overflow usize",
+            ));
+        }
         if self
             .query_key_norm_epsilon
             .is_some_and(|epsilon| !epsilon.is_finite() || epsilon <= 0.0)
@@ -137,12 +152,20 @@ impl GroupedQueryAttentionConfig {
     /// Initializes checkpoint-native `[out, in]` projections and optional Q/K norms.
     pub fn init<B: Backend>(&self, device: &B::Device) -> Result<GroupedQueryAttention<B>> {
         self.validate()?;
-        let query_width = self.query_heads * self.head_dim;
-        let key_value_width = self.key_value_heads * self.head_dim;
+        let query_width = self
+            .query_heads
+            .checked_mul(self.head_dim)
+            .ok_or_else(|| Error::configuration("attention", "query width overflows usize"))?;
+        let key_value_width = self
+            .key_value_heads
+            .checked_mul(self.head_dim)
+            .ok_or_else(|| Error::configuration("attention", "key/value width overflows usize"))?;
         let query_output_width = if self.output_gate == AttentionOutputGate::None {
             query_width
         } else {
-            query_width * 2
+            query_width.checked_mul(2).ok_or_else(|| {
+                Error::configuration("attention", "gated query width overflows usize")
+            })?
         };
         let linear = |input, output| {
             LinearConfig::new(input, output)
@@ -170,6 +193,7 @@ impl GroupedQueryAttentionConfig {
             o_proj: linear(query_width, self.hidden_size),
             query_norm,
             key_norm,
+            hidden_size: self.hidden_size,
             query_heads: self.query_heads,
             key_value_heads: self.key_value_heads,
             head_dim: self.head_dim,
@@ -208,6 +232,8 @@ pub struct GroupedQueryAttention<B: Backend> {
     pub query_norm: Option<RmsNorm<B>>,
     /// Optional per-key-head normalization.
     pub key_norm: Option<RmsNorm<B>>,
+    /// Input/output width of the residual stream.
+    pub hidden_size: usize,
     /// Number of query heads.
     pub query_heads: usize,
     /// Number of native key/value heads.
@@ -224,7 +250,7 @@ pub struct GroupedQueryAttention<B: Backend> {
 
 impl<B: Backend> GroupedQueryAttention<B> {
     /// Projects self-attention Q/K/V tensors without applying a position transform.
-    pub fn project_self(&self, hidden: Tensor<B, 3>) -> AttentionProjection<B> {
+    pub fn project_self(&self, hidden: Tensor<B, 3>) -> Result<AttentionProjection<B>> {
         self.project(hidden.clone(), hidden)
     }
 
@@ -233,10 +259,23 @@ impl<B: Backend> GroupedQueryAttention<B> {
         &self,
         query_hidden: Tensor<B, 3>,
         key_value_hidden: Tensor<B, 3>,
-    ) -> AttentionProjection<B> {
-        let [batch, query_sequence, _] = query_hidden.dims();
-        let [key_batch, key_sequence, _] = key_value_hidden.dims();
-        debug_assert_eq!(batch, key_batch, "query and key/value batches must match");
+    ) -> Result<AttentionProjection<B>> {
+        let [batch, query_sequence, query_hidden_size] = query_hidden.dims();
+        let [key_batch, key_sequence, key_value_hidden_size] = key_value_hidden.dims();
+        if batch == 0 || query_sequence == 0 || query_hidden_size != self.hidden_size {
+            return Err(Error::shape(
+                "attention.query_input",
+                format!("[batch>0, sequence>0, {}]", self.hidden_size),
+                format!("[{batch}, {query_sequence}, {query_hidden_size}]"),
+            ));
+        }
+        if key_batch != batch || key_sequence == 0 || key_value_hidden_size != self.hidden_size {
+            return Err(Error::shape(
+                "attention.key_value_input",
+                format!("[{batch}, sequence>0, {}]", self.hidden_size),
+                format!("[{key_batch}, {key_sequence}, {key_value_hidden_size}]"),
+            ));
+        }
         let query_width = self.query_heads * self.head_dim;
         let projected_query = self.q_proj.forward(query_hidden);
         let (query, gate) = if self.output_gate == AttentionOutputGate::None {
@@ -285,12 +324,12 @@ impl<B: Backend> GroupedQueryAttention<B> {
             .key_norm
             .as_ref()
             .map_or(key.clone(), |norm| norm.forward(key));
-        AttentionProjection {
+        Ok(AttentionProjection {
             query,
             key,
             value,
             gate,
-        }
+        })
     }
 
     /// Dispatches projected attention after the caller applies positional transforms.
@@ -344,7 +383,7 @@ impl<B: Backend> GroupedQueryAttention<B> {
         token_mask: Option<&TokenMask<B>>,
         causal: bool,
     ) -> Result<Tensor<B, 3>> {
-        let projection = self.project_self(hidden);
+        let projection = self.project_self(hidden)?;
         let [batch, _, query_sequence, _] = projection.query.dims();
         let key_sequence = projection.key.dims()[2];
         let mask = padding_attention_mask(
@@ -575,6 +614,15 @@ mod tests {
             .expect("query width need not equal residual width");
     }
 
+    /// Projected-width arithmetic is checked before an initializer sees a shape.
+    #[test]
+    fn attention_rejects_projection_dimension_overflow() {
+        let error = GroupedQueryAttentionConfig::new(8, usize::MAX, 1, 2)
+            .validate()
+            .expect_err("query head product must not wrap");
+        assert!(error.to_string().contains("overflow"));
+    }
+
     /// KV repetition duplicates each native head into one contiguous GQA group.
     #[test]
     fn key_value_repetition_preserves_group_order() {
@@ -617,6 +665,19 @@ mod tests {
             .attend(projection, None, None, true)
             .expect_err("wrong query-head count must fail");
         assert!(error.to_string().contains("attention.query"));
+    }
+
+    /// Projection validates residual width before dispatching a linear backend kernel.
+    #[test]
+    fn attention_rejects_malformed_projection_input() {
+        let device = Default::default();
+        let module = GroupedQueryAttentionConfig::new(8, 4, 2, 3)
+            .init::<Flex>(&device)
+            .expect("valid attention should initialize");
+        let error = module
+            .project_self(Tensor::zeros([1, 2, 7], &device))
+            .expect_err("wrong residual width must fail");
+        assert!(error.to_string().contains("attention.query_input"));
     }
 
     /// Valid-token masks invert exactly once at the low-level attention boundary.

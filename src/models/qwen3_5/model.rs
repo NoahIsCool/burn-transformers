@@ -132,7 +132,7 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
                 let attention = self.self_attn.as_ref().ok_or_else(|| {
                     Error::Checkpoint("Qwen full-attention layer has no attention module".into())
                 })?;
-                let mut projection = attention.project_self(normalized);
+                let mut projection = attention.project_self(normalized)?;
                 let angles = rotary_angles(rope, positions, evaluated_context)?;
                 (projection.query, projection.key) =
                     apply_rotary(projection.query, projection.key, &angles)?;
