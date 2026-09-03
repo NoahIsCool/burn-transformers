@@ -65,6 +65,10 @@ native KV heads. MTP owns an independent one-layer KV cache and uses
 transactional target state so a rejected speculative suffix can be discarded
 without corrupting either form of state.
 
+The exact namespace rewrites, tensor-shape equations, interleaved gated-query
+layout contract, MTP inventory, and metadata-only golden acceptance counts are
+recorded in [QWEN3_5_CHECKPOINT_MAPPING.md](QWEN3_5_CHECKPOINT_MAPPING.md).
+
 ## Numerical and acceptance policy
 
 - Full-precision stateless forwards remain differentiable and keep caches
@@ -91,4 +95,3 @@ without corrupting either form of state.
 - FLAN-T5 XXL: <https://huggingface.co/google/flan-t5-xxl/tree/ae7c9136adc7555eeccc78cdd960dfd60fb346ce>
 - FLAN-UL2: <https://huggingface.co/google/flan-ul2/tree/452d74ce28ac4a7f211d6ba3ef0717027f7a8074>
 - Nemotron-H 3.5: <https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/tree/a9904d24bcc1d289a1950fa9d2b978c47cf903b9>
-

@@ -20,6 +20,12 @@ use super::config::{
     positive_finite, probability, token_ids,
 };
 
+mod checkpoint;
+
+pub use checkpoint::{
+    Qwen3_5CheckpointContract, Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource,
+};
+
 /// Per-layer mixer selected by the serialized Qwen schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Qwen3_5LayerType {
