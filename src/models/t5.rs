@@ -15,10 +15,12 @@ use super::config::{
 };
 
 mod checkpoint;
+mod generation;
 mod load;
 mod model;
 
 pub use checkpoint::{T5CheckpointContract, T5CheckpointPlan};
+pub use generation::{T5BeamSearchOptions, generate_t5_beam_search};
 pub use load::{T5CheckpointLoadError, T5LoadError};
 pub use model::{
     T5Attention, T5Block, T5DecodeState, T5ForConditionalGeneration, T5LayerCrossAttention,

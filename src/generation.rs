@@ -1,10 +1,12 @@
 //! Backend-generic token sampling and host-side stopping state.
 //!
-//! Generation is split into two deliberately small pieces. [`LogitsProcessor`]
+//! Sampling is split into two deliberately small pieces. [`LogitsProcessor`]
 //! transforms model scores entirely on the selected Burn backend, avoiding a
 //! device-to-host copy of the full vocabulary. [`GenerationTracker`] retains
 //! only emitted token IDs on the host, where suffix matching and finish-reason
-//! bookkeeping are inexpensive and deterministic.
+//! bookkeeping are inexpensive and deterministic. Encoder-decoder beam search
+//! uses a separate cached coordinator because it must rank and reorder several
+//! competing target prefixes for each encoded source.
 //!
 //! Temperature sampling draws from
 //! `p(i) = exp(z_i / T) / sum_j exp(z_j / T)`. Top-k truncation keeps exactly
@@ -15,10 +17,15 @@
 //! infinity.
 
 mod causal;
+mod seq2seq;
 
 pub use causal::{
     CausalGenerationOutput, CausalGenerationRequest, GeneratedSequence, GenerationToken,
     generate_causal, generate_causal_streaming,
+};
+pub use seq2seq::{
+    BeamSearchConfig, BeamSearchSequence, Seq2SeqBeamSearchOutput, Seq2SeqBeamSearchRequest,
+    generate_seq2seq_beam_search,
 };
 
 use core::marker::PhantomData;
