@@ -9,6 +9,18 @@
 
 use serde::{Deserialize, Serialize};
 
+mod checkpoint;
+mod load;
+pub mod mla;
+pub mod model;
+
+pub use checkpoint::{DeepseekV2CheckpointContract, DeepseekV2CheckpointOptions};
+pub use load::{DeepseekV2CheckpointLoadError, DeepseekV2LoadError};
+pub use model::{
+    DeepseekV2DecodeState, DeepseekV2DecoderLayer, DeepseekV2ForCausalLm, DeepseekV2Model,
+    MlaExecutionPath,
+};
+
 use super::config::{
     ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, divisible, model_type, nonzero,
     positive_finite, probability, token_ids,
@@ -131,23 +143,23 @@ pub struct DeepseekV2Config {
 }
 
 impl Default for DeepseekV2Config {
-    /// Supplies representative DeepSeek-V2 defaults while retaining MLA and MoE.
+    /// Supplies the pinned DeepSeek-V2-Lite topology used by the v1 acceptance target.
     fn default() -> Self {
         Self {
             model_type: "deepseek_v2".into(),
             vocab_size: 102_400,
-            hidden_size: 4096,
-            intermediate_size: 11_008,
-            moe_intermediate_size: 1407,
-            num_hidden_layers: 30,
-            num_attention_heads: 32,
-            num_key_value_heads: 32,
-            n_shared_experts: 1,
+            hidden_size: 2048,
+            intermediate_size: 10_944,
+            moe_intermediate_size: 1408,
+            num_hidden_layers: 27,
+            num_attention_heads: 16,
+            num_key_value_heads: 16,
+            n_shared_experts: 2,
             n_routed_experts: 64,
             ep_size: 1,
             routed_scaling_factor: 1.0,
             kv_lora_rank: 512,
-            q_lora_rank: Some(1536),
+            q_lora_rank: None,
             qk_nope_head_dim: 128,
             qk_rope_head_dim: 64,
             v_head_dim: 128,
@@ -162,14 +174,23 @@ impl Default for DeepseekV2Config {
             aux_loss_alpha: 0.001,
             seq_aux: true,
             hidden_act: "silu".into(),
-            max_position_embeddings: 2048,
+            max_position_embeddings: 163_840,
             initializer_range: 0.02,
             rms_norm_eps: 1e-6,
             use_cache: true,
             pretraining_tp: 1,
             tie_word_embeddings: false,
             rope_theta: 10_000.0,
-            rope_scaling: None,
+            rope_scaling: Some(RopeParameters {
+                rope_type: super::config::RopeType::Yarn,
+                factor: Some(40.0),
+                original_max_position_embeddings: Some(4096),
+                beta_fast: Some(32.0),
+                beta_slow: Some(1.0),
+                mscale: Some(0.707),
+                mscale_all_dim: Some(0.707),
+                ..RopeParameters::default()
+            }),
             attention_bias: false,
             attention_dropout: 0.0,
             use_mla: true,
@@ -182,8 +203,12 @@ impl Default for DeepseekV2Config {
 
 impl DeepseekV2Config {
     /// Returns the concatenated content-plus-rotary query/key width per head.
+    ///
+    /// Invalid configurations whose dimensions overflow saturate here and are
+    /// rejected by [`Validate::validate`]. This keeps the convenience accessor
+    /// non-panicking even when it is used while reporting a malformed artifact.
     pub fn qk_head_dim(&self) -> usize {
-        self.qk_nope_head_dim + self.qk_rope_head_dim
+        self.qk_nope_head_dim.saturating_add(self.qk_rope_head_dim)
     }
 
     /// Reports whether a decoder index uses shared+routed experts.
@@ -222,6 +247,15 @@ impl Validate for DeepseekV2Config {
                 "RoPE rotates channel pairs, so this width must be even",
             ));
         }
+        self.qk_nope_head_dim
+            .checked_add(self.qk_rope_head_dim)
+            .ok_or_else(|| {
+                ConfigError::new(
+                    FAMILY,
+                    "qk_nope_head_dim",
+                    "content-plus-rotary head width overflows usize",
+                )
+            })?;
         if self.use_mla {
             nonzero(FAMILY, "kv_lora_rank", self.kv_lora_rank)?;
             if let Some(rank) = self.q_lora_rank {
@@ -354,6 +388,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn defaults_match_the_pinned_v2_lite_topology() {
+        let config = DeepseekV2Config::default();
+        assert_eq!(config.hidden_size, 2048);
+        assert_eq!(config.num_hidden_layers, 27);
+        assert_eq!(config.num_attention_heads, 16);
+        assert_eq!(config.n_routed_experts, 64);
+        assert_eq!(config.num_experts_per_tok, 6);
+        assert_eq!(config.n_shared_experts, 2);
+        assert_eq!(config.q_lora_rank, None);
+        assert_eq!(
+            config.rope_scaling.as_ref().map(|rope| rope.rope_type),
+            Some(super::super::config::RopeType::Yarn)
+        );
+        config.validate().unwrap();
+    }
+
+    #[test]
     fn lite_checkpoint_may_omit_query_lora() {
         let config = DeepseekV2Config {
             q_lora_rank: None,
@@ -371,6 +422,38 @@ mod tests {
             num_experts_per_tok: 3,
             ..DeepseekV2Config::default()
         };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn invalid_lora_schedule_and_router_scalars_fail_validation() {
+        let config = DeepseekV2Config {
+            q_lora_rank: Some(0),
+            ..DeepseekV2Config::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = DeepseekV2Config {
+            first_k_dense_replace: DeepseekV2Config::default().num_hidden_layers,
+            ..DeepseekV2Config::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = DeepseekV2Config {
+            routed_scaling_factor: f64::INFINITY,
+            ..DeepseekV2Config::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn overflowing_head_dimensions_fail_without_panicking() {
+        let config = DeepseekV2Config {
+            qk_nope_head_dim: usize::MAX,
+            qk_rope_head_dim: 2,
+            ..DeepseekV2Config::default()
+        };
+        assert_eq!(config.qk_head_dim(), usize::MAX);
         assert!(config.validate().is_err());
     }
 }
