@@ -5,6 +5,7 @@
 //! outside these schemas. Shared serialized concepts such as RoPE live in
 //! [`config`], while each architecture validates its own stronger invariants.
 
+mod auto;
 pub mod config;
 pub mod deepseek_v2;
 pub mod muse_glimmer;
@@ -12,6 +13,11 @@ pub mod nemotron_h;
 pub mod qwen3_5;
 pub mod qwen3_moe;
 pub mod t5;
+
+pub use auto::{
+    AutoCausalConfigRef, AutoCausalDecodeState, AutoCausalLm, AutoSeq2SeqConfigRef,
+    AutoSeq2SeqDecodeState, AutoSeq2SeqLm,
+};
 
 /// Qwen3.8 checkpoints intentionally retain Qwen3.5's `qwen3_5_text` model type.
 ///
