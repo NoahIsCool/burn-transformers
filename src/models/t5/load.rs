@@ -1,12 +1,14 @@
 //! Architecture-owned Burn parameter installation for T5 checkpoints.
 //!
 //! Checkpoint planning operates on dynamic names, ranks, and byte buffers, while
-//! Burn encodes tensor rank and linear-layout mappers in concrete Rust fields.
+//! Burn encodes tensor rank and linear layouts in concrete Rust fields.
 //! The [`TensorSink`] implementation below is therefore deliberately owned by
 //! the T5 architecture. It accepts only names emitted by [`T5CheckpointContract`]
-//! and installs weights through Burn's record-loading path. In particular, this
-//! preserves the transpose mapper that converts serialized linear weights from
-//! `[output, input]` to the runtime multiplication layout `[input, output]`.
+//! and installs weights through Burn's record-loading path. Official T5 linear
+//! matrices use `[output, input]`; they are transposed byte-for-byte to Burn's
+//! gradient-safe `[input, output]` runtime layout before installation. Avoiding
+//! `LinearLayout::Col` is intentional because Burn 0.21's initialization mapper
+//! disconnects mapped linear weights from autodiff gradients.
 //!
 //! Tied T5 heads require no second Burn parameter: the forward graph multiplies
 //! by `shared.weight^T` directly. The sink still validates the logical alias after
@@ -391,7 +393,72 @@ fn install_linear_weight<B: Backend>(
     linear: &mut Linear<B>,
     data: TensorData,
 ) -> Result<(), T5LoadError> {
+    let data = transpose_linear_data(target, data)?;
     install(target, &mut linear.weight, data)
+}
+
+/// Transposes checkpoint `[output, input]` bytes into runtime `[input, output]`.
+///
+/// Copying whole scalar byte groups preserves F16, BF16, and F32 bit patterns
+/// exactly without a dtype conversion or backend round trip. The generic load
+/// executor already bounds and validates source payloads, but this helper still
+/// checks rank and byte extent so direct sink calls remain non-panicking.
+fn transpose_linear_data(target: &str, data: TensorData) -> Result<TensorData, T5LoadError> {
+    if data.shape.len() != 2 {
+        return Err(T5LoadError::Parameter {
+            target: target.into(),
+            source: ParameterInstallError::Rank {
+                expected: 2,
+                actual: data.shape.len(),
+            },
+        });
+    }
+    let rows = data.shape[0];
+    let columns = data.shape[1];
+    let element_size = data.dtype.size();
+    let elements = rows
+        .checked_mul(columns)
+        .ok_or_else(|| T5LoadError::Parameter {
+            target: target.into(),
+            source: ParameterInstallError::Shape {
+                expected: Vec::new(),
+                actual: data.shape.to_vec(),
+            },
+        })?;
+    let bytes_expected =
+        elements
+            .checked_mul(element_size)
+            .ok_or_else(|| T5LoadError::Parameter {
+                target: target.into(),
+                source: ParameterInstallError::Shape {
+                    expected: Vec::new(),
+                    actual: data.shape.to_vec(),
+                },
+            })?;
+    let bytes = data.as_bytes();
+    if bytes.len() != bytes_expected {
+        return Err(T5LoadError::Parameter {
+            target: target.into(),
+            source: ParameterInstallError::Shape {
+                expected: vec![rows, columns],
+                actual: data.shape.to_vec(),
+            },
+        });
+    }
+    let mut transposed = vec![0_u8; bytes.len()];
+    for row in 0..rows {
+        for column in 0..columns {
+            let source = (row * columns + column) * element_size;
+            let destination = (column * rows + row) * element_size;
+            transposed[destination..destination + element_size]
+                .copy_from_slice(&bytes[source..source + element_size]);
+        }
+    }
+    Ok(TensorData::from_bytes_vec(
+        transposed,
+        [columns, rows],
+        data.dtype,
+    ))
 }
 
 /// Installs one T5 scale-only RMSNorm weight unchanged.
@@ -425,14 +492,15 @@ mod tests {
 
     use burn::{
         backend::Flex,
-        tensor::{Int, Tensor, TensorData},
+        tensor::{Int, Tensor, TensorData, Tolerance},
     };
     use serde_json::{Map, Value, json};
     use tempfile::TempDir;
 
     use crate::{
-        ForwardOptions,
+        DecodeInput, DecodeState, ForwardOptions, Seq2SeqLanguageModel,
         architecture::{CausalLmInput, Seq2SeqInput},
+        cache::CacheConfig,
         checkpoint::{
             CheckpointError, ExecutionFailureCause, LoadOptions, TensorDType, TensorOperation,
         },
@@ -806,7 +874,36 @@ mod tests {
         assert_eq!(fs::read(temp.path().join("sentinel")).unwrap(), b"ok");
     }
 
+    /// Linear checkpoint transposition preserves scalar order and rejects malformed data.
+    #[test]
+    fn linear_data_transposition_is_bit_exact_and_non_panicking() {
+        let transposed = transpose_linear_data(
+            "decoder.block.0.q.weight",
+            TensorData::new(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]),
+        )
+        .unwrap();
+        assert_eq!(transposed.shape, [3, 2].into());
+        assert_eq!(
+            transposed.to_vec::<f32>().unwrap(),
+            vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+        );
+
+        assert!(matches!(
+            transpose_linear_data("bad.rank", TensorData::new(vec![1.0_f32, 2.0], [1, 1, 2])),
+            Err(T5LoadError::Parameter {
+                source: ParameterInstallError::Rank { .. },
+                ..
+            })
+        ));
+        let malformed = TensorData::from_bytes_vec(vec![0_u8; 3], [2, 2], burn::tensor::DType::F32);
+        assert!(transpose_linear_data("bad.bytes", malformed).is_err());
+    }
+
     /// Loads the pinned official FLAN-T5-small artifact and executes real weights.
+    ///
+    /// Reference probes were produced by Transformers 5.2.0 in CPU F32 at the
+    /// pinned `0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab` revision. The same test
+    /// then proves cached prefill/decode parity against the loaded stateless graph.
     ///
     /// The test is ignored because it requires a 308 MB artifact outside Git and
     /// allocates the complete F32 model. Set `TRANSFORMERS_FLAN_T5_SMALL_DIR` when
@@ -863,6 +960,40 @@ mod tests {
             )
             .unwrap();
         assert_eq!(output.decoder.logits.dims(), [1, 1, 32_128]);
+        let reference_logits = output.decoder.logits.to_data();
+        let reference_logits = reference_logits.as_slice::<f32>().unwrap();
+        let mut ranked = reference_logits
+            .iter()
+            .copied()
+            .enumerate()
+            .collect::<Vec<_>>();
+        ranked.sort_unstable_by(|left, right| right.1.total_cmp(&left.1));
+        assert_eq!(
+            ranked
+                .iter()
+                .take(10)
+                .map(|(token, _)| *token)
+                .collect::<Vec<_>>(),
+            vec![71, 37, 2588, 1609, 10129, 6357, 290, 282, 389, 6776]
+        );
+        for (token, expected) in [
+            (0, -60.822_26_f32),
+            (1, -3.995_400_7),
+            (2, -14.725_48),
+            (3, -4.768_744_5),
+            (8, -7.057_482_2),
+            (71, 3.299_487_6),
+            (100, -3.746_507_4),
+            (999, -16.090_796),
+            (32_000, -61.027_275),
+            (32_127, -60.742_435),
+        ] {
+            assert!(
+                (reference_logits[token] - expected).abs() <= 1e-3,
+                "token {token}: expected {expected}, found {}",
+                reference_logits[token]
+            );
+        }
         assert!(
             output
                 .decoder
@@ -873,5 +1004,74 @@ mod tests {
                 .iter()
                 .all(|value| value.is_finite())
         );
+
+        let encoder = model
+            .encode(
+                CausalLmInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[71, 8, 57]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+            .unwrap();
+        let cached = model
+            .prefill_decoder(
+                &encoder,
+                CausalLmInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[0]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        cached.decoder.logits.into_data().assert_approx_eq::<f32>(
+            &output.decoder.logits.into_data(),
+            Tolerance::absolute(1e-4),
+        );
+
+        let cached_step = model
+            .decode(
+                &encoder,
+                DecodeInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[3]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        let stateless_step = model
+            .forward(
+                Seq2SeqInput {
+                    encoder: CausalLmInput {
+                        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[71, 8, 57]], &device),
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                    decoder: CausalLmInput {
+                        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[0, 3]], &device),
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                },
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        cached_step
+            .decoder
+            .logits
+            .into_data()
+            .assert_approx_eq::<f32>(
+                &stateless_step.decoder.logits.into_data(),
+                Tolerance::absolute(1e-4),
+            );
+        assert_eq!(state.lengths(), [2]);
     }
 }

@@ -16,12 +16,12 @@ use burn::{module::Module, tensor::backend::Backend};
 use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, DecodeState, EncoderOutput,
     Error, ForwardOptions, Result, Seq2SeqInput, Seq2SeqLanguageModel, Seq2SeqOutput,
-    cache::{CacheConfig, TensorDecodeState},
+    cache::CacheConfig,
 };
 
 use super::{
     qwen3_5::{Qwen3_5DecodeState, Qwen3_5ForCausalLm, Qwen3_5TextConfig},
-    t5::{T5Config, T5ForConditionalGeneration},
+    t5::{T5Config, T5DecodeState, T5ForConditionalGeneration},
 };
 use crate::models::config::ModelConfig;
 
@@ -133,8 +133,8 @@ impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum AutoSeq2SeqDecodeState<B: Backend> {
-    /// T5 decoder state. Construction remains unavailable until cached T5 lands.
-    T5(TensorDecodeState<B>),
+    /// T5 decoder self-attention and immutable encoder cross-attention state.
+    T5(T5DecodeState<B>),
 }
 
 impl<B: Backend> DecodeState<B> for AutoSeq2SeqDecodeState<B> {
@@ -334,7 +334,7 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
         }
     }
 
-    /// Allocates architecture-matched decoder state when that path is available.
+    /// Allocates architecture-matched decoder state for the selected model.
     pub fn new_decode_state(
         &self,
         config: CacheConfig,
@@ -480,21 +480,20 @@ mod tests {
         assert_eq!(state.lengths(), [0]);
     }
 
-    /// T5 registry initializes the stateless graph and preserves its config view.
+    /// T5 registry initializes the graph and allocates architecture-matched state.
     #[test]
-    fn seq2seq_registry_parses_t5_and_reports_cached_boundary() {
+    fn seq2seq_registry_parses_t5_and_allocates_cached_state() {
         let device = Default::default();
         let json = serde_json::to_string(&tiny_t5()).expect("serializable config");
         let model = AutoSeq2SeqLm::<TestBackend>::from_config_json(&json, &device)
             .expect("registered T5 config");
         assert_eq!(model.config().model_type(), "t5");
         assert_eq!(model.config().vocabulary_size(), 32);
-        assert!(
-            model
-                .new_decode_state(CacheConfig::new(1, 8).expect("valid cache"), 1, &device)
-                .is_err(),
-            "auto dispatch must preserve T5's explicit cached-decoder boundary"
-        );
+        let state = model
+            .new_decode_state(CacheConfig::new(1, 8).expect("valid cache"), 1, &device)
+            .expect("registered T5 state");
+        assert_eq!(state.batch_size(), 1);
+        assert_eq!(state.capacity(), 8);
     }
 
     /// Malformed, missing, and non-executable model types fail contextually.

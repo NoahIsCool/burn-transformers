@@ -1,4 +1,4 @@
-//! Stateless Burn implementation of the T5/FLAN/UL2 transformer graph.
+//! Burn implementation of the T5/FLAN/UL2 transformer graph.
 //!
 //! T5 is a pre-normalized encoder-decoder. Encoder self-attention is
 //! bidirectional, decoder self-attention is causal, and every decoder block has
@@ -11,7 +11,8 @@
 //! attention primitive is therefore configured with an explicit scale of one.
 //! This module intentionally omits stochastic dropout during inference. All
 //! parameterized operations remain ordinary Burn tensors and are suitable for
-//! a future training-mode wrapper.
+//! a future training-mode wrapper. Stateful inference keeps decoder self-KV and
+//! immutable encoder cross-KV outside this parameter graph in [`T5DecodeState`].
 
 use burn::{
     module::{Initializer, Module},
@@ -19,10 +20,7 @@ use burn::{
     tensor::{ElementConversion, Int, Tensor, TensorData, backend::Backend, module::linear},
 };
 
-use crate::{
-    CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, LogitsSelection, Result,
-    Seq2SeqLanguageModel, cache::CacheConfig, cache::TensorDecodeState,
-};
+use crate::{CausalLmInput, CausalLmOutput, Error, ForwardOptions, LogitsSelection, Result};
 use crate::{
     architecture::{EncoderOutput, Seq2SeqInput, Seq2SeqOutput, TokenMask},
     attention::{GroupedQueryAttention, GroupedQueryAttentionConfig, padding_attention_mask},
@@ -34,6 +32,10 @@ use crate::{
 };
 
 use super::{T5Config, T5FeedForwardProjection};
+
+mod decode;
+
+pub use decode::T5DecodeState;
 
 /// T5 multi-head attention projections plus an optional learned bias table.
 #[derive(Module, Debug)]
@@ -602,7 +604,7 @@ pub struct T5ForConditionalGeneration<B: Backend> {
 }
 
 impl<B: Backend> T5ForConditionalGeneration<B> {
-    /// Initializes a validated stateless T5/FLAN/UL2 graph.
+    /// Initializes a validated T5/FLAN/UL2 parameter graph.
     pub fn init(config: T5Config, device: &B::Device) -> Result<Self> {
         crate::ArchitectureConfig::validate(&config)?;
         let shared = EmbeddingConfig::new(config.vocab_size, config.d_model)
@@ -681,6 +683,9 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
         validate_options(options)?;
         let [batch, sequence] = validate_token_input(&decoder, self.config.vocab_size, "decoder")?;
         validate_encoder_output(encoder, batch, self.config.d_model)?;
+        if decoder.token_mask.is_some() {
+            return self.decode_stateless_masked(encoder, decoder, options);
+        }
         let hidden = self.shared.forward(decoder.token_ids.clone());
         debug_assert_eq!(hidden.dims(), [batch, sequence, self.config.d_model]);
         let output = self.decoder.forward_decoder(
@@ -729,66 +734,6 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
     }
 }
 
-impl<B: Backend> Seq2SeqLanguageModel<B> for T5ForConditionalGeneration<B> {
-    type Config = T5Config;
-    type State = TensorDecodeState<B>;
-
-    /// Returns the validated T5-family configuration used to build this graph.
-    fn config(&self) -> &Self::Config {
-        T5ForConditionalGeneration::config(self)
-    }
-
-    /// Runs the stateless bidirectional encoder implementation.
-    fn encode(
-        &self,
-        source: CausalLmInput<B>,
-        options: &ForwardOptions,
-    ) -> Result<EncoderOutput<B>> {
-        T5ForConditionalGeneration::encode(self, source, options)
-    }
-
-    /// Runs stateless encoder, causal decoder, cross-attention, and LM projection.
-    fn forward(
-        &self,
-        input: Seq2SeqInput<B>,
-        options: &ForwardOptions,
-    ) -> Result<Seq2SeqOutput<B>> {
-        T5ForConditionalGeneration::forward(self, input, options)
-    }
-
-    /// Reports the deliberately isolated cached-decoder integration boundary.
-    fn new_decode_state(
-        &self,
-        _config: CacheConfig,
-        _batch_size: usize,
-        _device: &B::Device,
-    ) -> Result<Self::State> {
-        Err(cached_decoder_unavailable())
-    }
-
-    /// Reports that stateful decoder prefill is deferred from this vertical slice.
-    fn prefill_decoder(
-        &self,
-        _encoder: &EncoderOutput<B>,
-        _decoder: CausalLmInput<B>,
-        _state: &mut Self::State,
-        _options: &ForwardOptions,
-    ) -> Result<Seq2SeqOutput<B>> {
-        Err(cached_decoder_unavailable())
-    }
-
-    /// Reports that recurrent decoder steps await the cross-attention cache API.
-    fn decode(
-        &self,
-        _encoder: &EncoderOutput<B>,
-        _input: DecodeInput<B>,
-        _state: &mut Self::State,
-        _options: &ForwardOptions,
-    ) -> Result<Seq2SeqOutput<B>> {
-        Err(cached_decoder_unavailable())
-    }
-}
-
 /// Initializes one conventional T5 scale-only RMS normalization.
 fn t5_norm<B: Backend>(config: &T5Config, device: &B::Device) -> Result<RmsNorm<B>> {
     let mut norm = RmsNormConfig::new(config.d_model)
@@ -801,11 +746,16 @@ fn t5_norm<B: Backend>(config: &T5Config, device: &B::Device) -> Result<RmsNorm<
     Ok(norm)
 }
 
-/// Initializes a bias-free checkpoint-layout linear map with an exact T5 variance.
+/// Initializes a bias-free, gradient-safe linear map with an exact T5 variance.
 fn t5_linear<B: Backend>(input: usize, output: usize, std: f64, device: &B::Device) -> Linear<B> {
     LinearConfig::new(input, output)
         .with_bias(false)
-        .with_layout(LinearLayout::Col)
+        // Burn 0.21's Col-layout initialization mapper transposes through an
+        // untracked tensor and therefore disconnects weight gradients. Keep
+        // the differentiable runtime parameter in [input, output] order; the
+        // T5 checkpoint sink transposes official [output, input] matrices once
+        // while streaming them into the model.
+        .with_layout(LinearLayout::Row)
         .with_initializer(Initializer::Normal { mean: 0.0, std })
         .init(device)
 }
@@ -1015,14 +965,6 @@ fn select_hidden<B: Backend>(
             ))
         }
     }
-}
-
-/// Returns the explicit boundary while decoder cache ownership is being stabilized.
-fn cached_decoder_unavailable() -> Error {
-    Error::BackendCapability(
-        "T5 cached decoding is not part of the stateless vertical slice; use forward until cross-attention cache integration lands"
-            .into(),
-    )
 }
 
 #[cfg(test)]
@@ -1522,23 +1464,6 @@ mod tests {
         config.num_layers = 1;
         config.num_decoder_layers = Some(1);
         config.dropout_rate = 0.0;
-    }
-
-    /// The trait advertises stateless methods but fails cached calls explicitly.
-    #[test]
-    fn cached_trait_boundary_is_explicit() {
-        let device = Default::default();
-        let model = T5ForConditionalGeneration::<TestBackend>::init(
-            tiny_config(T5FeedForwardProjection::Relu),
-            &device,
-        )
-        .expect("valid model");
-        let cache = CacheConfig::new(1, 8).expect("valid cache config");
-        let error = <T5ForConditionalGeneration<TestBackend> as Seq2SeqLanguageModel<
-            TestBackend,
-        >>::new_decode_state(&model, cache, 1, &device)
-        .expect_err("cached slice is intentionally isolated");
-        assert!(error.to_string().contains("stateless vertical slice"));
     }
 
     /// T5 attention scale remains one even when `d_kv` is not one.

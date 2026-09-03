@@ -140,9 +140,10 @@ impl T5CheckpointPlan {
 impl T5Config {
     /// Derives the exact official SafeTensors inventory from architecture metadata.
     ///
-    /// Shapes use checkpoint order. Burn column-layout linear layers save weights
-    /// as `[output, input]`, so the generic loader performs identity transforms and
-    /// Burn's parameter record mapper applies the runtime transpose during install.
+    /// Shapes use official checkpoint order `[output, input]`. The generic plan
+    /// therefore keeps identity transforms, while the architecture-owned T5 sink
+    /// transposes linear bytes once into Burn's gradient-safe `[input, output]`
+    /// runtime layout during installation.
     pub fn checkpoint_contract(&self) -> Result<T5CheckpointContract, ConfigError> {
         self.validate()?;
         let dimensions = Dimensions::try_from(self)?;
