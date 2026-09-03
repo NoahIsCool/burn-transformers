@@ -243,32 +243,33 @@ impl<B: Backend> Qwen3_5TextModel<B> {
     }
 }
 
-/// Decoder-only Qwen language model with an untied output head.
+/// Decoder-only Qwen language model with a tied or independent output head.
 #[derive(Module, Debug)]
 pub struct Qwen3_5ForCausalLm<B: Backend> {
     /// Hybrid text backbone.
     pub model: Qwen3_5TextModel<B>,
-    /// Vocabulary projection. Released Qwen3.8 checkpoints do not tie it.
-    pub lm_head: Linear<B>,
+    /// Independent vocabulary projection, absent when the embedding is tied.
+    ///
+    /// Tied checkpoints reuse `model.embed_tokens.weight` directly during the
+    /// forward pass. Keeping that case parameter-free guarantees one physical
+    /// allocation instead of relying on two differently mapped Burn parameters.
+    pub lm_head: Option<Linear<B>>,
 }
 
 impl<B: Backend> Qwen3_5ForCausalLm<B> {
     /// Initializes a validated inference/training graph with lazy parameters.
     pub fn init(config: Qwen3_5TextConfig, device: &B::Device) -> Result<Self> {
-        if config.tie_word_embeddings {
-            return Err(Error::configuration(
-                "qwen3_5.tie_word_embeddings",
-                "tied Qwen heads are not represented by this checkpoint family",
-            ));
-        }
         let hidden_size = config.hidden_size;
         let vocabulary_size = config.vocab_size;
+        let tie_word_embeddings = config.tie_word_embeddings;
         Ok(Self {
             model: Qwen3_5TextModel::init(config, device)?,
-            lm_head: LinearConfig::new(hidden_size, vocabulary_size)
-                .with_bias(false)
-                .with_layout(LinearLayout::Col)
-                .init(device),
+            lm_head: (!tie_word_embeddings).then(|| {
+                LinearConfig::new(hidden_size, vocabulary_size)
+                    .with_bias(false)
+                    .with_layout(LinearLayout::Col)
+                    .init(device)
+            }),
         })
     }
 
@@ -285,7 +286,14 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
         }
         let (hidden, hidden_states) = self.model.forward(&input, options.hidden_states)?;
         let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
-        let logits = self.lm_head.forward(selected);
+        let logits = match &self.lm_head {
+            Some(head) => head.forward(selected),
+            None => burn::tensor::module::linear(
+                selected,
+                self.model.embed_tokens.weight.val().transpose(),
+                None,
+            ),
+        };
         Ok(CausalLmOutput {
             logits,
             final_hidden_state: options.hidden_states.then_some(hidden),
@@ -561,6 +569,30 @@ mod tests {
             output.final_hidden_state.expect("requested").dims(),
             [2, 3, 8]
         );
+    }
+
+    /// Tied checkpoints project with the embedding table and allocate no second matrix.
+    #[test]
+    fn tied_embedding_head_runs_without_duplicate_parameter() {
+        let device = Default::default();
+        TestBackend::seed(&device, 17);
+        let mut config = tiny_config();
+        config.tie_word_embeddings = true;
+        let model = Qwen3_5ForCausalLm::<TestBackend>::init(config, &device)
+            .expect("tied tiny model must initialize");
+        assert!(model.lm_head.is_none());
+
+        let output = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions::default(),
+            )
+            .expect("embedding-backed vocabulary projection must run");
+        assert_eq!(output.logits.dims(), [1, 1, 32]);
     }
 
     /// Last-logit selection follows each row's last valid token under padding.
