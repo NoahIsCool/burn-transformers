@@ -33,7 +33,8 @@ pub mod tokenization;
 
 pub use architecture::{
     ArchitectureConfig, CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput,
-    DecodeState, ForwardOptions, LogitsSelection, Seq2SeqLanguageModel,
+    DecodeState, EncoderOutput, ForwardOptions, LogitsSelection, Seq2SeqInput,
+    Seq2SeqLanguageModel, Seq2SeqOutput, TokenMask,
 };
 pub use error::{Error, Result};
 pub use generation::{
