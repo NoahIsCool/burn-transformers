@@ -129,7 +129,12 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
         let token = self
             .target
             .process_and_select(target_logits, history)?
-            .into_data()
+            .try_into_data()
+            .map_err(|error| {
+                Error::BackendCapability(format!(
+                    "failed to read lead token from the backend: {error}"
+                ))
+            })?
             .convert::<i64>()
             .into_vec::<i64>()
             .map_err(|error| {
@@ -564,7 +569,12 @@ fn history_tensor<B: Backend>(
 /// Reads one selected backend token with checked unsigned conversion.
 fn selected_token<B: Backend>(token: Tensor<B, 1, Int>) -> Result<u32> {
     let values = token
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!(
+                "failed to read selected token from the backend: {error}"
+            ))
+        })?
         .convert::<i64>()
         .into_vec::<i64>()
         .map_err(|error| {
@@ -590,7 +600,12 @@ fn normalized_probabilities<B: Backend>(logits: Tensor<B, 2>) -> Result<Vec<f64>
     }
     let values = logits
         .clone()
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!(
+                "failed to read processed logits from the backend: {error}"
+            ))
+        })?
         .convert::<f32>()
         .into_vec::<f32>()
         .map_err(|error| {
@@ -614,7 +629,12 @@ fn normalized_probabilities<B: Backend>(logits: Tensor<B, 2>) -> Result<Vec<f64>
         ));
     }
     let probabilities = softmax(logits, 1)
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!(
+                "failed to read processed probabilities from the backend: {error}"
+            ))
+        })?
         .convert::<f32>()
         .into_vec::<f32>()
         .map_err(|error| {

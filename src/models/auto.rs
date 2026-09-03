@@ -14,12 +14,15 @@
 use burn::{module::Module, tensor::backend::Backend};
 
 use crate::{
-    CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, DecodeState, EncoderOutput,
-    Error, ForwardOptions, Result, Seq2SeqInput, Seq2SeqLanguageModel, Seq2SeqOutput,
-    cache::CacheConfig,
+    ArchitectureConfig, CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput,
+    DecodeState, EncoderOutput, Error, ForwardOptions, Result, Seq2SeqInput, Seq2SeqLanguageModel,
+    Seq2SeqOutput, cache::CacheConfig,
 };
 
 use super::{
+    deepseek_v2::{DeepseekV2Config, DeepseekV2DecodeState, DeepseekV2ForCausalLm},
+    muse_glimmer::{MuseGlimmerDecodeState, MuseGlimmerForCausalLm, MuseGlimmerTextConfig},
+    nemotron_h::{NemotronHConfig, NemotronHDecodeState, NemotronHForCausalLm},
     qwen3_5::{Qwen3_5DecodeState, Qwen3_5ForCausalLm, Qwen3_5TextConfig},
     qwen3_moe::{Qwen3MoeConfig, Qwen3MoeDecodeState, Qwen3MoeForCausalLm},
     t5::{T5Config, T5DecodeState, T5ForConditionalGeneration},
@@ -30,10 +33,72 @@ mod load;
 
 pub use load::AutoLoadOptions;
 
+/// Registry-level configuration associated with [`CausalLanguageModel`].
+///
+/// The detailed checkpoint configuration remains available through
+/// [`AutoCausalLm::config`]. This lightweight discriminator lets generic code
+/// use the architecture trait without duplicating a model's complete config
+/// inside the dispatch enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AutoCausalConfig {
+    /// DeepSeek-V2 MLA and sparse-expert runtime.
+    DeepseekV2,
+    /// Muse Glimmer hybrid-attention runtime.
+    MuseGlimmer,
+    /// NVIDIA Nemotron-H heterogeneous runtime.
+    NemotronH,
+    /// Qwen3.5/Qwen3.8 hybrid runtime.
+    Qwen3_5,
+    /// Qwen3 sparse-MoE runtime.
+    Qwen3Moe,
+}
+
+impl ArchitectureConfig for AutoCausalConfig {
+    const MODEL_TYPES: &'static [&'static str] = &[
+        "deepseek_v2",
+        "muse_glimmer_text",
+        "nemotron_h",
+        "qwen3_5_text",
+        "qwen3_moe",
+    ];
+
+    /// Registry discriminators are constructed only for executable families.
+    fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Registry-level configuration associated with [`Seq2SeqLanguageModel`].
+///
+/// The complete checkpoint configuration remains available through
+/// [`AutoSeq2SeqLm::config`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AutoSeq2SeqConfig {
+    /// T5, FLAN-T5, T5 v1.1, and UL2 runtime.
+    T5,
+}
+
+impl ArchitectureConfig for AutoSeq2SeqConfig {
+    const MODEL_TYPES: &'static [&'static str] = &["t5"];
+
+    /// Registry discriminators are constructed only for executable families.
+    fn validate(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
 /// Immutable architecture configuration borrowed from an automatic causal model.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub enum AutoCausalConfigRef<'a> {
+    /// DeepSeek-V2 MLA and sparse-expert configuration.
+    DeepseekV2(&'a DeepseekV2Config),
+    /// Muse Glimmer dense hybrid text configuration.
+    MuseGlimmer(&'a MuseGlimmerTextConfig),
+    /// NVIDIA Nemotron-H heterogeneous block configuration.
+    NemotronH(&'a NemotronHConfig),
     /// Qwen3.5/Qwen3.8 hybrid text configuration.
     Qwen3_5(&'a Qwen3_5TextConfig),
     /// Qwen3 sparse mixture-of-experts decoder configuration.
@@ -44,6 +109,9 @@ impl AutoCausalConfigRef<'_> {
     /// Returns the exact checkpoint `model_type` discriminator.
     pub fn model_type(self) -> &'static str {
         match self {
+            Self::DeepseekV2(_) => "deepseek_v2",
+            Self::MuseGlimmer(_) => "muse_glimmer_text",
+            Self::NemotronH(_) => "nemotron_h",
             Self::Qwen3_5(_) => "qwen3_5_text",
             Self::Qwen3Moe(_) => "qwen3_moe",
         }
@@ -52,6 +120,9 @@ impl AutoCausalConfigRef<'_> {
     /// Returns the model vocabulary size.
     pub fn vocabulary_size(self) -> usize {
         match self {
+            Self::DeepseekV2(config) => config.vocab_size,
+            Self::MuseGlimmer(config) => config.vocab_size,
+            Self::NemotronH(config) => config.vocab_size,
             Self::Qwen3_5(config) => config.vocab_size,
             Self::Qwen3Moe(config) => config.vocab_size,
         }
@@ -86,6 +157,12 @@ impl AutoSeq2SeqConfigRef<'_> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum AutoCausalDecodeState<B: Backend> {
+    /// DeepSeek-V2 compressed MLA and recurrent length state.
+    DeepseekV2(Box<DeepseekV2DecodeState<B>>),
+    /// Muse sliding-ring and full-attention KV state.
+    MuseGlimmer(Box<MuseGlimmerDecodeState<B>>),
+    /// Nemotron-H Mamba2 and grouped-query attention state.
+    NemotronH(Box<NemotronHDecodeState<B>>),
     /// Qwen native-KV and DeltaNet recurrent state.
     Qwen3_5(Box<Qwen3_5DecodeState<B>>),
     /// Qwen3 MoE native grouped-query KV state.
@@ -95,6 +172,9 @@ pub enum AutoCausalDecodeState<B: Backend> {
 impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
     fn batch_size(&self) -> usize {
         match self {
+            Self::DeepseekV2(state) => state.batch_size(),
+            Self::MuseGlimmer(state) => state.batch_size(),
+            Self::NemotronH(state) => state.batch_size(),
             Self::Qwen3_5(state) => state.batch_size(),
             Self::Qwen3Moe(state) => state.batch_size(),
         }
@@ -102,6 +182,9 @@ impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
 
     fn capacity(&self) -> usize {
         match self {
+            Self::DeepseekV2(state) => state.capacity(),
+            Self::MuseGlimmer(state) => state.capacity(),
+            Self::NemotronH(state) => state.capacity(),
             Self::Qwen3_5(state) => state.capacity(),
             Self::Qwen3Moe(state) => state.capacity(),
         }
@@ -109,6 +192,9 @@ impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
 
     fn lengths(&self) -> &[usize] {
         match self {
+            Self::DeepseekV2(state) => state.lengths(),
+            Self::MuseGlimmer(state) => state.lengths(),
+            Self::NemotronH(state) => state.lengths(),
             Self::Qwen3_5(state) => state.lengths(),
             Self::Qwen3Moe(state) => state.lengths(),
         }
@@ -116,6 +202,9 @@ impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
 
     fn reset(&mut self) -> Result<()> {
         match self {
+            Self::DeepseekV2(state) => state.reset(),
+            Self::MuseGlimmer(state) => state.reset(),
+            Self::NemotronH(state) => state.reset(),
             Self::Qwen3_5(state) => state.reset(),
             Self::Qwen3Moe(state) => state.reset(),
         }
@@ -123,6 +212,9 @@ impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
 
     fn reorder(&mut self, indices: &[usize]) -> Result<()> {
         match self {
+            Self::DeepseekV2(state) => state.reorder(indices),
+            Self::MuseGlimmer(state) => state.reorder(indices),
+            Self::NemotronH(state) => state.reorder(indices),
             Self::Qwen3_5(state) => state.reorder(indices),
             Self::Qwen3Moe(state) => state.reorder(indices),
         }
@@ -130,6 +222,9 @@ impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
 
     fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
         match self {
+            Self::DeepseekV2(state) => state.truncate(lengths),
+            Self::MuseGlimmer(state) => state.truncate(lengths),
+            Self::NemotronH(state) => state.truncate(lengths),
             Self::Qwen3_5(state) => state.truncate(lengths),
             Self::Qwen3Moe(state) => state.truncate(lengths),
         }
@@ -137,6 +232,9 @@ impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
 
     fn device(&self) -> &B::Device {
         match self {
+            Self::DeepseekV2(state) => state.device(),
+            Self::MuseGlimmer(state) => state.device(),
+            Self::NemotronH(state) => state.device(),
             Self::Qwen3_5(state) => state.device(),
             Self::Qwen3Moe(state) => state.device(),
         }
@@ -202,6 +300,12 @@ impl<B: Backend> DecodeState<B> for AutoSeq2SeqDecodeState<B> {
 // graphs would prevent derive-generated device/dtype/parameter traversal.
 #[allow(clippy::large_enum_variant)]
 pub enum AutoCausalLm<B: Backend> {
+    /// DeepSeek-V2 decoder with multi-head latent attention and sparse experts.
+    DeepseekV2(DeepseekV2ForCausalLm<B>),
+    /// Muse Glimmer dense decoder with sliding/full hybrid attention.
+    MuseGlimmer(MuseGlimmerForCausalLm<B>),
+    /// Nemotron-H decoder with interleaved Mamba2, attention, dense, and MoE blocks.
+    NemotronH(NemotronHForCausalLm<B>),
     /// Qwen3.5/Qwen3.8 gated-DeltaNet and full-attention hybrid decoder.
     Qwen3_5(Qwen3_5ForCausalLm<B>),
     /// Qwen3 decoder with token-routed sparse SwiGLU experts.
@@ -210,11 +314,35 @@ pub enum AutoCausalLm<B: Backend> {
 
 impl<B: Backend> AutoCausalLm<B> {
     /// Checkpoint model types currently accepted by this executable registry.
-    pub const MODEL_TYPES: &'static [&'static str] = &["qwen3_5_text", "qwen3_moe"];
+    pub const MODEL_TYPES: &'static [&'static str] = &[
+        "deepseek_v2",
+        "muse_glimmer_text",
+        "nemotron_h",
+        "qwen3_5_text",
+        "qwen3_moe",
+    ];
 
     /// Parses a direct or wrapped configuration and initializes its lazy graph.
     pub fn from_config_json(json: &str, device: &B::Device) -> Result<Self> {
         match detect_model_type(json)?.as_str() {
+            "deepseek_v2" => {
+                let config = DeepseekV2Config::from_json_str(json).map_err(|error| {
+                    Error::configuration("auto_causal.config", error.to_string())
+                })?;
+                DeepseekV2ForCausalLm::init(config, device).map(Self::DeepseekV2)
+            }
+            "muse_glimmer_text" => {
+                let config = MuseGlimmerTextConfig::from_json_str(json).map_err(|error| {
+                    Error::configuration("auto_causal.config", error.to_string())
+                })?;
+                MuseGlimmerForCausalLm::init(config, device).map(Self::MuseGlimmer)
+            }
+            "nemotron_h" => {
+                let config = NemotronHConfig::from_json_str(json).map_err(|error| {
+                    Error::configuration("auto_causal.config", error.to_string())
+                })?;
+                NemotronHForCausalLm::init(config, device).map(Self::NemotronH)
+            }
             "qwen3_5_text" => {
                 let config = Qwen3_5TextConfig::from_json_str(json).map_err(|error| {
                     Error::configuration("auto_causal.config", error.to_string())
@@ -237,6 +365,9 @@ impl<B: Backend> AutoCausalLm<B> {
     /// Returns the concrete architecture configuration without cloning it.
     pub fn config(&self) -> AutoCausalConfigRef<'_> {
         match self {
+            Self::DeepseekV2(model) => AutoCausalConfigRef::DeepseekV2(model.config()),
+            Self::MuseGlimmer(model) => AutoCausalConfigRef::MuseGlimmer(model.config()),
+            Self::NemotronH(model) => AutoCausalConfigRef::NemotronH(model.config()),
             Self::Qwen3_5(model) => AutoCausalConfigRef::Qwen3_5(model.config()),
             Self::Qwen3Moe(model) => AutoCausalConfigRef::Qwen3Moe(model.config()),
         }
@@ -249,6 +380,9 @@ impl<B: Backend> AutoCausalLm<B> {
         options: &ForwardOptions,
     ) -> Result<CausalLmOutput<B>> {
         match self {
+            Self::DeepseekV2(model) => CausalLanguageModel::forward(model, input, options),
+            Self::MuseGlimmer(model) => CausalLanguageModel::forward(model, input, options),
+            Self::NemotronH(model) => CausalLanguageModel::forward(model, input, options),
             Self::Qwen3_5(model) => CausalLanguageModel::forward(model, input, options),
             Self::Qwen3Moe(model) => CausalLanguageModel::forward(model, input, options),
         }
@@ -262,6 +396,21 @@ impl<B: Backend> AutoCausalLm<B> {
         device: &B::Device,
     ) -> Result<AutoCausalDecodeState<B>> {
         match self {
+            Self::DeepseekV2(model) => {
+                CausalLanguageModel::new_decode_state(model, config, batch_size, device)
+                    .map(Box::new)
+                    .map(AutoCausalDecodeState::DeepseekV2)
+            }
+            Self::MuseGlimmer(model) => {
+                CausalLanguageModel::new_decode_state(model, config, batch_size, device)
+                    .map(Box::new)
+                    .map(AutoCausalDecodeState::MuseGlimmer)
+            }
+            Self::NemotronH(model) => {
+                CausalLanguageModel::new_decode_state(model, config, batch_size, device)
+                    .map(Box::new)
+                    .map(AutoCausalDecodeState::NemotronH)
+            }
             Self::Qwen3_5(model) => {
                 CausalLanguageModel::new_decode_state(model, config, batch_size, device)
                     .map(Box::new)
@@ -283,6 +432,15 @@ impl<B: Backend> AutoCausalLm<B> {
         options: &ForwardOptions,
     ) -> Result<CausalLmOutput<B>> {
         match (self, state) {
+            (Self::DeepseekV2(model), AutoCausalDecodeState::DeepseekV2(state)) => {
+                CausalLanguageModel::prefill(model, input, state.as_mut(), options)
+            }
+            (Self::MuseGlimmer(model), AutoCausalDecodeState::MuseGlimmer(state)) => {
+                CausalLanguageModel::prefill(model, input, state.as_mut(), options)
+            }
+            (Self::NemotronH(model), AutoCausalDecodeState::NemotronH(state)) => {
+                CausalLanguageModel::prefill(model, input, state.as_mut(), options)
+            }
             (Self::Qwen3_5(model), AutoCausalDecodeState::Qwen3_5(state)) => {
                 CausalLanguageModel::prefill(model, input, state.as_mut(), options)
             }
@@ -303,6 +461,15 @@ impl<B: Backend> AutoCausalLm<B> {
         options: &ForwardOptions,
     ) -> Result<CausalLmOutput<B>> {
         match (self, state) {
+            (Self::DeepseekV2(model), AutoCausalDecodeState::DeepseekV2(state)) => {
+                CausalLanguageModel::decode(model, input, state.as_mut(), options)
+            }
+            (Self::MuseGlimmer(model), AutoCausalDecodeState::MuseGlimmer(state)) => {
+                CausalLanguageModel::decode(model, input, state.as_mut(), options)
+            }
+            (Self::NemotronH(model), AutoCausalDecodeState::NemotronH(state)) => {
+                CausalLanguageModel::decode(model, input, state.as_mut(), options)
+            }
             (Self::Qwen3_5(model), AutoCausalDecodeState::Qwen3_5(state)) => {
                 CausalLanguageModel::decode(model, input, state.as_mut(), options)
             }
@@ -313,6 +480,64 @@ impl<B: Backend> AutoCausalLm<B> {
                 "automatic causal decode state belongs to a different architecture".into(),
             )),
         }
+    }
+}
+
+impl<B: Backend> CausalLanguageModel<B> for AutoCausalLm<B> {
+    type Config = AutoCausalConfig;
+    type State = AutoCausalDecodeState<B>;
+
+    fn forward(
+        &self,
+        input: CausalLmInput<B>,
+        options: &ForwardOptions,
+    ) -> Result<CausalLmOutput<B>> {
+        AutoCausalLm::forward(self, input, options)
+    }
+
+    fn new_decode_state(
+        &self,
+        config: CacheConfig,
+        batch_size: usize,
+        device: &B::Device,
+    ) -> Result<Self::State> {
+        AutoCausalLm::new_decode_state(self, config, batch_size, device)
+    }
+
+    fn prefill(
+        &self,
+        input: CausalLmInput<B>,
+        state: &mut Self::State,
+        options: &ForwardOptions,
+    ) -> Result<CausalLmOutput<B>> {
+        AutoCausalLm::prefill(self, input, state, options)
+    }
+
+    fn decode(
+        &self,
+        input: DecodeInput<B>,
+        state: &mut Self::State,
+        options: &ForwardOptions,
+    ) -> Result<CausalLmOutput<B>> {
+        AutoCausalLm::decode(self, input, state, options)
+    }
+}
+
+impl<B: Backend> From<DeepseekV2ForCausalLm<B>> for AutoCausalLm<B> {
+    fn from(model: DeepseekV2ForCausalLm<B>) -> Self {
+        Self::DeepseekV2(model)
+    }
+}
+
+impl<B: Backend> From<MuseGlimmerForCausalLm<B>> for AutoCausalLm<B> {
+    fn from(model: MuseGlimmerForCausalLm<B>) -> Self {
+        Self::MuseGlimmer(model)
+    }
+}
+
+impl<B: Backend> From<NemotronHForCausalLm<B>> for AutoCausalLm<B> {
+    fn from(model: NemotronHForCausalLm<B>) -> Self {
+        Self::NemotronH(model)
     }
 }
 
@@ -431,6 +656,56 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
     }
 }
 
+impl<B: Backend> Seq2SeqLanguageModel<B> for AutoSeq2SeqLm<B> {
+    type Config = AutoSeq2SeqConfig;
+    type State = AutoSeq2SeqDecodeState<B>;
+
+    fn encode(
+        &self,
+        source: CausalLmInput<B>,
+        options: &ForwardOptions,
+    ) -> Result<EncoderOutput<B>> {
+        AutoSeq2SeqLm::encode(self, source, options)
+    }
+
+    fn forward(
+        &self,
+        input: Seq2SeqInput<B>,
+        options: &ForwardOptions,
+    ) -> Result<Seq2SeqOutput<B>> {
+        AutoSeq2SeqLm::forward(self, input, options)
+    }
+
+    fn new_decode_state(
+        &self,
+        config: CacheConfig,
+        batch_size: usize,
+        device: &B::Device,
+    ) -> Result<Self::State> {
+        AutoSeq2SeqLm::new_decode_state(self, config, batch_size, device)
+    }
+
+    fn prefill_decoder(
+        &self,
+        encoder: &EncoderOutput<B>,
+        decoder: CausalLmInput<B>,
+        state: &mut Self::State,
+        options: &ForwardOptions,
+    ) -> Result<Seq2SeqOutput<B>> {
+        AutoSeq2SeqLm::prefill_decoder(self, encoder, decoder, state, options)
+    }
+
+    fn decode(
+        &self,
+        encoder: &EncoderOutput<B>,
+        input: DecodeInput<B>,
+        state: &mut Self::State,
+        options: &ForwardOptions,
+    ) -> Result<Seq2SeqOutput<B>> {
+        AutoSeq2SeqLm::decode(self, encoder, input, state, options)
+    }
+}
+
 impl<B: Backend> From<T5ForConditionalGeneration<B>> for AutoSeq2SeqLm<B> {
     fn from(model: T5ForConditionalGeneration<B>) -> Self {
         Self::T5(model)
@@ -460,10 +735,17 @@ pub(super) fn detect_model_type(json: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use burn::backend::Flex;
+    use burn::{
+        backend::Flex,
+        tensor::{Int, Tensor},
+    };
 
     use super::*;
-    use crate::models::{qwen3_5::Qwen3_5LayerType, t5::T5FeedForwardProjection};
+    use crate::models::{
+        muse_glimmer::MuseGlimmerLayerType, nemotron_h::NemotronHBlockType,
+        qwen3_5::Qwen3_5LayerType, t5::T5FeedForwardProjection,
+    };
+    use crate::{CausalGenerationRequest, GenerationConfig, generate_causal};
 
     type TestBackend = Flex<f32, i32>;
 
@@ -510,6 +792,65 @@ mod tests {
             num_experts: 4,
             num_experts_per_tok: 2,
             ..Qwen3MoeConfig::default()
+        }
+    }
+
+    /// Constructs a tiny Muse decoder retaining local and global attention.
+    fn tiny_muse() -> MuseGlimmerTextConfig {
+        MuseGlimmerTextConfig {
+            vocab_size: 32,
+            hidden_size: 8,
+            intermediate_size: 12,
+            num_hidden_layers: 4,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 4,
+            max_position_embeddings: 32,
+            sliding_window: Some(3),
+            bos_token_id: Some(crate::models::config::TokenIds::One(1)),
+            eos_token_id: Some(crate::models::config::TokenIds::One(2)),
+            layer_types: vec![
+                MuseGlimmerLayerType::SlidingAttention,
+                MuseGlimmerLayerType::SlidingAttention,
+                MuseGlimmerLayerType::SlidingAttention,
+                MuseGlimmerLayerType::FullAttention,
+            ],
+            ..MuseGlimmerTextConfig::default()
+        }
+    }
+
+    /// Constructs a tiny Nemotron schedule retaining every executable block kind.
+    fn tiny_nemotron() -> NemotronHConfig {
+        NemotronHConfig {
+            vocab_size: 32,
+            hidden_size: 8,
+            layers_block_type: vec![
+                NemotronHBlockType::LinearAttention,
+                NemotronHBlockType::FullAttention,
+                NemotronHBlockType::Mlp,
+                NemotronHBlockType::Moe,
+            ],
+            num_hidden_layers: Some(4),
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 4,
+            max_position_embeddings: 32,
+            intermediate_size: 12,
+            ssm_state_size: 3,
+            mamba_num_heads: 4,
+            mamba_head_dim: 2,
+            n_groups: 2,
+            conv_kernel: 3,
+            chunk_size: 2,
+            n_routed_experts: 4,
+            n_shared_experts: 1,
+            moe_intermediate_size: 6,
+            moe_shared_expert_intermediate_size: 8,
+            num_experts_per_tok: 2,
+            n_group: 2,
+            topk_group: 1,
+            num_nextn_predict_layers: 0,
+            ..NemotronHConfig::default()
         }
     }
 
@@ -568,6 +909,118 @@ mod tests {
         state.reset().expect("empty state reset");
     }
 
+    /// Remaining v1 causal families select their concrete graphs and state variants.
+    #[test]
+    fn causal_registry_dispatches_deepseek_muse_and_nemotron() {
+        let device = Default::default();
+
+        let deepseek_config = crate::models::deepseek_v2::model::tests_support::tiny_config();
+        let deepseek = AutoCausalLm::<TestBackend>::from_config_json(
+            &serde_json::to_string(&deepseek_config).expect("serializable DeepSeek config"),
+            &device,
+        )
+        .expect("registered DeepSeek config");
+        assert_eq!(deepseek.config().model_type(), "deepseek_v2");
+        assert!(matches!(
+            deepseek
+                .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+                .expect("DeepSeek state"),
+            AutoCausalDecodeState::DeepseekV2(_)
+        ));
+
+        let muse = AutoCausalLm::<TestBackend>::from_config_json(
+            &serde_json::to_string(&tiny_muse()).expect("serializable Muse config"),
+            &device,
+        )
+        .expect("registered Muse config");
+        assert_eq!(muse.config().model_type(), "muse_glimmer_text");
+        assert!(matches!(
+            muse.new_decode_state(
+                CacheConfig::new(1, 8)
+                    .unwrap()
+                    .with_sliding_window(3)
+                    .unwrap(),
+                1,
+                &device,
+            )
+            .expect("Muse state"),
+            AutoCausalDecodeState::MuseGlimmer(_)
+        ));
+
+        let nemotron = AutoCausalLm::<TestBackend>::from_config_json(
+            &serde_json::to_string(&tiny_nemotron()).expect("serializable Nemotron config"),
+            &device,
+        )
+        .expect("registered Nemotron config");
+        assert_eq!(nemotron.config().model_type(), "nemotron_h");
+        assert!(matches!(
+            nemotron
+                .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+                .expect("Nemotron state"),
+            AutoCausalDecodeState::NemotronH(_)
+        ));
+    }
+
+    /// The automatic causal enum can be passed directly to generic generation.
+    #[test]
+    fn causal_registry_implements_generation_contract_end_to_end() {
+        let device = Default::default();
+        let concrete = crate::models::deepseek_v2::model::tests_support::initialized_model(
+            crate::models::deepseek_v2::model::tests_support::tiny_config(),
+            &device,
+        );
+        let model = AutoCausalLm::from(concrete);
+        let output = generate_causal(
+            &model,
+            CausalGenerationRequest {
+                prompt: CausalLmInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                cache: CacheConfig::new(1, 8).unwrap(),
+                generation: GenerationConfig {
+                    max_new_tokens: 2,
+                    ..Default::default()
+                },
+                vocabulary_size: 32,
+            },
+        )
+        .expect("auto-dispatched cached generation");
+        assert_eq!(output.sequences[0].token_ids.len(), 2);
+    }
+
+    /// Cross-family state mismatches fail without advancing the foreign cache.
+    #[test]
+    fn causal_registry_rejects_mismatched_state_atomically() {
+        let device = Default::default();
+        let deepseek = AutoCausalLm::from(
+            crate::models::deepseek_v2::model::tests_support::initialized_model(
+                crate::models::deepseek_v2::model::tests_support::tiny_config(),
+                &device,
+            ),
+        );
+        let qwen = AutoCausalLm::from(
+            Qwen3_5ForCausalLm::init(tiny_qwen(), &device).expect("tiny Qwen model"),
+        );
+        let mut foreign_state = qwen
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        let error = deepseek
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut foreign_state,
+                &ForwardOptions::default(),
+            )
+            .expect_err("foreign state must be rejected");
+        assert!(matches!(error, Error::Cache(_)));
+        assert_eq!(foreign_state.lengths(), [0]);
+    }
+
     /// T5 registry initializes the graph and allocates architecture-matched state.
     #[test]
     fn seq2seq_registry_parses_t5_and_allocates_cached_state() {
@@ -591,11 +1044,16 @@ mod tests {
         for json in ["{", "{}", r#"{"model_type": 7}"#] {
             assert!(AutoCausalLm::<TestBackend>::from_config_json(json, &device).is_err());
         }
-        let error = AutoCausalLm::<TestBackend>::from_config_json(
-            r#"{"model_type":"deepseek_v2"}"#,
-            &device,
-        )
-        .expect_err("config-only family must not be advertised as executable");
+        let error =
+            AutoCausalLm::<TestBackend>::from_config_json(r#"{"model_type":"bert"}"#, &device)
+                .expect_err("unregistered family must not be advertised as executable");
         assert!(matches!(error, Error::UnsupportedArchitecture(_)));
+        assert!(
+            AutoCausalLm::<TestBackend>::from_config_json(
+                r#"{"model_type":"deepseek_v2","hidden_size":0}"#,
+                &device,
+            )
+            .is_err()
+        );
     }
 }

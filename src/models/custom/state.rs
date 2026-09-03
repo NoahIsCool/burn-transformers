@@ -488,7 +488,12 @@ fn read_validity<B: Backend>(
             }
             mask.as_tensor()
                 .clone()
-                .into_data()
+                .try_into_data()
+                .map_err(|error| {
+                    Error::BackendCapability(format!(
+                        "failed to read custom decode validity mask from the backend: {error}"
+                    ))
+                })?
                 .into_vec::<bool>()
                 .map_err(|error| {
                     Error::BackendCapability(format!(
@@ -506,7 +511,12 @@ fn validate_decode_token_ids<B: Backend>(
     vocabulary: usize,
 ) -> Result<()> {
     let data = token_ids
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!(
+                "failed to inspect custom decode IDs on the backend: {error}"
+            ))
+        })?
         .convert::<i64>()
         .into_vec::<i64>()
         .map_err(|error| {
@@ -530,7 +540,12 @@ fn validate_decode_positions<B: Backend>(
     capacity: usize,
 ) -> Result<()> {
     let data = positions
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!(
+                "failed to inspect custom decode positions on the backend: {error}"
+            ))
+        })?
         .convert::<i64>()
         .into_vec::<i64>()
         .map_err(|error| {

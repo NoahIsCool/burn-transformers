@@ -443,11 +443,6 @@ impl<B: Backend> CausalLanguageModel<B> for DeepseekV2ForCausalLm<B> {
     type Config = super::super::DeepseekV2Config;
     type State = DeepseekV2DecodeState<B>;
 
-    /// Returns the validated architecture metadata used to instantiate the graph.
-    fn config(&self) -> &Self::Config {
-        DeepseekV2ForCausalLm::config(self)
-    }
-
     /// Executes the cache-free reference graph.
     fn forward(
         &self,
@@ -953,7 +948,10 @@ fn semantic_indices<B: Backend>(
     let values = mask
         .as_tensor()
         .clone()
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!("failed to read DeepSeek token mask: {error}"))
+        })?
         .to_vec::<bool>()
         .map_err(|error| {
             Error::BackendCapability(format!("failed to read DeepSeek token mask: {error}"))

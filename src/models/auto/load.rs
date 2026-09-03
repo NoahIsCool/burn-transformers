@@ -25,6 +25,12 @@ use crate::{
 use super::{AutoCausalLm, AutoSeq2SeqLm, detect_model_type};
 use crate::models::{
     config::{ModelConfig, TokenIds},
+    deepseek_v2::{DeepseekV2CheckpointOptions, DeepseekV2Config, DeepseekV2ForCausalLm},
+    muse_glimmer::{
+        MuseGlimmerCheckpointOptions, MuseGlimmerCheckpointSource, MuseGlimmerForCausalLm,
+        MuseGlimmerTextConfig,
+    },
+    nemotron_h::{NemotronHCheckpointOptions, NemotronHConfig, NemotronHForCausalLm},
     qwen3_5::{
         Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5ForCausalLm, Qwen3_5TextConfig,
     },
@@ -82,7 +88,135 @@ impl<B: Backend> AutoCausalLm<B> {
     ) -> Result<LoadedModel<Self>> {
         let (root, json) = read_required_config(root.as_ref())?;
         let model_type = detect_model_type(&json)?;
+        if options.qwen_mtp && model_type != "qwen3_5_text" {
+            return Err(Error::configuration(
+                "auto_causal.qwen_mtp",
+                "Qwen MTP is defined only for qwen3_5_text checkpoints",
+            ));
+        }
+        if options.quantized_burnpack.is_some() && model_type != "qwen3_5_text" {
+            return Err(Error::BackendCapability(format!(
+                "packed Burnpack loading for `{model_type}` is not yet certified; v1 currently enables automatic packed execution only for qwen3_5_text"
+            )));
+        }
         match model_type.as_str() {
+            "deepseek_v2" => {
+                let config = DeepseekV2Config::from_json_str(&json).map_err(|error| {
+                    Error::configuration("auto_causal.config", error.to_string())
+                })?;
+                let vocabulary_size = config.vocab_size;
+                let generation = normalize_generation_defaults(
+                    &root,
+                    config.eos_token_id.as_ref(),
+                    config.pad_token_id.as_ref(),
+                    vocabulary_size,
+                    options.generation.as_ref(),
+                )?;
+                let source = source_metadata(&root, &model_type, options)?;
+                let tokenizer = load_optional_tokenizer(&root, options.load_tokenizer)?;
+                let manifest = CheckpointManifest::discover(&root, &options.checkpoint)
+                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
+                let contract = config
+                    .checkpoint_contract(DeepseekV2CheckpointOptions::default())
+                    .map_err(|error| {
+                        Error::configuration(
+                            format!("{}.{}", error.architecture, error.field),
+                            error.reason,
+                        )
+                    })?;
+                let plan = contract
+                    .build_load_plan(&manifest, &options.checkpoint)
+                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
+                let mut model = DeepseekV2ForCausalLm::init(config, device)?;
+                let report = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
+                LoadedModel::new(
+                    Self::DeepseekV2(model),
+                    tokenizer,
+                    generation,
+                    source,
+                    report,
+                    vocabulary_size,
+                )
+            }
+            "muse_glimmer_text" => {
+                let config = MuseGlimmerTextConfig::from_json_str(&json).map_err(|error| {
+                    Error::configuration("auto_causal.config", error.to_string())
+                })?;
+                let vocabulary_size = config.vocab_size;
+                let generation = normalize_generation_defaults(
+                    &root,
+                    config.eos_token_id.as_ref(),
+                    config.pad_token_id.as_ref(),
+                    vocabulary_size,
+                    options.generation.as_ref(),
+                )?;
+                let source = source_metadata(&root, &model_type, options)?;
+                let tokenizer = load_optional_tokenizer(&root, options.load_tokenizer)?;
+                let manifest = CheckpointManifest::discover(&root, &options.checkpoint)
+                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
+                let source_layout = muse_source_layout(&manifest)?;
+                let contract = config
+                    .checkpoint_contract(MuseGlimmerCheckpointOptions {
+                        source: source_layout,
+                    })
+                    .map_err(|error| {
+                        Error::configuration(
+                            format!("{}.{}", error.architecture, error.field),
+                            error.reason,
+                        )
+                    })?;
+                let plan = contract
+                    .build_load_plan(&manifest, &options.checkpoint)
+                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
+                let mut model = MuseGlimmerForCausalLm::init(config, device)?;
+                let report = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
+                LoadedModel::new(
+                    Self::MuseGlimmer(model),
+                    tokenizer,
+                    generation,
+                    source,
+                    report,
+                    vocabulary_size,
+                )
+            }
+            "nemotron_h" => {
+                let config = NemotronHConfig::from_json_str(&json).map_err(|error| {
+                    Error::configuration("auto_causal.config", error.to_string())
+                })?;
+                let vocabulary_size = config.vocab_size;
+                let generation = normalize_generation_defaults(
+                    &root,
+                    config.eos_token_id.as_ref(),
+                    config.pad_token_id.as_ref(),
+                    vocabulary_size,
+                    options.generation.as_ref(),
+                )?;
+                let source = source_metadata(&root, &model_type, options)?;
+                let tokenizer = load_optional_tokenizer(&root, options.load_tokenizer)?;
+                let manifest = CheckpointManifest::discover(&root, &options.checkpoint)
+                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
+                let contract = config
+                    .checkpoint_contract(NemotronHCheckpointOptions::default())
+                    .map_err(|error| {
+                        Error::configuration(
+                            format!("{}.{}", error.architecture, error.field),
+                            error.reason,
+                        )
+                    })?;
+                let plan = contract
+                    .build_load_plan(&manifest, &options.checkpoint)
+                    .map_err(|error| Error::Checkpoint(error.to_string()))?;
+                let mut model = NemotronHForCausalLm::init(config, device)?;
+                let report = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
+                LoadedModel::new(
+                    Self::NemotronH(model),
+                    tokenizer,
+                    generation,
+                    source,
+                    report,
+                    vocabulary_size,
+                )
+            }
             "qwen3_5_text" => {
                 let config = Qwen3_5TextConfig::from_json_str(&json).map_err(|error| {
                     Error::configuration("auto_causal.config", error.to_string())
@@ -132,12 +266,6 @@ impl<B: Backend> AutoCausalLm<B> {
                 )
             }
             "qwen3_moe" => {
-                if options.qwen_mtp {
-                    return Err(Error::configuration(
-                        "auto_causal.qwen_mtp",
-                        "Qwen MTP is defined only for qwen3_5_text checkpoints",
-                    ));
-                }
                 let config = Qwen3MoeConfig::from_json_str(&json).map_err(|error| {
                     Error::configuration("auto_causal.config", error.to_string())
                 })?;
@@ -268,6 +396,11 @@ fn qwen_source_layout(manifest: &CheckpointManifest) -> Result<Qwen3_5Checkpoint
     classify_qwen_names(manifest.tensors.keys().map(String::as_str))
 }
 
+/// Distinguishes released multimodal and standalone Muse text namespaces.
+fn muse_source_layout(manifest: &CheckpointManifest) -> Result<MuseGlimmerCheckpointSource> {
+    classify_muse_names(manifest.tensors.keys().map(String::as_str))
+}
+
 /// Classifies a previously validated set of checkpoint tensor names.
 fn classify_qwen_names<'a>(
     names: impl IntoIterator<Item = &'a str>,
@@ -286,6 +419,28 @@ fn classify_qwen_names<'a>(
         )),
         (true, true) => Err(Error::Checkpoint(
             "Qwen checkpoint ambiguously contains wrapped and text-only language namespaces".into(),
+        )),
+    }
+}
+
+/// Classifies a validated Muse checkpoint key set without filename heuristics.
+fn classify_muse_names<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<MuseGlimmerCheckpointSource> {
+    let mut wrapped = false;
+    let mut text_only = false;
+    for name in names {
+        wrapped |= name.starts_with("model.language_model.");
+        text_only |= name == "model.embed_tokens.weight";
+    }
+    match (wrapped, text_only) {
+        (true, false) => Ok(MuseGlimmerCheckpointSource::Multimodal),
+        (false, true) => Ok(MuseGlimmerCheckpointSource::TextOnly),
+        (false, false) => Err(Error::Checkpoint(
+            "Muse checkpoint contains neither official language parameter namespace".into(),
+        )),
+        (true, true) => Err(Error::Checkpoint(
+            "Muse checkpoint ambiguously contains wrapped and text-only language namespaces".into(),
         )),
     }
 }
@@ -317,8 +472,13 @@ fn read_required_config(root: &Path) -> Result<(PathBuf, String)> {
             reason: "model source root must be a directory".into(),
         });
     }
-    let path = contained_regular_file(&root, "config.json", MAX_CONFIG_BYTES, true)?
-        .expect("required contained file returns Some");
+    let path =
+        contained_regular_file(&root, "config.json", MAX_CONFIG_BYTES, true)?.ok_or_else(|| {
+            Error::Artifact {
+                path: root.join("config.json"),
+                reason: "required config.json was not resolved".into(),
+            }
+        })?;
     let json = fs::read_to_string(&path).map_err(|source| Error::io(&path, source))?;
     if json.len() as u64 > MAX_CONFIG_BYTES {
         return Err(Error::Artifact {
@@ -530,20 +690,246 @@ fn normalize_pad_token_named(
 
 #[cfg(test)]
 mod tests {
+    use std::{fs::File, io::Write, path::Path};
+
     use burn::{
         backend::Flex,
         tensor::{Int, Tensor},
     };
+    use serde_json::{Map, Value, json};
 
     use super::*;
-    use crate::{CausalLmInput, ForwardOptions, Seq2SeqInput};
+    use crate::{
+        CausalLmInput, ForwardOptions, Seq2SeqInput,
+        checkpoint::{ExpectedTensor, LoadReport, MappingPlan, TensorOperation, TensorTransform},
+        models::{
+            deepseek_v2::model::tests_support::tiny_config as tiny_deepseek_config,
+            muse_glimmer::MuseGlimmerLayerType, nemotron_h::NemotronHBlockType,
+        },
+    };
 
     type TestBackend = Flex<f32, i32>;
+
+    /// Writes one complete zero-valued F32 checkpoint from a family contract.
+    ///
+    /// The contract remains the source of truth for both external names and
+    /// shapes. Alias operations have no independent checkpoint payload; the
+    /// automatic-loader fixtures use untied embeddings so every logical target
+    /// is represented by one physical `Map` operation.
+    fn write_contract_checkpoint(root: &Path, expected: &[ExpectedTensor], mappings: &MappingPlan) {
+        let mut tensors = Vec::new();
+        for operation in mappings.operations() {
+            match operation {
+                TensorOperation::Map {
+                    source,
+                    target,
+                    transform,
+                } => {
+                    let target_shape = expected
+                        .iter()
+                        .find(|tensor| tensor.name == *target)
+                        .unwrap_or_else(|| panic!("mapping target `{target}` must be expected"))
+                        .shape
+                        .clone();
+                    let source_shape = match transform {
+                        TensorTransform::Identity => target_shape,
+                        TensorTransform::Transpose2d => {
+                            assert_eq!(target_shape.len(), 2, "transpose fixture must be rank two");
+                            vec![target_shape[1], target_shape[0]]
+                        }
+                    };
+                    tensors.push((source.clone(), source_shape));
+                }
+                TensorOperation::Alias { .. } => {}
+                TensorOperation::Split { .. } | TensorOperation::Concatenate { .. } => {
+                    panic!("automatic family fixture supports map and alias contracts only")
+                }
+            }
+        }
+
+        let mut offset = 0_u64;
+        let mut header = Map::new();
+        for (name, shape) in tensors {
+            let elements = shape.iter().copied().product::<u64>();
+            let end = offset
+                .checked_add(elements.checked_mul(4).expect("fixture byte size"))
+                .expect("fixture data offset");
+            assert!(
+                header
+                    .insert(
+                        name.clone(),
+                        json!({"dtype": "F32", "shape": shape, "data_offsets": [offset, end]}),
+                    )
+                    .is_none(),
+                "fixture source `{name}` must be unique"
+            );
+            offset = end;
+        }
+        let mut header = serde_json::to_vec(&Value::Object(header)).expect("fixture header");
+        while !header.len().is_multiple_of(8) {
+            header.push(b' ');
+        }
+        let mut file = File::create(root.join("model.safetensors")).expect("fixture checkpoint");
+        file.write_all(&(header.len() as u64).to_le_bytes())
+            .expect("fixture header length");
+        file.write_all(&header).expect("fixture header bytes");
+        file.write_all(&vec![0; offset as usize])
+            .expect("fixture tensor bytes");
+    }
+
+    /// Persists one direct architecture config plus deterministic generation metadata.
+    fn write_auto_metadata<T: serde::Serialize>(root: &Path, config: &T) {
+        std::fs::write(
+            root.join("config.json"),
+            serde_json::to_vec(config).expect("serializable family config"),
+        )
+        .expect("config fixture");
+        std::fs::write(
+            root.join("generation_config.json"),
+            br#"{"max_new_tokens":5,"do_sample":false}"#,
+        )
+        .expect("generation fixture");
+    }
+
+    /// Returns provenance options that also avoid requiring a tokenizer fixture.
+    fn fixture_options(repository: &str, revision: &str) -> AutoLoadOptions {
+        AutoLoadOptions {
+            load_tokenizer: false,
+            repository: Some(repository.into()),
+            revision: Some(revision.into()),
+            ..AutoLoadOptions::default()
+        }
+    }
+
+    /// Verifies exhaustive strict accounting for one untied identity/rename contract.
+    fn assert_strict_report(
+        report: &LoadReport,
+        expected: &[ExpectedTensor],
+        mappings: &MappingPlan,
+    ) {
+        let mut expected_names = expected
+            .iter()
+            .map(|tensor| tensor.name.clone())
+            .collect::<Vec<_>>();
+        expected_names.sort();
+        assert_eq!(report.applied, expected_names);
+        assert!(report.is_strictly_valid());
+        assert!(report.missing.is_empty());
+        assert!(report.unexpected.is_empty());
+        assert!(report.allowlisted_missing.is_empty());
+        assert!(report.allowlisted_ignored.is_empty());
+        assert!(report.aliased.is_empty());
+        assert!(report.dtype_converted.is_empty());
+        assert!(report.quantized.is_empty());
+
+        let rename_count = mappings
+            .operations()
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    TensorOperation::Map { source, target, .. } if source != target
+                )
+            })
+            .count();
+        assert_eq!(report.transformed.len(), rename_count);
+        assert!(
+            report
+                .transformed
+                .iter()
+                .all(|record| record.operation == "rename")
+        );
+        let memory = report.memory.expect("strict plan must estimate memory");
+        assert!(memory.checkpoint_tensor_bytes > 0);
+        assert!(memory.target_parameter_bytes > 0);
+    }
+
+    /// Verifies source identity and normalized host-side generation defaults.
+    fn assert_bundle_metadata(
+        loaded: &LoadedModel<AutoCausalLm<TestBackend>>,
+        root: &Path,
+        model_type: &str,
+        repository: &str,
+        revision: &str,
+        eos_token_ids: &[u32],
+        pad_token_id: u32,
+    ) {
+        assert_eq!(
+            loaded.source().root(),
+            root.canonicalize().expect("canonical fixture root")
+        );
+        assert_eq!(loaded.source().model_type(), model_type);
+        assert_eq!(loaded.source().repository(), Some(repository));
+        assert_eq!(loaded.source().revision(), Some(revision));
+        assert_eq!(loaded.generation_defaults().max_new_tokens, 5);
+        assert_eq!(
+            loaded.generation_defaults().strategy,
+            SamplingStrategy::Greedy
+        );
+        assert_eq!(loaded.generation_defaults().eos_token_ids, eos_token_ids);
+        assert_eq!(
+            loaded.generation_defaults().pad_token_id,
+            Some(pad_token_id)
+        );
+        assert!(loaded.tokenizer().is_none());
+    }
+
+    /// Runs one automatic causal variant and requires finite vocabulary logits.
+    fn assert_finite_forward(
+        loaded: &LoadedModel<AutoCausalLm<TestBackend>>,
+        vocabulary_size: usize,
+    ) {
+        let device = Default::default();
+        let output = loaded
+            .model()
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions::default(),
+            )
+            .expect("loaded automatic model must execute");
+        let [batch, selected, vocabulary] = output.logits.dims();
+        assert_eq!([batch, selected, vocabulary], [1, 1, vocabulary_size]);
+        assert!(
+            output
+                .logits
+                .into_data()
+                .as_slice::<f32>()
+                .expect("F32 reference backend")
+                .iter()
+                .all(|value| value.is_finite())
+        );
+    }
 
     /// Automatic loading is base-only unless MTP consumption is explicit.
     #[test]
     fn automatic_options_keep_mtp_opt_in() {
         assert!(!AutoLoadOptions::default().qwen_mtp);
+    }
+
+    /// Automatic packed loading rejects families without a completed backend gate.
+    #[test]
+    fn automatic_packed_loading_is_limited_to_certified_qwen_hybrid_models() {
+        let root = tempfile::tempdir().expect("temporary model root");
+        std::fs::write(
+            root.path().join("config.json"),
+            serde_json::to_vec(&Qwen3MoeConfig::default()).expect("serializable config"),
+        )
+        .expect("config fixture");
+        let error = AutoCausalLm::<TestBackend>::load_local(
+            root.path(),
+            &AutoLoadOptions {
+                load_tokenizer: false,
+                quantized_burnpack: Some(PathBuf::from("weights.bpk")),
+                ..AutoLoadOptions::default()
+            },
+            &Default::default(),
+        )
+        .expect_err("uncertified family must fail before checkpoint discovery");
+        assert!(matches!(error, Error::BackendCapability(_)));
     }
 
     /// Model tokens provide defaults and local sampling metadata overrides them.
@@ -666,6 +1052,28 @@ mod tests {
         assert!(classify_qwen_names(["foreign.weight"]).is_err());
     }
 
+    /// Muse namespace detection accepts exactly one language-tower layout.
+    #[test]
+    fn muse_namespace_detection_is_unambiguous() {
+        assert_eq!(
+            classify_muse_names(["model.language_model.embed_tokens.weight"])
+                .expect("wrapped namespace"),
+            MuseGlimmerCheckpointSource::Multimodal
+        );
+        assert_eq!(
+            classify_muse_names(["model.embed_tokens.weight"]).expect("text namespace"),
+            MuseGlimmerCheckpointSource::TextOnly
+        );
+        assert!(
+            classify_muse_names([
+                "model.language_model.embed_tokens.weight",
+                "model.embed_tokens.weight"
+            ])
+            .is_err()
+        );
+        assert!(classify_muse_names(["foreign.weight"]).is_err());
+    }
+
     /// Required config reading rejects missing files and non-directory roots.
     #[test]
     fn required_config_is_bounded_and_regular() {
@@ -676,6 +1084,191 @@ mod tests {
         assert!(read_required_config(&file).is_err());
         std::fs::create_dir(root.path().join("config.json")).expect("fixture directory");
         assert!(read_required_config(root.path()).is_err());
+    }
+
+    /// The DeepSeek branch performs strict discovery, installation, and execution.
+    #[test]
+    fn automatic_deepseek_loads_complete_strict_fixture() {
+        let root = tempfile::tempdir().expect("temporary model root");
+        let mut config = tiny_deepseek_config();
+        config.eos_token_id = Some(TokenIds::Many(vec![3, 2, 3]));
+        config.pad_token_id = Some(TokenIds::One(0));
+        let contract = config
+            .checkpoint_contract(DeepseekV2CheckpointOptions::default())
+            .expect("valid DeepSeek contract");
+        write_auto_metadata(root.path(), &config);
+        write_contract_checkpoint(
+            root.path(),
+            contract.expected_tensors(),
+            contract.mappings(),
+        );
+
+        let repository = "deepseek-ai/tiny-deepseek-v2-fixture";
+        let revision = "deepseek-fixture-revision";
+        let loaded = AutoCausalLm::<TestBackend>::load_local(
+            root.path(),
+            &fixture_options(repository, revision),
+            &Default::default(),
+        )
+        .expect("automatic DeepSeek load");
+
+        assert!(matches!(loaded.model(), AutoCausalLm::DeepseekV2(_)));
+        assert_strict_report(
+            loaded.load_report(),
+            contract.expected_tensors(),
+            contract.mappings(),
+        );
+        assert_bundle_metadata(
+            &loaded,
+            root.path(),
+            "deepseek_v2",
+            repository,
+            revision,
+            &[2, 3],
+            0,
+        );
+        assert_finite_forward(&loaded, config.vocab_size);
+    }
+
+    /// The Muse text-only branch classifies its namespace and streams every tensor.
+    #[test]
+    fn automatic_muse_glimmer_loads_complete_strict_fixture() {
+        let root = tempfile::tempdir().expect("temporary model root");
+        let config = MuseGlimmerTextConfig {
+            vocab_size: 16,
+            hidden_size: 4,
+            intermediate_size: 8,
+            num_hidden_layers: 2,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 2,
+            max_position_embeddings: 16,
+            sliding_window: Some(4),
+            layer_types: vec![
+                MuseGlimmerLayerType::SlidingAttention,
+                MuseGlimmerLayerType::FullAttention,
+            ],
+            layer_rope_theta: vec![10_000.0, 0.0],
+            bos_token_id: Some(TokenIds::One(1)),
+            eos_token_id: Some(TokenIds::Many(vec![5, 4, 5])),
+            pad_token_id: Some(TokenIds::One(0)),
+            tie_word_embeddings: false,
+            ..MuseGlimmerTextConfig::default()
+        };
+        let family_options = MuseGlimmerCheckpointOptions {
+            source: MuseGlimmerCheckpointSource::TextOnly,
+        };
+        let contract = config
+            .checkpoint_contract(family_options)
+            .expect("valid Muse contract");
+        write_auto_metadata(root.path(), &config);
+        write_contract_checkpoint(
+            root.path(),
+            contract.expected_tensors(),
+            contract.mappings(),
+        );
+
+        let repository = "meta-models/tiny-muse-glimmer-fixture";
+        let revision = "muse-fixture-revision";
+        let loaded = AutoCausalLm::<TestBackend>::load_local(
+            root.path(),
+            &fixture_options(repository, revision),
+            &Default::default(),
+        )
+        .expect("automatic Muse load");
+
+        assert!(matches!(loaded.model(), AutoCausalLm::MuseGlimmer(_)));
+        assert_strict_report(
+            loaded.load_report(),
+            contract.expected_tensors(),
+            contract.mappings(),
+        );
+        assert_bundle_metadata(
+            &loaded,
+            root.path(),
+            "muse_glimmer_text",
+            repository,
+            revision,
+            &[4, 5],
+            0,
+        );
+        assert_finite_forward(&loaded, config.vocab_size);
+    }
+
+    /// The Nemotron branch loads a complete heterogeneous hybrid schedule.
+    #[test]
+    fn automatic_nemotron_h_loads_complete_strict_fixture() {
+        let root = tempfile::tempdir().expect("temporary model root");
+        let config = NemotronHConfig {
+            vocab_size: 16,
+            hidden_size: 8,
+            layers_block_type: vec![
+                NemotronHBlockType::LinearAttention,
+                NemotronHBlockType::FullAttention,
+                NemotronHBlockType::Mlp,
+                NemotronHBlockType::Moe,
+            ],
+            num_hidden_layers: Some(4),
+            tie_word_embeddings: false,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 4,
+            max_position_embeddings: 16,
+            intermediate_size: 12,
+            ssm_state_size: 3,
+            mamba_num_heads: 4,
+            mamba_head_dim: 2,
+            n_groups: 2,
+            conv_kernel: 3,
+            chunk_size: 2,
+            n_routed_experts: 4,
+            n_shared_experts: 1,
+            moe_intermediate_size: 6,
+            moe_shared_expert_intermediate_size: 8,
+            num_experts_per_tok: 2,
+            n_group: 2,
+            topk_group: 1,
+            num_nextn_predict_layers: 0,
+            bos_token_id: Some(TokenIds::One(1)),
+            eos_token_id: Some(TokenIds::Many(vec![7, 6, 7])),
+            pad_token_id: Some(TokenIds::One(0)),
+            ..NemotronHConfig::default()
+        };
+        let contract = config
+            .checkpoint_contract(NemotronHCheckpointOptions::default())
+            .expect("valid Nemotron-H contract");
+        write_auto_metadata(root.path(), &config);
+        write_contract_checkpoint(
+            root.path(),
+            contract.expected_tensors(),
+            contract.mappings(),
+        );
+
+        let repository = "nvidia/tiny-nemotron-h-fixture";
+        let revision = "nemotron-fixture-revision";
+        let loaded = AutoCausalLm::<TestBackend>::load_local(
+            root.path(),
+            &fixture_options(repository, revision),
+            &Default::default(),
+        )
+        .expect("automatic Nemotron-H load");
+
+        assert!(matches!(loaded.model(), AutoCausalLm::NemotronH(_)));
+        assert_strict_report(
+            loaded.load_report(),
+            contract.expected_tensors(),
+            contract.mappings(),
+        );
+        assert_bundle_metadata(
+            &loaded,
+            root.path(),
+            "nemotron_h",
+            repository,
+            revision,
+            &[6, 7],
+            0,
+        );
+        assert_finite_forward(&loaded, config.vocab_size);
     }
 
     /// Loads the pinned real FLAN checkpoint through the automatic public API.

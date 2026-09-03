@@ -168,6 +168,57 @@ fn discovers_shards_and_verifies_index_total_size() {
 }
 
 #[test]
+fn index_total_size_accepts_exact_decimal_compatibility_form() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "part.safetensors",
+        &[FixtureTensor::new("a", TensorDType::F16, [1])],
+    );
+    fs::write(
+        temp.path().join("model.safetensors.index.json"),
+        br#"{"metadata":{"total_size":2.0},"weight_map":{"a":"part.safetensors"}}"#,
+    )
+    .unwrap();
+
+    let manifest = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap();
+    assert!(matches!(
+        manifest.source,
+        ArtifactSource::Index {
+            declared_total_size: Some(2),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn index_total_size_rejects_ambiguous_or_non_integral_decimals() {
+    for invalid in [
+        "2.5",
+        "-2.0",
+        "2e0",
+        "55562855904.000001",
+        "18446744073709551616.0",
+    ] {
+        let temp = TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("model.safetensors.index.json"),
+            format!(
+                r#"{{"metadata":{{"total_size":{invalid}}},"weight_map":{{"a":"missing.safetensors"}}}}"#
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            discover_checkpoint(temp.path(), &LoadOptions::default()),
+            Err(CheckpointError::InvalidJson {
+                kind: "checkpoint index",
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
 fn explicit_nested_shard_path_is_allowed_when_contained() {
     let temp = TempDir::new().unwrap();
     write_shard(
@@ -892,6 +943,46 @@ fn preserve_and_cast_dtype_policies_are_strict() {
         ),
         Err(CheckpointError::InvalidMapping { .. })
     ));
+}
+
+/// Concrete architecture dtypes take precedence over a generic float cast.
+#[test]
+fn concrete_expected_dtype_overrides_blanket_float_cast() {
+    let (_temp, manifest) = fixture_manifest(&[
+        FixtureTensor::new("fixed", TensorDType::F32, [2]),
+        FixtureTensor::new("generic", TensorDType::BF16, [2]),
+    ]);
+    let expected = [
+        ExpectedTensor::new("fixed", [2]).with_dtype(TensorDType::F32),
+        ExpectedTensor::new("generic", [2]),
+    ];
+    let options = LoadOptions {
+        dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+        ..LoadOptions::default()
+    };
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &options,
+    )
+    .unwrap();
+    assert_eq!(
+        plan.tensors
+            .iter()
+            .find(|tensor| tensor.target == "fixed")
+            .unwrap()
+            .dtype,
+        TensorDType::F32
+    );
+    assert_eq!(
+        plan.tensors
+            .iter()
+            .find(|tensor| tensor.target == "generic")
+            .unwrap()
+            .dtype,
+        TensorDType::F16
+    );
 }
 
 #[test]

@@ -58,7 +58,10 @@ pub enum DTypePolicy {
     Auto,
     /// Never convert checkpoint dtypes.
     Preserve,
-    /// Convert every real floating-point tensor to the selected dtype.
+    /// Convert dtype-generic real floating-point tensors to the selected dtype.
+    ///
+    /// An architecture's concrete [`super::ExpectedTensor`] dtype remains
+    /// authoritative for numerically sensitive parameters and buffers.
     Cast(TensorDType),
 }
 

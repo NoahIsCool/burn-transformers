@@ -282,10 +282,6 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ModularSeq2SeqLm<B> {
     type Config = Seq2SeqSpec;
     type State = ModularDecodeState<B>;
 
-    fn config(&self) -> &Self::Config {
-        self.spec()
-    }
-
     fn encode(
         &self,
         source: CausalLmInput<B>,

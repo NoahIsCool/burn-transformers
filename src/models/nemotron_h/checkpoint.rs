@@ -9,13 +9,14 @@
 //! [`burn::nn::Linear`] record mapper installs that data into runtime `[in, out]`
 //! layout. The depthwise convolution remains
 //! `[convolution_channels, 1, kernel]`. The pinned artifact stores router
-//! correction buffers in FP32; an explicit all-F16 load policy may convert their
-//! storage, while routing still performs its comparison arithmetic in FP32.
+//! correction buffers in FP32. Their explicit contract dtype keeps that storage
+//! in FP32 even when dtype-generic projection tensors are cast to F16.
 
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint::{
-    CheckpointManifest, ExpectedTensor, LoadOptions, LoadPlan, MappingPlan, build_load_plan,
+    CheckpointManifest, ExpectedTensor, LoadOptions, LoadPlan, MappingPlan, TensorDType,
+    build_load_plan,
 };
 
 use super::{ConfigError, NemotronHBlockType, NemotronHConfig, Validate};
@@ -406,13 +407,13 @@ fn add_moe(
         &format!("{target}.router.weight"),
         vec![dimensions.routed_experts, dimensions.hidden],
     );
-    add_mapped(
-        expected,
-        mappings,
-        &format!("{source}.gate.e_score_correction_bias"),
-        &format!("{target}.correction_bias"),
-        vec![dimensions.routed_experts],
+    let correction_source = format!("{source}.gate.e_score_correction_bias");
+    let correction_target = format!("{target}.correction_bias");
+    expected.push(
+        ExpectedTensor::new(&correction_target, vec![dimensions.routed_experts])
+            .with_dtype(TensorDType::F32),
     );
+    mappings.map(correction_source, correction_target);
     for expert in 0..config.n_routed_experts {
         add_dense(
             expected,
@@ -767,16 +768,19 @@ mod tests {
             expected("model.layers.1.moe.router.weight").shape,
             [128, 2_688]
         );
-        assert_eq!(expected("model.layers.1.moe.correction_bias").dtype, None);
+        assert_eq!(
+            expected("model.layers.1.moe.correction_bias").dtype,
+            Some(TensorDType::F32)
+        );
         assert_eq!(
             expected("next_token_head.eh_proj.weight").shape,
             [2_688, 5_376]
         );
     }
 
-    /// An explicit Metal policy casts every floating tensor while routing computes FP32.
+    /// A Metal policy casts generic weights while preserving router buffers in FP32.
     #[test]
-    fn bf16_plan_casts_all_checkpoint_storage_to_f16() {
+    fn bf16_plan_preserves_fixed_fp32_router_buffers() {
         let contract = tiny_config()
             .checkpoint_contract(NemotronHCheckpointOptions::default())
             .unwrap();
@@ -789,18 +793,24 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(
-            plan.tensors
-                .iter()
-                .all(|tensor| tensor.dtype == TensorDType::F16)
-        );
+        for tensor in &plan.tensors {
+            let expected = if tensor.target.ends_with("correction_bias") {
+                TensorDType::F32
+            } else {
+                TensorDType::F16
+            };
+            assert_eq!(tensor.dtype, expected, "{}", tensor.target);
+        }
         assert_eq!(
             plan.report
                 .dtype_converted
                 .iter()
                 .filter(|conversion| conversion.target_dtype == TensorDType::F16)
                 .count(),
-            plan.tensors.len()
+            plan.tensors
+                .iter()
+                .filter(|tensor| !tensor.target.ends_with("correction_bias"))
+                .count()
         );
     }
 

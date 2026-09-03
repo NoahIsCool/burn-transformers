@@ -285,7 +285,7 @@ impl<B: Backend> MuseGlimmerDecoderLayer<B> {
         positions: Tensor<B, 2, Int>,
         token_mask: Option<&TokenMask<B>>,
         evaluated_context: usize,
-        sliding_window: usize,
+        sliding_window: Option<usize>,
     ) -> Result<Tensor<B, 3>> {
         let residual = hidden.clone();
         let normalized = self.input_layernorm.forward(hidden);
@@ -296,12 +296,21 @@ impl<B: Backend> MuseGlimmerDecoderLayer<B> {
                 apply_rotary(projection.query, projection.key, &angles)?;
         }
         let [batch, _, sequence, _] = projection.query.dims();
+        let local_window = match self.layer_type {
+            MuseGlimmerLayerType::SlidingAttention => Some(sliding_window.ok_or_else(|| {
+                Error::configuration(
+                    "muse_glimmer.sliding_window",
+                    "is required by a sliding-attention layer",
+                )
+            })?),
+            MuseGlimmerLayerType::FullAttention => None,
+        };
         let mask = stateless_attention_mask(
             token_mask,
             batch,
             self.self_attn.query_heads,
             sequence,
-            (self.layer_type == MuseGlimmerLayerType::SlidingAttention).then_some(sliding_window),
+            local_window,
             &projection.query.device(),
         )?;
         let attended = self.self_attn.attend(projection, mask, true)?;
@@ -369,6 +378,7 @@ impl<B: Backend> MuseGlimmerModel<B> {
     ) -> Result<(Tensor<B, 3>, Vec<Tensor<B, 3>>)> {
         let [batch, sequence] = input.token_ids.dims();
         validate_nonempty_input(batch, sequence)?;
+        validate_input_devices(input, &self.embed_tokens.weight.lazy_device())?;
         validate_token_ids(input.token_ids.clone(), self.config.vocab_size)?;
         validate_mask(input.token_mask.as_ref(), batch, sequence, false)?;
         let positions = resolve_positions(input, batch, sequence)?;
@@ -386,12 +396,7 @@ impl<B: Backend> MuseGlimmerModel<B> {
         if retain_hidden_states {
             hidden_states.push(hidden.clone());
         }
-        let window = self.config.sliding_window.ok_or_else(|| {
-            Error::configuration(
-                "muse_glimmer.sliding_window",
-                "is required by the executable decoder schedule",
-            )
-        })?;
+        let window = self.config.resolved_sliding_window();
         for layer in &self.layers {
             hidden = layer.forward(
                 hidden,
@@ -471,9 +476,24 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
 
     /// Projects selected hidden states and applies `T * tanh(m * logits / T)`.
     fn project_logits(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
+        let hidden_device = hidden.device();
         let raw = match &self.lm_head {
-            Some(head) => linear(hidden, head)?,
-            None => tied_projection(hidden, self.model.embed_tokens.weight.val())?,
+            Some(head) => {
+                ensure_model_device(
+                    "muse_glimmer.lm_head",
+                    &head.weight.lazy_device(),
+                    &hidden_device,
+                )?;
+                linear(hidden, head)?
+            }
+            None => {
+                ensure_model_device(
+                    "muse_glimmer.model.embed_tokens",
+                    &self.model.embed_tokens.weight.lazy_device(),
+                    &hidden_device,
+                )?;
+                tied_projection(hidden, self.model.embed_tokens.weight.val())?
+            }
         };
         let cap = self.config().final_logit_softcapping;
         Ok(((raw * self.config().output_multiplier) / cap).tanh() * cap)
@@ -577,11 +597,9 @@ fn muse_rope_config(config: &MuseGlimmerTextConfig, theta: f64) -> Result<RopeCo
                     Error::configuration("muse_glimmer.rope", error.to_string())
                 })?;
             }
-            if let (Some(fast), Some(slow)) = (parameters.beta_fast, parameters.beta_slow) {
-                yarn = yarn.with_betas(fast, slow).map_err(|error| {
-                    Error::configuration("muse_glimmer.rope", error.to_string())
-                })?;
-            }
+            yarn = yarn
+                .with_beta_overrides(parameters.beta_fast, parameters.beta_slow)
+                .map_err(|error| Error::configuration("muse_glimmer.rope", error.to_string()))?;
             RopeScaling::Yarn(yarn)
         }
         unsupported => {
@@ -603,6 +621,47 @@ fn validate_nonempty_input(batch: usize, sequence: usize) -> Result<()> {
             "non-empty [batch, sequence]",
             format!("[{batch}, {sequence}]"),
         ));
+    }
+    Ok(())
+}
+
+/// Rejects stateless input tensors that do not share the model parameter device.
+///
+/// Device identity is checked before any synchronizing reduction, positional
+/// arithmetic, or embedding lookup so callers receive a contextual error
+/// rather than a backend-specific mixed-device failure.
+fn validate_input_devices<B: Backend>(
+    input: &CausalLmInput<B>,
+    model_device: &B::Device,
+) -> Result<()> {
+    ensure_model_device(
+        "muse_glimmer.input_ids",
+        &input.token_ids.device(),
+        model_device,
+    )?;
+    if let Some(mask) = &input.token_mask {
+        ensure_model_device(
+            "muse_glimmer.token_mask",
+            &mask.as_tensor().device(),
+            model_device,
+        )?;
+    }
+    if let Some(positions) = &input.position_ids {
+        ensure_model_device(
+            "muse_glimmer.position_ids",
+            &positions.device(),
+            model_device,
+        )?;
+    }
+    Ok(())
+}
+
+/// Reports one stateless tensor/parameter device mismatch contextually.
+fn ensure_model_device<D: PartialEq>(tensor: &str, actual: &D, expected: &D) -> Result<()> {
+    if actual != expected {
+        return Err(Error::BackendCapability(format!(
+            "{tensor} and Muse-Glimmer model parameters are on different devices"
+        )));
     }
     Ok(())
 }
@@ -910,11 +969,11 @@ mod tests {
                 Tensor::from_ints([[0]], &device),
                 None,
                 1,
-                3,
+                None,
             )
             .unwrap();
         let later = layer
-            .forward(hidden, Tensor::from_ints([[17]], &device), None, 18, 3)
+            .forward(hidden, Tensor::from_ints([[17]], &device), None, 18, None)
             .unwrap();
         first
             .into_data()
@@ -991,13 +1050,16 @@ mod tests {
         let projection = layer.self_attn.project_self(normalized).unwrap();
         let attended = layer.self_attn.attend(projection, None, true).unwrap();
         let after_attention = hidden.clone() + layer.post_attention_layernorm.forward(attended);
-        let fed = layer.mlp.forward(
-            layer
-                .pre_feedforward_layernorm
-                .forward(after_attention.clone()),
-        );
+        let fed = layer
+            .mlp
+            .forward(
+                layer
+                    .pre_feedforward_layernorm
+                    .forward(after_attention.clone()),
+            )
+            .expect("validated feed-forward projection");
         let expected = after_attention + layer.post_feedforward_layernorm.forward(fed);
-        let actual = layer.forward(hidden, position, None, 1, 3).unwrap();
+        let actual = layer.forward(hidden, position, None, 1, Some(3)).unwrap();
         actual
             .into_data()
             .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(1e-6));
@@ -1055,6 +1117,23 @@ mod tests {
             attention_request,
             Err(Error::BackendCapability(_))
         ));
+    }
+
+    /// Stateless device preflight identifies every independently supplied tensor.
+    #[test]
+    fn stateless_device_affinity_errors_are_contextual() {
+        assert!(ensure_model_device("muse_glimmer.input_ids", &0_u8, &0_u8).is_ok());
+        for tensor in [
+            "muse_glimmer.input_ids",
+            "muse_glimmer.token_mask",
+            "muse_glimmer.position_ids",
+            "muse_glimmer.lm_head",
+        ] {
+            let error = ensure_model_device(tensor, &1_u8, &0_u8)
+                .expect_err("different device identities must fail preflight");
+            assert!(error.to_string().contains(tensor));
+            assert!(error.to_string().contains("model parameters"));
+        }
     }
 
     /// Stateless graph construction remains differentiable through embeddings and logits.

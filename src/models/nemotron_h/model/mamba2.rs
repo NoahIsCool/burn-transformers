@@ -407,9 +407,15 @@ impl<B: Backend> NemotronMamba2<B> {
                 format!("{:?}", mask.as_tensor().dims()),
             ));
         }
+        let hidden_device = hidden.device();
+        if token_mask.is_some_and(|mask| mask.as_tensor().device() != hidden_device) {
+            return Err(Error::BackendCapability(
+                "Nemotron-H Mamba input and token mask must share a device".into(),
+            ));
+        }
         let hidden_dtype = hidden.dtype();
         let recurrent_dtype = state.recurrent.dtype();
-        self.validate_state(state, batch, hidden_dtype)?;
+        self.validate_state(state, batch, hidden_dtype, &hidden_device)?;
 
         let valid = token_mask.map_or_else(
             || Tensor::<B, 2, Bool>::ones([batch, sequence], &hidden.device()),
@@ -503,6 +509,7 @@ impl<B: Backend> NemotronMamba2<B> {
         state: &NemotronMamba2State<B>,
         batch: usize,
         convolution_dtype: DType,
+        device: &B::Device,
     ) -> Result<()> {
         let recurrent = [batch, self.num_heads, self.head_dim, self.state_size];
         let convolution = [
@@ -532,6 +539,11 @@ impl<B: Backend> NemotronMamba2<B> {
                     state.convolution.dims(),
                     state.convolution.dtype()
                 ),
+            ));
+        }
+        if &state.recurrent.device() != device || &state.convolution.device() != device {
+            return Err(Error::BackendCapability(
+                "Nemotron-H Mamba input and recurrent state must share a device".into(),
             ));
         }
         Ok(())
@@ -655,25 +667,14 @@ fn scan_chunk<B: Backend>(
             "chunk width must be non-zero",
         ));
     }
-    let device = x.device();
     let x = x.cast(DType::F32);
     let b = b.cast(DType::F32);
     let c = c.cast(DType::F32);
     let log_decay = dt.clone() * a.reshape([1, 1, heads]);
-    let cumulative = log_decay.cumsum(1);
+    let cumulative = log_decay.clone().cumsum(1);
 
     // L[t,s] = exp(sum_{u=s+1..t} log_decay[u]) for s <= t.
-    let differences =
-        cumulative.clone().unsqueeze_dim::<4>(2) - cumulative.clone().unsqueeze_dim::<4>(1);
-    let target = Tensor::<B, 1, Int>::arange(0..width as i64, &device)
-        .reshape([1, width, 1, 1])
-        .expand([batch, width, width, heads]);
-    let source = Tensor::<B, 1, Int>::arange(0..width as i64, &device)
-        .reshape([1, 1, width, 1])
-        .expand([batch, width, width, heads]);
-    let transitions = differences
-        .mask_fill(source.greater(target), f32::NEG_INFINITY)
-        .exp();
+    let transitions = stable_decay_transitions(log_decay.clone());
     // Batched C @ B^T forms the semiseparable content kernel without
     // materializing `[batch, target, source, heads, state_size]`.
     let content_kernel = c
@@ -713,6 +714,33 @@ fn scan_chunk<B: Backend>(
         ));
     }
     Ok((output, terminal_initial + terminal_updates))
+}
+
+/// Builds lower-triangular chunk transitions without subtracting large prefixes.
+///
+/// For target `t` and source `s`, the returned value is
+/// `exp(sum(log_decay[s + 1..=t]))` when `s <= t`, and zero otherwise. A direct
+/// difference of two cumulative sums loses all local decay information after a
+/// very large earlier decay. The lower-triangular segmented sum used here is the
+/// stable formulation from the reference Mamba2 SSD algorithm.
+fn stable_decay_transitions<B: Backend>(log_decay: Tensor<B, 3>) -> Tensor<B, 4> {
+    let [batch, width, heads] = log_decay.dims();
+    let device = log_decay.device();
+    let target = Tensor::<B, 1, Int>::arange(0..width as i64, &device)
+        .reshape([1, width, 1, 1])
+        .expand([batch, width, width, heads]);
+    let source = Tensor::<B, 1, Int>::arange(0..width as i64, &device)
+        .reshape([1, 1, width, 1])
+        .expand([batch, width, width, heads]);
+    let strict_lower = source.clone().lower(target.clone());
+    let segment_terms = log_decay
+        .unsqueeze_dim::<4>(2)
+        .expand([batch, width, width, heads])
+        .mask_fill(strict_lower.bool_not(), 0.0);
+    segment_terms
+        .cumsum(1)
+        .mask_fill(source.greater(target), f32::NEG_INFINITY)
+        .exp()
 }
 
 #[cfg(test)]
@@ -799,6 +827,24 @@ mod tests {
         );
         terminal.into_data().assert_approx_eq::<f32>(
             &TensorData::from([[[[2.264_113_4]]]]),
+            Tolerance::absolute(1e-6),
+        );
+    }
+
+    /// Segmented decay retains local increments after an enormous earlier prefix.
+    #[test]
+    fn chunk_transition_sum_avoids_prefix_cancellation() {
+        let device = Default::default();
+        let transitions = stable_decay_transitions(Tensor::<TestBackend, 3>::from_floats(
+            [[[-100_000_000.0], [-1.0], [-2.0]]],
+            &device,
+        ));
+        transitions.into_data().assert_approx_eq::<f32>(
+            &TensorData::from([[
+                [[1.0], [0.0], [0.0]],
+                [[(-1.0_f32).exp()], [1.0], [0.0]],
+                [[(-3.0_f32).exp()], [(-2.0_f32).exp()], [1.0]],
+            ]]),
             Tolerance::absolute(1e-6),
         );
     }

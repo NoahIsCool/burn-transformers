@@ -44,13 +44,10 @@ pub trait DecodeState<B: Backend>: Send + core::fmt::Debug {
 
 /// Backend-generic interface for decoder-only language models.
 pub trait CausalLanguageModel<B: Backend>: Module<B> {
-    /// Architecture configuration associated with this model.
+    /// Validated architecture configuration used to construct this model type.
     type Config: ArchitectureConfig;
     /// Architecture-specific external cache state.
     type State: DecodeState<B>;
-
-    /// Returns the validated architecture configuration.
-    fn config(&self) -> &Self::Config;
 
     /// Evaluates a stateless, differentiable causal language-model forward pass.
     fn forward(
@@ -86,13 +83,10 @@ pub trait CausalLanguageModel<B: Backend>: Module<B> {
 
 /// Backend-generic interface for encoder-decoder language models such as T5.
 pub trait Seq2SeqLanguageModel<B: Backend>: Module<B> {
-    /// Architecture configuration associated with this model.
+    /// Validated architecture configuration used to construct this model type.
     type Config: ArchitectureConfig;
     /// Decoder self-attention and projected cross-attention cache state.
     type State: DecodeState<B>;
-
-    /// Returns the validated architecture configuration.
-    fn config(&self) -> &Self::Config;
 
     /// Encodes source tokens using bidirectional attention.
     fn encode(

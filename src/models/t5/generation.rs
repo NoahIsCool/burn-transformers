@@ -147,6 +147,8 @@ fn token_to_u32(token: usize, field: &str) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::PathBuf};
+
     use burn::{
         backend::Flex,
         tensor::{Int, Tensor},
@@ -155,8 +157,9 @@ mod tests {
     use super::{T5BeamSearchOptions, generate_t5_beam_search, one_token};
     use crate::{
         CausalLmInput, FinishReason,
+        checkpoint::LoadOptions,
         models::{
-            config::TokenIds,
+            config::{ModelConfig, TokenIds},
             t5::{T5Config, T5FeedForwardProjection, T5ForConditionalGeneration},
         },
     };
@@ -226,5 +229,57 @@ mod tests {
             one_token(Some(&TokenIds::One(7)), "pad_token_id").unwrap(),
             7
         );
+    }
+
+    /// Pinned FLAN-Small beam output matches Transformers 5.2.0 token-for-token.
+    #[test]
+    #[ignore = "requires pinned google/flan-t5-small SafeTensors artifacts"]
+    fn pinned_flan_small_beam_search_matches_reference_tokens() {
+        let root = std::env::var_os("TRANSFORMERS_FLAN_T5_SMALL_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab")
+            });
+        let config = T5Config::from_json_str(
+            &fs::read_to_string(root.join("config.json")).expect("read pinned FLAN config"),
+        )
+        .expect("parse pinned FLAN config");
+        let device = Default::default();
+        let mut model = T5ForConditionalGeneration::<TestBackend>::init(config, &device)
+            .expect("initialize FLAN graph");
+        model
+            .load_checkpoint(&root, &LoadOptions::default())
+            .expect("strictly load pinned FLAN weights");
+
+        let output = generate_t5_beam_search(
+            &model,
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints(
+                    [[13_959, 1_566, 12, 2_968, 10, 37, 629, 19, 1_627, 5, 1]],
+                    &device,
+                ),
+                token_mask: None,
+                position_ids: None,
+            },
+            T5BeamSearchOptions {
+                max_new_tokens: 16,
+                num_beams: 4,
+                num_return_sequences: 1,
+                length_penalty: 1.0,
+                early_stopping: false,
+            },
+        )
+        .expect("run cached FLAN beam search");
+        assert_eq!(output.sequences.len(), 1);
+        assert_eq!(output.sequences[0].len(), 1);
+        assert_eq!(
+            output.sequences[0][0].token_ids,
+            [644, 4_598, 229, 9_685, 5, 1]
+        );
+        assert!(matches!(
+            output.sequences[0][0].finish_reason,
+            FinishReason::EndOfSequence { token_id: 1 }
+        ));
     }
 }

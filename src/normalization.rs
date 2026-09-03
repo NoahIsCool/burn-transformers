@@ -23,6 +23,13 @@ pub struct RmsNormConfig {
     pub epsilon: f64,
     /// Whether the checkpoint parameter represents `scale - 1`.
     pub zero_centered: bool,
+    /// Whether to round the normalized activation before learned scaling.
+    ///
+    /// DeepSeek casts the unit-RMS activation back to the residual dtype and
+    /// then multiplies by its parameter. Qwen keeps both operations in FP32
+    /// and rounds only the final result, so the distinction is explicit.
+    #[serde(default)]
+    pub round_before_scale: bool,
 }
 
 impl RmsNormConfig {
@@ -32,6 +39,7 @@ impl RmsNormConfig {
             size,
             epsilon: 1e-6,
             zero_centered: false,
+            round_before_scale: false,
         }
     }
 
@@ -44,6 +52,12 @@ impl RmsNormConfig {
     /// Selects the `1 + weight` checkpoint convention.
     pub fn with_zero_centered(mut self, zero_centered: bool) -> Self {
         self.zero_centered = zero_centered;
+        self
+    }
+
+    /// Selects DeepSeek-style rounding before learned scaling.
+    pub fn with_round_before_scale(mut self, round_before_scale: bool) -> Self {
+        self.round_before_scale = round_before_scale;
         self
     }
 
@@ -73,6 +87,7 @@ impl RmsNormConfig {
             weight: initializer.init([self.size], device),
             epsilon: self.epsilon,
             zero_centered: self.zero_centered,
+            round_before_scale: self.round_before_scale,
         })
     }
 }
@@ -86,6 +101,8 @@ pub struct RmsNorm<B: Backend> {
     pub epsilon: f64,
     /// Whether to add one to the learned parameter before scaling.
     pub zero_centered: bool,
+    /// Whether the normalized activation is rounded before scale multiplication.
+    pub round_before_scale: bool,
 }
 
 impl<B: Backend> RmsNorm<B> {
@@ -93,9 +110,10 @@ impl<B: Backend> RmsNorm<B> {
     ///
     /// The input dtype is restored after the FP32 reduction so this method
     /// remains compatible with F16 Metal execution while preserving an FP32
-    /// variance estimate. The normalization and learned scaling also remain in
-    /// FP32 until the final cast; this matches zero-centered Qwen RMSNorm and
-    /// avoids rounding the reciprocal root before multiplication.
+    /// variance estimate. By default, normalization and learned scaling remain
+    /// in FP32 until the final cast; this matches zero-centered Qwen RMSNorm.
+    /// [`RmsNormConfig::with_round_before_scale`] instead reproduces the
+    /// DeepSeek convention of rounding the normalized activation first.
     pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
         let dtype = input.dtype();
         let input = input.cast(DType::F32);
@@ -105,7 +123,12 @@ impl<B: Backend> RmsNorm<B> {
         } else {
             self.weight.val().cast(DType::F32)
         };
-        ((input / rms) * scale.unsqueeze()).cast(dtype)
+        let normalized = input / rms;
+        if self.round_before_scale {
+            normalized.cast(dtype) * scale.cast(dtype).unsqueeze()
+        } else {
+            (normalized * scale.unsqueeze()).cast(dtype)
+        }
     }
 }
 
@@ -162,6 +185,32 @@ mod tests {
         let input = Tensor::<Flex, 2>::ones([2, 4], (&device, DType::F16));
         let output = norm.forward(input);
         assert_eq!(output.dtype(), DType::F16);
+    }
+
+    /// DeepSeek rounds the normalized activation before reduced-precision scaling.
+    #[test]
+    fn round_before_scale_matches_deepseek_operation_order() {
+        use burn::tensor::DType;
+
+        let device = Default::default();
+        let mut early = RmsNormConfig::new(3)
+            .with_round_before_scale(true)
+            .init::<Flex>(&device)
+            .unwrap();
+        let mut late = RmsNormConfig::new(3).init::<Flex>(&device).unwrap();
+        let weight =
+            Tensor::<Flex, 1>::from_floats([0.731, 1.337, -0.419], &device).cast(DType::F16);
+        early.weight = Param::from_tensor(weight.clone());
+        late.weight = Param::from_tensor(weight.clone());
+        let input =
+            Tensor::<Flex, 2>::from_floats([[0.337, 1.719, -2.113]], &device).cast(DType::F16);
+
+        let fp32 = input.clone().cast(DType::F32);
+        let rms = (fp32.clone().square().mean_dim(1) + 1e-6).sqrt();
+        let expected = (fp32 / rms).cast(DType::F16) * weight.unsqueeze();
+        let actual = early.forward(input.clone());
+        assert_eq!(actual.to_data(), expected.to_data());
+        assert_ne!(actual.to_data(), late.forward(input).to_data());
     }
 
     /// T5 normalization divides by RMS without subtracting the feature mean.

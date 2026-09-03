@@ -918,7 +918,12 @@ fn host_log_probabilities<B: Backend>(
         Tensor::<B, 2, Bool>::from_data(TensorData::new(active.to_vec(), [batch, 1]), &device)
             .expand([batch, vocabulary]);
     log_softmax(logits.mask_fill(active_mask.bool_not(), 0.0), 1)
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!(
+                "failed to read beam-search log probabilities from backend: {error}"
+            ))
+        })?
         .to_vec::<B::FloatElem>()
         .map(|values| {
             values
@@ -945,7 +950,8 @@ fn mask_values<B: Backend>(
             .as_tensor()
             .clone()
             .int()
-            .into_data()
+            .try_into_data()
+            .map_err(|error| Error::BackendCapability(format!("failed to read {label}: {error}")))?
             .to_vec::<B::IntElem>()
             .map(|values| {
                 values
@@ -1053,7 +1059,8 @@ fn tensor_i64_values<B: Backend, const D: usize>(
     label: &str,
 ) -> Result<Vec<i64>> {
     tensor
-        .into_data()
+        .try_into_data()
+        .map_err(|error| Error::BackendCapability(format!("failed to read {label}: {error}")))?
         .to_vec::<B::IntElem>()
         .map(|values| {
             values
@@ -1291,11 +1298,6 @@ mod tests {
     impl<B: Backend> Seq2SeqLanguageModel<B> for ScriptedModel<B> {
         type Config = ScriptedConfig;
         type State = ScriptedState<B>;
-
-        /// Returns the fixed scripted configuration.
-        fn config(&self) -> &Self::Config {
-            &self.config
-        }
 
         /// Encodes source IDs as one-channel floating markers.
         fn encode(

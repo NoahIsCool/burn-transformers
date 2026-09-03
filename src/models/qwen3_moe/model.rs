@@ -189,6 +189,7 @@ impl<B: Backend> Qwen3MoeModel<B> {
     ) -> Result<Qwen3MoeBackboneOutput<B>> {
         let [batch, sequence] = input.token_ids.dims();
         validate_nonempty_input(batch, sequence)?;
+        validate_input_devices(input, &self.embed_tokens.weight.lazy_device())?;
         validate_token_ids(input.token_ids.clone(), self.config.vocab_size)?;
         validate_mask(input.token_mask.as_ref(), batch, sequence, false)?;
         let positions = resolve_positions(input, batch, sequence)?;
@@ -315,13 +316,28 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
 
     /// Applies the independent or tied vocabulary projection.
     fn project_logits(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
+        let hidden_device = hidden.device();
         match &self.lm_head {
-            Some(head) => operations::linear(hidden, head),
-            None => Ok(burn::tensor::module::linear(
-                hidden,
-                self.model.embed_tokens.weight.val().transpose(),
-                None,
-            )),
+            Some(head) => {
+                ensure_model_device(
+                    "qwen3_moe.lm_head",
+                    &head.weight.lazy_device(),
+                    &hidden_device,
+                )?;
+                operations::linear(hidden, head)
+            }
+            None => {
+                ensure_model_device(
+                    "qwen3_moe.model.embed_tokens",
+                    &self.model.embed_tokens.weight.lazy_device(),
+                    &hidden_device,
+                )?;
+                Ok(burn::tensor::module::linear(
+                    hidden,
+                    self.model.embed_tokens.weight.val().transpose(),
+                    None,
+                ))
+            }
         }
     }
 }
@@ -373,11 +389,9 @@ fn qwen_rope_config(config: &Qwen3MoeConfig) -> Result<RopeConfig> {
                     .with_attention_factor(factor)
                     .map_err(|error| Error::configuration("qwen3_moe.rope", error.to_string()))?;
             }
-            if let (Some(fast), Some(slow)) = (parameters.beta_fast, parameters.beta_slow) {
-                yarn = yarn
-                    .with_betas(fast, slow)
-                    .map_err(|error| Error::configuration("qwen3_moe.rope", error.to_string()))?;
-            }
+            yarn = yarn
+                .with_beta_overrides(parameters.beta_fast, parameters.beta_slow)
+                .map_err(|error| Error::configuration("qwen3_moe.rope", error.to_string()))?;
             RopeScaling::Yarn(yarn)
         }
         unsupported => {
@@ -442,6 +456,43 @@ fn validate_nonempty_input(batch: usize, sequence: usize) -> Result<()> {
             "non-empty [batch, sequence]",
             format!("[{batch}, {sequence}]"),
         ));
+    }
+    Ok(())
+}
+
+/// Rejects stateless input tensors that do not share the model parameter device.
+///
+/// Checking device identity before reductions, mask scans, position math, and
+/// embedding lookup keeps backend mixed-device failures inside this crate's
+/// recoverable error taxonomy.
+fn validate_input_devices<B: Backend>(
+    input: &CausalLmInput<B>,
+    model_device: &B::Device,
+) -> Result<()> {
+    ensure_model_device(
+        "qwen3_moe.input_ids",
+        &input.token_ids.device(),
+        model_device,
+    )?;
+    if let Some(mask) = &input.token_mask {
+        ensure_model_device(
+            "qwen3_moe.token_mask",
+            &mask.as_tensor().device(),
+            model_device,
+        )?;
+    }
+    if let Some(positions) = &input.position_ids {
+        ensure_model_device("qwen3_moe.position_ids", &positions.device(), model_device)?;
+    }
+    Ok(())
+}
+
+/// Reports one stateless tensor/parameter device mismatch contextually.
+fn ensure_model_device<D: PartialEq>(tensor: &str, actual: &D, expected: &D) -> Result<()> {
+    if actual != expected {
+        return Err(Error::BackendCapability(format!(
+            "{tensor} and Qwen3 MoE model parameters are on different devices"
+        )));
     }
     Ok(())
 }
@@ -743,6 +794,23 @@ mod tests {
             assert_eq!(router.logits.expect("requested").dims(), [2, 3, 4]);
             assert_eq!(router.load_balancing_loss.expect("requested").dims(), [1]);
             assert!(router.z_loss.is_none());
+        }
+    }
+
+    /// Stateless device preflight names every independently supplied tensor.
+    #[test]
+    fn stateless_device_affinity_errors_are_contextual() {
+        assert!(ensure_model_device("qwen3_moe.input_ids", &0_u8, &0_u8).is_ok());
+        for tensor in [
+            "qwen3_moe.input_ids",
+            "qwen3_moe.token_mask",
+            "qwen3_moe.position_ids",
+            "qwen3_moe.lm_head",
+        ] {
+            let error = ensure_model_device(tensor, &1_u8, &0_u8)
+                .expect_err("different device identities must fail preflight");
+            assert!(error.to_string().contains(tensor));
+            assert!(error.to_string().contains("model parameters"));
         }
     }
 

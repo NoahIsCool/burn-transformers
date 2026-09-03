@@ -191,11 +191,6 @@ impl<B: Backend> CausalLanguageModel<B> for NemotronHForCausalLm<B> {
     type Config = super::super::NemotronHConfig;
     type State = NemotronHDecodeState<B>;
 
-    /// Returns the validated heterogeneous architecture configuration.
-    fn config(&self) -> &Self::Config {
-        NemotronHForCausalLm::config(self)
-    }
-
     /// Runs the differentiable cache-free graph.
     fn forward(
         &self,
@@ -840,7 +835,10 @@ fn semantic_indices<B: Backend>(
     let values = mask
         .as_tensor()
         .clone()
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!("failed to read Nemotron-H mask: {error}"))
+        })?
         .to_vec::<bool>()
         .map_err(|error| Error::BackendCapability(format!("failed to read mask: {error}")))?;
     Ok(values
@@ -894,7 +892,15 @@ fn cached_attention_mask<B: Backend>(
         .expand([1, heads, query_sequence, key_sequence]);
     let causal = key.clone().greater(query.clone());
     Ok(match window {
-        Some(window) => causal.bool_or((key + window as i64).lower_equal(query)),
+        Some(window) => {
+            let window = i64::try_from(window).map_err(|_| {
+                Error::configuration(
+                    "nemotron_h.sliding_window",
+                    "window exceeds portable signed index range",
+                )
+            })?;
+            causal.bool_or((key + window).lower_equal(query))
+        }
         None => causal,
     })
 }
@@ -1391,5 +1397,13 @@ mod tests {
                 .is_err()
         );
         assert_eq!(state.lengths(), &[2]);
+    }
+
+    /// Cached mask construction rejects windows that cannot enter signed indices.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn oversized_cached_attention_window_is_rejected() {
+        let device = Default::default();
+        assert!(cached_attention_mask::<TestBackend>(0, 1, 1, Some(usize::MAX), &device).is_err());
     }
 }

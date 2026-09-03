@@ -430,11 +430,6 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for T5ForConditionalGeneration<B> {
     type Config = T5Config;
     type State = T5DecodeState<B>;
 
-    /// Returns the validated architecture configuration behind this graph.
-    fn config(&self) -> &Self::Config {
-        T5ForConditionalGeneration::config(self)
-    }
-
     /// Evaluates the bidirectional encoder without allocating decoder state.
     fn encode(
         &self,
@@ -1146,7 +1141,12 @@ fn semantic_indices<B: Backend>(
     let values = mask
         .as_tensor()
         .clone()
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!(
+                "failed to read T5 decoder mask from the backend: {error}"
+            ))
+        })?
         .to_vec::<bool>()
         .map_err(|error| {
             Error::BackendCapability(format!("failed to read T5 decoder mask: {error}"))

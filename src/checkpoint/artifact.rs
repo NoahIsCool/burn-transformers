@@ -702,10 +702,50 @@ struct RawIndex {
 
 #[derive(Debug, Deserialize)]
 struct RawIndexMetadata {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_integral_u64")]
     total_size: Option<u64>,
 }
 
+/// Deserializes an optional non-negative integer from an integer or exact
+/// integer-valued JSON decimal.
+fn deserialize_optional_integral_u64<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<Box<serde_json::value::RawValue>>::deserialize(deserializer)?;
+    raw.map(|raw| parse_integral_u64_lexeme(raw.get()).map_err(de::Error::custom))
+        .transpose()
+}
+
+/// Parses one exact JSON-number lexeme without passing through floating point.
+///
+/// Canonical unsigned integers are accepted across the complete `u64` range.
+/// The sole compatibility extension is a decimal point followed exclusively
+/// by zeroes, which covers official indexes that serialize byte counts as
+/// `55562855904.0`. Fractions, signs, exponents, strings, and overflowing
+/// integers fail closed rather than being rounded by IEEE-754 conversion.
+fn parse_integral_u64_lexeme(lexeme: &str) -> std::result::Result<u64, String> {
+    let (integer, fraction) = match lexeme.split_once('.') {
+        Some((integer, fraction)) => (integer, Some(fraction)),
+        None => (lexeme, None),
+    };
+    let canonical_digits = !integer.is_empty() && integer.bytes().all(|byte| byte.is_ascii_digit());
+    let exact_zero_fraction = fraction
+        .map(|fraction| !fraction.is_empty() && fraction.bytes().all(|byte| byte == b'0'))
+        .unwrap_or(true);
+    if !canonical_digits || !exact_zero_fraction {
+        return Err(format!(
+            "metadata.total_size must be an unsigned integer or have only a zero fractional suffix, found {lexeme}"
+        ));
+    }
+    integer.parse::<u64>().map_err(|error| {
+        format!("metadata.total_size `{lexeme}` is outside the unsigned 64-bit range: {error}")
+    })
+}
+
+/// Deserializes a JSON object while rejecting duplicate tensor-name entries.
 fn deserialize_unique_string_map<'de, D>(
     deserializer: D,
 ) -> std::result::Result<BTreeMap<String, String>, D::Error>

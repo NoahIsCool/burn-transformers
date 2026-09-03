@@ -222,6 +222,7 @@ impl<B: Backend> Qwen3_5TextModel<B> {
                 format!("[{batch}, {sequence}]"),
             ));
         }
+        validate_input_devices(input, &self.embed_tokens.weight.lazy_device())?;
         validate_token_ids(input.token_ids.clone(), self.config.vocab_size)?;
         validate_mask(input.token_mask.as_ref(), batch, sequence)?;
         let positions = resolve_positions(input, batch, sequence)?;
@@ -344,6 +345,22 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
                 format!("[{batch}, {sequence}]"),
             ));
         }
+        let model_device = self.model.embed_tokens.weight.lazy_device();
+        ensure_model_device(
+            "qwen.mtp.next_token_ids",
+            &next_token_ids.device(),
+            &model_device,
+        )?;
+        ensure_model_device(
+            "qwen.mtp.target_hidden_state",
+            &target_hidden_state.device(),
+            &model_device,
+        )?;
+        ensure_model_device(
+            "qwen.mtp.position_ids",
+            &position_ids.device(),
+            &model_device,
+        )?;
         validate_token_ids(next_token_ids.clone(), self.config().vocab_size)?;
         decode::validate_position_range(
             position_ids.clone(),
@@ -368,13 +385,24 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
 
     /// Projects normalized hidden states with the shared base-model LM head.
     pub(crate) fn project_hidden(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
+        let hidden_device = hidden.device();
         match &self.lm_head {
-            Some(head) => operations::linear(hidden, head),
-            None => Ok(burn::tensor::module::linear(
-                hidden,
-                self.model.embed_tokens.weight.val().transpose(),
-                None,
-            )),
+            Some(head) => {
+                ensure_model_device("qwen.lm_head", &head.weight.lazy_device(), &hidden_device)?;
+                operations::linear(hidden, head)
+            }
+            None => {
+                ensure_model_device(
+                    "qwen.model.embed_tokens",
+                    &self.model.embed_tokens.weight.lazy_device(),
+                    &hidden_device,
+                )?;
+                Ok(burn::tensor::module::linear(
+                    hidden,
+                    self.model.embed_tokens.weight.val().transpose(),
+                    None,
+                ))
+            }
         }
     }
 }
@@ -416,11 +444,9 @@ fn qwen_rope_config(config: &Qwen3_5TextConfig) -> Result<RopeConfig> {
                     .with_attention_factor(factor)
                     .map_err(|error| Error::configuration("qwen3_5.rope", error.to_string()))?;
             }
-            if let (Some(fast), Some(slow)) = (parameters.beta_fast, parameters.beta_slow) {
-                yarn = yarn
-                    .with_betas(fast, slow)
-                    .map_err(|error| Error::configuration("qwen3_5.rope", error.to_string()))?;
-            }
+            yarn = yarn
+                .with_beta_overrides(parameters.beta_fast, parameters.beta_slow)
+                .map_err(|error| Error::configuration("qwen3_5.rope", error.to_string()))?;
             RopeScaling::Yarn(yarn)
         }
         unsupported => {
@@ -432,6 +458,34 @@ fn qwen_rope_config(config: &Qwen3_5TextConfig) -> Result<RopeConfig> {
     };
     RopeConfig::from_partial_factor(config.head_dim, partial, theta, scaling)
         .map_err(|error| Error::configuration("qwen3_5.rope", error.to_string()))
+}
+
+/// Rejects stateless input tensors that do not share the model parameter device.
+///
+/// This preflight precedes reductions, positional arithmetic, and embedding
+/// lookup so mixed-device user input remains a recoverable library error.
+fn validate_input_devices<B: Backend>(
+    input: &CausalLmInput<B>,
+    model_device: &B::Device,
+) -> Result<()> {
+    ensure_model_device("qwen.input_ids", &input.token_ids.device(), model_device)?;
+    if let Some(mask) = &input.token_mask {
+        ensure_model_device("qwen.token_mask", &mask.as_tensor().device(), model_device)?;
+    }
+    if let Some(positions) = &input.position_ids {
+        ensure_model_device("qwen.position_ids", &positions.device(), model_device)?;
+    }
+    Ok(())
+}
+
+/// Reports a stateless tensor/parameter device mismatch through the error taxonomy.
+fn ensure_model_device<D: PartialEq>(tensor: &str, actual: &D, expected: &D) -> Result<()> {
+    if actual != expected {
+        return Err(Error::BackendCapability(format!(
+            "{tensor} and Qwen3.5 model parameters are on different devices"
+        )));
+    }
+    Ok(())
 }
 
 /// Validates token values before the embedding backend sees an index.
@@ -720,6 +774,24 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// Stateless device preflight identifies every independently supplied tensor.
+    #[test]
+    fn stateless_device_affinity_errors_are_contextual() {
+        assert!(ensure_model_device("qwen.input_ids", &0_u8, &0_u8).is_ok());
+        for tensor in [
+            "qwen.input_ids",
+            "qwen.token_mask",
+            "qwen.position_ids",
+            "qwen.mtp.target_hidden_state",
+            "qwen.lm_head",
+        ] {
+            let error = ensure_model_device(tensor, &1_u8, &0_u8)
+                .expect_err("different device identities must fail preflight");
+            assert!(error.to_string().contains(tensor));
+            assert!(error.to_string().contains("model parameters"));
+        }
     }
 
     /// The official reduced Qwen3.8 fixture constructs all lazy parameter shapes.

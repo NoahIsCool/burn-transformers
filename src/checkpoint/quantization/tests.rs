@@ -64,12 +64,22 @@ fn eligibility_policy_explains_every_exclusion_class() {
             QuantizationEligibility::Excluded(QuantizationExclusion::Mtp),
         ),
         (
+            "next_token_head.attention.q_proj.weight",
+            &[8, 8][..],
+            QuantizationEligibility::Excluded(QuantizationExclusion::Mtp),
+        ),
+        (
             "model.embed_tokens.weight",
             &[128, 8][..],
             QuantizationEligibility::Excluded(QuantizationExclusion::Embedding),
         ),
         (
             "model.tok_embeddings.weight",
+            &[128, 8][..],
+            QuantizationEligibility::Excluded(QuantizationExclusion::Embedding),
+        ),
+        (
+            "shared.weight",
             &[128, 8][..],
             QuantizationEligibility::Excluded(QuantizationExclusion::Embedding),
         ),
@@ -96,7 +106,7 @@ fn eligibility_policy_explains_every_exclusion_class() {
         (
             "model.layers.0.router.expert_indices",
             &[8, 8][..],
-            QuantizationEligibility::Excluded(QuantizationExclusion::NotWeight),
+            QuantizationEligibility::Excluded(QuantizationExclusion::Router),
         ),
         (
             "model.layers.0.scale.weight",
@@ -112,6 +122,16 @@ fn eligibility_policy_explains_every_exclusion_class() {
             "encoder.block.0.relative_attention_bias.weight",
             &[32, 8][..],
             QuantizationEligibility::Excluded(QuantizationExclusion::BiasTable),
+        ),
+        (
+            "model.layers.1.sparse_mlp.routed.router.weight",
+            &[64, 2048][..],
+            QuantizationEligibility::Excluded(QuantizationExclusion::Router),
+        ),
+        (
+            "model.layers.0.self_attn.kv_b_proj.weight",
+            &[4096, 512][..],
+            QuantizationEligibility::Excluded(QuantizationExclusion::LatentExpansion),
         ),
         (
             "model.layers.0.experts.weight",
@@ -131,6 +151,8 @@ fn eligibility_policy_explains_every_exclusion_class() {
         "model.layers.0.self_attn.q_proj.weight",
         "model.layers.0.mlp.down_proj.weight",
         "model.layers.0.mlp.experts.7.gate_proj.weight",
+        "model.layers.1.moe.shared.up_proj.weight",
+        "model.layers.1.moe.shared.down_proj.weight",
         "lm_head.weight",
     ] {
         assert_eq!(

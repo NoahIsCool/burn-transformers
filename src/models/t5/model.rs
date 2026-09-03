@@ -643,6 +643,8 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
         options: &ForwardOptions,
     ) -> Result<EncoderOutput<B>> {
         validate_options(options)?;
+        let model_device = self.shared.weight.lazy_device();
+        validate_input_devices(&source, "encoder", &model_device)?;
         let [batch, sequence] = validate_token_input(&source, self.config.vocab_size, "encoder")?;
         let hidden = self.shared.forward(source.token_ids.clone());
         debug_assert_eq!(hidden.dims(), [batch, sequence, self.config.d_model]);
@@ -682,6 +684,9 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
         options: &ForwardOptions,
     ) -> Result<CausalLmOutput<B>> {
         validate_options(options)?;
+        let model_device = self.shared.weight.lazy_device();
+        validate_input_devices(&decoder, "decoder", &model_device)?;
+        validate_encoder_devices(encoder, &model_device)?;
         let [batch, sequence] = validate_token_input(&decoder, self.config.vocab_size, "decoder")?;
         validate_encoder_output(encoder, batch, self.config.d_model)?;
         if decoder.token_mask.is_some() {
@@ -713,6 +718,7 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
 
     /// Applies the tied/scaled or independent/unscaled vocabulary projection.
     fn project_logits(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
+        let hidden_device = hidden.device();
         if self.config.tie_word_embeddings {
             if self.lm_head.is_some() {
                 return Err(Error::configuration(
@@ -720,6 +726,11 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
                     "tied checkpoints must not own a separate vocabulary projection",
                 ));
             }
+            ensure_model_device(
+                "t5.shared",
+                &self.shared.weight.lazy_device(),
+                &hidden_device,
+            )?;
             let hidden = hidden.mul_scalar(1.0 / (self.config.d_model as f64).sqrt());
             return Ok(linear(hidden, self.shared.weight.val().transpose(), None));
         }
@@ -731,7 +742,10 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
                     "untied checkpoints require a separate vocabulary projection",
                 )
             })
-            .and_then(|head| operations::linear(hidden, head))
+            .and_then(|head| {
+                ensure_model_device("t5.lm_head", &head.weight.lazy_device(), &hidden_device)?;
+                operations::linear(hidden, head)
+            })
     }
 }
 
@@ -772,6 +786,68 @@ fn validate_options(options: &ForwardOptions) -> Result<()> {
         return Err(Error::BackendCapability(
             "T5 attention probability capture requires a reference attention path".into(),
         ));
+    }
+    Ok(())
+}
+
+/// Rejects stateless token tensors that do not share the model parameter device.
+///
+/// T5 rejects explicit absolute positions semantically, but their device is
+/// still checked first so every independently supplied tensor obeys one stable
+/// affinity contract.
+fn validate_input_devices<B: Backend>(
+    input: &CausalLmInput<B>,
+    stack: &'static str,
+    model_device: &B::Device,
+) -> Result<()> {
+    ensure_model_device(
+        &format!("t5.{stack}.input_ids"),
+        &input.token_ids.device(),
+        model_device,
+    )?;
+    if let Some(mask) = &input.token_mask {
+        ensure_model_device(
+            &format!("t5.{stack}.token_mask"),
+            &mask.as_tensor().device(),
+            model_device,
+        )?;
+    }
+    if let Some(positions) = &input.position_ids {
+        ensure_model_device(
+            &format!("t5.{stack}.position_ids"),
+            &positions.device(),
+            model_device,
+        )?;
+    }
+    Ok(())
+}
+
+/// Validates the cross-attention tensors of an externally supplied encoder result.
+fn validate_encoder_devices<B: Backend>(
+    encoder: &EncoderOutput<B>,
+    model_device: &B::Device,
+) -> Result<()> {
+    ensure_model_device(
+        "t5.encoder_output.hidden_state",
+        &encoder.hidden_state.device(),
+        model_device,
+    )?;
+    if let Some(mask) = &encoder.token_mask {
+        ensure_model_device(
+            "t5.encoder_output.token_mask",
+            &mask.as_tensor().device(),
+            model_device,
+        )?;
+    }
+    Ok(())
+}
+
+/// Reports one stateless tensor/parameter device mismatch contextually.
+fn ensure_model_device<D: PartialEq>(tensor: &str, actual: &D, expected: &D) -> Result<()> {
+    if actual != expected {
+        return Err(Error::BackendCapability(format!(
+            "{tensor} and T5 model parameters are on different devices"
+        )));
     }
     Ok(())
 }
@@ -1078,6 +1154,28 @@ mod tests {
                 .expect("decoder changed forward"),
         );
         assert_eq!(decoder_first, decoder_changed);
+    }
+
+    /// Stateless preflight names token, mask, position, encoder, and head tensors.
+    #[test]
+    fn stateless_device_affinity_errors_are_contextual() {
+        assert!(ensure_model_device("t5.encoder.input_ids", &0_u8, &0_u8).is_ok());
+        for tensor in [
+            "t5.encoder.input_ids",
+            "t5.encoder.token_mask",
+            "t5.encoder.position_ids",
+            "t5.decoder.input_ids",
+            "t5.decoder.token_mask",
+            "t5.decoder.position_ids",
+            "t5.encoder_output.hidden_state",
+            "t5.encoder_output.token_mask",
+            "t5.lm_head",
+        ] {
+            let error = ensure_model_device(tensor, &1_u8, &0_u8)
+                .expect_err("different device identities must fail preflight");
+            assert!(error.to_string().contains(tensor));
+            assert!(error.to_string().contains("model parameters"));
+        }
     }
 
     /// A false key mask prevents padded source content from affecting real queries.

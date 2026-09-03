@@ -89,10 +89,15 @@ impl MuseGlimmerLayerCache {
     }
 
     /// Returns the local window for sliding slots and no bound for full slots.
-    const fn window(self, window: usize) -> Option<usize> {
+    fn window(self, window: Option<usize>) -> Result<Option<usize>> {
         match self {
-            Self::Sliding { .. } => Some(window),
-            Self::Full { .. } => None,
+            Self::Sliding { .. } => window.map(Some).ok_or_else(|| {
+                Error::configuration(
+                    "muse_glimmer.decode_state.window",
+                    "a sliding cache slot requires an effective window",
+                )
+            }),
+            Self::Full { .. } => Ok(None),
         }
     }
 }
@@ -102,7 +107,7 @@ impl MuseGlimmerLayerCache {
 struct MuseGlimmerCacheLayout {
     schedule: Vec<MuseGlimmerLayerCache>,
     groups: Vec<NativeKvCacheSpec>,
-    window: usize,
+    window: Option<usize>,
 }
 
 /// External Muse decode state backed by shared preallocated tensor caches.
@@ -136,18 +141,22 @@ impl<B: Backend> MuseGlimmerDecodeState<B> {
                 "must fit Burn's portable signed position-index range",
             ));
         }
-        let architectural_window = model.config().sliding_window.ok_or_else(|| {
-            Error::configuration(
-                "muse_glimmer.sliding_window",
-                "is required by cached local attention",
-            )
-        })?;
-        let physical_window = architectural_window.min(requested.capacity());
+        let physical_window = model
+            .config()
+            .resolved_sliding_window()
+            .map(|window| window.min(requested.capacity()));
         let internal_config = CacheConfig::new(requested.sequence_count(), requested.capacity())
-            .and_then(|config| config.with_sliding_window(physical_window))
             .map_err(|error| {
                 Error::configuration("muse_glimmer.decode_state", error.to_string())
             })?;
+        let internal_config = match physical_window {
+            Some(window) => internal_config
+                .with_sliding_window(window)
+                .map_err(|error| {
+                    Error::configuration("muse_glimmer.decode_state", error.to_string())
+                })?,
+            None => internal_config,
+        };
         let layout = cache_layout(model, physical_window)?;
         let mut tensors = TensorDecodeState::new(internal_config, batch_size, device)?;
         for (expected_group, spec) in layout.groups.iter().copied().enumerate() {
@@ -173,9 +182,9 @@ impl<B: Backend> MuseGlimmerDecodeState<B> {
         self.layout.schedule.get(model_layer).copied()
     }
 
-    /// Returns the effective ring width, capped by logical state capacity.
+    /// Returns the effective ring width, or `None` for a full-attention-only model.
     #[must_use]
-    pub const fn sliding_window(&self) -> usize {
+    pub const fn sliding_window(&self) -> Option<usize> {
         self.layout.window
     }
 
@@ -232,10 +241,6 @@ impl<B: Backend> ArchitectureDecodeState<B> for MuseGlimmerDecodeState<B> {
 impl<B: Backend> CausalLanguageModel<B> for MuseGlimmerForCausalLm<B> {
     type Config = MuseGlimmerTextConfig;
     type State = MuseGlimmerDecodeState<B>;
-
-    fn config(&self) -> &Self::Config {
-        MuseGlimmerForCausalLm::config(self)
-    }
 
     fn forward(
         &self,
@@ -475,10 +480,8 @@ impl<B: Backend> MuseGlimmerDecoderLayer<B> {
         let cache = state.tensors.main().native_kv(group)?;
         let history = cache.read_sequence(group_layer, row, baseline)?;
         let retained = history.retained_positions();
-        let expected_start = match cache_slot {
-            MuseGlimmerLayerCache::Sliding { .. } => baseline.saturating_sub(state.layout.window),
-            MuseGlimmerLayerCache::Full { .. } => 0,
-        };
+        let local_window = cache_slot.window(state.layout.window)?;
+        let expected_start = local_window.map_or(0, |window| baseline.saturating_sub(window));
         if retained != (expected_start..baseline) {
             return Err(Error::Cache(format!(
                 "Muse layer {model_layer} retained {retained:?}, expected {expected_start}..{baseline}"
@@ -495,7 +498,7 @@ impl<B: Backend> MuseGlimmerDecoderLayer<B> {
             expected_start,
             key_sequence,
             self.self_attn.query_heads,
-            cache_slot.window(state.layout.window),
+            local_window,
             &projection.query.device(),
         )?;
         let attended = self.self_attn.attend(projection, Some(mask), false)?;
@@ -771,20 +774,30 @@ fn prepare_stateful_input<B: Backend>(
 /// Resolves the two homogeneous groups and dense per-layer schedule.
 fn cache_layout<B: Backend>(
     model: &MuseGlimmerForCausalLm<B>,
-    window: usize,
+    window: Option<usize>,
 ) -> Result<MuseGlimmerCacheLayout> {
-    if window == 0 {
-        return Err(Error::configuration(
-            "muse_glimmer.decode_state.window",
-            "must be non-zero",
-        ));
-    }
     let schedule_types = model.config().resolved_layer_types();
     let sliding_count = schedule_types
         .iter()
         .filter(|&&kind| kind == MuseGlimmerLayerType::SlidingAttention)
         .count();
     let full_count = schedule_types.len() - sliding_count;
+    let window = match (sliding_count, window) {
+        (0, _) => None,
+        (_, Some(0)) => {
+            return Err(Error::configuration(
+                "muse_glimmer.decode_state.window",
+                "must be non-zero",
+            ));
+        }
+        (_, Some(window)) => Some(window),
+        (_, None) => {
+            return Err(Error::configuration(
+                "muse_glimmer.decode_state.window",
+                "is required by the sliding cache group",
+            ));
+        }
+    };
     let dtype = model.model.embed_tokens.weight.val().dtype();
     let mut groups = Vec::with_capacity(2);
     let sliding_group = if sliding_count > 0 {
@@ -869,7 +882,12 @@ fn semantic_indices<B: Backend>(
     let values = mask
         .as_tensor()
         .clone()
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!(
+                "failed to read Muse mask from the backend: {error}"
+            ))
+        })?
         .to_vec::<bool>()
         .map_err(|error| Error::BackendCapability(format!("failed to read Muse mask: {error}")))?;
     Ok(values
@@ -1090,6 +1108,21 @@ mod tests {
         }
     }
 
+    /// One full-attention layer whose explicit head width differs from residual width.
+    fn full_only_config() -> MuseGlimmerTextConfig {
+        MuseGlimmerTextConfig {
+            hidden_size: 10,
+            num_hidden_layers: 1,
+            num_attention_heads: 3,
+            num_key_value_heads: 1,
+            head_dim: 4,
+            sliding_window: None,
+            layer_types: vec![MuseGlimmerLayerType::FullAttention],
+            layer_rope_theta: vec![0.0],
+            ..tiny_config()
+        }
+    }
+
     /// Installs stable tiny tensors for cached-versus-stateless comparisons.
     fn initialized_model<B: Backend>(
         config: MuseGlimmerTextConfig,
@@ -1135,7 +1168,7 @@ mod tests {
             .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
             .unwrap();
         assert_eq!(state.tensor_state().main().native_kv_count(), 2);
-        assert_eq!(state.sliding_window(), 3);
+        assert_eq!(state.sliding_window(), Some(3));
         assert_eq!(
             state.layer_cache(0),
             Some(MuseGlimmerLayerCache::Sliding { group: 0, layer: 0 })
@@ -1162,6 +1195,67 @@ mod tests {
                 .committed_time_slots(),
             8
         );
+    }
+
+    /// Full-only models allocate no ring metadata and retain cached/stateless parity.
+    #[test]
+    fn full_only_cache_needs_no_sliding_window() {
+        let device = <TestBackend as BackendTypes>::Device::default();
+        let model = initialized_model::<TestBackend>(full_only_config(), &device);
+        let stateless = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 2, 3]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        assert_eq!(state.sliding_window(), None);
+        assert!(
+            state
+                .tensor_state()
+                .main()
+                .config()
+                .sliding_window()
+                .is_none()
+        );
+        assert_eq!(state.tensor_state().main().native_kv_count(), 1);
+        assert_eq!(
+            state.layer_cache(0),
+            Some(MuseGlimmerLayerCache::Full { group: 0, layer: 0 })
+        );
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 2]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        let cached = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[3]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+        cached
+            .into_data()
+            .assert_approx_eq::<f32>(&stateless.into_data(), Tolerance::absolute(3e-4));
     }
 
     /// A prompt followed by one token agrees with one-shot execution.

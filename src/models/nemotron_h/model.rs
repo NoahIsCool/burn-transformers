@@ -30,6 +30,7 @@ use crate::{
     architecture::{Activation, RouterDiagnostics, TokenMask},
     attention::{GroupedQueryAttention, GroupedQueryAttentionConfig, padding_attention_mask},
     feed_forward::apply_activation,
+    moe::group_selected_experts,
     normalization::{RmsNorm, RmsNormConfig},
     operations,
 };
@@ -230,10 +231,13 @@ impl<B: Backend> NemotronHMoe<B> {
                 .with_bias(false)
                 .with_layout(LinearLayout::Col)
                 .init(device),
+            // NVIDIA declares this as an FP32 buffer: it changes the discrete
+            // top-k decision but is not optimized by back-propagation.
             correction_bias: Param::from_tensor(Tensor::zeros(
                 [config.n_routed_experts],
                 (device, DType::F32),
-            )),
+            ))
+            .set_require_grad(false),
             routed,
             shared: NemotronHDense::init(
                 config.hidden_size,
@@ -330,37 +334,53 @@ impl<B: Backend> NemotronHMoe<B> {
             let denominator = selected_weights.clone().sum_dim(1).clamp_min(1e-20);
             selected_weights = selected_weights / denominator;
         }
-        selected_weights = (selected_weights * self.routed_scale).cast(flat.dtype());
+        // The reference keeps sigmoid routing and the sparse weighted sum in
+        // FP32 even when expert projections execute in BF16/F16.
+        selected_weights = selected_weights * self.routed_scale;
 
         let routed_input = match &self.fc1_latent_proj {
             Some(projection) => operations::linear(flat.clone(), projection)?,
             None => flat.clone(),
         };
+        let routed_dtype = routed_input.dtype();
         let latent = routed_input.dims()[1];
-        let mut routed_output = Tensor::<B, 2>::zeros([tokens, latent], &flat.device());
+        let assignment_count = tokens.checked_mul(self.experts_per_token).ok_or_else(|| {
+            Error::configuration(
+                "nemotron_h.moe",
+                "tokens * experts_per_token overflows usize",
+            )
+        })?;
+        let groups = group_selected_experts(selected_experts_flat.clone(), experts)?;
+        let flat_selected_weights = selected_weights.clone().reshape([assignment_count]);
+        let mut routed_output =
+            Tensor::<B, 2>::zeros([tokens, latent], (&flat.device(), DType::F32));
         let mut counts = Vec::with_capacity(experts);
         let mut evaluated = 0;
-        for (expert_index, expert) in self.routed.iter().enumerate() {
-            let locations = selected_experts_flat
-                .clone()
-                .equal_elem(expert_index as i64)
-                .argwhere();
-            let assignments = locations.dims()[0];
+        for (expert, group) in self.routed.iter().zip(groups) {
+            let assignments = group.token_indices.len();
             counts.push(assignments);
             if assignments == 0 {
                 continue;
             }
             evaluated += 1;
-            let token_indices = locations.clone().narrow(1, 0, 1).squeeze_dim::<1>(1);
-            let weights = selected_weights
+            let token_indices = Tensor::<B, 1, Int>::from_data(
+                TensorData::new(group.token_indices, [assignments]),
+                &flat.device(),
+            );
+            let weight_indices = Tensor::<B, 1, Int>::from_data(
+                TensorData::new(group.weight_indices, [assignments]),
+                &flat.device(),
+            );
+            let weights = flat_selected_weights
                 .clone()
-                .gather_nd::<2, 1>(locations)
+                .select(0, weight_indices)
                 .unsqueeze_dim::<2>(1);
             let expert_input = routed_input.clone().select(0, token_indices.clone());
-            let contribution = expert.forward(expert_input)? * weights;
+            let contribution = expert.forward(expert_input)?.cast(DType::F32) * weights;
             routed_output =
                 routed_output.select_assign(0, token_indices, contribution, IndexingUpdateOp::Add);
         }
+        let routed_output = routed_output.cast(routed_dtype);
         let routed_output = match &self.fc2_latent_proj {
             Some(projection) => operations::linear(routed_output, projection)?,
             None => routed_output,
@@ -552,6 +572,11 @@ impl<B: Backend> NemotronHModel<B> {
     ) -> Result<NemotronHBackboneOutput<B>> {
         let [batch, sequence] = input.token_ids.dims();
         validate_input(input, batch, sequence, &self.config, false)?;
+        if self.embed_tokens.weight.val().device() != input.token_ids.device() {
+            return Err(Error::BackendCapability(
+                "Nemotron-H model parameters and inputs must share a device".into(),
+            ));
+        }
         let mut hidden = self.embed_tokens.forward(input.token_ids.clone());
         let mut hidden_states = Vec::with_capacity(if options.hidden_states {
             self.layers.len() + 2
@@ -645,6 +670,12 @@ impl<B: Backend> NemotronHNextTokenHead<B> {
                     .into(),
             ));
         }
+        let fusion_width = config.hidden_size.checked_mul(2).ok_or_else(|| {
+            Error::configuration(
+                "nemotron_h.next_token_head.eh_proj",
+                "2 * hidden_size overflows usize",
+            )
+        })?;
         let norm = || {
             RmsNormConfig::new(config.hidden_size)
                 .with_epsilon(config.layer_norm_epsilon)
@@ -660,7 +691,7 @@ impl<B: Backend> NemotronHNextTokenHead<B> {
         Ok(Self {
             embedding_norm: norm()?,
             hidden_norm: norm()?,
-            eh_proj: LinearConfig::new(config.hidden_size * 2, config.hidden_size)
+            eh_proj: LinearConfig::new(fusion_width, config.hidden_size)
                 .with_bias(false)
                 .with_layout(LinearLayout::Col)
                 .init(device),
@@ -687,6 +718,13 @@ impl<B: Backend> NemotronHNextTokenHead<B> {
                     base_hidden.dims()
                 ),
                 format!("shifted={:?}", shifted_embedding.dims()),
+            ));
+        }
+        if shifted_embedding.device() != base_hidden.device()
+            || self.eh_proj.weight.val().device() != base_hidden.device()
+        {
+            return Err(Error::BackendCapability(
+                "Nemotron-H MTP inputs and parameters must share a device".into(),
             ));
         }
         let fused = Tensor::cat(
@@ -734,6 +772,9 @@ pub struct NemotronHForCausalLm<B: Backend> {
 impl<B: Backend> NemotronHForCausalLm<B> {
     /// Initializes a validated full-precision inference graph.
     pub fn init(config: NemotronHConfig, device: &B::Device) -> Result<Self> {
+        // Validate before allocating the optional MTP body: malformed widths
+        // must return a contextual error instead of overflowing in LinearConfig.
+        ArchitectureConfig::validate(&config)?;
         let hidden = config.hidden_size;
         let vocabulary = config.vocab_size;
         let tied = config.tie_word_embeddings;
@@ -807,6 +848,15 @@ impl<B: Backend> NemotronHForCausalLm<B> {
 
     /// Applies the independent or tied vocabulary projection.
     fn project_logits(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
+        let weight_device = self.lm_head.as_ref().map_or_else(
+            || self.model.embed_tokens.weight.val().device(),
+            |head| head.weight.val().device(),
+        );
+        if weight_device != hidden.device() {
+            return Err(Error::BackendCapability(
+                "Nemotron-H LM head and hidden states must share a device".into(),
+            ));
+        }
         match &self.lm_head {
             Some(head) => operations::linear(hidden, head),
             None => Ok(burn::tensor::module::linear(
@@ -935,6 +985,11 @@ fn validate_input<B: Backend>(
     }
     validate_token_ids(input.token_ids.clone(), config.vocab_size)?;
     if let Some(mask) = &input.token_mask {
+        if mask.as_tensor().device() != input.token_ids.device() {
+            return Err(Error::BackendCapability(
+                "Nemotron-H token IDs and token mask must share a device".into(),
+            ));
+        }
         if mask.as_tensor().dims() != [batch, sequence] {
             return Err(Error::shape(
                 "nemotron_h.token_mask",
@@ -964,6 +1019,11 @@ fn validate_input<B: Backend>(
         }
     }
     if let Some(positions) = &input.position_ids {
+        if positions.device() != input.token_ids.device() {
+            return Err(Error::BackendCapability(
+                "Nemotron-H token IDs and position IDs must share a device".into(),
+            ));
+        }
         if positions.dims() != [batch, sequence] {
             return Err(Error::shape(
                 "nemotron_h.position_ids",
@@ -1073,6 +1133,20 @@ mod tests {
 
     type TestBackend = Flex<f32, i32>;
 
+    /// Converts one test projection to F16 without changing its logical shape.
+    fn cast_linear_to_f16(linear: &mut Linear<TestBackend>) {
+        linear.weight = Param::from_tensor(linear.weight.val().cast(DType::F16));
+        if let Some(bias) = linear.bias.take() {
+            linear.bias = Some(Param::from_tensor(bias.val().cast(DType::F16)));
+        }
+    }
+
+    /// Converts both projections of one test expert to F16.
+    fn cast_dense_to_f16(dense: &mut NemotronHDense<TestBackend>) {
+        cast_linear_to_f16(&mut dense.up_proj);
+        cast_linear_to_f16(&mut dense.down_proj);
+    }
+
     /// Reduced schedule retaining every released block kind.
     pub(crate) fn tiny_config(mtp: bool) -> NemotronHConfig {
         NemotronHConfig {
@@ -1158,6 +1232,58 @@ mod tests {
         assert_eq!(output.expert_token_counts.iter().sum::<usize>(), 2);
         assert_eq!(output.evaluated_experts, 2);
         assert_eq!(output.expert_token_counts, vec![1, 1, 0, 0]);
+    }
+
+    /// Router buffers and sparse accumulation retain their reference precisions.
+    #[test]
+    fn moe_mixed_precision_keeps_router_and_accumulator_fp32() {
+        let device = Default::default();
+        let config = tiny_config(false);
+        let mut moe = NemotronHMoe::<TestBackend>::init(&config, &device).unwrap();
+        cast_linear_to_f16(&mut moe.router);
+        for expert in &mut moe.routed {
+            cast_dense_to_f16(expert);
+        }
+        cast_dense_to_f16(&mut moe.shared);
+        if let Some(projection) = &mut moe.fc1_latent_proj {
+            cast_linear_to_f16(projection);
+        }
+        if let Some(projection) = &mut moe.fc2_latent_proj {
+            cast_linear_to_f16(projection);
+        }
+
+        assert_eq!(moe.correction_bias.val().dtype(), DType::F32);
+        assert!(!moe.correction_bias.val().is_require_grad());
+        let output = moe
+            .forward(Tensor::ones([1, 3, 8], (&device, DType::F16)))
+            .unwrap();
+        assert_eq!(output.hidden_state.dtype(), DType::F16);
+        assert_eq!(output.router_logits.dtype(), DType::F32);
+        assert_eq!(output.selected_weights.dtype(), DType::F32);
+        assert!(
+            output
+                .hidden_state
+                .cast(DType::F32)
+                .to_data()
+                .as_slice::<f32>()
+                .unwrap()
+                .iter()
+                .all(|value| value.is_finite())
+        );
+    }
+
+    /// Invalid MTP widths are rejected before any parameter allocation occurs.
+    #[test]
+    fn mtp_width_overflow_returns_configuration_error() {
+        let device = Default::default();
+        let mut config = tiny_config(true);
+        config.hidden_size = usize::MAX;
+        let error = NemotronHForCausalLm::<TestBackend>::init(config, &device).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("MTP concatenation width overflows")
+        );
     }
 
     /// The optional MTP body consumes aligned base hidden states and shared head.

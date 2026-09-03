@@ -460,7 +460,10 @@ fn neutralize_inactive_logits<B: Backend>(
 /// Copies a small Boolean metadata tensor to the host with error context.
 fn tensor_bool_values<B: Backend>(tensor: Tensor<B, 2, Bool>, label: &str) -> Result<Vec<bool>> {
     tensor
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
+        })?
         .to_vec::<B::BoolElem>()
         .map(|values| {
             values
@@ -479,7 +482,10 @@ fn tensor_i64_values<B: Backend, const D: usize>(
     label: &str,
 ) -> Result<Vec<i64>> {
     tensor
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
+        })?
         .to_vec::<B::IntElem>()
         .map(|values| {
             values
@@ -495,7 +501,10 @@ fn tensor_i64_values<B: Backend, const D: usize>(
 /// Copies selected log probabilities to the host without transferring logits.
 fn tensor_f64_values<B: Backend>(tensor: Tensor<B, 1>, label: &str) -> Result<Vec<f64>> {
     tensor
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
+        })?
         .to_vec::<B::FloatElem>()
         .map(|values| {
             values

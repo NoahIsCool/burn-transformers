@@ -151,6 +151,27 @@ impl YarnConfig {
         Ok(self)
     }
 
+    /// Replaces either correction bound while retaining the current value for an absent side.
+    ///
+    /// Checkpoint schemas serialize `beta_fast` and `beta_slow` independently.
+    /// Calling this on a freshly created configuration therefore resolves
+    /// missing fields to the reference defaults of 32 and 1.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same validation errors as [`YarnConfig::with_betas`] after
+    /// resolving the two optional overrides.
+    pub fn with_beta_overrides(
+        self,
+        beta_fast: Option<f64>,
+        beta_slow: Option<f64>,
+    ) -> Result<Self, RopeConfigError> {
+        self.with_betas(
+            beta_fast.unwrap_or(self.beta_fast),
+            beta_slow.unwrap_or(self.beta_slow),
+        )
+    }
+
     /// Returns the requested context-extension factor.
     #[must_use]
     pub const fn factor(self) -> f64 {
@@ -716,6 +737,17 @@ mod tests {
         assert_eq!(customized.attention_factor(), 1.25);
         assert_eq!(customized.beta_fast(), 64.0);
         assert_eq!(customized.beta_slow(), 2.0);
+
+        let fast_only = yarn
+            .with_beta_overrides(Some(24.0), None)
+            .expect("one-sided fast override");
+        assert_eq!(fast_only.beta_fast(), 24.0);
+        assert_eq!(fast_only.beta_slow(), 1.0);
+        let slow_only = yarn
+            .with_beta_overrides(None, Some(2.0))
+            .expect("one-sided slow override");
+        assert_eq!(slow_only.beta_fast(), 32.0);
+        assert_eq!(slow_only.beta_slow(), 2.0);
     }
 
     #[test]

@@ -12,8 +12,8 @@ use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
     tensor::{
-        Bool, DType, ElementConversion, IndexingUpdateOp, Int, Tensor, TensorData,
-        activation::softmax, backend::Backend,
+        Bool, DType, ElementConversion, Int, Tensor, TensorData, activation::softmax,
+        backend::Backend,
     },
 };
 
@@ -80,11 +80,15 @@ impl<B: Backend> DeepseekV2Moe<B> {
             config.n_routed_experts,
             config.num_experts_per_tok,
         );
-        routed.renormalize_selected = config.norm_topk_prob;
+        // The reference only normalizes a multi-expert mixture. For top-1
+        // routing, normalization would erase the router's confidence and make
+        // every selected route have unit weight.
+        let renormalize_selected = config.num_experts_per_tok > 1 && config.norm_topk_prob;
+        routed.renormalize_selected = renormalize_selected;
         // The reference applies routed_scaling_factor only on its unnormalized
         // branch. Lite uses `norm_topk_prob=false`, but retaining this condition
         // keeps other V2 configs mathematically faithful.
-        routed.routed_scale = if config.norm_topk_prob {
+        routed.routed_scale = if renormalize_selected {
             1.0
         } else {
             config.routed_scaling_factor
@@ -150,36 +154,25 @@ impl<B: Backend> DeepseekV2Moe<B> {
             let denominator = flat_weights.clone().sum_dim(1).clamp_min(f32::MIN_POSITIVE);
             flat_weights = flat_weights / denominator;
         }
-        flat_weights = (flat_weights * self.routed.routed_scale).cast(input_dtype);
+        flat_weights = flat_weights * self.routed.routed_scale;
         let flat_experts = selected_experts
             .clone()
             .reshape([tokens, self.routed.experts_per_token]);
-        let mut mixed =
-            Tensor::<B, 2>::zeros([tokens, hidden], (&flat_input.device(), input_dtype));
-        let mut expert_token_counts = Vec::with_capacity(self.routed.routed.len());
-        let mut evaluated_experts = 0;
-        for (expert_index, expert) in self.routed.routed.iter().enumerate() {
-            let locations = flat_experts
-                .clone()
-                .equal_elem(expert_index as i64)
-                .argwhere();
-            let assignments = locations.dims()[0];
-            expert_token_counts.push(assignments);
-            if assignments == 0 {
-                continue;
-            }
-            evaluated_experts += 1;
-            let token_indices = locations.clone().narrow(1, 0, 1).squeeze_dim::<1>(1);
-            let weights = flat_weights
-                .clone()
-                .gather_nd::<2, 1>(locations)
-                .unsqueeze_dim::<2>(1);
-            let expert_input = flat_input.clone().select(0, token_indices.clone());
-            let contribution = expert.forward(expert_input) * weights;
-            mixed = mixed.select_assign(0, token_indices, contribution, IndexingUpdateOp::Add);
-        }
+        // The reference keeps probabilities, weighted expert contributions,
+        // and index-add accumulation in FP32. Only the complete routed mixture
+        // is rounded back to the residual dtype, avoiding one rounding event
+        // per expert contribution in reduced precision.
+        let dispatch = self.routed.dispatch_selected_experts(
+            flat_input,
+            flat_weights.clone(),
+            flat_experts,
+            DType::F32,
+        )?;
         let routed = SparseMoeOutput {
-            hidden_state: mixed.reshape([batch, sequence, hidden]),
+            hidden_state: dispatch
+                .hidden_state
+                .cast(input_dtype)
+                .reshape([batch, sequence, hidden]),
             router_logits,
             selected_experts,
             selected_weights: flat_weights.reshape([
@@ -187,11 +180,11 @@ impl<B: Backend> DeepseekV2Moe<B> {
                 sequence,
                 self.routed.experts_per_token,
             ]),
-            expert_token_counts,
-            evaluated_experts,
+            expert_token_counts: dispatch.expert_token_counts,
+            evaluated_experts: dispatch.evaluated_experts,
         };
         Ok(DeepseekMoeOutput {
-            hidden_state: routed.hidden_state.clone() + self.shared_experts.forward(input),
+            hidden_state: routed.hidden_state.clone() + self.shared_experts.forward(input)?,
             routed,
         })
     }
@@ -262,6 +255,7 @@ impl<B: Backend> DeepseekV2DecoderLayer<B> {
         let norm = || {
             RmsNormConfig::new(config.hidden_size)
                 .with_epsilon(config.rms_norm_eps)
+                .with_round_before_scale(true)
                 .init(device)
         };
         let (sparse_mlp, dense_mlp) = if config.is_moe_layer(layer_index) {
@@ -332,7 +326,7 @@ impl<B: Backend> DeepseekV2DecoderLayer<B> {
                 })
             }
             (None, Some(mlp)) => Ok(LayerOutput {
-                hidden: residual + mlp.forward(normalized),
+                hidden: residual + mlp.forward(normalized)?,
                 attention: attention.probabilities,
                 routed: None,
             }),
@@ -393,6 +387,7 @@ impl<B: Backend> DeepseekV2Model<B> {
             layers,
             norm: RmsNormConfig::new(config.hidden_size)
                 .with_epsilon(config.rms_norm_eps)
+                .with_round_before_scale(true)
                 .init(device)?,
             config,
             rope,
@@ -407,6 +402,26 @@ impl<B: Backend> DeepseekV2Model<B> {
     ) -> Result<BackboneOutput<B>> {
         let [batch, sequence] = input.token_ids.dims();
         validate_nonempty_input(batch, sequence)?;
+        let model_device = self.embed_tokens.weight.lazy_device();
+        ensure_model_device(
+            "deepseek_v2.input_ids",
+            &input.token_ids.device(),
+            &model_device,
+        )?;
+        if let Some(mask) = &input.token_mask {
+            ensure_model_device(
+                "deepseek_v2.token_mask",
+                &mask.as_tensor().device(),
+                &model_device,
+            )?;
+        }
+        if let Some(positions) = &input.position_ids {
+            ensure_model_device(
+                "deepseek_v2.position_ids",
+                &positions.device(),
+                &model_device,
+            )?;
+        }
         validate_token_ids(input.token_ids.clone(), self.config.vocab_size)?;
         validate_mask(input.token_mask.as_ref(), batch, sequence, false)?;
         let positions = resolve_positions(input, batch, sequence)?;
@@ -541,12 +556,13 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
     /// Applies the independent or tied vocabulary projection.
     fn project_logits(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         match &self.lm_head {
-            Some(head) => operations::linear(hidden, head),
+            Some(head) => operations::linear(hidden, head).map(|logits| logits.cast(DType::F32)),
             None => Ok(burn::tensor::module::linear(
                 hidden,
                 self.model.embed_tokens.weight.val().transpose(),
                 None,
-            )),
+            )
+            .cast(DType::F32)),
         }
     }
 }
@@ -588,11 +604,12 @@ fn deepseek_rope_config(config: &DeepseekV2Config) -> Result<RopeConfig> {
             yarn = yarn
                 .with_attention_factor(amplitude)
                 .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))?;
-            if let (Some(fast), Some(slow)) = (parameters.beta_fast, parameters.beta_slow) {
-                yarn = yarn
-                    .with_betas(fast, slow)
-                    .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))?;
-            }
+            // Hugging Face resolves each optional bound independently. Using
+            // the shared YaRN defaults for only the missing side preserves
+            // one-sided custom checkpoint configurations.
+            yarn = yarn
+                .with_beta_overrides(parameters.beta_fast, parameters.beta_slow)
+                .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))?;
             RopeScaling::Yarn(yarn)
         }
         unsupported => {
@@ -752,6 +769,20 @@ fn validate_nonempty_input(batch: usize, sequence: usize) -> Result<()> {
             "non-empty [batch, sequence]",
             format!("[{batch}, {sequence}]"),
         ));
+    }
+    Ok(())
+}
+
+/// Rejects stateless tensors that do not share the model parameter device.
+///
+/// Device equality is checked before token reductions, mask scans, positional
+/// arithmetic, or embedding lookup so a user error is returned through the
+/// crate taxonomy instead of surfacing as a backend mixed-device panic.
+fn ensure_model_device<D: PartialEq>(tensor: &'static str, actual: &D, expected: &D) -> Result<()> {
+    if actual != expected {
+        return Err(Error::BackendCapability(format!(
+            "{tensor} and DeepSeek model parameters are on different devices"
+        )));
     }
     Ok(())
 }
@@ -1174,6 +1205,101 @@ mod tests {
         assert_eq!(output.routed.evaluated_experts, 2);
     }
 
+    /// Reduced-precision experts are weighted and accumulated before one final cast.
+    #[test]
+    fn routed_mixture_accumulates_in_fp32_before_residual_cast() {
+        let device = Default::default();
+        let config = tests_support::tiny_config();
+        let mut moe = DeepseekV2Moe::<TestBackend>::init(&config, &device).unwrap();
+        moe.routed.router.weight = Param::from_tensor(Tensor::zeros([8, 4], &device));
+
+        let single_path = |shape: [usize; 2], value: f32| {
+            let mut values = vec![0.0_f32; shape.iter().product()];
+            values[0] = value;
+            Tensor::<TestBackend, 2>::from_data(TensorData::new(values, shape), &device)
+                .cast(DType::F16)
+        };
+        for (expert, sign) in moe.routed.routed[..2].iter_mut().zip([1.0, -1.0]) {
+            expert.gate_proj.weight = Param::from_tensor(single_path([8, 6], 1.0));
+            expert.up_proj.weight = Param::from_tensor(single_path([8, 6], 1.0));
+            expert.down_proj.weight = Param::from_tensor(single_path([6, 8], sign));
+        }
+        let input = Tensor::<TestBackend, 2>::from_data(
+            TensorData::new(vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [1, 8]),
+            &device,
+        )
+        .cast(DType::F16);
+        let expert_zero = moe.routed.routed[0]
+            .forward(input.clone())
+            .unwrap()
+            .cast(DType::F32);
+        let expert_one = moe.routed.routed[1]
+            .forward(input.clone())
+            .unwrap()
+            .cast(DType::F32);
+        let dispatch = moe
+            .routed
+            .dispatch_selected_experts(
+                input.clone(),
+                Tensor::from_floats([[0.5001, 0.4999]], &device),
+                Tensor::<TestBackend, 2, Int>::from_ints([[0, 1]], &device),
+                DType::F32,
+            )
+            .unwrap();
+        assert_eq!(dispatch.hidden_state.dtype(), DType::F32);
+
+        let actual = dispatch.hidden_state.cast(DType::F16).cast(DType::F32);
+        let expected = (expert_zero.clone() * 0.5001 + expert_one.clone() * 0.4999)
+            .cast(DType::F16)
+            .cast(DType::F32);
+        let prematurely_rounded = ((expert_zero * 0.5001).cast(DType::F16)
+            + (expert_one * 0.4999).cast(DType::F16))
+        .cast(DType::F32);
+        actual
+            .clone()
+            .into_data()
+            .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(0.0));
+        let actual_first = actual.into_data().to_vec::<f32>().unwrap()[0];
+        let premature_first = prematurely_rounded.into_data().to_vec::<f32>().unwrap()[0];
+        assert!(
+            (actual_first - premature_first).abs() > 1e-5,
+            "the fixture must distinguish final-only rounding ({actual_first}) from per-expert rounding ({premature_first})"
+        );
+
+        for projection in [
+            &mut moe.shared_experts.gate_proj,
+            &mut moe.shared_experts.up_proj,
+            &mut moe.shared_experts.down_proj,
+        ] {
+            projection.weight = Param::from_tensor(projection.weight.val().cast(DType::F16));
+        }
+        let output = moe.forward(input.reshape([1, 1, 8])).unwrap();
+        assert_eq!(output.routed.selected_weights.dtype(), DType::F32);
+        assert_eq!(output.routed.hidden_state.dtype(), DType::F16);
+        assert_eq!(output.hidden_state.dtype(), DType::F16);
+    }
+
+    /// Top-one routing preserves confidence and the configured routed scale.
+    #[test]
+    fn top_one_routing_does_not_renormalize_away_confidence() {
+        let device = Default::default();
+        let mut config = tests_support::tiny_config();
+        config.num_experts_per_tok = 1;
+        config.norm_topk_prob = true;
+        config.routed_scaling_factor = 2.5;
+        let mut moe = DeepseekV2Moe::<TestBackend>::init(&config, &device).unwrap();
+        moe.routed.router.weight = Param::from_tensor(Tensor::zeros([8, 4], &device));
+
+        let output = moe.forward(Tensor::ones([1, 1, 8], &device)).unwrap();
+        let weights = output
+            .routed
+            .selected_weights
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_eq!(weights, [0.625]);
+    }
+
     /// Left padding is ignored and fully masked prompt rows fail before attention.
     #[test]
     fn semantic_padding_and_invalid_rows_are_validated() {
@@ -1213,6 +1339,22 @@ mod tests {
         assert!(error.to_string().contains("fully masked"));
     }
 
+    /// Stateless device preflight names every independently supplied tensor.
+    #[test]
+    fn stateless_device_affinity_errors_are_contextual() {
+        assert!(ensure_model_device("deepseek_v2.input_ids", &0_u8, &0_u8).is_ok());
+        for tensor in [
+            "deepseek_v2.input_ids",
+            "deepseek_v2.token_mask",
+            "deepseek_v2.position_ids",
+        ] {
+            let error = ensure_model_device(tensor, &1_u8, &0_u8)
+                .expect_err("different device identities must fail preflight");
+            assert!(error.to_string().contains(tensor));
+            assert!(error.to_string().contains("model parameters"));
+        }
+    }
+
     /// DeepSeek's YaRN scale uses both table amplitude and all-dimension score scale.
     #[test]
     fn pinned_yarn_scaling_matches_closed_form() {
@@ -1224,6 +1366,44 @@ mod tests {
         assert!((yarn.attention_factor() - 1.0).abs() < 1e-12);
         let expected = (192.0_f64).sqrt().recip() * yarn_mscale(40.0, 0.707).powi(2);
         assert!((deepseek_attention_scale(&config).unwrap() - expected).abs() < 1e-12);
+    }
+
+    /// One-sided YaRN beta overrides retain the official default for the other bound.
+    #[test]
+    fn yarn_beta_overrides_are_resolved_independently() {
+        let mut config = tests_support::tiny_config();
+        config.rope_scaling = Some(crate::models::config::RopeParameters {
+            rope_type: RopeType::Yarn,
+            factor: Some(2.0),
+            original_max_position_embeddings: Some(16),
+            beta_fast: Some(24.0),
+            ..Default::default()
+        });
+        let RopeScaling::Yarn(fast_only) = deepseek_rope_config(&config).unwrap().scaling() else {
+            panic!("expected YaRN")
+        };
+        assert_eq!(fast_only.beta_fast(), 24.0);
+        assert_eq!(fast_only.beta_slow(), 1.0);
+
+        config.rope_scaling.as_mut().unwrap().beta_fast = None;
+        config.rope_scaling.as_mut().unwrap().beta_slow = Some(2.0);
+        let RopeScaling::Yarn(slow_only) = deepseek_rope_config(&config).unwrap().scaling() else {
+            panic!("expected YaRN")
+        };
+        assert_eq!(slow_only.beta_fast(), 32.0);
+        assert_eq!(slow_only.beta_slow(), 2.0);
+    }
+
+    /// DeepSeek returns vocabulary logits in FP32 even for reduced-precision modules.
+    #[test]
+    fn vocabulary_projection_always_returns_fp32() {
+        let (mut model, device) = tiny_model();
+        let head = model.lm_head.as_mut().unwrap();
+        head.weight = Param::from_tensor(head.weight.val().cast(DType::F16));
+        let hidden = Tensor::<TestBackend, 3>::zeros([1, 2, 8], (&device, DType::F16));
+
+        let logits = model.project_logits(hidden).unwrap();
+        assert_eq!(logits.dtype(), DType::F32);
     }
 
     /// Invalid token IDs and selective logits return errors rather than panics.

@@ -422,7 +422,7 @@ impl<B: Backend> ModularFeedForward<B> {
     /// Evaluates the MLP and returns sparse-routing state only for an MoE layer.
     fn forward(&self, hidden: Tensor<B, 3>) -> Result<(Tensor<B, 3>, Option<SparseMoeOutput<B>>)> {
         match self {
-            Self::Dense(dense) => Ok((dense.forward(hidden), None)),
+            Self::Dense(dense) => Ok((dense.forward(hidden)?, None)),
             Self::MixtureOfExperts(moe) => {
                 let output = moe.forward(hidden)?;
                 Ok((output.hidden_state.clone(), Some(output)))
@@ -887,7 +887,12 @@ pub(super) fn relative_bias_from_positions<B: Backend>(
     let [batch, sequence] = positions.dims();
     let device = positions.device();
     let positions = positions
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!(
+                "failed to inspect custom T5 relative positions on the backend: {error}"
+            ))
+        })?
         .convert::<i64>()
         .into_vec::<i64>()
         .map_err(|error| {

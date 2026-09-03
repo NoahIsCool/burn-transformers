@@ -7,6 +7,7 @@
 
 mod auto;
 pub mod config;
+pub mod custom;
 pub mod deepseek_v2;
 pub mod muse_glimmer;
 pub mod nemotron_h;
@@ -15,8 +16,8 @@ pub mod qwen3_moe;
 pub mod t5;
 
 pub use auto::{
-    AutoCausalConfigRef, AutoCausalDecodeState, AutoCausalLm, AutoLoadOptions,
-    AutoSeq2SeqConfigRef, AutoSeq2SeqDecodeState, AutoSeq2SeqLm,
+    AutoCausalConfig, AutoCausalConfigRef, AutoCausalDecodeState, AutoCausalLm, AutoLoadOptions,
+    AutoSeq2SeqConfig, AutoSeq2SeqConfigRef, AutoSeq2SeqDecodeState, AutoSeq2SeqLm,
 };
 
 /// Qwen3.8 checkpoints intentionally retain Qwen3.5's `qwen3_5_text` model type.

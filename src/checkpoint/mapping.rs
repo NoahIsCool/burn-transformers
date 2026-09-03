@@ -714,7 +714,12 @@ fn resolve_dtype(
             Some(dtype) if source != dtype && source.is_float() && dtype.is_float() => dtype,
             _ => source,
         },
-        DTypePolicy::Cast(dtype) if source.is_float() => dtype,
+        // A concrete architecture contract denotes a numerically significant
+        // storage dtype (for example an FP32 recurrent/router buffer), so the
+        // blanket cast applies only to dtype-generic floating parameters.
+        DTypePolicy::Cast(dtype) if source.is_float() => expected
+            .filter(|candidate| candidate.is_float())
+            .unwrap_or(dtype),
         DTypePolicy::Cast(_) => source,
     };
     if let Some(expected) = expected

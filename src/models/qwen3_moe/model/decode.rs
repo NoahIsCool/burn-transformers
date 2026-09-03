@@ -153,10 +153,6 @@ impl<B: Backend> CausalLanguageModel<B> for Qwen3MoeForCausalLm<B> {
     type Config = super::super::Qwen3MoeConfig;
     type State = Qwen3MoeDecodeState<B>;
 
-    fn config(&self) -> &Self::Config {
-        Qwen3MoeForCausalLm::config(self)
-    }
-
     fn forward(
         &self,
         input: CausalLmInput<B>,
@@ -762,7 +758,12 @@ fn semantic_indices<B: Backend>(
     let values = mask
         .as_tensor()
         .clone()
-        .into_data()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!(
+                "failed to read Qwen3 MoE token mask from the backend: {error}"
+            ))
+        })?
         .to_vec::<bool>()
         .map_err(|error| {
             Error::BackendCapability(format!("failed to read Qwen3 MoE token mask: {error}"))

@@ -25,6 +25,10 @@ pub enum QuantizationExclusion {
     RecurrentConvolution,
     /// Learned relative-position and other additive bias tables stay unpacked.
     BiasTable,
+    /// Router classifiers remain in source precision to preserve expert selection.
+    Router,
+    /// MLA latent expansion stays unpacked until absorbed packed decode is available.
+    LatentExpansion,
     /// The key does not denote a conventional weight parameter.
     NotWeight,
     /// Rank-zero and rank-one tensors are never considered matrix weights.
@@ -56,7 +60,10 @@ pub fn classify_weight_for_quantization(name: &str, shape: &[usize]) -> Quantiza
 
     if components.iter().any(|component| {
         let component = component.to_ascii_lowercase();
-        component == "mtp" || component.starts_with("mtp_") || component == "multi_token_prediction"
+        component == "mtp"
+            || component.starts_with("mtp_")
+            || component == "multi_token_prediction"
+            || component == "next_token_head"
     }) {
         return QuantizationEligibility::Excluded(QuantizationExclusion::Mtp);
     }
@@ -79,12 +86,31 @@ pub fn classify_weight_for_quantization(name: &str, shape: &[usize]) -> Quantiza
 
     if components
         .iter()
+        .any(|component| component.eq_ignore_ascii_case("router"))
+    {
+        return QuantizationEligibility::Excluded(QuantizationExclusion::Router);
+    }
+
+    if components
+        .iter()
+        .any(|component| component.eq_ignore_ascii_case("kv_b_proj"))
+    {
+        return QuantizationEligibility::Excluded(QuantizationExclusion::LatentExpansion);
+    }
+
+    if components
+        .iter()
         .any(|component| is_normalization(component))
     {
         return QuantizationEligibility::Excluded(QuantizationExclusion::Normalization);
     }
 
-    if components.iter().any(|component| is_embedding(component)) {
+    // T5 owns its tied token table at the top-level `shared.weight`, while
+    // Nemotron uses `shared` below each MoE for an ordinary dense expert. The
+    // location is therefore part of the semantic distinction.
+    if (components.len() == 2 && components[0].eq_ignore_ascii_case("shared"))
+        || components.iter().any(|component| is_embedding(component))
+    {
         return QuantizationEligibility::Excluded(QuantizationExclusion::Embedding);
     }
 
@@ -115,7 +141,6 @@ fn is_embedding(component: &str) -> bool {
             | "tok_embeddings"
             | "wte"
             | "wpe"
-            | "shared"
     ) || component.starts_with("embed_")
         || component.ends_with("_embedding")
         || component.ends_with("_embeddings")

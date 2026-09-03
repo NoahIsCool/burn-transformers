@@ -367,16 +367,20 @@ impl RopeParameters {
             RopeType::Yarn => {
                 scaling_factor(architecture, self.factor)?;
                 original_context(architecture, self, max_position_embeddings)?;
-                if let (Some(fast), Some(slow)) = (self.beta_fast, self.beta_slow) {
-                    positive_finite(architecture, "beta_fast", fast)?;
-                    positive_finite(architecture, "beta_slow", slow)?;
-                    if fast <= slow {
-                        return Err(ConfigError::new(
-                            architecture,
-                            "beta_fast",
-                            "must be greater than beta_slow",
-                        ));
-                    }
+                // YaRN specifies each correction bound independently and uses
+                // 32/1 when a side is absent. Resolve those defaults before
+                // validation so malformed one-sided overrides fail during
+                // architecture validation rather than delayed model startup.
+                let fast = self.beta_fast.unwrap_or(32.0);
+                let slow = self.beta_slow.unwrap_or(1.0);
+                positive_finite(architecture, "beta_fast", fast)?;
+                positive_finite(architecture, "beta_slow", slow)?;
+                if fast <= slow {
+                    return Err(ConfigError::new(
+                        architecture,
+                        "beta_fast",
+                        "must be greater than beta_slow",
+                    ));
                 }
             }
             RopeType::LongRope => {
@@ -670,6 +674,32 @@ mod tests {
             ..RopeParameters::default()
         };
         llama3.validate_for("test", 8, 128, None).unwrap();
+    }
+
+    #[test]
+    fn yarn_validates_one_sided_beta_overrides_against_defaults() {
+        let base = RopeParameters {
+            rope_type: RopeType::Yarn,
+            factor: Some(4.0),
+            original_max_position_embeddings: Some(64),
+            ..RopeParameters::default()
+        };
+
+        let mut invalid_fast = base.clone();
+        invalid_fast.beta_fast = Some(-1.0);
+        assert!(invalid_fast.validate_for("test", 8, 128, None).is_err());
+
+        let mut invalid_slow = base.clone();
+        invalid_slow.beta_slow = Some(32.0);
+        assert!(invalid_slow.validate_for("test", 8, 128, None).is_err());
+
+        let mut valid_fast = base.clone();
+        valid_fast.beta_fast = Some(24.0);
+        valid_fast.validate_for("test", 8, 128, None).unwrap();
+
+        let mut valid_slow = base;
+        valid_slow.beta_slow = Some(2.0);
+        valid_slow.validate_for("test", 8, 128, None).unwrap();
     }
 
     #[test]

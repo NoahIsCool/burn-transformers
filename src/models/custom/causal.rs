@@ -168,10 +168,6 @@ impl<B: Backend> CausalLanguageModel<B> for ModularCausalLm<B> {
     type Config = DecoderSpec;
     type State = ModularDecodeState<B>;
 
-    fn config(&self) -> &Self::Config {
-        self.spec()
-    }
-
     fn forward(
         &self,
         input: CausalLmInput<B>,

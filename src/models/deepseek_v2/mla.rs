@@ -187,6 +187,7 @@ impl MultiLatentAttentionConfig {
                 Some(
                     RmsNormConfig::new(rank)
                         .with_epsilon(self.rms_norm_epsilon)
+                        .with_round_before_scale(true)
                         .init(device)?,
                 ),
                 Some(projection(rank, query_width, false)),
@@ -204,6 +205,7 @@ impl MultiLatentAttentionConfig {
             ),
             kv_a_layernorm: RmsNormConfig::new(self.kv_lora_rank)
                 .with_epsilon(self.rms_norm_epsilon)
+                .with_round_before_scale(true)
                 .init(device)?,
             kv_b_proj: projection(self.kv_lora_rank, self.expanded_kv_width()?, false),
             o_proj: projection(
