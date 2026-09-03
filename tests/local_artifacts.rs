@@ -23,8 +23,9 @@ use burn::{
 };
 #[cfg(feature = "metal")]
 use transformers::{
-    ForwardOptions,
+    CausalLanguageModel, DecodeInput, DecodeState, ForwardOptions, LogitsSelection,
     architecture::CausalLmInput,
+    cache::CacheConfig,
     checkpoint::{DTypePolicy, TensorDType, execute_local_load_plan},
     models::qwen3_5::{Qwen3_5CheckpointOptions, Qwen3_5ForCausalLm},
 };
@@ -161,11 +162,11 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         .collect::<Vec<_>>();
     let sequence = tokens.len();
     let input_ids =
-        Tensor::<Metal, 2, Int>::from_data(TensorData::new(tokens, [1, sequence]), &device);
+        Tensor::<Metal, 2, Int>::from_data(TensorData::new(tokens.clone(), [1, sequence]), &device);
     let output = model
         .forward(
             CausalLmInput {
-                token_ids: input_ids,
+                token_ids: input_ids.clone(),
                 token_mask: None,
                 position_ids: None,
             },
@@ -244,24 +245,13 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
             .collect::<Vec<_>>();
         let actual_logits = output
             .logits
+            .clone()
             .cast(DType::F32)
             .to_data()
             .to_vec::<f32>()
             .expect("Metal logits must convert to an f32 host vector");
         assert_eq!(actual_logits.len(), reference_logits.len());
-        let (dot, actual_square, reference_square) = actual_logits
-            .iter()
-            .zip(reference_logits)
-            .fold((0.0_f64, 0.0_f64, 0.0_f64), |acc, (actual, reference)| {
-                let actual = f64::from(*actual);
-                let reference = f64::from(reference);
-                (
-                    acc.0 + actual * reference,
-                    acc.1 + actual * actual,
-                    acc.2 + reference * reference,
-                )
-            });
-        let cosine = dot / (actual_square.sqrt() * reference_square.sqrt());
+        let cosine = cosine_similarity(&actual_logits, &reference_logits);
         eprintln!("full-vocabulary reference-logit cosine similarity: {cosine:.9}");
         assert!(
             cosine >= 0.999,
@@ -274,4 +264,143 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         .copied()
         .expect("top-k returns one result for a non-empty vocabulary");
     assert!((0..248_320).contains(&(top_token as usize)));
+
+    let expected_greedy = reference["greedy_token_ids"]
+        .as_array()
+        .expect("reference must contain a greedy continuation")
+        .iter()
+        .map(|value| value.as_i64().expect("greedy token IDs must be integers") as i32)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        expected_greedy.len(),
+        reference["greedy_max_new_tokens"]
+            .as_u64()
+            .expect("reference generation length must be an integer") as usize
+    );
+    let cache_config = CacheConfig::new(1, sequence + expected_greedy.len())
+        .expect("reference generation cache geometry must be valid");
+    let mut state = model
+        .new_decode_state(cache_config, 1, &device)
+        .expect("official Qwen cache geometry must initialize");
+    let mut cached = model
+        .prefill(
+            CausalLmInput {
+                token_ids: input_ids.clone(),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .expect("cached prompt prefill must execute");
+    let prompt_stateless = output
+        .logits
+        .clone()
+        .cast(DType::F32)
+        .to_data()
+        .to_vec::<f32>()
+        .expect("stateless prompt logits must convert to f32");
+    let prompt_cached = cached
+        .logits
+        .clone()
+        .cast(DType::F32)
+        .to_data()
+        .to_vec::<f32>()
+        .expect("cached prompt logits must convert to f32");
+    let prompt_cosine = cosine_similarity(&prompt_stateless, &prompt_cached);
+    assert!(
+        prompt_cosine >= 0.999,
+        "cached prefill cosine similarity {prompt_cosine} is below the 0.999 gate"
+    );
+
+    let mut generated = Vec::with_capacity(expected_greedy.len());
+    for (step, expected) in expected_greedy.iter().copied().enumerate() {
+        let selected = cached
+            .logits
+            .clone()
+            .argmax(2)
+            .to_data()
+            .to_vec::<i32>()
+            .expect("cached greedy IDs must use i32 storage");
+        let token = *selected
+            .first()
+            .expect("one cached logit row must select one token");
+        assert_eq!(
+            token, expected,
+            "cached continuation differs from the official reference at step {step}"
+        );
+        generated.push(token);
+        if step + 1 < expected_greedy.len() {
+            cached = model
+                .decode(
+                    DecodeInput {
+                        token_ids: Tensor::<Metal, 2, Int>::from_data(
+                            TensorData::new(vec![i64::from(token)], [1, 1]),
+                            &device,
+                        ),
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                    &mut state,
+                    &ForwardOptions::default(),
+                )
+                .unwrap_or_else(|error| panic!("cached decode step {step} failed: {error}"));
+        }
+    }
+    assert_eq!(generated, expected_greedy);
+    assert_eq!(state.lengths(), &[sequence + expected_greedy.len() - 1]);
+
+    let mut teacher_tokens = tokens;
+    teacher_tokens.extend(
+        expected_greedy
+            .iter()
+            .take(expected_greedy.len() - 1)
+            .map(|token| i64::from(*token)),
+    );
+    let teacher_sequence = teacher_tokens.len();
+    let teacher_output = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(teacher_tokens, [1, teacher_sequence]),
+                    &device,
+                ),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..ForwardOptions::default()
+            },
+        )
+        .expect("teacher-forced stateless forward must execute");
+    let stateless_greedy = teacher_output
+        .logits
+        .argmax(2)
+        .to_data()
+        .to_vec::<i32>()
+        .expect("stateless greedy IDs must use i32 storage");
+    assert_eq!(
+        stateless_greedy, expected_greedy,
+        "cached and stateless top-1 continuations must match at every step"
+    );
+}
+
+/// Computes cosine similarity with f64 accumulation for acceptance diagnostics.
+#[cfg(feature = "metal")]
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f64 {
+    assert_eq!(left.len(), right.len());
+    let (dot, left_square, right_square) =
+        left.iter()
+            .zip(right)
+            .fold((0.0_f64, 0.0_f64, 0.0_f64), |acc, (left, right)| {
+                let left = f64::from(*left);
+                let right = f64::from(*right);
+                (
+                    acc.0 + left * right,
+                    acc.1 + left * left,
+                    acc.2 + right * right,
+                )
+            });
+    dot / (left_square.sqrt() * right_square.sqrt())
 }

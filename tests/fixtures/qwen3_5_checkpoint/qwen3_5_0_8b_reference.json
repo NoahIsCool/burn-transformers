@@ -9,6 +9,9 @@
   "top_logits": [12.625, 11.46875, 10.78125, 10.25, 9.578125, 9.546875, 9.265625, 8.765625, 8.5859375, 8.359375],
   "sample_indices": [0, 1, 2, 100, 1000, 10000, 248000],
   "sample_logits": [10.78125, 4.04296875, 1.197265625, -1.9716796875, 2.93359375, -0.393798828125, -3.76171875],
+  "greedy_max_new_tokens": 32,
+  "greedy_token_ids": [11, 271, 40, 1044, 3133, 440, 264, 12654, 5148, 421, 5533, 279, 1510, 2311, 22233, 71962, 63, 4536, 310, 11290, 264, 2397, 59229, 22868, 13, 561, 5148, 369, 5995, 310, 1423, 279],
+  "greedy_text": ",\n\nI am working with a Python script that uses the `scipy.optimize` module to solve a non-linear equation. The script is designed to find the",
   "l2_norm": 2284.731689453125,
   "sum": -1007108.1875,
   "finite": true
