@@ -1,10 +1,30 @@
-//! Muse Glimmer's text-decoder topology.
+//! Muse Glimmer's dense hybrid text decoder.
 //!
 //! The released decoder is dense, but its attention schedule is hybrid: three
 //! sliding-window layers are followed by one full-attention layer, counted backward
 //! so the final layer is full attention. Full-attention layers use NoPE, represented
-//! by a per-layer theta of zero. Sliding layers retain RoPE. This coupling among
-//! schedule, window, and positional encoding is validated explicitly.
+//! by a per-layer theta of zero. Sliding layers retain RoPE. The default derives
+//! that exact coupling, while explicit equal-length vectors remain available for
+//! controlled architecture experiments.
+//!
+//! The executable family implementation deliberately excludes image and video
+//! towers. Its strict checkpoint contract consumes the nested language model and
+//! vocabulary head while reporting every visual tensor through an explicit
+//! allowlist. Cache state remains external to the Burn parameter graph: local
+//! layers use mirrored sliding rings and global NoPE layers retain full KV history.
+
+mod checkpoint;
+mod load;
+pub mod model;
+
+pub use checkpoint::{
+    MuseGlimmerCheckpointContract, MuseGlimmerCheckpointOptions, MuseGlimmerCheckpointSource,
+};
+pub use load::{MuseGlimmerCheckpointLoadError, MuseGlimmerLoadError};
+pub use model::{
+    MuseGlimmerAttention, MuseGlimmerDecodeState, MuseGlimmerDecoderLayer, MuseGlimmerForCausalLm,
+    MuseGlimmerLayerCache, MuseGlimmerModel,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -291,13 +311,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn final_layer_is_full_attention_with_nope() {
+    fn default_schedule_is_three_rotary_local_layers_then_one_nope_global_layer() {
         let config = MuseGlimmerTextConfig::default();
-        assert_eq!(
-            config.resolved_layer_types().last(),
-            Some(&MuseGlimmerLayerType::FullAttention)
-        );
-        assert_eq!(config.resolved_layer_rope_theta().last(), Some(&0.0));
+        let schedule = config.resolved_layer_types();
+        let theta = config.resolved_layer_rope_theta();
+        assert_eq!(schedule.len(), 52);
+        assert_eq!(theta.len(), 52);
+        for (index, (layer_type, theta)) in schedule.into_iter().zip(theta).enumerate() {
+            if index % 4 == 3 {
+                assert_eq!(layer_type, MuseGlimmerLayerType::FullAttention);
+                assert_eq!(theta, 0.0);
+            } else {
+                assert_eq!(layer_type, MuseGlimmerLayerType::SlidingAttention);
+                assert_eq!(theta, 500_000.0);
+            }
+        }
     }
 
     #[test]
