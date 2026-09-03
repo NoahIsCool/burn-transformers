@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "artifact_and_tokenizer_verified",
+  "phase": "weights_loaded_and_smoke_inference_verified",
   "repository": "Qwen/Qwen3.5-0.8B",
   "revision": "2fc06364715b967f1860aea9cf38778875588b17",
   "artifact_layout": {
@@ -25,9 +25,20 @@
     "tokenizer_loaded": true,
     "text_chat_template_rendered": true,
     "safetensors_header_strictly_validated": true,
-    "mapping_plan_strict": false,
-    "weights_applied": false,
+    "mapping_plan_strict": true,
+    "weights_applied": true,
+    "metal_f16_smoke_inference": true,
     "reference_logits_compared": false,
     "cached_generation_compared": false
+  },
+  "smoke_acceptance": {
+    "backend": "burn_metal",
+    "parameter_dtype_policy": "f16",
+    "prompt": "Hello",
+    "storage_owning_tensors_applied": 320,
+    "logical_aliases_applied": 1,
+    "allowlisted_tensors_not_loaded": 168,
+    "output_shape": [1, 1, 248320],
+    "first_run_wall_seconds_including_gpu_compilation_and_load": 142.52
   }
 }

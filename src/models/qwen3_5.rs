@@ -21,10 +21,12 @@ use super::config::{
 };
 
 mod checkpoint;
+mod load;
 
 pub use checkpoint::{
     Qwen3_5CheckpointContract, Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource,
 };
+pub use load::Qwen3_5LoadError;
 
 /// Per-layer mixer selected by the serialized Qwen schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

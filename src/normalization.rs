@@ -102,7 +102,7 @@ impl<B: Backend> RmsNorm<B> {
         } else {
             self.weight.val()
         };
-        (input / rms.cast(dtype)) * scale.unsqueeze()
+        (input / rms.cast(dtype)) * scale.cast(dtype).unsqueeze()
     }
 }
 
@@ -141,6 +141,20 @@ mod tests {
             .forward(Tensor::<Flex, 3>::zeros([2, 3, 4], &device))
             .to_data();
         assert_eq!(output, burn::tensor::TensorData::zeros::<f32, _>([2, 3, 4]));
+    }
+
+    /// FP32 checkpoint scales are cast back to an F16 activation's dtype.
+    #[test]
+    fn mixed_precision_scale_preserves_activation_dtype() {
+        use burn::tensor::DType;
+
+        let device = Default::default();
+        let norm = RmsNormConfig::new(4)
+            .init::<Flex>(&device)
+            .expect("norm should initialize");
+        let input = Tensor::<Flex, 2>::ones([2, 4], (&device, DType::F16));
+        let output = norm.forward(input);
+        assert_eq!(output.dtype(), DType::F16);
     }
 
     /// Invalid dimensions fail before an initializer reaches the backend.

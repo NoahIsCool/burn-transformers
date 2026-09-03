@@ -486,6 +486,10 @@ impl<B: Backend> GatedDeltaNet<B> {
     ) -> (Tensor<B, 3>, Tensor<B, 3>) {
         let sequence = projected.dims()[2];
         let history_width = self.convolution_kernel - 1;
+        // Recurrent matrices intentionally accumulate in FP32, but convolution
+        // history follows the projection dtype. Casting here also makes a state
+        // created before checkpoint dtype selection safe on its first call.
+        let history = history.cast(projected.dtype());
         let joined = Tensor::cat(vec![history, projected], 2);
         let convolved = conv1d(
             joined.clone(),
