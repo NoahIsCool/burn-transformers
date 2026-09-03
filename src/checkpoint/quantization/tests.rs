@@ -97,6 +97,21 @@ fn eligibility_policy_explains_every_exclusion_class() {
             &[8][..],
             QuantizationEligibility::Excluded(QuantizationExclusion::ScalarOrVector),
         ),
+        (
+            "model.layers.0.linear_attn.conv1d.weight",
+            &[32, 64][..],
+            QuantizationEligibility::Excluded(QuantizationExclusion::RecurrentConvolution),
+        ),
+        (
+            "encoder.block.0.relative_attention_bias.weight",
+            &[32, 8][..],
+            QuantizationEligibility::Excluded(QuantizationExclusion::BiasTable),
+        ),
+        (
+            "model.layers.0.experts.weight",
+            &[8, 32, 64][..],
+            QuantizationEligibility::Excluded(QuantizationExclusion::NonMatrix),
+        ),
     ];
     for (name, shape, expected) in cases {
         assert_eq!(
@@ -110,7 +125,6 @@ fn eligibility_policy_explains_every_exclusion_class() {
         "model.layers.0.self_attn.q_proj.weight",
         "model.layers.0.mlp.down_proj.weight",
         "model.layers.0.mlp.experts.7.gate_proj.weight",
-        "model.layers.0.linear_attn.conv1d.weight",
         "lm_head.weight",
     ] {
         assert_eq!(

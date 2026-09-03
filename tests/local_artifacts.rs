@@ -12,8 +12,17 @@ use std::{fs, path::PathBuf};
 use transformers::{ChatMessage, ChatTemplateOptions};
 use transformers::{
     EncodeOptions, LocalTokenizer,
-    checkpoint::{CheckpointManifest, LoadOptions},
-    models::{config::ModelConfig, qwen3_5::Qwen3_5TextConfig},
+    checkpoint::{
+        CheckpointManifest, LoadOptions,
+        quantization::{
+            QuantizedBurnpackArtifact, QuantizedCheckpointOptions, SymmetricQuantization,
+            WeightQuantizationConfig, quantize_local_checkpoint_to_burnpack,
+        },
+    },
+    models::{
+        config::ModelConfig,
+        qwen3_5::{Qwen3_5CheckpointOptions, Qwen3_5TextConfig},
+    },
 };
 
 #[cfg(feature = "metal")]
@@ -27,7 +36,7 @@ use transformers::{
     architecture::CausalLmInput,
     cache::CacheConfig,
     checkpoint::{DTypePolicy, TensorDType, execute_local_load_plan},
-    models::qwen3_5::{Qwen3_5CheckpointOptions, Qwen3_5ForCausalLm},
+    models::qwen3_5::Qwen3_5ForCausalLm,
 };
 
 /// Parses the official nested multimodal config and exercises text-only tokenization.
@@ -103,6 +112,115 @@ fn validates_pinned_qwen35_local_artifacts() {
         assert!(rendered.contains("<|im_start|>user"));
         assert!(rendered.ends_with("<think>\n\n</think>\n\n"));
     }
+}
+
+/// Converts every eligible mapped Qwen tensor to Q8 and Q4 official Burnpacks.
+#[test]
+#[ignore = "requires a pinned external Qwen3.5 artifact directory and temporary artifact space"]
+fn quantizes_pinned_qwen35_weights_to_burnpack() {
+    let root = PathBuf::from(
+        std::env::var_os("TRANSFORMERS_QWEN35_DIR")
+            .expect("set TRANSFORMERS_QWEN35_DIR to the pinned local checkout"),
+    );
+    let config_path = root.join("config.json");
+    let config_json = fs::read_to_string(&config_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", config_path.display()));
+    let config = Qwen3_5TextConfig::from_json_str(&config_json)
+        .expect("official nested text configuration must validate");
+    let load_options = LoadOptions::default();
+    let manifest = CheckpointManifest::discover(&root, &load_options)
+        .expect("official SafeTensors headers must pass strict discovery");
+    let contract = config
+        .checkpoint_contract(Qwen3_5CheckpointOptions::default())
+        .expect("official topology must produce a checkpoint contract");
+    let plan = contract
+        .build_load_plan(&manifest, &load_options)
+        .expect("every language tensor must map strictly");
+    let output_parent = root
+        .parent()
+        .expect("pinned checkpoint must have a parent directory");
+    let outputs = tempfile::tempdir_in(output_parent)
+        .expect("create temporary quantized artifacts beside model storage");
+
+    let mut summaries = Vec::new();
+    for scheme in [SymmetricQuantization::Q8, SymmetricQuantization::Q4] {
+        let label = match scheme {
+            SymmetricQuantization::Q8 => "q8",
+            SymmetricQuantization::Q4 => "q4",
+        };
+        let output = outputs.path().join(format!("qwen3.5-0.8b-{label}.bpk"));
+        let outcome = quantize_local_checkpoint_to_burnpack(
+            &manifest,
+            &plan,
+            &output,
+            QuantizedCheckpointOptions {
+                weights: WeightQuantizationConfig {
+                    scheme,
+                    ..WeightQuantizationConfig::default()
+                },
+                ..QuantizedCheckpointOptions::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{label} checkpoint conversion failed: {error}"));
+        assert!(outcome.report.is_strictly_valid());
+        assert!(!outcome.report.quantized.is_empty());
+        assert_eq!(
+            outcome.report.quantized.len(),
+            outcome.artifact.tensor_count
+        );
+        assert_eq!(outcome.execution.source.tensor_reads, 320);
+        assert_eq!(outcome.execution.source.max_open_shards, 1);
+        assert_eq!(outcome.staging.tensor_count, outcome.artifact.tensor_count);
+        assert!(
+            outcome
+                .report
+                .quantized
+                .windows(2)
+                .all(|pair| pair[0].target < pair[1].target),
+            "quantization report must be deterministic and deduplicated"
+        );
+
+        let mut artifact = QuantizedBurnpackArtifact::open(&output)
+            .unwrap_or_else(|error| panic!("open {label} Burnpack: {error}"));
+        let validation = artifact
+            .validate_all()
+            .unwrap_or_else(|error| panic!("validate {label} Burnpack: {error}"));
+        assert_eq!(validation.tensor_count, outcome.artifact.tensor_count);
+        assert_eq!(
+            validation.payload_bytes,
+            outcome.artifact.quantized_payload_bytes
+        );
+        assert_eq!(artifact.manifest().tensors.len(), validation.tensor_count);
+        eprintln!(
+            "{label}: tensors={}, excluded={}, payload_bytes={}, artifact_bytes={}, largest_tensor_bytes={}",
+            outcome.artifact.tensor_count,
+            outcome.excluded.len(),
+            outcome.artifact.quantized_payload_bytes,
+            outcome.artifact.artifact_bytes,
+            outcome.artifact.largest_materialized_tensor_bytes,
+        );
+        summaries.push((
+            outcome.artifact.quantized_payload_bytes,
+            outcome.artifact.artifact_bytes,
+            outcome.report.quantized,
+            outcome.excluded,
+        ));
+    }
+
+    let [q8, q4] = summaries.as_slice() else {
+        panic!("both Q8 and Q4 summaries must be recorded");
+    };
+    assert!(q4.0 < q8.0);
+    assert!(q4.1 < q8.1);
+    assert_eq!(
+        q4.2.iter()
+            .map(|record| record.target.as_str())
+            .collect::<Vec<_>>(),
+        q8.2.iter()
+            .map(|record| record.target.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(q4.3, q8.3);
 }
 
 /// Streams the pinned language weights into Metal F16 and executes one prompt.

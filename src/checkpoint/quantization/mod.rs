@@ -21,6 +21,7 @@
 //! for a future real packed kernel.
 
 mod burnpack;
+mod checkpoint;
 mod config;
 mod error;
 mod manifest;
@@ -31,6 +32,11 @@ pub use burnpack::{
     BURNPACK_MANIFEST_TENSOR, BurnpackAppendOutcome, BurnpackArtifactSummary,
     BurnpackSessionLimits, BurnpackStagingStats, BurnpackValidationReport,
     QuantizedBurnpackArtifact, QuantizedBurnpackSession, StagedTensorSummary,
+};
+pub use checkpoint::{
+    CheckpointQuantizationFailure, CheckpointQuantizationFailureCause,
+    CheckpointQuantizationOutcome, CheckpointQuantizationResult, QuantizationExclusionRecord,
+    QuantizedCheckpointOptions, quantize_local_checkpoint_to_burnpack,
 };
 pub use config::{
     PackedValueLayout, QuantizationGroupSize, QuantizedGroupLayout, QuantizedPayloadLayout,

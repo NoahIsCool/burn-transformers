@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "cached_reference_parity_and_hardening_verified_pending_quantized_stress",
+  "phase": "cached_and_burnpack_conversion_verified_pending_packed_kernel_and_32k_stress",
   "repository": "Qwen/Qwen3.5-0.8B",
   "revision": "2fc06364715b967f1860aea9cf38778875588b17",
   "artifact_layout": {
@@ -34,7 +34,11 @@
     "cached_generation_compared": true,
     "cached_stateless_top1_all_prefixes_compared": true,
     "cache_failure_atomicity_hardened": true,
-    "inactive_decode_rows_supported": true
+    "inactive_decode_rows_supported": true,
+    "q8_burnpack_conversion_validated": true,
+    "q4_burnpack_conversion_validated": true,
+    "packed_kernel_execution_validated": false,
+    "quantized_long_context_32k_validated": false
   },
   "smoke_acceptance": {
     "backend": "burn_metal",
@@ -62,5 +66,26 @@
       "full_vector_cosine_gate": 0.999,
       "full_vector_cosine_pending": false
     }
+  },
+  "burnpack_conversion_acceptance": {
+    "source_parameter_dtype": "bf16",
+    "group_size": 64,
+    "mapped_storage_tensors_read_per_pass": 320,
+    "quantized_matrix_tensors": 186,
+    "source_precision_tensors": 134,
+    "maximum_open_safetensors_shards": 1,
+    "q8": {
+      "quantized_payload_bytes": 528715776,
+      "artifact_bytes": 528831748,
+      "largest_materialized_tensor_bytes": 6684672
+    },
+    "q4": {
+      "quantized_payload_bytes": 279908352,
+      "artifact_bytes": 280027450,
+      "largest_materialized_tensor_bytes": 3538944
+    },
+    "combined_conversion_and_validation_wall_seconds": 153.55,
+    "artifacts_retained": false,
+    "packed_execution_support": "unavailable"
   }
 }

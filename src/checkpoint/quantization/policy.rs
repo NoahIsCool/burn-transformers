@@ -21,10 +21,16 @@ pub enum QuantizationExclusion {
     Bias,
     /// Numerically sensitive recurrent decay/time-step scalars remain unpacked.
     RecurrentScalar,
+    /// Sequence-mixer convolution kernels remain in source precision initially.
+    RecurrentConvolution,
+    /// Learned relative-position and other additive bias tables stay unpacked.
+    BiasTable,
     /// The key does not denote a conventional weight parameter.
     NotWeight,
     /// Rank-zero and rank-one tensors are never considered matrix weights.
     ScalarOrVector,
+    /// Rank-three and higher tensors are not projection matrices.
+    NonMatrix,
 }
 
 /// Eligibility decision for one architecture-owned parameter.
@@ -59,8 +65,16 @@ pub fn classify_weight_for_quantization(name: &str, shape: &[usize]) -> Quantiza
         return QuantizationEligibility::Excluded(QuantizationExclusion::RecurrentScalar);
     }
 
+    if components.iter().any(|component| is_convolution(component)) {
+        return QuantizationEligibility::Excluded(QuantizationExclusion::RecurrentConvolution);
+    }
+
     if last.eq_ignore_ascii_case("bias") {
         return QuantizationEligibility::Excluded(QuantizationExclusion::Bias);
+    }
+
+    if components.iter().any(|component| is_bias_table(component)) {
+        return QuantizationEligibility::Excluded(QuantizationExclusion::BiasTable);
     }
 
     if components
@@ -80,6 +94,9 @@ pub fn classify_weight_for_quantization(name: &str, shape: &[usize]) -> Quantiza
 
     if shape.len() < 2 {
         return QuantizationEligibility::Excluded(QuantizationExclusion::ScalarOrVector);
+    }
+    if shape.len() != 2 {
+        return QuantizationEligibility::Excluded(QuantizationExclusion::NonMatrix);
     }
 
     QuantizationEligibility::Eligible
@@ -110,6 +127,16 @@ fn is_normalization(component: &str) -> bool {
         || component == "ln_f"
         || component == "ln"
         || component.starts_with("ln_")
+}
+
+fn is_convolution(component: &str) -> bool {
+    let component = component.to_ascii_lowercase();
+    component == "conv" || component.starts_with("conv1d") || component.starts_with("conv_")
+}
+
+fn is_bias_table(component: &str) -> bool {
+    let component = component.to_ascii_lowercase();
+    component.ends_with("_bias") || component.ends_with("_biases")
 }
 
 fn is_recurrent_scalar(components: &[&str]) -> bool {

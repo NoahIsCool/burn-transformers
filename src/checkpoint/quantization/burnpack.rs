@@ -149,7 +149,7 @@ impl Default for BurnpackSessionLimits {
 }
 
 /// Current bounded-resource accounting for a write session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BurnpackStagingStats {
     /// Number of quantized model tensors staged so far.
     pub tensor_count: usize,
