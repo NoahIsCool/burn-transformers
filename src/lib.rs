@@ -1,14 +1,34 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+#![deny(missing_docs)]
+#![forbid(unsafe_code)]
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+//! Backend-generic implementations of modern transformer architectures.
+//!
+//! The crate separates reusable transformer mathematics from checkpoint-family
+//! wiring. Models are generic over a [`burn::tensor::backend::Backend`], while
+//! autoregressive caches remain external mutable state. This split preserves a
+//! stateless, differentiable forward graph for future training without forcing
+//! inference sessions into the serialized parameter tree.
+//!
+//! # Tensor conventions
+//!
+//! Unless a type documents a more specific layout, token tensors use
+//! `[batch, sequence]`, hidden tensors use `[batch, sequence, hidden]`, and
+//! attention tensors use `[batch, heads, query, key]`. Boolean token masks use
+//! `true` for a real token and `false` for padding.
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub mod architecture;
+pub mod attention;
+pub mod error;
+pub mod feed_forward;
+pub mod generation;
+pub mod moe;
+pub mod normalization;
+
+pub use architecture::{
+    ArchitectureConfig, CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput,
+    DecodeState, ForwardOptions, LogitsSelection, Seq2SeqLanguageModel,
+};
+pub use error::{Error, Result};
+pub use generation::{
+    FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, SamplingStrategy,
+};

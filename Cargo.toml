@@ -2,5 +2,27 @@
 name = "transformers"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+description = "Backend-generic modern transformer architectures for Burn"
+keywords = ["burn", "transformer", "inference", "llm"]
+categories = ["science", "algorithms"]
+
+[features]
+default = ["std", "flex"]
+std = ["burn/std"]
+autodiff = ["burn/autodiff"]
+cpu = ["burn/cpu"]
+flex = ["burn/flex"]
+metal = ["burn/metal"]
+cuda = ["burn/cuda"]
+rocm = ["burn/rocm"]
 
 [dependencies]
+burn = { version = "=0.21.0", default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+thiserror = "2.0.18"
+
+[dev-dependencies]
+proptest = "1.9.0"
