@@ -17,7 +17,9 @@
 use core::marker::PhantomData;
 
 use burn::tensor::{
-    Bool, IndexingUpdateOp, Int, Shape, Tensor, activation::softmax, backend::Backend,
+    Bool, ElementConversion, IndexingUpdateOp, Int, Shape, Tensor,
+    activation::{log_softmax, softmax},
+    backend::Backend,
 };
 use serde::{Deserialize, Serialize};
 
@@ -150,6 +152,15 @@ pub struct LogitsProcessor<B: Backend> {
     _backend: PhantomData<B>,
 }
 
+/// Tokens selected for one generation step and their processed log probabilities.
+#[derive(Debug)]
+pub struct TokenSelection<B: Backend> {
+    /// One selected vocabulary ID per batch row.
+    pub token_ids: Tensor<B, 1, Int>,
+    /// Log probability of each selected ID after penalties and truncation.
+    pub log_probabilities: Tensor<B, 1>,
+}
+
 impl<B: Backend> LogitsProcessor<B> {
     /// Creates a validated processor and seeds the backend random generator.
     pub fn new(
@@ -181,17 +192,10 @@ impl<B: Backend> LogitsProcessor<B> {
         logits: Tensor<B, 2>,
         history: Option<Tensor<B, 2, Int>>,
     ) -> Result<Tensor<B, 2>> {
-        let [batch, vocabulary_size] = logits.dims();
-        if vocabulary_size != self.vocabulary_size {
-            return Err(Error::shape(
-                "generation.logits",
-                format!("[batch, {}]", self.vocabulary_size),
-                format!("[{batch}, {vocabulary_size}]"),
-            ));
-        }
+        let batch = self.validate_logits_shape(&logits)?;
 
         let mut logits = if let Some(history) = history {
-            let [history_batch, _] = history.dims();
+            let [history_batch, history_length] = history.dims();
             if history_batch != batch {
                 return Err(Error::shape(
                     "generation.history",
@@ -199,7 +203,14 @@ impl<B: Backend> LogitsProcessor<B> {
                     format!("[{history_batch}, sequence]"),
                 ));
             }
-            self.apply_token_penalties(logits, history)
+            if history_length == 0
+                || (self.config.repetition_penalty == 1.0 && self.config.presence_penalty == 0.0)
+            {
+                logits
+            } else {
+                self.validate_history_values(&history)?;
+                self.apply_token_penalties(logits, history)
+            }
         } else {
             logits
         };
@@ -219,11 +230,12 @@ impl<B: Backend> LogitsProcessor<B> {
     }
 
     /// Selects one token per row from already processed logits.
-    pub fn select(&self, logits: Tensor<B, 2>) -> Tensor<B, 1, Int> {
-        match self.config.strategy {
+    pub fn select(&self, logits: Tensor<B, 2>) -> Result<Tensor<B, 1, Int>> {
+        self.validate_logits_shape(&logits)?;
+        Ok(match self.config.strategy {
             SamplingStrategy::Greedy => logits.argmax(1).squeeze_dim::<1>(1),
             SamplingStrategy::Sample => softmax(logits, 1).categorical(1).squeeze_dim::<1>(1),
-        }
+        })
     }
 
     /// Processes logits and immediately selects the next token for each row.
@@ -232,8 +244,75 @@ impl<B: Backend> LogitsProcessor<B> {
         logits: Tensor<B, 2>,
         history: Option<Tensor<B, 2, Int>>,
     ) -> Result<Tensor<B, 1, Int>> {
-        self.process(logits, history)
-            .map(|logits| self.select(logits))
+        let logits = self.process(logits, history)?;
+        self.select(logits)
+    }
+
+    /// Processes one step and returns both selected IDs and their log probabilities.
+    ///
+    /// Log probabilities use the renormalized distribution after temperature,
+    /// top-k/top-p filtering, repetition, and presence penalties. This is the
+    /// probability actually sampled, rather than the unprocessed model score.
+    pub fn process_and_select_with_log_probs(
+        &self,
+        logits: Tensor<B, 2>,
+        history: Option<Tensor<B, 2, Int>>,
+    ) -> Result<TokenSelection<B>> {
+        let logits = self.process(logits, history)?;
+        let token_ids = self.select(logits.clone())?;
+        let batch = token_ids.dims()[0];
+        let selected = log_softmax(logits, 1)
+            .gather(1, token_ids.clone().reshape([batch, 1]))
+            .squeeze_dim::<1>(1);
+        Ok(TokenSelection {
+            token_ids,
+            log_probabilities: selected,
+        })
+    }
+
+    /// Validates a public logits boundary before backend reductions or sampling.
+    fn validate_logits_shape(&self, logits: &Tensor<B, 2>) -> Result<usize> {
+        let [batch, vocabulary_size] = logits.dims();
+        if batch == 0 || vocabulary_size != self.vocabulary_size {
+            return Err(Error::shape(
+                "generation.logits",
+                format!("[nonzero_batch, {}]", self.vocabulary_size),
+                format!("[{batch}, {vocabulary_size}]"),
+            ));
+        }
+        Ok(batch)
+    }
+
+    /// Prevents invalid history IDs from reaching backend one-hot indexing.
+    fn validate_history_values(&self, history: &Tensor<B, 2, Int>) -> Result<()> {
+        let minimum = history
+            .clone()
+            .min()
+            .try_into_scalar()
+            .map_err(|error| {
+                Error::BackendCapability(format!(
+                    "failed to validate generation history minimum: {error}"
+                ))
+            })?
+            .elem::<i64>();
+        let maximum = history
+            .clone()
+            .max()
+            .try_into_scalar()
+            .map_err(|error| {
+                Error::BackendCapability(format!(
+                    "failed to validate generation history maximum: {error}"
+                ))
+            })?
+            .elem::<i64>();
+        if minimum < 0 || maximum as usize >= self.vocabulary_size {
+            return Err(Error::shape(
+                "generation.history",
+                format!("token values in 0..{}", self.vocabulary_size),
+                format!("observed range {minimum}..={maximum}"),
+            ));
+        }
+        Ok(())
     }
 
     /// Applies sign-aware repetition and additive presence penalties.
@@ -350,6 +429,7 @@ pub enum FinishReason {
 #[derive(Debug, Clone)]
 pub struct GenerationTracker {
     config: GenerationConfig,
+    vocabulary_size: usize,
     generated: Vec<Vec<u32>>,
     finished: Vec<Option<FinishReason>>,
 }
@@ -367,11 +447,36 @@ impl GenerationTracker {
                 "generation batch_size must be greater than zero".into(),
             ));
         }
+        let mut generated = Vec::new();
+        generated.try_reserve_exact(batch_size).map_err(|_| {
+            Error::Generation(format!(
+                "failed to allocate generation state for batch size {batch_size}"
+            ))
+        })?;
+        generated.resize_with(batch_size, Vec::new);
+        let mut finished = Vec::new();
+        finished.try_reserve_exact(batch_size).map_err(|_| {
+            Error::Generation(format!(
+                "failed to allocate finish state for batch size {batch_size}"
+            ))
+        })?;
+        finished.resize(batch_size, None);
         Ok(Self {
             config,
-            generated: vec![Vec::new(); batch_size],
-            finished: vec![None; batch_size],
+            vocabulary_size,
+            generated,
+            finished,
         })
+    }
+
+    /// Returns the fixed number of independently tracked sequences.
+    pub fn batch_size(&self) -> usize {
+        self.generated.len()
+    }
+
+    /// Returns the vocabulary bound enforced for every emitted token.
+    pub fn vocabulary_size(&self) -> usize {
+        self.vocabulary_size
     }
 
     /// Records a token and returns the sequence's finish reason, if any.
@@ -388,7 +493,18 @@ impl GenerationTracker {
         if self.finished[sequence].is_some() {
             return Ok(self.finished[sequence].as_ref());
         }
+        if token as usize >= self.vocabulary_size {
+            return Err(Error::Generation(format!(
+                "generated token {token} is outside vocabulary size {}",
+                self.vocabulary_size
+            )));
+        }
 
+        self.generated[sequence].try_reserve(1).map_err(|_| {
+            Error::Generation(format!(
+                "failed to extend generated tokens for sequence {sequence}"
+            ))
+        })?;
         self.generated[sequence].push(token);
         let reason = if self.config.eos_token_ids.contains(&token) {
             Some(FinishReason::EndOfSequence { token_id: token })
@@ -486,6 +602,30 @@ mod tests {
                 stop_sequences: vec![Vec::new()],
                 ..Default::default()
             },
+            GenerationConfig {
+                top_p: Some(f64::NAN),
+                ..Default::default()
+            },
+            GenerationConfig {
+                repetition_penalty: f64::INFINITY,
+                ..Default::default()
+            },
+            GenerationConfig {
+                presence_penalty: f64::NAN,
+                ..Default::default()
+            },
+            GenerationConfig {
+                eos_token_ids: vec![4],
+                ..Default::default()
+            },
+            GenerationConfig {
+                pad_token_id: Some(4),
+                ..Default::default()
+            },
+            GenerationConfig {
+                stop_sequences: vec![vec![4]],
+                ..Default::default()
+            },
         ];
         for config in invalid {
             assert!(config.validate(4).is_err());
@@ -506,6 +646,102 @@ mod tests {
             .expect("valid scores")
             .into_data()
             .assert_eq(&TensorData::from([1_i32, 2]), false);
+    }
+
+    /// Selected-token log probabilities describe the processed distribution.
+    #[test]
+    fn selection_reports_processed_log_probability() {
+        let device = Default::default();
+        let processor =
+            LogitsProcessor::<TestBackend>::new(GenerationConfig::default(), 2, &device)
+                .expect("valid processor");
+        let selection = processor
+            .process_and_select_with_log_probs(Tensor::from_floats([[0.0, 1.0]], &device), None)
+            .expect("valid scores");
+        selection
+            .token_ids
+            .into_data()
+            .assert_eq(&TensorData::from([1_i32]), false);
+        selection
+            .log_probabilities
+            .into_data()
+            .assert_approx_eq::<f32>(
+                &TensorData::from([-0.313_261_7_f32]),
+                Tolerance::absolute(1e-6),
+            );
+    }
+
+    /// Every public processor boundary rejects empty or mismatched score tensors.
+    #[test]
+    fn processor_rejects_invalid_shapes_before_backend_sampling() {
+        let device = Default::default();
+        let processor =
+            LogitsProcessor::<TestBackend>::new(GenerationConfig::default(), 4, &device)
+                .expect("valid processor");
+        assert!(
+            processor
+                .process(Tensor::zeros([0, 4], &device), None)
+                .is_err()
+        );
+        assert!(processor.select(Tensor::zeros([1, 3], &device)).is_err());
+        assert!(
+            processor
+                .process(
+                    Tensor::zeros([2, 4], &device),
+                    Some(Tensor::<TestBackend, 2, Int>::zeros([1, 1], &device)),
+                )
+                .is_err()
+        );
+    }
+
+    /// Penalty history validates token ranges before constructing one-hot tensors.
+    #[test]
+    fn penalty_history_rejects_invalid_ids_and_accepts_empty_history() {
+        let device = Default::default();
+        let config = GenerationConfig {
+            presence_penalty: 0.5,
+            ..Default::default()
+        };
+        let processor =
+            LogitsProcessor::<TestBackend>::new(config, 4, &device).expect("valid processor");
+        let logits = Tensor::from_floats([[3.0, 2.0, 1.0, 0.0]], &device);
+        for history in [
+            Tensor::<TestBackend, 2, Int>::from_ints([[-1]], &device),
+            Tensor::<TestBackend, 2, Int>::from_ints([[4]], &device),
+        ] {
+            assert!(processor.process(logits.clone(), Some(history)).is_err());
+        }
+        processor
+            .process(
+                logits.clone(),
+                Some(Tensor::<TestBackend, 2, Int>::zeros([1, 0], &device)),
+            )
+            .expect("an empty history applies no penalties")
+            .into_data()
+            .assert_eq(&logits.into_data(), false);
+    }
+
+    /// Re-seeding produces identical stochastic selections for a fixed batch.
+    #[test]
+    fn sampling_seed_is_deterministic() {
+        let device = Default::default();
+        let config = GenerationConfig {
+            strategy: SamplingStrategy::Sample,
+            seed: 91,
+            ..Default::default()
+        };
+        let logits = Tensor::<TestBackend, 2>::zeros([64, 4], &device);
+        let first = LogitsProcessor::<TestBackend>::new(config.clone(), 4, &device)
+            .expect("valid processor")
+            .process_and_select(logits.clone(), None)
+            .expect("valid scores")
+            .into_data();
+        let second = LogitsProcessor::<TestBackend>::new(config, 4, &device)
+            .expect("valid processor")
+            .process_and_select(logits, None)
+            .expect("valid scores")
+            .into_data();
+        assert_eq!(first, second);
     }
 
     /// Top-k retains exactly k finite entries, including tied boundary values.
@@ -588,7 +824,9 @@ mod tests {
             tracker.push(0, 2).expect("in range"),
             Some(&FinishReason::EndOfSequence { token_id: 2 })
         );
-        tracker.push(0, 7).expect("completed push is accepted");
+        tracker
+            .push(0, u32::MAX)
+            .expect("completed push is ignored before token validation");
         assert_eq!(tracker.generated(0).expect("in range"), &[1, 2]);
         assert!(tracker.all_finished());
     }
@@ -619,5 +857,21 @@ mod tests {
         assert!(tracker.finish_reason(2).is_err());
         assert!(tracker.generated(2).is_err());
         assert!(tracker.push(2, 0).is_err());
+    }
+
+    /// Tracker bounds and allocation failures are recoverable and mutation-free.
+    #[test]
+    fn tracker_rejects_invalid_tokens_and_impossible_batch_capacity() {
+        let mut tracker =
+            GenerationTracker::new(GenerationConfig::default(), 4, 2).expect("valid tracker");
+        assert_eq!(tracker.batch_size(), 2);
+        assert_eq!(tracker.vocabulary_size(), 4);
+        assert!(tracker.push(0, 4).is_err());
+        assert!(tracker.generated(0).expect("in range").is_empty());
+        assert_eq!(tracker.finish_reason(0).expect("in range"), None);
+        assert!(
+            GenerationTracker::new(GenerationConfig::default(), 4, usize::MAX).is_err(),
+            "capacity overflow must not reach an infallible allocation"
+        );
     }
 }

@@ -40,6 +40,7 @@ pub use architecture::{
 pub use error::{Error, Result};
 pub use generation::{
     FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, SamplingStrategy,
+    TokenSelection,
 };
 pub use loaded::{LoadedModel, ModelSourceMetadata, ModelTokenizer};
 #[cfg(feature = "tokenizers")]
