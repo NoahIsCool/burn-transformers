@@ -1,0 +1,1154 @@
+//! Native key/value attention cache tensors.
+//!
+//! Every committed layer uses `[batch, kv_heads, time, head_dim]`. Keeping time
+//! next to the feature dimension makes a chronological key/value slice directly
+//! consumable by attention kernels. Full storage allocates `time = capacity`;
+//! a standard sliding ring allocates `time = window`; a mirrored ring allocates
+//! `time = 2 * window` and writes each slot twice so the retained suffix is one
+//! contiguous tensor view.
+
+use core::num::NonZeroUsize;
+use core::ops::Range;
+
+use burn::tensor::{DType, Int, Tensor, TensorData, backend::Backend};
+
+use crate::cache::{
+    CacheConfig, plan_mirrored_ring_read, plan_mirrored_ring_write, plan_ring_read,
+    plan_ring_write, plan_staged_ring_transaction,
+};
+
+use super::{TensorCacheError, TensorCacheResult};
+
+/// Physical time-axis strategy used by a native key/value cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KvCacheStorage {
+    /// Stores every logical position at its absolute time index.
+    Full,
+    /// Stores `position mod window`, producing at most two chronological views.
+    SlidingRing,
+    /// Duplicates each ring slot at `slot + window` for one contiguous view.
+    MirroredSlidingRing,
+}
+
+impl KvCacheStorage {
+    /// Returns a stable human-readable storage name for diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::SlidingRing => "sliding ring",
+            Self::MirroredSlidingRing => "mirrored sliding ring",
+        }
+    }
+}
+
+/// Validated tensor geometry for a homogeneous group of attention layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NativeKvCacheSpec {
+    layers: NonZeroUsize,
+    key_value_heads: NonZeroUsize,
+    head_dimension: NonZeroUsize,
+    storage: KvCacheStorage,
+    dtype: DType,
+    staging_capacity: usize,
+}
+
+impl NativeKvCacheSpec {
+    /// Creates a native KV specification without speculative staging.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any dimension is zero or `dtype` is not a normal
+    /// floating-point tensor type.
+    pub fn new(
+        layers: usize,
+        key_value_heads: usize,
+        head_dimension: usize,
+        storage: KvCacheStorage,
+        dtype: DType,
+    ) -> TensorCacheResult<Self> {
+        let layers = non_zero("layers", layers)?;
+        let key_value_heads = non_zero("key_value_heads", key_value_heads)?;
+        let head_dimension = non_zero("head_dimension", head_dimension)?;
+        validate_float_dtype(dtype)?;
+        Ok(Self {
+            layers,
+            key_value_heads,
+            head_dimension,
+            storage,
+            dtype,
+            staging_capacity: 0,
+        })
+    }
+
+    /// Sets the maximum number of proposal tokens staged per sequence.
+    ///
+    /// A value of zero disables speculative staging. Staging tensors retain the
+    /// same `[batch, kv_heads, staging_capacity, head_dim]` layout as committed
+    /// tensors and are allocated once with the cache.
+    #[must_use]
+    pub const fn with_staging_capacity(mut self, staging_capacity: usize) -> Self {
+        self.staging_capacity = staging_capacity;
+        self
+    }
+
+    /// Returns the number of homogeneous attention layers.
+    #[must_use]
+    pub const fn layers(self) -> usize {
+        self.layers.get()
+    }
+
+    /// Returns the number of key/value heads per layer.
+    #[must_use]
+    pub const fn key_value_heads(self) -> usize {
+        self.key_value_heads.get()
+    }
+
+    /// Returns the scalar width of each key/value head.
+    #[must_use]
+    pub const fn head_dimension(self) -> usize {
+        self.head_dimension.get()
+    }
+
+    /// Returns the committed physical storage strategy.
+    #[must_use]
+    pub const fn storage(self) -> KvCacheStorage {
+        self.storage
+    }
+
+    /// Returns the runtime floating-point dtype of every tensor.
+    #[must_use]
+    pub const fn dtype(self) -> DType {
+        self.dtype
+    }
+
+    /// Returns the preallocated speculative suffix capacity per sequence.
+    #[must_use]
+    pub const fn staging_capacity(self) -> usize {
+        self.staging_capacity
+    }
+}
+
+/// One chronological key/value segment returned by a cache read.
+#[derive(Debug, Clone)]
+pub struct KvCacheReadSegment<B: Backend> {
+    absolute_positions: Range<usize>,
+    keys: Tensor<B, 4>,
+    values: Tensor<B, 4>,
+}
+
+impl<B: Backend> KvCacheReadSegment<B> {
+    /// Returns the absolute token positions represented by this segment.
+    #[must_use]
+    pub fn absolute_positions(&self) -> Range<usize> {
+        self.absolute_positions.clone()
+    }
+
+    /// Borrows keys shaped `[1, kv_heads, segment_time, head_dim]`.
+    #[must_use]
+    pub const fn keys(&self) -> &Tensor<B, 4> {
+        &self.keys
+    }
+
+    /// Borrows values shaped `[1, kv_heads, segment_time, head_dim]`.
+    #[must_use]
+    pub const fn values(&self) -> &Tensor<B, 4> {
+        &self.values
+    }
+}
+
+/// Chronological native-KV read, possibly split at one ring boundary.
+#[derive(Debug, Clone)]
+pub struct KvCacheRead<B: Backend> {
+    retained_positions: Range<usize>,
+    segments: Vec<KvCacheReadSegment<B>>,
+}
+
+impl<B: Backend> KvCacheRead<B> {
+    /// Returns the absolute key interval visible to the attention layer.
+    #[must_use]
+    pub fn retained_positions(&self) -> Range<usize> {
+        self.retained_positions.clone()
+    }
+
+    /// Returns zero, one, or two chronological tensor segments.
+    #[must_use]
+    pub fn segments(&self) -> &[KvCacheReadSegment<B>] {
+        &self.segments
+    }
+
+    /// Materializes split ring segments as one chronological key/value pair.
+    ///
+    /// Full and mirrored caches already have one segment and only clone their
+    /// tensor handles. A standard wrapped ring invokes [`Tensor::cat`] and may
+    /// allocate an attention input. Empty cache reads return `None` because
+    /// Burn backends do not uniformly support zero-length slicing.
+    #[must_use]
+    pub fn materialize(&self) -> Option<(Tensor<B, 4>, Tensor<B, 4>)> {
+        match self.segments.as_slice() {
+            [] => None,
+            [segment] => Some((segment.keys.clone(), segment.values.clone())),
+            segments => Some((
+                Tensor::cat(
+                    segments
+                        .iter()
+                        .map(|segment| segment.keys.clone())
+                        .collect(),
+                    2,
+                ),
+                Tensor::cat(
+                    segments
+                        .iter()
+                        .map(|segment| segment.values.clone())
+                        .collect(),
+                    2,
+                ),
+            )),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct KvLayer<B: Backend> {
+    keys: Tensor<B, 4>,
+    values: Tensor<B, 4>,
+    staged_keys: Option<Tensor<B, 4>>,
+    staged_values: Option<Tensor<B, 4>>,
+}
+
+/// Preallocated native key/value cache for one homogeneous layer group.
+///
+/// This type contains runtime state and intentionally does not implement
+/// [`burn::module::Module`]. Direct committed writes are available for normal
+/// prefill/decode. During a model-level speculative transaction, writes go to
+/// the separate staging tensors and only an accepted prefix is copied into the
+/// committed allocation.
+#[derive(Debug)]
+pub struct NativeKvCache<B: Backend> {
+    config: CacheConfig,
+    spec: NativeKvCacheSpec,
+    device: B::Device,
+    layers: Vec<KvLayer<B>>,
+    staged_lengths: Vec<Vec<usize>>,
+    staging_active: bool,
+    committed_time_slots: usize,
+}
+
+impl<B: Backend> NativeKvCache<B> {
+    /// Allocates zeroed committed and optional staging tensors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a batch/config mismatch, a ring without a sliding
+    /// window, mirrored-width overflow, or a dtype unsupported by the backend.
+    pub fn new(
+        config: CacheConfig,
+        batch_size: usize,
+        spec: NativeKvCacheSpec,
+        device: &B::Device,
+    ) -> TensorCacheResult<Self> {
+        validate_batch(config, batch_size)?;
+        if !B::supports_dtype(device, spec.dtype()) {
+            return Err(TensorCacheError::UnsupportedDType {
+                dtype: spec.dtype(),
+            });
+        }
+        let committed_time_slots = committed_time_slots(config, spec.storage())?;
+        let layers = B::memory_persistent_allocations(
+            device,
+            (spec, batch_size, committed_time_slots, device.clone()),
+            |(spec, batch_size, committed_time_slots, allocation_device)| {
+                let committed_shape = [
+                    batch_size,
+                    spec.key_value_heads(),
+                    committed_time_slots,
+                    spec.head_dimension(),
+                ];
+                let staging_shape = [
+                    batch_size,
+                    spec.key_value_heads(),
+                    spec.staging_capacity(),
+                    spec.head_dimension(),
+                ];
+                (0..spec.layers())
+                    .map(|_| KvLayer {
+                        keys: Tensor::zeros(
+                            committed_shape,
+                            (&allocation_device, spec.dtype()),
+                        ),
+                        values: Tensor::zeros(
+                            committed_shape,
+                            (&allocation_device, spec.dtype()),
+                        ),
+                        staged_keys: (spec.staging_capacity() > 0).then(|| {
+                            Tensor::zeros(staging_shape, (&allocation_device, spec.dtype()))
+                        }),
+                        staged_values: (spec.staging_capacity() > 0).then(|| {
+                            Tensor::zeros(staging_shape, (&allocation_device, spec.dtype()))
+                        }),
+                    })
+                    .collect()
+            },
+        );
+
+        Ok(Self {
+            config,
+            spec,
+            device: device.clone(),
+            layers,
+            staged_lengths: vec![vec![0; batch_size]; spec.layers()],
+            staging_active: false,
+            committed_time_slots,
+        })
+    }
+
+    /// Returns the immutable tensor geometry.
+    #[must_use]
+    pub const fn spec(&self) -> NativeKvCacheSpec {
+        self.spec
+    }
+
+    /// Returns the logical capacity and sliding-window policy.
+    #[must_use]
+    pub const fn config(&self) -> CacheConfig {
+        self.config
+    }
+
+    /// Returns the number of committed time-axis slots per tensor.
+    #[must_use]
+    pub const fn committed_time_slots(&self) -> usize {
+        self.committed_time_slots
+    }
+
+    /// Returns the device to which all cache tensors are bound.
+    #[must_use]
+    pub const fn device(&self) -> &B::Device {
+        &self.device
+    }
+
+    /// Borrows a layer's complete committed key allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `layer` is out of bounds.
+    pub fn keys(&self, layer: usize) -> TensorCacheResult<&Tensor<B, 4>> {
+        Ok(&self.layer(layer)?.keys)
+    }
+
+    /// Borrows a layer's complete committed value allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `layer` is out of bounds.
+    pub fn values(&self, layer: usize) -> TensorCacheResult<&Tensor<B, 4>> {
+        Ok(&self.layer(layer)?.values)
+    }
+
+    /// Writes one sequence's committed keys and values at absolute `start`.
+    ///
+    /// Inputs use `[1, kv_heads, tokens, head_dim]`. Ring modes apply
+    /// `physical_slot = absolute_position mod window`; oversized chunks retain
+    /// only their newest window. Direct writes are forbidden while speculative
+    /// staging is active.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid indices, shape/dtype/device mismatch,
+    /// position overflow, logical-capacity overflow, or an active transaction.
+    pub fn write_sequence(
+        &mut self,
+        layer: usize,
+        sequence: usize,
+        start: usize,
+        keys: Tensor<B, 4>,
+        values: Tensor<B, 4>,
+    ) -> TensorCacheResult<()> {
+        if self.staging_active {
+            return Err(TensorCacheError::TransactionActive {
+                operation: "write committed KV",
+            });
+        }
+        let token_count = self.validate_pair(layer, sequence, &keys, &values)?;
+        validate_write_end(start, token_count, self.config.capacity())?;
+        self.write_pair(layer, sequence, start, token_count, &keys, &values)
+    }
+
+    /// Reads one sequence's retained chronological key/value interval.
+    ///
+    /// Full storage returns `[0, sequence_length)`. Ring storage returns
+    /// `[max(0, sequence_length - window), sequence_length)`. A standard ring
+    /// may return two segments; mirrored storage always returns at most one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid index or a length beyond logical
+    /// capacity.
+    pub fn read_sequence(
+        &self,
+        layer: usize,
+        sequence: usize,
+        sequence_length: usize,
+    ) -> TensorCacheResult<KvCacheRead<B>> {
+        let layer = self.layer(layer)?;
+        validate_sequence(sequence, self.config.sequence_count())?;
+        if sequence_length > self.config.capacity() {
+            return Err(TensorCacheError::ReadExceedsCapacity {
+                length: sequence_length,
+                capacity: self.config.capacity(),
+            });
+        }
+        if sequence_length == 0 {
+            return Ok(KvCacheRead {
+                retained_positions: 0..0,
+                segments: Vec::new(),
+            });
+        }
+
+        match self.spec.storage() {
+            KvCacheStorage::Full => Ok(KvCacheRead {
+                retained_positions: 0..sequence_length,
+                segments: vec![read_segment(
+                    layer,
+                    sequence,
+                    0..sequence_length,
+                    0..sequence_length,
+                    self.spec,
+                )],
+            }),
+            KvCacheStorage::SlidingRing => {
+                let window = self.window()?;
+                let plan = plan_ring_read(sequence_length, window, window)?;
+                let segments = plan
+                    .segments()
+                    .iter()
+                    .map(|segment| {
+                        read_segment(
+                            layer,
+                            sequence,
+                            segment.absolute(),
+                            segment.physical(),
+                            self.spec,
+                        )
+                    })
+                    .collect();
+                Ok(KvCacheRead {
+                    retained_positions: plan.retained_positions(),
+                    segments,
+                })
+            }
+            KvCacheStorage::MirroredSlidingRing => {
+                let window = self.window()?;
+                let plan = plan_mirrored_ring_read(sequence_length, window)?;
+                Ok(KvCacheRead {
+                    retained_positions: plan.retained_positions(),
+                    segments: vec![read_segment(
+                        layer,
+                        sequence,
+                        plan.retained_positions(),
+                        plan.physical(),
+                        self.spec,
+                    )],
+                })
+            }
+        }
+    }
+
+    /// Appends one sequence's proposal values to preallocated staging storage.
+    ///
+    /// Staging uses linear proposal offsets independent of ring slots. This is
+    /// the central rollback invariant: rejected values never overwrite a
+    /// committed slot, even when the ring was already full.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error outside an active transaction, or for invalid tensor
+    /// metadata and staging-capacity overflow.
+    pub fn stage_sequence(
+        &mut self,
+        layer: usize,
+        sequence: usize,
+        keys: Tensor<B, 4>,
+        values: Tensor<B, 4>,
+    ) -> TensorCacheResult<()> {
+        if !self.staging_active {
+            return Err(TensorCacheError::TransactionNotActive);
+        }
+        let token_count = self.validate_pair(layer, sequence, &keys, &values)?;
+        let start = self.staged_lengths[layer][sequence];
+        let end =
+            start
+                .checked_add(token_count)
+                .ok_or(TensorCacheError::StagingCapacityExceeded {
+                    requested: usize::MAX,
+                    capacity: self.spec.staging_capacity(),
+                })?;
+        if end > self.spec.staging_capacity() {
+            return Err(TensorCacheError::StagingCapacityExceeded {
+                requested: end,
+                capacity: self.spec.staging_capacity(),
+            });
+        }
+        if token_count == 0 {
+            return Ok(());
+        }
+
+        let spec = self.spec;
+        let cache_layer = self.layer_mut(layer)?;
+        let staged_keys = cache_layer
+            .staged_keys
+            .as_mut()
+            .ok_or(TensorCacheError::StagingDisabled)?;
+        assign_segment(
+            staged_keys,
+            &keys,
+            sequence,
+            0..token_count,
+            start..end,
+            spec,
+        );
+        let staged_values = cache_layer
+            .staged_values
+            .as_mut()
+            .ok_or(TensorCacheError::StagingDisabled)?;
+        assign_segment(
+            staged_values,
+            &values,
+            sequence,
+            0..token_count,
+            start..end,
+            spec,
+        );
+        self.staged_lengths[layer][sequence] = end;
+        Ok(())
+    }
+
+    /// Returns the number of staged proposal tokens for a layer and sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid layer or sequence.
+    pub fn staged_length(&self, layer: usize, sequence: usize) -> TensorCacheResult<usize> {
+        self.layer(layer)?;
+        validate_sequence(sequence, self.config.sequence_count())?;
+        Ok(self.staged_lengths[layer][sequence])
+    }
+
+    /// Returns whether the cache is accepting proposal writes.
+    #[must_use]
+    pub const fn has_active_staging(&self) -> bool {
+        self.staging_active
+    }
+
+    /// Validates whether an absolute rewind preserves all ring-visible values.
+    ///
+    /// Rewinding a wrapped ring by any positive amount exposes positions that
+    /// have already been overwritten. Rewinding to zero is safe because the
+    /// affected row is explicitly cleared by [`apply_truncate`](Self::apply_truncate).
+    pub(crate) fn validate_truncate(
+        &self,
+        current: &[usize],
+        requested: &[usize],
+    ) -> TensorCacheResult<()> {
+        if self.spec.storage() == KvCacheStorage::Full {
+            return Ok(());
+        }
+        let window = self.window()?.get();
+        for (sequence, (&from, &to)) in current.iter().zip(requested).enumerate() {
+            if to < from && to != 0 && from > window {
+                return Err(TensorCacheError::UnsafeWrappedTruncate {
+                    storage: self.spec.storage().as_str(),
+                    sequence,
+                    current: from,
+                    requested: to,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Clears rows reset to zero after truncate validation succeeds.
+    pub(crate) fn apply_truncate(&mut self, current: &[usize], requested: &[usize]) {
+        for (sequence, (&from, &to)) in current.iter().zip(requested).enumerate() {
+            if from != 0 && to == 0 {
+                self.zero_sequence(sequence);
+            }
+        }
+    }
+
+    /// Enables empty proposal staging for a model-level transaction.
+    pub(crate) fn begin_staging(&mut self) -> TensorCacheResult<()> {
+        if self.staging_active {
+            return Err(TensorCacheError::TransactionAlreadyActive);
+        }
+        if self.spec.staging_capacity() == 0 {
+            return Err(TensorCacheError::StagingDisabled);
+        }
+        for lengths in &mut self.staged_lengths {
+            lengths.fill(0);
+        }
+        self.staging_active = true;
+        Ok(())
+    }
+
+    /// Checks a staged proposal and accepted prefix without mutating tensors.
+    pub(crate) fn validate_staging_commit(
+        &self,
+        baseline: &[usize],
+        proposed: &[usize],
+        accepted: &[usize],
+    ) -> TensorCacheResult<()> {
+        if !self.staging_active {
+            return Err(TensorCacheError::TransactionNotActive);
+        }
+        for layer in 0..self.spec.layers() {
+            for sequence in 0..self.config.sequence_count() {
+                let actual = self.staged_lengths[layer][sequence];
+                if actual != proposed[sequence] {
+                    return Err(TensorCacheError::IncompleteStaging {
+                        kind: "native KV",
+                        layer,
+                        sequence,
+                        expected: proposed[sequence],
+                        actual,
+                    });
+                }
+                let staging = plan_staged_ring_transaction(baseline[sequence], actual)?;
+                if accepted[sequence] > proposed[sequence] {
+                    return Err(TensorCacheError::AcceptedPrefixExceedsProposal {
+                        sequence,
+                        accepted: accepted[sequence],
+                        proposed: proposed[sequence],
+                    });
+                }
+                match self.spec.storage() {
+                    KvCacheStorage::Full => {
+                        validate_write_end(
+                            baseline[sequence],
+                            accepted[sequence],
+                            self.config.capacity(),
+                        )?;
+                    }
+                    KvCacheStorage::SlidingRing => {
+                        staging.commit_prefix(accepted[sequence], self.window()?)?;
+                    }
+                    KvCacheStorage::MirroredSlidingRing => {
+                        staging.commit_prefix(accepted[sequence], self.window()?)?;
+                        plan_mirrored_ring_write(
+                            baseline[sequence],
+                            accepted[sequence],
+                            self.window()?,
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Copies each accepted staging prefix into committed storage.
+    pub(crate) fn commit_staging(
+        &mut self,
+        baseline: &[usize],
+        accepted: &[usize],
+    ) -> TensorCacheResult<()> {
+        for layer_index in 0..self.spec.layers() {
+            for sequence in 0..self.config.sequence_count() {
+                let count = accepted[sequence];
+                if count == 0 {
+                    continue;
+                }
+                let layer = self.layer(layer_index)?;
+                let staged_keys = layer
+                    .staged_keys
+                    .as_ref()
+                    .ok_or(TensorCacheError::StagingDisabled)?
+                    .clone()
+                    .slice([
+                        sequence..sequence + 1,
+                        0..self.spec.key_value_heads(),
+                        0..count,
+                        0..self.spec.head_dimension(),
+                    ]);
+                let staged_values = layer
+                    .staged_values
+                    .as_ref()
+                    .ok_or(TensorCacheError::StagingDisabled)?
+                    .clone()
+                    .slice([
+                        sequence..sequence + 1,
+                        0..self.spec.key_value_heads(),
+                        0..count,
+                        0..self.spec.head_dimension(),
+                    ]);
+                self.write_pair(
+                    layer_index,
+                    sequence,
+                    baseline[sequence],
+                    count,
+                    &staged_keys,
+                    &staged_values,
+                )?;
+            }
+        }
+        self.finish_staging();
+        Ok(())
+    }
+
+    /// Discards all staged lengths without touching committed ring slots.
+    pub(crate) fn rollback_staging(&mut self) {
+        self.finish_staging();
+    }
+
+    /// Clears all committed and staging tensors for session reuse.
+    pub(crate) fn reset(&mut self) {
+        for layer in &mut self.layers {
+            zero_tensor(&mut layer.keys);
+            zero_tensor(&mut layer.values);
+            if let Some(tensor) = &mut layer.staged_keys {
+                zero_tensor(tensor);
+            }
+            if let Some(tensor) = &mut layer.staged_values {
+                zero_tensor(tensor);
+            }
+        }
+        for lengths in &mut self.staged_lengths {
+            lengths.fill(0);
+        }
+        self.staging_active = false;
+    }
+
+    /// Reorders or duplicates every tensor's batch dimension.
+    pub(crate) fn reorder(&mut self, indices: &[usize]) -> TensorCacheResult<()> {
+        if self.staging_active {
+            return Err(TensorCacheError::TransactionActive {
+                operation: "reorder KV",
+            });
+        }
+        validate_reorder_indices(indices, self.config.sequence_count())?;
+        let selection = selection_tensor::<B>(indices, &self.device)?;
+        for layer in &mut self.layers {
+            select_batch(&mut layer.keys, &selection);
+            select_batch(&mut layer.values, &selection);
+            if let Some(tensor) = &mut layer.staged_keys {
+                select_batch(tensor, &selection);
+            }
+            if let Some(tensor) = &mut layer.staged_values {
+                select_batch(tensor, &selection);
+            }
+        }
+        for lengths in &mut self.staged_lengths {
+            let old = lengths.clone();
+            *lengths = indices.iter().map(|&index| old[index]).collect();
+        }
+        Ok(())
+    }
+
+    /// Returns a checked immutable layer reference.
+    fn layer(&self, layer: usize) -> TensorCacheResult<&KvLayer<B>> {
+        self.layers
+            .get(layer)
+            .ok_or(TensorCacheError::LayerOutOfBounds {
+                layer,
+                layers: self.layers.len(),
+            })
+    }
+
+    /// Returns a checked mutable layer reference.
+    fn layer_mut(&mut self, layer: usize) -> TensorCacheResult<&mut KvLayer<B>> {
+        let layers = self.layers.len();
+        self.layers
+            .get_mut(layer)
+            .ok_or(TensorCacheError::LayerOutOfBounds { layer, layers })
+    }
+
+    /// Returns the configured window required by either ring representation.
+    fn window(&self) -> TensorCacheResult<NonZeroUsize> {
+        self.config
+            .sliding_window()
+            .ok_or(TensorCacheError::SlidingWindowRequired {
+                storage: self.spec.storage().as_str(),
+            })
+    }
+
+    /// Validates an input key/value pair and returns its token extent.
+    fn validate_pair(
+        &self,
+        layer: usize,
+        sequence: usize,
+        keys: &Tensor<B, 4>,
+        values: &Tensor<B, 4>,
+    ) -> TensorCacheResult<usize> {
+        self.layer(layer)?;
+        validate_sequence(sequence, self.config.sequence_count())?;
+        let token_count = keys.dims()[2];
+        let expected = [
+            1,
+            self.spec.key_value_heads(),
+            token_count,
+            self.spec.head_dimension(),
+        ];
+        validate_tensor(keys, "keys", expected, self.spec.dtype(), &self.device)?;
+        validate_tensor(values, "values", expected, self.spec.dtype(), &self.device)?;
+        Ok(token_count)
+    }
+
+    /// Applies storage-specific index planning to one validated tensor pair.
+    fn write_pair(
+        &mut self,
+        layer: usize,
+        sequence: usize,
+        start: usize,
+        token_count: usize,
+        keys: &Tensor<B, 4>,
+        values: &Tensor<B, 4>,
+    ) -> TensorCacheResult<()> {
+        if token_count == 0 {
+            return Ok(());
+        }
+        let spec = self.spec;
+        let window = self.config.sliding_window();
+        let cache_layer = self.layer_mut(layer)?;
+        match spec.storage() {
+            KvCacheStorage::Full => {
+                let target = start..start + token_count;
+                assign_segment(
+                    &mut cache_layer.keys,
+                    keys,
+                    sequence,
+                    0..token_count,
+                    target.clone(),
+                    spec,
+                );
+                assign_segment(
+                    &mut cache_layer.values,
+                    values,
+                    sequence,
+                    0..token_count,
+                    target,
+                    spec,
+                );
+            }
+            KvCacheStorage::SlidingRing => {
+                let window = window.ok_or(TensorCacheError::SlidingWindowRequired {
+                    storage: spec.storage().as_str(),
+                })?;
+                let plan = plan_ring_write(start, token_count, window)?;
+                for segment in plan.segments() {
+                    assign_segment(
+                        &mut cache_layer.keys,
+                        keys,
+                        sequence,
+                        segment.input(),
+                        segment.physical(),
+                        spec,
+                    );
+                    assign_segment(
+                        &mut cache_layer.values,
+                        values,
+                        sequence,
+                        segment.input(),
+                        segment.physical(),
+                        spec,
+                    );
+                }
+            }
+            KvCacheStorage::MirroredSlidingRing => {
+                let window = window.ok_or(TensorCacheError::SlidingWindowRequired {
+                    storage: spec.storage().as_str(),
+                })?;
+                for segment in plan_mirrored_ring_write(start, token_count, window)? {
+                    for target in [segment.primary(), segment.mirror()] {
+                        assign_segment(
+                            &mut cache_layer.keys,
+                            keys,
+                            sequence,
+                            segment.input(),
+                            target.clone(),
+                            spec,
+                        );
+                        assign_segment(
+                            &mut cache_layer.values,
+                            values,
+                            sequence,
+                            segment.input(),
+                            target,
+                            spec,
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Clears one batch row in all committed and staging tensors.
+    fn zero_sequence(&mut self, sequence: usize) {
+        let spec = self.spec;
+        let committed_slots = self.committed_time_slots;
+        let staging_slots = spec.staging_capacity();
+        for layer in &mut self.layers {
+            zero_4d_row(
+                &mut layer.keys,
+                sequence,
+                spec.key_value_heads(),
+                committed_slots,
+                spec.head_dimension(),
+            );
+            zero_4d_row(
+                &mut layer.values,
+                sequence,
+                spec.key_value_heads(),
+                committed_slots,
+                spec.head_dimension(),
+            );
+            if let Some(tensor) = &mut layer.staged_keys {
+                zero_4d_row(
+                    tensor,
+                    sequence,
+                    spec.key_value_heads(),
+                    staging_slots,
+                    spec.head_dimension(),
+                );
+            }
+            if let Some(tensor) = &mut layer.staged_values {
+                zero_4d_row(
+                    tensor,
+                    sequence,
+                    spec.key_value_heads(),
+                    staging_slots,
+                    spec.head_dimension(),
+                );
+            }
+        }
+    }
+
+    /// Ends staging and makes all staged bytes logically unreachable.
+    fn finish_staging(&mut self) {
+        for lengths in &mut self.staged_lengths {
+            lengths.fill(0);
+        }
+        self.staging_active = false;
+    }
+}
+
+/// Creates a non-zero dimension or a field-specific error.
+fn non_zero(field: &'static str, value: usize) -> TensorCacheResult<NonZeroUsize> {
+    NonZeroUsize::new(value).ok_or(TensorCacheError::ZeroDimension { field })
+}
+
+/// Rejects integer, boolean, and quantized runtime cache tensors.
+fn validate_float_dtype(dtype: DType) -> TensorCacheResult<()> {
+    if dtype.is_float() {
+        Ok(())
+    } else {
+        Err(TensorCacheError::NonFloatDType { dtype })
+    }
+}
+
+/// Ensures the caller's batch matches the metadata sequence count.
+pub(crate) fn validate_batch(config: CacheConfig, batch_size: usize) -> TensorCacheResult<()> {
+    if config.sequence_count() == batch_size {
+        Ok(())
+    } else {
+        Err(TensorCacheError::BatchSizeMismatch {
+            configured: config.sequence_count(),
+            requested: batch_size,
+        })
+    }
+}
+
+/// Computes the committed tensor's physical time-axis extent.
+fn committed_time_slots(config: CacheConfig, storage: KvCacheStorage) -> TensorCacheResult<usize> {
+    match storage {
+        KvCacheStorage::Full => Ok(config.capacity()),
+        KvCacheStorage::SlidingRing => config.sliding_window().map(NonZeroUsize::get).ok_or(
+            TensorCacheError::SlidingWindowRequired {
+                storage: storage.as_str(),
+            },
+        ),
+        KvCacheStorage::MirroredSlidingRing => {
+            let window =
+                config
+                    .sliding_window()
+                    .ok_or(TensorCacheError::SlidingWindowRequired {
+                        storage: storage.as_str(),
+                    })?;
+            window
+                .get()
+                .checked_mul(2)
+                .ok_or(TensorCacheError::MirroredCapacityOverflow {
+                    window: window.get(),
+                })
+        }
+    }
+}
+
+/// Validates one sequence index before any backend indexing call.
+fn validate_sequence(sequence: usize, batch_size: usize) -> TensorCacheResult<()> {
+    if sequence < batch_size {
+        Ok(())
+    } else {
+        Err(TensorCacheError::SequenceOutOfBounds {
+            sequence,
+            batch_size,
+        })
+    }
+}
+
+/// Checks absolute write arithmetic and logical capacity.
+fn validate_write_end(start: usize, tokens: usize, capacity: usize) -> TensorCacheResult<usize> {
+    let end = start
+        .checked_add(tokens)
+        .ok_or(TensorCacheError::WritePositionOverflow { start, tokens })?;
+    if end > capacity {
+        Err(TensorCacheError::WriteExceedsCapacity {
+            start,
+            end,
+            capacity,
+        })
+    } else {
+        Ok(end)
+    }
+}
+
+/// Checks shape, dtype, and device before invoking a backend assignment.
+fn validate_tensor<B: Backend>(
+    tensor: &Tensor<B, 4>,
+    name: &'static str,
+    expected: [usize; 4],
+    dtype: DType,
+    device: &B::Device,
+) -> TensorCacheResult<()> {
+    let actual = tensor.dims();
+    if actual != expected {
+        return Err(TensorCacheError::ShapeMismatch {
+            tensor: name,
+            expected: expected.to_vec(),
+            actual: actual.to_vec(),
+        });
+    }
+    if tensor.dtype() != dtype {
+        return Err(TensorCacheError::DTypeMismatch {
+            tensor: name,
+            expected: dtype,
+            actual: tensor.dtype(),
+        });
+    }
+    if tensor.device() != *device {
+        return Err(TensorCacheError::DeviceMismatch { tensor: name });
+    }
+    Ok(())
+}
+
+/// Assigns one non-empty source interval to one physical time interval.
+fn assign_segment<B: Backend>(
+    destination: &mut Tensor<B, 4>,
+    source: &Tensor<B, 4>,
+    sequence: usize,
+    input: Range<usize>,
+    physical: Range<usize>,
+    spec: NativeKvCacheSpec,
+) {
+    let values = source.clone().slice([
+        0..1,
+        0..spec.key_value_heads(),
+        input,
+        0..spec.head_dimension(),
+    ]);
+    destination.inplace(|tensor| {
+        tensor.slice_assign(
+            [
+                sequence..sequence + 1,
+                0..spec.key_value_heads(),
+                physical,
+                0..spec.head_dimension(),
+            ],
+            values,
+        )
+    });
+}
+
+/// Constructs one read segment from committed physical slots.
+fn read_segment<B: Backend>(
+    layer: &KvLayer<B>,
+    sequence: usize,
+    absolute_positions: Range<usize>,
+    physical: Range<usize>,
+    spec: NativeKvCacheSpec,
+) -> KvCacheReadSegment<B> {
+    let slices = [
+        sequence..sequence + 1,
+        0..spec.key_value_heads(),
+        physical,
+        0..spec.head_dimension(),
+    ];
+    KvCacheReadSegment {
+        absolute_positions,
+        keys: layer.keys.clone().slice(slices.clone()),
+        values: layer.values.clone().slice(slices),
+    }
+}
+
+/// Validates fixed-size beam reordering indices.
+pub(crate) fn validate_reorder_indices(
+    indices: &[usize],
+    batch_size: usize,
+) -> TensorCacheResult<()> {
+    if indices.len() != batch_size {
+        return Err(TensorCacheError::BatchSizeMismatch {
+            configured: batch_size,
+            requested: indices.len(),
+        });
+    }
+    for &sequence in indices {
+        validate_sequence(sequence, batch_size)?;
+    }
+    Ok(())
+}
+
+/// Builds the device-local integer tensor used by Burn batch selection.
+pub(crate) fn selection_tensor<B: Backend>(
+    indices: &[usize],
+    device: &B::Device,
+) -> TensorCacheResult<Tensor<B, 1, Int>> {
+    let values: Vec<i32> = indices
+        .iter()
+        .map(|&index| {
+            i32::try_from(index).map_err(|_| TensorCacheError::BatchIndexOverflow { index })
+        })
+        .collect::<TensorCacheResult<_>>()?;
+    Ok(Tensor::from_ints(
+        TensorData::new(values, [indices.len()]),
+        device,
+    ))
+}
+
+/// Applies the same batch gather to one rank-four state tensor.
+fn select_batch<B: Backend>(tensor: &mut Tensor<B, 4>, indices: &Tensor<B, 1, Int>) {
+    tensor.inplace(|value| value.select(0, indices.clone()));
+}
+
+/// Replaces a tensor with same-shape zeros, preserving dtype and device.
+fn zero_tensor<B: Backend, const D: usize>(tensor: &mut Tensor<B, D>) {
+    tensor.inplace(|value| value.zeros_like());
+}
+
+/// Clears one batch row of a rank-four tensor without changing its shape.
+fn zero_4d_row<B: Backend>(
+    tensor: &mut Tensor<B, 4>,
+    sequence: usize,
+    heads: usize,
+    time: usize,
+    dimension: usize,
+) {
+    let zeros = Tensor::zeros(
+        [1, heads, time, dimension],
+        (&tensor.device(), tensor.dtype()),
+    );
+    tensor.inplace(|value| {
+        value.slice_assign(
+            [sequence..sequence + 1, 0..heads, 0..time, 0..dimension],
+            zeros,
+        )
+    });
+}
