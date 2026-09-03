@@ -2,7 +2,10 @@
 
 use std::io::Write;
 
-use burn::tensor::{TensorData, bf16, f16};
+use burn::tensor::{
+    DType, TensorData, bf16, f16,
+    quantization::{QuantLevel, QuantMode, QuantParam, QuantScheme, QuantStore, QuantValue},
+};
 
 use super::{
     QuantizationEligibility, QuantizationError, QuantizationExclusion, QuantizedTensorMetadata,
@@ -132,6 +135,96 @@ impl QuantizedWeight {
         }
         let shape = self.metadata.host_shape()?;
         Ok(TensorData::new(values, shape))
+    }
+
+    /// Converts a compatible matrix into Burn's native packed `QFloat` data.
+    ///
+    /// The persisted v1 format groups a completely flattened row-major stream,
+    /// while Burn describes independent rectangular blocks. Those definitions
+    /// are identical for a rank-two `[output, input]` matrix only when `input`
+    /// is a multiple of the configured group size. This method enforces that
+    /// equivalence rather than silently changing scales at row boundaries.
+    ///
+    /// Values remain packed and scales remain F32. On CubeCL backends, using
+    /// the resulting tensor as a matmul operand allows the packed matmul kernel
+    /// to consume it directly. Burn's higher-level `Linear::forward` currently
+    /// dequantizes weights, so callers must use a quantization-preserving matmul
+    /// dispatch rather than treating this conversion alone as execution proof.
+    pub fn into_burn_qfloat_data(self) -> Result<TensorData> {
+        let (metadata, mut packed_values, scales) = self.into_parts();
+        let shape = metadata.host_shape()?;
+        let [rows, columns] = shape.as_slice() else {
+            return Err(QuantizationError::BurnQFloatIncompatible {
+                reason: format!("expected a rank-two matrix, found shape {shape:?}"),
+            });
+        };
+        let group_size = metadata.group_size.get();
+        if !columns.is_multiple_of(group_size) {
+            return Err(QuantizationError::BurnQFloatIncompatible {
+                reason: format!(
+                    "innermost dimension {columns} is not divisible by group size {group_size}"
+                ),
+            });
+        }
+        let (value, values_per_u32) = match metadata.scheme {
+            SymmetricQuantization::Q8 => (QuantValue::Q8S, 4),
+            SymmetricQuantization::Q4 => (QuantValue::Q4S, 8),
+        };
+        if !columns.is_multiple_of(values_per_u32) {
+            return Err(QuantizationError::BurnQFloatIncompatible {
+                reason: format!(
+                    "innermost dimension {columns} is not divisible by packed-u32 width {values_per_u32}"
+                ),
+            });
+        }
+        let expected_scales = rows
+            .checked_mul(columns / group_size)
+            .ok_or(QuantizationError::ShapeElementOverflow)?;
+        if scales.len() != expected_scales {
+            return Err(QuantizationError::ScaleCountMismatch {
+                expected: expected_scales,
+                actual: scales.len(),
+            });
+        }
+
+        // Our wire format numbers the first code in the least-significant bits
+        // of each u32. Byte reversal preserves that bit numbering on big-endian
+        // hosts before CubeCL receives native u32 storage.
+        #[cfg(target_endian = "big")]
+        for word in packed_values.chunks_exact_mut(core::mem::size_of::<u32>()) {
+            word.reverse();
+        }
+        let scale_bytes = scales
+            .len()
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or(QuantizationError::ByteLengthOverflow {
+                context: "Burn QFloat scale payload",
+            })?;
+        packed_values.try_reserve_exact(scale_bytes).map_err(|_| {
+            QuantizationError::AllocationFailed {
+                context: "Burn QFloat payload",
+                requested: scale_bytes,
+            }
+        })?;
+        for scale in scales {
+            packed_values.extend_from_slice(&scale.to_ne_bytes());
+        }
+
+        let group_size =
+            u8::try_from(group_size).map_err(|_| QuantizationError::BurnQFloatIncompatible {
+                reason: format!("group size {group_size} does not fit Burn's u8 block extent"),
+            })?;
+        let scheme = QuantScheme::default()
+            .with_value(value)
+            .with_param(QuantParam::F32)
+            .with_store(QuantStore::PackedU32(0))
+            .with_level(QuantLevel::block([1, group_size]))
+            .with_mode(QuantMode::Symmetric);
+        Ok(TensorData::from_bytes_vec(
+            packed_values,
+            [*rows, *columns],
+            DType::QFloat(scheme),
+        ))
     }
 }
 

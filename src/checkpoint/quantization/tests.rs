@@ -1,6 +1,12 @@
 use std::io::{self, Write};
 
-use burn::tensor::{DType, TensorData, bf16, f16};
+use burn::{
+    backend::Flex,
+    tensor::{
+        DType, Tensor, TensorData, bf16, f16,
+        quantization::{QuantLevel, QuantStore, QuantValue},
+    },
+};
 use proptest::prelude::*;
 
 use super::*;
@@ -598,6 +604,62 @@ fn payload_writer_preserves_context_for_io_failures() {
     assert!(matches!(
         quantized.write_burnpack_payload(&mut FailingWriter),
         Err(QuantizationError::PayloadIo(_))
+    ));
+}
+
+#[test]
+fn compatible_q4_and_q8_matrices_map_exactly_to_burn_qfloat() {
+    let device = Default::default();
+    let values = (0..128)
+        .map(|index| (index as f32 - 63.5) / 7.0)
+        .collect::<Vec<_>>();
+    for (precision, burn_value) in [
+        (SymmetricQuantization::Q8, QuantValue::Q8S),
+        (SymmetricQuantization::Q4, QuantValue::Q4S),
+    ] {
+        let quantized = quantize_tensor_data(
+            &TensorData::new(values.clone(), [2, 64]),
+            config(precision, 32),
+        )
+        .unwrap();
+        let expected = f32_values(&quantized.dequantize_f32().unwrap());
+        let data = quantized.into_burn_qfloat_data().unwrap();
+        let DType::QFloat(scheme) = data.dtype else {
+            panic!("adapter must produce QFloat data")
+        };
+        assert_eq!(scheme.value, burn_value);
+        assert_eq!(scheme.store, QuantStore::PackedU32(0));
+        assert_eq!(scheme.level, QuantLevel::block([1, 32]));
+
+        let actual = Tensor::<Flex, 2>::from_data(data, &device)
+            .dequantize()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn burn_qfloat_adapter_rejects_rank_and_cross_row_groups() {
+    let rank_one = quantize_tensor_data(
+        &TensorData::new(vec![1.0_f32; 64], [64]),
+        config(SymmetricQuantization::Q8, 32),
+    )
+    .unwrap();
+    assert!(matches!(
+        rank_one.into_burn_qfloat_data(),
+        Err(QuantizationError::BurnQFloatIncompatible { .. })
+    ));
+
+    let crossing = quantize_tensor_data(
+        &TensorData::new(vec![1.0_f32; 96], [2, 48]),
+        config(SymmetricQuantization::Q4, 32),
+    )
+    .unwrap();
+    assert!(matches!(
+        crossing.into_burn_qfloat_data(),
+        Err(QuantizationError::BurnQFloatIncompatible { .. })
     ));
 }
 

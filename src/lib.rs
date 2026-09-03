@@ -28,6 +28,7 @@ pub mod loaded;
 pub mod models;
 pub mod moe;
 pub mod normalization;
+pub mod operations;
 pub mod position;
 #[cfg(feature = "tokenizers")]
 pub mod tokenization;

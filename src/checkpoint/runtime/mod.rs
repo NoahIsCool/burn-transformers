@@ -22,10 +22,13 @@ use std::{
     fmt,
 };
 
-use burn::tensor::TensorData;
+use burn::tensor::{DType, TensorData};
 use burn::{
     module::{Module, Param},
-    tensor::{Tensor, backend::Backend},
+    tensor::{
+        Tensor,
+        backend::{Backend, DTypeUsage},
+    },
 };
 
 pub use source::{LocalShardSource, SourceStats, SourceTensor, TensorSource};
@@ -84,6 +87,11 @@ pub enum ParameterInstallError {
         /// Human-readable Burn dtype name.
         dtype: String,
     },
+    /// The target backend cannot store the checkpoint dtype on this device.
+    UnsupportedStorage {
+        /// Human-readable Burn dtype name.
+        dtype: String,
+    },
 }
 
 impl fmt::Display for ParameterInstallError {
@@ -103,6 +111,9 @@ impl fmt::Display for ParameterInstallError {
             }
             Self::NonFloat { dtype } => {
                 write!(formatter, "expected floating-point data, received {dtype}")
+            }
+            Self::UnsupportedStorage { dtype } => {
+                write!(formatter, "backend cannot store checkpoint dtype {dtype}")
             }
         }
     }
@@ -139,7 +150,8 @@ pub fn install_float_parameter<B: Backend, const D: usize>(
     if actual != expected {
         return Err(ParameterInstallError::Shape { expected, actual });
     }
-    if !data.dtype.is_float() {
+    let is_quantized_float = matches!(data.dtype, DType::QFloat(_));
+    if !data.dtype.is_float() && !is_quantized_float {
         return Err(ParameterInstallError::NonFloat {
             dtype: format!("{:?}", data.dtype),
         });
@@ -147,6 +159,11 @@ pub fn install_float_parameter<B: Backend, const D: usize>(
 
     let device = parameter.lazy_device();
     let dtype = data.dtype;
+    if is_quantized_float && !B::dtype_usage(&device, dtype).contains(DTypeUsage::Storage) {
+        return Err(ParameterInstallError::UnsupportedStorage {
+            dtype: format!("{dtype:?}"),
+        });
+    }
     let tensor = Tensor::<B, D>::from_data(data, (&device, dtype));
     let record = Param::from_tensor(tensor);
     let existing = std::mem::replace(parameter, record.clone());

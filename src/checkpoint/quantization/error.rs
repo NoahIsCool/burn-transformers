@@ -107,6 +107,12 @@ pub enum QuantizationError {
         /// Rejected signed quantized code.
         value: i8,
     },
+    /// The flat persisted grouping cannot be represented exactly by Burn QFloat blocks.
+    #[error("quantized weight is incompatible with Burn's packed QFloat layout: {reason}")]
+    BurnQFloatIncompatible {
+        /// Exact rank, alignment, or grouping mismatch.
+        reason: String,
+    },
     /// The manifest format version is not implemented by this crate.
     #[error("unsupported Burnpack quantization format version {version}")]
     UnsupportedFormatVersion {

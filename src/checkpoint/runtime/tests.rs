@@ -21,6 +21,9 @@ use tempfile::TempDir;
 use thiserror::Error;
 
 use super::*;
+use crate::checkpoint::quantization::{
+    QuantizationGroupSize, SymmetricQuantization, WeightQuantizationConfig, quantize_tensor_data,
+};
 use crate::checkpoint::{
     ArtifactSelection, CheckpointError, DTypePolicy, ExpectedTensor, LoadOptions, MappingPlan,
     PlannedSource, PlannedTensor, PlannedTransform, TensorDType, build_load_plan,
@@ -1351,6 +1354,37 @@ fn parameter_install_uses_burns_checkpoint_layout_mapper() {
         output,
         TensorData::from([[210.0_f32, 430.0_f32, 650.0_f32]])
     );
+}
+
+#[test]
+fn parameter_install_preserves_native_quantized_float_data() {
+    let device = Default::default();
+    let mut linear = LinearConfig::new(64, 3)
+        .with_bias(false)
+        .with_layout(LinearLayout::Col)
+        .init::<Flex>(&device);
+    let source = TensorData::new(
+        (0..192)
+            .map(|index| (index as f32 - 95.5) / 16.0)
+            .collect::<Vec<_>>(),
+        [3, 64],
+    );
+    let packed = quantize_tensor_data(
+        &source,
+        WeightQuantizationConfig {
+            scheme: SymmetricQuantization::Q8,
+            group_size: QuantizationGroupSize::new(32).unwrap(),
+        },
+    )
+    .unwrap()
+    .into_burn_qfloat_data()
+    .unwrap();
+
+    install_float_parameter(&mut linear.weight, packed).unwrap();
+
+    assert!(linear.weight.is_initialized());
+    assert_eq!(linear.weight.val().dims(), [64, 3]);
+    assert!(matches!(linear.weight.val().dtype(), DType::QFloat(_)));
 }
 
 #[test]
