@@ -8,9 +8,12 @@
 //!
 //! Discovery is deliberately separate from parameter application. Pass one reads
 //! only the index and shard headers and produces a [`CheckpointManifest`]. Pass two
-//! is described by a [`LoadPlan`], whose operations can be streamed one tensor (or
-//! one fused group) at a time by a Burn-specific parameter loader. That separation
-//! makes malformed artifacts fail before expensive model allocations occur.
+//! is described by a [`LoadPlan`] and executed through [`execute_load_plan`]. The
+//! executor owns at most one source payload and one transformation output at a
+//! time, then transfers the resulting [`burn::tensor::TensorData`] into an
+//! architecture-owned [`TensorSink`]. That separation makes malformed artifacts
+//! fail before expensive model allocations occur and avoids staging the complete
+//! checkpoint in host memory.
 
 mod artifact;
 mod dtype;
@@ -18,6 +21,7 @@ mod error;
 mod mapping;
 mod options;
 mod report;
+mod runtime;
 
 pub use artifact::{
     ArtifactSource, CheckpointManifest, ShardInventory, TensorInventory, discover_checkpoint,
@@ -31,6 +35,11 @@ pub use mapping::{
 pub use options::{ArtifactLimits, ArtifactSelection, DTypePolicy, LoadOptions};
 pub use report::{
     AliasRecord, DTypeConversion, LoadReport, MemoryEstimate, QuantizationRecord, TransformRecord,
+};
+pub use runtime::{
+    ExecutionFailure, ExecutionFailureCause, ExecutionOutcome, ExecutionResult, ExecutionStats,
+    LocalShardSource, SourceStats, SourceTensor, TensorSink, TensorSource, execute_load_plan,
+    execute_local_load_plan,
 };
 
 #[cfg(test)]

@@ -234,6 +234,62 @@ pub enum CheckpointError {
         /// Detailed report suitable for user-facing diagnostics.
         report: Box<LoadReport>,
     },
+    /// A shard changed after its header was inventoried during pass one.
+    #[error("checkpoint artifact `{path}` changed between discovery and loading: {reason}")]
+    ArtifactChanged {
+        /// Canonical shard path recorded by discovery.
+        path: PathBuf,
+        /// Metadata invariant that no longer holds.
+        reason: String,
+    },
+    /// A pass-two source descriptor disagreed with the discovered manifest.
+    #[error("load plan source `{tensor}` does not match the checkpoint manifest: {reason}")]
+    PlanManifestMismatch {
+        /// Source tensor named by the plan.
+        tensor: String,
+        /// Descriptor mismatch.
+        reason: String,
+    },
+    /// Tensor payload bytes were inconsistent with their declared metadata.
+    #[error("invalid runtime payload for tensor `{tensor}`: {reason}")]
+    InvalidTensorPayload {
+        /// Tensor being materialized.
+        tensor: String,
+        /// Violated payload or shape invariant.
+        reason: String,
+    },
+    /// A valid SafeTensors dtype has no unquantized Burn tensor representation.
+    #[error("SafeTensors dtype {dtype} cannot be materialized by the Burn runtime")]
+    UnsupportedRuntimeDType {
+        /// Source dtype without a matching Burn [`burn::tensor::DType`].
+        dtype: TensorDType,
+    },
+    /// The runtime cannot perform the requested scalar conversion.
+    #[error("unsupported runtime dtype conversion from {source_dtype} to {target_dtype}")]
+    UnsupportedDTypeConversion {
+        /// Stored checkpoint dtype.
+        source_dtype: TensorDType,
+        /// Requested target dtype.
+        target_dtype: TensorDType,
+    },
+    /// A checked host allocation could not be reserved.
+    #[error("failed to reserve {bytes} host bytes while {context}")]
+    AllocationFailed {
+        /// Requested allocation size.
+        bytes: u64,
+        /// Operation requiring the allocation.
+        context: &'static str,
+    },
+    /// Runtime staging would exceed the conservative pass-one bound.
+    #[error("runtime staging for `{tensor}` requires {required} bytes, plan permits {planned}")]
+    MemoryEstimateExceeded {
+        /// Model parameter being materialized.
+        tensor: String,
+        /// Runtime-computed source-plus-output bound.
+        required: u64,
+        /// Bound recorded in [`super::MemoryEstimate`].
+        planned: u64,
+    },
 }
 
 impl CheckpointError {
