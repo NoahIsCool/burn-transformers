@@ -1,5 +1,7 @@
 //! Errors for validated quantization and Burnpack metadata handling.
 
+use std::path::PathBuf;
+
 use burn::tensor::DType;
 use thiserror::Error;
 
@@ -120,6 +122,99 @@ pub enum QuantizationError {
         /// Repeated tensor name.
         name: String,
     },
+    /// A session resource limit was zero or exceeded Burnpack's public bounds.
+    #[error("invalid Burnpack session limit `{field}`={value}: {reason}")]
+    InvalidSessionLimit {
+        /// Configuration field that was rejected.
+        field: &'static str,
+        /// Rejected value.
+        value: u64,
+        /// Stable explanation of the supported range.
+        reason: &'static str,
+    },
+    /// The output path cannot identify an exact `.bpk` file.
+    #[error("invalid Burnpack output path `{path}`: {reason}")]
+    InvalidArtifactPath {
+        /// Rejected output path.
+        path: PathBuf,
+        /// Path invariant that was violated.
+        reason: &'static str,
+    },
+    /// A filesystem operation failed while staging or publishing an artifact.
+    #[error("failed to {operation} `{path}`: {source}")]
+    ArtifactIo {
+        /// Human-readable operation being attempted.
+        operation: &'static str,
+        /// Path involved in the operation.
+        path: PathBuf,
+        /// Operating-system failure.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The official Burn Store implementation rejected an artifact operation.
+    #[error("Burn Store failed to {operation}: {message}")]
+    BurnStore {
+        /// Burnpack operation being attempted.
+        operation: &'static str,
+        /// Upstream diagnostic.
+        message: String,
+    },
+    /// A logical model key collides with the manifest's reserved tensor name.
+    #[error("tensor name `{name}` is reserved for the Burnpack quantization manifest")]
+    ReservedTensorCollision {
+        /// Colliding model tensor name.
+        name: String,
+    },
+    /// A mutation was attempted after successful artifact publication.
+    #[error("Burnpack quantization session has already been finalized")]
+    SessionFinalized,
+    /// The staging file length changed outside the session's append protocol.
+    #[error("quantized staging file has {actual} bytes but session expected {expected}")]
+    StagingCorrupted {
+        /// Length derived from retained offsets.
+        expected: u64,
+        /// Observed file length.
+        actual: u64,
+    },
+    /// A bounded staging or metadata resource would exceed its configured limit.
+    #[error("Burnpack {kind} size/count {attempted} exceeds configured limit {limit}")]
+    SessionLimitExceeded {
+        /// Resource being bounded.
+        kind: &'static str,
+        /// Size or count after the proposed operation.
+        attempted: u64,
+        /// Configured maximum.
+        limit: u64,
+    },
+    /// Atomic publication refused to replace an existing path.
+    #[error("Burnpack output already exists: `{path}`")]
+    OutputAlreadyExists {
+        /// Existing output path.
+        path: PathBuf,
+    },
+    /// The official artifact did not contain the reserved manifest tensor.
+    #[error("Burnpack artifact is missing reserved manifest tensor `{name}`")]
+    MissingManifestTensor {
+        /// Reserved tensor name expected by this format.
+        name: &'static str,
+    },
+    /// A requested model tensor is not present in the quantization manifest.
+    #[error("quantized Burnpack tensor `{name}` was not found")]
+    QuantizedTensorNotFound {
+        /// Missing architecture-owned name.
+        name: String,
+    },
+    /// Artifact tensor names or physical U8 layouts disagree with the manifest.
+    #[error("invalid quantized Burnpack tensor `{name}`: {reason}")]
+    InvalidArtifactTensor {
+        /// Tensor whose physical representation was invalid.
+        name: String,
+        /// Violated physical or set invariant.
+        reason: String,
+    },
+    /// UTF-8 decoding failed for the reserved JSON manifest tensor.
+    #[error("Burnpack quantization manifest tensor is not UTF-8: {0}")]
+    ManifestUtf8(#[from] std::str::Utf8Error),
     /// JSON encoding or decoding failed.
     #[error("invalid Burnpack quantization manifest JSON: {0}")]
     ManifestJson(#[from] serde_json::Error),

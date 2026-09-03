@@ -22,6 +22,7 @@ chat-templates = ["tokenizers", "dep:minijinja"]
 
 [dependencies]
 burn = { version = "=0.21.0", default-features = false }
+burn-store = { version = "=0.21.0", default-features = false, features = ["burnpack", "memmap"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 safetensors = { version = "=0.7.0", default-features = false, features = ["std"] }

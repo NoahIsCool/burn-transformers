@@ -20,12 +20,18 @@
 //! callers must dequantize through the reference implementation or persist it
 //! for a future real packed kernel.
 
+mod burnpack;
 mod config;
 mod error;
 mod manifest;
 mod policy;
 mod reference;
 
+pub use burnpack::{
+    BURNPACK_MANIFEST_TENSOR, BurnpackAppendOutcome, BurnpackArtifactSummary,
+    BurnpackSessionLimits, BurnpackStagingStats, BurnpackValidationReport,
+    QuantizedBurnpackArtifact, QuantizedBurnpackSession, StagedTensorSummary,
+};
 pub use config::{
     PackedValueLayout, QuantizationGroupSize, QuantizedGroupLayout, QuantizedPayloadLayout,
     ScaleLayout, SymmetricQuantization, WeightQuantizationConfig,
@@ -43,5 +49,7 @@ pub use reference::{
     quantize_weight,
 };
 
+#[cfg(test)]
+mod burnpack_tests;
 #[cfg(test)]
 mod tests;
