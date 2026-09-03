@@ -24,6 +24,7 @@ pub mod delta_net;
 pub mod error;
 pub mod feed_forward;
 pub mod generation;
+pub mod loaded;
 pub mod models;
 pub mod moe;
 pub mod normalization;
@@ -40,6 +41,7 @@ pub use error::{Error, Result};
 pub use generation::{
     FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, SamplingStrategy,
 };
+pub use loaded::{LoadedModel, ModelSourceMetadata, ModelTokenizer};
 #[cfg(feature = "tokenizers")]
 pub use tokenization::{
     BatchEncoding, ChatMessage, ChatTemplateOptions, EncodeOptions, LocalTokenizer, Padding,
