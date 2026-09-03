@@ -36,6 +36,10 @@ use crate::{
 use super::{Qwen3_5LayerType, Qwen3_5TextConfig};
 use crate::models::config::RopeType;
 
+mod decode;
+
+pub use decode::{Qwen3_5DecodeState, Qwen3_5LayerCache};
+
 /// One Qwen decoder block with exactly one active sequence mixer.
 #[derive(Module, Debug)]
 pub struct Qwen3_5DecoderLayer<B: Backend> {
@@ -461,6 +465,7 @@ fn select_hidden<B: Backend>(
     selection: &LogitsSelection,
 ) -> Result<Tensor<B, 3>> {
     let [batch, sequence, width] = hidden.dims();
+    validate_logits_selection(selection, sequence)?;
     match selection {
         LogitsSelection::All => Ok(hidden),
         LogitsSelection::Last => match mask {
@@ -479,13 +484,6 @@ fn select_hidden<B: Backend>(
             }
         },
         LogitsSelection::Positions(positions) => {
-            if positions.is_empty() || positions.iter().any(|position| *position >= sequence) {
-                return Err(Error::shape(
-                    "forward_options.logits.positions",
-                    format!("a non-empty list of indices below {sequence}"),
-                    format!("{positions:?}"),
-                ));
-            }
             let device = hidden.device();
             let indices = positions
                 .iter()
@@ -498,6 +496,20 @@ fn select_hidden<B: Backend>(
             ))
         }
     }
+}
+
+/// Validates selective-logit indices before potentially stateful model work.
+fn validate_logits_selection(selection: &LogitsSelection, sequence: usize) -> Result<()> {
+    if let LogitsSelection::Positions(positions) = selection
+        && (positions.is_empty() || positions.iter().any(|position| *position >= sequence))
+    {
+        return Err(Error::shape(
+            "forward_options.logits.positions",
+            format!("a non-empty list of indices below {sequence}"),
+            format!("{positions:?}"),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
