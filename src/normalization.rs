@@ -93,16 +93,19 @@ impl<B: Backend> RmsNorm<B> {
     ///
     /// The input dtype is restored after the FP32 reduction so this method
     /// remains compatible with F16 Metal execution while preserving an FP32
-    /// variance estimate.
+    /// variance estimate. The normalization and learned scaling also remain in
+    /// FP32 until the final cast; this matches zero-centered Qwen RMSNorm and
+    /// avoids rounding the reciprocal root before multiplication.
     pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
         let dtype = input.dtype();
-        let rms = (input.clone().cast(DType::F32).square().mean_dim(D - 1) + self.epsilon).sqrt();
+        let input = input.cast(DType::F32);
+        let rms = (input.clone().square().mean_dim(D - 1) + self.epsilon).sqrt();
         let scale = if self.zero_centered {
-            self.weight.val() + 1.0
+            self.weight.val().cast(DType::F32) + 1.0
         } else {
-            self.weight.val()
+            self.weight.val().cast(DType::F32)
         };
-        (input / rms.cast(dtype)) * scale.cast(dtype).unsqueeze()
+        ((input / rms) * scale.unsqueeze()).cast(dtype)
     }
 }
 

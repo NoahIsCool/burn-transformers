@@ -28,6 +28,7 @@
     "mapping_plan_strict": true,
     "weights_applied": true,
     "metal_f16_smoke_inference": true,
+    "reference_top10_and_sampled_logits_compared": true,
     "reference_logits_compared": false,
     "cached_generation_compared": false
   },
@@ -39,6 +40,13 @@
     "logical_aliases_applied": 1,
     "allowlisted_tensors_not_loaded": 168,
     "output_shape": [1, 1, 248320],
-    "first_run_wall_seconds_including_gpu_compilation_and_load": 142.52
+    "first_run_wall_seconds_including_gpu_compilation_and_load": 142.52,
+    "reference": {
+      "implementation": "transformers==5.2.0",
+      "backend": "torch_mps_f16",
+      "top10_ids_identical": true,
+      "sampled_logit_absolute_tolerance": 0.25,
+      "full_vector_cosine_pending": true
+    }
   }
 }

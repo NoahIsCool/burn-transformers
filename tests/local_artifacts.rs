@@ -17,7 +17,7 @@ use transformers::{
 #[cfg(feature = "metal")]
 use burn::{
     backend::Metal,
-    tensor::{Int, Tensor, TensorData},
+    tensor::{DType, Int, Tensor, TensorData},
 };
 #[cfg(feature = "metal")]
 use transformers::{
@@ -171,12 +171,57 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         )
         .expect("loaded model must execute inference");
     assert_eq!(output.logits.dims(), [1, 1, 248_320]);
-    let top_token = output
-        .logits
-        .argmax(2)
+    let reference: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/qwen3_5_checkpoint/qwen3_5_0_8b_reference.json"
+    ))
+    .expect("committed reference logits must be valid JSON");
+    let expected_top_ids = reference["top_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_i64().unwrap() as i32)
+        .collect::<Vec<_>>();
+    let (_, top_ids) = output.logits.clone().topk_with_indices(10, 2);
+    let top_ids = top_ids
         .to_data()
         .to_vec::<i32>()
-        .expect("Metal argmax must return i32 token IDs");
-    assert_eq!(top_token.len(), 1);
-    assert!((0..248_320).contains(&(top_token[0] as usize)));
+        .expect("Metal top-k must return i32 token IDs");
+    assert_eq!(top_ids, expected_top_ids);
+
+    let sample_indices = reference["sample_indices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_i64().unwrap())
+        .collect::<Vec<_>>();
+    let sample_count = sample_indices.len();
+    let sample_indices = Tensor::<Metal, 1, Int>::from_data(
+        TensorData::new(sample_indices, [sample_count]),
+        &device,
+    );
+    let sample_logits = output
+        .logits
+        .select(2, sample_indices)
+        .cast(DType::F32)
+        .to_data()
+        .to_vec::<f32>()
+        .expect("selected Metal logits must convert to f32");
+    let expected_sample_logits = reference["sample_logits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_f64().unwrap() as f32)
+        .collect::<Vec<_>>();
+    for (actual, expected) in sample_logits.iter().zip(expected_sample_logits) {
+        assert!(
+            (actual - expected).abs() <= 0.25,
+            "reference logit mismatch: expected {expected}, found {actual}"
+        );
+    }
+
+    let top_token = top_ids
+        .first()
+        .copied()
+        .expect("top-k returns one result for a non-empty vocabulary");
+    assert!((0..248_320).contains(&(top_token as usize)));
 }

@@ -454,9 +454,7 @@ impl<B: Backend> GatedDeltaNet<B> {
             DeltaNetMode::Recurrent => recurrent_gated_delta_rule(rule_input, self.rule_config)?,
             DeltaNetMode::ChunkedPrefill => chunked_gated_delta_rule(rule_input, self.rule_config)?,
         };
-        let dtype = rule_output.values.dtype();
-        let gated = self.norm.forward(rule_output.values)
-            * activation::silu(z.cast(DType::F32)).cast(dtype);
+        let gated = gated_delta_norm(rule_output.values, z, &self.norm);
         state.convolution = convolution_state;
         state.recurrent = rule_output.final_state;
         Ok(self
@@ -527,6 +525,25 @@ impl<B: Backend> GatedDeltaNet<B> {
         }
         Ok(())
     }
+}
+
+/// Applies Qwen's output RMSNorm before its SiLU gate with exact cast points.
+///
+/// The reference implementation computes variance in FP32, casts the normalized
+/// value back to the activation dtype before multiplying the learned scale, then
+/// promotes the product for the FP32 SiLU gate and finally restores the activation
+/// dtype. These intermediate roundings are observable in F16 acceptance logits.
+fn gated_delta_norm<B: Backend>(
+    values: Tensor<B, 4>,
+    gate: Tensor<B, 4>,
+    norm: &crate::normalization::RmsNorm<B>,
+) -> Tensor<B, 4> {
+    let dtype = values.dtype();
+    let values = values.cast(DType::F32);
+    let denominator = (values.clone().square().mean_dim(3) + norm.epsilon).sqrt();
+    let normalized = (values / denominator).cast(dtype);
+    let weighted = normalized * norm.weight.val().cast(dtype).unsqueeze();
+    (weighted.cast(DType::F32) * activation::silu(gate.cast(DType::F32))).cast(dtype)
 }
 
 /// Repeats normalized key heads into contiguous value-head groups.
