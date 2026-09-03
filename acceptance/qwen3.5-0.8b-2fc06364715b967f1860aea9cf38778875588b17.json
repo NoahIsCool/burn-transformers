@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "cached_reference_parity_verified_pending_cache_hardening",
+  "phase": "cached_reference_parity_and_hardening_verified_pending_quantized_stress",
   "repository": "Qwen/Qwen3.5-0.8B",
   "revision": "2fc06364715b967f1860aea9cf38778875588b17",
   "artifact_layout": {
@@ -33,8 +33,8 @@
     "reference_greedy_32_tokens_compared": true,
     "cached_generation_compared": true,
     "cached_stateless_top1_all_prefixes_compared": true,
-    "cache_failure_atomicity_hardened": false,
-    "inactive_decode_rows_supported": false
+    "cache_failure_atomicity_hardened": true,
+    "inactive_decode_rows_supported": true
   },
   "smoke_acceptance": {
     "backend": "burn_metal",
@@ -45,7 +45,7 @@
     "allowlisted_tensors_not_loaded": 168,
     "output_shape": [1, 1, 248320],
     "first_run_wall_seconds_including_gpu_compilation_and_load": 142.52,
-    "cached_acceptance_wall_seconds_including_cold_load": 153.58,
+    "cached_acceptance_wall_seconds_including_cold_load": 158.15,
     "cached_prefill_cosine_gate": 0.999,
     "greedy_reference_tokens": 32,
     "cached_matches_reference_greedy": true,
