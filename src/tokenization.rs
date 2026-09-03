@@ -167,6 +167,12 @@ pub struct ChatMessage {
     pub role: String,
     /// Template-visible message content; strings and structured multimodal lists are accepted.
     pub content: Value,
+    /// Optional hidden reasoning content used by Qwen-style assistant turns.
+    pub reasoning_content: Option<String>,
+    /// Optional structured tool calls emitted by an assistant turn.
+    pub tool_calls: Option<Value>,
+    /// Optional participant or tool name.
+    pub name: Option<String>,
 }
 
 impl ChatMessage {
@@ -175,6 +181,9 @@ impl ChatMessage {
         Self {
             role: role.into(),
             content: Value::String(content.into()),
+            reasoning_content: None,
+            tool_calls: None,
+            name: None,
         }
     }
 }
@@ -188,6 +197,12 @@ pub struct ChatTemplateOptions {
     pub add_generation_prompt: bool,
     /// Optional tool schemas exposed to templates that support tool use.
     pub tools: Option<Value>,
+    /// Whether multimodal templates should number image and video placeholders.
+    pub add_vision_id: bool,
+    /// Optional reasoning-mode switch used by checkpoints that expose one.
+    pub enable_thinking: Option<bool>,
+    /// Additional checkpoint-specific variables; reserved built-ins cannot be replaced.
+    pub extra_context: BTreeMap<String, Value>,
 }
 
 /// Token IDs and semantic validity masks retained on the host.
@@ -450,6 +465,7 @@ impl LocalTokenizer {
         environment.set_undefined_behavior(UndefinedBehavior::Strict);
         environment.set_recursion_limit(64);
         environment.set_fuel(Some(CHAT_TEMPLATE_FUEL));
+        environment.set_unknown_method_callback(huggingface_string_method);
         environment.add_function(
             "raise_exception",
             |message: String| -> core::result::Result<String, minijinja::Error> {
@@ -469,10 +485,23 @@ impl LocalTokenizer {
             Value::Bool(options.add_generation_prompt),
         );
         context.insert("tools".into(), options.tools.clone().unwrap_or(Value::Null));
+        context.insert("add_vision_id".into(), Value::Bool(options.add_vision_id));
+        context.insert(
+            "enable_thinking".into(),
+            options.enable_thinking.map_or(Value::Null, Value::Bool),
+        );
         insert_special_context(&mut context, "bos_token", &self.metadata.special_tokens.bos);
         insert_special_context(&mut context, "eos_token", &self.metadata.special_tokens.eos);
         insert_special_context(&mut context, "pad_token", &self.metadata.special_tokens.pad);
         insert_special_context(&mut context, "unk_token", &self.metadata.special_tokens.unk);
+        for (name, value) in &options.extra_context {
+            if context.contains_key(name) {
+                return Err(Error::Tokenizer(format!(
+                    "extra chat context cannot replace reserved variable `{name}`"
+                )));
+            }
+            context.insert(name.clone(), value.clone());
+        }
 
         environment
             .render_str(template, Value::Object(context))
@@ -620,7 +649,12 @@ fn resolve_special(
 ) -> Result<Option<SpecialToken>> {
     let declared = tokenizer_config
         .and_then(|value| value.get(field))
-        .or_else(|| special_map.and_then(|value| value.get(field)));
+        .filter(|value| !value.is_null())
+        .or_else(|| {
+            special_map
+                .and_then(|value| value.get(field))
+                .filter(|value| !value.is_null())
+        });
     let declared_id = tokenizer_config
         .and_then(|value| value.get(format!("{field}_id")))
         .and_then(Value::as_u64)
@@ -779,16 +813,87 @@ fn select_template<'a>(
         return Ok(("default", template));
     }
     if templates.len() == 1 {
-        let (name, template) = templates
+        return templates
             .first_key_value()
-            .expect("length was checked immediately above");
-        return Ok((name, template));
+            .map(|(name, template)| (name.as_str(), template.as_str()))
+            .ok_or_else(|| Error::Tokenizer("checkpoint does not provide a chat template".into()));
     }
     Err(Error::Tokenizer(if templates.is_empty() {
         "checkpoint does not provide a chat template".into()
     } else {
         "checkpoint provides multiple chat templates but no default; choose a name".into()
     }))
+}
+
+/// Implements the small Python-string-method subset used by official HF templates.
+#[cfg(feature = "chat-templates")]
+fn huggingface_string_method(
+    _state: &minijinja::State<'_, '_>,
+    value: &minijinja::Value,
+    method: &str,
+    arguments: &[minijinja::Value],
+) -> core::result::Result<minijinja::Value, minijinja::Error> {
+    use minijinja::{Error as JinjaError, ErrorKind, Value as JinjaValue};
+
+    let source = value
+        .as_str()
+        .ok_or_else(|| JinjaError::from(ErrorKind::UnknownMethod))?;
+    let one_string = || {
+        if arguments.len() != 1 {
+            return Err(JinjaError::new(
+                ErrorKind::InvalidOperation,
+                format!("string.{method} expects exactly one string argument"),
+            ));
+        }
+        arguments[0].as_str().ok_or_else(|| {
+            JinjaError::new(
+                ErrorKind::InvalidOperation,
+                format!("string.{method} expects a string argument"),
+            )
+        })
+    };
+    match method {
+        "startswith" => Ok(JinjaValue::from(source.starts_with(one_string()?))),
+        "endswith" => Ok(JinjaValue::from(source.ends_with(one_string()?))),
+        "split" => Ok(JinjaValue::from_serialize(
+            source
+                .split(one_string()?)
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        )),
+        "lstrip" | "rstrip" | "strip" => {
+            if arguments.len() > 1
+                || arguments
+                    .first()
+                    .is_some_and(|value| value.as_str().is_none())
+            {
+                return Err(JinjaError::new(
+                    ErrorKind::InvalidOperation,
+                    format!("string.{method} accepts at most one string argument"),
+                ));
+            }
+            let characters = arguments.first().and_then(JinjaValue::as_str);
+            let stripped = match (method, characters) {
+                ("lstrip", Some(characters)) => {
+                    source.trim_start_matches(|character| characters.contains(character))
+                }
+                ("rstrip", Some(characters)) => {
+                    source.trim_end_matches(|character| characters.contains(character))
+                }
+                ("strip", Some(characters)) => {
+                    source.trim_matches(|character| characters.contains(character))
+                }
+                ("lstrip", None) => source.trim_start(),
+                ("rstrip", None) => source.trim_end(),
+                ("strip", None) => source.trim(),
+                _ => source,
+            };
+            Ok(JinjaValue::from(stripped.to_owned()))
+        }
+        "lower" if arguments.is_empty() => Ok(JinjaValue::from(source.to_lowercase())),
+        "upper" if arguments.is_empty() => Ok(JinjaValue::from(source.to_uppercase())),
+        _ => Err(JinjaError::from(ErrorKind::UnknownMethod)),
+    }
 }
 
 /// Adds a special token spelling or JSON null to template context.
