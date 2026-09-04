@@ -832,15 +832,8 @@ fn semantic_indices<B: Backend>(
         let dense = (0..sequence).collect::<Vec<_>>();
         return Ok((0..batch).map(|_| dense.clone()).collect());
     };
-    let values = mask
-        .as_tensor()
-        .clone()
-        .try_into_data()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to read Nemotron-H mask: {error}"))
-        })?
-        .to_vec::<bool>()
-        .map_err(|error| Error::BackendCapability(format!("failed to read mask: {error}")))?;
+    let values =
+        crate::architecture::tensor_bool_values(mask.as_tensor().clone(), "Nemotron-H token mask")?;
     Ok(values
         .chunks_exact(sequence)
         .map(|row| {

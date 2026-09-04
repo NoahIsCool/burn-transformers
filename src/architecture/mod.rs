@@ -11,6 +11,7 @@ pub use spec::{
     SlidingWindowSpec,
 };
 pub use traits::{ArchitectureConfig, CausalLanguageModel, DecodeState, Seq2SeqLanguageModel};
+pub(crate) use types::tensor_bool_values;
 pub use types::{
     CausalLmInput, CausalLmOutput, DecodeInput, EncoderOutput, ForwardOptions, LogitsSelection,
     RouterDiagnostics, Seq2SeqInput, Seq2SeqOutput, TokenMask,

@@ -256,7 +256,7 @@ fn validate_memory_bound(tensor: &PlannedTensor, planned: u64) -> Result<()> {
         && tensor
             .sources
             .first()
-            .is_some_and(|source| source.dtype == tensor.dtype)
+            .is_some_and(|source| identity_reuses_source_buffer(source.dtype, tensor.dtype))
     {
         largest_source
     } else {
@@ -291,6 +291,18 @@ fn materialize_identity<S: TensorSource>(
         return make_tensor_data(&tensor.target, tensor.dtype, &shape, bytes);
     }
 
+    // Burn 0.21 converts equal-width TensorData storage in place. A BF16 value
+    // is exactly representable as F32, so Burn's BF16 -> F32 -> F16 conversion
+    // performs the same single F16 rounding as the scalar reference path. This
+    // avoids allocating and zeroing a second multi-gigabyte buffer for the
+    // checkpoint conversion that dominates F16 Metal model loading.
+    if identity_reuses_source_buffer(source_dtype, tensor.dtype) {
+        normalize_little_endian(&mut bytes, source_dtype)?;
+        observe_peak(stats, bytes.len(), 0, &tensor.target)?;
+        let data = make_tensor_data(&tensor.target, source_dtype, &shape, bytes)?;
+        return Ok(data.convert_dtype(burn_dtype(tensor.dtype)?));
+    }
+
     let mut output = allocate_tensor_bytes(&tensor.target, &tensor.shape, tensor.dtype)?;
     observe_peak(stats, bytes.len(), output.len(), &tensor.target)?;
     let elements = checked_elements(&shape, &tensor.target)?;
@@ -305,6 +317,17 @@ fn materialize_identity<S: TensorSource>(
         elements,
     )?;
     make_tensor_data(&tensor.target, tensor.dtype, &tensor.shape, output)
+}
+
+/// Returns whether one identity operation can reuse its source allocation.
+///
+/// Equal dtypes are already a byte-preserving transfer. Burn 0.21 additionally
+/// guarantees an in-place `TensorData` conversion when source and target scalar
+/// widths match. The optimized cast is intentionally restricted to BF16 -> F16,
+/// the production Metal checkpoint path whose rounding semantics are covered
+/// exhaustively; every other dtype pair retains the generic reference transform.
+fn identity_reuses_source_buffer(source: TensorDType, target: TensorDType) -> bool {
+    source == target || matches!((source, target), (TensorDType::BF16, TensorDType::F16))
 }
 
 /// Transposes a row-major matrix while casting directly into its final buffer.

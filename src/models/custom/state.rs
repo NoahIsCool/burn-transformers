@@ -486,20 +486,10 @@ fn read_validity<B: Backend>(
                     format!("{:?}", mask.as_tensor().dims()),
                 ));
             }
-            mask.as_tensor()
-                .clone()
-                .try_into_data()
-                .map_err(|error| {
-                    Error::BackendCapability(format!(
-                        "failed to read custom decode validity mask from the backend: {error}"
-                    ))
-                })?
-                .into_vec::<bool>()
-                .map_err(|error| {
-                    Error::BackendCapability(format!(
-                        "failed to read custom decode validity mask: {error}"
-                    ))
-                })
+            crate::architecture::tensor_bool_values(
+                mask.as_tensor().clone(),
+                "custom decode validity mask",
+            )
         }
         None => Ok(vec![true; batch * step]),
     }

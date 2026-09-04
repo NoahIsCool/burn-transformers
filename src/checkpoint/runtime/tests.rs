@@ -618,13 +618,15 @@ fn every_bf16_bit_pattern_casts_to_f16_with_half_semantics() {
     let (_temp, manifest) = single_manifest(std::slice::from_ref(&tensor));
     let expected =
         [ExpectedTensor::new("weight", [bits.len() as u64]).with_dtype(TensorDType::F16)];
-    let plan = build_load_plan(
+    let mut plan = build_load_plan(
         &manifest,
         &expected,
         &MappingPlan::identity(&expected),
         &LoadOptions::default(),
     )
     .unwrap();
+    let payload_bytes = u64::try_from(bits.len() * 2).unwrap();
+    plan.memory.peak_host_staging_bytes = payload_bytes;
     let mut sink = CollectingSink::default();
 
     let outcome = execute_local_load_plan(&manifest, &plan, &mut sink).unwrap();
@@ -644,7 +646,42 @@ fn every_bf16_bit_pattern_casts_to_f16_with_half_semantics() {
         }
     }
     assert_eq!(outcome.report.dtype_converted.len(), 1);
-    assert_eq!(outcome.stats.peak_host_staging_bytes, 262_144);
+    assert_eq!(outcome.stats.peak_host_staging_bytes, payload_bytes);
+    assert_eq!(outcome.stats.largest_source_payload_bytes, payload_bytes);
+    assert_eq!(outcome.stats.largest_output_tensor_bytes, payload_bytes);
+}
+
+#[test]
+fn bf16_to_f16_identity_rejects_a_bound_smaller_than_its_reused_buffer() {
+    let tensor = FixtureTensor::new(
+        "weight",
+        TensorDType::BF16,
+        [4],
+        u16_bytes(&[0x0000, 0x3f80, 0x7f80, 0x7fc1]),
+    );
+    let (_temp, manifest) = single_manifest(std::slice::from_ref(&tensor));
+    let expected = [ExpectedTensor::new("weight", [4]).with_dtype(TensorDType::F16)];
+    let mut plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &LoadOptions::default(),
+    )
+    .unwrap();
+    plan.memory.peak_host_staging_bytes = 7;
+    let mut sink = CollectingSink::default();
+
+    let error = execute_local_load_plan(&manifest, &plan, &mut sink).unwrap_err();
+
+    assert!(matches!(
+        error.cause,
+        ExecutionFailureCause::Checkpoint(CheckpointError::MemoryEstimateExceeded {
+            required: 8,
+            planned: 7,
+            ..
+        })
+    ));
+    assert!(sink.events.is_empty());
 }
 
 #[test]

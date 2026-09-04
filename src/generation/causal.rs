@@ -459,21 +459,7 @@ fn neutralize_inactive_logits<B: Backend>(
 
 /// Copies a small Boolean metadata tensor to the host with error context.
 fn tensor_bool_values<B: Backend>(tensor: Tensor<B, 2, Bool>, label: &str) -> Result<Vec<bool>> {
-    tensor
-        .try_into_data()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
-        })?
-        .to_vec::<B::BoolElem>()
-        .map(|values| {
-            values
-                .into_iter()
-                .map(|value| value.elem::<bool>())
-                .collect()
-        })
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
-        })
+    crate::architecture::tensor_bool_values(tensor, label)
 }
 
 /// Copies a small integer metadata tensor to the host with error context.

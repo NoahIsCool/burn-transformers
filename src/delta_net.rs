@@ -388,10 +388,7 @@ impl<B: Backend> GatedDeltaNet<B> {
         }
         self.validate_state(state, batch)?;
 
-        let masked_hidden = match token_mask {
-            Some(mask) => hidden * mask.as_tensor().clone().int().float().unsqueeze_dim::<3>(2),
-            None => hidden,
-        };
+        let masked_hidden = mask_hidden(hidden, token_mask);
         let projected =
             operations::linear(masked_hidden.clone(), &self.in_proj_qkv)?.swap_dims(1, 2);
         let (convolved, convolution_state) =
@@ -524,6 +521,31 @@ impl<B: Backend> GatedDeltaNet<B> {
         }
         Ok(())
     }
+}
+
+/// Zeros padded residual-stream vectors without changing activation precision.
+///
+/// The semantic mask is embedded as `m[b,t] in {0,1}` and applies
+/// `x'[b,t,d] = x[b,t,d] * m[b,t]`. Integer-to-float conversion uses a backend's
+/// default float type, so the mask is explicitly restored to `x`'s dtype before
+/// multiplication; otherwise an F16 inference graph can be silently promoted to
+/// F32 merely because an all-valid mask was supplied.
+fn mask_hidden<B: Backend>(
+    hidden: Tensor<B, 3>,
+    token_mask: Option<&TokenMask<B>>,
+) -> Tensor<B, 3> {
+    let Some(mask) = token_mask else {
+        return hidden;
+    };
+    let dtype = hidden.dtype();
+    hidden
+        * mask
+            .as_tensor()
+            .clone()
+            .int()
+            .float()
+            .cast(dtype)
+            .unsqueeze_dim::<3>(2)
 }
 
 /// Applies Qwen's output RMSNorm before its SiLU gate with exact cast points.
@@ -828,15 +850,39 @@ fn validate_rank3_shape(tensor: &str, actual: [usize; 3], expected: [usize; 3]) 
 mod tests {
     use burn::{
         backend::Flex,
-        tensor::{Bool, Int, Tensor, TensorData, Tolerance, backend::Backend},
+        tensor::{Bool, DType, Int, Tensor, TensorData, Tolerance, backend::Backend},
     };
+
+    use crate::architecture::TokenMask;
 
     use super::{
         DeltaNetMode, DeltaRuleConfig, DeltaRuleInput, GatedDeltaNetConfig, GatedDeltaNetState,
-        chunked_gated_delta_rule, recurrent_gated_delta_rule,
+        chunked_gated_delta_rule, mask_hidden, recurrent_gated_delta_rule,
     };
 
     type TestBackend = Flex<f32, i32>;
+
+    /// Supplying an all-valid mask cannot promote an F16 residual stream to F32.
+    #[test]
+    fn all_valid_mask_preserves_activation_dtype_and_values() {
+        let device = Default::default();
+        let hidden = Tensor::<TestBackend, 3>::from_data(
+            TensorData::new(vec![0.5_f32, -1.0, 2.0, -3.0], [1, 2, 2]),
+            &device,
+        )
+        .cast(DType::F16);
+        let mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [[true, true]].into(),
+            &device,
+        ));
+        let masked = mask_hidden(hidden.clone(), Some(&mask));
+
+        assert_eq!(masked.dtype(), DType::F16);
+        masked.cast(DType::F32).into_data().assert_approx_eq::<f32>(
+            &hidden.cast(DType::F32).into_data(),
+            Tolerance::absolute(0.0),
+        );
+    }
 
     /// Builds deterministic nontrivial inputs spanning two heads and unequal widths.
     fn fixture(sequence: usize) -> DeltaRuleInput<TestBackend> {

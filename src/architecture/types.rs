@@ -1,6 +1,36 @@
 //! Typed model inputs, outputs, masks, and diagnostic requests.
 
-use burn::tensor::{Bool, Int, Tensor, backend::Backend};
+use burn::tensor::{Bool, ElementConversion, Int, Tensor, backend::Backend};
+
+use crate::{Error, Result};
+
+/// Copies a small Boolean metadata tensor to the host without assuming its storage encoding.
+///
+/// Burn backends may expose logical booleans as native bits, `u8`, or another backend-selected
+/// representation. Converting through the backend's integer element type avoids asking
+/// [`TensorData`](burn::tensor::TensorData) to reinterpret one Boolean representation as another;
+/// every nonzero integer retains the public `true == valid token` convention.
+pub(crate) fn tensor_bool_values<B: Backend, const D: usize>(
+    tensor: Tensor<B, D, Bool>,
+    label: &str,
+) -> Result<Vec<bool>> {
+    tensor
+        .int()
+        .try_into_data()
+        .map_err(|error| {
+            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
+        })?
+        .to_vec::<B::IntElem>()
+        .map(|values| {
+            values
+                .into_iter()
+                .map(|value| value.elem::<i64>() != 0)
+                .collect()
+        })
+        .map_err(|error| {
+            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
+        })
+}
 
 /// A token-validity mask with the unambiguous convention `true == real token`.
 #[derive(Clone, Debug)]
@@ -137,6 +167,47 @@ pub struct Seq2SeqOutput<B: Backend> {
 #[cfg(test)]
 mod tests {
     use super::{ForwardOptions, LogitsSelection};
+
+    #[cfg(feature = "flex")]
+    use burn::backend::Flex;
+    #[cfg(feature = "metal")]
+    use burn::backend::Metal;
+    #[cfg(any(feature = "flex", feature = "metal"))]
+    use burn::tensor::{Bool, Tensor, TensorData};
+
+    #[cfg(feature = "flex")]
+    type TestBackend = Flex<f32, i32>;
+
+    /// Boolean host extraction preserves logical values independently of physical storage.
+    #[cfg(feature = "flex")]
+    #[test]
+    fn boolean_metadata_uses_backend_portable_integer_conversion() {
+        let device = Default::default();
+        let tensor = Tensor::<TestBackend, 2, Bool>::from_data(
+            TensorData::new(vec![true, false, false, true], [2, 2]),
+            &device,
+        );
+        assert_eq!(
+            super::tensor_bool_values(tensor, "test mask").unwrap(),
+            [true, false, false, true]
+        );
+    }
+
+    /// Metal's native Boolean readback remains portable through the integer conversion path.
+    #[cfg(feature = "metal")]
+    #[test]
+    #[ignore = "requires a host-visible Metal adapter"]
+    fn metal_boolean_metadata_does_not_assume_u8_tensor_data() {
+        let device = Default::default();
+        let tensor = Tensor::<Metal, 2, Bool>::from_data(
+            TensorData::new(vec![true, false, false, true], [2, 2]),
+            &device,
+        );
+        assert_eq!(
+            super::tensor_bool_values(tensor, "Metal test mask").unwrap(),
+            [true, false, false, true]
+        );
+    }
 
     /// Ensures inference avoids a full vocabulary projection unless explicitly requested.
     #[test]
