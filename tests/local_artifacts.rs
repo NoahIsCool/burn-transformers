@@ -15,10 +15,12 @@ use transformers::{ChatMessage, ChatTemplateOptions};
 use transformers::{
     EncodeOptions, LocalTokenizer,
     checkpoint::{
-        ArtifactSource, CheckpointManifest, LoadOptions,
+        ArtifactSource, CheckpointManifest, LoadOptions, LoadPlan,
         quantization::{
-            QuantizedBurnpackArtifact, QuantizedCheckpointOptions, SymmetricQuantization,
-            WeightQuantizationConfig, quantize_local_checkpoint_to_burnpack,
+            QuantizationEligibility, QuantizationExclusion, QuantizedBurnpackArtifact,
+            QuantizedCheckpointOptions, SourceFloatDType, SymmetricQuantization,
+            WeightQuantizationConfig, classify_weight_for_quantization,
+            quantize_local_checkpoint_to_burnpack,
         },
     },
     models::{
@@ -79,6 +81,56 @@ fn pinned_qwen38_inventory() -> PinnedQwen38Inventory {
         "fixtures/qwen3_5_checkpoint/qwen3_8_27b_inventory.json"
     ))
     .expect("the committed Qwen3.8 tensor inventory must remain valid JSON")
+}
+
+/// Partitions the mapped Qwen3.8 parameters using the public v1 weight policy.
+fn qwen38_quantization_partition(
+    plan: &LoadPlan,
+) -> (Vec<String>, Vec<(String, QuantizationExclusion)>) {
+    let mut quantized = Vec::new();
+    let mut excluded = Vec::new();
+    for tensor in &plan.tensors {
+        let shape = tensor
+            .shape
+            .iter()
+            .map(|&dimension| {
+                usize::try_from(dimension)
+                    .expect("Qwen3.8 checkpoint dimensions must fit the host architecture")
+            })
+            .collect::<Vec<_>>();
+        match classify_weight_for_quantization(&tensor.target, &shape) {
+            QuantizationEligibility::Eligible => quantized.push(tensor.target.clone()),
+            QuantizationEligibility::Excluded(reason) => {
+                excluded.push((tensor.target.clone(), reason));
+            }
+        }
+    }
+    (quantized, excluded)
+}
+
+/// Asserts the immutable Qwen3.8 mixed-precision policy inventory.
+fn assert_qwen38_quantization_partition(
+    quantized: &[String],
+    excluded: &[(String, QuantizationExclusion)],
+) {
+    assert_eq!(quantized.len(), 497);
+    assert_eq!(excluded.len(), 369);
+    for (reason, expected) in [
+        (QuantizationExclusion::Mtp, 15),
+        (QuantizationExclusion::Embedding, 1),
+        (QuantizationExclusion::Normalization, 209),
+        (QuantizationExclusion::RecurrentScalar, 96),
+        (QuantizationExclusion::RecurrentConvolution, 48),
+    ] {
+        assert_eq!(
+            excluded
+                .iter()
+                .filter(|(_, observed)| *observed == reason)
+                .count(),
+            expected,
+            "unexpected Qwen3.8 exclusion count for {reason:?}"
+        );
+    }
 }
 
 /// Validates every pinned Qwen3.8 configuration field and physical tensor header.
@@ -217,6 +269,8 @@ fn strictly_maps_pinned_qwen38_text_and_mtp() {
         .map(String::as_str)
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(planned_sources, expected_sources);
+    let (quantized, excluded) = qwen38_quantization_partition(&plan);
+    assert_qwen38_quantization_partition(&quantized, &excluded);
     eprintln!("Qwen3.8 pre-allocation memory estimate: {:?}", plan.memory);
 }
 
@@ -274,10 +328,10 @@ fn validates_pinned_qwen38_chat_template() {
     );
 }
 
-/// Loads Qwen3.8 in Metal F16 through the public registry and checks cached parity.
+/// Loads Qwen3.8 in Metal F16, executes its base and MTP graphs, and checks cached parity.
 #[cfg(feature = "metal")]
 #[test]
-#[ignore = "requires pinned Qwen3.8 weights, about 60 GiB of free unified memory, and Metal"]
+#[ignore = "requires pinned Qwen3.8 weights, about 80 GiB of free unified memory, and Metal"]
 fn loads_pinned_qwen38_text_and_mtp_and_runs_metal() {
     let root = pinned_qwen38_root();
     let device = Default::default();
@@ -312,7 +366,7 @@ fn loads_pinned_qwen38_text_and_mtp_and_runs_metal() {
         .tokenizer()
         .expect("the public loaded-model bundle must retain the local tokenizer")
         .encode(
-            "Hello",
+            "Hello world, cached decoding.",
             &EncodeOptions {
                 add_special_tokens: false,
                 ..EncodeOptions::default()
@@ -320,18 +374,38 @@ fn loads_pinned_qwen38_text_and_mtp_and_runs_metal() {
         )
         .expect("the smoke prompt must tokenize");
     let sequence = encoding.token_ids()[0].len();
+    assert_eq!(
+        encoding.token_ids()[0],
+        [9_419, 1_814, 11, 19_954, 45_543, 13],
+        "the pinned six-token smoke fixture changed"
+    );
     let input = encoding
         .to_causal_input::<Metal>(&device)
         .expect("the tokenizer batch must convert to a public causal input");
+    let unmasked_input = CausalLmInput {
+        token_ids: input.token_ids.clone(),
+        token_mask: None,
+        position_ids: input.position_ids.clone(),
+    };
+    let diagnostic_options = ForwardOptions {
+        hidden_states: true,
+        ..ForwardOptions::default()
+    };
     let stateless_started = Instant::now();
     let stateless = loaded
         .model()
-        .forward(input.clone(), &ForwardOptions::default())
+        .forward(input.clone(), &diagnostic_options)
         .expect("the public auto model must execute stateless Qwen3.8 inference");
     assert_eq!(stateless.logits.dims(), [1, 1, 248_320]);
     let stateless_logits = metal_tensor_values("Qwen3.8 stateless logits", &stateless.logits);
     let stateless_seconds = stateless_started.elapsed().as_secs_f64();
     assert!(stateless_logits.iter().all(|value| value.is_finite()));
+    let unmasked = loaded
+        .model()
+        .forward(unmasked_input, &diagnostic_options)
+        .expect("an all-valid mask must be equivalent to an omitted mask");
+    let unmasked_logits = metal_tensor_values("Qwen3.8 unmasked logits", &unmasked.logits);
+    let mask_cosine = cosine_similarity(&stateless_logits, &unmasked_logits);
 
     let mut state = loaded
         .model()
@@ -344,12 +418,64 @@ fn loads_pinned_qwen38_text_and_mtp_and_runs_metal() {
     let prefill_started = Instant::now();
     let cached = loaded
         .model()
-        .prefill(input, &mut state, &ForwardOptions::default())
+        .prefill(input, &mut state, &diagnostic_options)
         .expect("the public auto model must execute cached Qwen3.8 prefill");
     let cached_logits = metal_tensor_values("Qwen3.8 cached logits", &cached.logits);
     let prefill_seconds = prefill_started.elapsed().as_secs_f64();
     assert!(cached_logits.iter().all(|value| value.is_finite()));
     let cached_cosine = cosine_similarity(&stateless_logits, &cached_logits);
+    let stateless_trace = metal_tensor_values(
+        "Qwen3.8 stateless hidden trace",
+        &Tensor::cat(stateless.hidden_states.clone(), 0),
+    );
+    let unmasked_trace = metal_tensor_values(
+        "Qwen3.8 unmasked hidden trace",
+        &Tensor::cat(unmasked.hidden_states, 0),
+    );
+    let cached_trace = metal_tensor_values(
+        "Qwen3.8 cached hidden trace",
+        &Tensor::cat(cached.hidden_states, 0),
+    );
+    let trace_width = sequence
+        * stateless
+            .hidden_states
+            .first()
+            .expect("requested stateless hidden trace")
+            .dims()[2];
+    let mask_layer_cosines = stateless_trace
+        .chunks_exact(trace_width)
+        .zip(unmasked_trace.chunks_exact(trace_width))
+        .map(|(masked, unmasked)| cosine_similarity(masked, unmasked))
+        .collect::<Vec<_>>();
+    let cached_layer_cosines = stateless_trace
+        .chunks_exact(trace_width)
+        .zip(cached_trace.chunks_exact(trace_width))
+        .map(|(stateless, cached)| cosine_similarity(stateless, cached))
+        .collect::<Vec<_>>();
+    for (layer, cosine) in mask_layer_cosines.iter().copied().enumerate() {
+        assert!(
+            cosine >= 0.999,
+            "Qwen3.8 all-valid/omitted-mask hidden cosine at trace {layer} was {cosine}"
+        );
+    }
+    for (layer, cosine) in cached_layer_cosines.iter().copied().enumerate() {
+        assert!(
+            cosine >= 0.999,
+            "Qwen3.8 stateless/cached hidden cosine at trace {layer} was {cosine}"
+        );
+    }
+    let minimum_mask_layer_cosine = mask_layer_cosines
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let minimum_cached_layer_cosine = cached_layer_cosines
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        mask_cosine >= 0.999,
+        "Qwen3.8 all-valid/omitted-mask cosine {mask_cosine} is below the gate"
+    );
     assert!(
         cached_cosine >= 0.999,
         "Qwen3.8 cached/stateless cosine {cached_cosine} is below the acceptance gate"
@@ -369,6 +495,34 @@ fn loads_pinned_qwen38_text_and_mtp_and_runs_metal() {
     assert_eq!(cached_top, stateless_top);
 
     let next_token = i64::from(stateless_top[0]);
+    let stateless_logits_hash = fnv1a64_f32(&stateless_logits);
+    let target_hidden = stateless
+        .final_hidden_state
+        .expect("MTP diagnostics requested the base model's final hidden state")
+        .narrow(1, sequence - 1, 1);
+    let mtp_started = Instant::now();
+    let mtp_prediction = match loaded.model() {
+        AutoCausalLm::Qwen3_5(model) => model
+            .forward_mtp(
+                Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(vec![next_token], [1, 1]),
+                    &device,
+                ),
+                target_hidden,
+                Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(vec![i64::try_from(sequence - 1).unwrap()], [1, 1]),
+                    &device,
+                ),
+                0,
+            )
+            .expect("the loaded Qwen3.8 MTP graph must execute"),
+        model => panic!("expected Qwen3.5-family auto dispatch, found {model:?}"),
+    };
+    assert_eq!(mtp_prediction.logits.dims(), [1, 1, 248_320]);
+    let mtp_logits = metal_tensor_values("Qwen3.8 MTP logits", &mtp_prediction.logits);
+    let mtp_seconds = mtp_started.elapsed().as_secs_f64();
+    assert!(mtp_logits.iter().all(|value| value.is_finite()));
+
     let decode_started = Instant::now();
     let decoded = loaded
         .model()
@@ -392,9 +546,404 @@ fn loads_pinned_qwen38_text_and_mtp_and_runs_metal() {
     assert_eq!(state.lengths(), &[sequence + 1]);
     eprintln!(
         "Qwen3.8 F16: prompt_tokens={sequence}, first_top1={next_token}, \
-         cached_cosine={cached_cosine:.9}, load_seconds={load_seconds:.3}, \
+         mask_cosine={mask_cosine:.9}, cached_cosine={cached_cosine:.9}, \
+         min_mask_layer_cosine={minimum_mask_layer_cosine:.9}, \
+         min_cached_layer_cosine={minimum_cached_layer_cosine:.9}, \
+         stateless_logits_fnv1a64={stateless_logits_hash:016x}, \
+         load_seconds={load_seconds:.3}, \
          stateless_seconds={stateless_seconds:.3}, prefill_seconds={prefill_seconds:.3}, \
-         decode_seconds={decode_seconds:.3}"
+         mtp_seconds={mtp_seconds:.3}, decode_seconds={decode_seconds:.3}"
+    );
+}
+
+/// Computes a stable FNV-1a digest over little-endian F32 logit bit patterns.
+fn fnv1a64_f32(values: &[f32]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for value in values {
+        for byte in value.to_bits().to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
+/// The acceptance digest fixes byte order and the FNV constants explicitly.
+#[test]
+fn f32_acceptance_digest_is_stable() {
+    assert_eq!(fnv1a64_f32(&[]), 0xcbf2_9ce4_8422_2325);
+    assert_eq!(fnv1a64_f32(&[0.0]), 0x4d25_767f_9dce_13f5);
+    assert_ne!(fnv1a64_f32(&[0.0]), fnv1a64_f32(&[-0.0]));
+}
+
+/// Converts the pinned Qwen3.8 text-plus-MTP graph to a persistent Q8 Burnpack.
+#[test]
+#[ignore = "requires pinned Qwen3.8 weights and TRANSFORMERS_QWEN38_Q8_OUTPUT_DIR on external storage"]
+fn quantizes_pinned_qwen38_weights_to_q8_burnpack() {
+    quantize_pinned_qwen38_weights_to_burnpack(
+        SymmetricQuantization::Q8,
+        "TRANSFORMERS_QWEN38_Q8_OUTPUT_DIR",
+    );
+}
+
+/// Converts the pinned Qwen3.8 text-plus-MTP graph to a persistent Q4 Burnpack.
+#[test]
+#[ignore = "requires pinned Qwen3.8 weights and TRANSFORMERS_QWEN38_Q4_OUTPUT_DIR on external storage"]
+fn quantizes_pinned_qwen38_weights_to_q4_burnpack() {
+    quantize_pinned_qwen38_weights_to_burnpack(
+        SymmetricQuantization::Q4,
+        "TRANSFORMERS_QWEN38_Q4_OUTPUT_DIR",
+    );
+}
+
+/// Streams one precision of the immutable Qwen3.8 checkpoint into Burnpack.
+///
+/// The checkpoint contract deliberately includes the auxiliary MTP graph even
+/// though the v1 quantization policy retains every `mtp.*` parameter in BF16/F16.
+/// Consequently, this gate proves both complete source consumption and the exact
+/// mixed-precision boundary rather than merely checking that a sidecar was
+/// written. The destination is explicitly supplied because finalization briefly
+/// needs both staging and published copies of these large artifacts.
+fn quantize_pinned_qwen38_weights_to_burnpack(
+    scheme: SymmetricQuantization,
+    output_directory_env: &str,
+) {
+    let root = pinned_qwen38_root();
+    let output_directory =
+        PathBuf::from(std::env::var_os(output_directory_env).unwrap_or_else(|| {
+            panic!("set {output_directory_env} to a dedicated external output directory")
+        }));
+    fs::create_dir_all(&output_directory).unwrap_or_else(|error| {
+        panic!(
+            "create Qwen3.8 quantized output directory {}: {error}",
+            output_directory.display()
+        )
+    });
+    assert!(
+        output_directory.is_dir(),
+        "{output_directory_env} must name a directory, got {}",
+        output_directory.display()
+    );
+
+    let label = match scheme {
+        SymmetricQuantization::Q8 => "q8",
+        SymmetricQuantization::Q4 => "q4",
+    };
+    let output = output_directory.join(format!("qwen3.8-27b-1d4bf0f2-{label}-g64.bpk"));
+    assert!(
+        !output.exists(),
+        "Qwen3.8 conversion is create-only; choose an empty output directory or retain the existing artifact at {}",
+        output.display()
+    );
+
+    let config_path = root.join("config.json");
+    let config_json = fs::read_to_string(&config_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", config_path.display()));
+    let config = Qwen3_5TextConfig::from_json_str(&config_json)
+        .expect("the pinned nested Qwen3.8 text configuration must validate");
+    let load_options = LoadOptions::default();
+    let manifest = CheckpointManifest::discover(&root, &load_options)
+        .expect("all pinned Qwen3.8 SafeTensors headers must pass strict discovery");
+    assert_eq!(manifest.shards.len(), 18);
+    assert_eq!(manifest.tensors.len(), 1_199);
+
+    let contract = config
+        .checkpoint_contract(Qwen3_5CheckpointOptions {
+            source: Qwen3_5CheckpointSource::Multimodal,
+            include_mtp: true,
+        })
+        .expect("the Qwen3.8 topology must produce its text-plus-MTP contract");
+    let plan = contract
+        .build_load_plan(&manifest, &load_options)
+        .expect("Qwen3.8 text and MTP tensors must map while vision remains allowlisted");
+    assert_eq!(plan.tensors.len(), 866);
+    assert!(plan.aliases.is_empty());
+    assert!(plan.report.is_strictly_valid());
+    assert_eq!(plan.report.allowlisted_ignored.len(), 333);
+    assert!(
+        plan.report
+            .allowlisted_ignored
+            .iter()
+            .all(|name| name.starts_with("model.visual."))
+    );
+
+    let (expected_quantized, expected_excluded) = qwen38_quantization_partition(&plan);
+    assert_qwen38_quantization_partition(&expected_quantized, &expected_excluded);
+
+    let outcome = quantize_local_checkpoint_to_burnpack(
+        &manifest,
+        &plan,
+        &output,
+        QuantizedCheckpointOptions {
+            weights: WeightQuantizationConfig {
+                scheme,
+                ..WeightQuantizationConfig::default()
+            },
+            ..QuantizedCheckpointOptions::default()
+        },
+    )
+    .unwrap_or_else(|error| panic!("Qwen3.8 {label} conversion failed: {error}"));
+
+    assert!(outcome.report.is_strictly_valid());
+    assert_eq!(outcome.report.applied.len(), 866);
+    assert_eq!(outcome.report.allowlisted_ignored.len(), 333);
+    assert!(outcome.report.dtype_converted.is_empty());
+    assert_eq!(outcome.report.quantized.len(), 497);
+    assert_eq!(outcome.artifact.tensor_count, 497);
+    assert_eq!(outcome.staging.tensor_count, 497);
+    assert_eq!(outcome.execution.tensors_applied, 866);
+    assert_eq!(outcome.execution.source.tensor_reads, 866);
+    assert_eq!(outcome.execution.source.max_open_shards, 1);
+    assert_eq!(
+        outcome.execution.delivered_tensor_bytes,
+        plan.memory.target_parameter_bytes
+    );
+    assert_eq!(outcome.artifact.path, output);
+    assert!(outcome.artifact.quantized_payload_bytes > 0);
+    assert!(
+        outcome.artifact.quantized_payload_bytes < plan.memory.target_parameter_bytes,
+        "{label} payload must be smaller than the mapped BF16 text-plus-MTP parameters"
+    );
+
+    let observed_quantized = outcome
+        .report
+        .quantized
+        .iter()
+        .map(|record| record.target.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(observed_quantized, expected_quantized);
+    assert!(outcome.report.quantized.iter().all(|record| {
+        record.scheme == format!("symmetric-{label}-g64-flat-row-major") && record.bytes > 0
+    }));
+    let observed_excluded = outcome
+        .excluded
+        .iter()
+        .map(|record| (record.target.clone(), record.reason))
+        .collect::<Vec<_>>();
+    assert_eq!(observed_excluded, expected_excluded);
+
+    let mut artifact = QuantizedBurnpackArtifact::open(&output)
+        .unwrap_or_else(|error| panic!("open Qwen3.8 {label} Burnpack: {error}"));
+    let validation = artifact
+        .validate_all()
+        .unwrap_or_else(|error| panic!("validate Qwen3.8 {label} Burnpack: {error}"));
+    assert_eq!(validation.tensor_count, 497);
+    assert_eq!(
+        validation.payload_bytes,
+        outcome.artifact.quantized_payload_bytes
+    );
+    assert_eq!(artifact.manifest().tensors.len(), 497);
+    assert!(artifact.manifest().packed_execution.is_available());
+    assert!(artifact.manifest().tensors.iter().all(|(name, tensor)| {
+        !name.starts_with("mtp.")
+            && tensor.scheme == scheme
+            && tensor.group_size.get() == 64
+            && tensor.source_dtype == SourceFloatDType::Bf16
+    }));
+    assert_eq!(
+        artifact
+            .manifest()
+            .tensors
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        expected_quantized
+    );
+    drop(artifact);
+
+    #[cfg(all(feature = "metal", not(feature = "rocm")))]
+    runs_pinned_qwen38_quantized_text_and_mtp_on_metal(&root, &output, scheme, 497);
+
+    eprintln!(
+        "Qwen3.8 {label}: tensors={}, excluded={}, payload_bytes={}, artifact_bytes={}, largest_tensor_bytes={}",
+        outcome.artifact.tensor_count,
+        outcome.excluded.len(),
+        outcome.artifact.quantized_payload_bytes,
+        outcome.artifact.artifact_bytes,
+        outcome.artifact.largest_materialized_tensor_bytes,
+    );
+}
+
+/// Loads one retained Qwen3.8 sidecar and exercises packed base and F16 MTP paths.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn runs_pinned_qwen38_quantized_text_and_mtp_on_metal(
+    root: &std::path::Path,
+    burnpack: &std::path::Path,
+    scheme: SymmetricQuantization,
+    quantized_count: usize,
+) {
+    let label = match scheme {
+        SymmetricQuantization::Q8 => "q8",
+        SymmetricQuantization::Q4 => "q4",
+    };
+    let device = Default::default();
+    let loaded = AutoCausalLm::<Metal>::load_local(
+        root,
+        &AutoLoadOptions {
+            checkpoint: LoadOptions {
+                dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+                ..LoadOptions::default()
+            },
+            load_tokenizer: false,
+            qwen_mtp: true,
+            quantized_burnpack: Some(burnpack.to_path_buf()),
+            repository: Some("Qwen/Qwen3.8-27B".into()),
+            revision: Some("1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0".into()),
+            ..AutoLoadOptions::default()
+        },
+        &device,
+    )
+    .unwrap_or_else(|error| panic!("load mixed F16/{label} Qwen3.8 model: {error}"));
+    assert!(loaded.load_report().is_strictly_valid());
+    assert_eq!(loaded.load_report().applied.len(), 866);
+    assert_eq!(loaded.load_report().quantized.len(), quantized_count);
+    assert_eq!(loaded.load_report().allowlisted_ignored.len(), 333);
+    assert!(
+        loaded.load_report().quantized.iter().all(|record| {
+            record.scheme == format!("burn-qfloat-symmetric-{label}-g64-block-1xg")
+        })
+    );
+
+    let AutoCausalLm::Qwen3_5(model) = loaded.model() else {
+        panic!("Qwen3.8 config must select the Qwen3.5-family hybrid decoder");
+    };
+    assert!(matches!(
+        model.model.layers[0]
+            .linear_attn
+            .as_ref()
+            .expect("Qwen3.8 layer zero must be DeltaNet")
+            .in_proj_qkv
+            .weight
+            .val()
+            .dtype(),
+        DType::QFloat(_)
+    ));
+    assert_eq!(
+        model
+            .mtp
+            .as_ref()
+            .expect("the acceptance load must instantiate MTP")
+            .fc
+            .weight
+            .val()
+            .dtype(),
+        DType::F16,
+        "MTP parameters must remain outside the packed v1 sidecar"
+    );
+
+    let token_ids = vec![9_419_i64, 1_814, 11, 19_954, 45_543, 13];
+    let sequence = token_ids.len();
+    let input = CausalLmInput {
+        token_ids: Tensor::<Metal, 2, Int>::from_data(
+            TensorData::new(token_ids, [1, sequence]),
+            &device,
+        ),
+        token_mask: None,
+        position_ids: None,
+    };
+    let stateless = loaded
+        .model()
+        .forward(
+            input.clone(),
+            &ForwardOptions {
+                hidden_states: true,
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("run stateless Qwen3.8 {label} inference: {error}"));
+    assert_eq!(stateless.logits.dims(), [1, 1, 248_320]);
+    let stateless_logits =
+        metal_tensor_values("quantized Qwen3.8 stateless logits", &stateless.logits);
+    assert!(stateless_logits.iter().all(|value| value.is_finite()));
+    let stateless_top = stateless
+        .logits
+        .argmax(2)
+        .to_data()
+        .to_vec::<i32>()
+        .expect("quantized Qwen3.8 top-1 IDs must use i32 storage");
+
+    let mut state = loaded
+        .model()
+        .new_decode_state(
+            CacheConfig::new(1, sequence + 1).expect("quantized Qwen3.8 smoke cache"),
+            1,
+            &device,
+        )
+        .expect("quantized Qwen3.8 decode state must initialize");
+    let cached = loaded
+        .model()
+        .prefill(input, &mut state, &ForwardOptions::default())
+        .unwrap_or_else(|error| panic!("run cached Qwen3.8 {label} prefill: {error}"));
+    let cached_logits = metal_tensor_values("quantized Qwen3.8 cached logits", &cached.logits);
+    assert!(cached_logits.iter().all(|value| value.is_finite()));
+    let cached_cosine = cosine_similarity(&stateless_logits, &cached_logits);
+    assert!(
+        cached_cosine >= 0.999,
+        "Qwen3.8 {label} cached/stateless cosine {cached_cosine} is below the gate"
+    );
+    assert_eq!(
+        cached
+            .logits
+            .argmax(2)
+            .to_data()
+            .to_vec::<i32>()
+            .expect("cached quantized Qwen3.8 top-1 IDs must use i32 storage"),
+        stateless_top
+    );
+
+    let next_token = i64::from(stateless_top[0]);
+    let target_hidden = stateless
+        .final_hidden_state
+        .expect("quantized MTP smoke requires the base final hidden state")
+        .narrow(1, sequence - 1, 1);
+    let mtp = match loaded.model() {
+        AutoCausalLm::Qwen3_5(model) => model
+            .forward_mtp(
+                Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(vec![next_token], [1, 1]),
+                    &device,
+                ),
+                target_hidden,
+                Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(vec![i64::try_from(sequence - 1).unwrap()], [1, 1]),
+                    &device,
+                ),
+                0,
+            )
+            .unwrap_or_else(|error| panic!("run Qwen3.8 {label} MTP inference: {error}")),
+        model => panic!("expected Qwen3.5-family auto dispatch, found {model:?}"),
+    };
+    assert_eq!(mtp.logits.dims(), [1, 1, 248_320]);
+    assert!(
+        metal_tensor_values("quantized Qwen3.8 MTP logits", &mtp.logits)
+            .iter()
+            .all(|value| value.is_finite())
+    );
+
+    let decoded = loaded
+        .model()
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(vec![next_token], [1, 1]),
+                    &device,
+                ),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_or_else(|error| panic!("run Qwen3.8 {label} recurrent decode: {error}"));
+    assert_eq!(decoded.logits.dims(), [1, 1, 248_320]);
+    assert!(
+        metal_tensor_values("quantized Qwen3.8 decoded logits", &decoded.logits)
+            .iter()
+            .all(|value| value.is_finite())
+    );
+    assert_eq!(state.lengths(), &[sequence + 1]);
+    eprintln!(
+        "Qwen3.8 {label} Metal: tensors={quantized_count}, top1={next_token}, cached_cosine={cached_cosine:.9}"
     );
 }
 
