@@ -6,6 +6,11 @@
 //! per-head Q/K RMSNorm and full-head RoPE. The official 30B-A3B topology puts
 //! a bias-free 128-expert SwiGLU router in all 48 blocks, chooses eight experts
 //! per token, renormalizes their probabilities, and has no shared expert.
+//! Qwen3-MoE RMSNorm evaluates the mean square in FP32, rounds the resulting
+//! unit-RMS activation back to the residual dtype, and only then applies the
+//! learned scale: `u = x_f32 / sqrt(mean(x_f32^2) + epsilon)` and
+//! `y = weight * cast_input_dtype(u)`. That last cast precedes multiplication,
+//! which is observable for F16 activations.
 //!
 //! This module deliberately uses the shared attention, normalization, position,
 //! feed-forward, and sparse-dispatch implementations. It owns only the exact
@@ -69,6 +74,7 @@ impl<B: Backend> Qwen3MoeDecoderLayer<B> {
         let norm = || {
             RmsNormConfig::new(config.hidden_size)
                 .with_epsilon(config.rms_norm_eps)
+                .with_round_before_scale(true)
                 .init(device)
         };
         let (sparse_mlp, dense_mlp) = if config.is_moe_layer(layer_index) {
@@ -89,8 +95,17 @@ impl<B: Backend> Qwen3MoeDecoderLayer<B> {
                 ),
             )
         };
+        let mut self_attn = attention.init(device)?;
+        // Q/K norms use the same upstream RMSNorm class as the residual-stream
+        // norms. The shared attention builder intentionally defaults to late
+        // scaling, so select Qwen3-MoE's reduced-precision ordering here.
+        for attention_norm in [&mut self_attn.query_norm, &mut self_attn.key_norm] {
+            if let Some(attention_norm) = attention_norm.as_mut() {
+                attention_norm.round_before_scale = true;
+            }
+        }
         Ok(Self {
-            self_attn: attention.init(device)?,
+            self_attn,
             sparse_mlp,
             dense_mlp,
             input_layernorm: norm()?,
@@ -175,6 +190,7 @@ impl<B: Backend> Qwen3MoeModel<B> {
             layers,
             norm: RmsNormConfig::new(config.hidden_size)
                 .with_epsilon(config.rms_norm_eps)
+                .with_round_before_scale(true)
                 .init(device)?,
             config,
             rope,
@@ -345,12 +361,13 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
 impl Qwen3MoeConfig {
     /// Returns the local-attention window for a layer, when enabled.
     ///
-    /// Hugging Face's legacy Qwen convention applies the window to the first
-    /// `max_window_layers` decoder blocks. Released Qwen3-30B-A3B disables the
-    /// feature, so every official layer returns `None`.
+    /// Transformers 4.51's Qwen3-MoE implementation leaves the prefix
+    /// `0..max_window_layers` on full attention and applies the finite window
+    /// starting exactly at `max_window_layers`. Released Qwen3-30B-A3B disables
+    /// the feature, so every layer in that checkpoint returns `None`.
     #[must_use]
     pub fn layer_sliding_window(&self, layer_index: usize) -> Option<usize> {
-        (self.use_sliding_window && layer_index < self.max_window_layers)
+        (self.use_sliding_window && layer_index >= self.max_window_layers)
             .then_some(self.sliding_window)
             .flatten()
     }
@@ -693,7 +710,8 @@ fn validate_logits_selection(selection: &LogitsSelection, sequence: usize) -> Re
 mod tests {
     use burn::{
         backend::Flex,
-        tensor::{Bool, Int, Tensor, Tolerance, backend::BackendTypes},
+        module::Param,
+        tensor::{Bool, DType, Int, Tensor, Tolerance, backend::BackendTypes},
     };
 
     use super::*;
@@ -762,6 +780,103 @@ mod tests {
         let device = Default::default();
         let model = initialized_model(tiny_config(), &device);
         (model, device)
+    }
+
+    /// Every Qwen3-MoE norm must round before scale, including per-head Q/K norms.
+    #[test]
+    fn every_rms_norm_uses_the_upstream_precision_policy() {
+        let device = Default::default();
+        let model = Qwen3MoeForCausalLm::<TestBackend>::init(tiny_config(), &device).unwrap();
+
+        assert!(model.model.norm.round_before_scale);
+        for layer in &model.model.layers {
+            assert!(layer.input_layernorm.round_before_scale);
+            assert!(layer.post_attention_layernorm.round_before_scale);
+            assert!(
+                layer
+                    .self_attn
+                    .query_norm
+                    .as_ref()
+                    .expect("Qwen3-MoE query RMSNorm")
+                    .round_before_scale
+            );
+            assert!(
+                layer
+                    .self_attn
+                    .key_norm
+                    .as_ref()
+                    .expect("Qwen3-MoE key RMSNorm")
+                    .round_before_scale
+            );
+        }
+    }
+
+    /// F16 exposes the upstream cast-before-scale order as a bitwise distinction.
+    #[test]
+    fn rms_norm_f16_matches_upstream_cast_before_scale_order() {
+        let device = Default::default();
+        let mut model = Qwen3MoeForCausalLm::<TestBackend>::init(tiny_config(), &device).unwrap();
+        let norm = &mut model.model.layers[0].input_layernorm;
+        let weight = Tensor::<TestBackend, 1>::from_floats(
+            [0.731, 1.337, -0.419, 0.613, -1.217, 1.091, 0.527, -0.883],
+            &device,
+        )
+        .cast(DType::F16);
+        norm.weight = Param::from_tensor(weight.clone());
+        let input = Tensor::<TestBackend, 2>::from_floats(
+            [[0.337, 1.719, -2.113, 0.491, -0.827, 1.239, 2.051, -1.477]],
+            &device,
+        )
+        .cast(DType::F16);
+
+        let input_f32 = input.clone().cast(DType::F32);
+        let rms = (input_f32.clone().square().mean_dim(1) + norm.epsilon).sqrt();
+        let unit_rms = input_f32 / rms;
+        let upstream = unit_rms.clone().cast(DType::F16) * weight.clone().unsqueeze();
+        let late_round = (unit_rms * weight.cast(DType::F32).unsqueeze()).cast(DType::F16);
+        let actual = norm.forward(input);
+
+        assert_eq!(actual.dtype(), DType::F16);
+        assert_eq!(actual.to_data(), upstream.to_data());
+        assert_ne!(actual.to_data(), late_round.to_data());
+    }
+
+    /// The v4.51 boundary is a full-attention prefix length, not a windowed prefix.
+    #[test]
+    fn sliding_window_schedule_matches_every_valid_boundary() {
+        let mut config = tiny_config();
+        config.num_hidden_layers = 8;
+        config.use_sliding_window = true;
+        config.sliding_window = Some(3);
+
+        for boundary in 0..=config.num_hidden_layers {
+            config.max_window_layers = boundary;
+            for layer_index in 0..config.num_hidden_layers {
+                let expected = (layer_index >= boundary).then_some(3);
+                assert_eq!(
+                    config.layer_sliding_window(layer_index),
+                    expected,
+                    "boundary={boundary}, layer={layer_index}"
+                );
+            }
+        }
+    }
+
+    /// Both upstream feature guards suppress the window independently.
+    #[test]
+    fn sliding_window_requires_enablement_and_a_configured_width() {
+        let mut config = tiny_config();
+        config.max_window_layers = 0;
+        config.sliding_window = Some(3);
+        for layer_index in 0..config.num_hidden_layers {
+            assert_eq!(config.layer_sliding_window(layer_index), None);
+        }
+
+        config.use_sliding_window = true;
+        config.sliding_window = None;
+        for layer_index in 0..config.num_hidden_layers {
+            assert_eq!(config.layer_sliding_window(layer_index), None);
+        }
     }
 
     /// Stateless output exposes requested hidden and router diagnostics.
@@ -1167,6 +1282,7 @@ mod tests {
         let mut config = tiny_config();
         config.use_sliding_window = true;
         config.sliding_window = Some(2);
+        config.max_window_layers = 0;
         let model = initialized_model::<TestBackend>(config, &device);
         let full = model
             .forward(

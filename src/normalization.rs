@@ -25,9 +25,10 @@ pub struct RmsNormConfig {
     pub zero_centered: bool,
     /// Whether to round the normalized activation before learned scaling.
     ///
-    /// DeepSeek casts the unit-RMS activation back to the residual dtype and
-    /// then multiplies by its parameter. Qwen keeps both operations in FP32
-    /// and rounds only the final result, so the distinction is explicit.
+    /// Some architectures, including DeepSeek V2 and Qwen3-MoE, cast the
+    /// unit-RMS activation back to the residual dtype before multiplying by
+    /// the learned parameter. Others, including Qwen3.5/Qwen3.8, keep both
+    /// operations in FP32 and round only the final result.
     #[serde(default)]
     pub round_before_scale: bool,
 }
@@ -55,7 +56,7 @@ impl RmsNormConfig {
         self
     }
 
-    /// Selects DeepSeek-style rounding before learned scaling.
+    /// Selects rounding before learned scaling for architectures that require it.
     pub fn with_round_before_scale(mut self, round_before_scale: bool) -> Self {
         self.round_before_scale = round_before_scale;
         self
@@ -92,7 +93,7 @@ impl RmsNormConfig {
     }
 }
 
-/// RMS normalization whose parameter semantics match both T5 and Qwen3.8.
+/// RMS normalization with explicit checkpoint-compatible precision ordering.
 #[derive(Module, Debug)]
 pub struct RmsNorm<B: Backend> {
     /// Learned scale, or learned scale minus one for zero-centered checkpoints.
@@ -112,8 +113,8 @@ impl<B: Backend> RmsNorm<B> {
     /// remains compatible with F16 Metal execution while preserving an FP32
     /// variance estimate. By default, normalization and learned scaling remain
     /// in FP32 until the final cast; this matches zero-centered Qwen RMSNorm.
-    /// [`RmsNormConfig::with_round_before_scale`] instead reproduces the
-    /// DeepSeek convention of rounding the normalized activation first.
+    /// [`RmsNormConfig::with_round_before_scale`] instead reproduces
+    /// architectures that round the normalized activation first.
     pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
         let dtype = input.dtype();
         let input = input.cast(DType::F32);
@@ -187,9 +188,9 @@ mod tests {
         assert_eq!(output.dtype(), DType::F16);
     }
 
-    /// DeepSeek rounds the normalized activation before reduced-precision scaling.
+    /// Architectures can round before reduced-precision learned scaling.
     #[test]
-    fn round_before_scale_matches_deepseek_operation_order() {
+    fn round_before_scale_matches_early_rounding_operation_order() {
         use burn::tensor::DType;
 
         let device = Default::default();
