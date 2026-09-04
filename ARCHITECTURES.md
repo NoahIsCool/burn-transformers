@@ -22,7 +22,7 @@ semantics are cross-checked against vLLM revision
 | Qwen3 MoE | `Qwen/Qwen3-30B-A3B` | `ad44e777bcd18fa416d9da3bd8f70d33ebb85d39` | GQA and Q/K normalization; 128 routed experts; top-8 routing; no shared expert | Strict sharded SafeTensors; selected-expert dispatch must remain sparse |
 | DeepSeek V2 | `deepseek-ai/DeepSeek-V2-Lite` | `604d5664dddd88a0433dbae533b7fe9472482de0` | Multi-head latent attention; compressed latent decode cache; YaRN; top-6 routed and two shared experts | Strict sharded SafeTensors; remote Python is never executed |
 | Muse Glimmer | `meta-models/Muse-Glimmer-30B` | `a4e59da52a7bc87ae7251dd5545c0dd437c44b68` | Three sliding-window RoPE blocks per full NoPE block; sandwich norms; query scaling; attention gates; final logit softcap | Load the text tower only and report visual tensors explicitly |
-| T5 / FLAN bring-up | `google/flan-t5-small` | `0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab` | Bidirectional encoder; causal decoder; cross attention; bucketed relative bias; tied embeddings; gated feed-forward | Single-file official SafeTensors |
+| T5 / FLAN bring-up | `google/flan-t5-small` | `0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab` | Bidirectional encoder; causal decoder; cross attention; bucketed relative bias; shared encoder/decoder embeddings; untied LM head; gated feed-forward | Single-file official SafeTensors |
 | T5 / FLAN full | `google/flan-t5-xxl` | `ae7c9136adc7555eeccc78cdd960dfd60fb346ce` | 24 encoder and 24 decoder layers; gated GELU | Official five-shard SafeTensors only |
 | T5 / UL2 | `google/flan-ul2` | `452d74ce28ac4a7f211d6ba3ef0717027f7a8074` | T5 encoder-decoder inference graph with gated SiLU | The pinned repository has PyTorch shards only; convert offline one shard at a time with `weights_only=True`, then validate every tensor against the source index |
 | Nemotron-H 3.5 | `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` | `a9904d24bcc1d289a1950fa9d2b978c47cf903b9` | Interleaved Mamba2, GQA, and MoE; 128 routed experts; top-6 routing plus a shared expert; ReLU-squared experts; next-token head | Strict sharded SafeTensors and BF16-to-F16 streaming conversion on Metal |
@@ -70,10 +70,11 @@ rejection sampling. `K` defaults to two. Prompt setup shifts `(x_(i+1), h_i)`
 into the MTP cache, accepted target and MTP prefixes commit atomically, and an
 all-accepted cycle performs one auxiliary catch-up step to preserve the invariant
 `target_length = mtp_length + 1`. The stochastic correction distribution is
-`normalize((p - q)_+)`, which preserves the target marginal. This is synthetic
-and reference-math validation only: support is not promoted to 27B acceptance
-until the pinned real checkpoint passes logits, token, memory, and throughput
-gates on target hardware.
+`normalize((p - q)_+)`, which preserves the target marginal. The pinned 27B
+checkpoint now passes strict text-plus-MTP loading and a Metal F16 smoke covering
+stateless, cached-prefill, MTP, and recurrent-decode execution. Support remains
+unadvertised until reference logits, longer token parity, quantized quality,
+long-context memory, and standardized throughput gates pass.
 
 The exact namespace rewrites, tensor-shape equations, interleaved gated-query
 layout contract, MTP inventory, and metadata-only golden acceptance counts are

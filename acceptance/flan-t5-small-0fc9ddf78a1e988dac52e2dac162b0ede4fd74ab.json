@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "strict_f32_load_reference_logits_cached_parity_and_beam_fixture_verified_pending_longer_generation_and_accelerator_acceptance",
+  "phase": "strict_f32_load_sampled_reference_logit_probes_cached_parity_and_beam_fixture_verified_pending_full_vector_generation_and_accelerator_acceptance",
   "repository": "google/flan-t5-small",
   "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
   "artifact_layout": {
@@ -18,6 +18,7 @@
     "generation_config.json": "f5a1c7e2be8092018d8835128987edf0111637dd98e90599cc80310fef75d95a",
     "tokenizer.json": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
     "tokenizer_config.json": "fcde0f79bffda3688119c94330866a8fbf8de20ae65a8c492c9bd47c704655a0",
+    "special_tokens_map.json": "5c87151ef0f72a99d1f766a4c418bd2a1f90aaa30a8e22fe5eca9641daebb64f",
     "spiece.model": "d60acb128cf7b7f2536e8f38a5b18a05535c9e14c7a355904270e15b0945ea86",
     "model.safetensors": "495fa51e204676f1a857a9fc13c4c89f3f5ba9f480b898cebca02add25e6d749"
   },
@@ -27,7 +28,9 @@
     "safetensors_header_strictly_validated": true,
     "mapping_plan_strict": true,
     "weights_applied": true,
-    "reference_f32_logits_compared": true,
+    "reference_top10_and_sampled_f32_logits_compared": true,
+    "full_vector_reference_logit_cosine_validated": false,
+    "reference_logit_output_hash_recorded": false,
     "cached_prefill_matches_stateless": true,
     "cached_decode_matches_stateless": true,
     "reference_beam_tokens_compared": true,
@@ -56,7 +59,18 @@
       "decoded_text": "Das Haus ist schön.",
       "finish_reason": "eos:1",
       "tokens_identical": true,
-      "burn_wall_seconds_including_load": 15.33
+      "burn_wall_seconds_including_load": 15.33,
+      "timing_classification": "non_benchmark_diagnostic",
+      "timing_reproducible": false,
+      "timing_missing_metadata": [
+        "crate_commit",
+        "rust_and_burn_versions",
+        "cargo_profile_features_and_exact_command",
+        "machine_and_operating_system",
+        "synchronization_and_timing_boundaries",
+        "raw_samples",
+        "output_hash"
+      ]
     }
   }
 }
