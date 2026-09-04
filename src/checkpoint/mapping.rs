@@ -319,7 +319,10 @@ pub struct PlannedTensor {
 /// Strictly validated second-pass load plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadPlan {
-    /// Non-alias operations, sorted by target name.
+    /// Non-alias mappings in canonical target-name order.
+    ///
+    /// The runtime derives a separate source-location execution schedule without
+    /// mutating this vector, so inspection and plan comparisons remain deterministic.
     pub tensors: Vec<PlannedTensor>,
     /// Alias operations, topologically resolved to storage-owning targets.
     pub aliases: Vec<PlannedTensor>,

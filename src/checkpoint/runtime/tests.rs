@@ -177,6 +177,32 @@ impl TensorSink for CollectingSink {
     }
 }
 
+/// Local fixture source that records each successful physical tensor read.
+struct TracingLocalSource<'a> {
+    inner: LocalShardSource<'a>,
+    reads: Vec<(String, String, u64)>,
+}
+
+impl TensorSource for TracingLocalSource<'_> {
+    fn read_tensor(&mut self, source: &PlannedSource) -> crate::checkpoint::Result<SourceTensor> {
+        let payload = self.inner.read_tensor(source)?;
+        self.reads.push((
+            source.shard.clone(),
+            source.name.clone(),
+            source.data_offsets[0],
+        ));
+        Ok(payload)
+    }
+
+    fn close(&mut self) -> crate::checkpoint::Result<()> {
+        self.inner.close()
+    }
+
+    fn stats(&self) -> SourceStats {
+        self.inner.stats()
+    }
+}
+
 fn single_manifest(tensors: &[FixtureTensor]) -> (TempDir, crate::checkpoint::CheckpointManifest) {
     let temp = TempDir::new().unwrap();
     write_shard(temp.path(), "model.safetensors", tensors);
@@ -248,6 +274,169 @@ fn identity_and_rename_deliver_native_burn_tensor_data() {
     assert_eq!(outcome.stats.source.max_open_shards, 1);
     assert_eq!(outcome.stats.source.tensor_reads, 3);
     assert_eq!(outcome.stats.source.shard_open_order, ["model.safetensors"]);
+}
+
+#[test]
+fn interleaved_targets_execute_once_per_shard_in_physical_offset_order() {
+    let first = [
+        FixtureTensor::new("source.zeta", TensorDType::F32, [1], f32_bytes(&[60.0])),
+        FixtureTensor::new(
+            "source.packed",
+            TensorDType::F32,
+            [2],
+            f32_bytes(&[40.0, 50.0]),
+        ),
+        FixtureTensor::new(
+            "source.matrix",
+            TensorDType::F32,
+            [1, 2],
+            f32_bytes(&[20.0, 21.0]),
+        ),
+    ];
+    let second = [
+        FixtureTensor::new("source.alpha", TensorDType::F32, [1], f32_bytes(&[10.0])),
+        FixtureTensor::new(
+            "source.concat_left",
+            TensorDType::F32,
+            [1],
+            f32_bytes(&[30.0]),
+        ),
+        FixtureTensor::new(
+            "source.concat_right",
+            TensorDType::F32,
+            [1],
+            f32_bytes(&[31.0]),
+        ),
+    ];
+    let temp = TempDir::new().unwrap();
+    write_shard(temp.path(), "part-01.safetensors", &first);
+    write_shard(temp.path(), "part-02.safetensors", &second);
+    write_index(
+        temp.path(),
+        &[
+            ("source.alpha", "part-02.safetensors"),
+            ("source.concat_left", "part-02.safetensors"),
+            ("source.concat_right", "part-02.safetensors"),
+            ("source.matrix", "part-01.safetensors"),
+            ("source.packed", "part-01.safetensors"),
+            ("source.zeta", "part-01.safetensors"),
+        ],
+        32,
+    );
+    let manifest = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap();
+    let expected = [
+        ExpectedTensor::new("aardvark_alias", [1]).with_dtype(TensorDType::F32),
+        ExpectedTensor::new("alpha", [1]).with_dtype(TensorDType::F32),
+        ExpectedTensor::new("beta", [2, 1]).with_dtype(TensorDType::F32),
+        ExpectedTensor::new("delta", [1]).with_dtype(TensorDType::F32),
+        ExpectedTensor::new("epsilon", [1]).with_dtype(TensorDType::F32),
+        ExpectedTensor::new("gamma", [2]).with_dtype(TensorDType::F32),
+        ExpectedTensor::new("zeta", [1]).with_dtype(TensorDType::F32),
+    ];
+    let mut mapping = MappingPlan::new();
+    mapping
+        .map("source.alpha", "alpha")
+        .transpose_2d("source.matrix", "beta")
+        .split(
+            "source.packed",
+            0,
+            [("delta".into(), 1), ("epsilon".into(), 1)],
+        )
+        .concatenate(
+            ["source.concat_left".into(), "source.concat_right".into()],
+            "gamma",
+            0,
+        )
+        .map("source.zeta", "zeta")
+        .alias("zeta", "aardvark_alias");
+    let plan = build_load_plan(&manifest, &expected, &mapping, &LoadOptions::default()).unwrap();
+    assert_eq!(
+        plan.tensors
+            .iter()
+            .map(|tensor| tensor.target.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha", "beta", "delta", "epsilon", "gamma", "zeta"]
+    );
+    assert_eq!(
+        plan.tensors
+            .iter()
+            .map(|tensor| tensor.sources[0].shard.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "part-02.safetensors",
+            "part-01.safetensors",
+            "part-01.safetensors",
+            "part-01.safetensors",
+            "part-02.safetensors",
+            "part-01.safetensors",
+        ]
+    );
+    let planned_report = plan.report.clone();
+    let mut source = TracingLocalSource {
+        inner: LocalShardSource::new(&manifest),
+        reads: Vec::new(),
+    };
+    let mut sink = CollectingSink::default();
+
+    let outcome = execute_load_plan(&plan, &mut source, &mut sink).unwrap();
+
+    assert_eq!(
+        outcome.stats.source.shard_open_order,
+        ["part-01.safetensors", "part-02.safetensors"]
+    );
+    assert_eq!(outcome.stats.source.shard_opens, 2);
+    assert_eq!(outcome.stats.source.max_open_shards, 1);
+    assert_eq!(outcome.stats.source.tensor_reads, 6);
+    assert_eq!(outcome.stats.source_reads, 6);
+    assert_eq!(
+        source.reads,
+        [
+            ("part-01.safetensors".into(), "source.zeta".into(), 0),
+            ("part-01.safetensors".into(), "source.packed".into(), 4),
+            ("part-01.safetensors".into(), "source.matrix".into(), 12),
+            ("part-02.safetensors".into(), "source.alpha".into(), 0),
+            ("part-02.safetensors".into(), "source.concat_left".into(), 4,),
+            (
+                "part-02.safetensors".into(),
+                "source.concat_right".into(),
+                8,
+            ),
+        ]
+    );
+    assert_eq!(
+        sink.events,
+        [
+            "write:zeta",
+            "write:delta",
+            "write:epsilon",
+            "write:beta",
+            "write:alpha",
+            "write:gamma",
+            "alias:aardvark_alias->zeta",
+        ]
+    );
+    assert_eq!(tensor_f32(&sink.tensors["alpha"]), [10.0]);
+    assert_eq!(tensor_f32(&sink.tensors["beta"]), [20.0, 21.0]);
+    assert_eq!(tensor_f32(&sink.tensors["delta"]), [40.0]);
+    assert_eq!(tensor_f32(&sink.tensors["epsilon"]), [50.0]);
+    assert_eq!(tensor_f32(&sink.tensors["gamma"]), [30.0, 31.0]);
+    assert_eq!(tensor_f32(&sink.tensors["zeta"]), [60.0]);
+    assert_eq!(sink.aliases["aardvark_alias"], "zeta");
+    let mut expected_report = planned_report;
+    expected_report.applied = [
+        "aardvark_alias",
+        "alpha",
+        "beta",
+        "delta",
+        "epsilon",
+        "gamma",
+        "zeta",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    expected_report.finalize();
+    assert_eq!(outcome.report, expected_report);
 }
 
 #[test]

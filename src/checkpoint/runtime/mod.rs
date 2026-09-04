@@ -281,13 +281,17 @@ impl<E: Error + 'static> Error for ExecutionFailure<E> {
 
 /// Executes a validated load plan from an arbitrary audited source into a sink.
 ///
-/// The complete mutable plan is preflighted before the first sink call. Each target
-/// then holds no more than one source payload plus its final output allocation.
-/// Targets slicing the same fused source are grouped at their first plan position:
-/// the payload remains resident while each output is materialized and handed off,
-/// avoiding rereads without retaining multiple target buffers. A concatenation
-/// keeps the final output while replacing one source payload at a time. Source
-/// resources are closed before aliases are installed.
+/// The complete mutable plan is preflighted before the first source read or sink
+/// call. Primary operations are then scheduled by source shard and byte offset,
+/// independently of the target-name order retained by [`LoadPlan`]. Consequently,
+/// a local source opens each shard once for the usual unary and fused-split model
+/// mappings even when architecture target names are interleaved across shards.
+/// Targets slicing the same fused source are grouped at that source's physical
+/// position: the payload remains resident while each output is materialized and
+/// handed off, avoiding rereads without retaining multiple target buffers. A
+/// concatenation remains one indivisible operation and keeps the final output while
+/// replacing one source payload at a time. Source resources are closed before
+/// aliases are installed.
 pub fn execute_load_plan<S, K>(
     plan: &LoadPlan,
     source: &mut S,
@@ -512,7 +516,22 @@ fn shared_slice_key(tensor: &PlannedTensor) -> Option<SharedSourceKey<'_>> {
     Some(source.into())
 }
 
-/// Groups all slices of one fused source while retaining deterministic order.
+/// Groups fused slices and orders primary work by physical checkpoint location.
+///
+/// [`LoadPlan::tensors`] stays sorted by target name because that ordering is part
+/// of the deterministic mapping contract. Execution has a different concern: the
+/// bounded local source owns only one shard handle, so alternating target names
+/// from different shards causes needless close/open cycles. Sorting the independent
+/// primary groups by their first source `(shard, byte offset)` makes unary model
+/// loads monotonic in checkpoint storage while leaving aliases and report ordering
+/// untouched.
+///
+/// A multi-source concatenation cannot be interleaved with another target without
+/// retaining several incomplete output allocations. It is therefore scheduled by
+/// its first logical source and remains atomic, preserving the pass-one memory
+/// bound. Fused slices are a single group because all outputs depend on one shared
+/// payload. Target name and original plan index are total-order tie breakers for
+/// hand-authored plans whose source descriptors happen to compare equally.
 fn execution_groups(tensors: &[PlannedTensor]) -> Vec<Vec<usize>> {
     let mut slices_by_source = BTreeMap::<SharedSourceKey<'_>, Vec<usize>>::new();
     for (index, tensor) in tensors.iter().enumerate() {
@@ -528,14 +547,66 @@ fn execution_groups(tensors: &[PlannedTensor]) -> Vec<Vec<usize>> {
             groups.push(vec![index]);
             continue;
         };
-        let indices = &slices_by_source[&key];
+        let Some(indices) = slices_by_source.get(&key) else {
+            // `key` was inserted during the immutable collection pass above. Keep
+            // this internal logic invariant non-panicking if the grouping code is
+            // changed independently in the future.
+            groups.push(vec![index]);
+            continue;
+        };
         if indices.len() == 1 {
             groups.push(vec![index]);
         } else if emitted.insert(key) {
             groups.push(indices.clone());
         }
     }
+    groups.sort_by(|left, right| execution_group_order(tensors, left, right));
     groups
+}
+
+/// Compares two indivisible execution groups by their first physical source.
+fn execution_group_order(
+    tensors: &[PlannedTensor],
+    left: &[usize],
+    right: &[usize],
+) -> std::cmp::Ordering {
+    let left_index = left.first().copied();
+    let right_index = right.first().copied();
+    let left_tensor = left_index.and_then(|index| tensors.get(index));
+    let right_tensor = right_index.and_then(|index| tensors.get(index));
+
+    match (left_tensor, right_tensor) {
+        (Some(left_tensor), Some(right_tensor)) => {
+            physical_source_order(left_tensor.sources.first(), right_tensor.sources.first())
+                .then_with(|| left_tensor.target.cmp(&right_tensor.target))
+                .then_with(|| left_index.cmp(&right_index))
+        }
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => left_index.cmp(&right_index),
+    }
+}
+
+/// Compares optional source descriptors in stable shard-and-offset order.
+///
+/// Missing descriptors sort after real sources. Runtime validation rejects them
+/// before this scheduler is called, but retaining a total comparison here keeps
+/// the helper defensive and avoids making scheduling itself a fallible phase.
+fn physical_source_order(
+    left: Option<&PlannedSource>,
+    right: Option<&PlannedSource>,
+) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left
+            .shard
+            .cmp(&right.shard)
+            .then_with(|| left.data_offsets[0].cmp(&right.data_offsets[0]))
+            .then_with(|| left.data_offsets[1].cmp(&right.data_offsets[1]))
+            .then_with(|| left.name.cmp(&right.name)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
 }
 
 /// Executes a load plan against its discovered local checkpoint manifest.
