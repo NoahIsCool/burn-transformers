@@ -36,7 +36,7 @@ means the named pinned artifact was actually streamed into a model and executed.
 | Target | Executable transformer/runtime surface | Checkpoint evidence | Current acceptance state |
 |---|---|---|---|
 | `Qwen/Qwen3.5-0.8B` at `2fc06364715b967f1860aea9cf38778875588b17` | Qwen3.5/Qwen3.8 hybrid graph with DeltaNet and full-attention layers, recurrent/KV decode state, gated GQA, partial MRoPE, SwiGLU, and optional batch-one, one-layer MTP speculation | Strict local multimodal mapping and real weight application passed. The checked artifact has 488 physical tensors; the base graph consumes 320 tensors, produces one tied alias, and explicitly reports 153 visual plus 15 omitted MTP tensors. | [Real-weight record](acceptance/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17.json): Metal F16 logit/reference and 32-token greedy parity, cached/stateless parity, and a Q4 packed smoke run passed. Q8 single-backend Metal, quantized quality, and 32K stress remain open; not advertised. |
-| `Qwen/Qwen3.8-27B` at `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | Same executable hybrid and MTP runtime as the bring-up model, with its exact 64-layer schedule | The pinned 18-shard artifact's exact configuration and all 1,199 physical headers match the committed inventory. Strict loading applied all 866 text-plus-MTP tensors and allowlisted exactly 333 visual tensors; the tokenizer and no-thinking chat template also passed. | [Real-weight record](acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json): Metal F16 stateless, cached prefill, MTP, and recurrent decode passed with `1.0` cosine at all 66 compared hidden traces. Reference logits, 32-token generation, Q8/Q4 quality, and 32K stress remain open; not advertised. |
+| `Qwen/Qwen3.8-27B` at `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | Same executable hybrid and MTP runtime as the bring-up model, with its exact 64-layer schedule | The pinned 18-shard artifact's exact configuration and all 1,199 physical headers match the committed inventory. Strict loading applied all 866 text-plus-MTP tensors and allowlisted exactly 333 visual tensors; the tokenizer and no-thinking chat template also passed. | [Real-weight record](acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json): Metal F16 stateless, cached prefill, MTP, and recurrent decode passed with `1.0` cosine at all 66 compared hidden traces. Strict mixed Q8/F16 and Q4/F16 Metal smokes also passed after packing 497 matrices and retaining 369 tensors per format. Reference logits, longer generation, quantized corpus quality, standardized throughput and output hashing, and 32K stress remain open; not advertised. |
 | `Qwen/Qwen3-30B-A3B` at `ad44e777bcd18fa416d9da3bd8f70d33ebb85d39` | Executable GQA decoder with Q/K normalization, top-8 routing, sparse selected-expert execution, and cached decode | Strict family mapping and automatic local loader are implemented and exercised with synthetic fixtures. | No pinned real-weight load or inference acceptance has been recorded; not advertised. |
 | `deepseek-ai/DeepSeek-V2-Lite` at `604d5664dddd88a0433dbae533b7fe9472482de0` | Executable YaRN/MLA decoder with reference unabsorbed prefill, compressed latent-cache absorbed decode, routed top-k experts, and shared experts | Strict family mapping and automatic local loader are implemented and exercised with synthetic golden, cache, and checkpoint-contract tests. | No pinned real-weight load or inference acceptance has been recorded; not advertised. |
 | `meta-models/Muse-Glimmer-30B` at `a4e59da52a7bc87ae7251dd5545c0dd437c44b68` | Executable text decoder with sliding/full attention, RoPE/NoPE scheduling, sandwich norms, attention output gates, and final-logit softcap | Strict text-only/multimodal mapping and automatic local loader are implemented and exercised with synthetic fixtures. | No pinned real-weight load or inference acceptance has been recorded; not advertised. |
@@ -74,9 +74,10 @@ explicitly allowlists them, as Qwen and Muse do for their visual towers.
   revision.
 - Qwen3.8 uses the Qwen3.5 architecture discriminator in the official artifact.
   No invented `qwen3_8_text` serialized value is accepted.
-- Qwen3.8's complete text-plus-MTP weights now load and execute on Metal F16, but
-  its reference-logit, 32-token generation, quantized-quality, and 32K gates are
-  still pending.
+- Qwen3.8's complete text-plus-MTP weights now load and execute on Metal F16,
+  while its mixed Q8/F16 and Q4/F16 graphs have each passed a strict smoke run.
+  Reference-logit, longer-generation, quantized-quality,
+  standardized-throughput and output-hash, and 32K gates are still pending.
 - Muse Glimmer vision topology is intentionally not represented. Only its nested
   text decoder is extracted.
 - Nemotron-H's historical configs are not RFC-compliant JSON because they contain
@@ -87,8 +88,8 @@ explicitly allowlists them, as Qwen and Muse do for their visual towers.
   acceptance record.
 - MTP execution, tokenization, cached generation, T5 beam search, and native Q4/Q8
   are runtime facilities rather than configuration claims. Automatic packed
-  checkpoint loading is currently limited to `qwen3_5_text`; Q8 Metal and quality
-  gates remain open.
+  checkpoint loading is currently limited to `qwen3_5_text`; Qwen3.8 Q8 and Q4
+  Metal smoke execution passed, while both quantized-quality gates remain open.
 - Qwen MTP speculative generation currently accepts batch size one only and
   defaults to two draft tokens per cycle. A different positive draft count is
   configurable; ordinary Qwen inference supports batches.

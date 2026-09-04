@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "strict_full_precision_metal_smoke_verified_pending_reference_generation_quantization_and_32k_acceptance",
+  "phase": "strict_full_precision_q8_and_q4_metal_smokes_verified_pending_reference_generation_quality_throughput_and_32k_acceptance",
   "repository": "Qwen/Qwen3.8-27B",
   "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
   "artifact_layout": {
@@ -73,6 +73,20 @@
     "metal_f16_mtp_inference": true,
     "metal_f16_recurrent_decode": true,
     "metal_f16_full_smoke": true,
+    "q8_streaming_conversion_validated": true,
+    "q8_burnpack_integrity_validated": true,
+    "q8_metal_mixed_precision_stateless_inference": true,
+    "q8_metal_mixed_precision_cached_prefill": true,
+    "q8_metal_mixed_precision_mtp_inference": true,
+    "q8_metal_mixed_precision_recurrent_decode": true,
+    "q8_metal_mixed_precision_full_smoke": true,
+    "q4_streaming_conversion_validated": true,
+    "q4_burnpack_integrity_validated": true,
+    "q4_metal_mixed_precision_stateless_inference": true,
+    "q4_metal_mixed_precision_cached_prefill": true,
+    "q4_metal_mixed_precision_mtp_inference": true,
+    "q4_metal_mixed_precision_recurrent_decode": true,
+    "q4_metal_mixed_precision_full_smoke": true,
     "reference_full_vector_logits_compared": false,
     "reference_greedy_32_tokens_compared": false,
     "cached_stateless_top1_all_prefixes_compared": false,
@@ -161,11 +175,150 @@
       "process": "/usr/bin/time -l around the complete direct test-binary invocation"
     }
   },
+  "q8_optimized_direct_binary_smoke": {
+    "status": "passed",
+    "result_recorded": true,
+    "command": "/usr/bin/time -l env 'TRANSFORMERS_QWEN38_DIR=/Volumes/bag of holding/models/Qwen/Qwen3.8-27B-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0' 'TRANSFORMERS_QWEN38_Q8_OUTPUT_DIR=/Volumes/bag of holding/models/transformers-acceptance/qwen3.8-27b-q8-1d4bf0f2' crates/transformers/target/release/deps/local_artifacts-ab2e8048baa68d15 quantizes_pinned_qwen38_weights_to_q8_burnpack --ignored --exact --nocapture",
+    "binary": {
+      "path": "crates/transformers/target/release/deps/local_artifacts-ab2e8048baa68d15",
+      "sha256": "f2554f6fba478fa24193b631e45866c4d3c97466a7c540501415d2e2a2413371"
+    },
+    "source": {
+      "acceptance_test_commit": "0953040",
+      "documentation_baseline_commit": "b01b6fa",
+      "note": "Commit 0953040 contains the executed Q8 acceptance harness; b01b6fa is the documentation baseline on which this evidence was recorded."
+    },
+    "build_and_machine": {
+      "build_reference": "optimized_direct_binary_smoke.build",
+      "machine_reference": "optimized_direct_binary_smoke.machine",
+      "execution_backend": "Burn Metal via burn-wgpu and CubeCL",
+      "mixed_precision_policy": "eligible matrices use Q8 Burn QFloat; excluded tensors remain BF16-derived F16 at runtime"
+    },
+    "conversion": {
+      "scheme": "symmetric-q8-g64-flat-row-major",
+      "source_dtype": "bf16",
+      "group_size": 64,
+      "quantized_tensors": 497,
+      "excluded_retained_tensors": 369,
+      "mapped_tensors_applied": 866,
+      "visual_tensors_allowlisted": 333,
+      "maximum_open_source_shards": 1,
+      "quantized_payload_bytes": 27223326720,
+      "artifact_bytes": 27223642316,
+      "largest_materialized_tensor_bytes": 1350860800,
+      "artifact": {
+        "path": "/Volumes/bag of holding/models/transformers-acceptance/qwen3.8-27b-q8-1d4bf0f2/qwen3.8-27b-1d4bf0f2-q8-g64.bpk",
+        "sha256": "732e693fe995b09ea9d864a5466792700035b3faf25b104b3dd23b208524bf97"
+      }
+    },
+    "fixture": {
+      "batch_size": 1,
+      "prompt_token_ids": [9419, 1814, 11, 19954, 45543, 13],
+      "prompt_tokens": 6,
+      "cache_capacity_tokens": 7,
+      "executed_graphs": [
+        "stateless_mixed_q8_f16_forward",
+        "cached_mixed_q8_f16_prefill",
+        "one_f16_mtp_forward",
+        "one_mixed_q8_f16_recurrent_decode_step"
+      ]
+    },
+    "results": {
+      "first_top1_token_id": 271,
+      "cached_vs_stateless_logit_cosine": 1.0,
+      "cached_vs_stateless_top1_equal": true,
+      "stateless_logits_finite": true,
+      "cached_logits_finite": true,
+      "mtp_logits_finite": true,
+      "recurrent_decode_logits_finite": true,
+      "rust_test_wall_seconds": 985.53,
+      "process_wall_seconds": 1241.12,
+      "macos_maximum_resident_set_bytes": 29786243072,
+      "macos_peak_memory_footprint_bytes": 34317474944,
+      "process_exit_status": 0
+    },
+    "measurement_classification": {
+      "kind": "cold end-to-end diagnostic acceptance run",
+      "timing_scope": "The Rust test includes streaming conversion, Burnpack validation, strict mixed-model loading, and Metal smoke execution; process time encloses the complete direct test-binary invocation.",
+      "standardized_benchmark": false,
+      "throughput_reportable": false
+    }
+  },
+  "q4_optimized_direct_binary_smoke": {
+    "status": "passed",
+    "result_recorded": true,
+    "command": "/usr/bin/time -l env 'TRANSFORMERS_QWEN38_DIR=/Volumes/bag of holding/models/Qwen/Qwen3.8-27B-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0' 'TRANSFORMERS_QWEN38_Q4_OUTPUT_DIR=/Volumes/bag of holding/models/transformers-acceptance/qwen3.8-27b-q4-1d4bf0f2' crates/transformers/target/release/deps/local_artifacts-ab2e8048baa68d15 quantizes_pinned_qwen38_weights_to_q4_burnpack --ignored --exact --nocapture",
+    "binary": {
+      "path": "crates/transformers/target/release/deps/local_artifacts-ab2e8048baa68d15",
+      "sha256": "f2554f6fba478fa24193b631e45866c4d3c97466a7c540501415d2e2a2413371"
+    },
+    "source": {
+      "acceptance_test_commit": "0953040",
+      "documentation_baseline_commit": "b01b6fa",
+      "note": "Commit 0953040 contains the executed Q4 acceptance harness; b01b6fa is the documentation baseline on which this evidence was recorded."
+    },
+    "build_and_machine": {
+      "build_reference": "optimized_direct_binary_smoke.build",
+      "machine_reference": "optimized_direct_binary_smoke.machine",
+      "execution_backend": "Burn Metal via burn-wgpu and CubeCL",
+      "mixed_precision_policy": "eligible matrices use Q4 Burn QFloat; excluded tensors remain BF16-derived F16 at runtime"
+    },
+    "conversion": {
+      "scheme": "symmetric-q4-g64-flat-row-major",
+      "source_dtype": "bf16",
+      "group_size": 64,
+      "quantized_tensors": 497,
+      "excluded_retained_tensors": 369,
+      "mapped_tensors_applied": 866,
+      "visual_tensors_allowlisted": 333,
+      "maximum_open_source_shards": 1,
+      "quantized_payload_bytes": 14412349440,
+      "artifact_bytes": 14412672972,
+      "largest_materialized_tensor_bytes": 715161600,
+      "artifact": {
+        "path": "/Volumes/bag of holding/models/transformers-acceptance/qwen3.8-27b-q4-1d4bf0f2/qwen3.8-27b-1d4bf0f2-q4-g64.bpk",
+        "sha256": "834068dea74179765218853315075b89815c8c74b5f25824c3be414cbdedf9b2"
+      }
+    },
+    "fixture": {
+      "batch_size": 1,
+      "prompt_token_ids": [9419, 1814, 11, 19954, 45543, 13],
+      "prompt_tokens": 6,
+      "cache_capacity_tokens": 7,
+      "executed_graphs": [
+        "stateless_mixed_q4_f16_forward",
+        "cached_mixed_q4_f16_prefill",
+        "one_f16_mtp_forward",
+        "one_mixed_q4_f16_recurrent_decode_step"
+      ]
+    },
+    "results": {
+      "first_top1_token_id": 271,
+      "cached_vs_stateless_logit_cosine": 1.0,
+      "cached_vs_stateless_top1_equal": true,
+      "stateless_logits_finite": true,
+      "cached_logits_finite": true,
+      "mtp_logits_finite": true,
+      "recurrent_decode_logits_finite": true,
+      "rust_test_wall_seconds": 966.10,
+      "process_wall_seconds": 966.15,
+      "macos_maximum_resident_set_bytes": 16752263168,
+      "macos_peak_memory_footprint_bytes": 20688689408,
+      "process_exit_status": 0
+    },
+    "measurement_classification": {
+      "kind": "cold end-to-end diagnostic acceptance run",
+      "timing_scope": "The Rust test includes streaming conversion, Burnpack validation, strict mixed-model loading, and Metal smoke execution; process time encloses the complete direct test-binary invocation.",
+      "standardized_benchmark": false,
+      "throughput_reportable": false
+    }
+  },
   "open_acceptance_gates": [
     "Compare full-model F16 logits against the pinned official reference and reach cosine similarity of at least 0.999.",
     "Match at least 32 greedy continuation tokens on stable-margin fixed prompts.",
     "Prove cached and stateless top-1 equality at every compared prefix, including decode steps.",
-    "Validate strict Q8 and Q4 conversion, packed Metal execution, and the fixed-corpus negative-log-likelihood quality limits.",
-    "Pass the quantized 32K-token stress test and record the required latency, throughput, cache-bytes-per-token, memory, and output-hash metrics."
+    "Validate Q8 and Q4 against their fixed-corpus negative-log-likelihood limits.",
+    "Run longer Q8 and Q4 generation and compare each with the pinned reference.",
+    "Pass the quantized 32K-token stress test and record the required standardized latency, throughput, cache-bytes-per-token, memory, and output-hash metrics."
   ]
 }
