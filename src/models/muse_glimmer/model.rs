@@ -11,10 +11,14 @@
 //! Attention is grouped-query attention with a distinct gate projection. After
 //! scale-free per-head Q/K normalization, queries are multiplied by
 //! `qk_scale_factor`; dot products still receive the standard `1/sqrt(d)`
-//! factor. The attention result is multiplied by `sigmoid(gate_proj(h))` before
-//! the output projection. Three local RoPE layers normally precede each global
-//! NoPE layer. Finally, logits follow the exact bounded map
-//! `T * tanh(output_multiplier * raw_logits / T)`.
+//! factor. Muse's eager reference evaluates the attention softmax in FP32 before
+//! restoring the query dtype. Burn's optimized Flex and CubeCL attention paths
+//! preserve that accumulator precision for half inputs. Passing the conventional
+//! scale as `None` is semantically exact and is also required for Burn 0.21 to
+//! retain fused CubeCL dispatch eligibility. The attention result is multiplied
+//! by `sigmoid(gate_proj(h))` before the output projection. Three local RoPE
+//! layers normally precede each global NoPE layer. Finally, logits follow the
+//! exact bounded map `T * tanh(output_multiplier * raw_logits / T)`.
 
 use burn::{
     module::Module,
@@ -208,15 +212,26 @@ impl<B: Backend> MuseGlimmerAttention<B> {
             value,
             mask,
             None,
-            AttentionModuleOptions {
-                scale: Some((self.head_dim as f64).sqrt().recip()),
-                softcap: None,
-                is_causal: causal,
-            },
+            muse_attention_options(causal),
         )
         .swap_dims(1, 2)
         .reshape([batch, query_sequence, query_width]);
         linear(context * sigmoid(projection.gate), &self.o_proj)
+    }
+}
+
+/// Builds Muse's backend attention options without disguising the default scale.
+///
+/// Burn defines `scale: None` as `1 / sqrt(head_dim)`, which is precisely Muse's
+/// checkpoint equation. On Burn 0.21, setting the same value explicitly is not a
+/// harmless representation detail: CubeCL classifies any custom scale as a
+/// fallback-only feature. Keeping the scale implicit therefore preserves both
+/// the reference mathematics and fused-attention eligibility.
+fn muse_attention_options(causal: bool) -> AttentionModuleOptions {
+    AttentionModuleOptions {
+        scale: None,
+        softcap: None,
+        is_causal: causal,
     }
 }
 
@@ -859,7 +874,7 @@ mod tests {
     use burn::{
         backend::Flex,
         module::Param,
-        tensor::{Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
+        tensor::{Int, Tensor, TensorData, Tolerance, backend::BackendTypes, f16},
     };
 
     use super::*;
@@ -923,6 +938,141 @@ mod tests {
     ) {
         let device = Default::default();
         (initialized_model(tiny_config(), &device), device)
+    }
+
+    /// Builds an isolated attention fixture whose values expose its softmax weights.
+    ///
+    /// The value rows are basis vectors and the output projection is the identity,
+    /// so the first three result channels equal the three attention probabilities.
+    /// A saturated gate retains them unchanged. This makes the fixture sensitive
+    /// to a one-ULP half-softmax regression without involving checkpoint loading.
+    fn softmax_oracle_attention(
+        dtype: DType,
+    ) -> (
+        MuseGlimmerAttention<TestBackend>,
+        MuseAttentionProjection<TestBackend>,
+    ) {
+        let device = Default::default();
+        let config = MuseGlimmerTextConfig {
+            hidden_size: 4,
+            intermediate_size: 8,
+            num_hidden_layers: 1,
+            num_attention_heads: 1,
+            num_key_value_heads: 1,
+            head_dim: 4,
+            max_position_embeddings: 8,
+            sliding_window: Some(2),
+            layer_types: vec![MuseGlimmerLayerType::FullAttention],
+            layer_rope_theta: vec![0.0],
+            vocab_size: 8,
+            bos_token_id: None,
+            eos_token_id: None,
+            ..Default::default()
+        };
+        let mut attention = MuseGlimmerAttention::<TestBackend>::init(&config, &device).unwrap();
+        attention.o_proj.weight = Param::from_tensor(
+            Tensor::from_floats(
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                &device,
+            )
+            .cast(dtype),
+        );
+        let projection = MuseAttentionProjection {
+            // With head_dim=4 the implicit scale is 1/2, so these dot
+            // products produce exact scores [-0.125, 5.875, 0.4375].
+            query: Tensor::from_floats([[[[2.0, 0.0, 0.0, 0.0]]]], &device).cast(dtype),
+            key: Tensor::<TestBackend, 3>::from_floats(
+                [[
+                    [-0.125, 0.0, 0.0, 0.0],
+                    [5.875, 0.0, 0.0, 0.0],
+                    [0.4375, 0.0, 0.0, 0.0],
+                ]],
+                &device,
+            )
+            .unsqueeze_dim::<4>(0)
+            .cast(dtype),
+            value: Tensor::<TestBackend, 3>::from_floats(
+                [[
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                ]],
+                &device,
+            )
+            .unsqueeze_dim::<4>(0)
+            .cast(dtype),
+            gate: Tensor::<TestBackend, 3>::full([1, 1, 4], 80.0, &device).cast(dtype),
+        };
+        (attention, projection)
+    }
+
+    /// F32 attention matches the literal upstream eager-softmax oracle.
+    ///
+    /// The expected probabilities were generated from
+    /// `eager_attention_forward` in Hugging Face Transformers revision
+    /// `cfa309cfa34b5497a32fd50af49aa97aac94c054`. Keeping literals here makes
+    /// the test independent of Burn's own softmax implementation.
+    #[test]
+    fn attention_matches_pinned_fp32_softmax_oracle() {
+        let (attention, projection) = softmax_oracle_attention(DType::F32);
+        let actual = attention
+            .attend(projection, None, false)
+            .expect("valid isolated attention");
+        let expected = TensorData::new(
+            vec![0.002_461_939_6_f32, 0.993_217_3, 0.004_320_838_5, 0.0],
+            [1, 1, 4],
+        );
+        actual
+            .into_data()
+            .assert_approx_eq::<f32>(&expected, Tolerance::absolute(1e-7));
+    }
+
+    /// F16 attention rounds the pinned FP32-softmax result, not a half-softmax.
+    ///
+    /// The third expected half has bits `0x1c6d`; evaluating exponentiation and
+    /// normalization in F16 instead produces adjacent value `0x1c6c`. This
+    /// one-ULP discriminator directly covers Muse's explicit upstream
+    /// `softmax(..., dtype=torch.float32).to(query.dtype)` requirement at
+    /// Transformers revision `cfa309cfa34b5497a32fd50af49aa97aac94c054`.
+    #[test]
+    fn f16_attention_uses_fp32_softmax_before_rounding() {
+        let (attention, projection) = softmax_oracle_attention(DType::F16);
+        let actual = attention
+            .attend(projection, None, false)
+            .expect("valid isolated attention");
+        assert_eq!(actual.dtype(), DType::F16);
+        let bits = actual
+            .into_data()
+            .to_vec::<f16>()
+            .expect("F16 result")
+            .into_iter()
+            .map(f16::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(bits, [0x190b, 0x3bf2, 0x1c6d, 0x0000]);
+        assert_ne!(bits[2], 0x1c6c, "half-precision softmax sentinel");
+    }
+
+    /// Default Muse options retain Burn's optimized-attention dispatch contract.
+    ///
+    /// Burn 0.21 CubeCL falls back whenever `scale.is_some()`, even when that
+    /// value redundantly equals `1/sqrt(head_dim)`. This structural assertion
+    /// prevents the family wiring from silently disabling fused kernels again.
+    #[test]
+    fn attention_options_preserve_fused_dispatch_eligibility() {
+        assert_eq!(
+            muse_attention_options(true),
+            AttentionModuleOptions {
+                scale: None,
+                softcap: None,
+                is_causal: true,
+            }
+        );
+        assert_eq!(muse_attention_options(false).scale, None);
     }
 
     /// Stateless inference emits exact requested shapes and dense diagnostics.
