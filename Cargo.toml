@@ -19,6 +19,10 @@ cuda = ["burn/cuda"]
 rocm = ["burn/rocm"]
 tokenizers = ["std", "dep:tokenizers"]
 chat-templates = ["tokenizers", "dep:minijinja"]
+# Enables opt-in tests that observe CubeCL kernel launch identifiers. This is
+# intentionally separate from `metal`: normal inference builds do not compile
+# tracing instrumentation into the backend.
+kernel-tracing = ["metal", "burn/tracing"]
 
 [dependencies]
 burn = { version = "=0.21.0", default-features = false }
@@ -34,3 +38,4 @@ minijinja = { version = "=2.19.0", default-features = false, features = ["adjace
 proptest = "1.9.0"
 sha2 = "=0.10.9"
 tempfile = "3.27.0"
+tracing = "=0.1.44"

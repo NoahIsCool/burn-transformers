@@ -19,8 +19,34 @@
 //!   --no-default-features --features std,metal,tokenizers,chat-templates \
 //!   --test qwen3_moe_artifacts --no-run
 //! ```
+//!
+//! Q8 and Q4 conversion use explicit, create-only output paths on the same
+//! external `/Volumes/<name>` tree as the checkpoint. For example:
+//!
+//! ```text
+//! TRANSFORMERS_QWEN3_MOE_Q8_BURNPACK=/Volumes/<name>/quantized/qwen3-30b-a3b-q8-g64.bpk \
+//! cargo test --manifest-path crates/transformers/Cargo.toml \
+//!   --no-default-features --features std,metal,tokenizers \
+//!   --test qwen3_moe_artifacts \
+//!   quantizes_pinned_qwen3_moe_weights_to_q8_burnpack \
+//!   -- --ignored --exact --nocapture
+//! ```
+//!
+//! Conversion and inference are separate gates. This is intentional: a
+//! successful create-only conversion remains reusable when a later Metal smoke
+//! uncovers a kernel or model issue.
+//!
+//! Add `kernel-tracing` to the exact single-backend feature set and select
+//! `audits_pinned_qwen3_moe_q{4,8}_decode_packed_metal_kernels` to prove one
+//! recurrent decode reaches all 1,345 packed projection kernels without a
+//! whole-weight dequantization launch. This audit reuses the corresponding
+//! `TRANSFORMERS_QWEN3_MOE_Q{4,8}_BURNPACK` path.
 
 #![cfg(feature = "tokenizers")]
+
+#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+#[path = "support/kernel_trace.rs"]
+mod kernel_trace;
 
 use sha2::{Digest, Sha256};
 use std::{
@@ -31,11 +57,18 @@ use std::{
     time::Instant,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 use transformers::{
     EncodeOptions, LocalTokenizer,
     checkpoint::{
         ArtifactSource, CheckpointManifest, DTypePolicy, LoadOptions, LoadPlan, PlannedTransform,
         TensorDType,
+        quantization::{
+            QuantizationEligibility, QuantizationExclusion, SymmetricQuantization,
+            WeightQuantizationConfig, classify_weight_for_quantization,
+        },
     },
     models::{
         config::ModelConfig,
@@ -49,10 +82,25 @@ use burn::{
     nn::Linear,
     tensor::{DType, Int, Tensor, TensorData, backend::Backend},
 };
+#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+use kernel_trace::{
+    calibrated_dequantization_kernel_names, capture_kernel_launches, compact_kernel_id,
+    packed_matmul_launches, whole_weight_dequantization_launches,
+};
 #[cfg(feature = "metal")]
 use transformers::{
     AutoCausalLm, AutoLoadOptions, DecodeInput, DecodeState, ForwardOptions, cache::CacheConfig,
     models::qwen3_moe::Qwen3MoeForCausalLm,
+};
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+use transformers::{
+    CausalLanguageModel,
+    checkpoint::ExecutionStats,
+    checkpoint::quantization::{
+        QuantizedBurnpackArtifact, QuantizedCheckpointOptions, SourceFloatDType,
+        execute_local_quantized_load_plan, quantize_local_checkpoint_to_burnpack,
+        validate_sidecar_contract,
+    },
 };
 
 /// Immutable upstream repository certified by both gates.
@@ -60,6 +108,52 @@ const REPOSITORY: &str = "Qwen/Qwen3-30B-A3B";
 
 /// Immutable upstream Git revision certified by both gates.
 const REVISION: &str = "ad44e777bcd18fa416d9da3bd8f70d33ebb85d39";
+
+/// Exact output path used by the create-only Q8 conversion and later Metal load.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+const Q8_BURNPACK_ENV: &str = "TRANSFORMERS_QWEN3_MOE_Q8_BURNPACK";
+
+/// Exact output path used by the create-only Q4 conversion and later Metal load.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+const Q4_BURNPACK_ENV: &str = "TRANSFORMERS_QWEN3_MOE_Q4_BURNPACK";
+
+/// Number of architecture parameters accepted by the strict checkpoint plan.
+const PARAMETER_COUNT: usize = 18_867;
+
+/// Parameters eligible for group-64 symmetric weight-only quantization.
+const QUANTIZED_PARAMETER_COUNT: usize = 18_625;
+
+/// Embedding, normalization, and router parameters retained in F16.
+const RETAINED_F16_PARAMETER_COUNT: usize = 242;
+
+/// Exact F16 bytes delivered for the 242 parameters absent from either sidecar.
+const RETAINED_SOURCE_TENSOR_BYTES: u64 = 647_917_568;
+
+/// Exact group-64 Q8 packed-value and scale bytes for all eligible matrices.
+const Q8_PAYLOAD_BYTES: u64 = 32_096_174_080;
+
+/// Exact group-64 Q4 packed-value and scale bytes for all eligible matrices.
+const Q4_PAYLOAD_BYTES: u64 = 16_992_092_160;
+
+/// Largest Q8 payload: the independent `[151936, 2048]` LM-head matrix.
+const Q8_LARGEST_PAYLOAD_BYTES: u64 = 330_612_736;
+
+/// Largest Q4 payload: the independent `[151936, 2048]` LM-head matrix.
+const Q4_LARGEST_PAYLOAD_BYTES: u64 = 175_030_272;
+
+/// Packed projections executed by one batch-one, one-token recurrent decode.
+///
+/// Each of 48 layers launches four attention projections and three projections
+/// for each of its eight selected experts. The independent LM head adds one:
+/// `48 * (4 + 8 * 3) + 1 = 1_345`. Router matrices intentionally remain F16.
+#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+const PACKED_DECODE_MATMUL_LAUNCHES: usize = 1_345;
+
+/// Exact BF16 bytes consumed by full-precision loading and sidecar conversion.
+const CHECKPOINT_TENSOR_BYTES: u64 = 61_064_245_248;
+
+/// Largest single checkpoint tensor and runtime staging allocation.
+const LARGEST_CHECKPOINT_TENSOR_BYTES: u64 = 622_329_856;
 
 /// Short prompt whose pinned tokenizer representation contains exactly six tokens.
 const SIX_TOKEN_PROMPT: &str = "Hello world, cached decoding.";
@@ -205,11 +299,19 @@ fn sha256_file_hex(path: &Path) -> String {
     );
     let mut file =
         File::open(path).unwrap_or_else(|error| panic!("open {}: {error}", path.display()));
+    let opened_metadata = file
+        .metadata()
+        .unwrap_or_else(|error| panic!("inspect open {}: {error}", path.display()));
     assert!(
-        file.metadata()
-            .unwrap_or_else(|error| panic!("inspect open {}: {error}", path.display()))
-            .is_file(),
+        opened_metadata.is_file(),
         "{} changed away from a regular file while opening",
+        path.display()
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        (link_metadata.dev(), link_metadata.ino()),
+        (opened_metadata.dev(), opened_metadata.ino()),
+        "{} changed between no-follow inspection and open",
         path.display()
     );
     let mut digest = Sha256::new();
@@ -348,7 +450,7 @@ fn validates_pinned_qwen3_moe_config_headers_plan_memory_and_tokenizer() {
             declared_total_size,
         } => {
             assert_eq!(relative_path, "model.safetensors.index.json");
-            assert_eq!(*declared_total_size, Some(61_064_245_248));
+            assert_eq!(*declared_total_size, Some(CHECKPOINT_TENSOR_BYTES));
         }
         ArtifactSource::Single { relative_path } => {
             panic!("expected the pinned shard index, found {relative_path}")
@@ -356,8 +458,8 @@ fn validates_pinned_qwen3_moe_config_headers_plan_memory_and_tokenizer() {
         _ => panic!("expected the standard indexed SafeTensors artifact"),
     }
     assert_eq!(manifest.shards.len(), 16);
-    assert_eq!(manifest.tensors.len(), 18_867);
-    assert_eq!(manifest.tensor_bytes, 61_064_245_248);
+    assert_eq!(manifest.tensors.len(), PARAMETER_COUNT);
+    assert_eq!(manifest.tensor_bytes, CHECKPOINT_TENSOR_BYTES);
     assert_eq!(manifest.artifact_bytes, 61_066_575_648);
     assert_eq!(header_inventory_digest(&manifest), HEADER_INVENTORY_SHA256);
     let expected_shards = (1..=16)
@@ -402,12 +504,12 @@ fn validates_pinned_qwen3_moe_config_headers_plan_memory_and_tokenizer() {
     let contract = observed
         .checkpoint_contract(Qwen3MoeCheckpointOptions::default())
         .expect("the pinned topology must produce its exact parameter contract");
-    assert_eq!(contract.expected_tensors().len(), 18_867);
+    assert_eq!(contract.expected_tensors().len(), PARAMETER_COUNT);
     let plan = contract
         .build_load_plan(&manifest, &options)
         .expect("every pinned tensor must map under strict F16 planning");
-    assert_eq!(plan.parameter_count(), 18_867);
-    assert_eq!(plan.tensors.len(), 18_867);
+    assert_eq!(plan.parameter_count(), PARAMETER_COUNT);
+    assert_eq!(plan.tensors.len(), PARAMETER_COUNT);
     assert!(plan.aliases.is_empty());
     assert!(plan.report.is_strictly_valid());
     assert!(plan.report.allowlisted_ignored.is_empty());
@@ -419,7 +521,7 @@ fn validates_pinned_qwen3_moe_config_headers_plan_memory_and_tokenizer() {
             .iter()
             .all(|record| record.operation == "rename")
     );
-    assert_eq!(plan.report.dtype_converted.len(), 18_867);
+    assert_eq!(plan.report.dtype_converted.len(), PARAMETER_COUNT);
     assert!(plan.report.dtype_converted.iter().all(|conversion| {
         conversion.source == TensorDType::BF16 && conversion.target_dtype == TensorDType::F16
     }));
@@ -437,14 +539,35 @@ fn validates_pinned_qwen3_moe_config_headers_plan_memory_and_tokenizer() {
     let physical_sources = manifest.tensors.keys().map(String::as_str).collect();
     assert_eq!(planned_sources, physical_sources);
     assert_eq!(plan.memory.artifact_bytes, 61_066_575_648);
-    assert_eq!(plan.memory.checkpoint_tensor_bytes, 61_064_245_248);
-    assert_eq!(plan.memory.target_parameter_bytes, 61_064_245_248);
-    assert_eq!(plan.memory.logical_model_bytes, 61_064_245_248);
+    assert_eq!(plan.memory.checkpoint_tensor_bytes, CHECKPOINT_TENSOR_BYTES);
+    assert_eq!(plan.memory.target_parameter_bytes, CHECKPOINT_TENSOR_BYTES);
+    assert_eq!(plan.memory.logical_model_bytes, CHECKPOINT_TENSOR_BYTES);
     assert_eq!(plan.memory.largest_shard_bytes, 3_999_975_472);
-    assert_eq!(plan.memory.largest_source_tensor_bytes, 622_329_856);
-    assert_eq!(plan.memory.largest_target_tensor_bytes, 622_329_856);
+    assert_eq!(
+        plan.memory.largest_source_tensor_bytes,
+        LARGEST_CHECKPOINT_TENSOR_BYTES
+    );
+    assert_eq!(
+        plan.memory.largest_target_tensor_bytes,
+        LARGEST_CHECKPOINT_TENSOR_BYTES
+    );
     assert_eq!(plan.memory.peak_host_staging_bytes, 4_622_305_328);
     assert_eq!(plan.report.memory, Some(plan.memory));
+
+    let (expected_quantized, expected_excluded) = qwen3_moe_quantization_partition(&plan);
+    assert_qwen3_moe_quantization_partition(&expected_quantized, &expected_excluded);
+    assert_eq!(
+        retained_source_tensor_bytes(&plan, &expected_excluded),
+        RETAINED_SOURCE_TENSOR_BYTES
+    );
+    assert_eq!(
+        expected_quantized_payload(&plan, SymmetricQuantization::Q8),
+        pinned_quantized_payload(SymmetricQuantization::Q8)
+    );
+    assert_eq!(
+        expected_quantized_payload(&plan, SymmetricQuantization::Q4),
+        pinned_quantized_payload(SymmetricQuantization::Q4)
+    );
 
     let tokenizer = LocalTokenizer::from_directory(&root)
         .expect("the pinned tokenizer artifacts must load without network access");
@@ -664,7 +787,7 @@ fn assert_all_parameters_f16(model: &Qwen3MoeForCausalLm<Metal>) {
             }
         }
     }
-    assert_eq!(parameters, 18_867);
+    assert_eq!(parameters, PARAMETER_COUNT);
 }
 
 /// Forces adapter discovery and one synchronized storage round trip.
@@ -733,26 +856,35 @@ fn loads_pinned_qwen3_moe_f16_and_runs_metal_smoke() {
     );
     let report = loaded.load_report();
     assert!(report.is_strictly_valid());
-    assert_eq!(report.applied.len(), 18_867);
+    assert_eq!(report.applied.len(), PARAMETER_COUNT);
     assert_eq!(report.transformed.len(), 18_480);
-    assert_eq!(report.dtype_converted.len(), 18_867);
+    assert_eq!(report.dtype_converted.len(), PARAMETER_COUNT);
     assert!(report.aliased.is_empty());
     assert!(report.allowlisted_ignored.is_empty());
     assert!(report.allowlisted_missing.is_empty());
     let execution = loaded
         .execution_stats()
         .expect("the automatic loader must retain pass-two execution counters");
-    assert_eq!(execution.tensors_applied, 18_867);
+    assert_eq!(execution.tensors_applied, PARAMETER_COUNT);
     assert_eq!(execution.aliases_applied, 0);
-    assert_eq!(execution.source_reads, 18_867);
-    assert_eq!(execution.source_payload_bytes, 61_064_245_248);
-    assert_eq!(execution.delivered_tensor_bytes, 61_064_245_248);
-    assert_eq!(execution.largest_source_payload_bytes, 622_329_856);
-    assert_eq!(execution.largest_output_tensor_bytes, 622_329_856);
-    assert_eq!(execution.peak_host_staging_bytes, 622_329_856);
+    assert_eq!(execution.source_reads, PARAMETER_COUNT as u64);
+    assert_eq!(execution.source_payload_bytes, CHECKPOINT_TENSOR_BYTES);
+    assert_eq!(execution.delivered_tensor_bytes, CHECKPOINT_TENSOR_BYTES);
+    assert_eq!(
+        execution.largest_source_payload_bytes,
+        LARGEST_CHECKPOINT_TENSOR_BYTES
+    );
+    assert_eq!(
+        execution.largest_output_tensor_bytes,
+        LARGEST_CHECKPOINT_TENSOR_BYTES
+    );
+    assert_eq!(
+        execution.peak_host_staging_bytes,
+        LARGEST_CHECKPOINT_TENSOR_BYTES
+    );
     assert_eq!(execution.source.shard_opens, 16);
-    assert_eq!(execution.source.tensor_reads, 18_867);
-    assert_eq!(execution.source.payload_bytes_read, 61_064_245_248);
+    assert_eq!(execution.source.tensor_reads, PARAMETER_COUNT as u64);
+    assert_eq!(execution.source.payload_bytes_read, CHECKPOINT_TENSOR_BYTES);
     assert_eq!(execution.source.max_open_shards, 1);
     assert_eq!(
         execution.source.shard_open_order,
@@ -896,5 +1028,1181 @@ fn loads_pinned_qwen3_moe_f16_and_runs_metal_smoke() {
         execution.source.shard_opens,
         execution.source.max_open_shards,
         execution.source_reads,
+    );
+}
+
+/// Converts every eligible Qwen3-MoE matrix into a persistent group-64 Q8 sidecar.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires pinned Qwen3-30B-A3B weights and an absent external Q8 Burnpack path"]
+fn quantizes_pinned_qwen3_moe_weights_to_q8_burnpack() {
+    quantize_pinned_qwen3_moe_weights_to_burnpack(SymmetricQuantization::Q8, Q8_BURNPACK_ENV);
+}
+
+/// Converts every eligible Qwen3-MoE matrix into a persistent group-64 Q4 sidecar.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires pinned Qwen3-30B-A3B weights and an absent external Q4 Burnpack path"]
+fn quantizes_pinned_qwen3_moe_weights_to_q4_burnpack() {
+    quantize_pinned_qwen3_moe_weights_to_burnpack(SymmetricQuantization::Q4, Q4_BURNPACK_ENV);
+}
+
+/// Loads the persistent Q8 sidecar and exercises packed Metal inference.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires pinned Qwen3-30B-A3B weights, a complete Q8 Burnpack, and Metal"]
+fn loads_pinned_qwen3_moe_q8_and_runs_metal_smoke() {
+    load_pinned_qwen3_moe_burnpack_and_run_metal(SymmetricQuantization::Q8, Q8_BURNPACK_ENV);
+}
+
+/// Loads the persistent Q4 sidecar and exercises packed Metal inference.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires pinned Qwen3-30B-A3B weights, a complete Q4 Burnpack, and Metal"]
+fn loads_pinned_qwen3_moe_q4_and_runs_metal_smoke() {
+    load_pinned_qwen3_moe_burnpack_and_run_metal(SymmetricQuantization::Q4, Q4_BURNPACK_ENV);
+}
+
+/// Audits every packed Q8 projection submitted by one recurrent Metal decode.
+#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires pinned Qwen3-30B-A3B weights, a complete Q8 Burnpack, Metal, and kernel tracing"]
+fn audits_pinned_qwen3_moe_q8_decode_packed_metal_kernels() {
+    load_pinned_qwen3_moe_burnpack_and_run_metal(SymmetricQuantization::Q8, Q8_BURNPACK_ENV);
+}
+
+/// Audits every packed Q4 projection submitted by one recurrent Metal decode.
+#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires pinned Qwen3-30B-A3B weights, a complete Q4 Burnpack, Metal, and kernel tracing"]
+fn audits_pinned_qwen3_moe_q4_decode_packed_metal_kernels() {
+    load_pinned_qwen3_moe_burnpack_and_run_metal(SymmetricQuantization::Q4, Q4_BURNPACK_ENV);
+}
+
+/// Streams one exact checkpoint revision into a create-only Burnpack sidecar.
+///
+/// Full source hashes are verified before conversion. The writer consumes the
+/// strict architecture plan rather than raw Hugging Face names, and the result
+/// is reopened and fully validated before its content digest is reported. The
+/// caller must provide an exact path because finalization temporarily requires
+/// both the private staging bytes and the published Burnpack on that filesystem.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn quantize_pinned_qwen3_moe_weights_to_burnpack(
+    scheme: SymmetricQuantization,
+    output_environment: &str,
+) {
+    let supplied_root = pinned_root();
+    let root = supplied_root
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("canonicalize {}: {error}", supplied_root.display()));
+    assert_control_file_hashes(&root);
+    assert_shard_file_hashes(&root);
+    let output = explicit_external_burnpack_path(&root, output_environment, false);
+    let (_, manifest, plan) = pinned_qwen3_moe_plan(&root, LoadOptions::default());
+    let (expected_quantized, expected_excluded) = qwen3_moe_quantization_partition(&plan);
+    assert_qwen3_moe_quantization_partition(&expected_quantized, &expected_excluded);
+    assert_eq!(
+        retained_source_tensor_bytes(&plan, &expected_excluded),
+        RETAINED_SOURCE_TENSOR_BYTES
+    );
+    let (expected_payload_bytes, expected_largest_payload) =
+        expected_quantized_payload(&plan, scheme);
+    assert_eq!(
+        (expected_payload_bytes, expected_largest_payload),
+        pinned_quantized_payload(scheme)
+    );
+    let label = quantization_label(scheme);
+
+    let conversion_started = Instant::now();
+    let outcome = quantize_local_checkpoint_to_burnpack(
+        &manifest,
+        &plan,
+        &output,
+        QuantizedCheckpointOptions {
+            weights: WeightQuantizationConfig {
+                scheme,
+                ..WeightQuantizationConfig::default()
+            },
+            ..QuantizedCheckpointOptions::default()
+        },
+    )
+    .unwrap_or_else(|error| panic!("Qwen3-MoE {label} conversion failed: {error}"));
+    let conversion_seconds = conversion_started.elapsed().as_secs_f64();
+
+    assert!(outcome.report.is_strictly_valid());
+    assert_eq!(outcome.report.applied.len(), PARAMETER_COUNT);
+    assert_eq!(outcome.report.transformed.len(), 18_480);
+    assert!(outcome.report.aliased.is_empty());
+    assert!(outcome.report.dtype_converted.is_empty());
+    assert!(outcome.report.allowlisted_ignored.is_empty());
+    assert!(outcome.report.allowlisted_missing.is_empty());
+    assert_eq!(
+        outcome
+            .report
+            .quantized
+            .iter()
+            .map(|record| record.target.clone())
+            .collect::<Vec<_>>(),
+        expected_quantized
+    );
+    assert!(outcome.report.quantized.iter().all(|record| {
+        record.scheme == format!("symmetric-{label}-g64-flat-row-major") && record.bytes > 0
+    }));
+    assert_eq!(
+        outcome
+            .report
+            .quantized
+            .iter()
+            .map(|record| record.bytes)
+            .sum::<u64>(),
+        expected_payload_bytes
+    );
+    assert_eq!(
+        outcome
+            .excluded
+            .iter()
+            .map(|record| (record.target.clone(), record.reason))
+            .collect::<Vec<_>>(),
+        expected_excluded
+    );
+    assert_complete_qwen3_moe_source_execution(&outcome.execution);
+
+    assert_eq!(outcome.staging.tensor_count, QUANTIZED_PARAMETER_COUNT);
+    assert_eq!(outcome.staging.staged_payload_bytes, expected_payload_bytes);
+    assert_eq!(
+        outcome.staging.largest_payload_bytes,
+        expected_largest_payload
+    );
+    assert!(outcome.staging.estimated_manifest_bytes > 0);
+    assert_eq!(outcome.artifact.path, output);
+    assert_eq!(outcome.artifact.tensor_count, QUANTIZED_PARAMETER_COUNT);
+    assert_eq!(
+        outcome.artifact.quantized_payload_bytes,
+        expected_payload_bytes
+    );
+    assert_eq!(
+        outcome.artifact.largest_materialized_tensor_bytes,
+        expected_largest_payload
+    );
+    assert!(outcome.artifact.manifest_bytes > 0);
+    assert!(outcome.artifact.artifact_bytes > expected_payload_bytes);
+    assert_eq!(
+        fs::metadata(&output)
+            .unwrap_or_else(|error| panic!("inspect {}: {error}", output.display()))
+            .len(),
+        outcome.artifact.artifact_bytes
+    );
+
+    let mut artifact = QuantizedBurnpackArtifact::open(&output)
+        .unwrap_or_else(|error| panic!("open Qwen3-MoE {label} Burnpack: {error}"));
+    assert_exact_qwen3_moe_burnpack(
+        &mut artifact,
+        &plan,
+        scheme,
+        &expected_quantized,
+        expected_payload_bytes,
+        expected_largest_payload,
+    );
+    drop(artifact);
+    let artifact_sha256 = sha256_file_hex(&output);
+    eprintln!(
+        "Qwen3-MoE {label} conversion: path={}, sha256={artifact_sha256}, \
+         tensors={}, retained_f16={}, payload_bytes={expected_payload_bytes}, \
+         artifact_bytes={}, largest_payload_bytes={expected_largest_payload}, \
+         source_reads={}, max_open_shards={}, conversion_seconds={conversion_seconds:.3}",
+        output.display(),
+        QUANTIZED_PARAMETER_COUNT,
+        RETAINED_F16_PARAMETER_COUNT,
+        outcome.artifact.artifact_bytes,
+        outcome.execution.source_reads,
+        outcome.execution.source.max_open_shards,
+    );
+}
+
+/// Loads a complete sidecar through the public quantized-plan executor and runs it.
+///
+/// The automatic registry deliberately does not advertise packed Qwen3-MoE yet.
+/// This acceptance gate therefore uses the lower-level public executor with the
+/// exact family sink. Success establishes the artifact, loader, packed parameter,
+/// routing, stateless, KV-prefill, and decode path needed before registry exposure.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn load_pinned_qwen3_moe_burnpack_and_run_metal(
+    scheme: SymmetricQuantization,
+    output_environment: &str,
+) {
+    let supplied_root = pinned_root();
+    let root = supplied_root
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("canonicalize {}: {error}", supplied_root.display()));
+    assert_control_file_hashes(&root);
+    assert_shard_file_hashes(&root);
+    let burnpack = explicit_external_burnpack_path(&root, output_environment, true);
+    let artifact_sha256 = sha256_file_hex(&burnpack);
+    let load_options = LoadOptions {
+        dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+        ..LoadOptions::default()
+    };
+    let (config, manifest, plan) = pinned_qwen3_moe_plan(&root, load_options);
+    assert_eq!(f16_plan_digest(&plan), F16_PLAN_SHA256);
+    let (expected_quantized, expected_excluded) = qwen3_moe_quantization_partition(&plan);
+    assert_qwen3_moe_quantization_partition(&expected_quantized, &expected_excluded);
+    assert_eq!(
+        retained_source_tensor_bytes(&plan, &expected_excluded),
+        RETAINED_SOURCE_TENSOR_BYTES
+    );
+    let (expected_payload_bytes, expected_largest_payload) =
+        expected_quantized_payload(&plan, scheme);
+    assert_eq!(
+        (expected_payload_bytes, expected_largest_payload),
+        pinned_quantized_payload(scheme)
+    );
+    let label = quantization_label(scheme);
+
+    let mut artifact = QuantizedBurnpackArtifact::open(&burnpack)
+        .unwrap_or_else(|error| panic!("open Qwen3-MoE {label} Burnpack: {error}"));
+    assert_exact_qwen3_moe_burnpack(
+        &mut artifact,
+        &plan,
+        scheme,
+        &expected_quantized,
+        expected_payload_bytes,
+        expected_largest_payload,
+    );
+    let device = Default::default();
+    assert_metal_backend_available(&device);
+    let mut model = Qwen3MoeForCausalLm::<Metal>::init(config, &device)
+        .expect("the pinned Qwen3-MoE topology must initialize lazily on Metal");
+    let load_started = Instant::now();
+    let outcome = execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut model)
+        .unwrap_or_else(|error| panic!("load mixed F16/{label} Qwen3-MoE model: {error}"));
+    <Metal<f32, i32> as Backend>::sync(&device)
+        .expect("all packed and F16 Metal parameter transfers must complete");
+    let load_seconds = load_started.elapsed().as_secs_f64();
+
+    assert!(outcome.report.is_strictly_valid());
+    assert_eq!(outcome.report.applied.len(), PARAMETER_COUNT);
+    assert_eq!(outcome.report.transformed.len(), 18_480);
+    assert_eq!(outcome.report.dtype_converted.len(), PARAMETER_COUNT);
+    assert!(outcome.report.aliased.is_empty());
+    assert!(outcome.report.allowlisted_ignored.is_empty());
+    assert!(outcome.report.allowlisted_missing.is_empty());
+    assert_eq!(outcome.report.quantized.len(), QUANTIZED_PARAMETER_COUNT);
+    assert!(
+        outcome.report.quantized.iter().all(|record| {
+            record.scheme == format!("burn-qfloat-symmetric-{label}-g64-block-1xg")
+        })
+    );
+    assert_eq!(
+        outcome
+            .report
+            .quantized
+            .iter()
+            .map(|record| record.target.clone())
+            .collect::<Vec<_>>(),
+        expected_quantized
+    );
+    assert_qwen3_moe_packed_overlay_execution(&outcome.execution, expected_payload_bytes);
+    assert_eq!(
+        outcome.packed.tensor_reads,
+        QUANTIZED_PARAMETER_COUNT as u64
+    );
+    assert_eq!(outcome.packed.tensors_applied, QUANTIZED_PARAMETER_COUNT);
+    assert_eq!(outcome.packed.payload_bytes, expected_payload_bytes);
+    assert_eq!(
+        outcome.packed.largest_payload_bytes,
+        expected_largest_payload
+    );
+    assert_qwen3_moe_mixed_parameter_dtypes(&model);
+
+    run_qwen3_moe_quantized_metal_smoke(
+        &model,
+        &root,
+        &burnpack,
+        &artifact_sha256,
+        scheme,
+        load_seconds,
+        &outcome.execution,
+        expected_payload_bytes,
+    );
+}
+
+/// Reconstructs the exact immutable family plan for one target dtype policy.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn pinned_qwen3_moe_plan(
+    root: &Path,
+    options: LoadOptions,
+) -> (Qwen3MoeConfig, CheckpointManifest, LoadPlan) {
+    let config_path = root.join("config.json");
+    let config_json = fs::read_to_string(&config_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", config_path.display()));
+    let config = Qwen3MoeConfig::from_json_str(&config_json)
+        .expect("the pinned Qwen3-MoE configuration must validate");
+    let expected = Qwen3MoeConfig::from_json_str(include_str!("fixtures/qwen3_30b_a3b.json"))
+        .expect("the committed Qwen3-MoE fixture must validate");
+    assert_eq!(config, expected);
+
+    let manifest = CheckpointManifest::discover(root, &options)
+        .expect("the pinned Qwen3-MoE SafeTensors inventory must validate");
+    assert_eq!(manifest.shards.len(), 16);
+    assert_eq!(manifest.tensors.len(), PARAMETER_COUNT);
+    assert_eq!(manifest.tensor_bytes, CHECKPOINT_TENSOR_BYTES);
+    assert_eq!(header_inventory_digest(&manifest), HEADER_INVENTORY_SHA256);
+    assert!(
+        manifest
+            .tensors
+            .values()
+            .all(|tensor| tensor.dtype == TensorDType::BF16)
+    );
+    let contract = config
+        .checkpoint_contract(Qwen3MoeCheckpointOptions::default())
+        .expect("the pinned Qwen3-MoE topology must produce a checkpoint contract");
+    let plan = contract
+        .build_load_plan(&manifest, &options)
+        .expect("every pinned Qwen3-MoE tensor must map strictly");
+    let canonical_f16_plan = contract
+        .build_load_plan(
+            &manifest,
+            &LoadOptions {
+                dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+                ..LoadOptions::default()
+            },
+        )
+        .expect("the pinned Qwen3-MoE mapping must remain valid under canonical F16 planning");
+    assert_eq!(f16_plan_digest(&canonical_f16_plan), F16_PLAN_SHA256);
+    assert_eq!(plan.parameter_count(), PARAMETER_COUNT);
+    assert_eq!(plan.tensors.len(), PARAMETER_COUNT);
+    assert!(plan.aliases.is_empty());
+    assert!(plan.report.is_strictly_valid());
+    assert!(plan.report.allowlisted_ignored.is_empty());
+    assert!(plan.report.allowlisted_missing.is_empty());
+    assert!(plan.tensors.iter().all(|tensor| {
+        tensor.sources.len() == 1 && matches!(tensor.transform, PlannedTransform::Identity)
+    }));
+    (config, manifest, plan)
+}
+
+/// Partitions the strict plan with the public conservative weight-only policy.
+fn qwen3_moe_quantization_partition(
+    plan: &LoadPlan,
+) -> (Vec<String>, Vec<(String, QuantizationExclusion)>) {
+    let mut quantized = Vec::new();
+    let mut excluded = Vec::new();
+    for tensor in &plan.tensors {
+        let shape = tensor
+            .shape
+            .iter()
+            .map(|&dimension| {
+                usize::try_from(dimension)
+                    .expect("Qwen3-MoE dimensions must fit the host architecture")
+            })
+            .collect::<Vec<_>>();
+        match classify_weight_for_quantization(&tensor.target, &shape) {
+            QuantizationEligibility::Eligible => quantized.push(tensor.target.clone()),
+            QuantizationEligibility::Excluded(reason) => {
+                excluded.push((tensor.target.clone(), reason));
+            }
+        }
+    }
+    quantized.sort();
+    excluded.sort_by(|left, right| left.0.cmp(&right.0));
+    (quantized, excluded)
+}
+
+/// Sums the exact source intervals retained by one quantization partition.
+fn retained_source_tensor_bytes(
+    plan: &LoadPlan,
+    excluded: &[(String, QuantizationExclusion)],
+) -> u64 {
+    let excluded = excluded
+        .iter()
+        .map(|(target, _)| target.as_str())
+        .collect::<BTreeSet<_>>();
+    let retained = plan
+        .tensors
+        .iter()
+        .filter(|tensor| excluded.contains(tensor.target.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(retained.len(), RETAINED_F16_PARAMETER_COUNT);
+    retained.into_iter().fold(0_u64, |total, tensor| {
+        let [source] = tensor.sources.as_slice() else {
+            panic!("retained target {} must have one source", tensor.target);
+        };
+        let bytes = source.data_offsets[1]
+            .checked_sub(source.data_offsets[0])
+            .expect("retained source offsets must be ordered");
+        total
+            .checked_add(bytes)
+            .expect("retained source-byte sum must fit u64")
+    })
+}
+
+/// Requires the immutable 18,625-packed/242-retained mixed-precision boundary.
+fn assert_qwen3_moe_quantization_partition(
+    quantized: &[String],
+    excluded: &[(String, QuantizationExclusion)],
+) {
+    assert_eq!(quantized.len(), QUANTIZED_PARAMETER_COUNT);
+    assert_eq!(excluded.len(), RETAINED_F16_PARAMETER_COUNT);
+    for (reason, expected) in [
+        (QuantizationExclusion::Embedding, 1),
+        (QuantizationExclusion::Normalization, 193),
+        (QuantizationExclusion::Router, 48),
+    ] {
+        assert_eq!(
+            excluded
+                .iter()
+                .filter(|(_, observed)| *observed == reason)
+                .count(),
+            expected,
+            "unexpected Qwen3-MoE exclusion count for {reason:?}"
+        );
+    }
+    assert!(excluded.iter().all(|(_, reason)| matches!(
+        reason,
+        QuantizationExclusion::Embedding
+            | QuantizationExclusion::Normalization
+            | QuantizationExclusion::Router
+    )));
+}
+
+/// Calculates exact packed values plus one F32 scale per contiguous group.
+fn packed_tensor_payload_bytes(
+    elements: u64,
+    scheme: SymmetricQuantization,
+    group_size: u64,
+) -> u64 {
+    assert!(group_size > 0, "quantization group size must be nonzero");
+    let packed = match scheme {
+        SymmetricQuantization::Q8 => elements,
+        SymmetricQuantization::Q4 => elements / 2 + elements % 2,
+    };
+    let groups = elements / group_size + u64::from(!elements.is_multiple_of(group_size));
+    packed
+        .checked_add(groups.checked_mul(4).expect("scale bytes must fit u64"))
+        .expect("packed tensor payload must fit u64")
+}
+
+/// Computes exact total and largest sidecar payloads independently of the writer.
+fn expected_quantized_payload(plan: &LoadPlan, scheme: SymmetricQuantization) -> (u64, u64) {
+    let group_size = u64::try_from(WeightQuantizationConfig::default().group_size.get())
+        .expect("group size must fit u64");
+    assert_eq!(group_size, 64);
+    let mut total = 0_u64;
+    let mut largest = 0_u64;
+    let mut count = 0_usize;
+    for tensor in &plan.tensors {
+        let host_shape = tensor
+            .shape
+            .iter()
+            .map(|&dimension| usize::try_from(dimension).expect("dimension must fit usize"))
+            .collect::<Vec<_>>();
+        if !matches!(
+            classify_weight_for_quantization(&tensor.target, &host_shape),
+            QuantizationEligibility::Eligible
+        ) {
+            continue;
+        }
+        let elements = tensor
+            .shape
+            .iter()
+            .try_fold(1_u64, |product, &dimension| product.checked_mul(dimension));
+        let elements = elements.expect("Qwen3-MoE tensor element count must fit u64");
+        let bytes = packed_tensor_payload_bytes(elements, scheme, group_size);
+        total = total
+            .checked_add(bytes)
+            .expect("Qwen3-MoE packed payload sum must fit u64");
+        largest = largest.max(bytes);
+        count += 1;
+    }
+    assert_eq!(count, QUANTIZED_PARAMETER_COUNT);
+    (total, largest)
+}
+
+/// Returns the immutable group-64 payload sizes derived from the pinned inventory.
+const fn pinned_quantized_payload(scheme: SymmetricQuantization) -> (u64, u64) {
+    match scheme {
+        SymmetricQuantization::Q8 => (Q8_PAYLOAD_BYTES, Q8_LARGEST_PAYLOAD_BYTES),
+        SymmetricQuantization::Q4 => (Q4_PAYLOAD_BYTES, Q4_LARGEST_PAYLOAD_BYTES),
+    }
+}
+
+/// Checks complete one-shard-at-a-time consumption of the 16-shard checkpoint.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn assert_complete_qwen3_moe_source_execution(execution: &ExecutionStats) {
+    assert_eq!(execution.tensors_applied, PARAMETER_COUNT);
+    assert_eq!(execution.aliases_applied, 0);
+    assert_eq!(execution.source_reads, PARAMETER_COUNT as u64);
+    assert_eq!(execution.source_payload_bytes, CHECKPOINT_TENSOR_BYTES);
+    assert_eq!(execution.delivered_tensor_bytes, CHECKPOINT_TENSOR_BYTES);
+    assert_eq!(
+        execution.largest_source_payload_bytes,
+        LARGEST_CHECKPOINT_TENSOR_BYTES
+    );
+    assert_eq!(
+        execution.largest_output_tensor_bytes,
+        LARGEST_CHECKPOINT_TENSOR_BYTES
+    );
+    assert_eq!(
+        execution.peak_host_staging_bytes,
+        LARGEST_CHECKPOINT_TENSOR_BYTES
+    );
+    assert_eq!(execution.source.shard_opens, 16);
+    assert_eq!(execution.source.tensor_reads, PARAMETER_COUNT as u64);
+    assert_eq!(execution.source.payload_bytes_read, CHECKPOINT_TENSOR_BYTES);
+    assert_eq!(execution.source.max_open_shards, 1);
+    assert_eq!(
+        execution.source.shard_open_order,
+        (1..=16)
+            .map(|index| format!("model-{index:05}-of-00016.safetensors"))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Checks fail-closed source validation for a Burnpack without provenance binding.
+///
+/// Burnpack v1 records tensor geometry but no checkpoint or load-plan digest.
+/// Consequently the production local source must read every BF16 payload before
+/// replacing eligible targets. The smaller delivered-byte count still proves that
+/// packed tensors, rather than discarded source values, reached the model sink.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn assert_qwen3_moe_packed_overlay_execution(
+    execution: &ExecutionStats,
+    packed_payload_bytes: u64,
+) {
+    assert_eq!(execution.tensors_applied, PARAMETER_COUNT);
+    assert_eq!(execution.aliases_applied, 0);
+    assert_eq!(execution.source_reads, PARAMETER_COUNT as u64);
+    assert_eq!(execution.source_payload_bytes, CHECKPOINT_TENSOR_BYTES);
+    assert_eq!(
+        execution.delivered_tensor_bytes,
+        RETAINED_SOURCE_TENSOR_BYTES
+            .checked_add(packed_payload_bytes)
+            .expect("mixed Qwen3-MoE delivered bytes must fit u64")
+    );
+    assert_eq!(
+        execution.largest_source_payload_bytes,
+        LARGEST_CHECKPOINT_TENSOR_BYTES
+    );
+    assert_eq!(
+        execution.largest_output_tensor_bytes,
+        LARGEST_CHECKPOINT_TENSOR_BYTES
+    );
+    assert_eq!(
+        execution.peak_host_staging_bytes,
+        LARGEST_CHECKPOINT_TENSOR_BYTES
+    );
+    assert_eq!(execution.source.shard_opens, 16);
+    assert_eq!(execution.source.tensor_reads, PARAMETER_COUNT as u64);
+    assert_eq!(execution.source.payload_bytes_read, CHECKPOINT_TENSOR_BYTES);
+    assert_eq!(execution.source.max_open_shards, 1);
+    assert_eq!(
+        execution.source.shard_open_order,
+        (1..=16)
+            .map(|index| format!("model-{index:05}-of-00016.safetensors"))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Reopens and validates the exact scheme, target set, and payload geometry.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn assert_exact_qwen3_moe_burnpack(
+    artifact: &mut QuantizedBurnpackArtifact,
+    plan: &LoadPlan,
+    scheme: SymmetricQuantization,
+    expected_quantized: &[String],
+    expected_payload_bytes: u64,
+    expected_largest_payload: u64,
+) {
+    validate_sidecar_contract(plan, artifact)
+        .unwrap_or_else(|error| panic!("validate Burnpack contract: {error}"));
+    let validation = artifact.validate_all().unwrap_or_else(|error| {
+        panic!("validate {} Burnpack: {error}", quantization_label(scheme))
+    });
+    assert_eq!(validation.tensor_count, QUANTIZED_PARAMETER_COUNT);
+    assert_eq!(validation.payload_bytes, expected_payload_bytes);
+    let manifest = artifact.manifest();
+    assert!(manifest.packed_execution.is_available());
+    assert_eq!(manifest.tensors.len(), QUANTIZED_PARAMETER_COUNT);
+    assert_eq!(
+        manifest.tensors.keys().cloned().collect::<Vec<_>>(),
+        expected_quantized
+    );
+    assert!(manifest.tensors.values().all(|tensor| {
+        tensor.scheme == scheme
+            && tensor.group_size.get() == 64
+            && tensor.source_dtype == SourceFloatDType::Bf16
+    }));
+    assert_eq!(
+        manifest
+            .tensors
+            .values()
+            .map(|tensor| tensor.packed_value_bytes + tensor.scale_bytes)
+            .sum::<u64>(),
+        expected_payload_bytes
+    );
+    assert_eq!(
+        manifest
+            .tensors
+            .values()
+            .map(|tensor| tensor.packed_value_bytes + tensor.scale_bytes)
+            .max(),
+        Some(expected_largest_payload)
+    );
+}
+
+/// Requires QFloat storage for eligible matrices and F16 for every exclusion.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn assert_qwen3_moe_mixed_parameter_dtypes(model: &Qwen3MoeForCausalLm<Metal>) {
+    let mut quantized = 0_usize;
+    let mut retained = 0_usize;
+    assert_eq!(model.model.embed_tokens.weight.val().dtype(), DType::F16);
+    retained += 1;
+    assert_eq!(model.model.norm.weight.val().dtype(), DType::F16);
+    retained += 1;
+    assert_linear_qfloat(
+        "lm_head",
+        model
+            .lm_head
+            .as_ref()
+            .expect("the pinned Qwen3-MoE checkpoint has an independent LM head"),
+    );
+    quantized += 1;
+
+    assert_eq!(model.model.layers.len(), 48);
+    for (layer_index, layer) in model.model.layers.iter().enumerate() {
+        for (name, norm) in [
+            ("input_layernorm", &layer.input_layernorm),
+            ("post_attention_layernorm", &layer.post_attention_layernorm),
+        ] {
+            assert_eq!(
+                norm.weight.val().dtype(),
+                DType::F16,
+                "layer {layer_index} {name} must remain F16"
+            );
+            retained += 1;
+        }
+        for (name, norm) in [
+            (
+                "q_norm",
+                layer
+                    .self_attn
+                    .query_norm
+                    .as_ref()
+                    .expect("Qwen3-MoE query norm"),
+            ),
+            (
+                "k_norm",
+                layer
+                    .self_attn
+                    .key_norm
+                    .as_ref()
+                    .expect("Qwen3-MoE key norm"),
+            ),
+        ] {
+            assert_eq!(
+                norm.weight.val().dtype(),
+                DType::F16,
+                "layer {layer_index} {name} must remain F16"
+            );
+            retained += 1;
+        }
+        for (name, projection) in [
+            ("q_proj", &layer.self_attn.q_proj),
+            ("k_proj", &layer.self_attn.k_proj),
+            ("v_proj", &layer.self_attn.v_proj),
+            ("o_proj", &layer.self_attn.o_proj),
+        ] {
+            assert_linear_qfloat(
+                &format!("model.layers.{layer_index}.self_attn.{name}"),
+                projection,
+            );
+            quantized += 1;
+        }
+
+        assert!(layer.dense_mlp.is_none());
+        let sparse = layer
+            .sparse_mlp
+            .as_ref()
+            .expect("each pinned Qwen3-MoE layer must own routed experts");
+        assert_eq!(sparse.routed.len(), 128);
+        assert!(sparse.shared.is_empty());
+        retained += assert_linear_f16(
+            &format!("model.layers.{layer_index}.sparse_mlp.router"),
+            &sparse.router,
+        );
+        for (expert_index, expert) in sparse.routed.iter().enumerate() {
+            for (name, projection) in [
+                ("gate_proj", &expert.gate_proj),
+                ("up_proj", &expert.up_proj),
+                ("down_proj", &expert.down_proj),
+            ] {
+                assert_linear_qfloat(
+                    &format!("model.layers.{layer_index}.sparse_mlp.routed.{expert_index}.{name}"),
+                    projection,
+                );
+                quantized += 1;
+            }
+        }
+    }
+    assert_eq!(quantized, QUANTIZED_PARAMETER_COUNT);
+    assert_eq!(retained, RETAINED_F16_PARAMETER_COUNT);
+    assert_eq!(quantized + retained, PARAMETER_COUNT);
+}
+
+/// Requires one bias-free linear weight to retain Burn's packed QFloat storage.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn assert_linear_qfloat(label: &str, linear: &Linear<Metal>) {
+    assert!(
+        matches!(linear.weight.val().dtype(), DType::QFloat(_)),
+        "{label}.weight must retain QFloat storage"
+    );
+    assert!(
+        linear.bias.is_none(),
+        "{label} unexpectedly contains an unaccounted bias"
+    );
+}
+
+/// Executes six-token stateless and cached prefill plus one recurrent decode.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[allow(clippy::too_many_arguments)]
+fn run_qwen3_moe_quantized_metal_smoke(
+    model: &Qwen3MoeForCausalLm<Metal>,
+    root: &Path,
+    burnpack: &Path,
+    artifact_sha256: &str,
+    scheme: SymmetricQuantization,
+    load_seconds: f64,
+    execution: &ExecutionStats,
+    packed_payload_bytes: u64,
+) {
+    let label = quantization_label(scheme);
+    let device = Default::default();
+    let tokenizer = LocalTokenizer::from_directory(root)
+        .expect("the exact pinned tokenizer must load locally for packed inference");
+    let encoding = tokenizer
+        .encode(
+            SIX_TOKEN_PROMPT,
+            &EncodeOptions {
+                add_special_tokens: false,
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("the packed Metal prompt must encode");
+    assert_eq!(encoding.token_ids()[0], SIX_TOKEN_IDS);
+    let sequence = SIX_TOKEN_IDS.len();
+    let input = encoding
+        .to_causal_input::<Metal>(&device)
+        .expect("the packed Metal prompt must become a causal input");
+    let diagnostics = ForwardOptions {
+        hidden_states: true,
+        ..ForwardOptions::default()
+    };
+
+    let stateless_started = Instant::now();
+    let stateless = model
+        .forward(input.clone(), &diagnostics)
+        .unwrap_or_else(|error| panic!("run stateless Qwen3-MoE {label}: {error}"));
+    assert_eq!(stateless.logits.dims(), [1, 1, 151_936]);
+    assert_eq!(stateless.hidden_states.len(), 50);
+    let stateless_logits = metal_values("quantized Qwen3-MoE stateless logits", &stateless.logits);
+    let stateless_trace = metal_values(
+        "quantized Qwen3-MoE stateless trace",
+        &Tensor::cat(stateless.hidden_states.clone(), 0),
+    );
+    let stateless_seconds = stateless_started.elapsed().as_secs_f64();
+    assert!(stateless_logits.iter().all(|value| value.is_finite()));
+    assert!(stateless_trace.iter().all(|value| value.is_finite()));
+
+    let mut state = model
+        .new_decode_state(
+            CacheConfig::new(1, sequence + 1).expect("packed smoke cache geometry"),
+            1,
+            &device,
+        )
+        .expect("packed Qwen3-MoE KV state must initialize");
+    let prefill_started = Instant::now();
+    let cached = model
+        .prefill(input, &mut state, &diagnostics)
+        .unwrap_or_else(|error| panic!("run cached Qwen3-MoE {label} prefill: {error}"));
+    assert_eq!(cached.logits.dims(), [1, 1, 151_936]);
+    assert_eq!(cached.hidden_states.len(), 50);
+    let cached_logits = metal_values("quantized Qwen3-MoE cached logits", &cached.logits);
+    let cached_trace = metal_values(
+        "quantized Qwen3-MoE cached trace",
+        &Tensor::cat(cached.hidden_states.clone(), 0),
+    );
+    let prefill_seconds = prefill_started.elapsed().as_secs_f64();
+    assert!(cached_logits.iter().all(|value| value.is_finite()));
+    assert!(cached_trace.iter().all(|value| value.is_finite()));
+    assert_eq!(state.lengths(), &[sequence]);
+
+    let cached_cosine = cosine_similarity(&stateless_logits, &cached_logits);
+    assert!(
+        cached_cosine >= 0.999,
+        "Qwen3-MoE {label} cached/stateless cosine {cached_cosine} is below the gate"
+    );
+    let trace_width = sequence * 2_048;
+    let hidden_cosines = stateless_trace
+        .chunks_exact(trace_width)
+        .zip(cached_trace.chunks_exact(trace_width))
+        .map(|(stateless, cached)| cosine_similarity(stateless, cached))
+        .collect::<Vec<_>>();
+    assert_eq!(hidden_cosines.len(), 50);
+    let minimum_hidden_cosine = hidden_cosines.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(
+        minimum_hidden_cosine >= 0.999,
+        "Qwen3-MoE {label} minimum hidden cached/stateless cosine was {minimum_hidden_cosine}"
+    );
+    let stateless_top = stateless
+        .logits
+        .argmax(2)
+        .to_data()
+        .to_vec::<i32>()
+        .expect("quantized Metal top-1 IDs must use i32 storage");
+    let cached_top = cached
+        .logits
+        .argmax(2)
+        .to_data()
+        .to_vec::<i32>()
+        .expect("cached quantized Metal top-1 IDs must use i32 storage");
+    assert_eq!(cached_top, stateless_top);
+    let next_token = i64::from(stateless_top[0]);
+
+    let decode_input = DecodeInput {
+        token_ids: Tensor::<Metal, 2, Int>::from_data(
+            TensorData::new(vec![next_token], [1, 1]),
+            &device,
+        ),
+        token_mask: None,
+        position_ids: None,
+    };
+    let decode_started = Instant::now();
+    #[cfg(feature = "kernel-tracing")]
+    let (decoded, decoded_logits) = {
+        // Calibrate the exact installed scheme using one small expert matrix.
+        // This materializes only that matrix, never the 30B parameter set.
+        let calibration_weight = model.model.layers[0]
+            .sparse_mlp
+            .as_ref()
+            .expect("the pinned first layer must be sparse")
+            .routed[0]
+            .gate_proj
+            .weight
+            .val();
+        let (_, calibration_trace) =
+            capture_kernel_launches(|| calibration_weight.dequantize().into_data());
+        let dequantization_names = calibrated_dequantization_kernel_names(&calibration_trace);
+        assert!(
+            !dequantization_names.is_empty(),
+            "installed {label} weight must calibrate an explicit whole-tensor dequantization kernel"
+        );
+
+        let ((decoded, decoded_logits), decode_trace) = capture_kernel_launches(|| {
+            let decoded = model
+                .decode(decode_input, &mut state, &ForwardOptions::default())
+                .unwrap_or_else(|error| panic!("run Qwen3-MoE {label} cached decode: {error}"));
+            assert_eq!(decoded.logits.dims(), [1, 1, 151_936]);
+            let decoded_logits =
+                metal_values("quantized Qwen3-MoE decoded logits", &decoded.logits);
+            (decoded, decoded_logits)
+        });
+        let packed = packed_matmul_launches(&decode_trace);
+        assert_eq!(
+            packed.len(),
+            PACKED_DECODE_MATMUL_LAUNCHES,
+            "batch-one Qwen3-MoE decode must execute exactly the architecture-declared packed projections"
+        );
+        let marker = match scheme {
+            SymmetricQuantization::Q8 => "Q8S",
+            SymmetricQuantization::Q4 => "Q4S",
+        };
+        assert!(packed.iter().all(|launch| {
+            launch.name.contains("matmul")
+                && launch.id.contains(marker)
+                && compact_kernel_id(launch).contains("PackedU32(1")
+        }));
+        let dequantizations =
+            whole_weight_dequantization_launches(&decode_trace, &dequantization_names);
+        assert!(
+            dequantizations.is_empty(),
+            "Qwen3-MoE {label} decode launched whole-weight dequantization: {dequantizations:#?}"
+        );
+        eprintln!(
+            "Qwen3-MoE {label} packed kernel audit: matmul_launches={}, expected={}, whole_weight_dequantizations=0",
+            packed.len(),
+            PACKED_DECODE_MATMUL_LAUNCHES
+        );
+        (decoded, decoded_logits)
+    };
+    #[cfg(not(feature = "kernel-tracing"))]
+    let (decoded, decoded_logits) = {
+        let decoded = model
+            .decode(decode_input, &mut state, &ForwardOptions::default())
+            .unwrap_or_else(|error| panic!("run Qwen3-MoE {label} cached decode: {error}"));
+        assert_eq!(decoded.logits.dims(), [1, 1, 151_936]);
+        let decoded_logits = metal_values("quantized Qwen3-MoE decoded logits", &decoded.logits);
+        (decoded, decoded_logits)
+    };
+    let decode_seconds = decode_started.elapsed().as_secs_f64();
+    assert!(decoded_logits.iter().all(|value| value.is_finite()));
+    assert_eq!(state.lengths(), &[sequence + 1]);
+    let decoded_top = decoded
+        .logits
+        .argmax(2)
+        .to_data()
+        .to_vec::<i32>()
+        .expect("decoded quantized Metal top-1 IDs must use i32 storage")[0];
+
+    eprintln!(
+        "Qwen3-MoE {label} Metal: burnpack={}, artifact_sha256={artifact_sha256}, \
+         packed_payload_bytes={packed_payload_bytes}, prompt_tokens={sequence}, \
+         first_top1={next_token}, decoded_top1={decoded_top}, \
+         cached_cosine={cached_cosine:.9}, min_hidden_cosine={minimum_hidden_cosine:.9}, \
+         stateless_logits_fnv1a64={:016x}, cached_logits_fnv1a64={:016x}, \
+         stateless_trace_fnv1a64={:016x}, cached_trace_fnv1a64={:016x}, \
+         decoded_logits_fnv1a64={:016x}, load_seconds={load_seconds:.3}, \
+         source_reads={}, max_open_shards={}, stateless_seconds={stateless_seconds:.3}, \
+         prefill_seconds={prefill_seconds:.3}, decode_seconds={decode_seconds:.3}",
+        burnpack.display(),
+        fnv1a64_f32(&stateless_logits),
+        fnv1a64_f32(&cached_logits),
+        fnv1a64_f32(&stateless_trace),
+        fnv1a64_f32(&cached_trace),
+        fnv1a64_f32(&decoded_logits),
+        execution.source_reads,
+        execution.source.max_open_shards,
+    );
+}
+
+/// Resolves a canonical, non-symlink Burnpack path on the checkpoint's volume.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn explicit_external_burnpack_path(
+    checkpoint_root: &Path,
+    environment: &str,
+    must_exist: bool,
+) -> PathBuf {
+    let supplied = PathBuf::from(std::env::var_os(environment).unwrap_or_else(|| {
+        panic!("set {environment} to an exact .bpk path on the checkpoint's external volume")
+    }));
+    validate_external_burnpack_path(
+        checkpoint_root,
+        &supplied,
+        must_exist,
+        Path::new("/Volumes"),
+    )
+}
+
+/// Applies the external-volume path policy with an injectable mount root for tests.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn validate_external_burnpack_path(
+    checkpoint_root: &Path,
+    supplied: &Path,
+    must_exist: bool,
+    volumes_root: &Path,
+) -> PathBuf {
+    assert!(supplied.is_absolute(), "Burnpack path must be absolute");
+    assert_eq!(
+        supplied
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some("bpk"),
+        "Burnpack path must end in .bpk"
+    );
+    let file_name = supplied
+        .file_name()
+        .expect("the explicit Burnpack path must contain a file name");
+    let supplied_parent = supplied
+        .parent()
+        .expect("the explicit Burnpack path must have a parent directory");
+    let parent = supplied_parent.canonicalize().unwrap_or_else(|error| {
+        panic!(
+            "canonicalize pre-created Burnpack parent {}: {error}",
+            supplied_parent.display()
+        )
+    });
+    let normalized = parent.join(file_name);
+    assert_eq!(
+        supplied, normalized,
+        "Burnpack path must use its canonical parent without traversal or symlink components"
+    );
+
+    let checkpoint_root = checkpoint_root
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("canonicalize checkpoint root: {error}"));
+    let volumes_root = volumes_root
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("canonicalize volume root: {error}"));
+    let relative = checkpoint_root
+        .strip_prefix(&volumes_root)
+        .unwrap_or_else(|_| {
+            panic!(
+                "checkpoint root {} is not below volume root {}",
+                checkpoint_root.display(),
+                volumes_root.display()
+            )
+        });
+    let volume_name = relative
+        .components()
+        .next()
+        .expect("external checkpoint path must identify a volume");
+    let volume_root = volumes_root.join(volume_name.as_os_str());
+    assert!(
+        normalized.starts_with(&volume_root),
+        "Burnpack path must remain below the checkpoint volume {}",
+        volume_root.display()
+    );
+
+    match fs::symlink_metadata(&normalized) {
+        Ok(metadata) if must_exist => {
+            assert!(
+                !metadata.file_type().is_symlink(),
+                "Burnpack must not be a symlink"
+            );
+            assert!(metadata.is_file(), "Burnpack must be a regular file");
+        }
+        Ok(_) => panic!(
+            "conversion is create-only and refuses existing output {}",
+            normalized.display()
+        ),
+        Err(error) if must_exist => {
+            panic!(
+                "required Burnpack {} is unavailable: {error}",
+                normalized.display()
+            )
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!(
+            "inspect Burnpack destination {}: {error}",
+            normalized.display()
+        ),
+    }
+    normalized
+}
+
+/// Constructs an isolated two-volume tree for external-path policy tests.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn external_path_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    let directory = tempfile::tempdir().expect("create path-policy fixture");
+    let root = directory
+        .path()
+        .canonicalize()
+        .expect("canonicalize path-policy fixture");
+    let volumes = root.join("Volumes");
+    let first = volumes.join("weights");
+    let second = volumes.join("other");
+    let checkpoint = first.join("models/qwen");
+    let output_parent = first.join("quantized");
+    fs::create_dir_all(&checkpoint).expect("create checkpoint directory");
+    fs::create_dir_all(&output_parent).expect("create Burnpack directory");
+    fs::create_dir_all(&second).expect("create second volume");
+    (directory, volumes, checkpoint, output_parent)
+}
+
+/// Accepts canonical create-only and existing paths on the checkpoint volume.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[test]
+fn external_burnpack_path_accepts_only_the_selected_mode() {
+    let (_directory, volumes, checkpoint, output_parent) = external_path_fixture();
+    let output = output_parent.join("model-q8.bpk");
+    assert_eq!(
+        validate_external_burnpack_path(&checkpoint, &output, false, &volumes),
+        output
+    );
+    File::create(&output).expect("create existing Burnpack fixture");
+    assert_eq!(
+        validate_external_burnpack_path(&checkpoint, &output, true, &volumes),
+        output
+    );
+    assert!(
+        std::panic::catch_unwind(|| {
+            validate_external_burnpack_path(&checkpoint, &output, false, &volumes)
+        })
+        .is_err()
+    );
+    let directory_target = output_parent.join("directory.bpk");
+    fs::create_dir(&directory_target).expect("create directory target fixture");
+    assert!(
+        std::panic::catch_unwind(|| {
+            validate_external_burnpack_path(&checkpoint, &directory_target, true, &volumes)
+        })
+        .is_err()
+    );
+}
+
+/// Rejects lexical escapes, another volume, wrong extensions, and relative paths.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[test]
+fn external_burnpack_path_rejects_unsafe_locations() {
+    let (_directory, volumes, checkpoint, output_parent) = external_path_fixture();
+    let candidates = [
+        output_parent.join("../quantized/model.bpk"),
+        volumes.join("other/model.bpk"),
+        output_parent.join("model.bin"),
+        PathBuf::from("model.bpk"),
+    ];
+    for candidate in candidates {
+        assert!(
+            std::panic::catch_unwind(|| {
+                validate_external_burnpack_path(&checkpoint, &candidate, false, &volumes)
+            })
+            .is_err(),
+            "unsafe path unexpectedly passed: {}",
+            candidate.display()
+        );
+    }
+}
+
+/// Rejects a symlinked parent and a symlink masquerading as an existing Burnpack.
+#[cfg(all(feature = "metal", not(feature = "rocm"), unix))]
+#[test]
+fn external_burnpack_path_rejects_symlink_components_and_targets() {
+    use std::os::unix::fs::symlink;
+
+    let (_directory, volumes, checkpoint, output_parent) = external_path_fixture();
+    let real = output_parent.join("real.bpk");
+    File::create(&real).expect("create real Burnpack fixture");
+    let target_link = output_parent.join("target-link.bpk");
+    symlink(&real, &target_link).expect("create target symlink");
+    assert!(
+        std::panic::catch_unwind(|| {
+            validate_external_burnpack_path(&checkpoint, &target_link, true, &volumes)
+        })
+        .is_err()
+    );
+
+    let linked_parent = volumes.join("weights/linked-quantized");
+    symlink(&output_parent, &linked_parent).expect("create parent symlink");
+    let through_parent = linked_parent.join("new.bpk");
+    assert!(
+        std::panic::catch_unwind(|| {
+            validate_external_burnpack_path(&checkpoint, &through_parent, false, &volumes)
+        })
+        .is_err()
+    );
+}
+
+/// Returns the stable precision label used by artifacts and reports.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+const fn quantization_label(scheme: SymmetricQuantization) -> &'static str {
+    match scheme {
+        SymmetricQuantization::Q8 => "q8",
+        SymmetricQuantization::Q4 => "q4",
+    }
+}
+
+/// Locks the independent payload-accounting arithmetic used by the large gates.
+#[test]
+fn quantized_payload_accounting_is_stable() {
+    assert_eq!(
+        packed_tensor_payload_bytes(64, SymmetricQuantization::Q8, 64),
+        68
+    );
+    assert_eq!(
+        packed_tensor_payload_bytes(64, SymmetricQuantization::Q4, 64),
+        36
+    );
+    assert_eq!(
+        packed_tensor_payload_bytes(65, SymmetricQuantization::Q4, 64),
+        41
     );
 }
