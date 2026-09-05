@@ -20,6 +20,26 @@
 //!   --test qwen3_moe_artifacts --no-run
 //! ```
 //!
+//! Generate and authenticate the official full-vocabulary reference entirely
+//! from the pinned local checkpoint with:
+//!
+//! ```text
+//! python3 crates/transformers/scripts/generate_qwen3_moe_reference.py \
+//!   --model-dir /path/to/Qwen3-30B-A3B-ad44e777 \
+//!   --output-dir /external/reference-parent
+//!
+//! TRANSFORMERS_QWEN3_MOE_REFERENCE_DIR=/external/reference-parent/qwen3-30b-a3b-ad44e777-reference.bundle \
+//! cargo test --manifest-path crates/transformers/Cargo.toml \
+//!   --no-default-features --features std,tokenizers \
+//!   --test qwen3_moe_artifacts \
+//!   validates_pinned_qwen3_moe_official_reference_bundle \
+//!   -- --ignored --exact --nocapture
+//! ```
+//!
+//! Add `metal` and select
+//! `compares_pinned_qwen3_moe_f16_with_official_reference` while also setting
+//! `TRANSFORMERS_QWEN3_MOE_DIR` to execute the expensive numerical gate.
+//!
 //! Q8 and Q4 conversion use explicit, create-only output paths on the same
 //! external `/Volumes/<name>` tree as the checkpoint. For example:
 //!
@@ -47,6 +67,9 @@
 #[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
 #[path = "support/kernel_trace.rs"]
 mod kernel_trace;
+
+#[path = "support/qwen3_moe_reference.rs"]
+mod qwen3_moe_reference;
 
 use sha2::{Digest, Sha256};
 use std::{
@@ -89,8 +112,8 @@ use kernel_trace::{
 };
 #[cfg(feature = "metal")]
 use transformers::{
-    AutoCausalLm, AutoLoadOptions, DecodeInput, DecodeState, ForwardOptions, cache::CacheConfig,
-    models::qwen3_moe::Qwen3MoeForCausalLm,
+    AutoCausalLm, AutoLoadOptions, CausalLmInput, DecodeInput, DecodeState, ForwardOptions,
+    LogitsSelection, cache::CacheConfig, models::qwen3_moe::Qwen3MoeForCausalLm,
 };
 #[cfg(all(feature = "metal", not(feature = "rocm")))]
 use transformers::{
@@ -198,7 +221,6 @@ const CONTROL_FILE_SHA256: [(&str, &str); 7] = [
 ];
 
 /// SHA-256 identities for all weight shards at the immutable revision.
-#[cfg(feature = "metal")]
 const SHARD_FILE_SHA256: [(&str, &str); 16] = [
     (
         "model-00001-of-00016.safetensors",
@@ -629,6 +651,197 @@ fn validates_pinned_qwen3_moe_config_headers_plan_memory_and_tokenizer() {
         plan.memory.target_parameter_bytes,
         plan.memory.peak_host_staging_bytes,
         started.elapsed().as_secs_f64(),
+    );
+}
+
+/// Authenticates the official Python bundle without allocating model parameters.
+#[test]
+#[ignore = "requires the externally generated pinned Qwen3-MoE reference bundle"]
+fn validates_pinned_qwen3_moe_official_reference_bundle() {
+    let reference = qwen3_moe_reference::load_and_validate_reference_bundle();
+    eprintln!(
+        "Qwen3-MoE official reference: revision={REVISION}, prompt_logits={}, \
+         cached_logits={}, teacher_prefix_logits={}, greedy_tokens={}",
+        reference.prompt_logits.len(),
+        reference.cached_logits.len(),
+        reference.teacher_prefix_logits.len(),
+        reference.greedy_token_ids.len(),
+    );
+}
+
+/// Compares full-vocabulary Burn F16 outputs with the pinned official graph.
+///
+/// This is deliberately separate from bundle authentication so maintainers can
+/// validate a newly generated 40 MB reference before committing to a 61 GB
+/// checkpoint load. It checks the stateless prompt, all 32 recurrent decisions,
+/// and all 32 corresponding stateless teacher-forced rows at cosine `>= 0.999`.
+#[cfg(feature = "metal")]
+#[test]
+#[ignore = "requires the pinned 30B checkpoint, official reference bundle, Metal, and about 70 GiB free unified memory"]
+fn compares_pinned_qwen3_moe_f16_with_official_reference() {
+    let reference = qwen3_moe_reference::load_and_validate_reference_bundle();
+    let root = pinned_root();
+    assert_control_file_hashes(&root);
+    assert_shard_file_hashes(&root);
+    let device = Default::default();
+    assert_metal_backend_available(&device);
+
+    let loaded = AutoCausalLm::<Metal>::load_local(
+        &root,
+        &AutoLoadOptions {
+            checkpoint: LoadOptions {
+                dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+                ..LoadOptions::default()
+            },
+            load_tokenizer: true,
+            repository: Some(REPOSITORY.to_owned()),
+            revision: Some(REVISION.to_owned()),
+            ..AutoLoadOptions::default()
+        },
+        &device,
+    )
+    .expect("strictly load Qwen3-MoE for official-reference comparison");
+    <Metal<f32, i32> as Backend>::sync(&device).expect("finish reference-gate model load");
+    let tokenizer = loaded
+        .tokenizer()
+        .expect("official-reference comparison requires the pinned tokenizer");
+    let encoding = tokenizer
+        .encode(
+            SIX_TOKEN_PROMPT,
+            &EncodeOptions {
+                add_special_tokens: false,
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("encode official-reference prompt");
+    assert_eq!(encoding.token_ids()[0], SIX_TOKEN_IDS);
+    let prompt = encoding
+        .to_causal_input::<Metal>(&device)
+        .expect("construct official-reference prompt input");
+
+    let stateless = loaded
+        .model()
+        .forward(prompt.clone(), &ForwardOptions::default())
+        .expect("run stateless official-reference prompt");
+    let stateless_values = metal_values("Qwen3-MoE reference stateless logits", &stateless.logits);
+    let stateless_cosine = cosine_similarity(&stateless_values, &reference.prompt_logits);
+    assert!(
+        stateless_cosine >= 0.999,
+        "stateless official-reference cosine {stateless_cosine} is below 0.999"
+    );
+    assert_eq!(
+        stateless
+            .logits
+            .clone()
+            .argmax(2)
+            .to_data()
+            .to_vec::<i32>()
+            .expect("stateless top-1 storage"),
+        [i32::try_from(reference.greedy_token_ids[0]).expect("token ID fits i32")]
+    );
+
+    let mut state = loaded
+        .model()
+        .new_decode_state(
+            CacheConfig::new(1, SIX_TOKEN_IDS.len() + 32).expect("reference cache geometry"),
+            1,
+            &device,
+        )
+        .expect("allocate Qwen3-MoE official-reference cache");
+    let mut cached = loaded
+        .model()
+        .prefill(prompt, &mut state, &ForwardOptions::default())
+        .expect("run official-reference cached prefill");
+    let mut minimum_cached_cosine = f64::INFINITY;
+    for step in 0..32 {
+        let actual = metal_values("Qwen3-MoE reference cached logits", &cached.logits);
+        let expected = &reference.cached_logits[step * 151_936..(step + 1) * 151_936];
+        let cosine = cosine_similarity(&actual, expected);
+        assert!(
+            cosine >= 0.999,
+            "cached official-reference cosine at step {step} was {cosine}"
+        );
+        minimum_cached_cosine = minimum_cached_cosine.min(cosine);
+        let actual_top1 = cached
+            .logits
+            .clone()
+            .argmax(2)
+            .to_data()
+            .to_vec::<i32>()
+            .expect("cached top-1 storage");
+        assert_eq!(
+            actual_top1,
+            [i32::try_from(reference.greedy_token_ids[step]).expect("token ID fits i32")],
+            "cached top-1 differs at step {step}"
+        );
+        if step + 1 < 32 {
+            cached = loaded
+                .model()
+                .decode(
+                    DecodeInput {
+                        token_ids: Tensor::<Metal, 2, Int>::from_data(
+                            TensorData::new(
+                                vec![i64::from(reference.greedy_token_ids[step])],
+                                [1, 1],
+                            ),
+                            &device,
+                        ),
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                    &mut state,
+                    &ForwardOptions::default(),
+                )
+                .unwrap_or_else(|error| panic!("decode reference step {step}: {error}"));
+        }
+    }
+    assert_eq!(state.lengths(), &[SIX_TOKEN_IDS.len() + 31]);
+
+    let mut teacher_ids = SIX_TOKEN_IDS.into_iter().map(i64::from).collect::<Vec<_>>();
+    teacher_ids.extend(
+        reference
+            .greedy_token_ids
+            .iter()
+            .take(31)
+            .copied()
+            .map(i64::from),
+    );
+    let teacher_sequence = teacher_ids.len();
+    let teacher = loaded
+        .model()
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(teacher_ids, [1, teacher_sequence]),
+                    &device,
+                ),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..ForwardOptions::default()
+            },
+        )
+        .expect("run all-logit Qwen3-MoE teacher-forced reference graph");
+    assert_eq!(teacher.logits.dims(), [1, 37, 151_936]);
+    let teacher_values = metal_values("Qwen3-MoE Burn teacher logits", &teacher.logits);
+    let mut minimum_teacher_cosine = f64::INFINITY;
+    for step in 0..32 {
+        let position = SIX_TOKEN_IDS.len() - 1 + step;
+        let actual = &teacher_values[position * 151_936..(position + 1) * 151_936];
+        let expected = &reference.teacher_prefix_logits[step * 151_936..(step + 1) * 151_936];
+        let cosine = cosine_similarity(actual, expected);
+        assert!(
+            cosine >= 0.999,
+            "teacher-forced official-reference cosine at step {step} was {cosine}"
+        );
+        minimum_teacher_cosine = minimum_teacher_cosine.min(cosine);
+    }
+    eprintln!(
+        "Qwen3-MoE official parity: stateless_cosine={stateless_cosine:.12}, \
+         minimum_cached_cosine={minimum_cached_cosine:.12}, \
+         minimum_teacher_cosine={minimum_teacher_cosine:.12}, greedy_tokens=32"
     );
 }
 
