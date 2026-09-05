@@ -99,6 +99,22 @@ class ReferenceHelperTests(unittest.TestCase):
                         {"eos_token_id": invalid}
                     )
 
+    def test_pinned_prompt_is_a_varied_stable_three_word_cycle(self) -> None:
+        """Pin the diagnostic-proven 113x-ULP fixture without using a trivial token loop."""
+
+        self.assertEqual(REFERENCE.PROMPT, "one two three one two three")
+        self.assertEqual(
+            REFERENCE.INPUT_IDS,
+            [588, 1_330, 2_250, 799, 1_330, 2_250],
+        )
+        self.assertEqual(REFERENCE.INPUT_IDS[1:3], REFERENCE.INPUT_IDS[4:6])
+        self.assertNotEqual(
+            REFERENCE.INPUT_IDS[0],
+            REFERENCE.INPUT_IDS[3],
+            "sentence-initial and space-prefixed `one` must remain distinct tokens",
+        )
+        self.assertGreater(len(set(REFERENCE.INPUT_IDS)), 1)
+
     def test_binary16_ulp_is_scale_aware_and_requires_exact_f16(self) -> None:
         self.assertEqual(REFERENCE.binary16_ulp(0.0), 2.0**-24)
         self.assertEqual(REFERENCE.binary16_ulp(1.0), 2.0**-10)

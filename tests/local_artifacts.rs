@@ -1217,8 +1217,11 @@ fn read_pinned_qwen38_reference() -> (Qwen38OfficialReference, Vec<f32>) {
         "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
     );
     assert_eq!(reference.reference_class, "transformers.Qwen3_5ForCausalLM");
-    assert_eq!(reference.prompt, "Hello world, cached decoding.");
-    assert_eq!(reference.input_ids, [9_419, 1_814, 11, 19_954, 45_543, 13]);
+    // The repeated three-word cycle keeps all 32 reference choices comfortably
+    // outside the binary16 perturbation boundary while still exercising varied
+    // token identities, recurrent states, and whitespace-sensitive tokenization.
+    assert_eq!(reference.prompt, "one two three one two three");
+    assert_eq!(reference.input_ids, [588, 1_330, 2_250, 799, 1_330, 2_250]);
     assert_eq!(reference.execution.dtype, "float16");
     assert_eq!(reference.execution.device, "mps");
     assert_eq!(reference.execution.attention_implementation, "eager");

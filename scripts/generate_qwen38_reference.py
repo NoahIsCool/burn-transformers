@@ -51,8 +51,17 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "0"
 REPOSITORY = "Qwen/Qwen3.8-27B"
 REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 REFERENCE_CLASS = "transformers.Qwen3_5ForCausalLM"
-PROMPT = "Hello world, cached decoding."
-INPUT_IDS = [9_419, 1_814, 11, 19_954, 45_543, 13]
+# A non-acceptance selection diagnostic completed all 32 decisions with a
+# minimum margin of 0.8828125, a minimum margin-to-epsilon ratio of 113.0, and
+# cached/stateless top-1 agreement (minimum cosine 0.9998457587791264); its
+# continuation repeated [799, 1330, 2250].  This six-token repetition of three
+# distinct words therefore avoids the late near-boundary choice in the
+# natural-language fixture while exercising varied recurrent states.  Initial
+# `one` and space-prefixed ` one` intentionally have different IDs; the repeated
+# ` two three` suffix makes the continuation cycle and whitespace-sensitive
+# tokenization structurally auditable.
+PROMPT = "one two three one two three"
+INPUT_IDS = [588, 1_330, 2_250, 799, 1_330, 2_250]
 VOCAB_SIZE = 248_320
 GREEDY_TOKENS = 32
 EXPECTED_EOS_TOKEN_IDS = [248_046, 248_044]
