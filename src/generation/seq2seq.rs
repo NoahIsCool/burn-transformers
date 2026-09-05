@@ -45,9 +45,12 @@ pub struct BeamSearchConfig {
     pub length_penalty: f64,
     /// Stop a source row as soon as `num_beams` finished hypotheses exist.
     ///
-    /// This is the conventional eager rule. When false, search continues to
-    /// the configured length bound so an unfinished prefix may still overtake
-    /// an early EOS after length normalization.
+    /// Following Transformers 5.2 eager semantics, only finished candidates
+    /// ranked within the current top `num_beams` may enter that pool; the rest
+    /// of the wider candidate frontier exists solely to find live successors.
+    /// When false, search continues to the configured length bound so an
+    /// unfinished prefix may still overtake an early EOS after length
+    /// normalization.
     pub early_stopping: bool,
     /// Token IDs that finish a hypothesis after being appended.
     pub eos_token_ids: Vec<u32>,
@@ -262,9 +265,15 @@ where
                 request.search.eos_token_ids.len(),
                 candidates.len(),
             )?;
-            for candidate in candidates.into_iter().take(frontier) {
+            for (candidate_rank, candidate) in candidates.into_iter().take(frontier).enumerate() {
                 let is_eos = request.search.eos_token_ids.contains(&candidate.token_id);
                 if is_eos || at_length_limit {
+                    // Transformers 5.2 masks finished candidates below the
+                    // current beam width. Those extra frontier rows are only
+                    // backups for selecting enough non-finished successors.
+                    if candidate_rank >= request.search.num_beams {
+                        continue;
+                    }
                     let reason = if is_eos {
                         FinishReason::EndOfSequence {
                             token_id: candidate.token_id,
@@ -1594,6 +1603,40 @@ mod tests {
         let trace = trace.lock().expect("script trace mutex");
         assert!(trace.reorders.is_empty());
         assert!(trace.decode_tokens.is_empty());
+    }
+
+    /// Lower-frontier EOS candidates are backups, not admissible completions.
+    #[test]
+    fn eager_stopping_ignores_eos_below_top_beam_ranks() {
+        let device = Default::default();
+        let model = ScriptedModel::<TestBackend>::new(
+            ScriptedConfig {
+                vocabulary_size: 5,
+                emit_nonfinite: false,
+            },
+            &device,
+        );
+        let trace = Arc::clone(&model.trace);
+        let mut config = search(4, 2);
+        // The prefill ranks live IDs 1 and 2 first, followed by EOS IDs 4
+        // and 3. Transformers 5.2 therefore ignores both initial EOS rows;
+        // they must not fill the eager completion pool before one decode.
+        config.eos_token_ids = vec![3, 4];
+        config.early_stopping = true;
+        let output = generate_seq2seq_beam_search(&model, request(&device, config))
+            .expect("lower-frontier EOS beam search");
+        assert_eq!(output.sequences[0].len(), 2);
+        assert!(output.sequences[0].iter().all(|sequence| {
+            sequence.token_ids.len() == 2
+                && matches!(
+                    sequence.finish_reason,
+                    FinishReason::EndOfSequence { token_id: 3 | 4 }
+                )
+        }));
+        let trace = trace.lock().expect("script trace mutex");
+        assert_eq!(trace.reorders, vec![vec![0, 0]]);
+        assert_eq!(trace.decode_tokens, vec![vec![1, 2]]);
+        assert_eq!(trace.decode_valid, vec![vec![true, true]]);
     }
 
     /// Disabled eager stopping continues live non-EOS prefixes to the bound.
