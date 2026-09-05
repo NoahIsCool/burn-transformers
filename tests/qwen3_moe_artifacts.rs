@@ -667,6 +667,24 @@ fn assert_all_parameters_f16(model: &Qwen3MoeForCausalLm<Metal>) {
     assert_eq!(parameters, 18_867);
 }
 
+/// Forces adapter discovery and one synchronized storage round trip.
+#[cfg(feature = "metal")]
+fn assert_metal_backend_available(device: &<Metal as burn::tensor::backend::BackendTypes>::Device) {
+    let probe = Tensor::<Metal, 1>::zeros([1], device)
+        .to_data()
+        .to_vec::<f32>()
+        .expect("the Metal acceptance backend must expose F32 storage");
+    assert_eq!(probe, [0.0]);
+}
+
+/// Fails quickly when macOS does not expose a usable Metal adapter.
+#[cfg(feature = "metal")]
+#[test]
+#[ignore = "requires an available Metal adapter"]
+fn initializes_metal_acceptance_backend() {
+    assert_metal_backend_available(&Default::default());
+}
+
 /// Strictly loads F16 weights on Metal and exercises stateless, cached, and decode paths.
 ///
 /// This gate intentionally requires explicit execution because the checkpoint
@@ -679,8 +697,9 @@ fn assert_all_parameters_f16(model: &Qwen3MoeForCausalLm<Metal>) {
 fn loads_pinned_qwen3_moe_f16_and_runs_metal_smoke() {
     let root = pinned_root();
     assert_control_file_hashes(&root);
-    assert_shard_file_hashes(&root);
     let device = Default::default();
+    assert_metal_backend_available(&device);
+    assert_shard_file_hashes(&root);
     let load_started = Instant::now();
     let loaded = AutoCausalLm::<Metal>::load_local(
         &root,
