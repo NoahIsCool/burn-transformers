@@ -112,7 +112,25 @@ struct Qwen38ReferenceExecution {
     float32_matmul_precision: String,
     mps_per_process_memory_fraction: f64,
     explicit_all_one_attention_masks: bool,
+    allocator_warmup_override: Qwen38AllocatorWarmupOverride,
     kernel_status: BTreeMap<String, bool>,
+}
+
+/// Auditable scope and observations for the performance-only MPS loader workaround.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38AllocatorWarmupOverride {
+    target: String,
+    policy: String,
+    scope: String,
+    reason: String,
+    upstream_source_module: String,
+    call_count: usize,
+    expanded_device_map_entries: usize,
+    expanded_device_types: Vec<String>,
+    hf_quantizer_present: bool,
+    restored: bool,
 }
 
 /// Fully recorded Python process, wheel set, device, and offline controls.
@@ -1155,6 +1173,34 @@ fn read_pinned_qwen38_reference() -> (Qwen38OfficialReference, Vec<f32>) {
     assert_eq!(reference.execution.float32_matmul_precision, "highest");
     assert_eq!(reference.execution.mps_per_process_memory_fraction, 1.0);
     assert!(reference.execution.explicit_all_one_attention_masks);
+    let allocator_override = &reference.execution.allocator_warmup_override;
+    assert_eq!(
+        allocator_override.target,
+        "transformers.modeling_utils.caching_allocator_warmup"
+    );
+    assert_eq!(
+        allocator_override.policy,
+        "mps-exclusive-noop-during-from-pretrained"
+    );
+    assert_eq!(
+        allocator_override.scope,
+        "Qwen3_5ForCausalLM.from_pretrained"
+    );
+    assert_eq!(
+        allocator_override.reason,
+        "Transformers 5.2 caching allocator warmup attempts an MPS allocation with a \
+         one-dimensional tensor exceeding INT_MAX; skipping this performance-only allocation \
+         does not alter checkpoint tensors or model math."
+    );
+    assert_eq!(
+        allocator_override.upstream_source_module,
+        "transformers.modeling_utils"
+    );
+    assert_eq!(allocator_override.call_count, 1);
+    assert!(allocator_override.expanded_device_map_entries > 0);
+    assert_eq!(allocator_override.expanded_device_types, ["mps"]);
+    assert!(!allocator_override.hf_quantizer_present);
+    assert!(allocator_override.restored);
     assert_eq!(
         reference.execution.kernel_status,
         BTreeMap::from([
@@ -1352,6 +1398,15 @@ fn read_pinned_qwen38_reference() -> (Qwen38OfficialReference, Vec<f32>) {
     assert_eq!(
         observed_source_modules,
         expected_sources.keys().copied().collect::<BTreeSet<_>>()
+    );
+    assert!(
+        observed_source_modules.contains(
+            reference
+                .execution
+                .allocator_warmup_override
+                .upstream_source_module
+                .as_str()
+        )
     );
     assert_eq!(reference.provenance.artifacts.len(), 24);
     let mut artifact_names = BTreeSet::new();

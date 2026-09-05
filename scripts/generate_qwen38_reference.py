@@ -61,6 +61,16 @@ SELF_PARITY_COSINE = 0.999
 RAW_FILENAME = "qwen3.8-27b-1d4bf0f2-six-token-f16-last-logits.f32le"
 JSON_FILENAME = "qwen3.8-27b-1d4bf0f2-reference.json"
 BUNDLE_DIRNAME = "qwen3.8-27b-1d4bf0f2-reference.bundle"
+ALLOCATOR_WARMUP_TARGET = "transformers.modeling_utils.caching_allocator_warmup"
+ALLOCATOR_WARMUP_POLICY = "mps-exclusive-noop-during-from-pretrained"
+ALLOCATOR_WARMUP_SCOPE = "Qwen3_5ForCausalLM.from_pretrained"
+ALLOCATOR_WARMUP_REASON = (
+    "Transformers 5.2 caching allocator warmup attempts an MPS allocation with a "
+    "one-dimensional tensor exceeding INT_MAX; skipping this performance-only "
+    "allocation does not alter checkpoint tensors or model math."
+)
+ALLOCATOR_WARMUP_SOURCE_MODULE = "transformers.modeling_utils"
+EXPECTED_ALLOCATOR_WARMUP_CALLS = 1
 
 
 EXPECTED_PACKAGE_VERSIONS = {
@@ -633,6 +643,109 @@ def verify_reference_sources(transformers_root: Path) -> list[dict[str, Any]]:
     return sources
 
 
+def load_with_verified_mps_allocator_warmup_noop(
+    modeling_utils: Any,
+    torch: Any,
+    expected_model_class: type,
+    loader: Any,
+) -> tuple[Any, dict[str, Any]]:
+    """Run one model load with only the unsafe MPS allocator warmup disabled.
+
+    Transformers 5.2 models its optional allocator warmup as one flat F16
+    tensor.  The Qwen3.8 element count exceeds Metal's signed 32-bit dimension
+    limit even though the real parameter tensors are individually valid.  This
+    wrapper replaces only that performance hook, accepts only an all-MPS device
+    map and an unquantized Qwen model, and restores the exact original callable
+    even when loading raises.
+    """
+
+    if getattr(modeling_utils, "__name__", None) != ALLOCATOR_WARMUP_SOURCE_MODULE:
+        raise RuntimeError("allocator warmup owner is not transformers.modeling_utils")
+    original = getattr(modeling_utils, "caching_allocator_warmup", None)
+    if not callable(original):
+        raise RuntimeError("Transformers allocator warmup target is not callable")
+    if (
+        getattr(original, "__module__", None) != ALLOCATOR_WARMUP_SOURCE_MODULE
+        or getattr(original, "__name__", None) != "caching_allocator_warmup"
+    ):
+        raise RuntimeError("Transformers allocator warmup callable identity changed")
+
+    call_count = 0
+    expanded_device_map_entries = 0
+    expanded_device_types: list[str] = []
+
+    def verified_mps_noop(
+        model: Any, expanded_device_map: Any, hf_quantizer: Any
+    ) -> None:
+        """Validate the intercepted invocation and skip its performance allocation."""
+
+        nonlocal call_count, expanded_device_map_entries, expanded_device_types
+        call_count += 1
+        if call_count > EXPECTED_ALLOCATOR_WARMUP_CALLS:
+            raise RuntimeError("Transformers allocator warmup was invoked more than once")
+        if type(model) is not expected_model_class:
+            raise RuntimeError(
+                "allocator warmup received an unexpected model class: "
+                f"{type(model)!r}"
+            )
+        if hf_quantizer is not None:
+            raise RuntimeError("allocator warmup no-op is forbidden for quantized loading")
+        if not isinstance(expanded_device_map, dict) or not expanded_device_map:
+            raise RuntimeError("allocator warmup requires a nonempty expanded device map")
+        if any(not isinstance(name, str) for name in expanded_device_map):
+            raise RuntimeError("expanded device-map parameter names must be strings")
+
+        device_types: set[str] = set()
+        for assignment in expanded_device_map.values():
+            try:
+                device = torch.device(assignment)
+            except (TypeError, ValueError) as error:
+                raise RuntimeError(
+                    f"invalid expanded device-map assignment {assignment!r}"
+                ) from error
+            device_types.add(str(device.type))
+        if device_types != {"mps"}:
+            raise RuntimeError(
+                "allocator warmup no-op requires an exclusively MPS expanded device map, "
+                f"found {sorted(device_types)}"
+            )
+        expanded_device_map_entries = len(expanded_device_map)
+        expanded_device_types = sorted(device_types)
+
+    setattr(modeling_utils, "caching_allocator_warmup", verified_mps_noop)
+    patch_remained_scoped = False
+    try:
+        loaded = loader()
+        patch_remained_scoped = (
+            modeling_utils.caching_allocator_warmup is verified_mps_noop
+        )
+    finally:
+        setattr(modeling_utils, "caching_allocator_warmup", original)
+
+    if not patch_remained_scoped:
+        raise RuntimeError("allocator warmup override was modified during model loading")
+    if modeling_utils.caching_allocator_warmup is not original:
+        raise RuntimeError("original allocator warmup callable was not restored")
+    if call_count != EXPECTED_ALLOCATOR_WARMUP_CALLS:
+        raise RuntimeError(
+            "Transformers allocator warmup invocation count changed: "
+            f"expected {EXPECTED_ALLOCATOR_WARMUP_CALLS}, found {call_count}"
+        )
+    provenance = {
+        "target": ALLOCATOR_WARMUP_TARGET,
+        "policy": ALLOCATOR_WARMUP_POLICY,
+        "scope": ALLOCATOR_WARMUP_SCOPE,
+        "reason": ALLOCATOR_WARMUP_REASON,
+        "upstream_source_module": ALLOCATOR_WARMUP_SOURCE_MODULE,
+        "call_count": call_count,
+        "expanded_device_map_entries": expanded_device_map_entries,
+        "expanded_device_types": expanded_device_types,
+        "hf_quantizer_present": False,
+        "restored": True,
+    }
+    return loaded, provenance
+
+
 def verify_checkpoint(
     model_dir: Path,
 ) -> tuple[list[dict[str, Any]], int, str, list[int]]:
@@ -839,7 +952,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     import tokenizers
     import torch
     import transformers
-    from transformers import AutoTokenizer, Qwen3_5Config, Qwen3_5ForCausalLM
+    from transformers import AutoTokenizer, Qwen3_5Config, Qwen3_5ForCausalLM, modeling_utils
     from transformers.models.qwen3_5 import configuration_qwen3_5, modeling_qwen3_5
 
     del numpy, safetensors, tokenizers  # Versions were captured through package metadata.
@@ -892,19 +1005,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     text_config._attn_implementation = "eager"
 
     load_started = time.perf_counter()
-    model, loading_info = Qwen3_5ForCausalLM.from_pretrained(
-        model_dir,
-        config=text_config,
-        dtype=torch.float16,
-        device_map={"": "mps"},
-        attn_implementation="eager",
-        local_files_only=True,
-        trust_remote_code=False,
-        revision=REVISION,
-        use_safetensors=True,
-        weights_only=True,
-        low_cpu_mem_usage=True,
-        output_loading_info=True,
+    (model, loading_info), allocator_warmup_override = (
+        load_with_verified_mps_allocator_warmup_noop(
+            modeling_utils,
+            torch,
+            Qwen3_5ForCausalLM,
+            lambda: Qwen3_5ForCausalLM.from_pretrained(
+                model_dir,
+                config=text_config,
+                dtype=torch.float16,
+                device_map={"": "mps"},
+                attn_implementation="eager",
+                local_files_only=True,
+                trust_remote_code=False,
+                revision=REVISION,
+                use_safetensors=True,
+                weights_only=True,
+                low_cpu_mem_usage=True,
+                output_loading_info=True,
+            ),
+        )
     )
     synchronize(torch)
     load_seconds = checked_duration("model load", time.perf_counter() - load_started)
@@ -1149,6 +1269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "float32_matmul_precision": "highest",
             "mps_per_process_memory_fraction": 1.0,
             "explicit_all_one_attention_masks": True,
+            "allocator_warmup_override": allocator_warmup_override,
             "kernel_status": kernel_status,
         },
         "environment": {

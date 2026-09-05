@@ -8,6 +8,7 @@ import io
 import math
 import struct
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -18,6 +19,38 @@ SPEC = importlib.util.spec_from_file_location("generate_qwen38_reference", SCRIP
 assert SPEC is not None and SPEC.loader is not None
 REFERENCE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(REFERENCE)
+
+
+class FakeTorch:
+    """Minimal torch.device facade used to test allocator policy validation."""
+
+    @staticmethod
+    def device(assignment: object) -> object:
+        """Return a device-like object whose type follows a string assignment."""
+
+        if not isinstance(assignment, str) or not assignment:
+            raise TypeError("invalid fake device")
+        return types.SimpleNamespace(type=assignment.partition(":")[0])
+
+
+class FakeQwenModel:
+    """Exact model-class sentinel accepted by allocator override helper tests."""
+
+
+def fake_modeling_utils() -> tuple[object, object]:
+    """Create an upstream-shaped module and retain its original warmup callable."""
+
+    def caching_allocator_warmup(
+        _model: object, _expanded_device_map: object, _hf_quantizer: object
+    ) -> None:
+        raise AssertionError("the original allocator warmup must be intercepted")
+
+    caching_allocator_warmup.__module__ = "transformers.modeling_utils"
+    owner = types.SimpleNamespace(
+        __name__="transformers.modeling_utils",
+        caching_allocator_warmup=caching_allocator_warmup,
+    )
+    return owner, caching_allocator_warmup
 
 
 class ReferenceHelperTests(unittest.TestCase):
@@ -154,6 +187,102 @@ class ReferenceHelperTests(unittest.TestCase):
                 self.assertEqual(source["bytes"], expected["bytes"])
                 self.assertEqual(source["sha256"], expected["sha256"])
                 self.assertTrue(Path(source["path"]).is_absolute())
+
+    def test_mps_allocator_warmup_override_is_exact_and_recorded(self) -> None:
+        owner, original = fake_modeling_utils()
+        loaded_sentinel = object()
+
+        def loader() -> object:
+            result = owner.caching_allocator_warmup(
+                FakeQwenModel(), {"first": "mps", "second": "mps:0"}, None
+            )
+            self.assertIsNone(result)
+            return loaded_sentinel
+
+        loaded, provenance = REFERENCE.load_with_verified_mps_allocator_warmup_noop(
+            owner, FakeTorch, FakeQwenModel, loader
+        )
+        self.assertIs(loaded, loaded_sentinel)
+        self.assertIs(owner.caching_allocator_warmup, original)
+        self.assertEqual(
+            provenance,
+            {
+                "target": REFERENCE.ALLOCATOR_WARMUP_TARGET,
+                "policy": REFERENCE.ALLOCATOR_WARMUP_POLICY,
+                "scope": REFERENCE.ALLOCATOR_WARMUP_SCOPE,
+                "reason": REFERENCE.ALLOCATOR_WARMUP_REASON,
+                "upstream_source_module": REFERENCE.ALLOCATOR_WARMUP_SOURCE_MODULE,
+                "call_count": 1,
+                "expanded_device_map_entries": 2,
+                "expanded_device_types": ["mps"],
+                "hf_quantizer_present": False,
+                "restored": True,
+            },
+        )
+
+    def test_mps_allocator_warmup_override_requires_exactly_one_call(self) -> None:
+        owner, original = fake_modeling_utils()
+        with self.assertRaisesRegex(RuntimeError, "invocation count changed"):
+            REFERENCE.load_with_verified_mps_allocator_warmup_noop(
+                owner, FakeTorch, FakeQwenModel, lambda: "loaded"
+            )
+        self.assertIs(owner.caching_allocator_warmup, original)
+
+        def twice() -> None:
+            owner.caching_allocator_warmup(FakeQwenModel(), {"": "mps"}, None)
+            owner.caching_allocator_warmup(FakeQwenModel(), {"": "mps"}, None)
+
+        with self.assertRaisesRegex(RuntimeError, "invoked more than once"):
+            REFERENCE.load_with_verified_mps_allocator_warmup_noop(
+                owner, FakeTorch, FakeQwenModel, twice
+            )
+        self.assertIs(owner.caching_allocator_warmup, original)
+
+    def test_mps_allocator_warmup_override_rejects_non_mps_maps(self) -> None:
+        owner, original = fake_modeling_utils()
+
+        def mixed_devices() -> None:
+            owner.caching_allocator_warmup(
+                FakeQwenModel(), {"first": "mps", "second": "cpu"}, None
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "exclusively MPS"):
+            REFERENCE.load_with_verified_mps_allocator_warmup_noop(
+                owner, FakeTorch, FakeQwenModel, mixed_devices
+            )
+        self.assertIs(owner.caching_allocator_warmup, original)
+
+    def test_mps_allocator_warmup_override_restores_after_loader_failure(self) -> None:
+        owner, original = fake_modeling_utils()
+
+        def failing_loader() -> None:
+            owner.caching_allocator_warmup(FakeQwenModel(), {"": "mps"}, None)
+            raise ValueError("injected model-load failure")
+
+        with self.assertRaisesRegex(ValueError, "injected model-load failure"):
+            REFERENCE.load_with_verified_mps_allocator_warmup_noop(
+                owner, FakeTorch, FakeQwenModel, failing_loader
+            )
+        self.assertIs(owner.caching_allocator_warmup, original)
+
+    def test_mps_allocator_warmup_override_rejects_quantized_or_wrong_model(self) -> None:
+        invalid_calls = [
+            (object(), {"": "mps"}, None, "unexpected model class"),
+            (FakeQwenModel(), {"": "mps"}, object(), "forbidden for quantized"),
+            (FakeQwenModel(), {}, None, "nonempty expanded device map"),
+        ]
+        for model, device_map, quantizer, message in invalid_calls:
+            with self.subTest(message=message):
+                owner, original = fake_modeling_utils()
+
+                def invalid_loader() -> None:
+                    owner.caching_allocator_warmup(model, device_map, quantizer)
+
+                with self.assertRaisesRegex(RuntimeError, message):
+                    REFERENCE.load_with_verified_mps_allocator_warmup_noop(
+                        owner, FakeTorch, FakeQwenModel, invalid_loader
+                    )
+                self.assertIs(owner.caching_allocator_warmup, original)
 
     def test_write_create_only_never_overwrites(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
