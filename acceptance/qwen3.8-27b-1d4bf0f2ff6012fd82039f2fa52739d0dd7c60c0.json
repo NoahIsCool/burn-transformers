@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "strict_full_precision_q8_and_q4_metal_smokes_verified_pending_reference_generation_quality_throughput_and_32k_acceptance",
+  "phase": "strict_full_precision_official_reference_q8_and_q4_metal_gates_verified_pending_quantized_quality_throughput_and_32k_acceptance",
   "repository": "Qwen/Qwen3.8-27B",
   "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
   "artifact_layout": {
@@ -87,9 +87,9 @@
     "q4_metal_mixed_precision_mtp_inference": true,
     "q4_metal_mixed_precision_recurrent_decode": true,
     "q4_metal_mixed_precision_full_smoke": true,
-    "reference_full_vector_logits_compared": false,
-    "reference_greedy_32_tokens_compared": false,
-    "cached_stateless_top1_all_prefixes_compared": false,
+    "reference_full_vector_logits_compared": true,
+    "reference_greedy_32_tokens_compared": true,
+    "cached_stateless_top1_all_prefixes_compared": true,
     "quantized_quality_corpus_validated": false,
     "quantized_long_context_32k_validated": false
   },
@@ -313,10 +313,99 @@
       "throughput_reportable": false
     }
   },
+  "official_f16_reference_acceptance": {
+    "status": "passed",
+    "result_recorded": true,
+    "reference_class": "transformers.Qwen3_5ForCausalLM",
+    "reference_bundle": {
+      "directory": "/Volumes/bag of holding/models/transformers-acceptance/qwen3.8-27b-official-reference-1d4bf0f2/qwen3.8-27b-1d4bf0f2-reference.bundle",
+      "json": {
+        "bytes": 34206,
+        "sha256": "1d4f7d3c02a996c72a1d767d672f933ce83792dea116c4964b794003ac345ce2"
+      },
+      "full_vocabulary_logits": {
+        "relative_path": "qwen3.8-27b-1d4bf0f2-six-token-f16-last-logits.f32le",
+        "encoding": "ieee754-f32-little-endian",
+        "elements": 248320,
+        "bytes": 993280,
+        "sha256": "0deca0c71c576a529ec3ceec9297d10df9d3d024302b3418e09f74bec2eca998"
+      }
+    },
+    "generator": {
+      "command": "/usr/bin/time -l /usr/local/bin/python3 crates/transformers/scripts/generate_qwen38_reference.py --model-dir '/Volumes/bag of holding/models/Qwen/Qwen3.8-27B-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0' --output-dir '/Volumes/bag of holding/models/transformers-acceptance/qwen3.8-27b-official-reference-1d4bf0f2'",
+      "git_commit": "b7aab93d8825f0b0458265fa11f5a2d68cb226bc",
+      "script_sha256": "e52b3699ae08920ca8f177a7fad0b68d807732d0fae524d6c943347357ed864b",
+      "git_dirty": false,
+      "transformers_version": "5.2.0",
+      "torch_version": "2.10.0",
+      "device": "mps",
+      "dtype": "float16",
+      "attention_implementation": "eager",
+      "loaded_parameter_count": 26895998464,
+      "missing_tensors": 0,
+      "unexpected_tensors": 0,
+      "process_wall_seconds": 104.27,
+      "macos_maximum_resident_set_bytes": 38398869504,
+      "macos_peak_memory_footprint_bytes": 56188343808
+    },
+    "fixture": {
+      "prompt": "one two three one two three",
+      "prompt_token_ids": [588, 1330, 2250, 799, 1330, 2250],
+      "prompt_tokens": 6,
+      "maximum_new_tokens": 32,
+      "minimum_official_top_two_margin": 0.8828125,
+      "minimum_official_margin_to_f16_elementwise_epsilon_ratio": 113.0,
+      "official_cached_vs_stateless_minimum_cosine": 0.9998457587791264,
+      "official_cached_vs_stateless_maximum_absolute_error": 0.5499267578125
+    },
+    "rust_comparison": {
+      "command": "/usr/bin/time -l env 'TRANSFORMERS_QWEN38_DIR=/Volumes/bag of holding/models/Qwen/Qwen3.8-27B-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0' 'TRANSFORMERS_QWEN38_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/qwen3.8-27b-official-reference-1d4bf0f2' crates/transformers/target/release/deps/local_artifacts-cfd627974dfd1f9c matches_pinned_qwen38_official_reference_on_metal --ignored --exact --nocapture",
+      "binary": {
+        "path": "crates/transformers/target/release/deps/local_artifacts-cfd627974dfd1f9c",
+        "bytes": 47527936,
+        "sha256": "8c11c70c6346db15eccc34aef0a9076c5516419d1d7cb69425194275b463aa40"
+      },
+      "source": {
+        "crate_commit": "4dd35bc17019a9e4c3b0db40588a9c08225314c8",
+        "commit_subject": "test(transformers): correct qwen3.8 reference digest",
+        "compiled_source_paths_match_commit": true,
+        "working_tree_clean": false,
+        "note": "The only uncommitted transformer path was the separate qwen3_moe_artifacts integration test. It was neither compiled nor linked into this local_artifacts binary; all compiled crate and local_artifacts sources matched the recorded commit. The unrelated crates/hmm modification was also outside this executable."
+      },
+      "build": {
+        "profile": "release",
+        "optimized": true,
+        "default_features": false,
+        "features": ["std", "metal", "tokenizers", "chat-templates"],
+        "exact_build_command": "cargo test --release --manifest-path crates/transformers/Cargo.toml --no-default-features --features 'std metal tokenizers chat-templates' --test local_artifacts --no-run",
+        "burn_version": "0.21.0",
+        "rustc": "1.94.0-nightly (4f14395c3 2025-12-22)",
+        "cargo": "1.94.0-nightly (3861f60f6 2025-12-19)",
+        "target": "aarch64-apple-darwin"
+      },
+      "results": {
+        "full_vocabulary_logit_cosine": 0.999999881,
+        "cosine_gate": 0.999,
+        "prompt_top1_token_id": 799,
+        "prompt_top1_exact": true,
+        "greedy_tokens_compared": 32,
+        "greedy_tokens_exact": true,
+        "cached_stateless_top1_all_prefixes_exact": true,
+        "rust_test_wall_seconds": 218.37,
+        "process_wall_seconds": 218.79,
+        "macos_maximum_resident_set_bytes": 11254513664,
+        "macos_peak_memory_footprint_bytes": 63811727296,
+        "process_exit_status": 0
+      },
+      "measurement_classification": {
+        "kind": "cold end-to-end official numerical acceptance run",
+        "standardized_benchmark": false,
+        "throughput_reportable": false,
+        "scope": "The complete test validates both generated-reference digests and provenance, strictly streams the 18-shard text graph as F16, compares the full prompt-logit vector, generates 32 cached tokens, and checks stateless teacher-forced top-1 at every generated prefix."
+      }
+    }
+  },
   "open_acceptance_gates": [
-    "Compare full-model F16 logits against the pinned official reference and reach cosine similarity of at least 0.999.",
-    "Match at least 32 greedy continuation tokens on stable-margin fixed prompts.",
-    "Prove cached and stateless top-1 equality at every compared prefix, including decode steps.",
     "Validate Q8 and Q4 against their fixed-corpus negative-log-likelihood limits.",
     "Run longer Q8 and Q4 generation and compare each with the pinned reference.",
     "Pass the quantized 32K-token stress test and record the required standardized latency, throughput, cache-bytes-per-token, memory, and output-hash metrics."
