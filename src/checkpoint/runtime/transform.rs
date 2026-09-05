@@ -429,6 +429,25 @@ fn materialize_transpose<S: TensorSource>(
     let columns = shape[1];
     let mut output = allocate_tensor_bytes(&tensor.target, &tensor.shape, tensor.dtype)?;
     observe_peak(stats, bytes.len(), output.len(), &tensor.target)?;
+
+    // SafeTensors and this host use the same scalar byte order, so an equal-dtype
+    // transpose is a pure permutation of fixed-width byte strings. The tiled path
+    // validates the complete layout once, then keeps a small source tile and the
+    // corresponding target row segments hot in cache. Casts retain the scalar
+    // reference loop below because they must round each value exactly once.
+    #[cfg(target_endian = "little")]
+    if source_dtype == tensor.dtype {
+        transpose_little_endian_bytes(
+            &tensor.target,
+            &bytes,
+            &mut output,
+            rows,
+            columns,
+            source_dtype,
+        )?;
+        return make_tensor_data(&tensor.target, tensor.dtype, &tensor.shape, output);
+    }
+
     for row in 0..rows {
         for column in 0..columns {
             let source_index = row
@@ -459,6 +478,111 @@ fn materialize_transpose<S: TensorSource>(
         normalize_little_endian(&mut output, tensor.dtype)?;
     }
     make_tensor_data(&tensor.target, tensor.dtype, &tensor.shape, output)
+}
+
+/// Transposes equal-dtype little-endian scalars as opaque, fixed-width bytes.
+///
+/// A scalar at source coordinate `(r, c)` occupies byte interval
+/// `((r * columns + c) * width)..`; its destination begins at
+/// `((c * rows + r) * width)`. Blocking both axes bounds the active source and
+/// destination cache footprint without allocating a scratch tile. Selecting a
+/// constant-width worker also lets optimized builds reduce each scalar copy to
+/// one fixed-size load and store while preserving every floating-point bit
+/// pattern, including NaN payloads and signed zero.
+#[cfg(target_endian = "little")]
+fn transpose_little_endian_bytes(
+    tensor: &str,
+    source: &[u8],
+    target: &mut [u8],
+    rows: u64,
+    columns: u64,
+    dtype: TensorDType,
+) -> Result<()> {
+    let width =
+        usize::try_from(scalar_bytes(dtype)?).map_err(|_| CheckpointError::ArithmeticOverflow {
+            context: "converting transpose scalar width to usize",
+        })?;
+    let rows = usize::try_from(rows).map_err(|_| CheckpointError::InvalidTensorPayload {
+        tensor: tensor.to_owned(),
+        reason: "transpose row count does not fit in usize".into(),
+    })?;
+    let columns = usize::try_from(columns).map_err(|_| CheckpointError::InvalidTensorPayload {
+        tensor: tensor.to_owned(),
+        reason: "transpose column count does not fit in usize".into(),
+    })?;
+    let expected = rows
+        .checked_mul(columns)
+        .and_then(|elements| elements.checked_mul(width))
+        .ok_or(CheckpointError::ArithmeticOverflow {
+            context: "computing tiled transpose byte length",
+        })?;
+    if source.len() != expected || target.len() != expected {
+        return Err(payload_bounds(tensor));
+    }
+    if expected == 0 {
+        return Ok(());
+    }
+
+    match width {
+        1 => transpose_scalar_bytes::<1>(source, target, rows, columns),
+        2 => transpose_scalar_bytes::<2>(source, target, rows, columns),
+        4 => transpose_scalar_bytes::<4>(source, target, rows, columns),
+        8 => transpose_scalar_bytes::<8>(source, target, rows, columns),
+        _ => {
+            return Err(CheckpointError::InvalidTensorPayload {
+                tensor: tensor.to_owned(),
+                reason: format!("runtime scalar width {width} cannot be transposed"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Applies one cache-tiled transpose for a compile-time scalar byte width.
+///
+/// The function is infallible after [`transpose_little_endian_bytes`] proves that
+/// both buffers contain exactly `rows * columns` complete scalars. It uses only
+/// disjoint mutable slices and adds no staging allocation, so the executor's
+/// source-plus-output peak-memory bound remains exact.
+#[cfg(target_endian = "little")]
+fn transpose_scalar_bytes<const WIDTH: usize>(
+    source: &[u8],
+    target: &mut [u8],
+    rows: usize,
+    columns: usize,
+) {
+    const TILE_EDGE: usize = 32;
+
+    let source_row_bytes = columns * WIDTH;
+    let target_row_bytes = rows * WIDTH;
+    let columns_per_tile = columns.min(TILE_EDGE);
+    let target_tile_bytes = target_row_bytes * columns_per_tile;
+
+    for (column_block, target_block) in target.chunks_mut(target_tile_bytes).enumerate() {
+        let column_start = column_block * columns_per_tile;
+        for row_start in (0..rows).step_by(TILE_EDGE) {
+            let row_end = row_start.saturating_add(TILE_EDGE).min(rows);
+            let source_start = row_start * source_row_bytes;
+            let source_end = row_end * source_row_bytes;
+            let source_rows = &source[source_start..source_end];
+            let target_start = row_start * WIDTH;
+            let target_end = row_end * WIDTH;
+
+            for (local_column, target_row) in
+                target_block.chunks_exact_mut(target_row_bytes).enumerate()
+            {
+                let source_column = (column_start + local_column) * WIDTH;
+                let target_scalars = &mut target_row[target_start..target_end];
+                for (source_row, target_scalar) in source_rows
+                    .chunks_exact(source_row_bytes)
+                    .zip(target_scalars.chunks_exact_mut(WIDTH))
+                {
+                    target_scalar
+                        .copy_from_slice(&source_row[source_column..source_column + WIDTH]);
+                }
+            }
+        }
+    }
 }
 
 /// Extracts a consecutive section along an arbitrary row-major axis.

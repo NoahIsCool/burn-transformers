@@ -1797,24 +1797,31 @@ fn explicit_artifact_selection_still_streams_the_selected_file() {
     );
 }
 
-fn in_memory_transpose(rows: u64, columns: u64, values: Vec<u16>) -> Vec<u16> {
+/// Executes one equal-dtype transpose through the complete in-memory runtime.
+fn in_memory_transpose_data(
+    rows: u64,
+    columns: u64,
+    dtype: TensorDType,
+    bytes: Vec<u8>,
+) -> TensorData {
+    let payload_bytes = dtype.storage_bytes(rows * columns).unwrap();
     let source = PlannedSource {
         name: "source".into(),
         shard: "memory.safetensors".into(),
         shape: vec![rows, columns],
-        dtype: TensorDType::U16,
-        data_offsets: [0, rows * columns * 2],
+        dtype,
+        data_offsets: [0, payload_bytes],
     };
     let target = PlannedTensor {
         target: "target".into(),
         sources: vec![source],
         transform: PlannedTransform::Transpose2d,
         shape: vec![columns, rows],
-        dtype: TensorDType::U16,
+        dtype,
     };
     let report = crate::checkpoint::LoadReport {
         memory: Some(crate::checkpoint::MemoryEstimate {
-            peak_host_staging_bytes: rows * columns * 4,
+            peak_host_staging_bytes: payload_bytes * 2,
             ..crate::checkpoint::MemoryEstimate::default()
         }),
         ..crate::checkpoint::LoadReport::default()
@@ -1825,24 +1832,58 @@ fn in_memory_transpose(rows: u64, columns: u64, values: Vec<u16>) -> Vec<u16> {
         aliases: Vec::new(),
         report,
         memory: crate::checkpoint::MemoryEstimate {
-            peak_host_staging_bytes: rows * columns * 4,
+            peak_host_staging_bytes: payload_bytes * 2,
             ..crate::checkpoint::MemoryEstimate::default()
         },
     };
     let mut source = MemorySource::default();
     source.tensors.insert(
         "source".into(),
-        SourceTensor::new(
-            "source",
-            [rows, columns],
-            TensorDType::U16,
-            u16_bytes(&values),
-        )
-        .unwrap(),
+        SourceTensor::new("source", [rows, columns], dtype, bytes).unwrap(),
     );
     let mut sink = CollectingSink::default();
     execute_load_plan(&plan, &mut source, &mut sink).unwrap();
-    tensor_u16(&sink.tensors["target"])
+    sink.tensors.remove("target").unwrap()
+}
+
+/// Executes the numeric `u16` transpose used by the index-equation property test.
+fn in_memory_transpose(rows: u64, columns: u64, values: Vec<u16>) -> Vec<u16> {
+    let data = in_memory_transpose_data(rows, columns, TensorDType::U16, u16_bytes(&values));
+    tensor_u16(&data)
+}
+
+#[cfg(target_endian = "little")]
+/// Computes a deliberately simple scalar-by-scalar byte-transpose oracle.
+fn reference_transpose_bytes(rows: usize, columns: usize, width: usize, bytes: &[u8]) -> Vec<u8> {
+    let mut output = vec![0; bytes.len()];
+    for row in 0..rows {
+        for column in 0..columns {
+            let source = (row * columns + column) * width;
+            let target = (column * rows + row) * width;
+            output[target..target + width].copy_from_slice(&bytes[source..source + width]);
+        }
+    }
+    output
+}
+
+#[cfg(target_endian = "little")]
+/// Encodes each scalar index into its own little-endian raw-bit pattern.
+///
+/// The odd multiplier is bijective modulo every supported power-of-two scalar
+/// width. In particular, advancing by the 32-scalar tile edge changes the low
+/// byte, unlike a byte-index pattern whose eight-byte scalars repeat every tile.
+fn indexed_scalar_bytes(elements: usize, width: usize, seed: u8) -> Vec<u8> {
+    assert!(matches!(width, 1 | 2 | 4 | 8));
+    let mut bytes = Vec::with_capacity(elements.checked_mul(width).unwrap());
+    let salt = u64::from(seed).wrapping_mul(0x0101_0101_0101_0101);
+    for index in 0..elements {
+        let encoded = (index as u64)
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add(salt)
+            .to_le_bytes();
+        bytes.extend_from_slice(&encoded[..width]);
+    }
+    bytes
 }
 
 proptest! {
@@ -1865,6 +1906,120 @@ proptest! {
             }
         }
         prop_assert_eq!(actual, expected);
+    }
+
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn tiled_equal_dtype_transpose_is_bit_exact(
+        rows in 0_usize..70,
+        columns in 0_usize..70,
+        width_selector in 0_usize..4,
+        seed in any::<u8>(),
+    ) {
+        let (dtype, width) = [
+            (TensorDType::U8, 1_usize),
+            (TensorDType::U16, 2),
+            (TensorDType::U32, 4),
+            (TensorDType::U64, 8),
+        ][width_selector];
+        let bytes = indexed_scalar_bytes(rows * columns, width, seed);
+        let expected = reference_transpose_bytes(rows, columns, width, &bytes);
+        let actual = in_memory_transpose_data(
+            rows as u64,
+            columns as u64,
+            dtype,
+            bytes,
+        );
+        prop_assert_eq!(actual.as_bytes(), expected);
+    }
+}
+
+#[cfg(target_endian = "little")]
+#[test]
+fn tiled_transpose_covers_zero_and_every_tile_boundary() {
+    let dimensions = [0_usize, 1, 31, 32, 33, 63, 64, 65];
+    let dtypes = [
+        (TensorDType::U8, 1_usize),
+        (TensorDType::U16, 2),
+        (TensorDType::U32, 4),
+        (TensorDType::U64, 8),
+    ];
+
+    for rows in dimensions {
+        for columns in dimensions {
+            for (dtype, width) in dtypes {
+                let bytes = indexed_scalar_bytes(rows * columns, width, 91);
+                let expected = reference_transpose_bytes(rows, columns, width, &bytes);
+                let actual = in_memory_transpose_data(rows as u64, columns as u64, dtype, bytes);
+
+                assert_eq!(
+                    actual.as_bytes(),
+                    expected,
+                    "dtype {dtype}, source shape [{rows}, {columns}]"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(target_endian = "little")]
+#[test]
+fn tiled_transpose_preserves_float_nan_payloads_signed_zero_and_tile_edges() {
+    let rows = 35_usize;
+    let columns = 67_usize;
+    let patterns = [
+        0x0000_0000_u32,
+        0x8000_0000,
+        0x7fc0_0001,
+        0x7fa1_2345,
+        0xffc5_4321,
+        0x7f80_0000,
+        0xff80_0000,
+        0x0000_0001,
+    ];
+    let bytes: Vec<_> = (0..rows * columns)
+        .flat_map(|index| patterns[index % patterns.len()].to_le_bytes())
+        .collect();
+    let expected = reference_transpose_bytes(rows, columns, 4, &bytes);
+
+    let actual = in_memory_transpose_data(rows as u64, columns as u64, TensorDType::F32, bytes);
+
+    assert_eq!(actual.as_bytes(), expected);
+}
+
+#[cfg(target_endian = "little")]
+#[test]
+fn tiled_transpose_is_bit_exact_for_every_runtime_dtype() {
+    let rows = 33_usize;
+    let columns = 35_usize;
+    let dtypes = [
+        (TensorDType::BOOL, 1_usize),
+        (TensorDType::U8, 1),
+        (TensorDType::I8, 1),
+        (TensorDType::U16, 2),
+        (TensorDType::I16, 2),
+        (TensorDType::F16, 2),
+        (TensorDType::BF16, 2),
+        (TensorDType::U32, 4),
+        (TensorDType::I32, 4),
+        (TensorDType::F32, 4),
+        (TensorDType::U64, 8),
+        (TensorDType::I64, 8),
+        (TensorDType::F64, 8),
+    ];
+
+    for (dtype, width) in dtypes {
+        let bytes = if dtype == TensorDType::BOOL {
+            (0..rows * columns)
+                .map(|index| u8::from(index % 67 < 29))
+                .collect()
+        } else {
+            indexed_scalar_bytes(rows * columns, width, 17)
+        };
+        let expected = reference_transpose_bytes(rows, columns, width, &bytes);
+        let actual = in_memory_transpose_data(rows as u64, columns as u64, dtype, bytes);
+
+        assert_eq!(actual.as_bytes(), expected, "dtype {dtype}");
     }
 }
 
