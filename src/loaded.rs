@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, GenerationConfig, Result, checkpoint::LoadReport};
+use crate::{
+    Error, GenerationConfig, Result,
+    checkpoint::{ExecutionStats, LoadReport},
+};
 
 /// Tokenizer type carried by [`LoadedModel`] when tokenizer support is enabled.
 #[cfg(feature = "tokenizers")]
@@ -101,6 +104,7 @@ pub struct LoadedModel<M> {
     generation_defaults: GenerationConfig,
     source: ModelSourceMetadata,
     load_report: LoadReport,
+    execution_stats: Option<ExecutionStats>,
 }
 
 impl<M> LoadedModel<M> {
@@ -114,7 +118,55 @@ impl<M> LoadedModel<M> {
         tokenizer: Option<ModelTokenizer>,
         generation_defaults: GenerationConfig,
         source: ModelSourceMetadata,
+        load_report: LoadReport,
+        vocabulary_size: usize,
+    ) -> Result<Self> {
+        Self::build(
+            model,
+            tokenizer,
+            generation_defaults,
+            source,
+            load_report,
+            None,
+            vocabulary_size,
+        )
+    }
+
+    /// Builds a bundle with the exact counters from checkpoint-plan execution.
+    ///
+    /// Automatic loaders use this constructor after successful pass-two
+    /// execution. Callers assembling a bundle from an architecture-specific
+    /// [`crate::checkpoint::ExecutionOutcome`] should do the same so shard I/O,
+    /// source reads, and bounded host-staging measurements remain attached to
+    /// the model whose parameters they describe.
+    pub fn new_with_execution_stats(
+        model: M,
+        tokenizer: Option<ModelTokenizer>,
+        generation_defaults: GenerationConfig,
+        source: ModelSourceMetadata,
+        load_report: LoadReport,
+        execution_stats: ExecutionStats,
+        vocabulary_size: usize,
+    ) -> Result<Self> {
+        Self::build(
+            model,
+            tokenizer,
+            generation_defaults,
+            source,
+            load_report,
+            Some(execution_stats),
+            vocabulary_size,
+        )
+    }
+
+    /// Validates shared invariants and constructs a bundle with optional counters.
+    fn build(
+        model: M,
+        tokenizer: Option<ModelTokenizer>,
+        generation_defaults: GenerationConfig,
+        source: ModelSourceMetadata,
         mut load_report: LoadReport,
+        execution_stats: Option<ExecutionStats>,
         vocabulary_size: usize,
     ) -> Result<Self> {
         generation_defaults.validate(vocabulary_size)?;
@@ -126,12 +178,16 @@ impl<M> LoadedModel<M> {
                 load_report.unexpected.len()
             )));
         }
+        if let Some(stats) = &execution_stats {
+            validate_execution_stats(&load_report, stats)?;
+        }
         Ok(Self {
             model,
             tokenizer,
             generation_defaults,
             source,
             load_report,
+            execution_stats,
         })
     }
 
@@ -165,12 +221,25 @@ impl<M> LoadedModel<M> {
         &self.load_report
     }
 
+    /// Returns checkpoint-plan execution counters when they were retained.
+    ///
+    /// Values are present for models returned by the automatic local loaders.
+    /// A bundle constructed through the compatibility [`Self::new`] API has no
+    /// executor context and therefore returns `None`.
+    pub fn execution_stats(&self) -> Option<&ExecutionStats> {
+        self.execution_stats.as_ref()
+    }
+
     /// Consumes the bundle and returns the executable module.
     pub fn into_model(self) -> M {
         self.model
     }
 
-    /// Consumes the bundle without discarding any component.
+    /// Consumes the bundle using the original five-component compatibility API.
+    ///
+    /// This method intentionally omits optional checkpoint execution counters.
+    /// Use [`Self::into_parts_with_execution_stats`] when retaining that audit
+    /// data matters.
     pub fn into_parts(
         self,
     ) -> (
@@ -188,6 +257,54 @@ impl<M> LoadedModel<M> {
             self.load_report,
         )
     }
+
+    /// Consumes the bundle and returns every component, including load counters.
+    pub fn into_parts_with_execution_stats(
+        self,
+    ) -> (
+        M,
+        Option<ModelTokenizer>,
+        GenerationConfig,
+        ModelSourceMetadata,
+        LoadReport,
+        Option<ExecutionStats>,
+    ) {
+        (
+            self.model,
+            self.tokenizer,
+            self.generation_defaults,
+            self.source,
+            self.load_report,
+            self.execution_stats,
+        )
+    }
+}
+
+/// Checks the redundant invariants that make retained execution counters auditable.
+fn validate_execution_stats(report: &LoadReport, stats: &ExecutionStats) -> Result<()> {
+    let writes = stats
+        .tensors_applied
+        .checked_add(stats.aliases_applied)
+        .ok_or_else(|| Error::Checkpoint("checkpoint execution write count overflowed".into()))?;
+    if writes != report.applied.len() {
+        return Err(Error::Checkpoint(format!(
+            "checkpoint execution recorded {writes} successful writes but the load report contains {} applied tensors",
+            report.applied.len()
+        )));
+    }
+    if stats.source_reads != stats.source.tensor_reads {
+        return Err(Error::Checkpoint(format!(
+            "checkpoint executor recorded {} source reads but its source recorded {}",
+            stats.source_reads, stats.source.tensor_reads
+        )));
+    }
+    if stats.source_payload_bytes != stats.source.payload_bytes_read {
+        return Err(Error::Checkpoint(format!(
+            "checkpoint executor recorded {} source bytes but its source recorded {}",
+            stats.source_payload_bytes, stats.source.payload_bytes_read
+        )));
+    }
+    Ok(())
 }
 
 /// Rejects empty, surrounding-whitespace, and control-character provenance.
@@ -209,7 +326,7 @@ fn validate_label(field: &str, value: String) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::checkpoint::LoadReport;
+    use crate::checkpoint::{ExecutionStats, LoadReport, SourceStats};
 
     use super::{LoadedModel, ModelSourceMetadata};
 
@@ -273,12 +390,63 @@ mod tests {
         assert_eq!(loaded.source(), &source);
         assert_eq!(loaded.load_report().applied, ["a.weight", "z.weight"]);
         assert_eq!(loaded.generation_defaults().max_new_tokens, 256);
+        assert!(loaded.execution_stats().is_none());
 
         let (model, tokenizer, _, unpacked_source, unpacked_report) = loaded.into_parts();
         assert_eq!(model, 17);
         assert!(tokenizer.is_none());
         assert_eq!(unpacked_source, source);
         assert_eq!(unpacked_report.applied, ["a.weight", "z.weight"]);
+    }
+
+    /// Execution-aware construction and consumption retain exact audit counters.
+    #[test]
+    fn loaded_model_preserves_execution_stats_without_changing_legacy_parts() {
+        let directory = tempfile::tempdir().expect("temporary source root");
+        let source =
+            ModelSourceMetadata::local(directory.path(), "qwen3_moe").expect("valid local source");
+        let stats = ExecutionStats {
+            tensors_applied: 2,
+            aliases_applied: 1,
+            source_reads: 2,
+            source_payload_bytes: 96,
+            delivered_tensor_bytes: 96,
+            largest_source_payload_bytes: 64,
+            largest_output_tensor_bytes: 64,
+            peak_host_staging_bytes: 128,
+            source: SourceStats {
+                shard_opens: 1,
+                tensor_reads: 2,
+                payload_bytes_read: 96,
+                max_open_shards: 1,
+                shard_open_order: vec!["model.safetensors".into()],
+            },
+        };
+        let mut report = LoadReport::new();
+        report.applied = vec![
+            "model.embed_tokens.weight".into(),
+            "model.norm.weight".into(),
+            "lm_head.weight".into(),
+        ];
+        let loaded = LoadedModel::new_with_execution_stats(
+            23_u8,
+            None,
+            Default::default(),
+            source.clone(),
+            report,
+            stats.clone(),
+            32_128,
+        )
+        .expect("strict execution-aware bundle");
+
+        assert_eq!(loaded.execution_stats(), Some(&stats));
+        let (model, tokenizer, _, unpacked_source, unpacked_report, unpacked_stats) =
+            loaded.into_parts_with_execution_stats();
+        assert_eq!(model, 23);
+        assert!(tokenizer.is_none());
+        assert_eq!(unpacked_source, source);
+        assert!(unpacked_report.is_strictly_valid());
+        assert_eq!(unpacked_stats, Some(stats));
     }
 
     /// Invalid generation controls and non-strict reports cannot escape loaders.
@@ -308,5 +476,68 @@ mod tests {
         let error = LoadedModel::new((), None, Default::default(), source, report, 32)
             .expect_err("non-strict report must fail");
         assert!(error.to_string().contains("1 missing and 1 unexpected"));
+    }
+
+    /// Contradictory retained counters cannot be presented as a successful audit.
+    #[test]
+    fn loaded_model_rejects_inconsistent_execution_stats() {
+        let directory = tempfile::tempdir().expect("temporary source root");
+        let source = ModelSourceMetadata::local(directory.path(), "t5").expect("valid source");
+        let construct = |stats| {
+            LoadedModel::new_with_execution_stats(
+                (),
+                None,
+                Default::default(),
+                source.clone(),
+                LoadReport::new(),
+                stats,
+                32,
+            )
+        };
+
+        let write_overflow = ExecutionStats {
+            tensors_applied: usize::MAX,
+            aliases_applied: 1,
+            ..ExecutionStats::default()
+        };
+        assert!(
+            construct(write_overflow)
+                .unwrap_err()
+                .to_string()
+                .contains("overflowed")
+        );
+
+        let write_mismatch = ExecutionStats {
+            tensors_applied: 1,
+            ..ExecutionStats::default()
+        };
+        assert!(
+            construct(write_mismatch)
+                .unwrap_err()
+                .to_string()
+                .contains("1 successful writes")
+        );
+
+        let read_mismatch = ExecutionStats {
+            source_reads: 1,
+            ..ExecutionStats::default()
+        };
+        assert!(
+            construct(read_mismatch)
+                .unwrap_err()
+                .to_string()
+                .contains("1 source reads")
+        );
+
+        let byte_mismatch = ExecutionStats {
+            source_payload_bytes: 1,
+            ..ExecutionStats::default()
+        };
+        assert!(
+            construct(byte_mismatch)
+                .unwrap_err()
+                .to_string()
+                .contains("1 source bytes")
+        );
     }
 }
