@@ -18,12 +18,13 @@ use burn::tensor::{BoolStore, DType, TensorData, bf16, f16};
 
 use super::{ExecutionStats, TensorSource};
 use crate::checkpoint::{
-    CheckpointError, LoadPlan, PlannedSource, PlannedTensor, PlannedTransform, Result,
-    SourceTensor, TensorDType,
+    CheckpointEquivalenceRecord, CheckpointError, LoadPlan, PlannedSource, PlannedTensor,
+    PlannedTensorEquivalence, PlannedTransform, Result, SourceTensor, TensorDType,
 };
 
 /// Validates all mutable public plan fields before the first sink mutation.
 pub(super) fn validate_plan(plan: &LoadPlan) -> Result<()> {
+    validate_equivalences(plan)?;
     let mut targets = BTreeSet::new();
     let mut primary = BTreeMap::new();
     for tensor in &plan.tensors {
@@ -104,25 +105,7 @@ fn validate_primary(tensor: &PlannedTensor) -> Result<()> {
     let _ = burn_dtype(tensor.dtype)?;
     let _ = byte_len(&tensor.shape, tensor.dtype, &tensor.target)?;
     for source in &tensor.sources {
-        if source.name.is_empty() || source.shard.is_empty() {
-            return invalid_plan(format!(
-                "target `{}` has an empty source name or shard",
-                tensor.target
-            ));
-        }
-        let _ = burn_dtype(source.dtype)?;
-        let described = source.data_offsets[1]
-            .checked_sub(source.data_offsets[0])
-            .ok_or_else(|| CheckpointError::InvalidMapping {
-                message: format!("source `{}` has reversed data offsets", source.name),
-            })?;
-        let expected = byte_len(&source.shape, source.dtype, &source.name)?;
-        if described != expected {
-            return invalid_plan(format!(
-                "source `{}` offsets describe {described} bytes, expected {expected}",
-                source.name
-            ));
-        }
+        validate_source_descriptor(source)?;
         validate_conversion(source.dtype, tensor.dtype)?;
     }
 
@@ -194,6 +177,109 @@ fn validate_primary(tensor: &PlannedTensor) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Validates exact physical-equivalence work and its report/memory accounting.
+fn validate_equivalences(plan: &LoadPlan) -> Result<()> {
+    let mut aliases = BTreeSet::new();
+    let mut records = Vec::with_capacity(plan.equivalences.len());
+    let mut largest_pair = 0_u64;
+    for equivalence in &plan.equivalences {
+        validate_source_descriptor(&equivalence.alias)?;
+        validate_source_descriptor(&equivalence.owner)?;
+        if equivalence.alias.name == equivalence.owner.name {
+            return equivalence_error(equivalence, "alias and owner names must differ");
+        }
+        if !aliases.insert(equivalence.alias.name.as_str()) {
+            return equivalence_error(
+                equivalence,
+                "alias occurs in multiple equivalence work items",
+            );
+        }
+        if equivalence.alias.shape != equivalence.owner.shape {
+            return equivalence_error(equivalence, "alias and owner shapes differ");
+        }
+        if equivalence.alias.dtype != equivalence.owner.dtype {
+            return equivalence_error(equivalence, "alias and owner dtypes differ");
+        }
+        let alias_bytes = source_byte_len(&equivalence.alias)?;
+        let owner_bytes = source_byte_len(&equivalence.owner)?;
+        if alias_bytes != owner_bytes {
+            return equivalence_error(equivalence, "alias and owner payload lengths differ");
+        }
+        let pair =
+            alias_bytes
+                .checked_add(owner_bytes)
+                .ok_or(CheckpointError::ArithmeticOverflow {
+                    context: "validating checkpoint equivalence staging bytes",
+                })?;
+        if pair > plan.memory.peak_host_staging_bytes {
+            return Err(CheckpointError::MemoryEstimateExceeded {
+                tensor: equivalence.alias.name.clone(),
+                required: pair,
+                planned: plan.memory.peak_host_staging_bytes,
+            });
+        }
+        largest_pair = largest_pair.max(pair);
+        records.push(CheckpointEquivalenceRecord::new(
+            &equivalence.alias.name,
+            &equivalence.owner.name,
+        ));
+    }
+    records.sort();
+    if plan.report.equivalence_planned != records {
+        return invalid_plan(
+            "planned checkpoint equivalence report does not match executable work items",
+        );
+    }
+    if !plan.report.equivalence_verified.is_empty() {
+        return invalid_plan("an unexecuted load plan cannot contain verified equivalences");
+    }
+    if plan.memory.largest_equivalence_pair_bytes != largest_pair {
+        return invalid_plan(format!(
+            "largest equivalence pair is {largest_pair} bytes, memory plan records {}",
+            plan.memory.largest_equivalence_pair_bytes
+        ));
+    }
+    Ok(())
+}
+
+/// Validates one immutable source descriptor carried by a public load plan.
+fn validate_source_descriptor(source: &PlannedSource) -> Result<()> {
+    if source.name.is_empty() || source.shard.is_empty() {
+        return invalid_plan("source descriptor has an empty tensor name or shard");
+    }
+    let _ = burn_dtype(source.dtype)?;
+    let described = source_byte_len(source)?;
+    let expected = byte_len(&source.shape, source.dtype, &source.name)?;
+    if described != expected {
+        return invalid_plan(format!(
+            "source `{}` offsets describe {described} bytes, expected {expected}",
+            source.name
+        ));
+    }
+    Ok(())
+}
+
+/// Returns the checked payload extent carried by one planned source.
+fn source_byte_len(source: &PlannedSource) -> Result<u64> {
+    source.data_offsets[1]
+        .checked_sub(source.data_offsets[0])
+        .ok_or_else(|| CheckpointError::InvalidMapping {
+            message: format!("source `{}` has reversed data offsets", source.name),
+        })
+}
+
+/// Builds one contextual equivalence-plan validation failure.
+fn equivalence_error<T>(
+    equivalence: &PlannedTensorEquivalence,
+    reason: impl Into<String>,
+) -> Result<T> {
+    Err(CheckpointError::TensorEquivalenceMismatch {
+        alias: equivalence.alias.name.clone(),
+        owner: equivalence.owner.name.clone(),
+        reason: reason.into(),
+    })
 }
 
 /// Validates the shape equation for a concatenation.

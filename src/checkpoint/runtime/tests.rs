@@ -25,9 +25,9 @@ use crate::checkpoint::quantization::{
     QuantizationGroupSize, SymmetricQuantization, WeightQuantizationConfig, quantize_tensor_data,
 };
 use crate::checkpoint::{
-    ArtifactSelection, CheckpointError, DTypePolicy, ExpectedTensor, LoadOptions, MappingPlan,
-    PlannedSource, PlannedTensor, PlannedTransform, TensorDType, build_load_plan,
-    discover_checkpoint,
+    ArtifactSelection, CheckpointEquivalenceRecord, CheckpointError, DTypePolicy, ExpectedTensor,
+    IndexTensorAlias, LoadOptions, MappingPlan, PlannedSource, PlannedTensor, PlannedTransform,
+    QuantizationRecord, TensorDType, build_load_plan, discover_checkpoint,
 };
 
 #[derive(Clone)]
@@ -227,6 +227,350 @@ fn identity_plan(
         &LoadOptions::default(),
     )
     .unwrap()
+}
+
+#[test]
+fn executor_replaces_stale_runtime_report_records() {
+    let tensors = [FixtureTensor::new(
+        "weight",
+        TensorDType::F32,
+        [1],
+        f32_bytes(&[2.0]),
+    )];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let mut plan = identity_plan(&manifest, &tensors);
+    plan.report.applied.push("stale.target".into());
+    plan.report.quantized.push(QuantizationRecord {
+        target: "stale.target".into(),
+        scheme: "stale-scheme".into(),
+        bytes: 1,
+    });
+    let mut source = LocalShardSource::new(&manifest);
+    let mut sink = CollectingSink::default();
+
+    let outcome = execute_load_plan(&plan, &mut source, &mut sink).unwrap();
+
+    assert_eq!(outcome.report.applied, ["weight"]);
+    assert!(outcome.report.quantized.is_empty());
+    assert_eq!(tensor_f32(&sink.tensors["weight"]), [2.0]);
+}
+
+#[test]
+fn physical_checkpoint_equivalence_is_verified_before_model_writes() {
+    let tensors = vec![
+        FixtureTensor::new(
+            "shared.weight",
+            TensorDType::F32,
+            [2],
+            f32_bytes(&[1.0, -2.0]),
+        ),
+        FixtureTensor::new(
+            "decoder.embed_tokens.weight",
+            TensorDType::F32,
+            [2],
+            f32_bytes(&[1.0, -2.0]),
+        ),
+    ];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let expected = [ExpectedTensor::new("shared.weight", [2]).with_dtype(TensorDType::F32)];
+    let options = LoadOptions {
+        index_aliases: vec![IndexTensorAlias::new(
+            "decoder.embed_tokens.weight",
+            "shared.weight",
+        )],
+        ..LoadOptions::default()
+    };
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &options,
+    )
+    .unwrap();
+    let record = CheckpointEquivalenceRecord::new("decoder.embed_tokens.weight", "shared.weight");
+    assert_eq!(plan.equivalences.len(), 1);
+    assert_eq!(
+        plan.report.equivalence_planned,
+        std::slice::from_ref(&record)
+    );
+    assert!(plan.report.equivalence_verified.is_empty());
+    assert!(plan.report.allowlisted_ignored.is_empty());
+    assert_eq!(plan.memory.largest_equivalence_pair_bytes, 16);
+
+    let mut source = TracingLocalSource {
+        inner: LocalShardSource::new(&manifest),
+        reads: Vec::new(),
+    };
+    let mut sink = CollectingSink::default();
+    let outcome = execute_load_plan(&plan, &mut source, &mut sink).unwrap();
+
+    assert_eq!(sink.events, ["write:shared.weight"]);
+    assert_eq!(
+        outcome.report.equivalence_planned,
+        std::slice::from_ref(&record)
+    );
+    assert_eq!(outcome.report.equivalence_verified, [record]);
+    assert_eq!(outcome.stats.equivalences_verified, 1);
+    assert_eq!(outcome.stats.equivalence_source_reads, 2);
+    assert_eq!(outcome.stats.equivalence_source_payload_bytes, 16);
+    assert_eq!(outcome.stats.source_reads, 3);
+    assert_eq!(outcome.stats.source_payload_bytes, 24);
+    assert_eq!(outcome.stats.largest_equivalence_pair_bytes, 16);
+    assert_eq!(outcome.stats.peak_host_staging_bytes, 16);
+    assert_eq!(
+        source
+            .reads
+            .iter()
+            .map(|(_, name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "shared.weight",
+            "decoder.embed_tokens.weight",
+            "shared.weight"
+        ]
+    );
+}
+
+#[test]
+fn physical_checkpoint_equivalence_mismatch_fails_before_any_sink_mutation() {
+    let tensors = vec![
+        FixtureTensor::new(
+            "shared.weight",
+            TensorDType::F32,
+            [2],
+            f32_bytes(&[1.0, -2.0]),
+        ),
+        FixtureTensor::new(
+            "decoder.embed_tokens.weight",
+            TensorDType::F32,
+            [2],
+            f32_bytes(&[1.0, 3.0]),
+        ),
+    ];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let expected = [ExpectedTensor::new("shared.weight", [2])];
+    let options = LoadOptions {
+        index_aliases: vec![IndexTensorAlias::new(
+            "decoder.embed_tokens.weight",
+            "shared.weight",
+        )],
+        ..LoadOptions::default()
+    };
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &options,
+    )
+    .unwrap();
+    let mut source = TracingLocalSource {
+        inner: LocalShardSource::new(&manifest),
+        reads: Vec::new(),
+    };
+    let mut sink = CollectingSink::default();
+
+    let failure = *execute_load_plan(&plan, &mut source, &mut sink).unwrap_err();
+
+    assert_eq!(
+        failure.failed_target.as_deref(),
+        Some("decoder.embed_tokens.weight")
+    );
+    assert!(matches!(
+        failure.cause,
+        ExecutionFailureCause::Checkpoint(CheckpointError::TensorEquivalenceMismatch {
+            ref alias,
+            ref owner,
+            ..
+        }) if alias == "decoder.embed_tokens.weight" && owner == "shared.weight"
+    ));
+    assert!(sink.events.is_empty());
+    assert!(sink.tensors.is_empty());
+    assert!(failure.report.applied.is_empty());
+    assert!(failure.report.equivalence_verified.is_empty());
+    assert_eq!(failure.stats.equivalences_verified, 0);
+    assert_eq!(failure.stats.equivalence_source_reads, 2);
+    assert_eq!(failure.stats.equivalence_source_payload_bytes, 16);
+    assert_eq!(failure.stats.source_reads, 2);
+}
+
+#[test]
+fn equivalence_preflight_reports_only_verified_prefix_and_still_writes_nothing() {
+    let tensors = vec![
+        FixtureTensor::new("owner", TensorDType::F32, [1], f32_bytes(&[7.0])),
+        FixtureTensor::new("a.copy", TensorDType::F32, [1], f32_bytes(&[7.0])),
+        FixtureTensor::new("z.copy", TensorDType::F32, [1], f32_bytes(&[8.0])),
+    ];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let expected = [ExpectedTensor::new("owner", [1])];
+    let options = LoadOptions {
+        index_aliases: vec![
+            IndexTensorAlias::new("z.copy", "owner"),
+            IndexTensorAlias::new("a.copy", "owner"),
+        ],
+        ..LoadOptions::default()
+    };
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &options,
+    )
+    .unwrap();
+    let mut source = LocalShardSource::new(&manifest);
+    let mut sink = CollectingSink::default();
+
+    let failure = *execute_load_plan(&plan, &mut source, &mut sink).unwrap_err();
+
+    assert!(sink.events.is_empty());
+    assert_eq!(
+        failure.report.equivalence_verified,
+        [CheckpointEquivalenceRecord::new("a.copy", "owner")]
+    );
+    assert_eq!(failure.stats.equivalences_verified, 1);
+    assert_eq!(failure.stats.equivalence_source_reads, 4);
+    assert_eq!(failure.stats.source_reads, 4);
+    assert_eq!(failure.stats.source_payload_bytes, 16);
+}
+
+#[test]
+fn equivalence_declarations_are_optional_but_physical_aliases_require_an_owner() {
+    let mapped = FixtureTensor::new("mapped", TensorDType::F32, [1], f32_bytes(&[1.0]));
+    let (_temp, manifest) = single_manifest(std::slice::from_ref(&mapped));
+    let expected = [ExpectedTensor::new("mapped", [1])];
+    let absent_alias = LoadOptions {
+        index_aliases: vec![IndexTensorAlias::new("optional.copy", "mapped")],
+        ..LoadOptions::default()
+    };
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &absent_alias,
+    )
+    .unwrap();
+    assert!(plan.equivalences.is_empty());
+    assert!(plan.report.equivalence_planned.is_empty());
+
+    let tensors = vec![
+        mapped,
+        FixtureTensor::new("physical.copy", TensorDType::F32, [1], f32_bytes(&[1.0])),
+    ];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let absent_owner = LoadOptions {
+        index_aliases: vec![IndexTensorAlias::new("physical.copy", "missing.owner")],
+        ..LoadOptions::default()
+    };
+    assert!(matches!(
+        build_load_plan(
+            &manifest,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &absent_owner,
+        ),
+        Err(CheckpointError::TensorEquivalenceMismatch {
+            ref alias,
+            ref owner,
+            ..
+        }) if alias == "physical.copy" && owner == "missing.owner"
+    ));
+}
+
+#[test]
+fn equivalence_shape_dtype_and_public_plan_mutations_fail_closed() {
+    for alias in [
+        FixtureTensor::new("copy", TensorDType::F32, [2], f32_bytes(&[1.0, 2.0])),
+        FixtureTensor::new("copy", TensorDType::I32, [1], i32_bytes(&[1])),
+    ] {
+        let tensors = vec![
+            FixtureTensor::new("owner", TensorDType::F32, [1], f32_bytes(&[1.0])),
+            alias,
+        ];
+        let (_temp, manifest) = single_manifest(&tensors);
+        let expected = [ExpectedTensor::new("owner", [1])];
+        let options = LoadOptions {
+            index_aliases: vec![IndexTensorAlias::new("copy", "owner")],
+            ..LoadOptions::default()
+        };
+        assert!(matches!(
+            build_load_plan(
+                &manifest,
+                &expected,
+                &MappingPlan::identity(&expected),
+                &options,
+            ),
+            Err(CheckpointError::TensorEquivalenceMismatch { .. })
+        ));
+    }
+
+    let tensors = vec![
+        FixtureTensor::new("owner", TensorDType::F32, [1], f32_bytes(&[1.0])),
+        FixtureTensor::new("copy", TensorDType::F32, [1], f32_bytes(&[1.0])),
+    ];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let expected = [ExpectedTensor::new("owner", [1])];
+    let options = LoadOptions {
+        index_aliases: vec![IndexTensorAlias::new("copy", "owner")],
+        ..LoadOptions::default()
+    };
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &options,
+    )
+    .unwrap();
+    let assert_preflight_failure =
+        |plan: &crate::checkpoint::LoadPlan, expected_error: fn(&CheckpointError) -> bool| {
+            let mut source = LocalShardSource::new(&manifest);
+            let mut sink = CollectingSink::default();
+            let failure = *execute_load_plan(plan, &mut source, &mut sink).unwrap_err();
+            let ExecutionFailureCause::Checkpoint(error) = &failure.cause else {
+                panic!("plan mutation unexpectedly reached the sink")
+            };
+            assert!(expected_error(error), "unexpected preflight error: {error}");
+            assert_eq!(failure.stats.source_reads, 0);
+            assert_eq!(source.stats().tensor_reads, 0);
+            assert!(sink.events.is_empty());
+        };
+
+    let mut missing_report = plan.clone();
+    missing_report.report.equivalence_planned.clear();
+    assert_preflight_failure(&missing_report, |error| {
+        matches!(error, CheckpointError::InvalidMapping { .. })
+    });
+
+    let mut prematurely_verified = plan.clone();
+    prematurely_verified.report.equivalence_verified =
+        prematurely_verified.report.equivalence_planned.clone();
+    assert_preflight_failure(&prematurely_verified, |error| {
+        matches!(error, CheckpointError::InvalidMapping { .. })
+    });
+
+    let mut understated_memory = plan.clone();
+    understated_memory.memory.largest_equivalence_pair_bytes = 0;
+    assert_preflight_failure(&understated_memory, |error| {
+        matches!(error, CheckpointError::InvalidMapping { .. })
+    });
+
+    let mut invalid_descriptor = plan.clone();
+    invalid_descriptor.equivalences[0].alias.shape = vec![2];
+    assert_preflight_failure(&invalid_descriptor, |error| {
+        matches!(error, CheckpointError::InvalidMapping { .. })
+    });
+
+    let mut changed_dtype = plan.clone();
+    changed_dtype.equivalences[0].alias.dtype = TensorDType::I32;
+    assert_preflight_failure(&changed_dtype, |error| {
+        matches!(error, CheckpointError::TensorEquivalenceMismatch { .. })
+    });
+
+    let mut duplicate_work = plan.clone();
+    duplicate_work
+        .equivalences
+        .push(duplicate_work.equivalences[0].clone());
+    assert_preflight_failure(&duplicate_work, |error| {
+        matches!(error, CheckpointError::TensorEquivalenceMismatch { .. })
+    });
 }
 
 #[test]
@@ -1476,6 +1820,7 @@ fn in_memory_transpose(rows: u64, columns: u64, values: Vec<u16>) -> Vec<u16> {
         ..crate::checkpoint::LoadReport::default()
     };
     let plan = crate::checkpoint::LoadPlan {
+        equivalences: Vec::new(),
         tensors: vec![target],
         aliases: Vec::new(),
         report,

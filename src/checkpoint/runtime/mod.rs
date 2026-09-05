@@ -9,9 +9,10 @@
 //! generic loader prevents unchecked rank casts and permits the sink to transfer a
 //! tensor to its backend immediately.
 //!
-//! Alias operations run only after every storage-owning parameter succeeds. This
-//! provides a simple transaction boundary: a failure report lists exactly the
-//! target writes accepted by the sink, and no alias can reference a missing owner.
+//! Physical checkpoint equivalences are compared before the first sink mutation.
+//! Model alias operations then run only after every storage-owning parameter
+//! succeeds. These boundaries ensure a mismatched redundant payload cannot leak a
+//! partially initialized model and no model alias can reference a missing owner.
 
 mod source;
 mod transform;
@@ -34,8 +35,8 @@ use burn::{
 pub use source::{LocalShardSource, SourceStats, SourceTensor, TensorSource};
 
 use super::{
-    CheckpointError, CheckpointManifest, LoadPlan, LoadReport, PlannedSource, PlannedTensor,
-    PlannedTransform, TensorDType,
+    CheckpointEquivalenceRecord, CheckpointError, CheckpointManifest, LoadPlan, LoadReport,
+    PlannedSource, PlannedTensor, PlannedTransform, TensorDType,
 };
 
 /// Destination for streamed, transformed Burn tensor data.
@@ -182,6 +183,12 @@ pub struct ExecutionStats {
     pub tensors_applied: usize,
     /// Alias targets accepted by the sink.
     pub aliases_applied: usize,
+    /// Physical checkpoint alias/owner pairs verified before sink mutation.
+    pub equivalences_verified: usize,
+    /// Source reads performed specifically for equivalence preflight.
+    pub equivalence_source_reads: u64,
+    /// Raw source bytes read specifically for equivalence preflight.
+    pub equivalence_source_payload_bytes: u64,
     /// Successful source payload reads; fused-split groups count as one read.
     pub source_reads: u64,
     /// Total source payload bytes returned to transformation code.
@@ -190,8 +197,14 @@ pub struct ExecutionStats {
     pub delivered_tensor_bytes: u64,
     /// Largest individual source payload held by transformation code.
     pub largest_source_payload_bytes: u64,
-    /// Largest individual target buffer delivered to the sink.
+    /// Largest individual target buffer materialized by the executor.
+    ///
+    /// For a non-certifying packed override this can include the validated
+    /// full-precision value discarded immediately before the packed replacement
+    /// is decoded, even though that value never reaches the sink.
     pub largest_output_tensor_bytes: u64,
+    /// Largest simultaneously held alias-plus-owner comparison payload.
+    pub largest_equivalence_pair_bytes: u64,
     /// Maximum simultaneous source-plus-output bytes controlled by the executor.
     pub peak_host_staging_bytes: u64,
     /// Source-specific file/resource counters at completion or failure.
@@ -286,7 +299,8 @@ impl<E: Error + 'static> Error for ExecutionFailure<E> {
 /// independently of the target-name order retained by [`LoadPlan`]. Consequently,
 /// a local source opens each shard once for the usual unary and fused-split model
 /// mappings even when architecture target names are interleaved across shards.
-/// Targets slicing the same fused source are grouped at that source's physical
+/// Physical alias/owner pairs are first compared as exact raw payloads, before
+/// `TensorSink` receives any call. Targets slicing the same fused source are grouped at that source's physical
 /// position: the payload remains resident while each output is materialized and
 /// handed off, avoiding rereads without retaining multiple target buffers. A
 /// concatenation remains one indivisible operation and keeps the final output while
@@ -301,8 +315,47 @@ where
     S: TensorSource,
     K: TensorSink,
 {
+    execute_load_plan_with_overrides(plan, source, sink, |_, _| false, |_, _| Ok(None))
+}
+
+/// Executes a validated plan with optional post-transform target overrides.
+///
+/// The immutable predicate is evaluated before a fused-slice group acquires its
+/// shared source. An overridden target bypasses that source only when the source
+/// independently certifies every planned descriptor through
+/// [`TensorSource::validate_tensor_descriptor`]. Certification must bind the
+/// descriptor to authenticated checkpoint content; structural header validation
+/// alone is insufficient. Sources without such a certificate take the strict
+/// fallback: the ordinary source payload is read and transformed for validation,
+/// discarded, and only then replaced. When
+/// every target in a fused group is both overridden and certified, its physical
+/// payload is never requested. A partial group still reads the shared source
+/// exactly once, while overridden targets retain the group's established
+/// installation order. The materializer returns `Some(data)` only for targets
+/// selected by the predicate; an inconsistent `None` is reported as a checkpoint
+/// error rather than panicking.
+///
+/// This hook is crate-internal because overrides must already have passed an
+/// architecture-specific contract proving their post-transform shapes and
+/// storage semantics. The ordinary public executor above supplies a predicate
+/// that is always false and therefore preserves its existing behavior.
+pub(super) fn execute_load_plan_with_overrides<S, K, H, R>(
+    plan: &LoadPlan,
+    source: &mut S,
+    sink: &mut K,
+    has_override: H,
+    mut read_override: R,
+) -> ExecutionResult<ExecutionOutcome, K::Error>
+where
+    S: TensorSource,
+    K: TensorSink,
+    H: Fn(&K, &PlannedTensor) -> bool,
+    R: FnMut(&mut K, &PlannedTensor) -> Result<Option<TensorData>, K::Error>,
+{
     let mut report = plan.report.clone();
     report.applied.clear();
+    report.quantized.clear();
+    report.equivalence_verified.clear();
     let mut stats = ExecutionStats::default();
 
     if let Err(error) = transform::validate_plan(plan) {
@@ -310,26 +363,37 @@ where
         return Err(checkpoint_failure(None, error, report, stats, source));
     }
 
-    for group in execution_groups(&plan.tensors) {
-        let shared_payload = if group.len() > 1 {
-            let tensor = &plan.tensors[group[0]];
-            let Some(planned_source) = tensor.sources.first() else {
-                let _ = source.close();
-                return Err(checkpoint_failure(
-                    Some(tensor.target.clone()),
-                    CheckpointError::InvalidMapping {
-                        message: format!(
-                            "fused-split target `{}` has no source descriptor",
-                            tensor.target
-                        ),
-                    },
-                    report,
-                    stats,
-                    source,
-                ));
-            };
-            match transform::read_verified(source, planned_source, &mut stats) {
-                Ok(payload) => Some(payload),
+    if let Err((failed_alias, error)) =
+        verify_checkpoint_equivalences(plan, source, &mut report, &mut stats)
+    {
+        let _ = source.close();
+        return Err(checkpoint_failure(
+            Some(failed_alias),
+            error,
+            report,
+            stats,
+            source,
+        ));
+    }
+
+    // Freeze ownership before any source or sink mutation. Besides making the
+    // scheduling decision deterministic, this prevents a stateful predicate
+    // from selecting a target during group preflight and changing its answer at
+    // installation time.
+    let overridden = plan
+        .tensors
+        .iter()
+        .map(|tensor| has_override(sink, tensor))
+        .collect::<Vec<_>>();
+    let mut can_skip_source = vec![false; plan.tensors.len()];
+    for (index, tensor) in plan.tensors.iter().enumerate() {
+        if !overridden[index] {
+            continue;
+        }
+        let mut descriptors_certified = true;
+        for planned_source in &tensor.sources {
+            match source.validate_tensor_descriptor(planned_source) {
+                Ok(certified) => descriptors_certified &= certified,
                 Err(error) => {
                     let _ = source.close();
                     return Err(checkpoint_failure(
@@ -341,19 +405,113 @@ where
                     ));
                 }
             }
-        } else {
-            None
-        };
+        }
+        can_skip_source[index] = descriptors_certified;
+    }
+
+    for group in execution_groups(&plan.tensors) {
+        let source_target_index = group.iter().copied().find(|&index| !can_skip_source[index]);
+        let shared_payload =
+            if let (true, Some(source_target_index)) = (group.len() > 1, source_target_index) {
+                let tensor = &plan.tensors[source_target_index];
+                let Some(planned_source) = tensor.sources.first() else {
+                    let _ = source.close();
+                    return Err(checkpoint_failure(
+                        Some(tensor.target.clone()),
+                        CheckpointError::InvalidMapping {
+                            message: format!(
+                                "fused-split target `{}` has no source descriptor",
+                                tensor.target
+                            ),
+                        },
+                        report,
+                        stats,
+                        source,
+                    ));
+                };
+                match transform::read_verified(source, planned_source, &mut stats) {
+                    Ok(payload) => Some(payload),
+                    Err(error) => {
+                        let _ = source.close();
+                        return Err(checkpoint_failure(
+                            Some(tensor.target.clone()),
+                            error,
+                            report,
+                            stats,
+                            source,
+                        ));
+                    }
+                }
+            } else {
+                None
+            };
 
         for index in group {
             let tensor = &plan.tensors[index];
-            let materialized = match &shared_payload {
-                Some(payload) => transform::materialize_shared_slice(tensor, payload, &mut stats),
-                None => transform::materialize(tensor, source, &mut stats),
+            let source_data = if can_skip_source[index] {
+                None
+            } else {
+                let materialized = match &shared_payload {
+                    Some(payload) => {
+                        transform::materialize_shared_slice(tensor, payload, &mut stats)
+                    }
+                    None => transform::materialize(tensor, source, &mut stats),
+                };
+                match materialized {
+                    Ok(data) => Some(data),
+                    Err(error) => {
+                        let _ = source.close();
+                        return Err(checkpoint_failure(
+                            Some(tensor.target.clone()),
+                            error,
+                            report,
+                            stats,
+                            source,
+                        ));
+                    }
+                }
             };
-            let data = match materialized {
-                Ok(data) => data,
-                Err(error) => {
+            let data = if overridden[index] {
+                // A non-certifying source reaches this branch only after its
+                // ordinary materialized value has been fully validated. Drop it
+                // before decoding the override so the fallback does not retain
+                // two output buffers at once.
+                drop(source_data);
+                let override_data = match read_override(sink, tensor) {
+                    Ok(Some(data)) => data,
+                    Ok(None) => {
+                        let _ = source.close();
+                        return Err(checkpoint_failure(
+                            Some(tensor.target.clone()),
+                            CheckpointError::InvalidMapping {
+                                message: format!(
+                                    "override predicate selected `{}` but its materializer returned no tensor",
+                                    tensor.target
+                                ),
+                            },
+                            report,
+                            stats,
+                            source,
+                        ));
+                    }
+                    Err(error) => {
+                        let _ = source.close();
+                        return Err(sink_failure(
+                            Some(tensor.target.clone()),
+                            error,
+                            report,
+                            stats,
+                            source,
+                        ));
+                    }
+                };
+                if let Err(error) = observe_override_peak(
+                    tensor,
+                    &override_data,
+                    shared_payload.as_ref(),
+                    plan.memory.peak_host_staging_bytes,
+                    &mut stats,
+                ) {
                     let _ = source.close();
                     return Err(checkpoint_failure(
                         Some(tensor.target.clone()),
@@ -363,6 +521,24 @@ where
                         source,
                     ));
                 }
+                override_data
+            } else {
+                let Some(data) = source_data else {
+                    let _ = source.close();
+                    return Err(checkpoint_failure(
+                        Some(tensor.target.clone()),
+                        CheckpointError::InvalidMapping {
+                            message: format!(
+                                "non-overridden target `{}` unexpectedly bypassed its source",
+                                tensor.target
+                            ),
+                        },
+                        report,
+                        stats,
+                        source,
+                    ));
+                };
+                data
             };
             match install_tensor(tensor, data, sink, &mut report, &mut stats) {
                 Ok(()) => {}
@@ -438,12 +614,177 @@ where
     Ok(ExecutionOutcome { report, stats })
 }
 
+/// Verifies every redundant physical checkpoint tensor before the first write.
+fn verify_checkpoint_equivalences<S: TensorSource>(
+    plan: &LoadPlan,
+    source: &mut S,
+    report: &mut LoadReport,
+    stats: &mut ExecutionStats,
+) -> std::result::Result<(), (String, CheckpointError)> {
+    for equivalence in &plan.equivalences {
+        let failed_alias = equivalence.alias.name.clone();
+        let owner = transform::read_verified(source, &equivalence.owner, stats)
+            .map_err(|error| (failed_alias.clone(), error))?;
+        observe_equivalence_read(&failed_alias, owner.byte_len(), stats)
+            .map_err(|error| (failed_alias.clone(), error))?;
+        let alias = transform::read_verified(source, &equivalence.alias, stats)
+            .map_err(|error| (failed_alias.clone(), error))?;
+        observe_equivalence_read(&failed_alias, alias.byte_len(), stats)
+            .map_err(|error| (failed_alias.clone(), error))?;
+
+        let pair_bytes = u64::try_from(owner.byte_len())
+            .ok()
+            .and_then(|owner| {
+                u64::try_from(alias.byte_len())
+                    .ok()
+                    .and_then(|alias| owner.checked_add(alias))
+            })
+            .ok_or_else(|| {
+                (
+                    failed_alias.clone(),
+                    CheckpointError::ArithmeticOverflow {
+                        context: "accounting checkpoint equivalence payloads",
+                    },
+                )
+            })?;
+        stats.largest_equivalence_pair_bytes = stats.largest_equivalence_pair_bytes.max(pair_bytes);
+        stats.peak_host_staging_bytes = stats.peak_host_staging_bytes.max(pair_bytes);
+        if pair_bytes > plan.memory.peak_host_staging_bytes {
+            return Err((
+                failed_alias.clone(),
+                CheckpointError::MemoryEstimateExceeded {
+                    tensor: failed_alias,
+                    required: pair_bytes,
+                    planned: plan.memory.peak_host_staging_bytes,
+                },
+            ));
+        }
+        if owner.bytes() != alias.bytes() {
+            let offset = owner
+                .bytes()
+                .iter()
+                .zip(alias.bytes())
+                .position(|(owner, alias)| owner != alias)
+                .unwrap_or(0);
+            return Err((
+                failed_alias.clone(),
+                CheckpointError::TensorEquivalenceMismatch {
+                    alias: failed_alias,
+                    owner: equivalence.owner.name.clone(),
+                    reason: format!("raw payload differs at byte offset {offset}"),
+                },
+            ));
+        }
+        stats.equivalences_verified =
+            stats.equivalences_verified.checked_add(1).ok_or_else(|| {
+                (
+                    failed_alias.clone(),
+                    CheckpointError::ArithmeticOverflow {
+                        context: "counting verified checkpoint equivalences",
+                    },
+                )
+            })?;
+        report.record_equivalence_verified(CheckpointEquivalenceRecord::new(
+            &equivalence.alias.name,
+            &equivalence.owner.name,
+        ));
+    }
+    Ok(())
+}
+
+/// Accounts for one successful source read used by equivalence preflight.
+fn observe_equivalence_read(
+    tensor: &str,
+    payload_bytes: usize,
+    stats: &mut ExecutionStats,
+) -> Result<(), CheckpointError> {
+    let payload_bytes =
+        u64::try_from(payload_bytes).map_err(|_| CheckpointError::InvalidTensorPayload {
+            tensor: tensor.into(),
+            reason: "equivalence payload length does not fit in u64".into(),
+        })?;
+    stats.equivalence_source_reads = stats.equivalence_source_reads.checked_add(1).ok_or(
+        CheckpointError::ArithmeticOverflow {
+            context: "counting checkpoint equivalence source reads",
+        },
+    )?;
+    stats.equivalence_source_payload_bytes = stats
+        .equivalence_source_payload_bytes
+        .checked_add(payload_bytes)
+        .ok_or(CheckpointError::ArithmeticOverflow {
+            context: "summing checkpoint equivalence source bytes",
+        })?;
+    stats.peak_host_staging_bytes = stats.peak_host_staging_bytes.max(payload_bytes);
+    Ok(())
+}
+
 /// Error raised immediately before or while handing one tensor to its sink.
 enum InstallError<E> {
     /// Executor accounting rejected the materialized tensor.
     Checkpoint(CheckpointError),
     /// The architecture-specific destination rejected the tensor.
     Sink(E),
+}
+
+/// Accounts for one override buffer and any fused source retained beside it.
+///
+/// Override dtypes may intentionally differ from the plan's floating-point
+/// target dtype—for example, Burn's packed `QFloat` storage—so this boundary
+/// validates the logical shape and physical byte count without imposing the
+/// ordinary transform dtype. The pass-one bound remains conservative because a
+/// valid packed override cannot be allowed to exceed it.
+fn observe_override_peak(
+    tensor: &PlannedTensor,
+    data: &TensorData,
+    shared_source: Option<&SourceTensor>,
+    planned_peak: u64,
+    stats: &mut ExecutionStats,
+) -> Result<(), CheckpointError> {
+    let expected_shape = tensor
+        .shape
+        .iter()
+        .map(|&dimension| {
+            usize::try_from(dimension).map_err(|_| CheckpointError::InvalidTensorPayload {
+                tensor: tensor.target.clone(),
+                reason: format!("dimension {dimension} does not fit in usize"),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if data.shape.as_slice() != expected_shape {
+        return Err(CheckpointError::InvalidTensorPayload {
+            tensor: tensor.target.clone(),
+            reason: format!(
+                "override shape {:?} differs from planned shape {:?}",
+                data.shape, expected_shape
+            ),
+        });
+    }
+    let output =
+        u64::try_from(data.bytes.len()).map_err(|_| CheckpointError::InvalidTensorPayload {
+            tensor: tensor.target.clone(),
+            reason: "override byte length does not fit in u64".into(),
+        })?;
+    let source = shared_source.map_or(Ok(0_u64), |payload| {
+        u64::try_from(payload.byte_len()).map_err(|_| CheckpointError::InvalidTensorPayload {
+            tensor: tensor.target.clone(),
+            reason: "shared source byte length does not fit in u64".into(),
+        })
+    })?;
+    let peak = source
+        .checked_add(output)
+        .ok_or(CheckpointError::ArithmeticOverflow {
+            context: "recording override staging high-water mark",
+        })?;
+    stats.peak_host_staging_bytes = stats.peak_host_staging_bytes.max(peak);
+    stats.largest_output_tensor_bytes = stats.largest_output_tensor_bytes.max(output);
+    if peak > planned_peak {
+        return Err(CheckpointError::MemoryEstimateExceeded {
+            tensor: tensor.target.clone(),
+            required: peak,
+            planned: planned_peak,
+        });
+    }
+    Ok(())
 }
 
 /// Transfers one final tensor and atomically advances its report counters.

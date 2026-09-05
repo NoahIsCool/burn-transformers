@@ -25,17 +25,22 @@ mod report;
 mod runtime;
 
 pub use artifact::{
-    ArtifactSource, CheckpointManifest, ShardInventory, TensorInventory, discover_checkpoint,
+    ArtifactSource, CheckpointManifest, ResolvedIndexTensorAlias, ShardInventory, TensorInventory,
+    discover_checkpoint,
 };
 pub use dtype::TensorDType;
 pub use error::{CheckpointError, Result};
 pub use mapping::{
     ExpectedTensor, KeyMatcher, LoadPlan, MappingPlan, PlannedSource, PlannedTensor,
-    PlannedTransform, TensorOperation, TensorTransform, build_load_plan,
+    PlannedTensorEquivalence, PlannedTransform, TensorOperation, TensorTransform, build_load_plan,
 };
-pub use options::{ArtifactLimits, ArtifactSelection, DTypePolicy, LoadOptions};
+pub use options::{
+    ArtifactLimits, ArtifactSelection, DTypePolicy, IndexAliasSizeAccounting, IndexTensorAlias,
+    LoadOptions,
+};
 pub use report::{
-    AliasRecord, DTypeConversion, LoadReport, MemoryEstimate, QuantizationRecord, TransformRecord,
+    AliasRecord, CheckpointEquivalenceRecord, DTypeConversion, LoadReport, MemoryEstimate,
+    QuantizationRecord, TransformRecord,
 };
 pub use runtime::{
     ExecutionFailure, ExecutionFailureCause, ExecutionOutcome, ExecutionResult, ExecutionStats,

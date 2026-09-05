@@ -18,6 +18,9 @@ use std::{
     io::{Read, Seek, SeekFrom},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 use super::super::{
     CheckpointError, CheckpointManifest, PlannedSource, Result, TensorDType, TensorInventory,
 };
@@ -126,6 +129,25 @@ impl SourceTensor {
 /// row-major little-endian representation. The executor independently checks the
 /// returned name, shape, dtype, and byte count against each [`PlannedSource`].
 pub trait TensorSource {
+    /// Validates one descriptor without acquiring or returning its payload.
+    ///
+    /// Sources backed by a cryptographically authenticated inventory may override
+    /// this hook so an executor can bypass source payload I/O for an externally
+    /// supplied target. `true` is a strong certificate: it promises that the
+    /// descriptor belongs to the exact checkpoint content to which the override is
+    /// bound, not merely that it resembles an in-memory manifest entry. The
+    /// default `false` retains the ordinary read-and-transform path.
+    ///
+    /// Implementations must fail closed when they cannot prove byte-level
+    /// provenance. A parsed header, canonical path, file length, modification time,
+    /// or repository label is not sufficient because each can survive or race a
+    /// payload replacement. The built-in local source therefore validates public
+    /// descriptors but deliberately returns `false` until checkpoint and sidecar
+    /// digests are part of the persisted artifact contract.
+    fn validate_tensor_descriptor(&self, _source: &PlannedSource) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Reads exactly one planned source tensor.
     fn read_tensor(&mut self, source: &PlannedSource) -> Result<SourceTensor>;
 
@@ -201,12 +223,38 @@ impl<'a> LocalShardSource<'a> {
             });
         }
 
+        let path_metadata =
+            fs::symlink_metadata(&canonical).map_err(|error| CheckpointError::ArtifactChanged {
+                path: canonical.clone(),
+                reason: format!("cannot inspect shard path without following links: {error}"),
+            })?;
+        if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
+            return Err(CheckpointError::ArtifactChanged {
+                path: canonical.clone(),
+                reason: "shard path is no longer a regular non-symlink file".into(),
+            });
+        }
         let mut file = File::open(&canonical)
             .map_err(|error| CheckpointError::io("open checkpoint shard", &canonical, error))?;
-        let current_bytes = file
+        let opened_metadata = file
             .metadata()
-            .map_err(|error| CheckpointError::io("inspect checkpoint shard", &canonical, error))?
-            .len();
+            .map_err(|error| CheckpointError::io("inspect checkpoint shard", &canonical, error))?;
+        if !opened_metadata.is_file() {
+            return Err(CheckpointError::ArtifactChanged {
+                path: canonical.clone(),
+                reason: "opened shard is no longer a regular file".into(),
+            });
+        }
+        #[cfg(unix)]
+        if path_metadata.dev() != opened_metadata.dev()
+            || path_metadata.ino() != opened_metadata.ino()
+        {
+            return Err(CheckpointError::ArtifactChanged {
+                path: canonical.clone(),
+                reason: "shard path changed between no-follow inspection and open".into(),
+            });
+        }
+        let current_bytes = opened_metadata.len();
         if current_bytes != shard.file_bytes {
             return Err(CheckpointError::ArtifactChanged {
                 path: canonical,
@@ -270,7 +318,7 @@ impl<'a> LocalShardSource<'a> {
 }
 
 impl TensorSource for LocalShardSource<'_> {
-    fn read_tensor(&mut self, source: &PlannedSource) -> Result<SourceTensor> {
+    fn validate_tensor_descriptor(&self, source: &PlannedSource) -> Result<bool> {
         let observed = self.manifest.tensor(&source.name).ok_or_else(|| {
             CheckpointError::PlanManifestMismatch {
                 tensor: source.name.clone(),
@@ -278,6 +326,14 @@ impl TensorSource for LocalShardSource<'_> {
             }
         })?;
         validate_descriptor(source, observed)?;
+        // The discovery inventory authenticates structure, not payload bytes.
+        // Returning `true` here would let a packed sidecar suppress every runtime
+        // access to a shard that was deleted or replaced after pass one.
+        Ok(false)
+    }
+
+    fn read_tensor(&mut self, source: &PlannedSource) -> Result<SourceTensor> {
+        let _ = self.validate_tensor_descriptor(source)?;
         self.ensure_open(&source.shard)?;
 
         let byte_len = source.data_offsets[1]

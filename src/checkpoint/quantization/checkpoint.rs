@@ -307,6 +307,7 @@ fn unstarted_report(plan: &LoadPlan) -> LoadReport {
     let mut report = plan.report.clone();
     report.applied.clear();
     report.quantized.clear();
+    report.equivalence_verified.clear();
     report.finalize();
     report
 }

@@ -178,6 +178,13 @@ impl<M> LoadedModel<M> {
                 load_report.unexpected.len()
             )));
         }
+        if load_report.equivalence_verified != load_report.equivalence_planned {
+            return Err(Error::Checkpoint(format!(
+                "cannot construct LoadedModel: verified {} of {} planned tensor equivalences",
+                load_report.equivalence_verified.len(),
+                load_report.equivalence_planned.len()
+            )));
+        }
         if let Some(stats) = &execution_stats {
             validate_execution_stats(&load_report, stats)?;
         }
@@ -304,6 +311,56 @@ fn validate_execution_stats(report: &LoadReport, stats: &ExecutionStats) -> Resu
             stats.source_payload_bytes, stats.source.payload_bytes_read
         )));
     }
+    if report.equivalence_verified != report.equivalence_planned {
+        return Err(Error::Checkpoint(format!(
+            "checkpoint execution verified {} of {} planned tensor equivalences",
+            report.equivalence_verified.len(),
+            report.equivalence_planned.len()
+        )));
+    }
+    if stats.equivalences_verified != report.equivalence_verified.len() {
+        return Err(Error::Checkpoint(format!(
+            "checkpoint executor counted {} verified equivalences but the load report contains {}",
+            stats.equivalences_verified,
+            report.equivalence_verified.len()
+        )));
+    }
+    let expected_equivalence_reads = u64::try_from(stats.equivalences_verified)
+        .ok()
+        .and_then(|count| count.checked_mul(2))
+        .ok_or_else(|| Error::Checkpoint("equivalence read count overflowed".into()))?;
+    if stats.equivalence_source_reads != expected_equivalence_reads {
+        return Err(Error::Checkpoint(format!(
+            "checkpoint executor recorded {} equivalence reads for {} verified pairs",
+            stats.equivalence_source_reads, stats.equivalences_verified
+        )));
+    }
+    if stats.equivalence_source_payload_bytes > stats.source_payload_bytes {
+        return Err(Error::Checkpoint(format!(
+            "equivalence source bytes {} exceed all checkpoint source bytes {}",
+            stats.equivalence_source_payload_bytes, stats.source_payload_bytes
+        )));
+    }
+    if stats.largest_equivalence_pair_bytes > stats.equivalence_source_payload_bytes {
+        return Err(Error::Checkpoint(format!(
+            "largest equivalence pair {} exceeds all equivalence source bytes {}",
+            stats.largest_equivalence_pair_bytes, stats.equivalence_source_payload_bytes
+        )));
+    }
+    if let Some(memory) = report.memory {
+        if stats.largest_equivalence_pair_bytes != memory.largest_equivalence_pair_bytes {
+            return Err(Error::Checkpoint(format!(
+                "checkpoint executor observed a {}-byte largest equivalence pair but the load plan records {} bytes",
+                stats.largest_equivalence_pair_bytes, memory.largest_equivalence_pair_bytes
+            )));
+        }
+        if stats.peak_host_staging_bytes > memory.peak_host_staging_bytes {
+            return Err(Error::Checkpoint(format!(
+                "checkpoint executor observed a {}-byte host-staging peak above the planned {}-byte bound",
+                stats.peak_host_staging_bytes, memory.peak_host_staging_bytes
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -326,7 +383,9 @@ fn validate_label(field: &str, value: String) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::checkpoint::{ExecutionStats, LoadReport, SourceStats};
+    use crate::checkpoint::{
+        CheckpointEquivalenceRecord, ExecutionStats, LoadReport, MemoryEstimate, SourceStats,
+    };
 
     use super::{LoadedModel, ModelSourceMetadata};
 
@@ -408,11 +467,15 @@ mod tests {
         let stats = ExecutionStats {
             tensors_applied: 2,
             aliases_applied: 1,
+            equivalences_verified: 0,
+            equivalence_source_reads: 0,
+            equivalence_source_payload_bytes: 0,
             source_reads: 2,
             source_payload_bytes: 96,
             delivered_tensor_bytes: 96,
             largest_source_payload_bytes: 64,
             largest_output_tensor_bytes: 64,
+            largest_equivalence_pair_bytes: 0,
             peak_host_staging_bytes: 128,
             source: SourceStats {
                 shard_opens: 1,
@@ -539,5 +602,117 @@ mod tests {
                 .to_string()
                 .contains("1 source bytes")
         );
+
+        let equivalence = CheckpointEquivalenceRecord::new("copy", "owner");
+        let equivalence_report = LoadReport {
+            equivalence_planned: vec![equivalence.clone()],
+            equivalence_verified: vec![equivalence],
+            memory: Some(MemoryEstimate {
+                largest_equivalence_pair_bytes: 8,
+                peak_host_staging_bytes: 8,
+                ..MemoryEstimate::default()
+            }),
+            ..LoadReport::default()
+        };
+        let equivalence_stats = ExecutionStats {
+            equivalences_verified: 1,
+            equivalence_source_reads: 2,
+            equivalence_source_payload_bytes: 8,
+            source_reads: 2,
+            source_payload_bytes: 8,
+            largest_source_payload_bytes: 4,
+            largest_equivalence_pair_bytes: 8,
+            peak_host_staging_bytes: 8,
+            source: SourceStats {
+                tensor_reads: 2,
+                payload_bytes_read: 8,
+                ..SourceStats::default()
+            },
+            ..ExecutionStats::default()
+        };
+        LoadedModel::new_with_execution_stats(
+            (),
+            None,
+            Default::default(),
+            source.clone(),
+            equivalence_report.clone(),
+            equivalence_stats.clone(),
+            32,
+        )
+        .expect("consistent equivalence accounting must remain loadable");
+
+        for stats in [
+            ExecutionStats {
+                equivalences_verified: 0,
+                ..equivalence_stats.clone()
+            },
+            ExecutionStats {
+                equivalence_source_reads: 1,
+                ..equivalence_stats.clone()
+            },
+            ExecutionStats {
+                equivalence_source_payload_bytes: 7,
+                ..equivalence_stats.clone()
+            },
+            ExecutionStats {
+                largest_equivalence_pair_bytes: 7,
+                ..equivalence_stats.clone()
+            },
+            ExecutionStats {
+                peak_host_staging_bytes: 9,
+                ..equivalence_stats.clone()
+            },
+        ] {
+            assert!(
+                LoadedModel::new_with_execution_stats(
+                    (),
+                    None,
+                    Default::default(),
+                    source.clone(),
+                    equivalence_report.clone(),
+                    stats,
+                    32,
+                )
+                .is_err()
+            );
+        }
+
+        let incomplete_report = LoadReport {
+            equivalence_verified: Vec::new(),
+            ..equivalence_report
+        };
+        assert!(
+            LoadedModel::new_with_execution_stats(
+                (),
+                None,
+                Default::default(),
+                source,
+                incomplete_report,
+                equivalence_stats,
+                32,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("verified 0 of 1")
+        );
+    }
+
+    /// The compatibility constructor cannot bless an unexecuted equivalence plan.
+    #[test]
+    fn loaded_model_rejects_unverified_equivalence_without_execution_stats() {
+        let directory = tempfile::tempdir().expect("temporary source root");
+        let source = ModelSourceMetadata::local(directory.path(), "t5").expect("valid source");
+        let report = LoadReport {
+            equivalence_planned: vec![CheckpointEquivalenceRecord::new(
+                "decoder.embed_tokens.weight",
+                "shared.weight",
+            )],
+            ..LoadReport::default()
+        };
+
+        let error = LoadedModel::new((), None, Default::default(), source, report, 32)
+            .expect_err("unverified physical equivalence must not be presented as loaded");
+
+        assert!(error.to_string().contains("0 of 1"));
     }
 }

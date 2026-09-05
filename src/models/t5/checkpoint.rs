@@ -9,15 +9,18 @@
 //!
 //! T5 has one learned relative-position table per stack, owned by block zero.
 //! Later blocks reuse its computed bias and therefore must not acquire their own
-//! checkpoint parameters. The logical LM head is always present in the expected
-//! inventory. For original tied T5 it aliases `shared.weight`; T5 v1.1, FLAN,
-//! and UL2 instead map an independently stored `lm_head.weight`.
+//! checkpoint parameters. Burn stores linear weights in `[input, output]` order,
+//! so every official `[output, input]` projection is represented by an explicit
+//! rank-two transpose in the generic load plan. The logical LM head is always
+//! present in the expected inventory. For original tied T5 it aliases
+//! `shared.weight`; T5 v1.1, FLAN, and UL2 instead map an independently stored
+//! `lm_head.weight` through the same explicit layout conversion.
 
 use std::path::Path;
 
 use crate::checkpoint::{
-    CheckpointManifest, ExpectedTensor, KeyMatcher, LoadOptions, LoadPlan, MappingPlan,
-    build_load_plan, discover_checkpoint,
+    CheckpointManifest, ExpectedTensor, IndexTensorAlias, KeyMatcher, LoadOptions, LoadPlan,
+    MappingPlan, build_load_plan, discover_checkpoint,
 };
 
 use super::{ConfigError, T5Config, Validate};
@@ -30,6 +33,7 @@ pub struct T5CheckpointContract {
     expected: Vec<ExpectedTensor>,
     mappings: MappingPlan,
     allow_unexpected: Vec<KeyMatcher>,
+    index_aliases: Vec<IndexTensorAlias>,
 }
 
 impl T5CheckpointContract {
@@ -48,18 +52,22 @@ impl T5CheckpointContract {
         &self.mappings
     }
 
-    /// Returns known serialized aliases that do not own model storage.
+    /// Returns architecture-owned checkpoint keys that may be ignored explicitly.
     ///
-    /// Hugging Face exports may repeat `shared.weight` under the encoder and
-    /// decoder embedding paths. Tied checkpoints may additionally serialize an
-    /// LM-head copy. These exact keys are ignored because the executable model
-    /// has one canonical shared table; they remain explicit in [`crate::checkpoint::LoadReport`].
+    /// Shared embedding copies are not allowlisted: [`Self::index_aliases`]
+    /// resolves index-only names and requires physical copies to compare exactly.
     #[must_use]
     pub fn allow_unexpected(&self) -> &[KeyMatcher] {
         &self.allow_unexpected
     }
 
-    /// Adds exact family-owned alias exceptions to caller-supplied load policy.
+    /// Returns exact framework aliases that an index may deduplicate from headers.
+    #[must_use]
+    pub fn index_aliases(&self) -> &[IndexTensorAlias] {
+        &self.index_aliases
+    }
+
+    /// Adds exact family-owned exceptions and equivalences to load policy.
     ///
     /// Existing resource bounds, dtype conversion, and caller exceptions are
     /// preserved. Duplicate matchers are not added.
@@ -67,6 +75,11 @@ impl T5CheckpointContract {
         for matcher in &self.allow_unexpected {
             if !options.allow_unexpected.contains(matcher) {
                 options.allow_unexpected.push(matcher.clone());
+            }
+        }
+        for alias in &self.index_aliases {
+            if !options.index_aliases.contains(alias) {
+                options.index_aliases.push(alias.clone());
             }
         }
     }
@@ -104,8 +117,10 @@ impl T5CheckpointContract {
         root: impl AsRef<Path>,
         options: &LoadOptions,
     ) -> crate::checkpoint::Result<T5CheckpointPlan> {
-        let manifest = discover_checkpoint(root, options)?;
-        let plan = self.build_load_plan(&manifest, options)?;
+        let mut options = options.clone();
+        self.configure_load_options(&mut options);
+        let manifest = discover_checkpoint(root, &options)?;
+        let plan = self.build_load_plan(&manifest, &options)?;
         Ok(T5CheckpointPlan { manifest, plan })
     }
 }
@@ -140,10 +155,11 @@ impl T5CheckpointPlan {
 impl T5Config {
     /// Derives the exact official SafeTensors inventory from architecture metadata.
     ///
-    /// Shapes use official checkpoint order `[output, input]`. The generic plan
-    /// therefore keeps identity transforms, while the architecture-owned T5 sink
-    /// transposes linear bytes once into Burn's gradient-safe `[input, output]`
-    /// runtime layout during installation.
+    /// Expected shapes describe Burn's executable parameter layout. Embeddings,
+    /// norms, and relative-position tables preserve their serialized axes, while
+    /// every independent linear projection maps official `[output, input]`
+    /// storage into Burn's gradient-safe `[input, output]` layout through an
+    /// auditable [`MappingPlan::transpose_2d`] operation.
     pub fn checkpoint_contract(&self) -> Result<T5CheckpointContract, ConfigError> {
         self.validate()?;
         let dimensions = Dimensions::try_from(self)?;
@@ -153,17 +169,17 @@ impl T5Config {
         builder.stack("encoder", self.num_layers, false, self, &dimensions);
         builder.stack("decoder", self.decoder_layers(), true, self, &dimensions);
 
-        builder.expected.push(ExpectedTensor::new(
-            "lm_head.weight",
-            vec![dimensions.vocab, dimensions.model],
-        ));
         if self.tie_word_embeddings {
+            builder.expected.push(ExpectedTensor::new(
+                "lm_head.weight",
+                vec![dimensions.vocab, dimensions.model],
+            ));
             builder.mappings.alias("shared.weight", "lm_head.weight");
             builder
-                .allow_unexpected
-                .push(KeyMatcher::exact("lm_head.weight"));
+                .index_aliases
+                .push(IndexTensorAlias::new("lm_head.weight", "shared.weight"));
         } else {
-            builder.mappings.map("lm_head.weight", "lm_head.weight");
+            builder.linear("lm_head.weight", dimensions.model, dimensions.vocab);
         }
         Ok(builder.finish())
     }
@@ -214,6 +230,7 @@ struct ContractBuilder {
     expected: Vec<ExpectedTensor>,
     mappings: MappingPlan,
     allow_unexpected: Vec<KeyMatcher>,
+    index_aliases: Vec<IndexTensorAlias>,
 }
 
 impl ContractBuilder {
@@ -222,9 +239,10 @@ impl ContractBuilder {
         Self {
             expected: Vec::new(),
             mappings: MappingPlan::new(),
-            allow_unexpected: vec![
-                KeyMatcher::exact("encoder.embed_tokens.weight"),
-                KeyMatcher::exact("decoder.embed_tokens.weight"),
+            allow_unexpected: Vec::new(),
+            index_aliases: vec![
+                IndexTensorAlias::new("encoder.embed_tokens.weight", "shared.weight"),
+                IndexTensorAlias::new("decoder.embed_tokens.weight", "shared.weight"),
             ],
         }
     }
@@ -235,6 +253,7 @@ impl ContractBuilder {
             expected: self.expected,
             mappings: self.mappings,
             allow_unexpected: self.allow_unexpected,
+            index_aliases: self.index_aliases,
         }
     }
 
@@ -243,6 +262,18 @@ impl ContractBuilder {
         let name = name.into();
         self.expected.push(ExpectedTensor::new(&name, shape));
         self.mappings.map(&name, &name);
+    }
+
+    /// Adds one official linear matrix with Burn's runtime `[input, output]` shape.
+    ///
+    /// SafeTensors stores the same scalar matrix in `[output, input]` order. A
+    /// transpose preserves its element count and dtype but changes the stride
+    /// interpretation required by Burn's row-layout linear primitive.
+    fn linear(&mut self, name: impl Into<String>, input: u64, output: u64) {
+        let name = name.into();
+        self.expected
+            .push(ExpectedTensor::new(&name, vec![input, output]));
+        self.mappings.transpose_2d(&name, &name);
     }
 
     /// Adds every block and final normalization for one encoder or decoder stack.
@@ -301,17 +332,19 @@ impl ContractBuilder {
         );
     }
 
-    /// Adds one attention module in official `[output, input]` matrix order.
+    /// Adds one attention module in Burn's runtime `[input, output]` matrix order.
     fn attention(&mut self, prefix: &str, dimensions: &Dimensions) {
         for projection in ["q", "k", "v"] {
-            self.tensor(
+            self.linear(
                 format!("{prefix}.{projection}.weight"),
-                vec![dimensions.attention, dimensions.model],
+                dimensions.model,
+                dimensions.attention,
             );
         }
-        self.tensor(
+        self.linear(
             format!("{prefix}.o.weight"),
-            vec![dimensions.model, dimensions.attention],
+            dimensions.attention,
+            dimensions.model,
         );
     }
 
@@ -327,20 +360,23 @@ impl ContractBuilder {
         let prefix = format!("{stack}.block.{index}.layer.{layer}.DenseReluDense");
         if config.feed_forward_proj.is_gated() {
             for input in ["wi_0", "wi_1"] {
-                self.tensor(
+                self.linear(
                     format!("{prefix}.{input}.weight"),
-                    vec![dimensions.feed_forward, dimensions.model],
+                    dimensions.model,
+                    dimensions.feed_forward,
                 );
             }
         } else {
-            self.tensor(
+            self.linear(
                 format!("{prefix}.wi.weight"),
-                vec![dimensions.feed_forward, dimensions.model],
+                dimensions.model,
+                dimensions.feed_forward,
             );
         }
-        self.tensor(
+        self.linear(
             format!("{prefix}.wo.weight"),
-            vec![dimensions.model, dimensions.feed_forward],
+            dimensions.feed_forward,
+            dimensions.model,
         );
         self.tensor(
             format!("{stack}.block.{index}.layer.{layer}.layer_norm.weight"),
@@ -377,7 +413,7 @@ mod tests {
     use crate::{
         checkpoint::{
             ArtifactSource, CheckpointError, CheckpointManifest, KeyMatcher, LoadOptions,
-            PlannedTransform, TensorDType, TensorInventory, TensorOperation,
+            PlannedTransform, TensorDType, TensorInventory, TensorOperation, TensorTransform,
         },
         models::config::ModelConfig,
     };
@@ -404,32 +440,37 @@ mod tests {
         }
     }
 
-    /// Builds a metadata-only manifest matching the contract's non-alias sources.
+    /// Builds a metadata-only manifest in official checkpoint source layout.
     fn manifest(contract: &T5CheckpointContract) -> CheckpointManifest {
-        let alias_targets = contract
-            .mappings()
-            .operations()
-            .iter()
-            .filter_map(|operation| match operation {
-                TensorOperation::Alias { target, .. } => Some(target.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
         let mut tensors = BTreeMap::new();
         let mut offset = 0_u64;
-        for expected in contract.expected_tensors() {
-            if alias_targets.contains(&expected.name.as_str()) {
+        for operation in contract.mappings().operations() {
+            let TensorOperation::Map {
+                source,
+                target,
+                transform,
+            } = operation
+            else {
                 continue;
+            };
+            let expected = contract
+                .expected_tensors()
+                .iter()
+                .find(|expected| expected.name == *target)
+                .unwrap();
+            let mut source_shape = expected.shape.clone();
+            if *transform == TensorTransform::Transpose2d {
+                source_shape.swap(0, 1);
             }
-            let elements = expected.shape.iter().product();
+            let elements = source_shape.iter().product();
             let byte_len = TensorDType::F32.storage_bytes(elements).unwrap();
             let end = offset.checked_add(byte_len).unwrap();
             tensors.insert(
-                expected.name.clone(),
+                source.clone(),
                 TensorInventory {
-                    name: expected.name.clone(),
+                    name: source.clone(),
                     shard: "metadata-only.safetensors".into(),
-                    shape: expected.shape.clone(),
+                    shape: source_shape,
                     dtype: TensorDType::F32,
                     data_offsets: [offset, end],
                     byte_len,
@@ -444,12 +485,15 @@ mod tests {
             },
             shards: Vec::new(),
             tensors,
+            index_aliases: Vec::new(),
+            index_alias_size_accounting: None,
+            indexed_tensor_bytes: offset,
             tensor_bytes: offset,
             artifact_bytes: offset,
         }
     }
 
-    /// Finds one expected tensor and returns its checkpoint-order shape.
+    /// Finds one expected tensor and returns its Burn runtime shape.
     fn shape<'a>(contract: &'a T5CheckpointContract, name: &str) -> &'a [u64] {
         &contract
             .expected_tensors()
@@ -517,34 +561,95 @@ mod tests {
 
     #[test]
     fn attention_and_feed_forward_shapes_follow_t5_projection_widths() {
-        let contract = tiny(super::super::T5FeedForwardProjection::GatedGelu, false)
-            .checkpoint_contract()
-            .unwrap();
+        let mut config = tiny(super::super::T5FeedForwardProjection::GatedGelu, false);
+        config.d_kv = 3;
+        let contract = config.checkpoint_contract().unwrap();
         assert_eq!(
             shape(&contract, "encoder.block.1.layer.0.SelfAttention.q.weight"),
-            [4, 4]
+            [4, 6]
         );
         assert_eq!(
             shape(
                 &contract,
                 "decoder.block.0.layer.1.EncDecAttention.o.weight"
             ),
-            [4, 4]
+            [6, 4]
         );
         assert_eq!(
             shape(
                 &contract,
                 "decoder.block.0.layer.2.DenseReluDense.wi_0.weight"
             ),
-            [6, 4]
+            [4, 6]
         );
         assert_eq!(
             shape(
                 &contract,
                 "decoder.block.0.layer.2.DenseReluDense.wo.weight"
             ),
-            [4, 6]
+            [6, 4]
         );
+        assert_eq!(shape(&contract, "lm_head.weight"), [4, 11]);
+    }
+
+    #[test]
+    fn every_independent_linear_is_reported_as_an_element_equivalent_transpose() {
+        use super::super::T5FeedForwardProjection::{GatedGelu, Relu};
+
+        for (projection, tied, expected_transposes) in [
+            (Relu, false, 23),
+            (Relu, true, 22),
+            (GatedGelu, false, 26),
+            (GatedGelu, true, 25),
+        ] {
+            let contract = tiny(projection, tied).checkpoint_contract().unwrap();
+            for operation in contract.mappings().operations() {
+                let TensorOperation::Map {
+                    target, transform, ..
+                } = operation
+                else {
+                    continue;
+                };
+                let preserves_layout = target == "shared.weight"
+                    || target.ends_with("layer_norm.weight")
+                    || target.ends_with("relative_attention_bias.weight");
+                assert_eq!(
+                    *transform,
+                    if preserves_layout {
+                        TensorTransform::Identity
+                    } else {
+                        TensorTransform::Transpose2d
+                    },
+                    "unexpected layout policy for {target}"
+                );
+            }
+
+            let observed = manifest(&contract);
+            let plan = contract
+                .build_load_plan(&observed, &LoadOptions::default())
+                .unwrap();
+            assert_eq!(plan.report.transformed.len(), expected_transposes);
+            assert!(plan.report.transformed.iter().all(|record| {
+                record.operation == "transpose_2d"
+                    && record.sources.as_slice() == [record.target.as_str()]
+            }));
+
+            // A transpose changes axes but neither element count nor dtype. The
+            // unique runtime parameter footprint must therefore equal all
+            // consumed source payload bytes exactly.
+            assert_eq!(plan.memory.target_parameter_bytes, observed.tensor_bytes);
+            assert_eq!(plan.memory.largest_target_tensor_bytes, 11 * 4 * 4);
+            assert_eq!(
+                plan.memory.largest_target_tensor_bytes,
+                plan.memory.largest_source_tensor_bytes
+            );
+            let alias_bytes = if tied { 11 * 4 * 4 } else { 0 };
+            assert_eq!(
+                plan.memory.logical_model_bytes,
+                observed.tensor_bytes + alias_bytes
+            );
+            assert_eq!(plan.report.memory, Some(plan.memory));
+        }
     }
 
     #[test]
@@ -555,6 +660,8 @@ mod tests {
         let tied_plan = tied
             .build_load_plan(&manifest(&tied), &LoadOptions::default())
             .unwrap();
+        assert_eq!(shape(&tied, "shared.weight"), [11, 4]);
+        assert_eq!(shape(&tied, "lm_head.weight"), [11, 4]);
         assert_eq!(tied_plan.parameter_count(), 35);
         assert_eq!(tied_plan.tensors.len(), 34);
         assert!(matches!(
@@ -574,6 +681,7 @@ mod tests {
         let untied_plan = untied
             .build_load_plan(&manifest(&untied), &LoadOptions::default())
             .unwrap();
+        assert_eq!(shape(&untied, "lm_head.weight"), [4, 11]);
         assert_eq!(untied_plan.tensors.len(), 35);
         assert!(untied_plan.aliases.is_empty());
     }
@@ -608,15 +716,12 @@ mod tests {
             let plan = contract
                 .build_load_plan(&observed, &LoadOptions::default())
                 .unwrap();
+            assert!(plan.report.allowlisted_ignored.is_empty());
             assert_eq!(
-                plan.report.allowlisted_ignored.len(),
+                plan.report.equivalence_planned.len(),
                 if tied { 3 } else { 2 }
             );
-            assert!(
-                plan.report
-                    .allowlisted_ignored
-                    .contains(&"encoder.embed_tokens.weight".into())
-            );
+            assert!(plan.report.equivalence_verified.is_empty());
             assert_eq!(plan.parameter_count(), 38);
 
             let custom = KeyMatcher::exact("local.optional.weight");
@@ -706,12 +811,38 @@ mod tests {
                 .all(|operation| { !matches!(operation, TensorOperation::Alias { .. }) })
         );
         assert_eq!(
+            flan_contract
+                .mappings()
+                .operations()
+                .iter()
+                .filter(|operation| matches!(
+                    operation,
+                    TensorOperation::Map {
+                        transform: TensorTransform::Transpose2d,
+                        ..
+                    }
+                ))
+                .count(),
+            433
+        );
+        assert_eq!(
             shape(
                 &flan_contract,
                 "decoder.block.23.layer.2.DenseReluDense.wi_0.weight"
             ),
-            [5120, 2048]
+            [2048, 5120]
         );
+        assert_eq!(
+            flan_contract.index_aliases(),
+            [
+                IndexTensorAlias::new("encoder.embed_tokens.weight", "shared.weight"),
+                IndexTensorAlias::new("decoder.embed_tokens.weight", "shared.weight"),
+            ]
+        );
+        let mut options = LoadOptions::default();
+        flan_contract.configure_load_options(&mut options);
+        flan_contract.configure_load_options(&mut options);
+        assert_eq!(options.index_aliases, flan_contract.index_aliases());
 
         let ul2 =
             T5Config::from_json_str(include_str!("../../../tests/fixtures/ul2.json")).unwrap();
@@ -722,6 +853,14 @@ mod tests {
             Some(TensorOperation::Alias { source_target, target })
                 if source_target == "shared.weight" && target == "lm_head.weight"
         ));
+        assert_eq!(
+            ul2_contract.index_aliases(),
+            [
+                IndexTensorAlias::new("encoder.embed_tokens.weight", "shared.weight"),
+                IndexTensorAlias::new("decoder.embed_tokens.weight", "shared.weight"),
+                IndexTensorAlias::new("lm_head.weight", "shared.weight"),
+            ]
+        );
     }
 
     #[test]

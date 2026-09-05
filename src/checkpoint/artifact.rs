@@ -7,9 +7,12 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use serde::{Deserialize, Deserializer, de};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
-use super::{ArtifactSelection, CheckpointError, LoadOptions, Result, TensorDType};
+use super::{
+    ArtifactSelection, CheckpointError, IndexAliasSizeAccounting, IndexTensorAlias, LoadOptions,
+    Result, TensorDType,
+};
 
 const STANDARD_INDEX: &str = "model.safetensors.index.json";
 const STANDARD_SINGLE: &str = "model.safetensors";
@@ -47,6 +50,39 @@ pub struct TensorInventory {
     pub data_offsets: [u64; 2],
     /// Exact byte length derived from shape and dtype.
     pub byte_len: u64,
+}
+
+/// One index-only alias resolved to physical storage during header discovery.
+///
+/// Unlike [`IndexTensorAlias`], which is architecture policy and therefore does
+/// not know artifact placement, this record preserves the shard assignment
+/// proven by the index and the storage owner's validated header. Keeping that
+/// provenance in the manifest lets planning recheck public manifest values
+/// before it emits a strict load report.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ResolvedIndexTensorAlias {
+    /// Index key omitted from its assigned shard header.
+    pub alias: String,
+    /// Physical tensor key whose payload owns the shared storage.
+    pub storage_key: String,
+    /// Root-relative shard assigned to both keys by the checkpoint index.
+    pub shard: String,
+}
+
+impl ResolvedIndexTensorAlias {
+    /// Creates a resolved alias carrying its validated same-shard provenance.
+    #[must_use]
+    pub fn new(
+        alias: impl Into<String>,
+        storage_key: impl Into<String>,
+        shard: impl Into<String>,
+    ) -> Self {
+        Self {
+            alias: alias.into(),
+            storage_key: storage_key.into(),
+            shard: shard.into(),
+        }
+    }
 }
 
 impl TensorInventory {
@@ -98,6 +134,16 @@ pub struct CheckpointManifest {
     pub shards: Vec<ShardInventory>,
     /// Globally unique tensors in name order.
     pub tensors: BTreeMap<String, TensorInventory>,
+    /// Validated index-only aliases resolved to physical same-shard storage.
+    pub index_aliases: Vec<ResolvedIndexTensorAlias>,
+    /// Alias-size convention proven against an index, or `None` for one file.
+    pub index_alias_size_accounting: Option<IndexAliasSizeAccounting>,
+    /// Byte total validated against index metadata under the recorded convention.
+    ///
+    /// This equals [`Self::tensor_bytes`] for unsharded artifacts and indexes
+    /// using physical accounting. Logical accounting additionally counts the
+    /// storage-owner byte length once for every resolved index-only alias.
+    pub indexed_tensor_bytes: u64,
     /// Sum of validated tensor payload lengths.
     pub tensor_bytes: u64,
     /// Sum of complete shard file lengths.
@@ -223,6 +269,9 @@ fn discover_single(
         },
         shards: vec![shard],
         tensors,
+        index_aliases: Vec::new(),
+        index_alias_size_accounting: None,
+        indexed_tensor_bytes: tensor_bytes,
         tensor_bytes,
         artifact_bytes,
     })
@@ -246,6 +295,7 @@ fn discover_index(
             options.limits.max_tensors,
         ));
     }
+    let authorized_aliases = validated_index_alias_policy(&options.index_aliases)?;
 
     let mut shards = Vec::with_capacity(shard_names.len());
     let mut tensors: BTreeMap<String, TensorInventory> = BTreeMap::new();
@@ -301,23 +351,86 @@ fn discover_index(
         shards.push(shard);
     }
 
+    let mut resolved_aliases = Vec::new();
     for (tensor, declared_shard) in &index.weight_map {
         if !tensors.contains_key(tensor) {
-            return Err(CheckpointError::IndexMismatch {
-                tensor: tensor.clone(),
-                reason: format!("assigned to `{declared_shard}` but absent from its header"),
-            });
+            let Some(storage_key) = authorized_aliases.get(tensor) else {
+                return Err(CheckpointError::IndexMismatch {
+                    tensor: tensor.clone(),
+                    reason: format!("assigned to `{declared_shard}` but absent from its header"),
+                });
+            };
+            let Some(storage_shard) = index.weight_map.get(storage_key) else {
+                return Err(CheckpointError::InvalidIndexAlias {
+                    alias: tensor.clone(),
+                    reason: format!("storage key `{storage_key}` is absent from weight_map"),
+                });
+            };
+            if storage_shard != declared_shard {
+                return Err(CheckpointError::InvalidIndexAlias {
+                    alias: tensor.clone(),
+                    reason: format!(
+                        "alias is assigned to `{declared_shard}` but storage key `{storage_key}` is assigned to `{storage_shard}`"
+                    ),
+                });
+            }
+            let Some(storage) = tensors.get(storage_key) else {
+                return Err(CheckpointError::InvalidIndexAlias {
+                    alias: tensor.clone(),
+                    reason: format!(
+                        "storage key `{storage_key}` is not present in its assigned shard header"
+                    ),
+                });
+            };
+            if storage.shard != *declared_shard {
+                return Err(CheckpointError::InvalidIndexAlias {
+                    alias: tensor.clone(),
+                    reason: format!(
+                        "validated storage key `{storage_key}` belongs to `{}`, not `{declared_shard}`",
+                        storage.shard
+                    ),
+                });
+            }
+            resolved_aliases.push(ResolvedIndexTensorAlias::new(
+                tensor,
+                storage_key,
+                declared_shard,
+            ));
         }
     }
+    resolved_aliases.sort();
+    let indexed_tensor_bytes = match options.index_alias_size_accounting {
+        IndexAliasSizeAccounting::Logical => {
+            resolved_aliases
+                .iter()
+                .try_fold(tensor_bytes, |total, alias| {
+                    let storage = tensors.get(&alias.storage_key).ok_or_else(|| {
+                    CheckpointError::InvalidIndexAlias {
+                        alias: alias.alias.clone(),
+                        reason: format!(
+                            "validated storage key `{}` disappeared from the immutable manifest",
+                            alias.storage_key
+                        ),
+                    }
+                })?;
+                    total
+                        .checked_add(storage.byte_len)
+                        .ok_or(CheckpointError::ArithmeticOverflow {
+                            context: "summing logical index tensor bytes including aliases",
+                        })
+                })?
+        }
+        IndexAliasSizeAccounting::Physical => tensor_bytes,
+    };
     if let Some(declared) = index
         .metadata
         .as_ref()
         .and_then(|metadata| metadata.total_size)
-        && declared != tensor_bytes
+        && declared != indexed_tensor_bytes
     {
         return Err(CheckpointError::TotalSizeMismatch {
             declared,
-            observed: tensor_bytes,
+            observed: indexed_tensor_bytes,
         });
     }
 
@@ -329,9 +442,51 @@ fn discover_index(
         },
         shards,
         tensors,
+        index_aliases: resolved_aliases,
+        index_alias_size_accounting: Some(options.index_alias_size_accounting),
+        indexed_tensor_bytes,
         tensor_bytes,
         artifact_bytes,
     })
+}
+
+/// Validates exact index-alias policy and returns a deterministic lookup table.
+pub(super) fn validated_index_alias_policy(
+    aliases: &[IndexTensorAlias],
+) -> Result<BTreeMap<String, String>> {
+    let mut validated = BTreeMap::new();
+    for alias in aliases {
+        if alias.alias.is_empty() {
+            return Err(CheckpointError::InvalidIndexAlias {
+                alias: alias.alias.clone(),
+                reason: "alias key must not be empty".into(),
+            });
+        }
+        if alias.storage_key.is_empty() {
+            return Err(CheckpointError::InvalidIndexAlias {
+                alias: alias.alias.clone(),
+                reason: "storage key must not be empty".into(),
+            });
+        }
+        if alias.alias == alias.storage_key {
+            return Err(CheckpointError::InvalidIndexAlias {
+                alias: alias.alias.clone(),
+                reason: "alias and storage key must differ".into(),
+            });
+        }
+        if let Some(previous) = validated.insert(alias.alias.clone(), alias.storage_key.clone())
+            && previous != alias.storage_key
+        {
+            return Err(CheckpointError::InvalidIndexAlias {
+                alias: alias.alias.clone(),
+                reason: format!(
+                    "alias maps to both `{previous}` and `{}`",
+                    alias.storage_key
+                ),
+            });
+        }
+    }
+    Ok(validated)
 }
 
 fn resolve_local_file(root: &Path, untrusted: &str, kind: &'static str) -> Result<PathBuf> {

@@ -4,11 +4,11 @@
 //! Burn encodes tensor rank and linear layouts in concrete Rust fields.
 //! The [`TensorSink`] implementation below is therefore deliberately owned by
 //! the T5 architecture. It accepts only names emitted by [`T5CheckpointContract`]
-//! and installs weights through Burn's record-loading path. Official T5 linear
-//! matrices use `[output, input]`; they are transposed byte-for-byte to Burn's
-//! gradient-safe `[input, output]` runtime layout before installation. Avoiding
-//! `LinearLayout::Col` is intentional because Burn 0.21's initialization mapper
-//! disconnects mapped linear weights from autodiff gradients.
+//! and installs weights through Burn's record-loading path. The generic load plan
+//! has already transformed official T5 `[output, input]` matrices into Burn's
+//! gradient-safe `[input, output]` runtime layout. Keeping layout conversion out
+//! of this sink makes every transpose visible in [`crate::checkpoint::LoadReport`]
+//! and ensures direct writes obey the same runtime-shape contract.
 //!
 //! Tied T5 heads require no second Burn parameter: the forward graph multiplies
 //! by `shared.weight^T` directly. The sink still validates the logical alias after
@@ -393,72 +393,7 @@ fn install_linear_weight<B: Backend>(
     linear: &mut Linear<B>,
     data: TensorData,
 ) -> Result<(), T5LoadError> {
-    let data = transpose_linear_data(target, data)?;
     install(target, &mut linear.weight, data)
-}
-
-/// Transposes checkpoint `[output, input]` bytes into runtime `[input, output]`.
-///
-/// Copying whole scalar byte groups preserves F16, BF16, and F32 bit patterns
-/// exactly without a dtype conversion or backend round trip. The generic load
-/// executor already bounds and validates source payloads, but this helper still
-/// checks rank and byte extent so direct sink calls remain non-panicking.
-fn transpose_linear_data(target: &str, data: TensorData) -> Result<TensorData, T5LoadError> {
-    if data.shape.len() != 2 {
-        return Err(T5LoadError::Parameter {
-            target: target.into(),
-            source: ParameterInstallError::Rank {
-                expected: 2,
-                actual: data.shape.len(),
-            },
-        });
-    }
-    let rows = data.shape[0];
-    let columns = data.shape[1];
-    let element_size = data.dtype.size();
-    let elements = rows
-        .checked_mul(columns)
-        .ok_or_else(|| T5LoadError::Parameter {
-            target: target.into(),
-            source: ParameterInstallError::Shape {
-                expected: Vec::new(),
-                actual: data.shape.to_vec(),
-            },
-        })?;
-    let bytes_expected =
-        elements
-            .checked_mul(element_size)
-            .ok_or_else(|| T5LoadError::Parameter {
-                target: target.into(),
-                source: ParameterInstallError::Shape {
-                    expected: Vec::new(),
-                    actual: data.shape.to_vec(),
-                },
-            })?;
-    let bytes = data.as_bytes();
-    if bytes.len() != bytes_expected {
-        return Err(T5LoadError::Parameter {
-            target: target.into(),
-            source: ParameterInstallError::Shape {
-                expected: vec![rows, columns],
-                actual: data.shape.to_vec(),
-            },
-        });
-    }
-    let mut transposed = vec![0_u8; bytes.len()];
-    for row in 0..rows {
-        for column in 0..columns {
-            let source = (row * columns + column) * element_size;
-            let destination = (column * rows + row) * element_size;
-            transposed[destination..destination + element_size]
-                .copy_from_slice(&bytes[source..source + element_size]);
-        }
-    }
-    Ok(TensorData::from_bytes_vec(
-        transposed,
-        [columns, rows],
-        data.dtype,
-    ))
 }
 
 /// Installs one T5 scale-only RMSNorm weight unchanged.
@@ -503,6 +438,7 @@ mod tests {
         cache::CacheConfig,
         checkpoint::{
             CheckpointError, ExecutionFailureCause, LoadOptions, TensorDType, TensorOperation,
+            TensorTransform,
         },
         models::config::ModelConfig,
     };
@@ -538,20 +474,30 @@ mod tests {
         contract: &super::super::T5CheckpointContract,
         mutate: impl FnOnce(&mut Vec<(String, Vec<u64>)>),
     ) {
-        let alias_targets = contract
+        let mut tensors = contract
             .mappings()
             .operations()
             .iter()
-            .filter_map(|operation| match operation {
-                TensorOperation::Alias { target, .. } => Some(target.as_str()),
-                _ => None,
+            .filter_map(|operation| {
+                let TensorOperation::Map {
+                    source,
+                    target,
+                    transform,
+                } = operation
+                else {
+                    return None;
+                };
+                let expected = contract
+                    .expected_tensors()
+                    .iter()
+                    .find(|expected| expected.name == *target)
+                    .unwrap();
+                let mut source_shape = expected.shape.clone();
+                if *transform == TensorTransform::Transpose2d {
+                    source_shape.swap(0, 1);
+                }
+                Some((source.clone(), source_shape))
             })
-            .collect::<Vec<_>>();
-        let mut tensors = contract
-            .expected_tensors()
-            .iter()
-            .filter(|tensor| !alias_targets.contains(&tensor.name.as_str()))
-            .map(|tensor| (tensor.name.clone(), tensor.shape.clone()))
             .collect::<Vec<_>>();
         mutate(&mut tensors);
 
@@ -756,6 +702,10 @@ mod tests {
                 .unwrap();
             assert_eq!(planned.load_plan().parameter_count(), 38);
             assert_eq!(planned.manifest().tensors.len(), if tied { 37 } else { 38 });
+            assert_eq!(
+                planned.load_plan().report.transformed.len(),
+                if tied { 25 } else { 26 }
+            );
             let (_manifest, generic_plan) = planned.into_parts();
             assert_eq!(generic_plan.parameter_count(), 38);
 
@@ -765,6 +715,7 @@ mod tests {
                 .load_checkpoint(temp.path(), &LoadOptions::default())
                 .unwrap();
             assert_eq!(outcome.report.applied.len(), 38);
+            assert_eq!(outcome.report.transformed.len(), if tied { 25 } else { 26 });
             assert_eq!(outcome.stats.tensors_applied, if tied { 37 } else { 38 });
             assert_eq!(outcome.stats.aliases_applied, usize::from(tied));
             assert_eq!(outcome.stats.source.shard_opens, 1);
@@ -874,29 +825,36 @@ mod tests {
         assert_eq!(fs::read(temp.path().join("sentinel")).unwrap(), b"ok");
     }
 
-    /// Linear checkpoint transposition preserves scalar order and rejects malformed data.
+    /// The sink accepts only tensors already transformed into Burn's linear layout.
     #[test]
-    fn linear_data_transposition_is_bit_exact_and_non_panicking() {
-        let transposed = transpose_linear_data(
-            "decoder.block.0.q.weight",
-            TensorData::new(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]),
-        )
-        .unwrap();
-        assert_eq!(transposed.shape, [3, 2].into());
-        assert_eq!(
-            transposed.to_vec::<f32>().unwrap(),
-            vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
-        );
+    fn linear_sink_rejects_checkpoint_layout_and_accepts_runtime_layout() {
+        let device = Default::default();
+        let mut config = tiny(T5FeedForwardProjection::Relu, false);
+        config.d_kv = 3;
+        let mut model = T5ForConditionalGeneration::<TestBackend>::init(config, &device).unwrap();
 
+        let q = "encoder.block.0.layer.0.SelfAttention.q.weight";
         assert!(matches!(
-            transpose_linear_data("bad.rank", TensorData::new(vec![1.0_f32, 2.0], [1, 1, 2])),
+            model.write_tensor(q, TensorData::zeros::<f32, _>([6, 4])),
             Err(T5LoadError::Parameter {
-                source: ParameterInstallError::Rank { .. },
+                source: ParameterInstallError::Shape { .. },
                 ..
             })
         ));
-        let malformed = TensorData::from_bytes_vec(vec![0_u8; 3], [2, 2], burn::tensor::DType::F32);
-        assert!(transpose_linear_data("bad.bytes", malformed).is_err());
+        model
+            .write_tensor(q, TensorData::zeros::<f32, _>([4, 6]))
+            .unwrap();
+
+        assert!(matches!(
+            model.write_tensor("lm_head.weight", TensorData::zeros::<f32, _>([13, 4])),
+            Err(T5LoadError::Parameter {
+                source: ParameterInstallError::Shape { .. },
+                ..
+            })
+        ));
+        model
+            .write_tensor("lm_head.weight", TensorData::zeros::<f32, _>([4, 13]))
+            .unwrap();
     }
 
     /// Loads the pinned official FLAN-T5-small artifact and executes real weights.
@@ -930,6 +888,7 @@ mod tests {
             .unwrap();
         assert_eq!(plan.manifest().tensors.len(), 190);
         assert_eq!(plan.load_plan().parameter_count(), 190);
+        assert_eq!(plan.load_plan().report.transformed.len(), 145);
         assert!(plan.load_plan().report.allowlisted_ignored.is_empty());
         assert_eq!(plan.load_plan().memory.checkpoint_tensor_bytes, 307_844_608);
 
@@ -939,6 +898,7 @@ mod tests {
             .load_checkpoint(&root, &LoadOptions::default())
             .unwrap();
         assert_eq!(outcome.report.applied.len(), 190);
+        assert_eq!(outcome.report.transformed.len(), 145);
         assert_eq!(outcome.stats.source.shard_opens, 1);
         assert_eq!(outcome.stats.source.max_open_shards, 1);
 

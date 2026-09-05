@@ -10,7 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AliasRecord, CheckpointError, CheckpointManifest, DTypeConversion, DTypePolicy, LoadOptions,
+    AliasRecord, ArtifactSource, CheckpointEquivalenceRecord, CheckpointError, CheckpointManifest,
+    DTypeConversion, DTypePolicy, IndexAliasSizeAccounting, IndexTensorAlias, LoadOptions,
     LoadReport, MemoryEstimate, Result, TensorDType, TensorInventory, TransformRecord,
 };
 
@@ -316,9 +317,24 @@ pub struct PlannedTensor {
     pub dtype: TensorDType,
 }
 
+/// Two physical source descriptors requiring exact raw-payload equivalence.
+///
+/// These work items are executed before the first [`crate::checkpoint::TensorSink`]
+/// mutation. The alias payload is redundant model state, while `owner` is the
+/// canonical checkpoint tensor consumed by the architecture mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedTensorEquivalence {
+    /// Redundant physical checkpoint tensor.
+    pub alias: PlannedSource,
+    /// Canonical physical checkpoint tensor.
+    pub owner: PlannedSource,
+}
+
 /// Strictly validated second-pass load plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadPlan {
+    /// Physical checkpoint aliases verified before any parameter is installed.
+    pub equivalences: Vec<PlannedTensorEquivalence>,
     /// Non-alias mappings in canonical target-name order.
     ///
     /// The runtime derives a separate source-location execution schedule without
@@ -352,6 +368,7 @@ pub fn build_load_plan(
 ) -> Result<LoadPlan> {
     validate_matchers(&options.allow_missing)?;
     validate_matchers(&options.allow_unexpected)?;
+    validate_manifest_index_provenance(manifest, options)?;
     if matches!(options.dtype_policy, DTypePolicy::Cast(dtype) if !dtype.is_float()) {
         return Err(CheckpointError::InvalidMapping {
             message: "DTypePolicy::Cast requires a real floating-point target dtype".into(),
@@ -581,7 +598,15 @@ pub fn build_load_plan(
         });
     }
 
+    let equivalences = plan_tensor_equivalences(manifest, options, &mut consumed)?;
     let mut report = create_report(&primary, &aliases);
+    report.checkpoint_aliases = manifest.index_aliases.clone();
+    report.equivalence_planned = equivalences
+        .iter()
+        .map(|equivalence| {
+            CheckpointEquivalenceRecord::new(&equivalence.alias.name, &equivalence.owner.name)
+        })
+        .collect();
     for key in expected.keys().filter(|key| !produced.contains(*key)) {
         if matches_any(&options.allow_missing, key) {
             report.allowlisted_missing.push(key.clone());
@@ -589,9 +614,14 @@ pub fn build_load_plan(
             report.missing.push(key.clone());
         }
     }
+    // Index-only storage aliases are part of the source checkpoint's logical
+    // inventory even though they have no second payload. Requiring them to be
+    // consumed or allowlisted prevents strict reports from silently dropping an
+    // architecture-authorized exception after header discovery.
     for key in manifest
         .tensors
         .keys()
+        .chain(manifest.index_aliases.iter().map(|alias| &alias.alias))
         .filter(|key| !consumed.contains(*key))
     {
         if matches_any(&options.allow_unexpected, key) {
@@ -611,14 +641,264 @@ pub fn build_load_plan(
 
     primary.sort_by(|left, right| left.target.cmp(&right.target));
     aliases.sort_by(|left, right| left.target.cmp(&right.target));
-    let memory = estimate_memory(manifest, &primary, &aliases)?;
+    let memory = estimate_memory(manifest, &primary, &aliases, &equivalences)?;
     report.memory = Some(memory);
     Ok(LoadPlan {
+        equivalences,
         tensors: primary,
         aliases,
         report,
         memory,
     })
+}
+
+/// Plans exact comparisons for declared aliases that own physical payloads.
+///
+/// A declaration is optional across artifact encodings: a key omitted from the
+/// index entirely requires no work, an index-only key was already resolved by
+/// discovery, and a physically present key becomes a pass-two comparison. Both
+/// index-only and physical aliases count as consumed checkpoint entries rather
+/// than generic allowlisted omissions.
+fn plan_tensor_equivalences(
+    manifest: &CheckpointManifest,
+    options: &LoadOptions,
+    consumed: &mut BTreeSet<String>,
+) -> Result<Vec<PlannedTensorEquivalence>> {
+    let declared = super::artifact::validated_index_alias_policy(&options.index_aliases)?;
+    let index_only = manifest
+        .index_aliases
+        .iter()
+        .map(|alias| (alias.alias.as_str(), alias.storage_key.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    for alias in &manifest.index_aliases {
+        consume(consumed, &alias.alias)?;
+    }
+
+    let mut planned = Vec::new();
+    for (alias, owner) in declared {
+        if index_only.get(alias.as_str()) == Some(&owner.as_str()) {
+            continue;
+        }
+        let Some(alias_tensor) = manifest.tensors.get(&alias) else {
+            continue;
+        };
+        let owner_tensor = manifest.tensors.get(&owner).ok_or_else(|| {
+            CheckpointError::TensorEquivalenceMismatch {
+                alias: alias.clone(),
+                owner: owner.clone(),
+                reason: "declared owner is absent from the physical tensor inventory".into(),
+            }
+        })?;
+        if alias_tensor.shape != owner_tensor.shape {
+            return Err(CheckpointError::TensorEquivalenceMismatch {
+                alias,
+                owner,
+                reason: format!(
+                    "shape {:?} differs from owner shape {:?}",
+                    alias_tensor.shape, owner_tensor.shape
+                ),
+            });
+        }
+        if alias_tensor.dtype != owner_tensor.dtype {
+            return Err(CheckpointError::TensorEquivalenceMismatch {
+                alias,
+                owner,
+                reason: format!(
+                    "dtype {} differs from owner dtype {}",
+                    alias_tensor.dtype, owner_tensor.dtype
+                ),
+            });
+        }
+        if alias_tensor.byte_len != owner_tensor.byte_len {
+            return Err(CheckpointError::TensorEquivalenceMismatch {
+                alias,
+                owner,
+                reason: format!(
+                    "payload length {} differs from owner length {}",
+                    alias_tensor.byte_len, owner_tensor.byte_len
+                ),
+            });
+        }
+        consume(consumed, &alias)?;
+        planned.push(PlannedTensorEquivalence {
+            alias: alias_tensor.into(),
+            owner: owner_tensor.into(),
+        });
+    }
+    planned.sort_by(|left, right| {
+        left.alias
+            .name
+            .cmp(&right.alias.name)
+            .then_with(|| left.owner.name.cmp(&right.owner.name))
+    });
+    Ok(planned)
+}
+
+/// Rechecks index-only alias and size provenance before compiling a public manifest.
+///
+/// [`CheckpointManifest`] remains inspectable and constructible by downstream
+/// code, so planning cannot assume its discovery-only invariants still hold. The
+/// checks below bind every resolved alias to an authorized declaration, its
+/// physical owner, the owner's shard inventory, and the exact byte-accounting
+/// convention that accepted `metadata.total_size`.
+fn validate_manifest_index_provenance(
+    manifest: &CheckpointManifest,
+    options: &LoadOptions,
+) -> Result<()> {
+    let authorized = super::artifact::validated_index_alias_policy(&options.index_aliases)?;
+    let declarations = manifest
+        .index_aliases
+        .iter()
+        .map(|alias| IndexTensorAlias::new(&alias.alias, &alias.storage_key))
+        .collect::<Vec<_>>();
+    let resolved = super::artifact::validated_index_alias_policy(&declarations)?;
+    if resolved.len() != manifest.index_aliases.len() {
+        return Err(CheckpointError::InvalidIndexAlias {
+            alias: "<duplicate>".into(),
+            reason: "resolved manifest aliases must have unique alias keys".into(),
+        });
+    }
+
+    for alias in &manifest.index_aliases {
+        if authorized.get(&alias.alias) != Some(&alias.storage_key) {
+            return Err(CheckpointError::InvalidIndexAlias {
+                alias: alias.alias.clone(),
+                reason: format!(
+                    "resolved storage key `{}` is not authorized by this load plan",
+                    alias.storage_key
+                ),
+            });
+        }
+        if alias.shard.is_empty() {
+            return Err(CheckpointError::InvalidIndexAlias {
+                alias: alias.alias.clone(),
+                reason: "resolved shard provenance must not be empty".into(),
+            });
+        }
+        if manifest.tensors.contains_key(&alias.alias) {
+            return Err(CheckpointError::InvalidIndexAlias {
+                alias: alias.alias.clone(),
+                reason: "index-only alias is also present in the physical tensor inventory".into(),
+            });
+        }
+        let owner = manifest.tensors.get(&alias.storage_key).ok_or_else(|| {
+            CheckpointError::InvalidIndexAlias {
+                alias: alias.alias.clone(),
+                reason: format!(
+                    "storage key `{}` is absent from the physical tensor inventory",
+                    alias.storage_key
+                ),
+            }
+        })?;
+        if owner.shard != alias.shard {
+            return Err(CheckpointError::InvalidIndexAlias {
+                alias: alias.alias.clone(),
+                reason: format!(
+                    "resolved shard `{}` differs from storage owner shard `{}`",
+                    alias.shard, owner.shard
+                ),
+            });
+        }
+        let shard =
+            manifest
+                .shard(&alias.shard)
+                .ok_or_else(|| CheckpointError::InvalidIndexAlias {
+                    alias: alias.alias.clone(),
+                    reason: format!(
+                        "resolved shard `{}` is absent from the manifest",
+                        alias.shard
+                    ),
+                })?;
+        if shard.tensors.get(&alias.storage_key) != Some(owner) {
+            return Err(CheckpointError::InvalidIndexAlias {
+                alias: alias.alias.clone(),
+                reason: format!(
+                    "storage key `{}` does not match its resolved shard inventory",
+                    alias.storage_key
+                ),
+            });
+        }
+    }
+
+    match &manifest.source {
+        ArtifactSource::Single { .. } => {
+            if !manifest.index_aliases.is_empty() {
+                return Err(manifest_accounting_mismatch(
+                    "an unsharded manifest cannot contain index-only aliases".into(),
+                ));
+            }
+            if manifest.index_alias_size_accounting.is_some() {
+                return Err(manifest_accounting_mismatch(
+                    "an unsharded manifest cannot record index alias accounting".into(),
+                ));
+            }
+        }
+        ArtifactSource::Index {
+            declared_total_size,
+            ..
+        } => {
+            let physical_bytes = manifest.tensors.values().try_fold(0_u64, |total, tensor| {
+                total
+                    .checked_add(tensor.byte_len)
+                    .ok_or(CheckpointError::ArithmeticOverflow {
+                        context: "revalidating checkpoint manifest tensor bytes",
+                    })
+            })?;
+            if manifest.tensor_bytes != physical_bytes {
+                return Err(manifest_accounting_mismatch(format!(
+                    "manifest records {} physical tensor bytes, inventory sums to {physical_bytes}",
+                    manifest.tensor_bytes
+                )));
+            }
+            let recorded = manifest.index_alias_size_accounting.ok_or_else(|| {
+                manifest_accounting_mismatch(
+                    "an indexed manifest is missing its alias-size convention".into(),
+                )
+            })?;
+            if recorded != options.index_alias_size_accounting {
+                return Err(manifest_accounting_mismatch(format!(
+                    "manifest was discovered with {recorded:?} alias accounting, load plan requested {:?}",
+                    options.index_alias_size_accounting
+                )));
+            }
+            let expected_indexed_bytes = match recorded {
+                IndexAliasSizeAccounting::Logical => {
+                    manifest
+                        .index_aliases
+                        .iter()
+                        .try_fold(physical_bytes, |total, alias| {
+                            let owner = &manifest.tensors[&alias.storage_key];
+                            total.checked_add(owner.byte_len).ok_or(
+                                CheckpointError::ArithmeticOverflow {
+                                    context: "revalidating logical index tensor bytes",
+                                },
+                            )
+                        })?
+                }
+                IndexAliasSizeAccounting::Physical => physical_bytes,
+            };
+            if manifest.indexed_tensor_bytes != expected_indexed_bytes {
+                return Err(manifest_accounting_mismatch(format!(
+                    "manifest records {} indexed tensor bytes, validated convention requires {expected_indexed_bytes}",
+                    manifest.indexed_tensor_bytes
+                )));
+            }
+            if let Some(declared) = declared_total_size
+                && *declared != expected_indexed_bytes
+            {
+                return Err(CheckpointError::TotalSizeMismatch {
+                    declared: *declared,
+                    observed: expected_indexed_bytes,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Builds one contextual public-manifest accounting failure.
+fn manifest_accounting_mismatch(reason: String) -> CheckpointError {
+    CheckpointError::ManifestAccountingMismatch { reason }
 }
 
 fn expected_inventory(expected: &[ExpectedTensor]) -> Result<BTreeMap<String, &ExpectedTensor>> {
@@ -820,6 +1100,7 @@ fn estimate_memory(
     manifest: &CheckpointManifest,
     primary: &[PlannedTensor],
     aliases: &[PlannedTensor],
+    equivalences: &[PlannedTensorEquivalence],
 ) -> Result<MemoryEstimate> {
     let largest_shard_bytes = manifest
         .shards
@@ -858,11 +1139,39 @@ fn estimate_memory(
                 context: "summing aliased logical model bytes",
             })?;
     }
-    let peak_host_staging_bytes = largest_shard_bytes
+    let largest_equivalence_pair_bytes =
+        equivalences
+            .iter()
+            .try_fold(0_u64, |largest, equivalence| {
+                let alias_bytes = equivalence.alias.data_offsets[1]
+                    .checked_sub(equivalence.alias.data_offsets[0])
+                    .ok_or_else(|| CheckpointError::InvalidMapping {
+                        message: format!(
+                            "equivalence alias `{}` has reversed data offsets",
+                            equivalence.alias.name
+                        ),
+                    })?;
+                let owner_bytes = equivalence.owner.data_offsets[1]
+                    .checked_sub(equivalence.owner.data_offsets[0])
+                    .ok_or_else(|| CheckpointError::InvalidMapping {
+                        message: format!(
+                            "equivalence owner `{}` has reversed data offsets",
+                            equivalence.owner.name
+                        ),
+                    })?;
+                let pair = alias_bytes.checked_add(owner_bytes).ok_or(
+                    CheckpointError::ArithmeticOverflow {
+                        context: "estimating checkpoint equivalence staging bytes",
+                    },
+                )?;
+                Ok::<u64, CheckpointError>(largest.max(pair))
+            })?;
+    let transform_staging_bytes = largest_shard_bytes
         .checked_add(largest_target_tensor_bytes)
         .ok_or(CheckpointError::ArithmeticOverflow {
             context: "estimating peak host staging bytes",
         })?;
+    let peak_host_staging_bytes = transform_staging_bytes.max(largest_equivalence_pair_bytes);
     Ok(MemoryEstimate {
         artifact_bytes: manifest.artifact_bytes,
         checkpoint_tensor_bytes: manifest.tensor_bytes,
@@ -871,6 +1180,7 @@ fn estimate_memory(
         largest_shard_bytes,
         largest_source_tensor_bytes,
         largest_target_tensor_bytes,
+        largest_equivalence_pair_bytes,
         peak_host_staging_bytes,
     })
 }

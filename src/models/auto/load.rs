@@ -710,7 +710,7 @@ fn normalize_pad_token_named(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, io::Write, path::Path};
+    use std::{collections::BTreeMap, fs::File, io::Write, path::Path};
 
     use burn::{
         backend::Flex,
@@ -826,7 +826,7 @@ mod tests {
         }
     }
 
-    /// Verifies exhaustive strict accounting for one untied identity/rename contract.
+    /// Verifies exhaustive strict accounting for one untied map/alias contract.
     fn assert_strict_report(
         report: &LoadReport,
         expected: &[ExpectedTensor],
@@ -847,23 +847,33 @@ mod tests {
         assert!(report.dtype_converted.is_empty());
         assert!(report.quantized.is_empty());
 
-        let rename_count = mappings
+        let expected_transforms = mappings
             .operations()
             .iter()
-            .filter(|operation| {
-                matches!(
-                    operation,
-                    TensorOperation::Map { source, target, .. } if source != target
-                )
+            .filter_map(|operation| {
+                let TensorOperation::Map {
+                    source,
+                    target,
+                    transform,
+                } = operation
+                else {
+                    return None;
+                };
+                match transform {
+                    TensorTransform::Identity if source != target => {
+                        Some((target.as_str(), "rename"))
+                    }
+                    TensorTransform::Transpose2d => Some((target.as_str(), "transpose_2d")),
+                    TensorTransform::Identity => None,
+                }
             })
-            .count();
-        assert_eq!(report.transformed.len(), rename_count);
-        assert!(
-            report
-                .transformed
-                .iter()
-                .all(|record| record.operation == "rename")
-        );
+            .collect::<BTreeMap<_, _>>();
+        let observed_transforms = report
+            .transformed
+            .iter()
+            .map(|record| (record.target.as_str(), record.operation.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(observed_transforms, expected_transforms);
         let memory = report.memory.expect("strict plan must estimate memory");
         assert!(memory.checkpoint_tensor_bytes > 0);
         assert!(memory.target_parameter_bytes > 0);

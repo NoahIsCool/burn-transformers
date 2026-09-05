@@ -164,13 +164,39 @@ pub enum CheckpointError {
         /// Mismatch description.
         reason: String,
     },
-    /// The index total-size field disagreed with tensor metadata.
-    #[error("checkpoint index declares {declared} tensor bytes, headers describe {observed}")]
+    /// An architecture-authorized index alias was malformed or unsafe.
+    #[error("invalid checkpoint index alias `{alias}`: {reason}")]
+    InvalidIndexAlias {
+        /// Index-only alias key.
+        alias: String,
+        /// Violated exact-alias invariant.
+        reason: String,
+    },
+    /// A physical checkpoint alias differed from its declared storage owner.
+    #[error("checkpoint tensor `{alias}` is not equivalent to owner `{owner}`: {reason}")]
+    TensorEquivalenceMismatch {
+        /// Redundant physical checkpoint key.
+        alias: String,
+        /// Canonical physical storage-owner key.
+        owner: String,
+        /// Shape, dtype, descriptor, or raw-payload mismatch.
+        reason: String,
+    },
+    /// The index total-size field disagreed with validated physical tensors and aliases.
+    #[error(
+        "checkpoint index declares {declared} tensor bytes, validated index entries describe {observed}"
+    )]
     TotalSizeMismatch {
         /// Index metadata value.
         declared: u64,
         /// Sum derived from validated tensors.
         observed: u64,
+    },
+    /// Public manifest accounting no longer matches its discovery provenance.
+    #[error("checkpoint manifest accounting mismatch: {reason}")]
+    ManifestAccountingMismatch {
+        /// Violated physical, logical, or accounting-policy invariant.
+        reason: String,
     },
     /// An explicit mapping operation was malformed.
     #[error("invalid tensor mapping: {message}")]

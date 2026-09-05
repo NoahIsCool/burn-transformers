@@ -4,6 +4,45 @@ use serde::{Deserialize, Serialize};
 
 use super::TensorDType;
 
+/// One checkpoint tensor name required to be equivalent to a storage owner.
+///
+/// When an index retains a framework alias that the shard writer deduplicated,
+/// discovery accepts the absent entry only when both keys share a shard and the
+/// owner is physically present. When both entries have physical payloads, pass
+/// two requires identical shape, dtype, and raw bytes before any model mutation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct IndexTensorAlias {
+    /// Index key that may be absent from its assigned shard header.
+    pub alias: String,
+    /// Indexed key whose validated tensor payload owns the shared storage.
+    pub storage_key: String,
+}
+
+impl IndexTensorAlias {
+    /// Creates one exact alias-to-storage declaration.
+    #[must_use]
+    pub fn new(alias: impl Into<String>, storage_key: impl Into<String>) -> Self {
+        Self {
+            alias: alias.into(),
+            storage_key: storage_key.into(),
+        }
+    }
+}
+
+/// Defines how `metadata.total_size` accounts for index-only aliases.
+///
+/// SafeTensors exporters have used both conventions. The selected policy is
+/// explicit so discovery never guesses which byte total a checkpoint intended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[non_exhaustive]
+pub enum IndexAliasSizeAccounting {
+    /// Count each logical index entry, including an alias owner's byte length.
+    #[default]
+    Logical,
+    /// Count each physical payload once, excluding index-only aliases.
+    Physical,
+}
+
 /// Hard resource bounds applied while parsing untrusted artifact metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactLimits {
@@ -78,4 +117,15 @@ pub struct LoadOptions {
     pub allow_missing: Vec<super::KeyMatcher>,
     /// Explicit exceptions for checkpoint keys not consumed by the text model.
     pub allow_unexpected: Vec<super::KeyMatcher>,
+    /// Exact alias/owner equivalences authorized by the selected architecture.
+    ///
+    /// This is deliberately not a pattern allowlist. An accepted alias must
+    /// either resolve to a same-shard index-only owner or pass an exact physical
+    /// payload comparison, preventing a distinct tensor from being ignored as
+    /// shared storage.
+    #[serde(default)]
+    pub index_aliases: Vec<IndexTensorAlias>,
+    /// Convention used to reconcile index-only aliases with `total_size`.
+    #[serde(default)]
+    pub index_alias_size_accounting: IndexAliasSizeAccounting,
 }

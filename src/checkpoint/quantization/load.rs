@@ -3,18 +3,28 @@
 //! A quantized Burnpack is a weight-only sidecar. Embeddings, normalization
 //! scales, biases, recurrent parameters, and MTP tensors still come from the
 //! original SafeTensors checkpoint. [`execute_quantized_load_plan`] therefore
-//! runs the ordinary architecture plan and interposes at its final tensor-sink
-//! boundary: a matching sidecar payload replaces the already transformed source
-//! tensor, while an absent payload passes through unchanged.
+//! runs the ordinary architecture plan with a pre-materialization override. An
+//! authenticated source may certify that a matching sidecar payload can replace
+//! its checkpoint source directly; the built-in local source intentionally lacks
+//! that certificate and therefore reads and validates the ordinary value before
+//! replacing it. An absent payload always follows the ordinary path.
 //!
 //! Preflight happens before the first source read. Every packed name must identify
 //! a storage-owning plan target with the same post-transform shape and dtype, must
 //! remain eligible under the conservative policy, and must map exactly to Burn's
 //! `[1, group]` block geometry. This prevents a same-shaped but differently wired
 //! artifact from silently bypassing the architecture contract. Runtime ownership
-//! remains bounded by one ordinary source tensor plus one decoded packed target.
+//! is normally one source tensor or one decoded packed target. A partial fused
+//! split may hold its one shared source while installing a packed sibling, still
+//! within the plan's conservative source-plus-output memory bound.
+//!
+//! Packed I/O counters advance only after a payload decodes successfully. A
+//! corrupt mapped payload can therefore be physically inspected before the
+//! audited successful-read count advances. Burnpack decoding and conversion are
+//! still bounded to one tensor at a time, but their internal temporary buffers
+//! are outside [`ExecutionStats::peak_host_staging_bytes`].
 
-use std::{error::Error as StdError, fmt};
+use std::{collections::BTreeMap, error::Error as StdError, fmt};
 
 use burn::tensor::TensorData;
 
@@ -26,7 +36,7 @@ use super::{
 use crate::checkpoint::{
     CheckpointManifest, ExecutionFailureCause, ExecutionOutcome, ExecutionStats, LoadPlan,
     LoadReport, LocalShardSource, QuantizationRecord, TensorDType, TensorSink, TensorSource,
-    execute_load_plan,
+    runtime::execute_load_plan_with_overrides,
 };
 
 /// Sidecar I/O counters kept separate from ordinary checkpoint source statistics.
@@ -34,9 +44,9 @@ use crate::checkpoint::{
 pub struct PackedLoadStats {
     /// Packed payloads decoded successfully, including a later sink rejection.
     pub tensor_reads: u64,
-    /// Sum of packed-value and scale bytes read from the mapped artifact.
+    /// Sum of packed-value and scale bytes decoded successfully.
     pub payload_bytes: u64,
-    /// Largest individual packed-value-plus-scale payload materialized.
+    /// Largest individual packed-value-plus-scale payload decoded successfully.
     pub largest_payload_bytes: u64,
     /// Packed parameters accepted by the architecture sink.
     pub tensors_applied: usize,
@@ -135,9 +145,11 @@ pub type QuantizedExecutionResult<E> =
 /// The source remains authoritative for checkpoint discovery, allowlists, aliases,
 /// and all policy-excluded tensors. The sidecar is accepted only when its complete
 /// manifest passes [`validate_sidecar_contract`] before `source.read_tensor` can be
-/// called. On a later failure, the boxed [`QuantizedExecutionFailure`] contains
-/// both the exact applied prefix and the underlying quantization or architecture
-/// error.
+/// called. Source payload bypass additionally requires the source's explicit
+/// cryptographic certification; ordinary local checkpoints fail closed to full
+/// source validation because Burnpack v1 has no checkpoint digest. On a later
+/// failure, the boxed [`QuantizedExecutionFailure`] contains both the exact applied
+/// prefix and the underlying quantization or architecture error.
 pub fn execute_quantized_load_plan<S, K>(
     plan: &LoadPlan,
     source: &mut S,
@@ -174,7 +186,13 @@ where
     }
 
     let mut overlay = QuantizedOverlaySink::new(artifact, sink);
-    let execution = execute_load_plan(plan, source, &mut overlay);
+    let execution = execute_load_plan_with_overrides(
+        plan,
+        source,
+        &mut overlay,
+        |overlay, tensor| overlay.has_override(&tensor.target),
+        |overlay, tensor| overlay.read_override(&tensor.target),
+    );
     let packed = overlay.stats;
     let records = std::mem::take(&mut overlay.records);
     drop(overlay);
@@ -233,15 +251,29 @@ pub fn validate_sidecar_contract(
         });
     }
 
+    // Index once rather than scanning all model targets for every packed tensor.
+    // Qwen3-MoE has roughly nineteen thousand entries on both sides, so the
+    // previous nested search performed hundreds of millions of string compares.
+    let mut planned_by_target = BTreeMap::new();
+    for planned in &plan.tensors {
+        if planned_by_target
+            .insert(planned.target.as_str(), planned)
+            .is_some()
+        {
+            return Err(QuantizationError::SidecarContract {
+                name: planned.target.clone(),
+                reason: "strict load plan contains a duplicate storage target".into(),
+            });
+        }
+    }
+
     for (name, metadata) in &manifest.tensors {
-        let planned = plan
-            .tensors
-            .iter()
-            .find(|tensor| tensor.target == *name)
-            .ok_or_else(|| QuantizationError::SidecarContract {
+        let planned = planned_by_target.get(name.as_str()).ok_or_else(|| {
+            QuantizationError::SidecarContract {
                 name: name.clone(),
                 reason: "name is not a storage-owning target in the strict load plan".into(),
-            })?;
+            }
+        })?;
         metadata.validate_burn_qfloat_layout()?;
         if metadata.shape != planned.shape {
             return Err(QuantizationError::SidecarContract {
@@ -277,6 +309,21 @@ pub fn validate_sidecar_contract(
                 ),
             });
         }
+        let payload_bytes = metadata
+            .packed_value_bytes
+            .checked_add(metadata.scale_bytes)
+            .ok_or(QuantizationError::ByteLengthOverflow {
+                context: "packed preflight payload size",
+            })?;
+        if payload_bytes > plan.memory.peak_host_staging_bytes {
+            return Err(QuantizationError::SidecarContract {
+                name: name.clone(),
+                reason: format!(
+                    "packed payload requires {payload_bytes} bytes before backend transfer, exceeding the plan's {}-byte host-staging bound",
+                    plan.memory.peak_host_staging_bytes
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -299,17 +346,63 @@ impl<'a, K> QuantizedOverlaySink<'a, K> {
             stats: PackedLoadStats::default(),
         }
     }
+
+    /// Returns whether the sidecar owns one post-transform storage target.
+    fn has_override(&self, target: &str) -> bool {
+        self.artifact.manifest().tensors.contains_key(target)
+    }
 }
 
 impl<K: TensorSink> TensorSink for QuantizedOverlaySink<'_, K> {
     type Error = QuantizedSinkError<K::Error>;
 
-    fn write_tensor(&mut self, target: &str, source_data: TensorData) -> Result<(), Self::Error> {
+    fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
         let Some(metadata) = self.artifact.manifest().tensors.get(target).cloned() else {
             return self
                 .inner
-                .write_tensor(target, source_data)
+                .write_tensor(target, data)
                 .map_err(QuantizedSinkError::Architecture);
+        };
+        let payload_bytes = metadata
+            .packed_value_bytes
+            .checked_add(metadata.scale_bytes)
+            .ok_or(QuantizationError::ByteLengthOverflow {
+                context: "packed load payload accounting",
+            })?;
+        let tensors_applied = self.stats.tensors_applied.checked_add(1).ok_or(
+            QuantizationError::ByteLengthOverflow {
+                context: "packed applied tensor count",
+            },
+        )?;
+        let record = QuantizationRecord {
+            target: target.into(),
+            scheme: scheme_name(&metadata),
+            bytes: payload_bytes,
+        };
+
+        self.inner
+            .write_tensor(target, data)
+            .map_err(QuantizedSinkError::Architecture)?;
+        self.stats.tensors_applied = tensors_applied;
+        self.records.push(record);
+        Ok(())
+    }
+
+    fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error> {
+        self.inner
+            .alias_tensor(target, source_target)
+            .map_err(QuantizedSinkError::Architecture)
+    }
+}
+
+impl<K: TensorSink> QuantizedOverlaySink<'_, K> {
+    /// Decodes one selected packed target and advances read-side counters only.
+    fn read_override(
+        &mut self,
+        target: &str,
+    ) -> Result<Option<TensorData>, QuantizedSinkError<K::Error>> {
+        let Some(metadata) = self.artifact.manifest().tensors.get(target).cloned() else {
+            return Ok(None);
         };
         let payload_bytes = metadata
             .packed_value_bytes
@@ -336,27 +429,7 @@ impl<K: TensorSink> TensorSink for QuantizedOverlaySink<'_, K> {
         self.stats.tensor_reads = tensor_reads;
         self.stats.payload_bytes = total_payload;
         self.stats.largest_payload_bytes = self.stats.largest_payload_bytes.max(payload_bytes);
-
-        self.inner
-            .write_tensor(target, packed)
-            .map_err(QuantizedSinkError::Architecture)?;
-        self.stats.tensors_applied = self.stats.tensors_applied.checked_add(1).ok_or(
-            QuantizationError::ByteLengthOverflow {
-                context: "packed applied tensor count",
-            },
-        )?;
-        self.records.push(QuantizationRecord {
-            target: target.into(),
-            scheme: scheme_name(&metadata),
-            bytes: payload_bytes,
-        });
-        Ok(())
-    }
-
-    fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error> {
-        self.inner
-            .alias_tensor(target, source_target)
-            .map_err(QuantizedSinkError::Architecture)
+        Ok(Some(packed))
     }
 }
 
@@ -388,6 +461,7 @@ fn unstarted_report(plan: &LoadPlan) -> LoadReport {
     let mut report = plan.report.clone();
     report.applied.clear();
     report.quantized.clear();
+    report.equivalence_verified.clear();
     report.finalize();
     report
 }
@@ -408,7 +482,14 @@ pub const fn burn_qfloat_execution_support() -> PackedExecutionSupport {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs::File, io::Write, path::Path};
+    use std::{
+        cell::Cell,
+        collections::BTreeMap,
+        fs::{self, File},
+        io::Write,
+        path::Path,
+        rc::Rc,
+    };
 
     use burn::tensor::{DType, TensorData};
     use serde_json::{Map, Value, json};
@@ -421,13 +502,17 @@ mod tests {
         quantize_local_checkpoint_to_burnpack,
     };
     use crate::checkpoint::{
-        DTypePolicy, ExpectedTensor, LoadOptions, MappingPlan, build_load_plan, discover_checkpoint,
+        CheckpointEquivalenceRecord, CheckpointError, DTypePolicy, ExpectedTensor,
+        IndexTensorAlias, LoadOptions, LocalShardSource, MappingPlan, PlannedSource, SourceStats,
+        SourceTensor, build_load_plan, discover_checkpoint, execute_local_load_plan,
     };
 
     /// Minimal architecture sink that retains delivered metadata and payloads.
     #[derive(Default)]
     struct RecordingSink {
         tensors: BTreeMap<String, TensorData>,
+        aliases: Vec<(String, String)>,
+        operations: Vec<String>,
     }
 
     /// Deterministic architecture rejection used to inspect error wrapping.
@@ -439,12 +524,133 @@ mod tests {
         type Error = SinkError;
 
         fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
+            self.operations.push(format!("write:{target}"));
             self.tensors.insert(target.into(), data);
             Ok(())
         }
 
+        fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error> {
+            self.operations.push(format!("alias:{target}"));
+            self.aliases
+                .push((target.to_owned(), source_target.to_owned()));
+            Ok(())
+        }
+    }
+
+    /// Local source wrapper that deliberately cannot certify descriptors without I/O.
+    struct NonCertifyingLocalSource<'a> {
+        inner: LocalShardSource<'a>,
+    }
+
+    impl TensorSource for NonCertifyingLocalSource<'_> {
+        fn read_tensor(
+            &mut self,
+            source: &PlannedSource,
+        ) -> crate::checkpoint::Result<SourceTensor> {
+            self.inner.read_tensor(source)
+        }
+
+        fn close(&mut self) -> crate::checkpoint::Result<()> {
+            self.inner.close()
+        }
+
+        fn stats(&self) -> SourceStats {
+            self.inner.stats()
+        }
+    }
+
+    /// Local source that records closure while retaining fail-closed descriptor validation.
+    struct CloseAwareLocalSource<'a> {
+        inner: LocalShardSource<'a>,
+        closed: Rc<Cell<bool>>,
+        fail_close: bool,
+    }
+
+    impl TensorSource for CloseAwareLocalSource<'_> {
+        fn validate_tensor_descriptor(
+            &self,
+            source: &PlannedSource,
+        ) -> crate::checkpoint::Result<bool> {
+            self.inner.validate_tensor_descriptor(source)
+        }
+
+        fn read_tensor(
+            &mut self,
+            source: &PlannedSource,
+        ) -> crate::checkpoint::Result<SourceTensor> {
+            self.inner.read_tensor(source)
+        }
+
+        fn close(&mut self) -> crate::checkpoint::Result<()> {
+            self.closed.set(true);
+            self.inner.close()?;
+            if self.fail_close {
+                Err(CheckpointError::InvalidMapping {
+                    message: "synthetic close failure".into(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+
+        fn stats(&self) -> SourceStats {
+            self.inner.stats()
+        }
+    }
+
+    /// Sink whose alias boundary proves that source closure precedes tied storage.
+    struct CloseAwareSink {
+        closed: Rc<Cell<bool>>,
+        operations: Vec<String>,
+    }
+
+    impl TensorSink for CloseAwareSink {
+        type Error = SinkError;
+
+        fn write_tensor(&mut self, target: &str, _data: TensorData) -> Result<(), Self::Error> {
+            self.operations.push(format!("write:{target}"));
+            Ok(())
+        }
+
         fn alias_tensor(&mut self, target: &str, _source_target: &str) -> Result<(), Self::Error> {
-            Err(SinkError(target.into()))
+            if !self.closed.get() {
+                return Err(SinkError(format!("source-open:{target}")));
+            }
+            self.operations.push(format!("alias:{target}"));
+            Ok(())
+        }
+    }
+
+    /// Source with configurable certification that rejects every payload read.
+    #[derive(Default)]
+    struct FailingSource {
+        certify: bool,
+        closed: bool,
+        reads: usize,
+    }
+
+    impl TensorSource for FailingSource {
+        fn validate_tensor_descriptor(
+            &self,
+            _source: &PlannedSource,
+        ) -> crate::checkpoint::Result<bool> {
+            Ok(self.certify)
+        }
+
+        fn read_tensor(
+            &mut self,
+            source: &PlannedSource,
+        ) -> crate::checkpoint::Result<SourceTensor> {
+            self.reads += 1;
+            Err(CheckpointError::InvalidTensorPayload {
+                tensor: source.name.clone(),
+                reason: "synthetic read failure".into(),
+            })
+        }
+
+        fn close(&mut self) -> crate::checkpoint::Result<()> {
+            self.closed = true;
+            Ok(())
         }
     }
 
@@ -529,7 +735,41 @@ mod tests {
         (manifest, plan, output)
     }
 
-    /// Packed projections replace source tensors while excluded weights pass through.
+    /// Writes an executable group-32 Q8 sidecar for explicit post-transform targets.
+    fn write_sidecar(path: &Path, tensors: &[(&str, Vec<usize>)]) {
+        let mut session =
+            crate::checkpoint::quantization::QuantizedBurnpackSession::new(path).unwrap();
+        for (name, shape) in tensors {
+            let elements = shape.iter().product::<usize>();
+            let values = (0..elements)
+                .map(|index| (index as f32 - 17.0) / 11.0)
+                .collect::<Vec<_>>();
+            session
+                .append(
+                    name,
+                    &TensorData::new(values, shape.clone()),
+                    WeightQuantizationConfig {
+                        group_size: QuantizationGroupSize::new(32).unwrap(),
+                        ..WeightQuantizationConfig::default()
+                    },
+                )
+                .unwrap();
+        }
+        session.finalize().unwrap();
+    }
+
+    /// Returns the unique location of one complete byte sequence in a fixture.
+    fn unique_subslice(haystack: &[u8], needle: &[u8]) -> usize {
+        let locations = haystack
+            .windows(needle.len())
+            .enumerate()
+            .filter_map(|(index, candidate)| (candidate == needle).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(locations.len(), 1, "fixture byte sequence must be unique");
+        locations[0]
+    }
+
+    /// Local packed overlays validate every source before replacing eligible weights.
     #[test]
     fn local_overlay_installs_mixed_precision_and_reports_exact_io() {
         let directory = tempfile::tempdir().unwrap();
@@ -544,8 +784,18 @@ mod tests {
         let outcome =
             execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink).unwrap();
 
+        assert_eq!(outcome.execution.tensors_applied, 3);
+        assert_eq!(outcome.execution.source_reads, 3);
+        assert_eq!(outcome.execution.source_payload_bytes, 4_480);
+        assert_eq!(outcome.execution.delivered_tensor_bytes, 1_536);
+        assert_eq!(outcome.execution.largest_source_payload_bytes, 4_096);
+        assert_eq!(outcome.execution.largest_output_tensor_bytes, 1_152);
+        assert_eq!(outcome.execution.peak_host_staging_bytes, 4_096);
         assert_eq!(outcome.execution.source.tensor_reads, 3);
+        assert_eq!(outcome.execution.source.payload_bytes_read, 4_480);
         assert_eq!(outcome.packed.tensor_reads, 1);
+        assert_eq!(outcome.packed.payload_bytes, 1_152);
+        assert_eq!(outcome.packed.largest_payload_bytes, 1_152);
         assert_eq!(outcome.packed.tensors_applied, 1);
         assert_eq!(outcome.report.quantized.len(), 1);
         assert_eq!(
@@ -563,6 +813,234 @@ mod tests {
         );
     }
 
+    /// Packed overlays cannot bypass physical checkpoint equivalence preflight.
+    #[test]
+    fn local_overlay_verifies_redundant_physical_payloads_before_installation() {
+        let directory = tempfile::tempdir().unwrap();
+        write_checkpoint(
+            directory.path(),
+            &[
+                ("model.embed_tokens.weight", vec![2, 32]),
+                ("decoder.embed_tokens.weight", vec![2, 32]),
+                ("model.layers.0.input_layernorm.weight", vec![32]),
+                ("model.layers.0.self_attn.q_proj.weight", vec![32, 32]),
+            ],
+        );
+        let options = LoadOptions {
+            index_aliases: vec![IndexTensorAlias::new(
+                "decoder.embed_tokens.weight",
+                "model.embed_tokens.weight",
+            )],
+            ..LoadOptions::default()
+        };
+        let manifest = discover_checkpoint(directory.path(), &options).unwrap();
+        let expected = [
+            ExpectedTensor::new("model.embed_tokens.weight", [2, 32]),
+            ExpectedTensor::new("model.layers.0.input_layernorm.weight", [32]),
+            ExpectedTensor::new("model.layers.0.self_attn.q_proj.weight", [32, 32]),
+        ];
+        let plan = build_load_plan(
+            &manifest,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &options,
+        )
+        .unwrap();
+        let record = CheckpointEquivalenceRecord::new(
+            "decoder.embed_tokens.weight",
+            "model.embed_tokens.weight",
+        );
+        assert_eq!(
+            plan.report.equivalence_planned,
+            std::slice::from_ref(&record)
+        );
+
+        let output = directory.path().join("weights-equivalence-q8.bpk");
+        let conversion = quantize_local_checkpoint_to_burnpack(
+            &manifest,
+            &plan,
+            &output,
+            QuantizedCheckpointOptions {
+                weights: WeightQuantizationConfig {
+                    group_size: QuantizationGroupSize::new(32).unwrap(),
+                    ..WeightQuantizationConfig::default()
+                },
+                ..QuantizedCheckpointOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            conversion.report.equivalence_verified,
+            std::slice::from_ref(&record)
+        );
+        assert_eq!(conversion.execution.equivalences_verified, 1);
+
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let mut sink = RecordingSink::default();
+        let outcome =
+            execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink).unwrap();
+
+        assert_eq!(outcome.report.equivalence_verified, [record]);
+        assert_eq!(outcome.execution.equivalences_verified, 1);
+        assert_eq!(outcome.execution.equivalence_source_reads, 2);
+        assert_eq!(outcome.execution.equivalence_source_payload_bytes, 512);
+        assert_eq!(outcome.execution.source_reads, 5);
+        assert_eq!(outcome.execution.source_payload_bytes, 4_992);
+        assert_eq!(outcome.execution.largest_equivalence_pair_bytes, 512);
+        assert_eq!(sink.operations.len(), 3);
+    }
+
+    /// A sidecar cannot conceal a local source removed after header discovery.
+    #[test]
+    fn local_overlay_fails_closed_when_an_overridden_source_disappears() {
+        let directory = tempfile::tempdir().unwrap();
+        let (manifest, plan, output) = executable_sidecar(&directory);
+        fs::remove_file(directory.path().join("model.safetensors")).unwrap();
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let failure = execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink)
+            .unwrap_err();
+
+        assert_eq!(failure.execution.source_reads, 0);
+        assert_eq!(failure.execution.source.shard_opens, 0);
+        assert_eq!(failure.packed.tensor_reads, 0);
+        assert!(failure.report.applied.is_empty());
+        assert!(sink.operations.is_empty());
+        assert!(matches!(
+            failure.cause,
+            ExecutionFailureCause::Checkpoint(CheckpointError::ArtifactChanged { .. })
+        ));
+    }
+
+    /// Packed size is rejected from metadata before source or sidecar payload I/O.
+    #[test]
+    fn packed_payload_exceeding_the_plan_bound_fails_in_preflight() {
+        let directory = tempfile::tempdir().unwrap();
+        let (manifest, mut plan, output) = executable_sidecar(&directory);
+        plan.memory.peak_host_staging_bytes = 1_151;
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let failure = execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink)
+            .unwrap_err();
+
+        assert_eq!(failure.execution.source_reads, 0);
+        assert_eq!(failure.packed.tensor_reads, 0);
+        assert!(failure.report.applied.is_empty());
+        assert!(sink.operations.is_empty());
+        assert!(matches!(
+            failure.cause,
+            ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(
+                QuantizationError::SidecarContract { .. }
+            ))
+        ));
+    }
+
+    /// The deterministic preflight index rejects duplicate mutable plan targets.
+    #[test]
+    fn sidecar_preflight_rejects_duplicate_plan_targets() {
+        let directory = tempfile::tempdir().unwrap();
+        let (manifest, mut plan, output) = executable_sidecar(&directory);
+        let duplicate = plan
+            .tensors
+            .iter()
+            .find(|tensor| tensor.target.ends_with("q_proj.weight"))
+            .unwrap()
+            .clone();
+        plan.tensors.push(duplicate);
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let failure = execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink)
+            .unwrap_err();
+
+        assert_eq!(failure.execution.source_reads, 0);
+        assert_eq!(failure.packed.tensor_reads, 0);
+        assert!(failure.report.applied.is_empty());
+        assert!(sink.operations.is_empty());
+        assert!(matches!(
+            failure.cause,
+            ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(
+                QuantizationError::SidecarContract { .. }
+            ))
+        ));
+    }
+
+    /// A source without cryptographic certification retains strict source reads.
+    #[test]
+    fn non_certifying_source_falls_back_to_full_materialization() {
+        let directory = tempfile::tempdir().unwrap();
+        let (manifest, plan, output) = executable_sidecar(&directory);
+        let mut source = NonCertifyingLocalSource {
+            inner: LocalShardSource::new(&manifest),
+        };
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let outcome =
+            execute_quantized_load_plan(&plan, &mut source, &mut artifact, &mut sink).unwrap();
+
+        assert_eq!(outcome.execution.tensors_applied, 3);
+        assert_eq!(outcome.execution.source_reads, 3);
+        assert_eq!(outcome.execution.source_payload_bytes, 4_480);
+        assert_eq!(outcome.execution.source.tensor_reads, 3);
+        assert_eq!(outcome.execution.source.payload_bytes_read, 4_480);
+        assert_eq!(outcome.execution.delivered_tensor_bytes, 1_536);
+        assert_eq!(outcome.execution.largest_source_payload_bytes, 4_096);
+        assert_eq!(outcome.execution.largest_output_tensor_bytes, 1_152);
+        assert_eq!(outcome.execution.peak_host_staging_bytes, 4_096);
+        assert_eq!(outcome.packed.tensor_reads, 1);
+        assert_eq!(outcome.packed.payload_bytes, 1_152);
+        assert_eq!(outcome.packed.tensors_applied, 1);
+        assert!(matches!(
+            sink.tensors["model.layers.0.self_attn.q_proj.weight"].dtype,
+            DType::QFloat(_)
+        ));
+    }
+
+    /// Strict fallback must validate a failing source before decoding its override.
+    #[test]
+    fn non_certifying_override_source_failure_precedes_packed_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = "model.layers.0.self_attn.q_proj.weight";
+        write_checkpoint(directory.path(), &[(target, vec![32, 32])]);
+        let options = LoadOptions::default();
+        let manifest = discover_checkpoint(directory.path(), &options).unwrap();
+        let expected = [ExpectedTensor::new(target, [32, 32])];
+        let plan = build_load_plan(
+            &manifest,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &options,
+        )
+        .unwrap();
+        let output = directory.path().join("strict-fallback.bpk");
+        write_sidecar(&output, &[(target, vec![32, 32])]);
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let mut source = FailingSource::default();
+        let mut sink = RecordingSink::default();
+
+        let failure =
+            execute_quantized_load_plan(&plan, &mut source, &mut artifact, &mut sink).unwrap_err();
+
+        assert_eq!(failure.failed_target.as_deref(), Some(target));
+        assert_eq!(source.reads, 1);
+        assert!(source.closed);
+        assert_eq!(failure.execution.source_reads, 0);
+        assert_eq!(failure.execution.tensors_applied, 0);
+        assert_eq!(failure.packed.tensor_reads, 0);
+        assert_eq!(failure.packed.payload_bytes, 0);
+        assert_eq!(failure.packed.tensors_applied, 0);
+        assert!(failure.report.applied.is_empty());
+        assert!(failure.report.quantized.is_empty());
+        assert!(sink.operations.is_empty());
+        assert!(matches!(
+            failure.cause,
+            ExecutionFailureCause::Checkpoint(CheckpointError::InvalidTensorPayload { .. })
+        ));
+    }
+
     /// Packed weights remain reusable when excluded source tensors change dtype.
     #[test]
     fn preserved_sidecar_composes_with_a_cast_inference_plan() {
@@ -576,12 +1054,474 @@ mod tests {
             execute_local_quantized_load_plan(&manifest, &cast_plan, &mut artifact, &mut sink)
                 .unwrap();
 
+        assert_eq!(outcome.execution.tensors_applied, 3);
+        assert_eq!(outcome.execution.source_reads, 3);
+        assert_eq!(outcome.execution.source_payload_bytes, 4_480);
+        assert_eq!(outcome.execution.delivered_tensor_bytes, 1_344);
+        assert_eq!(outcome.execution.largest_source_payload_bytes, 4_096);
+        assert_eq!(outcome.execution.largest_output_tensor_bytes, 2_048);
+        assert_eq!(outcome.execution.peak_host_staging_bytes, 6_144);
         assert_eq!(outcome.report.quantized.len(), 1);
         assert_eq!(sink.tensors["model.embed_tokens.weight"].dtype, DType::F16);
         assert!(matches!(
             sink.tensors["model.layers.0.self_attn.q_proj.weight"].dtype,
             DType::QFloat(_)
         ));
+    }
+
+    /// A deliberately partial sidecar still validates all local source tensors.
+    #[test]
+    fn partial_sidecar_revalidates_every_local_source() {
+        let directory = tempfile::tempdir().unwrap();
+        write_checkpoint(
+            directory.path(),
+            &[
+                ("model.embed_tokens.weight", vec![2, 32]),
+                ("model.layers.0.input_layernorm.weight", vec![32]),
+                ("model.layers.0.self_attn.q_proj.weight", vec![32, 32]),
+                ("model.layers.0.self_attn.k_proj.weight", vec![32, 32]),
+            ],
+        );
+        let options = LoadOptions::default();
+        let manifest = discover_checkpoint(directory.path(), &options).unwrap();
+        let expected = [
+            ExpectedTensor::new("model.embed_tokens.weight", [2, 32]),
+            ExpectedTensor::new("model.layers.0.input_layernorm.weight", [32]),
+            ExpectedTensor::new("model.layers.0.self_attn.q_proj.weight", [32, 32]),
+            ExpectedTensor::new("model.layers.0.self_attn.k_proj.weight", [32, 32]),
+        ];
+        let plan = build_load_plan(
+            &manifest,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &options,
+        )
+        .unwrap();
+        let output = directory.path().join("partial.bpk");
+        write_sidecar(
+            &output,
+            &[("model.layers.0.self_attn.q_proj.weight", vec![32, 32])],
+        );
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let outcome =
+            execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink).unwrap();
+
+        assert_eq!(outcome.execution.tensors_applied, 4);
+        assert_eq!(outcome.execution.source_reads, 4);
+        assert_eq!(outcome.execution.source_payload_bytes, 8_576);
+        assert_eq!(outcome.execution.source.tensor_reads, 4);
+        assert_eq!(outcome.execution.source.payload_bytes_read, 8_576);
+        assert_eq!(outcome.execution.delivered_tensor_bytes, 5_632);
+        assert_eq!(outcome.execution.largest_source_payload_bytes, 4_096);
+        assert_eq!(outcome.execution.largest_output_tensor_bytes, 4_096);
+        assert_eq!(outcome.execution.peak_host_staging_bytes, 4_096);
+        assert_eq!(outcome.packed.tensor_reads, 1);
+        assert_eq!(outcome.packed.payload_bytes, 1_152);
+        assert_eq!(outcome.packed.tensors_applied, 1);
+        assert!(matches!(
+            sink.tensors["model.layers.0.self_attn.q_proj.weight"].dtype,
+            DType::QFloat(_)
+        ));
+        assert_eq!(
+            sink.tensors["model.layers.0.self_attn.k_proj.weight"].dtype,
+            DType::F32
+        );
+    }
+
+    /// A partial fused split reads its shared source once and preserves alias order.
+    #[test]
+    fn partial_fused_split_reuses_one_source_around_a_packed_sibling() {
+        let directory = tempfile::tempdir().unwrap();
+        write_checkpoint(directory.path(), &[("fused.weight", vec![64, 32])]);
+        let options = LoadOptions::default();
+        let manifest = discover_checkpoint(directory.path(), &options).unwrap();
+        let q = "model.layers.0.self_attn.q_proj.weight";
+        let k = "model.layers.0.self_attn.k_proj.weight";
+        let alias = "lm_head.weight";
+        let expected = [
+            ExpectedTensor::new(q, [32, 32]),
+            ExpectedTensor::new(k, [32, 32]),
+            ExpectedTensor::new(alias, [32, 32]),
+        ];
+        let mut mappings = MappingPlan::new();
+        mappings
+            .split("fused.weight", 0, [(q.to_owned(), 32), (k.to_owned(), 32)])
+            .alias(q, alias);
+        let plan = build_load_plan(&manifest, &expected, &mappings, &options).unwrap();
+        let output = directory.path().join("partial-fused.bpk");
+        write_sidecar(&output, &[(q, vec![32, 32])]);
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let outcome =
+            execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink).unwrap();
+
+        assert_eq!(outcome.execution.tensors_applied, 2);
+        assert_eq!(outcome.execution.aliases_applied, 1);
+        assert_eq!(outcome.execution.source_reads, 1);
+        assert_eq!(outcome.execution.source_payload_bytes, 8_192);
+        assert_eq!(outcome.execution.source.tensor_reads, 1);
+        assert_eq!(outcome.execution.delivered_tensor_bytes, 5_248);
+        assert_eq!(outcome.execution.largest_source_payload_bytes, 8_192);
+        assert_eq!(outcome.execution.largest_output_tensor_bytes, 4_096);
+        assert_eq!(outcome.execution.peak_host_staging_bytes, 12_288);
+        assert_eq!(outcome.packed.tensor_reads, 1);
+        assert_eq!(outcome.packed.payload_bytes, 1_152);
+        assert_eq!(outcome.packed.tensors_applied, 1);
+        assert_eq!(outcome.report.applied.len(), 3);
+        assert_eq!(sink.aliases, [(alias.to_owned(), q.to_owned())]);
+        assert_eq!(
+            sink.operations,
+            [
+                format!("write:{k}"),
+                format!("write:{q}"),
+                format!("alias:{alias}"),
+            ]
+        );
+        assert!(matches!(sink.tensors[q].dtype, DType::QFloat(_)));
+        assert_eq!(sink.tensors[k].dtype, DType::F32);
+    }
+
+    /// Packed output contributes to the high-water mark while a fused source is live.
+    #[test]
+    fn asymmetric_partial_fused_split_accounts_for_concurrent_packed_output() {
+        let directory = tempfile::tempdir().unwrap();
+        write_checkpoint(directory.path(), &[("fused.weight", vec![129, 32])]);
+        let options = LoadOptions::default();
+        let manifest = discover_checkpoint(directory.path(), &options).unwrap();
+        let packed = "model.layers.0.self_attn.k_proj.weight";
+        let retained = "model.layers.0.self_attn.q_proj.weight";
+        let expected = [
+            ExpectedTensor::new(packed, [128, 32]),
+            ExpectedTensor::new(retained, [1, 32]),
+        ];
+        let mut mappings = MappingPlan::new();
+        mappings.split(
+            "fused.weight",
+            0,
+            [(packed.to_owned(), 128), (retained.to_owned(), 1)],
+        );
+        let plan = build_load_plan(&manifest, &expected, &mappings, &options).unwrap();
+        let output = directory.path().join("asymmetric-fused.bpk");
+        write_sidecar(&output, &[(packed, vec![128, 32])]);
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let outcome =
+            execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink).unwrap();
+
+        assert_eq!(outcome.execution.source_reads, 1);
+        assert_eq!(outcome.execution.source_payload_bytes, 16_512);
+        assert_eq!(outcome.execution.delivered_tensor_bytes, 4_736);
+        assert_eq!(outcome.execution.largest_source_payload_bytes, 16_512);
+        assert_eq!(outcome.execution.largest_output_tensor_bytes, 16_384);
+        assert_eq!(outcome.execution.peak_host_staging_bytes, 32_896);
+        assert_eq!(outcome.packed.tensor_reads, 1);
+        assert_eq!(outcome.packed.payload_bytes, 4_608);
+        assert_eq!(outcome.packed.tensors_applied, 1);
+        assert_eq!(
+            sink.operations,
+            [format!("write:{packed}"), format!("write:{retained}")]
+        );
+    }
+
+    /// A fully packed fused split validates its local source and applies aliases last.
+    #[test]
+    fn complete_fused_split_sidecar_reads_the_shared_local_source_once() {
+        let directory = tempfile::tempdir().unwrap();
+        write_checkpoint(directory.path(), &[("fused.weight", vec![64, 32])]);
+        let options = LoadOptions::default();
+        let manifest = discover_checkpoint(directory.path(), &options).unwrap();
+        let q = "model.layers.0.self_attn.q_proj.weight";
+        let k = "model.layers.0.self_attn.k_proj.weight";
+        let alias = "lm_head.weight";
+        let expected = [
+            ExpectedTensor::new(q, [32, 32]),
+            ExpectedTensor::new(k, [32, 32]),
+            ExpectedTensor::new(alias, [32, 32]),
+        ];
+        let mut mappings = MappingPlan::new();
+        mappings
+            .split("fused.weight", 0, [(q.to_owned(), 32), (k.to_owned(), 32)])
+            .alias(q, alias);
+        let plan = build_load_plan(&manifest, &expected, &mappings, &options).unwrap();
+        let output = directory.path().join("complete-fused.bpk");
+        write_sidecar(&output, &[(q, vec![32, 32]), (k, vec![32, 32])]);
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let outcome =
+            execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink).unwrap();
+
+        assert_eq!(outcome.execution.tensors_applied, 2);
+        assert_eq!(outcome.execution.aliases_applied, 1);
+        assert_eq!(outcome.execution.source_reads, 1);
+        assert_eq!(outcome.execution.source_payload_bytes, 8_192);
+        assert_eq!(outcome.execution.source.shard_opens, 1);
+        assert_eq!(outcome.execution.source.tensor_reads, 1);
+        assert_eq!(outcome.execution.source.payload_bytes_read, 8_192);
+        assert_eq!(outcome.execution.delivered_tensor_bytes, 2_304);
+        assert_eq!(outcome.execution.largest_source_payload_bytes, 8_192);
+        assert_eq!(outcome.execution.largest_output_tensor_bytes, 4_096);
+        assert_eq!(outcome.execution.peak_host_staging_bytes, 12_288);
+        assert_eq!(outcome.packed.tensor_reads, 2);
+        assert_eq!(outcome.packed.payload_bytes, 2_304);
+        assert_eq!(outcome.packed.tensors_applied, 2);
+        assert_eq!(outcome.report.applied.len(), 3);
+        assert_eq!(sink.aliases, [(alias.to_owned(), q.to_owned())]);
+        assert_eq!(
+            sink.operations,
+            [
+                format!("write:{k}"),
+                format!("write:{q}"),
+                format!("alias:{alias}"),
+            ]
+        );
+        assert!(matches!(sink.tensors[q].dtype, DType::QFloat(_)));
+        assert!(matches!(sink.tensors[k].dtype, DType::QFloat(_)));
+    }
+
+    /// Source-validated packed execution closes its source before applying aliases.
+    #[test]
+    fn fully_packed_owner_closes_source_before_alias_installation() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = "model.layers.0.self_attn.q_proj.weight";
+        let alias = "lm_head.weight";
+        write_checkpoint(directory.path(), &[(owner, vec![32, 32])]);
+        let options = LoadOptions::default();
+        let manifest = discover_checkpoint(directory.path(), &options).unwrap();
+        let expected = [
+            ExpectedTensor::new(owner, [32, 32]),
+            ExpectedTensor::new(alias, [32, 32]),
+        ];
+        let mut mappings = MappingPlan::new();
+        mappings.map(owner, owner).alias(owner, alias);
+        let plan = build_load_plan(&manifest, &expected, &mappings, &options).unwrap();
+        let output = directory.path().join("owner-alias.bpk");
+        write_sidecar(&output, &[(owner, vec![32, 32])]);
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let closed = Rc::new(Cell::new(false));
+        let mut source = CloseAwareLocalSource {
+            inner: LocalShardSource::new(&manifest),
+            closed: closed.clone(),
+            fail_close: false,
+        };
+        let mut sink = CloseAwareSink {
+            closed,
+            operations: Vec::new(),
+        };
+
+        let outcome =
+            execute_quantized_load_plan(&plan, &mut source, &mut artifact, &mut sink).unwrap();
+
+        assert_eq!(outcome.execution.source_reads, 1);
+        assert_eq!(outcome.execution.source.shard_opens, 1);
+        assert_eq!(outcome.execution.tensors_applied, 1);
+        assert_eq!(outcome.execution.aliases_applied, 1);
+        assert_eq!(outcome.packed.tensor_reads, 1);
+        assert_eq!(outcome.packed.tensors_applied, 1);
+        assert_eq!(
+            sink.operations,
+            [format!("write:{owner}"), format!("alias:{alias}")]
+        );
+    }
+
+    /// A close failure preserves its installed packed owner and suppresses aliases.
+    #[test]
+    fn source_close_failure_reports_packed_owner_without_pending_alias() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = "model.layers.0.self_attn.q_proj.weight";
+        let alias = "lm_head.weight";
+        write_checkpoint(directory.path(), &[(owner, vec![32, 32])]);
+        let options = LoadOptions::default();
+        let manifest = discover_checkpoint(directory.path(), &options).unwrap();
+        let expected = [
+            ExpectedTensor::new(owner, [32, 32]),
+            ExpectedTensor::new(alias, [32, 32]),
+        ];
+        let mut mappings = MappingPlan::new();
+        mappings.map(owner, owner).alias(owner, alias);
+        let plan = build_load_plan(&manifest, &expected, &mappings, &options).unwrap();
+        let output = directory.path().join("owner-close-failure.bpk");
+        write_sidecar(&output, &[(owner, vec![32, 32])]);
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let closed = Rc::new(Cell::new(false));
+        let mut source = CloseAwareLocalSource {
+            inner: LocalShardSource::new(&manifest),
+            closed: closed.clone(),
+            fail_close: true,
+        };
+        let mut sink = CloseAwareSink {
+            closed,
+            operations: Vec::new(),
+        };
+
+        let failure =
+            execute_quantized_load_plan(&plan, &mut source, &mut artifact, &mut sink).unwrap_err();
+
+        assert_eq!(failure.failed_target, None);
+        assert_eq!(failure.execution.source_reads, 1);
+        assert_eq!(failure.execution.tensors_applied, 1);
+        assert_eq!(failure.execution.aliases_applied, 0);
+        assert_eq!(failure.execution.delivered_tensor_bytes, 1_152);
+        assert_eq!(failure.packed.tensor_reads, 1);
+        assert_eq!(failure.packed.payload_bytes, 1_152);
+        assert_eq!(failure.packed.tensors_applied, 1);
+        assert_eq!(failure.report.applied, [owner]);
+        assert_eq!(failure.report.quantized.len(), 1);
+        assert_eq!(failure.report.quantized[0].target, owner);
+        assert_eq!(sink.operations, [format!("write:{owner}")]);
+        assert!(matches!(
+            failure.cause,
+            ExecutionFailureCause::Checkpoint(CheckpointError::InvalidMapping { .. })
+        ));
+    }
+
+    /// A partial fused group acquires its required source before any packed sibling.
+    #[test]
+    fn fused_source_failure_precedes_packed_first_target_installation() {
+        let directory = tempfile::tempdir().unwrap();
+        write_checkpoint(directory.path(), &[("fused.weight", vec![64, 32])]);
+        let options = LoadOptions::default();
+        let manifest = discover_checkpoint(directory.path(), &options).unwrap();
+        let packed_first = "model.layers.0.self_attn.k_proj.weight";
+        let uncovered_second = "model.layers.0.self_attn.q_proj.weight";
+        let expected = [
+            ExpectedTensor::new(packed_first, [32, 32]),
+            ExpectedTensor::new(uncovered_second, [32, 32]),
+        ];
+        let mut mappings = MappingPlan::new();
+        mappings.split(
+            "fused.weight",
+            0,
+            [
+                (packed_first.to_owned(), 32),
+                (uncovered_second.to_owned(), 32),
+            ],
+        );
+        let plan = build_load_plan(&manifest, &expected, &mappings, &options).unwrap();
+        assert_eq!(plan.tensors[0].target, packed_first);
+        let output = directory.path().join("packed-first.bpk");
+        write_sidecar(&output, &[(packed_first, vec![32, 32])]);
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let mut source = FailingSource {
+            certify: true,
+            ..FailingSource::default()
+        };
+        let mut sink = RecordingSink::default();
+
+        let failure =
+            execute_quantized_load_plan(&plan, &mut source, &mut artifact, &mut sink).unwrap_err();
+
+        assert_eq!(failure.failed_target.as_deref(), Some(uncovered_second));
+        assert_eq!(source.reads, 1);
+        assert!(source.closed);
+        assert_eq!(failure.execution.source_reads, 0);
+        assert_eq!(failure.execution.tensors_applied, 0);
+        assert_eq!(failure.packed.tensor_reads, 0);
+        assert_eq!(failure.packed.tensors_applied, 0);
+        assert!(failure.report.applied.is_empty());
+        assert!(failure.report.quantized.is_empty());
+        assert!(sink.operations.is_empty());
+        assert!(matches!(
+            failure.cause,
+            ExecutionFailureCause::Checkpoint(CheckpointError::InvalidTensorPayload { .. })
+        ));
+    }
+
+    /// Packed post-transform targets still validate transpose and concatenation sources.
+    #[test]
+    fn packed_transpose_and_concatenation_targets_validate_every_local_input() {
+        let directory = tempfile::tempdir().unwrap();
+        write_checkpoint(
+            directory.path(),
+            &[
+                ("transpose.weight", vec![32, 64]),
+                ("concat.a.weight", vec![16, 32]),
+                ("concat.b.weight", vec![16, 32]),
+            ],
+        );
+        let options = LoadOptions::default();
+        let manifest = discover_checkpoint(directory.path(), &options).unwrap();
+        let transpose = "model.layers.0.self_attn.o_proj.weight";
+        let concatenate = "model.layers.0.mlp.down_proj.weight";
+        let alias = "lm_head.weight";
+        let expected = [
+            ExpectedTensor::new(transpose, [64, 32]),
+            ExpectedTensor::new(concatenate, [32, 32]),
+            ExpectedTensor::new(alias, [64, 32]),
+        ];
+        let mut mappings = MappingPlan::new();
+        mappings
+            .transpose_2d("transpose.weight", transpose)
+            .concatenate(
+                ["concat.a.weight".to_owned(), "concat.b.weight".to_owned()],
+                concatenate,
+                0,
+            )
+            .alias(transpose, alias);
+        let plan = build_load_plan(&manifest, &expected, &mappings, &options).unwrap();
+        let output = directory.path().join("transformed.bpk");
+        let conversion = quantize_local_checkpoint_to_burnpack(
+            &manifest,
+            &plan,
+            &output,
+            QuantizedCheckpointOptions {
+                weights: WeightQuantizationConfig {
+                    group_size: QuantizationGroupSize::new(32).unwrap(),
+                    ..WeightQuantizationConfig::default()
+                },
+                ..QuantizedCheckpointOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(conversion.execution.source_reads, 3);
+        assert_eq!(conversion.execution.source_payload_bytes, 12_288);
+        assert_eq!(conversion.staging.tensor_count, 2);
+
+        let mut reference_sink = RecordingSink::default();
+        execute_local_load_plan(&manifest, &plan, &mut reference_sink).unwrap();
+        let mut parity_artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+        for target in [transpose, concatenate] {
+            let packed = parity_artifact.read_weight(target).unwrap();
+            let tolerance = packed.scales().iter().copied().fold(0.0_f32, f32::max) / 2.0 + 1.0e-5;
+            let restored = packed.dequantize_f32().unwrap();
+            let reference = reference_sink.tensors[target].as_slice::<f32>().unwrap();
+            let restored = restored.as_slice::<f32>().unwrap();
+            assert_eq!(restored.len(), reference.len());
+            assert!(
+                restored
+                    .iter()
+                    .zip(reference)
+                    .all(|(restored, reference)| (restored - reference).abs() <= tolerance),
+                "{target} quantized transform exceeded error tolerance {tolerance}"
+            );
+        }
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let outcome =
+            execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink).unwrap();
+
+        assert_eq!(outcome.execution.tensors_applied, 2);
+        assert_eq!(outcome.execution.aliases_applied, 1);
+        assert_eq!(outcome.execution.source_reads, 3);
+        assert_eq!(outcome.execution.source_payload_bytes, 12_288);
+        assert_eq!(outcome.execution.source.shard_opens, 1);
+        assert_eq!(outcome.execution.delivered_tensor_bytes, 3_456);
+        assert_eq!(outcome.execution.largest_source_payload_bytes, 8_192);
+        assert_eq!(outcome.execution.largest_output_tensor_bytes, 8_192);
+        assert_eq!(outcome.execution.peak_host_staging_bytes, 16_384);
+        assert_eq!(outcome.packed.tensor_reads, 2);
+        assert_eq!(outcome.packed.payload_bytes, 3_456);
+        assert_eq!(outcome.packed.largest_payload_bytes, 2_304);
+        assert_eq!(outcome.packed.tensors_applied, 2);
+        assert_eq!(outcome.report.quantized.len(), 2);
+        assert_eq!(sink.aliases, [(alias.to_owned(), transpose.to_owned())]);
+        assert!(matches!(sink.tensors[transpose].dtype, DType::QFloat(_)));
+        assert!(matches!(sink.tensors[concatenate].dtype, DType::QFloat(_)));
     }
 
     /// An unknown packed target fails before either source or sink observes a tensor.
@@ -620,6 +1560,39 @@ mod tests {
         ));
     }
 
+    /// A packed target cannot conceal a source descriptor mutated after planning.
+    #[test]
+    fn skipped_source_descriptor_is_still_checked_against_the_manifest() {
+        let directory = tempfile::tempdir().unwrap();
+        let (manifest, mut plan, output) = executable_sidecar(&directory);
+        let target = "model.layers.0.self_attn.q_proj.weight";
+        let tensor = plan
+            .tensors
+            .iter_mut()
+            .find(|tensor| tensor.target == target)
+            .unwrap();
+        tensor.sources[0].data_offsets[0] += 4;
+        tensor.sources[0].data_offsets[1] += 4;
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let failure = execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink)
+            .unwrap_err();
+
+        assert_eq!(failure.failed_target.as_deref(), Some(target));
+        assert_eq!(failure.execution.source_reads, 0);
+        assert_eq!(failure.execution.source.shard_opens, 0);
+        assert_eq!(failure.packed.tensor_reads, 0);
+        assert!(failure.report.applied.is_empty());
+        assert!(sink.tensors.is_empty());
+        assert!(matches!(
+            failure.cause,
+            ExecutionFailureCause::Checkpoint(
+                crate::checkpoint::CheckpointError::PlanManifestMismatch { .. }
+            )
+        ));
+    }
+
     /// Reference-only flat groups can be stored but cannot enter packed execution.
     #[test]
     fn incompatible_artifact_is_marked_and_rejected_before_loading() {
@@ -647,6 +1620,7 @@ mod tests {
         assert!(matches!(
             validate_sidecar_contract(
                 &LoadPlan {
+                    equivalences: Vec::new(),
                     tensors: Vec::new(),
                     aliases: Vec::new(),
                     report: LoadReport::default(),
@@ -694,12 +1668,81 @@ mod tests {
             failure.failed_target.as_deref(),
             Some("model.layers.0.self_attn.q_proj.weight")
         );
+        assert_eq!(failure.execution.source_reads, 3);
+        assert_eq!(failure.execution.source_payload_bytes, 4_480);
+        assert_eq!(failure.execution.source.tensor_reads, 3);
+        assert_eq!(failure.execution.source.payload_bytes_read, 4_480);
+        assert_eq!(failure.execution.tensors_applied, 2);
+        assert_eq!(failure.execution.delivered_tensor_bytes, 384);
+        assert_eq!(failure.execution.largest_source_payload_bytes, 4_096);
+        assert_eq!(failure.execution.largest_output_tensor_bytes, 1_152);
+        assert_eq!(failure.execution.peak_host_staging_bytes, 4_096);
         assert_eq!(failure.packed.tensor_reads, 1);
+        assert_eq!(failure.packed.payload_bytes, 1_152);
+        assert_eq!(failure.packed.largest_payload_bytes, 1_152);
         assert_eq!(failure.packed.tensors_applied, 0);
+        assert_eq!(
+            failure.report.applied,
+            [
+                "model.embed_tokens.weight",
+                "model.layers.0.input_layernorm.weight",
+            ]
+        );
         assert!(failure.report.quantized.is_empty());
         assert!(matches!(
             failure.cause,
             ExecutionFailureCause::Sink(QuantizedSinkError::Architecture(_))
+        ));
+    }
+
+    /// Corrupt packed codes fail at the override boundary with an exact partial prefix.
+    #[test]
+    fn corrupt_packed_payload_preserves_source_and_report_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let (manifest, plan, output) = executable_sidecar(&directory);
+        let target = "model.layers.0.self_attn.q_proj.weight";
+        let payload = {
+            let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+            artifact.tensor_payload(target).unwrap().as_bytes().to_vec()
+        };
+        let mut artifact_bytes = fs::read(&output).unwrap();
+        let payload_offset = unique_subslice(&artifact_bytes, &payload);
+        artifact_bytes[payload_offset] = 0x80;
+        fs::write(&output, artifact_bytes).unwrap();
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let failure = execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink)
+            .unwrap_err();
+
+        assert_eq!(failure.failed_target.as_deref(), Some(target));
+        assert_eq!(failure.execution.source_reads, 3);
+        assert_eq!(failure.execution.source_payload_bytes, 4_480);
+        assert_eq!(failure.execution.tensors_applied, 2);
+        assert_eq!(failure.execution.delivered_tensor_bytes, 384);
+        assert_eq!(failure.execution.largest_source_payload_bytes, 4_096);
+        assert_eq!(failure.execution.largest_output_tensor_bytes, 256);
+        assert_eq!(failure.execution.peak_host_staging_bytes, 4_096);
+        assert_eq!(failure.packed.tensor_reads, 0);
+        assert_eq!(failure.packed.payload_bytes, 0);
+        assert_eq!(failure.packed.tensors_applied, 0);
+        assert_eq!(
+            failure.report.applied,
+            [
+                "model.embed_tokens.weight",
+                "model.layers.0.input_layernorm.weight",
+            ]
+        );
+        assert!(failure.report.quantized.is_empty());
+        assert_eq!(sink.tensors.len(), 2);
+        assert!(matches!(
+            failure.cause,
+            ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(
+                QuantizationError::InvalidQuantizedValue {
+                    index: 0,
+                    value: -128,
+                }
+            ))
         ));
     }
 }

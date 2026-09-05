@@ -407,6 +407,9 @@ mod tests {
             },
             shards: Vec::new(),
             tensors,
+            index_aliases: Vec::new(),
+            index_alias_size_accounting: None,
+            indexed_tensor_bytes: offset,
             tensor_bytes: offset,
             artifact_bytes: offset,
         }

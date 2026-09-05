@@ -768,8 +768,8 @@ fn t5_linear<B: Backend>(input: usize, output: usize, std: f64, device: &B::Devi
         // Burn 0.21's Col-layout initialization mapper transposes through an
         // untracked tensor and therefore disconnects weight gradients. Keep
         // the differentiable runtime parameter in [input, output] order; the
-        // T5 checkpoint sink transposes official [output, input] matrices once
-        // while streaming them into the model.
+        // generic checkpoint plan explicitly transposes official [output, input]
+        // matrices once before this architecture's sink installs them.
         .with_layout(LinearLayout::Row)
         .with_initializer(Initializer::Normal { mean: 0.0, std })
         .init(device)

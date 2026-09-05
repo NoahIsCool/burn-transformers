@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::TensorDType;
+use super::{ResolvedIndexTensorAlias, TensorDType};
 
 /// Conservative memory figures computed before parameter allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -21,11 +21,15 @@ pub struct MemoryEstimate {
     pub largest_source_tensor_bytes: u64,
     /// Largest materialized target tensor produced by one operation.
     pub largest_target_tensor_bytes: u64,
-    /// Conservative pass-two host bound: largest shard plus largest output buffer.
+    /// Largest pair of raw checkpoint payloads compared for exact equivalence.
+    #[serde(default)]
+    pub largest_equivalence_pair_bytes: u64,
+    /// Conservative pass-two host bound for transforms and equivalence preflight.
     ///
     /// Memory mapping can make physical RSS lower than this value, while backend
-    /// transfer queues can make process-wide usage higher. This figure captures
-    /// the memory controlled directly by a one-shard-at-a-time loader.
+    /// transfer queues can make process-wide usage higher. The bound is the
+    /// greater of largest-shard-plus-output and the largest simultaneously held
+    /// physical alias/owner pair.
     pub peak_host_staging_bytes: u64,
 }
 
@@ -71,6 +75,26 @@ pub struct QuantizationRecord {
     pub bytes: u64,
 }
 
+/// Records one physical checkpoint tensor required to equal a storage owner.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CheckpointEquivalenceRecord {
+    /// Redundant physical checkpoint key.
+    pub alias: String,
+    /// Canonical physical checkpoint key owning the model storage.
+    pub owner: String,
+}
+
+impl CheckpointEquivalenceRecord {
+    /// Creates one exact physical alias-to-owner equivalence record.
+    #[must_use]
+    pub fn new(alias: impl Into<String>, owner: impl Into<String>) -> Self {
+        Self {
+            alias: alias.into(),
+            owner: owner.into(),
+        }
+    }
+}
+
 /// Exhaustive accounting of a checkpoint load attempt.
 ///
 /// Vectors are sorted and deduplicated by [`LoadReport::finalize`] so reports are
@@ -83,6 +107,18 @@ pub struct LoadReport {
     pub transformed: Vec<TransformRecord>,
     /// Tied parameter aliases planned or performed.
     pub aliased: Vec<AliasRecord>,
+    /// Index-only checkpoint keys resolved to physical storage-owning keys.
+    ///
+    /// These describe artifact serialization, whereas [`Self::aliased`]
+    /// describes logical parameters that share storage in the executable model.
+    #[serde(default)]
+    pub checkpoint_aliases: Vec<ResolvedIndexTensorAlias>,
+    /// Physical checkpoint equivalences that pass two must verify before writes.
+    #[serde(default)]
+    pub equivalence_planned: Vec<CheckpointEquivalenceRecord>,
+    /// Physical checkpoint equivalences already verified byte-for-byte.
+    #[serde(default)]
+    pub equivalence_verified: Vec<CheckpointEquivalenceRecord>,
     /// Dtype conversions planned or performed.
     pub dtype_converted: Vec<DTypeConversion>,
     /// Weight-only quantization performed by the runtime loader.
@@ -122,6 +158,11 @@ impl LoadReport {
         self.quantized.push(record);
     }
 
+    /// Records one successful raw-payload equivalence comparison.
+    pub fn record_equivalence_verified(&mut self, record: CheckpointEquivalenceRecord) {
+        self.equivalence_verified.push(record);
+    }
+
     /// Sorts and deduplicates all set-like report categories.
     pub fn finalize(&mut self) {
         self.applied.sort();
@@ -138,6 +179,12 @@ impl LoadReport {
         self.transformed.dedup();
         self.aliased.sort_by(|a, b| a.target.cmp(&b.target));
         self.aliased.dedup();
+        self.checkpoint_aliases.sort();
+        self.checkpoint_aliases.dedup();
+        self.equivalence_planned.sort();
+        self.equivalence_planned.dedup();
+        self.equivalence_verified.sort();
+        self.equivalence_verified.dedup();
         self.dtype_converted.sort_by(|a, b| a.target.cmp(&b.target));
         self.dtype_converted.dedup();
         self.quantized.sort_by(|a, b| a.target.cmp(&b.target));
@@ -154,6 +201,16 @@ mod tests {
         let mut report = LoadReport {
             applied: vec!["z".into(), "a".into(), "a".into()],
             unexpected: vec!["b".into(), "a".into(), "b".into()],
+            checkpoint_aliases: vec![
+                ResolvedIndexTensorAlias::new("z.alias", "z.owner", "z.safetensors"),
+                ResolvedIndexTensorAlias::new("a.alias", "a.owner", "a.safetensors"),
+                ResolvedIndexTensorAlias::new("a.alias", "a.owner", "a.safetensors"),
+            ],
+            equivalence_planned: vec![
+                CheckpointEquivalenceRecord::new("z.copy", "z.owner"),
+                CheckpointEquivalenceRecord::new("a.copy", "a.owner"),
+                CheckpointEquivalenceRecord::new("a.copy", "a.owner"),
+            ],
             ..LoadReport::default()
         };
         report.finalize();
@@ -162,6 +219,72 @@ mod tests {
         assert_eq!(report, once);
         assert_eq!(report.applied, ["a", "z"]);
         assert_eq!(report.unexpected, ["a", "b"]);
+        assert_eq!(
+            report.checkpoint_aliases,
+            [
+                ResolvedIndexTensorAlias::new("a.alias", "a.owner", "a.safetensors"),
+                ResolvedIndexTensorAlias::new("z.alias", "z.owner", "z.safetensors")
+            ]
+        );
+        assert_eq!(
+            report.equivalence_planned,
+            [
+                CheckpointEquivalenceRecord::new("a.copy", "a.owner"),
+                CheckpointEquivalenceRecord::new("z.copy", "z.owner")
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_report_without_alias_equivalence_fields_deserializes_with_defaults() {
+        let mut value = serde_json::to_value(LoadReport {
+            memory: Some(MemoryEstimate {
+                artifact_bytes: 11,
+                checkpoint_tensor_bytes: 7,
+                target_parameter_bytes: 5,
+                logical_model_bytes: 5,
+                largest_shard_bytes: 7,
+                largest_source_tensor_bytes: 4,
+                largest_target_tensor_bytes: 4,
+                largest_equivalence_pair_bytes: 0,
+                peak_host_staging_bytes: 11,
+            }),
+            ..LoadReport::default()
+        })
+        .unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("checkpoint_aliases")
+            .unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("equivalence_planned")
+            .unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("equivalence_verified")
+            .unwrap();
+        value["memory"]
+            .as_object_mut()
+            .unwrap()
+            .remove("largest_equivalence_pair_bytes")
+            .unwrap();
+
+        let decoded: LoadReport = serde_json::from_value(value).unwrap();
+
+        assert!(decoded.checkpoint_aliases.is_empty());
+        assert!(decoded.equivalence_planned.is_empty());
+        assert!(decoded.equivalence_verified.is_empty());
+        assert_eq!(
+            decoded
+                .memory
+                .expect("legacy memory estimate should remain present")
+                .largest_equivalence_pair_bytes,
+            0
+        );
     }
 
     #[test]

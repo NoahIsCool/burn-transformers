@@ -599,6 +599,312 @@ fn index_assignment_mismatch_and_declared_but_absent_tensor_are_rejected() {
 }
 
 #[test]
+fn exact_same_shard_index_alias_resolves_without_inventing_a_tensor() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "part.safetensors",
+        &[FixtureTensor::new("shared.weight", TensorDType::F16, [1])],
+    );
+    write_index(
+        temp.path(),
+        &[
+            ("shared.weight", "part.safetensors"),
+            ("encoder.embed_tokens.weight", "part.safetensors"),
+        ],
+        Some(4),
+    );
+    let options = LoadOptions {
+        index_aliases: vec![IndexTensorAlias::new(
+            "encoder.embed_tokens.weight",
+            "shared.weight",
+        )],
+        ..LoadOptions::default()
+    };
+
+    let manifest = discover_checkpoint(temp.path(), &options).unwrap();
+
+    assert_eq!(
+        manifest.tensors.keys().collect::<Vec<_>>(),
+        [&"shared.weight"]
+    );
+    assert_eq!(manifest.tensor_bytes, 2);
+    assert_eq!(manifest.indexed_tensor_bytes, 4);
+    assert_eq!(
+        manifest.index_alias_size_accounting,
+        Some(IndexAliasSizeAccounting::Logical)
+    );
+    assert_eq!(
+        manifest.index_aliases,
+        [ResolvedIndexTensorAlias::new(
+            "encoder.embed_tokens.weight",
+            "shared.weight",
+            "part.safetensors"
+        )]
+    );
+    let expected = [ExpectedTensor::new("shared.weight", [1])];
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &LoadOptions {
+            allow_unexpected: vec![KeyMatcher::exact("encoder.embed_tokens.weight")],
+            index_aliases: options.index_aliases.clone(),
+            ..LoadOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(plan.report.allowlisted_ignored.is_empty());
+    assert_eq!(plan.report.checkpoint_aliases, manifest.index_aliases);
+    assert!(plan.report.equivalence_planned.is_empty());
+
+    assert!(
+        build_load_plan(
+            &manifest,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &LoadOptions {
+                index_aliases: options.index_aliases.clone(),
+                ..LoadOptions::default()
+            }
+        )
+        .is_ok()
+    );
+
+    let mut unauthorized = manifest.clone();
+    unauthorized.index_aliases[0].storage_key = "other.weight".into();
+    assert!(matches!(
+        build_load_plan(
+            &unauthorized,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &LoadOptions {
+                allow_unexpected: vec![KeyMatcher::exact("encoder.embed_tokens.weight")],
+                index_aliases: options.index_aliases.clone(),
+                ..LoadOptions::default()
+            }
+        ),
+        Err(CheckpointError::InvalidIndexAlias { alias, .. })
+            if alias == "encoder.embed_tokens.weight"
+    ));
+
+    let planning_options = LoadOptions {
+        allow_unexpected: vec![KeyMatcher::exact("encoder.embed_tokens.weight")],
+        index_aliases: options.index_aliases.clone(),
+        ..LoadOptions::default()
+    };
+    let mut missing_owner = manifest.clone();
+    missing_owner.tensors.remove("shared.weight");
+    assert!(matches!(
+        build_load_plan(
+            &missing_owner,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &planning_options,
+        ),
+        Err(CheckpointError::InvalidIndexAlias { alias, .. })
+            if alias == "encoder.embed_tokens.weight"
+    ));
+
+    let mut physical_alias = manifest.clone();
+    let mut duplicate = physical_alias.tensors["shared.weight"].clone();
+    duplicate.name = "encoder.embed_tokens.weight".into();
+    physical_alias
+        .tensors
+        .insert(duplicate.name.clone(), duplicate);
+    assert!(matches!(
+        build_load_plan(
+            &physical_alias,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &planning_options,
+        ),
+        Err(CheckpointError::InvalidIndexAlias { alias, .. })
+            if alias == "encoder.embed_tokens.weight"
+    ));
+
+    let mut wrong_shard = manifest.clone();
+    wrong_shard.index_aliases[0].shard = "other.safetensors".into();
+    assert!(matches!(
+        build_load_plan(
+            &wrong_shard,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &planning_options,
+        ),
+        Err(CheckpointError::InvalidIndexAlias { alias, .. })
+            if alias == "encoder.embed_tokens.weight"
+    ));
+
+    let mut wrong_indexed_bytes = manifest.clone();
+    wrong_indexed_bytes.indexed_tensor_bytes = 2;
+    assert!(matches!(
+        build_load_plan(
+            &wrong_indexed_bytes,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &planning_options,
+        ),
+        Err(CheckpointError::ManifestAccountingMismatch { .. })
+    ));
+
+    let contradictory_accounting = LoadOptions {
+        index_alias_size_accounting: IndexAliasSizeAccounting::Physical,
+        ..planning_options.clone()
+    };
+    assert!(matches!(
+        build_load_plan(
+            &manifest,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &contradictory_accounting,
+        ),
+        Err(CheckpointError::ManifestAccountingMismatch { .. })
+    ));
+
+    write_index(
+        temp.path(),
+        &[
+            ("shared.weight", "part.safetensors"),
+            ("encoder.embed_tokens.weight", "part.safetensors"),
+        ],
+        Some(2),
+    );
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &options),
+        Err(CheckpointError::TotalSizeMismatch {
+            declared: 2,
+            observed: 4
+        })
+    ));
+    let physical_options = LoadOptions {
+        index_aliases: options.index_aliases.clone(),
+        index_alias_size_accounting: IndexAliasSizeAccounting::Physical,
+        ..LoadOptions::default()
+    };
+    let physical = discover_checkpoint(temp.path(), &physical_options).unwrap();
+    assert_eq!(physical.indexed_tensor_bytes, 2);
+    assert_eq!(
+        physical.index_alias_size_accounting,
+        Some(IndexAliasSizeAccounting::Physical)
+    );
+}
+
+#[test]
+fn index_alias_options_round_trip_and_default_when_absent() {
+    let options = LoadOptions {
+        index_aliases: vec![IndexTensorAlias::new("alias.weight", "owner.weight")],
+        ..LoadOptions::default()
+    };
+    let value = serde_json::to_value(&options).unwrap();
+    assert_eq!(
+        serde_json::from_value::<LoadOptions>(value).unwrap(),
+        options
+    );
+
+    let mut legacy = serde_json::to_value(LoadOptions::default()).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("index_aliases")
+        .unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("index_alias_size_accounting")
+        .unwrap();
+    let decoded = serde_json::from_value::<LoadOptions>(legacy).unwrap();
+    assert!(decoded.index_aliases.is_empty());
+    assert_eq!(
+        decoded.index_alias_size_accounting,
+        IndexAliasSizeAccounting::Logical
+    );
+}
+
+#[test]
+fn index_alias_requires_exact_unique_same_shard_physical_storage() {
+    let make = || {
+        let temp = TempDir::new().unwrap();
+        write_shard(
+            temp.path(),
+            "one.safetensors",
+            &[FixtureTensor::new("shared.weight", TensorDType::F16, [1])],
+        );
+        write_shard(
+            temp.path(),
+            "two.safetensors",
+            &[FixtureTensor::new("sentinel", TensorDType::F16, [1])],
+        );
+        temp
+    };
+
+    let temp = make();
+    write_index(
+        temp.path(),
+        &[
+            ("shared.weight", "one.safetensors"),
+            ("sentinel", "two.safetensors"),
+            ("alias.weight", "two.safetensors"),
+        ],
+        Some(4),
+    );
+    let options = LoadOptions {
+        index_aliases: vec![IndexTensorAlias::new("alias.weight", "shared.weight")],
+        ..LoadOptions::default()
+    };
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &options),
+        Err(CheckpointError::InvalidIndexAlias { alias, .. }) if alias == "alias.weight"
+    ));
+
+    let temp = make();
+    write_index(
+        temp.path(),
+        &[
+            ("shared.weight", "one.safetensors"),
+            ("sentinel", "two.safetensors"),
+            ("alias.weight", "one.safetensors"),
+        ],
+        Some(4),
+    );
+    let options = LoadOptions {
+        index_aliases: vec![
+            IndexTensorAlias::new("alias.weight", "shared.weight"),
+            IndexTensorAlias::new("alias.weight", "sentinel"),
+        ],
+        ..LoadOptions::default()
+    };
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &options),
+        Err(CheckpointError::InvalidIndexAlias { alias, .. }) if alias == "alias.weight"
+    ));
+
+    for invalid in [
+        IndexTensorAlias::new("", "shared.weight"),
+        IndexTensorAlias::new("alias.weight", ""),
+        IndexTensorAlias::new("shared.weight", "shared.weight"),
+    ] {
+        let temp = make();
+        write_index(
+            temp.path(),
+            &[
+                ("shared.weight", "one.safetensors"),
+                ("sentinel", "two.safetensors"),
+            ],
+            Some(4),
+        );
+        let options = LoadOptions {
+            index_aliases: vec![invalid.clone()],
+            ..LoadOptions::default()
+        };
+        assert!(matches!(
+            discover_checkpoint(temp.path(), &options),
+            Err(CheckpointError::InvalidIndexAlias { .. })
+        ));
+    }
+}
+
+#[test]
 fn tensor_cannot_appear_in_two_shards() {
     let temp = TempDir::new().unwrap();
     write_shard(
