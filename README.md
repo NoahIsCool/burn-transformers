@@ -7,9 +7,10 @@ mixture-of-experts layers, position encodings, caches, loading, and generation
 can be tested independently and recombined in experimental models.
 
 This crate is pre-release. **No checkpoint is currently advertised as fully
-supported.** Qwen3.5-0.8B, Qwen3.8-27B, Qwen3-30B-A3B, and FLAN-T5-small have
-passed substantial real-weight bring-up checks, but each still has open release
-gates. The remaining acceptance checkpoints are pending real-weight runs.
+supported.** Qwen3.5-0.8B, Qwen3.8-27B, Qwen3-30B-A3B,
+DeepSeek-V2-Lite, and FLAN-T5-small have passed substantial real-weight
+bring-up checks, but each still has open release gates. The remaining
+acceptance checkpoints are pending real-weight runs.
 Configuration parsing or a runnable synthetic graph is not a support claim.
 
 The pinned architecture research and release criteria live in
@@ -24,7 +25,7 @@ acceptance.
 | --- | --- | --- |
 | Qwen3.5 / Qwen3.8 hybrid | DeltaNet/full-attention schedules, gated GQA, partial RoPE, SwiGLU, external recurrent/KV caches, batch-one MTP speculation, and strict text-tower mapping | [Qwen3.5-0.8B](acceptance/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17.json) passed reference-logit, 32-token greedy, cached-parity, and packed-Q4 gates. [Qwen3.8-27B](acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json) strictly applied all 866 text/MTP tensors and passed six-token Metal F16 plus mixed Q8/F16 and Q4/F16 stateless, cached, MTP, and recurrent-decode smoke checks. Neither is advertised: 27B reference and longer-generation parity, quantized corpus quality, standardized throughput and output hashing, and 32K stress gates remain open. |
 | Qwen3 MoE | GQA with Q/K normalization, sparse selected-expert dispatch, top-k routing, and cached decode | [Qwen3-30B-A3B](acceptance/qwen3-30b-a3b-ad44e777bcd18fa416d9da3bd8f70d33ebb85d39.json) strictly applied all 18,867 BF16-derived F16 tensors and passed a six-token Metal stateless, cached-prefill, hidden-trace, and recurrent-decode smoke. Official reference logits, 32-token generation, quantization, and 32K stress remain open; not advertised. |
-| DeepSeek V2 | YaRN, MLA reference prefill, compressed latent-cache absorbed decode, routed and shared experts | Synthetic golden, cache, and checkpoint-contract tests only; DeepSeek-V2-Lite real weights are pending. |
+| DeepSeek V2 | YaRN, MLA reference prefill, compressed latent-cache absorbed decode, routed and shared experts | [DeepSeek-V2-Lite](acceptance/deepseek-v2-lite-604d5664dddd88a0433dbae533b7fe9472482de0.json) strictly applied all 5,291 BF16-derived F16 tensors and passed a six-token Metal stateless, reference-prefill, compressed-cache, and absorbed-decode smoke. Cached/stateless cosine was `1.0`; absorbed decode matched the internal stateless path at `0.999998964`. This is internal Burn-path parity, not comparison with the official implementation. Official reference logits, 32-token generation, quantization, and 32K stress remain open; not advertised. |
 | Muse Glimmer | Sliding/full hybrid attention, RoPE/NoPE schedule, sandwich norms, output gates, and logit softcap | Synthetic and checkpoint-contract tests only; Muse-Glimmer-30B real weights are pending. |
 | T5 / FLAN / UL2 | Bidirectional encoder, causal decoder, cross-attention cache, relative-position bias, shared encoder/decoder embeddings with a configurable tied or independent LM head, and cached beam search | [FLAN-T5-small](acceptance/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab.json) passed strict F32 loading, pinned top-10 and sampled-logit probes, cached parity, and an exact four-beam translation fixture on Flex. It is not advertised: full-vector reference-logit cosine, longer generation, accelerator, and context-boundary gates remain open. FLAN-T5-XXL and UL2 are pending. |
 | Nemotron-H | Interleaved Mamba2, GQA, dense/MoE blocks, ReLU-squared experts, shared experts, and next-token-head mapping | Synthetic golden, cache, and checkpoint-contract tests only; Nemotron 3.5 Lightning real weights are pending. |
