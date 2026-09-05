@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib.metadata
 import importlib.util
 import io
-import math
 import struct
 import tempfile
 import types
@@ -100,14 +99,72 @@ class ReferenceHelperTests(unittest.TestCase):
                         {"eos_token_id": invalid}
                     )
 
-    def test_greedy_decision_requires_finite_stable_non_eos_result(self) -> None:
-        REFERENCE.validate_greedy_decision(7, 0.25, [8, 9], 0)
+    def test_binary16_ulp_is_scale_aware_and_requires_exact_f16(self) -> None:
+        self.assertEqual(REFERENCE.binary16_ulp(0.0), 2.0**-24)
+        self.assertEqual(REFERENCE.binary16_ulp(1.0), 2.0**-10)
+        self.assertEqual(REFERENCE.binary16_ulp(8.0), 2.0**-7)
+        self.assertEqual(REFERENCE.binary16_ulp(7.99609375), 2.0**-8)
+        with self.assertRaisesRegex(ValueError, "not exactly representable"):
+            REFERENCE.binary16_ulp(0.1)
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            REFERENCE.binary16_ulp(float("inf"))
+
+    def test_greedy_stability_uses_binary16_perturbation_proof(self) -> None:
+        decision = REFERENCE.greedy_decision_stability(
+            step=2,
+            top1_token_id=7,
+            top2_token_id=6,
+            top1_logit=8.046875,
+            top2_logit=7.96484375,
+            eos_token_ids=[8, 9],
+        )
+        self.assertEqual(decision["margin"], 0.08203125)
+        self.assertEqual(decision["top1_f16_ulp"], 0.0078125)
+        self.assertEqual(decision["top2_f16_ulp"], 0.00390625)
+        self.assertEqual(decision["elementwise_epsilon"], 0.0078125)
+        self.assertEqual(decision["margin_to_epsilon_ratio"], 10.5)
+        self.assertTrue(decision["stable_under_budget"])
+        self.assertEqual(
+            REFERENCE.validate_decision_stability([decision]),
+            (0.08203125, 10.5),
+        )
+
+    def test_greedy_stability_reports_all_unstable_steps_after_collection(self) -> None:
+        unstable = [
+            REFERENCE.greedy_decision_stability(
+                step=step,
+                top1_token_id=7,
+                top2_token_id=6,
+                top1_logit=16.0,
+                top2_logit=runner_up,
+                eos_token_ids=[8, 9],
+            )
+            for step, runner_up in ((1, 15.984375), (2, 15.96875))
+        ]
+        self.assertEqual(unstable[1]["margin_to_epsilon_ratio"], 2.0)
+        self.assertTrue(all(not item["stable_under_budget"] for item in unstable))
+        with self.assertRaisesRegex(RuntimeError, r"steps \[1, 2\].*minimum_margin="):
+            REFERENCE.validate_decision_stability(unstable)
+
+    def test_greedy_stability_rejects_non_finite_or_eos_decisions(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "non-finite"):
-            REFERENCE.validate_greedy_decision(7, float("nan"), [8, 9], 1)
-        with self.assertRaisesRegex(RuntimeError, "below the required 0.25"):
-            REFERENCE.validate_greedy_decision(7, math.nextafter(0.25, 0.0), [8, 9], 2)
+            REFERENCE.greedy_decision_stability(
+                step=1,
+                top1_token_id=7,
+                top2_token_id=6,
+                top1_logit=float("nan"),
+                top2_logit=1.0,
+                eos_token_ids=[8, 9],
+            )
         with self.assertRaisesRegex(RuntimeError, "reached EOS token 8"):
-            REFERENCE.validate_greedy_decision(8, 1.0, [8, 9], 3)
+            REFERENCE.greedy_decision_stability(
+                step=3,
+                top1_token_id=8,
+                top2_token_id=6,
+                top1_logit=2.0,
+                top2_logit=1.0,
+                eos_token_ids=[8, 9],
+            )
 
     def test_strict_json_rejects_non_finite_numbers(self) -> None:
         self.assertEqual(

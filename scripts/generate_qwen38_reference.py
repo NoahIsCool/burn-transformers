@@ -28,6 +28,7 @@ import json
 import math
 import os
 import platform
+import struct
 import subprocess
 import sys
 import tempfile
@@ -56,7 +57,16 @@ VOCAB_SIZE = 248_320
 GREEDY_TOKENS = 32
 EXPECTED_EOS_TOKEN_IDS = [248_046, 248_044]
 EXPECTED_PARAMETER_COUNT = 26_895_998_464
-MIN_GREEDY_MARGIN = 0.25
+BINARY16_ELEMENTWISE_PERTURBATION_ULPS = 1.0
+TOP1_STABILITY_SAFETY_FACTOR = 2.0
+TOP1_STABILITY_POLICY = "binary16-elementwise-ulp-bound"
+TOP1_STABILITY_RATIONALE = (
+    "If every score changes by at most epsilon, the top score can fall by epsilon "
+    "while its strongest competitor rises by epsilon; margin > 2*epsilon therefore "
+    "preserves top-1. Epsilon is one local binary16 ULP of the wider-spaced top-two "
+    "logit, budgeting one representable step per score. This fixture screen complements, "
+    "and does not replace, exact Burn/reference token parity."
+)
 SELF_PARITY_COSINE = 0.999
 RAW_FILENAME = "qwen3.8-27b-1d4bf0f2-six-token-f16-last-logits.f32le"
 JSON_FILENAME = "qwen3.8-27b-1d4bf0f2-reference.json"
@@ -335,23 +345,99 @@ def vector_summary(values: Sequence[float], probe_indices: Sequence[int]) -> dic
     }
 
 
-def validate_greedy_decision(
-    token_id: int, margin: float, eos_token_ids: Sequence[int], step: int
-) -> None:
-    """Enforce finite, stable-margin, non-EOS acceptance for one greedy decision."""
+def binary16_ulp(value: float) -> float:
+    """Return the wider adjacent binary16 spacing at one exact finite F16 value."""
 
-    if not math.isfinite(margin):
-        raise RuntimeError(f"greedy margin became non-finite at step {step}")
-    if margin < MIN_GREEDY_MARGIN:
+    if not math.isfinite(value):
+        raise ValueError("binary16 ULP is undefined for a non-finite value")
+    try:
+        roundtrip = struct.unpack("<e", struct.pack("<e", value))[0]
+    except OverflowError as error:
+        raise ValueError(f"value {value!r} lies outside finite binary16") from error
+    if roundtrip != value:
+        raise ValueError(f"value {value!r} is not exactly representable as binary16")
+    magnitude = abs(value)
+    if magnitude < 2.0**-14:
+        return 2.0**-24
+    exponent = math.floor(math.log2(magnitude))
+    return math.ldexp(1.0, exponent - 10)
+
+
+def greedy_decision_stability(
+    *,
+    step: int,
+    top1_token_id: int,
+    top2_token_id: int,
+    top1_logit: float,
+    top2_logit: float,
+    eos_token_ids: Sequence[int],
+) -> dict[str, Any]:
+    """Measure one top-two decision against a binary16 perturbation proof budget."""
+
+    if top1_token_id == top2_token_id:
+        raise RuntimeError(f"greedy top-two token IDs are equal at step {step}")
+    if top1_token_id in eos_token_ids:
         raise RuntimeError(
-            f"greedy margin {margin} at step {step} is below the required "
-            f"{MIN_GREEDY_MARGIN}"
-        )
-    if token_id in eos_token_ids:
-        raise RuntimeError(
-            f"official generation reached EOS token {token_id} at decision {step}; "
+            f"official generation reached EOS token {top1_token_id} at decision {step}; "
             f"all {GREEDY_TOKENS} decisions are required"
         )
+    if not math.isfinite(top1_logit) or not math.isfinite(top2_logit):
+        raise RuntimeError(f"greedy top-two logits became non-finite at step {step}")
+    if top1_logit < top2_logit:
+        raise RuntimeError(f"greedy top-two logits are out of order at step {step}")
+
+    margin = top1_logit - top2_logit
+    top1_ulp = binary16_ulp(top1_logit)
+    top2_ulp = binary16_ulp(top2_logit)
+    elementwise_epsilon = (
+        max(top1_ulp, top2_ulp) * BINARY16_ELEMENTWISE_PERTURBATION_ULPS
+    )
+    margin_to_epsilon_ratio = margin / elementwise_epsilon
+    values = (
+        margin,
+        top1_ulp,
+        top2_ulp,
+        elementwise_epsilon,
+        margin_to_epsilon_ratio,
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise RuntimeError(f"greedy stability evidence became non-finite at step {step}")
+    return {
+        "step": step,
+        "top1_token_id": top1_token_id,
+        "top2_token_id": top2_token_id,
+        "top1_logit": top1_logit,
+        "top2_logit": top2_logit,
+        "margin": margin,
+        "top1_f16_ulp": top1_ulp,
+        "top2_f16_ulp": top2_ulp,
+        "elementwise_epsilon": elementwise_epsilon,
+        "margin_to_epsilon_ratio": margin_to_epsilon_ratio,
+        "stable_under_budget": margin_to_epsilon_ratio > TOP1_STABILITY_SAFETY_FACTOR,
+    }
+
+
+def validate_decision_stability(decisions: Sequence[Mapping[str, Any]]) -> tuple[float, float]:
+    """Validate all collected decisions and return their minimum margin and ratio."""
+
+    if not decisions:
+        raise RuntimeError("cannot validate an empty greedy-decision sequence")
+    minimum_margin = min(float(decision["margin"]) for decision in decisions)
+    minimum_ratio = min(
+        float(decision["margin_to_epsilon_ratio"]) for decision in decisions
+    )
+    if not math.isfinite(minimum_margin) or not math.isfinite(minimum_ratio):
+        raise RuntimeError("greedy stability minima are non-finite")
+    unstable = [decision for decision in decisions if not decision["stable_under_budget"]]
+    if unstable:
+        unstable_steps = [int(decision["step"]) for decision in unstable]
+        raise RuntimeError(
+            f"binary16 top-1 stability failed at steps {unstable_steps}: "
+            f"minimum_margin={minimum_margin}, minimum_margin_to_epsilon_ratio="
+            f"{minimum_ratio}, required_ratio>{TOP1_STABILITY_SAFETY_FACTOR}; "
+            f"unstable={json.dumps(unstable, allow_nan=False, sort_keys=True)}"
+        )
+    return minimum_margin, minimum_ratio
 
 
 def strict_json_bytes(value: Mapping[str, Any]) -> bytes:
@@ -1091,6 +1177,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         cached_rows = []
         generated_ids: list[int] = []
         margins: list[float] = []
+        decision_stability: list[dict[str, Any]] = []
         for step in range(GREEDY_TOKENS):
             if cached_output.logits.dtype != torch.float16:
                 raise RuntimeError(
@@ -1110,8 +1197,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not bool(torch.isfinite(top_values).all().item()):
                 raise RuntimeError(f"cached top-two logits became non-finite at step {step}")
             token_id = int(top_indices[0].item())
-            margin = float((top_values[0] - top_values[1]).item())
-            validate_greedy_decision(token_id, margin, eos_token_ids, step)
+            runner_up_id = int(top_indices[1].item())
+            decision = greedy_decision_stability(
+                step=step,
+                top1_token_id=token_id,
+                top2_token_id=runner_up_id,
+                top1_logit=float(top_values[0].item()),
+                top2_logit=float(top_values[1].item()),
+                eos_token_ids=eos_token_ids,
+            )
+            margin = float(decision["margin"])
+            decision_stability.append(decision)
             generated_ids.append(token_id)
             margins.append(margin)
             if step + 1 < GREEDY_TOKENS:
@@ -1134,6 +1230,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         synchronize(torch)
         generation_seconds = checked_duration(
             "cached generation", time.perf_counter() - generation_started
+        )
+        minimum_observed_margin, minimum_margin_to_epsilon_ratio = (
+            validate_decision_stability(decision_stability)
         )
         first_eos_position = next(
             (
@@ -1249,9 +1348,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             "loaded parameter dtypes changed: expected only "
             f"{EXPECTED_PARAMETER_COUNT} float16 elements, found {parameter_dtypes}"
         )
-    minimum_observed_margin = min(margins)
-    if not math.isfinite(minimum_observed_margin):
-        raise RuntimeError("minimum observed greedy margin is non-finite")
     record = {
         "schema_version": 1,
         "repository": REPOSITORY,
@@ -1312,8 +1408,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             "max_new_tokens": GREEDY_TOKENS,
             "token_ids": generated_ids,
             "margins": margins,
-            "minimum_required_margin": MIN_GREEDY_MARGIN,
+            "stability_policy": {
+                "name": TOP1_STABILITY_POLICY,
+                "elementwise_perturbation_ulps": BINARY16_ELEMENTWISE_PERTURBATION_ULPS,
+                "safety_factor": TOP1_STABILITY_SAFETY_FACTOR,
+                "rationale": TOP1_STABILITY_RATIONALE,
+            },
+            "decision_stability": decision_stability,
             "minimum_observed_margin": minimum_observed_margin,
+            "minimum_margin_to_epsilon_ratio": minimum_margin_to_epsilon_ratio,
             "decoded_text": tokenizer.decode(
                 generated_ids,
                 skip_special_tokens=False,

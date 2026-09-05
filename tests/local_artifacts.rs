@@ -282,12 +282,43 @@ struct Qwen38ReferenceGeneration {
     max_new_tokens: usize,
     token_ids: Vec<i64>,
     margins: Vec<f64>,
+    stability_policy: Qwen38Top1StabilityPolicy,
+    decision_stability: Vec<Qwen38DecisionStability>,
     decoded_text: String,
     eos_token_ids: Vec<i64>,
     first_eos_position: Option<usize>,
     completed_32_decisions: bool,
-    minimum_required_margin: f64,
     minimum_observed_margin: f64,
+    minimum_margin_to_epsilon_ratio: f64,
+}
+
+/// Scale-aware proof policy used to classify each F16 greedy decision.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38Top1StabilityPolicy {
+    name: String,
+    elementwise_perturbation_ulps: f64,
+    safety_factor: f64,
+    rationale: String,
+}
+
+/// Complete top-two and binary16-spacing evidence for one cached decision.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38DecisionStability {
+    step: usize,
+    top1_token_id: i64,
+    top2_token_id: i64,
+    top1_logit: f64,
+    top2_logit: f64,
+    margin: f64,
+    top1_f16_ulp: f64,
+    top2_f16_ulp: f64,
+    elementwise_epsilon: f64,
+    margin_to_epsilon_ratio: f64,
+    stable_under_budget: bool,
 }
 
 /// Official stateless all-logit predictions and cached-prefix parity diagnostics.
@@ -1050,6 +1081,30 @@ fn top_two_with_margin(values: &[f32]) -> (usize, usize, f64) {
     (first, second, f64::from(values[first] - values[second]))
 }
 
+/// Computes the wider adjacent IEEE-754 binary16 spacing at an exact F16 value.
+#[cfg(feature = "metal")]
+fn binary16_ulp(value: f64) -> f64 {
+    assert!(value.is_finite(), "binary16 value must be finite");
+    let magnitude = value.abs();
+    assert!(
+        magnitude <= 65_504.0,
+        "value {value} lies outside finite binary16"
+    );
+    let ulp = if magnitude < 2.0_f64.powi(-14) {
+        2.0_f64.powi(-24)
+    } else {
+        let exponent = magnitude.log2().floor() as i32;
+        2.0_f64.powi(exponent - 10)
+    };
+    let ulp_units = value / ulp;
+    assert_eq!(
+        ulp_units,
+        ulp_units.round(),
+        "value {value} is not exactly representable as binary16"
+    );
+    ulp
+}
+
 /// Creates the explicit all-valid mask promised by the reference schema.
 #[cfg(feature = "metal")]
 fn all_valid_metal_mask(
@@ -1547,6 +1602,19 @@ fn read_pinned_qwen38_reference() -> (Qwen38OfficialReference, Vec<f32>) {
     assert_eq!(reference.generation.max_new_tokens, 32);
     assert_eq!(reference.generation.token_ids.len(), 32);
     assert_eq!(reference.generation.margins.len(), 32);
+    assert_eq!(reference.generation.decision_stability.len(), 32);
+    let stability_policy = &reference.generation.stability_policy;
+    assert_eq!(stability_policy.name, "binary16-elementwise-ulp-bound");
+    assert_eq!(stability_policy.elementwise_perturbation_ulps, 1.0);
+    assert_eq!(stability_policy.safety_factor, 2.0);
+    assert_eq!(
+        stability_policy.rationale,
+        "If every score changes by at most epsilon, the top score can fall by epsilon while its \
+         strongest competitor rises by epsilon; margin > 2*epsilon therefore preserves top-1. \
+         Epsilon is one local binary16 ULP of the wider-spaced top-two logit, budgeting one \
+         representable step per score. This fixture screen complements, and does not replace, \
+         exact Burn/reference token parity."
+    );
     assert_eq!(reference.generation.eos_token_ids, [248_046, 248_044]);
     let first_eos_position = reference
         .generation
@@ -1561,7 +1629,6 @@ fn read_pinned_qwen38_reference() -> (Qwen38OfficialReference, Vec<f32>) {
             && first_eos_position.is_none()
     );
     assert!(reference.generation.completed_32_decisions);
-    assert_eq!(reference.generation.minimum_required_margin, 0.25);
     assert!(
         reference
             .generation
@@ -1569,9 +1636,58 @@ fn read_pinned_qwen38_reference() -> (Qwen38OfficialReference, Vec<f32>) {
             .iter()
             .all(|token| (0..248_320).contains(token))
     );
-    assert!(reference.generation.margins.iter().all(|margin| {
-        margin.is_finite() && *margin >= reference.generation.minimum_required_margin
-    }));
+    let mut observed_minimum_margin = f64::INFINITY;
+    let mut observed_minimum_ratio = f64::INFINITY;
+    for (step, decision) in reference.generation.decision_stability.iter().enumerate() {
+        assert_eq!(decision.step, step);
+        assert_eq!(decision.top1_token_id, reference.generation.token_ids[step]);
+        assert_ne!(decision.top1_token_id, decision.top2_token_id);
+        assert!((0..248_320).contains(&decision.top1_token_id));
+        assert!((0..248_320).contains(&decision.top2_token_id));
+        assert!(decision.top1_logit.is_finite());
+        assert!(decision.top2_logit.is_finite());
+        assert!(decision.top1_logit > decision.top2_logit);
+        assert_reference_close(
+            "decision top-two subtraction margin",
+            decision.top1_logit - decision.top2_logit,
+            decision.margin,
+        );
+        assert_reference_close(
+            "decision duplicated generation margin",
+            reference.generation.margins[step],
+            decision.margin,
+        );
+        let top1_ulp = binary16_ulp(decision.top1_logit);
+        let top2_ulp = binary16_ulp(decision.top2_logit);
+        assert_reference_close(
+            "decision top-1 binary16 ULP",
+            top1_ulp,
+            decision.top1_f16_ulp,
+        );
+        assert_reference_close(
+            "decision top-2 binary16 ULP",
+            top2_ulp,
+            decision.top2_f16_ulp,
+        );
+        let epsilon = top1_ulp.max(top2_ulp) * stability_policy.elementwise_perturbation_ulps;
+        assert_reference_close(
+            "decision elementwise perturbation epsilon",
+            epsilon,
+            decision.elementwise_epsilon,
+        );
+        assert_reference_close(
+            "decision margin-to-epsilon ratio",
+            decision.margin / epsilon,
+            decision.margin_to_epsilon_ratio,
+        );
+        assert_eq!(
+            decision.stable_under_budget,
+            decision.margin_to_epsilon_ratio > stability_policy.safety_factor
+        );
+        assert!(decision.stable_under_budget);
+        observed_minimum_margin = observed_minimum_margin.min(decision.margin);
+        observed_minimum_ratio = observed_minimum_ratio.min(decision.margin_to_epsilon_ratio);
+    }
     assert_reference_close(
         "first greedy top-two margin from raw logits",
         observed_first_margin,
@@ -1583,18 +1699,16 @@ fn read_pinned_qwen38_reference() -> (Qwen38OfficialReference, Vec<f32>) {
     );
     assert_reference_close(
         "minimum generated greedy margin",
-        reference
-            .generation
-            .margins
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min),
+        observed_minimum_margin,
         reference.generation.minimum_observed_margin,
     );
-    assert!(
-        reference.generation.minimum_observed_margin
-            >= reference.generation.minimum_required_margin
+    assert_reference_close(
+        "minimum generated margin-to-epsilon ratio",
+        observed_minimum_ratio,
+        reference.generation.minimum_margin_to_epsilon_ratio,
     );
+    assert!(reference.generation.minimum_observed_margin > 0.0);
+    assert!(reference.generation.minimum_margin_to_epsilon_ratio > stability_policy.safety_factor);
     assert!(!reference.generation.decoded_text.contains('\0'));
     assert!(
         reference
@@ -1898,6 +2012,13 @@ fn qwen38_reference_validation_helpers_cover_edges() {
         top_two_with_margin(&[3.0, 3.0, 2.0]),
         (0, 1, 0.0),
         "equal logits must use the lower token ID first"
+    );
+    assert_eq!(binary16_ulp(0.0), 2.0_f64.powi(-24));
+    assert_eq!(binary16_ulp(7.996_093_75), 2.0_f64.powi(-8));
+    assert_eq!(binary16_ulp(8.0), 2.0_f64.powi(-7));
+    assert!(
+        std::panic::catch_unwind(|| binary16_ulp(0.1)).is_err(),
+        "non-binary16 values must fail closed"
     );
 
     let mut artifacts = vec![
