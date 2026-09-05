@@ -7,7 +7,18 @@
 #![cfg(feature = "tokenizers")]
 
 #[cfg(feature = "metal")]
+use sha2::{Digest, Sha256};
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(feature = "metal")]
 use std::time::Instant;
+#[cfg(feature = "metal")]
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::{File, OpenOptions},
+    io::Read,
+    path::{Component, Path},
+};
 use std::{fs, path::PathBuf};
 
 #[cfg(feature = "chat-templates")]
@@ -32,14 +43,14 @@ use transformers::{
 #[cfg(feature = "metal")]
 use burn::{
     backend::Metal,
-    tensor::{DType, Int, Tensor, TensorData},
+    tensor::{Bool, DType, Int, Tensor, TensorData},
 };
 #[cfg(all(feature = "metal", not(feature = "rocm")))]
 use burn::{module::Param, nn::Linear};
 #[cfg(feature = "metal")]
 use transformers::{
     AutoCausalLm, AutoLoadOptions, CausalLanguageModel, DecodeInput, DecodeState, ForwardOptions,
-    LogitsSelection,
+    LogitsSelection, TokenMask,
     architecture::CausalLmInput,
     cache::CacheConfig,
     checkpoint::{DTypePolicy, TensorDType, execute_local_load_plan},
@@ -65,6 +76,229 @@ struct PinnedTensorInventory {
     name: String,
     shape: Vec<u64>,
     dtype: String,
+}
+
+/// Strict schema emitted by the pinned official Qwen3.8 reference generator.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38OfficialReference {
+    schema_version: u32,
+    repository: String,
+    revision: String,
+    reference_class: String,
+    prompt: String,
+    input_ids: Vec<i64>,
+    execution: Qwen38ReferenceExecution,
+    environment: Qwen38ReferenceEnvironment,
+    provenance: Qwen38ReferenceProvenance,
+    last_logits: Qwen38ReferenceLogits,
+    generation: Qwen38ReferenceGeneration,
+    teacher_forced: Qwen38ReferenceTeacherForced,
+    timings_seconds: Qwen38ReferenceTimings,
+}
+
+/// Deterministic graph and accelerator choices used by the official runtime.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceExecution {
+    dtype: String,
+    device: String,
+    attention_implementation: String,
+    deterministic_algorithms: bool,
+    seed: u64,
+    use_cache: bool,
+    float32_matmul_precision: String,
+    mps_per_process_memory_fraction: f64,
+    explicit_all_one_attention_masks: bool,
+    kernel_status: BTreeMap<String, bool>,
+}
+
+/// Fully recorded Python process, wheel set, device, and offline controls.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceEnvironment {
+    generated_at_utc: String,
+    command: Vec<String>,
+    python: Qwen38ReferencePython,
+    packages: BTreeMap<String, String>,
+    distribution_provenance: BTreeMap<String, Qwen38ReferenceDistribution>,
+    distribution_manifest_sha256: String,
+    device: serde_json::Value,
+    offline_environment: BTreeMap<String, String>,
+}
+
+/// Installed wheel identity derived from its immutable dist-info records.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceDistribution {
+    version: String,
+    metadata: Qwen38ReferenceDistributionFile,
+    record: Qwen38ReferenceDistributionFile,
+}
+
+/// One dist-info file whose bytes authenticate an installed Python wheel.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceDistributionFile {
+    relative_path: String,
+    bytes: usize,
+    sha256: String,
+}
+
+/// Python interpreter details retained to make numerical provenance auditable.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferencePython {
+    version: String,
+    executable: String,
+    implementation: String,
+    platform: String,
+}
+
+/// Generator, upstream source, and checkpoint identities for one reference run.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceProvenance {
+    generator: Qwen38ReferenceGenerator,
+    reference_sources: Vec<Qwen38ReferenceSource>,
+    artifacts: Vec<Qwen38ReferenceArtifact>,
+    artifact_manifest_sha256: String,
+    checkpoint_tensor_bytes: u64,
+    loaded_parameter_count: u64,
+    parameter_dtype_elements: BTreeMap<String, u64>,
+    loading_info: Qwen38ReferenceLoadingInfo,
+}
+
+/// Exact generator content and Git state used to create the external result.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceGenerator {
+    relative_path: String,
+    sha256: String,
+    git_head: String,
+    git_dirty: bool,
+}
+
+/// One installed official Transformers source file and its byte identity.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceSource {
+    module: String,
+    relative_path: String,
+    path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+/// One immutable checkpoint control file or SafeTensors shard.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceArtifact {
+    relative_path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+/// Empty strict-load classifications produced by the official text-only class.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceLoadingInfo {
+    missing_keys: Qwen38ReferenceLoadingClass,
+    unexpected_keys: Qwen38ReferenceLoadingClass,
+    mismatched_keys: Qwen38ReferenceLoadingClass,
+    error_msgs: Qwen38ReferenceLoadingClass,
+}
+
+/// Count and stable digest for one official checkpoint-load classification.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceLoadingClass {
+    count: usize,
+    sha256: String,
+}
+
+/// Integrity metadata and diagnostic samples for the raw prompt logit vector.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceLogits {
+    relative_path: String,
+    encoding: String,
+    elements: usize,
+    bytes: usize,
+    sha256: String,
+    finite: bool,
+    top1_token_id: i64,
+    top10: Vec<Qwen38ReferenceLogit>,
+    probes: Vec<Qwen38ReferenceLogit>,
+    l2_norm: f64,
+    sum: f64,
+}
+
+/// One token-indexed logit sampled from the complete raw reference vector.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceLogit {
+    token_id: usize,
+    logit: f64,
+}
+
+/// Exactly 32 manually selected cached greedy tokens and their top-two margins.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceGeneration {
+    max_new_tokens: usize,
+    token_ids: Vec<i64>,
+    margins: Vec<f64>,
+    decoded_text: String,
+    eos_token_ids: Vec<i64>,
+    first_eos_position: Option<usize>,
+    completed_32_decisions: bool,
+    minimum_required_margin: f64,
+    minimum_observed_margin: f64,
+}
+
+/// Official stateless all-logit predictions and cached-prefix parity diagnostics.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceTeacherForced {
+    input_ids: Vec<i64>,
+    prediction_positions: Vec<usize>,
+    all_position_top1_token_ids: Vec<i64>,
+    continuation_top1_token_ids: Vec<i64>,
+    cached_top1_token_ids: Vec<i64>,
+    top1_equal: bool,
+    per_prefix_cosine: Vec<f64>,
+    minimum_cosine: f64,
+    per_prefix_max_abs_error: Vec<f64>,
+    maximum_abs_error: f64,
+    prompt_cached_stateless_cosine: f64,
+}
+
+/// Wall-clock measurements retained as diagnostics rather than performance gates.
+#[cfg(feature = "metal")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qwen38ReferenceTimings {
+    load: f64,
+    stateless_prompt: f64,
+    cached_generation_32: f64,
+    teacher_forced_all_logits: f64,
 }
 
 /// Resolves the opt-in Qwen3.8 artifact root without silently choosing mutable data.
@@ -553,6 +787,1101 @@ fn loads_pinned_qwen38_text_and_mtp_and_runs_metal() {
          load_seconds={load_seconds:.3}, \
          stateless_seconds={stateless_seconds:.3}, prefill_seconds={prefill_seconds:.3}, \
          mtp_seconds={mtp_seconds:.3}, decode_seconds={decode_seconds:.3}"
+    );
+}
+
+/// Loads the external official-reference directory selected for Qwen3.8 acceptance.
+#[cfg(feature = "metal")]
+fn pinned_qwen38_reference_root() -> PathBuf {
+    const BUNDLE_DIRECTORY: &str = "qwen3.8-27b-1d4bf0f2-reference.bundle";
+
+    PathBuf::from(
+        std::env::var_os("TRANSFORMERS_QWEN38_REFERENCE_DIR").expect(
+            "set TRANSFORMERS_QWEN38_REFERENCE_DIR to the external parent directory passed to \
+             scripts/generate_qwen38_reference.py",
+        ),
+    )
+    .join(BUNDLE_DIRECTORY)
+}
+
+/// Trusted hashes filled only after an independently reviewed reference run.
+///
+/// These deliberately start unset: the ignored acceptance gate must fail closed
+/// until a maintainer records the two generated outputs in the same milestone
+/// that records the official inference result. The JSON digest authenticates the
+/// complete run record; the raw digest independently authenticates the large
+/// numerical payload used for cosine parity.
+#[cfg(feature = "metal")]
+const TRUSTED_QWEN38_REFERENCE_JSON_SHA256: Option<&str> = None;
+
+/// Trusted digest for the generated full-vocabulary F32 prompt-logit vector.
+#[cfg(feature = "metal")]
+const TRUSTED_QWEN38_REFERENCE_RAW_SHA256: Option<&str> = None;
+
+/// Returns whether a string is one canonical lowercase SHA-256 hexadecimal digest.
+#[cfg(feature = "metal")]
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Computes SHA-256 through the audited implementation used by the test harness.
+#[cfg(feature = "metal")]
+fn sha256_hex(payload: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(payload))
+}
+
+/// Opens one macOS file descriptor without following its final path component.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn open_regular_file_no_follow(path: &Path, expected_bytes: u64, maximum_bytes: u64) -> File {
+    // Darwin's O_NOFOLLOW value is stable ABI. `OpenOptionsExt` is used instead
+    // of a path metadata check so a symlink swap between inspection and open
+    // cannot redirect the descriptor.
+    const DARWIN_O_NOFOLLOW: i32 = 0x0000_0100;
+    const DARWIN_O_NONBLOCK: i32 = 0x0000_0004;
+
+    assert!(
+        expected_bytes <= maximum_bytes,
+        "expected size {expected_bytes} exceeds the {maximum_bytes}-byte safety cap for {}",
+        path.display()
+    );
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(DARWIN_O_NOFOLLOW | DARWIN_O_NONBLOCK)
+        .open(path)
+        .unwrap_or_else(|error| {
+            panic!(
+                "open regular file {} without following links: {error}",
+                path.display()
+            )
+        });
+    let metadata = file
+        .metadata()
+        .unwrap_or_else(|error| panic!("inspect opened file {}: {error}", path.display()));
+    assert!(
+        metadata.file_type().is_file(),
+        "{} must resolve to a regular file descriptor",
+        path.display()
+    );
+    assert_eq!(
+        metadata.len(),
+        expected_bytes,
+        "unexpected byte length for {}",
+        path.display()
+    );
+    file
+}
+
+/// Inspects a small path without following its final component before opening it.
+#[cfg(feature = "metal")]
+fn bounded_regular_file_length(path: &Path, maximum_bytes: u64) -> u64 {
+    let metadata = fs::symlink_metadata(path)
+        .unwrap_or_else(|error| panic!("inspect bounded file {}: {error}", path.display()));
+    assert!(
+        metadata.file_type().is_file(),
+        "{} must be a non-symlink regular file",
+        path.display()
+    );
+    assert!(
+        metadata.len() <= maximum_bytes,
+        "{} is {} bytes, exceeding the {maximum_bytes}-byte safety cap",
+        path.display(),
+        metadata.len()
+    );
+    metadata.len()
+}
+
+/// Makes non-macOS compilation explicit while keeping the Metal gate macOS-only.
+#[cfg(all(feature = "metal", not(target_os = "macos")))]
+fn open_regular_file_no_follow(_path: &Path, _expected_bytes: u64, _maximum_bytes: u64) -> File {
+    panic!("the Qwen3.8 Metal reference gate requires macOS O_NOFOLLOW semantics")
+}
+
+/// Reads one small regular file with a fixed allocation and a hard byte ceiling.
+#[cfg(feature = "metal")]
+fn read_regular_file_exact(path: &Path, expected_bytes: u64, maximum_bytes: u64) -> Vec<u8> {
+    let file = open_regular_file_no_follow(path, expected_bytes, maximum_bytes);
+    let capacity = usize::try_from(expected_bytes)
+        .expect("bounded reference file length must fit the host address space");
+    let mut payload = Vec::with_capacity(capacity);
+    file.take(maximum_bytes.saturating_add(1))
+        .read_to_end(&mut payload)
+        .unwrap_or_else(|error| panic!("read bounded regular file {}: {error}", path.display()));
+    assert_eq!(
+        payload.len(),
+        capacity,
+        "opened file {} changed length while being read",
+        path.display()
+    );
+    payload
+}
+
+/// Streams one regular file into SHA-256 while enforcing its recorded length.
+#[cfg(feature = "metal")]
+fn sha256_regular_file(path: &Path, expected_bytes: u64) -> String {
+    const HASH_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+
+    let mut file = open_regular_file_no_follow(path, expected_bytes, expected_bytes);
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    let mut observed_bytes = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .unwrap_or_else(|error| panic!("hash regular file {}: {error}", path.display()));
+        if read == 0 {
+            break;
+        }
+        observed_bytes = observed_bytes
+            .checked_add(u64::try_from(read).expect("read length fits u64"))
+            .expect("hashed file length must not overflow u64");
+        assert!(
+            observed_bytes <= expected_bytes,
+            "{} grew beyond its recorded {expected_bytes} bytes while being hashed",
+            path.display()
+        );
+        digest.update(&buffer[..read]);
+    }
+    assert_eq!(
+        observed_bytes,
+        expected_bytes,
+        "{} changed length while being hashed",
+        path.display()
+    );
+    format!("{:x}", digest.finalize())
+}
+
+/// Fails closed until the generated result has an independently pinned digest.
+#[cfg(feature = "metal")]
+fn assert_trusted_reference_digest(label: &str, observed: &str, trusted: Option<&str>) {
+    let trusted = trusted.unwrap_or_else(|| {
+        panic!(
+            "trusted {label} SHA-256 has not been pinned; set the narrowly scoped constant in \
+             tests/local_artifacts.rs after reviewing the generated bundle (observed {observed})"
+        )
+    });
+    assert!(is_sha256(trusted), "trusted {label} SHA-256 is malformed");
+    assert_eq!(observed, trusted, "generated {label} identity changed");
+}
+
+/// Returns true only for a single ordinary UTF-8 filename component.
+#[cfg(feature = "metal")]
+fn is_safe_artifact_filename(relative_path: &str) -> bool {
+    let mut components = Path::new(relative_path).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+/// Returns true for a nonempty relative path containing only ordinary components.
+#[cfg(feature = "metal")]
+fn is_safe_relative_path(relative_path: &str) -> bool {
+    let mut saw_component = false;
+    for component in Path::new(relative_path).components() {
+        if !matches!(component, Component::Normal(_)) {
+            return false;
+        }
+        saw_component = true;
+    }
+    saw_component
+}
+
+/// Authenticates every checkpoint input named by the trusted reference record.
+#[cfg(feature = "metal")]
+fn verify_qwen38_reference_artifacts(artifacts: &[Qwen38ReferenceArtifact]) {
+    let checkpoint_root = pinned_qwen38_root();
+    let checkpoint_root = fs::canonicalize(&checkpoint_root).unwrap_or_else(|error| {
+        panic!(
+            "canonicalize Qwen3.8 checkpoint root {}: {error}",
+            checkpoint_root.display()
+        )
+    });
+    assert!(
+        checkpoint_root.is_dir(),
+        "Qwen3.8 checkpoint root must be a directory"
+    );
+
+    for artifact in artifacts {
+        assert!(
+            is_safe_artifact_filename(&artifact.relative_path),
+            "unsafe checkpoint artifact path `{}`",
+            artifact.relative_path
+        );
+        let path = checkpoint_root.join(&artifact.relative_path);
+        let digest = sha256_regular_file(&path, artifact.bytes);
+        assert_eq!(
+            digest, artifact.sha256,
+            "checkpoint artifact content changed for `{}`",
+            artifact.relative_path
+        );
+    }
+}
+
+/// Finds deterministic top-two token IDs and their F32 subtraction margin.
+#[cfg(feature = "metal")]
+fn top_two_with_margin(values: &[f32]) -> (usize, usize, f64) {
+    assert!(values.len() >= 2, "top-two selection requires two logits");
+    let mut ids = (0..values.len()).collect::<Vec<_>>();
+    ids.select_nth_unstable_by(1, |left, right| {
+        values[*right]
+            .total_cmp(&values[*left])
+            .then_with(|| left.cmp(right))
+    });
+    let first = ids[0];
+    let second = ids[1];
+    (first, second, f64::from(values[first] - values[second]))
+}
+
+/// Creates the explicit all-valid mask promised by the reference schema.
+#[cfg(feature = "metal")]
+fn all_valid_metal_mask(
+    sequence: usize,
+    device: &<Metal as burn::tensor::backend::BackendTypes>::Device,
+) -> TokenMask<Metal> {
+    TokenMask::new(Tensor::<Metal, 2, Bool>::from_data(
+        TensorData::new(vec![true; sequence], [1, sequence]),
+        device,
+    ))
+}
+
+/// Reproduces the generator's canonical artifact-manifest digest construction.
+#[cfg(feature = "metal")]
+fn qwen38_reference_artifact_digest(artifacts: &[Qwen38ReferenceArtifact]) -> String {
+    let mut artifacts = artifacts.iter().collect::<Vec<_>>();
+    artifacts.sort_unstable_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let mut canonical = String::new();
+    for artifact in artifacts {
+        canonical.push_str(&artifact.relative_path);
+        canonical.push('\0');
+        canonical.push_str(&artifact.bytes.to_string());
+        canonical.push('\0');
+        canonical.push_str(&artifact.sha256);
+        canonical.push('\n');
+    }
+    sha256_hex(canonical.as_bytes())
+}
+
+/// Reproduces the generator's canonical installed-distribution identity digest.
+#[cfg(feature = "metal")]
+fn qwen38_reference_distribution_digest(
+    distributions: &BTreeMap<String, Qwen38ReferenceDistribution>,
+) -> String {
+    let mut canonical = String::new();
+    for (name, distribution) in distributions {
+        canonical.push_str(name);
+        canonical.push('\0');
+        canonical.push_str(&distribution.version);
+        canonical.push('\n');
+        for (logical_name, file) in [
+            ("metadata", &distribution.metadata),
+            ("record", &distribution.record),
+        ] {
+            canonical.push_str(logical_name);
+            canonical.push('\0');
+            canonical.push_str(&file.relative_path);
+            canonical.push('\0');
+            canonical.push_str(&file.bytes.to_string());
+            canonical.push('\0');
+            canonical.push_str(&file.sha256);
+            canonical.push('\n');
+        }
+    }
+    sha256_hex(canonical.as_bytes())
+}
+
+/// Checks one recomputed floating-point diagnostic with a scale-aware tolerance.
+#[cfg(feature = "metal")]
+fn assert_reference_close(label: &str, actual: f64, expected: f64) {
+    let tolerance = expected.abs().max(1.0) * 1.0e-8;
+    assert!(
+        actual.is_finite() && expected.is_finite() && (actual - expected).abs() <= tolerance,
+        "{label} mismatch: expected {expected}, found {actual}, tolerance {tolerance}"
+    );
+}
+
+/// Reads and exhaustively validates the official JSON and raw F32 prompt vector.
+#[cfg(feature = "metal")]
+fn read_pinned_qwen38_reference() -> (Qwen38OfficialReference, Vec<f32>) {
+    const JSON_FILENAME: &str = "qwen3.8-27b-1d4bf0f2-reference.json";
+    const RAW_FILENAME: &str = "qwen3.8-27b-1d4bf0f2-six-token-f16-last-logits.f32le";
+    const MAXIMUM_JSON_BYTES: u64 = 1024 * 1024;
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const ARTIFACT_MANIFEST_SHA256: &str =
+        "188de1fbf58b9e6897b9dc218d5afc4d9b9082657121db3ddb238b5296d66833";
+
+    let root = pinned_qwen38_reference_root();
+    let root_metadata = fs::symlink_metadata(&root)
+        .unwrap_or_else(|error| panic!("inspect reference bundle {}: {error}", root.display()));
+    assert!(
+        root_metadata.file_type().is_dir(),
+        "reference bundle must be a non-symlink directory"
+    );
+    let root = fs::canonicalize(&root)
+        .unwrap_or_else(|error| panic!("canonicalize {}: {error}", root.display()));
+    assert!(
+        !root.starts_with(env!("CARGO_MANIFEST_DIR")),
+        "large generated references must remain outside the crate"
+    );
+    let json_path = root.join(JSON_FILENAME);
+    let json_bytes = read_regular_file_exact(
+        &json_path,
+        bounded_regular_file_length(&json_path, MAXIMUM_JSON_BYTES),
+        MAXIMUM_JSON_BYTES,
+    );
+    let json_digest = sha256_hex(&json_bytes);
+    assert_trusted_reference_digest(
+        "Qwen3.8 reference JSON",
+        &json_digest,
+        TRUSTED_QWEN38_REFERENCE_JSON_SHA256,
+    );
+    let reference: Qwen38OfficialReference = serde_json::from_slice(&json_bytes)
+        .unwrap_or_else(|error| panic!("parse strict reference {}: {error}", json_path.display()));
+
+    assert_eq!(reference.schema_version, 1);
+    assert_eq!(reference.repository, "Qwen/Qwen3.8-27B");
+    assert_eq!(
+        reference.revision,
+        "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    );
+    assert_eq!(reference.reference_class, "transformers.Qwen3_5ForCausalLM");
+    assert_eq!(reference.prompt, "Hello world, cached decoding.");
+    assert_eq!(reference.input_ids, [9_419, 1_814, 11, 19_954, 45_543, 13]);
+    assert_eq!(reference.execution.dtype, "float16");
+    assert_eq!(reference.execution.device, "mps");
+    assert_eq!(reference.execution.attention_implementation, "eager");
+    assert!(reference.execution.deterministic_algorithms);
+    assert_eq!(reference.execution.seed, 0);
+    assert!(reference.execution.use_cache);
+    assert_eq!(reference.execution.float32_matmul_precision, "highest");
+    assert_eq!(reference.execution.mps_per_process_memory_fraction, 1.0);
+    assert!(reference.execution.explicit_all_one_attention_masks);
+    assert_eq!(
+        reference.execution.kernel_status,
+        BTreeMap::from([
+            ("causal_conv1d_kernel_available".into(), false),
+            ("chunk_gated_delta_kernel_available".into(), false),
+            ("fast_path_available".into(), false),
+            ("recurrent_gated_delta_kernel_available".into(), false),
+        ])
+    );
+
+    assert!(reference.environment.generated_at_utc.ends_with('Z'));
+    assert!(
+        reference
+            .environment
+            .command
+            .iter()
+            .any(|part| part.ends_with("generate_qwen38_reference.py"))
+    );
+    assert!(!reference.environment.python.version.is_empty());
+    assert!(!reference.environment.python.executable.is_empty());
+    assert_eq!(reference.environment.python.implementation, "CPython");
+    assert!(!reference.environment.python.platform.is_empty());
+    let expected_packages = BTreeMap::from([
+        ("accelerate".into(), "1.12.0".into()),
+        ("numpy".into(), "2.4.3".into()),
+        ("safetensors".into(), "0.7.0".into()),
+        ("tokenizers".into(), "0.22.2".into()),
+        ("torch".into(), "2.10.0".into()),
+        ("transformers".into(), "5.2.0".into()),
+    ]);
+    assert_eq!(reference.environment.packages, expected_packages);
+    assert_eq!(
+        reference
+            .environment
+            .distribution_provenance
+            .keys()
+            .collect::<Vec<_>>(),
+        reference.environment.packages.keys().collect::<Vec<_>>()
+    );
+    for (distribution, identity) in &reference.environment.distribution_provenance {
+        assert_eq!(
+            reference.environment.packages.get(distribution),
+            Some(&identity.version),
+            "distribution provenance version changed for {distribution}"
+        );
+        for (label, file, expected_filename) in [
+            ("METADATA", &identity.metadata, "METADATA"),
+            ("RECORD", &identity.record, "RECORD"),
+        ] {
+            assert!(
+                is_safe_relative_path(&file.relative_path),
+                "unsafe {distribution} {label} path"
+            );
+            assert_eq!(
+                Path::new(&file.relative_path)
+                    .file_name()
+                    .and_then(|value| value.to_str()),
+                Some(expected_filename)
+            );
+            assert!(file.bytes > 0, "empty {distribution} {label} provenance");
+            assert!(
+                is_sha256(&file.sha256),
+                "malformed {distribution} {label} SHA-256"
+            );
+        }
+    }
+    let distribution_digest =
+        qwen38_reference_distribution_digest(&reference.environment.distribution_provenance);
+    assert_eq!(
+        distribution_digest,
+        "b814bb3254d51a28c6d74e80c04c3532c9836a0aadc4fab0eed410d6612d59dd"
+    );
+    assert_eq!(
+        reference.environment.distribution_manifest_sha256,
+        distribution_digest
+    );
+    assert_eq!(reference.environment.device["kind"], "mps");
+    assert_eq!(reference.environment.device["built"], true);
+    assert_eq!(reference.environment.device["available"], true);
+    assert_eq!(
+        reference.environment.offline_environment,
+        BTreeMap::from([
+            ("HF_DATASETS_OFFLINE".into(), "1".into()),
+            ("HF_DEACTIVATE_ASYNC_LOAD".into(), "1".into()),
+            ("HF_HUB_OFFLINE".into(), "1".into()),
+            ("PYTORCH_ENABLE_MPS_FALLBACK".into(), "0".into()),
+            ("TOKENIZERS_PARALLELISM".into(), "false".into()),
+            ("TRANSFORMERS_OFFLINE".into(), "1".into()),
+        ])
+    );
+
+    assert_eq!(
+        reference.provenance.generator.relative_path,
+        "scripts/generate_qwen38_reference.py"
+    );
+    assert_eq!(
+        reference.provenance.generator.sha256,
+        sha256_hex(include_bytes!("../scripts/generate_qwen38_reference.py")),
+        "reference must be regenerated after its generator changes"
+    );
+    assert_eq!(reference.provenance.generator.git_head.len(), 40);
+    assert!(
+        reference
+            .provenance
+            .generator
+            .git_head
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    );
+    assert!(
+        !reference.provenance.generator.git_dirty,
+        "advertised reference evidence must come from a clean generator"
+    );
+    assert_eq!(reference.provenance.reference_sources.len(), 8);
+    let expected_sources = BTreeMap::from([
+        (
+            "transformers.cache_utils",
+            (
+                "cache_utils.py",
+                60_147_u64,
+                "e4fe20ca1eeb17ea0ce7e62d1dbd0d6eab32e7072044f293612403b8e0c477fd",
+            ),
+        ),
+        (
+            "transformers.configuration_utils",
+            (
+                "configuration_utils.py",
+                57_894,
+                "52100272e3bf59551c072a064053e90bc30f1fd0aa9e48fac7ad4b675c63ebcc",
+            ),
+        ),
+        (
+            "transformers.conversion_mapping",
+            (
+                "conversion_mapping.py",
+                19_302,
+                "c8efcc6ce2224939299804d495ba4f361ab596e59f33e3db28e9b4629fc481e0",
+            ),
+        ),
+        (
+            "transformers.masking_utils",
+            (
+                "masking_utils.py",
+                74_373,
+                "c3c82f7b7b6e03d3f04ba6c6c58a3dd6910623636452ec67ef70e3eb522f9fe7",
+            ),
+        ),
+        (
+            "transformers.modeling_attn_mask_utils",
+            (
+                "modeling_attn_mask_utils.py",
+                21_930,
+                "fb3ec46639a19fda1eb99339f4e7770332a0f4f75b9de4abb34a0b1ee379838b",
+            ),
+        ),
+        (
+            "transformers.modeling_utils",
+            (
+                "modeling_utils.py",
+                247_340,
+                "2f45c2139ce633e6e3eae9290675dd5815643b37c27f2cc4dd83586fb648f7bb",
+            ),
+        ),
+        (
+            "transformers.models.qwen3_5.configuration_qwen3_5",
+            (
+                "models/qwen3_5/configuration_qwen3_5.py",
+                14_576,
+                "2280c6e6bd9d66d7281155243f67cf5fed2756a828af41316566afe611ff16c0",
+            ),
+        ),
+        (
+            "transformers.models.qwen3_5.modeling_qwen3_5",
+            (
+                "models/qwen3_5/modeling_qwen3_5.py",
+                97_339,
+                "d1ae3856f53763591ec65054129af46e003a1715efcf7eef2b752a31e85526b8",
+            ),
+        ),
+    ]);
+    let mut observed_source_modules = BTreeSet::new();
+    for source in &reference.provenance.reference_sources {
+        assert!(observed_source_modules.insert(source.module.as_str()));
+        let &(expected_path, expected_bytes, expected_sha256) = expected_sources
+            .get(source.module.as_str())
+            .unwrap_or_else(|| panic!("unexpected reference source module `{}`", source.module));
+        assert_eq!(source.relative_path, expected_path);
+        assert_eq!(source.bytes, expected_bytes);
+        assert_eq!(source.sha256, expected_sha256);
+        assert!(Path::new(&source.path).is_absolute());
+        assert!(is_safe_relative_path(&source.relative_path));
+        assert!(Path::new(&source.path).ends_with(&source.relative_path));
+        assert!(is_sha256(&source.sha256));
+    }
+    assert_eq!(
+        observed_source_modules,
+        expected_sources.keys().copied().collect::<BTreeSet<_>>()
+    );
+    assert_eq!(reference.provenance.artifacts.len(), 24);
+    let mut artifact_names = BTreeSet::new();
+    for artifact in &reference.provenance.artifacts {
+        assert!(is_safe_artifact_filename(&artifact.relative_path));
+        assert!(artifact_names.insert(artifact.relative_path.as_str()));
+        assert!(artifact.bytes > 0);
+        assert!(is_sha256(&artifact.sha256));
+    }
+    let expected_control_names = BTreeSet::from([
+        "chat_template.jinja",
+        "config.json",
+        "generation_config.json",
+        "model.safetensors.index.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+    ]);
+    let observed_control_names = artifact_names
+        .iter()
+        .copied()
+        .filter(|name| !name.ends_with(".safetensors"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(observed_control_names, expected_control_names);
+    assert_eq!(
+        artifact_names
+            .iter()
+            .filter(|name| name.ends_with(".safetensors"))
+            .count(),
+        18
+    );
+    let artifact_digest = qwen38_reference_artifact_digest(&reference.provenance.artifacts);
+    assert_eq!(artifact_digest, ARTIFACT_MANIFEST_SHA256);
+    assert_eq!(
+        reference.provenance.artifact_manifest_sha256,
+        artifact_digest
+    );
+    assert_eq!(reference.provenance.checkpoint_tensor_bytes, 55_562_855_904);
+    assert_eq!(reference.provenance.loaded_parameter_count, 26_895_998_464);
+    assert_eq!(reference.provenance.parameter_dtype_elements.len(), 1);
+    assert_eq!(
+        reference.provenance.parameter_dtype_elements.get("float16"),
+        Some(&reference.provenance.loaded_parameter_count)
+    );
+    for class in [
+        &reference.provenance.loading_info.missing_keys,
+        &reference.provenance.loading_info.unexpected_keys,
+        &reference.provenance.loading_info.mismatched_keys,
+        &reference.provenance.loading_info.error_msgs,
+    ] {
+        assert_eq!(class.count, 0);
+        assert_eq!(class.sha256, EMPTY_SHA256);
+    }
+    // The trusted JSON digest binds this inventory. Re-hashing the actual local
+    // files now prevents a same-revision directory with altered bytes from
+    // reaching Burn's loader below.
+    verify_qwen38_reference_artifacts(&reference.provenance.artifacts);
+
+    assert_eq!(reference.last_logits.relative_path, RAW_FILENAME);
+    assert_eq!(reference.last_logits.encoding, "ieee754-f32-little-endian");
+    assert_eq!(reference.last_logits.elements, 248_320);
+    assert_eq!(reference.last_logits.bytes, 248_320 * size_of::<f32>());
+    assert!(reference.last_logits.finite);
+    assert!(is_sha256(&reference.last_logits.sha256));
+    let raw_path = root.join(&reference.last_logits.relative_path);
+    let raw = read_regular_file_exact(
+        &raw_path,
+        u64::try_from(reference.last_logits.bytes).expect("raw byte count fits u64"),
+        u64::try_from(reference.last_logits.bytes).expect("raw byte count fits u64"),
+    );
+    assert_eq!(raw.len(), reference.last_logits.bytes);
+    let raw_digest = sha256_hex(&raw);
+    assert_trusted_reference_digest(
+        "Qwen3.8 reference raw logits",
+        &raw_digest,
+        TRUSTED_QWEN38_REFERENCE_RAW_SHA256,
+    );
+    assert_eq!(raw_digest, reference.last_logits.sha256);
+    let values = raw
+        .chunks_exact(size_of::<f32>())
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte F32 logit")))
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), reference.last_logits.elements);
+    assert!(values.iter().all(|value| value.is_finite()));
+    let top1 = values
+        .iter()
+        .enumerate()
+        .max_by(|(left_index, left), (right_index, right)| {
+            left.total_cmp(right)
+                .then_with(|| right_index.cmp(left_index))
+        })
+        .map(|(index, _)| index)
+        .expect("reference vocabulary must be non-empty");
+    assert_eq!(
+        i64::try_from(top1).expect("token ID fits i64"),
+        reference.last_logits.top1_token_id
+    );
+    let (first_id, second_id, observed_first_margin) = top_two_with_margin(&values);
+    assert_eq!(first_id, top1);
+    assert_ne!(first_id, second_id);
+    let mut sorted_ids = (0..values.len()).collect::<Vec<_>>();
+    sorted_ids.sort_unstable_by(|left, right| {
+        values[*right]
+            .total_cmp(&values[*left])
+            .then_with(|| left.cmp(right))
+    });
+    assert_eq!(reference.last_logits.top10.len(), 10);
+    for (record, expected_id) in reference
+        .last_logits
+        .top10
+        .iter()
+        .zip(sorted_ids.iter().copied())
+    {
+        assert_eq!(record.token_id, expected_id);
+        assert_eq!(record.logit as f32, values[expected_id]);
+    }
+    let mut probe_ids = BTreeSet::new();
+    for probe in &reference.last_logits.probes {
+        assert!(probe_ids.insert(probe.token_id), "duplicate logit probe");
+        assert_eq!(probe.logit as f32, values[probe.token_id]);
+    }
+    let observed_sum = values.iter().map(|value| f64::from(*value)).sum::<f64>();
+    let observed_norm = values
+        .iter()
+        .map(|value| f64::from(*value).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    assert_reference_close(
+        "reference logit sum",
+        observed_sum,
+        reference.last_logits.sum,
+    );
+    assert_reference_close(
+        "reference logit L2 norm",
+        observed_norm,
+        reference.last_logits.l2_norm,
+    );
+
+    assert_eq!(reference.generation.max_new_tokens, 32);
+    assert_eq!(reference.generation.token_ids.len(), 32);
+    assert_eq!(reference.generation.margins.len(), 32);
+    assert_eq!(reference.generation.eos_token_ids, [248_046, 248_044]);
+    let first_eos_position = reference
+        .generation
+        .token_ids
+        .iter()
+        .position(|token| reference.generation.eos_token_ids.contains(token));
+    assert_eq!(reference.generation.first_eos_position, first_eos_position);
+    assert_eq!(first_eos_position, None);
+    assert_eq!(
+        reference.generation.completed_32_decisions,
+        reference.generation.token_ids.len() == reference.generation.max_new_tokens
+            && first_eos_position.is_none()
+    );
+    assert!(reference.generation.completed_32_decisions);
+    assert_eq!(reference.generation.minimum_required_margin, 0.25);
+    assert!(
+        reference
+            .generation
+            .token_ids
+            .iter()
+            .all(|token| (0..248_320).contains(token))
+    );
+    assert!(reference.generation.margins.iter().all(|margin| {
+        margin.is_finite() && *margin >= reference.generation.minimum_required_margin
+    }));
+    assert_reference_close(
+        "first greedy top-two margin from raw logits",
+        observed_first_margin,
+        reference.generation.margins[0],
+    );
+    assert_eq!(
+        i64::try_from(first_id).expect("top token ID fits i64"),
+        reference.generation.token_ids[0]
+    );
+    assert_reference_close(
+        "minimum generated greedy margin",
+        reference
+            .generation
+            .margins
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min),
+        reference.generation.minimum_observed_margin,
+    );
+    assert!(
+        reference.generation.minimum_observed_margin
+            >= reference.generation.minimum_required_margin
+    );
+    assert!(!reference.generation.decoded_text.contains('\0'));
+    assert!(
+        reference
+            .generation
+            .token_ids
+            .iter()
+            .all(|token| !reference.generation.eos_token_ids.contains(token)),
+        "the accepted 32-decision continuation must not terminate early"
+    );
+
+    let mut expected_teacher_input = reference.input_ids.clone();
+    expected_teacher_input.extend(reference.generation.token_ids.iter().take(31).copied());
+    assert_eq!(reference.teacher_forced.input_ids, expected_teacher_input);
+    assert_eq!(reference.teacher_forced.input_ids.len(), 37);
+    assert_eq!(
+        reference.teacher_forced.prediction_positions,
+        (5..37).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        reference.teacher_forced.all_position_top1_token_ids.len(),
+        37
+    );
+    assert_eq!(
+        reference.teacher_forced.continuation_top1_token_ids,
+        reference.generation.token_ids
+    );
+    assert_eq!(
+        reference.teacher_forced.cached_top1_token_ids,
+        reference.generation.token_ids
+    );
+    assert!(reference.teacher_forced.top1_equal);
+    assert_eq!(reference.teacher_forced.per_prefix_cosine.len(), 32);
+    assert_eq!(reference.teacher_forced.per_prefix_max_abs_error.len(), 32);
+    assert!(
+        reference
+            .teacher_forced
+            .per_prefix_cosine
+            .iter()
+            .all(|cosine| cosine.is_finite() && *cosine >= 0.999 && *cosine <= 1.000_001)
+    );
+    assert_reference_close(
+        "minimum official cached/stateless cosine",
+        reference
+            .teacher_forced
+            .per_prefix_cosine
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min),
+        reference.teacher_forced.minimum_cosine,
+    );
+    assert!(reference.teacher_forced.minimum_cosine >= 0.999);
+    assert!(
+        reference
+            .teacher_forced
+            .per_prefix_max_abs_error
+            .iter()
+            .all(|error| error.is_finite() && *error >= 0.0)
+    );
+    assert_reference_close(
+        "maximum official cached/stateless absolute error",
+        reference
+            .teacher_forced
+            .per_prefix_max_abs_error
+            .iter()
+            .copied()
+            .fold(0.0, f64::max),
+        reference.teacher_forced.maximum_abs_error,
+    );
+    assert!(reference.teacher_forced.prompt_cached_stateless_cosine >= 0.999);
+    for timing in [
+        reference.timings_seconds.load,
+        reference.timings_seconds.stateless_prompt,
+        reference.timings_seconds.cached_generation_32,
+        reference.timings_seconds.teacher_forced_all_logits,
+    ] {
+        assert!(timing.is_finite() && timing >= 0.0);
+    }
+    (reference, values)
+}
+
+/// Compares Burn Metal against the complete official Qwen3.8 F16 reference run.
+#[cfg(feature = "metal")]
+#[test]
+#[ignore = "requires pinned Qwen3.8 weights, generated official F16 references, about 80 GiB of unified memory, and Metal"]
+fn matches_pinned_qwen38_official_reference_on_metal() {
+    let (reference, reference_logits) = read_pinned_qwen38_reference();
+    let root = pinned_qwen38_root();
+    let device = Default::default();
+    let loaded = AutoCausalLm::<Metal>::load_local(
+        &root,
+        &AutoLoadOptions {
+            checkpoint: LoadOptions {
+                dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+                ..LoadOptions::default()
+            },
+            load_tokenizer: false,
+            qwen_mtp: false,
+            repository: Some(reference.repository.clone()),
+            revision: Some(reference.revision.clone()),
+            ..AutoLoadOptions::default()
+        },
+        &device,
+    )
+    .expect("strictly stream the pinned Qwen3.8 text graph into Metal F16");
+    assert!(loaded.load_report().is_strictly_valid());
+    assert_eq!(loaded.load_report().applied.len(), 851);
+    assert_eq!(loaded.load_report().allowlisted_ignored.len(), 348);
+    assert_eq!(
+        loaded.source().repository(),
+        Some(reference.repository.as_str())
+    );
+    assert_eq!(
+        loaded.source().revision(),
+        Some(reference.revision.as_str())
+    );
+    assert!(matches!(loaded.model(), AutoCausalLm::Qwen3_5(_)));
+
+    let prompt_length = reference.input_ids.len();
+    let prompt_ids = Tensor::<Metal, 2, Int>::from_data(
+        TensorData::new(reference.input_ids.clone(), [1, prompt_length]),
+        &device,
+    );
+    let prompt_mask = all_valid_metal_mask(prompt_length, &device);
+    let stateless = loaded
+        .model()
+        .forward(
+            CausalLmInput {
+                token_ids: prompt_ids.clone(),
+                token_mask: Some(prompt_mask.clone()),
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .expect("run stateless Burn Qwen3.8 prompt inference");
+    assert_eq!(stateless.logits.dims(), [1, 1, 248_320]);
+    let actual_logits = metal_tensor_values("Qwen3.8 official-reference logits", &stateless.logits);
+    assert!(actual_logits.iter().all(|value| value.is_finite()));
+    let cosine = cosine_similarity(&actual_logits, &reference_logits);
+    assert!(
+        cosine >= 0.999,
+        "official/Burn full-vocabulary cosine {cosine} is below the 0.999 gate"
+    );
+    let stateless_top1 = stateless
+        .logits
+        .argmax(2)
+        .to_data()
+        .to_vec::<i32>()
+        .expect("Metal prompt top-1 token must use i32 storage");
+    assert_eq!(
+        i64::from(stateless_top1[0]),
+        reference.last_logits.top1_token_id
+    );
+
+    let mut state = loaded
+        .model()
+        .new_decode_state(
+            CacheConfig::new(1, prompt_length + reference.generation.max_new_tokens)
+                .expect("official reference cache geometry must validate"),
+            1,
+            &device,
+        )
+        .expect("allocate the official-reference Qwen3.8 decode state");
+    let mut cached = loaded
+        .model()
+        .prefill(
+            CausalLmInput {
+                token_ids: prompt_ids,
+                token_mask: Some(prompt_mask),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .expect("prefill the official-reference Qwen3.8 prompt");
+    let mut cached_tokens = Vec::with_capacity(reference.generation.max_new_tokens);
+    for (step, expected) in reference.generation.token_ids.iter().copied().enumerate() {
+        let token = i64::from(
+            *cached
+                .logits
+                .clone()
+                .argmax(2)
+                .to_data()
+                .to_vec::<i32>()
+                .expect("cached Metal top-1 token must use i32 storage")
+                .first()
+                .expect("one cached row must select one token"),
+        );
+        assert_eq!(
+            token, expected,
+            "Burn cached greedy token differs from the official reference at step {step}"
+        );
+        cached_tokens.push(token);
+        if step + 1 < reference.generation.max_new_tokens {
+            cached = loaded
+                .model()
+                .decode(
+                    DecodeInput {
+                        token_ids: Tensor::<Metal, 2, Int>::from_data(
+                            TensorData::new(vec![token], [1, 1]),
+                            &device,
+                        ),
+                        token_mask: Some(all_valid_metal_mask(1, &device)),
+                        position_ids: None,
+                    },
+                    &mut state,
+                    &ForwardOptions::default(),
+                )
+                .unwrap_or_else(|error| panic!("Qwen3.8 cached decode step {step}: {error}"));
+        }
+    }
+    assert_eq!(cached_tokens, reference.generation.token_ids);
+    assert_eq!(
+        state.lengths(),
+        &[prompt_length + reference.generation.max_new_tokens - 1]
+    );
+
+    let teacher_length = reference.teacher_forced.input_ids.len();
+    let teacher = loaded
+        .model()
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(
+                        reference.teacher_forced.input_ids.clone(),
+                        [1, teacher_length],
+                    ),
+                    &device,
+                ),
+                token_mask: Some(all_valid_metal_mask(teacher_length, &device)),
+                position_ids: None,
+            },
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..ForwardOptions::default()
+            },
+        )
+        .expect("run Qwen3.8 stateless teacher-forced all-logit inference");
+    assert_eq!(teacher.logits.dims(), [1, teacher_length, 248_320]);
+    let all_top1 = teacher
+        .logits
+        .argmax(2)
+        .to_data()
+        .to_vec::<i32>()
+        .expect("teacher-forced Metal top-1 tokens must use i32 storage")
+        .into_iter()
+        .map(i64::from)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        all_top1, reference.teacher_forced.all_position_top1_token_ids,
+        "Burn teacher-forced predictions differ at one or more sequence positions"
+    );
+    let continuation_top1 = reference
+        .teacher_forced
+        .prediction_positions
+        .iter()
+        .map(|&position| all_top1[position])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        continuation_top1, cached_tokens,
+        "Burn cached/stateless top-1 predictions must agree at every generated prefix"
+    );
+    assert_eq!(
+        continuation_top1,
+        reference.teacher_forced.continuation_top1_token_ids
+    );
+    eprintln!(
+        "Qwen3.8 official F16 parity: prompt_cosine={cosine:.9}, top1={}, greedy_tokens={}",
+        reference.last_logits.top1_token_id,
+        cached_tokens.len()
+    );
+}
+
+/// The test harness SHA-256 wrapper matches standard empty and `abc` vectors.
+#[cfg(feature = "metal")]
+#[test]
+fn qwen38_reference_sha256_is_stable() {
+    assert_eq!(
+        sha256_hex(b""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(
+        sha256_hex(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+/// Reference path and top-two helpers enforce deterministic boundary behavior.
+#[cfg(feature = "metal")]
+#[test]
+fn qwen38_reference_validation_helpers_cover_edges() {
+    assert!(is_safe_artifact_filename("config.json"));
+    for unsafe_name in ["", ".", "..", "model/config.json", "/config.json"] {
+        assert!(
+            !is_safe_artifact_filename(unsafe_name),
+            "unexpectedly accepted `{unsafe_name}`"
+        );
+    }
+
+    assert_eq!(top_two_with_margin(&[1.0, 4.0, 2.0]), (1, 2, 2.0));
+    assert_eq!(
+        top_two_with_margin(&[3.0, 3.0, 2.0]),
+        (0, 1, 0.0),
+        "equal logits must use the lower token ID first"
+    );
+
+    let mut artifacts = vec![
+        Qwen38ReferenceArtifact {
+            relative_path: "b".into(),
+            bytes: 2,
+            sha256: "b".repeat(64),
+        },
+        Qwen38ReferenceArtifact {
+            relative_path: "a".into(),
+            bytes: 1,
+            sha256: "a".repeat(64),
+        },
+    ];
+    let first = qwen38_reference_artifact_digest(&artifacts);
+    artifacts.reverse();
+    assert_eq!(qwen38_reference_artifact_digest(&artifacts), first);
+}
+
+/// Bounded reads reject final-component symlinks and cap allocations.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn qwen38_reference_reader_is_bounded_and_no_follow() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().expect("create reference-reader fixture directory");
+    let regular = directory.path().join("regular");
+    fs::write(&regular, b"reference").expect("write regular reference-reader fixture");
+    assert_eq!(read_regular_file_exact(&regular, 9, 9), b"reference");
+    assert!(
+        std::panic::catch_unwind(|| read_regular_file_exact(&regular, 9, 8)).is_err(),
+        "the byte ceiling must be enforced before allocation"
+    );
+
+    let link = directory.path().join("link");
+    symlink(&regular, &link).expect("create reference-reader symlink fixture");
+    assert!(
+        std::panic::catch_unwind(|| read_regular_file_exact(&link, 9, 9)).is_err(),
+        "the final path component must never be followed"
     );
 }
 
