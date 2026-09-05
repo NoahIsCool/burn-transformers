@@ -54,7 +54,10 @@ use transformers::{
     AutoLoadOptions, AutoSeq2SeqLm, CausalLmInput, DecodeInput, DecodeState, EncodeOptions,
     FinishReason, ForwardOptions, LogitsSelection, Seq2SeqInput, Seq2SeqLanguageModel, TokenMask,
     cache::CacheConfig,
-    checkpoint::{DTypePolicy, LoadOptions},
+    checkpoint::{
+        CheckpointEquivalenceRecord, DTypePolicy, ExecutionStats, LoadOptions, LoadReport,
+        ResolvedIndexTensorAlias,
+    },
     models::t5::{T5BeamSearchOptions, generate_t5_beam_search},
 };
 
@@ -91,6 +94,28 @@ const FIRST_GREEDY_TOKEN_ID: [u32; 1] = [GREEDY_TOKEN_IDS[0]];
 
 /// Exact EOS-terminated Transformers four-beam continuation.
 const BEAM_TOKEN_IDS: [u32; 6] = [644, 4_598, 229, 19_250, 5, 1];
+
+/// SHA-256 of [`GREEDY_TOKEN_IDS`] encoded as canonical little-endian `u32` values.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+const GREEDY_TOKEN_IDS_SHA256: &str =
+    "39e7bb643f90ca0127d2f4401912774f3648fcce3ea96c5df3ff1ee0fe543008";
+
+/// SHA-256 of [`BEAM_TOKEN_IDS`] encoded as canonical little-endian `u32` values.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+const BEAM_TOKEN_IDS_SHA256: &str =
+    "b818fc36304dd2cc12d37ba110ef2afa8500525fb5a2917f6776dc16a3303352";
+
+/// Physical opens from equivalence preflight followed by source-ordered loading.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+const EXPECTED_SHARD_OPEN_ORDER: [&str; 7] = [
+    "model-00001-of-00005.safetensors",
+    "model-00003-of-00005.safetensors",
+    "model-00001-of-00005.safetensors",
+    "model-00002-of-00005.safetensors",
+    "model-00003-of-00005.safetensors",
+    "model-00004-of-00005.safetensors",
+    "model-00005-of-00005.safetensors",
+];
 
 /// Immutable reference-manifest filename within the create-only bundle.
 const REFERENCE_JSON: &str = "flan-t5-xxl-ae7c9136-reference.json";
@@ -361,6 +386,221 @@ fn sha256_file_hex(path: &Path, expected_bytes: u64) -> String {
         digest.update(&buffer[..count]);
     }
     format!("{:x}", digest.finalize())
+}
+
+/// Hashes host F32 values in canonical row-major little-endian representation.
+///
+/// Burn materializes the tensors in logical row-major order. Encoding each
+/// scalar explicitly makes the recorded digest independent of host endianness
+/// while preserving the exact IEEE-754 bit pattern produced by Metal.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn f32le_sha256(values: &[f32]) -> String {
+    let mut digest = Sha256::new();
+    for value in values {
+        digest.update(value.to_le_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
+/// Hashes token IDs in canonical row-major little-endian `u32` representation.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn u32le_sha256(values: &[u32]) -> String {
+    let mut digest = Sha256::new();
+    for value in values {
+        digest.update(value.to_le_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
+/// Checked product used by analytical cache-memory accounting.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn checked_u64_product(label: &str, factors: &[usize]) -> u64 {
+    factors.iter().fold(1_u64, |product, &factor| {
+        let factor = u64::try_from(factor)
+            .unwrap_or_else(|_| panic!("{label} factor {factor} does not fit u64"));
+        product
+            .checked_mul(factor)
+            .unwrap_or_else(|| panic!("{label} byte count overflows u64"))
+    })
+}
+
+/// Analytical payload sizes for T5 decoder self- and cross-attention caches.
+///
+/// Every decoder layer owns a key and value tensor. Both use
+/// `num_heads * d_kv` scalars per sequence position, so the self-cache grows by
+/// the same number of bytes per target token that the immutable cross-cache
+/// consumes per source token.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AnalyticalT5CacheBytes {
+    /// Preallocated self-KV payload for one target token across every layer.
+    self_per_target_token: u64,
+    /// Complete self-KV payload at the requested target capacity.
+    self_total: u64,
+    /// Immutable encoder cross-KV payload across every decoder layer.
+    cross_total: u64,
+    /// Sum of self- and cross-KV tensor payloads.
+    total: u64,
+}
+
+/// Derives T5 cache payload bytes from runtime model and fixture geometry.
+///
+/// This deliberately reports tensor payload only. Backend allocation metadata,
+/// retained encoder hidden states, masks, logical lengths, and temporary
+/// attention workspaces are not cache payload and are not included.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn analytical_t5_cache_bytes(
+    decoder_layers: usize,
+    batch_size: usize,
+    attention_heads: usize,
+    head_dimension: usize,
+    source_sequence: usize,
+    target_capacity: usize,
+    element_bytes: usize,
+) -> AnalyticalT5CacheBytes {
+    let self_per_target_token = checked_u64_product(
+        "T5 self-KV bytes per target token",
+        &[
+            2,
+            decoder_layers,
+            batch_size,
+            attention_heads,
+            head_dimension,
+            element_bytes,
+        ],
+    );
+    let self_total = self_per_target_token
+        .checked_mul(u64::try_from(target_capacity).expect("target capacity must fit u64"))
+        .expect("T5 self-KV byte count must fit u64");
+    let cross_total = self_per_target_token
+        .checked_mul(u64::try_from(source_sequence).expect("source sequence must fit u64"))
+        .expect("T5 cross-KV byte count must fit u64");
+    let total = self_total
+        .checked_add(cross_total)
+        .expect("T5 total cache payload must fit u64");
+    AnalyticalT5CacheBytes {
+        self_per_target_token,
+        self_total,
+        cross_total,
+        total,
+    }
+}
+
+/// Certifies every load-report and pass-two counter for the pinned F32 plan.
+///
+/// The expected byte totals follow from the committed plan: 558 F32 target
+/// tensors deliver 44,541,329,408 bytes, while the one redundant decoder/shared
+/// embedding comparison reads two additional 526,385,152-byte payloads before
+/// the first model write. All target operations are unary identity or transpose
+/// transforms, so each applied tensor contributes exactly one ordinary source
+/// read and preserves its byte length.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn assert_pinned_f32_load_accounting(report: &LoadReport, execution: &ExecutionStats) {
+    const TARGET_TENSORS: usize = 558;
+    const TRANSPOSED_TENSORS: usize = 433;
+    const CHECKPOINT_TENSOR_BYTES: u64 = 45_067_714_560;
+    const TARGET_PARAMETER_BYTES: u64 = 44_541_329_408;
+    const EMBEDDING_BYTES: u64 = 526_385_152;
+    const EQUIVALENCE_PAIR_BYTES: u64 = 2 * EMBEDDING_BYTES;
+    const SOURCE_PAYLOAD_BYTES: u64 = TARGET_PARAMETER_BYTES + EQUIVALENCE_PAIR_BYTES;
+    const SOURCE_READS: u64 = TARGET_TENSORS as u64 + 2;
+
+    assert!(report.is_strictly_valid());
+    assert_eq!(report.applied.len(), TARGET_TENSORS);
+    assert_eq!(report.transformed.len(), TRANSPOSED_TENSORS);
+    assert!(report.aliased.is_empty());
+    assert_eq!(
+        report.checkpoint_aliases,
+        [ResolvedIndexTensorAlias::new(
+            "encoder.embed_tokens.weight",
+            "shared.weight",
+            "model-00001-of-00005.safetensors",
+        )]
+    );
+    let equivalence =
+        CheckpointEquivalenceRecord::new("decoder.embed_tokens.weight", "shared.weight");
+    assert_eq!(
+        report.equivalence_planned,
+        std::slice::from_ref(&equivalence)
+    );
+    assert_eq!(report.equivalence_verified, [equivalence]);
+    assert!(report.dtype_converted.is_empty());
+    assert!(report.quantized.is_empty());
+    assert!(report.allowlisted_missing.is_empty());
+    assert!(report.allowlisted_ignored.is_empty());
+    assert!(report.missing.is_empty());
+    assert!(report.unexpected.is_empty());
+
+    let memory = report
+        .memory
+        .expect("strict FLAN-T5-XXL loading must retain its pass-one memory estimate");
+    assert_eq!(memory.artifact_bytes, 45_067_783_756);
+    assert_eq!(memory.checkpoint_tensor_bytes, CHECKPOINT_TENSOR_BYTES);
+    assert_eq!(memory.target_parameter_bytes, TARGET_PARAMETER_BYTES);
+    assert_eq!(memory.logical_model_bytes, TARGET_PARAMETER_BYTES);
+    assert_eq!(memory.largest_shard_bytes, 9_999_712_776);
+    assert_eq!(memory.largest_source_tensor_bytes, EMBEDDING_BYTES);
+    assert_eq!(memory.largest_target_tensor_bytes, EMBEDDING_BYTES);
+    assert_eq!(
+        memory.largest_equivalence_pair_bytes,
+        EQUIVALENCE_PAIR_BYTES
+    );
+    assert_eq!(memory.peak_host_staging_bytes, 10_526_097_928);
+
+    assert_eq!(execution.tensors_applied, TARGET_TENSORS);
+    assert_eq!(execution.aliases_applied, 0);
+    assert_eq!(execution.equivalences_verified, 1);
+    assert_eq!(execution.equivalence_source_reads, 2);
+    assert_eq!(
+        execution.equivalence_source_payload_bytes,
+        EQUIVALENCE_PAIR_BYTES
+    );
+    assert_eq!(execution.source_reads, SOURCE_READS);
+    assert_eq!(execution.source_payload_bytes, SOURCE_PAYLOAD_BYTES);
+    assert_eq!(execution.delivered_tensor_bytes, TARGET_PARAMETER_BYTES);
+    assert_eq!(execution.largest_source_payload_bytes, EMBEDDING_BYTES);
+    assert_eq!(execution.largest_output_tensor_bytes, EMBEDDING_BYTES);
+    assert_eq!(
+        execution.largest_equivalence_pair_bytes,
+        EQUIVALENCE_PAIR_BYTES
+    );
+    assert_eq!(execution.peak_host_staging_bytes, EQUIVALENCE_PAIR_BYTES);
+    assert_eq!(execution.source.shard_opens, 7);
+    assert_eq!(execution.source.tensor_reads, SOURCE_READS);
+    assert_eq!(execution.source.payload_bytes_read, SOURCE_PAYLOAD_BYTES);
+    assert_eq!(execution.source.max_open_shards, 1);
+    assert_eq!(
+        execution.source.shard_open_order,
+        EXPECTED_SHARD_OPEN_ORDER
+            .iter()
+            .map(|shard| (*shard).to_owned())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Pins canonical hash encoding and the XXL cache-size arithmetic without weights.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn canonical_output_hashes_and_cache_geometry_are_stable() {
+    assert_eq!(
+        f32le_sha256(&[0.0, -0.0, 1.5]),
+        "39093b17a422b3958b0b3f6789da2d88e11300cacde197bd811453b4d5daa852"
+    );
+    assert_eq!(
+        u32le_sha256(&[0, 1, u32::MAX]),
+        "de25d19943926b201c1693709bc5eca70ecf04229c1668e2f276249f9bebe043"
+    );
+    assert_eq!(u32le_sha256(&GREEDY_TOKEN_IDS), GREEDY_TOKEN_IDS_SHA256);
+    assert_eq!(u32le_sha256(&BEAM_TOKEN_IDS), BEAM_TOKEN_IDS_SHA256);
+    assert_eq!(
+        analytical_t5_cache_bytes(24, 1, 64, 64, 51, 32, 4),
+        AnalyticalT5CacheBytes {
+            self_per_target_token: 786_432,
+            self_total: 25_165_824,
+            cross_total: 40_108_032,
+            total: 65_273_856,
+        }
+    );
 }
 
 /// Requires an exact JSON value at one RFC 6901 pointer.
@@ -1100,6 +1340,9 @@ fn loads_flan_t5_xxl_f32_and_matches_official_reference() {
             &device,
         )
         .expect("allocate FLAN decoder and cross-attention cache");
+    assert_eq!(state.capacity(), 32);
+    assert!(!state.has_encoder_cache());
+    assert_eq!(state.encoder_sequence_length(), None);
     let cached_started = Instant::now();
     let prefill = model
         .prefill_decoder(
@@ -1112,6 +1355,8 @@ fn loads_flan_t5_xxl_f32_and_matches_official_reference() {
     let cached_encoder = prefill.encoder;
     let first_decoder = prefill.decoder;
     assert_eq!(state.lengths(), &[1]);
+    assert!(state.has_encoder_cache());
+    assert_eq!(state.encoder_sequence_length(), Some(LONG_INPUT_IDS.len()));
     assert_eq!(first_decoder.logits.dims(), [1, 1, 32_128]);
     assert!(first_decoder.final_hidden_state.is_none());
     let mut cached_logits = metal_values("FLAN first cached logits", &first_decoder.logits);
@@ -1148,6 +1393,21 @@ fn loads_flan_t5_xxl_f32_and_matches_official_reference() {
     let cached_seconds = cached_started.elapsed().as_secs_f64();
     assert_eq!(state.lengths(), &[32]);
     assert_eq!(generated, GREEDY_TOKEN_IDS);
+    let analytical_cache = analytical_t5_cache_bytes(
+        model.config.decoder_layers(),
+        1,
+        model.config.num_heads,
+        model.config.d_kv,
+        state
+            .encoder_sequence_length()
+            .expect("successful prefill must bind the source sequence"),
+        state.capacity(),
+        model.shared.weight.val().dtype().size(),
+    );
+    assert_eq!(analytical_cache.self_per_target_token, 786_432);
+    assert_eq!(analytical_cache.self_total, 25_165_824);
+    assert_eq!(analytical_cache.cross_total, 40_108_032);
+    assert_eq!(analytical_cache.total, 65_273_856);
     let cached_minimum_cosine = assert_metal_reference(
         "FLAN cached greedy logits",
         &cached_logits,
@@ -1209,6 +1469,21 @@ fn loads_flan_t5_xxl_f32_and_matches_official_reference() {
     let execution = loaded
         .execution_stats()
         .expect("automatic strict load must retain execution accounting");
+    assert_pinned_f32_load_accounting(report, execution);
+    let memory = report
+        .memory
+        .expect("strict FLAN-T5-XXL loading must retain its memory estimate");
+
+    let encoder_f32le_sha256 = f32le_sha256(&encoder_values);
+    let decoder_first_f32le_sha256 = f32le_sha256(&first_hidden_values);
+    let first_logits_f32le_sha256 = f32le_sha256(&first_logits);
+    let cached_logits_f32le_sha256 = f32le_sha256(&cached_logits);
+    let teacher_logits_f32le_sha256 = f32le_sha256(&teacher_logits);
+    let greedy_u32le_sha256 = u32le_sha256(&generated);
+    let beam_u32le_sha256 = u32le_sha256(&beam.sequences[0][0].token_ids);
+    assert_eq!(greedy_u32le_sha256, GREEDY_TOKEN_IDS_SHA256);
+    assert_eq!(beam_u32le_sha256, BEAM_TOKEN_IDS_SHA256);
+
     eprintln!(
         "FLAN-T5-XXL F32 Metal: revision={REVISION}, load_seconds={load_seconds:.3}, \
          encoder_seconds={encoder_seconds:.3}, stateless_first_seconds={stateless_first_seconds:.3}, \
@@ -1216,12 +1491,78 @@ fn loads_flan_t5_xxl_f32_and_matches_official_reference() {
          teacher_seconds={teacher_seconds:.3}, beam_seconds={beam_seconds:.3}, \
          encoder_cosine={encoder_cosine:.12}, decoder_first_hidden_cosine={decoder_hidden_cosine:.12}, \
          first_logits_cosine={first_logits_cosine:.12}, cached_minimum_row_cosine={cached_minimum_cosine:.12}, \
-         teacher_minimum_row_cosine={teacher_minimum_cosine:.12}, cache_bytes=65273856, \
-         source_payload_bytes={}, delivered_tensor_bytes={}, peak_host_staging_bytes={}, \
+         teacher_minimum_row_cosine={teacher_minimum_cosine:.12}, \
+         analytical_self_cache_bytes_per_target_token={}, analytical_self_cache_bytes={}, \
+         analytical_cross_cache_bytes={}, analytical_total_cache_payload_bytes={}, \
          greedy_ids={generated:?}, beam_ids={:?}",
+        analytical_cache.self_per_target_token,
+        analytical_cache.self_total,
+        analytical_cache.cross_total,
+        analytical_cache.total,
+        beam.sequences[0][0].token_ids,
+    );
+    eprintln!(
+        "FLAN-T5-XXL load report: applied={}, transformed={}, aliased={}, \
+         checkpoint_aliases={}, equivalence_planned={}, equivalence_verified={}, \
+         dtype_converted={}, quantized={}, allowlisted_missing={}, allowlisted_ignored={}, \
+         missing={}, unexpected={}, artifact_bytes={}, checkpoint_tensor_bytes={}, \
+         target_parameter_bytes={}, logical_model_bytes={}, largest_shard_bytes={}, \
+         largest_source_tensor_bytes={}, largest_target_tensor_bytes={}, \
+         largest_planned_equivalence_pair_bytes={}, planned_peak_host_staging_bytes={}",
+        report.applied.len(),
+        report.transformed.len(),
+        report.aliased.len(),
+        report.checkpoint_aliases.len(),
+        report.equivalence_planned.len(),
+        report.equivalence_verified.len(),
+        report.dtype_converted.len(),
+        report.quantized.len(),
+        report.allowlisted_missing.len(),
+        report.allowlisted_ignored.len(),
+        report.missing.len(),
+        report.unexpected.len(),
+        memory.artifact_bytes,
+        memory.checkpoint_tensor_bytes,
+        memory.target_parameter_bytes,
+        memory.logical_model_bytes,
+        memory.largest_shard_bytes,
+        memory.largest_source_tensor_bytes,
+        memory.largest_target_tensor_bytes,
+        memory.largest_equivalence_pair_bytes,
+        memory.peak_host_staging_bytes,
+    );
+    eprintln!(
+        "FLAN-T5-XXL load execution: tensors_applied={}, aliases_applied={}, \
+         equivalences_verified={}, equivalence_source_reads={}, \
+         equivalence_source_payload_bytes={}, source_reads={}, source_payload_bytes={}, \
+         delivered_tensor_bytes={}, largest_source_payload_bytes={}, \
+         largest_output_tensor_bytes={}, largest_equivalence_pair_bytes={}, \
+         peak_host_staging_bytes={}, shard_opens={}, source_tensor_reads={}, \
+         source_payload_bytes_read={}, max_open_shards={}, shard_open_order={:?}",
+        execution.tensors_applied,
+        execution.aliases_applied,
+        execution.equivalences_verified,
+        execution.equivalence_source_reads,
+        execution.equivalence_source_payload_bytes,
+        execution.source_reads,
         execution.source_payload_bytes,
         execution.delivered_tensor_bytes,
+        execution.largest_source_payload_bytes,
+        execution.largest_output_tensor_bytes,
+        execution.largest_equivalence_pair_bytes,
         execution.peak_host_staging_bytes,
-        beam.sequences[0][0].token_ids,
+        execution.source.shard_opens,
+        execution.source.tensor_reads,
+        execution.source.payload_bytes_read,
+        execution.source.max_open_shards,
+        execution.source.shard_open_order,
+    );
+    eprintln!(
+        "FLAN-T5-XXL canonical output SHA-256: encoder_final_f32le={encoder_f32le_sha256}, \
+         decoder_first_final_f32le={decoder_first_f32le_sha256}, \
+         first_logits_f32le={first_logits_f32le_sha256}, \
+         cached_logits_32x32128_f32le={cached_logits_f32le_sha256}, \
+         teacher_logits_32x32128_f32le={teacher_logits_f32le_sha256}, \
+         greedy_token_ids_u32le={greedy_u32le_sha256}, beam_token_ids_u32le={beam_u32le_sha256}"
     );
 }
