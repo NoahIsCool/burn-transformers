@@ -1,4 +1,4 @@
-//! Serializable metadata for the first Burnpack quantization format.
+//! Serializable metadata for versioned Burnpack quantization formats.
 
 use std::collections::BTreeMap;
 
@@ -6,12 +6,23 @@ use burn::tensor::DType;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    PackedValueLayout, QuantizationError, QuantizationGroupSize, QuantizedGroupLayout,
-    QuantizedPayloadLayout, Result, ScaleLayout, SymmetricQuantization, WeightQuantizationConfig,
+    BurnpackProvenance, PackedValueLayout, QuantizationError, QuantizationGroupSize,
+    QuantizedGroupLayout, QuantizedPayloadLayout, Result, ScaleLayout, SymmetricQuantization,
+    WeightQuantizationConfig, provenance::validate_sha256,
 };
 
-/// Burnpack quantization format implemented by this module.
-pub const BURNPACK_QUANTIZATION_FORMAT_VERSION: u32 = 1;
+/// Legacy Burnpack quantization format without checkpoint content provenance.
+pub const BURNPACK_QUANTIZATION_FORMAT_VERSION_V1: u32 = 1;
+
+/// Burnpack format carrying exact SHA-256 checkpoint and load-plan provenance.
+pub const BURNPACK_QUANTIZATION_FORMAT_VERSION_V2: u32 = 2;
+
+/// Current architecture-aware Burnpack quantization format written after binding.
+pub const BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT: u32 =
+    BURNPACK_QUANTIZATION_FORMAT_VERSION_V2;
+
+/// Backward-compatible name for [`BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT`].
+pub const BURNPACK_QUANTIZATION_FORMAT_VERSION: u32 = BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT;
 
 /// Byte order used by explicitly byte-encoded scalar fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,7 +64,11 @@ impl PackedExecutionSupport {
     }
 }
 
-/// Floating-point representation of the checkpoint source tensor.
+/// Floating-point representation presented to the quantizer.
+///
+/// Architecture-aware conversion records the post-transform value. For example,
+/// a BF16 checkpoint loaded through `Cast(F16)` is recorded as F16. Legacy
+/// low-level writers record the dtype of the `TensorData` they receive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceFloatDType {
@@ -118,7 +133,7 @@ impl TryFrom<DType> for SourceFloatDType {
 pub struct QuantizedTensorMetadata {
     /// Logical row-major tensor shape.
     pub shape: Vec<u64>,
-    /// Original floating-point storage representation.
+    /// Floating-point dtype of the post-transform quantizer input.
     pub source_dtype: SourceFloatDType,
     /// Symmetric quantization precision.
     pub scheme: SymmetricQuantization,
@@ -140,6 +155,12 @@ pub struct QuantizedTensorMetadata {
     pub packed_value_bytes: u64,
     /// Exact byte length of the scale region.
     pub scale_bytes: u64,
+    /// SHA-256 over the exact packed-values-then-little-endian-scales payload.
+    ///
+    /// Version-one artifacts omit this field. Version two requires it for every
+    /// tensor so the complete sidecar can be checked before model mutation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_sha256: Option<String>,
 }
 
 impl QuantizedTensorMetadata {
@@ -194,6 +215,7 @@ impl QuantizedTensorMetadata {
             group_count,
             packed_value_bytes,
             scale_bytes,
+            payload_sha256: None,
         })
     }
 
@@ -256,6 +278,9 @@ impl QuantizedTensorMetadata {
         if self.payload_layout != QuantizedPayloadLayout::PackedValuesThenScales {
             return invalid_metadata("unsupported payload layout");
         }
+        if let Some(digest) = &self.payload_sha256 {
+            validate_sha256(digest, "packed tensor payload")?;
+        }
         Ok(())
     }
 
@@ -280,7 +305,7 @@ impl QuantizedTensorMetadata {
 
     /// Verifies that flattened groups are also exact Burn rectangular blocks.
     ///
-    /// Version-one artifacts group the row-major stream contiguously. For a
+    /// Both supported artifact versions group the row-major stream contiguously. For a
     /// matrix `[output, input]`, that stream is representable as Burn blocks
     /// `[1, group_size]` exactly when every input row ends on a group boundary.
     /// Packed-U32 storage additionally requires the input width to contain a
@@ -359,20 +384,44 @@ pub struct BurnpackQuantizationManifest {
     pub byte_order: BurnpackByteOrder,
     /// Direct backend execution availability.
     pub packed_execution: PackedExecutionSupport,
+    /// Exact checkpoint and architecture content binding, required by version two.
+    ///
+    /// Version-one artifacts omit this field and remain readable, but cannot
+    /// content-bind source-payload bypass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<BurnpackProvenance>,
     /// Tensor metadata keyed by architecture-owned parameter name.
     pub tensors: BTreeMap<String, QuantizedTensorMetadata>,
 }
 
 impl BurnpackQuantizationManifest {
-    /// Creates an empty version-one manifest.
+    /// Creates an explicitly legacy, provenance-free version-one manifest.
+    ///
+    /// This constructor is intentionally named: the current writer format is v2,
+    /// which cannot be valid until checkpoint provenance and every payload digest
+    /// have been bound. Architecture-aware callers should use
+    /// [`QuantizedBurnpackSession`](super::QuantizedBurnpackSession), which stages
+    /// this legacy form privately and promotes it atomically during binding.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new_legacy_v1() -> Self {
         Self {
-            format_version: BURNPACK_QUANTIZATION_FORMAT_VERSION,
+            format_version: BURNPACK_QUANTIZATION_FORMAT_VERSION_V1,
             byte_order: BurnpackByteOrder::LittleEndian,
             packed_execution: PackedExecutionSupport::Unavailable,
+            provenance: None,
             tensors: BTreeMap::new(),
         }
+    }
+
+    /// Promotes a legacy in-progress manifest to v2 with validated provenance.
+    pub fn bind_provenance(&mut self, provenance: BurnpackProvenance) -> Result<()> {
+        provenance.validate()?;
+        let mut candidate = self.clone();
+        candidate.format_version = BURNPACK_QUANTIZATION_FORMAT_VERSION;
+        candidate.provenance = Some(provenance);
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
     }
 
     /// Inserts one tensor, rejecting empty and duplicate architecture keys.
@@ -395,16 +444,48 @@ impl BurnpackQuantizationManifest {
 
     /// Validates the schema version and every tensor's redundant layout fields.
     pub fn validate(&self) -> Result<()> {
-        if self.format_version != BURNPACK_QUANTIZATION_FORMAT_VERSION {
-            return Err(QuantizationError::UnsupportedFormatVersion {
-                version: self.format_version,
-            });
+        match (self.format_version, &self.provenance) {
+            (BURNPACK_QUANTIZATION_FORMAT_VERSION_V1, None) => {}
+            (BURNPACK_QUANTIZATION_FORMAT_VERSION_V1, Some(_)) => {
+                return Err(QuantizationError::InvalidProvenance {
+                    reason: "format version one must not claim v2 provenance".into(),
+                });
+            }
+            (BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, Some(provenance)) => {
+                provenance.validate()?;
+            }
+            (BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, None) => {
+                return Err(QuantizationError::InvalidProvenance {
+                    reason: "format version two requires checkpoint and load-plan provenance"
+                        .into(),
+                });
+            }
+            (version, _) => {
+                return Err(QuantizationError::UnsupportedFormatVersion { version });
+            }
         }
         for (name, metadata) in &self.tensors {
             if name.is_empty() {
                 return Err(QuantizationError::EmptyTensorName);
             }
             metadata.validate()?;
+            match self.format_version {
+                BURNPACK_QUANTIZATION_FORMAT_VERSION_V1 if metadata.payload_sha256.is_some() => {
+                    return Err(QuantizationError::InvalidProvenance {
+                        reason: format!(
+                            "format version one tensor `{name}` must not claim a v2 payload digest"
+                        ),
+                    });
+                }
+                BURNPACK_QUANTIZATION_FORMAT_VERSION_V2 if metadata.payload_sha256.is_none() => {
+                    return Err(QuantizationError::InvalidProvenance {
+                        reason: format!(
+                            "format version two tensor `{name}` is missing its payload SHA-256"
+                        ),
+                    });
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -420,12 +501,6 @@ impl BurnpackQuantizationManifest {
         let manifest: Self = serde_json::from_str(json)?;
         manifest.validate()?;
         Ok(manifest)
-    }
-}
-
-impl Default for BurnpackQuantizationManifest {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

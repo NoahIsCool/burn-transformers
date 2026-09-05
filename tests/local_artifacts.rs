@@ -366,7 +366,7 @@ fn pinned_qwen38_inventory() -> PinnedQwen38Inventory {
     .expect("the committed Qwen3.8 tensor inventory must remain valid JSON")
 }
 
-/// Partitions the mapped Qwen3.8 parameters using the public v1 weight policy.
+/// Partitions the mapped Qwen3.8 parameters using the public weight-only policy.
 fn qwen38_quantization_partition(
     plan: &LoadPlan,
 ) -> (Vec<String>, Vec<(String, QuantizationExclusion)>) {
@@ -2108,7 +2108,7 @@ fn quantizes_pinned_qwen38_weights_to_q4_burnpack() {
 /// Streams one precision of the immutable Qwen3.8 checkpoint into Burnpack.
 ///
 /// The checkpoint contract deliberately includes the auxiliary MTP graph even
-/// though the v1 quantization policy retains every `mtp.*` parameter in BF16/F16.
+/// though the v2 quantization policy retains every `mtp.*` parameter in F16.
 /// Consequently, this gate proves both complete source consumption and the exact
 /// mixed-precision boundary rather than merely checking that a sidecar was
 /// written. The destination is explicitly supplied because finalization briefly
@@ -2150,7 +2150,13 @@ fn quantize_pinned_qwen38_weights_to_burnpack(
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", config_path.display()));
     let config = Qwen3_5TextConfig::from_json_str(&config_json)
         .expect("the pinned nested Qwen3.8 text configuration must validate");
-    let load_options = LoadOptions::default();
+    // Burnpack v2 binds the complete executable plan, including its target
+    // dtype. Conversion must therefore use the same streaming BF16-to-F16 plan
+    // that the certified M3 Metal load consumes below.
+    let load_options = LoadOptions {
+        dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+        ..LoadOptions::default()
+    };
     let manifest = CheckpointManifest::discover(&root, &load_options)
         .expect("all pinned Qwen3.8 SafeTensors headers must pass strict discovery");
     assert_eq!(manifest.shards.len(), 18);
@@ -2196,7 +2202,7 @@ fn quantize_pinned_qwen38_weights_to_burnpack(
     assert!(outcome.report.is_strictly_valid());
     assert_eq!(outcome.report.applied.len(), 866);
     assert_eq!(outcome.report.allowlisted_ignored.len(), 333);
-    assert!(outcome.report.dtype_converted.is_empty());
+    assert_eq!(outcome.report.dtype_converted.len(), 866);
     assert_eq!(outcome.report.quantized.len(), 497);
     assert_eq!(outcome.artifact.tensor_count, 497);
     assert_eq!(outcome.staging.tensor_count, 497);
@@ -2247,7 +2253,7 @@ fn quantize_pinned_qwen38_weights_to_burnpack(
         !name.starts_with("mtp.")
             && tensor.scheme == scheme
             && tensor.group_size.get() == 64
-            && tensor.source_dtype == SourceFloatDType::Bf16
+            && tensor.source_dtype == SourceFloatDType::F16
     }));
     assert_eq!(
         artifact
@@ -2337,7 +2343,7 @@ fn runs_pinned_qwen38_quantized_text_and_mtp_on_metal(
             .val()
             .dtype(),
         DType::F16,
-        "MTP parameters must remain outside the packed v1 sidecar"
+        "MTP parameters must remain outside the packed v2 sidecar"
     );
 
     let token_ids = vec![9_419_i64, 1_814, 11, 19_954, 45_543, 13];
@@ -2544,7 +2550,12 @@ fn quantizes_pinned_qwen35_weights_to_burnpack() {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", config_path.display()));
     let config = Qwen3_5TextConfig::from_json_str(&config_json)
         .expect("official nested text configuration must validate");
-    let load_options = LoadOptions::default();
+    // Persist the exact F16 execution plan used by every Metal replay. A v2
+    // sidecar intentionally cannot be reused with a different BF16 target plan.
+    let load_options = LoadOptions {
+        dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+        ..LoadOptions::default()
+    };
     let manifest = CheckpointManifest::discover(&root, &load_options)
         .expect("official SafeTensors headers must pass strict discovery");
     let contract = config
@@ -2611,6 +2622,7 @@ fn quantizes_pinned_qwen35_weights_to_burnpack() {
         .unwrap_or_else(|error| panic!("{label} checkpoint conversion failed: {error}"));
         assert!(outcome.report.is_strictly_valid());
         assert!(!outcome.report.quantized.is_empty());
+        assert_eq!(outcome.report.dtype_converted.len(), 320);
         assert_eq!(
             outcome.report.quantized.len(),
             outcome.artifact.tensor_count
@@ -2641,6 +2653,13 @@ fn quantizes_pinned_qwen35_weights_to_burnpack() {
         assert!(
             artifact.manifest().packed_execution.is_available(),
             "{label} writer must certify the native Burn QFloat layout"
+        );
+        assert!(
+            artifact
+                .manifest()
+                .tensors
+                .values()
+                .all(|tensor| tensor.source_dtype == SourceFloatDType::F16)
         );
 
         #[cfg(all(feature = "metal", not(feature = "rocm")))]

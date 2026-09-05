@@ -39,9 +39,11 @@ use burn::tensor::{DType, Shape, TensorData};
 use burn_store::{BurnpackStore, BurnpackWriter, ModuleStore, TensorSnapshot, TensorSnapshotError};
 
 use super::{
-    BurnpackQuantizationManifest, PackedExecutionSupport, QuantizationEligibility,
-    QuantizationError, QuantizationExclusion, QuantizedTensorMetadata, QuantizedWeight, Result,
-    SourceFloatDType, WeightQuantizationConfig, classify_weight_for_quantization,
+    BurnpackProvenance, BurnpackQuantizationManifest, PackedExecutionSupport,
+    QuantizationEligibility, QuantizationError, QuantizationExclusion, QuantizedTensorMetadata,
+    QuantizedWeight, Result, SourceFloatDType, WeightQuantizationConfig,
+    classify_weight_for_quantization,
+    provenance::{packed_payload_sha256, quantized_payload_sha256},
     quantize_tensor_data,
 };
 
@@ -67,6 +69,8 @@ const UPSTREAM_MAX_TENSOR_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const MANIFEST_BASE_ESTIMATE: u64 = 2048;
 const MANIFEST_ENTRY_OVERHEAD: u64 = 2048;
 const MANIFEST_SHAPE_DIMENSION_OVERHEAD: u64 = 32;
+const MANIFEST_PROVENANCE_BASE_OVERHEAD: u64 = 1024;
+const MANIFEST_PROVENANCE_SHARD_OVERHEAD: u64 = 512;
 const JSON_STRING_ESCAPE_FACTOR: u64 = 6;
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -221,6 +225,7 @@ pub struct BurnpackValidationReport {
 struct StagedTensor {
     offset: u64,
     payload_bytes: u64,
+    payload_sha256: String,
 }
 
 /// Incremental, one-source-tensor-at-a-time quantized Burnpack writer.
@@ -264,7 +269,7 @@ impl QuantizedBurnpackSession {
             staging_path,
             staging_file: Some(staging_file),
             entries: BTreeMap::new(),
-            manifest: BurnpackQuantizationManifest::new(),
+            manifest: BurnpackQuantizationManifest::new_legacy_v1(),
             limits,
             stats: BurnpackStagingStats {
                 tensor_count: 0,
@@ -294,6 +299,80 @@ impl QuantizedBurnpackSession {
         self.stats
     }
 
+    /// Binds the in-progress artifact to exact checkpoint bytes, payloads, and a load plan.
+    ///
+    /// Low-level callers that do not own a checkpoint may omit this operation and
+    /// continue producing readable v1 artifacts. Architecture-aware conversion
+    /// always calls it after proving the source remained stable across execution.
+    pub fn bind_provenance(&mut self, provenance: BurnpackProvenance) -> Result<()> {
+        self.ensure_mutable()?;
+        if self.manifest.provenance.is_some() {
+            return Err(QuantizationError::ProvenanceAlreadyBound);
+        }
+        let bound_estimate = self
+            .stats
+            .estimated_manifest_bytes
+            .checked_add(estimated_provenance_bytes(&provenance)?)
+            .ok_or(QuantizationError::ByteLengthOverflow {
+                context: "bound manifest size estimate",
+            })?;
+        if bound_estimate > self.limits.max_manifest_bytes as u64 {
+            return Err(QuantizationError::SessionLimitExceeded {
+                kind: "estimated manifest",
+                attempted: bound_estimate,
+                limit: self.limits.max_manifest_bytes as u64,
+            });
+        }
+
+        // Assemble and validate a complete candidate before changing live state.
+        // This keeps a manifest-size or digest error retryable as a v1 session.
+        let mut candidate = self.manifest.clone();
+        let manifest_tensor_count = candidate.tensors.len() as u64;
+        for (name, entry) in &self.entries {
+            let metadata =
+                candidate
+                    .tensors
+                    .get_mut(name)
+                    .ok_or(QuantizationError::StagingCorrupted {
+                        expected: self.entries.len() as u64,
+                        actual: manifest_tensor_count,
+                    })?;
+            metadata.payload_sha256 = Some(entry.payload_sha256.clone());
+        }
+        candidate.packed_execution = packed_execution_support(&candidate);
+        candidate.bind_provenance(provenance)?;
+
+        let actual_manifest_bytes = candidate.to_json_pretty()?.len();
+        self.check_manifest_size(actual_manifest_bytes)?;
+        let actual_manifest_bytes_u64 = u64::try_from(actual_manifest_bytes).map_err(|_| {
+            QuantizationError::ByteLengthOverflow {
+                context: "bound manifest byte length conversion",
+            }
+        })?;
+        let staged_with_manifest = self
+            .stats
+            .staged_payload_bytes
+            .checked_add(actual_manifest_bytes_u64)
+            .ok_or(QuantizationError::ByteLengthOverflow {
+                context: "bound staging length with manifest",
+            })?;
+        if staged_with_manifest > self.limits.max_staged_bytes {
+            return Err(QuantizationError::SessionLimitExceeded {
+                kind: "staged payload",
+                attempted: staged_with_manifest,
+                limit: self.limits.max_staged_bytes,
+            });
+        }
+
+        self.manifest = candidate;
+        self.stats.estimated_manifest_bytes = self
+            .stats
+            .estimated_manifest_bytes
+            .max(bound_estimate)
+            .max(actual_manifest_bytes_u64);
+        Ok(())
+    }
+
     /// Applies policy, quantizes one source TensorData, and releases it before the next call.
     pub fn append(
         &mut self,
@@ -302,6 +381,7 @@ impl QuantizedBurnpackSession {
         config: WeightQuantizationConfig,
     ) -> Result<BurnpackAppendOutcome> {
         self.ensure_mutable()?;
+        self.ensure_provenance_unbound()?;
         self.validate_name(name)?;
         match classify_weight_for_quantization(name, source.shape.as_slice()) {
             QuantizationEligibility::Eligible => {
@@ -335,6 +415,7 @@ impl QuantizedBurnpackSession {
         weight: QuantizedWeight,
     ) -> Result<StagedTensorSummary> {
         self.ensure_mutable()?;
+        self.ensure_provenance_unbound()?;
         self.validate_name(name)?;
         self.append_quantized_inner(name, weight)
     }
@@ -351,16 +432,7 @@ impl QuantizedBurnpackSession {
             });
         }
 
-        self.manifest.packed_execution = if self
-            .manifest
-            .tensors
-            .values()
-            .all(|metadata| metadata.validate_burn_qfloat_layout().is_ok())
-        {
-            PackedExecutionSupport::BurnQFloatMatmul
-        } else {
-            PackedExecutionSupport::Unavailable
-        };
+        self.manifest.packed_execution = packed_execution_support(&self.manifest);
 
         let manifest_bytes = self.manifest.to_json_pretty()?.into_bytes();
         self.check_manifest_size(manifest_bytes.len())?;
@@ -412,6 +484,7 @@ impl QuantizedBurnpackSession {
     ) -> Result<StagedTensorSummary> {
         let metadata = weight.metadata().clone();
         metadata.validate()?;
+        let payload_sha256 = quantized_payload_sha256(weight.packed_values(), weight.scales());
         let payload_bytes = metadata
             .packed_value_bytes
             .checked_add(metadata.scale_bytes)
@@ -462,6 +535,7 @@ impl QuantizedBurnpackSession {
             StagedTensor {
                 offset,
                 payload_bytes,
+                payload_sha256,
             },
         );
         self.stats.tensor_count += 1;
@@ -595,6 +669,15 @@ impl QuantizedBurnpackSession {
         }
     }
 
+    /// Prevents late staging from invalidating an already bound v2 manifest.
+    fn ensure_provenance_unbound(&self) -> Result<()> {
+        if self.manifest.provenance.is_some() {
+            Err(QuantizationError::ProvenanceAlreadyBound)
+        } else {
+            Ok(())
+        }
+    }
+
     fn staging_file_mut(&mut self) -> Result<&mut File> {
         self.staging_file
             .as_mut()
@@ -710,6 +793,14 @@ impl QuantizedBurnpackSession {
             .len();
         drop(artifact_file);
 
+        // Re-open through the production reader and validate every payload before
+        // publication. This binds the bytes actually emitted by Burn Store—not
+        // merely the in-memory values that were intended for staging—to the v2
+        // manifest digests. Validation retains at most one payload at a time.
+        let mut completed = QuantizedBurnpackArtifact::open(&temporary_path)?;
+        completed.validate_all()?;
+        drop(completed);
+
         fs::hard_link(&temporary_path, &self.output_path).map_err(|source| {
             if source.kind() == std::io::ErrorKind::AlreadyExists {
                 QuantizationError::OutputAlreadyExists {
@@ -819,6 +910,19 @@ impl QuantizedBurnpackSession {
         self.staging_file.as_ref().unwrap().set_len(length).unwrap();
     }
 
+    #[cfg(test)]
+    /// Flips selected bits in one staged byte to exercise publication verification.
+    pub(super) fn xor_staging_byte_for_test(&mut self, offset: u64, mask: u8) {
+        let file = self.staging_file.as_mut().unwrap();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        let mut byte = [0_u8; 1];
+        file.read_exact(&mut byte).unwrap();
+        byte[0] ^= mask;
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.write_all(&byte).unwrap();
+        file.seek(SeekFrom::End(0)).unwrap();
+    }
+
     fn close_staging(&mut self) {
         if let Some(file) = self.staging_file.take() {
             drop(file);
@@ -920,6 +1024,7 @@ impl QuantizedBurnpackArtifact {
             }
         })?;
         let expected = payload_len_usize(metadata)?;
+        let expected_sha256 = metadata.payload_sha256.clone();
         let data = materialize_store_tensor(&mut self.store, name)?.ok_or_else(|| {
             QuantizationError::InvalidArtifactTensor {
                 name: name.to_owned(),
@@ -927,18 +1032,41 @@ impl QuantizedBurnpackArtifact {
             }
         })?;
         validate_u8_payload_descriptor(name, &data, expected)?;
+        if let Some(expected_sha256) = expected_sha256 {
+            let actual_sha256 = packed_payload_sha256(data.as_bytes());
+            if actual_sha256 != expected_sha256 {
+                return Err(QuantizationError::PackedPayloadDigestMismatch {
+                    name: name.to_owned(),
+                    expected: expected_sha256,
+                    actual: actual_sha256,
+                });
+            }
+        }
         Ok(data)
     }
 
     /// Materializes, decodes, and validates one packed tensor for reference execution.
+    ///
+    /// Version-two payloads are copied out of their mutable memory mapping before
+    /// hashing. The digest therefore content-verifies the exact owned bytes decoded
+    /// below, and is computed exactly once per call. The subsequent trusted
+    /// constructor skips only the duplicate hash; it still validates metadata,
+    /// lengths, scales, and every packed code.
     pub fn read_weight(&mut self, name: &str) -> Result<QuantizedWeight> {
         let metadata = self.manifest.tensors.get(name).cloned().ok_or_else(|| {
             QuantizationError::QuantizedTensorNotFound {
                 name: name.to_owned(),
             }
         })?;
-        let data = self.tensor_payload(name)?;
-        decode_payload(metadata, data.as_bytes())
+        let expected = payload_len_usize(&metadata)?;
+        let data = materialize_store_tensor(&mut self.store, name)?.ok_or_else(|| {
+            QuantizationError::InvalidArtifactTensor {
+                name: name.to_owned(),
+                reason: "manifest key is missing from Burnpack tensor map".into(),
+            }
+        })?;
+        validate_u8_payload_descriptor(name, &data, expected)?;
+        decode_payload(name, metadata, data.as_bytes())
     }
 
     /// Sequentially materializes and validates all payloads, dropping each before the next.
@@ -967,7 +1095,52 @@ impl QuantizedBurnpackArtifact {
     }
 }
 
-fn decode_payload(metadata: QuantizedTensorMetadata, bytes: &[u8]) -> Result<QuantizedWeight> {
+/// Computes the exact persisted packed-execution discriminator.
+fn packed_execution_support(manifest: &BurnpackQuantizationManifest) -> PackedExecutionSupport {
+    if !manifest.tensors.is_empty()
+        && manifest
+            .tensors
+            .values()
+            .all(|metadata| metadata.validate_burn_qfloat_layout().is_ok())
+    {
+        PackedExecutionSupport::BurnQFloatMatmul
+    } else {
+        PackedExecutionSupport::Unavailable
+    }
+}
+
+/// Conservatively estimates late-bound checkpoint provenance before JSON allocation.
+fn estimated_provenance_bytes(provenance: &BurnpackProvenance) -> Result<u64> {
+    provenance.validate()?;
+    provenance.checkpoint_shards.keys().try_fold(
+        MANIFEST_PROVENANCE_BASE_OVERHEAD,
+        |estimate, path| {
+            let escaped_path = u64::try_from(path.len())
+                .ok()
+                .and_then(|length| length.checked_mul(JSON_STRING_ESCAPE_FACTOR))
+                .ok_or(QuantizationError::ByteLengthOverflow {
+                    context: "escaped provenance shard path estimate",
+                })?;
+            estimate
+                .checked_add(MANIFEST_PROVENANCE_SHARD_OVERHEAD)
+                .and_then(|estimate| estimate.checked_add(escaped_path))
+                .ok_or(QuantizationError::ByteLengthOverflow {
+                    context: "checkpoint provenance manifest estimate",
+                })
+        },
+    )
+}
+
+/// Copies, content-verifies, decodes, and semantically validates one mapped payload.
+///
+/// Hashing occurs only after the complete canonical payload is owned. This order
+/// prevents a concurrently mutated mapping from changing between the integrity
+/// check and the copy consumed by reference execution.
+fn decode_payload(
+    name: &str,
+    metadata: QuantizedTensorMetadata,
+    bytes: &[u8],
+) -> Result<QuantizedWeight> {
     let packed_len = usize::try_from(metadata.packed_value_bytes).map_err(|_| {
         QuantizationError::ByteLengthOverflow {
             context: "packed payload host length",
@@ -986,19 +1159,33 @@ fn decode_payload(metadata: QuantizedTensorMetadata, bytes: &[u8]) -> Result<Qua
             })?;
     if bytes.len() != expected {
         return Err(QuantizationError::InvalidArtifactTensor {
-            name: "<decoded payload>".into(),
+            name: name.to_owned(),
             reason: format!("payload has {} bytes, expected {expected}", bytes.len()),
         });
     }
 
-    let mut packed = Vec::new();
-    packed
-        .try_reserve_exact(packed_len)
+    let mut owned_payload = Vec::new();
+    owned_payload
+        .try_reserve_exact(expected)
         .map_err(|_| QuantizationError::AllocationFailed {
-            context: "mapped packed-value copy",
-            requested: packed_len,
+            context: "mapped quantized-payload copy",
+            requested: expected,
         })?;
-    packed.extend_from_slice(&bytes[..packed_len]);
+    owned_payload.extend_from_slice(bytes);
+
+    if let Some(expected_sha256) = &metadata.payload_sha256 {
+        let actual_sha256 = packed_payload_sha256(&owned_payload);
+        if actual_sha256 != *expected_sha256 {
+            return Err(QuantizationError::PackedPayloadDigestMismatch {
+                name: name.to_owned(),
+                expected: expected_sha256.clone(),
+                actual: actual_sha256,
+            });
+        }
+    }
+
+    let scale_bytes = owned_payload.split_off(packed_len);
+    let packed = owned_payload;
 
     if !scale_len.is_multiple_of(4) {
         return Err(QuantizationError::InvalidMetadata {
@@ -1013,10 +1200,10 @@ fn decode_payload(metadata: QuantizedTensorMetadata, bytes: &[u8]) -> Result<Qua
             context: "mapped quantization scales",
             requested: scale_count,
         })?;
-    for chunk in bytes[packed_len..].chunks_exact(4) {
+    for chunk in scale_bytes.chunks_exact(4) {
         scales.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
-    QuantizedWeight::from_parts(metadata, packed, scales)
+    QuantizedWeight::from_payload_digest_verified_parts(metadata, packed, scales)
 }
 
 fn validate_store_descriptors(

@@ -1,4 +1,7 @@
-use std::io::{self, Write};
+use std::{
+    collections::BTreeMap,
+    io::{self, Write},
+};
 
 use burn::{
     backend::Flex,
@@ -446,6 +449,41 @@ fn persisted_parts_validate_lengths_scales_and_reserved_codes() {
 }
 
 #[test]
+fn digest_verified_constructor_skips_only_the_completed_integrity_check() {
+    let weight = quantize_tensor_data(
+        &TensorData::new(vec![1.0_f32; 32], [4, 8]),
+        config(SymmetricQuantization::Q8, 32),
+    )
+    .unwrap();
+    let (mut metadata, packed, scales) = weight.into_parts();
+    metadata.payload_sha256 = Some("0".repeat(64));
+
+    assert!(matches!(
+        QuantizedWeight::from_parts(metadata.clone(), packed.clone(), scales.clone()),
+        Err(QuantizationError::PackedPayloadDigestMismatch { .. })
+    ));
+
+    let trusted = QuantizedWeight::from_payload_digest_verified_parts(
+        metadata.clone(),
+        packed.clone(),
+        scales.clone(),
+    )
+    .unwrap();
+    assert_eq!(trusted.packed_values(), packed);
+    assert_eq!(trusted.scales(), scales);
+
+    let mut invalid_codes = packed;
+    invalid_codes[0] = 0x80;
+    assert!(matches!(
+        QuantizedWeight::from_payload_digest_verified_parts(metadata, invalid_codes, scales),
+        Err(QuantizationError::InvalidQuantizedValue {
+            index: 0,
+            value: -128
+        })
+    ));
+}
+
+#[test]
 fn metadata_redundancy_detects_tampering() {
     let mut metadata = QuantizedTensorMetadata::new(
         &[4, 8],
@@ -509,8 +547,7 @@ fn manifest_json_is_deterministic_validated_and_sorted() {
         config(SymmetricQuantization::Q4, 128),
     )
     .unwrap();
-    let mut manifest = BurnpackQuantizationManifest::new();
-    assert_eq!(manifest, BurnpackQuantizationManifest::default());
+    let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
     manifest.insert("z.weight", q8).unwrap();
     manifest.insert("a.weight", q4).unwrap();
     let json = manifest.to_json_pretty().unwrap();
@@ -552,7 +589,7 @@ fn manifest_json_is_deterministic_validated_and_sorted() {
         Err(QuantizationError::UnsupportedFormatVersion { version: 99 })
     ));
 
-    manifest.format_version = BURNPACK_QUANTIZATION_FORMAT_VERSION;
+    manifest.format_version = BURNPACK_QUANTIZATION_FORMAT_VERSION_V1;
     manifest.tensors.insert(
         String::new(),
         QuantizedTensorMetadata::new(
@@ -576,7 +613,7 @@ fn manifest_rejects_unknown_fields_and_invalid_derived_counts() {
         WeightQuantizationConfig::default(),
     )
     .unwrap();
-    let mut manifest = BurnpackQuantizationManifest::new();
+    let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
     manifest.insert("x.weight", metadata).unwrap();
     let json = manifest.to_json_pretty().unwrap();
     let with_unknown = json.replacen('{', "{\"unknown\":true,", 1);
@@ -586,6 +623,76 @@ fn manifest_rejects_unknown_fields_and_invalid_derived_counts() {
     assert!(matches!(
         BurnpackQuantizationManifest::from_json(&invalid_count),
         Err(QuantizationError::InvalidMetadata { .. })
+    ));
+}
+
+#[test]
+fn manifest_v2_requires_provenance_while_v1_remains_compatible() {
+    let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
+    manifest
+        .insert(
+            "x.weight",
+            QuantizedTensorMetadata::new(
+                &[32, 32],
+                SourceFloatDType::F32,
+                WeightQuantizationConfig::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let v1_json = manifest.to_json_pretty().unwrap();
+    assert!(!v1_json.contains("provenance"));
+    assert!(!v1_json.contains("payload_sha256"));
+    assert_eq!(
+        BurnpackQuantizationManifest::from_json(&v1_json).unwrap(),
+        manifest
+    );
+
+    manifest.format_version = BURNPACK_QUANTIZATION_FORMAT_VERSION_V2;
+    assert!(matches!(
+        manifest.validate(),
+        Err(QuantizationError::InvalidProvenance { .. })
+    ));
+
+    manifest.format_version = BURNPACK_QUANTIZATION_FORMAT_VERSION_V1;
+    manifest.tensors.get_mut("x.weight").unwrap().payload_sha256 = Some("3".repeat(64));
+    manifest
+        .bind_provenance(BurnpackProvenance {
+            load_plan_sha256: "1".repeat(64),
+            checkpoint_shards: BTreeMap::from([(
+                "model.safetensors".into(),
+                BurnpackShardProvenance {
+                    file_bytes: 4096,
+                    sha256: "2".repeat(64),
+                },
+            )]),
+        })
+        .unwrap();
+    assert_eq!(
+        manifest.format_version,
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_V2
+    );
+    let v2_json = manifest.to_json_pretty().unwrap();
+    assert_eq!(
+        BurnpackQuantizationManifest::from_json(&v2_json).unwrap(),
+        manifest
+    );
+
+    let mut missing_payload_digest = manifest.clone();
+    missing_payload_digest
+        .tensors
+        .get_mut("x.weight")
+        .unwrap()
+        .payload_sha256 = None;
+    assert!(matches!(
+        missing_payload_digest.validate(),
+        Err(QuantizationError::InvalidProvenance { .. })
+    ));
+
+    manifest.format_version = BURNPACK_QUANTIZATION_FORMAT_VERSION_V1;
+    assert!(matches!(
+        manifest.validate(),
+        Err(QuantizationError::InvalidProvenance { .. })
     ));
 }
 
@@ -694,7 +801,7 @@ fn packed_backend_execution_is_explicitly_unavailable() {
         Err(QuantizationError::PackedExecutionUnavailable)
     ));
     assert_eq!(
-        BurnpackQuantizationManifest::new().packed_execution,
+        BurnpackQuantizationManifest::new_legacy_v1().packed_execution,
         support
     );
 }

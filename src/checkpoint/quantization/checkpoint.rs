@@ -13,6 +13,12 @@
 //! MTP weights are validated and reported but remain in the source checkpoint.
 //! Aliases consume no duplicate payload; their topology remains in the strict
 //! checkpoint report.
+//!
+//! Architecture-aware conversion emits provenance-bearing format v2. It hashes
+//! every complete source shard before and after pass two and refuses publication
+//! if the identities differ, then binds the stable source inventory to a canonical
+//! SHA-256 of the exact load-plan transformations. Direct low-level Burnpack write
+//! sessions remain available for backward-compatible v1 artifacts.
 
 use std::{
     error::Error as StdError,
@@ -23,9 +29,10 @@ use std::{
 use burn::tensor::TensorData;
 
 use super::{
-    BurnpackAppendOutcome, BurnpackArtifactSummary, BurnpackSessionLimits, BurnpackStagingStats,
-    QuantizationError, QuantizationExclusion, QuantizedBurnpackSession, SymmetricQuantization,
-    WeightQuantizationConfig,
+    BurnpackAppendOutcome, BurnpackArtifactSummary, BurnpackProvenance, BurnpackSessionLimits,
+    BurnpackStagingStats, QuantizationError, QuantizationExclusion, QuantizedBurnpackSession,
+    SymmetricQuantization, WeightQuantizationConfig,
+    provenance::{ProvenanceExecutionStats, hash_local_checkpoint_provenance_audited},
 };
 use crate::checkpoint::{
     CheckpointError, CheckpointManifest, ExecutionFailureCause, ExecutionStats, LoadPlan,
@@ -67,6 +74,8 @@ pub struct CheckpointQuantizationOutcome {
     pub execution: ExecutionStats,
     /// Final writer staging counters before the private staging file was removed.
     pub staging: BurnpackStagingStats,
+    /// Full-shard hashing performed before and after conversion execution.
+    pub provenance: ProvenanceExecutionStats,
 }
 
 /// Root cause of a failed checkpoint conversion.
@@ -114,6 +123,17 @@ pub struct CheckpointQuantizationFailure {
     pub staging: BurnpackStagingStats,
     /// Targets intentionally excluded before the failure.
     pub excluded: Vec<QuantizationExclusionRecord>,
+    /// Full-shard hashing attempted before and after conversion execution.
+    pub provenance: ProvenanceExecutionStats,
+}
+
+/// Progress fields shared by every conversion failure boundary.
+struct CheckpointQuantizationProgress {
+    report: LoadReport,
+    execution: ExecutionStats,
+    staging: BurnpackStagingStats,
+    excluded: Vec<QuantizationExclusionRecord>,
+    provenance: ProvenanceExecutionStats,
 }
 
 impl fmt::Display for CheckpointQuantizationFailure {
@@ -153,6 +173,12 @@ pub type CheckpointQuantizationResult<T> =
 /// ranges, while `plan` supplies the exact architecture mapping. Publication is
 /// create-only and atomic; every error leaves `output_path` absent or preserves a
 /// file that already existed before this call.
+///
+/// Provenance requires two complete sequential reads of every source shard. This
+/// adds bounded-I/O work to offline conversion and prevents publication when an
+/// ordinary persistent checkpoint modification spans execution. It is not a
+/// hostile-filesystem authenticity guarantee: an adversarial ABA replacement
+/// restored before the second observation remains outside the contract.
 pub fn quantize_local_checkpoint_to_burnpack(
     manifest: &CheckpointManifest,
     plan: &LoadPlan,
@@ -161,18 +187,46 @@ pub fn quantize_local_checkpoint_to_burnpack(
 ) -> CheckpointQuantizationResult<CheckpointQuantizationOutcome> {
     let output_path = output_path.as_ref().to_path_buf();
     let mut report = unstarted_report(plan);
+    let mut provenance_stats = ProvenanceExecutionStats::default();
     let mut session =
         QuantizedBurnpackSession::with_limits(&output_path, options.limits).map_err(|cause| {
             conversion_failure(
                 output_path.clone(),
                 None,
                 CheckpointQuantizationFailureCause::Quantization(cause),
-                report.clone(),
-                ExecutionStats::default(),
-                BurnpackStagingStats::default(),
-                Vec::new(),
+                CheckpointQuantizationProgress {
+                    report: report.clone(),
+                    execution: ExecutionStats::default(),
+                    staging: BurnpackStagingStats::default(),
+                    excluded: Vec::new(),
+                    provenance: provenance_stats,
+                },
             )
         })?;
+
+    // Hashing on both sides of pass two prevents a source mutation from spanning
+    // conversion unnoticed. The one-MiB hash buffer is independent of model size.
+    provenance_stats.pre_execution = Some(Default::default());
+    let (initial_provenance, initial_hash_stats) =
+        match hash_local_checkpoint_provenance_audited(manifest, plan) {
+            Ok(result) => result,
+            Err(failure) => {
+                provenance_stats.pre_execution = Some(failure.stats);
+                return Err(conversion_failure(
+                    output_path,
+                    None,
+                    CheckpointQuantizationFailureCause::Quantization(failure.error),
+                    CheckpointQuantizationProgress {
+                        report,
+                        execution: ExecutionStats::default(),
+                        staging: BurnpackStagingStats::default(),
+                        excluded: Vec::new(),
+                        provenance: provenance_stats,
+                    },
+                ));
+            }
+        };
+    provenance_stats.pre_execution = Some(initial_hash_stats);
 
     let mut source = LocalShardSource::new(manifest);
     let mut sink = BurnpackQuantizationSink::new(&mut session, options.weights);
@@ -180,7 +234,7 @@ pub fn quantize_local_checkpoint_to_burnpack(
     let quantized = std::mem::take(&mut sink.quantized);
     let mut excluded = std::mem::take(&mut sink.excluded);
     drop(sink);
-    let staging = session.stats();
+    let mut staging = session.stats();
 
     let execution = match execution_result {
         Ok(execution) => execution,
@@ -201,10 +255,13 @@ pub fn quantize_local_checkpoint_to_burnpack(
                 output_path,
                 failure.failed_target,
                 cause,
-                report,
-                failure.stats,
-                staging,
-                excluded,
+                CheckpointQuantizationProgress {
+                    report,
+                    execution: failure.stats,
+                    staging,
+                    excluded,
+                    provenance: provenance_stats,
+                },
             ));
         }
     };
@@ -212,15 +269,71 @@ pub fn quantize_local_checkpoint_to_burnpack(
     report = execution.report;
     extend_quantized_report(&mut report, quantized);
     normalize_exclusions(&mut excluded);
+    provenance_stats.post_execution = Some(Default::default());
+    let (final_provenance, final_hash_stats) =
+        match hash_local_checkpoint_provenance_audited(manifest, plan) {
+            Ok(result) => result,
+            Err(failure) => {
+                provenance_stats.post_execution = Some(failure.stats);
+                return Err(conversion_failure(
+                    output_path,
+                    None,
+                    CheckpointQuantizationFailureCause::Quantization(failure.error),
+                    CheckpointQuantizationProgress {
+                        report,
+                        execution: execution.stats,
+                        staging,
+                        excluded,
+                        provenance: provenance_stats,
+                    },
+                ));
+            }
+        };
+    provenance_stats.post_execution = Some(final_hash_stats);
+    if initial_provenance != final_provenance {
+        let shard = first_changed_shard(&initial_provenance, &final_provenance);
+        return Err(conversion_failure(
+            output_path,
+            None,
+            CheckpointQuantizationFailureCause::Quantization(
+                QuantizationError::CheckpointChangedDuringQuantization { shard },
+            ),
+            CheckpointQuantizationProgress {
+                report,
+                execution: execution.stats,
+                staging,
+                excluded,
+                provenance: provenance_stats,
+            },
+        ));
+    }
+    session.bind_provenance(final_provenance).map_err(|cause| {
+        conversion_failure(
+            output_path.clone(),
+            None,
+            CheckpointQuantizationFailureCause::Quantization(cause),
+            CheckpointQuantizationProgress {
+                report: report.clone(),
+                execution: execution.stats.clone(),
+                staging,
+                excluded: excluded.clone(),
+                provenance: provenance_stats,
+            },
+        )
+    })?;
+    staging = session.stats();
     let artifact = session.finalize().map_err(|cause| {
         conversion_failure(
             output_path.clone(),
             None,
             CheckpointQuantizationFailureCause::Quantization(cause),
-            report.clone(),
-            execution.stats.clone(),
-            staging,
-            excluded.clone(),
+            CheckpointQuantizationProgress {
+                report: report.clone(),
+                execution: execution.stats.clone(),
+                staging,
+                excluded: excluded.clone(),
+                provenance: provenance_stats,
+            },
         )
     })?;
 
@@ -230,7 +343,19 @@ pub fn quantize_local_checkpoint_to_burnpack(
         excluded,
         execution: execution.stats,
         staging,
+        provenance: provenance_stats,
     })
+}
+
+/// Identifies the first source shard changed across conversion's two hash passes.
+fn first_changed_shard(before: &BurnpackProvenance, after: &BurnpackProvenance) -> String {
+    before
+        .checkpoint_shards
+        .keys()
+        .chain(after.checkpoint_shards.keys())
+        .find(|name| before.checkpoint_shards.get(*name) != after.checkpoint_shards.get(*name))
+        .cloned()
+        .unwrap_or_else(|| "<load-plan>".into())
 }
 
 /// Tensor sink that applies quantization policy after load-plan transformations.
@@ -331,19 +456,17 @@ fn conversion_failure(
     output_path: PathBuf,
     failed_target: Option<String>,
     cause: CheckpointQuantizationFailureCause,
-    report: LoadReport,
-    execution: ExecutionStats,
-    staging: BurnpackStagingStats,
-    excluded: Vec<QuantizationExclusionRecord>,
+    progress: CheckpointQuantizationProgress,
 ) -> Box<CheckpointQuantizationFailure> {
     Box::new(CheckpointQuantizationFailure {
         output_path,
         failed_target,
         cause,
-        report,
-        execution,
-        staging,
-        excluded,
+        report: progress.report,
+        execution: progress.execution,
+        staging: progress.staging,
+        excluded: progress.excluded,
+        provenance: progress.provenance,
     })
 }
 
@@ -481,9 +604,28 @@ mod tests {
         );
         assert_eq!(outcome.execution.source.tensor_reads, 3);
         assert_eq!(outcome.staging.tensor_count, 1);
+        assert!(outcome.staging.estimated_manifest_bytes >= outcome.artifact.manifest_bytes as u64);
+        let pre_hash = outcome.provenance.pre_execution.unwrap();
+        let post_hash = outcome.provenance.post_execution.unwrap();
+        for stats in [pre_hash, post_hash] {
+            assert_eq!(stats.passes_completed, 1);
+            assert_eq!(stats.shards_hashed, 1);
+            assert_eq!(stats.bytes_hashed, manifest.artifact_bytes);
+            assert_eq!(
+                stats.peak_buffer_bytes,
+                crate::checkpoint::quantization::PROVENANCE_HASH_BUFFER_BYTES
+            );
+        }
         assert!(output.is_file());
 
         let mut artifact = super::super::QuantizedBurnpackArtifact::open(&output).unwrap();
+        assert!(
+            artifact
+                .manifest()
+                .tensors
+                .values()
+                .all(|metadata| metadata.payload_sha256.is_some())
+        );
         artifact.validate_all().unwrap();
         assert_eq!(
             artifact
@@ -543,6 +685,11 @@ mod tests {
         assert_eq!(failure.report.applied, ["a.weight"]);
         assert_eq!(failure.report.quantized.len(), 1);
         assert_eq!(failure.staging.tensor_count, 1);
+        let pre_hash = failure.provenance.pre_execution.unwrap();
+        assert_eq!(pre_hash.passes_completed, 1);
+        assert_eq!(pre_hash.shards_hashed, 1);
+        assert_eq!(pre_hash.bytes_hashed, manifest.artifact_bytes);
+        assert_eq!(failure.provenance.post_execution, None);
         assert!(!output.exists());
     }
 
@@ -585,6 +732,7 @@ mod tests {
             )
         ));
         assert_eq!(failure.execution.source.tensor_reads, 0);
+        assert_eq!(failure.provenance, Default::default());
         assert_eq!(std::fs::read(&output).unwrap(), b"original");
     }
 }

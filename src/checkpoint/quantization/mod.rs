@@ -27,6 +27,7 @@ mod error;
 mod load;
 mod manifest;
 mod policy;
+mod provenance;
 mod reference;
 
 pub use burnpack::{
@@ -50,11 +51,18 @@ pub use load::{
     execute_local_quantized_load_plan, execute_quantized_load_plan, validate_sidecar_contract,
 };
 pub use manifest::{
-    BURNPACK_QUANTIZATION_FORMAT_VERSION, BurnpackByteOrder, BurnpackQuantizationManifest,
-    PackedExecutionSupport, QuantizedTensorMetadata, SourceFloatDType,
+    BURNPACK_QUANTIZATION_FORMAT_VERSION, BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT,
+    BURNPACK_QUANTIZATION_FORMAT_VERSION_V1, BURNPACK_QUANTIZATION_FORMAT_VERSION_V2,
+    BurnpackByteOrder, BurnpackQuantizationManifest, PackedExecutionSupport,
+    QuantizedTensorMetadata, SourceFloatDType,
 };
 pub use policy::{
     QuantizationEligibility, QuantizationExclusion, classify_weight_for_quantization,
+};
+pub use provenance::{
+    BurnpackProvenance, BurnpackShardProvenance, PROVENANCE_HASH_BUFFER_BYTES,
+    ProvenanceExecutionStats, ProvenanceHashStats, hash_local_checkpoint_provenance,
+    load_plan_sha256, verify_load_plan_provenance, verify_local_checkpoint_provenance,
 };
 pub use reference::{
     QuantizedWeight, ReferenceQuantizationStats, WeightQuantizationOutcome, quantize_tensor_data,

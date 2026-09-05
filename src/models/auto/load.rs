@@ -44,6 +44,9 @@ use burn::tensor::backend::Backend;
 const MAX_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_GENERATION_CONFIG_BYTES: u64 = 1024 * 1024;
 
+/// Causal families whose packed installation path has an acceptance contract.
+const PACKED_CAUSAL_MODEL_TYPES: &[&str] = &["qwen3_5_text"];
+
 /// Host-side policy for automatic local model loading.
 #[derive(Debug, Clone)]
 pub struct AutoLoadOptions {
@@ -96,9 +99,12 @@ impl<B: Backend> AutoCausalLm<B> {
                 "Qwen MTP is defined only for qwen3_5_text checkpoints",
             ));
         }
-        if options.quantized_burnpack.is_some() && model_type != "qwen3_5_text" {
+        if options.quantized_burnpack.is_some()
+            && !PACKED_CAUSAL_MODEL_TYPES.contains(&model_type.as_str())
+        {
             return Err(Error::BackendCapability(format!(
-                "packed Burnpack loading for `{model_type}` is not yet certified; v1 currently enables automatic packed execution only for qwen3_5_text"
+                "packed Burnpack loading for `{model_type}` is not yet certified; automatic packed execution is limited to {}",
+                PACKED_CAUSAL_MODEL_TYPES.join(", ")
             )));
         }
         match model_type.as_str() {
@@ -351,8 +357,8 @@ where
 
 /// Retains generic source execution counters from one packed-overlay load.
 ///
-/// Burnpack reads have a separate [`crate::checkpoint::quantization::PackedLoadStats`]
-/// audit at the lower-level API. [`LoadedModel`] carries the checkpoint executor's
+/// Burnpack reads and provenance hash passes have separate audits on the
+/// lower-level quantized outcome. [`LoadedModel`] carries the checkpoint executor's
 /// [`crate::checkpoint::ExecutionStats`], whose source and host-staging counters
 /// have identical meaning for full-precision and packed-overlay execution.
 fn checkpoint_execution_from_quantized(outcome: QuantizedExecutionOutcome) -> ExecutionOutcome {
@@ -714,7 +720,7 @@ mod tests {
 
     use burn::{
         backend::Flex,
-        tensor::{Int, Tensor},
+        tensor::{DType, Int, Tensor},
     };
     use serde_json::{Map, Value, json};
 
@@ -722,9 +728,13 @@ mod tests {
     use crate::{
         CausalLmInput, ForwardOptions, Seq2SeqInput,
         checkpoint::{
-            ExecutionStats, ExpectedTensor, LoadReport, MappingPlan, SourceStats, TensorOperation,
-            TensorTransform,
-            quantization::{PackedLoadStats, QuantizedExecutionOutcome},
+            CheckpointManifest, ExecutionStats, ExpectedTensor, LoadReport, MappingPlan,
+            SourceStats, TensorOperation, TensorTransform,
+            quantization::{
+                BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, PackedLoadStats, ProvenanceExecutionStats,
+                QuantizedBurnpackArtifact, QuantizedCheckpointOptions, QuantizedExecutionOutcome,
+                quantize_local_checkpoint_to_burnpack,
+            },
         },
         models::{
             deepseek_v2::model::tests_support::tiny_config as tiny_deepseek_config,
@@ -994,6 +1004,7 @@ mod tests {
                 largest_payload_bytes: 48,
                 tensors_applied: 1,
             },
+            provenance: ProvenanceExecutionStats::default(),
         });
 
         assert_eq!(converted.report, report);
@@ -1002,11 +1013,11 @@ mod tests {
 
     /// Automatic packed loading rejects families without a completed backend gate.
     #[test]
-    fn automatic_packed_loading_is_limited_to_certified_qwen_hybrid_models() {
+    fn automatic_packed_loading_rejects_uncertified_causal_families() {
         let root = tempfile::tempdir().expect("temporary model root");
         std::fs::write(
             root.path().join("config.json"),
-            serde_json::to_vec(&Qwen3MoeConfig::default()).expect("serializable config"),
+            serde_json::to_vec(&tiny_deepseek_config()).expect("serializable config"),
         )
         .expect("config fixture");
         let error = AutoCausalLm::<TestBackend>::load_local(
@@ -1020,6 +1031,122 @@ mod tests {
         )
         .expect_err("uncertified family must fail before checkpoint discovery");
         assert!(matches!(error, Error::BackendCapability(_)));
+    }
+
+    /// Qwen3-MoE uses the public automatic path for a provenance-bound packed overlay.
+    #[test]
+    #[ignore = "enable after real Qwen3-MoE Q4/Q8 checkpoint acceptance passes"]
+    fn automatic_qwen3_moe_loads_v2_quantized_burnpack() {
+        let root = tempfile::tempdir().expect("temporary model root");
+        let config = Qwen3MoeConfig {
+            vocab_size: 64,
+            hidden_size: 64,
+            intermediate_size: 64,
+            num_hidden_layers: 1,
+            num_attention_heads: 4,
+            num_key_value_heads: 2,
+            head_dim: 16,
+            max_position_embeddings: 16,
+            max_window_layers: 1,
+            decoder_sparse_step: 1,
+            moe_intermediate_size: 64,
+            num_experts: 2,
+            num_experts_per_tok: 1,
+            norm_topk_prob: true,
+            eos_token_id: Some(TokenIds::One(3)),
+            pad_token_id: Some(TokenIds::One(0)),
+            ..Qwen3MoeConfig::default()
+        };
+        let contract = config
+            .checkpoint_contract(Qwen3MoeCheckpointOptions::default())
+            .expect("valid packed Qwen3-MoE contract");
+        write_auto_metadata(root.path(), &config);
+        write_contract_checkpoint(
+            root.path(),
+            contract.expected_tensors(),
+            contract.mappings(),
+        );
+        let load_options = LoadOptions::default();
+        let checkpoint = CheckpointManifest::discover(root.path(), &load_options)
+            .expect("discover tiny Qwen3-MoE checkpoint");
+        let plan = contract
+            .build_load_plan(&checkpoint, &load_options)
+            .expect("plan tiny Qwen3-MoE checkpoint");
+        let burnpack = root.path().join("weights.bpk");
+        let converted = quantize_local_checkpoint_to_burnpack(
+            &checkpoint,
+            &plan,
+            &burnpack,
+            QuantizedCheckpointOptions::default(),
+        )
+        .expect("convert tiny Qwen3-MoE Burnpack");
+        assert_eq!(converted.report.quantized.len(), 11);
+        let artifact =
+            QuantizedBurnpackArtifact::open(&burnpack).expect("open tiny Qwen3-MoE Burnpack");
+        assert_eq!(
+            artifact.manifest().format_version,
+            BURNPACK_QUANTIZATION_FORMAT_VERSION_V2
+        );
+        assert!(artifact.manifest().provenance.is_some());
+        drop(artifact);
+
+        let repository = "Qwen/tiny-qwen3-moe-packed-fixture";
+        let revision = "qwen3-moe-packed-fixture-revision";
+        let loaded = AutoCausalLm::<TestBackend>::load_local(
+            root.path(),
+            &AutoLoadOptions {
+                quantized_burnpack: Some(PathBuf::from("weights.bpk")),
+                ..fixture_options(repository, revision)
+            },
+            &Default::default(),
+        )
+        .expect("automatic packed Qwen3-MoE load");
+
+        let model = match loaded.model() {
+            AutoCausalLm::Qwen3Moe(model) => model,
+            model => panic!("expected Qwen3-MoE automatic variant, found {model:?}"),
+        };
+        assert!(matches!(
+            model
+                .lm_head
+                .as_ref()
+                .expect("untied fixture LM head")
+                .weight
+                .val()
+                .dtype(),
+            DType::QFloat(_)
+        ));
+        assert_eq!(model.model.embed_tokens.weight.val().dtype(), DType::F32);
+        assert!(loaded.load_report().is_strictly_valid());
+        assert_eq!(
+            loaded.load_report().applied.len(),
+            contract.expected_tensors().len()
+        );
+        assert_eq!(loaded.load_report().quantized.len(), 11);
+        assert!(
+            loaded
+                .load_report()
+                .quantized
+                .iter()
+                .all(|record| { record.scheme == "burn-qfloat-symmetric-q8-g64-block-1xg" })
+        );
+        let execution = loaded
+            .execution_stats()
+            .expect("automatic packed load retains checkpoint counters");
+        assert_eq!(execution.source_reads, 7);
+        assert_eq!(execution.source_payload_bytes, 17_792);
+        assert_eq!(execution.source.shard_opens, 1);
+        assert_eq!(execution.source.max_open_shards, 1);
+        assert_bundle_metadata(
+            &loaded,
+            root.path(),
+            "qwen3_moe",
+            repository,
+            revision,
+            &[3],
+            0,
+        );
+        assert_finite_forward(&loaded, config.vocab_size);
     }
 
     /// Model tokens provide defaults and local sampling metadata overrides them.

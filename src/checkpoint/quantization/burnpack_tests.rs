@@ -53,6 +53,19 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> usize {
         .expect("fixture payload must occur in Burnpack bytes")
 }
 
+fn fixture_provenance() -> BurnpackProvenance {
+    BurnpackProvenance {
+        load_plan_sha256: "1".repeat(64),
+        checkpoint_shards: std::collections::BTreeMap::from([(
+            "model.safetensors".into(),
+            BurnpackShardProvenance {
+                file_bytes: 128,
+                sha256: "2".repeat(64),
+            },
+        )]),
+    }
+}
+
 #[test]
 fn official_burnpack_round_trip_preserves_exact_payloads_and_metadata() {
     let directory = tempdir().unwrap();
@@ -417,6 +430,61 @@ fn successful_finalization_closes_mutation_and_leaves_no_partial_file() {
 }
 
 #[test]
+fn provenance_binding_adds_payload_digests_updates_size_and_freezes_staging() {
+    let directory = tempdir().unwrap();
+    let output = directory.path().join("bound.bpk");
+    let source = TensorData::new(vec![1.0_f32; 64], [8, 8]);
+    let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+    session
+        .append("q.weight", &source, WeightQuantizationConfig::default())
+        .unwrap();
+    let estimate_before = session.stats().estimated_manifest_bytes;
+
+    session.bind_provenance(fixture_provenance()).unwrap();
+
+    let manifest_bytes = session.manifest().to_json_pretty().unwrap().len() as u64;
+    assert_eq!(session.manifest().format_version, 2);
+    assert!(
+        session.manifest().tensors["q.weight"]
+            .payload_sha256
+            .is_some()
+    );
+    assert!(session.stats().estimated_manifest_bytes >= estimate_before);
+    assert!(session.stats().estimated_manifest_bytes >= manifest_bytes);
+    assert!(matches!(
+        session.append("k.weight", &source, WeightQuantizationConfig::default()),
+        Err(QuantizationError::ProvenanceAlreadyBound)
+    ));
+    assert!(matches!(
+        session.bind_provenance(fixture_provenance()),
+        Err(QuantizationError::ProvenanceAlreadyBound)
+    ));
+
+    session.finalize().unwrap();
+    let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+    artifact.validate_all().unwrap();
+}
+
+#[test]
+fn v2_same_size_staging_corruption_is_rejected_before_publication() {
+    let directory = tempdir().unwrap();
+    let output = directory.path().join("staging-content-corrupt.bpk");
+    let source = TensorData::new(vec![1.0_f32; 64], [8, 8]);
+    let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+    session
+        .append("q.weight", &source, WeightQuantizationConfig::default())
+        .unwrap();
+    session.bind_provenance(fixture_provenance()).unwrap();
+    session.xor_staging_byte_for_test(0, 1);
+
+    assert!(matches!(
+        session.finalize(),
+        Err(QuantizationError::PackedPayloadDigestMismatch { .. })
+    ));
+    assert!(!output.exists());
+}
+
+#[test]
 fn unexpected_staging_mutation_is_detected_before_another_append() {
     let directory = tempdir().unwrap();
     let output = directory.path().join("stage-corrupt.bpk");
@@ -443,6 +511,10 @@ fn empty_session_is_still_a_valid_official_burnpack() {
     let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
     assert!(artifact.manifest().tensors.is_empty());
     assert_eq!(
+        artifact.manifest().packed_execution,
+        PackedExecutionSupport::Unavailable
+    );
+    assert_eq!(
         artifact.validate_all().unwrap(),
         BurnpackValidationReport {
             tensor_count: 0,
@@ -465,7 +537,7 @@ fn missing_manifest_and_unexpected_or_missing_payloads_are_rejected() {
     ));
 
     let unexpected = directory.path().join("unexpected.bpk");
-    let empty_manifest = BurnpackQuantizationManifest::new();
+    let empty_manifest = BurnpackQuantizationManifest::new_legacy_v1();
     write_official(
         &unexpected,
         vec![
@@ -485,7 +557,7 @@ fn missing_manifest_and_unexpected_or_missing_payloads_are_rejected() {
         WeightQuantizationConfig::default(),
     )
     .unwrap();
-    let mut manifest = BurnpackQuantizationManifest::new();
+    let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
     manifest.insert("q.weight", metadata).unwrap();
     write_official(
         &missing_payload,
@@ -506,7 +578,7 @@ fn physical_dtype_and_shape_must_match_the_reserved_u8_contract() {
         WeightQuantizationConfig::default(),
     )
     .unwrap();
-    let mut manifest = BurnpackQuantizationManifest::new();
+    let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
     manifest.insert("q.weight", metadata).unwrap();
 
     let wrong_shape = directory.path().join("wrong-shape.bpk");

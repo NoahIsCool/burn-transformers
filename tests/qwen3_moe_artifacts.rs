@@ -97,9 +97,10 @@ use transformers::{
     CausalLanguageModel,
     checkpoint::ExecutionStats,
     checkpoint::quantization::{
-        QuantizedBurnpackArtifact, QuantizedCheckpointOptions, SourceFloatDType,
-        execute_local_quantized_load_plan, quantize_local_checkpoint_to_burnpack,
-        validate_sidecar_contract,
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, PROVENANCE_HASH_BUFFER_BYTES,
+        ProvenanceExecutionStats, QuantizedBurnpackArtifact, QuantizedCheckpointOptions,
+        SourceFloatDType, execute_local_quantized_load_plan, load_plan_sha256,
+        quantize_local_checkpoint_to_burnpack, validate_sidecar_contract,
     },
 };
 
@@ -151,6 +152,9 @@ const PACKED_DECODE_MATMUL_LAUNCHES: usize = 1_345;
 
 /// Exact BF16 bytes consumed by full-precision loading and sidecar conversion.
 const CHECKPOINT_TENSOR_BYTES: u64 = 61_064_245_248;
+
+/// Exact bytes hashed across the 16 complete SafeTensors shard files.
+const CHECKPOINT_ARTIFACT_BYTES: u64 = 61_066_575_648;
 
 /// Largest single checkpoint tensor and runtime staging allocation.
 const LARGEST_CHECKPOINT_TENSOR_BYTES: u64 = 622_329_856;
@@ -460,7 +464,7 @@ fn validates_pinned_qwen3_moe_config_headers_plan_memory_and_tokenizer() {
     assert_eq!(manifest.shards.len(), 16);
     assert_eq!(manifest.tensors.len(), PARAMETER_COUNT);
     assert_eq!(manifest.tensor_bytes, CHECKPOINT_TENSOR_BYTES);
-    assert_eq!(manifest.artifact_bytes, 61_066_575_648);
+    assert_eq!(manifest.artifact_bytes, CHECKPOINT_ARTIFACT_BYTES);
     assert_eq!(header_inventory_digest(&manifest), HEADER_INVENTORY_SHA256);
     let expected_shards = (1..=16)
         .map(|index| format!("model-{index:05}-of-00016.safetensors"))
@@ -538,7 +542,7 @@ fn validates_pinned_qwen3_moe_config_headers_plan_memory_and_tokenizer() {
         .collect::<BTreeSet<_>>();
     let physical_sources = manifest.tensors.keys().map(String::as_str).collect();
     assert_eq!(planned_sources, physical_sources);
-    assert_eq!(plan.memory.artifact_bytes, 61_066_575_648);
+    assert_eq!(plan.memory.artifact_bytes, CHECKPOINT_ARTIFACT_BYTES);
     assert_eq!(plan.memory.checkpoint_tensor_bytes, CHECKPOINT_TENSOR_BYTES);
     assert_eq!(plan.memory.target_parameter_bytes, CHECKPOINT_TENSOR_BYTES);
     assert_eq!(plan.memory.logical_model_bytes, CHECKPOINT_TENSOR_BYTES);
@@ -1098,7 +1102,7 @@ fn quantize_pinned_qwen3_moe_weights_to_burnpack(
     assert_control_file_hashes(&root);
     assert_shard_file_hashes(&root);
     let output = explicit_external_burnpack_path(&root, output_environment, false);
-    let (_, manifest, plan) = pinned_qwen3_moe_plan(&root, LoadOptions::default());
+    let (_, manifest, plan) = pinned_qwen3_moe_plan(&root, metal_f16_load_options());
     let (expected_quantized, expected_excluded) = qwen3_moe_quantization_partition(&plan);
     assert_qwen3_moe_quantization_partition(&expected_quantized, &expected_excluded);
     assert_eq!(
@@ -1133,7 +1137,10 @@ fn quantize_pinned_qwen3_moe_weights_to_burnpack(
     assert_eq!(outcome.report.applied.len(), PARAMETER_COUNT);
     assert_eq!(outcome.report.transformed.len(), 18_480);
     assert!(outcome.report.aliased.is_empty());
-    assert!(outcome.report.dtype_converted.is_empty());
+    assert_eq!(outcome.report.dtype_converted.len(), PARAMETER_COUNT);
+    assert!(outcome.report.dtype_converted.iter().all(|conversion| {
+        conversion.source == TensorDType::BF16 && conversion.target_dtype == TensorDType::F16
+    }));
     assert!(outcome.report.allowlisted_ignored.is_empty());
     assert!(outcome.report.allowlisted_missing.is_empty());
     assert_eq!(
@@ -1166,6 +1173,7 @@ fn quantize_pinned_qwen3_moe_weights_to_burnpack(
         expected_excluded
     );
     assert_complete_qwen3_moe_source_execution(&outcome.execution);
+    assert_complete_qwen3_moe_provenance(outcome.provenance);
 
     assert_eq!(outcome.staging.tensor_count, QUANTIZED_PARAMETER_COUNT);
     assert_eq!(outcome.staging.staged_payload_bytes, expected_payload_bytes);
@@ -1221,10 +1229,11 @@ fn quantize_pinned_qwen3_moe_weights_to_burnpack(
 
 /// Loads a complete sidecar through the public quantized-plan executor and runs it.
 ///
-/// The automatic registry deliberately does not advertise packed Qwen3-MoE yet.
-/// This acceptance gate therefore uses the lower-level public executor with the
-/// exact family sink. Success establishes the artifact, loader, packed parameter,
-/// routing, stateless, KV-prefill, and decode path needed before registry exposure.
+/// The automatic registry uses this same executor for packed Qwen3-MoE loading.
+/// This acceptance gate calls the lower-level API directly so it can additionally
+/// certify packed-payload and provenance-hash counters that
+/// [`transformers::LoadedModel`] intentionally does not retain. The concrete sink
+/// and execution semantics are otherwise exact.
 #[cfg(all(feature = "metal", not(feature = "rocm")))]
 fn load_pinned_qwen3_moe_burnpack_and_run_metal(
     scheme: SymmetricQuantization,
@@ -1238,10 +1247,7 @@ fn load_pinned_qwen3_moe_burnpack_and_run_metal(
     assert_shard_file_hashes(&root);
     let burnpack = explicit_external_burnpack_path(&root, output_environment, true);
     let artifact_sha256 = sha256_file_hex(&burnpack);
-    let load_options = LoadOptions {
-        dtype_policy: DTypePolicy::Cast(TensorDType::F16),
-        ..LoadOptions::default()
-    };
+    let load_options = metal_f16_load_options();
     let (config, manifest, plan) = pinned_qwen3_moe_plan(&root, load_options);
     assert_eq!(f16_plan_digest(&plan), F16_PLAN_SHA256);
     let (expected_quantized, expected_excluded) = qwen3_moe_quantization_partition(&plan);
@@ -1302,6 +1308,7 @@ fn load_pinned_qwen3_moe_burnpack_and_run_metal(
         expected_quantized
     );
     assert_qwen3_moe_packed_overlay_execution(&outcome.execution, expected_payload_bytes);
+    assert_complete_qwen3_moe_provenance(outcome.provenance);
     assert_eq!(
         outcome.packed.tensor_reads,
         QUANTIZED_PARAMETER_COUNT as u64
@@ -1324,6 +1331,20 @@ fn load_pinned_qwen3_moe_burnpack_and_run_metal(
         &outcome.execution,
         expected_payload_bytes,
     );
+}
+
+/// Returns the one target-dtype policy signed by conversion and used on M3 Metal.
+///
+/// Burn's Metal backend cannot store the official BF16 parameters on the
+/// acceptance device. Conversion must therefore quantize the exact F16 plan that
+/// later installs the sidecar; Burnpack v2 deliberately rejects even a
+/// shape-compatible plan whose target dtype differs.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn metal_f16_load_options() -> LoadOptions {
+    LoadOptions {
+        dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+        ..LoadOptions::default()
+    }
 }
 
 /// Reconstructs the exact immutable family plan for one target dtype policy.
@@ -1558,12 +1579,40 @@ fn assert_complete_qwen3_moe_source_execution(execution: &ExecutionStats) {
     );
 }
 
-/// Checks fail-closed source validation for a Burnpack without provenance binding.
+/// Checks both bounded full-shard hash passes around a successful v2 operation.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn assert_complete_qwen3_moe_provenance(provenance: ProvenanceExecutionStats) {
+    for (phase, stats) in [
+        ("pre-execution", provenance.pre_execution),
+        ("post-execution", provenance.post_execution),
+    ] {
+        let stats = stats.unwrap_or_else(|| panic!("v2 omitted its {phase} provenance pass"));
+        assert_eq!(stats.passes_completed, 1, "{phase} pass count");
+        assert_eq!(stats.shards_hashed, 16, "{phase} shard count");
+        assert_eq!(
+            stats.bytes_hashed, CHECKPOINT_ARTIFACT_BYTES,
+            "{phase} hashed byte count"
+        );
+        assert_eq!(
+            stats.peak_buffer_bytes, PROVENANCE_HASH_BUFFER_BYTES,
+            "{phase} hash-buffer bound"
+        );
+    }
+    assert_eq!(
+        provenance.bytes_hashed(),
+        u128::from(CHECKPOINT_ARTIFACT_BYTES) * 2
+    );
+    assert_eq!(provenance.peak_buffer_bytes(), PROVENANCE_HASH_BUFFER_BYTES);
+}
+
+/// Checks content-verified v2 source bypass for the mixed packed/F16 load.
 ///
-/// Burnpack v1 records tensor geometry but no checkpoint or load-plan digest.
-/// Consequently the production local source must read every BF16 payload before
-/// replacing eligible targets. The smaller delivered-byte count still proves that
-/// packed tensors, rather than discarded source values, reached the model sink.
+/// The executor hashes every complete shard before the first model write. Once
+/// that checkpoint and the exact F16 plan match the v2 manifest, the 18,625
+/// packed matrices need no redundant BF16 materialization; only embeddings,
+/// norms, and routers are read from SafeTensors. Hash I/O is intentionally
+/// separate from tensor-read counters, while the persisted official shard hashes
+/// are checked by [`assert_exact_qwen3_moe_burnpack`].
 #[cfg(all(feature = "metal", not(feature = "rocm")))]
 fn assert_qwen3_moe_packed_overlay_execution(
     execution: &ExecutionStats,
@@ -1571,8 +1620,8 @@ fn assert_qwen3_moe_packed_overlay_execution(
 ) {
     assert_eq!(execution.tensors_applied, PARAMETER_COUNT);
     assert_eq!(execution.aliases_applied, 0);
-    assert_eq!(execution.source_reads, PARAMETER_COUNT as u64);
-    assert_eq!(execution.source_payload_bytes, CHECKPOINT_TENSOR_BYTES);
+    assert_eq!(execution.source_reads, RETAINED_F16_PARAMETER_COUNT as u64);
+    assert_eq!(execution.source_payload_bytes, RETAINED_SOURCE_TENSOR_BYTES);
     assert_eq!(
         execution.delivered_tensor_bytes,
         RETAINED_SOURCE_TENSOR_BYTES
@@ -1592,8 +1641,14 @@ fn assert_qwen3_moe_packed_overlay_execution(
         LARGEST_CHECKPOINT_TENSOR_BYTES
     );
     assert_eq!(execution.source.shard_opens, 16);
-    assert_eq!(execution.source.tensor_reads, PARAMETER_COUNT as u64);
-    assert_eq!(execution.source.payload_bytes_read, CHECKPOINT_TENSOR_BYTES);
+    assert_eq!(
+        execution.source.tensor_reads,
+        RETAINED_F16_PARAMETER_COUNT as u64
+    );
+    assert_eq!(
+        execution.source.payload_bytes_read,
+        RETAINED_SOURCE_TENSOR_BYTES
+    );
     assert_eq!(execution.source.max_open_shards, 1);
     assert_eq!(
         execution.source.shard_open_order,
@@ -1621,6 +1676,28 @@ fn assert_exact_qwen3_moe_burnpack(
     assert_eq!(validation.tensor_count, QUANTIZED_PARAMETER_COUNT);
     assert_eq!(validation.payload_bytes, expected_payload_bytes);
     let manifest = artifact.manifest();
+    assert_eq!(
+        manifest.format_version,
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_V2
+    );
+    let provenance = manifest
+        .provenance
+        .as_ref()
+        .expect("architecture-aware conversion must publish v2 provenance");
+    assert_eq!(provenance.load_plan_sha256, load_plan_sha256(plan));
+    assert_eq!(provenance.checkpoint_shards.len(), SHARD_FILE_SHA256.len());
+    let mut provenance_bytes = 0_u64;
+    for (relative_path, expected_sha256) in SHARD_FILE_SHA256 {
+        let shard = provenance
+            .checkpoint_shards
+            .get(relative_path)
+            .unwrap_or_else(|| panic!("v2 provenance omitted {relative_path}"));
+        assert_eq!(shard.sha256, expected_sha256);
+        provenance_bytes = provenance_bytes
+            .checked_add(shard.file_bytes)
+            .expect("provenance byte total must fit u64");
+    }
+    assert_eq!(provenance_bytes, plan.memory.artifact_bytes);
     assert!(manifest.packed_execution.is_available());
     assert_eq!(manifest.tensors.len(), QUANTIZED_PARAMETER_COUNT);
     assert_eq!(
@@ -1630,7 +1707,8 @@ fn assert_exact_qwen3_moe_burnpack(
     assert!(manifest.tensors.values().all(|tensor| {
         tensor.scheme == scheme
             && tensor.group_size.get() == 64
-            && tensor.source_dtype == SourceFloatDType::Bf16
+            && tensor.source_dtype == SourceFloatDType::F16
+            && tensor.payload_sha256.is_some()
     }));
     assert_eq!(
         manifest
@@ -2204,5 +2282,15 @@ fn quantized_payload_accounting_is_stable() {
     assert_eq!(
         packed_tensor_payload_bytes(65, SymmetricQuantization::Q4, 64),
         41
+    );
+}
+
+/// Conversion and loading sign the same M3-compatible F16 target policy.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[test]
+fn quantized_acceptance_uses_one_f16_load_policy() {
+    assert_eq!(
+        metal_f16_load_options().dtype_policy,
+        DTypePolicy::Cast(TensorDType::F16)
     );
 }

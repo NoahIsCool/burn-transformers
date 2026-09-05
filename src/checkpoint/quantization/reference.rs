@@ -10,7 +10,7 @@ use burn::tensor::{
 use super::{
     QuantizationEligibility, QuantizationError, QuantizationExclusion, QuantizedTensorMetadata,
     Result, SourceFloatDType, SymmetricQuantization, WeightQuantizationConfig,
-    classify_weight_for_quantization,
+    classify_weight_for_quantization, provenance::quantized_payload_sha256,
 };
 
 /// Bounded-work statistics produced by the reference converter.
@@ -36,6 +36,32 @@ pub struct QuantizedWeight {
 impl QuantizedWeight {
     /// Builds a packed weight from persisted regions after exhaustive validation.
     pub fn from_parts(
+        metadata: QuantizedTensorMetadata,
+        packed_values: Vec<u8>,
+        scales: Vec<f32>,
+    ) -> Result<Self> {
+        let weight = Self::from_payload_digest_verified_parts(metadata, packed_values, scales)?;
+        if let Some(expected) = &weight.metadata.payload_sha256 {
+            let actual = quantized_payload_sha256(&weight.packed_values, &weight.scales);
+            if actual != *expected {
+                return Err(QuantizationError::PackedPayloadDigestMismatch {
+                    name: "<in-memory packed weight>".into(),
+                    expected: expected.clone(),
+                    actual,
+                });
+            }
+        }
+        Ok(weight)
+    }
+
+    /// Builds a packed weight after its exact owned wire bytes passed their digest check.
+    ///
+    /// This is the crate's integrity trust boundary: the caller must first copy
+    /// both packed values and little-endian scale bytes into owned memory and
+    /// compare the SHA-256 of that exact canonical payload with the manifest.
+    /// This constructor deliberately repeats every structural and numerical
+    /// validation while omitting only that already-completed digest computation.
+    pub(super) fn from_payload_digest_verified_parts(
         metadata: QuantizedTensorMetadata,
         packed_values: Vec<u8>,
         scales: Vec<f32>,
@@ -114,8 +140,9 @@ impl QuantizedWeight {
     /// Dequantizes into a row-major Burn `TensorData` with dtype `f32`.
     ///
     /// Element `i` is reconstructed as `q_i * scales[i / group_size]`.
-    /// This is the only v1 execution path; it intentionally expands the complete
-    /// tensor and is not presented as a packed backend kernel.
+    /// This reference path intentionally expands the complete tensor and is not
+    /// presented as a packed backend kernel. It applies to both v1 payloads and
+    /// provenance-bound v2 payloads after their integrity checks succeed.
     pub fn dequantize_f32(&self) -> Result<TensorData> {
         let (elements, _, _) = self.metadata.host_counts()?;
         validate_scales(&self.scales)?;
@@ -139,7 +166,7 @@ impl QuantizedWeight {
 
     /// Converts a compatible matrix into Burn's native packed `QFloat` data.
     ///
-    /// The persisted v1 format groups a completely flattened row-major stream,
+    /// The persisted packed format groups a completely flattened row-major stream,
     /// while Burn describes independent rectangular blocks. Those definitions
     /// are identical for a rank-two `[output, input]` matrix only when `input`
     /// is a multiple of the configured group size. This method enforces that

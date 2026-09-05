@@ -121,6 +121,63 @@ pub enum QuantizationError {
         /// Exact target, shape, dtype, or eligibility disagreement.
         reason: String,
     },
+    /// Persisted source or plan provenance is malformed or incomplete.
+    #[error("invalid Burnpack provenance: {reason}")]
+    InvalidProvenance {
+        /// Stable explanation of the violated provenance invariant.
+        reason: String,
+    },
+    /// The sidecar was produced from a different architecture load plan.
+    #[error("Burnpack load-plan SHA-256 mismatch: expected {expected}, computed {actual}")]
+    LoadPlanProvenanceMismatch {
+        /// Digest persisted in the sidecar.
+        expected: String,
+        /// Digest computed from the requested load plan.
+        actual: String,
+    },
+    /// A v2 sidecar was passed to an API whose tensor source cannot prove artifact binding.
+    #[error(
+        "Burnpack v2 execution requires an artifact-bound checkpoint source; use a source-specific provenance-verifying loader"
+    )]
+    ArtifactBoundSourceRequired,
+    /// A checkpoint shard length differs from the sidecar's source binding.
+    #[error(
+        "checkpoint shard `{shard}` length mismatch: expected {expected} bytes, found {actual}"
+    )]
+    CheckpointProvenanceLengthMismatch {
+        /// Root-relative shard path.
+        shard: String,
+        /// Length persisted in provenance or discovery metadata.
+        expected: u64,
+        /// Length observed while hashing.
+        actual: u64,
+    },
+    /// A complete checkpoint shard has different bytes than the sidecar source.
+    #[error("checkpoint shard `{shard}` SHA-256 mismatch: expected {expected}, computed {actual}")]
+    CheckpointProvenanceDigestMismatch {
+        /// Root-relative shard path.
+        shard: String,
+        /// Digest persisted in the sidecar.
+        expected: String,
+        /// Digest computed from current shard bytes.
+        actual: String,
+    },
+    /// A packed tensor's mapped bytes differ from the digest bound by its v2 manifest.
+    #[error("quantized payload `{name}` SHA-256 mismatch: expected {expected}, computed {actual}")]
+    PackedPayloadDigestMismatch {
+        /// Architecture-owned packed tensor name.
+        name: String,
+        /// Digest persisted in the v2 tensor metadata.
+        expected: String,
+        /// Digest computed from the mapped payload.
+        actual: String,
+    },
+    /// Source bytes changed between the conversion's two provenance passes.
+    #[error("checkpoint changed while quantizing shard `{shard}`")]
+    CheckpointChangedDuringQuantization {
+        /// First root-relative shard whose identity changed.
+        shard: String,
+    },
     /// The manifest format version is not implemented by this crate.
     #[error("unsupported Burnpack quantization format version {version}")]
     UnsupportedFormatVersion {
@@ -182,6 +239,11 @@ pub enum QuantizationError {
     /// A mutation was attempted after successful artifact publication.
     #[error("Burnpack quantization session has already been finalized")]
     SessionFinalized,
+    /// Tensor staging or a second binding was attempted after v2 provenance was fixed.
+    #[error(
+        "Burnpack provenance is already bound; no further tensor or binding mutation is allowed"
+    )]
+    ProvenanceAlreadyBound,
     /// The staging file length changed outside the session's append protocol.
     #[error("quantized staging file has {actual} bytes but session expected {expected}")]
     StagingCorrupted {

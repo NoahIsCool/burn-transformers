@@ -96,8 +96,11 @@ explicitly allowlists them, as Qwen and Muse do for their visual towers.
   runtimes and strict loaders but no real-weight acceptance record.
 - MTP execution, tokenization, cached generation, T5 beam search, and native Q4/Q8
   are runtime facilities rather than configuration claims. Automatic packed
-  checkpoint loading is currently limited to `qwen3_5_text`; Qwen3.8 Q8 and Q4
-  Metal smoke execution passed, while both quantized-quality gates remain open.
+  checkpoint loading remains limited to `qwen3_5_text`; v2 sidecars bind exact
+  checkpoint, load-plan, and payload hashes, while legacy v1 artifacts retain
+  full source-payload validation. Qwen3.8 Q8 and Q4 Metal smoke execution passed,
+  while Qwen3-MoE conversion/smoke, automatic registration, and all
+  quantized-quality gates remain open.
 - Qwen MTP speculative generation currently accepts batch size one only and
   defaults to two draft tokens per cycle. A different positive draft count is
   configurable; ordinary Qwen inference supports batches.

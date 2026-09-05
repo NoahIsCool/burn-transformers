@@ -6,13 +6,15 @@
 //! token; consequently routing counts are shape-bearing configuration, not sampling
 //! policy.
 //!
-//! # Automatic registry follow-up
+//! # Automatic registry
 //!
 //! The executable model and strict local loader are available directly through
-//! [`Qwen3MoeForCausalLm`]. `AutoCausalLm` registration is intentionally left to
-//! the integration branch owner because that central enum and its loader are
-//! concurrently shared by other family slices; adding the variant is a small
-//! exhaustive-match follow-up after those branches merge.
+//! [`Qwen3MoeForCausalLm`] and through the crate's automatic causal-model registry.
+//! Automatic loading accepts full-precision SafeTensors. Q8/Q4 Burnpack support
+//! is implemented through the strict local loader, but automatic packed
+//! registration remains gated on real-checkpoint acceptance. Version-two
+//! sidecars content-bind the checkpoint and load plan, while legacy version-one
+//! compatibility retains full source validation.
 
 use std::collections::HashSet;
 
