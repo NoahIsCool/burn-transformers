@@ -1,0 +1,253 @@
+{
+  "schema_version": 1,
+  "advertised_supported": false,
+  "phase": "strict_f16_metal_smoke_verified_pending_official_reference_generation_quantization_and_32k_acceptance",
+  "repository": "Qwen/Qwen3-30B-A3B",
+  "revision": "ad44e777bcd18fa416d9da3bd8f70d33ebb85d39",
+  "artifact_layout": {
+    "safetensors_shards": 16,
+    "physical_tensors": 18867,
+    "dtype_counts": {
+      "BF16": 18867
+    },
+    "checkpoint_tensor_bytes": 61064245248,
+    "artifact_shard_bytes": 61066575648,
+    "control_files_hashed": 7,
+    "weight_shards_hashed": 16
+  },
+  "architecture": {
+    "model_type": "qwen3_moe",
+    "hidden_layers": 48,
+    "hidden_size": 2048,
+    "attention_heads": 32,
+    "key_value_heads": 4,
+    "head_dim": 128,
+    "routed_experts_per_layer": 128,
+    "selected_experts_per_token": 8,
+    "shared_experts_per_layer": 0,
+    "normalize_selected_expert_probabilities": true,
+    "sliding_window_enabled": false,
+    "maximum_position_embeddings": 40960,
+    "vocabulary_size": 151936
+  },
+  "strict_memory_plan": {
+    "target_parameter_bytes": 61064245248,
+    "logical_model_bytes": 61064245248,
+    "largest_shard_bytes": 3999975472,
+    "largest_source_tensor_bytes": 622329856,
+    "largest_target_tensor_bytes": 622329856,
+    "peak_host_staging_bytes": 4622305328,
+    "strategy": "two_pass_header_validation_then_source_ordered_single_shard_streaming",
+    "source_dtype": "bf16",
+    "acceptance_target_dtype": "f16",
+    "estimate_classification": "conservative_upper_bound",
+    "execution_note": "The planner combines the largest shard and largest tensor for its conservative 4,622,305,328-byte bound. The executed identity-transform dtype-cast schedule kept one shard open and materialized at most one 622,329,856-byte tensor payload at a time."
+  },
+  "inventory_digests": {
+    "header_inventory_sha256": "c4bc720cd21ec7a0fde1358a12a06f6ee09f6c6c39dcda613abeda5d16a29861",
+    "f16_load_plan_sha256": "b90fa8fbfa08b6500dc3be8dd6e0458501b62580de704acac3bd300150d5b49d"
+  },
+  "sha256": {
+    "config.json": "2850ddb3bf7aecad20b611e2d44f3077fc8193f4827c93beddd4c02ad63c2297",
+    "generation_config.json": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2",
+    "model.safetensors.index.json": "df0d481ec595c55a0ba58426d517390c6214a566ec4ff1c8fc4bbce9f57b3c24",
+    "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+    "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
+    "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+    "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    "model-00001-of-00016.safetensors": "454e77b346a61bfb201d54df60e15158838cf930617ee135113556204f2802b5",
+    "model-00002-of-00016.safetensors": "47f015d6e5bb1782a834d75c06113c5e8c77ddca1cb7daf89686a4ec0deda19e",
+    "model-00003-of-00016.safetensors": "ac0bf5990f2da995c1e8b77a3149dee71900b4fe1b8a614231dea9647193d96b",
+    "model-00004-of-00016.safetensors": "89b01fd34a683c70fdb7f22c2e7090538d65063335ba0db46f3654642b17d1e5",
+    "model-00005-of-00016.safetensors": "9849eb3584d928e35bf5956ccfd91b64207467e1fad8304aae68dc4d92d6d6d9",
+    "model-00006-of-00016.safetensors": "f7a0f1525557d740158fb692986ad43506e1b5901e7406ae65808c6457bc53ad",
+    "model-00007-of-00016.safetensors": "920702a50f27a009e5f676da3b02978dbd794f6ad7854f301d709136154c1a84",
+    "model-00008-of-00016.safetensors": "a85bf0cc8a8047c116172d4c08cf4792eb59d4375032708ba3e1a7ffca0f708a",
+    "model-00009-of-00016.safetensors": "25cd8aaed86b8e17685efb152912f92448ea3fffb1bdc247f257f04d05907604",
+    "model-00010-of-00016.safetensors": "7c3307ee214797c4bc61c0994f81d690e768150df5f14d18edf84e53ba4810dc",
+    "model-00011-of-00016.safetensors": "c658cad2842d36fa4c7c7f726f8515dc5670a3d80c94e13257d4e322ffe61988",
+    "model-00012-of-00016.safetensors": "8cb898bc5e78492600053d1105c9ff61d7a719f5cc2802df63e41535a652cc26",
+    "model-00013-of-00016.safetensors": "599594421f314cb8e8ab4474db0eb490cc6310585067e82d73821254b93319ce",
+    "model-00014-of-00016.safetensors": "66d3294e9976b5f01d117a0a0bed768f128a8898eb6937e224d051de2961d363",
+    "model-00015-of-00016.safetensors": "2fe000da4fc7399ff6303bb0daec8c415a5d850f5ea53863392758c77fc37664",
+    "model-00016-of-00016.safetensors": "0c979e314faf06e94a5e1841abd285d4e26e763c79c1abe7710d543192d9da48"
+  },
+  "checks": {
+    "exact_config_validated": true,
+    "all_safetensors_headers_strictly_validated": true,
+    "all_control_files_sha256_validated": true,
+    "all_weight_shards_sha256_validated": true,
+    "tensor_inventory_matches_pinned_fixture": true,
+    "strict_mapping_planned": true,
+    "tokenizer_round_trip_validated": true,
+    "all_weights_applied": true,
+    "all_parameters_installed_as_f16": true,
+    "source_ordered_single_shard_streaming_validated": true,
+    "metal_f16_stateless_inference": true,
+    "metal_f16_cached_prefill": true,
+    "metal_f16_hidden_trace_equivalence": true,
+    "metal_f16_recurrent_decode": true,
+    "metal_f16_full_smoke": true,
+    "official_reference_full_vector_logits_compared": false,
+    "official_reference_greedy_32_tokens_compared": false,
+    "cached_stateless_top1_all_prefixes_compared": false,
+    "q8_metal_acceptance": false,
+    "q4_metal_acceptance": false,
+    "quantized_quality_corpus_validated": false,
+    "long_context_32k_validated": false
+  },
+  "optimized_direct_binary_smoke": {
+    "status": "passed",
+    "result_recorded": true,
+    "command": "/usr/bin/time -l env 'TRANSFORMERS_QWEN3_MOE_DIR=/Volumes/bag of holding/models/Qwen/Qwen3-30B-A3B-ad44e777bcd18fa416d9da3bd8f70d33ebb85d39' crates/transformers/target/release/deps/qwen3_moe_artifacts-4cf698f5f552f41c loads_pinned_qwen3_moe_f16_and_runs_metal_smoke --ignored --exact --nocapture",
+    "binary": {
+      "path": "crates/transformers/target/release/deps/qwen3_moe_artifacts-4cf698f5f552f41c",
+      "bytes": 44911600,
+      "sha256": "3af68a901bb2f7fb3a91e4ae040551a2a3c114c29aa7a4b7c53a833082c42433"
+    },
+    "source": {
+      "crate_commit": "25607bc8874e9300e6145d3118a06fc9a7b69c3f",
+      "commit_subject": "test(transformers): preflight metal acceptance backend",
+      "transformer_source_matches_commit": true,
+      "note": "The executable was built from the recorded transformer commit. An unrelated modification outside crates/transformers was not part of the acceptance source."
+    },
+    "build": {
+      "profile": "release",
+      "optimized": true,
+      "default_features": false,
+      "features": ["std", "metal", "tokenizers", "chat-templates"],
+      "exact_build_command": "cargo test --release --manifest-path crates/transformers/Cargo.toml --no-default-features --features 'std metal tokenizers chat-templates' --test qwen3_moe_artifacts --no-run",
+      "burn_version": "0.21.0",
+      "rustc": "1.94.0-nightly (4f14395c3 2025-12-22)",
+      "cargo": "1.94.0-nightly (3861f60f6 2025-12-19)",
+      "target": "aarch64-apple-darwin"
+    },
+    "machine": {
+      "operating_system": "macOS 15.7.9 (24G830)",
+      "architecture": "arm64",
+      "processor": "Apple M3 Max",
+      "unified_memory_bytes": 103079215104,
+      "backend": "Burn Metal via burn-wgpu and CubeCL"
+    },
+    "fixture": {
+      "batch_size": 1,
+      "prompt": "Hello world, cached decoding.",
+      "prompt_token_ids": [9707, 1879, 11, 20579, 47116, 13],
+      "prompt_tokens": 6,
+      "cache_capacity_tokens": 7,
+      "parameter_dtype_policy": "bf16_checkpoint_cast_to_f16_while_streaming",
+      "executed_graphs": [
+        "stateless_forward_with_hidden_states",
+        "cached_prefill_with_hidden_states",
+        "one_recurrent_decode_step"
+      ],
+      "logits_shape": [1, 1, 151936],
+      "hidden_trace_count_per_comparison": 50,
+      "cached_stateless_cosine_gate": 0.999
+    },
+    "load_execution": {
+      "weights_applied": 18867,
+      "aliases_applied": 0,
+      "rename_transforms": 18480,
+      "dtype_conversions": 18867,
+      "source_tensor_reads": 18867,
+      "source_payload_bytes": 61064245248,
+      "delivered_tensor_bytes": 61064245248,
+      "largest_source_payload_bytes": 622329856,
+      "largest_output_tensor_bytes": 622329856,
+      "peak_runtime_host_staging_bytes": 622329856,
+      "shard_opens": 16,
+      "maximum_simultaneously_open_shards": 1,
+      "shard_open_order": [
+        "model-00001-of-00016.safetensors",
+        "model-00002-of-00016.safetensors",
+        "model-00003-of-00016.safetensors",
+        "model-00004-of-00016.safetensors",
+        "model-00005-of-00016.safetensors",
+        "model-00006-of-00016.safetensors",
+        "model-00007-of-00016.safetensors",
+        "model-00008-of-00016.safetensors",
+        "model-00009-of-00016.safetensors",
+        "model-00010-of-00016.safetensors",
+        "model-00011-of-00016.safetensors",
+        "model-00012-of-00016.safetensors",
+        "model-00013-of-00016.safetensors",
+        "model-00014-of-00016.safetensors",
+        "model-00015-of-00016.safetensors",
+        "model-00016-of-00016.safetensors"
+      ]
+    },
+    "results": {
+      "first_top1_token_id": 1096,
+      "cached_vs_stateless_logit_cosine": 1.0,
+      "minimum_cached_vs_stateless_hidden_trace_cosine": 1.0,
+      "cached_vs_stateless_top1_equal": true,
+      "stateless_logits_finite": true,
+      "cached_logits_finite": true,
+      "hidden_traces_finite": true,
+      "recurrent_decode_logits_finite": true,
+      "stateless_logit_digest": {
+        "algorithm": "fnv1a64",
+        "input_encoding": "little_endian_f32_bit_patterns",
+        "hex": "57978e6dd6a86859"
+      },
+      "cached_logit_digest": {
+        "algorithm": "fnv1a64",
+        "input_encoding": "little_endian_f32_bit_patterns",
+        "hex": "57978e6dd6a86859"
+      },
+      "stateless_hidden_trace_digest": {
+        "algorithm": "fnv1a64",
+        "input_encoding": "little_endian_f32_bit_patterns",
+        "hex": "eec14b59825e96a0"
+      },
+      "cached_hidden_trace_digest": {
+        "algorithm": "fnv1a64",
+        "input_encoding": "little_endian_f32_bit_patterns",
+        "hex": "eec14b59825e96a0"
+      },
+      "decoded_logit_digest": {
+        "algorithm": "fnv1a64",
+        "input_encoding": "little_endian_f32_bit_patterns",
+        "hex": "bfb1e2e5c72c4eee"
+      },
+      "load_seconds": 74.185,
+      "stateless_seconds": 1.867,
+      "prefill_seconds": 1.509,
+      "decode_seconds": 0.726,
+      "rust_test_wall_seconds": 217.47,
+      "process_wall_seconds": 217.84,
+      "macos_maximum_resident_set_bytes": 2326970368,
+      "macos_peak_memory_footprint_bytes": 66569296256,
+      "process_exit_status": 0
+    },
+    "timing_scope": {
+      "load": "AutoCausalLm::load_local plus synchronized completion of strict source-ordered streaming, BF16-to-F16 conversion, and Metal parameter upload; the prior full-shard SHA-256 pass is excluded",
+      "stateless": "one six-token stateless forward with all 50 hidden traces through synchronized host extraction",
+      "prefill": "one six-token cached prefill with all 50 hidden traces through synchronized host extraction",
+      "decode": "one recurrent decode token through synchronized host extraction",
+      "rust_test": "the complete Rust test, including validation and SHA-256 verification of all 16 weight shards",
+      "process": "/usr/bin/time -l around the complete direct test-binary invocation"
+    },
+    "measurement_classification": {
+      "kind": "cold end-to-end diagnostic acceptance run",
+      "standardized_benchmark": false,
+      "throughput_reportable": false,
+      "rss_note": "macOS maximum resident set size does not account for the full unified-memory Metal allocation; peak memory footprint is the more representative process-level high-water mark for this run."
+    },
+    "attempt_history": {
+      "excluded_sandbox_attempt": "The first managed-sandbox invocation was excluded from acceptance evidence.",
+      "accepted_direct_hardware_attempt": "The direct-hardware invocation completed with exit status 0 and supplied every recorded measurement."
+    }
+  },
+  "remaining_release_gates": [
+    "official reference full-vector logit comparison",
+    "official reference 32-token greedy continuation",
+    "cached-versus-stateless top-1 parity at every generated prefix",
+    "native Q8 and Q4 conversion and Metal inference acceptance",
+    "quantized fixed-corpus quality limits",
+    "32K-token quantized context stress",
+    "standardized synchronized warm latency and throughput series"
+  ],
+  "support_note": "This record proves strict artifact identity, complete F16 weight application, source-ordered single-shard streaming, and short stateless/cached/decode execution on the named Metal system. It does not establish numerical parity with the official implementation, generation parity, quantized accuracy, or long-context behavior; advertised support therefore remains false."
+}

@@ -10,7 +10,7 @@ strict loader means that the family owns an explicit tensor contract and can loa
 local SafeTensors without unexplained keys; it does not prove that the release
 checkpoint has actually completed weight application or inference.
 
-No checkpoint is currently advertised as fully supported. The three real-weight
+No checkpoint is currently advertised as fully supported. The four real-weight
 acceptance records all retain `advertised_supported: false`, and the remaining
 families do not yet have real-weight acceptance records.
 
@@ -37,7 +37,7 @@ means the named pinned artifact was actually streamed into a model and executed.
 |---|---|---|---|
 | `Qwen/Qwen3.5-0.8B` at `2fc06364715b967f1860aea9cf38778875588b17` | Qwen3.5/Qwen3.8 hybrid graph with DeltaNet and full-attention layers, recurrent/KV decode state, gated GQA, partial MRoPE, SwiGLU, and optional batch-one, one-layer MTP speculation | Strict local multimodal mapping and real weight application passed. The checked artifact has 488 physical tensors; the base graph consumes 320 tensors, produces one tied alias, and explicitly reports 153 visual plus 15 omitted MTP tensors. | [Real-weight record](acceptance/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17.json): Metal F16 logit/reference and 32-token greedy parity, cached/stateless parity, and a Q4 packed smoke run passed. Q8 single-backend Metal, quantized quality, and 32K stress remain open; not advertised. |
 | `Qwen/Qwen3.8-27B` at `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | Same executable hybrid and MTP runtime as the bring-up model, with its exact 64-layer schedule | The pinned 18-shard artifact's exact configuration and all 1,199 physical headers match the committed inventory. Strict loading applied all 866 text-plus-MTP tensors and allowlisted exactly 333 visual tensors; the tokenizer and no-thinking chat template also passed. | [Real-weight record](acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json): Metal F16 stateless, cached prefill, MTP, and recurrent decode passed with `1.0` cosine at all 66 compared hidden traces. Strict mixed Q8/F16 and Q4/F16 Metal smokes also passed after packing 497 matrices and retaining 369 tensors per format. Reference logits, longer generation, quantized corpus quality, standardized throughput and output hashing, and 32K stress remain open; not advertised. |
-| `Qwen/Qwen3-30B-A3B` at `ad44e777bcd18fa416d9da3bd8f70d33ebb85d39` | Executable GQA decoder with Q/K normalization, top-8 routing, sparse selected-expert execution, and cached decode | Strict family mapping and automatic local loader are implemented and exercised with synthetic fixtures. | No pinned real-weight load or inference acceptance has been recorded; not advertised. |
+| `Qwen/Qwen3-30B-A3B` at `ad44e777bcd18fa416d9da3bd8f70d33ebb85d39` | Executable GQA decoder with Q/K normalization, top-8 routing, sparse selected-expert execution, and cached decode | The pinned 16-shard artifact's exact configuration and all 18,867 BF16 tensor headers match the committed inventory. Strict source-ordered loading applied every tensor as F16 with 18,480 explicit renames, opened each shard exactly once, and retained the tokenizer. | [Real-weight record](acceptance/qwen3-30b-a3b-ad44e777bcd18fa416d9da3bd8f70d33ebb85d39.json): a six-token Metal F16 stateless, cached-prefill, 50-hidden-trace, and recurrent-decode smoke passed with `1.0` cached/stateless cosine. Official reference logits, 32-token generation, quantization, and 32K stress remain open; not advertised. |
 | `deepseek-ai/DeepSeek-V2-Lite` at `604d5664dddd88a0433dbae533b7fe9472482de0` | Executable YaRN/MLA decoder with reference unabsorbed prefill, compressed latent-cache absorbed decode, routed top-k experts, and shared experts | Strict family mapping and automatic local loader are implemented and exercised with synthetic golden, cache, and checkpoint-contract tests. | No pinned real-weight load or inference acceptance has been recorded; not advertised. |
 | `meta-models/Muse-Glimmer-30B` at `a4e59da52a7bc87ae7251dd5545c0dd437c44b68` | Executable text decoder with sliding/full attention, RoPE/NoPE scheduling, sandwich norms, attention output gates, and final-logit softcap | Strict text-only/multimodal mapping and automatic local loader are implemented and exercised with synthetic fixtures. | No pinned real-weight load or inference acceptance has been recorded; not advertised. |
 | `google/flan-t5-small` at `0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab` | Executable T5 encoder-decoder with bidirectional encoding, causal decoding, cross-attention caches, relative-position bias, shared encoder/decoder embeddings, an independent LM head, and cached beam search | The official one-file SafeTensors artifact was strictly loaded and all 190 F32 tensors were applied through the public automatic loader. | [Real-weight record](acceptance/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab.json): pinned top-10 and sampled-logit probes, cached prefill/decode parity, and the exact four-beam translation fixture passed on Flex. Full-vector reference-logit cosine, longer generation, accelerator inference, and context-boundary stress remain open; not advertised. |
@@ -83,8 +83,11 @@ explicitly allowlists them, as Qwen and Muse do for their visual towers.
 - Nemotron-H's historical configs are not RFC-compliant JSON because they contain
   `Infinity`; only the published positive-infinity case is repaired. `NaN` and
   negative infinity remain errors.
-- Qwen3 MoE, DeepSeek V2 Lite, Muse Glimmer, FLAN-T5 XXL/UL2, and Nemotron-H 3.5
-  have executable synthetic runtimes and strict loaders but no real-weight
+- Qwen3 MoE's pinned 30B-A3B artifact has passed complete F16 weight application
+  and a short Metal stateless/cached/decode smoke. Official reference,
+  generation, quantization, and 32K gates remain open.
+- DeepSeek V2 Lite, Muse Glimmer, FLAN-T5 XXL/UL2, and Nemotron-H 3.5 have
+  executable synthetic runtimes and strict loaders but no real-weight
   acceptance record.
 - MTP execution, tokenization, cached generation, T5 beam search, and native Q4/Q8
   are runtime facilities rather than configuration claims. Automatic packed
