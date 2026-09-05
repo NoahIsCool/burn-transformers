@@ -66,6 +66,7 @@ VOCAB_SIZE = 248_320
 GREEDY_TOKENS = 32
 EXPECTED_EOS_TOKEN_IDS = [248_046, 248_044]
 EXPECTED_PARAMETER_COUNT = 26_895_998_464
+MAX_EXACT_JSON_INTEGER = (1 << 53) - 1
 BINARY16_ELEMENTWISE_PERTURBATION_ULPS = 1.0
 TOP1_STABILITY_SAFETY_FACTOR = 2.0
 TOP1_STABILITY_POLICY = "binary16-elementwise-ulp-bound"
@@ -302,6 +303,33 @@ def validated_generation_eos_token_ids(config: Mapping[str, Any]) -> list[int]:
             f"expected {EXPECTED_EOS_TOKEN_IDS}, found {eos_token_ids!r}"
         )
     return list(eos_token_ids)
+
+
+def checked_json_nonnegative_integer(value: Any, field: str) -> int:
+    """Canonicalize an exact JSON integer within the interoperable F64 range.
+
+    JSON itself has no integer/float distinction, and some checkpoint producers
+    serialize byte counts with a trailing ``.0``.  Values through ``2^53 - 1``
+    have an unambiguous integer representation in both binary64 JSON consumers
+    and Rust's ``u64`` schema.  Booleans are rejected explicitly because Python
+    otherwise treats them as integers.
+    """
+
+    if isinstance(value, bool) or type(value) not in (int, float):
+        raise ValueError(f"{field} must be a JSON integer, found {value!r}")
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{field} must be finite, found {value!r}")
+        if not value.is_integer():
+            raise ValueError(f"{field} must be exactly integral, found {value!r}")
+    if value < 0 or value > MAX_EXACT_JSON_INTEGER:
+        raise ValueError(
+            f"{field} must lie in 0..={MAX_EXACT_JSON_INTEGER}, found {value!r}"
+        )
+    canonical = int(value)
+    if isinstance(value, float) and float(canonical) != value:
+        raise ValueError(f"{field} cannot be losslessly canonicalized, found {value!r}")
+    return canonical
 
 
 def f32le_bytes(values: Iterable[float]) -> bytes:
@@ -879,7 +907,12 @@ def verify_checkpoint(
     for name in shard_names:
         if Path(name).name != name:
             raise ValueError(f"checkpoint index contains a non-local shard path: {name!r}")
-    tensor_bytes = index.get("metadata", {}).get("total_size")
+    index_metadata = index.get("metadata")
+    if not isinstance(index_metadata, dict):
+        raise ValueError("checkpoint index has no object-valued metadata")
+    tensor_bytes = checked_json_nonnegative_integer(
+        index_metadata.get("total_size"), "checkpoint index metadata.total_size"
+    )
     if tensor_bytes != 55_562_855_904:
         raise ValueError(
             "checkpoint tensor-byte declaration changed: "

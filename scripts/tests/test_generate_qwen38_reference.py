@@ -99,6 +99,48 @@ class ReferenceHelperTests(unittest.TestCase):
                         {"eos_token_id": invalid}
                     )
 
+    def test_checked_json_integer_canonicalizes_int_and_integral_float(self) -> None:
+        accepted = [
+            (0, 0),
+            (-0.0, 0),
+            (55_562_855_904, 55_562_855_904),
+            (55_562_855_904.0, 55_562_855_904),
+            (REFERENCE.MAX_EXACT_JSON_INTEGER, REFERENCE.MAX_EXACT_JSON_INTEGER),
+            (
+                float(REFERENCE.MAX_EXACT_JSON_INTEGER),
+                REFERENCE.MAX_EXACT_JSON_INTEGER,
+            ),
+        ]
+        for encoded, expected in accepted:
+            with self.subTest(encoded=encoded):
+                observed = REFERENCE.checked_json_nonnegative_integer(
+                    encoded, "fixture.total_size"
+                )
+                self.assertIs(type(observed), int)
+                self.assertEqual(observed, expected)
+
+    def test_checked_json_integer_rejects_ambiguous_or_invalid_values(self) -> None:
+        invalid = [
+            True,
+            False,
+            None,
+            "1",
+            1.5,
+            -0.5,
+            -1,
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            REFERENCE.MAX_EXACT_JSON_INTEGER + 1,
+            float(REFERENCE.MAX_EXACT_JSON_INTEGER + 1),
+        ]
+        for encoded in invalid:
+            with self.subTest(encoded=encoded):
+                with self.assertRaisesRegex(ValueError, "fixture.total_size"):
+                    REFERENCE.checked_json_nonnegative_integer(
+                        encoded, "fixture.total_size"
+                    )
+
     def test_pinned_prompt_is_a_varied_stable_three_word_cycle(self) -> None:
         """Pin the diagnostic-proven 113x-ULP fixture without using a trivial token loop."""
 
