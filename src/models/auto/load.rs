@@ -19,7 +19,8 @@ use crate::{
     checkpoint::{
         CheckpointManifest, ExecutionOutcome, LoadOptions, execute_local_load_plan,
         quantization::{
-            QuantizedBurnpackArtifact, QuantizedExecutionOutcome, execute_local_quantized_load_plan,
+            AuditedQuantizedExecutionOutcome, QuantizedBurnpackArtifact,
+            execute_local_quantized_load_plan_audited,
         },
     },
 };
@@ -45,7 +46,7 @@ const MAX_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_GENERATION_CONFIG_BYTES: u64 = 1024 * 1024;
 
 /// Causal families whose packed installation path has an acceptance contract.
-const PACKED_CAUSAL_MODEL_TYPES: &[&str] = &["qwen3_5_text"];
+const PACKED_CAUSAL_MODEL_TYPES: &[&str] = &["qwen3_5_text", "qwen3_moe"];
 
 /// Host-side policy for automatic local model loading.
 #[derive(Debug, Clone)]
@@ -137,13 +138,11 @@ impl<B: Backend> AutoCausalLm<B> {
                     .map_err(|error| Error::Checkpoint(error.to_string()))?;
                 let mut model = DeepseekV2ForCausalLm::init(config, device)?;
                 let outcome = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
-                LoadedModel::new_with_execution_stats(
+                outcome.into_loaded(
                     Self::DeepseekV2(model),
                     tokenizer,
                     generation,
                     source,
-                    outcome.report,
-                    outcome.stats,
                     vocabulary_size,
                 )
             }
@@ -179,13 +178,11 @@ impl<B: Backend> AutoCausalLm<B> {
                     .map_err(|error| Error::Checkpoint(error.to_string()))?;
                 let mut model = MuseGlimmerForCausalLm::init(config, device)?;
                 let outcome = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
-                LoadedModel::new_with_execution_stats(
+                outcome.into_loaded(
                     Self::MuseGlimmer(model),
                     tokenizer,
                     generation,
                     source,
-                    outcome.report,
-                    outcome.stats,
                     vocabulary_size,
                 )
             }
@@ -218,13 +215,11 @@ impl<B: Backend> AutoCausalLm<B> {
                     .map_err(|error| Error::Checkpoint(error.to_string()))?;
                 let mut model = NemotronHForCausalLm::init(config, device)?;
                 let outcome = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
-                LoadedModel::new_with_execution_stats(
+                outcome.into_loaded(
                     Self::NemotronH(model),
                     tokenizer,
                     generation,
                     source,
-                    outcome.report,
-                    outcome.stats,
                     vocabulary_size,
                 )
             }
@@ -267,13 +262,11 @@ impl<B: Backend> AutoCausalLm<B> {
                 }
                 let mut model = Qwen3_5ForCausalLm::init(executable_config, device)?;
                 let outcome = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
-                LoadedModel::new_with_execution_stats(
+                outcome.into_loaded(
                     Self::Qwen3_5(model),
                     tokenizer,
                     generation,
                     source,
-                    outcome.report,
-                    outcome.stats,
                     vocabulary_size,
                 )
             }
@@ -306,13 +299,11 @@ impl<B: Backend> AutoCausalLm<B> {
                     .map_err(|error| Error::Checkpoint(error.to_string()))?;
                 let mut model = Qwen3MoeForCausalLm::init(config, device)?;
                 let outcome = execute_causal_plan(&root, &manifest, &plan, options, &mut model)?;
-                LoadedModel::new_with_execution_stats(
+                outcome.into_loaded(
                     Self::Qwen3Moe(model),
                     tokenizer,
                     generation,
                     source,
-                    outcome.report,
-                    outcome.stats,
                     vocabulary_size,
                 )
             }
@@ -324,6 +315,46 @@ impl<B: Backend> AutoCausalLm<B> {
     }
 }
 
+/// Successful causal checkpoint execution, preserving sidecar-only counters.
+enum CausalExecutionOutcome {
+    /// Ordinary SafeTensors execution without a packed overlay.
+    FullPrecision(ExecutionOutcome),
+    /// Mixed source-precision and Burnpack execution with provenance counters.
+    Quantized(AuditedQuantizedExecutionOutcome),
+}
+
+impl CausalExecutionOutcome {
+    /// Attaches every available execution counter to one loaded model bundle.
+    fn into_loaded<M>(
+        self,
+        model: M,
+        tokenizer: Option<ModelTokenizer>,
+        generation_defaults: GenerationConfig,
+        source: ModelSourceMetadata,
+        vocabulary_size: usize,
+    ) -> Result<LoadedModel<M>> {
+        match self {
+            Self::FullPrecision(outcome) => LoadedModel::new_with_execution_stats(
+                model,
+                tokenizer,
+                generation_defaults,
+                source,
+                outcome.report,
+                outcome.stats,
+                vocabulary_size,
+            ),
+            Self::Quantized(outcome) => LoadedModel::new_with_quantized_execution(
+                model,
+                tokenizer,
+                generation_defaults,
+                source,
+                outcome,
+                vocabulary_size,
+            ),
+        }
+    }
+}
+
 /// Executes a validated causal-family plan with an optional packed sidecar.
 fn execute_causal_plan<M: crate::checkpoint::TensorSink>(
     root: &Path,
@@ -331,7 +362,7 @@ fn execute_causal_plan<M: crate::checkpoint::TensorSink>(
     plan: &crate::checkpoint::LoadPlan,
     options: &AutoLoadOptions,
     model: &mut M,
-) -> Result<ExecutionOutcome>
+) -> Result<CausalExecutionOutcome>
 where
     M::Error: core::fmt::Display,
 {
@@ -346,25 +377,13 @@ where
                 path: path.clone(),
                 reason: error.to_string(),
             })?;
-        execute_local_quantized_load_plan(manifest, plan, &mut artifact, model)
+        execute_local_quantized_load_plan_audited(manifest, plan, &mut artifact, model)
             .map_err(|error| Error::Checkpoint(error.to_string()))
-            .map(checkpoint_execution_from_quantized)
+            .map(CausalExecutionOutcome::Quantized)
     } else {
         execute_local_load_plan(manifest, plan, model)
             .map_err(|error| Error::Checkpoint(error.to_string()))
-    }
-}
-
-/// Retains generic source execution counters from one packed-overlay load.
-///
-/// Burnpack reads and provenance hash passes have separate audits on the
-/// lower-level quantized outcome. [`LoadedModel`] carries the checkpoint executor's
-/// [`crate::checkpoint::ExecutionStats`], whose source and host-staging counters
-/// have identical meaning for full-precision and packed-overlay execution.
-fn checkpoint_execution_from_quantized(outcome: QuantizedExecutionOutcome) -> ExecutionOutcome {
-    ExecutionOutcome {
-        report: outcome.report,
-        stats: outcome.execution,
+            .map(CausalExecutionOutcome::FullPrecision)
     }
 }
 
@@ -728,12 +747,11 @@ mod tests {
     use crate::{
         CausalLmInput, ForwardOptions, Seq2SeqInput,
         checkpoint::{
-            CheckpointManifest, ExecutionStats, ExpectedTensor, LoadReport, MappingPlan,
-            SourceStats, TensorOperation, TensorTransform,
+            CheckpointManifest, ExpectedTensor, LoadReport, MappingPlan, TensorOperation,
+            TensorTransform,
             quantization::{
-                BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, PackedLoadStats, ProvenanceExecutionStats,
-                QuantizedBurnpackArtifact, QuantizedCheckpointOptions, QuantizedExecutionOutcome,
-                quantize_local_checkpoint_to_burnpack,
+                BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, QuantizedBurnpackArtifact,
+                QuantizedCheckpointOptions, quantize_local_checkpoint_to_burnpack,
             },
         },
         models::{
@@ -973,44 +991,6 @@ mod tests {
         assert!(!AutoLoadOptions::default().qwen_mtp);
     }
 
-    /// Packed automatic loading keeps the generic checkpoint counters verbatim.
-    #[test]
-    fn packed_outcome_retains_exact_checkpoint_execution_stats() {
-        let stats = ExecutionStats {
-            tensors_applied: 2,
-            source_reads: 2,
-            source_payload_bytes: 96,
-            delivered_tensor_bytes: 96,
-            largest_source_payload_bytes: 64,
-            largest_output_tensor_bytes: 64,
-            peak_host_staging_bytes: 128,
-            source: SourceStats {
-                shard_opens: 1,
-                tensor_reads: 2,
-                payload_bytes_read: 96,
-                max_open_shards: 1,
-                shard_open_order: vec!["model.safetensors".into()],
-            },
-            ..ExecutionStats::default()
-        };
-        let mut report = LoadReport::new();
-        report.applied = vec!["model.weight".into(), "lm_head.weight".into()];
-        let converted = checkpoint_execution_from_quantized(QuantizedExecutionOutcome {
-            report: report.clone(),
-            execution: stats.clone(),
-            packed: PackedLoadStats {
-                tensor_reads: 1,
-                payload_bytes: 48,
-                largest_payload_bytes: 48,
-                tensors_applied: 1,
-            },
-            provenance: ProvenanceExecutionStats::default(),
-        });
-
-        assert_eq!(converted.report, report);
-        assert_eq!(converted.stats, stats);
-    }
-
     /// Automatic packed loading rejects families without a completed backend gate.
     #[test]
     fn automatic_packed_loading_rejects_uncertified_causal_families() {
@@ -1035,7 +1015,6 @@ mod tests {
 
     /// Qwen3-MoE uses the public automatic path for a provenance-bound packed overlay.
     #[test]
-    #[ignore = "enable after real Qwen3-MoE Q4/Q8 checkpoint acceptance passes"]
     fn automatic_qwen3_moe_loads_v2_quantized_burnpack() {
         let root = tempfile::tempdir().expect("temporary model root");
         let config = Qwen3MoeConfig {
@@ -1081,6 +1060,12 @@ mod tests {
         )
         .expect("convert tiny Qwen3-MoE Burnpack");
         assert_eq!(converted.report.quantized.len(), 11);
+        let expected_packed_bytes = converted
+            .report
+            .quantized
+            .iter()
+            .map(|record| record.bytes)
+            .sum::<u64>();
         let artifact =
             QuantizedBurnpackArtifact::open(&burnpack).expect("open tiny Qwen3-MoE Burnpack");
         assert_eq!(
@@ -1137,6 +1122,35 @@ mod tests {
         assert_eq!(execution.source_payload_bytes, 17_792);
         assert_eq!(execution.source.shard_opens, 1);
         assert_eq!(execution.source.max_open_shards, 1);
+        let quantized = loaded
+            .quantized_load_audit()
+            .expect("automatic packed load retains sidecar counters");
+        assert_eq!(
+            quantized.format_version(),
+            BURNPACK_QUANTIZATION_FORMAT_VERSION_V2
+        );
+        assert_eq!(quantized.preflight().passes_started, 1);
+        assert_eq!(quantized.preflight().passes_completed, 1);
+        assert_eq!(quantized.preflight().tensor_reads, 11);
+        assert_eq!(quantized.preflight().payload_bytes, expected_packed_bytes);
+        assert!(quantized.preflight().peak_owned_payload_bytes > 0);
+        assert_eq!(quantized.packed().tensor_reads, 11);
+        assert_eq!(quantized.packed().payload_bytes, expected_packed_bytes);
+        assert_eq!(quantized.packed().tensors_applied, 11);
+        let before = quantized
+            .provenance()
+            .pre_execution
+            .expect("v2 load hashes checkpoint before execution");
+        let after = quantized
+            .provenance()
+            .post_execution
+            .expect("v2 load hashes checkpoint after execution");
+        assert_eq!(before.passes_completed, 1);
+        assert_eq!(after.passes_completed, 1);
+        assert_eq!(before.shards_hashed, checkpoint.shards.len());
+        assert_eq!(after.shards_hashed, checkpoint.shards.len());
+        assert_eq!(before.bytes_hashed, checkpoint.artifact_bytes);
+        assert_eq!(after.bytes_hashed, checkpoint.artifact_bytes);
         assert_bundle_metadata(
             &loaded,
             root.path(),
@@ -1330,6 +1344,7 @@ mod tests {
         .expect("automatic DeepSeek load");
 
         assert!(matches!(loaded.model(), AutoCausalLm::DeepseekV2(_)));
+        assert!(loaded.quantized_load_audit().is_none());
         assert_strict_report(
             loaded.load_report(),
             contract.expected_tensors(),
@@ -1532,6 +1547,7 @@ mod tests {
             contract.mappings(),
         );
         assert_execution_audit(&loaded);
+        assert!(loaded.quantized_load_audit().is_none());
         assert_eq!(loaded.source().model_type(), "t5");
         assert_eq!(loaded.generation_defaults().eos_token_ids, [1]);
         assert_eq!(loaded.generation_defaults().pad_token_id, Some(0));

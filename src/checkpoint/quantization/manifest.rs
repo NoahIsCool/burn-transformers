@@ -21,8 +21,14 @@ pub const BURNPACK_QUANTIZATION_FORMAT_VERSION_V2: u32 = 2;
 pub const BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT: u32 =
     BURNPACK_QUANTIZATION_FORMAT_VERSION_V2;
 
-/// Backward-compatible name for [`BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT`].
-pub const BURNPACK_QUANTIZATION_FORMAT_VERSION: u32 = BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT;
+/// Compatibility name for the original version-one wire format.
+///
+/// New code must select [`BURNPACK_QUANTIZATION_FORMAT_VERSION_V1`] when it
+/// deliberately handles an unbound legacy artifact, or
+/// [`BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT`] when it needs the newest
+/// architecture-aware format. Keeping this historical name equal to one avoids
+/// silently changing the meaning of existing downstream version checks.
+pub const BURNPACK_QUANTIZATION_FORMAT_VERSION: u32 = BURNPACK_QUANTIZATION_FORMAT_VERSION_V1;
 
 /// Byte order used by explicitly byte-encoded scalar fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,6 +401,16 @@ pub struct BurnpackQuantizationManifest {
 }
 
 impl BurnpackQuantizationManifest {
+    /// Creates the legacy, provenance-free version-one manifest used by the
+    /// original public API.
+    ///
+    /// Architecture-aware writers should use [`QuantizedBurnpackSession`](super::QuantizedBurnpackSession),
+    /// whose checkpoint conversion path binds provenance and publishes v2.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::new_legacy_v1()
+    }
+
     /// Creates an explicitly legacy, provenance-free version-one manifest.
     ///
     /// This constructor is intentionally named: the current writer format is v2,
@@ -417,7 +433,7 @@ impl BurnpackQuantizationManifest {
     pub fn bind_provenance(&mut self, provenance: BurnpackProvenance) -> Result<()> {
         provenance.validate()?;
         let mut candidate = self.clone();
-        candidate.format_version = BURNPACK_QUANTIZATION_FORMAT_VERSION;
+        candidate.format_version = BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT;
         candidate.provenance = Some(provenance);
         candidate.validate()?;
         *self = candidate;
@@ -501,6 +517,18 @@ impl BurnpackQuantizationManifest {
         let manifest: Self = serde_json::from_str(json)?;
         manifest.validate()?;
         Ok(manifest)
+    }
+}
+
+/// Backward-compatible default for callers compiled against the version-one API.
+///
+/// The default is intentionally equivalent to [`Self::new_legacy_v1`]. New
+/// architecture-aware artifacts do not use this implementation: they become v2
+/// only after a [`BurnpackProvenance`] binding validates their checkpoint, plan,
+/// and payload digests.
+impl Default for BurnpackQuantizationManifest {
+    fn default() -> Self {
+        Self::new_legacy_v1()
     }
 }
 

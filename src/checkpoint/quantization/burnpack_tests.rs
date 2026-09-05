@@ -148,13 +148,17 @@ fn official_burnpack_round_trip_preserves_exact_payloads_and_metadata() {
     assert_eq!(restored_q4.metadata(), expected_q4.metadata());
     assert_eq!(restored_q4.packed_values(), expected_q4.packed_values());
     assert_eq!(restored_q4.scales(), expected_q4.scales());
+    let validation = artifact.validate_all().unwrap();
+    assert_eq!(validation.tensor_count, 2);
+    assert_eq!(validation.payload_bytes, summary.quantized_payload_bytes);
+    let audit = artifact.validate_all_audited().unwrap();
+    assert_eq!(audit.tensor_reads, 2);
+    assert_eq!(audit.tensors_validated, 2);
     assert_eq!(
-        artifact.validate_all().unwrap(),
-        BurnpackValidationReport {
-            tensor_count: 2,
-            payload_bytes: summary.quantized_payload_bytes,
-        }
+        audit.largest_payload_bytes,
+        payload(&expected_q8).len().max(payload(&expected_q4).len()) as u64
     );
+    assert!(audit.peak_owned_payload_bytes >= audit.largest_payload_bytes);
 }
 
 #[test]
@@ -690,13 +694,18 @@ fn invalid_packed_codes_are_found_by_sequential_validation() {
     fs::write(&output, bytes).unwrap();
 
     let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+    let failure = artifact.validate_all_audited().unwrap_err();
     assert!(matches!(
-        artifact.validate_all(),
-        Err(QuantizationError::InvalidQuantizedValue {
+        failure.error,
+        QuantizationError::InvalidQuantizedValue {
             index: 0,
             value: -128
-        })
+        }
     ));
+    assert_eq!(failure.audit.tensor_reads, 1);
+    assert_eq!(failure.audit.tensors_validated, 0);
+    assert_eq!(failure.audit.payload_bytes, expected_payload.len() as u64);
+    assert!(failure.audit.peak_owned_payload_bytes >= expected_payload.len() as u64);
     assert!(matches!(
         artifact.read_weight("missing.weight"),
         Err(QuantizationError::QuantizedTensorNotFound { .. })

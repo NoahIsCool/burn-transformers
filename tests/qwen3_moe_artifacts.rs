@@ -1229,11 +1229,11 @@ fn quantize_pinned_qwen3_moe_weights_to_burnpack(
 
 /// Loads a complete sidecar through the public quantized-plan executor and runs it.
 ///
-/// The automatic registry uses this same executor for packed Qwen3-MoE loading.
-/// This acceptance gate calls the lower-level API directly so it can additionally
-/// certify packed-payload and provenance-hash counters that
-/// [`transformers::LoadedModel`] intentionally does not retain. The concrete sink
-/// and execution semantics are otherwise exact.
+/// The automatic registry uses the audited form of this executor and retains its
+/// format, preflight, packed-execution, and provenance evidence in
+/// [`transformers::LoadedModel`]. This acceptance gate calls the compatibility
+/// API directly to exercise the concrete architecture sink while independently
+/// certifying its packed-payload and provenance-hash counters.
 #[cfg(all(feature = "metal", not(feature = "rocm")))]
 fn load_pinned_qwen3_moe_burnpack_and_run_metal(
     scheme: SymmetricQuantization,

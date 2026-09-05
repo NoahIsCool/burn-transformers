@@ -13,7 +13,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Error, GenerationConfig, Result,
-    checkpoint::{ExecutionStats, LoadReport},
+    checkpoint::{
+        ExecutionStats, LoadReport,
+        quantization::{
+            AuditedQuantizedExecutionOutcome, BURNPACK_QUANTIZATION_FORMAT_VERSION_V1,
+            BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, PackedLoadStats, PackedPreflightStats,
+            ProvenanceExecutionStats, ProvenanceHashStats,
+        },
+    },
 };
 
 /// Tokenizer type carried by [`LoadedModel`] when tokenizer support is enabled.
@@ -96,6 +103,57 @@ impl ModelSourceMetadata {
     }
 }
 
+/// Sidecar-specific counters retained after a successful quantized load.
+///
+/// A Burnpack overlay performs work outside the ordinary SafeTensors executor:
+/// every packed payload is validated before model mutation, selected payloads
+/// are decoded into Burn's quantized representation, and version-two artifacts
+/// hash the complete source checkpoint before and after installation. These
+/// counters stay separate from [`ExecutionStats`] because sidecar bytes and
+/// provenance passes are not checkpoint tensor reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuantizedLoadAudit {
+    format_version: u32,
+    preflight: PackedPreflightStats,
+    packed: PackedLoadStats,
+    provenance: ProvenanceExecutionStats,
+}
+
+impl QuantizedLoadAudit {
+    /// Returns the exact Burnpack manifest format used for the successful load.
+    pub fn format_version(&self) -> u32 {
+        self.format_version
+    }
+
+    /// Returns mandatory validation work completed before model mutation.
+    pub fn preflight(&self) -> &PackedPreflightStats {
+        &self.preflight
+    }
+
+    /// Returns packed decode and installation counters.
+    pub fn packed(&self) -> &PackedLoadStats {
+        &self.packed
+    }
+
+    /// Returns full-checkpoint hashing counters for a provenance-bound sidecar.
+    ///
+    /// Legacy version-one Burnpacks return an audit whose two hash passes are
+    /// both `None`; a successful version-two local load records two completed
+    /// passes.
+    pub fn provenance(&self) -> &ProvenanceExecutionStats {
+        &self.provenance
+    }
+}
+
+/// Optional execution domains forwarded through the common bundle validator.
+#[derive(Default)]
+struct RetainedLoadAudit {
+    /// Generic SafeTensors plan execution counters.
+    execution: Option<ExecutionStats>,
+    /// Burnpack-only preflight and provenance counters.
+    quantized: Option<QuantizedLoadAudit>,
+}
+
 /// An executable model and all host-side state established by a strict load.
 #[derive(Debug)]
 pub struct LoadedModel<M> {
@@ -105,6 +163,7 @@ pub struct LoadedModel<M> {
     source: ModelSourceMetadata,
     load_report: LoadReport,
     execution_stats: Option<ExecutionStats>,
+    quantized_load_audit: Option<QuantizedLoadAudit>,
 }
 
 impl<M> LoadedModel<M> {
@@ -127,7 +186,7 @@ impl<M> LoadedModel<M> {
             generation_defaults,
             source,
             load_report,
-            None,
+            RetainedLoadAudit::default(),
             vocabulary_size,
         )
     }
@@ -154,7 +213,50 @@ impl<M> LoadedModel<M> {
             generation_defaults,
             source,
             load_report,
-            Some(execution_stats),
+            RetainedLoadAudit {
+                execution: Some(execution_stats),
+                quantized: None,
+            },
+            vocabulary_size,
+        )
+    }
+
+    /// Builds a bundle from a complete successful quantized execution outcome.
+    ///
+    /// Unlike [`Self::new_with_execution_stats`], this constructor retains the
+    /// Burnpack preflight/decode and source-provenance counters in addition to
+    /// the generic checkpoint executor counters. Cross-domain relationships are
+    /// validated before the model can be presented as successfully loaded.
+    pub fn new_with_quantized_execution(
+        model: M,
+        tokenizer: Option<ModelTokenizer>,
+        generation_defaults: GenerationConfig,
+        source: ModelSourceMetadata,
+        outcome: AuditedQuantizedExecutionOutcome,
+        vocabulary_size: usize,
+    ) -> Result<Self> {
+        let AuditedQuantizedExecutionOutcome {
+            format_version,
+            preflight,
+            execution: outcome,
+        } = outcome;
+        let report = outcome.report;
+        let execution = outcome.execution;
+        Self::build(
+            model,
+            tokenizer,
+            generation_defaults,
+            source,
+            report,
+            RetainedLoadAudit {
+                execution: Some(execution),
+                quantized: Some(QuantizedLoadAudit {
+                    format_version,
+                    preflight,
+                    packed: outcome.packed,
+                    provenance: outcome.provenance,
+                }),
+            },
             vocabulary_size,
         )
     }
@@ -166,9 +268,13 @@ impl<M> LoadedModel<M> {
         generation_defaults: GenerationConfig,
         source: ModelSourceMetadata,
         mut load_report: LoadReport,
-        execution_stats: Option<ExecutionStats>,
+        retained_audit: RetainedLoadAudit,
         vocabulary_size: usize,
     ) -> Result<Self> {
+        let RetainedLoadAudit {
+            execution: execution_stats,
+            quantized: quantized_load_audit,
+        } = retained_audit;
         generation_defaults.validate(vocabulary_size)?;
         load_report.finalize();
         if !load_report.is_strictly_valid() {
@@ -188,6 +294,9 @@ impl<M> LoadedModel<M> {
         if let Some(stats) = &execution_stats {
             validate_execution_stats(&load_report, stats)?;
         }
+        if let Some(audit) = &quantized_load_audit {
+            validate_quantized_load_audit(&load_report, audit)?;
+        }
         Ok(Self {
             model,
             tokenizer,
@@ -195,6 +304,7 @@ impl<M> LoadedModel<M> {
             source,
             load_report,
             execution_stats,
+            quantized_load_audit,
         })
     }
 
@@ -235,6 +345,14 @@ impl<M> LoadedModel<M> {
     /// executor context and therefore returns `None`.
     pub fn execution_stats(&self) -> Option<&ExecutionStats> {
         self.execution_stats.as_ref()
+    }
+
+    /// Returns Burnpack and provenance counters for a quantized load.
+    ///
+    /// Full-precision loads and bundles built through the compatibility
+    /// constructors return `None`.
+    pub fn quantized_load_audit(&self) -> Option<&QuantizedLoadAudit> {
+        self.quantized_load_audit.as_ref()
     }
 
     /// Consumes the bundle and returns the executable module.
@@ -285,6 +403,185 @@ impl<M> LoadedModel<M> {
             self.execution_stats,
         )
     }
+
+    /// Consumes the bundle and additionally returns its quantized-load audit.
+    ///
+    /// The first six elements intentionally match
+    /// [`Self::into_parts_with_execution_stats`]. Full-precision bundles return
+    /// `None` for the final element.
+    pub fn into_parts_with_quantized_load_audit(
+        self,
+    ) -> (
+        M,
+        Option<ModelTokenizer>,
+        GenerationConfig,
+        ModelSourceMetadata,
+        LoadReport,
+        Option<ExecutionStats>,
+        Option<QuantizedLoadAudit>,
+    ) {
+        (
+            self.model,
+            self.tokenizer,
+            self.generation_defaults,
+            self.source,
+            self.load_report,
+            self.execution_stats,
+            self.quantized_load_audit,
+        )
+    }
+}
+
+/// Checks relationships between a completed packed pass and its strict report.
+fn validate_quantized_load_audit(report: &LoadReport, audit: &QuantizedLoadAudit) -> Result<()> {
+    let packed = audit.packed;
+    let preflight = audit.preflight;
+    if preflight.passes_started != 1 || preflight.passes_completed != 1 {
+        return Err(Error::Checkpoint(format!(
+            "successful quantized execution requires one completed Burnpack preflight, recorded {} started and {} completed",
+            preflight.passes_started, preflight.passes_completed
+        )));
+    }
+    if preflight.tensor_reads != packed.tensor_reads {
+        return Err(Error::Checkpoint(format!(
+            "Burnpack preflight read {} tensors but execution decoded {}",
+            preflight.tensor_reads, packed.tensor_reads
+        )));
+    }
+    if preflight.payload_bytes != packed.payload_bytes {
+        return Err(Error::Checkpoint(format!(
+            "Burnpack preflight read {} payload bytes but execution decoded {}",
+            preflight.payload_bytes, packed.payload_bytes
+        )));
+    }
+    if preflight.largest_payload_bytes != packed.largest_payload_bytes {
+        return Err(Error::Checkpoint(format!(
+            "Burnpack preflight largest payload is {}, but execution records {}",
+            preflight.largest_payload_bytes, packed.largest_payload_bytes
+        )));
+    }
+    if packed.tensors_applied > 0 {
+        if packed.largest_payload_bytes == 0 || preflight.peak_owned_payload_bytes == 0 {
+            return Err(Error::Checkpoint(
+                "non-empty Burnpack execution requires non-zero largest-payload and owned-allocation peak counters".into(),
+            ));
+        }
+        if packed.largest_payload_bytes > packed.payload_bytes {
+            return Err(Error::Checkpoint(format!(
+                "largest Burnpack payload {} exceeds all decoded payload bytes {}",
+                packed.largest_payload_bytes, packed.payload_bytes
+            )));
+        }
+        if preflight.peak_owned_payload_bytes < packed.largest_payload_bytes {
+            return Err(Error::Checkpoint(format!(
+                "Burnpack owned-payload peak {} is smaller than its largest decoded payload {}",
+                preflight.peak_owned_payload_bytes, packed.largest_payload_bytes
+            )));
+        }
+    }
+    let tensor_reads = usize::try_from(packed.tensor_reads)
+        .map_err(|_| Error::Checkpoint("Burnpack tensor read count exceeds usize".into()))?;
+    if tensor_reads != packed.tensors_applied {
+        return Err(Error::Checkpoint(format!(
+            "Burnpack decoded {} tensors but installed {}",
+            packed.tensor_reads, packed.tensors_applied
+        )));
+    }
+    if packed.tensors_applied != report.quantized.len() {
+        return Err(Error::Checkpoint(format!(
+            "Burnpack installed {} tensors but the load report contains {} quantized records",
+            packed.tensors_applied,
+            report.quantized.len()
+        )));
+    }
+    let reported_payload_bytes = report
+        .quantized
+        .iter()
+        .try_fold(0_u64, |total, record| total.checked_add(record.bytes));
+    let reported_payload_bytes = reported_payload_bytes.ok_or_else(|| {
+        Error::Checkpoint("quantized load-report payload byte count overflowed".into())
+    })?;
+    if reported_payload_bytes != packed.payload_bytes {
+        return Err(Error::Checkpoint(format!(
+            "Burnpack decoded {} payload bytes but the load report accounts for {reported_payload_bytes}",
+            packed.payload_bytes
+        )));
+    }
+    let reported_largest_payload = report
+        .quantized
+        .iter()
+        .map(|record| record.bytes)
+        .max()
+        .unwrap_or(0);
+    if packed.largest_payload_bytes != reported_largest_payload {
+        return Err(Error::Checkpoint(format!(
+            "largest Burnpack payload is {}, but the load report records {reported_largest_payload}",
+            packed.largest_payload_bytes
+        )));
+    }
+    match audit.format_version {
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_V1 => match (
+            audit.provenance.pre_execution,
+            audit.provenance.post_execution,
+        ) {
+            (None, None) => Ok(()),
+            _ => Err(Error::Checkpoint(
+                "legacy Burnpack v1 execution cannot claim checkpoint provenance hash passes".into(),
+            )),
+        },
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_V2 => match (
+            audit.provenance.pre_execution,
+            audit.provenance.post_execution,
+        ) {
+            (Some(before), Some(after)) => validate_provenance_pair(
+                before,
+                after,
+                report.memory.map(|memory| memory.artifact_bytes),
+            ),
+            _ => Err(Error::Checkpoint(
+                "successful Burnpack v2 execution requires both pre- and post-execution hash audits".into(),
+            )),
+        },
+        format_version => Err(Error::Checkpoint(format!(
+            "successful quantized execution recorded unsupported Burnpack format version {format_version}"
+        ))),
+    }
+}
+
+/// Checks that two successful provenance passes cover the same checkpoint bytes.
+fn validate_provenance_pair(
+    before: ProvenanceHashStats,
+    after: ProvenanceHashStats,
+    expected_artifact_bytes: Option<u64>,
+) -> Result<()> {
+    for (phase, stats) in [("pre-execution", before), ("post-execution", after)] {
+        if stats.passes_completed != 1 {
+            return Err(Error::Checkpoint(format!(
+                "successful quantized execution requires one completed {phase} provenance pass, recorded {}",
+                stats.passes_completed
+            )));
+        }
+        if stats.shards_hashed == 0 || stats.bytes_hashed == 0 || stats.peak_buffer_bytes == 0 {
+            return Err(Error::Checkpoint(format!(
+                "successful {phase} provenance pass must hash non-empty checkpoint content"
+            )));
+        }
+        if let Some(expected) = expected_artifact_bytes
+            && stats.bytes_hashed != expected
+        {
+            return Err(Error::Checkpoint(format!(
+                "{phase} provenance hashed {} bytes but the load plan records {expected} checkpoint artifact bytes",
+                stats.bytes_hashed
+            )));
+        }
+    }
+    if before.shards_hashed != after.shards_hashed || before.bytes_hashed != after.bytes_hashed {
+        return Err(Error::Checkpoint(format!(
+            "pre/post provenance coverage differs: {} shards and {} bytes before, {} shards and {} bytes after",
+            before.shards_hashed, before.bytes_hashed, after.shards_hashed, after.bytes_hashed
+        )));
+    }
+    Ok(())
 }
 
 /// Checks the redundant invariants that make retained execution counters auditable.
@@ -384,7 +681,13 @@ fn validate_label(field: &str, value: String) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::{
-        CheckpointEquivalenceRecord, ExecutionStats, LoadReport, MemoryEstimate, SourceStats,
+        CheckpointEquivalenceRecord, ExecutionStats, LoadReport, MemoryEstimate,
+        QuantizationRecord, SourceStats,
+        quantization::{
+            AuditedQuantizedExecutionOutcome, BURNPACK_QUANTIZATION_FORMAT_VERSION_V1,
+            BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, PackedLoadStats, PackedPreflightStats,
+            ProvenanceExecutionStats, ProvenanceHashStats, QuantizedExecutionOutcome,
+        },
     };
 
     use super::{LoadedModel, ModelSourceMetadata};
@@ -450,6 +753,7 @@ mod tests {
         assert_eq!(loaded.load_report().applied, ["a.weight", "z.weight"]);
         assert_eq!(loaded.generation_defaults().max_new_tokens, 256);
         assert!(loaded.execution_stats().is_none());
+        assert!(loaded.quantized_load_audit().is_none());
 
         let (model, tokenizer, _, unpacked_source, unpacked_report) = loaded.into_parts();
         assert_eq!(model, 17);
@@ -503,6 +807,7 @@ mod tests {
         .expect("strict execution-aware bundle");
 
         assert_eq!(loaded.execution_stats(), Some(&stats));
+        assert!(loaded.quantized_load_audit().is_none());
         let (model, tokenizer, _, unpacked_source, unpacked_report, unpacked_stats) =
             loaded.into_parts_with_execution_stats();
         assert_eq!(model, 23);
@@ -510,6 +815,402 @@ mod tests {
         assert_eq!(unpacked_source, source);
         assert!(unpacked_report.is_strictly_valid());
         assert_eq!(unpacked_stats, Some(stats));
+    }
+
+    /// Quantized construction retains all three execution counter domains.
+    #[test]
+    fn loaded_model_preserves_quantized_load_audit() {
+        let directory = tempfile::tempdir().expect("temporary source root");
+        let source =
+            ModelSourceMetadata::local(directory.path(), "qwen3_moe").expect("valid source");
+        let mut report = LoadReport::new();
+        report
+            .applied
+            .push("model.layers.0.mlp.down_proj.weight".into());
+        report.quantized.push(QuantizationRecord {
+            target: "model.layers.0.mlp.down_proj.weight".into(),
+            scheme: "burn-qfloat-symmetric-q8-g64-block-1xg".into(),
+            bytes: 72,
+        });
+        report.memory = Some(MemoryEstimate {
+            artifact_bytes: 4_096,
+            peak_host_staging_bytes: 256,
+            ..MemoryEstimate::default()
+        });
+        let execution = ExecutionStats {
+            tensors_applied: 1,
+            delivered_tensor_bytes: 256,
+            largest_output_tensor_bytes: 256,
+            peak_host_staging_bytes: 256,
+            ..ExecutionStats::default()
+        };
+        let hash_pass = ProvenanceHashStats {
+            passes_completed: 1,
+            shards_hashed: 2,
+            bytes_hashed: 4_096,
+            peak_buffer_bytes: 1_048_576,
+        };
+        let packed = PackedLoadStats {
+            tensor_reads: 1,
+            payload_bytes: 72,
+            largest_payload_bytes: 72,
+            tensors_applied: 1,
+        };
+        let preflight = PackedPreflightStats {
+            passes_started: 1,
+            passes_completed: 1,
+            tensor_reads: 1,
+            payload_bytes: 72,
+            largest_payload_bytes: 72,
+            peak_owned_payload_bytes: 144,
+        };
+        let provenance = ProvenanceExecutionStats {
+            pre_execution: Some(hash_pass),
+            post_execution: Some(hash_pass),
+        };
+        let loaded = LoadedModel::new_with_quantized_execution(
+            29_u8,
+            None,
+            Default::default(),
+            source.clone(),
+            AuditedQuantizedExecutionOutcome {
+                format_version: BURNPACK_QUANTIZATION_FORMAT_VERSION_V2,
+                preflight,
+                execution: QuantizedExecutionOutcome {
+                    report,
+                    execution: execution.clone(),
+                    packed,
+                    provenance,
+                },
+            },
+            32_128,
+        )
+        .expect("consistent quantized outcome must bundle");
+
+        assert_eq!(loaded.execution_stats(), Some(&execution));
+        let audit = loaded
+            .quantized_load_audit()
+            .expect("quantized outcome must retain its sidecar audit");
+        assert_eq!(
+            audit.format_version(),
+            BURNPACK_QUANTIZATION_FORMAT_VERSION_V2
+        );
+        assert_eq!(audit.preflight(), &preflight);
+        assert_eq!(audit.packed(), &packed);
+        assert_eq!(audit.provenance(), &provenance);
+
+        let (model, tokenizer, _, unpacked_source, unpacked_report, unpacked_stats, unpacked_audit) =
+            loaded.into_parts_with_quantized_load_audit();
+        assert_eq!(model, 29);
+        assert!(tokenizer.is_none());
+        assert_eq!(unpacked_source, source);
+        assert_eq!(unpacked_report.quantized.len(), 1);
+        assert_eq!(unpacked_stats, Some(execution));
+        let unpacked_audit = unpacked_audit.expect("retained audit");
+        assert_eq!(unpacked_audit.preflight(), &preflight);
+        assert_eq!(unpacked_audit.packed(), &packed);
+    }
+
+    /// Contradictory packed or provenance counters cannot escape as success.
+    #[test]
+    fn loaded_model_rejects_inconsistent_quantized_load_audit() {
+        let directory = tempfile::tempdir().expect("temporary source root");
+        let source =
+            ModelSourceMetadata::local(directory.path(), "qwen3_moe").expect("valid source");
+        let mut report = LoadReport::new();
+        report
+            .applied
+            .push("model.layers.0.mlp.down_proj.weight".into());
+        report.quantized.push(QuantizationRecord {
+            target: "model.layers.0.mlp.down_proj.weight".into(),
+            scheme: "burn-qfloat-symmetric-q8-g64-block-1xg".into(),
+            bytes: 72,
+        });
+        report.memory = Some(MemoryEstimate {
+            artifact_bytes: 4_096,
+            ..MemoryEstimate::default()
+        });
+        let execution = ExecutionStats {
+            tensors_applied: 1,
+            ..ExecutionStats::default()
+        };
+        let packed = PackedLoadStats {
+            tensor_reads: 1,
+            payload_bytes: 72,
+            largest_payload_bytes: 72,
+            tensors_applied: 1,
+        };
+        let preflight = PackedPreflightStats {
+            passes_started: 1,
+            passes_completed: 1,
+            tensor_reads: 1,
+            payload_bytes: 72,
+            largest_payload_bytes: 72,
+            peak_owned_payload_bytes: 144,
+        };
+        let hash_pass = ProvenanceHashStats {
+            passes_completed: 1,
+            shards_hashed: 1,
+            bytes_hashed: 4_096,
+            peak_buffer_bytes: 1_048_576,
+        };
+        let construct = |format_version, report, preflight, packed, provenance| {
+            LoadedModel::new_with_quantized_execution(
+                (),
+                None,
+                Default::default(),
+                source.clone(),
+                AuditedQuantizedExecutionOutcome {
+                    format_version,
+                    preflight,
+                    execution: QuantizedExecutionOutcome {
+                        report,
+                        execution: execution.clone(),
+                        packed,
+                        provenance,
+                    },
+                },
+                32,
+            )
+        };
+
+        for inconsistent in [
+            PackedPreflightStats {
+                passes_started: 0,
+                ..preflight
+            },
+            PackedPreflightStats {
+                passes_completed: 0,
+                ..preflight
+            },
+            PackedPreflightStats {
+                tensor_reads: 2,
+                ..preflight
+            },
+            PackedPreflightStats {
+                payload_bytes: 73,
+                ..preflight
+            },
+            PackedPreflightStats {
+                largest_payload_bytes: 73,
+                ..preflight
+            },
+            PackedPreflightStats {
+                peak_owned_payload_bytes: 0,
+                ..preflight
+            },
+            PackedPreflightStats {
+                peak_owned_payload_bytes: 71,
+                ..preflight
+            },
+        ] {
+            assert!(
+                construct(
+                    BURNPACK_QUANTIZATION_FORMAT_VERSION_V1,
+                    report.clone(),
+                    inconsistent,
+                    packed,
+                    ProvenanceExecutionStats::default(),
+                )
+                .is_err()
+            );
+        }
+
+        for inconsistent in [
+            PackedLoadStats {
+                tensor_reads: 2,
+                ..packed
+            },
+            PackedLoadStats {
+                payload_bytes: 73,
+                ..packed
+            },
+            PackedLoadStats {
+                tensors_applied: 0,
+                ..packed
+            },
+        ] {
+            assert!(
+                construct(
+                    BURNPACK_QUANTIZATION_FORMAT_VERSION_V1,
+                    report.clone(),
+                    preflight,
+                    inconsistent,
+                    ProvenanceExecutionStats::default(),
+                )
+                .is_err()
+            );
+        }
+
+        let zero_largest = PackedLoadStats {
+            largest_payload_bytes: 0,
+            ..packed
+        };
+        assert!(
+            construct(
+                BURNPACK_QUANTIZATION_FORMAT_VERSION_V1,
+                report.clone(),
+                PackedPreflightStats {
+                    largest_payload_bytes: 0,
+                    ..preflight
+                },
+                zero_largest,
+                ProvenanceExecutionStats::default(),
+            )
+            .is_err()
+        );
+        let largest_above_total = PackedLoadStats {
+            payload_bytes: 71,
+            ..packed
+        };
+        assert!(
+            construct(
+                BURNPACK_QUANTIZATION_FORMAT_VERSION_V1,
+                report.clone(),
+                PackedPreflightStats {
+                    payload_bytes: 71,
+                    ..preflight
+                },
+                largest_above_total,
+                ProvenanceExecutionStats::default(),
+            )
+            .is_err()
+        );
+
+        assert!(
+            construct(
+                BURNPACK_QUANTIZATION_FORMAT_VERSION_V2,
+                report.clone(),
+                preflight,
+                packed,
+                ProvenanceExecutionStats::default(),
+            )
+            .is_err()
+        );
+        assert!(
+            construct(
+                99,
+                report.clone(),
+                preflight,
+                packed,
+                ProvenanceExecutionStats::default(),
+            )
+            .is_err()
+        );
+        construct(
+            BURNPACK_QUANTIZATION_FORMAT_VERSION_V1,
+            report.clone(),
+            preflight,
+            packed,
+            ProvenanceExecutionStats::default(),
+        )
+        .expect("v1 explicitly explains the absence of provenance hashes");
+
+        assert!(
+            construct(
+                BURNPACK_QUANTIZATION_FORMAT_VERSION_V2,
+                report.clone(),
+                preflight,
+                packed,
+                ProvenanceExecutionStats {
+                    pre_execution: Some(hash_pass),
+                    post_execution: None,
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            construct(
+                BURNPACK_QUANTIZATION_FORMAT_VERSION_V2,
+                report.clone(),
+                preflight,
+                packed,
+                ProvenanceExecutionStats {
+                    pre_execution: Some(ProvenanceHashStats {
+                        passes_completed: 0,
+                        ..hash_pass
+                    }),
+                    post_execution: Some(hash_pass),
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            construct(
+                BURNPACK_QUANTIZATION_FORMAT_VERSION_V2,
+                report.clone(),
+                preflight,
+                packed,
+                ProvenanceExecutionStats {
+                    pre_execution: Some(hash_pass),
+                    post_execution: Some(ProvenanceHashStats {
+                        bytes_hashed: hash_pass.bytes_hashed + 1,
+                        ..hash_pass
+                    }),
+                }
+            )
+            .is_err()
+        );
+
+        let after_wrong_bytes = construct(
+            BURNPACK_QUANTIZATION_FORMAT_VERSION_V2,
+            report.clone(),
+            preflight,
+            packed,
+            ProvenanceExecutionStats {
+                pre_execution: Some(hash_pass),
+                post_execution: Some(ProvenanceHashStats {
+                    bytes_hashed: 4_095,
+                    ..hash_pass
+                }),
+            },
+        )
+        .expect_err("the post-execution pass must match planned artifact bytes");
+        assert!(after_wrong_bytes.to_string().contains("post-execution"));
+
+        let mut overflowing_report = report;
+        overflowing_report.applied.push("second.weight".into());
+        overflowing_report.quantized[0].bytes = u64::MAX;
+        overflowing_report.quantized.push(QuantizationRecord {
+            target: "second.weight".into(),
+            scheme: "burn-qfloat-symmetric-q8-g64-block-1xg".into(),
+            bytes: 1,
+        });
+        let overflowing_execution = ExecutionStats {
+            tensors_applied: 2,
+            ..ExecutionStats::default()
+        };
+        let overflowing = LoadedModel::new_with_quantized_execution(
+            (),
+            None,
+            Default::default(),
+            source,
+            AuditedQuantizedExecutionOutcome {
+                format_version: BURNPACK_QUANTIZATION_FORMAT_VERSION_V1,
+                preflight: PackedPreflightStats {
+                    passes_started: 1,
+                    passes_completed: 1,
+                    tensor_reads: 2,
+                    payload_bytes: u64::MAX,
+                    largest_payload_bytes: u64::MAX,
+                    peak_owned_payload_bytes: u64::MAX,
+                },
+                execution: QuantizedExecutionOutcome {
+                    report: overflowing_report,
+                    execution: overflowing_execution,
+                    packed: PackedLoadStats {
+                        tensor_reads: 2,
+                        payload_bytes: u64::MAX,
+                        largest_payload_bytes: u64::MAX,
+                        tensors_applied: 2,
+                    },
+                    provenance: ProvenanceExecutionStats::default(),
+                },
+            },
+            32,
+        )
+        .expect_err("overflowing report byte sums must fail closed");
+        assert!(overflowing.to_string().contains("overflowed"));
     }
 
     /// Invalid generation controls and non-strict reports cannot escape loaders.

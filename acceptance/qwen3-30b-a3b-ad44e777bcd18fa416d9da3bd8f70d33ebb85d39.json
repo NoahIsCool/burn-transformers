@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "strict_f16_metal_smoke_verified_pending_official_reference_generation_quantization_and_32k_acceptance",
+  "phase": "strict_f16_q8_q4_metal_and_packed_kernel_smokes_verified_pending_official_reference_generation_quality_and_32k_acceptance",
   "repository": "Qwen/Qwen3-30B-A3B",
   "revision": "ad44e777bcd18fa416d9da3bd8f70d33ebb85d39",
   "artifact_layout": {
@@ -91,8 +91,16 @@
     "official_reference_full_vector_logits_compared": false,
     "official_reference_greedy_32_tokens_compared": false,
     "cached_stateless_top1_all_prefixes_compared": false,
-    "q8_metal_acceptance": false,
-    "q4_metal_acceptance": false,
+    "q8_streaming_conversion_validated": true,
+    "q8_burnpack_v2_integrity_validated": true,
+    "q8_metal_acceptance": true,
+    "q8_packed_metal_kernel_execution_validated": true,
+    "q8_whole_weight_dequantization_absent": true,
+    "q4_streaming_conversion_validated": true,
+    "q4_burnpack_v2_integrity_validated": true,
+    "q4_metal_acceptance": true,
+    "q4_packed_metal_kernel_execution_validated": true,
+    "q4_whole_weight_dequantization_absent": true,
     "quantized_quality_corpus_validated": false,
     "long_context_32k_validated": false
   },
@@ -240,14 +248,273 @@
       "accepted_direct_hardware_attempt": "The direct-hardware invocation completed with exit status 0 and supplied every recorded measurement."
     }
   },
+  "native_quantized_acceptance": {
+    "status": "passed_for_conversion_short_metal_execution_and_packed_kernel_dispatch",
+    "result_recorded": true,
+    "source": {
+      "crate_commit": "a8dc10ad9c3def45df105bf63e9cb681e634aa77",
+      "tree": "f4f3106448c4ca005998169549d73f70575dc496",
+      "commit_subject": "test(transformers): record flan t5 xxl metal parity",
+      "acceptance_test_path": "crates/transformers/tests/qwen3_moe_artifacts.rs",
+      "acceptance_test_sha256": "dc8285b97a722d770511ec515dbdde82bd88a4f4bcddd31151df760ade0fb875",
+      "transformer_source_matches_commit": true,
+      "note": "The immutable executable predates only documentation and later load-accounting changes. An unrelated modification outside crates/transformers was not part of the acceptance source."
+    },
+    "build": {
+      "profile": "release",
+      "optimized": true,
+      "default_features": false,
+      "ordinary_features": ["std", "metal", "tokenizers"],
+      "traced_features": ["std", "metal", "tokenizers", "kernel-tracing"],
+      "burn_version": "0.21.0",
+      "rustc": "1.94.0-nightly (4f14395c3 2025-12-22)",
+      "cargo": "1.94.0-nightly (3861f60f6 2025-12-19)",
+      "target": "aarch64-apple-darwin",
+      "ordinary_binary": {
+        "path": "/Volumes/bag of holding/cargo-target/hmm-compression-transformers/release/deps/qwen3_moe_artifacts-6f04c67821a92e32",
+        "bytes": 45310704,
+        "sha256": "80dc977b3a97b8686df17cdb073e9311e65aa96596498e2aa76ce513133d30df"
+      },
+      "kernel_traced_binary": {
+        "path": "/Volumes/bag of holding/cargo-target/hmm-compression-transformers/release/deps/qwen3_moe_artifacts-5bb0f82167b20af3",
+        "bytes": 45547840,
+        "sha256": "e2554e3b5e4ffb3681eb4a1bd980f5632366bf0d298ada6892a5b5c1181dac2b"
+      }
+    },
+    "machine": {
+      "operating_system": "macOS 15.7.9 (24G830)",
+      "architecture": "arm64",
+      "processor": "Apple M3 Max",
+      "unified_memory_bytes": 103079215104,
+      "backend": "Burn Metal via burn-wgpu and CubeCL"
+    },
+    "common_contract": {
+      "format_version": 2,
+      "load_plan_sha256": "b90fa8fbfa08b6500dc3be8dd6e0458501b62580de704acac3bd300150d5b49d",
+      "checkpoint_provenance_shards": 16,
+      "checkpoint_provenance_bytes_per_hash_pass": 61066575648,
+      "pre_and_post_source_hash_passes": 2,
+      "source_hash_peak_buffer_bytes": 1048576,
+      "source_dtype": "bf16",
+      "target_dtype": "f16",
+      "group_size": 64,
+      "quantized_tensors": 18625,
+      "retained_f16_tensors": 242,
+      "retained_f16_source_bytes": 647917568,
+      "mapped_tensors_applied": 18867,
+      "rename_transforms": 18480,
+      "dtype_conversions": 18867,
+      "aliases": 0,
+      "unexpected_tensors": 0,
+      "missing_tensors": 0,
+      "maximum_open_source_shards": 1,
+      "publication_reopened_and_fully_validated": true,
+      "every_payload_sha256_validated": true,
+      "fixture": {
+        "batch_size": 1,
+        "prompt": "Hello world, cached decoding.",
+        "prompt_token_ids": [9707, 1879, 11, 20579, 47116, 13],
+        "prompt_tokens": 6,
+        "cache_capacity_tokens": 7,
+        "hidden_trace_count_per_comparison": 50,
+        "logits_shape": [1, 1, 151936]
+      },
+      "measurement_note": "Conversion and smoke observations are cold end-to-end acceptance runs, not standardized throughput benchmarks. Conversion includes complete source hashing, streaming quantization, private publication, reopen, and validation. Smoke and kernel runs include artifact validation, complete pre/post checkpoint provenance hashing, retained F16 loading, packed loading, and synchronized Metal execution."
+    },
+    "q8": {
+      "scheme": "symmetric-q8-g64-flat-row-major",
+      "runtime_storage": "burn-qfloat-symmetric-q8-g64-block-1xg",
+      "artifact": {
+        "path": "/Volumes/bag of holding/models/transformers-acceptance/qwen3-30b-a3b-q8-ad44e777/qwen3-30b-a3b-ad44e777-q8-g64-v2.bpk",
+        "bytes": 32110057725,
+        "sha256": "7f5230819e7d2170bd85aa3a68ec2c18c303b06a5322cc811f1fbcae64a78f0c",
+        "quantized_payload_bytes": 32096174080,
+        "largest_payload_bytes": 330612736
+      },
+      "conversion": {
+        "test": "quantizes_pinned_qwen3_moe_weights_to_q8_burnpack",
+        "source_tensor_reads": 18867,
+        "maximum_open_source_shards": 1,
+        "conversion_seconds": 1593.321,
+        "rust_test_wall_seconds": 1899.68,
+        "process_wall_seconds": 1899.77,
+        "macos_maximum_resident_set_bytes": 33463664640,
+        "macos_reported_peak_memory_footprint_bytes": 1333022720,
+        "memory_note": "The conversion-run peak-footprint counter was lower than RSS and is retained verbatim as an anomalous macOS observation; it is not used as the acceptance memory high-water mark.",
+        "process_exit_status": 0
+      },
+      "payload_io_per_smoke_or_kernel_process": {
+        "full_payload_passes": [
+          {
+            "phase": "explicit_test_harness_validation",
+            "tensor_reads": 18625,
+            "payload_bytes": 32096174080
+          },
+          {
+            "phase": "mandatory_executor_preflight",
+            "tensor_reads": 18625,
+            "payload_bytes": 32096174080
+          },
+          {
+            "phase": "model_installation",
+            "tensor_reads": 18625,
+            "payload_bytes": 32096174080
+          }
+        ],
+        "tensor_reads_across_all_passes": 55875,
+        "payload_bytes_across_all_passes": 96288522240,
+        "note": "The explicit acceptance helper validates the artifact once before calling the loader. The loader then performs its own fail-before-mutation validation and reads every payload once more for installation. Executor PackedLoadStats in the executed binary described only the final installation pass."
+      },
+      "metal_smoke": {
+        "test": "loads_pinned_qwen3_moe_q8_and_runs_metal_smoke",
+        "retained_source_tensor_reads": 242,
+        "installation_packed_tensor_reads": 18625,
+        "installation_packed_payload_bytes": 32096174080,
+        "first_top1_token_id": 1096,
+        "decoded_top1_token_id": 374,
+        "cached_vs_stateless_logit_cosine": 1.0,
+        "minimum_cached_vs_stateless_hidden_trace_cosine": 1.0,
+        "stateless_logit_fnv1a64": "229184cde9c903ae",
+        "cached_logit_fnv1a64": "229184cde9c903ae",
+        "stateless_hidden_trace_fnv1a64": "e39b840db7b5127b",
+        "cached_hidden_trace_fnv1a64": "e39b840db7b5127b",
+        "decoded_logit_fnv1a64": "3d9f0c8ee4fe7353",
+        "load_seconds": 516.451,
+        "stateless_seconds": 1.163,
+        "prefill_seconds": 0.479,
+        "decode_seconds": 0.306,
+        "rust_test_wall_seconds": 867.64,
+        "process_wall_seconds": 868.75,
+        "macos_maximum_resident_set_bytes": 34560016384,
+        "macos_peak_memory_footprint_bytes": 38081382336,
+        "process_exit_status": 0
+      },
+      "packed_kernel_audit": {
+        "test": "audits_pinned_qwen3_moe_q8_decode_packed_metal_kernels",
+        "expected_packed_matmul_launches": 1345,
+        "observed_packed_matmul_launches": 1345,
+        "whole_weight_dequantization_launches": 0,
+        "first_top1_token_id": 1096,
+        "decoded_top1_token_id": 374,
+        "cached_vs_stateless_logit_cosine": 1.0,
+        "minimum_cached_vs_stateless_hidden_trace_cosine": 1.0,
+        "stateless_logit_fnv1a64": "229184cde9c903ae",
+        "cached_logit_fnv1a64": "229184cde9c903ae",
+        "stateless_hidden_trace_fnv1a64": "e39b840db7b5127b",
+        "cached_hidden_trace_fnv1a64": "e39b840db7b5127b",
+        "decoded_logit_fnv1a64": "3d9f0c8ee4fe7353",
+        "load_seconds": 536.631,
+        "stateless_seconds": 1.149,
+        "prefill_seconds": 0.505,
+        "decode_seconds": 0.488,
+        "rust_test_wall_seconds": 889.68,
+        "process_wall_seconds": 889.80,
+        "macos_maximum_resident_set_bytes": 34554724352,
+        "macos_peak_memory_footprint_bytes": 38074272064,
+        "process_exit_status": 0
+      }
+    },
+    "q4": {
+      "scheme": "symmetric-q4-g64-flat-row-major",
+      "runtime_storage": "burn-qfloat-symmetric-q4-g64-block-1xg",
+      "artifact": {
+        "path": "/Volumes/bag of holding/models/transformers-acceptance/qwen3-30b-a3b-q4-ad44e777/qwen3-30b-a3b-ad44e777-q4-g64-v2.bpk",
+        "bytes": 17006255982,
+        "sha256": "70acdcc7e5c6149b888fefab42d42ebf64cb2f2444af2bdadbf573a91a934dd4",
+        "quantized_payload_bytes": 16992092160,
+        "largest_payload_bytes": 175030272
+      },
+      "conversion": {
+        "test": "quantizes_pinned_qwen3_moe_weights_to_q4_burnpack",
+        "source_tensor_reads": 18867,
+        "maximum_open_source_shards": 1,
+        "conversion_seconds": 1467.756,
+        "rust_test_wall_seconds": 1739.76,
+        "process_wall_seconds": 1740.17,
+        "macos_maximum_resident_set_bytes": 17852235776,
+        "macos_reported_peak_memory_footprint_bytes": 1331384448,
+        "memory_note": "The conversion-run peak-footprint counter was lower than RSS and is retained verbatim as an anomalous macOS observation; it is not used as the acceptance memory high-water mark.",
+        "process_exit_status": 0
+      },
+      "payload_io_per_smoke_or_kernel_process": {
+        "full_payload_passes": [
+          {
+            "phase": "explicit_test_harness_validation",
+            "tensor_reads": 18625,
+            "payload_bytes": 16992092160
+          },
+          {
+            "phase": "mandatory_executor_preflight",
+            "tensor_reads": 18625,
+            "payload_bytes": 16992092160
+          },
+          {
+            "phase": "model_installation",
+            "tensor_reads": 18625,
+            "payload_bytes": 16992092160
+          }
+        ],
+        "tensor_reads_across_all_passes": 55875,
+        "payload_bytes_across_all_passes": 50976276480,
+        "note": "The explicit acceptance helper validates the artifact once before calling the loader. The loader then performs its own fail-before-mutation validation and reads every payload once more for installation. Executor PackedLoadStats in the executed binary described only the final installation pass."
+      },
+      "metal_smoke": {
+        "test": "loads_pinned_qwen3_moe_q4_and_runs_metal_smoke",
+        "retained_source_tensor_reads": 242,
+        "installation_packed_tensor_reads": 18625,
+        "installation_packed_payload_bytes": 16992092160,
+        "first_top1_token_id": 1096,
+        "decoded_top1_token_id": 374,
+        "cached_vs_stateless_logit_cosine": 1.0,
+        "minimum_cached_vs_stateless_hidden_trace_cosine": 1.0,
+        "stateless_logit_fnv1a64": "7a95e5850b6dc6b4",
+        "cached_logit_fnv1a64": "7a95e5850b6dc6b4",
+        "stateless_hidden_trace_fnv1a64": "bb526e3adf5fb4f8",
+        "cached_hidden_trace_fnv1a64": "bb526e3adf5fb4f8",
+        "decoded_logit_fnv1a64": "7cd17329b471c9b7",
+        "load_seconds": 408.657,
+        "stateless_seconds": 0.950,
+        "prefill_seconds": 0.507,
+        "decode_seconds": 0.374,
+        "rust_test_wall_seconds": 640.29,
+        "process_wall_seconds": 641.39,
+        "macos_maximum_resident_set_bytes": 19299860480,
+        "macos_peak_memory_footprint_bytes": 23441559232,
+        "process_exit_status": 0
+      },
+      "packed_kernel_audit": {
+        "test": "audits_pinned_qwen3_moe_q4_decode_packed_metal_kernels",
+        "expected_packed_matmul_launches": 1345,
+        "observed_packed_matmul_launches": 1345,
+        "whole_weight_dequantization_launches": 0,
+        "first_top1_token_id": 1096,
+        "decoded_top1_token_id": 374,
+        "cached_vs_stateless_logit_cosine": 1.0,
+        "minimum_cached_vs_stateless_hidden_trace_cosine": 1.0,
+        "stateless_logit_fnv1a64": "7a95e5850b6dc6b4",
+        "cached_logit_fnv1a64": "7a95e5850b6dc6b4",
+        "stateless_hidden_trace_fnv1a64": "bb526e3adf5fb4f8",
+        "cached_hidden_trace_fnv1a64": "bb526e3adf5fb4f8",
+        "decoded_logit_fnv1a64": "7cd17329b471c9b7",
+        "load_seconds": 400.902,
+        "stateless_seconds": 0.758,
+        "prefill_seconds": 0.488,
+        "decode_seconds": 0.484,
+        "rust_test_wall_seconds": 635.43,
+        "process_wall_seconds": 635.84,
+        "macos_maximum_resident_set_bytes": 19297681408,
+        "macos_peak_memory_footprint_bytes": 23448391360,
+        "process_exit_status": 0
+      }
+    }
+  },
   "remaining_release_gates": [
     "official reference full-vector logit comparison",
     "official reference 32-token greedy continuation",
     "cached-versus-stateless top-1 parity at every generated prefix",
-    "native Q8 and Q4 conversion and Metal inference acceptance",
     "quantized fixed-corpus quality limits",
     "32K-token quantized context stress",
     "standardized synchronized warm latency and throughput series"
   ],
-  "support_note": "This record proves strict artifact identity, complete F16 weight application, source-ordered single-shard streaming, and short stateless/cached/decode execution on the named Metal system. It does not establish numerical parity with the official implementation, generation parity, quantized accuracy, or long-context behavior; advertised support therefore remains false."
+  "support_note": "This record proves strict artifact identity, complete F16 weight application, source-ordered single-shard streaming, short F16/Q8/Q4 stateless-cached-decode execution, and packed Q8/Q4 Metal kernel dispatch without whole-weight dequantization on the named system. It does not establish numerical parity with the official implementation, 32-token generation parity, quantized corpus quality, or long-context behavior; advertised support therefore remains false."
 }

@@ -696,6 +696,41 @@ fn manifest_v2_requires_provenance_while_v1_remains_compatible() {
     ));
 }
 
+/// Historical constructors and the unsuffixed version constant retain v1 semantics.
+#[test]
+fn compatibility_manifest_api_remains_v1_compatible_without_changing_current_v2() {
+    assert_eq!(
+        BURNPACK_QUANTIZATION_FORMAT_VERSION,
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_V1
+    );
+    assert_eq!(
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT,
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_V2
+    );
+    assert_ne!(
+        BURNPACK_QUANTIZATION_FORMAT_VERSION,
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT
+    );
+
+    let legacy = BurnpackQuantizationManifest::new();
+    assert_eq!(legacy, BurnpackQuantizationManifest::new_legacy_v1());
+    assert_eq!(legacy, BurnpackQuantizationManifest::default());
+    assert_eq!(
+        legacy.format_version,
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_V1
+    );
+    assert!(legacy.provenance.is_none());
+    assert!(legacy.tensors.is_empty());
+
+    let json = legacy.to_json_pretty().unwrap();
+    assert!(!json.contains("provenance"));
+    assert!(!json.contains("payload_sha256"));
+    assert_eq!(
+        BurnpackQuantizationManifest::from_json(&json).unwrap(),
+        legacy
+    );
+}
+
 #[test]
 fn payload_writer_uses_packed_then_little_endian_scales() {
     let mut values = vec![0.0_f32; 32];

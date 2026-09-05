@@ -221,6 +221,49 @@ pub struct BurnpackValidationReport {
     pub payload_bytes: u64,
 }
 
+/// Detailed validation accounting used by audited packed-load entry points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct BurnpackValidationAudit {
+    /// Payloads copied completely from mapped storage, including a failing payload.
+    pub tensor_reads: u64,
+    /// Payloads whose digest, structure, scales, and codes all validated.
+    pub tensors_validated: usize,
+    /// Sum of payload bytes copied, including a failing payload when fully copied.
+    pub payload_bytes: u64,
+    /// Largest individual payload copied completely from mapped storage.
+    pub largest_payload_bytes: u64,
+    /// Maximum simultaneous Rust-owned bytes used to decode one payload.
+    pub peak_owned_payload_bytes: u64,
+}
+
+/// Partial sequential-validation audit retained when one payload is invalid.
+#[derive(Debug)]
+pub(super) struct BurnpackValidationFailure {
+    /// Root payload, allocation, or semantic validation error.
+    pub error: QuantizationError,
+    /// Exact progress through and including any completely copied failing payload.
+    pub audit: BurnpackValidationAudit,
+}
+
+/// Owned-buffer accounting for one packed payload read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct BurnpackPayloadReadStats {
+    /// Whether the complete mapped payload reached owned memory.
+    pub tensor_reads: u64,
+    /// Complete mapped payload bytes copied into owned memory.
+    pub payload_bytes: u64,
+    /// Maximum simultaneous capacity of owned payload and scale vectors.
+    pub peak_owned_payload_bytes: u64,
+}
+
+/// Failed packed read paired with allocation and byte progress through the error.
+pub(super) struct BurnpackPayloadReadFailure {
+    /// Root payload, allocation, digest, or semantic validation error.
+    pub error: QuantizationError,
+    /// Owned-buffer accounting completed before the error.
+    pub stats: BurnpackPayloadReadStats,
+}
+
 #[derive(Debug, Clone)]
 struct StagedTensor {
     offset: u64,
@@ -1053,45 +1096,88 @@ impl QuantizedBurnpackArtifact {
     /// constructor skips only the duplicate hash; it still validates metadata,
     /// lengths, scales, and every packed code.
     pub fn read_weight(&mut self, name: &str) -> Result<QuantizedWeight> {
-        let metadata = self.manifest.tensors.get(name).cloned().ok_or_else(|| {
-            QuantizationError::QuantizedTensorNotFound {
-                name: name.to_owned(),
-            }
-        })?;
-        let expected = payload_len_usize(&metadata)?;
-        let data = materialize_store_tensor(&mut self.store, name)?.ok_or_else(|| {
-            QuantizationError::InvalidArtifactTensor {
-                name: name.to_owned(),
-                reason: "manifest key is missing from Burnpack tensor map".into(),
-            }
-        })?;
-        validate_u8_payload_descriptor(name, &data, expected)?;
+        self.read_weight_audited(name)
+            .map(|(weight, _)| weight)
+            .map_err(|failure| failure.error)
+    }
+
+    /// Reads one weight while retaining exact owned-buffer progress on failure.
+    pub(super) fn read_weight_audited(
+        &mut self,
+        name: &str,
+    ) -> std::result::Result<(QuantizedWeight, BurnpackPayloadReadStats), BurnpackPayloadReadFailure>
+    {
+        let metadata =
+            self.manifest
+                .tensors
+                .get(name)
+                .cloned()
+                .ok_or_else(|| BurnpackPayloadReadFailure {
+                    error: QuantizationError::QuantizedTensorNotFound {
+                        name: name.to_owned(),
+                    },
+                    stats: BurnpackPayloadReadStats::default(),
+                })?;
+        let expected = payload_len_usize(&metadata).map_err(empty_read_failure)?;
+        let data = materialize_store_tensor(&mut self.store, name)
+            .map_err(empty_read_failure)?
+            .ok_or_else(|| BurnpackPayloadReadFailure {
+                error: QuantizationError::InvalidArtifactTensor {
+                    name: name.to_owned(),
+                    reason: "manifest key is missing from Burnpack tensor map".into(),
+                },
+                stats: BurnpackPayloadReadStats::default(),
+            })?;
+        validate_u8_payload_descriptor(name, &data, expected).map_err(empty_read_failure)?;
         decode_payload(name, metadata, data.as_bytes())
     }
 
     /// Sequentially materializes and validates all payloads, dropping each before the next.
     pub fn validate_all(&mut self) -> Result<BurnpackValidationReport> {
+        self.validate_all_audited()
+            .map(|audit| BurnpackValidationReport {
+                tensor_count: audit.tensors_validated,
+                payload_bytes: audit.payload_bytes,
+            })
+            .map_err(|failure| failure.error)
+    }
+
+    /// Sequentially validates all payloads while preserving a failing prefix audit.
+    pub(super) fn validate_all_audited(
+        &mut self,
+    ) -> std::result::Result<BurnpackValidationAudit, BurnpackValidationFailure> {
         let names: Vec<_> = self.manifest.tensors.keys().cloned().collect();
-        let mut payload_bytes = 0_u64;
+        let mut audit = BurnpackValidationAudit::default();
         for name in &names {
-            let weight = self.read_weight(name)?;
-            let tensor_bytes = weight
-                .metadata()
-                .packed_value_bytes
-                .checked_add(weight.metadata().scale_bytes)
-                .ok_or(QuantizationError::ByteLengthOverflow {
-                    context: "validated payload byte count",
-                })?;
-            payload_bytes = payload_bytes.checked_add(tensor_bytes).ok_or(
-                QuantizationError::ByteLengthOverflow {
-                    context: "validated artifact payload byte count",
-                },
-            )?;
+            let read = self.read_weight_audited(name);
+            let read_stats = match &read {
+                Ok((_, stats)) => *stats,
+                Err(failure) => failure.stats,
+            };
+            if let Err(error) = record_validation_read(&mut audit, read_stats) {
+                return Err(BurnpackValidationFailure { error, audit });
+            }
+            match read {
+                Ok((_weight, _)) => {
+                    let Some(tensors_validated) = audit.tensors_validated.checked_add(1) else {
+                        return Err(BurnpackValidationFailure {
+                            error: QuantizationError::ByteLengthOverflow {
+                                context: "validated tensor count",
+                            },
+                            audit,
+                        });
+                    };
+                    audit.tensors_validated = tensors_validated;
+                }
+                Err(failure) => {
+                    return Err(BurnpackValidationFailure {
+                        error: failure.error,
+                        audit,
+                    });
+                }
+            }
         }
-        Ok(BurnpackValidationReport {
-            tensor_count: names.len(),
-            payload_bytes,
-        })
+        Ok(audit)
     }
 }
 
@@ -1140,70 +1226,151 @@ fn decode_payload(
     name: &str,
     metadata: QuantizedTensorMetadata,
     bytes: &[u8],
-) -> Result<QuantizedWeight> {
+) -> std::result::Result<(QuantizedWeight, BurnpackPayloadReadStats), BurnpackPayloadReadFailure> {
     let packed_len = usize::try_from(metadata.packed_value_bytes).map_err(|_| {
-        QuantizationError::ByteLengthOverflow {
+        empty_read_failure(QuantizationError::ByteLengthOverflow {
             context: "packed payload host length",
-        }
+        })
     })?;
     let scale_len = usize::try_from(metadata.scale_bytes).map_err(|_| {
-        QuantizationError::ByteLengthOverflow {
+        empty_read_failure(QuantizationError::ByteLengthOverflow {
             context: "scale payload host length",
-        }
+        })
     })?;
-    let expected =
-        packed_len
-            .checked_add(scale_len)
-            .ok_or(QuantizationError::ByteLengthOverflow {
-                context: "combined payload host length",
-            })?;
+    let expected = packed_len.checked_add(scale_len).ok_or_else(|| {
+        empty_read_failure(QuantizationError::ByteLengthOverflow {
+            context: "combined payload host length",
+        })
+    })?;
     if bytes.len() != expected {
-        return Err(QuantizationError::InvalidArtifactTensor {
-            name: name.to_owned(),
-            reason: format!("payload has {} bytes, expected {expected}", bytes.len()),
-        });
+        return Err(empty_read_failure(
+            QuantizationError::InvalidArtifactTensor {
+                name: name.to_owned(),
+                reason: format!("payload has {} bytes, expected {expected}", bytes.len()),
+            },
+        ));
     }
 
     let mut owned_payload = Vec::new();
-    owned_payload
-        .try_reserve_exact(expected)
-        .map_err(|_| QuantizationError::AllocationFailed {
+    owned_payload.try_reserve_exact(expected).map_err(|_| {
+        empty_read_failure(QuantizationError::AllocationFailed {
             context: "mapped quantized-payload copy",
             requested: expected,
-        })?;
+        })
+    })?;
     owned_payload.extend_from_slice(bytes);
+    let mut stats = BurnpackPayloadReadStats {
+        tensor_reads: 1,
+        payload_bytes: u64::try_from(bytes.len()).map_err(|_| {
+            empty_read_failure(QuantizationError::ByteLengthOverflow {
+                context: "mapped quantized-payload byte accounting",
+            })
+        })?,
+        peak_owned_payload_bytes: owned_payload_bytes(owned_payload.capacity(), 0)
+            .map_err(empty_read_failure)?,
+    };
 
     if let Some(expected_sha256) = &metadata.payload_sha256 {
         let actual_sha256 = packed_payload_sha256(&owned_payload);
         if actual_sha256 != *expected_sha256 {
-            return Err(QuantizationError::PackedPayloadDigestMismatch {
-                name: name.to_owned(),
-                expected: expected_sha256.clone(),
-                actual: actual_sha256,
-            });
+            return Err(read_failure(
+                QuantizationError::PackedPayloadDigestMismatch {
+                    name: name.to_owned(),
+                    expected: expected_sha256.clone(),
+                    actual: actual_sha256,
+                },
+                stats,
+            ));
         }
     }
 
-    let scale_bytes = owned_payload.split_off(packed_len);
-    let packed = owned_payload;
-
     if !scale_len.is_multiple_of(4) {
-        return Err(QuantizationError::InvalidMetadata {
-            reason: "scale byte count is not divisible by four".into(),
-        });
+        return Err(read_failure(
+            QuantizationError::InvalidMetadata {
+                reason: "scale byte count is not divisible by four".into(),
+            },
+            stats,
+        ));
     }
     let scale_count = scale_len / 4;
     let mut scales = Vec::new();
-    scales
-        .try_reserve_exact(scale_count)
-        .map_err(|_| QuantizationError::AllocationFailed {
-            context: "mapped quantization scales",
-            requested: scale_count,
-        })?;
-    for chunk in scale_bytes.chunks_exact(4) {
+    scales.try_reserve_exact(scale_count).map_err(|_| {
+        read_failure(
+            QuantizationError::AllocationFailed {
+                context: "mapped quantization scales",
+                requested: scale_count,
+            },
+            stats,
+        )
+    })?;
+    stats.peak_owned_payload_bytes = stats.peak_owned_payload_bytes.max(
+        owned_payload_bytes(owned_payload.capacity(), scales.capacity())
+            .map_err(|error| read_failure(error, stats))?,
+    );
+    for chunk in owned_payload[packed_len..].chunks_exact(4) {
         scales.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
-    QuantizedWeight::from_payload_digest_verified_parts(metadata, packed, scales)
+    owned_payload.truncate(packed_len);
+    let weight =
+        QuantizedWeight::from_payload_digest_verified_parts(metadata, owned_payload, scales)
+            .map_err(|error| read_failure(error, stats))?;
+    Ok((weight, stats))
+}
+
+/// Wraps an error raised before a complete payload reaches owned memory.
+fn empty_read_failure(error: QuantizationError) -> BurnpackPayloadReadFailure {
+    read_failure(error, BurnpackPayloadReadStats::default())
+}
+
+/// Pairs a packed-read error with its exact completed allocation progress.
+fn read_failure(
+    error: QuantizationError,
+    stats: BurnpackPayloadReadStats,
+) -> BurnpackPayloadReadFailure {
+    BurnpackPayloadReadFailure { error, stats }
+}
+
+/// Counts simultaneous capacity of the payload byte vector and decoded scales.
+fn owned_payload_bytes(payload_capacity: usize, scale_capacity: usize) -> Result<u64> {
+    let payload =
+        u64::try_from(payload_capacity).map_err(|_| QuantizationError::ByteLengthOverflow {
+            context: "owned packed-payload capacity",
+        })?;
+    let scales = scale_capacity
+        .checked_mul(core::mem::size_of::<f32>())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or(QuantizationError::ByteLengthOverflow {
+            context: "owned packed-scale capacity",
+        })?;
+    payload
+        .checked_add(scales)
+        .ok_or(QuantizationError::ByteLengthOverflow {
+            context: "owned packed decoder high-water mark",
+        })
+}
+
+/// Adds one audited payload read to a sequential validation report atomically.
+fn record_validation_read(
+    audit: &mut BurnpackValidationAudit,
+    read: BurnpackPayloadReadStats,
+) -> Result<()> {
+    let tensor_reads = audit.tensor_reads.checked_add(read.tensor_reads).ok_or(
+        QuantizationError::ByteLengthOverflow {
+            context: "Burnpack validation tensor reads",
+        },
+    )?;
+    let payload_bytes = audit.payload_bytes.checked_add(read.payload_bytes).ok_or(
+        QuantizationError::ByteLengthOverflow {
+            context: "Burnpack validation payload bytes",
+        },
+    )?;
+    audit.tensor_reads = tensor_reads;
+    audit.payload_bytes = payload_bytes;
+    audit.largest_payload_bytes = audit.largest_payload_bytes.max(read.payload_bytes);
+    audit.peak_owned_payload_bytes = audit
+        .peak_owned_payload_bytes
+        .max(read.peak_owned_payload_bytes);
+    Ok(())
 }
 
 fn validate_store_descriptors(

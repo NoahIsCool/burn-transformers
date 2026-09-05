@@ -24,7 +24,7 @@ acceptance.
 | Runtime | Implemented surface | Real-checkpoint status |
 | --- | --- | --- |
 | Qwen3.5 / Qwen3.8 hybrid | DeltaNet/full-attention schedules, gated GQA, partial RoPE, SwiGLU, external recurrent/KV caches, batch-one MTP speculation, and strict text-tower mapping | [Qwen3.5-0.8B](acceptance/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17.json) passed reference-logit, 32-token greedy, cached-parity, and packed-Q4 gates. [Qwen3.8-27B](acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json) strictly applied all 866 text/MTP tensors, matched the official F16 full-vocabulary logits at `0.999999881` cosine and all 32 greedy tokens, and passed mixed Q8/F16 and Q4/F16 stateless, cached, MTP, and recurrent-decode smokes. Neither is advertised: quantized corpus quality, standardized throughput and output hashing, and 32K stress gates remain open. |
-| Qwen3 MoE | GQA with Q/K normalization, sparse selected-expert dispatch, top-k routing, and cached decode | [Qwen3-30B-A3B](acceptance/qwen3-30b-a3b-ad44e777bcd18fa416d9da3bd8f70d33ebb85d39.json) strictly applied all 18,867 BF16-derived F16 tensors and passed a six-token Metal stateless, cached-prefill, hidden-trace, and recurrent-decode smoke. Official reference logits, 32-token generation, quantization, and 32K stress remain open; not advertised. |
+| Qwen3 MoE | GQA with Q/K normalization, sparse selected-expert dispatch, top-k routing, and cached decode | [Qwen3-30B-A3B](acceptance/qwen3-30b-a3b-ad44e777bcd18fa416d9da3bd8f70d33ebb85d39.json) strictly applied all 18,867 BF16-derived F16 tensors and passed six-token F16, mixed Q8/F16, and mixed Q4/F16 Metal stateless, cached-prefill, hidden-trace, and recurrent-decode smokes. Both packed decode audits observed all 1,345 architecture-declared matmuls without whole-weight dequantization. Official reference logits, 32-token generation, quantized quality, standardized performance, and 32K stress remain open; not advertised. |
 | DeepSeek V2 | YaRN, MLA reference prefill, compressed latent-cache absorbed decode, routed and shared experts | [DeepSeek-V2-Lite](acceptance/deepseek-v2-lite-604d5664dddd88a0433dbae533b7fe9472482de0.json) strictly applied all 5,291 BF16-derived F16 tensors and passed a six-token Metal stateless, reference-prefill, compressed-cache, and absorbed-decode smoke. Cached/stateless cosine was `1.0`; absorbed decode matched the internal stateless path at `0.999998964`. This is internal Burn-path parity, not comparison with the official implementation. Official reference logits, 32-token generation, quantization, and 32K stress remain open; not advertised. |
 | Muse Glimmer | Sliding/full hybrid attention, RoPE/NoPE schedule, sandwich norms, output gates, and logit softcap | Synthetic and checkpoint-contract tests only; Muse-Glimmer-30B real weights are pending. |
 | T5 / FLAN / UL2 | Bidirectional encoder, causal decoder, cross-attention cache, relative-position bias, shared encoder/decoder embeddings with a configurable tied or independent LM head, and cached beam search | [FLAN-T5-small](acceptance/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab.json) passed strict F32 loading, cached parity, and a beam fixture on Flex. [FLAN-T5-XXL](acceptance/flan-t5-xxl-ae7c9136adc7555eeccc78cdd960dfd60fb346ce.json) strictly applied all 558 runtime tensors on Metal and matched official Transformers/MPS F32 encoder, decoder-hidden, first-logit, 32-row cached and teacher-forced fixtures at minimum cosine `0.999999999998`, plus exact greedy and four-beam tokens. Neither is advertised; XXL still needs padded/context-boundary, quantized quality/32K, and standardized performance gates. UL2 is pending. |
@@ -220,7 +220,7 @@ SafeTensors. Embeddings, norms, biases, router classifiers, recurrent scalars
 and convolutions, MLA latent expansion, and first-generation MTP parameters
 remain in source precision.
 
-Automatic packed loading is currently enabled only for `qwen3_5_text`.
+Automatic packed loading is enabled for `qwen3_5_text` and `qwen3_moe`.
 Qwen3.5-0.8B Q4 has passed a finite full-model Metal smoke test and exact
 cached/stateless consistency, but its first token differs from F16 and the
 quality corpus has not passed. Qwen3.8-27B Q8 and Q4 have each passed strict
@@ -231,6 +231,16 @@ paths. The F16 graph now matches the pinned official full-vocabulary logits and
 all 32 stable-margin greedy tokens, but quantized reference/longer-generation
 parity, the quality corpus, standardized throughput and output hashing, and 32K
 stress remain open. Neither format is advertised for production inference yet.
+
+Qwen3-30B-A3B Q8 and Q4 have also passed provenance-bound streaming
+conversion and mixed F16/packed Metal stateless, cached-prefill, and recurrent
+decode smokes. Each sidecar contains 18,625 packed matrices; 242 embeddings,
+norms, and routers remain F16, and runtime MoE dispatch evaluates only selected
+experts. The Q4 decode audit observed all 1,345 expected packed matmuls and no
+whole-weight dequantization; the Q8 audit proved the same 1,345-of-1,345 packed
+launch result. Official-reference and 32-token generation parity, quantized
+quality, standardized performance, and 32K stress remain open, so the model is
+not yet advertised as fully supported.
 
 Burn 0.21 can execute compatible Burnpack matrices through packed `QFloat`
 matmul. The only certified packed-Metal build shape is an exact single-backend

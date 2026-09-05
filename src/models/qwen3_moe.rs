@@ -10,11 +10,13 @@
 //!
 //! The executable model and strict local loader are available directly through
 //! [`Qwen3MoeForCausalLm`] and through the crate's automatic causal-model registry.
-//! Automatic loading accepts full-precision SafeTensors. Q8/Q4 Burnpack support
-//! is implemented through the strict local loader, but automatic packed
-//! registration remains gated on real-checkpoint acceptance. Version-two
-//! sidecars content-bind the checkpoint and load plan, while legacy version-one
-//! compatibility retains full source validation.
+//! Automatic loading accepts full-precision SafeTensors and Q8/Q4 Burnpack
+//! overlays. Version-two sidecars content-bind the checkpoint, load plan, and
+//! packed payloads, while legacy version-one compatibility retains full source
+//! validation. Registration reflects successful strict conversion, short Metal
+//! smokes, and Q8/Q4 packed-kernel audits in which all 1,345 expected decode
+//! matmuls used packed execution without whole-weight dequantization. It is not a
+//! claim that the model has passed every release gate.
 
 use std::collections::HashSet;
 

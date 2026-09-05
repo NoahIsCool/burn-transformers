@@ -21,9 +21,11 @@
 //!
 //! Every packed payload in a stable artifact is verified and decoded sequentially
 //! before the first model-sink call, so existing corruption in a later payload
-//! cannot create a partial model write. Packed I/O counters still advance only
-//! during execution. Burnpack decoding and conversion are bounded to one tensor
-//! at a time, but their internal temporary buffers are outside
+//! cannot create a partial model write. [`PackedPreflightStats`] accounts for that
+//! mandatory pass separately from the compatibility-stable [`PackedLoadStats`]
+//! execution counters and records the decoder's owned-allocation high-water mark.
+//! Burnpack decoding and conversion remain bounded to one tensor at a time; their
+//! memory stays separate from generic checkpoint staging in
 //! [`ExecutionStats::peak_host_staging_bytes`].
 
 use std::{collections::BTreeMap, error::Error as StdError, fmt};
@@ -33,7 +35,9 @@ use burn::tensor::TensorData;
 use super::{
     BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, PackedExecutionSupport, QuantizationEligibility,
     QuantizationError, QuantizedBurnpackArtifact, QuantizedTensorMetadata, SourceFloatDType,
-    SymmetricQuantization, classify_weight_for_quantization,
+    SymmetricQuantization,
+    burnpack::BurnpackValidationAudit,
+    classify_weight_for_quantization,
     provenance::{
         ProvenanceExecutionStats, compare_checkpoint_provenance,
         hash_local_checkpoint_provenance_audited, preflight_local_checkpoint_provenance,
@@ -59,6 +63,28 @@ pub struct PackedLoadStats {
     pub tensors_applied: usize,
 }
 
+/// Mandatory Burnpack validation work completed before model mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct PackedPreflightStats {
+    /// Sequential validation passes entered; a load attempt starts at most one.
+    pub passes_started: u64,
+    /// Sequential validation passes that reached every sidecar tensor.
+    pub passes_completed: u64,
+    /// Payloads copied completely, including a failing payload.
+    pub tensor_reads: u64,
+    /// Packed-value and scale bytes copied, including a failing complete copy.
+    pub payload_bytes: u64,
+    /// Largest individual payload copied completely from mapped storage.
+    pub largest_payload_bytes: u64,
+    /// Maximum simultaneous Rust-owned bytes used to decode one payload.
+    ///
+    /// This reports actual `Vec` capacities. It excludes memory mappings,
+    /// persistent manifests, generic checkpoint staging, backend allocations,
+    /// and buffers retained by the model sink.
+    pub peak_owned_payload_bytes: u64,
+}
+
 /// Successful mixed source-precision and packed checkpoint execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuantizedExecutionOutcome {
@@ -70,6 +96,26 @@ pub struct QuantizedExecutionOutcome {
     pub packed: PackedLoadStats,
     /// Full-shard hashing performed around local v2 execution.
     pub provenance: ProvenanceExecutionStats,
+}
+
+/// Successful local packed execution plus preflight and format-version evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AuditedQuantizedExecutionOutcome {
+    /// Exact Burnpack manifest format used by this load.
+    pub format_version: u32,
+    /// Mandatory packed-payload validation performed before model mutation.
+    pub preflight: PackedPreflightStats,
+    /// Legacy-compatible checkpoint, packed execution, and provenance outcome.
+    pub execution: QuantizedExecutionOutcome,
+}
+
+impl AuditedQuantizedExecutionOutcome {
+    /// Discards additive preflight/version evidence for a compatibility caller.
+    #[must_use]
+    pub fn into_execution(self) -> QuantizedExecutionOutcome {
+        self.execution
+    }
 }
 
 /// Error raised by the packed overlay or its architecture-owned inner sink.
@@ -147,9 +193,45 @@ impl<E: StdError + 'static> StdError for QuantizedExecutionFailure<E> {
     }
 }
 
+/// Failed local packed execution with its additive preflight/version evidence.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct AuditedQuantizedExecutionFailure<E> {
+    /// Exact Burnpack manifest format used by this load attempt.
+    pub format_version: u32,
+    /// Mandatory payload-validation progress before the failure.
+    pub preflight: PackedPreflightStats,
+    /// Legacy-compatible execution failure and its applied-prefix audit.
+    pub execution: QuantizedExecutionFailure<E>,
+}
+
+impl<E> AuditedQuantizedExecutionFailure<E> {
+    /// Discards additive preflight/version evidence for a compatibility caller.
+    #[must_use]
+    pub fn into_execution(self) -> QuantizedExecutionFailure<E> {
+        self.execution
+    }
+}
+
+impl<E: fmt::Display> fmt::Display for AuditedQuantizedExecutionFailure<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.execution.fmt(formatter)
+    }
+}
+
+impl<E: StdError + 'static> StdError for AuditedQuantizedExecutionFailure<E> {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        Some(&self.execution)
+    }
+}
+
 /// Rich execution result retaining partial strict reports on failure.
 pub type QuantizedExecutionResult<E> =
     std::result::Result<QuantizedExecutionOutcome, Box<QuantizedExecutionFailure<E>>>;
+
+/// Local packed execution result retaining additive preflight/version evidence.
+pub type AuditedQuantizedExecutionResult<E> =
+    std::result::Result<AuditedQuantizedExecutionOutcome, Box<AuditedQuantizedExecutionFailure<E>>>;
 
 /// Executes a strict plan while replacing matching targets with packed weights.
 ///
@@ -182,15 +264,24 @@ where
             ProvenanceExecutionStats::default(),
         ));
     }
-    if let Err(error) =
-        validate_sidecar_contract(plan, artifact).and_then(|()| artifact.validate_all().map(|_| ()))
-    {
+    if let Err(error) = validate_sidecar_contract(plan, artifact) {
         return Err(source_preflight_failure(
             plan,
             source,
             error,
             ProvenanceExecutionStats::default(),
         ));
+    }
+    match artifact.validate_all_audited() {
+        Ok(_) => {}
+        Err(failure) => {
+            return Err(source_preflight_failure(
+                plan,
+                source,
+                failure.error,
+                ProvenanceExecutionStats::default(),
+            ));
+        }
     }
 
     execute_prevalidated_quantized_load_plan(plan, source, artifact, sink, false)
@@ -251,14 +342,32 @@ where
     }
 }
 
-/// Executes a packed overlay against a bounded, provenance-aware local source.
+/// Executes a local packed overlay through the compatibility outcome API.
+///
+/// This entry point performs the same mandatory validation and provenance gates
+/// as [`execute_local_quantized_load_plan_audited`], then deliberately discards
+/// only the additive preflight and format-version fields. Existing packed
+/// execution and provenance counters retain their historical representation.
+pub fn execute_local_quantized_load_plan<K: TensorSink>(
+    manifest: &CheckpointManifest,
+    plan: &LoadPlan,
+    artifact: &mut QuantizedBurnpackArtifact,
+    sink: &mut K,
+) -> QuantizedExecutionResult<K::Error> {
+    execute_local_quantized_load_plan_audited(manifest, plan, artifact, sink)
+        .map(AuditedQuantizedExecutionOutcome::into_execution)
+        .map_err(|failure| Box::new((*failure).into_execution()))
+}
+
+/// Executes a packed overlay and retains validation, format, and provenance audits.
 ///
 /// V2 first streams every complete shard through SHA-256 before any sink mutation,
 /// then permits matching packed descriptors to skip their full-precision buffers.
 /// After successful execution it hashes every shard again and refuses to return
 /// success if source content changed. The sink is not transactional: callers must
 /// discard it when this post-execution gate fails. V1 retains the ordinary
-/// one-tensor-at-a-time validation path.
+/// one-tensor-at-a-time validation path and explicitly reports format version one
+/// with no provenance hash passes.
 ///
 /// Pre/post hashing detects persistent concurrent changes but does not establish
 /// hostile-file authenticity. It assumes non-adversarial concurrency and cannot
@@ -266,16 +375,19 @@ where
 /// post-execution read. The mapped Burnpack must likewise remain stable throughout
 /// execution; eliminating same-user concurrent artifact races requires an external
 /// immutable snapshot or operating-system sealing.
-pub fn execute_local_quantized_load_plan<K: TensorSink>(
+pub fn execute_local_quantized_load_plan_audited<K: TensorSink>(
     manifest: &CheckpointManifest,
     plan: &LoadPlan,
     artifact: &mut QuantizedBurnpackArtifact,
     sink: &mut K,
-) -> QuantizedExecutionResult<K::Error> {
+) -> AuditedQuantizedExecutionResult<K::Error> {
+    let format_version = artifact.manifest().format_version;
     if let Err(error) = validate_sidecar_contract(plan, artifact) {
-        return Err(local_preflight_failure(
+        return Err(local_audited_preflight_failure(
             plan,
             error,
+            format_version,
+            PackedPreflightStats::default(),
             ProvenanceExecutionStats::default(),
         ));
     }
@@ -285,15 +397,30 @@ pub fn execute_local_quantized_load_plan<K: TensorSink>(
     if let Some(expected) = &expected_provenance
         && let Err(error) = preflight_local_checkpoint_provenance(manifest, expected)
     {
-        return Err(local_preflight_failure(plan, error, provenance_stats));
+        return Err(local_audited_preflight_failure(
+            plan,
+            error,
+            format_version,
+            PackedPreflightStats::default(),
+            provenance_stats,
+        ));
     }
 
     // Validate every payload before the first model sink mutation. This is a
     // sequential, one-payload-at-a-time pass for both v1 semantic validation and
     // v2 content-digest verification.
-    if let Err(error) = artifact.validate_all() {
-        return Err(local_preflight_failure(plan, error, provenance_stats));
-    }
+    let preflight = match artifact.validate_all_audited() {
+        Ok(audit) => packed_preflight_stats(audit, true),
+        Err(failure) => {
+            return Err(local_audited_preflight_failure(
+                plan,
+                failure.error,
+                format_version,
+                packed_preflight_stats(failure.audit, false),
+                provenance_stats,
+            ));
+        }
+    };
 
     let content_verified = if let Some(expected) = &expected_provenance {
         provenance_stats.pre_execution = Some(Default::default());
@@ -301,16 +428,24 @@ pub fn execute_local_quantized_load_plan<K: TensorSink>(
             Ok(result) => result,
             Err(failure) => {
                 provenance_stats.pre_execution = Some(failure.stats);
-                return Err(local_preflight_failure(
+                return Err(local_audited_preflight_failure(
                     plan,
                     failure.error,
+                    format_version,
+                    preflight,
                     provenance_stats,
                 ));
             }
         };
         provenance_stats.pre_execution = Some(stats);
         if let Err(error) = compare_checkpoint_provenance(&actual, expected) {
-            return Err(local_preflight_failure(plan, error, provenance_stats));
+            return Err(local_audited_preflight_failure(
+                plan,
+                error,
+                format_version,
+                preflight,
+                provenance_stats,
+            ));
         }
         true
     } else {
@@ -329,40 +464,67 @@ pub fn execute_local_quantized_load_plan<K: TensorSink>(
     );
     let mut outcome = match execution {
         Ok(outcome) => outcome,
-        Err(mut failure) => {
+        Err(failure) => {
+            let mut failure = *failure;
             failure.provenance = provenance_stats;
-            return Err(failure);
+            return Err(Box::new(AuditedQuantizedExecutionFailure {
+                format_version,
+                preflight,
+                execution: failure,
+            }));
         }
     };
 
     let Some(expected) = expected_provenance else {
         outcome.provenance = provenance_stats;
-        return Ok(outcome);
+        return Ok(AuditedQuantizedExecutionOutcome {
+            format_version,
+            preflight,
+            execution: outcome,
+        });
     };
 
     if let Err(error) = verify_load_plan_provenance(plan, &expected)
         .and_then(|()| preflight_local_checkpoint_provenance(manifest, &expected))
     {
-        return Err(post_execution_failure(outcome, error, provenance_stats));
+        return Err(post_audited_execution_failure(
+            outcome,
+            error,
+            format_version,
+            preflight,
+            provenance_stats,
+        ));
     }
     provenance_stats.post_execution = Some(Default::default());
     let (actual, stats) = match hash_local_checkpoint_provenance_audited(manifest, plan) {
         Ok(result) => result,
         Err(failure) => {
             provenance_stats.post_execution = Some(failure.stats);
-            return Err(post_execution_failure(
+            return Err(post_audited_execution_failure(
                 outcome,
                 failure.error,
+                format_version,
+                preflight,
                 provenance_stats,
             ));
         }
     };
     provenance_stats.post_execution = Some(stats);
     if let Err(error) = compare_checkpoint_provenance(&actual, &expected) {
-        return Err(post_execution_failure(outcome, error, provenance_stats));
+        return Err(post_audited_execution_failure(
+            outcome,
+            error,
+            format_version,
+            preflight,
+            provenance_stats,
+        ));
     }
     outcome.provenance = provenance_stats;
-    Ok(outcome)
+    Ok(AuditedQuantizedExecutionOutcome {
+        format_version,
+        preflight,
+        execution: outcome,
+    })
 }
 
 /// Validates a complete sidecar against post-transform plan targets.
@@ -539,19 +701,37 @@ impl TensorSource for ProvenanceLocalSource<'_> {
     }
 }
 
-/// Builds a uniform pre-execution failure for local provenance or contract gates.
-fn local_preflight_failure<E>(
+/// Converts one mandatory validation attempt into public packed-load counters.
+fn packed_preflight_stats(audit: BurnpackValidationAudit, completed: bool) -> PackedPreflightStats {
+    PackedPreflightStats {
+        passes_started: 1,
+        passes_completed: u64::from(completed),
+        tensor_reads: audit.tensor_reads,
+        payload_bytes: audit.payload_bytes,
+        largest_payload_bytes: audit.largest_payload_bytes,
+        peak_owned_payload_bytes: audit.peak_owned_payload_bytes,
+    }
+}
+
+/// Builds an audited pre-execution failure for local provenance or contract gates.
+fn local_audited_preflight_failure<E>(
     plan: &LoadPlan,
     error: QuantizationError,
+    format_version: u32,
+    preflight: PackedPreflightStats,
     provenance: ProvenanceExecutionStats,
-) -> Box<QuantizedExecutionFailure<E>> {
-    Box::new(QuantizedExecutionFailure {
-        failed_target: None,
-        cause: ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(error)),
-        report: unstarted_report(plan),
-        execution: ExecutionStats::default(),
-        packed: PackedLoadStats::default(),
-        provenance,
+) -> Box<AuditedQuantizedExecutionFailure<E>> {
+    Box::new(AuditedQuantizedExecutionFailure {
+        format_version,
+        preflight,
+        execution: QuantizedExecutionFailure {
+            failed_target: None,
+            cause: ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(error)),
+            report: unstarted_report(plan),
+            execution: ExecutionStats::default(),
+            packed: PackedLoadStats::default(),
+            provenance,
+        },
     })
 }
 
@@ -583,19 +763,25 @@ where
     })
 }
 
-/// Converts a completed execution into a fail-closed post-verification error.
-fn post_execution_failure<E>(
+/// Converts completed execution into an audited fail-closed post-verification error.
+fn post_audited_execution_failure<E>(
     outcome: QuantizedExecutionOutcome,
     error: QuantizationError,
+    format_version: u32,
+    preflight: PackedPreflightStats,
     provenance: ProvenanceExecutionStats,
-) -> Box<QuantizedExecutionFailure<E>> {
-    Box::new(QuantizedExecutionFailure {
-        failed_target: None,
-        cause: ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(error)),
-        report: outcome.report,
-        execution: outcome.execution,
-        packed: outcome.packed,
-        provenance,
+) -> Box<AuditedQuantizedExecutionFailure<E>> {
+    Box::new(AuditedQuantizedExecutionFailure {
+        format_version,
+        preflight,
+        execution: QuantizedExecutionFailure {
+            failed_target: None,
+            cause: ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(error)),
+            report: outcome.report,
+            execution: outcome.execution,
+            packed: outcome.packed,
+            provenance,
+        },
     })
 }
 
@@ -691,15 +877,16 @@ impl<K: TensorSink> QuantizedOverlaySink<'_, K> {
                 context: "packed load payload sum",
             },
         )?;
-        let packed = self
+        let weight = self
             .artifact
             .read_weight(target)
-            .map_err(QuantizedSinkError::Quantization)?
-            .into_burn_qfloat_data()
             .map_err(QuantizedSinkError::Quantization)?;
         self.stats.tensor_reads = tensor_reads;
         self.stats.payload_bytes = total_payload;
         self.stats.largest_payload_bytes = self.stats.largest_payload_bytes.max(payload_bytes);
+        let packed = weight
+            .into_burn_qfloat_data()
+            .map_err(QuantizedSinkError::Quantization)?;
         Ok(Some(packed))
     }
 }
@@ -1098,7 +1285,7 @@ mod tests {
         );
     }
 
-    /// Authenticated local overlays bypass packed sources after whole-shard hashing.
+    /// Content-verified local overlays bypass packed sources after whole-shard hashing.
     #[test]
     fn local_overlay_installs_mixed_precision_and_reports_exact_io() {
         let directory = tempfile::tempdir().unwrap();
@@ -1111,8 +1298,20 @@ mod tests {
         assert!(artifact.manifest().provenance.is_some());
         let mut sink = RecordingSink::default();
 
-        let outcome =
-            execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink).unwrap();
+        let audited =
+            execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+                .unwrap();
+        assert_eq!(
+            audited.format_version,
+            BURNPACK_QUANTIZATION_FORMAT_VERSION_V2
+        );
+        assert_eq!(audited.preflight.passes_started, 1);
+        assert_eq!(audited.preflight.passes_completed, 1);
+        assert_eq!(audited.preflight.tensor_reads, 1);
+        assert_eq!(audited.preflight.payload_bytes, 1_152);
+        assert_eq!(audited.preflight.largest_payload_bytes, 1_152);
+        assert!(audited.preflight.peak_owned_payload_bytes >= 1_280);
+        let outcome = audited.execution;
 
         assert_eq!(outcome.execution.tensors_applied, 3);
         assert_eq!(outcome.execution.source_reads, 2);
@@ -1239,8 +1438,11 @@ mod tests {
         let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
         let mut sink = RecordingSink::default();
 
-        let failure = execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink)
-            .unwrap_err();
+        let audited =
+            execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+                .unwrap_err();
+        assert_eq!(audited.preflight, PackedPreflightStats::default());
+        let failure = &audited.execution;
 
         assert_eq!(failure.execution.source_reads, 0);
         assert_eq!(failure.execution.source.shard_opens, 0);
@@ -1268,8 +1470,15 @@ mod tests {
         let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
         let mut sink = RecordingSink::default();
 
-        let failure = execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink)
-            .unwrap_err();
+        let audited =
+            execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+                .unwrap_err();
+        assert_eq!(audited.preflight.passes_started, 1);
+        assert_eq!(audited.preflight.passes_completed, 1);
+        assert_eq!(audited.preflight.tensor_reads, 1);
+        assert_eq!(audited.preflight.payload_bytes, 1_152);
+        assert!(audited.preflight.peak_owned_payload_bytes >= 1_280);
+        let failure = &audited.execution;
 
         assert_eq!(failure.execution.source_reads, 0);
         assert_eq!(failure.execution.source.shard_opens, 0);
@@ -1329,8 +1538,15 @@ mod tests {
             mutated: false,
         };
 
-        let failure = execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink)
-            .unwrap_err();
+        let audited =
+            execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+                .unwrap_err();
+        assert_eq!(audited.preflight.passes_started, 1);
+        assert_eq!(audited.preflight.passes_completed, 1);
+        assert_eq!(audited.preflight.tensor_reads, 1);
+        assert_eq!(audited.preflight.payload_bytes, 1_152);
+        assert!(audited.preflight.peak_owned_payload_bytes >= 1_280);
+        let failure = &audited.execution;
 
         assert!(sink.mutated);
         assert_eq!(failure.failed_target, None);
@@ -1362,8 +1578,11 @@ mod tests {
         let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
         let mut sink = RecordingSink::default();
 
-        let failure = execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink)
-            .unwrap_err();
+        let audited =
+            execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+                .unwrap_err();
+        assert_eq!(audited.preflight, PackedPreflightStats::default());
+        let failure = &audited.execution;
 
         assert_eq!(failure.execution.source_reads, 0);
         assert_eq!(failure.packed.tensor_reads, 0);
@@ -1397,8 +1616,12 @@ mod tests {
         let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
         let mut sink = RecordingSink::default();
 
-        let failure = execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink)
-            .unwrap_err();
+        let audited =
+            execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+                .unwrap_err();
+        assert_eq!(audited.format_version, 1);
+        assert_eq!(audited.preflight, PackedPreflightStats::default());
+        let failure = &audited.execution;
 
         assert_eq!(failure.execution.source_reads, 0);
         assert_eq!(failure.packed.tensor_reads, 0);
@@ -2304,8 +2527,20 @@ mod tests {
         let (manifest, plan, output) = executable_sidecar(&directory);
         let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
         let mut sink = RejectingSink;
-        let failure = execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink)
-            .unwrap_err();
+        let audited =
+            execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+                .unwrap_err();
+        assert_eq!(
+            audited.format_version,
+            BURNPACK_QUANTIZATION_FORMAT_VERSION_V2
+        );
+        assert_eq!(audited.preflight.passes_started, 1);
+        assert_eq!(audited.preflight.passes_completed, 1);
+        assert_eq!(audited.preflight.tensor_reads, 1);
+        assert_eq!(audited.preflight.payload_bytes, 1_152);
+        assert_eq!(audited.preflight.largest_payload_bytes, 1_152);
+        assert!(audited.preflight.peak_owned_payload_bytes >= 1_280);
+        let failure = &audited.execution;
 
         assert_eq!(
             failure.failed_target.as_deref(),
@@ -2355,8 +2590,20 @@ mod tests {
         let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
         let mut sink = RecordingSink::default();
 
-        let failure = execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink)
-            .unwrap_err();
+        let audited =
+            execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+                .unwrap_err();
+        assert_eq!(
+            audited.format_version,
+            BURNPACK_QUANTIZATION_FORMAT_VERSION_V2
+        );
+        assert_eq!(audited.preflight.passes_started, 1);
+        assert_eq!(audited.preflight.passes_completed, 0);
+        assert_eq!(audited.preflight.tensor_reads, 1);
+        assert_eq!(audited.preflight.payload_bytes, 1_152);
+        assert_eq!(audited.preflight.largest_payload_bytes, 1_152);
+        assert!(audited.preflight.peak_owned_payload_bytes >= 1_152);
+        let failure = &audited.execution;
 
         assert_eq!(failure.failed_target, None);
         assert_eq!(failure.execution.source_reads, 0);
@@ -2372,7 +2619,7 @@ mod tests {
         assert_eq!(failure.provenance.pre_execution, None);
         assert_eq!(failure.provenance.post_execution, None);
         assert!(matches!(
-            failure.cause,
+            &failure.cause,
             ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(
                 QuantizationError::PackedPayloadDigestMismatch { name, .. }
             )) if name == target
@@ -2408,8 +2655,16 @@ mod tests {
         let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
         let mut sink = RecordingSink::default();
 
-        let failure = execute_local_quantized_load_plan(&manifest, &plan, &mut artifact, &mut sink)
-            .unwrap_err();
+        let audited =
+            execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+                .unwrap_err();
+        assert_eq!(audited.format_version, 1);
+        assert_eq!(audited.preflight.passes_started, 1);
+        assert_eq!(audited.preflight.passes_completed, 0);
+        assert_eq!(audited.preflight.tensor_reads, 1);
+        assert_eq!(audited.preflight.payload_bytes, 1_152);
+        assert!(audited.preflight.peak_owned_payload_bytes >= 1_280);
+        let failure = &audited.execution;
 
         assert_eq!(failure.failed_target, None);
         assert_eq!(failure.execution.source_reads, 0);

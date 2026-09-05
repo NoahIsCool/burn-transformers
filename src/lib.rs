@@ -44,7 +44,7 @@ pub use generation::{
     GenerationConfig, GenerationToken, GenerationTracker, LogitsProcessor, SamplingStrategy,
     TokenSelection, generate_causal, generate_causal_streaming,
 };
-pub use loaded::{LoadedModel, ModelSourceMetadata, ModelTokenizer};
+pub use loaded::{LoadedModel, ModelSourceMetadata, ModelTokenizer, QuantizedLoadAudit};
 pub use models::{
     AutoCausalConfig, AutoCausalLm, AutoLoadOptions, AutoSeq2SeqConfig, AutoSeq2SeqLm,
 };

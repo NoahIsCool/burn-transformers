@@ -26,7 +26,7 @@ use transformers::{ChatMessage, ChatTemplateOptions};
 use transformers::{
     EncodeOptions, LocalTokenizer,
     checkpoint::{
-        ArtifactSource, CheckpointManifest, LoadOptions, LoadPlan,
+        ArtifactSource, CheckpointManifest, DTypePolicy, LoadOptions, LoadPlan, TensorDType,
         quantization::{
             QuantizationEligibility, QuantizationExclusion, QuantizedBurnpackArtifact,
             QuantizedCheckpointOptions, SourceFloatDType, SymmetricQuantization,
@@ -50,11 +50,8 @@ use burn::{module::Param, nn::Linear};
 #[cfg(feature = "metal")]
 use transformers::{
     AutoCausalLm, AutoLoadOptions, CausalLanguageModel, DecodeInput, DecodeState, ForwardOptions,
-    LogitsSelection, TokenMask,
-    architecture::CausalLmInput,
-    cache::CacheConfig,
-    checkpoint::{DTypePolicy, TensorDType, execute_local_load_plan},
-    models::qwen3_5::Qwen3_5ForCausalLm,
+    LogitsSelection, TokenMask, architecture::CausalLmInput, cache::CacheConfig,
+    checkpoint::execute_local_load_plan, models::qwen3_5::Qwen3_5ForCausalLm,
 };
 #[cfg(all(feature = "metal", not(feature = "rocm")))]
 use transformers::{

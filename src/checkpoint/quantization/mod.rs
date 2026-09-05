@@ -46,9 +46,12 @@ pub use config::{
 };
 pub use error::{QuantizationError, Result};
 pub use load::{
-    PackedLoadStats, QuantizedExecutionFailure, QuantizedExecutionOutcome,
-    QuantizedExecutionResult, QuantizedSinkError, burn_qfloat_execution_support,
-    execute_local_quantized_load_plan, execute_quantized_load_plan, validate_sidecar_contract,
+    AuditedQuantizedExecutionFailure, AuditedQuantizedExecutionOutcome,
+    AuditedQuantizedExecutionResult, PackedLoadStats, PackedPreflightStats,
+    QuantizedExecutionFailure, QuantizedExecutionOutcome, QuantizedExecutionResult,
+    QuantizedSinkError, burn_qfloat_execution_support, execute_local_quantized_load_plan,
+    execute_local_quantized_load_plan_audited, execute_quantized_load_plan,
+    validate_sidecar_contract,
 };
 pub use manifest::{
     BURNPACK_QUANTIZATION_FORMAT_VERSION, BURNPACK_QUANTIZATION_FORMAT_VERSION_CURRENT,
