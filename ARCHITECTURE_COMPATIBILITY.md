@@ -10,7 +10,7 @@ strict loader means that the family owns an explicit tensor contract and can loa
 local SafeTensors without unexplained keys; it does not prove that the release
 checkpoint has actually completed weight application or inference.
 
-No checkpoint is currently advertised as fully supported. The five real-weight
+No checkpoint is currently advertised as fully supported. The six real-weight
 acceptance records all retain `advertised_supported: false`, and the remaining
 families do not yet have real-weight acceptance records.
 
@@ -41,7 +41,8 @@ means the named pinned artifact was actually streamed into a model and executed.
 | `deepseek-ai/DeepSeek-V2-Lite` at `604d5664dddd88a0433dbae533b7fe9472482de0` | Executable YaRN/MLA decoder with reference unabsorbed prefill, compressed latent-cache absorbed decode, routed top-k experts, and shared experts | The pinned four-shard artifact's exact configuration and all 5,291 BF16 tensor headers match the committed inventory. Strict source-ordered loading applied every tensor as F16 with 5,099 explicit renames, opened each shard exactly once, and retained the tokenizer. | [Real-weight record](acceptance/deepseek-v2-lite-604d5664dddd88a0433dbae533b7fe9472482de0.json): a six-token Metal F16 stateless, reference-unabsorbed cached-prefill, 29-hidden-trace, compressed-cache, and absorbed-decode smoke passed. Cached/stateless cosine was `1.0`; absorbed decode matched the internal stateless path at `0.999998964`. No official-reference numerical comparison has run. Reference logits, 32-token generation, quantization, and 32K stress remain open; not advertised. |
 | `meta-models/Muse-Glimmer-30B` at `a4e59da52a7bc87ae7251dd5545c0dd437c44b68` | Executable text decoder with sliding/full attention, RoPE/NoPE scheduling, sandwich norms, attention output gates, and final-logit softcap | Strict text-only/multimodal mapping and automatic local loader are implemented and exercised with synthetic fixtures. | No pinned real-weight load or inference acceptance has been recorded; not advertised. |
 | `google/flan-t5-small` at `0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab` | Executable T5 encoder-decoder with bidirectional encoding, causal decoding, cross-attention caches, relative-position bias, shared encoder/decoder embeddings, an independent LM head, and cached beam search | The official one-file SafeTensors artifact was strictly loaded and all 190 F32 tensors were applied through the public automatic loader. | [Real-weight record](acceptance/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab.json): pinned top-10 and sampled-logit probes, cached prefill/decode parity, and the exact four-beam translation fixture passed on Flex. Full-vector reference-logit cosine, longer generation, accelerator inference, and context-boundary stress remain open; not advertised. |
-| `google/flan-t5-xxl` at `ae7c9136adc7555eeccc78cdd960dfd60fb346ce` and `google/flan-ul2` at `452d74ce28ac4a7f211d6ba3ef0717027f7a8074` | The executable T5 runtime represents XXL's gated-GELU and UL2's gated-SiLU topology | Strict T5-family mapping and local loading exist, but neither pinned target has completed a real artifact run. UL2 additionally requires the planned verified offline PyTorch-to-SafeTensors conversion at this revision. | No real-weight acceptance record; not advertised. |
+| `google/flan-t5-xxl` at `ae7c9136adc7555eeccc78cdd960dfd60fb346ce` | Executable 24-layer encoder/24-layer decoder T5 graph with gated GELU, relative-position bias, cross-attention caches, greedy decode, and beam search | All five official F32 SafeTensors shards were content-verified. Strict loading applied all 558 runtime parameters, verified the physical embedding equivalence, performed 433 checkpoint-layout transposes, and retained the tokenizer. | [Real-weight record](acceptance/flan-t5-xxl-ae7c9136adc7555eeccc78cdd960dfd60fb346ce.json): Metal matched five official Transformers/MPS F32 tensor fixtures at minimum cosine `0.999999999998`, all 32 cached greedy tokens, all teacher-forced top-1 rows, and the exact four-beam continuation. Padded/context-boundary, quantized quality/32K, and standardized performance gates remain open; not advertised. |
+| `google/flan-ul2` at `452d74ce28ac4a7f211d6ba3ef0717027f7a8074` | The executable T5 runtime represents UL2's gated-SiLU topology | Strict T5-family mapping exists. The pinned target still requires the planned verified offline PyTorch-to-SafeTensors conversion at this revision. | No real-weight acceptance record; not advertised. |
 | `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` at `a9904d24bcc1d289a1950fa9d2b978c47cf903b9` | Executable heterogeneous Mamba2/GQA/dense-MLP/MoE graph with ReLU-squared experts, shared expert, recurrent/KV state, and next-token-head mapping | Strict family mapping, automatic local loader, BF16 conversion policy, and synthetic configuration/math/cache/checkpoint tests are implemented. The Nano revision `bf77c3174f68ad409e1c2aa60daeb46e32d1c606` is configuration-compatible only. | Neither the 3.5 Lightning target nor Nano has a real-weight inference acceptance record; not advertised. |
 
 ## Loader behavior
@@ -92,8 +93,8 @@ explicitly allowlists them, as Qwen and Muse do for their visual towers.
   cached and decode comparisons are internal Burn-path parity, not official
   numerical-reference acceptance; generation, quantization, and 32K gates also
   remain open.
-- Muse Glimmer, FLAN-T5 XXL/UL2, and Nemotron-H 3.5 have executable synthetic
-  runtimes and strict loaders but no real-weight acceptance record.
+- Muse Glimmer, FLAN-UL2, and Nemotron-H 3.5 have executable synthetic runtimes
+  and strict loaders but no real-weight acceptance record.
 - MTP execution, tokenization, cached generation, T5 beam search, and native Q4/Q8
   are runtime facilities rather than configuration claims. Automatic packed
   checkpoint loading remains limited to `qwen3_5_text`; v2 sidecars bind exact

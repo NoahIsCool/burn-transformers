@@ -1,0 +1,303 @@
+{
+  "schema_version": 1,
+  "advertised_supported": false,
+  "phase": "strict_f32_metal_official_reference_cached_generation_and_beam_parity_verified_pending_padded_context_boundary_quantized_quality_32k_and_standardized_performance_acceptance",
+  "repository": "google/flan-t5-xxl",
+  "revision": "ae7c9136adc7555eeccc78cdd960dfd60fb346ce",
+  "artifact_layout": {
+    "safetensors_shards": 5,
+    "physical_tensors": 559,
+    "logical_index_keys": 560,
+    "runtime_parameter_tensors": 558,
+    "dtype_counts": {
+      "F32": 559
+    },
+    "checkpoint_tensor_bytes": 45067714560,
+    "index_declared_source_bytes": 45594099712,
+    "artifact_shard_bytes": 45067783756,
+    "target_parameter_bytes": 44541329408,
+    "control_files_hashed": 6,
+    "weight_shards_hashed": 5
+  },
+  "architecture": {
+    "model_type": "t5",
+    "encoder_layers": 24,
+    "decoder_layers": 24,
+    "d_model": 4096,
+    "d_ff": 10240,
+    "d_kv": 64,
+    "attention_heads": 64,
+    "feed_forward_projection": "gated-gelu",
+    "relative_attention_buckets": 32,
+    "relative_attention_max_distance": 128,
+    "vocabulary_size": 32128,
+    "serialized_tie_word_embeddings": false,
+    "decoder_start_token_id": 0,
+    "pad_token_id": 0,
+    "eos_token_id": 1
+  },
+  "strict_memory_plan": {
+    "target_parameter_bytes": 44541329408,
+    "logical_model_bytes": 44541329408,
+    "largest_shard_bytes": 9999712776,
+    "largest_source_tensor_bytes": 526385152,
+    "largest_target_tensor_bytes": 526385152,
+    "largest_equivalence_pair_bytes": 1052770304,
+    "planned_peak_host_staging_bytes": 10526097928,
+    "executed_peak_host_staging_bytes": 1052770304,
+    "strategy": "two_pass_header_validation_equivalence_preflight_then_source_ordered_single_shard_streaming",
+    "source_dtype": "f32",
+    "acceptance_target_dtype": "f32",
+    "estimate_classification": "conservative_upper_bound",
+    "execution_note": "The conservative plan combines the largest shard with the largest source tensor. Runtime equivalence verification simultaneously held the two 526,385,152-byte vocabulary tensors; subsequent loading retained at most one source shard and one transformed tensor at a time."
+  },
+  "inventory_digests": {
+    "artifact_manifest_sha256": "bbe4dfea65c912159a98ed8aa0584960e6c89e5fcb607f32eb437fa46e0f2d6e",
+    "header_inventory_sha256": "794a9c5bb717021bf491ee6942cda6dab2b223a7bb5f7c2861be01248f590a0d",
+    "f32_load_plan_sha256": "711cd9f6d278f519d511c47614be1ec1353e2b1657d7d04cbe7c34cb7881365b"
+  },
+  "sha256": {
+    "config.json": "dd923bd687781f336e7845b7e011b7bbeca5fdde5c27f8b06071540340707dbd",
+    "generation_config.json": "f5a1c7e2be8092018d8835128987edf0111637dd98e90599cc80310fef75d95a",
+    "model.safetensors.index.json": "bab7fd6107b34412f8575908370f29f44f433617a93d557e57b299d6ee688efe",
+    "tokenizer.json": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+    "tokenizer_config.json": "ef30e0628a2d067c5d9d02d98cbf9a2040f4a51883e5d16e1809eea548db0eff",
+    "special_tokens_map.json": "5c87151ef0f72a99d1f766a4c418bd2a1f90aaa30a8e22fe5eca9641daebb64f",
+    "model-00001-of-00005.safetensors": "2399615e60e983d1e647248b15bfad3c0ccd9473a0e387dbe03284fcaacf21c2",
+    "model-00002-of-00005.safetensors": "4d2459d60251e60af6314ae4785fb0bea32febb1989434c816de84c0fdae2d88",
+    "model-00003-of-00005.safetensors": "60a2c0b6f284a55df23ee68ce3065631368d7a6a35e5443b5cd98151f145fd67",
+    "model-00004-of-00005.safetensors": "5f0cbe2b9a51ab64c93d16993e79bf81cc39f8692f89122cc68fa3b824c2b3cf",
+    "model-00005-of-00005.safetensors": "b0001f5f48ce5bf0e7e997c57ce5170ce0c0b0d667ee2a72d01d9aa26f40b7b5"
+  },
+  "reference_bundle": {
+    "manifest_file": "flan-t5-xxl-ae7c9136-reference.json",
+    "manifest_bytes": 54555,
+    "manifest_sha256": "430c2b4f4891e518ee717e6bcd1a8b53d1200d41a596105b0ced96d8ba16582f",
+    "reference_class": "transformers.T5ForConditionalGeneration",
+    "transformers_version": "5.2.0",
+    "torch_version": "2.10.0",
+    "device": "mps",
+    "dtype": "float32",
+    "attention_implementation": "eager",
+    "deterministic_algorithms": true,
+    "generator_commit": "163c9495b4a2f378edc1cd436cb3717aece81463",
+    "generator_sha256": "c2c7dae7aae08bdffb25a37740ee67d016693610bce57b3740e0ae398c4687cb",
+    "reference_source_manifest_sha256": "06554bbcfc8fc87ce5d4f44cb6ef7da412e6870fe67d75b247d63420d7a58408",
+    "raw_tensor_bytes": 9205248,
+    "raw_tensor_sha256": {
+      "encoder_final_hidden_state": "b1fbaec8d4a4d6d880d45f84df4b1481eb6b6b3bda202ad6d398956b40e22c78",
+      "decoder_first_final_hidden_state": "560a1a8bccd175ae64b919fafdbfd92b34c2d3ec41f2e891a8fd6f238a1f9269",
+      "first_logits": "6f9e1b3f69d856a73eee8dda9e1c4fc54c2dc603b2671339222202a47a7650cc",
+      "cached_greedy_logits": "7884d5b65ea3ccc596858812cca0f9e67cb7061debabeb1d2b99fcc8ab484756",
+      "teacher_forced_logits": "8d0b0b554d6dd61e4ec1b03f484acf15b12f87cfcad0d6fc28aec5d2018ae8eb"
+    }
+  },
+  "checks": {
+    "exact_config_validated": true,
+    "all_safetensors_headers_strictly_validated": true,
+    "all_control_files_sha256_validated": true,
+    "all_weight_shards_sha256_validated": true,
+    "tensor_inventory_matches_pinned_fixture": true,
+    "strict_mapping_planned": true,
+    "tokenizer_long_and_short_fixtures_validated": true,
+    "all_weights_applied": true,
+    "all_parameters_installed_as_f32": true,
+    "physical_index_alias_verified": true,
+    "source_ordered_single_shard_streaming_validated": true,
+    "metal_f32_encoder_reference_compared": true,
+    "metal_f32_decoder_hidden_reference_compared": true,
+    "official_reference_full_vector_logits_compared": true,
+    "official_reference_greedy_32_tokens_compared": true,
+    "cached_stateless_top1_all_prefixes_compared": true,
+    "teacher_forced_32_row_reference_compared": true,
+    "four_beam_reference_generation_compared": true,
+    "short_prompt_execution": true,
+    "padded_batch_execution": false,
+    "context_boundary_execution": false,
+    "q8_metal_acceptance": false,
+    "q4_metal_acceptance": false,
+    "quantized_quality_corpus_validated": false,
+    "long_context_32k_validated": false,
+    "standardized_warm_performance_series": false
+  },
+  "optimized_direct_binary_acceptance": {
+    "status": "passed",
+    "result_recorded": true,
+    "command": "/usr/bin/time -l -o /private/tmp/flan-t5-xxl-06b485b-time.txt env TRANSFORMERS_FLAN_T5_XXL_DIR='/Volumes/bag of holding/models/google/flan-t5-xxl' TRANSFORMERS_FLAN_T5_XXL_REFERENCE_DIR='/Volumes/bag of holding/models/transformers-acceptance/flan-t5-xxl-ae7c9136-reference.bundle' '/Volumes/bag of holding/cargo-target/hmm-compression-transformers/release/deps/t5_xxl_metal-7e2a21073eb67dd2' loads_flan_t5_xxl_f32_and_matches_official_reference --ignored --exact --nocapture --test-threads=1",
+    "binary": {
+      "path": "/Volumes/bag of holding/cargo-target/hmm-compression-transformers/release/deps/t5_xxl_metal-7e2a21073eb67dd2",
+      "bytes": 39308624,
+      "sha256": "687e0718170256e8464d8f5ac52a6b74c7fd76012638f1f2ce0e8861be5bed57"
+    },
+    "source": {
+      "crate_commit": "06b485b7f20b778352367dc031ca091370f62d8c",
+      "commit_subject": "test(transformers): harden flan t5 xxl acceptance evidence",
+      "git_tree": "8c5bfba0d48802ebc24b7b08b353ecba6ff23aad",
+      "acceptance_test_path": "crates/transformers/tests/t5_xxl_metal.rs",
+      "acceptance_test_sha256": "34bf156fb94d494d9f885282850438d608a0ce5397803f7bdaa787c4b9d43d0c",
+      "transformer_source_matches_commit": true,
+      "note": "The executable was built from the recorded transformer commit. An unrelated modification outside crates/transformers was not part of the acceptance source."
+    },
+    "build": {
+      "profile": "release",
+      "optimized": true,
+      "default_features": false,
+      "features": ["std", "metal", "tokenizers"],
+      "exact_build_command": "CARGO_TARGET_DIR='/Volumes/bag of holding/cargo-target/hmm-compression-transformers' cargo test --release --manifest-path crates/transformers/Cargo.toml --no-default-features --features std,metal,tokenizers --test t5_xxl_metal --no-run",
+      "burn_version": "0.21.0",
+      "rustc": "1.94.0-nightly (4f14395c3 2025-12-22)",
+      "cargo": "1.94.0-nightly (3861f60f6 2025-12-19)",
+      "target": "aarch64-apple-darwin"
+    },
+    "machine": {
+      "operating_system": "macOS 15.7.9 (24G830)",
+      "kernel": "Darwin 24.6.0",
+      "architecture": "arm64",
+      "processor": "Apple M3 Max",
+      "logical_cpu_count": 14,
+      "unified_memory_bytes": 103079215104,
+      "backend": "Burn Metal via burn-wgpu and CubeCL",
+      "power": "AC Power; battery charged"
+    },
+    "fixture": {
+      "batch_size": 1,
+      "long_prompt": "translate English to German: In the early morning, the scientist walked slowly through the quiet garden, carefully recording how sunlight touched every leaf, how birds moved between the branches, and how the cool air changed as the city began to wake around her.",
+      "long_prompt_tokens": 51,
+      "translation_prompt": "translate English to German: The house is wonderful.",
+      "translation_prompt_tokens": 11,
+      "decoder_start_token_id": 0,
+      "greedy_new_tokens": 32,
+      "beam_count": 4,
+      "beam_max_new_tokens": 16,
+      "cache_capacity_tokens": 32,
+      "parameter_dtype_policy": "preserve_f32",
+      "explicit_all_one_encoder_and_decoder_masks": true,
+      "executed_graphs": [
+        "encoder_forward",
+        "stateless_first_decoder_token_with_final_hidden_state",
+        "cached_decoder_prefill_and_31_recurrent_decode_steps",
+        "stateless_32_token_teacher_forcing",
+        "four_beam_cached_generation"
+      ]
+    },
+    "load_report": {
+      "weights_applied": 558,
+      "transpose_transforms": 433,
+      "aliases_applied": 0,
+      "checkpoint_aliases_resolved": 1,
+      "equivalences_planned": 1,
+      "equivalences_verified": 1,
+      "dtype_conversions": 0,
+      "quantized_tensors": 0,
+      "allowlisted_missing": 0,
+      "allowlisted_ignored": 0,
+      "missing": 0,
+      "unexpected": 0
+    },
+    "load_execution": {
+      "weights_applied": 558,
+      "aliases_applied": 0,
+      "equivalences_verified": 1,
+      "equivalence_source_reads": 2,
+      "equivalence_source_payload_bytes": 1052770304,
+      "source_tensor_reads": 560,
+      "source_payload_bytes": 45594099712,
+      "delivered_tensor_bytes": 44541329408,
+      "largest_source_payload_bytes": 526385152,
+      "largest_output_tensor_bytes": 526385152,
+      "largest_equivalence_pair_bytes": 1052770304,
+      "peak_runtime_host_staging_bytes": 1052770304,
+      "shard_opens": 7,
+      "maximum_simultaneously_open_shards": 1,
+      "shard_open_order": [
+        "model-00001-of-00005.safetensors",
+        "model-00003-of-00005.safetensors",
+        "model-00001-of-00005.safetensors",
+        "model-00002-of-00005.safetensors",
+        "model-00003-of-00005.safetensors",
+        "model-00004-of-00005.safetensors",
+        "model-00005-of-00005.safetensors"
+      ]
+    },
+    "cache_geometry": {
+      "self_cache_bytes_per_target_token": 786432,
+      "self_cache_bytes_at_capacity": 25165824,
+      "cross_attention_cache_bytes": 40108032,
+      "total_cache_payload_bytes": 65273856,
+      "source_tokens": 51,
+      "target_capacity_tokens": 32
+    },
+    "results": {
+      "encoder_final_cosine": 0.999999999999,
+      "decoder_first_final_hidden_cosine": 0.999999999999,
+      "first_logits_cosine": 1.0,
+      "cached_minimum_row_cosine": 0.999999999998,
+      "teacher_forced_minimum_row_cosine": 0.999999999998,
+      "greedy_token_ids": [86, 74, 13558, 35, 20147, 31743, 3, 7, 235, 32, 17, 74, 17589, 1171, 20194, 732, 177, 3, 31622, 10469, 6, 3, 18152, 15, 3, 49, 3, 11059, 26, 1411, 6, 587],
+      "beam_token_ids": [644, 4598, 229, 19250, 5, 1],
+      "beam_finish_reason": "eos:1",
+      "burn_output_sha256": {
+        "encoder_final_f32le": "e3d76795c0af455046c580dc54fde740c301322b5ae8b905836b129fb829c523",
+        "decoder_first_final_f32le": "b4ae4d84f4d872fecdbbf61dd223bbf6f88a7b3ce9af1ef7715840b335a9b5af",
+        "first_logits_f32le": "05fa8d0b2fe007c11cc888bda82b3679877e5354aa10b9951392a930ef9823de",
+        "cached_logits_32x32128_f32le": "043c141632dbde31b604c3e778437bcf531eecdc1aa4e96f37ca5aba2cd31d9b",
+        "teacher_logits_32x32128_f32le": "af10790cca5ce443d83a6ae4ddeac84cd569fb10126c934090aad0b43f2d80c0",
+        "greedy_token_ids_u32le": "39e7bb643f90ca0127d2f4401912774f3648fcce3ea96c5df3ff1ee0fe543008",
+        "beam_token_ids_u32le": "b818fc36304dd2cc12d37ba110ef2afa8500525fb5a2917f6776dc16a3303352"
+      },
+      "load_seconds": 71.107,
+      "encoder_seconds": 0.901,
+      "stateless_first_seconds": 0.833,
+      "cached_32_seconds": 7.091,
+      "teacher_forced_seconds": 2.195,
+      "beam_seconds": 8.756,
+      "rust_test_wall_seconds": 91.09,
+      "process_wall_seconds": 92.06,
+      "process_user_seconds": 17.58,
+      "process_system_seconds": 28.24,
+      "macos_maximum_resident_set_bytes": 11276173312,
+      "macos_peak_memory_footprint_bytes": 50210770368,
+      "process_exit_status": 0
+    },
+    "timing_scope": {
+      "load": "AutoSeq2SeqLm::load_local through strict source-ordered F32 loading and synchronized Metal parameter upload; separate checkpoint and reference SHA-256 gates are excluded",
+      "encoder": "one synchronized 51-token encoder forward through host extraction",
+      "stateless_first": "one synchronized stateless start-token decoder forward with final hidden state through host extraction",
+      "cached_32": "cached decoder start-token prefill plus 31 recurrent greedy decode steps, each through synchronized host extraction",
+      "teacher_forced": "one synchronized stateless 32-row teacher-forced decoder forward through host extraction",
+      "beam": "one four-beam generation with early stopping through synchronized completion",
+      "rust_test": "complete direct Rust acceptance test excluding the separately invoked artifact-hash gates",
+      "process": "/usr/bin/time -l around the complete direct test-binary invocation"
+    },
+    "measurement_classification": {
+      "kind": "single cold diagnostic correctness acceptance run",
+      "standardized_benchmark": false,
+      "throughput_reportable": false,
+      "warmup_iterations": 0,
+      "measured_repetitions": 1,
+      "rss_note": "macOS maximum resident set size does not include the complete unified-memory Metal allocation; peak memory footprint is the more representative process-level high-water mark for this run. Neither measurement subtracts an idle-process baseline."
+    }
+  },
+  "artifact_revalidation": {
+    "post_inference_header_config_plan_tokenizer_gate": {
+      "status": "passed",
+      "elapsed_seconds": 0.278
+    },
+    "post_inference_complete_weight_shard_sha256_gate": {
+      "status": "passed",
+      "bytes_hashed": 45067783756,
+      "elapsed_seconds": 1584.841,
+      "profile": "debug",
+      "note": "The debug SHA-256 gate is correctness evidence, not a throughput benchmark."
+    }
+  },
+  "remaining_release_gates": [
+    "padded-batch execution",
+    "context-boundary execution",
+    "native Q8 and Q4 conversion and Metal inference acceptance",
+    "quantized fixed-corpus quality limits",
+    "32K-token quantized context stress",
+    "standardized synchronized warm latency and throughput series with idle-memory baseline"
+  ],
+  "support_note": "This record proves immutable artifact identity, strict complete F32 weight application, official Transformers full-vector tensor and logit parity, exact 32-token cached greedy continuation, stateless teacher-forced parity, exact four-beam generation, and analytical cache geometry on the named Metal system. Padded/context-boundary, quantized quality and 32K stress, and standardized warm performance gates remain open; advertised support therefore remains false."
+}
