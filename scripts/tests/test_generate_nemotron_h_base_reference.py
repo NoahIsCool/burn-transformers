@@ -520,9 +520,183 @@ class ReferenceHelperTests(unittest.TestCase):
         self.assertEqual(
             len(REFERENCE.EXPECTED_GENERATED_TOKEN_IDS), REFERENCE.GREEDY_TOKENS
         )
+        self.assertEqual(REFERENCE.EXPECTED_CYCLE_TOKEN_PIECES, ["ĠĠ", "Ċ"])
+        self.assertEqual(REFERENCE.EXPECTED_DECODED_CONTINUATION, "  \n" * 16)
+        self.assertEqual(REFERENCE.SELF_PARITY_COSINE, 0.999)
+        self.assertEqual(REFERENCE.CROSS_RUNTIME_PARITY_COSINE, 0.999)
         self.assertEqual(REFERENCE.EXPECTED_LAYER_TYPES.count("linear_attention"), 23)
         self.assertEqual(REFERENCE.EXPECTED_LAYER_TYPES.count("moe"), 23)
         self.assertEqual(REFERENCE.EXPECTED_LAYER_TYPES.count("full_attention"), 6)
+
+    def test_trace_architecture_maps_every_boundary_and_rejects_unknowns(self) -> None:
+        self.assertEqual(
+            REFERENCE.trace_row_architecture("embeddings")["operation"],
+            "embedding",
+        )
+        layer = REFERENCE.trace_row_architecture("layers.5")
+        self.assertEqual(layer["layer_index"], 5)
+        self.assertEqual(layer["layer_type"], "full_attention")
+        self.assertEqual(
+            REFERENCE.trace_row_architecture("norm_f")["operation"],
+            "final_rms_norm",
+        )
+        for label in ("layer.0", "layers.-1", "layers.52"):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ValueError, "unknown|out of range"):
+                    REFERENCE.trace_row_architecture(label)
+
+    def test_hidden_path_summary_localizes_worst_decision_and_layer(self) -> None:
+        labels = [
+            "embeddings",
+            *[f"layers.{index}" for index in range(52)],
+            "norm_f",
+        ]
+
+        class CachedTrace:
+            shape = [REFERENCE.HIDDEN_TRACE_ROWS, REFERENCE.HIDDEN_SIZE]
+
+            def __init__(self, decision: int) -> None:
+                self.decision = decision
+
+            def __getitem__(self, row: int) -> tuple[str, int, int]:
+                return ("cached", self.decision, row)
+
+        class TeacherTraces:
+            shape = [
+                REFERENCE.GREEDY_TOKENS,
+                REFERENCE.HIDDEN_TRACE_ROWS,
+                REFERENCE.HIDDEN_SIZE,
+            ]
+
+            def __getitem__(self, key: tuple[int, int]) -> tuple[str, int, int]:
+                decision, row = key
+                return ("teacher", decision, row)
+
+        cached = [CachedTrace(decision) for decision in range(REFERENCE.GREEDY_TOKENS)]
+
+        def cosine(_torch: object, left: tuple[str, int, int], right: object) -> float:
+            self.assertEqual(left[1:], right[1:])
+            decision, row = left[1:]
+            if decision == 22 and row == 24:
+                return 0.8
+            if decision == 22 and row == 23:
+                return 0.99
+            return 1.0
+
+        with mock.patch.object(REFERENCE, "tensor_cosine", side_effect=cosine):
+            summary = REFERENCE.hidden_path_divergence_summary(
+                object(), cached, TeacherTraces(), labels
+            )
+        self.assertFalse(summary["cross_runtime_acceptance_gate"])
+        self.assertEqual(summary["worst_decision"]["decision"], 22)
+        self.assertEqual(summary["worst_decision"]["minimum_trace_row"], 24)
+        self.assertEqual(
+            summary["worst_decision_largest_boundary_drop"]["trace_row"], 24
+        )
+        self.assertEqual(
+            summary["first_decision_below_0_999_diagnostic_threshold"]["decision"],
+            22,
+        )
+
+    def test_selected_hidden_trace_positions_fail_closed_before_hooks(self) -> None:
+        for positions in ([], [1, 0], [0, 0], [-1], [3], [True]):
+            with self.subTest(positions=positions):
+                with self.assertRaisesRegex(ValueError, "unique in-range"):
+                    REFERENCE.capture_selected_hidden_traces(
+                        object(), object(), 3, positions, lambda: None
+                    )
+
+    def test_selected_hidden_trace_captures_requested_axes_once(self) -> None:
+        class FakeTensor:
+            def __init__(self, shape: list[int], dtype: str) -> None:
+                self.shape = shape
+                self.dtype = dtype
+                self.device = types.SimpleNamespace(type="mps")
+
+            def __getitem__(self, key: tuple[int, list[int]]) -> "FakeTensor":
+                batch, positions = key
+                if batch != 0:
+                    raise AssertionError("unexpected fake batch")
+                return FakeTensor([len(positions), REFERENCE.HIDDEN_SIZE], self.dtype)
+
+            def float(self) -> "FakeTensor":
+                return FakeTensor(list(self.shape), "float32")
+
+            def clone(self) -> "FakeTensor":
+                return FakeTensor(list(self.shape), self.dtype)
+
+            def permute(self, *axes: int) -> "FakeTensor":
+                return FakeTensor([self.shape[index] for index in axes], self.dtype)
+
+            def cpu(self) -> "FakeTensor":
+                return self
+
+            def contiguous(self) -> "FakeTensor":
+                return self
+
+        class FakeHandle:
+            def __init__(self, module: "FakeModule") -> None:
+                self.module = module
+
+            def remove(self) -> None:
+                self.module.hook = None
+
+        class FakeModule:
+            def __init__(self) -> None:
+                self.hook: object | None = None
+
+            def register_forward_hook(self, hook: object) -> FakeHandle:
+                self.hook = hook
+                return FakeHandle(self)
+
+            def emit(self) -> None:
+                assert callable(self.hook)
+                self.hook(
+                    self,
+                    (),
+                    FakeTensor([1, 3, REFERENCE.HIDDEN_SIZE], "float16"),
+                )
+
+        modules = [FakeModule() for _ in range(REFERENCE.HIDDEN_TRACE_ROWS)]
+        language_model = types.SimpleNamespace(
+            embeddings=modules[0],
+            layers=modules[1:-1],
+            norm_f=modules[-1],
+        )
+
+        def stack(rows: list[FakeTensor]) -> FakeTensor:
+            self.assertEqual(len(rows), REFERENCE.HIDDEN_TRACE_ROWS)
+            self.assertTrue(
+                all(row.shape == [2, REFERENCE.HIDDEN_SIZE] for row in rows)
+            )
+            return FakeTensor(
+                [REFERENCE.HIDDEN_TRACE_ROWS, 2, REFERENCE.HIDDEN_SIZE],
+                "float32",
+            )
+
+        fake_torch = types.SimpleNamespace(
+            float16="float16",
+            float32="float32",
+            stack=stack,
+        )
+        sentinel = object()
+
+        def run() -> object:
+            for module in modules:
+                module.emit()
+            return sentinel
+
+        output, labels, traces = REFERENCE.capture_selected_hidden_traces(
+            fake_torch, language_model, 3, [0, 2], run
+        )
+        self.assertIs(output, sentinel)
+        self.assertEqual(len(labels), REFERENCE.HIDDEN_TRACE_ROWS)
+        self.assertEqual(
+            traces.shape,
+            [2, REFERENCE.HIDDEN_TRACE_ROWS, REFERENCE.HIDDEN_SIZE],
+        )
+        self.assertEqual(traces.dtype, "float32")
+        self.assertTrue(all(module.hook is None for module in modules))
 
     def test_official_cache_validator_checks_every_layer_geometry(self) -> None:
         class FakeTensor:
