@@ -32,6 +32,27 @@
 //! whole-weight dequantization launch. These are short correctness diagnostics,
 //! not quantized-quality, 32K, or advertised-support gates.
 //!
+//! Quality is measured in separate Q8 and Q4 processes so each 30B graph is
+//! released before the other precision loads. Both commands also require
+//! `TRANSFORMERS_MUSE_GLIMMER_DIR` and
+//! `TRANSFORMERS_MUSE_GLIMMER_REFERENCE_DIR`:
+//!
+//! ```text
+//! TRANSFORMERS_MUSE_GLIMMER_Q8_BURNPACK=/absolute/path/to/reviewed-q8.bpk \
+//! cargo test --release --manifest-path crates/transformers/Cargo.toml \
+//!   --no-default-features --features std,metal,tokenizers \
+//!   --test muse_glimmer_artifacts \
+//!   measures_pinned_muse_glimmer_q8_official_cached_quality_on_metal \
+//!   -- --ignored --exact --nocapture
+//!
+//! TRANSFORMERS_MUSE_GLIMMER_Q4_BURNPACK=/absolute/path/to/reviewed-q4.bpk \
+//! cargo test --release --manifest-path crates/transformers/Cargo.toml \
+//!   --no-default-features --features std,metal,tokenizers \
+//!   --test muse_glimmer_artifacts \
+//!   measures_pinned_muse_glimmer_q4_official_cached_quality_on_metal \
+//!   -- --ignored --exact --nocapture
+//! ```
+//!
 //! Stream all 59.6 GB through the independent payload identity gate with:
 //!
 //! ```text
@@ -78,6 +99,9 @@
 #[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
 #[path = "support/kernel_trace.rs"]
 mod kernel_trace;
+
+#[path = "support/quantized_quality.rs"]
+mod quantized_quality;
 
 use sha2::{Digest, Sha256};
 use std::{
@@ -133,8 +157,8 @@ use burn::{
 };
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 use transformers::{
-    AutoCausalLm, AutoLoadOptions, DecodeInput, DecodeState, ForwardOptions, LogitsSelection,
-    SamplingStrategy, TokenMask,
+    AutoCausalLm, AutoLoadOptions, DecodeInput, DecodeState, ForwardOptions, LoadedModel,
+    LogitsSelection, SamplingStrategy, TokenMask,
     architecture::CausalLmInput,
     cache::{CacheConfig, KvCacheStorage},
     models::{
@@ -142,6 +166,9 @@ use transformers::{
         muse_glimmer::{MuseGlimmerDecodeState, MuseGlimmerForCausalLm, MuseGlimmerLayerCache},
     },
 };
+
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+use quantized_quality::{FixedSequenceQuality, enforce_regression_limit};
 
 #[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
 use kernel_trace::{
@@ -332,6 +359,14 @@ const Q8_BURNPACK_ARTIFACT_BYTES: Option<u64> = Some(28_165_645_337);
 /// Reviewed Q4 artifact length after conversion and full reopen.
 #[cfg(feature = "tokenizers")]
 const Q4_BURNPACK_ARTIFACT_BYTES: Option<u64> = Some(14_911_372_485);
+
+/// Inclusive Q8 mean-NLL regression budget from the v1 release policy.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+const Q8_MAXIMUM_RELATIVE_NLL_REGRESSION: f64 = 0.01;
+
+/// Inclusive Q4 mean-NLL regression budget from the v1 release policy.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+const Q4_MAXIMUM_RELATIVE_NLL_REGRESSION: f64 = 0.05;
 
 /// Number of consumed tensors renamed out of the multimodal namespace.
 const RENAMED_TENSOR_COUNT: usize = 626;
@@ -4107,18 +4142,33 @@ fn assert_muse_mixed_parameter_dtypes(model: &MuseGlimmerForCausalLm<Metal>) {
     assert_eq!(retained, RETAINED_F16_TENSOR_COUNT);
 }
 
-/// Loads, executes, and optionally traces one exact Muse packed sidecar.
+/// A fully authenticated mixed-precision graph and its cold load duration.
 #[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
-fn smoke_and_audit_pinned_muse_glimmer_burnpack(
+struct AuthenticatedMuseBurnpack {
+    /// Executable model plus the strict load and provenance reports it produced.
+    loaded: LoadedModel<AutoCausalLm<Metal>>,
+    /// Synchronized load duration retained only as a non-standardized diagnostic.
+    load_seconds: f64,
+}
+
+/// Authenticates one reviewed sidecar and source checkpoint before returning a model.
+///
+/// This common prelude is intentionally shared by packed-kernel and quality
+/// gates. It fully rehashes and decodes the sidecar, verifies its F16 load-plan
+/// binding, lets the quantized loader perform source pre/postflight hashing,
+/// and proves all 417 eligible matrices remain packed while every exclusion
+/// remains F16.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+fn load_authenticated_muse_burnpack(
     scheme: SymmetricQuantization,
     output_environment: &str,
-) {
+    device: &<Metal as burn::tensor::backend::BackendTypes>::Device,
+) -> AuthenticatedMuseBurnpack {
     let supplied_root = pinned_root();
     let root = supplied_root
         .canonicalize()
         .unwrap_or_else(|error| panic!("canonicalize {}: {error}", supplied_root.display()));
-    let device = Default::default();
-    assert_metal_backend_available(&device);
+    assert_metal_backend_available(device);
     assert_control_files(&root);
     let (_manifest, plan) = pinned_muse_f16_plan(&root);
     let (expected_quantized, _) = assert_muse_quantization_partition(&plan);
@@ -4127,21 +4177,19 @@ fn smoke_and_audit_pinned_muse_glimmer_burnpack(
         SymmetricQuantization::Q8 => (
             Q8_BURNPACK_SHA256,
             Q8_BURNPACK_ARTIFACT_BYTES,
-            Some(Q8_BURNPACK_FILE_NAME),
+            Q8_BURNPACK_FILE_NAME,
         ),
         SymmetricQuantization::Q4 => (
             Q4_BURNPACK_SHA256,
             Q4_BURNPACK_ARTIFACT_BYTES,
-            Some(Q4_BURNPACK_FILE_NAME),
+            Q4_BURNPACK_FILE_NAME,
         ),
     };
-    if let Some(expected_file_name) = expected_file_name {
-        assert_eq!(
-            burnpack.file_name().and_then(|name| name.to_str()),
-            Some(expected_file_name),
-            "reviewed sidecar filename changed"
-        );
-    }
+    assert_eq!(
+        burnpack.file_name().and_then(|name| name.to_str()),
+        Some(expected_file_name),
+        "reviewed sidecar filename changed"
+    );
     let expected_sha256 = expected_sha256
         .expect("review and pin the complete Muse Burnpack SHA-256 before Metal execution");
     let expected_artifact_bytes = expected_artifact_bytes
@@ -4167,15 +4215,15 @@ fn smoke_and_audit_pinned_muse_glimmer_burnpack(
                 ..LoadOptions::default()
             },
             load_tokenizer: false,
-            quantized_burnpack: Some(burnpack.clone()),
+            quantized_burnpack: Some(burnpack),
             repository: Some(REPOSITORY.to_owned()),
             revision: Some(REVISION.to_owned()),
             ..AutoLoadOptions::default()
         },
-        &device,
+        device,
     )
     .expect("strictly load mixed F16/packed Muse through the automatic registry");
-    <Metal<f32, i32> as Backend>::sync(&device).expect("complete mixed Muse parameter transfers");
+    <Metal<f32, i32> as Backend>::sync(device).expect("complete mixed Muse parameter transfers");
     let load_seconds = load_started.elapsed().as_secs_f64();
     assert_eq!(loaded.source().model_type(), "muse_glimmer_text");
     assert_eq!(loaded.source().repository(), Some(REPOSITORY));
@@ -4285,6 +4333,28 @@ fn smoke_and_audit_pinned_muse_glimmer_burnpack(
         model => panic!("expected Muse automatic variant, found {model:?}"),
     };
     assert_muse_mixed_parameter_dtypes(model);
+    AuthenticatedMuseBurnpack {
+        loaded,
+        load_seconds,
+    }
+}
+
+/// Loads, executes, and optionally traces one exact Muse packed sidecar.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+fn smoke_and_audit_pinned_muse_glimmer_burnpack(
+    scheme: SymmetricQuantization,
+    output_environment: &str,
+) {
+    let device = Default::default();
+    let AuthenticatedMuseBurnpack {
+        loaded,
+        load_seconds,
+    } = load_authenticated_muse_burnpack(scheme, output_environment, &device);
+    #[cfg(feature = "kernel-tracing")]
+    let model = match loaded.model() {
+        AutoCausalLm::MuseGlimmer(model) => model,
+        model => panic!("expected Muse automatic variant, found {model:?}"),
+    };
     let sequence = SMOKE_TOKEN_IDS.len();
     let prompt = CausalLmInput {
         token_ids: Tensor::<Metal, 2, Int>::from_data(
@@ -4436,6 +4506,172 @@ fn smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal() {
 fn smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal() {
     require_muse_packed_kernel_tracing();
     smoke_and_audit_pinned_muse_glimmer_burnpack(SymmetricQuantization::Q4, Q4_BURNPACK_ENV);
+}
+
+/// Scores one reviewed sidecar against the matching official cached F16 rows.
+///
+/// After the authenticated prompt prefill, each decode consumes the committed
+/// official token rather than the quantized model's prediction. Therefore row
+/// `i` always represents the same prefix and target in both streams even when a
+/// quantized top-one changes. Cached/stateless self-consistency is neither
+/// computed nor accepted as quality evidence here.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+fn measure_pinned_muse_glimmer_quantized_quality(
+    scheme: SymmetricQuantization,
+    output_environment: &str,
+    maximum_relative_nll_regression: f64,
+) {
+    let oracle = read_pinned_muse_reference();
+    let reference = &oracle.reference;
+    let row_positions = &reference.outputs.cached_prefix_logits.row_position_ids;
+    let targets = &reference.generation.token_ids;
+    assert_eq!(targets.as_slice(), REFERENCE_GENERATED_TOKEN_IDS);
+    assert_eq!(
+        reference
+            .outputs
+            .cached_prefix_logits
+            .row_top1_token_ids
+            .as_slice(),
+        targets.as_slice()
+    );
+    assert_eq!(
+        row_positions,
+        &reference.execution.cache.decision_position_ids
+    );
+    let mut quality = FixedSequenceQuality::new(
+        &oracle.cached_prefix_logits,
+        targets,
+        row_positions,
+        202_048,
+    )
+    .unwrap_or_else(|error| panic!("validate Muse official cached quality contract: {error}"));
+
+    let device = Default::default();
+    let AuthenticatedMuseBurnpack {
+        loaded,
+        load_seconds,
+    } = load_authenticated_muse_burnpack(scheme, output_environment, &device);
+    let prompt_length = reference.input_ids.len();
+    assert_eq!(prompt_length, REFERENCE_TOKEN_IDS.len());
+    let cache_capacity = prompt_length + targets.len();
+    let mut state = loaded
+        .model()
+        .new_decode_state(
+            CacheConfig::new(1, cache_capacity).expect("Muse quality cache geometry"),
+            1,
+            &device,
+        )
+        .expect("allocate Muse quantized-quality decode state");
+    assert_muse_cache_geometry(&state, 0, cache_capacity);
+    let quality_started = Instant::now();
+    let mut cached = loaded
+        .model()
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(
+                        reference
+                            .input_ids
+                            .iter()
+                            .copied()
+                            .map(i64::from)
+                            .collect::<Vec<_>>(),
+                        [1, prompt_length],
+                    ),
+                    &device,
+                ),
+                token_mask: Some(all_valid_metal_mask(prompt_length, &device)),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .expect("prefill the fixed Muse quality prompt");
+
+    for (step, &target) in targets.iter().enumerate() {
+        let expected_length = reference.execution.cache.decision_logical_lengths[step];
+        let position_id = row_positions[step];
+        assert_eq!(position_id + 1, expected_length);
+        assert_muse_cache_geometry(&state, expected_length, cache_capacity);
+        assert_eq!(cached.logits.dims(), [1, 1, 202_048]);
+        assert_eq!(cached.logits.dtype(), DType::F16);
+        let quantized_row = metal_values(
+            &format!("Muse {scheme:?} quality cached logits row {step}"),
+            &cached.logits,
+        );
+        quality
+            .observe(position_id, target, &quantized_row)
+            .unwrap_or_else(|error| panic!("score Muse {scheme:?} quality row {step}: {error}"));
+
+        if step + 1 < targets.len() {
+            assert_eq!(
+                reference.execution.cache.decode_input_position_ids[step],
+                row_positions[step + 1]
+            );
+            cached = loaded
+                .model()
+                .decode(
+                    DecodeInput {
+                        token_ids: Tensor::<Metal, 2, Int>::from_data(
+                            TensorData::new(vec![i64::from(target)], [1, 1]),
+                            &device,
+                        ),
+                        token_mask: Some(all_valid_metal_mask(1, &device)),
+                        position_ids: None,
+                    },
+                    &mut state,
+                    &ForwardOptions::default(),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("teacher-force Muse {scheme:?} fixed token at row {step}: {error}")
+                });
+            assert_muse_cache_geometry(&state, expected_length + 1, cache_capacity);
+        }
+    }
+    let quality_seconds = quality_started.elapsed().as_secs_f64();
+    let summary = quality
+        .finish()
+        .unwrap_or_else(|error| panic!("finalize Muse {scheme:?} quality: {error}"));
+    eprintln!(
+        "Muse-Glimmer-30B {scheme:?} official cached fixed-sequence quality: \
+         rows={}, official_mean_nll={:.12}, quantized_mean_nll={:.12}, \
+         relative_nll_regression={:.9}, maximum_relative_nll_regression={:.9}, \
+         exact_top1_matches={}, minimum_full_vector_cosine={:.12}, \
+         load_seconds={load_seconds:.3}, fixed_sequence_seconds={quality_seconds:.3}",
+        summary.rows,
+        summary.official_mean_nll,
+        summary.quantized_mean_nll,
+        summary.relative_nll_regression,
+        maximum_relative_nll_regression,
+        summary.exact_top1_matches,
+        summary.minimum_full_vector_cosine,
+    );
+    enforce_regression_limit(&summary, maximum_relative_nll_regression)
+        .unwrap_or_else(|error| panic!("Muse {scheme:?} quantized quality failed: {error}"));
+}
+
+/// Enforces the one-percent Q8 mean-NLL budget on all 32 official cached rows.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires pinned Muse weights, schema-3 oracle, reviewed Q8 Burnpack, Metal, and unified memory"]
+fn measures_pinned_muse_glimmer_q8_official_cached_quality_on_metal() {
+    measure_pinned_muse_glimmer_quantized_quality(
+        SymmetricQuantization::Q8,
+        Q8_BURNPACK_ENV,
+        Q8_MAXIMUM_RELATIVE_NLL_REGRESSION,
+    );
+}
+
+/// Enforces the five-percent Q4 mean-NLL budget on all 32 official cached rows.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires pinned Muse weights, schema-3 oracle, reviewed Q4 Burnpack, Metal, and unified memory"]
+fn measures_pinned_muse_glimmer_q4_official_cached_quality_on_metal() {
+    measure_pinned_muse_glimmer_quantized_quality(
+        SymmetricQuantization::Q4,
+        Q4_BURNPACK_ENV,
+        Q4_MAXIMUM_RELATIVE_NLL_REGRESSION,
+    );
 }
 
 /// Strictly streams the F16 text graph and audits source order and generation defaults.

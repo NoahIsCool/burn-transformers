@@ -1212,9 +1212,14 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   payloads, and published a `14,911,372,485`-byte v2 sidecar with SHA-256
   `05b69f67799b4dc0228b4298e39d466d753fcc5d6484f61c8920c551017daed3`.
   A separate Q4 trace also observed all 417 packed matmuls without whole-weight
-  dequantization, with cached/stateless logit cosine `1.0`. Quantized
-  official-reference and quality evaluation plus long-context execution remain
-  pending, so this is not a support claim.
+  dequantization, with cached/stateless logit cosine `1.0`. Separate ignored Q8
+  and Q4 quality gates now teacher-force the exact committed 32-token sequence
+  through packed recurrent decode, align every row and absolute position with
+  the authenticated official cached F16 fixture, and apply stable F64
+  full-vocabulary NLL budgets of 1% and 5%, respectively. They also report
+  official/quantized top-one agreement and minimum full-vector cosine as
+  diagnostics. Neither quality gate has run; quantized quality and long-context
+  execution remain pending, so this is not a support claim.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.
