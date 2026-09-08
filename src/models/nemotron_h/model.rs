@@ -302,27 +302,35 @@ impl<B: Backend> NemotronHMoe<B> {
                 .val()
                 .cast(DType::F32)
                 .reshape([1, experts]);
-        let experts_per_group = experts / self.groups;
-        let group_candidates = deterministic_top_k(
+        let eligible = if self.groups == 1 {
+            // Lightning's `n_group = topk_group = 1` makes group pruning the
+            // identity. Besides avoiding unnecessary work, this branch is
+            // required because Burn intentionally rejects one-hot tensors with
+            // fewer than two classes.
             corrected
-                .clone()
-                .reshape([tokens, self.groups, experts_per_group]),
-            2.min(experts_per_group),
-        )
-        .0
-        .sum_dim(2)
-        .reshape([1, tokens, self.groups]);
-        let selected_groups = deterministic_top_k(group_candidates, self.top_groups)
-            .1
-            .reshape([tokens, self.top_groups]);
-        let group_mask = selected_groups
-            .one_hot::<3>(self.groups)
-            .sum_dim(1)
-            .greater_elem(0)
-            .reshape([tokens, self.groups, 1])
-            .expand([tokens, self.groups, experts_per_group])
-            .reshape([tokens, experts]);
-        let eligible = corrected.mask_fill(group_mask.bool_not(), f32::NEG_INFINITY);
+        } else {
+            let experts_per_group = experts / self.groups;
+            let group_candidates = deterministic_top_k(
+                corrected
+                    .clone()
+                    .reshape([tokens, self.groups, experts_per_group]),
+                2.min(experts_per_group),
+            )
+            .0
+            .sum_dim(2)
+            .reshape([1, tokens, self.groups]);
+            let selected_groups = deterministic_top_k(group_candidates, self.top_groups)
+                .1
+                .reshape([tokens, self.top_groups]);
+            let group_mask = selected_groups
+                .one_hot::<3>(self.groups)
+                .sum_dim(1)
+                .greater_elem(0)
+                .reshape([tokens, self.groups, 1])
+                .expand([tokens, self.groups, experts_per_group])
+                .reshape([tokens, experts]);
+            corrected.mask_fill(group_mask.bool_not(), f32::NEG_INFINITY)
+        };
         let (ignored_corrected_weights, selected_experts) = deterministic_top_k(
             eligible.reshape([1, tokens, experts]),
             self.experts_per_token,
@@ -1273,6 +1281,42 @@ mod tests {
         assert_eq!(output.expert_token_counts.iter().sum::<usize>(), 2);
         assert_eq!(output.evaluated_experts, 2);
         assert_eq!(output.expert_token_counts, vec![1, 1, 0, 0]);
+    }
+
+    /// Lightning's single router group is the identity eligibility transform.
+    #[test]
+    fn moe_single_group_matches_all_groups_retained() {
+        let device = Default::default();
+        let config = tiny_config(false);
+        let mut moe = NemotronHMoe::<TestBackend>::init(&config, &device).unwrap();
+        let input = Tensor::from_floats([[[0.2, -0.5, 0.8, 0.1, -0.3, 0.7, 0.4, -0.9]]], &device);
+
+        moe.groups = 1;
+        moe.top_groups = 1;
+        let single_group = moe.forward(input.clone()).unwrap();
+
+        moe.groups = 2;
+        moe.top_groups = 2;
+        let all_groups = moe.forward(input).unwrap();
+
+        assert_eq!(
+            single_group.selected_experts.into_data(),
+            all_groups.selected_experts.into_data()
+        );
+        single_group
+            .selected_weights
+            .into_data()
+            .assert_approx_eq::<f32>(
+                &all_groups.selected_weights.into_data(),
+                Tolerance::absolute(0.0),
+            );
+        single_group
+            .hidden_state
+            .into_data()
+            .assert_approx_eq::<f32>(
+                &all_groups.hidden_state.into_data(),
+                Tolerance::absolute(1e-6),
+            );
     }
 
     /// Router buffers and sparse accumulation retain their reference precisions.

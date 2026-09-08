@@ -9,8 +9,9 @@
 //! `metadata.total_size` exceeds the physical tensor payload by exactly the
 //! combined size of the 23 base-model router matrices. The matrices occur only
 //! once in both the index and the physical headers; the MTP router is not part
-//! of the discrepancy. Generic checkpoint discovery must therefore continue to
-//! reject this artifact until a provenance-bound family exception is supplied.
+//! of the discrepancy. Generic checkpoint discovery continues to reject this
+//! artifact; only the exact provenance-bound Nemotron family policy accepts the
+//! reviewed overstatement while preserving the physical tensor inventory.
 //!
 //! Once a complete local checkpoint is available, authenticate every payload
 //! without loading the model using:
@@ -22,6 +23,17 @@
 //!   --test nemotron_h_artifacts \
 //!   validates_pinned_nemotron_control_and_weight_payloads \
 //!   -- --ignored --exact --nocapture
+//! ```
+//!
+//! To load every tensor and exercise the base graph on Metal, use:
+//!
+//! ```text
+//! TRANSFORMERS_NEMOTRON_H_DIR=/absolute/pinned/checkpoint \
+//! cargo test --release --manifest-path crates/transformers/Cargo.toml \
+//!   --no-default-features --features std,metal,tokenizers \
+//!   --test nemotron_h_artifacts \
+//!   loads_pinned_nemotron_f16_and_smokes_base_inference \
+//!   -- --ignored --exact --nocapture --test-threads=1
 //! ```
 //!
 //! The separately produced numerical oracle is deliberately fail-closed. Its
@@ -36,6 +48,8 @@ use serde::{
     de::{Error as _, MapAccess, Visitor},
 };
 use sha2::{Digest, Sha256};
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+use std::time::Instant;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -54,6 +68,19 @@ use transformers::{
         config::ModelConfig,
         nemotron_h::{NemotronHBlockType, NemotronHCheckpointOptions, NemotronHConfig},
     },
+};
+
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+use burn::{
+    backend::Metal,
+    tensor::{Bool, DType, Int, Tensor, TensorData, backend::Backend},
+};
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+use transformers::{
+    AutoCausalLm, AutoLoadOptions, DecodeInput, DecodeState, ForwardOptions, TokenMask,
+    architecture::CausalLmInput,
+    cache::{CacheConfig, KvCacheStorage},
+    models::AutoCausalDecodeState,
 };
 
 /// Immutable upstream repository certified by every gate.
@@ -780,6 +807,141 @@ fn assert_weight_files(root: &Path) {
     }
 }
 
+/// Creates an explicit true-valid Metal mask for the one-row smoke fixture.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn all_valid_metal_mask(
+    sequence: usize,
+    device: &<Metal as burn::tensor::backend::BackendTypes>::Device,
+) -> TokenMask<Metal> {
+    TokenMask::new(Tensor::<Metal, 2, Bool>::from_data(
+        TensorData::new(vec![true; sequence], [1, sequence]),
+        device,
+    ))
+}
+
+/// Forces Metal adapter discovery before any multi-gigabyte checkpoint work.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn assert_metal_backend_available(device: &<Metal as burn::tensor::backend::BackendTypes>::Device) {
+    let values = Tensor::<Metal, 1>::zeros([1], device)
+        .to_data()
+        .to_vec::<f32>()
+        .expect("the Metal acceptance backend must expose F32 storage");
+    assert_eq!(values, [0.0]);
+}
+
+/// Reads one tensor through explicit F32 storage and rejects non-finite output.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn finite_metal_values<const D: usize>(label: &str, tensor: &Tensor<Metal, D>) -> Vec<f32> {
+    let values = tensor
+        .clone()
+        .cast(DType::F32)
+        .to_data()
+        .to_vec::<f32>()
+        .unwrap_or_else(|error| panic!("read {label} as F32: {error}"));
+    assert!(
+        values.iter().all(|value| value.is_finite()),
+        "{label} contains a non-finite value"
+    );
+    values
+}
+
+/// Materializes the semantic last-token row from every requested hidden state.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn hidden_trace(label: &str, states: &[Tensor<Metal, 3>], sequence: usize) -> Vec<f32> {
+    assert_eq!(states.len(), 54, "{label} hidden-state count");
+    let mut trace = Vec::with_capacity(states.len() * 2_688);
+    for (index, state) in states.iter().enumerate() {
+        assert_eq!(state.dims(), [1, sequence, 2_688], "{label} row {index}");
+        assert_eq!(state.dtype(), DType::F16, "{label} row {index} dtype");
+        trace.extend(finite_metal_values(
+            &format!("{label} row {index}"),
+            &state.clone().narrow(1, sequence - 1, 1).reshape([2_688]),
+        ));
+    }
+    trace
+}
+
+/// Hashes an F32 diagnostic in portable little-endian scalar order.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn f32_trace_sha256(values: &[f32]) -> String {
+    let mut digest = Sha256::new();
+    for value in values {
+        digest.update(value.to_le_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
+/// Computes cosine similarity with finite, nonzero norm preconditions.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f64 {
+    assert_eq!(left.len(), right.len());
+    let (dot, left_square, right_square) = left.iter().zip(right).fold(
+        (0.0_f64, 0.0_f64, 0.0_f64),
+        |(dot, left_square, right_square), (left, right)| {
+            let left = f64::from(*left);
+            let right = f64::from(*right);
+            (
+                dot + left * right,
+                left_square + left * left,
+                right_square + right * right,
+            )
+        },
+    );
+    assert!(left_square > 0.0 && right_square > 0.0);
+    let cosine = dot / (left_square.sqrt() * right_square.sqrt());
+    assert!(cosine.is_finite());
+    cosine
+}
+
+/// Borrows the concrete Nemotron state selected by automatic dispatch.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn nemotron_state(
+    state: &AutoCausalDecodeState<Metal>,
+) -> &transformers::models::nemotron_h::NemotronHDecodeState<Metal> {
+    match state {
+        AutoCausalDecodeState::NemotronH(state) => state,
+        _ => panic!("automatic decode state must be Nemotron-H"),
+    }
+}
+
+/// Checks exact Lightning cache topology, dtypes, and logical cursor state.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn assert_nemotron_cache_geometry(
+    state: &AutoCausalDecodeState<Metal>,
+    expected_length: usize,
+    expected_capacity: usize,
+) {
+    assert_eq!(state.capacity(), expected_capacity);
+    assert_eq!(state.lengths(), &[expected_length]);
+    let state = nemotron_state(state);
+    assert_eq!(state.attention_layer_count(), 6);
+    assert_eq!(state.mamba_layer_count(), 23);
+    let tensors = state.tensor_state();
+    assert_eq!(tensors.main().native_kv_count(), 1);
+    assert_eq!(tensors.main().recurrent_count(), 1);
+    let kv = tensors
+        .main()
+        .native_kv(0)
+        .expect("Nemotron attention KV cache");
+    assert_eq!(kv.spec().layers(), 6);
+    assert_eq!(kv.spec().key_value_heads(), 2);
+    assert_eq!(kv.spec().head_dimension(), 128);
+    assert_eq!(kv.spec().storage(), KvCacheStorage::Full);
+    assert_eq!(kv.spec().dtype(), DType::F16);
+    let recurrent = tensors
+        .main()
+        .recurrent(0)
+        .expect("Nemotron Mamba recurrent cache");
+    assert_eq!(recurrent.spec().layers(), 23);
+    assert_eq!(recurrent.spec().state_heads(), 64);
+    assert_eq!(recurrent.spec().state_rows(), 64);
+    assert_eq!(recurrent.spec().state_columns(), 128);
+    assert_eq!(recurrent.spec().convolution_channels(), 6_144);
+    assert_eq!(recurrent.spec().convolution_width(), 3);
+    assert_eq!(recurrent.spec().matrix_dtype(), DType::F32);
+    assert_eq!(recurrent.spec().convolution_dtype(), DType::F16);
+}
+
 /// The exact config, index, and all physical header ranges remain immutable.
 #[test]
 fn pinned_config_index_and_headers_have_exact_identity() {
@@ -1312,6 +1474,272 @@ fn validates_pinned_nemotron_control_and_weight_payloads() {
     assert_weight_files(&root);
     eprintln!(
         "Nemotron 3.5 artifacts authenticated: repository={REPOSITORY}, revision={REVISION}, shards=14, bytes={PHYSICAL_ARTIFACT_BYTES}"
+    );
+}
+
+/// Streams every base and MTP parameter in physical source order, then exercises
+/// the base LM's stateless, cached-prefill, and one-token recurrent paths.
+///
+/// This is an implementation smoke, not official-reference parity. In
+/// particular, the loaded 270-tensor MTP body is not invoked here because its
+/// dedicated cache and speculative verification protocol remain release gates.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+#[test]
+#[ignore = "requires authenticated Nemotron 3.5 weights, Metal, and about 80 GiB free unified memory"]
+fn loads_pinned_nemotron_f16_and_smokes_base_inference() {
+    let started = Instant::now();
+    let supplied = pinned_root();
+    let root = supplied
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("canonicalize {}: {error}", supplied.display()));
+    let device = Default::default();
+    assert_metal_backend_available(&device);
+    assert_control_files(&root);
+    assert_weight_files(&root);
+
+    let load_started = Instant::now();
+    let loaded = AutoCausalLm::<Metal>::load_local(
+        &root,
+        &AutoLoadOptions {
+            checkpoint: LoadOptions {
+                dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+                index_alias_size_accounting: IndexAliasSizeAccounting::Physical,
+                ..LoadOptions::default()
+            },
+            load_tokenizer: true,
+            repository: Some(REPOSITORY.to_owned()),
+            revision: Some(REVISION.to_owned()),
+            ..AutoLoadOptions::default()
+        },
+        &device,
+    )
+    .expect("strictly stream the exact Nemotron checkpoint into the Metal F16 graph");
+    <Metal<f32, i32> as Backend>::sync(&device)
+        .expect("all Nemotron parameter transfers must complete");
+    let load_seconds = load_started.elapsed().as_secs_f64();
+
+    assert!(matches!(loaded.model(), AutoCausalLm::NemotronH(_)));
+    assert_eq!(loaded.source().model_type(), "nemotron_h");
+    assert_eq!(loaded.source().repository(), Some(REPOSITORY));
+    assert_eq!(loaded.source().revision(), Some(REVISION));
+    assert_eq!(loaded.source().root(), root);
+    let report = loaded.load_report();
+    assert!(report.is_strictly_valid());
+    assert_eq!(report.applied.len(), PHYSICAL_TENSOR_COUNT);
+    assert_eq!(report.transformed.len(), PHYSICAL_TENSOR_COUNT - 1);
+    assert_eq!(report.dtype_converted.len(), BF16_TENSOR_COUNT);
+    assert!(report.aliased.is_empty());
+    assert!(report.allowlisted_missing.is_empty());
+    assert!(report.allowlisted_ignored.is_empty());
+    let execution = loaded
+        .execution_stats()
+        .expect("automatic loading must retain pass-two counters");
+    assert_eq!(execution.tensors_applied, PHYSICAL_TENSOR_COUNT);
+    assert_eq!(execution.aliases_applied, 0);
+    assert_eq!(execution.source_reads, PHYSICAL_TENSOR_COUNT as u64);
+    assert_eq!(execution.source_payload_bytes, PHYSICAL_TENSOR_BYTES);
+    assert_eq!(execution.delivered_tensor_bytes, PHYSICAL_TENSOR_BYTES);
+    assert_eq!(execution.largest_source_payload_bytes, LARGEST_TENSOR_BYTES);
+    assert_eq!(execution.largest_output_tensor_bytes, LARGEST_TENSOR_BYTES);
+    assert_eq!(execution.peak_host_staging_bytes, LARGEST_TENSOR_BYTES);
+    assert_eq!(execution.source.shard_opens, SHARDS.len() as u64);
+    assert_eq!(execution.source.tensor_reads, PHYSICAL_TENSOR_COUNT as u64);
+    assert_eq!(execution.source.payload_bytes_read, PHYSICAL_TENSOR_BYTES);
+    assert_eq!(execution.source.max_open_shards, 1);
+    assert_eq!(
+        execution.source.shard_open_order,
+        SHARDS
+            .iter()
+            .map(|shard| shard.name.to_owned())
+            .collect::<Vec<_>>()
+    );
+
+    let tokenizer = loaded
+        .tokenizer()
+        .expect("the exact local tokenizer must remain attached");
+    assert_eq!(tokenizer.root(), root);
+    let encoding = tokenizer
+        .encode(
+            SMOKE_PROMPT,
+            &transformers::EncodeOptions {
+                add_special_tokens: false,
+                ..transformers::EncodeOptions::default()
+            },
+        )
+        .expect("tokenize the pinned Nemotron smoke prompt");
+    assert_eq!(encoding.token_ids()[0], SMOKE_TOKEN_IDS);
+    let prompt_ids = SMOKE_TOKEN_IDS
+        .iter()
+        .copied()
+        .map(i64::from)
+        .collect::<Vec<_>>();
+    let prompt_length = prompt_ids.len();
+    let prompt = Tensor::<Metal, 2, Int>::from_data(
+        TensorData::new(prompt_ids.clone(), [1, prompt_length]),
+        &device,
+    );
+    let prompt_mask = all_valid_metal_mask(prompt_length, &device);
+    let diagnostics = ForwardOptions {
+        hidden_states: true,
+        ..ForwardOptions::default()
+    };
+
+    let stateless_started = Instant::now();
+    let stateless = loaded
+        .model()
+        .forward(
+            CausalLmInput {
+                token_ids: prompt.clone(),
+                token_mask: Some(prompt_mask.clone()),
+                position_ids: None,
+            },
+            &diagnostics,
+        )
+        .expect("run stateless Nemotron base inference");
+    <Metal<f32, i32> as Backend>::sync(&device).expect("complete stateless inference");
+    let stateless_seconds = stateless_started.elapsed().as_secs_f64();
+    assert_eq!(stateless.logits.dims(), [1, 1, 131_072]);
+    assert_eq!(stateless.logits.dtype(), DType::F32);
+    let stateless_logits = finite_metal_values("Nemotron stateless logits", &stateless.logits);
+    let stateless_hidden = hidden_trace(
+        "Nemotron stateless prompt hidden trace",
+        &stateless.hidden_states,
+        prompt_length,
+    );
+
+    let capacity = prompt_length + 1;
+    let mut state = loaded
+        .model()
+        .new_decode_state(
+            CacheConfig::new(1, capacity).expect("valid one-row smoke cache"),
+            1,
+            &device,
+        )
+        .expect("allocate exact Nemotron hybrid cache");
+    assert_nemotron_cache_geometry(&state, 0, capacity);
+    let prefill_started = Instant::now();
+    let prefill = loaded
+        .model()
+        .prefill(
+            CausalLmInput {
+                token_ids: prompt,
+                token_mask: Some(prompt_mask),
+                position_ids: None,
+            },
+            &mut state,
+            &diagnostics,
+        )
+        .expect("run cached Nemotron base prefill");
+    <Metal<f32, i32> as Backend>::sync(&device).expect("complete cached prefill");
+    let prefill_seconds = prefill_started.elapsed().as_secs_f64();
+    assert_nemotron_cache_geometry(&state, prompt_length, capacity);
+    assert_eq!(prefill.logits.dims(), [1, 1, 131_072]);
+    assert_eq!(prefill.logits.dtype(), DType::F32);
+    let prefill_logits = finite_metal_values("Nemotron cached-prefill logits", &prefill.logits);
+    let prefill_hidden = hidden_trace(
+        "Nemotron cached-prefill hidden trace",
+        &prefill.hidden_states,
+        prompt_length,
+    );
+    let prompt_logit_cosine = cosine_similarity(&stateless_logits, &prefill_logits);
+    let prompt_hidden_cosine = cosine_similarity(&stateless_hidden, &prefill_hidden);
+    assert!(
+        prompt_logit_cosine >= 0.999,
+        "stateless/prefill logit cosine {prompt_logit_cosine} is below 0.999"
+    );
+    assert!(
+        prompt_hidden_cosine >= 0.999,
+        "stateless/prefill hidden cosine {prompt_hidden_cosine} is below 0.999"
+    );
+    let next_token = prefill
+        .logits
+        .clone()
+        .argmax(2)
+        .to_data()
+        .to_vec::<i32>()
+        .expect("Nemotron top-1 must use i32 storage")[0];
+    assert!(next_token >= 0);
+
+    let decode_started = Instant::now();
+    let decoded = loaded
+        .model()
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(vec![i64::from(next_token)], [1, 1]),
+                    &device,
+                ),
+                token_mask: Some(all_valid_metal_mask(1, &device)),
+                position_ids: None,
+            },
+            &mut state,
+            &diagnostics,
+        )
+        .expect("run one recurrent Nemotron decode step");
+    <Metal<f32, i32> as Backend>::sync(&device).expect("complete recurrent decode");
+    let decode_seconds = decode_started.elapsed().as_secs_f64();
+    assert_nemotron_cache_geometry(&state, capacity, capacity);
+    assert_eq!(decoded.logits.dims(), [1, 1, 131_072]);
+    assert_eq!(decoded.logits.dtype(), DType::F32);
+    let decode_logits = finite_metal_values("Nemotron recurrent decode logits", &decoded.logits);
+    let decode_hidden = hidden_trace(
+        "Nemotron recurrent decode hidden trace",
+        &decoded.hidden_states,
+        1,
+    );
+
+    let mut teacher_ids = prompt_ids;
+    teacher_ids.push(i64::from(next_token));
+    let teacher = loaded
+        .model()
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(teacher_ids, [1, capacity]),
+                    &device,
+                ),
+                token_mask: Some(all_valid_metal_mask(capacity, &device)),
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .expect("run teacher-forced Nemotron prefix");
+    let teacher_logits = finite_metal_values("Nemotron teacher logits", &teacher.logits);
+    let decode_teacher_cosine = cosine_similarity(&decode_logits, &teacher_logits);
+    assert!(
+        decode_teacher_cosine >= 0.999,
+        "recurrent/teacher logit cosine {decode_teacher_cosine} is below 0.999"
+    );
+    let decoded_top1 = decoded
+        .logits
+        .argmax(2)
+        .to_data()
+        .to_vec::<i32>()
+        .expect("decoded top-1 must use i32 storage")[0];
+    let teacher_top1 = teacher
+        .logits
+        .argmax(2)
+        .to_data()
+        .to_vec::<i32>()
+        .expect("teacher top-1 must use i32 storage")[0];
+    assert_eq!(decoded_top1, teacher_top1);
+
+    eprintln!(
+        "Nemotron 3.5 Burn Metal smoke: tensors_applied={}, source_bytes={}, \
+         shard_order={:?}, load_seconds={load_seconds:.3}, \
+         stateless_seconds={stateless_seconds:.3}, prefill_seconds={prefill_seconds:.3}, \
+         decode_seconds={decode_seconds:.3}, first_token={next_token}, \
+         stateless_hidden_sha256={}, prefill_hidden_sha256={}, decode_hidden_sha256={}, \
+         stateless_prefill_logit_cosine={prompt_logit_cosine:.9}, \
+         stateless_prefill_hidden_cosine={prompt_hidden_cosine:.9}, \
+         decode_teacher_logit_cosine={decode_teacher_cosine:.9}, total_seconds={:.3}",
+        execution.tensors_applied,
+        execution.source_payload_bytes,
+        execution.source.shard_open_order,
+        f32_trace_sha256(&stateless_hidden),
+        f32_trace_sha256(&prefill_hidden),
+        f32_trace_sha256(&decode_hidden),
+        started.elapsed().as_secs_f64(),
     );
 }
 
