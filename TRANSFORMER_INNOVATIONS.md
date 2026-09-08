@@ -1195,8 +1195,12 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   revalidated all 417 payloads, and produced a `28,165,645,337`-byte v2 sidecar
   with SHA-256
   `91cfd35bfe0a389cbc2eed2189c4e33312bdce1a0ff50d8452acf06d00f0e8eb`.
-  Q8 packed-Metal execution, Q4 conversion, kernel traces, quantized quality,
-  and long-context execution remain pending, so this is not a support claim.
+  A separate traced Metal gate reauthenticated the sidecar and checkpoint
+  provenance, ran stateless, cached-prefill, and recurrent decode, and observed
+  exactly 417 packed Q8 matmuls with no whole-weight dequantization. Its
+  cached/stateless logit cosine was `1.0`. Q4 conversion/execution, quantized
+  official-reference and quality evaluation, and long-context execution remain
+  pending, so this is not a support claim.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

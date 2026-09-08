@@ -3382,7 +3382,62 @@ fn committed_muse_q8_burnpack_anchor_is_complete_and_non_claiming() {
         q8["all_payloads_reopened_and_validated"].as_bool(),
         Some(true)
     );
-    assert_eq!(q8["packed_metal_executed"].as_bool(), Some(false));
+    assert_eq!(q8["packed_metal_executed"].as_bool(), Some(true));
+    let execution = &q8["packed_metal_execution"];
+    assert_eq!(execution["status"].as_str(), Some("passed"));
+    assert_eq!(execution["profile"].as_str(), Some("release"));
+    assert_eq!(execution["backend"].as_str(), Some("metal"));
+    assert_eq!(
+        execution["features"].as_array().map(|features| {
+            features
+                .iter()
+                .map(|feature| feature.as_str().expect("feature must be a string"))
+                .collect::<Vec<_>>()
+        }),
+        Some(vec!["std", "metal", "tokenizers", "kernel-tracing"])
+    );
+    assert_eq!(
+        execution["test"].as_str(),
+        Some("smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal")
+    );
+    assert_eq!(execution["total_test_seconds"].as_f64(), Some(743.75));
+    assert_eq!(execution["load_seconds"].as_f64(), Some(595.993));
+    assert_eq!(execution["stateless_seconds"].as_f64(), Some(5.134));
+    assert_eq!(execution["cached_prefill_seconds"].as_f64(), Some(0.561));
+    assert_eq!(execution["recurrent_decode_seconds"].as_f64(), Some(0.247));
+    assert_eq!(
+        execution["cached_stateless_logit_cosine"].as_f64(),
+        Some(1.0)
+    );
+    assert_eq!(execution["prompt_top1_token_id"].as_u64(), Some(85_068));
+    assert_eq!(execution["decode_top1_token_id"].as_u64(), Some(90));
+    assert_eq!(
+        execution["packed_matmul_launches"].as_u64(),
+        Some(QUANTIZED_TENSOR_COUNT as u64)
+    );
+    assert_eq!(
+        execution["expected_packed_matmul_launches"].as_u64(),
+        Some(QUANTIZED_TENSOR_COUNT as u64)
+    );
+    assert_eq!(
+        execution["whole_weight_dequantization_launches"].as_u64(),
+        Some(0)
+    );
+    for check in [
+        "mixed_parameter_dtypes_validated",
+        "sidecar_sha256_revalidated",
+        "all_payloads_reopened_and_validated",
+        "source_provenance_pre_and_postflight_revalidated",
+    ] {
+        assert_eq!(execution[check].as_bool(), Some(true), "{check}");
+    }
+    assert_eq!(execution["source_shard_opens"].as_u64(), Some(2));
+    assert_eq!(execution["maximum_open_source_shards"].as_u64(), Some(1));
+    assert_eq!(execution["source_tensor_reads"].as_u64(), Some(210));
+    assert_eq!(
+        execution["source_payload_bytes"].as_u64(),
+        Some(RETAINED_F16_TENSOR_BYTES)
+    );
     assert_eq!(q8["quality_evaluated"].as_bool(), Some(false));
     assert_eq!(
         record["checks"]["native_quantization_real_q8_conversion_validated"].as_bool(),
@@ -3390,7 +3445,11 @@ fn committed_muse_q8_burnpack_anchor_is_complete_and_non_claiming() {
     );
     assert_eq!(
         record["checks"]["native_quantization_real_packed_execution_validated"].as_bool(),
-        Some(false)
+        Some(true)
+    );
+    assert_eq!(
+        record["checks"]["source_ordered_single_shard_streaming_validated"].as_bool(),
+        Some(true)
     );
     assert_eq!(
         record["checks"]["quantization_validated"].as_bool(),
