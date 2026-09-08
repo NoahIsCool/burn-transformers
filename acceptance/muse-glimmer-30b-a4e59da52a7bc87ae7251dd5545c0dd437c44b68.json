@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "strict_f16_official_reference_bounded_attention_synthetic_32k_envelope_and_real_q8_packed_metal_gates_verified_pending_q4_quality_real_32k_and_release_hardening",
+  "phase": "strict_f16_official_reference_bounded_attention_synthetic_32k_real_q8_packed_metal_and_q4_conversion_gates_verified_pending_q4_execution_quality_real_32k_and_release_hardening",
   "repository": "meta-models/Muse-Glimmer-30B",
   "revision": "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
   "reference": {
@@ -270,7 +270,7 @@
     "f16_load_plan_sha256": "fde94638b261fbaee47e53dbf035660e5bd1732a6d92e45c45cddb720ed95d6d"
   },
   "native_quantization_scaffold": {
-    "status": "real_q8_conversion_and_packed_metal_execution_verified_real_q4_and_quantized_quality_pending",
+    "status": "real_q8_packed_metal_and_q4_conversion_verified_q4_packed_metal_and_quantized_quality_pending",
     "scheme": ["symmetric_q8_g64", "symmetric_q4_g64"],
     "f16_plan_tensors": 627,
     "eligible_packed_matrices": 417,
@@ -348,10 +348,45 @@
       },
       "quality_evaluated": false
     },
-    "real_q4_sidecar_created": false,
+    "real_q4_sidecar_created": true,
+    "real_q4_conversion": {
+      "artifact_filename": "muse-glimmer-30b-a4e59da5-q4-g64-v2.bpk",
+      "artifact_path": "/Volumes/bag of holding/models/transformers-acceptance/muse-glimmer-30b-q4-a4e59da5/muse-glimmer-30b-a4e59da5-q4-g64-v2.bpk",
+      "artifact_bytes": 14911372485,
+      "payload_bytes": 14911064064,
+      "largest_payload_bytes": 756467712,
+      "sha256": "05b69f67799b4dc0228b4298e39d466d753fcc5d6484f61c8920c551017daed3",
+      "elapsed_seconds": 1359.922,
+      "format_version": 2,
+      "packed_matrices": 417,
+      "retained_f16_tensors": 210,
+      "text_tensors_applied": 627,
+      "renames_applied": 626,
+      "bf16_to_f16_conversions": 627,
+      "visual_tensors_allowlisted": 809,
+      "source_shard_opens": 2,
+      "maximum_open_source_shards": 1,
+      "source_tensor_reads": 627,
+      "source_payload_bytes": 55709561856,
+      "provenance_preflight": {
+        "passes_completed": 1,
+        "shards_hashed": 2,
+        "bytes_hashed": 59553435272,
+        "peak_buffer_bytes": 1048576
+      },
+      "provenance_postflight": {
+        "passes_completed": 1,
+        "shards_hashed": 2,
+        "bytes_hashed": 59553435272,
+        "peak_buffer_bytes": 1048576
+      },
+      "all_payloads_reopened_and_validated": true,
+      "packed_metal_executed": false,
+      "quality_evaluated": false
+    },
     "real_packed_metal_kernel_trace_validated": true,
     "real_quantized_quality_validated": false,
-    "note": "The Q8 payload count is exact observed conversion evidence, and one traced recurrent decode launched all 417 packed projections without whole-weight dequantization. Q4 remains arithmetic and synthetic evidence only. Quantized official-reference and quality gates remain open, so neither format is an advertised-support claim."
+    "note": "Both Q8 and Q4 payload counts are exact observed conversion evidence. The Q8 traced recurrent decode launched all 417 packed projections without whole-weight dequantization; Q4 Metal execution remains pending. Quantized official-reference and quality gates remain open, so neither format is an advertised-support claim."
   },
   "sha256": {
     "chat_template.jinja": "cfc67e5f349f37690dfd31ed1f18bc4442a9dd32fe39a648f993cb4eb3cae678",
@@ -398,6 +433,7 @@
     "native_quantization_exact_partition_validated": true,
     "native_quantization_nonzero_synthetic_q8_q4_execution_validated": true,
     "native_quantization_real_q8_conversion_validated": true,
+    "native_quantization_real_q4_conversion_validated": true,
     "native_quantization_real_packed_execution_validated": true,
     "quantization_validated": false,
     "long_context_32k_validated": false
@@ -428,7 +464,7 @@
   },
   "open_release_gates": [
     "real-checkpoint padded and context-boundary tests",
-    "real native Q4 sidecar conversion and packed-Metal kernel proof; Q8 and Q4 official-reference and quality evaluation",
+    "real native Q4 packed-Metal kernel proof; Q8 and Q4 official-reference and quality evaluation",
     "real full-model 32K production-path stress using the bounded attention policy",
     "standardized latency, throughput, cache, memory, and output-hash benchmarks"
   ]

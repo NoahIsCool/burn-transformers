@@ -1207,9 +1207,13 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   A separate traced Metal gate reauthenticated the sidecar and checkpoint
   provenance, ran stateless, cached-prefill, and recurrent decode, and observed
   exactly 417 packed Q8 matmuls with no whole-weight dequantization. Its
-  cached/stateless logit cosine was `1.0`. Q4 conversion/execution, quantized
-  official-reference and quality evaluation, and long-context execution remain
-  pending, so this is not a support claim.
+  cached/stateless logit cosine was `1.0`. The real Q4/G64 streaming conversion
+  has independently bound the same sources and F16 plan, reopened all 417
+  payloads, and published a `14,911,372,485`-byte v2 sidecar with SHA-256
+  `05b69f67799b4dc0228b4298e39d466d753fcc5d6484f61c8920c551017daed3`.
+  Q4 packed-Metal execution, quantized official-reference and quality
+  evaluation, and long-context execution remain pending, so this is not a
+  support claim.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

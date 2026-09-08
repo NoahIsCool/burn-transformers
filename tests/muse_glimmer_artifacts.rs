@@ -303,26 +303,35 @@ const Q4_BURNPACK_ENV: &str = "TRANSFORMERS_MUSE_GLIMMER_Q4_BURNPACK";
 #[cfg(feature = "tokenizers")]
 const Q8_BURNPACK_FILE_NAME: &str = "muse-glimmer-30b-a4e59da5-q8-g64-v2.bpk";
 
+/// Immutable filename of the reviewed complete Q4/G64 v2 sidecar.
+#[cfg(feature = "tokenizers")]
+const Q4_BURNPACK_FILE_NAME: &str = "muse-glimmer-30b-a4e59da5-q4-g64-v2.bpk";
+
 /// Absolute external path observed for the conversion acceptance run.
 #[cfg(feature = "tokenizers")]
 const Q8_BURNPACK_OBSERVED_PATH: &str = "/Volumes/bag of holding/models/transformers-acceptance/muse-glimmer-30b-q8-a4e59da5/muse-glimmer-30b-a4e59da5-q8-g64-v2.bpk";
+
+/// Absolute external path observed for the Q4 conversion acceptance run.
+#[cfg(feature = "tokenizers")]
+const Q4_BURNPACK_OBSERVED_PATH: &str = "/Volumes/bag of holding/models/transformers-acceptance/muse-glimmer-30b-q4-a4e59da5/muse-glimmer-30b-a4e59da5-q4-g64-v2.bpk";
 
 /// Reviewed complete Q8 Burnpack identity after conversion and full reopen.
 #[cfg(feature = "tokenizers")]
 const Q8_BURNPACK_SHA256: Option<&str> =
     Some("91cfd35bfe0a389cbc2eed2189c4e33312bdce1a0ff50d8452acf06d00f0e8eb");
 
-/// Reviewed complete Q4 Burnpack identity; populated only after local creation.
+/// Reviewed complete Q4 Burnpack identity after conversion and full reopen.
 #[cfg(feature = "tokenizers")]
-const Q4_BURNPACK_SHA256: Option<&str> = None;
+const Q4_BURNPACK_SHA256: Option<&str> =
+    Some("05b69f67799b4dc0228b4298e39d466d753fcc5d6484f61c8920c551017daed3");
 
 /// Reviewed Q8 artifact length after conversion and full reopen.
 #[cfg(feature = "tokenizers")]
 const Q8_BURNPACK_ARTIFACT_BYTES: Option<u64> = Some(28_165_645_337);
 
-/// Reviewed Q4 artifact length; populated with the sidecar hash after creation.
+/// Reviewed Q4 artifact length after conversion and full reopen.
 #[cfg(feature = "tokenizers")]
-const Q4_BURNPACK_ARTIFACT_BYTES: Option<u64> = None;
+const Q4_BURNPACK_ARTIFACT_BYTES: Option<u64> = Some(14_911_372_485);
 
 /// Number of consumed tensors renamed out of the multimodal namespace.
 const RENAMED_TENSOR_COUNT: usize = 626;
@@ -3301,10 +3310,10 @@ fn committed_muse_glimmer_fixture_has_exact_schedule_and_contract() {
     assert_eq!(REFERENCE_SOURCE_SHA256.len(), 64);
 }
 
-/// Keeps the immutable Q8 artifact anchor aligned with its non-support record.
+/// Keeps both immutable Muse artifact anchors aligned with their support record.
 #[cfg(feature = "tokenizers")]
 #[test]
-fn committed_muse_q8_burnpack_anchor_is_complete_and_non_claiming() {
+fn committed_muse_burnpack_anchors_are_complete_and_non_claiming() {
     let q8_sha256 = Q8_BURNPACK_SHA256.expect("the completed Q8 conversion must be pinned");
     let q8_artifact_bytes =
         Q8_BURNPACK_ARTIFACT_BYTES.expect("the completed Q8 artifact length must be pinned");
@@ -3321,8 +3330,22 @@ fn committed_muse_q8_burnpack_anchor_is_complete_and_non_claiming() {
         302_105,
         "manifest and alignment overhead changed"
     );
-    assert!(Q4_BURNPACK_SHA256.is_none());
-    assert!(Q4_BURNPACK_ARTIFACT_BYTES.is_none());
+    let q4_sha256 = Q4_BURNPACK_SHA256.expect("the completed Q4 conversion must be pinned");
+    let q4_artifact_bytes =
+        Q4_BURNPACK_ARTIFACT_BYTES.expect("the completed Q4 artifact length must be pinned");
+    assert_eq!(q4_sha256.len(), 64);
+    assert!(
+        q4_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "Q4 identity must be a lowercase SHA-256"
+    );
+    assert_eq!(q4_artifact_bytes, 14_911_372_485);
+    assert_eq!(
+        q4_artifact_bytes - Q4_PACKED_PAYLOAD_BYTES,
+        308_421,
+        "Q4 manifest and alignment overhead changed"
+    );
 
     let record: serde_json::Value = serde_json::from_str(include_str!(
         "../acceptance/muse-glimmer-30b-a4e59da52a7bc87ae7251dd5545c0dd437c44b68.json"
@@ -3336,7 +3359,7 @@ fn committed_muse_q8_burnpack_anchor_is_complete_and_non_claiming() {
     );
     assert_eq!(
         quantization["real_q4_sidecar_created"].as_bool(),
-        Some(false)
+        Some(true)
     );
     let q8 = &quantization["real_q8_conversion"];
     assert_eq!(
@@ -3439,8 +3462,58 @@ fn committed_muse_q8_burnpack_anchor_is_complete_and_non_claiming() {
         Some(RETAINED_F16_TENSOR_BYTES)
     );
     assert_eq!(q8["quality_evaluated"].as_bool(), Some(false));
+    let q4 = &quantization["real_q4_conversion"];
+    assert_eq!(
+        q4["artifact_filename"].as_str(),
+        Some(Q4_BURNPACK_FILE_NAME)
+    );
+    assert_eq!(
+        q4["artifact_path"].as_str(),
+        Some(Q4_BURNPACK_OBSERVED_PATH)
+    );
+    assert_eq!(q4["artifact_bytes"].as_u64(), Some(q4_artifact_bytes));
+    assert_eq!(q4["payload_bytes"].as_u64(), Some(Q4_PACKED_PAYLOAD_BYTES));
+    assert_eq!(
+        q4["largest_payload_bytes"].as_u64(),
+        Some(Q4_LARGEST_PACKED_TENSOR_BYTES)
+    );
+    assert_eq!(q4["sha256"].as_str(), Some(q4_sha256));
+    assert_eq!(q4["elapsed_seconds"].as_f64(), Some(1_359.922));
+    assert_eq!(q4["format_version"].as_u64(), Some(2));
+    assert_eq!(q4["packed_matrices"].as_u64(), Some(417));
+    assert_eq!(q4["retained_f16_tensors"].as_u64(), Some(210));
+    assert_eq!(q4["text_tensors_applied"].as_u64(), Some(627));
+    assert_eq!(q4["renames_applied"].as_u64(), Some(626));
+    assert_eq!(q4["bf16_to_f16_conversions"].as_u64(), Some(627));
+    assert_eq!(q4["visual_tensors_allowlisted"].as_u64(), Some(809));
+    assert_eq!(q4["source_shard_opens"].as_u64(), Some(2));
+    assert_eq!(q4["maximum_open_source_shards"].as_u64(), Some(1));
+    assert_eq!(q4["source_tensor_reads"].as_u64(), Some(627));
+    assert_eq!(
+        q4["source_payload_bytes"].as_u64(),
+        Some(LANGUAGE_PARAMETER_BYTES)
+    );
+    for pass in ["provenance_preflight", "provenance_postflight"] {
+        assert_eq!(q4[pass]["passes_completed"].as_u64(), Some(1));
+        assert_eq!(q4[pass]["shards_hashed"].as_u64(), Some(2));
+        assert_eq!(
+            q4[pass]["bytes_hashed"].as_u64(),
+            Some(CHECKPOINT_ARTIFACT_BYTES)
+        );
+        assert_eq!(q4[pass]["peak_buffer_bytes"].as_u64(), Some(1_048_576));
+    }
+    assert_eq!(
+        q4["all_payloads_reopened_and_validated"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(q4["packed_metal_executed"].as_bool(), Some(false));
+    assert_eq!(q4["quality_evaluated"].as_bool(), Some(false));
     assert_eq!(
         record["checks"]["native_quantization_real_q8_conversion_validated"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        record["checks"]["native_quantization_real_q4_conversion_validated"].as_bool(),
         Some(true)
     );
     assert_eq!(
@@ -3990,7 +4063,11 @@ fn smoke_and_audit_pinned_muse_glimmer_burnpack(
             Q8_BURNPACK_ARTIFACT_BYTES,
             Some(Q8_BURNPACK_FILE_NAME),
         ),
-        SymmetricQuantization::Q4 => (Q4_BURNPACK_SHA256, Q4_BURNPACK_ARTIFACT_BYTES, None),
+        SymmetricQuantization::Q4 => (
+            Q4_BURNPACK_SHA256,
+            Q4_BURNPACK_ARTIFACT_BYTES,
+            Some(Q4_BURNPACK_FILE_NAME),
+        ),
     };
     if let Some(expected_file_name) = expected_file_name {
         assert_eq!(
