@@ -5,8 +5,18 @@ edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 description = "Backend-generic modern transformer architectures for Burn"
+readme = "README.md"
 keywords = ["burn", "transformer", "inference", "llm"]
 categories = ["science", "algorithms"]
+include = [
+    "src/**",
+    "examples/**",
+    "tests/**",
+    "scripts/**",
+    "acceptance/**",
+    "*.md",
+    "LICENSE-*",
+]
 
 [features]
 default = ["std", "flex"]
@@ -52,3 +62,7 @@ opt-level = 3
 
 [profile.test.package.sha2]
 opt-level = 3
+
+[package.metadata.docs.rs]
+no-default-features = true
+features = ["std", "flex", "tokenizers", "chat-templates"]
