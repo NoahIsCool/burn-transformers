@@ -154,6 +154,11 @@ pub(crate) enum QualityError {
         /// Rejected limit.
         limit: f64,
     },
+    /// A caller supplied a non-finite measured regression.
+    NonFiniteRegression {
+        /// Rejected regression value.
+        regression: f64,
+    },
     /// Quantization exceeded the release policy's relative NLL budget.
     RegressionExceeded {
         /// Measured relative change `(quantized - reference) / reference`.
@@ -411,6 +416,11 @@ pub(crate) fn enforce_regression_limit(
     if !limit.is_finite() || limit < 0.0 {
         return Err(QualityError::InvalidRegressionLimit { limit });
     }
+    if !summary.relative_nll_regression.is_finite() {
+        return Err(QualityError::NonFiniteRegression {
+            regression: summary.relative_nll_regression,
+        });
+    }
     if summary.relative_nll_regression > limit {
         return Err(QualityError::RegressionExceeded {
             regression: summary.relative_nll_regression,
@@ -471,7 +481,7 @@ fn top1_token_id(logits: &[f32], stream: LogitStream, row: usize) -> Result<usiz
                 column,
             });
         }
-        if value.total_cmp(&logits[best]).is_gt() {
+        if value > logits[best] {
             best = column;
         }
     }
@@ -634,6 +644,18 @@ mod tests {
     }
 
     #[test]
+    fn nonfinite_measured_regressions_are_rejected() {
+        for regression in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut summary = identical_summary();
+            summary.relative_nll_regression = regression;
+            assert!(matches!(
+                enforce_regression_limit(&summary, 0.01),
+                Err(QualityError::NonFiniteRegression { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn zero_vocabulary_and_empty_sequence_are_rejected() {
         assert!(matches!(
             FixedSequenceQuality::new(&[], &[0], &[0], 0),
@@ -719,6 +741,15 @@ mod tests {
         assert!(FixedSequenceQuality::new(&[2.0, 2.0, 0.0], &[0], &[0], 3).is_ok());
         assert!(matches!(
             FixedSequenceQuality::new(&[2.0, 2.0, 0.0], &[1], &[0], 3),
+            Err(QualityError::ReferenceTop1Mismatch { top1: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn signed_zero_ties_are_resolved_to_the_lowest_token_id() {
+        assert!(FixedSequenceQuality::new(&[-0.0, 0.0, -1.0], &[0], &[0], 3).is_ok());
+        assert!(matches!(
+            FixedSequenceQuality::new(&[-0.0, 0.0, -1.0], &[1], &[0], 3),
             Err(QualityError::ReferenceTop1Mismatch { top1: 0, .. })
         ));
     }

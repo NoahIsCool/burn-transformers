@@ -149,23 +149,26 @@ use transformers::{EncodeOptions, LocalTokenizer};
 #[cfg(feature = "chat-templates")]
 use transformers::{ChatMessage, ChatTemplateOptions};
 
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+use burn::nn::Linear;
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 use burn::{
     backend::Metal,
-    nn::Linear,
     tensor::{Bool, DType, Int, Tensor, TensorData, backend::Backend},
 };
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 use transformers::{
-    AutoCausalLm, AutoLoadOptions, DecodeInput, DecodeState, ForwardOptions, LoadedModel,
-    LogitsSelection, SamplingStrategy, TokenMask,
+    AutoCausalLm, AutoLoadOptions, DecodeInput, DecodeState, ForwardOptions, LogitsSelection,
+    SamplingStrategy, TokenMask,
     architecture::CausalLmInput,
     cache::{CacheConfig, KvCacheStorage},
     models::{
         AutoCausalDecodeState,
-        muse_glimmer::{MuseGlimmerDecodeState, MuseGlimmerForCausalLm, MuseGlimmerLayerCache},
+        muse_glimmer::{MuseGlimmerDecodeState, MuseGlimmerLayerCache},
     },
 };
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+use transformers::{LoadedModel, models::muse_glimmer::MuseGlimmerForCausalLm};
 
 #[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
 use quantized_quality::{FixedSequenceQuality, enforce_regression_limit};
@@ -3038,6 +3041,7 @@ struct MuseRustAcceptanceProvenance {
     transformers_tree: String,
     transformers_tree_dirty: bool,
     test_source_sha256: String,
+    quantized_quality_source_sha256: String,
     cargo_package_rust_version: String,
     rustc_verbose: String,
     profile: String,
@@ -3124,6 +3128,30 @@ fn rust_acceptance_provenance() -> MuseRustAcceptanceProvenance {
         sha256_hex(compiled_test_source),
         "running Muse acceptance binary was compiled from stale test source"
     );
+    let compiled_quantized_quality_source = include_bytes!("support/quantized_quality.rs");
+    let quantized_quality_source_path = crate_root.join("tests/support/quantized_quality.rs");
+    let quantized_quality_source_metadata = fs::symlink_metadata(&quantized_quality_source_path)
+        .unwrap_or_else(|error| {
+            panic!(
+                "inspect {}: {error}",
+                quantized_quality_source_path.display()
+            )
+        });
+    assert!(
+        quantized_quality_source_metadata.is_file()
+            && !quantized_quality_source_metadata.file_type().is_symlink()
+            && quantized_quality_source_metadata.len() <= 1024 * 1024,
+        "quantized-quality source must be a bounded regular non-symlink file"
+    );
+    let current_quantized_quality_source =
+        fs::read(&quantized_quality_source_path).unwrap_or_else(|error| {
+            panic!("read {}: {error}", quantized_quality_source_path.display())
+        });
+    assert_eq!(
+        sha256_hex(&current_quantized_quality_source),
+        sha256_hex(compiled_quantized_quality_source),
+        "running Muse acceptance binary was compiled from stale quantized-quality source"
+    );
     MuseRustAcceptanceProvenance {
         git_head: checked_command_output("git", &["rev-parse", "HEAD"], repository),
         git_tree: checked_command_output("git", &["rev-parse", "HEAD^{tree}"], repository),
@@ -3134,6 +3162,7 @@ fn rust_acceptance_provenance() -> MuseRustAcceptanceProvenance {
         ),
         transformers_tree_dirty: false,
         test_source_sha256: sha256_hex(compiled_test_source),
+        quantized_quality_source_sha256: sha256_hex(compiled_quantized_quality_source),
         cargo_package_rust_version: env!("CARGO_PKG_RUST_VERSION").to_owned(),
         rustc_verbose: checked_command_output("rustc", &["-Vv"], repository),
         profile: if cfg!(debug_assertions) {
@@ -4521,6 +4550,13 @@ fn measure_pinned_muse_glimmer_quantized_quality(
     output_environment: &str,
     maximum_relative_nll_regression: f64,
 ) {
+    let provenance = rust_acceptance_provenance();
+    assert_eq!(provenance.cargo_package_rust_version, "1.92");
+    assert_eq!(provenance.profile, "release");
+    eprintln!(
+        "muse_rust_acceptance_provenance={}",
+        serde_json::to_string(&provenance).expect("serialize Rust acceptance provenance")
+    );
     let oracle = read_pinned_muse_reference();
     let reference = &oracle.reference;
     let row_positions = &reference.outputs.cached_prefix_logits.row_position_ids;
