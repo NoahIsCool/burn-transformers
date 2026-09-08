@@ -8,8 +8,13 @@
 //! followed by `y_t[h,p] = sum_n S_t[h,p,n] C_t[h,n] + D[h] x_t[h,p]`.
 //! `A = -exp(A_log)` is stable and input independent, whereas `dt`, `B`, and
 //! `C` are selected by each token. Several heads share one projected B/C group.
-//! Scan arithmetic is FP32; an external cache may store terminal state as F32,
-//! F16, or BF16 and is promoted again for the next segment.
+//! The chunked scan promotes `x`, `B`, `C`, `dt`, and state arithmetic to FP32.
+//! The recurrent decode path deliberately follows the pinned Transformers
+//! fallback more closely: decay and state accumulation are FP32, but `dt * B *
+//! x`, the state-to-`C` contraction, and the `D` skip retain the activation
+//! dtype. An external cache may store terminal state as F32, F16, or BF16; a
+//! reduced-precision state is rounded after every recurrent token, just as an
+//! in-place reference cache would be.
 //!
 //! [`NemotronMamba2Mode::Recurrent`] is the transparent token loop used as a
 //! golden reference and for single-token decode. The chunked path evaluates all
@@ -17,6 +22,16 @@
 //! quadratic temporary to `chunk_size^2` while carrying only the terminal state
 //! between chunks. Both paths return new state instead of mutating their input,
 //! which lets an architecture publish every cache layer atomically.
+//!
+//! A [`TokenMask`] is semantic in this crate: `false` means that no recurrent
+//! time passes, so the corresponding `dt` is zero and the matrix state is an
+//! exact identity transition. This intentionally differs from Transformers
+//! revision `cfa309cfa34b5497a32fd50af49aa97aac94c054`, whose padding helper
+//! zeroes `x/B/C` but leaves `dt` active. The architecture-level stateful API
+//! compacts valid tokens before calling this mixer, making both recurrent and
+//! convolution caches true semantic-token caches. A direct masked call keeps
+//! the reference convolution's physical-column history; callers that persist
+//! that history must therefore compact interior holes first.
 
 use burn::{
     module::{Module, Param},
@@ -207,7 +222,7 @@ pub enum NemotronMamba2Mode {
 /// External terminal state for one Mamba2 layer.
 #[derive(Clone, Debug)]
 pub struct NemotronMamba2State<B: Backend> {
-    /// FP32 selective state `[batch, heads, head_dim, state_size]`.
+    /// Selective state `[batch, heads, head_dim, state_size]` in F32/F16/BF16.
     pub recurrent: Tensor<B, 4>,
     /// Recent projected convolution channels `[batch, channels, kernel - 1]`.
     pub convolution: Tensor<B, 3>,
@@ -281,9 +296,21 @@ pub struct NemotronGroupedGatedRmsNorm<B: Backend> {
 }
 
 impl<B: Backend> NemotronGroupedGatedRmsNorm<B> {
-    /// Computes `RMSNorm_group(y * SiLU(gate))` in FP32.
+    /// Computes `RMSNorm_group(y * SiLU(gate))` using the Zamba2 operation graph.
+    ///
+    /// Both the gate and group variance are evaluated in FP32. The normalized
+    /// activation is then rounded back to the input dtype *before* multiplying
+    /// by the learned scale. Multiplication by `reciprocal(sqrt(variance + eps))`
+    /// is kept explicit because replacing it with division is algebraically
+    /// equivalent but can differ by one ULP in F16.
     pub fn forward(&self, values: Tensor<B, 3>, gate: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
         let [batch, sequence, width] = values.dims();
+        if !self.epsilon.is_finite() || self.epsilon <= 0.0 {
+            return Err(Error::configuration(
+                "nemotron_h.mamba2.gated_norm.epsilon",
+                "must be finite and greater than zero",
+            ));
+        }
         if gate.dims() != [batch, sequence, width]
             || self.groups == 0
             || !width.is_multiple_of(self.groups)
@@ -299,8 +326,10 @@ impl<B: Backend> NemotronGroupedGatedRmsNorm<B> {
         let group_width = width / self.groups;
         let gated = values.cast(DType::F32) * activation::silu(gate.cast(DType::F32));
         let grouped = gated.reshape([batch, sequence, self.groups, group_width]);
-        let denominator = (grouped.clone().square().mean_dim(3) + self.epsilon).sqrt();
-        let normalized = (grouped / denominator)
+        let inverse_rms = (grouped.clone().square().mean_dim(3) + self.epsilon)
+            .sqrt()
+            .recip();
+        let normalized = (grouped * inverse_rms)
             .reshape([batch, sequence, width])
             .cast(dtype);
         Ok(normalized * self.weight.val().cast(dtype).reshape([1, 1, width]))
@@ -468,28 +497,35 @@ impl<B: Backend> NemotronMamba2<B> {
         let b = repeat_groups(b, self.num_heads);
         let c = repeat_groups(c, self.num_heads);
 
-        let mut dt = activation::softplus(
-            dt.cast(DType::F32)
-                + self
-                    .dt_bias
-                    .val()
-                    .cast(DType::F32)
-                    .reshape([1, 1, self.num_heads]),
-            1.0,
-        )
-        .clamp_min(self.time_step_min);
-        if let Some(upper) = self.time_step_max {
-            dt = dt.clamp_max(upper);
-        }
-        dt = dt * valid.float().unsqueeze_dim::<3>(2).cast(DType::F32);
+        let dt = discretization_steps(
+            dt,
+            self.dt_bias.val(),
+            self.time_step_min,
+            self.time_step_max,
+            mode,
+            valid,
+        );
         let a = -self.a_log.val().cast(DType::F32).exp();
-        let d = self.d.val().cast(DType::F32);
-        let initial = state.recurrent.clone().cast(DType::F32);
         let (scan, recurrent) = match mode {
-            NemotronMamba2Mode::Recurrent => recurrent_scan(x.clone(), b, c, dt, a, d, initial),
-            NemotronMamba2Mode::ChunkedPrefill => {
-                chunked_scan(x.clone(), b, c, dt, a, d, initial, self.chunk_size)
-            }
+            NemotronMamba2Mode::Recurrent => recurrent_scan(
+                x.clone(),
+                b,
+                c,
+                dt,
+                a,
+                self.d.val(),
+                state.recurrent.clone(),
+            ),
+            NemotronMamba2Mode::ChunkedPrefill => chunked_scan(
+                x.clone(),
+                b,
+                c,
+                dt,
+                a,
+                self.d.val().cast(DType::F32),
+                state.recurrent.clone().cast(DType::F32),
+                self.chunk_size,
+            ),
         }?;
         let scan = scan.reshape([batch, sequence, intermediate]);
         let normalized = self.norm.forward(scan, gate)?;
@@ -550,6 +586,45 @@ impl<B: Backend> NemotronMamba2<B> {
     }
 }
 
+/// Applies the learned Mamba discretization bias and positive-step transform.
+///
+/// The pinned Nemotron-H fallback adds `dt_bias`, evaluates softplus, and clamps
+/// while `dt` still has the fused projection's dtype. Burn's generic softplus is
+/// a literal `log(1 + exp(x))` graph and can round small F16 results to zero, so
+/// this implementation evaluates the stable identity `max(x, 0) +
+/// log1p(exp(-abs(x)))` in FP32 after the bias addition has already rounded. It
+/// immediately restores the projection dtype, reproducing PyTorch's
+/// reduced-precision softplus kernel without moving the bias addition across the
+/// dtype boundary. Only the scan promotes the stored result to FP32. This crate
+/// then multiplies by the true-valid mask in the same dtype so an invalid semantic
+/// token has `dt = 0` and cannot decay the recurrent state.
+///
+/// Only chunked prefill applies the configured bounds. The pinned recurrent
+/// `mamba2_selective_state_update` fallback accepts `dt_limit` through keyword
+/// arguments but does not use it; matching that asymmetry is necessary when a
+/// learned decode step falls below the chunk path's minimum.
+fn discretization_steps<B: Backend>(
+    dt: Tensor<B, 3>,
+    bias: Tensor<B, 1>,
+    minimum: f64,
+    maximum: Option<f64>,
+    mode: NemotronMamba2Mode,
+    valid: Tensor<B, 2, Bool>,
+) -> Tensor<B, 3> {
+    let dtype = dt.dtype();
+    let heads = dt.dims()[2];
+    let biased = dt + bias.cast(dtype).reshape([1, 1, heads]);
+    let biased = biased.cast(DType::F32);
+    let mut dt = (biased.clone().clamp_min(0.0) + (-biased.abs()).exp().log1p()).cast(dtype);
+    if mode == NemotronMamba2Mode::ChunkedPrefill {
+        dt = dt.clamp_min(minimum);
+        if let Some(upper) = maximum {
+            dt = dt.clamp_max(upper);
+        }
+    }
+    dt * valid.float().unsqueeze_dim::<3>(2).cast(dtype)
+}
+
 /// Repeats each B/C group across its contiguous state-space heads.
 fn repeat_groups<B: Backend>(tensor: Tensor<B, 4>, heads: usize) -> Tensor<B, 4> {
     let [batch, sequence, groups, state] = tensor.dims();
@@ -563,7 +638,15 @@ fn repeat_groups<B: Backend>(tensor: Tensor<B, 4>, heads: usize) -> Tensor<B, 4>
         .reshape([batch, sequence, heads, state])
 }
 
-/// Executes the defining token recurrence in FP32.
+/// Executes the reference single-token selective-state update operation graph.
+///
+/// The stable decay and accumulated matrix state are FP32. In contrast, the
+/// input-dependent update is formed as `(dt * B) * x` in the activation dtype,
+/// matching the fallback's two rounding points, before promotion into the state
+/// addition. For the output, the new FP32 state is rounded to `C`'s dtype before
+/// contraction and the direct `D * x` skip is also evaluated there. When state
+/// storage is F16/BF16, every loop iteration rounds through that storage dtype;
+/// therefore a multi-token call is equivalent to repeated cached decode calls.
 fn recurrent_scan<B: Backend>(
     x: Tensor<B, 4>,
     b: Tensor<B, 4>,
@@ -571,41 +654,43 @@ fn recurrent_scan<B: Backend>(
     dt: Tensor<B, 3>,
     a: Tensor<B, 1>,
     d: Tensor<B, 1>,
-    mut state: Tensor<B, 4>,
+    state: Tensor<B, 4>,
 ) -> Result<(Tensor<B, 4>, Tensor<B, 4>)> {
     let [batch, sequence, heads, head_dim] = x.dims();
     let state_size = b.dims()[3];
+    let activation_dtype = x.dtype();
+    let state_dtype = state.dtype();
+    let mut state = state.cast(DType::F32);
     let mut outputs = Vec::with_capacity(sequence);
     let a = a.reshape([1, heads]);
-    let d = d.reshape([1, heads, 1]);
+    let d = d.cast(activation_dtype).reshape([1, heads, 1]);
     for token in 0..sequence {
-        let x_t = x
-            .clone()
-            .narrow(1, token, 1)
-            .squeeze_dim::<3>(1)
-            .cast(DType::F32);
-        let b_t = b
-            .clone()
-            .narrow(1, token, 1)
-            .squeeze_dim::<3>(1)
-            .cast(DType::F32);
-        let c_t = c
-            .clone()
-            .narrow(1, token, 1)
-            .squeeze_dim::<3>(1)
-            .cast(DType::F32);
+        let x_t = x.clone().narrow(1, token, 1).squeeze_dim::<3>(1);
+        let b_t = b.clone().narrow(1, token, 1).squeeze_dim::<3>(1);
+        let c_t = c.clone().narrow(1, token, 1).squeeze_dim::<3>(1);
         let dt_t = dt.clone().narrow(1, token, 1).squeeze_dim::<2>(1);
-        let decay = (dt_t.clone() * a.clone())
+        let decay = (dt_t.clone().cast(DType::F32) * a.clone())
             .exp()
             .reshape([batch, heads, 1, 1]);
-        let update = (x_t.clone() * dt_t.reshape([batch, heads, 1])).unsqueeze_dim::<4>(3)
-            * b_t.clone().unsqueeze_dim::<4>(2);
-        state = state * decay + update;
-        let output = (state.clone() * c_t.unsqueeze_dim::<4>(2))
-            .sum_dim(3)
+        let discretized_b = dt_t.reshape([batch, heads, 1, 1]) * b_t.clone().unsqueeze_dim::<4>(2);
+        let update = discretized_b * x_t.clone().unsqueeze_dim::<4>(3);
+        let next_state = state * decay + update.cast(DType::F32);
+
+        let state_for_output =
+            next_state
+                .clone()
+                .cast(c_t.dtype())
+                .reshape([batch * heads, head_dim, state_size]);
+        let c_for_output = c_t.reshape([batch * heads, state_size, 1]);
+        let output = state_for_output
+            .matmul(c_for_output)
             .reshape([batch, heads, head_dim])
             + x_t * d.clone();
         outputs.push(output.unsqueeze_dim::<4>(1));
+
+        // `copy_(ssm_states.to(state.dtype))` in the reference makes reduced
+        // cache precision observable on the next recurrent token.
+        state = next_state.cast(state_dtype).cast(DType::F32);
     }
     if state.dims() != [batch, heads, head_dim, state_size] {
         return Err(Error::shape(
@@ -614,7 +699,7 @@ fn recurrent_scan<B: Backend>(
             format!("{:?}", state.dims()),
         ));
     }
-    Ok((Tensor::cat(outputs, 1), state))
+    Ok((Tensor::cat(outputs, 1), state.cast(state_dtype)))
 }
 
 /// Executes bounded semiseparable chunks and carries only terminal state.
@@ -670,6 +755,7 @@ fn scan_chunk<B: Backend>(
     let x = x.cast(DType::F32);
     let b = b.cast(DType::F32);
     let c = c.cast(DType::F32);
+    let dt = dt.cast(DType::F32);
     let log_decay = dt.clone() * a.reshape([1, 1, heads]);
     let cumulative = log_decay.clone().cumsum(1);
 
@@ -745,7 +831,11 @@ fn stable_decay_transitions<B: Backend>(log_decay: Tensor<B, 3>) -> Tensor<B, 4>
 
 #[cfg(test)]
 mod tests {
-    use burn::{backend::Flex, module::Param, tensor::Tolerance};
+    use burn::{
+        backend::Flex,
+        module::Param,
+        tensor::{Tolerance, bf16, f16},
+    };
 
     use super::*;
 
@@ -809,6 +899,71 @@ mod tests {
             );
     }
 
+    /// Segmenting prompt prefill preserves convolution and recurrent cache state.
+    ///
+    /// The split is intentionally not aligned to the configured scan chunk width,
+    /// so this covers both the `kernel - 1` convolution history convention and
+    /// the algebra that carries an FP32 terminal matrix between arbitrary calls.
+    #[test]
+    fn segmented_prefill_matches_one_shot_cache_and_outputs() {
+        let device = Default::default();
+        let mixer = config().init::<TestBackend>(&device).unwrap();
+        let input = Tensor::from_floats(
+            [[
+                [0.1, 0.2, -0.3, 0.4, 0.5, -0.6, 0.7, 0.8],
+                [0.3, -0.1, 0.2, 0.6, -0.4, 0.5, 0.9, -0.2],
+                [-0.5, 0.7, 0.1, -0.8, 0.2, 0.4, -0.6, 0.3],
+                [0.8, 0.1, -0.2, 0.5, 0.6, -0.7, 0.4, -0.3],
+                [0.2, -0.4, 0.6, 0.1, -0.5, 0.3, 0.7, 0.9],
+            ]],
+            &device,
+        );
+        let mut initial = NemotronMamba2State::zeros(&config(), 1, DType::F32, &device).unwrap();
+        initial.recurrent = Tensor::ones([1, 4, 2, 3], &device) * 0.037;
+        initial.convolution = Tensor::ones([1, 20, 2], &device) * -0.019;
+
+        let (one_shot, one_shot_state) = mixer
+            .forward_with_state(
+                input.clone(),
+                None,
+                &initial,
+                NemotronMamba2Mode::ChunkedPrefill,
+            )
+            .unwrap();
+        let (prefix, prefix_state) = mixer
+            .forward_with_state(
+                input.clone().narrow(1, 0, 3),
+                None,
+                &initial,
+                NemotronMamba2Mode::ChunkedPrefill,
+            )
+            .unwrap();
+        let (suffix, segmented_state) = mixer
+            .forward_with_state(
+                input.narrow(1, 3, 2),
+                None,
+                &prefix_state,
+                NemotronMamba2Mode::ChunkedPrefill,
+            )
+            .unwrap();
+        let segmented = Tensor::cat(vec![prefix, suffix], 1);
+
+        segmented
+            .into_data()
+            .assert_approx_eq::<f32>(&one_shot.into_data(), Tolerance::absolute(3e-5));
+        segmented_state
+            .recurrent
+            .into_data()
+            .assert_approx_eq::<f32>(
+                &one_shot_state.recurrent.into_data(),
+                Tolerance::absolute(3e-5),
+            );
+        assert_eq!(
+            segmented_state.convolution.to_data(),
+            one_shot_state.convolution.to_data()
+        );
+    }
+
     /// A one-head scalar recurrence matches a hand-computed selective-SSM oracle.
     #[test]
     fn recurrent_scan_matches_scalar_golden_values() {
@@ -866,6 +1021,431 @@ mod tests {
         assert!(values.iter().all(|value| value.is_finite()));
         assert!((values[0] / values[1] - 0.5).abs() < 1e-5);
         assert!((values[2] / values[3] - 0.75).abs() < 1e-5);
+    }
+
+    /// Grouped normalization retains Zamba2's multiply-by-inverse-root graph.
+    ///
+    /// These literals were generated with `Zamba2RMSNormGated.forward` from
+    /// Transformers revision `cfa309cfa34b5497a32fd50af49aa97aac94c054`.
+    /// A saturated gate isolates RMS application from backend-specific fused
+    /// SiLU approximations. The first component is a one-ULP discriminator:
+    /// replacing multiplication by reciprocal-sqrt with division produces
+    /// `0xbfaa`, not `0xbfa9`.
+    #[test]
+    fn grouped_norm_matches_pinned_reduced_precision_oracles() {
+        let device = Default::default();
+        let norm = NemotronGroupedGatedRmsNorm::<TestBackend> {
+            weight: Param::from_tensor(
+                Tensor::from_floats(
+                    [-1.934_570_3, 0.954_101_56, -0.644_531_25, -2.945_312_5],
+                    &device,
+                )
+                .cast(DType::F16),
+            ),
+            groups: 2,
+            epsilon: 1e-6,
+        };
+        let values = Tensor::from_floats(
+            [[[6.406_25, -6.535_156_2, 7.539_062_5, -5.781_25]]],
+            &device,
+        )
+        .cast(DType::F16);
+        let gate = Tensor::full([1, 1, 4], 80.0, (&device, DType::F16));
+
+        let actual = norm.forward(values.clone(), gate.clone()).unwrap();
+        let actual_bits = actual
+            .into_data()
+            .to_vec::<f16>()
+            .unwrap()
+            .into_iter()
+            .map(f16::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_bits, [0xbfa9, 0xbbb5, 0xb9c9, 0x4111]);
+
+        let gated = values.cast(DType::F32) * activation::silu(gate.cast(DType::F32));
+        let grouped = gated.reshape([1, 1, 2, 2]);
+        let divided = (grouped.clone() / (grouped.square().mean_dim(3) + norm.epsilon).sqrt())
+            .reshape([1, 1, 4])
+            .cast(DType::F16)
+            * norm.weight.val().reshape([1, 1, 4]);
+        let divided_bits = divided
+            .into_data()
+            .to_vec::<f16>()
+            .unwrap()
+            .into_iter()
+            .map(f16::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(divided_bits[0], 0xbfaa);
+
+        let bf16_norm = NemotronGroupedGatedRmsNorm::<TestBackend> {
+            weight: Param::from_tensor(
+                Tensor::from_floats(
+                    [-1.934_570_3, 0.954_101_56, -0.644_531_25, -2.945_312_5],
+                    &device,
+                )
+                .cast(DType::BF16),
+            ),
+            groups: 2,
+            epsilon: 1e-6,
+        };
+        let bf16_output = bf16_norm
+            .forward(
+                Tensor::from_floats(
+                    [[[6.406_25, -6.535_156_2, 7.539_062_5, -5.781_25]]],
+                    &device,
+                )
+                .cast(DType::BF16),
+                Tensor::full([1, 1, 4], 80.0, (&device, DType::BF16)),
+            )
+            .unwrap();
+        let bf16_bits = bf16_output
+            .into_data()
+            .to_vec::<bf16>()
+            .unwrap()
+            .into_iter()
+            .map(bf16::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(bf16_bits, [0xbff6, 0xbf76, 0xbf3a, 0x4022]);
+    }
+
+    /// Softplus and bias addition occur in projection dtype before scan promotion.
+    ///
+    /// The expected F16 value is from the pinned fallback. Promoting before
+    /// softplus yields adjacent value `0x0675`, so the literal guards the exact
+    /// mixed-precision boundary as well as the result dtype.
+    #[test]
+    fn discretization_rounds_before_fp32_scan_math() {
+        let device = Default::default();
+        let raw =
+            Tensor::<TestBackend, 3>::from_floats([[[-9.726_562_5]]], &device).cast(DType::F16);
+        let bias = Tensor::<TestBackend, 1>::from_floats([0.501_464_84], &device).cast(DType::F16);
+        let valid = Tensor::<TestBackend, 2, Bool>::from_bool([[true]].into(), &device);
+        let actual = discretization_steps(
+            raw.clone(),
+            bias.clone(),
+            0.0,
+            None,
+            NemotronMamba2Mode::Recurrent,
+            valid,
+        );
+        assert_eq!(actual.dtype(), DType::F16);
+        let actual_bits = actual
+            .into_data()
+            .to_vec::<f16>()
+            .unwrap()
+            .into_iter()
+            .map(f16::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_bits, [0x0673]);
+
+        let promoted_biased =
+            raw.clone().cast(DType::F32) + bias.clone().cast(DType::F32).reshape([1, 1, 1]);
+        let promoted = (promoted_biased.clone().clamp_min(0.0)
+            + (-promoted_biased.abs()).exp().log1p())
+        .cast(DType::F16);
+        let promoted_bits = promoted
+            .into_data()
+            .to_vec::<f16>()
+            .unwrap()
+            .into_iter()
+            .map(f16::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(promoted_bits, [0x0675]);
+
+        let all_valid = || Tensor::<TestBackend, 2, Bool>::from_bool([[true]].into(), &device);
+        let recurrent = discretization_steps(
+            raw.clone(),
+            bias.clone(),
+            0.001,
+            Some(0.01),
+            NemotronMamba2Mode::Recurrent,
+            all_valid(),
+        );
+        let chunked = discretization_steps(
+            raw,
+            bias,
+            0.001,
+            Some(0.01),
+            NemotronMamba2Mode::ChunkedPrefill,
+            all_valid(),
+        );
+        assert_eq!(
+            recurrent
+                .into_data()
+                .to_vec::<f16>()
+                .unwrap()
+                .into_iter()
+                .map(f16::to_bits)
+                .collect::<Vec<_>>(),
+            [0x0673]
+        );
+        assert_eq!(
+            chunked.into_data().to_vec::<f16>().unwrap(),
+            [f16::from_f32(0.001)]
+        );
+
+        let bf16_dt = discretization_steps(
+            Tensor::<TestBackend, 3>::from_floats([[[-9.726_562_5]]], &device).cast(DType::BF16),
+            Tensor::<TestBackend, 1>::from_floats([0.501_464_84], &device).cast(DType::BF16),
+            0.0,
+            None,
+            NemotronMamba2Mode::Recurrent,
+            all_valid(),
+        );
+        let bf16_bits = bf16_dt
+            .into_data()
+            .to_vec::<bf16>()
+            .unwrap()
+            .into_iter()
+            .map(bf16::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(bf16_bits, [0x38ca]);
+    }
+
+    /// Recurrent decode preserves the fallback's low-precision update and output graph.
+    ///
+    /// The oracle comes from `mamba2_selective_state_update` at pinned revision
+    /// `cfa309cfa34b5497a32fd50af49aa97aac94c054`. Computing `dt * x * B` and
+    /// the state-to-`C` contraction entirely in FP32 changes the second output
+    /// from `0x480e` to `0x480d`.
+    #[test]
+    fn recurrent_scan_matches_pinned_f16_operation_order() {
+        let device = Default::default();
+        let x = Tensor::<TestBackend, 4>::from_floats([[[[-2.974_609_4, -2.005_859_4]]]], &device)
+            .cast(DType::F16);
+        let b = Tensor::<TestBackend, 4>::from_floats([[[[-0.223_266_6, -0.369_873_05]]]], &device)
+            .cast(DType::F16);
+        let c = Tensor::<TestBackend, 4>::from_floats([[[[2.910_156_2, 3.505_859_4]]]], &device)
+            .cast(DType::F16);
+        let dt =
+            Tensor::<TestBackend, 3>::from_floats([[[0.836_914_06]]], &device).cast(DType::F16);
+        let a = Tensor::<TestBackend, 1>::from_floats([-1.803_729_5], &device);
+        let d = Tensor::<TestBackend, 1>::from_floats([-1.289_062_5], &device).cast(DType::F16);
+        let initial = Tensor::<TestBackend, 4>::from_floats(
+            [[[[2.960_324_3, -0.659_675_4], [2.499_563_9, 0.827_825_8]]]],
+            &device,
+        );
+
+        let (output, terminal) = recurrent_scan(x, b, c, dt, a, d, initial).unwrap();
+        assert_eq!(output.dtype(), DType::F16);
+        let bits = output
+            .into_data()
+            .to_vec::<f16>()
+            .unwrap()
+            .into_iter()
+            .map(f16::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(bits, [0x4909, 0x480e]);
+        terminal.into_data().assert_approx_eq::<f32>(
+            &TensorData::from([[[[1.210_400_9_f32, 0.775_106_43], [0.927_173_8, 0.804_048]]]]),
+            Tolerance::absolute(2e-6),
+        );
+    }
+
+    /// Chunked prefill keeps FP32 outputs while recurrent decode restores model dtype.
+    ///
+    /// This asymmetry is present in the pinned fallback: `mamba2_chunk_scan`
+    /// promotes its scan tensors, whereas `mamba2_selective_state_update` casts
+    /// its result back to the input activation dtype before grouped normalization.
+    #[test]
+    fn recurrent_and_chunked_scans_preserve_reference_output_dtypes() {
+        let device = Default::default();
+        let x = Tensor::<TestBackend, 4>::from_floats([[[[0.7, -0.2]], [[-0.4, 1.1]]]], &device)
+            .cast(DType::F16);
+        let b =
+            Tensor::<TestBackend, 4>::from_floats([[[[0.3]], [[-0.8]]]], &device).cast(DType::F16);
+        let c =
+            Tensor::<TestBackend, 4>::from_floats([[[[1.2]], [[0.6]]]], &device).cast(DType::F16);
+        let dt = Tensor::<TestBackend, 3>::from_floats([[[0.2], [0.9]]], &device).cast(DType::F16);
+        let a = Tensor::<TestBackend, 1>::from_floats([-0.75], &device);
+        let d = Tensor::<TestBackend, 1>::from_floats([0.4], &device).cast(DType::F16);
+        let initial = Tensor::<TestBackend, 4>::from_floats([[[[0.25], [-0.5]]]], &device);
+
+        let (recurrent, recurrent_state) = recurrent_scan(
+            x.clone(),
+            b.clone(),
+            c.clone(),
+            dt.clone(),
+            a.clone(),
+            d.clone(),
+            initial.clone(),
+        )
+        .unwrap();
+        let (chunked, chunked_state) =
+            chunked_scan(x, b, c, dt, a, d.cast(DType::F32), initial, 2).unwrap();
+        assert_eq!(recurrent.dtype(), DType::F16);
+        assert_eq!(chunked.dtype(), DType::F32);
+        assert_eq!(recurrent_state.dtype(), DType::F32);
+        assert_eq!(chunked_state.dtype(), DType::F32);
+        recurrent
+            .cast(DType::F32)
+            .into_data()
+            .assert_approx_eq::<f32>(&chunked.into_data(), Tolerance::absolute(3e-3));
+
+        let bf16_x = Tensor::<TestBackend, 4>::ones([1, 1, 1, 1], (&device, DType::BF16));
+        let bf16_b = Tensor::<TestBackend, 4>::ones([1, 1, 1, 1], (&device, DType::BF16));
+        let bf16_c = Tensor::<TestBackend, 4>::ones([1, 1, 1, 1], (&device, DType::BF16));
+        let bf16_dt = Tensor::<TestBackend, 3>::ones([1, 1, 1], (&device, DType::BF16));
+        let bf16_d = Tensor::<TestBackend, 1>::ones([1], (&device, DType::BF16));
+        let bf16_initial = Tensor::<TestBackend, 4>::zeros([1, 1, 1, 1], &device);
+        let (bf16_recurrent, _) = recurrent_scan(
+            bf16_x.clone(),
+            bf16_b.clone(),
+            bf16_c.clone(),
+            bf16_dt.clone(),
+            Tensor::from_floats([-1.0], &device),
+            bf16_d.clone(),
+            bf16_initial.clone(),
+        )
+        .unwrap();
+        let (bf16_chunked, _) = chunked_scan(
+            bf16_x,
+            bf16_b,
+            bf16_c,
+            bf16_dt,
+            Tensor::from_floats([-1.0], &device),
+            bf16_d.cast(DType::F32),
+            bf16_initial,
+            1,
+        )
+        .unwrap();
+        assert_eq!(bf16_recurrent.dtype(), DType::BF16);
+        assert_eq!(bf16_chunked.dtype(), DType::F32);
+    }
+
+    /// Reduced-precision recurrent caches round between consecutive tokens.
+    ///
+    /// A multi-token recurrent call is defined as repeated decode updates. This
+    /// exact equality prevents an optimization from accidentally retaining an
+    /// unpublished FP32 state between tokens when the configured cache is F16.
+    #[test]
+    fn f16_recurrent_cache_matches_repeated_single_token_updates() {
+        let device = Default::default();
+        let x = Tensor::<TestBackend, 4>::from_floats([[[[1.3, -0.7]], [[-0.2, 0.9]]]], &device)
+            .cast(DType::F16);
+        let b =
+            Tensor::<TestBackend, 4>::from_floats([[[[0.6]], [[1.1]]]], &device).cast(DType::F16);
+        let c =
+            Tensor::<TestBackend, 4>::from_floats([[[[-0.4]], [[0.8]]]], &device).cast(DType::F16);
+        let dt =
+            Tensor::<TestBackend, 3>::from_floats([[[0.35], [0.55]]], &device).cast(DType::F16);
+        let a = Tensor::<TestBackend, 1>::from_floats([-1.25], &device);
+        let d = Tensor::<TestBackend, 1>::from_floats([0.75], &device).cast(DType::F16);
+        let initial =
+            Tensor::<TestBackend, 4>::from_floats([[[[0.33], [-0.27]]]], &device).cast(DType::F16);
+
+        let (combined_output, combined_state) = recurrent_scan(
+            x.clone(),
+            b.clone(),
+            c.clone(),
+            dt.clone(),
+            a.clone(),
+            d.clone(),
+            initial.clone(),
+        )
+        .unwrap();
+        let (first_output, first_state) = recurrent_scan(
+            x.clone().narrow(1, 0, 1),
+            b.clone().narrow(1, 0, 1),
+            c.clone().narrow(1, 0, 1),
+            dt.clone().narrow(1, 0, 1),
+            a.clone(),
+            d.clone(),
+            initial,
+        )
+        .unwrap();
+        let (second_output, repeated_state) = recurrent_scan(
+            x.narrow(1, 1, 1),
+            b.narrow(1, 1, 1),
+            c.narrow(1, 1, 1),
+            dt.narrow(1, 1, 1),
+            a,
+            d,
+            first_state,
+        )
+        .unwrap();
+        assert_eq!(
+            combined_output.to_data(),
+            Tensor::cat(vec![first_output, second_output], 1).to_data()
+        );
+        assert_eq!(combined_state.to_data(), repeated_state.to_data());
+    }
+
+    /// Semantic invalid tokens produce identity recurrent transitions.
+    ///
+    /// Transformers' padding helper leaves `dt` active and would decay the
+    /// state here. This crate intentionally zeroes it because stateful model
+    /// execution compacts true-valid tokens before invoking Mamba.
+    #[test]
+    fn semantic_mask_prevents_padding_decay() {
+        let device = Default::default();
+        let valid = Tensor::<TestBackend, 2, Bool>::from_bool([[false]].into(), &device);
+        let dt = discretization_steps(
+            Tensor::zeros([1, 1, 1], &device),
+            Tensor::ones([1], &device),
+            0.001,
+            None,
+            NemotronMamba2Mode::Recurrent,
+            valid,
+        );
+        assert_eq!(dt.to_data(), TensorData::zeros::<f32, _>([1, 1, 1]));
+
+        let initial = Tensor::<TestBackend, 4>::from_floats([[[[3.25]]]], &device);
+        let (_, terminal) = recurrent_scan(
+            Tensor::zeros([1, 1, 1, 1], &device),
+            Tensor::zeros([1, 1, 1, 1], &device),
+            Tensor::zeros([1, 1, 1, 1], &device),
+            dt,
+            Tensor::from_floats([-7.0], &device),
+            Tensor::ones([1], &device),
+            initial.clone(),
+        )
+        .unwrap();
+        assert_eq!(terminal.to_data(), initial.to_data());
+    }
+
+    /// Gated normalization rejects every invalid grouping or tensor geometry.
+    #[test]
+    fn grouped_norm_rejects_invalid_geometry() {
+        let device = Default::default();
+        let values = Tensor::<TestBackend, 3>::ones([1, 2, 4], &device);
+        let gate = Tensor::<TestBackend, 3>::ones([1, 2, 4], &device);
+        let norm = NemotronGroupedGatedRmsNorm::<TestBackend> {
+            weight: Param::from_tensor(Tensor::ones([4], &device)),
+            groups: 3,
+            epsilon: 1e-6,
+        };
+        assert!(norm.forward(values.clone(), gate.clone()).is_err());
+
+        let norm = NemotronGroupedGatedRmsNorm::<TestBackend> {
+            weight: Param::from_tensor(Tensor::ones([3], &device)),
+            groups: 2,
+            epsilon: 1e-6,
+        };
+        assert!(norm.forward(values.clone(), gate).is_err());
+
+        let norm = NemotronGroupedGatedRmsNorm::<TestBackend> {
+            weight: Param::from_tensor(Tensor::ones([4], &device)),
+            groups: 2,
+            epsilon: 1e-6,
+        };
+        assert!(
+            norm.forward(values, Tensor::ones([1, 1, 4], &device))
+                .is_err()
+        );
+
+        let norm = NemotronGroupedGatedRmsNorm::<TestBackend> {
+            weight: Param::from_tensor(Tensor::ones([4], &device)),
+            groups: 2,
+            epsilon: f64::NAN,
+        };
+        assert!(
+            norm.forward(
+                Tensor::ones([1, 2, 4], &device),
+                Tensor::ones([1, 2, 4], &device),
+            )
+            .is_err()
+        );
     }
 
     /// Invalid groups and state dtypes return contextual errors before kernels.
