@@ -932,10 +932,7 @@ fn acceptance_record_matches_pinned_header_evidence() {
             shard.payload_sha256
         );
     }
-    assert_eq!(
-        record["checks"]["all_weight_shards_sha256_validated"],
-        true
-    );
+    assert_eq!(record["checks"]["all_weight_shards_sha256_validated"], true);
     assert_eq!(
         record["checks"]["all_control_files_sha256_validated_against_local_checkpoint"],
         true
