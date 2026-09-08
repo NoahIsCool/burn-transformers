@@ -474,9 +474,13 @@ class ReferenceHelperTests(unittest.TestCase):
             )
 
     def test_committed_generation_and_cache_schedule_are_exact(self) -> None:
-        # The empty continuation is a deliberate first-run fail-closed gate;
-        # it must be replaced with 32 reviewed IDs before a bundle can publish.
-        self.assertEqual(REFERENCE.EXPECTED_GENERATED_TOKEN_IDS, [])
+        self.assertEqual(
+            REFERENCE.EXPECTED_GENERATED_TOKEN_IDS,
+            [1_256, 1_010] * 16,
+        )
+        self.assertEqual(
+            len(REFERENCE.EXPECTED_GENERATED_TOKEN_IDS), REFERENCE.GREEDY_TOKENS
+        )
         self.assertEqual(REFERENCE.EXPECTED_LAYER_TYPES.count("linear_attention"), 23)
         self.assertEqual(REFERENCE.EXPECTED_LAYER_TYPES.count("moe"), 23)
         self.assertEqual(REFERENCE.EXPECTED_LAYER_TYPES.count("full_attention"), 6)

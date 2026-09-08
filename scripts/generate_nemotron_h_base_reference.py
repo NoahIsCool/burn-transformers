@@ -135,9 +135,15 @@ VOCAB_SIZE = 131_072
 HIDDEN_SIZE = 2_688
 HIDDEN_TRACE_ROWS = 54
 GREEDY_TOKENS = 32
-# A first diagnostic run must fail closed and print the observed continuation;
-# these IDs are replaced by independently reviewed values before publication.
-EXPECTED_GENERATED_TOKEN_IDS: list[int] = []
+# The first fail-closed diagnostic produced this binary16-stable continuation.
+# The authenticated tokenizer maps 1256 to two space markers and 1010 to a
+# newline marker, so the pinned model repeats a whitespace-only two-token cycle.
+EXPECTED_GENERATED_TOKEN_IDS = [
+    1_256, 1_010, 1_256, 1_010, 1_256, 1_010, 1_256, 1_010,
+    1_256, 1_010, 1_256, 1_010, 1_256, 1_010, 1_256, 1_010,
+    1_256, 1_010, 1_256, 1_010, 1_256, 1_010, 1_256, 1_010,
+    1_256, 1_010, 1_256, 1_010, 1_256, 1_010, 1_256, 1_010,
+]
 EXPECTED_RAW_LAYER_TYPES = [
     "mamba", "moe", "mamba", "moe", "mamba", "attention", "moe",
     "mamba", "moe", "mamba", "moe", "mamba", "attention", "moe",
