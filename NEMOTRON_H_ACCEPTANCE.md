@@ -5,10 +5,11 @@ This document defines the artifact and numerical gates for
 `a9904d24bcc1d289a1950fa9d2b978c47cf903b9`. The exact local artifact has passed
 full-payload authentication, strict source-ordered F16 application, and a short
 Burn Metal base-model smoke. That smoke is internal-consistency evidence; the
-separately pinned official oracle has not yet been compared with Burn.
-Real-weight MTP parity and the remaining release gates are also incomplete, so
-the model is not advertised as supported. The committed machine-readable state
-remains
+separately pinned official oracle has not yet been compared with Burn. A
+path-safe ignored Burn-versus-official gate is now implemented and compiles,
+but it has deliberately not been executed as part of that smoke. Real-weight
+MTP parity and the remaining release gates are also incomplete, so the model is
+not advertised as supported. The committed machine-readable state remains
 [`acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json`](acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json).
 An external, authenticated seven-file base-model oracle now proves the official
 Transformers graph can load and execute the complete language tower. It does
@@ -254,6 +255,19 @@ must match the official teacher rows, each at cosine at least 0.999. Crossing
 the two official paths is gated by exact top-1 equality and preserved as two
 separate oracle matrices, not mislabeled as a 0.999 comparison.
 
+The ignored Rust parity gate encodes this distinction in its types. It first
+compares a dedicated Burn stateless prompt row and all 32 positions from one
+Burn teacher-forced chunk with the official stateless prompt/teacher payloads.
+Separately, it compares Burn cached prefill plus 31 recurrent updates with all
+32 official cached rows. Every full-vocabulary row requires cosine at least
+0.999 and exact top-1, in contiguous decision order. Each of the 54 boundaries
+in the stateless-prompt, cached-prefill, and first recurrent-decode hidden traces
+also requires row-wise cosine at least 0.999 at the same semantic point. A
+stateless/cached path or hidden-phase mismatch fails before numerical
+comparison. This gate has passed compile-only and pure contract tests; until its
+ignored 30B Metal run completes, it is executable policy rather than acceptance
+evidence.
+
 The exact official cache has physical batch one while `DynamicCache.batch_size`
 reports its `-1` sentinel. Each of 23 Mamba layers stores an F16 convolution
 tail `[1, 6144, 4]` and FP32 recurrent state `[1, 64, 64, 128]`; each of six
@@ -284,8 +298,12 @@ symlinked bundle or member, any missing or extra member, traversal, a changed
 closed JSON schema, source/provenance drift, non-finite F32LE payload values,
 descriptor mismatch, and changed numerical summaries. It also recomputes the
 prompt ranking, all 64 cached/teacher argmaxes, and the minimum crossed-path
-cosine from the payloads. The record cannot authorize itself through hashes
-inside its own JSON.
+cosine from the payloads. Its accessors attach a stateless or cached path to
+every returned row and an exact semantic point to every hidden trace.
+[`tests/support/nemotron_h_parity.rs`](tests/support/nemotron_h_parity.rs)
+enforces those identities, full-vector shape and finiteness, nonzero norms,
+contiguous coverage, the 0.999 threshold, and exact stable top-1. The record
+cannot authorize itself through hashes inside its own JSON.
 
 The generator requires 40 GiB of free system-volume space before MPS load,
 samples a 10 GiB runtime reserve after expensive forwards, and separately
@@ -343,6 +361,23 @@ cargo test --release --manifest-path crates/transformers/Cargo.toml \
   -- --ignored --exact --nocapture --test-threads=1
 ```
 
+Run the heavier corresponding-path Burn/official comparison only with both
+authenticated local inputs and serialized Metal execution:
+
+```sh
+TRANSFORMERS_NEMOTRON_H_DIR=/absolute/path/to/pinned-checkpoint \
+TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR=/absolute/path/to/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle \
+cargo test --release --manifest-path crates/transformers/Cargo.toml \
+  --no-default-features --features std,metal,tokenizers \
+  --test nemotron_h_artifacts \
+  compares_pinned_nemotron_f16_with_official_base_reference \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
+That command reauthenticates all checkpoint and oracle bytes, strictly reloads
+the complete F16 graph, and checks corresponding streams only. It never treats
+the official cached-versus-teacher cosine as a Burn parity criterion.
+
 Generate a new immutable base oracle only from generator commit `0f222f6`, the
 pinned CPython 3.11.9 environment, the exact clean Transformers checkout, and an
 output directory in which the fixed bundle name does not already exist:
@@ -374,10 +409,11 @@ reading any bundle because none of its independent anchors is populated.
 This base oracle satisfies only the official-reference side of the numerical
 contract. Before this checkpoint can be advertised as supported:
 
-1. Match Burn cached execution to the official cached rows and Burn stateless
-   execution to the official teacher-forced rows at cosine at least 0.999;
-   require exact top-1 for every cached and stateless prefix, while keeping the
-   two official Mamba paths distinct.
+1. Execute the implemented ignored Metal gate and record Burn cached execution
+   against the official cached rows and Burn stateless execution against the
+   official stateless/teacher-forced rows at cosine at least 0.999, with exact
+   top-1 throughout. The gate already keeps the two official Mamba paths
+   distinct; compile-only validation is not a numerical pass.
 2. Generate the MTP evidence with pinned vLLM and independently review and pin
    every combined-bundle hash; do not reuse the base loader as MTP evidence.
 3. Exercise real-weight MTP draft/verification state handling, padding,

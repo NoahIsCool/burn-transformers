@@ -59,6 +59,151 @@ const GENERATED_TOKEN_IDS: [u32; 32] = [
     1_256, 1_010, 1_256, 1_010, 1_256, 1_010,
 ];
 
+/// Vocabulary width of every full-distribution oracle row.
+pub(super) const REFERENCE_VOCABULARY_SIZE: usize = 131_072;
+
+/// Number of embedding/block/final-norm boundaries in each hidden trace.
+pub(super) const REFERENCE_HIDDEN_ROWS: usize = 54;
+
+/// Residual width of every boundary in each hidden trace.
+pub(super) const REFERENCE_HIDDEN_SIZE: usize = 2_688;
+
+/// Number of generation decisions recorded for each execution path.
+pub(super) const REFERENCE_DECISIONS: usize = GENERATED_TOKEN_IDS.len();
+
+/// Numerical execution stream that produced an official oracle payload.
+///
+/// Nemotron-H's official recurrent Mamba path and chunked stateless Mamba path
+/// are not numerically interchangeable. Carrying the path beside every row
+/// lets the Burn gate reject a crossed comparison before considering cosine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OfficialExecutionPath {
+    /// One chunked forward over a complete causal prefix.
+    Stateless,
+    /// Prefill followed by recurrent one-token cache updates.
+    Cached,
+}
+
+/// One authenticated full-vocabulary row and its execution-path identity.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct OfficialLogitRow<'a> {
+    path: OfficialExecutionPath,
+    decision: usize,
+    values: &'a [f32],
+    top1_token_id: u32,
+}
+
+impl OfficialLogitRow<'_> {
+    /// Returns the official execution stream that produced this row.
+    pub(super) const fn path(&self) -> OfficialExecutionPath {
+        self.path
+    }
+
+    /// Returns the zero-based generation decision represented by this row.
+    pub(super) const fn decision(&self) -> usize {
+        self.decision
+    }
+
+    /// Borrows all vocabulary logits in token-ID order.
+    pub(super) const fn values(&self) -> &[f32] {
+        self.values
+    }
+
+    /// Returns the authenticated stable top-1 token ID for this decision.
+    pub(super) const fn top1_token_id(&self) -> u32 {
+        self.top1_token_id
+    }
+
+    /// Builds a synthetic row for pure contract tests.
+    #[cfg(test)]
+    pub(super) const fn synthetic(
+        path: OfficialExecutionPath,
+        decision: usize,
+        values: &[f32],
+        top1_token_id: u32,
+    ) -> OfficialLogitRow<'_> {
+        OfficialLogitRow {
+            path,
+            decision,
+            values,
+            top1_token_id,
+        }
+    }
+}
+
+/// Semantic point represented by one authenticated residual-boundary trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OfficialHiddenPoint {
+    /// Last prompt token from a chunked stateless forward.
+    StatelessPrompt,
+    /// Last prompt token from cached prefill.
+    CachedPrefill,
+    /// First recurrent decode token after cached prefill.
+    CachedDecodeOne,
+}
+
+impl OfficialHiddenPoint {
+    /// Returns the numerical execution stream that owns this trace.
+    pub(super) const fn path(self) -> OfficialExecutionPath {
+        match self {
+            Self::StatelessPrompt => OfficialExecutionPath::Stateless,
+            Self::CachedPrefill | Self::CachedDecodeOne => OfficialExecutionPath::Cached,
+        }
+    }
+}
+
+/// One authenticated hidden trace paired with its exact semantic point.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct OfficialHiddenTrace<'a> {
+    point: OfficialHiddenPoint,
+    rows: usize,
+    width: usize,
+    values: &'a [f32],
+}
+
+impl OfficialHiddenTrace<'_> {
+    /// Returns the exact stateless, prefill, or recurrent-decode point.
+    pub(super) const fn point(&self) -> OfficialHiddenPoint {
+        self.point
+    }
+
+    /// Returns the numerical execution stream that owns this trace.
+    pub(super) const fn path(&self) -> OfficialExecutionPath {
+        self.point.path()
+    }
+
+    /// Returns the number of embedding/block/final-norm boundaries.
+    pub(super) const fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Returns the residual width stored for every boundary.
+    pub(super) const fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Borrows flattened `[boundary, hidden]` F32 values.
+    pub(super) const fn values(&self) -> &[f32] {
+        self.values
+    }
+
+    /// Builds a synthetic trace for pure contract tests.
+    #[cfg(test)]
+    pub(super) const fn synthetic(
+        point: OfficialHiddenPoint,
+        rows: usize,
+        width: usize,
+        values: &[f32],
+    ) -> OfficialHiddenTrace<'_> {
+        OfficialHiddenTrace {
+            point,
+            rows,
+            width,
+            values,
+        }
+    }
+}
+
 /// One independently reviewed file anchor.
 #[derive(Debug, Clone, Copy)]
 struct FileAnchor {
@@ -131,6 +276,88 @@ pub(super) struct ValidatedBaseReference {
     pub(super) cached_prefill_hidden: Vec<f32>,
     /// First recurrent-decode residual-boundary trace.
     pub(super) cached_decode_hidden: Vec<f32>,
+}
+
+impl ValidatedBaseReference {
+    /// Returns the exact tokenizer IDs for the literal six-token prompt.
+    pub(super) const fn prompt_token_ids(&self) -> &[u32] {
+        &SMOKE_TOKEN_IDS
+    }
+
+    /// Returns the exact 32-token greedy continuation shared by both paths.
+    pub(super) const fn generation_token_ids(&self) -> &[u32] {
+        &GENERATED_TOKEN_IDS
+    }
+
+    /// Returns the separately emitted stateless prompt row.
+    pub(super) fn stateless_prompt_row(&self) -> OfficialLogitRow<'_> {
+        OfficialLogitRow {
+            path: OfficialExecutionPath::Stateless,
+            decision: 0,
+            values: &self.prompt_logits,
+            top1_token_id: GENERATED_TOKEN_IDS[0],
+        }
+    }
+
+    /// Returns one official chunked teacher-forced decision row.
+    pub(super) fn teacher_row(&self, decision: usize) -> Option<OfficialLogitRow<'_>> {
+        matrix_row(&self.teacher_logits, decision).map(|values| OfficialLogitRow {
+            path: OfficialExecutionPath::Stateless,
+            decision,
+            values,
+            top1_token_id: GENERATED_TOKEN_IDS[decision],
+        })
+    }
+
+    /// Returns one official cached-prefill or recurrent-decode decision row.
+    pub(super) fn cached_row(&self, decision: usize) -> Option<OfficialLogitRow<'_>> {
+        matrix_row(&self.cached_logits, decision).map(|values| OfficialLogitRow {
+            path: OfficialExecutionPath::Cached,
+            decision,
+            values,
+            top1_token_id: GENERATED_TOKEN_IDS[decision],
+        })
+    }
+
+    /// Returns the official stateless prompt residual-boundary trace.
+    pub(super) fn stateless_hidden_trace(&self) -> OfficialHiddenTrace<'_> {
+        OfficialHiddenTrace {
+            point: OfficialHiddenPoint::StatelessPrompt,
+            rows: REFERENCE_HIDDEN_ROWS,
+            width: REFERENCE_HIDDEN_SIZE,
+            values: &self.stateless_hidden,
+        }
+    }
+
+    /// Returns the official cached-prefill residual-boundary trace.
+    pub(super) fn cached_prefill_hidden_trace(&self) -> OfficialHiddenTrace<'_> {
+        OfficialHiddenTrace {
+            point: OfficialHiddenPoint::CachedPrefill,
+            rows: REFERENCE_HIDDEN_ROWS,
+            width: REFERENCE_HIDDEN_SIZE,
+            values: &self.cached_prefill_hidden,
+        }
+    }
+
+    /// Returns the official first recurrent-decode residual-boundary trace.
+    pub(super) fn cached_decode_hidden_trace(&self) -> OfficialHiddenTrace<'_> {
+        OfficialHiddenTrace {
+            point: OfficialHiddenPoint::CachedDecodeOne,
+            rows: REFERENCE_HIDDEN_ROWS,
+            width: REFERENCE_HIDDEN_SIZE,
+            values: &self.cached_decode_hidden,
+        }
+    }
+}
+
+/// Borrows one decision row from an authenticated row-major matrix.
+fn matrix_row(values: &[f32], decision: usize) -> Option<&[f32]> {
+    if decision >= REFERENCE_DECISIONS {
+        return None;
+    }
+    let start = decision.checked_mul(REFERENCE_VOCABULARY_SIZE)?;
+    let end = start.checked_add(REFERENCE_VOCABULARY_SIZE)?;
+    values.get(start..end)
 }
 
 /// Strict top-level schema; nested objects receive explicit closed-key checks.
@@ -2171,5 +2398,93 @@ mod tests {
     #[test]
     fn ranking_is_descending_and_tie_stable() {
         assert_eq!(ranked_indices(&[1.0, 3.0, 3.0, -1.0], 3), [1, 2, 0]);
+    }
+
+    /// Path-specific accessors expose exact tokens, row bounds, and phases.
+    #[test]
+    fn validated_payload_accessors_preserve_path_identity() {
+        let mut prompt_logits = vec![0.0; REFERENCE_VOCABULARY_SIZE];
+        prompt_logits[GENERATED_TOKEN_IDS[0] as usize] = 2.0;
+        let mut cached_logits = vec![0.0; 2 * REFERENCE_VOCABULARY_SIZE];
+        cached_logits[GENERATED_TOKEN_IDS[0] as usize] = 2.0;
+        cached_logits[REFERENCE_VOCABULARY_SIZE + GENERATED_TOKEN_IDS[1] as usize] = 2.0;
+        let teacher_logits = cached_logits.clone();
+        let reference = ValidatedBaseReference {
+            output_count: FILES.len(),
+            prompt_tokens: SMOKE_TOKEN_IDS.len(),
+            generation_tokens: GENERATED_TOKEN_IDS.len(),
+            minimum_official_path_cosine: 0.9,
+            prompt_logits,
+            stateless_hidden: vec![1.0, 2.0],
+            cached_logits,
+            teacher_logits,
+            cached_prefill_hidden: vec![3.0, 4.0],
+            cached_decode_hidden: vec![5.0, 6.0],
+        };
+
+        assert_eq!(reference.prompt_token_ids(), SMOKE_TOKEN_IDS);
+        assert_eq!(reference.generation_token_ids(), GENERATED_TOKEN_IDS);
+        let prompt = reference.stateless_prompt_row();
+        assert_eq!(prompt.path(), OfficialExecutionPath::Stateless);
+        assert_eq!(prompt.decision(), 0);
+        assert_eq!(prompt.values().len(), REFERENCE_VOCABULARY_SIZE);
+        assert_eq!(prompt.top1_token_id(), GENERATED_TOKEN_IDS[0]);
+
+        let cached = reference.cached_row(1).expect("second cached row");
+        assert_eq!(cached.path(), OfficialExecutionPath::Cached);
+        assert_eq!(cached.decision(), 1);
+        assert_eq!(cached.top1_token_id(), GENERATED_TOKEN_IDS[1]);
+        let teacher = reference.teacher_row(1).expect("second teacher row");
+        assert_eq!(teacher.path(), OfficialExecutionPath::Stateless);
+        assert_eq!(teacher.values(), cached.values());
+        assert!(reference.cached_row(2).is_none());
+        assert!(reference.teacher_row(REFERENCE_DECISIONS).is_none());
+
+        let stateless_hidden = reference.stateless_hidden_trace();
+        assert_eq!(
+            stateless_hidden.point(),
+            OfficialHiddenPoint::StatelessPrompt
+        );
+        assert_eq!(stateless_hidden.path(), OfficialExecutionPath::Stateless);
+        assert_eq!(stateless_hidden.rows(), REFERENCE_HIDDEN_ROWS);
+        assert_eq!(stateless_hidden.width(), REFERENCE_HIDDEN_SIZE);
+        assert_eq!(stateless_hidden.values(), [1.0, 2.0]);
+        assert_eq!(
+            reference.cached_prefill_hidden_trace().point(),
+            OfficialHiddenPoint::CachedPrefill
+        );
+        assert_eq!(
+            reference.cached_decode_hidden_trace().point(),
+            OfficialHiddenPoint::CachedDecodeOne
+        );
+    }
+
+    /// Matrix row slicing fails closed on short payloads and invalid decisions.
+    #[test]
+    fn matrix_rows_require_one_complete_vocabulary_slice() {
+        let values = vec![0.0; REFERENCE_VOCABULARY_SIZE + 1];
+        assert_eq!(
+            matrix_row(&values, 0).expect("complete first row").len(),
+            REFERENCE_VOCABULARY_SIZE
+        );
+        assert!(matrix_row(&values, 1).is_none());
+        assert!(matrix_row(&values, REFERENCE_DECISIONS).is_none());
+    }
+
+    /// Hidden points map only to their mathematically corresponding stream.
+    #[test]
+    fn hidden_points_report_their_execution_path() {
+        assert_eq!(
+            OfficialHiddenPoint::StatelessPrompt.path(),
+            OfficialExecutionPath::Stateless
+        );
+        assert_eq!(
+            OfficialHiddenPoint::CachedPrefill.path(),
+            OfficialExecutionPath::Cached
+        );
+        assert_eq!(
+            OfficialHiddenPoint::CachedDecodeOne.path(),
+            OfficialExecutionPath::Cached
+        );
     }
 }

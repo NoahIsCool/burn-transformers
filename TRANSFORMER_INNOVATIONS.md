@@ -667,6 +667,9 @@ while the two official paths remain separate reference streams.
 
 **Implementation:** [`chunked_gated_delta_rule`](src/delta_net.rs) and the
 chunked mode in [`nemotron_h/model/mamba2.rs`](src/models/nemotron_h/model/mamba2.rs).
+The ignored real-weight gate binds each Burn stream to its matching official
+stream in
+[`tests/support/nemotron_h_parity.rs`](tests/support/nemotron_h_parity.rs).
 **Acceptance evidence:** [Nemotron-H 3.5 Lightning](NEMOTRON_H_ACCEPTANCE.md).
 
 ### Feed-forward and expert routing
@@ -1124,9 +1127,11 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   edge above. That recorded real-weight smoke installed but did not execute the
   270 MTP tensors. Subsequent tiny Flex tests execute the pinned one-stage graph,
   shifted independent KV cache, and transactional speculative coordinator, but
-  they do not establish official real-weight parity. No official-reference,
-  32-token, quantized, or 32K claim follows from either internal-consistency
-  gate. See
+  they do not establish official real-weight parity. A separate ignored gate now
+  compiles and is ready to compare all 32 Burn stateless and cached decisions
+  with their corresponding official rows, but that 30B Metal gate has not been
+  executed. No official-reference, 32-token, quantized, or 32K pass follows from
+  implementation or compile-only validation. See
   [`NEMOTRON_H_ACCEPTANCE.md`](NEMOTRON_H_ACCEPTANCE.md).
 - **Nemotron's two official Mamba paths are distinct reference streams.** The
   pinned base oracle records the recurrent cached row and teacher-forced
@@ -1135,7 +1140,11 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   Mamba-originated difference followed by larger MoE-boundary divergence. This
   source self-consistency observation does not relax the 0.999 Burn-versus-
   official gate on each corresponding path and does not establish different
-  expert selection.
+  expert selection. Typed oracle rows make the ignored gate reject a crossed
+  path before computing cosine; ordered summaries also prevent a missing or
+  duplicated decision from masquerading as complete coverage. Stateless prompt,
+  teacher-forced, cached-prefill, cached-decode, and hidden-trace checks remain
+  separately labeled.
 - **Nemotron's cache batch property is a sentinel, not physical geometry.** The
   authenticated `DynamicCache.batch_size` reports `-1` even though every
   concrete Mamba, convolution, and attention cache tensor has leading extent

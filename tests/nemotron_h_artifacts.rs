@@ -36,6 +36,19 @@
 //!   -- --ignored --exact --nocapture --test-threads=1
 //! ```
 //!
+//! To compare both Burn paths with their corresponding authenticated official
+//! rows, additionally select the external oracle bundle:
+//!
+//! ```text
+//! TRANSFORMERS_NEMOTRON_H_DIR=/absolute/pinned/checkpoint \
+//! TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR=/absolute/pinned/reference.bundle \
+//! cargo test --release --manifest-path crates/transformers/Cargo.toml \
+//!   --no-default-features --features std,metal,tokenizers \
+//!   --test nemotron_h_artifacts \
+//!   compares_pinned_nemotron_f16_with_official_base_reference \
+//!   -- --ignored --exact --nocapture --test-threads=1
+//! ```
+//!
 //! The separately produced numerical oracle is deliberately fail-closed. Its
 //! JSON and every binary payload require independent SHA-256 anchors before the
 //! ignored reader will accept the bundle.
@@ -45,6 +58,9 @@ mod nemotron_h_reference;
 
 #[path = "support/nemotron_h_base_reference.rs"]
 mod nemotron_h_base_reference;
+
+#[path = "support/nemotron_h_parity.rs"]
+mod nemotron_h_parity;
 
 use serde::{
     Deserialize, Deserializer,
@@ -80,7 +96,8 @@ use burn::{
 };
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 use transformers::{
-    AutoCausalLm, AutoLoadOptions, DecodeInput, DecodeState, ForwardOptions, TokenMask,
+    AutoCausalLm, AutoLoadOptions, DecodeInput, DecodeState, ForwardOptions, LogitsSelection,
+    TokenMask,
     architecture::CausalLmInput,
     cache::{CacheConfig, KvCacheStorage},
     models::AutoCausalDecodeState,
@@ -945,6 +962,74 @@ fn assert_nemotron_cache_geometry(
     assert_eq!(recurrent.spec().convolution_dtype(), DType::F16);
 }
 
+/// Strictly loads and audits the exact full Nemotron F16 graph on Metal.
+///
+/// Both the bounded implementation smoke and the official-reference parity
+/// gate use this entry point, so artifact identity, dtype conversion, tensor
+/// accounting, shard order, and host-staging requirements cannot drift between
+/// the two expensive acceptance paths.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn load_pinned_nemotron_f16(
+    root: &Path,
+    device: &<Metal as burn::tensor::backend::BackendTypes>::Device,
+) -> transformers::LoadedModel<AutoCausalLm<Metal>> {
+    let loaded = AutoCausalLm::<Metal>::load_local(
+        root,
+        &AutoLoadOptions {
+            checkpoint: LoadOptions {
+                dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+                index_alias_size_accounting: IndexAliasSizeAccounting::Physical,
+                ..LoadOptions::default()
+            },
+            load_tokenizer: true,
+            repository: Some(REPOSITORY.to_owned()),
+            revision: Some(REVISION.to_owned()),
+            ..AutoLoadOptions::default()
+        },
+        device,
+    )
+    .expect("strictly stream the exact Nemotron checkpoint into the Metal F16 graph");
+    <Metal<f32, i32> as Backend>::sync(device)
+        .expect("all Nemotron parameter transfers must complete");
+
+    assert!(matches!(loaded.model(), AutoCausalLm::NemotronH(_)));
+    assert_eq!(loaded.source().model_type(), "nemotron_h");
+    assert_eq!(loaded.source().repository(), Some(REPOSITORY));
+    assert_eq!(loaded.source().revision(), Some(REVISION));
+    assert_eq!(loaded.source().root(), root);
+    let report = loaded.load_report();
+    assert!(report.is_strictly_valid());
+    assert_eq!(report.applied.len(), PHYSICAL_TENSOR_COUNT);
+    assert_eq!(report.transformed.len(), PHYSICAL_TENSOR_COUNT - 1);
+    assert_eq!(report.dtype_converted.len(), BF16_TENSOR_COUNT);
+    assert!(report.aliased.is_empty());
+    assert!(report.allowlisted_missing.is_empty());
+    assert!(report.allowlisted_ignored.is_empty());
+    let execution = loaded
+        .execution_stats()
+        .expect("automatic loading must retain pass-two counters");
+    assert_eq!(execution.tensors_applied, PHYSICAL_TENSOR_COUNT);
+    assert_eq!(execution.aliases_applied, 0);
+    assert_eq!(execution.source_reads, PHYSICAL_TENSOR_COUNT as u64);
+    assert_eq!(execution.source_payload_bytes, PHYSICAL_TENSOR_BYTES);
+    assert_eq!(execution.delivered_tensor_bytes, PHYSICAL_TENSOR_BYTES);
+    assert_eq!(execution.largest_source_payload_bytes, LARGEST_TENSOR_BYTES);
+    assert_eq!(execution.largest_output_tensor_bytes, LARGEST_TENSOR_BYTES);
+    assert_eq!(execution.peak_host_staging_bytes, LARGEST_TENSOR_BYTES);
+    assert_eq!(execution.source.shard_opens, SHARDS.len() as u64);
+    assert_eq!(execution.source.tensor_reads, PHYSICAL_TENSOR_COUNT as u64);
+    assert_eq!(execution.source.payload_bytes_read, PHYSICAL_TENSOR_BYTES);
+    assert_eq!(execution.source.max_open_shards, 1);
+    assert_eq!(
+        execution.source.shard_open_order,
+        SHARDS
+            .iter()
+            .map(|shard| shard.name.to_owned())
+            .collect::<Vec<_>>()
+    );
+    loaded
+}
+
 /// The exact config, index, and all physical header ranges remain immutable.
 #[test]
 fn pinned_config_index_and_headers_have_exact_identity() {
@@ -1577,61 +1662,11 @@ fn loads_pinned_nemotron_f16_and_smokes_base_inference() {
     assert_weight_files(&root);
 
     let load_started = Instant::now();
-    let loaded = AutoCausalLm::<Metal>::load_local(
-        &root,
-        &AutoLoadOptions {
-            checkpoint: LoadOptions {
-                dtype_policy: DTypePolicy::Cast(TensorDType::F16),
-                index_alias_size_accounting: IndexAliasSizeAccounting::Physical,
-                ..LoadOptions::default()
-            },
-            load_tokenizer: true,
-            repository: Some(REPOSITORY.to_owned()),
-            revision: Some(REVISION.to_owned()),
-            ..AutoLoadOptions::default()
-        },
-        &device,
-    )
-    .expect("strictly stream the exact Nemotron checkpoint into the Metal F16 graph");
-    <Metal<f32, i32> as Backend>::sync(&device)
-        .expect("all Nemotron parameter transfers must complete");
+    let loaded = load_pinned_nemotron_f16(&root, &device);
     let load_seconds = load_started.elapsed().as_secs_f64();
-
-    assert!(matches!(loaded.model(), AutoCausalLm::NemotronH(_)));
-    assert_eq!(loaded.source().model_type(), "nemotron_h");
-    assert_eq!(loaded.source().repository(), Some(REPOSITORY));
-    assert_eq!(loaded.source().revision(), Some(REVISION));
-    assert_eq!(loaded.source().root(), root);
-    let report = loaded.load_report();
-    assert!(report.is_strictly_valid());
-    assert_eq!(report.applied.len(), PHYSICAL_TENSOR_COUNT);
-    assert_eq!(report.transformed.len(), PHYSICAL_TENSOR_COUNT - 1);
-    assert_eq!(report.dtype_converted.len(), BF16_TENSOR_COUNT);
-    assert!(report.aliased.is_empty());
-    assert!(report.allowlisted_missing.is_empty());
-    assert!(report.allowlisted_ignored.is_empty());
     let execution = loaded
         .execution_stats()
         .expect("automatic loading must retain pass-two counters");
-    assert_eq!(execution.tensors_applied, PHYSICAL_TENSOR_COUNT);
-    assert_eq!(execution.aliases_applied, 0);
-    assert_eq!(execution.source_reads, PHYSICAL_TENSOR_COUNT as u64);
-    assert_eq!(execution.source_payload_bytes, PHYSICAL_TENSOR_BYTES);
-    assert_eq!(execution.delivered_tensor_bytes, PHYSICAL_TENSOR_BYTES);
-    assert_eq!(execution.largest_source_payload_bytes, LARGEST_TENSOR_BYTES);
-    assert_eq!(execution.largest_output_tensor_bytes, LARGEST_TENSOR_BYTES);
-    assert_eq!(execution.peak_host_staging_bytes, LARGEST_TENSOR_BYTES);
-    assert_eq!(execution.source.shard_opens, SHARDS.len() as u64);
-    assert_eq!(execution.source.tensor_reads, PHYSICAL_TENSOR_COUNT as u64);
-    assert_eq!(execution.source.payload_bytes_read, PHYSICAL_TENSOR_BYTES);
-    assert_eq!(execution.source.max_open_shards, 1);
-    assert_eq!(
-        execution.source.shard_open_order,
-        SHARDS
-            .iter()
-            .map(|shard| shard.name.to_owned())
-            .collect::<Vec<_>>()
-    );
 
     let tokenizer = loaded
         .tokenizer()
@@ -1818,6 +1853,326 @@ fn loads_pinned_nemotron_f16_and_smokes_base_inference() {
         f32_trace_sha256(&stateless_hidden),
         f32_trace_sha256(&prefill_hidden),
         f32_trace_sha256(&decode_hidden),
+        started.elapsed().as_secs_f64(),
+    );
+}
+
+/// Compares every pinned base-model row with Burn on the same Mamba path.
+///
+/// The stateless half evaluates the literal prompt and one 37-token
+/// teacher-forced chunk, selecting the 32 causal decision positions retained by
+/// the official stateless oracle. The cached half evaluates the prompt prefill
+/// followed by 31 one-token recurrent updates against the official cached
+/// oracle. Typed reference rows make a cached-versus-teacher comparison fail
+/// before cosine is computed. All 64 decision rows require full-vocabulary
+/// cosine `>= 0.999` and exact top-1; the three available hidden traces use the
+/// same threshold at their exact stateless/prefill/decode semantic points.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+#[test]
+#[ignore = "requires the pinned Nemotron checkpoint and base oracle, Metal, and about 80 GiB free unified memory"]
+fn compares_pinned_nemotron_f16_with_official_base_reference() {
+    use nemotron_h_base_reference::{
+        OfficialExecutionPath, OfficialHiddenPoint, REFERENCE_DECISIONS, REFERENCE_HIDDEN_ROWS,
+        REFERENCE_HIDDEN_SIZE, REFERENCE_VOCABULARY_SIZE,
+    };
+    use nemotron_h_parity::{
+        CorrespondingPathSummary, assert_corresponding_hidden_trace, assert_corresponding_logit_row,
+    };
+
+    let started = Instant::now();
+    let reference = nemotron_h_base_reference::load_and_validate_reference_bundle();
+    assert_eq!(reference.prompt_token_ids(), SMOKE_TOKEN_IDS);
+    assert_eq!(reference.generation_token_ids().len(), REFERENCE_DECISIONS);
+
+    let supplied = pinned_root();
+    let root = supplied
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("canonicalize {}: {error}", supplied.display()));
+    let device = Default::default();
+    assert_metal_backend_available(&device);
+    assert_control_files(&root);
+    assert_weight_files(&root);
+
+    let load_started = Instant::now();
+    let loaded = load_pinned_nemotron_f16(&root, &device);
+    let load_seconds = load_started.elapsed().as_secs_f64();
+    let tokenizer = loaded
+        .tokenizer()
+        .expect("official parity requires the exact local tokenizer");
+    let encoding = tokenizer
+        .encode(
+            SMOKE_PROMPT,
+            &transformers::EncodeOptions {
+                add_special_tokens: false,
+                ..transformers::EncodeOptions::default()
+            },
+        )
+        .expect("tokenize the pinned official-reference prompt");
+    assert_eq!(encoding.token_ids()[0], reference.prompt_token_ids());
+
+    let prompt_ids = reference
+        .prompt_token_ids()
+        .iter()
+        .copied()
+        .map(i64::from)
+        .collect::<Vec<_>>();
+    let prompt_length = prompt_ids.len();
+    let prompt = Tensor::<Metal, 2, Int>::from_data(
+        TensorData::new(prompt_ids.clone(), [1, prompt_length]),
+        &device,
+    );
+    let prompt_mask = all_valid_metal_mask(prompt_length, &device);
+    let hidden_options = ForwardOptions {
+        hidden_states: true,
+        ..ForwardOptions::default()
+    };
+
+    let stateless_started = Instant::now();
+    let stateless = loaded
+        .model()
+        .forward(
+            CausalLmInput {
+                token_ids: prompt.clone(),
+                token_mask: Some(prompt_mask.clone()),
+                position_ids: None,
+            },
+            &hidden_options,
+        )
+        .expect("run Burn stateless prompt for official parity");
+    assert_eq!(stateless.logits.dims(), [1, 1, REFERENCE_VOCABULARY_SIZE]);
+    assert_eq!(stateless.logits.dtype(), DType::F32);
+    let stateless_logits = finite_metal_values(
+        "Nemotron official-parity stateless prompt logits",
+        &stateless.logits,
+    );
+    assert_eq!(stateless_logits.len(), REFERENCE_VOCABULARY_SIZE);
+    let stateless_prompt = assert_corresponding_logit_row(
+        "Nemotron stateless prompt",
+        OfficialExecutionPath::Stateless,
+        &stateless_logits,
+        reference.stateless_prompt_row(),
+    );
+    let stateless_hidden = hidden_trace(
+        "Nemotron official-parity stateless hidden trace",
+        &stateless.hidden_states,
+        prompt_length,
+    );
+    assert_eq!(
+        stateless_hidden.len(),
+        REFERENCE_HIDDEN_ROWS * REFERENCE_HIDDEN_SIZE
+    );
+    let stateless_hidden_summary = assert_corresponding_hidden_trace(
+        "Nemotron stateless prompt hidden trace",
+        OfficialHiddenPoint::StatelessPrompt,
+        &stateless_hidden,
+        reference.stateless_hidden_trace(),
+    );
+    let stateless_prompt_seconds = stateless_started.elapsed().as_secs_f64();
+    drop(stateless);
+    drop(stateless_logits);
+
+    // A single causal chunk produces every stateless teacher-forced decision.
+    // Position `prompt_length - 1 + d` predicts generated token `d`.
+    let mut teacher_ids = prompt_ids;
+    teacher_ids.extend(
+        reference
+            .generation_token_ids()
+            .iter()
+            .take(REFERENCE_DECISIONS - 1)
+            .copied()
+            .map(i64::from),
+    );
+    let teacher_length = teacher_ids.len();
+    assert_eq!(teacher_length, prompt_length + REFERENCE_DECISIONS - 1);
+    let teacher_started = Instant::now();
+    let teacher = loaded
+        .model()
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(teacher_ids, [1, teacher_length]),
+                    &device,
+                ),
+                token_mask: Some(all_valid_metal_mask(teacher_length, &device)),
+                position_ids: None,
+            },
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..ForwardOptions::default()
+            },
+        )
+        .expect("run Burn teacher-forced chunk for official stateless parity");
+    assert_eq!(
+        teacher.logits.dims(),
+        [1, teacher_length, REFERENCE_VOCABULARY_SIZE]
+    );
+    assert_eq!(teacher.logits.dtype(), DType::F32);
+    let teacher_values = finite_metal_values(
+        "Nemotron official-parity teacher-forced logits",
+        &teacher.logits,
+    );
+    let mut stateless_summary = CorrespondingPathSummary::new(OfficialExecutionPath::Stateless);
+    for decision in 0..REFERENCE_DECISIONS {
+        let position = prompt_length - 1 + decision;
+        let start = position * REFERENCE_VOCABULARY_SIZE;
+        let end = start + REFERENCE_VOCABULARY_SIZE;
+        stateless_summary.observe(
+            "Nemotron teacher-forced row",
+            &teacher_values[start..end],
+            reference
+                .teacher_row(decision)
+                .unwrap_or_else(|| panic!("missing official teacher row {decision}")),
+        );
+    }
+    let stateless_summary = stateless_summary.finish(REFERENCE_DECISIONS);
+    let teacher_seconds = teacher_started.elapsed().as_secs_f64();
+    drop(teacher);
+    drop(teacher_values);
+
+    let mut cached_summary = CorrespondingPathSummary::new(OfficialExecutionPath::Cached);
+    let mut state = loaded
+        .model()
+        .new_decode_state(
+            CacheConfig::new(1, teacher_length).expect("valid official parity cache"),
+            1,
+            &device,
+        )
+        .expect("allocate the exact Nemotron hybrid parity cache");
+    assert_nemotron_cache_geometry(&state, 0, teacher_length);
+
+    let cached_started = Instant::now();
+    let prefill = loaded
+        .model()
+        .prefill(
+            CausalLmInput {
+                token_ids: prompt,
+                token_mask: Some(prompt_mask),
+                position_ids: None,
+            },
+            &mut state,
+            &hidden_options,
+        )
+        .expect("run Burn cached prefill for official parity");
+    assert_nemotron_cache_geometry(&state, prompt_length, teacher_length);
+    assert_eq!(prefill.logits.dims(), [1, 1, REFERENCE_VOCABULARY_SIZE]);
+    assert_eq!(prefill.logits.dtype(), DType::F32);
+    let prefill_logits = finite_metal_values(
+        "Nemotron official-parity cached-prefill logits",
+        &prefill.logits,
+    );
+    cached_summary.observe(
+        "Nemotron cached-prefill row",
+        &prefill_logits,
+        reference
+            .cached_row(0)
+            .expect("official cached-prefill row"),
+    );
+    let cached_prefill_hidden = hidden_trace(
+        "Nemotron official-parity cached-prefill hidden trace",
+        &prefill.hidden_states,
+        prompt_length,
+    );
+    let cached_prefill_hidden_summary = assert_corresponding_hidden_trace(
+        "Nemotron cached-prefill hidden trace",
+        OfficialHiddenPoint::CachedPrefill,
+        &cached_prefill_hidden,
+        reference.cached_prefill_hidden_trace(),
+    );
+    drop(prefill);
+    drop(prefill_logits);
+
+    let mut cached_decode_hidden = None;
+    let mut cached_decode_hidden_summary = None;
+    for decision in 1..REFERENCE_DECISIONS {
+        let capture_hidden = decision == 1;
+        let decoded = loaded
+            .model()
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::<Metal, 2, Int>::from_data(
+                        TensorData::new(
+                            vec![i64::from(reference.generation_token_ids()[decision - 1])],
+                            [1, 1],
+                        ),
+                        &device,
+                    ),
+                    token_mask: Some(all_valid_metal_mask(1, &device)),
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions {
+                    hidden_states: capture_hidden,
+                    ..ForwardOptions::default()
+                },
+            )
+            .unwrap_or_else(|error| panic!("run official cached decision {decision}: {error}"));
+        assert_nemotron_cache_geometry(&state, prompt_length + decision, teacher_length);
+        assert_eq!(decoded.logits.dims(), [1, 1, REFERENCE_VOCABULARY_SIZE]);
+        assert_eq!(decoded.logits.dtype(), DType::F32);
+        let decoded_logits =
+            finite_metal_values("Nemotron official-parity recurrent logits", &decoded.logits);
+        cached_summary.observe(
+            "Nemotron recurrent cached row",
+            &decoded_logits,
+            reference
+                .cached_row(decision)
+                .unwrap_or_else(|| panic!("missing official cached row {decision}")),
+        );
+        if capture_hidden {
+            let trace = hidden_trace(
+                "Nemotron official-parity first recurrent hidden trace",
+                &decoded.hidden_states,
+                1,
+            );
+            cached_decode_hidden_summary = Some(assert_corresponding_hidden_trace(
+                "Nemotron first recurrent-decode hidden trace",
+                OfficialHiddenPoint::CachedDecodeOne,
+                &trace,
+                reference.cached_decode_hidden_trace(),
+            ));
+            cached_decode_hidden = Some(trace);
+        } else {
+            assert!(
+                decoded.hidden_states.is_empty(),
+                "later cached decisions must not retain hidden-state diagnostics"
+            );
+        }
+    }
+    let cached_summary = cached_summary.finish(REFERENCE_DECISIONS);
+    let cached_seconds = cached_started.elapsed().as_secs_f64();
+    let cached_decode_hidden =
+        cached_decode_hidden.expect("the first recurrent hidden trace must be captured");
+    let cached_decode_hidden_summary =
+        cached_decode_hidden_summary.expect("the first recurrent hidden summary must be captured");
+    assert_eq!(state.lengths(), &[teacher_length]);
+
+    eprintln!(
+        "Nemotron 3.5 official corresponding-path parity: load_seconds={load_seconds:.3}, \
+         stateless_prompt_seconds={stateless_prompt_seconds:.3}, teacher_seconds={teacher_seconds:.3}, \
+         cached_seconds={cached_seconds:.3}, prompt_cosine={:.12}, \
+         stateless_minimum_cosine={:.12}@{}, cached_minimum_cosine={:.12}@{}, \
+         stateless_hidden_minimum_cosine={:.12}@{}, \
+         cached_prefill_hidden_minimum_cosine={:.12}@{}, \
+         cached_decode_hidden_minimum_cosine={:.12}@{}, \
+         stateless_hidden_sha256={}, cached_prefill_hidden_sha256={}, \
+         cached_decode_hidden_sha256={}, official_crossed_path_minimum_diagnostic={:.12}, \
+         decisions_per_path={}, total_seconds={:.3}",
+        stateless_prompt.cosine,
+        stateless_summary.minimum_cosine,
+        stateless_summary.minimum_decision,
+        cached_summary.minimum_cosine,
+        cached_summary.minimum_decision,
+        stateless_hidden_summary.minimum_cosine,
+        stateless_hidden_summary.minimum_boundary,
+        cached_prefill_hidden_summary.minimum_cosine,
+        cached_prefill_hidden_summary.minimum_boundary,
+        cached_decode_hidden_summary.minimum_cosine,
+        cached_decode_hidden_summary.minimum_boundary,
+        f32_trace_sha256(&stateless_hidden),
+        f32_trace_sha256(&cached_prefill_hidden),
+        f32_trace_sha256(&cached_decode_hidden),
+        reference.minimum_official_path_cosine,
+        REFERENCE_DECISIONS,
         started.elapsed().as_secs_f64(),
     );
 }
