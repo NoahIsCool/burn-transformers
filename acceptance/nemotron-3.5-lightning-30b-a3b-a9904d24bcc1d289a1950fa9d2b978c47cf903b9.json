@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "exact_config_index_and_all_safetensors_headers_verified_with_fail_closed_reference_scaffold_pending_provenance_bound_index_exception_full_payload_authentication_weight_application_and_inference",
+  "phase": "exact_config_index_headers_controls_and_all_weight_payloads_authenticated_with_fail_closed_reference_scaffold_pending_provenance_bound_index_exception_weight_application_and_inference",
   "repository": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
   "revision": "a9904d24bcc1d289a1950fa9d2b978c47cf903b9",
   "evidence_scope": {
-    "classification": "artifact_metadata_and_oracle_scaffold_only",
-    "weight_payloads_downloaded_for_this_record": false,
-    "weight_payloads_hashed_for_this_record": false,
+    "classification": "authenticated_local_artifact_and_oracle_scaffold",
+    "weight_payloads_downloaded_for_this_record": true,
+    "weight_payloads_hashed_for_this_record": true,
     "weights_applied": false,
     "inference_executed": false,
     "real_reference_bundle_reviewed": false
@@ -226,8 +226,8 @@
     "index_total_size_defect_reproduced": true,
     "strict_corrected_metadata_f16_plan_validated": true,
     "adversarial_component_oracle_validated": true,
-    "all_control_files_sha256_validated_against_local_checkpoint": false,
-    "all_weight_shards_sha256_validated": false,
+    "all_control_files_sha256_validated_against_local_checkpoint": true,
+    "all_weight_shards_sha256_validated": true,
     "provenance_bound_index_exception_implemented": false,
     "strict_real_checkpoint_load": false,
     "all_weights_applied": false,
@@ -241,9 +241,36 @@
     "quantization_validated": false,
     "long_context_32k_validated": false
   },
+  "artifact_authentication": {
+    "status": "passed",
+    "result_recorded": true,
+    "source": {
+      "crate_commit": "cdcfae85df2ba90d9d52b117e56b8de2a1f51809",
+      "repository_tree": "5b14f4fe8bded44270be0c6a5102523788eec5fb",
+      "transformers_subtree": "0384cf1950f9a48bb799164c8b37f6cf803106b4",
+      "transformer_source_matches_commit": true,
+      "note": "The transformer subtree was clean. A pre-existing modification outside crates/transformers was neither built as part of this standalone crate nor included in the evidence source."
+    },
+    "execution": {
+      "cargo_profile": "release",
+      "default_features": false,
+      "features": ["std"],
+      "rustc": "rustc 1.94.0-nightly (4f14395c3 2025-12-22)",
+      "cargo": "cargo 1.94.0-nightly (3861f60f6 2025-12-19)",
+      "host": "aarch64-apple-darwin",
+      "test": "validates_pinned_nemotron_control_and_weight_payloads"
+    },
+    "result": {
+      "status": "passed",
+      "control_files_hashed": 7,
+      "weight_shards_hashed": 14,
+      "artifact_bytes_hashed": 65827374264,
+      "rust_test_elapsed_seconds": 179.14,
+      "weights_allocated": false
+    }
+  },
   "open_release_gates": [
     "implement and test an exact-provenance-bound exception for the upstream total_size defect without weakening generic checkpoint validation",
-    "download the pinned checkpoint externally and authenticate all seven controls and fourteen full shard payloads",
     "stream and apply every base and MTP tensor with no unexplained missing or unexpected keys",
     "produce, independently review, hash-pin, and compare the dual Transformers-base and vLLM-MTP reference bundle",
     "run Metal F16 stateless, cached-prefill, recurrent-decode, MTP, and 32-token greedy parity",

@@ -934,7 +934,16 @@ fn acceptance_record_matches_pinned_header_evidence() {
     }
     assert_eq!(
         record["checks"]["all_weight_shards_sha256_validated"],
-        false
+        true
+    );
+    assert_eq!(
+        record["checks"]["all_control_files_sha256_validated_against_local_checkpoint"],
+        true
+    );
+    assert_eq!(record["artifact_authentication"]["status"], "passed");
+    assert_eq!(
+        record["artifact_authentication"]["result"]["artifact_bytes_hashed"],
+        PHYSICAL_ARTIFACT_BYTES
     );
     assert_eq!(record["checks"]["strict_real_checkpoint_load"], false);
     assert_eq!(record["checks"]["mtp_inference"], false);
