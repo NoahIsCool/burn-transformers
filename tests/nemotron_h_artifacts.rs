@@ -43,6 +43,9 @@
 #[path = "support/nemotron_h_reference.rs"]
 mod nemotron_h_reference;
 
+#[path = "support/nemotron_h_base_reference.rs"]
+mod nemotron_h_base_reference;
+
 use serde::{
     Deserialize, Deserializer,
     de::{Error as _, MapAccess, Visitor},
@@ -1522,9 +1525,18 @@ fn adversarial_component_oracle_is_strict_and_source_bound() {
     nemotron_h_reference::validate_committed_synthetic_oracle();
 }
 
-/// Real numerical evidence remains impossible to accept before review pins hashes.
+/// The independently reviewed Transformers base-oracle anchors are complete.
 #[test]
-fn official_reference_bundle_is_fail_closed_before_anchor_review() {
+fn official_base_reference_anchors_are_complete() {
+    assert_eq!(
+        nemotron_h_base_reference::trusted_reference_hashes().len(),
+        7
+    );
+}
+
+/// MTP evidence remains impossible to accept before a separate vLLM review.
+#[test]
+fn official_mtp_reference_bundle_is_fail_closed_before_anchor_review() {
     assert!(nemotron_h_reference::trusted_reference_hashes().is_err());
 }
 
@@ -1810,13 +1822,27 @@ fn loads_pinned_nemotron_f16_and_smokes_base_inference() {
     );
 }
 
-/// Authenticates a separately generated base-plus-MTP numerical reference bundle.
+/// Authenticates the independently reviewed Transformers base-model oracle.
 #[test]
-#[ignore = "requires an independently reviewed external Nemotron official-reference bundle"]
-fn validates_pinned_nemotron_official_reference_bundle() {
+#[ignore = "requires the independently reviewed external Nemotron base-reference bundle"]
+fn validates_pinned_nemotron_official_base_reference_bundle() {
+    let reference = nemotron_h_base_reference::load_and_validate_reference_bundle();
+    eprintln!(
+        "Nemotron base reference authenticated: outputs={}, prompt_tokens={}, generation_tokens={}, minimum_path_cosine={}",
+        reference.output_count,
+        reference.prompt_tokens,
+        reference.generation_tokens,
+        reference.minimum_official_path_cosine,
+    );
+}
+
+/// A future combined target-plus-MTP bundle remains gated separately.
+#[test]
+#[ignore = "requires separately reviewed pinned vLLM Nemotron MTP evidence"]
+fn validates_pinned_nemotron_official_mtp_reference_bundle() {
     let reference = nemotron_h_reference::load_and_validate_reference_bundle();
     eprintln!(
-        "Nemotron reference authenticated: outputs={}, prompt_tokens={}, synthetic_cases={}",
+        "Nemotron combined reference authenticated: outputs={}, prompt_tokens={}, synthetic_cases={}",
         reference.output_count, reference.prompt_tokens, reference.synthetic_cases,
     );
 }
