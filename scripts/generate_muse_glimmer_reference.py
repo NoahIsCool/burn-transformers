@@ -4,11 +4,11 @@
 This is an offline maintainer tool, not Rust runtime code.  It loads the exact
 official multimodal class from a clean local Transformers checkout pinned to
 ``cfa309cfa34b5497a32fd50af49aa97aac94c054`` and exercises only its language
-path.  It records one full-vocabulary prompt row, 54 last-token hidden trace
-rows, 32 cached greedy decisions, and the corresponding stateless
-teacher-forced top-1 decisions.
+path.  It records one full-vocabulary prompt row, all 32 cached and
+teacher-forced full-vocabulary rows, and 54-row hidden traces for stateless
+prompt, cached-prefill, and first recurrent-decode execution.
 
-The three output files are fsynced inside a hidden sibling staging directory
+The seven output files are fsynced inside a hidden sibling staging directory
 and atomically published with no-replace semantics.  Interrupted runs expose no
 partial final bundle and retain staging evidence for diagnosis.
 
@@ -197,6 +197,44 @@ VOCAB_SIZE = 202_048
 HIDDEN_SIZE = 6_656
 HIDDEN_TRACE_ROWS = 54
 GREEDY_TOKENS = 32
+EXPECTED_GENERATED_TOKEN_IDS = [
+    328,
+    19_669,
+    200_023,
+    51_015,
+    5_959,
+    290,
+    21_752,
+    14_774,
+    10_950,
+    310,
+    1_085,
+    81_080,
+    24_429,
+    1_574,
+    51_015,
+    5_959,
+    21_752,
+    14_774,
+    10_950,
+    310,
+    1_085,
+    81_080,
+    24_429,
+    1_574,
+    2_991,
+    1_657,
+    81_080,
+    24_429,
+    26,
+    97_147,
+    10_758,
+    98_400,
+]
+EXPECTED_LAYER_TYPES = [
+    "full_attention" if index % 4 == 3 else "sliding_attention"
+    for index in range(52)
+]
 EXPECTED_EOS_TOKEN_IDS = [200_001, 200_008]
 EXPECTED_PARAMETER_COUNT = 29_776_626_688
 EXPECTED_CHECKPOINT_TENSOR_BYTES = 59_553_253_376
@@ -229,6 +267,14 @@ TRANSITIVE_TRUST_BOUNDARY = (
 JSON_FILENAME = "muse-glimmer-30b-a4e59da-reference.json"
 LOGITS_FILENAME = "muse-glimmer-30b-a4e59da-prompt-logits.f32le"
 HIDDEN_FILENAME = "muse-glimmer-30b-a4e59da-hidden-last.f32le"
+CACHED_LOGITS_FILENAME = "muse-glimmer-30b-a4e59da-cached-prefix-logits.f32le"
+TEACHER_LOGITS_FILENAME = "muse-glimmer-30b-a4e59da-teacher-prefix-logits.f32le"
+CACHED_PREFILL_HIDDEN_FILENAME = (
+    "muse-glimmer-30b-a4e59da-cached-prefill-hidden-last.f32le"
+)
+CACHED_DECODE_HIDDEN_FILENAME = (
+    "muse-glimmer-30b-a4e59da-cached-decode-1-hidden-last.f32le"
+)
 BUNDLE_DIRNAME = "muse-glimmer-30b-a4e59da-reference.bundle"
 
 EXPECTED_DEPENDENCY_VERSIONS = {
@@ -707,7 +753,15 @@ def rename_directory_create_only(source: Path, destination: Path) -> None:
 def publish_reference_bundle(output_dir: Path, payloads: Mapping[str, bytes]) -> Path:
     """Durably publish a complete fixed-name bundle through one atomic rename."""
 
-    expected_names = {JSON_FILENAME, LOGITS_FILENAME, HIDDEN_FILENAME}
+    expected_names = {
+        JSON_FILENAME,
+        LOGITS_FILENAME,
+        HIDDEN_FILENAME,
+        CACHED_LOGITS_FILENAME,
+        TEACHER_LOGITS_FILENAME,
+        CACHED_PREFILL_HIDDEN_FILENAME,
+        CACHED_DECODE_HIDDEN_FILENAME,
+    }
     if set(payloads) != expected_names:
         raise ValueError(f"reference payload set changed: {sorted(payloads)}")
     bundle = output_dir / BUNDLE_DIRNAME
@@ -1424,10 +1478,16 @@ def tensor_cosine(torch: Any, left: Any, right: Any) -> float:
     return value
 
 
-def capture_prompt_hidden_trace(
-    torch: Any, language_model: Any, run: Callable[[], Any]
+def capture_last_hidden_trace(
+    torch: Any,
+    language_model: Any,
+    expected_sequence: int,
+    run: Callable[[], Any],
 ) -> tuple[Any, list[str], Any]:
     """Capture embed-norm, 52 post-layer, and final-norm last-token rows."""
+
+    if expected_sequence <= 0:
+        raise ValueError("hidden-trace sequence length must be positive")
 
     # Muse applies a parameter-free RMS normalization immediately after token
     # lookup. Burn's first diagnostic is that normalized embedding, so hook
@@ -1445,8 +1505,13 @@ def capture_prompt_hidden_trace(
     for label, module in zip(labels, modules, strict=True):
         def hook(_module: Any, _inputs: Any, output: Any, *, trace_label: str = label) -> None:
             tensor = output[0] if isinstance(output, tuple) else output
-            if list(tensor.shape) != [1, len(INPUT_IDS), HIDDEN_SIZE]:
+            if list(tensor.shape) != [1, expected_sequence, HIDDEN_SIZE]:
                 raise RuntimeError(f"hidden trace {trace_label} shape changed: {list(tensor.shape)}")
+            if tensor.dtype != torch.float16 or tensor.device.type != "mps":
+                raise RuntimeError(
+                    f"hidden trace {trace_label} dtype/device changed: "
+                    f"{tensor.dtype}/{tensor.device}"
+                )
             captured.append((trace_label, tensor[0, -1].float().cpu().contiguous()))
 
         handles.append(module.register_forward_hook(hook))
@@ -1464,7 +1529,114 @@ def capture_prompt_hidden_trace(
     return output, labels, trace
 
 
-def binary_descriptor(relative_path: str, payload: bytes, shape: Sequence[int]) -> dict[str, Any]:
+def capture_implicit_position_ids(
+    torch: Any,
+    rotary_embedding: Any,
+    expected: Sequence[int],
+    run: Callable[[], Any],
+) -> Any:
+    """Prove the official model derived one exact implicit position-ID row."""
+
+    expected = list(expected)
+    if not expected:
+        raise ValueError("position-ID expectation must be nonempty")
+    captured: list[list[int]] = []
+
+    def hook(_module: Any, inputs: Any) -> None:
+        if len(inputs) != 2:
+            raise RuntimeError(f"rotary embedding input arity changed: {len(inputs)}")
+        position_ids = inputs[1]
+        if (
+            list(position_ids.shape) != [1, len(expected)]
+            or position_ids.dtype != torch.int64
+            or position_ids.device.type != "mps"
+        ):
+            raise RuntimeError(
+                "implicit position-ID tensor shape/dtype/device changed: "
+                f"{list(position_ids.shape)}/{position_ids.dtype}/{position_ids.device}"
+            )
+        captured.append([int(value) for value in position_ids[0].cpu().tolist()])
+
+    handle = rotary_embedding.register_forward_pre_hook(hook)
+    try:
+        output = run()
+    finally:
+        handle.remove()
+    if captured != [expected]:
+        raise RuntimeError(f"implicit position IDs changed: {captured} != {[expected]}")
+    return output
+
+
+def validate_official_cache(
+    torch: Any,
+    cache: Any,
+    dynamic_cache_class: type,
+    expected_length: int,
+) -> None:
+    """Validate every official KV layer's logical and physical short-run geometry."""
+
+    if expected_length <= 0 or expected_length >= 2_048:
+        raise ValueError("short oracle cache length must be in 1..2048")
+    if type(cache) is not dynamic_cache_class:
+        raise RuntimeError(f"official cache class changed: {type(cache)!r}")
+    if (
+        cache.get_seq_length() != expected_length
+        or cache.batch_size != 1
+        or len(cache.layers) != len(EXPECTED_LAYER_TYPES)
+    ):
+        raise RuntimeError(
+            "official cache topology changed: "
+            f"length={cache.get_seq_length()}, batch={cache.batch_size}, "
+            f"layers={len(cache.layers)}"
+        )
+    for index, (layer, expected_kind) in enumerate(
+        zip(cache.layers, EXPECTED_LAYER_TYPES, strict=True)
+    ):
+        expected_class = (
+            "DynamicSlidingWindowLayer"
+            if expected_kind == "sliding_attention"
+            else "DynamicLayer"
+        )
+        if type(layer).__name__ != expected_class:
+            raise RuntimeError(
+                f"official cache layer {index} class changed: {type(layer).__name__}"
+            )
+        if layer.get_seq_length() != expected_length:
+            raise RuntimeError(
+                f"official cache layer {index} logical length changed: "
+                f"{layer.get_seq_length()}"
+            )
+        for name, tensor in (("keys", layer.keys), ("values", layer.values)):
+            if (
+                list(tensor.shape) != [1, 2, expected_length, 128]
+                or tensor.dtype != torch.float16
+                or tensor.device.type != "mps"
+            ):
+                raise RuntimeError(
+                    f"official cache layer {index} {name} geometry changed: "
+                    f"{list(tensor.shape)}/{tensor.dtype}/{tensor.device}"
+                )
+
+
+def tensor_f32le_bytes(torch: Any, tensor: Any) -> bytes:
+    """Serialize one finite contiguous CPU F32 tensor without Python-float expansion."""
+
+    if sys.byteorder != "little":
+        raise RuntimeError("F32LE oracle generation requires a little-endian host")
+    if tensor.dtype != torch.float32 or tensor.device.type != "cpu" or not tensor.is_contiguous():
+        raise ValueError("oracle payload tensor must be contiguous CPU float32")
+    if not bool(torch.isfinite(tensor).all()):
+        raise ValueError("oracle payload tensor contains a non-finite value")
+    return tensor.numpy().tobytes(order="C")
+
+
+def binary_descriptor(
+    relative_path: str,
+    payload: bytes,
+    shape: Sequence[int],
+    *,
+    source_dtype: str,
+) -> dict[str, Any]:
     """Describe one finite F32LE tensor payload without embedding it in JSON."""
 
     elements = math.prod(shape)
@@ -1473,10 +1645,13 @@ def binary_descriptor(relative_path: str, payload: bytes, shape: Sequence[int]) 
     return {
         "relative_path": relative_path,
         "encoding": "ieee754-f32-little-endian",
+        "source_dtype": source_dtype,
+        "storage_dtype": "float32",
         "shape": list(shape),
         "elements": elements,
         "bytes": len(payload),
         "sha256": sha256_bytes(payload),
+        "finite": True,
     }
 
 
@@ -1626,6 +1801,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError(f"loaded unexpected configuration class {type(config)!r}")
     if config.transformers_version != CHECKPOINT_CONFIG_TRANSFORMERS_VERSION:
         raise RuntimeError("parsed checkpoint Transformers metadata changed")
+    if (
+        config.text_config.layer_types != EXPECTED_LAYER_TYPES
+        or config.text_config.sliding_window != 2_048
+        or config.text_config.num_hidden_layers != 52
+        or config.text_config.num_key_value_heads != 2
+        or config.text_config.head_dim != 128
+    ):
+        raise RuntimeError("parsed checkpoint cache geometry changed")
     config._attn_implementation = "eager"
     config.text_config._attn_implementation = "eager"
     config.vision_config._attn_implementation = "eager"
@@ -1692,53 +1875,88 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     input_ids = torch.tensor([INPUT_IDS], dtype=torch.long, device="mps")
     prompt_mask = torch.ones_like(input_ids, dtype=torch.long, device="mps")
+    prompt_positions = list(range(len(INPUT_IDS)))
 
     with torch.inference_mode():
         stateless_started = time.perf_counter()
-        stateless, trace_labels, hidden_trace = capture_prompt_hidden_trace(
+        stateless, trace_labels, hidden_trace = capture_last_hidden_trace(
             torch,
             model.model.language_model,
-            lambda: model(
-                input_ids=input_ids,
-                attention_mask=prompt_mask,
-                use_cache=False,
-                logits_to_keep=1,
-                return_dict=True,
+            len(INPUT_IDS),
+            lambda: capture_implicit_position_ids(
+                torch,
+                model.model.language_model.rotary_emb,
+                prompt_positions,
+                lambda: model(
+                    input_ids=input_ids,
+                    attention_mask=prompt_mask,
+                    use_cache=False,
+                    logits_to_keep=1,
+                    return_dict=True,
+                ),
             ),
         )
         torch.mps.synchronize()
         stateless_seconds = checked_duration(
             "stateless prompt", time.perf_counter() - stateless_started
         )
-        if stateless.logits.dtype != torch.float16:
-            raise RuntimeError(f"stateless logits dtype changed: {stateless.logits.dtype}")
+        if (
+            list(stateless.logits.shape) != [1, 1, VOCAB_SIZE]
+            or stateless.logits.dtype != torch.float16
+            or stateless.logits.device.type != "mps"
+        ):
+            raise RuntimeError(
+                "stateless logits shape/dtype/device changed: "
+                f"{list(stateless.logits.shape)}/{stateless.logits.dtype}/"
+                f"{stateless.logits.device}"
+            )
         stateless_row = stateless.logits[0, -1].float().cpu().contiguous()
         if list(stateless_row.shape) != [VOCAB_SIZE] or not bool(torch.isfinite(stateless_row).all()):
             raise RuntimeError("stateless full-vocabulary row is invalid")
 
         generation_started = time.perf_counter()
-        cached = model(
-            input_ids=input_ids,
-            attention_mask=prompt_mask,
-            use_cache=True,
-            logits_to_keep=1,
-            return_dict=True,
+        cached, cached_prefill_labels, cached_prefill_hidden_trace = capture_last_hidden_trace(
+            torch,
+            model.model.language_model,
+            len(INPUT_IDS),
+            lambda: capture_implicit_position_ids(
+                torch,
+                model.model.language_model.rotary_emb,
+                prompt_positions,
+                lambda: model(
+                    input_ids=input_ids,
+                    attention_mask=prompt_mask,
+                    use_cache=True,
+                    logits_to_keep=1,
+                    return_dict=True,
+                ),
+            ),
         )
+        if cached_prefill_labels != trace_labels:
+            raise RuntimeError("cached-prefill hidden-trace labels changed")
         cache = cached.past_key_values
         generated: list[int] = []
         cached_rows = []
         decisions = []
+        cached_decode_hidden_trace = None
+        cached_decode_labels = None
+        decision_logical_lengths = []
+        decision_position_ids = []
         for step in range(GREEDY_TOKENS):
+            logical_length = len(INPUT_IDS) + step
+            validate_official_cache(torch, cache, DynamicCache, logical_length)
             if (
-                cached.logits.dtype != torch.float16
-                or not isinstance(cache, DynamicCache)
-                or cache.get_seq_length() != len(INPUT_IDS) + step
+                list(cached.logits.shape) != [1, 1, VOCAB_SIZE]
+                or cached.logits.dtype != torch.float16
+                or cached.logits.device.type != "mps"
             ):
                 raise RuntimeError(f"cached output invalid at decision {step}")
             row = cached.logits[0, -1].float().cpu().contiguous()
             if list(row.shape) != [VOCAB_SIZE] or not bool(torch.isfinite(row).all()):
                 raise RuntimeError(f"cached vocabulary row invalid at decision {step}")
             cached_rows.append(row)
+            decision_logical_lengths.append(logical_length)
+            decision_position_ids.append(logical_length - 1)
             ranked = top_k_records(row.tolist(), 2)
             record = decision_record(
                 step,
@@ -1750,17 +1968,50 @@ def main(argv: Sequence[str] | None = None) -> int:
             decisions.append(record)
             generated.append(token_id)
             if step + 1 < GREEDY_TOKENS:
-                cached = model(
-                    input_ids=torch.tensor([[token_id]], dtype=torch.long, device="mps"),
-                    attention_mask=torch.ones(
-                        (1, len(INPUT_IDS) + step + 1), dtype=torch.long, device="mps"
-                    ),
-                    past_key_values=cache,
-                    use_cache=True,
-                    logits_to_keep=1,
-                    return_dict=True,
-                )
+                decode_position = logical_length
+
+                def run_decode() -> Any:
+                    return capture_implicit_position_ids(
+                        torch,
+                        model.model.language_model.rotary_emb,
+                        [decode_position],
+                        lambda: model(
+                            input_ids=torch.tensor(
+                                [[token_id]], dtype=torch.long, device="mps"
+                            ),
+                            attention_mask=torch.ones(
+                                (1, logical_length + 1),
+                                dtype=torch.long,
+                                device="mps",
+                            ),
+                            past_key_values=cache,
+                            use_cache=True,
+                            logits_to_keep=1,
+                            return_dict=True,
+                        ),
+                    )
+
+                if step == 0:
+                    (
+                        cached,
+                        cached_decode_labels,
+                        cached_decode_hidden_trace,
+                    ) = capture_last_hidden_trace(
+                        torch,
+                        model.model.language_model,
+                        1,
+                        run_decode,
+                    )
+                else:
+                    cached = run_decode()
                 cache = cached.past_key_values
+        if generated != EXPECTED_GENERATED_TOKEN_IDS:
+            raise RuntimeError(
+                "pinned official greedy continuation changed: "
+                f"{generated} != {EXPECTED_GENERATED_TOKEN_IDS}"
+            )
+        if cached_decode_hidden_trace is None or cached_decode_labels != trace_labels:
+            raise RuntimeError("first recurrent-decode hidden trace was not captured")
         torch.mps.synchronize()
         generation_seconds = checked_duration(
             "cached generation", time.perf_counter() - generation_started
@@ -1768,45 +2019,132 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         teacher_ids = INPUT_IDS + generated[:-1]
         teacher_started = time.perf_counter()
-        teacher = model(
-            input_ids=torch.tensor([teacher_ids], dtype=torch.long, device="mps"),
-            attention_mask=torch.ones((1, len(teacher_ids)), dtype=torch.long, device="mps"),
-            use_cache=False,
-            logits_to_keep=0,
-            return_dict=True,
+        teacher = capture_implicit_position_ids(
+            torch,
+            model.model.language_model.rotary_emb,
+            list(range(len(teacher_ids))),
+            lambda: model(
+                input_ids=torch.tensor([teacher_ids], dtype=torch.long, device="mps"),
+                attention_mask=torch.ones(
+                    (1, len(teacher_ids)), dtype=torch.long, device="mps"
+                ),
+                use_cache=False,
+                logits_to_keep=0,
+                return_dict=True,
+            ),
         )
         torch.mps.synchronize()
         teacher_seconds = checked_duration(
             "teacher-forced stateless", time.perf_counter() - teacher_started
         )
+        if (
+            list(teacher.logits.shape) != [1, len(teacher_ids), VOCAB_SIZE]
+            or teacher.logits.dtype != torch.float16
+            or teacher.logits.device.type != "mps"
+        ):
+            raise RuntimeError(
+                "teacher-forced logits shape/dtype/device changed: "
+                f"{list(teacher.logits.shape)}/{teacher.logits.dtype}/"
+                f"{teacher.logits.device}"
+            )
         teacher_logits = teacher.logits[0].float().cpu().contiguous()
         positions = list(range(len(INPUT_IDS) - 1, len(INPUT_IDS) - 1 + GREEDY_TOKENS))
-        stateless_top1 = [int(teacher_logits[position].argmax().item()) for position in positions]
+        teacher_prefix_logits = teacher_logits[positions].contiguous()
+        cached_prefix_logits = torch.stack(cached_rows).contiguous()
+        if list(cached_prefix_logits.shape) != [GREEDY_TOKENS, VOCAB_SIZE]:
+            raise RuntimeError("cached prefix-logit matrix shape changed")
+        if list(teacher_prefix_logits.shape) != [GREEDY_TOKENS, VOCAB_SIZE]:
+            raise RuntimeError("teacher prefix-logit matrix shape changed")
+        stateless_top1 = [
+            int(teacher_prefix_logits[row].argmax().item())
+            for row in range(GREEDY_TOKENS)
+        ]
         if stateless_top1 != generated:
             raise RuntimeError(
                 f"official cached/stateless top-1 mismatch: {generated} != {stateless_top1}"
             )
         prefix_cosines = [
-            tensor_cosine(torch, cached_row, teacher_logits[position])
-            for cached_row, position in zip(cached_rows, positions, strict=True)
+            tensor_cosine(torch, cached_row, teacher_row)
+            for cached_row, teacher_row in zip(
+                cached_rows, teacher_prefix_logits, strict=True
+            )
         ]
         if min(prefix_cosines) < SELF_PARITY_COSINE:
             raise RuntimeError(f"cached/stateless cosine below {SELF_PARITY_COSINE}")
         prompt_cached_cosine = tensor_cosine(torch, stateless_row, cached_rows[0])
         if prompt_cached_cosine < SELF_PARITY_COSINE:
             raise RuntimeError("prompt cached/stateless cosine is below the gate")
+        cached_prefill_hidden_cosines = [
+            tensor_cosine(torch, stateless_row, cached_row)
+            for stateless_row, cached_row in zip(
+                hidden_trace, cached_prefill_hidden_trace, strict=True
+            )
+        ]
+        if min(cached_prefill_hidden_cosines) < SELF_PARITY_COSINE:
+            raise RuntimeError("cached-prefill/stateless hidden cosine is below the gate")
 
     logits_values = [float(value) for value in stateless_row.tolist()]
-    hidden_values = [float(value) for value in hidden_trace.flatten().tolist()]
-    logits_payload = f32le_bytes(logits_values)
-    hidden_payload = f32le_bytes(hidden_values)
-    logits_descriptor = binary_descriptor(LOGITS_FILENAME, logits_payload, [VOCAB_SIZE])
+    logits_payload = tensor_f32le_bytes(torch, stateless_row)
+    hidden_payload = tensor_f32le_bytes(torch, hidden_trace)
+    cached_logits_payload = tensor_f32le_bytes(torch, cached_prefix_logits)
+    teacher_logits_payload = tensor_f32le_bytes(torch, teacher_prefix_logits)
+    cached_prefill_hidden_payload = tensor_f32le_bytes(
+        torch, cached_prefill_hidden_trace
+    )
+    cached_decode_hidden_payload = tensor_f32le_bytes(
+        torch, cached_decode_hidden_trace
+    )
+    logits_descriptor = binary_descriptor(
+        LOGITS_FILENAME,
+        logits_payload,
+        [VOCAB_SIZE],
+        source_dtype="float16",
+    )
     logits_descriptor.update(vector_summary(logits_values))
     logits_descriptor["top1_token_id"] = int(stateless_row.argmax().item())
     hidden_descriptor = binary_descriptor(
-        HIDDEN_FILENAME, hidden_payload, [HIDDEN_TRACE_ROWS, HIDDEN_SIZE]
+        HIDDEN_FILENAME,
+        hidden_payload,
+        [HIDDEN_TRACE_ROWS, HIDDEN_SIZE],
+        source_dtype="float16",
     )
     hidden_descriptor["labels"] = trace_labels
+    hidden_descriptor["phase"] = "stateless_prompt"
+    hidden_descriptor["token_position"] = len(INPUT_IDS) - 1
+    cached_prefill_hidden_descriptor = binary_descriptor(
+        CACHED_PREFILL_HIDDEN_FILENAME,
+        cached_prefill_hidden_payload,
+        [HIDDEN_TRACE_ROWS, HIDDEN_SIZE],
+        source_dtype="float16",
+    )
+    cached_prefill_hidden_descriptor["labels"] = cached_prefill_labels
+    cached_prefill_hidden_descriptor["phase"] = "cached_prefill"
+    cached_prefill_hidden_descriptor["token_position"] = len(INPUT_IDS) - 1
+    cached_decode_hidden_descriptor = binary_descriptor(
+        CACHED_DECODE_HIDDEN_FILENAME,
+        cached_decode_hidden_payload,
+        [HIDDEN_TRACE_ROWS, HIDDEN_SIZE],
+        source_dtype="float16",
+    )
+    cached_decode_hidden_descriptor["labels"] = cached_decode_labels
+    cached_decode_hidden_descriptor["phase"] = "cached_decode"
+    cached_decode_hidden_descriptor["token_position"] = len(INPUT_IDS)
+    cached_logits_descriptor = binary_descriptor(
+        CACHED_LOGITS_FILENAME,
+        cached_logits_payload,
+        [GREEDY_TOKENS, VOCAB_SIZE],
+        source_dtype="float16",
+    )
+    cached_logits_descriptor["row_position_ids"] = decision_position_ids
+    cached_logits_descriptor["row_top1_token_ids"] = generated
+    teacher_logits_descriptor = binary_descriptor(
+        TEACHER_LOGITS_FILENAME,
+        teacher_logits_payload,
+        [GREEDY_TOKENS, VOCAB_SIZE],
+        source_dtype="float16",
+    )
+    teacher_logits_descriptor["row_position_ids"] = positions
+    teacher_logits_descriptor["row_top1_token_ids"] = stateless_top1
 
     post_reference_source = verify_transformers_checkout(transformers_dir)
     (
@@ -1845,7 +2183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     script = Path(__file__).resolve(strict=True)
     now = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
     record = {
-        "schema_version": 2,
+        "schema_version": 3,
         "repository": REPOSITORY,
         "revision": REVISION,
         "reference": {
@@ -1880,6 +2218,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             "imported_module_bindings": import_bindings,
             "authenticated_import_bytecode_policy": bytecode_policy,
             "allocator_warmup_override": warmup,
+            "cache": {
+                "class": "transformers.cache_utils.DynamicCache",
+                "batch_size": 1,
+                "layer_count": len(EXPECTED_LAYER_TYPES),
+                "layer_types": EXPECTED_LAYER_TYPES,
+                "sliding_layers": EXPECTED_LAYER_TYPES.count("sliding_attention"),
+                "full_layers": EXPECTED_LAYER_TYPES.count("full_attention"),
+                "sliding_window": 2_048,
+                "key_value_heads": 2,
+                "head_dimension": 128,
+                "tensor_dtype": "float16",
+                "tensor_device": "mps",
+                "decision_logical_lengths": decision_logical_lengths,
+                "decision_physical_lengths": decision_logical_lengths,
+                "decision_position_ids": decision_position_ids,
+                "decode_input_position_ids": decision_position_ids[1:],
+                "teacher_position_ids": list(range(len(teacher_ids))),
+                "implicit_position_ids_verified": True,
+                "all_layers_validated_at_every_decision": True,
+            },
         },
         "environment": {
             "generated_at_utc": now,
@@ -1932,6 +2290,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "outputs": {
             "prompt_logits": logits_descriptor,
             "hidden_last_trace": hidden_descriptor,
+            "cached_prefix_logits": cached_logits_descriptor,
+            "teacher_prefix_logits": teacher_logits_descriptor,
+            "cached_prefill_hidden_trace": cached_prefill_hidden_descriptor,
+            "cached_decode_hidden_trace": cached_decode_hidden_descriptor,
         },
         "generation": {
             "max_new_tokens": GREEDY_TOKENS,
@@ -1949,6 +2311,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             "prompt_cached_cosine": prompt_cached_cosine,
             "minimum_cached_stateless_prefix_cosine": min(prefix_cosines),
+            "minimum_cached_prefill_stateless_hidden_cosine": min(
+                cached_prefill_hidden_cosines
+            ),
         },
         "timings_seconds": {
             "load": load_seconds,
@@ -1964,6 +2329,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             JSON_FILENAME: json_payload,
             LOGITS_FILENAME: logits_payload,
             HIDDEN_FILENAME: hidden_payload,
+            CACHED_LOGITS_FILENAME: cached_logits_payload,
+            TEACHER_LOGITS_FILENAME: teacher_logits_payload,
+            CACHED_PREFILL_HIDDEN_FILENAME: cached_prefill_hidden_payload,
+            CACHED_DECODE_HIDDEN_FILENAME: cached_decode_hidden_payload,
         },
     )
     if published != bundle:
@@ -1972,6 +2341,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"json_sha256={sha256_bytes(json_payload)}")
     print(f"logits_sha256={sha256_bytes(logits_payload)}")
     print(f"hidden_sha256={sha256_bytes(hidden_payload)}")
+    print(f"cached_logits_sha256={sha256_bytes(cached_logits_payload)}")
+    print(f"teacher_logits_sha256={sha256_bytes(teacher_logits_payload)}")
+    print(
+        "cached_prefill_hidden_sha256="
+        f"{sha256_bytes(cached_prefill_hidden_payload)}"
+    )
+    print(
+        "cached_decode_hidden_sha256="
+        f"{sha256_bytes(cached_decode_hidden_payload)}"
+    )
     return 0
 
 

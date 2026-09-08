@@ -1,7 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "advertised_supported": false,
-  "phase": "authenticated_artifact_and_strict_f16_plan_verified_pending_weight_application_official_reference_generation_and_32k_acceptance",
+  "phase": "authenticated_artifact_and_strict_f16_plan_verified_pending_regenerated_strict_numerical_oracle_weight_application_and_32k_acceptance",
   "repository": "meta-models/Muse-Glimmer-30B",
   "revision": "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
   "reference": {
@@ -10,6 +10,60 @@
     "source": "src/transformers/models/muse_glimmer/modeling_muse_glimmer.py",
     "source_bytes": 53259,
     "source_sha256": "459498a758446f580fb4a9203c64ab4be68488b40a04acd379dd62658d5bad71"
+  },
+  "strict_reference_bundle": {
+    "schema_version": 3,
+    "status": "pending_regeneration_and_independent_hash_review",
+    "files": [
+      {
+        "role": "strict_json",
+        "maximum_bytes": 1048576
+      },
+      {
+        "role": "stateless_prompt_logits",
+        "shape": [202048],
+        "source_dtype": "float16",
+        "storage_dtype": "float32_le",
+        "bytes": 808192
+      },
+      {
+        "role": "cached_prefix_logits",
+        "shape": [32, 202048],
+        "source_dtype": "float16",
+        "storage_dtype": "float32_le",
+        "bytes": 25862144
+      },
+      {
+        "role": "teacher_prefix_logits",
+        "shape": [32, 202048],
+        "source_dtype": "float16",
+        "storage_dtype": "float32_le",
+        "bytes": 25862144
+      },
+      {
+        "role": "stateless_prompt_hidden_trace",
+        "shape": [54, 6656],
+        "source_dtype": "float16",
+        "storage_dtype": "float32_le",
+        "bytes": 1437696
+      },
+      {
+        "role": "cached_prefill_hidden_trace",
+        "shape": [54, 6656],
+        "source_dtype": "float16",
+        "storage_dtype": "float32_le",
+        "bytes": 1437696
+      },
+      {
+        "role": "first_recurrent_decode_hidden_trace",
+        "shape": [54, 6656],
+        "source_dtype": "float16",
+        "storage_dtype": "float32_le",
+        "bytes": 1437696
+      }
+    ],
+    "minimum_per_row_cosine": 0.999,
+    "committed_generated_token_ids": [328, 19669, 200023, 51015, 5959, 290, 21752, 14774, 10950, 310, 1085, 81080, 24429, 1574, 51015, 5959, 21752, 14774, 10950, 310, 1085, 81080, 24429, 1574, 2991, 1657, 81080, 24429, 26, 97147, 10758, 98400]
   },
   "artifact_layout": {
     "safetensors_shards": 2,
@@ -55,6 +109,28 @@
     "estimate_classification": "conservative_upper_bound",
     "execution_note": "The planner combines the largest shard and largest target tensor for a conservative preflight bound. Pass-two runtime counters remain unrecorded until the complete text graph is applied."
   },
+  "exact_eager_32k_blocker": {
+    "status": "open",
+    "production_path": "Muse float16 explicit eager attention",
+    "full_attention_score_shape": [1, 32, 32768, 32768],
+    "score_elements": 34359738368,
+    "float16_score_bytes": 68719476736,
+    "float32_softmax_bytes": 137438953472,
+    "note": "A single 32K full-attention layer requires about 64 GiB for F16 scores before mask storage and the F32 softmax temporary; this cannot coexist with the 55.7 GB F16 language graph on the current 96 GB machine. Exact-compatible tiled attention or a validated bounded chunked-prefill path is required before the production 32K gate can run. Reducing only the cache allocation does not solve this quadratic activation bound."
+  },
+  "rust_acceptance_reproduction": {
+    "status": "pending_regenerated_oracle_and_successful_run",
+    "manifest_path": "crates/transformers/Cargo.toml",
+    "test_target": "muse_glimmer_artifacts",
+    "test_name": "matches_pinned_muse_glimmer_official_f16_reference_on_metal",
+    "profile": "release",
+    "no_default_features": true,
+    "features": ["std", "metal", "tokenizers"],
+    "package_rust_version": "1.92",
+    "source_clean_scope": "crates/transformers",
+    "runtime_record_fields": ["git_head", "git_tree", "transformers_tree", "transformers_tree_dirty", "test_source_sha256", "cargo_package_rust_version", "rustc_verbose", "profile", "target", "features"],
+    "command": "TRANSFORMERS_MUSE_GLIMMER_REFERENCE_DIR=/absolute/external/reference-parent cargo test --release --manifest-path crates/transformers/Cargo.toml --no-default-features --features std,metal,tokenizers --test muse_glimmer_artifacts matches_pinned_muse_glimmer_official_f16_reference_on_metal -- --ignored --exact --nocapture"
+  },
   "inventory_digests": {
     "header_inventory_sha256": "7bf662cfb4142c1f9994926574082e9adf52f9c335f226e46b998a7d9c4547cb",
     "f16_load_plan_sha256": "fde94638b261fbaee47e53dbf035660e5bd1732a6d92e45c45cddb720ed95d6d"
@@ -88,8 +164,15 @@
     "metal_f16_recurrent_decode": false,
     "official_reference_full_vector_logits_compared": false,
     "official_reference_hidden_trace_compared": false,
+    "official_reference_cached_prefill_hidden_trace_compared": false,
+    "official_reference_recurrent_decode_hidden_trace_compared": false,
     "official_reference_greedy_32_tokens_compared": false,
     "cached_stateless_top1_all_prefixes_compared": false,
+    "cached_full_vector_all_prefixes_compared": false,
+    "teacher_full_vector_all_prefixes_compared": false,
+    "cached_teacher_per_row_cosine_compared": false,
+    "cache_geometry_dtype_lengths_and_positions_validated": false,
+    "rust_source_toolchain_features_and_trees_recorded": false,
     "quantization_validated": false,
     "long_context_32k_validated": false
   },
@@ -119,11 +202,12 @@
   },
   "open_release_gates": [
     "strict full F16 language-graph weight application",
-    "official Transformers F16 prompt-logit and hidden-trace parity",
-    "32-token cached and stateless greedy parity",
+    "regenerate and independently hash-review the strict seven-file official oracle bundle",
+    "official Transformers F16 prompt, cached-prefix, teacher-prefix, and hidden-trace parity",
+    "32-token cached and stateless full-vector parity",
     "padded and context-boundary tests",
     "native Q8 and Q4 conversion, quality, and packed-kernel proof",
-    "32K context stress",
+    "exact-compatible tiled or bounded chunked-prefill implementation enabling 32K production-path stress",
     "standardized latency, throughput, cache, memory, and output-hash benchmarks"
   ]
 }

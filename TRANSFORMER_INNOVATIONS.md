@@ -380,6 +380,16 @@ fused kernel: Burn 0.21's ordinary `metal` feature defaults to fallback, and
 runtime selection requires its separate `autotune` feature. This scaling changes
 attention entropy without letting raw projection norms determine temperature.
 
+This exact-eager choice currently blocks the real 32K production-path gate on
+the 96 GB M3 Max. One full-attention score tensor at 32K has shape
+`[1, 32, 32768, 32768]`: 34,359,738,368 elements, or 68,719,476,736 bytes in
+F16, before the causal mask and 137,438,953,472-byte FP32 softmax temporary.
+That activation cannot coexist with the 55.7 GB F16 language graph. A tiled
+operation that preserves the pinned F16-score/FP32-softmax semantics, or a
+bounded chunked-prefill path validated against exact eager execution, is a
+release prerequisite; shrinking KV storage alone cannot remove this quadratic
+activation bound.
+
 **Implementation:** [`MuseGlimmerAttention`](src/models/muse_glimmer/model.rs).
 **Reference:** the [pinned Muse-Glimmer reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/muse_glimmer/modular_muse_glimmer.py).
 
@@ -1030,6 +1040,12 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   `5.17.0.dev0`. Oracle generation therefore authenticates the Git revision and
   source bytes and records the config value separately; it never substitutes
   one version string for the other.
+- **Muse's short-context numerical gate is not its 32K gate.** The strict
+  seven-file oracle now retains every cached and teacher-forced vocabulary row,
+  cached-prefill and first recurrent-decode hidden traces, and exact cache
+  lengths/positions. Those checks can certify the short production graph, but
+  the F16 exact-eager allocation described above still prevents advertising
+  32K support on current hardware.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

@@ -37,9 +37,10 @@
 //! ```
 //!
 //! The tool is deliberately local-only and MPS/F16/eager-only. It atomically
-//! publishes a create-only three-file bundle after recording full-vocabulary
-//! prompt logits, 54 hidden-trace rows, and 32 cached/stateless greedy choices.
-//! An independent reviewer must pin all three printed output hashes below; the
+//! publishes a create-only seven-file bundle after recording full-vocabulary
+//! prompt logits, all 32 cached and teacher-forced vocabulary rows, and three
+//! 54-row hidden traces. An independent reviewer must pin every printed output
+//! hash below; the
 //! ignored Rust acceptance gate fails closed until that has happened.
 //!
 //! Once those hashes are reviewed and pinned, run the full comparison with:
@@ -53,6 +54,8 @@
 //!   -- --ignored --exact --nocapture
 //! ```
 
+#![recursion_limit = "256"]
+
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -62,6 +65,9 @@ use std::{
     path::{Component, Path, PathBuf},
     time::Instant,
 };
+
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+use std::process::Command;
 
 #[cfg(all(feature = "metal", feature = "tokenizers", target_os = "macos"))]
 use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
@@ -96,7 +102,13 @@ use burn::{
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 use transformers::{
     AutoCausalLm, AutoLoadOptions, DecodeInput, DecodeState, ForwardOptions, LogitsSelection,
-    SamplingStrategy, TokenMask, architecture::CausalLmInput, cache::CacheConfig,
+    SamplingStrategy, TokenMask,
+    architecture::CausalLmInput,
+    cache::{CacheConfig, KvCacheStorage},
+    models::{
+        AutoCausalDecodeState,
+        muse_glimmer::{MuseGlimmerDecodeState, MuseGlimmerLayerCache},
+    },
 };
 
 /// Immutable upstream repository certified by every local gate.
@@ -265,6 +277,13 @@ const REFERENCE_TOKEN_IDS: [u32; 67] = [
     10_950, 310, 1_085, 81_080, 24_429, 26, 200_008, 200_022, 140_680,
 ];
 
+/// Reviewed greedy continuation produced by the pinned official F16 graph.
+const REFERENCE_GENERATED_TOKEN_IDS: [u32; 32] = [
+    328, 19_669, 200_023, 51_015, 5_959, 290, 21_752, 14_774, 10_950, 310, 1_085, 81_080, 24_429,
+    1_574, 51_015, 5_959, 21_752, 14_774, 10_950, 310, 1_085, 81_080, 24_429, 1_574, 2_991, 1_657,
+    81_080, 24_429, 26, 97_147, 10_758, 98_400,
+];
+
 /// Fixed create-only directory emitted by the official-reference generator.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 const REFERENCE_BUNDLE_DIRECTORY: &str = "muse-glimmer-30b-a4e59da-reference.bundle";
@@ -279,14 +298,29 @@ const REFERENCE_LOGITS_FILENAME: &str = "muse-glimmer-30b-a4e59da-prompt-logits.
 /// Last-token embedding/layer/final-norm trace within the reference bundle.
 const REFERENCE_HIDDEN_FILENAME: &str = "muse-glimmer-30b-a4e59da-hidden-last.f32le";
 
+/// All 32 recurrent cached full-vocabulary decision rows.
+const REFERENCE_CACHED_LOGITS_FILENAME: &str =
+    "muse-glimmer-30b-a4e59da-cached-prefix-logits.f32le";
+
+/// All 32 stateless teacher-forced full-vocabulary decision rows.
+const REFERENCE_TEACHER_LOGITS_FILENAME: &str =
+    "muse-glimmer-30b-a4e59da-teacher-prefix-logits.f32le";
+
+/// Cached-prefill last-token embedding/layer/final-norm trace.
+const REFERENCE_CACHED_PREFILL_HIDDEN_FILENAME: &str =
+    "muse-glimmer-30b-a4e59da-cached-prefill-hidden-last.f32le";
+
+/// First true recurrent-decode embedding/layer/final-norm trace.
+const REFERENCE_CACHED_DECODE_HIDDEN_FILENAME: &str =
+    "muse-glimmer-30b-a4e59da-cached-decode-1-hidden-last.f32le";
+
 /// Canonical digest of the nine independently pinned checkpoint artifacts.
 const REFERENCE_ARTIFACT_MANIFEST_SHA256: &str =
     "5b8265f3a0fe6b07668caa8e5b949667b8f26f664550dfcc86d35f93fb7971ab";
 
 /// JSON output identity to pin only after independent reference-run review.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
-const TRUSTED_MUSE_REFERENCE_JSON_SHA256: Option<&str> =
-    Some("eac57db2e05e4b9e9366a71ffc3fad71e1ff2f7fd176000950ad1d01d1cbfb33");
+const TRUSTED_MUSE_REFERENCE_JSON_SHA256: Option<&str> = None;
 
 /// Numerical prompt-logit identity to pin independently of the JSON claim.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
@@ -297,6 +331,22 @@ const TRUSTED_MUSE_REFERENCE_LOGITS_SHA256: Option<&str> =
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 const TRUSTED_MUSE_REFERENCE_HIDDEN_SHA256: Option<&str> =
     Some("6ce52668e97a612b0bf8c5adbb306eceda0d002aec8ed1726385b5dd11ab9c3f");
+
+/// Cached-prefix payload identity to pin after independent reference review.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+const TRUSTED_MUSE_REFERENCE_CACHED_LOGITS_SHA256: Option<&str> = None;
+
+/// Teacher-prefix payload identity to pin after independent reference review.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+const TRUSTED_MUSE_REFERENCE_TEACHER_LOGITS_SHA256: Option<&str> = None;
+
+/// Cached-prefill hidden identity to pin after independent reference review.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+const TRUSTED_MUSE_REFERENCE_CACHED_PREFILL_HIDDEN_SHA256: Option<&str> = None;
+
+/// Recurrent-decode hidden identity to pin after independent reference review.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+const TRUSTED_MUSE_REFERENCE_CACHED_DECODE_HIDDEN_SHA256: Option<&str> = None;
 
 /// Resolves the explicitly selected immutable local artifact directory.
 fn pinned_root() -> PathBuf {
@@ -735,6 +785,31 @@ struct MuseReferenceExecution {
     imported_module_bindings: BTreeMap<String, String>,
     authenticated_import_bytecode_policy: MuseReferenceBytecodePolicy,
     allocator_warmup_override: MuseReferenceWarmupOverride,
+    cache: MuseReferenceCacheContract,
+}
+
+/// Exact official DynamicCache topology and every short-run length/position.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MuseReferenceCacheContract {
+    class: String,
+    batch_size: usize,
+    layer_count: usize,
+    layer_types: Vec<String>,
+    sliding_layers: usize,
+    full_layers: usize,
+    sliding_window: usize,
+    key_value_heads: usize,
+    head_dimension: usize,
+    tensor_dtype: String,
+    tensor_device: String,
+    decision_logical_lengths: Vec<usize>,
+    decision_physical_lengths: Vec<usize>,
+    decision_position_ids: Vec<usize>,
+    decode_input_position_ids: Vec<usize>,
+    teacher_position_ids: Vec<usize>,
+    implicit_position_ids_verified: bool,
+    all_layers_validated_at_every_decision: bool,
 }
 
 /// Controls that force imports through authenticated source rather than stale bytecode.
@@ -906,6 +981,10 @@ struct MuseReferenceDiagnostic {
 struct MuseReferenceOutputs {
     prompt_logits: MuseReferencePromptLogits,
     hidden_last_trace: MuseReferenceHiddenTrace,
+    cached_prefix_logits: MuseReferenceLogitMatrix,
+    teacher_prefix_logits: MuseReferenceLogitMatrix,
+    cached_prefill_hidden_trace: MuseReferenceHiddenTrace,
+    cached_decode_hidden_trace: MuseReferenceHiddenTrace,
 }
 
 /// Full-vocabulary F32LE prompt-logit descriptor and integrity summary.
@@ -914,6 +993,8 @@ struct MuseReferenceOutputs {
 struct MuseReferencePromptLogits {
     relative_path: String,
     encoding: String,
+    source_dtype: String,
+    storage_dtype: String,
     shape: Vec<usize>,
     elements: usize,
     bytes: usize,
@@ -939,11 +1020,33 @@ struct MuseReferenceRankedLogit {
 struct MuseReferenceHiddenTrace {
     relative_path: String,
     encoding: String,
+    source_dtype: String,
+    storage_dtype: String,
     shape: Vec<usize>,
     elements: usize,
     bytes: usize,
     sha256: String,
+    finite: bool,
     labels: Vec<String>,
+    phase: String,
+    token_position: usize,
+}
+
+/// F32LE matrix retaining every full-vocabulary autoregressive decision row.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MuseReferenceLogitMatrix {
+    relative_path: String,
+    encoding: String,
+    source_dtype: String,
+    storage_dtype: String,
+    shape: Vec<usize>,
+    elements: usize,
+    bytes: usize,
+    sha256: String,
+    finite: bool,
+    row_position_ids: Vec<usize>,
+    row_top1_token_ids: Vec<u32>,
 }
 
 /// Cached and stateless top-1 evidence for 32 autoregressive prefixes.
@@ -961,6 +1064,7 @@ struct MuseReferenceGeneration {
     decoded_text: String,
     prompt_cached_cosine: f64,
     minimum_cached_stateless_prefix_cosine: f64,
+    minimum_cached_prefill_stateless_hidden_cosine: f64,
 }
 
 /// Binary16 perturbation evidence for one reference greedy decision.
@@ -1045,7 +1149,7 @@ fn validate_reference_schema(reference: &MuseOfficialReference) -> Result<(), St
         condition.then_some(()).ok_or_else(|| message.to_owned())
     };
     ensure(
-        reference.schema_version == 2,
+        reference.schema_version == 3,
         "reference schema version changed",
     )?;
     ensure(
@@ -1117,6 +1221,46 @@ fn validate_reference_schema(reference: &MuseOfficialReference) -> Result<(), St
             && execution.float32_matmul_precision == "highest"
             && execution.mps_per_process_memory_fraction == 1.0,
         "reference precision or mask controls changed",
+    )?;
+    let expected_layer_types = (0..52)
+        .map(|index| {
+            if index % 4 == 3 {
+                "full_attention"
+            } else {
+                "sliding_attention"
+            }
+            .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let expected_decision_lengths = (REFERENCE_TOKEN_IDS.len()
+        ..REFERENCE_TOKEN_IDS.len() + REFERENCE_GENERATED_TOKEN_IDS.len())
+        .collect::<Vec<_>>();
+    let expected_decision_positions = (REFERENCE_TOKEN_IDS.len() - 1
+        ..REFERENCE_TOKEN_IDS.len() - 1 + REFERENCE_GENERATED_TOKEN_IDS.len())
+        .collect::<Vec<_>>();
+    let cache = &execution.cache;
+    ensure(
+        cache.class == "transformers.cache_utils.DynamicCache"
+            && cache.batch_size == 1
+            && cache.layer_count == 52
+            && cache.layer_types == expected_layer_types
+            && cache.sliding_layers == 39
+            && cache.full_layers == 13
+            && cache.sliding_window == 2_048
+            && cache.key_value_heads == 2
+            && cache.head_dimension == 128
+            && cache.tensor_dtype == "float16"
+            && cache.tensor_device == "mps"
+            && cache.decision_logical_lengths == expected_decision_lengths
+            && cache.decision_physical_lengths == expected_decision_lengths
+            && cache.decision_position_ids == expected_decision_positions
+            && cache.decode_input_position_ids == expected_decision_positions[1..]
+            && cache.teacher_position_ids
+                == (0..REFERENCE_TOKEN_IDS.len() + REFERENCE_GENERATED_TOKEN_IDS.len() - 1)
+                    .collect::<Vec<_>>()
+            && cache.implicit_position_ids_verified
+            && cache.all_layers_validated_at_every_decision,
+        "reference cache geometry, lengths, or positions changed",
     )?;
     ensure(
         execution.integrity_threat_model == REFERENCE_INTEGRITY_THREAT_MODEL,
@@ -1319,6 +1463,8 @@ fn validate_reference_schema(reference: &MuseOfficialReference) -> Result<(), St
         logits.relative_path == REFERENCE_LOGITS_FILENAME
             && is_safe_filename(&logits.relative_path)
             && logits.encoding == "ieee754-f32-little-endian"
+            && logits.source_dtype == "float16"
+            && logits.storage_dtype == "float32"
             && logits.shape == [202_048]
             && logits.elements == 202_048
             && logits.bytes == 202_048 * size_of::<f32>()
@@ -1339,25 +1485,98 @@ fn validate_reference_schema(reference: &MuseOfficialReference) -> Result<(), St
         hidden.relative_path == REFERENCE_HIDDEN_FILENAME
             && is_safe_filename(&hidden.relative_path)
             && hidden.encoding == "ieee754-f32-little-endian"
+            && hidden.source_dtype == "float16"
+            && hidden.storage_dtype == "float32"
             && hidden.shape == [54, 6_656]
             && hidden.elements == 54 * 6_656
             && hidden.bytes == 54 * 6_656 * size_of::<f32>()
             && is_sha256(&hidden.sha256)
-            && hidden.labels == expected_hidden_trace_labels(),
+            && hidden.finite
+            && hidden.labels == expected_hidden_trace_labels()
+            && hidden.phase == "stateless_prompt"
+            && hidden.token_position == REFERENCE_TOKEN_IDS.len() - 1,
         "hidden-trace descriptor changed",
     )?;
+    let cached_prefill_hidden = &reference.outputs.cached_prefill_hidden_trace;
+    ensure(
+        cached_prefill_hidden.relative_path == REFERENCE_CACHED_PREFILL_HIDDEN_FILENAME
+            && is_safe_filename(&cached_prefill_hidden.relative_path)
+            && cached_prefill_hidden.encoding == "ieee754-f32-little-endian"
+            && cached_prefill_hidden.source_dtype == "float16"
+            && cached_prefill_hidden.storage_dtype == "float32"
+            && cached_prefill_hidden.shape == [54, 6_656]
+            && cached_prefill_hidden.elements == 54 * 6_656
+            && cached_prefill_hidden.bytes == 54 * 6_656 * size_of::<f32>()
+            && is_sha256(&cached_prefill_hidden.sha256)
+            && cached_prefill_hidden.finite
+            && cached_prefill_hidden.labels == expected_hidden_trace_labels()
+            && cached_prefill_hidden.phase == "cached_prefill"
+            && cached_prefill_hidden.token_position == REFERENCE_TOKEN_IDS.len() - 1,
+        "cached-prefill hidden-trace descriptor changed",
+    )?;
+    let cached_decode_hidden = &reference.outputs.cached_decode_hidden_trace;
+    ensure(
+        cached_decode_hidden.relative_path == REFERENCE_CACHED_DECODE_HIDDEN_FILENAME
+            && is_safe_filename(&cached_decode_hidden.relative_path)
+            && cached_decode_hidden.encoding == "ieee754-f32-little-endian"
+            && cached_decode_hidden.source_dtype == "float16"
+            && cached_decode_hidden.storage_dtype == "float32"
+            && cached_decode_hidden.shape == [54, 6_656]
+            && cached_decode_hidden.elements == 54 * 6_656
+            && cached_decode_hidden.bytes == 54 * 6_656 * size_of::<f32>()
+            && is_sha256(&cached_decode_hidden.sha256)
+            && cached_decode_hidden.finite
+            && cached_decode_hidden.labels == expected_hidden_trace_labels()
+            && cached_decode_hidden.phase == "cached_decode"
+            && cached_decode_hidden.token_position == REFERENCE_TOKEN_IDS.len(),
+        "cached-decode hidden-trace descriptor changed",
+    )?;
+    for (label, matrix, filename) in [
+        (
+            "cached-prefix",
+            &reference.outputs.cached_prefix_logits,
+            REFERENCE_CACHED_LOGITS_FILENAME,
+        ),
+        (
+            "teacher-prefix",
+            &reference.outputs.teacher_prefix_logits,
+            REFERENCE_TEACHER_LOGITS_FILENAME,
+        ),
+    ] {
+        ensure(
+            matrix.relative_path == filename
+                && is_safe_filename(&matrix.relative_path)
+                && matrix.encoding == "ieee754-f32-little-endian"
+                && matrix.source_dtype == "float16"
+                && matrix.storage_dtype == "float32"
+                && matrix.shape == [32, 202_048]
+                && matrix.elements == 32 * 202_048
+                && matrix.bytes == 32 * 202_048 * size_of::<f32>()
+                && is_sha256(&matrix.sha256)
+                && matrix.finite
+                && matrix.row_position_ids == expected_decision_positions
+                && matrix.row_top1_token_ids == REFERENCE_GENERATED_TOKEN_IDS,
+            if label == "cached-prefix" {
+                "cached-prefix logit descriptor changed"
+            } else {
+                "teacher-prefix logit descriptor changed"
+            },
+        )?;
+    }
 
     let generation = &reference.generation;
     ensure(
         generation.max_new_tokens == 32
             && generation.eos_token_ids == [200_001, 200_008]
-            && generation.token_ids.len() == 32
+            && generation.token_ids == REFERENCE_GENERATED_TOKEN_IDS
             && generation.cached_prefix_top1 == generation.token_ids
             && generation.stateless_prefix_top1 == generation.token_ids
             && generation.decisions.len() == 32
             && !generation.decoded_text.is_empty()
-            && generation.prompt_cached_cosine >= 0.999
-            && generation.minimum_cached_stateless_prefix_cosine >= 0.999,
+            && (0.999..=1.0 + 1.0e-12).contains(&generation.prompt_cached_cosine)
+            && (0.999..=1.0 + 1.0e-12).contains(&generation.minimum_cached_stateless_prefix_cosine)
+            && (0.999..=1.0 + 1.0e-12)
+                .contains(&generation.minimum_cached_prefill_stateless_hidden_cosine),
         "generation topology or cached/stateless parity changed",
     )?;
     ensure(
@@ -1429,13 +1648,15 @@ fn synthetic_reference_json() -> serde_json::Value {
             })
         })
         .collect::<Vec<_>>();
-    let token_ids = vec![7_u32; 32];
+    let token_ids = REFERENCE_GENERATED_TOKEN_IDS.to_vec();
     let decisions = (0..32)
         .map(|step| {
+            let top1 = token_ids[step];
+            let top2 = if top1 == 8 { 9 } else { 8 };
             serde_json::json!({
                 "step": step,
-                "top1_token_id": 7,
-                "top2_token_id": 8,
+                "top1_token_id": top1,
+                "top2_token_id": top2,
                 "top1_logit": 2.0,
                 "top2_logit": 1.0,
                 "margin": 1.0,
@@ -1452,7 +1673,7 @@ fn synthetic_reference_json() -> serde_json::Value {
     let top10 = (0..10)
         .map(|rank| {
             serde_json::json!({
-                "token_id": 7 + rank,
+                "token_id": if rank == 0 { REFERENCE_GENERATED_TOKEN_IDS[0] } else { rank },
                 "logit": 2.0 - f64::from(rank) * 0.125,
             })
         })
@@ -1470,7 +1691,7 @@ fn synthetic_reference_json() -> serde_json::Value {
     );
 
     serde_json::json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "repository": REPOSITORY,
         "revision": REVISION,
         "reference": {
@@ -1523,6 +1744,26 @@ fn synthetic_reference_json() -> serde_json::Value {
                 "expanded_device_types": ["mps"],
                 "hf_quantizer_present": false,
                 "restored": true,
+            },
+            "cache": {
+                "class": "transformers.cache_utils.DynamicCache",
+                "batch_size": 1,
+                "layer_count": 52,
+                "layer_types": (0..52).map(|index| if index % 4 == 3 { "full_attention" } else { "sliding_attention" }).collect::<Vec<_>>(),
+                "sliding_layers": 39,
+                "full_layers": 13,
+                "sliding_window": 2_048,
+                "key_value_heads": 2,
+                "head_dimension": 128,
+                "tensor_dtype": "float16",
+                "tensor_device": "mps",
+                "decision_logical_lengths": (67..99).collect::<Vec<_>>(),
+                "decision_physical_lengths": (67..99).collect::<Vec<_>>(),
+                "decision_position_ids": (66..98).collect::<Vec<_>>(),
+                "decode_input_position_ids": (67..98).collect::<Vec<_>>(),
+                "teacher_position_ids": (0..98).collect::<Vec<_>>(),
+                "implicit_position_ids_verified": true,
+                "all_layers_validated_at_every_decision": true,
             },
         },
         "environment": {
@@ -1599,6 +1840,8 @@ fn synthetic_reference_json() -> serde_json::Value {
             "prompt_logits": {
                 "relative_path": REFERENCE_LOGITS_FILENAME,
                 "encoding": "ieee754-f32-little-endian",
+                "source_dtype": "float16",
+                "storage_dtype": "float32",
                 "shape": [202_048],
                 "elements": 202_048,
                 "bytes": 202_048 * size_of::<f32>(),
@@ -1607,16 +1850,75 @@ fn synthetic_reference_json() -> serde_json::Value {
                 "sum": 0.0,
                 "l2_norm": 1.0,
                 "top10": top10,
-                "top1_token_id": 7,
+                "top1_token_id": REFERENCE_GENERATED_TOKEN_IDS[0],
             },
             "hidden_last_trace": {
                 "relative_path": REFERENCE_HIDDEN_FILENAME,
                 "encoding": "ieee754-f32-little-endian",
+                "source_dtype": "float16",
+                "storage_dtype": "float32",
                 "shape": [54, 6_656],
                 "elements": 54 * 6_656,
                 "bytes": 54 * 6_656 * size_of::<f32>(),
                 "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                "finite": true,
                 "labels": expected_hidden_trace_labels(),
+                "phase": "stateless_prompt",
+                "token_position": 66,
+            },
+            "cached_prefix_logits": {
+                "relative_path": REFERENCE_CACHED_LOGITS_FILENAME,
+                "encoding": "ieee754-f32-little-endian",
+                "source_dtype": "float16",
+                "storage_dtype": "float32",
+                "shape": [32, 202_048],
+                "elements": 32 * 202_048,
+                "bytes": 32 * 202_048 * size_of::<f32>(),
+                "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+                "finite": true,
+                "row_position_ids": (66..98).collect::<Vec<_>>(),
+                "row_top1_token_ids": token_ids.clone(),
+            },
+            "teacher_prefix_logits": {
+                "relative_path": REFERENCE_TEACHER_LOGITS_FILENAME,
+                "encoding": "ieee754-f32-little-endian",
+                "source_dtype": "float16",
+                "storage_dtype": "float32",
+                "shape": [32, 202_048],
+                "elements": 32 * 202_048,
+                "bytes": 32 * 202_048 * size_of::<f32>(),
+                "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+                "finite": true,
+                "row_position_ids": (66..98).collect::<Vec<_>>(),
+                "row_top1_token_ids": token_ids.clone(),
+            },
+            "cached_prefill_hidden_trace": {
+                "relative_path": REFERENCE_CACHED_PREFILL_HIDDEN_FILENAME,
+                "encoding": "ieee754-f32-little-endian",
+                "source_dtype": "float16",
+                "storage_dtype": "float32",
+                "shape": [54, 6_656],
+                "elements": 54 * 6_656,
+                "bytes": 54 * 6_656 * size_of::<f32>(),
+                "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+                "finite": true,
+                "labels": expected_hidden_trace_labels(),
+                "phase": "cached_prefill",
+                "token_position": 66,
+            },
+            "cached_decode_hidden_trace": {
+                "relative_path": REFERENCE_CACHED_DECODE_HIDDEN_FILENAME,
+                "encoding": "ieee754-f32-little-endian",
+                "source_dtype": "float16",
+                "storage_dtype": "float32",
+                "shape": [54, 6_656],
+                "elements": 54 * 6_656,
+                "bytes": 54 * 6_656 * size_of::<f32>(),
+                "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+                "finite": true,
+                "labels": expected_hidden_trace_labels(),
+                "phase": "cached_decode",
+                "token_position": 67,
             },
         },
         "generation": {
@@ -1631,6 +1933,7 @@ fn synthetic_reference_json() -> serde_json::Value {
             "decoded_text": "fixture",
             "prompt_cached_cosine": 1.0,
             "minimum_cached_stateless_prefix_cosine": 1.0,
+            "minimum_cached_prefill_stateless_hidden_cosine": 1.0,
         },
         "timings_seconds": {
             "load": 0.0,
@@ -1669,6 +1972,37 @@ fn muse_official_reference_schema_is_weight_independent_and_strict() {
     assert!(
         serde_json::from_value::<MuseOfficialReference>(unknown).is_err(),
         "unknown fields must fail closed"
+    );
+
+    let mut tampered = schema.clone();
+    tampered["outputs"]["cached_prefix_logits"]["bytes"] = serde_json::json!(1);
+    let reference: MuseOfficialReference =
+        serde_json::from_value(tampered).expect("structurally valid size tamper must deserialize");
+    assert!(
+        validate_reference_schema(&reference)
+            .expect_err("unsafe payload size must fail")
+            .contains("cached-prefix logit descriptor")
+    );
+
+    let mut tampered = schema.clone();
+    tampered["execution"]["cache"]["decision_position_ids"][1] = serde_json::json!(999);
+    let reference: MuseOfficialReference = serde_json::from_value(tampered)
+        .expect("structurally valid position tamper must deserialize");
+    assert!(
+        validate_reference_schema(&reference)
+            .expect_err("position tamper must fail")
+            .contains("cache geometry")
+    );
+
+    let mut tampered = schema.clone();
+    tampered["outputs"]["cached_decode_hidden_trace"]["source_dtype"] =
+        serde_json::json!("float32");
+    let reference: MuseOfficialReference =
+        serde_json::from_value(tampered).expect("structurally valid dtype tamper must deserialize");
+    assert!(
+        validate_reference_schema(&reference)
+            .expect_err("dtype tamper must fail")
+            .contains("cached-decode hidden-trace")
     );
 
     let mut tampered = schema;
@@ -1850,6 +2184,20 @@ fn ranked_token_ids(values: &[f32], count: usize) -> Vec<usize> {
     ids
 }
 
+/// Selects one maximum in linear time while preserving low-ID tie breaking.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn top1_token_id(values: &[f32]) -> usize {
+    assert!(!values.is_empty());
+    assert!(values.iter().all(|value| value.is_finite()));
+    let mut best = 0;
+    for candidate in 1..values.len() {
+        if values[candidate].total_cmp(&values[best]).is_gt() {
+            best = candidate;
+        }
+    }
+    best
+}
+
 /// Checks a recomputed floating summary with a conservative summation tolerance.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 fn assert_reference_close(label: &str, actual: f64, expected: f64) {
@@ -1860,9 +2208,59 @@ fn assert_reference_close(label: &str, actual: f64, expected: f64) {
     );
 }
 
+/// Fully authenticated numerical tensors from one strict external bundle.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+struct LoadedMuseReference {
+    reference: MuseOfficialReference,
+    prompt_logits: Vec<f32>,
+    stateless_prompt_hidden: Vec<f32>,
+    cached_prefix_logits: Vec<f32>,
+    teacher_prefix_logits: Vec<f32>,
+    cached_prefill_hidden: Vec<f32>,
+    cached_decode_hidden: Vec<f32>,
+}
+
+/// Reads, bounds, hashes, and decodes one exact F32LE tensor payload.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn read_reference_tensor(
+    root: &Path,
+    label: &str,
+    relative_path: &str,
+    expected_bytes: usize,
+    expected_elements: usize,
+    descriptor_sha256: &str,
+    trusted_sha256: Option<&str>,
+) -> Vec<f32> {
+    let path = root.join(relative_path);
+    let expected_bytes = u64::try_from(expected_bytes).expect("reference byte count fits u64");
+    assert_eq!(
+        bounded_reference_file_length(&path, expected_bytes),
+        expected_bytes,
+        "{label} length differs from its fixed schema bound"
+    );
+    let raw = read_reference_file_exact(&path, expected_bytes, expected_bytes);
+    let digest = sha256_hex(&raw);
+    assert_trusted_reference_digest(label, &digest, trusted_sha256);
+    assert_eq!(
+        digest, descriptor_sha256,
+        "trusted {label} identity differs from the JSON descriptor"
+    );
+    let values = decode_f32le(label, &raw);
+    assert_eq!(
+        values.len(),
+        expected_elements,
+        "{label} element count changed"
+    );
+    assert!(
+        values.iter().all(|value| value.is_finite()),
+        "{label} contains a non-finite value"
+    );
+    values
+}
+
 /// Reads and independently authenticates the complete external oracle bundle.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
-fn read_pinned_muse_reference() -> (MuseOfficialReference, Vec<f32>, Vec<f32>) {
+fn read_pinned_muse_reference() -> LoadedMuseReference {
     const MAXIMUM_JSON_BYTES: u64 = 1024 * 1024;
 
     let supplied_root = pinned_reference_root();
@@ -1887,6 +2285,10 @@ fn read_pinned_muse_reference() -> (MuseOfficialReference, Vec<f32>, Vec<f32>) {
         REFERENCE_JSON_FILENAME.to_owned(),
         REFERENCE_LOGITS_FILENAME.to_owned(),
         REFERENCE_HIDDEN_FILENAME.to_owned(),
+        REFERENCE_CACHED_LOGITS_FILENAME.to_owned(),
+        REFERENCE_TEACHER_LOGITS_FILENAME.to_owned(),
+        REFERENCE_CACHED_PREFILL_HIDDEN_FILENAME.to_owned(),
+        REFERENCE_CACHED_DECODE_HIDDEN_FILENAME.to_owned(),
     ]);
     let observed_entries = fs::read_dir(&root)
         .unwrap_or_else(|error| panic!("enumerate reference bundle {}: {error}", root.display()))
@@ -1933,23 +2335,15 @@ fn read_pinned_muse_reference() -> (MuseOfficialReference, Vec<f32>, Vec<f32>) {
     validate_reference_schema(&reference)
         .unwrap_or_else(|error| panic!("validate strict Muse reference: {error}"));
 
-    let logits_path = root.join(&reference.outputs.prompt_logits.relative_path);
-    let logits_bytes = u64::try_from(reference.outputs.prompt_logits.bytes)
-        .expect("prompt-logit byte count fits u64");
-    let raw_logits = read_reference_file_exact(&logits_path, logits_bytes, logits_bytes);
-    let logits_digest = sha256_hex(&raw_logits);
-    assert_trusted_reference_digest(
+    let logits = read_reference_tensor(
+        &root,
         "Muse reference prompt logits",
-        &logits_digest,
+        &reference.outputs.prompt_logits.relative_path,
+        reference.outputs.prompt_logits.bytes,
+        reference.outputs.prompt_logits.elements,
+        &reference.outputs.prompt_logits.sha256,
         TRUSTED_MUSE_REFERENCE_LOGITS_SHA256,
     );
-    assert_eq!(
-        logits_digest, reference.outputs.prompt_logits.sha256,
-        "trusted raw logit identity differs from the JSON descriptor"
-    );
-    let logits = decode_f32le("Muse prompt logits", &raw_logits);
-    assert_eq!(logits.len(), reference.outputs.prompt_logits.elements);
-    assert!(logits.iter().all(|value| value.is_finite()));
     let ranked = ranked_token_ids(&logits, 10);
     for (record, token_id) in reference
         .outputs
@@ -1982,24 +2376,97 @@ fn read_pinned_muse_reference() -> (MuseOfficialReference, Vec<f32>, Vec<f32>) {
         reference.outputs.prompt_logits.l2_norm,
     );
 
-    let hidden_path = root.join(&reference.outputs.hidden_last_trace.relative_path);
-    let hidden_bytes = u64::try_from(reference.outputs.hidden_last_trace.bytes)
-        .expect("hidden-trace byte count fits u64");
-    let raw_hidden = read_reference_file_exact(&hidden_path, hidden_bytes, hidden_bytes);
-    let hidden_digest = sha256_hex(&raw_hidden);
-    assert_trusted_reference_digest(
+    let hidden = read_reference_tensor(
+        &root,
         "Muse reference hidden trace",
-        &hidden_digest,
+        &reference.outputs.hidden_last_trace.relative_path,
+        reference.outputs.hidden_last_trace.bytes,
+        reference.outputs.hidden_last_trace.elements,
+        &reference.outputs.hidden_last_trace.sha256,
         TRUSTED_MUSE_REFERENCE_HIDDEN_SHA256,
     );
-    assert_eq!(
-        hidden_digest, reference.outputs.hidden_last_trace.sha256,
-        "trusted hidden identity differs from the JSON descriptor"
+    let cached_prefix_logits = read_reference_tensor(
+        &root,
+        "Muse reference cached-prefix logits",
+        &reference.outputs.cached_prefix_logits.relative_path,
+        reference.outputs.cached_prefix_logits.bytes,
+        reference.outputs.cached_prefix_logits.elements,
+        &reference.outputs.cached_prefix_logits.sha256,
+        TRUSTED_MUSE_REFERENCE_CACHED_LOGITS_SHA256,
     );
-    let hidden = decode_f32le("Muse hidden trace", &raw_hidden);
-    assert_eq!(hidden.len(), reference.outputs.hidden_last_trace.elements);
-    assert!(hidden.iter().all(|value| value.is_finite()));
-    (reference, logits, hidden)
+    let teacher_prefix_logits = read_reference_tensor(
+        &root,
+        "Muse reference teacher-prefix logits",
+        &reference.outputs.teacher_prefix_logits.relative_path,
+        reference.outputs.teacher_prefix_logits.bytes,
+        reference.outputs.teacher_prefix_logits.elements,
+        &reference.outputs.teacher_prefix_logits.sha256,
+        TRUSTED_MUSE_REFERENCE_TEACHER_LOGITS_SHA256,
+    );
+    let cached_prefill_hidden = read_reference_tensor(
+        &root,
+        "Muse reference cached-prefill hidden trace",
+        &reference.outputs.cached_prefill_hidden_trace.relative_path,
+        reference.outputs.cached_prefill_hidden_trace.bytes,
+        reference.outputs.cached_prefill_hidden_trace.elements,
+        &reference.outputs.cached_prefill_hidden_trace.sha256,
+        TRUSTED_MUSE_REFERENCE_CACHED_PREFILL_HIDDEN_SHA256,
+    );
+    let cached_decode_hidden = read_reference_tensor(
+        &root,
+        "Muse reference cached-decode hidden trace",
+        &reference.outputs.cached_decode_hidden_trace.relative_path,
+        reference.outputs.cached_decode_hidden_trace.bytes,
+        reference.outputs.cached_decode_hidden_trace.elements,
+        &reference.outputs.cached_decode_hidden_trace.sha256,
+        TRUSTED_MUSE_REFERENCE_CACHED_DECODE_HIDDEN_SHA256,
+    );
+    let prompt_cached_cosine = cosine_similarity(&logits, &cached_prefix_logits[..202_048]);
+    assert!(
+        prompt_cached_cosine >= 0.999,
+        "official stateless/cached prompt cosine was {prompt_cached_cosine}"
+    );
+    for (row, (stateless, cached)) in hidden
+        .chunks_exact(6_656)
+        .zip(cached_prefill_hidden.chunks_exact(6_656))
+        .enumerate()
+    {
+        let cosine = cosine_similarity(stateless, cached);
+        assert!(
+            cosine >= 0.999,
+            "official stateless/cached-prefill hidden cosine at row {row} was {cosine}"
+        );
+    }
+    for (step, (cached_row, teacher_row)) in cached_prefix_logits
+        .chunks_exact(202_048)
+        .zip(teacher_prefix_logits.chunks_exact(202_048))
+        .enumerate()
+    {
+        assert_eq!(
+            top1_token_id(cached_row),
+            usize::try_from(REFERENCE_GENERATED_TOKEN_IDS[step]).unwrap(),
+            "official cached-prefix top-1 changed at step {step}"
+        );
+        assert_eq!(
+            top1_token_id(teacher_row),
+            usize::try_from(REFERENCE_GENERATED_TOKEN_IDS[step]).unwrap(),
+            "official teacher-prefix top-1 changed at step {step}"
+        );
+        let cosine = cosine_similarity(cached_row, teacher_row);
+        assert!(
+            cosine >= 0.999,
+            "official cached/teacher cosine at step {step} was {cosine}"
+        );
+    }
+    LoadedMuseReference {
+        reference,
+        prompt_logits: logits,
+        stateless_prompt_hidden: hidden,
+        cached_prefix_logits,
+        teacher_prefix_logits,
+        cached_prefill_hidden,
+        cached_decode_hidden,
+    }
 }
 
 /// Materializes one Metal tensor as synchronized F32 acceptance values.
@@ -2045,6 +2512,279 @@ fn all_valid_metal_mask(
         TensorData::new(vec![true; sequence], [1, sequence]),
         device,
     ))
+}
+
+/// Forces adapter discovery and one synchronized storage round trip.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn assert_metal_backend_available(device: &<Metal as burn::tensor::backend::BackendTypes>::Device) {
+    let probe = Tensor::<Metal, 1>::zeros([1], device)
+        .to_data()
+        .to_vec::<f32>()
+        .expect("the Metal acceptance backend must expose F32 storage");
+    assert_eq!(probe, [0.0]);
+}
+
+/// Borrows the concrete Muse state selected by automatic model dispatch.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn muse_state(state: &AutoCausalDecodeState<Metal>) -> &MuseGlimmerDecodeState<Metal> {
+    match state {
+        AutoCausalDecodeState::MuseGlimmer(state) => state,
+        _ => panic!("automatic decode state must be Muse-Glimmer"),
+    }
+}
+
+/// Proves the complete Burn cache allocation, schedule, dtype, and retention state.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn assert_muse_cache_geometry(
+    state: &AutoCausalDecodeState<Metal>,
+    expected_length: usize,
+    expected_capacity: usize,
+) {
+    assert_eq!(state.capacity(), expected_capacity);
+    assert_eq!(state.lengths(), &[expected_length]);
+    let state = muse_state(state);
+    assert_eq!(state.sliding_window(), Some(expected_capacity));
+    let tensors = state.tensor_state();
+    assert_eq!(tensors.main().native_kv_count(), 2);
+    assert_eq!(tensors.main().recurrent_count(), 0);
+    let sliding = tensors.main().native_kv(0).expect("Muse sliding KV group");
+    let full = tensors.main().native_kv(1).expect("Muse full KV group");
+    let sliding_spec = sliding.spec();
+    assert_eq!(sliding_spec.layers(), 39);
+    assert_eq!(sliding_spec.key_value_heads(), 2);
+    assert_eq!(sliding_spec.head_dimension(), 128);
+    assert_eq!(sliding_spec.storage(), KvCacheStorage::MirroredSlidingRing);
+    assert_eq!(sliding_spec.dtype(), DType::F16);
+    assert_eq!(sliding_spec.staging_capacity(), 0);
+    assert_eq!(sliding.committed_time_slots(), expected_capacity * 2);
+    let full_spec = full.spec();
+    assert_eq!(full_spec.layers(), 13);
+    assert_eq!(full_spec.key_value_heads(), 2);
+    assert_eq!(full_spec.head_dimension(), 128);
+    assert_eq!(full_spec.storage(), KvCacheStorage::Full);
+    assert_eq!(full_spec.dtype(), DType::F16);
+    assert_eq!(full_spec.staging_capacity(), 0);
+    assert_eq!(full.committed_time_slots(), expected_capacity);
+
+    let mut sliding_layer = 0;
+    let mut full_layer = 0;
+    for model_layer in 0..52 {
+        let expected = if model_layer % 4 == 3 {
+            let slot = MuseGlimmerLayerCache::Full {
+                group: 1,
+                layer: full_layer,
+            };
+            full_layer += 1;
+            slot
+        } else {
+            let slot = MuseGlimmerLayerCache::Sliding {
+                group: 0,
+                layer: sliding_layer,
+            };
+            sliding_layer += 1;
+            slot
+        };
+        assert_eq!(state.layer_cache(model_layer), Some(expected));
+    }
+    assert_eq!(sliding_layer, 39);
+    assert_eq!(full_layer, 13);
+
+    for (label, cache, layers, time_slots) in [
+        ("sliding", sliding, 39, expected_capacity * 2),
+        ("full", full, 13, expected_capacity),
+    ] {
+        for layer in 0..layers {
+            let keys = cache.keys(layer).expect("Muse cache keys");
+            let values = cache.values(layer).expect("Muse cache values");
+            assert_eq!(keys.dims(), [1, 2, time_slots, 128], "{label} keys");
+            assert_eq!(values.dims(), [1, 2, time_slots, 128], "{label} values");
+            assert_eq!(keys.dtype(), DType::F16, "{label} keys dtype");
+            assert_eq!(values.dtype(), DType::F16, "{label} values dtype");
+            let retained = cache
+                .read_sequence(layer, 0, expected_length)
+                .expect("read Muse cache retention");
+            assert_eq!(retained.retained_positions(), 0..expected_length);
+            assert_eq!(retained.segments().len(), usize::from(expected_length > 0));
+            if let Some(segment) = retained.segments().first() {
+                assert_eq!(segment.absolute_positions(), 0..expected_length);
+                assert_eq!(segment.keys().dims(), [1, 2, expected_length, 128]);
+                assert_eq!(segment.values().dims(), [1, 2, expected_length, 128]);
+                assert_eq!(segment.keys().dtype(), DType::F16);
+                assert_eq!(segment.values().dtype(), DType::F16);
+            }
+        }
+    }
+}
+
+/// Captures the clean Rust source, exact trees, toolchain, target, and feature set.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+#[derive(Debug, serde::Serialize)]
+struct MuseRustAcceptanceProvenance {
+    git_head: String,
+    git_tree: String,
+    transformers_tree: String,
+    transformers_tree_dirty: bool,
+    test_source_sha256: String,
+    cargo_package_rust_version: String,
+    rustc_verbose: String,
+    profile: String,
+    target: String,
+    features: Vec<String>,
+}
+
+/// Runs one bounded source-control or toolchain query and returns trimmed UTF-8.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn checked_command_output(program: &str, arguments: &[&str], directory: &Path) -> String {
+    let output = Command::new(program)
+        .args(arguments)
+        .current_dir(directory)
+        .output()
+        .unwrap_or_else(|error| panic!("run {program} {arguments:?}: {error}"));
+    assert!(
+        output.status.success(),
+        "{program} {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("provenance command output must be UTF-8")
+        .trim()
+        .to_owned()
+}
+
+/// Requires a clean transformer subtree and builds the reproducibility record.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn rust_acceptance_provenance() -> MuseRustAcceptanceProvenance {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repository = crate_root
+        .parent()
+        .and_then(Path::parent)
+        .expect("transformer crate must live at repository/crates/transformers");
+    let status = checked_command_output(
+        "git",
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            "crates/transformers",
+        ],
+        repository,
+    );
+    assert!(
+        status.is_empty(),
+        "Muse acceptance requires a committed, clean crates/transformers subtree: {status}"
+    );
+    let features = [
+        ("std", cfg!(feature = "std")),
+        ("metal", cfg!(feature = "metal")),
+        ("tokenizers", cfg!(feature = "tokenizers")),
+        ("autodiff", cfg!(feature = "autodiff")),
+        ("cpu", cfg!(feature = "cpu")),
+        ("flex", cfg!(feature = "flex")),
+        ("cuda", cfg!(feature = "cuda")),
+        ("rocm", cfg!(feature = "rocm")),
+        ("chat-templates", cfg!(feature = "chat-templates")),
+        ("kernel-tracing", cfg!(feature = "kernel-tracing")),
+        (
+            "attention-kernel-tracing",
+            cfg!(feature = "attention-kernel-tracing"),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(name, enabled)| enabled.then_some(name.to_owned()))
+    .collect::<Vec<_>>();
+    assert_eq!(features, ["std", "metal", "tokenizers"]);
+    let compiled_test_source = include_bytes!("muse_glimmer_artifacts.rs");
+    let test_source_path = crate_root.join("tests/muse_glimmer_artifacts.rs");
+    let test_source_metadata = fs::symlink_metadata(&test_source_path)
+        .unwrap_or_else(|error| panic!("inspect {}: {error}", test_source_path.display()));
+    assert!(
+        test_source_metadata.is_file()
+            && !test_source_metadata.file_type().is_symlink()
+            && test_source_metadata.len() <= 1024 * 1024,
+        "acceptance test source must be a bounded regular non-symlink file"
+    );
+    let current_test_source = fs::read(&test_source_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", test_source_path.display()));
+    assert_eq!(
+        sha256_hex(&current_test_source),
+        sha256_hex(compiled_test_source),
+        "running Muse acceptance binary was compiled from stale test source"
+    );
+    MuseRustAcceptanceProvenance {
+        git_head: checked_command_output("git", &["rev-parse", "HEAD"], repository),
+        git_tree: checked_command_output("git", &["rev-parse", "HEAD^{tree}"], repository),
+        transformers_tree: checked_command_output(
+            "git",
+            &["rev-parse", "HEAD:crates/transformers"],
+            repository,
+        ),
+        transformers_tree_dirty: false,
+        test_source_sha256: sha256_hex(compiled_test_source),
+        cargo_package_rust_version: env!("CARGO_PKG_RUST_VERSION").to_owned(),
+        rustc_verbose: checked_command_output("rustc", &["-Vv"], repository),
+        profile: if cfg!(debug_assertions) {
+            "debug".to_owned()
+        } else {
+            "release".to_owned()
+        },
+        target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        features,
+    }
+}
+
+/// Materializes exactly one last-token row from every F16 hidden diagnostic.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn metal_hidden_trace(
+    label: &str,
+    hidden_states: &[Tensor<Metal, 3>],
+    sequence: usize,
+) -> Vec<f32> {
+    assert_eq!(hidden_states.len(), 54, "{label} diagnostic row count");
+    for (row, hidden) in hidden_states.iter().enumerate() {
+        assert_eq!(hidden.dims(), [1, sequence, 6_656], "{label} row {row}");
+        assert_eq!(hidden.dtype(), DType::F16, "{label} row {row} dtype");
+    }
+    let trace = Tensor::cat(
+        hidden_states
+            .iter()
+            .map(|hidden| {
+                hidden
+                    .clone()
+                    .slice([0..1, sequence - 1..sequence, 0..6_656])
+            })
+            .collect(),
+        0,
+    );
+    assert_eq!(trace.dtype(), DType::F16);
+    metal_values(label, &trace)
+}
+
+/// Requires row-wise official/Burn hidden parity and returns the minimum cosine.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn assert_hidden_trace_parity(
+    label: &str,
+    actual: &[f32],
+    expected: &[f32],
+    labels: &[String],
+) -> f64 {
+    assert_eq!(actual.len(), expected.len());
+    assert_eq!(labels.len(), 54);
+    let mut minimum = f64::INFINITY;
+    for (row, ((actual, expected), semantic_label)) in actual
+        .chunks_exact(6_656)
+        .zip(expected.chunks_exact(6_656))
+        .zip(labels)
+        .enumerate()
+    {
+        let cosine = cosine_similarity(actual, expected);
+        assert!(
+            cosine >= 0.999,
+            "{label} cosine for row {row} ({semantic_label}) was {cosine}"
+        );
+        minimum = minimum.min(cosine);
+    }
+    minimum
 }
 
 /// Proves the exact committed config, layer schedule, generation policy, and mapping.
@@ -2517,9 +3257,10 @@ fn loads_pinned_muse_glimmer_f16_and_audits_streaming() {
     let root = supplied_root
         .canonicalize()
         .unwrap_or_else(|error| panic!("canonicalize {}: {error}", supplied_root.display()));
+    let device = Default::default();
+    assert_metal_backend_available(&device);
     assert_control_files(&root);
     assert_shard_file_hashes(&root);
-    let device = Default::default();
     let loaded = AutoCausalLm::<Metal>::load_local(
         &root,
         &AutoLoadOptions {
@@ -2608,6 +3349,14 @@ fn loads_pinned_muse_glimmer_f16_and_audits_streaming() {
     assert_eq!(encoding.token_ids()[0], SMOKE_TOKEN_IDS);
 }
 
+/// Fails quickly when macOS does not expose a usable Metal adapter.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+#[test]
+#[ignore = "requires an available Metal adapter"]
+fn initializes_muse_metal_acceptance_backend() {
+    assert_metal_backend_available(&Default::default());
+}
+
 /// Compares Burn Metal with the authenticated official eager/F16 MPS oracle.
 ///
 /// In addition to full-vocabulary prompt logits, this checks every semantic
@@ -2618,15 +3367,24 @@ fn loads_pinned_muse_glimmer_f16_and_audits_streaming() {
 #[test]
 #[ignore = "requires reviewed Muse oracle hashes, pinned weights, Metal, and about 70 GiB free unified memory"]
 fn matches_pinned_muse_glimmer_official_f16_reference_on_metal() {
-    let (reference, reference_logits, reference_hidden) = read_pinned_muse_reference();
+    let oracle = read_pinned_muse_reference();
+    let reference = &oracle.reference;
+    let provenance = rust_acceptance_provenance();
+    assert_eq!(provenance.cargo_package_rust_version, "1.92");
+    assert_eq!(provenance.profile, "release");
+    eprintln!(
+        "muse_rust_acceptance_provenance={}",
+        serde_json::to_string(&provenance).expect("serialize Rust acceptance provenance")
+    );
     let supplied_root = pinned_root();
     let root = supplied_root
         .canonicalize()
         .unwrap_or_else(|error| panic!("canonicalize {}: {error}", supplied_root.display()));
+    let device = Default::default();
+    assert_metal_backend_available(&device);
     assert_control_files(&root);
     assert_shard_file_hashes(&root);
 
-    let device = Default::default();
     let loaded = AutoCausalLm::<Metal>::load_local(
         &root,
         &AutoLoadOptions {
@@ -2682,10 +3440,11 @@ fn matches_pinned_muse_glimmer_official_f16_reference_on_metal() {
         )
         .expect("run stateless Burn Muse prompt inference");
     assert_eq!(stateless.logits.dims(), [1, 1, 202_048]);
+    assert_eq!(stateless.logits.dtype(), DType::F16);
     assert_eq!(stateless.hidden_states.len(), 54);
     let actual_logits = metal_values("Muse official-reference logits", &stateless.logits);
     assert!(actual_logits.iter().all(|value| value.is_finite()));
-    let prompt_cosine = cosine_similarity(&actual_logits, &reference_logits);
+    let prompt_cosine = cosine_similarity(&actual_logits, &oracle.prompt_logits);
     assert!(
         prompt_cosine >= 0.999,
         "official/Burn Muse prompt-logit cosine {prompt_cosine} is below 0.999"
@@ -2702,39 +3461,17 @@ fn matches_pinned_muse_glimmer_official_f16_reference_on_metal() {
         reference.outputs.prompt_logits.top1_token_id
     );
 
-    let hidden_tensor = Tensor::cat(
-        stateless
-            .hidden_states
-            .iter()
-            .map(|hidden| {
-                hidden
-                    .clone()
-                    .slice([0..1, prompt_length - 1..prompt_length, 0..6_656])
-            })
-            .collect(),
-        0,
+    let actual_hidden = metal_hidden_trace(
+        "Muse stateless prompt hidden trace",
+        &stateless.hidden_states,
+        prompt_length,
     );
-    let actual_hidden = metal_values("Muse official-reference hidden trace", &hidden_tensor);
-    assert_eq!(actual_hidden.len(), reference_hidden.len());
-    let hidden_cosines = actual_hidden
-        .chunks_exact(6_656)
-        .zip(reference_hidden.chunks_exact(6_656))
-        .map(|(actual, expected)| cosine_similarity(actual, expected))
-        .collect::<Vec<_>>();
-    assert_eq!(hidden_cosines.len(), 54);
-    for ((label, cosine), row) in reference
-        .outputs
-        .hidden_last_trace
-        .labels
-        .iter()
-        .zip(hidden_cosines.iter().copied())
-        .zip(0..)
-    {
-        assert!(
-            cosine >= 0.999,
-            "official/Burn Muse hidden cosine for row {row} ({label}) was {cosine}"
-        );
-    }
+    let minimum_hidden_cosine = assert_hidden_trace_parity(
+        "official/Burn Muse stateless prompt hidden",
+        &actual_hidden,
+        &oracle.stateless_prompt_hidden,
+        &reference.outputs.hidden_last_trace.labels,
+    );
 
     let mut state = loaded
         .model()
@@ -2745,6 +3482,8 @@ fn matches_pinned_muse_glimmer_official_f16_reference_on_metal() {
             &device,
         )
         .expect("allocate Muse reference decode state");
+    let cache_capacity = prompt_length + reference.generation.max_new_tokens;
+    assert_muse_cache_geometry(&state, 0, cache_capacity);
     let mut cached = loaded
         .model()
         .prefill(
@@ -2754,18 +3493,40 @@ fn matches_pinned_muse_glimmer_official_f16_reference_on_metal() {
                 position_ids: None,
             },
             &mut state,
-            &ForwardOptions::default(),
+            &diagnostics,
         )
         .expect("prefill the official-reference Muse prompt");
-    assert_eq!(state.lengths(), &[prompt_length]);
+    assert_muse_cache_geometry(&state, prompt_length, cache_capacity);
+    assert_eq!(cached.logits.dims(), [1, 1, 202_048]);
+    assert_eq!(cached.logits.dtype(), DType::F16);
     let cached_prompt_logits = metal_values("Muse cached prompt logits", &cached.logits);
-    let cached_prompt_cosine = cosine_similarity(&cached_prompt_logits, &reference_logits);
+    let cached_prompt_cosine = cosine_similarity(&cached_prompt_logits, &oracle.prompt_logits);
     assert!(
         cached_prompt_cosine >= 0.999,
         "official/Burn Muse cached prompt cosine {cached_prompt_cosine} is below 0.999"
     );
+    let actual_cached_prefill_hidden = metal_hidden_trace(
+        "Muse cached-prefill hidden trace",
+        &cached.hidden_states,
+        prompt_length,
+    );
+    let minimum_cached_prefill_hidden_cosine = assert_hidden_trace_parity(
+        "official/Burn Muse cached-prefill hidden",
+        &actual_cached_prefill_hidden,
+        &oracle.cached_prefill_hidden,
+        &reference.outputs.cached_prefill_hidden_trace.labels,
+    );
+    let minimum_burn_prefill_stateless_hidden_cosine = assert_hidden_trace_parity(
+        "Burn cached-prefill/stateless hidden",
+        &actual_cached_prefill_hidden,
+        &actual_hidden,
+        &reference.outputs.cached_prefill_hidden_trace.labels,
+    );
 
     let mut generated = Vec::with_capacity(reference.generation.max_new_tokens);
+    let mut burn_cached_logits = Vec::with_capacity(oracle.cached_prefix_logits.len());
+    let mut minimum_cached_official_cosine = f64::INFINITY;
+    let mut minimum_decode_hidden_cosine = None;
     for (step, expected_token) in reference
         .generation
         .cached_prefix_top1
@@ -2773,20 +3534,40 @@ fn matches_pinned_muse_glimmer_official_f16_reference_on_metal() {
         .copied()
         .enumerate()
     {
-        let selected = cached
-            .logits
-            .clone()
-            .argmax(2)
-            .to_data()
-            .to_vec::<i32>()
-            .expect("cached Metal top-1 token must use i32 storage");
-        let selected = u32::try_from(selected[0]).expect("nonnegative Muse token ID");
+        let expected_length = reference.execution.cache.decision_logical_lengths[step];
+        assert_eq!(
+            reference.execution.cache.decision_position_ids[step],
+            expected_length - 1
+        );
+        assert_muse_cache_geometry(&state, expected_length, cache_capacity);
+        assert_eq!(cached.logits.dims(), [1, 1, 202_048]);
+        assert_eq!(cached.logits.dtype(), DType::F16);
+        let cached_row = metal_values(&format!("Muse cached logits step {step}"), &cached.logits);
+        let official_cached_row =
+            &oracle.cached_prefix_logits[step * 202_048..(step + 1) * 202_048];
+        let cached_official_cosine = cosine_similarity(&cached_row, official_cached_row);
+        assert!(
+            cached_official_cosine >= 0.999,
+            "official/Burn Muse cached cosine at step {step} was {cached_official_cosine}"
+        );
+        minimum_cached_official_cosine = minimum_cached_official_cosine.min(cached_official_cosine);
+        let selected =
+            u32::try_from(top1_token_id(&cached_row)).expect("Muse vocabulary index must fit u32");
         assert_eq!(
             selected, expected_token,
             "Burn Muse cached greedy token changed at step {step}"
         );
+        burn_cached_logits.extend_from_slice(&cached_row);
         generated.push(selected);
         if step + 1 < reference.generation.max_new_tokens {
+            assert_eq!(
+                reference.execution.cache.decode_input_position_ids[step],
+                expected_length
+            );
+            let decode_options = ForwardOptions {
+                hidden_states: step == 0,
+                ..ForwardOptions::default()
+            };
             cached = loaded
                 .model()
                 .decode(
@@ -2799,16 +3580,37 @@ fn matches_pinned_muse_glimmer_official_f16_reference_on_metal() {
                         position_ids: None,
                     },
                     &mut state,
-                    &ForwardOptions::default(),
+                    &decode_options,
                 )
                 .unwrap_or_else(|error| panic!("Muse cached decode step {step}: {error}"));
+            assert_muse_cache_geometry(&state, expected_length + 1, cache_capacity);
+            if step == 0 {
+                let actual_decode_hidden = metal_hidden_trace(
+                    "Muse first recurrent-decode hidden trace",
+                    &cached.hidden_states,
+                    1,
+                );
+                minimum_decode_hidden_cosine = Some(assert_hidden_trace_parity(
+                    "official/Burn Muse first recurrent-decode hidden",
+                    &actual_decode_hidden,
+                    &oracle.cached_decode_hidden,
+                    &reference.outputs.cached_decode_hidden_trace.labels,
+                ));
+            } else {
+                assert!(cached.hidden_states.is_empty());
+            }
         }
     }
+    assert_eq!(generated, REFERENCE_GENERATED_TOKEN_IDS);
     assert_eq!(generated, reference.generation.token_ids);
-    assert_eq!(
-        state.lengths(),
-        &[prompt_length + reference.generation.max_new_tokens - 1]
+    assert_eq!(burn_cached_logits.len(), oracle.cached_prefix_logits.len());
+    assert_muse_cache_geometry(
+        &state,
+        prompt_length + reference.generation.max_new_tokens - 1,
+        cache_capacity,
     );
+    let minimum_decode_hidden_cosine =
+        minimum_decode_hidden_cosine.expect("first recurrent-decode trace must be checked");
 
     let mut teacher_ids = prompt_ids;
     teacher_ids.extend(
@@ -2821,6 +3623,10 @@ fn matches_pinned_muse_glimmer_official_f16_reference_on_metal() {
     let prediction_positions = (prompt_length - 1
         ..prompt_length - 1 + reference.generation.max_new_tokens)
         .collect::<Vec<_>>();
+    assert_eq!(
+        prediction_positions,
+        reference.execution.cache.decision_position_ids
+    );
     let teacher = loaded
         .model()
         .forward(
@@ -2842,15 +3648,39 @@ fn matches_pinned_muse_glimmer_official_f16_reference_on_metal() {
         teacher.logits.dims(),
         [1, reference.generation.max_new_tokens, 202_048]
     );
-    let stateless_top1 = teacher
-        .logits
-        .argmax(2)
-        .to_data()
-        .to_vec::<i32>()
-        .expect("teacher-forced Metal top-1 tokens must use i32 storage")
-        .into_iter()
-        .map(|token| u32::try_from(token).expect("nonnegative Muse token ID"))
-        .collect::<Vec<_>>();
+    assert_eq!(teacher.logits.dtype(), DType::F16);
+    let burn_teacher_logits = metal_values("Muse teacher-prefix logits", &teacher.logits);
+    assert_eq!(
+        burn_teacher_logits.len(),
+        oracle.teacher_prefix_logits.len()
+    );
+    let mut stateless_top1 = Vec::with_capacity(reference.generation.max_new_tokens);
+    let mut minimum_teacher_official_cosine = f64::INFINITY;
+    let mut minimum_burn_cached_teacher_cosine = f64::INFINITY;
+    for (step, ((teacher_row, official_teacher_row), cached_row)) in burn_teacher_logits
+        .chunks_exact(202_048)
+        .zip(oracle.teacher_prefix_logits.chunks_exact(202_048))
+        .zip(burn_cached_logits.chunks_exact(202_048))
+        .enumerate()
+    {
+        let teacher_official_cosine = cosine_similarity(teacher_row, official_teacher_row);
+        assert!(
+            teacher_official_cosine >= 0.999,
+            "official/Burn Muse teacher cosine at step {step} was {teacher_official_cosine}"
+        );
+        minimum_teacher_official_cosine =
+            minimum_teacher_official_cosine.min(teacher_official_cosine);
+        let cached_teacher_cosine = cosine_similarity(cached_row, teacher_row);
+        assert!(
+            cached_teacher_cosine >= 0.999,
+            "Burn cached/teacher Muse cosine at step {step} was {cached_teacher_cosine}"
+        );
+        minimum_burn_cached_teacher_cosine =
+            minimum_burn_cached_teacher_cosine.min(cached_teacher_cosine);
+        stateless_top1.push(
+            u32::try_from(top1_token_id(teacher_row)).expect("Muse vocabulary index must fit u32"),
+        );
+    }
     assert_eq!(
         stateless_top1, reference.generation.stateless_prefix_top1,
         "Burn Muse stateless predictions differ from the official reference"
@@ -2860,11 +3690,17 @@ fn matches_pinned_muse_glimmer_official_f16_reference_on_metal() {
         "Burn Muse cached and stateless predictions differ"
     );
 
-    let minimum_hidden_cosine = hidden_cosines.iter().copied().fold(f64::INFINITY, f64::min);
     eprintln!(
         "Muse-Glimmer-30B official F16 parity: prompt_cosine={prompt_cosine:.9}, \
          cached_prompt_cosine={cached_prompt_cosine:.9}, \
-         minimum_hidden_cosine={minimum_hidden_cosine:.9}, greedy_tokens={}",
+         minimum_hidden_cosine={minimum_hidden_cosine:.9}, \
+         minimum_cached_prefill_hidden_cosine={minimum_cached_prefill_hidden_cosine:.9}, \
+         minimum_burn_prefill_stateless_hidden_cosine={minimum_burn_prefill_stateless_hidden_cosine:.9}, \
+         minimum_decode_hidden_cosine={minimum_decode_hidden_cosine:.9}, \
+         minimum_cached_official_cosine={minimum_cached_official_cosine:.9}, \
+         minimum_teacher_official_cosine={minimum_teacher_official_cosine:.9}, \
+         minimum_burn_cached_teacher_cosine={minimum_burn_cached_teacher_cosine:.9}, \
+         greedy_tokens={}",
         generated.len()
     );
 }

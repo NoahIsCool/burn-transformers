@@ -128,12 +128,19 @@ class ReferenceHelperTests(unittest.TestCase):
 
     def test_binary_descriptor_binds_shape_length_and_digest(self) -> None:
         payload = struct.pack("<ffff", 1.0, 2.0, 3.0, 4.0)
-        descriptor = REFERENCE.binary_descriptor("fixture.f32le", payload, [2, 2])
+        descriptor = REFERENCE.binary_descriptor(
+            "fixture.f32le", payload, [2, 2], source_dtype="float16"
+        )
         self.assertEqual(descriptor["elements"], 4)
         self.assertEqual(descriptor["bytes"], 16)
         self.assertEqual(descriptor["sha256"], REFERENCE.sha256_bytes(payload))
+        self.assertEqual(descriptor["source_dtype"], "float16")
+        self.assertEqual(descriptor["storage_dtype"], "float32")
+        self.assertTrue(descriptor["finite"])
         with self.assertRaisesRegex(ValueError, "inconsistent shape"):
-            REFERENCE.binary_descriptor("fixture.f32le", payload, [3])
+            REFERENCE.binary_descriptor(
+                "fixture.f32le", payload, [3], source_dtype="float16"
+            )
 
     def test_binary16_stability_requires_a_strict_two_sided_budget(self) -> None:
         record = REFERENCE.decision_record(0, [7, 6], [8.046875, 7.96484375], [8])
@@ -221,6 +228,8 @@ class ReferenceHelperTests(unittest.TestCase):
         class FakeTensor:
             def __init__(self, shape: list[int]) -> None:
                 self.shape = shape
+                self.dtype = "float16"
+                self.device = types.SimpleNamespace(type="mps")
 
             def __getitem__(self, _index: object) -> "FakeTensor":
                 return self
@@ -268,7 +277,8 @@ class ReferenceHelperTests(unittest.TestCase):
             norm=final_norm,
         )
         fake_torch = types.SimpleNamespace(
-            stack=lambda rows: FakeTensor([len(rows), REFERENCE.HIDDEN_SIZE])
+            float16="float16",
+            stack=lambda rows: FakeTensor([len(rows), REFERENCE.HIDDEN_SIZE]),
         )
         sentinel = object()
 
@@ -277,8 +287,8 @@ class ReferenceHelperTests(unittest.TestCase):
                 module.emit()
             return sentinel
 
-        output, labels, trace = REFERENCE.capture_prompt_hidden_trace(
-            fake_torch, language_model, run
+        output, labels, trace = REFERENCE.capture_last_hidden_trace(
+            fake_torch, language_model, len(REFERENCE.INPUT_IDS), run
         )
         self.assertIs(output, sentinel)
         self.assertEqual(labels[0], "embed_norm")
@@ -288,6 +298,113 @@ class ReferenceHelperTests(unittest.TestCase):
         self.assertTrue(
             all(module.hook is None for module in [embed_norm, *layers, final_norm])
         )
+
+    def test_position_capture_requires_the_exact_implicit_row(self) -> None:
+        class FakePositionTensor:
+            shape = [1, 3]
+            dtype = "int64"
+            device = types.SimpleNamespace(type="mps")
+
+            def __getitem__(self, _index: object) -> "FakePositionTensor":
+                return self
+
+            def cpu(self) -> "FakePositionTensor":
+                return self
+
+            def tolist(self) -> list[int]:
+                return [4, 5, 6]
+
+        class FakeHandle:
+            def __init__(self, module: "FakeRotary") -> None:
+                self.module = module
+
+            def remove(self) -> None:
+                self.module.hook = None
+
+        class FakeRotary:
+            hook: object | None = None
+
+            def register_forward_pre_hook(self, hook: object) -> FakeHandle:
+                self.hook = hook
+                return FakeHandle(self)
+
+            def emit(self) -> None:
+                assert callable(self.hook)
+                self.hook(self, (object(), FakePositionTensor()))
+
+        rotary = FakeRotary()
+        sentinel = object()
+
+        def run() -> object:
+            rotary.emit()
+            return sentinel
+
+        output = REFERENCE.capture_implicit_position_ids(
+            types.SimpleNamespace(int64="int64"), rotary, [4, 5, 6], run
+        )
+        self.assertIs(output, sentinel)
+        self.assertIsNone(rotary.hook)
+        with self.assertRaisesRegex(RuntimeError, "implicit position IDs changed"):
+            REFERENCE.capture_implicit_position_ids(
+                types.SimpleNamespace(int64="int64"), rotary, [4, 5, 7], run
+            )
+
+    def test_committed_generation_and_cache_schedule_are_exact(self) -> None:
+        self.assertEqual(len(REFERENCE.EXPECTED_GENERATED_TOKEN_IDS), 32)
+        self.assertEqual(
+            REFERENCE.EXPECTED_GENERATED_TOKEN_IDS,
+            [
+                328, 19669, 200023, 51015, 5959, 290, 21752, 14774,
+                10950, 310, 1085, 81080, 24429, 1574, 51015, 5959,
+                21752, 14774, 10950, 310, 1085, 81080, 24429, 1574,
+                2991, 1657, 81080, 24429, 26, 97147, 10758, 98400,
+            ],
+        )
+        self.assertEqual(REFERENCE.EXPECTED_LAYER_TYPES.count("sliding_attention"), 39)
+        self.assertEqual(REFERENCE.EXPECTED_LAYER_TYPES.count("full_attention"), 13)
+
+    def test_official_cache_validator_checks_every_layer_geometry(self) -> None:
+        class FakeTensor:
+            def __init__(self, length: int) -> None:
+                self.shape = [1, 2, length, 128]
+                self.dtype = "float16"
+                self.device = types.SimpleNamespace(type="mps")
+
+        class DynamicLayer:
+            def __init__(self, length: int) -> None:
+                self.length = length
+                self.keys = FakeTensor(length)
+                self.values = FakeTensor(length)
+
+            def get_seq_length(self) -> int:
+                return self.length
+
+        class DynamicSlidingWindowLayer(DynamicLayer):
+            pass
+
+        class FakeDynamicCache:
+            def __init__(self, length: int) -> None:
+                self.length = length
+                self.batch_size = 1
+                self.layers = [
+                    DynamicLayer(length)
+                    if kind == "full_attention"
+                    else DynamicSlidingWindowLayer(length)
+                    for kind in REFERENCE.EXPECTED_LAYER_TYPES
+                ]
+
+            def get_seq_length(self) -> int:
+                return self.length
+
+        cache = FakeDynamicCache(7)
+        REFERENCE.validate_official_cache(
+            types.SimpleNamespace(float16="float16"), cache, FakeDynamicCache, 7
+        )
+        cache.layers[31].values.shape = [1, 2, 6, 128]
+        with self.assertRaisesRegex(RuntimeError, "layer 31 values geometry changed"):
+            REFERENCE.validate_official_cache(
+                types.SimpleNamespace(float16="float16"), cache, FakeDynamicCache, 7
+            )
 
     def test_allocator_override_is_scoped_exactly_once_to_mps(self) -> None:
         owner, original = fake_modeling_utils()
@@ -353,6 +470,10 @@ class ReferenceHelperTests(unittest.TestCase):
                 REFERENCE.JSON_FILENAME: b"json",
                 REFERENCE.LOGITS_FILENAME: b"logits",
                 REFERENCE.HIDDEN_FILENAME: b"hidden",
+                REFERENCE.CACHED_LOGITS_FILENAME: b"cached-logits",
+                REFERENCE.TEACHER_LOGITS_FILENAME: b"teacher-logits",
+                REFERENCE.CACHED_PREFILL_HIDDEN_FILENAME: b"prefill-hidden",
+                REFERENCE.CACHED_DECODE_HIDDEN_FILENAME: b"decode-hidden",
             }
             bundle = REFERENCE.publish_reference_bundle(root, payloads)
             self.assertEqual(bundle, root / REFERENCE.BUNDLE_DIRNAME)
@@ -370,6 +491,10 @@ class ReferenceHelperTests(unittest.TestCase):
                 REFERENCE.JSON_FILENAME: b"json",
                 REFERENCE.LOGITS_FILENAME: b"logits",
                 REFERENCE.HIDDEN_FILENAME: b"hidden",
+                REFERENCE.CACHED_LOGITS_FILENAME: b"cached-logits",
+                REFERENCE.TEACHER_LOGITS_FILENAME: b"teacher-logits",
+                REFERENCE.CACHED_PREFILL_HIDDEN_FILENAME: b"prefill-hidden",
+                REFERENCE.CACHED_DECODE_HIDDEN_FILENAME: b"decode-hidden",
             }
             original = REFERENCE.write_create_only
 
