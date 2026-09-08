@@ -13,7 +13,9 @@ mod checkpoint;
 mod load;
 pub mod model;
 
-pub use checkpoint::{NemotronHCheckpointContract, NemotronHCheckpointOptions};
+pub use checkpoint::{
+    NemotronHCheckpointContract, NemotronHCheckpointOptions, NemotronHCheckpointProvenance,
+};
 pub use load::{NemotronHCheckpointLoadError, NemotronHLoadError};
 pub use model::mamba2::{
     NemotronMamba2, NemotronMamba2Config, NemotronMamba2Mode, NemotronMamba2State,

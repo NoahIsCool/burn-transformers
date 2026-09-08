@@ -33,7 +33,10 @@ use crate::models::{
         MuseGlimmerCheckpointOptions, MuseGlimmerCheckpointSource, MuseGlimmerForCausalLm,
         MuseGlimmerTextConfig,
     },
-    nemotron_h::{NemotronHCheckpointOptions, NemotronHConfig, NemotronHForCausalLm},
+    nemotron_h::{
+        NemotronHCheckpointOptions, NemotronHCheckpointProvenance, NemotronHConfig,
+        NemotronHForCausalLm,
+    },
     qwen3_5::{
         Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5ForCausalLm, Qwen3_5TextConfig,
     },
@@ -200,16 +203,23 @@ impl<B: Backend> AutoCausalLm<B> {
                 )?;
                 let source = source_metadata(&root, &model_type, options)?;
                 let tokenizer = load_optional_tokenizer(&root, options.load_tokenizer)?;
-                let manifest = CheckpointManifest::discover(&root, &options.checkpoint)
+                let architecture_options = match (&options.repository, &options.revision) {
+                    (Some(repository), Some(revision)) => NemotronHCheckpointOptions::default()
+                        .with_provenance(NemotronHCheckpointProvenance::new(repository, revision)),
+                    _ => NemotronHCheckpointOptions::default(),
+                };
+                let contract =
+                    config
+                        .checkpoint_contract(architecture_options)
+                        .map_err(|error| {
+                            Error::configuration(
+                                format!("{}.{}", error.architecture, error.field),
+                                error.reason,
+                            )
+                        })?;
+                let manifest = contract
+                    .discover_checkpoint(&root, &options.checkpoint)
                     .map_err(|error| Error::Checkpoint(error.to_string()))?;
-                let contract = config
-                    .checkpoint_contract(NemotronHCheckpointOptions::default())
-                    .map_err(|error| {
-                        Error::configuration(
-                            format!("{}.{}", error.architecture, error.field),
-                            error.reason,
-                        )
-                    })?;
                 let plan = contract
                     .build_load_plan(&manifest, &options.checkpoint)
                     .map_err(|error| Error::Checkpoint(error.to_string()))?;

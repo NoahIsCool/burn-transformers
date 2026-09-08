@@ -8,10 +8,12 @@ use std::{
 };
 
 use serde::{Deserialize, Deserializer, Serialize, de};
+use sha2::{Digest, Sha256};
 
 use super::{
     ArtifactSelection, CheckpointError, IndexAliasSizeAccounting, IndexTensorAlias, LoadOptions,
     Result, TensorDType,
+    accounting::{IndexTotalSizeEvidence, PinnedControlFile, PinnedIndexTotalSizePolicy},
 };
 
 const STANDARD_INDEX: &str = "model.safetensors.index.json";
@@ -179,6 +181,28 @@ pub fn discover_checkpoint(
     root: impl AsRef<Path>,
     options: &LoadOptions,
 ) -> Result<CheckpointManifest> {
+    discover_checkpoint_with_policy(root, options, None)
+}
+
+/// Discovers a checkpoint with one architecture-owned total-size policy.
+///
+/// This crate-private entry point is intentionally absent from the public
+/// loader API. Architectures may use it only with an immutable, content-bound
+/// policy; ordinary [`CheckpointManifest::discover`] always remains strict.
+pub(crate) fn discover_checkpoint_with_index_total_size_policy(
+    root: impl AsRef<Path>,
+    options: &LoadOptions,
+    policy: &PinnedIndexTotalSizePolicy,
+) -> Result<CheckpointManifest> {
+    discover_checkpoint_with_policy(root, options, Some(policy))
+}
+
+/// Shared discovery implementation with an optional pinned accounting policy.
+fn discover_checkpoint_with_policy(
+    root: impl AsRef<Path>,
+    options: &LoadOptions,
+    policy: Option<&PinnedIndexTotalSizePolicy>,
+) -> Result<CheckpointManifest> {
     let supplied_root = root.as_ref();
     let metadata = fs::metadata(supplied_root)
         .map_err(|error| CheckpointError::io("inspect checkpoint root", supplied_root, error))?;
@@ -192,15 +216,19 @@ pub fn discover_checkpoint(
     })?;
 
     match &options.artifact {
-        ArtifactSelection::Auto => discover_auto(root, options),
-        ArtifactSelection::Index(path) => discover_index(root, path, options),
+        ArtifactSelection::Auto => discover_auto(root, options, policy),
+        ArtifactSelection::Index(path) => discover_index(root, path, options, policy),
         ArtifactSelection::Single(path) => discover_single(root, path, options),
     }
 }
 
-fn discover_auto(root: PathBuf, options: &LoadOptions) -> Result<CheckpointManifest> {
+fn discover_auto(
+    root: PathBuf,
+    options: &LoadOptions,
+    policy: Option<&PinnedIndexTotalSizePolicy>,
+) -> Result<CheckpointManifest> {
     if root.join(STANDARD_INDEX).is_file() {
-        return discover_index(root, STANDARD_INDEX, options);
+        return discover_index(root, STANDARD_INDEX, options, policy);
     }
     if root.join(STANDARD_SINGLE).is_file() {
         return discover_single(root, STANDARD_SINGLE, options);
@@ -229,7 +257,7 @@ fn discover_auto(root: PathBuf, options: &LoadOptions) -> Result<CheckpointManif
     singles.dedup();
 
     match indexes.as_slice() {
-        [only] => return discover_index(root, only, options),
+        [only] => return discover_index(root, only, options, policy),
         [] => {}
         _ => {
             return Err(CheckpointError::AmbiguousArtifacts {
@@ -281,9 +309,11 @@ fn discover_index(
     root: PathBuf,
     relative_path: &str,
     options: &LoadOptions,
+    policy: Option<&PinnedIndexTotalSizePolicy>,
 ) -> Result<CheckpointManifest> {
     let path = resolve_local_file(&root, relative_path, "checkpoint index")?;
-    let index = read_index(&path, options)?;
+    let index_document = read_index(&path, options)?;
+    let index = &index_document.index;
     let shard_names: BTreeSet<_> = index.weight_map.values().cloned().collect();
     if shard_names.len() > options.limits.max_shards {
         return Err(limit("shard", shard_names.len(), options.limits.max_shards));
@@ -422,23 +452,36 @@ fn discover_index(
         }
         IndexAliasSizeAccounting::Physical => tensor_bytes,
     };
-    if let Some(declared) = index
+    let declared_total_size = index
         .metadata
         .as_ref()
-        .and_then(|metadata| metadata.total_size)
+        .and_then(|metadata| metadata.total_size);
+    if let Some(declared) = declared_total_size
         && declared != indexed_tensor_bytes
     {
-        return Err(CheckpointError::TotalSizeMismatch {
+        let Some(policy) = policy else {
+            return Err(CheckpointError::TotalSizeMismatch {
+                declared,
+                observed: indexed_tensor_bytes,
+            });
+        };
+        validate_discovered_total_size_policy(
+            &root,
+            relative_path,
+            &index_document,
             declared,
-            observed: indexed_tensor_bytes,
-        });
+            tensor_bytes,
+            &tensors,
+            resolved_aliases.len(),
+            policy,
+        )?;
     }
 
     Ok(CheckpointManifest {
         root,
         source: ArtifactSource::Index {
             relative_path: relative_path.to_owned(),
-            declared_total_size: index.metadata.and_then(|metadata| metadata.total_size),
+            declared_total_size,
         },
         shards,
         tensors,
@@ -448,6 +491,105 @@ fn discover_index(
         tensor_bytes,
         artifact_bytes,
     })
+}
+
+/// Authenticates and validates a policy against freshly discovered evidence.
+#[allow(clippy::too_many_arguments)]
+fn validate_discovered_total_size_policy(
+    root: &Path,
+    index_relative_path: &str,
+    index: &RawIndexDocument,
+    declared_total_size: u64,
+    physical_tensor_bytes: u64,
+    tensors: &BTreeMap<String, TensorInventory>,
+    index_alias_count: usize,
+    policy: &PinnedIndexTotalSizePolicy,
+) -> Result<()> {
+    let (config_bytes, config_sha256) = read_pinned_control_identity(root, &policy.config)?;
+    policy.validate(IndexTotalSizeEvidence {
+        index_relative_path,
+        index_bytes: index.bytes,
+        index_sha256: &index.sha256,
+        config_relative_path: &policy.config.relative_path,
+        config_bytes,
+        config_sha256: &config_sha256,
+        declared_total_size,
+        physical_tensor_bytes,
+        tensors,
+        index_alias_count,
+    })
+}
+
+/// Revalidates a public manifest against the same policy used at discovery.
+///
+/// [`CheckpointManifest`] exposes its inventories for diagnostics, so planning
+/// must not trust that callers preserved them after discovery. This function
+/// re-authenticates both control files and the complete implicated tensor set.
+pub(super) fn validate_manifest_index_total_size_policy(
+    manifest: &CheckpointManifest,
+    policy: &PinnedIndexTotalSizePolicy,
+) -> Result<()> {
+    let (index_relative_path, declared_total_size) = match &manifest.source {
+        ArtifactSource::Index {
+            relative_path,
+            declared_total_size: Some(declared),
+        } => (relative_path.as_str(), *declared),
+        ArtifactSource::Index {
+            declared_total_size: None,
+            ..
+        } => {
+            return Err(CheckpointError::IndexTotalSizePolicyMismatch {
+                reason: "pinned accounting requires index metadata.total_size".into(),
+            });
+        }
+        ArtifactSource::Single { .. } => {
+            return Err(CheckpointError::IndexTotalSizePolicyMismatch {
+                reason: "pinned index accounting cannot apply to an unsharded artifact".into(),
+            });
+        }
+    };
+    let observed_index = PinnedControlFile {
+        relative_path: index_relative_path.to_owned(),
+        ..policy.index.clone()
+    };
+    let (index_bytes, index_sha256) =
+        read_pinned_control_identity(&manifest.root, &observed_index)?;
+    let (config_bytes, config_sha256) =
+        read_pinned_control_identity(&manifest.root, &policy.config)?;
+    policy.validate(IndexTotalSizeEvidence {
+        index_relative_path,
+        index_bytes,
+        index_sha256: &index_sha256,
+        config_relative_path: &policy.config.relative_path,
+        config_bytes,
+        config_sha256: &config_sha256,
+        declared_total_size,
+        physical_tensor_bytes: manifest.tensor_bytes,
+        tensors: &manifest.tensors,
+        index_alias_count: manifest.index_aliases.len(),
+    })
+}
+
+/// Reads and hashes one small pinned control file under a fixed allocation bound.
+fn read_pinned_control_identity(
+    root: &Path,
+    expected: &PinnedControlFile,
+) -> Result<(u64, String)> {
+    let path = resolve_local_file(root, &expected.relative_path, "checkpoint control file")?;
+    let file = File::open(&path)
+        .map_err(|error| CheckpointError::io("open checkpoint control file", &path, error))?;
+    let read_limit = expected.bytes.saturating_add(1);
+    let capacity = usize::try_from(read_limit).map_err(|_| CheckpointError::LimitExceeded {
+        kind: "pinned control-file byte",
+        actual: read_limit,
+        limit: usize::MAX as u64,
+    })?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| CheckpointError::io("read checkpoint control file", &path, error))?;
+    let observed_bytes = bytes.len() as u64;
+    Ok((observed_bytes, format!("{:x}", Sha256::digest(&bytes))))
 }
 
 /// Validates exact index-alias policy and returns a deterministic lookup table.
@@ -855,6 +997,16 @@ struct RawIndex {
     weight_map: BTreeMap<String, String>,
 }
 
+/// Parsed index plus the exact bounded bytes from which it was decoded.
+struct RawIndexDocument {
+    /// Strictly decoded JSON fields.
+    index: RawIndex,
+    /// Exact serialized byte length.
+    bytes: u64,
+    /// SHA-256 over the exact serialized representation.
+    sha256: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct RawIndexMetadata {
     #[serde(default, deserialize_with = "deserialize_optional_integral_u64")]
@@ -910,7 +1062,7 @@ where
     Ok(UniqueStringMap::deserialize(deserializer)?.0)
 }
 
-fn read_index(path: &Path, options: &LoadOptions) -> Result<RawIndex> {
+fn read_index(path: &Path, options: &LoadOptions) -> Result<RawIndexDocument> {
     let file = File::open(path)
         .map_err(|error| CheckpointError::io("open checkpoint index", path, error))?;
     let size = file
@@ -938,8 +1090,13 @@ fn read_index(path: &Path, options: &LoadOptions) -> Result<RawIndex> {
             limit: options.limits.max_index_bytes,
         });
     }
-    serde_json::from_slice(&bytes)
-        .map_err(|error| classify_json_error("checkpoint index", path, error))
+    let index = serde_json::from_slice(&bytes)
+        .map_err(|error| classify_json_error("checkpoint index", path, error))?;
+    Ok(RawIndexDocument {
+        index,
+        bytes: bytes.len() as u64,
+        sha256: format!("{:x}", Sha256::digest(&bytes)),
+    })
 }
 
 fn classify_json_error(

@@ -19,8 +19,8 @@ use thiserror::Error;
 use crate::{
     attention::GroupedQueryAttention,
     checkpoint::{
-        CheckpointError, CheckpointManifest, ExecutionFailure, ExecutionOutcome, LoadOptions,
-        ParameterInstallError, TensorSink, execute_local_load_plan, install_float_parameter,
+        CheckpointError, ExecutionFailure, ExecutionOutcome, LoadOptions, ParameterInstallError,
+        TensorSink, execute_local_load_plan, install_float_parameter,
     },
     normalization::RmsNorm,
 };
@@ -194,10 +194,29 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         root: impl AsRef<Path>,
         options: &LoadOptions,
     ) -> Result<ExecutionOutcome, NemotronHCheckpointLoadError> {
-        let manifest = CheckpointManifest::discover(root, options)?;
-        let contract = self
-            .config()
-            .checkpoint_contract(NemotronHCheckpointOptions::default())?;
+        self.load_checkpoint_with_architecture_options(
+            root,
+            options,
+            NemotronHCheckpointOptions::default(),
+        )
+    }
+
+    /// Loads with explicit family provenance for pinned artifact policies.
+    ///
+    /// The default loader intentionally remains generic and strict. The
+    /// provenance-bearing path is required for NVIDIA Lightning revision
+    /// `a9904d24bcc1d289a1950fa9d2b978c47cf903b9`, whose index overstates its
+    /// physical payload by counting 23 base routers twice. Every source label,
+    /// control hash, tensor name, dtype, shape, and byte total is revalidated
+    /// before that one exception is applied.
+    pub fn load_checkpoint_with_architecture_options(
+        &mut self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+        architecture_options: NemotronHCheckpointOptions,
+    ) -> Result<ExecutionOutcome, NemotronHCheckpointLoadError> {
+        let contract = self.config().checkpoint_contract(architecture_options)?;
+        let manifest = contract.discover_checkpoint(root, options)?;
         let plan = contract.build_load_plan(&manifest, options)?;
         Ok(execute_local_load_plan(&manifest, &plan, self)?)
     }

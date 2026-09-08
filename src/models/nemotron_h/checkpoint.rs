@@ -12,30 +12,76 @@
 //! correction buffers in FP32. Their explicit contract dtype keeps that storage
 //! in FP32 even when dtype-generic projection tensors are cast to F16.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint::{
     CheckpointManifest, ExpectedTensor, LoadOptions, LoadPlan, MappingPlan, TensorDType,
-    build_load_plan,
+    accounting::{
+        DecimalLayerTensorSelector, PinnedAccountingTensor, PinnedControlFile,
+        PinnedIndexTotalSizePolicy,
+    },
+    build_load_plan, build_load_plan_with_index_total_size_policy, discover_checkpoint,
+    discover_checkpoint_with_index_total_size_policy,
 };
 
 use super::{ConfigError, NemotronHBlockType, NemotronHConfig, Validate};
 
 const FAMILY: &str = "nemotron_h";
 
-/// Reserved architecture-specific checkpoint controls.
+/// Caller-supplied upstream identity for a local Nemotron-H checkpoint.
 ///
-/// The supported base and MTP namespaces are unambiguous, so v1 requires no
-/// family exception flags. Keeping this value makes additive wrapper policies
-/// possible without changing the contract-building signature.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NemotronHCheckpointOptions {}
+/// Labels do not establish authenticity by themselves. The sole pinned index
+/// accounting policy additionally hashes exact `config.json` and shard-index
+/// bytes before it accepts NVIDIA's published metadata defect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NemotronHCheckpointProvenance {
+    /// Upstream repository identifier.
+    pub repository: String,
+    /// Immutable upstream Git or content revision.
+    pub revision: String,
+}
+
+impl NemotronHCheckpointProvenance {
+    /// Creates source labels that will be checked against pinned artifact hashes.
+    #[must_use]
+    pub fn new(repository: impl Into<String>, revision: impl Into<String>) -> Self {
+        Self {
+            repository: repository.into(),
+            revision: revision.into(),
+        }
+    }
+}
+
+/// Architecture-specific checkpoint controls.
+///
+/// Without provenance, discovery retains generic strict equality for index
+/// totals. Supplying provenance does not generally relax that rule: it merely
+/// makes the exact pinned NVIDIA Lightning policy available if—and only if—the
+/// index actually exhibits its authenticated 23-router overstatement.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NemotronHCheckpointOptions {
+    /// Optional repository and immutable revision used by pinned artifact policy.
+    #[serde(default)]
+    pub provenance: Option<NemotronHCheckpointProvenance>,
+}
+
+impl NemotronHCheckpointOptions {
+    /// Attaches source provenance to the otherwise strict family contract.
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: NemotronHCheckpointProvenance) -> Self {
+        self.provenance = Some(provenance);
+        self
+    }
+}
 
 /// Complete internal tensor inventory plus explicit source renames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NemotronHCheckpointContract {
     expected: Vec<ExpectedTensor>,
     mappings: MappingPlan,
+    total_size_policy: Option<PinnedIndexTotalSizePolicy>,
 }
 
 impl NemotronHCheckpointContract {
@@ -51,13 +97,38 @@ impl NemotronHCheckpointContract {
         &self.mappings
     }
 
+    /// Discovers headers under this architecture's strict artifact policy.
+    ///
+    /// A contract without pinned provenance delegates to generic discovery.
+    /// With provenance, only the exact NVIDIA Lightning source, control-file
+    /// hashes, totals, and router inventory can use its known accounting quirk.
+    pub fn discover_checkpoint(
+        &self,
+        root: impl AsRef<Path>,
+        options: &LoadOptions,
+    ) -> crate::checkpoint::Result<CheckpointManifest> {
+        match &self.total_size_policy {
+            Some(policy) => discover_checkpoint_with_index_total_size_policy(root, options, policy),
+            None => discover_checkpoint(root, options),
+        }
+    }
+
     /// Strictly compares a discovered artifact with this complete contract.
     pub fn build_load_plan(
         &self,
         manifest: &CheckpointManifest,
         options: &LoadOptions,
     ) -> crate::checkpoint::Result<LoadPlan> {
-        build_load_plan(manifest, &self.expected, &self.mappings, options)
+        match &self.total_size_policy {
+            Some(policy) => build_load_plan_with_index_total_size_policy(
+                manifest,
+                &self.expected,
+                &self.mappings,
+                options,
+                policy,
+            ),
+            None => build_load_plan(manifest, &self.expected, &self.mappings, options),
+        }
     }
 }
 
@@ -65,7 +136,7 @@ impl NemotronHConfig {
     /// Derives the exact base and optional MTP parameter contract.
     pub fn checkpoint_contract(
         &self,
-        _options: NemotronHCheckpointOptions,
+        options: NemotronHCheckpointOptions,
     ) -> Result<NemotronHCheckpointContract, ConfigError> {
         self.validate()?;
         let dimensions = Dimensions::try_from(self)?;
@@ -144,7 +215,72 @@ impl NemotronHConfig {
         if self.num_nextn_predict_layers > 0 {
             add_mtp(&mut expected, &mut mappings, dimensions, self)?;
         }
-        Ok(NemotronHCheckpointContract { expected, mappings })
+        let total_size_policy = options.provenance.as_ref().map(lightning_total_size_policy);
+        Ok(NemotronHCheckpointContract {
+            expected,
+            mappings,
+            total_size_policy,
+        })
+    }
+}
+
+/// Immutable NVIDIA repository whose index contains the reviewed overstatement.
+const LIGHTNING_REPOSITORY: &str = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16";
+/// Immutable checkpoint revision whose exact control bytes are reviewed.
+const LIGHTNING_REVISION: &str = "a9904d24bcc1d289a1950fa9d2b978c47cf903b9";
+/// Exact byte length of the pinned raw `config.json`.
+const LIGHTNING_CONFIG_BYTES: u64 = 2_352;
+/// SHA-256 over the exact pinned raw `config.json`.
+const LIGHTNING_CONFIG_SHA256: &str =
+    "a3827a0f5e311547b40943dc081e3ff2f8a277466e8c1a3df2291e8db8a7617c";
+/// Exact byte length of the pinned raw shard index.
+const LIGHTNING_INDEX_BYTES: u64 = 612_207;
+/// SHA-256 over the exact pinned raw shard index.
+const LIGHTNING_INDEX_SHA256: &str =
+    "67f21da80ce245a3e24967f54eef3fa10e67a63eba16ef19a2d0569f06103f50";
+/// Physical tensor bytes proven by all fourteen official SafeTensors headers.
+const LIGHTNING_PHYSICAL_TENSOR_BYTES: u64 = 65_826_538_624;
+/// Defective total serialized by the pinned official shard index.
+const LIGHTNING_DECLARED_TOTAL_SIZE: u64 = 65_842_365_568;
+/// MoE layer indexes whose base router matrices were counted twice upstream.
+const LIGHTNING_BASE_ROUTER_LAYERS: &[usize] = &[
+    1, 3, 6, 8, 10, 13, 15, 17, 20, 22, 24, 27, 29, 31, 34, 36, 38, 40, 43, 45, 47, 49, 51,
+];
+/// MTP router that is physical and required but does not contribute to the defect.
+const LIGHTNING_MTP_ROUTER: &str = "mtp.layers.1.mixer.gate.weight";
+
+/// Builds the only nonstandard index-accounting policy owned by Nemotron-H.
+fn lightning_total_size_policy(
+    provenance: &NemotronHCheckpointProvenance,
+) -> PinnedIndexTotalSizePolicy {
+    let router =
+        |name: String| PinnedAccountingTensor::new(name, TensorDType::BF16, vec![128, 2_688]);
+    PinnedIndexTotalSizePolicy {
+        supplied_repository: provenance.repository.clone(),
+        supplied_revision: provenance.revision.clone(),
+        expected_repository: LIGHTNING_REPOSITORY.into(),
+        expected_revision: LIGHTNING_REVISION.into(),
+        config: PinnedControlFile::new(
+            "config.json",
+            LIGHTNING_CONFIG_BYTES,
+            LIGHTNING_CONFIG_SHA256,
+        ),
+        index: PinnedControlFile::new(
+            "model.safetensors.index.json",
+            LIGHTNING_INDEX_BYTES,
+            LIGHTNING_INDEX_SHA256,
+        ),
+        expected_physical_tensor_bytes: LIGHTNING_PHYSICAL_TENSOR_BYTES,
+        expected_declared_total_size: LIGHTNING_DECLARED_TOTAL_SIZE,
+        duplicated_tensor_selector: DecimalLayerTensorSelector::new(
+            "backbone.layers.",
+            ".mixer.gate.weight",
+        ),
+        duplicated_tensors: LIGHTNING_BASE_ROUTER_LAYERS
+            .iter()
+            .map(|layer| router(format!("backbone.layers.{layer}.mixer.gate.weight")))
+            .collect(),
+        excluded_tensors: vec![router(LIGHTNING_MTP_ROUTER.into())],
     }
 }
 
@@ -572,8 +708,8 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
     use crate::checkpoint::{
-        ArtifactSource, CheckpointManifest, DTypePolicy, TensorDType, TensorInventory,
-        TensorOperation,
+        ArtifactSource, CheckpointError, CheckpointManifest, DTypePolicy, TensorDType,
+        TensorInventory, TensorOperation, accounting::IndexTotalSizeEvidence,
     };
 
     use super::*;
@@ -667,6 +803,65 @@ mod tests {
             tensor_bytes: offset,
             artifact_bytes: offset,
         }
+    }
+
+    /// Builds one physical tensor descriptor for policy-only evidence tests.
+    fn policy_tensor(
+        name: impl Into<String>,
+        dtype: TensorDType,
+        shape: impl Into<Vec<u64>>,
+    ) -> TensorInventory {
+        let name = name.into();
+        let shape = shape.into();
+        let elements = shape.iter().product();
+        let byte_len = dtype.storage_bytes(elements).unwrap();
+        TensorInventory {
+            name: name.clone(),
+            shard: "model-00001-of-00014.safetensors".into(),
+            shape,
+            dtype,
+            data_offsets: [0, byte_len],
+            byte_len,
+        }
+    }
+
+    /// Recreates the exact 23-base-router set plus the excluded MTP router.
+    fn lightning_router_inventory() -> BTreeMap<String, TensorInventory> {
+        LIGHTNING_BASE_ROUTER_LAYERS
+            .iter()
+            .map(|layer| format!("backbone.layers.{layer}.mixer.gate.weight"))
+            .chain(std::iter::once(LIGHTNING_MTP_ROUTER.into()))
+            .map(|name| {
+                let tensor = policy_tensor(&name, TensorDType::BF16, [128, 2_688]);
+                (name, tensor)
+            })
+            .collect()
+    }
+
+    /// Returns exact official policy evidence over a caller-owned inventory.
+    fn lightning_evidence(
+        tensors: &BTreeMap<String, TensorInventory>,
+    ) -> IndexTotalSizeEvidence<'_> {
+        IndexTotalSizeEvidence {
+            index_relative_path: "model.safetensors.index.json",
+            index_bytes: LIGHTNING_INDEX_BYTES,
+            index_sha256: LIGHTNING_INDEX_SHA256,
+            config_relative_path: "config.json",
+            config_bytes: LIGHTNING_CONFIG_BYTES,
+            config_sha256: LIGHTNING_CONFIG_SHA256,
+            declared_total_size: LIGHTNING_DECLARED_TOTAL_SIZE,
+            physical_tensor_bytes: LIGHTNING_PHYSICAL_TENSOR_BYTES,
+            tensors,
+            index_alias_count: 0,
+        }
+    }
+
+    /// Requires a near miss to fail through the dedicated policy taxonomy.
+    fn assert_policy_mismatch(result: crate::checkpoint::Result<()>) {
+        assert!(matches!(
+            result,
+            Err(CheckpointError::IndexTotalSizePolicyMismatch { .. })
+        ));
     }
 
     /// The strict plan consumes base and all 270 MTP tensor sources exactly once.
@@ -779,6 +974,171 @@ mod tests {
             expected("next_token_head.eh_proj.weight").shape,
             [2_688, 5_376]
         );
+    }
+
+    /// The pinned defect is exactly 23 base BF16 routers and excludes MTP.
+    #[test]
+    fn lightning_total_size_policy_accepts_only_the_reviewed_router_delta() {
+        let tensors = lightning_router_inventory();
+        let policy = lightning_total_size_policy(&NemotronHCheckpointProvenance::new(
+            LIGHTNING_REPOSITORY,
+            LIGHTNING_REVISION,
+        ));
+        policy.validate(lightning_evidence(&tensors)).unwrap();
+        assert_eq!(policy.duplicated_tensors.len(), 23);
+        assert_eq!(policy.excluded_tensors.len(), 1);
+        assert_eq!(policy.excluded_tensors[0].name, LIGHTNING_MTP_ROUTER);
+        let router_bytes = TensorDType::BF16.storage_bytes(128 * 2_688).unwrap();
+        assert_eq!(router_bytes, 688_128);
+        assert_eq!(
+            LIGHTNING_DECLARED_TOTAL_SIZE - LIGHTNING_PHYSICAL_TENSOR_BYTES,
+            router_bytes * 23
+        );
+    }
+
+    /// Repository and immutable revision are both mandatory provenance inputs.
+    #[test]
+    fn lightning_total_size_policy_rejects_wrong_source_labels_and_other_families() {
+        let tensors = lightning_router_inventory();
+        for provenance in [
+            NemotronHCheckpointProvenance::new("nvidia/wrong", LIGHTNING_REVISION),
+            NemotronHCheckpointProvenance::new(LIGHTNING_REPOSITORY, "wrong-revision"),
+            NemotronHCheckpointProvenance::new("Qwen/Qwen3-30B-A3B", LIGHTNING_REVISION),
+        ] {
+            assert_policy_mismatch(
+                lightning_total_size_policy(&provenance).validate(lightning_evidence(&tensors)),
+            );
+        }
+    }
+
+    /// Both raw control files require exact paths, byte lengths, and SHA-256 hashes.
+    #[test]
+    fn lightning_total_size_policy_rejects_every_control_identity_near_miss() {
+        let tensors = lightning_router_inventory();
+        let policy = lightning_total_size_policy(&NemotronHCheckpointProvenance::new(
+            LIGHTNING_REPOSITORY,
+            LIGHTNING_REVISION,
+        ));
+        let exact = lightning_evidence(&tensors);
+
+        let mut wrong = exact;
+        wrong.config_relative_path = "nested/config.json";
+        assert_policy_mismatch(policy.validate(wrong));
+        let mut wrong = exact;
+        wrong.config_bytes -= 1;
+        assert_policy_mismatch(policy.validate(wrong));
+        let mut wrong = exact;
+        wrong.config_sha256 = "03827a0f5e311547b40943dc081e3ff2f8a277466e8c1a3df2291e8db8a7617c";
+        assert_policy_mismatch(policy.validate(wrong));
+        let mut wrong = exact;
+        wrong.index_relative_path = "weights.safetensors.index.json";
+        assert_policy_mismatch(policy.validate(wrong));
+        let mut wrong = exact;
+        wrong.index_bytes += 1;
+        assert_policy_mismatch(policy.validate(wrong));
+        let mut wrong = exact;
+        wrong.index_sha256 = "07f21da80ce245a3e24967f54eef3fa10e67a63eba16ef19a2d0569f06103f50";
+        assert_policy_mismatch(policy.validate(wrong));
+    }
+
+    /// Missing, renamed, and extra base routers cannot preserve policy validity.
+    #[test]
+    fn lightning_total_size_policy_rejects_router_name_and_count_drift() {
+        let policy = lightning_total_size_policy(&NemotronHCheckpointProvenance::new(
+            LIGHTNING_REPOSITORY,
+            LIGHTNING_REVISION,
+        ));
+        let first = "backbone.layers.1.mixer.gate.weight";
+
+        let mut missing = lightning_router_inventory();
+        missing.remove(first);
+        assert_policy_mismatch(policy.validate(lightning_evidence(&missing)));
+
+        let mut renamed = lightning_router_inventory();
+        let tensor = renamed.remove(first).unwrap();
+        let wrong = "backbone.layers.2.mixer.gate.weight";
+        renamed.insert(
+            wrong.into(),
+            TensorInventory {
+                name: wrong.into(),
+                ..tensor
+            },
+        );
+        assert_policy_mismatch(policy.validate(lightning_evidence(&renamed)));
+
+        let mut extra = lightning_router_inventory();
+        let wrong = "backbone.layers.52.mixer.gate.weight";
+        extra.insert(
+            wrong.into(),
+            policy_tensor(wrong, TensorDType::BF16, [128, 2_688]),
+        );
+        assert_policy_mismatch(policy.validate(lightning_evidence(&extra)));
+
+        let mut duplicate_policy = policy.clone();
+        duplicate_policy
+            .duplicated_tensors
+            .push(duplicate_policy.duplicated_tensors[0].clone());
+        assert_policy_mismatch(
+            duplicate_policy.validate(lightning_evidence(&lightning_router_inventory())),
+        );
+    }
+
+    /// Router descriptor changes fail even when their byte width happens to match.
+    #[test]
+    fn lightning_total_size_policy_rejects_dtype_shape_and_byte_length_drift() {
+        let policy = lightning_total_size_policy(&NemotronHCheckpointProvenance::new(
+            LIGHTNING_REPOSITORY,
+            LIGHTNING_REVISION,
+        ));
+        let first = "backbone.layers.1.mixer.gate.weight";
+
+        let mut wrong_dtype = lightning_router_inventory();
+        wrong_dtype.get_mut(first).unwrap().dtype = TensorDType::F16;
+        assert_policy_mismatch(policy.validate(lightning_evidence(&wrong_dtype)));
+
+        let mut wrong_shape = lightning_router_inventory();
+        wrong_shape.get_mut(first).unwrap().shape = vec![64, 5_376];
+        assert_policy_mismatch(policy.validate(lightning_evidence(&wrong_shape)));
+
+        let mut wrong_bytes = lightning_router_inventory();
+        wrong_bytes.get_mut(first).unwrap().byte_len += 1;
+        assert_policy_mismatch(policy.validate(lightning_evidence(&wrong_bytes)));
+    }
+
+    /// Totals, aliases, and the non-accounted MTP router are independent gates.
+    #[test]
+    fn lightning_total_size_policy_rejects_delta_alias_and_mtp_drift() {
+        let tensors = lightning_router_inventory();
+        let policy = lightning_total_size_policy(&NemotronHCheckpointProvenance::new(
+            LIGHTNING_REPOSITORY,
+            LIGHTNING_REVISION,
+        ));
+        let exact = lightning_evidence(&tensors);
+
+        let mut wrong = exact;
+        wrong.declared_total_size += 1;
+        assert_policy_mismatch(policy.validate(wrong));
+        let mut wrong = exact;
+        wrong.physical_tensor_bytes -= 1;
+        assert_policy_mismatch(policy.validate(wrong));
+        let mut wrong = exact;
+        wrong.index_alias_count = 1;
+        assert_policy_mismatch(policy.validate(wrong));
+
+        let mut missing_mtp = tensors.clone();
+        missing_mtp.remove(LIGHTNING_MTP_ROUTER);
+        assert_policy_mismatch(policy.validate(lightning_evidence(&missing_mtp)));
+
+        let mut counted_mtp = policy.clone();
+        counted_mtp
+            .duplicated_tensors
+            .push(counted_mtp.excluded_tensors[0].clone());
+        assert_policy_mismatch(counted_mtp.validate(exact));
+
+        let mut mtp_sized_delta = exact;
+        mtp_sized_delta.declared_total_size +=
+            TensorDType::BF16.storage_bytes(128 * 2_688).unwrap();
+        assert_policy_mismatch(policy.validate(mtp_sized_delta));
     }
 
     /// A Metal policy casts generic weights while preserving router buffers in FP32.

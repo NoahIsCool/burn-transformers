@@ -15,6 +15,7 @@
 //! fail before expensive model allocations occur and avoids staging the complete
 //! checkpoint in host memory.
 
+pub(crate) mod accounting;
 mod artifact;
 mod dtype;
 mod error;
@@ -24,12 +25,14 @@ pub mod quantization;
 mod report;
 mod runtime;
 
+pub(crate) use artifact::discover_checkpoint_with_index_total_size_policy;
 pub use artifact::{
     ArtifactSource, CheckpointManifest, ResolvedIndexTensorAlias, ShardInventory, TensorInventory,
     discover_checkpoint,
 };
 pub use dtype::TensorDType;
 pub use error::{CheckpointError, Result};
+pub(crate) use mapping::build_load_plan_with_index_total_size_policy;
 pub use mapping::{
     ExpectedTensor, KeyMatcher, LoadPlan, MappingPlan, PlannedSource, PlannedTensor,
     PlannedTensorEquivalence, PlannedTransform, TensorOperation, TensorTransform, build_load_plan,

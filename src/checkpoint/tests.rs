@@ -455,6 +455,114 @@ fn index_total_size_must_equal_validated_tensor_bytes() {
 }
 
 #[test]
+fn pinned_total_size_policy_is_explicit_and_generic_paths_remain_strict() {
+    use sha2::{Digest, Sha256};
+
+    use super::accounting::{
+        DecimalLayerTensorSelector, PinnedAccountingTensor, PinnedControlFile,
+        PinnedIndexTotalSizePolicy,
+    };
+
+    let temp = TempDir::new().unwrap();
+    let base_router = "backbone.layers.0.mixer.gate.weight";
+    let mtp_router = "mtp.layers.1.mixer.gate.weight";
+    write_shard(
+        temp.path(),
+        "part.safetensors",
+        &[
+            FixtureTensor::new(base_router, TensorDType::BF16, [1]),
+            FixtureTensor::new(mtp_router, TensorDType::BF16, [1]),
+        ],
+    );
+    write_index(
+        temp.path(),
+        &[
+            (base_router, "part.safetensors"),
+            (mtp_router, "part.safetensors"),
+        ],
+        Some(6),
+    );
+    let config = b"{}";
+    fs::write(temp.path().join("config.json"), config).unwrap();
+    let index = fs::read(temp.path().join("model.safetensors.index.json")).unwrap();
+    let policy = PinnedIndexTotalSizePolicy {
+        supplied_repository: "test/pinned".into(),
+        supplied_revision: "0123456789abcdef".into(),
+        expected_repository: "test/pinned".into(),
+        expected_revision: "0123456789abcdef".into(),
+        config: PinnedControlFile::new(
+            "config.json",
+            config.len() as u64,
+            format!("{:x}", Sha256::digest(config)),
+        ),
+        index: PinnedControlFile::new(
+            "model.safetensors.index.json",
+            index.len() as u64,
+            format!("{:x}", Sha256::digest(&index)),
+        ),
+        expected_physical_tensor_bytes: 4,
+        expected_declared_total_size: 6,
+        duplicated_tensor_selector: DecimalLayerTensorSelector::new(
+            "backbone.layers.",
+            ".mixer.gate.weight",
+        ),
+        duplicated_tensors: vec![PinnedAccountingTensor::new(
+            base_router,
+            TensorDType::BF16,
+            vec![1],
+        )],
+        excluded_tensors: vec![PinnedAccountingTensor::new(
+            mtp_router,
+            TensorDType::BF16,
+            vec![1],
+        )],
+    };
+
+    assert!(matches!(
+        discover_checkpoint(temp.path(), &LoadOptions::default()),
+        Err(CheckpointError::TotalSizeMismatch {
+            declared: 6,
+            observed: 4
+        })
+    ));
+    let manifest = super::artifact::discover_checkpoint_with_index_total_size_policy(
+        temp.path(),
+        &LoadOptions::default(),
+        &policy,
+    )
+    .unwrap();
+    assert_eq!(manifest.tensor_bytes, 4);
+    assert_eq!(manifest.indexed_tensor_bytes, 4);
+
+    let expected = [
+        ExpectedTensor::new(base_router, [1]),
+        ExpectedTensor::new(mtp_router, [1]),
+    ];
+    assert!(matches!(
+        build_load_plan(
+            &manifest,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &LoadOptions::default(),
+        ),
+        Err(CheckpointError::TotalSizeMismatch {
+            declared: 6,
+            observed: 4
+        })
+    ));
+    let plan = super::mapping::build_load_plan_with_index_total_size_policy(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &LoadOptions::default(),
+        &policy,
+    )
+    .unwrap();
+    assert_eq!(plan.tensors.len(), 2);
+    assert!(plan.report.is_strictly_valid());
+}
+
+#[test]
 fn explicit_index_and_nonstandard_index_auto_discovery_work_without_total_size() {
     let temp = TempDir::new().unwrap();
     write_shard(

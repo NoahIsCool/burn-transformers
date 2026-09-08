@@ -366,9 +366,31 @@ pub fn build_load_plan(
     mappings: &MappingPlan,
     options: &LoadOptions,
 ) -> Result<LoadPlan> {
+    build_load_plan_with_policy(manifest, expected, mappings, options, None)
+}
+
+/// Builds a plan with one architecture-owned, provenance-bound size policy.
+pub(crate) fn build_load_plan_with_index_total_size_policy(
+    manifest: &CheckpointManifest,
+    expected: &[ExpectedTensor],
+    mappings: &MappingPlan,
+    options: &LoadOptions,
+    policy: &super::accounting::PinnedIndexTotalSizePolicy,
+) -> Result<LoadPlan> {
+    build_load_plan_with_policy(manifest, expected, mappings, options, Some(policy))
+}
+
+/// Shared planner implementation with an optional pinned accounting policy.
+fn build_load_plan_with_policy(
+    manifest: &CheckpointManifest,
+    expected: &[ExpectedTensor],
+    mappings: &MappingPlan,
+    options: &LoadOptions,
+    policy: Option<&super::accounting::PinnedIndexTotalSizePolicy>,
+) -> Result<LoadPlan> {
     validate_matchers(&options.allow_missing)?;
     validate_matchers(&options.allow_unexpected)?;
-    validate_manifest_index_provenance(manifest, options)?;
+    validate_manifest_index_provenance(manifest, options, policy)?;
     if matches!(options.dtype_policy, DTypePolicy::Cast(dtype) if !dtype.is_float()) {
         return Err(CheckpointError::InvalidMapping {
             message: "DTypePolicy::Cast requires a real floating-point target dtype".into(),
@@ -744,6 +766,7 @@ fn plan_tensor_equivalences(
 fn validate_manifest_index_provenance(
     manifest: &CheckpointManifest,
     options: &LoadOptions,
+    total_size_policy: Option<&super::accounting::PinnedIndexTotalSizePolicy>,
 ) -> Result<()> {
     let authorized = super::artifact::validated_index_alias_policy(&options.index_aliases)?;
     let declarations = manifest
@@ -886,10 +909,13 @@ fn validate_manifest_index_provenance(
             if let Some(declared) = declared_total_size
                 && *declared != expected_indexed_bytes
             {
-                return Err(CheckpointError::TotalSizeMismatch {
-                    declared: *declared,
-                    observed: expected_indexed_bytes,
-                });
+                let Some(policy) = total_size_policy else {
+                    return Err(CheckpointError::TotalSizeMismatch {
+                        declared: *declared,
+                        observed: expected_indexed_bytes,
+                    });
+                };
+                super::artifact::validate_manifest_index_total_size_policy(manifest, policy)?;
             }
         }
     }

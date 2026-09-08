@@ -1013,6 +1013,17 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
 - **Nemotron is NoPE.** The exact Nano and 3.5 attention implementations do not
   apply RoPE. Serialized RoPE-shaped fields are compatibility metadata, not an
   executed position transform.
+- **Nemotron 3.5 has a pinned index-accounting defect.** At revision `a9904d…`,
+  the fourteen SafeTensors headers contain 65,826,538,624 physical tensor bytes,
+  while `metadata.total_size` declares 65,842,365,568. The 15,826,944-byte
+  difference is exactly 23 BF16 base-router matrices of shape `[128, 2688]`;
+  the equally shaped MTP router is not part of the difference. Generic manifest
+  discovery therefore remains strict. Only the Nemotron checkpoint contract can
+  reconcile this total, and only after matching the exact repository, revision,
+  raw config/index SHA-256 identities, all 23 base-router names and descriptors,
+  and the separately required MTP router. See
+  [`checkpoint/accounting.rs`](src/checkpoint/accounting.rs) and
+  [`nemotron_h/checkpoint.rs`](src/models/nemotron_h/checkpoint.rs).
 - **FLAN-UL2's LM head is tied.** Its pinned config omits
   `tie_word_embeddings`; the pinned upstream T5 schema and the local Serde
   default both resolve that omission to `true`. FLAN Small and XXL explicitly

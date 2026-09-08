@@ -192,6 +192,12 @@ pub enum CheckpointError {
         /// Sum derived from validated tensors.
         observed: u64,
     },
+    /// A family-owned exception did not match its complete pinned provenance.
+    #[error("checkpoint index total-size policy mismatch: {reason}")]
+    IndexTotalSizePolicyMismatch {
+        /// Violated source, control-file, tensor-set, or byte-accounting invariant.
+        reason: String,
+    },
     /// Public manifest accounting no longer matches its discovery provenance.
     #[error("checkpoint manifest accounting mismatch: {reason}")]
     ManifestAccountingMismatch {
