@@ -318,9 +318,10 @@ const REFERENCE_CACHED_DECODE_HIDDEN_FILENAME: &str =
 const REFERENCE_ARTIFACT_MANIFEST_SHA256: &str =
     "5b8265f3a0fe6b07668caa8e5b949667b8f26f664550dfcc86d35f93fb7971ab";
 
-/// JSON output identity to pin only after independent reference-run review.
+/// Independently reviewed JSON output identity.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
-const TRUSTED_MUSE_REFERENCE_JSON_SHA256: Option<&str> = None;
+const TRUSTED_MUSE_REFERENCE_JSON_SHA256: Option<&str> =
+    Some("cab22352cf833802b4e530b1ad6b6a223481f3a52378ce2c3bfb980e15543f10");
 
 /// Numerical prompt-logit identity to pin independently of the JSON claim.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
@@ -332,21 +333,25 @@ const TRUSTED_MUSE_REFERENCE_LOGITS_SHA256: Option<&str> =
 const TRUSTED_MUSE_REFERENCE_HIDDEN_SHA256: Option<&str> =
     Some("6ce52668e97a612b0bf8c5adbb306eceda0d002aec8ed1726385b5dd11ab9c3f");
 
-/// Cached-prefix payload identity to pin after independent reference review.
+/// Independently reviewed cached-prefix payload identity.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
-const TRUSTED_MUSE_REFERENCE_CACHED_LOGITS_SHA256: Option<&str> = None;
+const TRUSTED_MUSE_REFERENCE_CACHED_LOGITS_SHA256: Option<&str> =
+    Some("864e67fef08cd4dcdd35b4e7181d8b4d9eb6a924d9fec04563ac91c3af719a0d");
 
-/// Teacher-prefix payload identity to pin after independent reference review.
+/// Independently reviewed teacher-prefix payload identity.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
-const TRUSTED_MUSE_REFERENCE_TEACHER_LOGITS_SHA256: Option<&str> = None;
+const TRUSTED_MUSE_REFERENCE_TEACHER_LOGITS_SHA256: Option<&str> =
+    Some("ff7eb300361f7ba7d036dacbf56cb8e4f8680ce0c01e427775623f03b09cc89d");
 
-/// Cached-prefill hidden identity to pin after independent reference review.
+/// Independently reviewed cached-prefill hidden identity.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
-const TRUSTED_MUSE_REFERENCE_CACHED_PREFILL_HIDDEN_SHA256: Option<&str> = None;
+const TRUSTED_MUSE_REFERENCE_CACHED_PREFILL_HIDDEN_SHA256: Option<&str> =
+    Some("6ce52668e97a612b0bf8c5adbb306eceda0d002aec8ed1726385b5dd11ab9c3f");
 
-/// Recurrent-decode hidden identity to pin after independent reference review.
+/// Independently reviewed recurrent-decode hidden identity.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
-const TRUSTED_MUSE_REFERENCE_CACHED_DECODE_HIDDEN_SHA256: Option<&str> = None;
+const TRUSTED_MUSE_REFERENCE_CACHED_DECODE_HIDDEN_SHA256: Option<&str> =
+    Some("76a4b1e3a6a6b0fbb9dcc6696f90131f112b35e2ee9f117c2cca8d71549a80a4");
 
 /// Resolves the explicitly selected immutable local artifact directory.
 fn pinned_root() -> PathBuf {
@@ -794,6 +799,8 @@ struct MuseReferenceExecution {
 struct MuseReferenceCacheContract {
     class: String,
     batch_size: usize,
+    api_reported_batch_size: i64,
+    batch_size_authority: String,
     layer_count: usize,
     layer_types: Vec<String>,
     sliding_layers: usize,
@@ -1242,6 +1249,8 @@ fn validate_reference_schema(reference: &MuseOfficialReference) -> Result<(), St
     ensure(
         cache.class == "transformers.cache_utils.DynamicCache"
             && cache.batch_size == 1
+            && cache.api_reported_batch_size == -1
+            && cache.batch_size_authority == "physical_key_value_tensor_axis_0"
             && cache.layer_count == 52
             && cache.layer_types == expected_layer_types
             && cache.sliding_layers == 39
@@ -1748,6 +1757,8 @@ fn synthetic_reference_json() -> serde_json::Value {
             "cache": {
                 "class": "transformers.cache_utils.DynamicCache",
                 "batch_size": 1,
+                "api_reported_batch_size": -1,
+                "batch_size_authority": "physical_key_value_tensor_axis_0",
                 "layer_count": 52,
                 "layer_types": (0..52).map(|index| if index % 4 == 3 { "full_attention" } else { "sliding_attention" }).collect::<Vec<_>>(),
                 "sliding_layers": 39,
