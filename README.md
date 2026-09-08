@@ -255,9 +255,13 @@ of 52 layers, and the independent LM head) and retains the embedding plus 209
 normalization vectors. Every eligible input width aligns to G64. A nonzero
 two-layer fixture has passed Q8 and Q4 streaming conversion, automatic mixed
 loading, stateless/prefill/recurrent parity, complete dtype accounting, and a
-negative gate proving row-unaligned artifacts remain reference-only. Real
-30B sidecar creation, packed Metal kernel tracing, quantized quality, and 32K
-execution remain pending; Muse is not advertised as supported.
+negative gate proving row-unaligned artifacts remain reference-only. The real
+Q8/G64 conversion then revalidated all 417 payloads and published a
+`28,165,645,337`-byte v2 artifact with SHA-256
+`91cfd35bfe0a389cbc2eed2189c4e33312bdce1a0ff50d8452acf06d00f0e8eb`;
+the strict conversion/provenance gate took `1,570.845 s`. Q8 Metal execution,
+Q4 conversion, packed-kernel tracing, quantized quality, and 32K execution
+remain pending; Muse is not advertised as supported.
 
 Burn 0.21 can execute compatible Burnpack matrices through packed `QFloat`
 matmul. The only certified packed-Metal build shape is an exact single-backend

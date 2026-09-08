@@ -1190,9 +1190,13 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   group size. Nonzero two-layer fixtures prove that automatic Q8 and Q4 loading
   keeps all eligible parameters on packed-aware linear paths through stateless,
   cached-prefill, and recurrent-decode execution. A deliberately row-unaligned
-  Burnpack is rejected as reference-only. Real 30B sidecars, packed-Metal kernel
-  traces, quantized quality, and long-context execution remain pending, so this
-  boundary is not a support claim.
+  Burnpack is rejected as reference-only. The real Q8/G64 streaming conversion
+  bound both source shards and the exact F16 plan before and after execution,
+  revalidated all 417 payloads, and produced a `28,165,645,337`-byte v2 sidecar
+  with SHA-256
+  `91cfd35bfe0a389cbc2eed2189c4e33312bdce1a0ff50d8452acf06d00f0e8eb`.
+  Q8 packed-Metal execution, Q4 conversion, kernel traces, quantized quality,
+  and long-context execution remain pending, so this is not a support claim.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.
