@@ -31,7 +31,7 @@ use crate::{
     attention::{GroupedQueryAttention, GroupedQueryAttentionConfig, padding_attention_mask},
     feed_forward::apply_activation,
     moe::group_selected_experts,
-    normalization::{RmsNorm, RmsNormConfig},
+    normalization::{RmsNorm, RmsNormConfig, RmsNormRootMode},
     operations,
 };
 
@@ -425,9 +425,7 @@ impl<B: Backend> NemotronHBlock<B> {
         block_type: NemotronHBlockType,
         device: &B::Device,
     ) -> Result<Self> {
-        let norm = RmsNormConfig::new(config.hidden_size)
-            .with_epsilon(config.layer_norm_epsilon)
-            .init(device)?;
+        let norm = nemotron_rms_norm(config.hidden_size, config.layer_norm_epsilon, device)?;
         let activation = activation_from_name(&config.mlp_hidden_act)?;
         let (mamba, attention, mlp, moe) = match block_type {
             NemotronHBlockType::LinearAttention => {
@@ -557,9 +555,7 @@ impl<B: Backend> NemotronHModel<B> {
         Ok(Self {
             embed_tokens: EmbeddingConfig::new(config.vocab_size, config.hidden_size).init(device),
             layers,
-            norm: RmsNormConfig::new(config.hidden_size)
-                .with_epsilon(config.layer_norm_epsilon)
-                .init(device)?,
+            norm: nemotron_rms_norm(config.hidden_size, config.layer_norm_epsilon, device)?,
             config,
         })
     }
@@ -676,11 +672,7 @@ impl<B: Backend> NemotronHNextTokenHead<B> {
                 "2 * hidden_size overflows usize",
             )
         })?;
-        let norm = || {
-            RmsNormConfig::new(config.hidden_size)
-                .with_epsilon(config.layer_norm_epsilon)
-                .init(device)
-        };
+        let norm = || nemotron_rms_norm(config.hidden_size, config.layer_norm_epsilon, device);
         let mut attention = GroupedQueryAttentionConfig::new(
             config.hidden_size,
             config.num_attention_heads,
@@ -879,6 +871,24 @@ fn activation_from_name(name: &str) -> Result<Activation> {
             format!("unsupported activation {name:?}"),
         )),
     }
+}
+
+/// Initializes the exact Nemotron-H RMSNorm floating-point operation graph.
+///
+/// NVIDIA's reference first computes `x * rsqrt(mean(x^2) + epsilon)` in
+/// FP32, rounds that unit-RMS activation back to the residual dtype, and only
+/// then multiplies by the learned scale. This differs by representable F16
+/// values from both division by `sqrt` and late rounding after the scale.
+fn nemotron_rms_norm<B: Backend>(
+    size: usize,
+    epsilon: f64,
+    device: &B::Device,
+) -> Result<RmsNorm<B>> {
+    RmsNormConfig::new(size)
+        .with_epsilon(epsilon)
+        .with_round_before_scale(true)
+        .with_root_mode(RmsNormRootMode::MultiplyByReciprocalSqrt)
+        .init(device)
 }
 
 /// Builds one exact Mamba2 component config from the family schema.
@@ -1128,7 +1138,10 @@ fn select_hidden<B: Backend>(
 
 #[cfg(test)]
 mod tests {
-    use burn::{backend::Flex, tensor::Tolerance};
+    use burn::{
+        backend::Flex,
+        tensor::{Tolerance, f16},
+    };
 
     use super::*;
 
@@ -1192,6 +1205,33 @@ mod tests {
         assert!(model.model.layers[1].attention.is_some());
         assert!(model.model.layers[2].mlp.is_some());
         assert!(model.model.layers[3].moe.is_some());
+    }
+
+    /// Nemotron's upstream `rsqrt` plus early-rounding graph is F16 observable.
+    ///
+    /// The expected bits come from the pinned Transformers Nemotron-H fallback
+    /// expression `weight * (x.float() * torch.rsqrt(ms)).to(x.dtype)`.
+    #[test]
+    fn rms_norm_matches_pinned_f16_operation_order() {
+        let device = Default::default();
+        let mut norm = nemotron_rms_norm::<TestBackend>(2, 1e-6, &device).unwrap();
+        norm.weight = Param::from_tensor(
+            Tensor::from_floats([0.288_818_36, -3.437_5], &device).cast(DType::F16),
+        );
+        let input = Tensor::<TestBackend, 2>::from_floats([[7.457_031_25, -0.452_148_44]], &device)
+            .cast(DType::F16);
+
+        assert!(norm.round_before_scale);
+        assert_eq!(norm.root_mode, RmsNormRootMode::MultiplyByReciprocalSqrt);
+        let bits = norm
+            .forward(input)
+            .into_data()
+            .to_vec::<f16>()
+            .unwrap()
+            .into_iter()
+            .map(f16::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(bits, [0x3685, 0x34b5]);
     }
 
     /// Stateless inference honors output and router diagnostic selections.

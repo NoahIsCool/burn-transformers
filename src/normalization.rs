@@ -32,7 +32,7 @@ pub enum RmsNormRootMode {
     /// Multiplies by `reciprocal(sqrt(mean_square + epsilon))`.
     ///
     /// This is Burn 0.21's portable expression of the `rsqrt` graph used by
-    /// Muse's zero-centered sandwich norms.
+    /// Muse's zero-centered sandwich norms and Nemotron-H RMSNorm.
     MultiplyByReciprocalSqrt,
 }
 
@@ -47,10 +47,10 @@ pub struct RmsNormConfig {
     pub zero_centered: bool,
     /// Whether to round the normalized activation before learned scaling.
     ///
-    /// Some architectures, including DeepSeek V2 and Qwen3-MoE, cast the
-    /// unit-RMS activation back to the residual dtype before multiplying by
-    /// the learned parameter. Others, including Qwen3.5/Qwen3.8, keep both
-    /// operations in FP32 and round only the final result.
+    /// Some architectures, including DeepSeek V2, Qwen3-MoE, and Nemotron-H,
+    /// cast the unit-RMS activation back to the residual dtype before
+    /// multiplying by the learned parameter. Others, including Qwen3.5/Qwen3.8,
+    /// keep both operations in FP32 and round only the final result.
     #[serde(default)]
     pub round_before_scale: bool,
     /// Inverse-root operation graph required by the checkpoint implementation.

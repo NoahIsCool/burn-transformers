@@ -35,7 +35,7 @@ description below.
 | **FLAN-S** | [google/flan-t5-small @ `0fc9dd…`](https://huggingface.co/google/flan-t5-small/blob/0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab/config.json) | [Pinned T5 reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/t5/modeling_t5.py), [T5 paper](https://arxiv.org/abs/1910.10683) | [`t5`](src/models/t5/model.rs) |
 | **FLAN-XXL** | [google/flan-t5-xxl @ `ae7c91…`](https://huggingface.co/google/flan-t5-xxl/blob/ae7c9136adc7555eeccc78cdd960dfd60fb346ce/config.json) | [Pinned T5 reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/t5/modeling_t5.py), [FLAN paper](https://arxiv.org/abs/2210.11416) | [`t5`](src/models/t5/model.rs) |
 | **FLAN-UL2** | [google/flan-ul2 @ `452d74…`](https://huggingface.co/google/flan-ul2/blob/452d74ce28ac4a7f211d6ba3ef0717027f7a8074/config.json) | [Pinned T5 reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/t5/modeling_t5.py), [UL2 paper](https://arxiv.org/abs/2205.05131) | [`t5`](src/models/t5/model.rs) |
-| **Nem-3.5** | [NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 @ `a9904d…`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/blob/a9904d24bcc1d289a1950fa9d2b978c47cf903b9/config.json) | [NVIDIA architecture/recipe](https://docs.nvidia.com/nemotron/nightly/nemotron/lightning35/pretrain.html), [Nemotron-H reference](https://github.com/huggingface/transformers/blob/main/src/transformers/models/nemotron_h/modeling_nemotron_h.py) | [`nemotron_h`](src/models/nemotron_h/model.rs) |
+| **Nem-3.5** | [NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 @ `a9904d…`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/blob/a9904d24bcc1d289a1950fa9d2b978c47cf903b9/config.json) | [NVIDIA architecture/recipe](https://docs.nvidia.com/nemotron/nightly/nemotron/lightning35/pretrain.html), [Nemotron-H reference @ `cfa309…`](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/nemotron_h/modeling_nemotron_h.py) | [`nemotron_h`](src/models/nemotron_h/model.rs) |
 | **Nem-Nano** | [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 @ `bf77c3…`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/bf77c3174f68ad409e1c2aa60daeb46e32d1c606/config.json) | [Pinned NVIDIA reference](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/bf77c3174f68ad409e1c2aa60daeb46e32d1c606/modeling_nemotron_h.py), [technical report](https://research.nvidia.com/labs/nemotron/files/NVIDIA-Nemotron-3-Nano-Technical-Report.pdf) | [`nemotron_h`](src/models/nemotron_h/model.rs) |
 
 Qwen3.8's inner text model is officially serialized as `qwen3_5_text`, not
@@ -93,7 +93,7 @@ mathematical and implementation description.
 | [Auxiliary load-balancing objective](#innovation-router-aux-loss) | — | — | coefficient 0.001 | coefficient 0.001 | — | — | — | — | seq-aux 0.0001 (recipe) | seq-aux 0.0001 (recipe) |
 | [RMS normalization](#innovation-rmsnorm) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | [Zero-centered RMSNorm parameters](#innovation-zero-centered-rmsnorm) | ✓ | ✓ | — | — | block norms | — | — | — | — | — |
-| [Round-before-scale RMSNorm](#innovation-round-before-scale) | — | — | ✓ | ✓ | — | — | — | — | — | — |
+| [Round-before-scale RMSNorm](#innovation-round-before-scale) | — | — | ✓ | ✓ | — | — | — | — | ✓ | ✓ |
 | [Sandwich normalization](#innovation-sandwich-norm) | — | — | — | — | ✓ | — | — | — | — | — |
 | [Scale-free embedding normalization](#innovation-scale-free-embedding) | — | — | — | — | ✓ | — | — | — | — | — |
 | [Shared encoder/decoder token embedding](#innovation-shared-stack-embedding) | — | — | — | — | — | ✓ | ✓ | ✓ | — | — |
@@ -743,7 +743,9 @@ by a square root, multiplication by `pow(mean_square, -0.5)`, and
 multiplication by a reciprocal square root are algebraically equivalent but
 can differ by an F16 ULP. The shared configuration retains these operation
 graphs explicitly: Muse ordinary and scale-free norms use the power form,
-while its centered block norms use the reciprocal-square-root form.
+while its centered block norms and Nemotron-H use the reciprocal-square-root
+form. Nemotron additionally rounds the unit-RMS activation before learned
+scaling.
 
 **Implementation:** [`normalization.rs`](src/normalization.rs). **Reference:**
 [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467).
@@ -769,14 +771,17 @@ final cast, while its final norm stores an ordinary direct scale and uses
 
 Reduced-precision ordering is observable. Qwen3-MoE and DeepSeek compute
 $u=x_{f32}/\sqrt{\operatorname{mean}(x_{f32}^2)+\epsilon}$, cast $u$ back to the
-residual dtype, and only then multiply by the learned scale. Other families may
-multiply in FP32 and round once at the end. Matching this extra rounding point
-is necessary for checkpoint-level logit parity.
+residual dtype, and only then multiply by the learned scale. Nemotron-H uses
+the same early rounding point but spells the inverse root as FP32 `rsqrt`.
+Other families may multiply in FP32 and round once at the end. Matching both
+the inverse-root graph and this extra rounding point is necessary for
+checkpoint-level logit parity.
 
 **Implementation:** `round_before_scale` in
 [`normalization.rs`](src/normalization.rs), configured by
 [`qwen3_moe/model.rs`](src/models/qwen3_moe/model.rs) and
-[`deepseek_v2/model.rs`](src/models/deepseek_v2/model.rs).
+[`deepseek_v2/model.rs`](src/models/deepseek_v2/model.rs), and
+[`nemotron_h/model.rs`](src/models/nemotron_h/model.rs).
 
 <a id="innovation-sandwich-norm"></a>
 ### Sandwich normalization
