@@ -274,6 +274,7 @@ class ReferenceHelperTests(unittest.TestCase):
             - REFERENCE.EXPECTED_PHYSICAL_TENSOR_BYTES,
             REFERENCE.EXPECTED_REPORTED_SIZE_DELTA,
         )
+        self.assertEqual(REFERENCE.EXPECTED_EOS_TOKEN_IDS, [2, 11])
 
     def test_runtime_and_dependency_contract_matches_the_audited_environment(self) -> None:
         self.assertEqual(

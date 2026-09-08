@@ -2167,7 +2167,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     observed_ids = tokenizer.encode(PROMPT, add_special_tokens=False)
     if observed_ids != INPUT_IDS:
         raise RuntimeError(f"pinned prompt tokenization changed: {observed_ids}")
-    if tokenizer.eos_token_id != 2 or tokenizer.pad_token_id != 0:
+    # The model config retains the pretraining EOS/PAD IDs 2/0 while the
+    # checkpoint tokenizer intentionally maps both user-facing EOS and PAD to
+    # chat terminator 11. Generation accepts both EOS 2 and 11.
+    if tokenizer.eos_token_id != 11 or tokenizer.pad_token_id != 11:
         raise RuntimeError(
             "pinned tokenizer EOS/PAD identity changed: "
             f"{tokenizer.eos_token_id}/{tokenizer.pad_token_id}"
