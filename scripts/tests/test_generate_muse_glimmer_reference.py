@@ -42,7 +42,10 @@ def fake_modeling_utils() -> tuple[object, object]:
     def caching_allocator_warmup(
         _model: object, _device_map: object, _quantizer: object
     ) -> None:
-        raise AssertionError("the original warmup must be intercepted")
+        caching_allocator_warmup.calls += 1
+
+    caching_allocator_warmup.__module__ = "transformers.modeling_utils"
+    caching_allocator_warmup.calls = 0
 
     owner = types.SimpleNamespace(
         __name__="transformers.modeling_utils",
@@ -157,6 +160,56 @@ class ReferenceHelperTests(unittest.TestCase):
             REFERENCE.canonical_artifact_digest(list(reversed(artifacts))),
         )
 
+    def test_runtime_and_dependency_contract_matches_the_audited_environment(self) -> None:
+        self.assertEqual(
+            REFERENCE.EXPECTED_PYTHON_VERSION,
+            (3, 11, 9, "final", 0),
+        )
+        self.assertEqual(REFERENCE.REFERENCE_SOURCE_VERSION, "5.17.0.dev0")
+        self.assertEqual(
+            REFERENCE.CHECKPOINT_CONFIG_TRANSFORMERS_VERSION,
+            "5.15.0.dev0",
+        )
+        self.assertEqual(
+            REFERENCE.EXPECTED_DEPENDENCY_VERSIONS,
+            {
+                "accelerate": "1.12.0",
+                "filelock": "3.17.0",
+                "huggingface-hub": "1.5.0",
+                "numpy": "2.4.3",
+                "packaging": "25.0",
+                "PyYAML": "6.0.2",
+                "regex": "2026.1.15",
+                "safetensors": "0.8.0",
+                "tokenizers": "0.23.1",
+                "torch": "2.10.0",
+                "tqdm": "4.67.1",
+            },
+        )
+
+    def test_distribution_manifest_digest_is_pinned_and_order_independent(self) -> None:
+        summaries = {
+            name: {
+                "version": REFERENCE.EXPECTED_DEPENDENCY_VERSIONS[name],
+                "verified_files": fields[0],
+                "verified_bytes": fields[1],
+                "ignored_bytecode_files": fields[2],
+                "excluded_external_scripts": list(fields[3]),
+                "payload_manifest_sha256": fields[4],
+            }
+            for name, fields in REFERENCE.EXPECTED_DISTRIBUTION_PAYLOADS.items()
+        }
+        self.assertEqual(
+            REFERENCE.canonical_distribution_digest(summaries),
+            REFERENCE.EXPECTED_DISTRIBUTION_MANIFEST_SHA256,
+        )
+        self.assertEqual(
+            REFERENCE.canonical_distribution_digest(summaries),
+            REFERENCE.canonical_distribution_digest(
+                dict(reversed(list(summaries.items())))
+            ),
+        )
+
     def test_loading_diagnostics_require_all_empty_classes(self) -> None:
         expected_empty = REFERENCE.sha256_bytes(b"")
         summary = REFERENCE.loading_info_summary({})
@@ -204,13 +257,13 @@ class ReferenceHelperTests(unittest.TestCase):
                     FakeTensor([1, len(REFERENCE.INPUT_IDS), REFERENCE.HIDDEN_SIZE]),
                 )
 
-        raw_embedding = FakeModule()
         embed_norm = FakeModule()
         layers = [FakeModule() for _ in range(52)]
         final_norm = FakeModule()
         language_model = types.SimpleNamespace(
-            embed_tokens=raw_embedding,
-            embed_norm=embed_norm,
+            # The official graph owns the parameter-free norm inside its
+            # MuseGlimmerTextNormedEmbedding subclass.
+            embed_tokens=types.SimpleNamespace(embed_norm=embed_norm),
             layers=layers,
             norm=final_norm,
         )
@@ -232,7 +285,6 @@ class ReferenceHelperTests(unittest.TestCase):
         self.assertEqual(labels[-1], "norm")
         self.assertEqual(len(labels), 54)
         self.assertEqual(trace.shape, [54, REFERENCE.HIDDEN_SIZE])
-        self.assertIsNone(raw_embedding.hook)
         self.assertTrue(
             all(module.hook is None for module in [embed_norm, *layers, final_norm])
         )
@@ -242,23 +294,46 @@ class ReferenceHelperTests(unittest.TestCase):
         sentinel = object()
 
         def loader() -> object:
-            owner.caching_allocator_warmup(FakeMuseModel(), {"a": "mps", "b": "mps:0"}, None)
+            owner.caching_allocator_warmup(
+                FakeMuseModel(),
+                {
+                    f"parameter.{index}": "mps"
+                    for index in range(REFERENCE.EXPECTED_ALLOCATOR_WARMUP_ENTRIES)
+                },
+                None,
+            )
             return sentinel
 
-        loaded, provenance = REFERENCE.load_with_verified_mps_warmup_noop(
+        loaded, provenance = REFERENCE.load_with_verified_mps_warmup(
             owner, FakeTorch, FakeMuseModel, loader
         )
         self.assertIs(loaded, sentinel)
         self.assertIs(owner.caching_allocator_warmup, original)
+        self.assertEqual(original.calls, 1)
         self.assertEqual(provenance["call_count"], 1)
-        self.assertEqual(provenance["expanded_device_map_entries"], 2)
+        self.assertEqual(
+            provenance["expanded_device_map_entries"],
+            REFERENCE.EXPECTED_ALLOCATOR_WARMUP_ENTRIES,
+        )
         self.assertTrue(provenance["restored"])
 
         def mixed_loader() -> None:
-            owner.caching_allocator_warmup(FakeMuseModel(), {"a": "mps", "b": "cpu"}, None)
+            owner.caching_allocator_warmup(
+                FakeMuseModel(),
+                {
+                    **{
+                        f"parameter.{index}": "mps"
+                        for index in range(
+                            REFERENCE.EXPECTED_ALLOCATOR_WARMUP_ENTRIES - 1
+                        )
+                    },
+                    "escaped": "cpu",
+                },
+                None,
+            )
 
         with self.assertRaisesRegex(RuntimeError, "escaped MPS"):
-            REFERENCE.load_with_verified_mps_warmup_noop(
+            REFERENCE.load_with_verified_mps_warmup(
                 owner, FakeTorch, FakeMuseModel, mixed_loader
             )
         self.assertIs(owner.caching_allocator_warmup, original)
@@ -324,6 +399,27 @@ class ReferenceHelperTests(unittest.TestCase):
             observed[-1].mkdir()
             with self.assertRaises(FileExistsError):
                 REFERENCE.ensure_external_paths(model, source, output)
+
+    def test_checkpoint_root_inventory_is_closed_over_loader_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.dict(
+                REFERENCE.EXPECTED_ARTIFACTS,
+                {"config.json": (2, "0" * 64)},
+                clear=True,
+            ), mock.patch.dict(
+                REFERENCE.EXPECTED_INERT_ROOT_FILES,
+                {"README.md": 5},
+                clear=True,
+            ):
+                (root / "config.json").write_bytes(b"{}")
+                (root / "README.md").write_text("inert", encoding="utf-8")
+                (root / ".cache").mkdir()
+                REFERENCE.verify_checkpoint_root_inventory(root)
+
+                (root / "model.safetensors").write_bytes(b"injected")
+                with self.assertRaisesRegex(RuntimeError, "could influence local loading"):
+                    REFERENCE.verify_checkpoint_root_inventory(root)
 
     def test_cli_is_mps_only_and_has_no_device_or_network_switch(self) -> None:
         parsed = REFERENCE.parse_arguments(

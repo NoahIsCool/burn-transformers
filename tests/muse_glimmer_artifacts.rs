@@ -121,6 +121,28 @@ const REFERENCE_SOURCE_BYTES: u64 = 53_259;
 const REFERENCE_SOURCE_SHA256: &str =
     "459498a758446f580fb4a9203c64ab4be68488b40a04acd379dd62658d5bad71";
 
+/// Package version declared by the exact pinned Transformers source checkout.
+const REFERENCE_SOURCE_VERSION: &str = "5.17.0.dev0";
+
+/// Older producer metadata embedded in the immutable checkpoint configuration.
+const CHECKPOINT_CONFIG_TRANSFORMERS_VERSION: &str = "5.15.0.dev0";
+
+/// Canonical identity of all authenticated importable wheel payload manifests.
+const REFERENCE_DISTRIBUTION_MANIFEST_SHA256: &str =
+    "6eca7252cebb0750fa344a7d05419a4511f3ecf985e6f893dadf3e0e94c2b2a6";
+
+/// Explicit boundary of the descriptor/hash preflight and postflight checks.
+const REFERENCE_INTEGRITY_THREAT_MODEL: &str = "Pre/post descriptor identities and SHA-256 detect persistent mutation and ordinary races. An actively malicious same-UID process that swaps a pathname only while Transformers or SafeTensors reopens it, then restores the original before postflight, is outside scope because it can also tamper with this process.";
+
+/// Explicitly non-authenticated interpreter and operating-system trust boundary.
+const REFERENCE_INTERPRETER_TRUST_BOUNDARY: &str = "CPython implementation and 3.11.9 final version are enforced and the executable paths are recorded, but interpreter, standard-library, system-library, Git executable, and OS payload bytes are trusted environment inputs rather than content-authenticated.";
+
+/// Explicitly non-authenticated transitive-package trust boundary.
+const REFERENCE_TRANSITIVE_TRUST_BOUNDARY: &str = "The 11 listed primary wheels have exact versions and RECORD payload manifests. Every other imported third-party module must belong to a recorded installed distribution, but those transitive distribution payloads are trusted from the selected offline virtual environment rather than content-authenticated.";
+
+/// Exact reason the pinned official MPS warmup branch is wrapped and observed.
+const REFERENCE_WARMUP_REASON: &str = "Pinned Transformers 5.17 explicitly skips allocator warmup on MPS. The scoped wrapper validates the complete expanded parameter map, then delegates to that official no-op branch without changing model tensors or numerical execution.";
+
 /// Exact pinned config identity, also enforced by the committed fixture.
 const CONFIG_SHA256: &str = "5a9df2d8a385b3d361ab6ae68d73586f4e775033933bd0cd863fb7f3820e6a14";
 
@@ -432,6 +454,199 @@ fn expected_language_shape_counts() -> BTreeMap<Vec<u64>, usize> {
     ])
 }
 
+/// Returns the exact direct dependency versions authenticated by the oracle.
+fn expected_reference_packages() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("PyYAML".to_owned(), "6.0.2".to_owned()),
+        ("accelerate".to_owned(), "1.12.0".to_owned()),
+        ("filelock".to_owned(), "3.17.0".to_owned()),
+        ("huggingface-hub".to_owned(), "1.5.0".to_owned()),
+        ("numpy".to_owned(), "2.4.3".to_owned()),
+        ("packaging".to_owned(), "25.0".to_owned()),
+        ("regex".to_owned(), "2026.1.15".to_owned()),
+        ("safetensors".to_owned(), "0.8.0".to_owned()),
+        ("tokenizers".to_owned(), "0.23.1".to_owned()),
+        ("torch".to_owned(), "2.10.0".to_owned()),
+        ("tqdm".to_owned(), "4.67.1".to_owned()),
+    ])
+}
+
+/// Builds the independently compiled wheel-payload identities for schema validation.
+fn expected_reference_distributions() -> BTreeMap<String, MuseReferenceDistribution> {
+    let item = |version: &str,
+                verified_files,
+                verified_bytes,
+                ignored_bytecode_files,
+                excluded_external_scripts: &[&str],
+                payload_manifest_sha256: &str| MuseReferenceDistribution {
+        version: version.to_owned(),
+        verified_files,
+        verified_bytes,
+        ignored_bytecode_files,
+        excluded_external_scripts: excluded_external_scripts
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
+        payload_manifest_sha256: payload_manifest_sha256.to_owned(),
+    };
+    BTreeMap::from([
+        (
+            "PyYAML".to_owned(),
+            item(
+                "6.0.2",
+                24,
+                581_466,
+                18,
+                &[],
+                "a2413d950416eb3e271ce2e79d0a0d9af772b2f509e4f6368ac21a21059951c8",
+            ),
+        ),
+        (
+            "accelerate".to_owned(),
+            item(
+                "1.12.0",
+                90,
+                1_482_046,
+                84,
+                &[
+                    "../../../bin/accelerate",
+                    "../../../bin/accelerate-config",
+                    "../../../bin/accelerate-estimate-memory",
+                    "../../../bin/accelerate-launch",
+                    "../../../bin/accelerate-merge-weights",
+                ],
+                "a4777b667bf3cf092af2ac15403be4b1217f4eada9dea1c93729d0ba1fce374c",
+            ),
+        ),
+        (
+            "filelock".to_owned(),
+            item(
+                "3.17.0",
+                14,
+                42_043,
+                9,
+                &[],
+                "fa010d76505458640b82b4245cc7e88a0279adaa5d35939a3f62632f86f41d9f",
+            ),
+        ),
+        (
+            "huggingface-hub".to_owned(),
+            item(
+                "1.5.0",
+                174,
+                2_379_101,
+                164,
+                &["../../../bin/hf", "../../../bin/tiny-agents"],
+                "e31e33b4619feb0de20b31a105b3dd4a48a0b5c7082a879c39730cfab8950a38",
+            ),
+        ),
+        (
+            "numpy".to_owned(),
+            item(
+                "2.4.3",
+                1_038,
+                20_253_880,
+                487,
+                &["../../../bin/f2py", "../../../bin/numpy-config"],
+                "ea91cc1904675f4a171c29d31fda752911857c256eef4b463f79b5f2647aa17c",
+            ),
+        ),
+        (
+            "packaging".to_owned(),
+            item(
+                "25.0",
+                23,
+                236_488,
+                16,
+                &[],
+                "28a5d31e3899005c3c4765b86bbdf2617439c46a113eba215187948e1914cebb",
+            ),
+        ),
+        (
+            "regex".to_owned(),
+            item(
+                "2026.1.15",
+                10,
+                1_248_895,
+                4,
+                &[],
+                "39c375db510bf8720c449985de413ec2b506bc22b5cecf51d0a0209817537a4f",
+            ),
+        ),
+        (
+            "safetensors".to_owned(),
+            item(
+                "0.8.0",
+                16,
+                1_211_818,
+                7,
+                &[],
+                "cfa1be33517b651209e190e761fcdac179935a7df4fdbc8215bb20573cacb0b0",
+            ),
+        ),
+        (
+            "tokenizers".to_owned(),
+            item(
+                "0.23.1",
+                33,
+                8_879_675,
+                16,
+                &[],
+                "384ef072334a048d972eecdb2d86f4b7e359fc3ac7b1054b3d00adb926f2c0c7",
+            ),
+        ),
+        (
+            "torch".to_owned(),
+            item(
+                "2.10.0",
+                12_338,
+                338_441_672,
+                2_199,
+                &["../../../bin/torchfrtrace", "../../../bin/torchrun"],
+                "ac5e7ce059b386aeecec89677baacc9875bad01557c4947ed98e05d14634b3c6",
+            ),
+        ),
+        (
+            "tqdm".to_owned(),
+            item(
+                "4.67.1",
+                40,
+                222_872,
+                32,
+                &["../../../bin/tqdm"],
+                "e821f85778c550267aa17a5c38b7db7e388892fbaf18cf996718c7d960be9704",
+            ),
+        ),
+    ])
+}
+
+/// Reproduces the generator's canonical primary-wheel aggregate identity.
+fn reference_distribution_digest(
+    distributions: &BTreeMap<String, MuseReferenceDistribution>,
+) -> String {
+    let mut canonical = Vec::new();
+    for (name, distribution) in distributions {
+        canonical.extend_from_slice(name.as_bytes());
+        canonical.push(0);
+        canonical.extend_from_slice(distribution.version.as_bytes());
+        canonical.push(0);
+        canonical.extend_from_slice(distribution.verified_files.to_string().as_bytes());
+        canonical.push(0);
+        canonical.extend_from_slice(distribution.verified_bytes.to_string().as_bytes());
+        canonical.push(0);
+        canonical.extend_from_slice(distribution.ignored_bytecode_files.to_string().as_bytes());
+        canonical.push(0);
+        canonical.extend_from_slice(distribution.payload_manifest_sha256.as_bytes());
+        canonical.push(b'\n');
+        for path in &distribution.excluded_external_scripts {
+            canonical.extend_from_slice(b"external\0");
+            canonical.extend_from_slice(path.as_bytes());
+            canonical.push(b'\n');
+        }
+    }
+    sha256_hex(&canonical)
+}
+
 /// Strict schema emitted by `generate_muse_glimmer_reference.py`.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -457,6 +672,8 @@ struct MuseReferenceImplementation {
     repository: String,
     revision: String,
     class: String,
+    source_version: String,
+    checkpoint_config_transformers_version: String,
     source: MuseReferenceSource,
     checkout_clean: bool,
 }
@@ -485,7 +702,21 @@ struct MuseReferenceExecution {
     explicit_all_one_attention_masks: bool,
     float32_matmul_precision: String,
     mps_per_process_memory_fraction: f64,
+    integrity_threat_model: String,
+    authenticated_import_resolutions: BTreeMap<String, String>,
+    imported_module_bindings: BTreeMap<String, String>,
+    authenticated_import_bytecode_policy: MuseReferenceBytecodePolicy,
     allocator_warmup_override: MuseReferenceWarmupOverride,
+}
+
+/// Controls that force imports through authenticated source rather than stale bytecode.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MuseReferenceBytecodePolicy {
+    adjacent_bytecode_ignored: bool,
+    writes_disabled: bool,
+    private_cache_remained_empty: bool,
+    restored: bool,
 }
 
 /// Official eager-attention score equation and mixed-precision boundary.
@@ -503,6 +734,8 @@ struct MuseReferenceAttentionPrecision {
 struct MuseReferenceWarmupOverride {
     target: String,
     policy: String,
+    scope: String,
+    reason: String,
     call_count: usize,
     expanded_device_map_entries: usize,
     expanded_device_types: Vec<String>,
@@ -515,12 +748,64 @@ struct MuseReferenceWarmupOverride {
 #[serde(deny_unknown_fields)]
 struct MuseReferenceEnvironment {
     generated_at_utc: String,
-    python_version: String,
-    python_implementation: String,
-    platform: String,
+    python: MuseReferencePython,
     packages: BTreeMap<String, String>,
+    distribution_provenance: BTreeMap<String, MuseReferenceDistribution>,
+    distribution_manifest_sha256: String,
+    absent_optional_distributions: Vec<String>,
+    transitive_distributions: BTreeMap<String, String>,
+    trust_boundary: MuseReferenceTrustBoundary,
     device: MuseReferenceDevice,
     offline_environment: BTreeMap<String, String>,
+}
+
+/// Exact CPython interpreter contract used by the official reference run.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MuseReferencePython {
+    version: String,
+    version_info: MuseReferencePythonVersion,
+    executable: String,
+    resolved_executable: String,
+    prefix: String,
+    base_prefix: String,
+    implementation: String,
+    platform: String,
+}
+
+/// Separates authenticated inputs from deliberately trusted environment state.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MuseReferenceTrustBoundary {
+    interpreter_and_stdlib: String,
+    interpreter_and_stdlib_content_authenticated: bool,
+    record_authenticated_primary_distributions: Vec<String>,
+    transitive_distributions: String,
+    transitive_distribution_content_authenticated: bool,
+    all_module_origins_attributed: bool,
+}
+
+/// Structured Python version components that cannot be hidden in a free-form string.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MuseReferencePythonVersion {
+    major: u8,
+    minor: u8,
+    micro: u8,
+    releaselevel: String,
+    serial: u8,
+}
+
+/// Authenticated in-environment payload inventory for one exact wheel.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct MuseReferenceDistribution {
+    version: String,
+    verified_files: usize,
+    verified_bytes: u64,
+    ignored_bytecode_files: usize,
+    excluded_external_scripts: Vec<String>,
+    payload_manifest_sha256: String,
 }
 
 /// MPS availability and conservative full-model load-memory preflight.
@@ -545,6 +830,7 @@ struct MuseReferenceProvenance {
     loaded_parameter_count: u64,
     parameter_dtype_elements: BTreeMap<String, u64>,
     loading_info: MuseReferenceLoadingInfo,
+    integrity_postflight_passed: bool,
 }
 
 /// Exact committed generator source that produced an external bundle.
@@ -555,6 +841,7 @@ struct MuseReferenceGenerator {
     bytes: usize,
     sha256: String,
     git_head: String,
+    git_tree: String,
     git_dirty: bool,
 }
 
@@ -730,7 +1017,7 @@ fn validate_reference_schema(reference: &MuseOfficialReference) -> Result<(), St
         condition.then_some(()).ok_or_else(|| message.to_owned())
     };
     ensure(
-        reference.schema_version == 1,
+        reference.schema_version == 2,
         "reference schema version changed",
     )?;
     ensure(
@@ -749,6 +1036,12 @@ fn validate_reference_schema(reference: &MuseOfficialReference) -> Result<(), St
     ensure(
         reference.reference.class == "transformers.MuseGlimmerForConditionalGeneration",
         "official reference class changed",
+    )?;
+    ensure(
+        reference.reference.source_version == REFERENCE_SOURCE_VERSION
+            && reference.reference.checkpoint_config_transformers_version
+                == CHECKPOINT_CONFIG_TRANSFORMERS_VERSION,
+        "official source or checkpoint producer version changed",
     )?;
     ensure(
         reference.reference.checkout_clean,
@@ -794,12 +1087,51 @@ fn validate_reference_schema(reference: &MuseOfficialReference) -> Result<(), St
             && execution.mps_per_process_memory_fraction == 1.0,
         "reference precision or mask controls changed",
     )?;
+    ensure(
+        execution.integrity_threat_model == REFERENCE_INTEGRITY_THREAT_MODEL,
+        "reference integrity threat model changed",
+    )?;
+    let expected_package_keys = expected_reference_packages()
+        .into_keys()
+        .collect::<BTreeSet<_>>();
+    let mut expected_resolution_keys = expected_package_keys.clone();
+    expected_resolution_keys.insert("transformers-source".to_owned());
+    ensure(
+        execution
+            .authenticated_import_resolutions
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            == expected_resolution_keys
+            && execution
+                .imported_module_bindings
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                == expected_package_keys
+            && execution
+                .authenticated_import_resolutions
+                .values()
+                .chain(execution.imported_module_bindings.values())
+                .all(|path| Path::new(path).is_absolute()),
+        "authenticated import bindings changed",
+    )?;
+    let bytecode = &execution.authenticated_import_bytecode_policy;
+    ensure(
+        bytecode.adjacent_bytecode_ignored
+            && bytecode.writes_disabled
+            && bytecode.private_cache_remained_empty
+            && bytecode.restored,
+        "authenticated bytecode policy changed",
+    )?;
     let warmup = &execution.allocator_warmup_override;
     ensure(
         warmup.target == "transformers.modeling_utils.caching_allocator_warmup"
-            && warmup.policy == "mps-exclusive-noop-during-from-pretrained"
+            && warmup.policy == "mps-official-noop-verified-during-from-pretrained"
+            && warmup.scope == "MuseGlimmerForConditionalGeneration.from_pretrained"
+            && warmup.reason == REFERENCE_WARMUP_REASON
             && warmup.call_count == 1
-            && warmup.expanded_device_map_entries > 0
+            && warmup.expanded_device_map_entries == PHYSICAL_TENSOR_COUNT
             && warmup.expanded_device_types == ["mps"]
             && !warmup.hf_quantizer_present
             && warmup.restored,
@@ -809,22 +1141,58 @@ fn validate_reference_schema(reference: &MuseOfficialReference) -> Result<(), St
     let environment = &reference.environment;
     ensure(
         environment.generated_at_utc.ends_with('Z')
-            && !environment.python_version.is_empty()
-            && environment.python_implementation == "CPython"
-            && !environment.platform.is_empty(),
+            && environment.python.version.starts_with("3.11.9 ")
+            && Path::new(&environment.python.executable).is_absolute()
+            && Path::new(&environment.python.resolved_executable).is_absolute()
+            && Path::new(&environment.python.prefix).is_absolute()
+            && Path::new(&environment.python.base_prefix).is_absolute()
+            && environment.python.prefix != environment.python.base_prefix
+            && environment.python.implementation == "CPython"
+            && !environment.python.platform.is_empty()
+            && environment.python.version_info.major == 3
+            && environment.python.version_info.minor == 11
+            && environment.python.version_info.micro == 9
+            && environment.python.version_info.releaselevel == "final"
+            && environment.python.version_info.serial == 0,
         "Python environment metadata changed",
     )?;
-    let expected_packages = BTreeMap::from([
-        ("accelerate".to_owned(), "1.12.0".to_owned()),
-        ("numpy".to_owned(), "2.4.3".to_owned()),
-        ("safetensors".to_owned(), "0.7.0".to_owned()),
-        ("tokenizers".to_owned(), "0.22.2".to_owned()),
-        ("torch".to_owned(), "2.10.0".to_owned()),
-        ("transformers".to_owned(), "5.15.0.dev0".to_owned()),
-    ]);
     ensure(
-        environment.packages == expected_packages,
+        environment.packages == expected_reference_packages()
+            && environment.distribution_provenance == expected_reference_distributions()
+            && reference_distribution_digest(&environment.distribution_provenance)
+                == REFERENCE_DISTRIBUTION_MANIFEST_SHA256
+            && environment.distribution_manifest_sha256 == REFERENCE_DISTRIBUTION_MANIFEST_SHA256
+            && environment.absent_optional_distributions == ["flash-attn", "kernels", "torchao"],
         "reference dependency versions changed",
+    )?;
+    let primary_distributions = expected_reference_packages()
+        .into_keys()
+        .collect::<Vec<_>>();
+    let trust = &environment.trust_boundary;
+    ensure(
+        trust.interpreter_and_stdlib == REFERENCE_INTERPRETER_TRUST_BOUNDARY
+            && !trust.interpreter_and_stdlib_content_authenticated
+            && trust.record_authenticated_primary_distributions == primary_distributions
+            && trust.transitive_distributions == REFERENCE_TRANSITIVE_TRUST_BOUNDARY
+            && !trust.transitive_distribution_content_authenticated
+            && trust.all_module_origins_attributed,
+        "runtime trust boundary changed",
+    )?;
+    let primary_keys = expected_reference_packages()
+        .into_keys()
+        .collect::<BTreeSet<_>>();
+    ensure(
+        environment
+            .transitive_distributions
+            .get("typing_extensions")
+            .is_some_and(|version| !version.is_empty())
+            && environment
+                .transitive_distributions
+                .iter()
+                .all(|(name, version)| {
+                    !name.is_empty() && !version.is_empty() && !primary_keys.contains(name)
+                }),
+        "recorded transitive distribution set changed",
     )?;
     ensure(
         environment.device.backend_available
@@ -859,9 +1227,15 @@ fn validate_reference_schema(reference: &MuseOfficialReference) -> Result<(), St
         provenance.generator.bytes == generator_bytes.len()
             && provenance.generator.sha256 == sha256_hex(generator_bytes)
             && provenance.generator.git_head.len() == 40
+            && provenance.generator.git_tree.len() == 40
             && provenance
                 .generator
                 .git_head
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            && provenance
+                .generator
+                .git_tree
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit())
             && !provenance.generator.git_dirty,
@@ -892,7 +1266,8 @@ fn validate_reference_schema(reference: &MuseOfficialReference) -> Result<(), St
             && provenance.checkpoint_tensor_bytes == CHECKPOINT_TENSOR_BYTES
             && provenance.loaded_parameter_count == 29_776_626_688
             && provenance.parameter_dtype_elements
-                == BTreeMap::from([("float16".to_owned(), 29_776_626_688)]),
+                == BTreeMap::from([("float16".to_owned(), 29_776_626_688)])
+            && provenance.integrity_postflight_passed,
         "loaded model size or dtype inventory changed",
     )?;
     let empty_sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -1051,15 +1426,28 @@ fn synthetic_reference_json() -> serde_json::Value {
             })
         })
         .collect::<Vec<_>>();
+    let packages = expected_reference_packages();
+    let distributions = expected_reference_distributions();
+    let bindings = packages
+        .keys()
+        .map(|name| (name.clone(), format!("/fixture/site-packages/{name}")))
+        .collect::<BTreeMap<_, _>>();
+    let mut resolutions = bindings.clone();
+    resolutions.insert(
+        "transformers-source".to_owned(),
+        "/fixture/transformers/src/transformers/__init__.py".to_owned(),
+    );
 
     serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "repository": REPOSITORY,
         "revision": REVISION,
         "reference": {
             "repository": REFERENCE_REPOSITORY,
             "revision": REFERENCE_REVISION,
             "class": "transformers.MuseGlimmerForConditionalGeneration",
+            "source_version": REFERENCE_SOURCE_VERSION,
+            "checkpoint_config_transformers_version": CHECKPOINT_CONFIG_TRANSFORMERS_VERSION,
             "source": {
                 "relative_path": REFERENCE_SOURCE,
                 "bytes": REFERENCE_SOURCE_BYTES,
@@ -1085,11 +1473,22 @@ fn synthetic_reference_json() -> serde_json::Value {
             "explicit_all_one_attention_masks": true,
             "float32_matmul_precision": "highest",
             "mps_per_process_memory_fraction": 1.0,
+            "integrity_threat_model": REFERENCE_INTEGRITY_THREAT_MODEL,
+            "authenticated_import_resolutions": resolutions,
+            "imported_module_bindings": bindings,
+            "authenticated_import_bytecode_policy": {
+                "adjacent_bytecode_ignored": true,
+                "writes_disabled": true,
+                "private_cache_remained_empty": true,
+                "restored": true,
+            },
             "allocator_warmup_override": {
                 "target": "transformers.modeling_utils.caching_allocator_warmup",
-                "policy": "mps-exclusive-noop-during-from-pretrained",
+                "policy": "mps-official-noop-verified-during-from-pretrained",
+                "scope": "MuseGlimmerForConditionalGeneration.from_pretrained",
+                "reason": REFERENCE_WARMUP_REASON,
                 "call_count": 1,
-                "expanded_device_map_entries": 627,
+                "expanded_device_map_entries": PHYSICAL_TENSOR_COUNT,
                 "expanded_device_types": ["mps"],
                 "hf_quantizer_present": false,
                 "restored": true,
@@ -1097,16 +1496,34 @@ fn synthetic_reference_json() -> serde_json::Value {
         },
         "environment": {
             "generated_at_utc": "2026-09-05T00:00:00Z",
-            "python_version": "3.14.0 fixture",
-            "python_implementation": "CPython",
-            "platform": "fixture",
-            "packages": {
-                "accelerate": "1.12.0",
-                "numpy": "2.4.3",
-                "safetensors": "0.7.0",
-                "tokenizers": "0.22.2",
-                "torch": "2.10.0",
-                "transformers": "5.15.0.dev0",
+            "python": {
+                "version": "3.11.9 fixture",
+                "version_info": {
+                    "major": 3,
+                    "minor": 11,
+                    "micro": 9,
+                    "releaselevel": "final",
+                    "serial": 0,
+                },
+                "executable": "/fixture/bin/python",
+                "resolved_executable": "/fixture/base/bin/python3.11",
+                "prefix": "/fixture",
+                "base_prefix": "/fixture/base",
+                "implementation": "CPython",
+                "platform": "fixture",
+            },
+            "packages": packages,
+            "distribution_provenance": distributions,
+            "distribution_manifest_sha256": REFERENCE_DISTRIBUTION_MANIFEST_SHA256,
+            "absent_optional_distributions": ["flash-attn", "kernels", "torchao"],
+            "transitive_distributions": {"typing_extensions": "4.15.0"},
+            "trust_boundary": {
+                "interpreter_and_stdlib": REFERENCE_INTERPRETER_TRUST_BOUNDARY,
+                "interpreter_and_stdlib_content_authenticated": false,
+                "record_authenticated_primary_distributions": expected_reference_packages().into_keys().collect::<Vec<_>>(),
+                "transitive_distributions": REFERENCE_TRANSITIVE_TRUST_BOUNDARY,
+                "transitive_distribution_content_authenticated": false,
+                "all_module_origins_attributed": true,
             },
             "device": {
                 "backend_available": true,
@@ -1130,6 +1547,7 @@ fn synthetic_reference_json() -> serde_json::Value {
                 "bytes": generator_bytes.len(),
                 "sha256": sha256_hex(generator_bytes),
                 "git_head": "0000000000000000000000000000000000000000",
+                "git_tree": "1111111111111111111111111111111111111111",
                 "git_dirty": false,
             },
             "artifacts": artifacts,
@@ -1144,6 +1562,7 @@ fn synthetic_reference_json() -> serde_json::Value {
                 "mismatched_keys": empty_diagnostic.clone(),
                 "error_msgs": empty_diagnostic,
             },
+            "integrity_postflight_passed": true,
         },
         "outputs": {
             "prompt_logits": {
@@ -1201,6 +1620,10 @@ fn muse_official_reference_schema_is_weight_independent_and_strict() {
         REFERENCE_ARTIFACT_MANIFEST_SHA256
     );
     assert_eq!(expected_hidden_trace_labels().len(), 54);
+    assert_eq!(
+        reference_distribution_digest(&expected_reference_distributions()),
+        REFERENCE_DISTRIBUTION_MANIFEST_SHA256
+    );
 
     let schema = synthetic_reference_json();
     let reference: MuseOfficialReference =
@@ -1279,6 +1702,20 @@ fn open_reference_file_no_follow(path: &Path, expected_bytes: u64, maximum_bytes
     file
 }
 
+/// Returns descriptor fields that expose replacement or mutation during a read.
+#[cfg(all(feature = "metal", feature = "tokenizers", target_os = "macos"))]
+fn reference_file_identity(metadata: &fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
+    (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    )
+}
+
 /// Keeps unsupported host compilation explicit for the macOS-only Metal gate.
 #[cfg(all(feature = "metal", feature = "tokenizers", not(target_os = "macos")))]
 fn open_reference_file_no_follow(_path: &Path, _expected_bytes: u64, _maximum_bytes: u64) -> File {
@@ -1307,11 +1744,16 @@ fn bounded_reference_file_length(path: &Path, maximum_bytes: u64) -> u64 {
 /// Reads one bounded regular file and rejects concurrent length changes.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 fn read_reference_file_exact(path: &Path, expected_bytes: u64, maximum_bytes: u64) -> Vec<u8> {
-    let file = open_reference_file_no_follow(path, expected_bytes, maximum_bytes);
+    let mut file = open_reference_file_no_follow(path, expected_bytes, maximum_bytes);
+    #[cfg(target_os = "macos")]
+    let before = file
+        .metadata()
+        .unwrap_or_else(|error| panic!("inspect opened file {}: {error}", path.display()));
     let capacity = usize::try_from(expected_bytes)
         .expect("bounded Muse reference length must fit the host address space");
     let mut payload = Vec::with_capacity(capacity);
-    file.take(maximum_bytes.saturating_add(1))
+    (&mut file)
+        .take(maximum_bytes.saturating_add(1))
         .read_to_end(&mut payload)
         .unwrap_or_else(|error| panic!("read reference file {}: {error}", path.display()));
     assert_eq!(
@@ -1320,6 +1762,18 @@ fn read_reference_file_exact(path: &Path, expected_bytes: u64, maximum_bytes: u6
         "{} changed length while being read",
         path.display()
     );
+    #[cfg(target_os = "macos")]
+    {
+        let after = file
+            .metadata()
+            .unwrap_or_else(|error| panic!("reinspect opened file {}: {error}", path.display()));
+        assert_eq!(
+            reference_file_identity(&before),
+            reference_file_identity(&after),
+            "{} changed identity or metadata while being read",
+            path.display()
+        );
+    }
     payload
 }
 
@@ -1397,6 +1851,41 @@ fn read_pinned_muse_reference() -> (MuseOfficialReference, Vec<f32>, Vec<f32>) {
     assert!(
         !root.starts_with(env!("CARGO_MANIFEST_DIR")),
         "generated numerical references must remain outside the crate"
+    );
+    let expected_entries = BTreeSet::from([
+        REFERENCE_JSON_FILENAME.to_owned(),
+        REFERENCE_LOGITS_FILENAME.to_owned(),
+        REFERENCE_HIDDEN_FILENAME.to_owned(),
+    ]);
+    let observed_entries = fs::read_dir(&root)
+        .unwrap_or_else(|error| panic!("enumerate reference bundle {}: {error}", root.display()))
+        .map(|entry| {
+            let entry = entry.unwrap_or_else(|error| {
+                panic!(
+                    "inspect reference bundle entry in {}: {error}",
+                    root.display()
+                )
+            });
+            let file_type = entry.file_type().unwrap_or_else(|error| {
+                panic!(
+                    "inspect reference entry {}: {error}",
+                    entry.path().display()
+                )
+            });
+            assert!(
+                file_type.is_file() && !file_type.is_symlink(),
+                "reference bundle entry {} must be a regular non-symlink file",
+                entry.path().display()
+            );
+            entry
+                .file_name()
+                .into_string()
+                .unwrap_or_else(|_| panic!("reference bundle contains a non-UTF-8 name"))
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        observed_entries, expected_entries,
+        "reference bundle entry set changed"
     );
 
     let json_path = root.join(REFERENCE_JSON_FILENAME);
