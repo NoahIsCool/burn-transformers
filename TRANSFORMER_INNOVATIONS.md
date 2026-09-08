@@ -533,11 +533,29 @@ $$
 then reads
 $y_t[h,p]=\sum_nS_t[h,p,n]C_t[h,n]+D[h]x_t[h,p]$.
 $A=-e^{A_{log}}$ is stable; token-selected $\Delta,B,C$ make the SSM selective.
-The pinned models use 64 heads of width 64, state size 128, eight shared B/C
-groups, convolution width 4, and FP32 scan state.
+The Lightning checkpoint uses 64 heads of width 64; the Nano configuration
+uses 128. Both use state size 128, eight shared B/C groups, and convolution
+width 4. Precision is path-dependent rather than uniformly FP32. Chunked
+prefill applies its configured $\Delta$ limits in activation dtype, then
+promotes $x,B,C,\Delta$, scan outputs, and state arithmetic to FP32. Recurrent
+decode does not apply those limits: decay and state accumulation are FP32, but
+$(\Delta B)x$, the state-to-$C$ contraction, the $D$ skip, and output retain the
+activation dtype. An F16/BF16 recurrent cache rounds after every token; chunked
+prefill rounds only the terminal state when publishing it to that cache.
+
+Bias addition and softplus also belong to the activation-dtype boundary. The
+Burn implementation evaluates the stable identity
+$\max(u,0)+\log(1+e^{-|u|})$ in FP32 between an activation-dtype bias addition
+and immediate cast back. Its semantic token mask additionally sets $\Delta=0$
+for invalid tokens, so they cannot decay state. This intentionally differs from
+the pinned fallback, which masks $x,B,C$ but leaves $\Delta$ active. Stateful
+model entry points compact valid tokens first; a direct masked mixer call still
+advances the convolution through physical columns.
 
 **Implementation:** [`nemotron_h/model/mamba2.rs`](src/models/nemotron_h/model/mamba2.rs).
-**Reference:** [Transformers are SSMs / Mamba-2](https://arxiv.org/abs/2405.21060).
+**Reference:** [Transformers are SSMs / Mamba-2](https://arxiv.org/abs/2405.21060),
+[pinned Nemotron-H fallback @ `cfa309…`](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/nemotron_h/modeling_nemotron_h.py),
+and [its pinned Zamba2 gated normalization @ `cfa309…`](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/zamba2/modeling_zamba2.py).
 
 <a id="innovation-depthwise-convolution"></a>
 ### Depthwise causal convolution
