@@ -760,6 +760,7 @@ pub(super) fn causal_output<B: Backend>(
         hidden_states,
         attentions: Vec::new(),
         routers,
+        load_balancing_loss: None,
     }
 }
 

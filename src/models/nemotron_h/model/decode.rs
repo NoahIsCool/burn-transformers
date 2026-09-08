@@ -384,6 +384,7 @@ impl<B: Backend> NemotronHForCausalLm<B> {
             hidden_states,
             attentions: Vec::new(),
             routers,
+            load_balancing_loss: None,
         })
     }
 

@@ -568,6 +568,7 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
                 .collect(),
             attentions: Vec::new(),
             routers: Vec::new(),
+            load_balancing_loss: None,
         })
     }
 
@@ -684,6 +685,7 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
                 hidden_states,
                 attentions: Vec::new(),
                 routers: Vec::new(),
+                load_balancing_loss: None,
             },
             encoder: bound_encoder,
             cross_attentions: Vec::new(),

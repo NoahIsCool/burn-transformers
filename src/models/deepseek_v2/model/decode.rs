@@ -643,6 +643,7 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
             hidden_states,
             attentions: Vec::new(),
             routers,
+            load_balancing_loss: None,
         })
     }
 }

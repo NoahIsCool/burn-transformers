@@ -23,13 +23,13 @@ use crate::{
         CacheConfig, DecodeStateError, KvCacheStorage, NativeKvCacheSpec, TensorCacheError,
         TensorDecodeState,
     },
-    moe::{SparseMoeOutput, load_balancing_loss},
+    moe::SparseMoeOutput,
     position::{RopeScaling, RotaryAngles, apply_rotary, derive_position_ids, rotary_angles},
 };
 
 use super::{
-    Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm, Qwen3MoeModel, select_hidden,
-    validate_logits_selection, validate_position_range, validate_token_ids,
+    Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm, Qwen3MoeModel, qwen3_moe_load_balancing_loss,
+    select_hidden, validate_logits_selection, validate_position_range, validate_token_ids,
 };
 
 const NATIVE_KV_GROUP: usize = 0;
@@ -265,10 +265,6 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
                                 [1, prepared.sequence, self.config().num_experts],
                                 (&device, self.model.embed_tokens.weight.val().dtype()),
                             ),
-                            selected: Tensor::zeros(
-                                [1, prepared.sequence, self.config().num_experts_per_tok],
-                                &device,
-                            ),
                         });
                     }
                 }
@@ -321,11 +317,6 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
                 for (destination, routed) in router_rows.iter_mut().zip(compact.routers) {
                     destination.push(RowRouter {
                         logits: scatter_compact(routed.router_logits, prepared.sequence, valid)?,
-                        selected: scatter_compact_int(
-                            routed.selected_experts,
-                            prepared.sequence,
-                            valid,
-                        )?,
                     });
                 }
             }
@@ -336,21 +327,39 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
             .into_iter()
             .map(|rows| Tensor::cat(rows, 0))
             .collect();
-        let routers = router_rows
-            .into_iter()
-            .map(|rows| {
-                let logits = Tensor::cat(rows.iter().map(|row| row.logits.clone()).collect(), 0);
-                let selected = Tensor::cat(rows.into_iter().map(|row| row.selected).collect(), 0);
-                Ok(RouterDiagnostics {
-                    logits: retain_router_logits.then(|| logits.clone()),
-                    load_balancing_loss: options
-                        .auxiliary_losses
-                        .then(|| load_balancing_loss(logits, selected, input.token_mask.as_ref()))
-                        .transpose()?,
+        let mut routers = Vec::with_capacity(if retain_router_logits {
+            sparse_count
+        } else {
+            0
+        });
+        let mut auxiliary_router_logits = Vec::with_capacity(if options.auxiliary_losses {
+            sparse_count
+        } else {
+            0
+        });
+        for rows in router_rows {
+            let logits = Tensor::cat(rows.into_iter().map(|row| row.logits).collect(), 0);
+            if options.auxiliary_losses {
+                auxiliary_router_logits.push(logits.clone());
+            }
+            if retain_router_logits {
+                routers.push(RouterDiagnostics {
+                    logits: Some(logits),
+                    load_balancing_loss: None,
                     z_loss: None,
-                })
+                });
+            }
+        }
+        let load_balancing_loss = options
+            .auxiliary_losses
+            .then(|| {
+                qwen3_moe_load_balancing_loss(
+                    &auxiliary_router_logits,
+                    self.config().num_experts_per_tok,
+                    input.token_mask.as_ref(),
+                )
             })
-            .collect::<Result<Vec<_>>>()?;
+            .transpose()?;
         let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
         let logits = self.project_logits(selected)?;
         pending.commit(
@@ -364,6 +373,7 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
             hidden_states,
             attentions: Vec::new(),
             routers,
+            load_balancing_loss,
         })
     }
 }
@@ -601,7 +611,6 @@ impl<B: Backend> PendingKvWrites<B> {
 /// Rectangular router tensors reconstructed from one compact row.
 struct RowRouter<B: Backend> {
     logits: Tensor<B, 3>,
-    selected: Tensor<B, 3, Int>,
 }
 
 /// Validated host metadata for a stateful input.
@@ -918,36 +927,6 @@ fn scatter_compact<B: Backend>(
             [1, sequence - cursor, width],
             (&device, dtype),
         ));
-    }
-    Ok(Tensor::cat(segments, 1))
-}
-
-/// Scatters compact integer expert IDs back to rectangular columns.
-fn scatter_compact_int<B: Backend>(
-    compact: Tensor<B, 3, Int>,
-    sequence: usize,
-    indices: &[usize],
-) -> Result<Tensor<B, 3, Int>> {
-    let [batch, compact_sequence, width] = compact.dims();
-    if batch != 1 || compact_sequence != indices.len() {
-        return Err(Error::shape(
-            "qwen3_moe.compact_router",
-            "[1, valid_columns, top_k]",
-            format!("{:?}", compact.dims()),
-        ));
-    }
-    let device = compact.device();
-    let mut segments = Vec::with_capacity(indices.len().saturating_mul(2).saturating_add(1));
-    let mut cursor = 0;
-    for (compact_index, &output_index) in indices.iter().enumerate() {
-        if output_index > cursor {
-            segments.push(Tensor::zeros([1, output_index - cursor, width], &device));
-        }
-        segments.push(compact.clone().narrow(1, compact_index, 1));
-        cursor = output_index + 1;
-    }
-    if cursor < sequence {
-        segments.push(Tensor::zeros([1, sequence - cursor, width], &device));
     }
     Ok(Tensor::cat(segments, 1))
 }

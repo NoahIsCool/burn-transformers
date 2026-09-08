@@ -626,7 +626,13 @@ evaluated. The portable Burn path groups the compact `(token, top-k slot)`
 indices by expert, gathers just those token rows, evaluates that expert, weights
 its outputs, and index-adds them back. Stable expert-ID tie breaking makes the
 discrete route deterministic across backends while gradients remain on selected
-inputs and route weights.
+inputs and route weights. The weighting boundary is architecture-selectable:
+Qwen3-MoE multiplies each reduced-precision expert output by its normalized FP32
+route weight in FP32, rounds that individual contribution to the residual dtype,
+and then index-adds it. DeepSeek instead keeps every contribution and the whole
+routed sum in FP32 before one final cast. These orders can differ by an F16 ULP,
+so they are represented by an explicit `RoutedWeightingPrecision` policy rather
+than implicit backend dtype promotion.
 
 **Implementation:** grouping and differentiable dispatch in
 [`moe.rs`](src/moe.rs), reused or specialized by all three MoE families.
@@ -675,28 +681,41 @@ loss.
 <a id="innovation-router-aux-loss"></a>
 ### Auxiliary load-balancing objective
 
-For softmax route probabilities $p_{t,e}$ and discrete top-k indicators
-$a_{t,j,e}$, Qwen's differentiable diagnostic is
-$L_{bal}=E\sum_{j,e}\operatorname{mean}_t(a_{t,j,e})
-\operatorname{mean}_t(p_{t,e})$. DeepSeek's pinned `seq_aux=true` instead
-computes the assignment frequency and mean probability independently for each
-sequence, sums their product over experts, and averages over the batch. Both
-forms penalize agreement between high average probability and over-assignment
-to the same experts; padding is excluded from every count and mean. The pinned
-Qwen and DeepSeek configs both declare coefficient 0.001. The local DeepSeek
-diagnostic applies `aux_loss_alpha`; the local Qwen diagnostic returns the raw
-shared loss, so a training caller must apply `router_aux_loss_coef` before
-adding it. NVIDIA's Nano report and Lightning-derived recipe use sequence-level
-balancing with coefficient 0.0001 alongside correction-biased routing. The
-local Nemotron path likewise returns the raw diagnostic; the 0.0001 shown in
-the matrix is recipe provenance, not a multiplier silently applied at
-inference. None of these losses changes inference logits internally.
+Qwen3-MoE's pinned Transformers 5.2 path has a subtle double-softmax convention.
+The router computes $p=\operatorname{softmax}(r)$ in FP32, and the framework's
+output recorder captures $p$ even though the public tuple calls it
+`router_logits`. The causal-LM loss function concatenates every sparse-layer and
+token row, applies $q=\operatorname{softmax}(p)$ again, recomputes top-k
+indicators $a_{l,t,j,e}$, and evaluates
+$L_{bal}=E\sum_{j,e}\operatorname{mean}_{l,t}(a_{l,t,j,e})
+\operatorname{mean}_{l,t}(q_{l,t,e})$. The local API preserves genuinely raw
+per-layer projections for diagnostics, performs both softmax operations when
+the family loss is requested, and returns the single unscaled stack-wide scalar
+as `CausalLmOutput::load_balancing_loss`; per-layer diagnostic loss fields stay
+empty rather than duplicating a global value.
 
-**Implementation:** [`load_balancing_loss`](src/moe.rs), DeepSeek's sequence
-variant and Nemotron's sigmoid-score variant in their respective family
+DeepSeek's pinned `seq_aux=true` instead computes the assignment frequency and
+mean probability independently for each sequence, sums their product over
+experts, and averages over the batch. Both forms penalize agreement between high
+average probability and over-assignment to the same experts; padding is excluded
+from every count and mean. The pinned Qwen and DeepSeek configs both declare
+coefficient 0.001. The local DeepSeek diagnostic applies `aux_loss_alpha`; the
+local Qwen scalar remains raw, so a training caller must apply
+`router_aux_loss_coef` before adding it. NVIDIA's Nano report and
+Lightning-derived recipe use sequence-level balancing with coefficient 0.0001
+alongside correction-biased routing. The local Nemotron path likewise returns
+the raw diagnostic; the 0.0001 shown in the matrix is recipe provenance, not a
+multiplier silently applied at inference. None of these losses changes inference
+logits internally.
+
+**Implementation:** Qwen's pinned stack function in
+[`qwen3_moe/model.rs`](src/models/qwen3_moe/model.rs), shared
+[`load_balancing_loss`](src/moe.rs), and DeepSeek's sequence variant and
+Nemotron's sigmoid-score variant in their respective family
 [`model.rs`](src/models/deepseek_v2/model.rs) and
-[`model.rs`](src/models/nemotron_h/model.rs), exposed through router diagnostics
-in [`architecture/types.rs`](src/architecture/types.rs). **Reference:** the
+[`model.rs`](src/models/nemotron_h/model.rs). Model-wide and per-layer outputs
+are distinguished in [`architecture/types.rs`](src/architecture/types.rs).
+**Reference:** the
 [Nano technical report](https://research.nvidia.com/labs/nemotron/files/NVIDIA-Nemotron-3-Nano-Technical-Report.pdf)
 and [NVIDIA recipe](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/nemotronh/h100/nemotron_3_nano.py).
 

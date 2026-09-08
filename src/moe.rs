@@ -29,6 +29,21 @@ use crate::{
     operations,
 };
 
+/// Rounding boundary for selected router weights in a sparse expert block.
+///
+/// This is independent of router-softmax precision. Both modes may rank and
+/// normalize in FP32; they differ in whether a selected probability is rounded
+/// before or after multiplication by a reduced-precision expert output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutedWeightingPrecision {
+    /// Round selected weights to the residual dtype before multiplication.
+    #[default]
+    Residual,
+    /// Multiply expert outputs and selected weights in FP32, then round each contribution.
+    Fp32ThenResidual,
+}
+
 /// Configuration for routed and optionally shared gated experts.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SparseMoeConfig {
@@ -48,6 +63,9 @@ pub struct SparseMoeConfig {
     pub renormalize_selected: bool,
     /// Scale applied to the complete routed-expert contribution.
     pub routed_scale: f64,
+    /// Rounding boundary for selected probabilities and expert outputs.
+    #[serde(default)]
+    pub weighting_precision: RoutedWeightingPrecision,
     /// Whether expert projections contain additive biases.
     pub expert_bias: bool,
 }
@@ -69,6 +87,7 @@ impl SparseMoeConfig {
             activation: Activation::Silu,
             renormalize_selected: true,
             routed_scale: 1.0,
+            weighting_precision: RoutedWeightingPrecision::Residual,
             expert_bias: false,
         }
     }
@@ -119,6 +138,7 @@ impl SparseMoeConfig {
             experts_per_token: self.experts_per_token,
             renormalize_selected: self.renormalize_selected,
             routed_scale: self.routed_scale,
+            weighting_precision: self.weighting_precision,
             hidden_size: self.hidden_size,
         })
     }
@@ -157,6 +177,68 @@ pub(crate) struct RoutedExpertDispatch<B: Backend> {
     pub(crate) expert_token_counts: Vec<usize>,
     /// Number of expert graphs evaluated by this invocation.
     pub(crate) evaluated_experts: usize,
+}
+
+/// Numerical policy for weighting and accumulating routed expert outputs.
+///
+/// The distinction is observable in reduced precision. Qwen multiplies each
+/// reduced-precision expert output by its FP32 routing weight, rounds that
+/// weighted contribution to the residual dtype, and only then performs
+/// `index_add`. DeepSeek instead retains the weighted contributions and their
+/// complete sum in FP32 before one final cast at the routed-block boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RoutedExpertPrecision {
+    /// Dtype used for the elementwise expert-output/router-weight product.
+    multiplication_dtype: DType,
+    /// Dtype of the destination and every contribution entering index-add.
+    accumulation_dtype: DType,
+}
+
+impl RoutedExpertPrecision {
+    /// Uses one dtype for multiplication and accumulation.
+    const fn uniform(dtype: DType) -> Self {
+        Self {
+            multiplication_dtype: dtype,
+            accumulation_dtype: dtype,
+        }
+    }
+
+    /// Keeps routing weights FP32 but rounds each contribution before summing.
+    const fn fp32_weights_round_each(accumulation_dtype: DType) -> Self {
+        Self {
+            multiplication_dtype: DType::F32,
+            accumulation_dtype,
+        }
+    }
+
+    /// Rejects integer or Boolean policies before backend kernels execute.
+    fn validate(self) -> Result<()> {
+        if !self.multiplication_dtype.is_float() || !self.accumulation_dtype.is_float() {
+            return Err(Error::configuration(
+                "moe.dispatch.precision",
+                format!(
+                    "multiplication and accumulation dtypes must be floating point, found {:?} and {:?}",
+                    self.multiplication_dtype, self.accumulation_dtype
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Multiplies an expert output by its routing weights at the configured precision.
+///
+/// Explicit casts make the rounding point backend-independent. In particular,
+/// this does not rely on implicit mixed-dtype promotion when an F16 expert is
+/// multiplied by an FP32 routing probability.
+fn weighted_expert_contribution<B: Backend>(
+    expert_output: Tensor<B, 2>,
+    weights: Tensor<B, 2>,
+    precision: RoutedExpertPrecision,
+) -> Tensor<B, 2> {
+    (expert_output.cast(precision.multiplication_dtype)
+        * weights.cast(precision.multiplication_dtype))
+    .cast(precision.accumulation_dtype)
 }
 
 /// Host metadata for one expert, ordered by flattened `(token, slot)` index.
@@ -382,6 +464,9 @@ pub struct SparseMoe<B: Backend> {
     pub renormalize_selected: bool,
     /// Multiplicative routed-output scale.
     pub routed_scale: f64,
+    /// Explicit route-weight/expert-output rounding policy.
+    #[module(skip)]
+    pub weighting_precision: RoutedWeightingPrecision,
     /// Residual-stream width used when flattening tokens.
     pub hidden_size: usize,
 }
@@ -402,6 +487,22 @@ impl<B: Backend> SparseMoe<B> {
         flat_weights: Tensor<B, 2>,
         selected_experts: Tensor<B, 2, Int>,
         accumulation_dtype: DType,
+    ) -> Result<RoutedExpertDispatch<B>> {
+        self.dispatch_selected_experts_with_precision(
+            flat_input,
+            flat_weights,
+            selected_experts,
+            RoutedExpertPrecision::uniform(accumulation_dtype),
+        )
+    }
+
+    /// Dispatches selected experts with an explicit multiply/accumulate policy.
+    fn dispatch_selected_experts_with_precision(
+        &self,
+        flat_input: Tensor<B, 2>,
+        flat_weights: Tensor<B, 2>,
+        selected_experts: Tensor<B, 2, Int>,
+        precision: RoutedExpertPrecision,
     ) -> Result<RoutedExpertDispatch<B>> {
         let [tokens, hidden] = flat_input.dims();
         let [weight_tokens, weight_slots] = flat_weights.dims();
@@ -441,12 +542,7 @@ impl<B: Backend> SparseMoe<B> {
                 ),
             ));
         }
-        if !accumulation_dtype.is_float() {
-            return Err(Error::configuration(
-                "moe.dispatch.accumulation_dtype",
-                format!("must be floating point, found {accumulation_dtype:?}"),
-            ));
-        }
+        precision.validate()?;
         let device = flat_input.device();
         if flat_weights.device() != device || selected_experts.device() != device {
             return Err(Error::BackendCapability(
@@ -462,9 +558,9 @@ impl<B: Backend> SparseMoe<B> {
             )
         })?;
         let groups = group_selected_experts(selected_experts, self.routed.len())?;
-        let flat_weights = flat_weights.cast(accumulation_dtype).reshape([assignments]);
+        let flat_weights = flat_weights.reshape([assignments]);
         let mut hidden_state =
-            Tensor::<B, 2>::zeros([tokens, hidden], (&device, accumulation_dtype));
+            Tensor::<B, 2>::zeros([tokens, hidden], (&device, precision.accumulation_dtype));
         let mut expert_token_counts = Vec::with_capacity(self.routed.len());
         let mut evaluated_experts = 0;
 
@@ -488,7 +584,8 @@ impl<B: Backend> SparseMoe<B> {
                 .select(0, weight_indices)
                 .unsqueeze_dim::<2>(1);
             let expert_input = flat_input.clone().select(0, token_indices.clone());
-            let contribution = expert.forward(expert_input)?.cast(accumulation_dtype) * weights;
+            let contribution =
+                weighted_expert_contribution(expert.forward(expert_input)?, weights, precision);
             hidden_state =
                 hidden_state.select_assign(0, token_indices, contribution, IndexingUpdateOp::Add);
         }
@@ -534,10 +631,10 @@ impl<B: Backend> SparseMoe<B> {
         })?;
         let flat_input = input.clone().reshape([tokens, hidden]);
         let router_logits = operations::linear(input, &self.router)?;
-        // Qwen ranks the softmax probabilities in FP32.  Casting before top-k can
-        // collapse nearby scores in F16/BF16 and silently route a token to a
-        // different expert, so only the final selected mixture weights return
-        // to the residual-stream dtype.
+        // Routing ranks the softmax probabilities in FP32. Casting before top-k
+        // can collapse nearby scores in F16/BF16 and silently select a different
+        // expert. The explicit weighting policy below controls the later rounding
+        // boundary without changing this discrete selection invariant.
         let probabilities = softmax(router_logits.clone().cast(DType::F32), 2);
         let (selected_weights, selected_experts) =
             deterministic_top_k(probabilities.clone(), self.experts_per_token);
@@ -548,15 +645,24 @@ impl<B: Backend> SparseMoe<B> {
             let denominator = flat_weights.clone().sum_dim(1).clamp_min(f32::MIN_POSITIVE);
             flat_weights = flat_weights / denominator;
         }
-        flat_weights = (flat_weights * self.routed_scale).cast(flat_input.dtype());
+        flat_weights = flat_weights * self.routed_scale;
+        let precision = match self.weighting_precision {
+            RoutedWeightingPrecision::Residual => {
+                flat_weights = flat_weights.cast(flat_input.dtype());
+                RoutedExpertPrecision::uniform(flat_input.dtype())
+            }
+            RoutedWeightingPrecision::Fp32ThenResidual => {
+                RoutedExpertPrecision::fp32_weights_round_each(flat_input.dtype())
+            }
+        };
         let flat_experts = selected_experts
             .clone()
             .reshape([tokens, self.experts_per_token]);
-        let dispatch = self.dispatch_selected_experts(
+        let dispatch = self.dispatch_selected_experts_with_precision(
             flat_input.clone(),
             flat_weights.clone(),
             flat_experts,
-            flat_input.dtype(),
+            precision,
         )?;
 
         let mut shared_output =
@@ -586,7 +692,7 @@ impl<B: Backend> SparseMoe<B> {
 /// the smallest expert index, gathers that probability, and masks precisely the
 /// chosen index. The complexity is `O(kE)` and does not allocate the `O(E^2)`
 /// pairwise-ranking tensor that a lexicographic sort would require.
-fn deterministic_top_k<B: Backend>(
+pub(crate) fn deterministic_top_k<B: Backend>(
     probabilities: Tensor<B, 3>,
     k: usize,
 ) -> (Tensor<B, 3>, Tensor<B, 3, Int>) {
@@ -630,7 +736,10 @@ mod tests {
         tensor::{DType, Int, Tensor, backend::BackendTypes},
     };
 
-    use super::{SparseMoe, SparseMoeConfig, group_selected_experts, load_balancing_loss};
+    use super::{
+        RoutedExpertPrecision, RoutedWeightingPrecision, SparseMoe, SparseMoeConfig,
+        group_selected_experts, load_balancing_loss, weighted_expert_contribution,
+    };
 
     /// Installs zero parameters without advancing Burn's process-wide test RNG.
     fn deterministic_module(
@@ -666,6 +775,28 @@ mod tests {
             .validate()
             .expect_err("top-k greater than expert count must fail");
         assert!(error.to_string().contains("experts_per_token"));
+    }
+
+    /// Serialized configs default legacy payloads to residual-dtype route weighting.
+    #[test]
+    fn weighting_precision_is_explicit_and_backward_compatible() {
+        let mut config = SparseMoeConfig::new(4, 8, 3, 2);
+        let mut legacy = serde_json::to_value(&config).unwrap();
+        legacy
+            .as_object_mut()
+            .expect("configuration serializes as an object")
+            .remove("weighting_precision");
+        let decoded: SparseMoeConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            decoded.weighting_precision,
+            RoutedWeightingPrecision::Residual
+        );
+
+        config.weighting_precision = RoutedWeightingPrecision::Fp32ThenResidual;
+        assert_eq!(
+            serde_json::to_value(config).unwrap()["weighting_precision"],
+            "fp32_then_residual"
+        );
     }
 
     /// Sparse routing returns stable public shapes for diagnostics and hidden states.
@@ -752,7 +883,32 @@ mod tests {
                 DType::I32,
             )
             .expect_err("integer accumulation must fail before a tensor cast");
-        assert!(error.to_string().contains("accumulation_dtype"));
+        assert!(error.to_string().contains("moe.dispatch.precision"));
+    }
+
+    /// Qwen retains an FP32 route weight until after multiplication by an F16 expert output.
+    #[test]
+    fn qwen_f16_route_weight_rounds_after_multiplication() {
+        let device = Default::default();
+        let expert_output = Tensor::<Flex, 2>::from_floats([[1.5]], &device).cast(DType::F16);
+        let fp32_weight = Tensor::<Flex, 2>::from_floats([[0.1]], &device);
+
+        let actual = weighted_expert_contribution(
+            expert_output.clone(),
+            fp32_weight.clone(),
+            RoutedExpertPrecision::fp32_weights_round_each(DType::F16),
+        );
+        let upstream =
+            (expert_output.clone().cast(DType::F32) * fp32_weight.clone()).cast(DType::F16);
+        let weight_rounded_too_early = expert_output * fp32_weight.cast(DType::F16);
+
+        assert_eq!(actual.dtype(), DType::F16);
+        assert_eq!(actual.to_data(), upstream.to_data());
+        assert_ne!(actual.to_data(), weight_rounded_too_early.to_data());
+        assert_eq!(
+            actual.cast(DType::F32).into_data().to_vec::<f32>().unwrap(),
+            [0.150_024_41]
+        );
     }
 
     /// Equal router scores select lower expert IDs first on every backend.

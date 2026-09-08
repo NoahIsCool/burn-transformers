@@ -11,6 +11,13 @@
 //! learned scale: `u = x_f32 / sqrt(mean(x_f32^2) + epsilon)` and
 //! `y = weight * cast_input_dtype(u)`. That last cast precedes multiplication,
 //! which is observable for F16 activations.
+//! Expert route weights follow a different rounding boundary: normalized FP32
+//! probabilities multiply the reduced-precision expert result in FP32, then
+//! each weighted contribution is rounded to the residual dtype immediately
+//! before index-add. Router diagnostics expose the raw linear projections, but
+//! the optional family loss reproduces Transformers 5.2's unusual stack-wide
+//! `softmax(softmax(raw))` objective through
+//! [`qwen3_moe_load_balancing_loss`].
 //!
 //! This module deliberately uses the shared attention, normalization, position,
 //! feed-forward, and sparse-dispatch implementations. It owns only the exact
@@ -20,7 +27,10 @@
 use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
-    tensor::{Bool, ElementConversion, Int, Tensor, TensorData, backend::Backend},
+    tensor::{
+        Bool, DType, ElementConversion, Int, Tensor, TensorData, activation::softmax,
+        backend::Backend,
+    },
 };
 
 use crate::{
@@ -29,7 +39,10 @@ use crate::{
     architecture::{RouterDiagnostics, TokenMask},
     attention::{GroupedQueryAttention, GroupedQueryAttentionConfig, padding_attention_mask},
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
-    moe::{SparseMoe, SparseMoeConfig, SparseMoeOutput},
+    moe::{
+        RoutedWeightingPrecision, SparseMoe, SparseMoeConfig, SparseMoeOutput, deterministic_top_k,
+        load_balancing_loss,
+    },
     normalization::{RmsNorm, RmsNormConfig},
     operations,
     position::{
@@ -85,6 +98,7 @@ impl<B: Backend> Qwen3MoeDecoderLayer<B> {
                 config.num_experts_per_tok,
             );
             sparse.renormalize_selected = config.norm_topk_prob;
+            sparse.weighting_precision = RoutedWeightingPrecision::Fp32ThenResidual;
             (Some(sparse.init(device)?), None)
         } else {
             (
@@ -218,11 +232,18 @@ impl<B: Backend> Qwen3MoeModel<B> {
             0
         });
         let retain_router_logits = options.router_logits || self.config.output_router_logits;
-        let mut routers = Vec::with_capacity(if retain_router_logits || options.auxiliary_losses {
-            self.layers
-                .iter()
-                .filter(|layer| layer.sparse_mlp.is_some())
-                .count()
+        let sparse_layers = self
+            .layers
+            .iter()
+            .filter(|layer| layer.sparse_mlp.is_some())
+            .count();
+        let mut routers = Vec::with_capacity(if retain_router_logits {
+            sparse_layers
+        } else {
+            0
+        });
+        let mut auxiliary_router_logits = Vec::with_capacity(if options.auxiliary_losses {
+            sparse_layers
         } else {
             0
         });
@@ -243,15 +264,13 @@ impl<B: Backend> Qwen3MoeModel<B> {
             if options.hidden_states {
                 hidden_states.push(hidden.clone());
             }
-            if let Some(routed) = routed
-                && (retain_router_logits || options.auxiliary_losses)
-            {
-                routers.push(router_diagnostics(
-                    &routed,
-                    input.token_mask.as_ref(),
-                    options,
-                    retain_router_logits,
-                )?);
+            if let Some(routed) = routed {
+                if options.auxiliary_losses {
+                    auxiliary_router_logits.push(routed.router_logits.clone());
+                }
+                if retain_router_logits {
+                    routers.push(router_diagnostics(&routed));
+                }
             }
         }
         hidden = self.norm.forward(hidden);
@@ -262,6 +281,7 @@ impl<B: Backend> Qwen3MoeModel<B> {
             hidden,
             hidden_states,
             routers,
+            auxiliary_router_logits,
         })
     }
 }
@@ -271,6 +291,7 @@ struct Qwen3MoeBackboneOutput<B: Backend> {
     hidden: Tensor<B, 3>,
     hidden_states: Vec<Tensor<B, 3>>,
     routers: Vec<RouterDiagnostics<B>>,
+    auxiliary_router_logits: Vec<Tensor<B, 3>>,
 }
 
 /// Decoder-only Qwen3 MoE language model.
@@ -312,6 +333,16 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
             ));
         }
         let backbone = self.model.forward(&input, options)?;
+        let load_balancing_loss = options
+            .auxiliary_losses
+            .then(|| {
+                qwen3_moe_load_balancing_loss(
+                    &backbone.auxiliary_router_logits,
+                    self.config().num_experts_per_tok,
+                    input.token_mask.as_ref(),
+                )
+            })
+            .transpose()?;
         let hidden = backbone.hidden;
         let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
         let logits = self.project_logits(selected)?;
@@ -321,6 +352,7 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
             hidden_states: backbone.hidden_states,
             attentions: Vec::new(),
             routers: backbone.routers,
+            load_balancing_loss,
         })
     }
 
@@ -422,21 +454,131 @@ fn qwen_rope_config(config: &Qwen3MoeConfig) -> Result<RopeConfig> {
         .map_err(|error| Error::configuration("qwen3_moe.rope", error.to_string()))
 }
 
-/// Produces optional public router diagnostics without retaining unused tensors.
-fn router_diagnostics<B: Backend>(
-    output: &SparseMoeOutput<B>,
-    mask: Option<&TokenMask<B>>,
-    options: &ForwardOptions,
-    retain_router_logits: bool,
-) -> Result<RouterDiagnostics<B>> {
-    Ok(RouterDiagnostics {
-        logits: retain_router_logits.then(|| output.router_logits.clone()),
-        load_balancing_loss: options
-            .auxiliary_losses
-            .then(|| output.load_balancing_loss(mask))
-            .transpose()?,
+/// Computes the pinned Transformers 5.2 Qwen3-MoE stack-wide balance objective.
+///
+/// The upstream output recorder captures each router *after* its FP32 softmax,
+/// despite naming the captured tensor `router_logits`. Its causal-LM wrapper
+/// concatenates every layer/token row, applies softmax a second time, recomputes
+/// top-k assignments, then evaluates the Switch Transformer balance objective
+///
+/// `E * sum_(j,e) mean_(l,b,t)(a[l,b,t,j,e]) * mean_(l,b,t)(q[l,b,t,e])`,
+///
+/// where `p = softmax(raw_logits)`, `q = softmax(p)`, and `a` is the one-hot
+/// top-k assignment from `q`. This API accepts the raw logits exposed by this
+/// crate and performs both softmax operations explicitly. Padding is replicated
+/// across layers exactly as in the pinned reference. The returned scalar is not
+/// multiplied by [`Qwen3MoeConfig::router_aux_loss_coef`].
+///
+/// # Errors
+///
+/// Returns a contextual error when there are no sparse-layer tensors, tensor
+/// shapes/devices differ, `experts_per_token` is invalid, or the optional mask
+/// does not match each layer's batch and sequence axes.
+pub fn qwen3_moe_load_balancing_loss<B: Backend>(
+    raw_router_logits: &[Tensor<B, 3>],
+    experts_per_token: usize,
+    token_mask: Option<&TokenMask<B>>,
+) -> Result<Tensor<B, 1>> {
+    let Some(first) = raw_router_logits.first() else {
+        return Err(Error::configuration(
+            "qwen3_moe.auxiliary_loss.router_logits",
+            "requires at least one sparse-layer router tensor",
+        ));
+    };
+    let [batch, sequence, experts] = first.dims();
+    if batch == 0 || sequence == 0 || experts == 0 {
+        return Err(Error::shape(
+            "qwen3_moe.auxiliary_loss.router_logits[0]",
+            "non-empty [batch, sequence, experts]",
+            format!("{:?}", first.dims()),
+        ));
+    }
+    if experts_per_token == 0 || experts_per_token > experts {
+        return Err(Error::configuration(
+            "qwen3_moe.auxiliary_loss.experts_per_token",
+            format!("must be in 1..={experts}"),
+        ));
+    }
+    if !first.dtype().is_float() {
+        return Err(Error::configuration(
+            "qwen3_moe.auxiliary_loss.router_logits[0]",
+            format!("must have a floating dtype, found {:?}", first.dtype()),
+        ));
+    }
+    let device = first.device();
+    if let Some(mask) = token_mask {
+        if mask.as_tensor().dims() != [batch, sequence] {
+            return Err(Error::shape(
+                "qwen3_moe.auxiliary_loss.token_mask",
+                format!("[{batch}, {sequence}]"),
+                format!("{:?}", mask.as_tensor().dims()),
+            ));
+        }
+        if mask.as_tensor().device() != device {
+            return Err(Error::BackendCapability(
+                "Qwen3 MoE auxiliary-loss mask and router logits must reside on the same device"
+                    .into(),
+            ));
+        }
+    }
+    batch.checked_mul(raw_router_logits.len()).ok_or_else(|| {
+        Error::shape(
+            "qwen3_moe.auxiliary_loss.router_logits",
+            "a layer * batch product representable by usize",
+            format!("{} * {batch}", raw_router_logits.len()),
+        )
+    })?;
+
+    let mut recorded_router_outputs = Vec::with_capacity(raw_router_logits.len());
+    for (layer, logits) in raw_router_logits.iter().enumerate() {
+        if logits.dims() != [batch, sequence, experts] {
+            return Err(Error::shape(
+                format!("qwen3_moe.auxiliary_loss.router_logits[{layer}]"),
+                format!("[{batch}, {sequence}, {experts}]"),
+                format!("{:?}", logits.dims()),
+            ));
+        }
+        if logits.device() != device {
+            return Err(Error::BackendCapability(format!(
+                "Qwen3 MoE auxiliary-loss router tensor {layer} is on a different device"
+            )));
+        }
+        if !logits.dtype().is_float() {
+            return Err(Error::configuration(
+                format!("qwen3_moe.auxiliary_loss.router_logits[{layer}]"),
+                format!("must have a floating dtype, found {:?}", logits.dtype()),
+            ));
+        }
+        recorded_router_outputs.push(softmax(logits.clone().cast(DType::F32), 2));
+    }
+
+    let recorded_router_outputs = Tensor::cat(recorded_router_outputs, 0);
+    let second_pass = softmax(recorded_router_outputs.clone(), 2);
+    let (_, selected_experts) = deterministic_top_k(second_pass, experts_per_token);
+    let stacked_mask = token_mask.map(|mask| {
+        TokenMask::new(Tensor::cat(
+            (0..raw_router_logits.len())
+                .map(|_| mask.as_tensor().clone())
+                .collect(),
+            0,
+        ))
+    });
+    load_balancing_loss(
+        recorded_router_outputs,
+        selected_experts,
+        stacked_mask.as_ref(),
+    )
+}
+
+/// Preserves Qwen's raw pre-softmax router projection for diagnostics.
+fn router_diagnostics<B: Backend>(output: &SparseMoeOutput<B>) -> RouterDiagnostics<B> {
+    RouterDiagnostics {
+        logits: Some(output.router_logits.clone()),
+        // The pinned objective spans every sparse layer and is returned on the
+        // enclosing CausalLmOutput instead of being duplicated per layer.
+        load_balancing_loss: None,
         z_loss: None,
-    })
+    }
 }
 
 /// Combines padding with an optional left-bounded causal window.
@@ -811,6 +953,24 @@ mod tests {
         }
     }
 
+    /// Every routed layer selects Qwen's FP32-weight/per-contribution rounding boundary.
+    #[test]
+    fn every_sparse_layer_uses_the_upstream_weighting_precision() {
+        let device = Default::default();
+        let model = Qwen3MoeForCausalLm::<TestBackend>::init(tiny_config(), &device).unwrap();
+
+        for layer in &model.model.layers {
+            assert_eq!(
+                layer
+                    .sparse_mlp
+                    .as_ref()
+                    .expect("tiny topology is all-MoE")
+                    .weighting_precision,
+                RoutedWeightingPrecision::Fp32ThenResidual
+            );
+        }
+    }
+
     /// F16 exposes the upstream cast-before-scale order as a bitwise distinction.
     #[test]
     fn rms_norm_f16_matches_upstream_cast_before_scale_order() {
@@ -904,12 +1064,152 @@ mod tests {
             .expect("tiny stateless forward");
         assert_eq!(output.logits.dims(), [2, 3, 32]);
         assert_eq!(output.hidden_states.len(), 4);
+        assert_eq!(
+            output
+                .load_balancing_loss
+                .as_ref()
+                .expect("requested stack-wide loss")
+                .dims(),
+            [1]
+        );
         assert_eq!(output.routers.len(), 2);
         for router in output.routers {
             assert_eq!(router.logits.expect("requested").dims(), [2, 3, 4]);
-            assert_eq!(router.load_balancing_loss.expect("requested").dims(), [1]);
+            assert!(router.load_balancing_loss.is_none());
             assert!(router.z_loss.is_none());
         }
+    }
+
+    /// A pinned Transformers 5.2 fixture proves the layer-stack and double-softmax semantics.
+    #[test]
+    fn stack_wide_auxiliary_loss_matches_transformers_5_2_golden() {
+        let device = Default::default();
+        let raw_router_logits = vec![
+            Tensor::<TestBackend, 3>::from_floats(
+                [
+                    [[2.0, 0.0, -1.0], [0.5, 0.4, -0.2]],
+                    [[-1.0, 1.5, 0.25], [3.0, -2.0, 1.0]],
+                ],
+                &device,
+            ),
+            Tensor::<TestBackend, 3>::from_floats(
+                [
+                    [[0.0, 1.0, 2.0], [-0.5, 0.25, 1.25]],
+                    [[1.0, 0.99, -1.0], [0.2, -0.3, 0.7]],
+                ],
+                &device,
+            ),
+        ];
+        let mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [[true, true], [true, false]].into(),
+            &device,
+        ));
+
+        let loss = qwen3_moe_load_balancing_loss(&raw_router_logits, 2, Some(&mask))
+            .expect("valid pinned auxiliary-loss fixture");
+
+        assert_eq!(loss.dtype(), DType::F32);
+        loss.into_data().assert_approx_eq::<f32>(
+            &TensorData::from([2.009_133_8_f32]),
+            Tolerance::absolute(1.0e-6),
+        );
+    }
+
+    /// Auxiliary loss is global and does not force raw per-layer diagnostics into the output.
+    #[test]
+    fn auxiliary_loss_only_retains_no_public_router_tensors() {
+        let (model, device) = tiny_model();
+        let output = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 2, 3]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions {
+                    auxiliary_losses: true,
+                    ..Default::default()
+                },
+            )
+            .expect("tiny auxiliary-only forward");
+
+        assert!(output.routers.is_empty());
+        let loss = output
+            .load_balancing_loss
+            .expect("Qwen auxiliary flag requests one global loss")
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()[0];
+        assert!(
+            loss > 1.0,
+            "the raw objective must not apply the 0.001 coefficient"
+        );
+    }
+
+    /// Stateful prefill returns the same global loss API and no fabricated per-layer losses.
+    #[test]
+    fn cached_auxiliary_loss_uses_the_stack_wide_path() {
+        let (model, device) = tiny_model();
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        let output = model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 2, 3]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions {
+                    router_logits: true,
+                    auxiliary_losses: true,
+                    ..Default::default()
+                },
+            )
+            .expect("tiny stateful auxiliary forward");
+        let raw_router_logits = output
+            .routers
+            .iter()
+            .map(|router| {
+                assert!(router.load_balancing_loss.is_none());
+                router.logits.clone().expect("raw diagnostics requested")
+            })
+            .collect::<Vec<_>>();
+        let expected = qwen3_moe_load_balancing_loss(
+            &raw_router_logits,
+            model.config().num_experts_per_tok,
+            None,
+        )
+        .unwrap();
+
+        output
+            .load_balancing_loss
+            .expect("stateful path returns one global objective")
+            .into_data()
+            .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(0.0));
+    }
+
+    /// The public loss helper rejects missing layers and invalid top-k before tensor kernels.
+    #[test]
+    fn auxiliary_loss_validates_family_inputs() {
+        let device = Default::default();
+        let no_layers = qwen3_moe_load_balancing_loss::<TestBackend>(&[], 1, None)
+            .expect_err("an empty sparse stack has no balance objective");
+        assert!(no_layers.to_string().contains("at least one sparse-layer"));
+
+        let logits = [Tensor::<TestBackend, 3>::zeros([1, 2, 3], &device)];
+        let invalid_top_k = qwen3_moe_load_balancing_loss(&logits, 4, None)
+            .expect_err("top-k cannot exceed the expert count");
+        assert!(invalid_top_k.to_string().contains("experts_per_token"));
+
+        let mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [[true]].into(),
+            &device,
+        ));
+        let invalid_mask = qwen3_moe_load_balancing_loss(&logits, 1, Some(&mask))
+            .expect_err("mask axes must match every router layer");
+        assert!(invalid_mask.to_string().contains("token_mask"));
     }
 
     /// Stateless device preflight names every independently supplied tensor.

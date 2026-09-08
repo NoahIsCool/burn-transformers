@@ -1254,6 +1254,7 @@ mod tests {
                     hidden_states: Vec::new(),
                     attentions: Vec::new(),
                     routers: Vec::new(),
+                    load_balancing_loss: None,
                 },
                 encoder,
                 cross_attentions: Vec::new(),

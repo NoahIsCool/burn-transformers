@@ -544,6 +544,7 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
             hidden_states: backbone.hidden_states,
             attentions: backbone.attentions,
             routers: backbone.routers,
+            load_balancing_loss: None,
         })
     }
 

@@ -129,6 +129,33 @@ pub struct CausalLmOutput<B: Backend> {
     pub attentions: Vec<Tensor<B, 4>>,
     /// Per-MoE-layer router data when requested.
     pub routers: Vec<RouterDiagnostics<B>>,
+    /// One architecture-defined stack-wide load-balancing objective, when requested.
+    ///
+    /// Some reference implementations, notably Qwen3-MoE, define one loss over
+    /// the concatenated router outputs from every sparse layer. Such a scalar
+    /// cannot be represented truthfully as a per-layer [`RouterDiagnostics`]
+    /// value. The objective is returned without the model configuration's
+    /// training coefficient; applying that coefficient belongs to the caller's
+    /// loss composition policy.
+    pub load_balancing_loss: Option<Tensor<B, 1>>,
+}
+
+impl<B: Backend> CausalLmOutput<B> {
+    /// Creates an output containing vocabulary logits and no optional diagnostics.
+    ///
+    /// Architecture implementations that do not expose hidden states, attention,
+    /// router data, or a stack-wide balancing objective can use this constructor
+    /// to make the absence of every diagnostic explicit and future-proof.
+    pub fn from_logits(logits: Tensor<B, 3>) -> Self {
+        Self {
+            logits,
+            final_hidden_state: None,
+            hidden_states: Vec::new(),
+            attentions: Vec::new(),
+            routers: Vec::new(),
+            load_balancing_loss: None,
+        }
+    }
 }
 
 /// Source-side output retained for encoder-decoder inference.
@@ -166,7 +193,7 @@ pub struct Seq2SeqOutput<B: Backend> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ForwardOptions, LogitsSelection};
+    use super::{CausalLmOutput, ForwardOptions, LogitsSelection};
 
     #[cfg(feature = "flex")]
     use burn::backend::Flex;
@@ -218,6 +245,21 @@ mod tests {
         assert!(!options.attentions);
         assert!(!options.router_logits);
         assert!(!options.auxiliary_losses);
+    }
+
+    /// The minimal output constructor initializes every optional diagnostic to absence.
+    #[cfg(feature = "flex")]
+    #[test]
+    fn logits_only_output_drops_no_uninitialized_diagnostics() {
+        let device = Default::default();
+        let output = CausalLmOutput::<TestBackend>::from_logits(Tensor::zeros([2, 1, 7], &device));
+
+        assert_eq!(output.logits.dims(), [2, 1, 7]);
+        assert!(output.final_hidden_state.is_none());
+        assert!(output.hidden_states.is_empty());
+        assert!(output.attentions.is_empty());
+        assert!(output.routers.is_empty());
+        assert!(output.load_balancing_loss.is_none());
     }
 
     /// Verifies an explicit position list survives serde round trips without ambiguity.

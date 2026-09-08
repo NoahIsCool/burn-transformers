@@ -28,7 +28,10 @@ pub mod model;
 
 pub use checkpoint::{Qwen3MoeCheckpointContract, Qwen3MoeCheckpointOptions};
 pub use load::{Qwen3MoeCheckpointLoadError, Qwen3MoeLoadError};
-pub use model::{Qwen3MoeDecodeState, Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm, Qwen3MoeModel};
+pub use model::{
+    Qwen3MoeDecodeState, Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm, Qwen3MoeModel,
+    qwen3_moe_load_balancing_loss,
+};
 
 use super::config::{
     ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, divisible, model_type, nonzero,

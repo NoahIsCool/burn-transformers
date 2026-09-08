@@ -386,6 +386,7 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
             hidden_states,
             attentions: Vec::new(),
             routers: Vec::new(),
+            load_balancing_loss: None,
         })
     }
 }
