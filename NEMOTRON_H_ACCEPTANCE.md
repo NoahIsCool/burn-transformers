@@ -2,13 +2,19 @@
 
 This document defines the artifact and numerical gates for
 `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` at immutable revision
-`a9904d24bcc1d289a1950fa9d2b978c47cf903b9`. The exact local artifact has now
-passed full-payload authentication, strict source-ordered F16 application, and
-a short Burn Metal base-model smoke. That smoke is internal-consistency
-evidence, not comparison with an official numerical oracle; real-weight MTP
-parity and the remaining release gates are still incomplete, so the model is not
-advertised as supported. The machine-readable state is
+`a9904d24bcc1d289a1950fa9d2b978c47cf903b9`. The exact local artifact has passed
+full-payload authentication, strict source-ordered F16 application, and a short
+Burn Metal base-model smoke. That smoke is internal-consistency evidence; the
+separately pinned official oracle has not yet been compared with Burn.
+Real-weight MTP parity and the remaining release gates are also incomplete, so
+the model is not advertised as supported. The committed machine-readable state
+remains
 [`acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json`](acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json).
+An external, authenticated seven-file base-model oracle now proves the official
+Transformers graph can load and execute the complete language tower. It does
+not execute the 270 physical `mtp.*` tensors and does not make the checkpoint
+advertised as supported. Its independent Rust reader pins every external file
+and keeps the separate MTP evidence path fail-closed.
 
 ## Pinned evidence
 
@@ -173,15 +179,126 @@ token embedding followed by normalized target hidden state, concatenation and
 projection, attention residual, MoE residual, then final normalization. The
 MTP graph shares the target embedding and LM head.
 
+## Authenticated official base-model oracle
+
+[`scripts/generate_nemotron_h_base_reference.py`](scripts/generate_nemotron_h_base_reference.py)
+at Git commit `0f222f6213ebf320a5fd91221021d5499622987d`
+(139,608 bytes, SHA-256
+`10ab5c7a6aea744ba28120a2b5415ff91c2260e9f01da69c583a1cc4f060b94a`)
+generated the external directory
+`nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle`. The generator
+authenticates the exact config, index, fourteen shards, pinned Transformers
+checkout and sources, and eleven primary distribution payload manifests before
+importing the model. Their combined artifact and distribution manifest SHA-256
+values are `cb72063ee5b215548d9adbc67052de5f54871f1e28b80a0e0db9782afd4ad759`
+and `6eca7252cebb0750fa344a7d05419a4511f3ecf985e6f893dadf3e0e94c2b2a6`.
+It enforces and records the CPython runtime but explicitly treats interpreter,
+standard-library, system-library, and transitive-distribution bytes as trusted
+environment inputs rather than claiming to authenticate them. It repeats all
+content checks after inference, blocks network, remote code and external
+kernels, requires a clean committed copy of itself, and writes through a hidden
+sibling directory followed by one atomic no-replace rename. Every final file is
+create-only; failed runs leave no partial final bundle.
+
+The official F16 MPS eager graph loaded 31,577,937,344 parameter elements. Its
+401 state entries include 23 FP32 router-correction buffers totaling 2,944
+elements. Its strict loading report contains zero missing, unexpected,
+mismatched, or error entries. Before
+loading, the independent header parser counted all 6,513 physical tensors,
+including exactly 270 `mtp.*` tensors with name-manifest SHA-256
+`9dceb828e3bb078ebb0dfe24b1e7257ba6bb2f9c49c0be14539caad770078e48`.
+The pinned class's sole unexpected-key filter is exactly `mtp.*`; after that
+filter, no unexplained load anomaly remains. The record explicitly says those
+MTP tensors were not instantiated or executed.
+
+The literal prompt `Hello world, cached decoding.` tokenizes without added
+special tokens to `[22177, 4304, 1044, 57424, 59417, 1046]`. Model config
+EOS/PAD remain 2/0, the tokenizer maps both EOS and PAD to 11, and generation
+accepts EOS `[2, 11]`. Its binary16-stable greedy continuation is the pair
+`[1256, 1010]` repeated sixteen times. The authenticated tokenizer maps those
+IDs to `['ĠĠ', 'Ċ']`, yielding two spaces followed by a newline on every cycle.
+This whitespace loop is retained as evidence rather than replaced with a more
+favorable prompt.
+
+The bundle preserves both official numerical paths: one full-vocabulary prompt
+row, all 32 cached rows, all 32 teacher-forced rows, the 54-boundary stateless
+prompt hidden trace, cached-prefill hidden trace, and first recurrent-decode
+hidden trace. Stateless and cached prompt hidden payloads are byte-identical;
+their logit cosine is `1.0000000000000009` under the recorded F64 reduction,
+and the minimum corresponding hidden-boundary cosine is
+`0.9999999999999998`. Cached and teacher-forced top-1 IDs agree for all 32
+decisions, but the two official Mamba algorithms are not numerically
+interchangeable: recurrent cached versus chunked teacher logits reach a minimum
+cosine of `0.9215047947571176` at decision 22. At that row the dot product is
+`401545.8810470642` and the two norms are `637.4856846878333` and
+`683.5450448546004`. The largest absolute error is `3.314453125` at vocabulary
+index 6507 (cached `5.6171875`, teacher `2.302734375`); the largest relative
+error is `17301.86108714409` at index 67673 under denominator
+`max(abs(teacher), 1e-12)`. Cached top two are token 1256 at `17.4375` and token
+8129 at `11.6484375`, a `5.7890625` margin; teacher top two are token 1256 at
+`17.03125` and token 1032 at `12.0390625`, a `4.9921875` margin. Thus the
+crossed paths differ substantially while retaining the same stable top-1.
+
+Per-layer localization first falls below 0.999 at decision 1 after MoE layer 27
+(`0.9919212313408887`). The worst hidden boundary is decision 14 after MoE layer 1
+(`0.4418906779817166`): the identical embedding first falls to
+`0.8920338531579629` after Mamba layer 0, then drops another
+`0.4501431751762463` at the following MoE boundary. This proves the recurrent
+versus chunk-scan difference begins in Mamba and is amplified across the next
+MoE block; expert-ID hooks were not captured, so it does not by itself prove
+that different experts were selected.
+
+This source self-divergence is diagnostic, not a relaxed parity threshold. A
+Burn cached run must match the official cached rows, and a Burn stateless run
+must match the official teacher rows, each at cosine at least 0.999. Crossing
+the two official paths is gated by exact top-1 equality and preserved as two
+separate oracle matrices, not mislabeled as a 0.999 comparison.
+
+The exact official cache has physical batch one while `DynamicCache.batch_size`
+reports its `-1` sentinel. Each of 23 Mamba layers stores an F16 convolution
+tail `[1, 6144, 4]` and FP32 recurrent state `[1, 64, 64, 128]`; each of six
+NoPE-GQA layers stores F16 key/value tensors `[1, 2, L, 128]`, growing from
+`L=6` to `L=37`; the 23 MoE schedule slots remain uninitialized cache
+placeholders. The generator validates every layer at every decision.
+
+The published file anchors are:
+
+- record JSON, 98,220 bytes:
+  `bd3abb417f2fee82d1bef8bb654ca846fa4816351b1d9d7d0d057105f92de196`;
+- prompt logits, 524,288 bytes:
+  `f3c014bb043e9ffa3a114a4296ca0e0c2165c4abd63b942df6d910a4383a1dff`;
+- stateless hidden trace, 580,608 bytes:
+  `56033b284b0c926a40fd50e51eeb232412d3d77ae97282782dc39b9645ff0be2`;
+- cached logits, 16,777,216 bytes:
+  `b3a1ae948e55e6db409e0f9973c41c8767c874c6d64b1d351cfff7bbafa72480`;
+- teacher logits, 16,777,216 bytes:
+  `c1878c5e1396ddf01f3dfa85729ea58aa879ece28507399bdaf7addf4a65601b`;
+- cached-prefill hidden trace, 580,608 bytes:
+  `56033b284b0c926a40fd50e51eeb232412d3d77ae97282782dc39b9645ff0be2`;
+- first cached-decode hidden trace, 580,608 bytes:
+  `46c65b5cc91b53c3cdb2c3b6df9acaf4fbb216e91ae09f007c8d1b5571d93b79`.
+
+[`tests/support/nemotron_h_base_reference.rs`](tests/support/nemotron_h_base_reference.rs)
+independently pins those exact names, lengths, and digests. It rejects a
+symlinked bundle or member, any missing or extra member, traversal, a changed
+closed JSON schema, source/provenance drift, non-finite F32LE payload values,
+descriptor mismatch, and changed numerical summaries. It also recomputes the
+prompt ranking, all 64 cached/teacher argmaxes, and the minimum crossed-path
+cosine from the payloads. The record cannot authorize itself through hashes
+inside its own JSON.
+
+The generator requires 40 GiB of free system-volume space before MPS load,
+samples a 10 GiB runtime reserve after expensive forwards, and separately
+requires 1 GiB on the external output volume; this closes the temporary
+MPS-graph disk failure observed during an earlier concurrent diagnostic.
+
 The committed synthetic fixture probes F16 RMSNorm rounding order, grouped
 gated RMSNorm, correction-biased router selection with unbiased route weights,
-and the MTP topology contract. A real reference must additionally provide six
-little-endian F32 payloads: prompt logits, target hidden trace, 32 cached logits,
-32 teacher-forced logits, MTP draft logits, and MTP hidden trace. Its strict
-reader rejects unknown fields, non-regular files, symlinks, nested or traversing
-paths, wrong shapes, non-finite declarations, changed sources, and extra bundle
-members. All seven independent trust anchors (record plus six payloads) are
-intentionally absent, so every real bundle fails closed until review pins them.
+and the MTP topology contract. A separate combined base-plus-MTP reader remains
+intentionally fail-closed: its record and six payload anchors, including MTP
+draft logits and an MTP hidden trace, are absent until a pinned vLLM execution
+is independently reviewed. The accepted base-only bundle cannot satisfy or
+weaken that MTP gate.
 
 ## Reproduction commands
 
@@ -192,6 +309,15 @@ tests require no weight payloads:
 cargo test --manifest-path crates/transformers/Cargo.toml \
   --no-default-features --features std \
   --test nemotron_h_artifacts
+```
+
+The generator's 34 pure tests exercise its closed schemas, integrity checks,
+disk preflights, MTP filtering, cache validation, numerical diagnostics, and
+atomic create-only publication without importing PyTorch or loading weights:
+
+```sh
+python3 -m unittest \
+  crates/transformers/scripts/tests/test_generate_nemotron_h_base_reference.py
 ```
 
 After an external pinned download, authenticate all seven controls and every
@@ -217,30 +343,43 @@ cargo test --release --manifest-path crates/transformers/Cargo.toml \
   -- --ignored --exact --nocapture --test-threads=1
 ```
 
-After a dual-runtime reference bundle has been independently reviewed and its
-seven hashes have been pinned in the reader, authenticate it with:
+Generate a new immutable base oracle only from generator commit `0f222f6`, the
+pinned CPython 3.11.9 environment, the exact clean Transformers checkout, and an
+output directory in which the fixed bundle name does not already exist:
+
+```sh
+/absolute/path/to/pinned/python3.11 \
+  crates/transformers/scripts/generate_nemotron_h_base_reference.py \
+  --model-dir /absolute/path/to/pinned-checkpoint \
+  --transformers-dir /absolute/path/to/transformers-cfa309c \
+  --output-dir /absolute/path/on/external-volume
+```
+
+Authenticate the independently pinned base-only bundle without loading a model:
 
 ```sh
 TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR=/absolute/path/to/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle \
-cargo test --release --manifest-path crates/transformers/Cargo.toml \
+cargo test --manifest-path crates/transformers/Cargo.toml \
   --no-default-features --features std \
   --test nemotron_h_artifacts \
-  validates_pinned_nemotron_official_reference_bundle \
+  validates_pinned_nemotron_official_base_reference_bundle \
   -- --ignored --exact --nocapture
 ```
 
-Running the last command before hash review is expected to fail; the bundle may
-not authorize itself through hashes stored inside its JSON.
+The future combined MTP reader remains a different ignored test and fails before
+reading any bundle because none of its independent anchors is populated.
 
 ## Remaining release gates
 
-Before this checkpoint can be advertised as supported:
+This base oracle satisfies only the official-reference side of the numerical
+contract. Before this checkpoint can be advertised as supported:
 
-1. Generate the target evidence with pinned Transformers and the MTP evidence
-   with pinned vLLM; independently review and pin every bundle hash.
-2. Match full-vocabulary prompt logits and hidden traces, then match 32-token
-   cached generation and stateless top-1 at every prefix.
-3. Exercise official-parity recurrent decode, MTP draft/verification state
-   handling, padding, context boundaries, native Q8/Q4 quality and packed
-   kernels, the 32K stress gate, and standardized
-   memory/latency/throughput reporting.
+1. Match Burn cached execution to the official cached rows and Burn stateless
+   execution to the official teacher-forced rows at cosine at least 0.999;
+   require exact top-1 for every cached and stateless prefix, while keeping the
+   two official Mamba paths distinct.
+2. Generate the MTP evidence with pinned vLLM and independently review and pin
+   every combined-bundle hash; do not reuse the base loader as MTP evidence.
+3. Exercise real-weight MTP draft/verification state handling, padding,
+   context boundaries, native Q8/Q4 quality and packed kernels, the 32K stress
+   gate, and standardized memory/latency/throughput reporting.

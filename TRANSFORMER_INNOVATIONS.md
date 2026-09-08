@@ -35,7 +35,7 @@ description below.
 | **FLAN-S** | [google/flan-t5-small @ `0fc9dd…`](https://huggingface.co/google/flan-t5-small/blob/0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab/config.json) | [Pinned T5 reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/t5/modeling_t5.py), [T5 paper](https://arxiv.org/abs/1910.10683) | [`t5`](src/models/t5/model.rs) |
 | **FLAN-XXL** | [google/flan-t5-xxl @ `ae7c91…`](https://huggingface.co/google/flan-t5-xxl/blob/ae7c9136adc7555eeccc78cdd960dfd60fb346ce/config.json) | [Pinned T5 reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/t5/modeling_t5.py), [FLAN paper](https://arxiv.org/abs/2210.11416) | [`t5`](src/models/t5/model.rs) |
 | **FLAN-UL2** | [google/flan-ul2 @ `452d74…`](https://huggingface.co/google/flan-ul2/blob/452d74ce28ac4a7f211d6ba3ef0717027f7a8074/config.json) | [Pinned T5 reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/t5/modeling_t5.py), [UL2 paper](https://arxiv.org/abs/2205.05131) | [`t5`](src/models/t5/model.rs) |
-| **Nem-3.5** | [NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 @ `a9904d…`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/blob/a9904d24bcc1d289a1950fa9d2b978c47cf903b9/config.json) | [NVIDIA architecture/recipe](https://docs.nvidia.com/nemotron/nightly/nemotron/lightning35/pretrain.html), [Nemotron-H reference @ `cfa309…`](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/nemotron_h/modeling_nemotron_h.py), [vLLM MTP reference @ `6e448d…`](https://github.com/vllm-project/vllm/blob/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/vllm/model_executor/models/nemotron_h_mtp.py) | [`nemotron_h`](src/models/nemotron_h/model.rs) |
+| **Nem-3.5** | [NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 @ `a9904d…`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/blob/a9904d24bcc1d289a1950fa9d2b978c47cf903b9/config.json) | [NVIDIA architecture/recipe](https://docs.nvidia.com/nemotron/nightly/nemotron/lightning35/pretrain.html), [Nemotron-H base reference @ `cfa309…`](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/nemotron_h/modeling_nemotron_h.py), [vLLM MTP graph @ `6e448d…`](https://github.com/vllm-project/vllm/blob/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/vllm/model_executor/models/nemotron_h_mtp.py) | [`nemotron_h`](src/models/nemotron_h/model.rs) |
 | **Nem-Nano** | [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 @ `bf77c3…`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/bf77c3174f68ad409e1c2aa60daeb46e32d1c606/config.json) | [Pinned NVIDIA reference](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/bf77c3174f68ad409e1c2aa60daeb46e32d1c606/modeling_nemotron_h.py), [technical report](https://research.nvidia.com/labs/nemotron/files/NVIDIA-Nemotron-3-Nano-Technical-Report.pdf) | [`nemotron_h`](src/models/nemotron_h/model.rs) |
 
 Qwen3.8's inner text model is officially serialized as `qwen3_5_text`, not
@@ -596,8 +596,12 @@ prefill applies its configured $\Delta$ limits in activation dtype, then
 promotes $x,B,C,\Delta$, scan outputs, and state arithmetic to FP32. Recurrent
 decode does not apply those limits: decay and state accumulation are FP32, but
 $(\Delta B)x$, the state-to-$C$ contraction, the $D$ skip, and output retain the
-activation dtype. An F16/BF16 recurrent cache rounds after every token; chunked
-prefill rounds only the terminal state when publishing it to that cache.
+activation dtype. An explicitly configured F16/BF16 recurrent cache rounds
+after every recurrent token; chunked prefill rounds only its terminal state
+when publishing to such a reduced-precision cache. Lightning instead declares
+`mamba_ssm_cache_dtype = "float32"`. Its authenticated official F16 MPS run
+physically retained every `[1, 64, 64, 128]` recurrent tensor in FP32 while its
+`[1, 6144, 4]` convolution tails remained F16.
 
 Bias addition and softplus also belong to the activation-dtype boundary. The
 Burn implementation evaluates the stable identity
@@ -650,8 +654,20 @@ a masked semiseparable transfer matrix within each chunk and carries only the
 terminal state between chunks. Both paths are mathematically equivalent to the
 transparent recurrence up to floating-point reassociation.
 
+That qualification is operationally important for sparse hybrids. In the
+authenticated Lightning F16 oracle, cached recurrent and teacher-forced chunked
+execution retained identical top-1 tokens for 32 decisions but reached logit
+cosine `0.9215047947571176` at decision 22. Hidden localization at decision 14
+first moved from cosine 1.0 to `0.8920338531579629` after Mamba layer 0, then to
+`0.4418906779817166` after the following MoE layer. The trace proves that the
+path difference begins in Mamba and is amplified across the next sparse block;
+it does not prove different expert IDs because the oracle did not capture router
+selections. Corresponding-path Burn comparisons therefore keep the 0.999 gate,
+while the two official paths remain separate reference streams.
+
 **Implementation:** [`chunked_gated_delta_rule`](src/delta_net.rs) and the
 chunked mode in [`nemotron_h/model/mamba2.rs`](src/models/nemotron_h/model/mamba2.rs).
+**Acceptance evidence:** [Nemotron-H 3.5 Lightning](NEMOTRON_H_ACCEPTANCE.md).
 
 ### Feed-forward and expert routing
 
@@ -1005,6 +1021,13 @@ convolution tail. Keeping this state outside Burn parameters makes reset,
 reorder, truncate, and failure-atomic publication explicit and keeps stateless
 full-precision graphs autodiff-safe.
 
+For the exact Lightning base oracle at physical batch one, the 23 Mamba slots
+hold F16 convolution tensors `[1, 6144, 4]` and FP32 SSM tensors
+`[1, 64, 64, 128]`. Six attention slots at layers 5, 12, 19, 26, 33, and 42
+hold F16 K/V tensors `[1, 2, L, 128]`; 23 MoE schedule positions have no cache
+payload. The aggregate `DynamicCache.batch_size` value is `-1` because it is an
+API sentinel, not because physical batch geometry is unknown.
+
 **Implementation:** [`cache/tensor/recurrent.rs`](src/cache/tensor/recurrent.rs)
 and [`cache/tensor/state.rs`](src/cache/tensor/state.rs), consumed by Qwen and
 Nemotron decode modules.
@@ -1105,6 +1128,19 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   32-token, quantized, or 32K claim follows from either internal-consistency
   gate. See
   [`NEMOTRON_H_ACCEPTANCE.md`](NEMOTRON_H_ACCEPTANCE.md).
+- **Nemotron's two official Mamba paths are distinct reference streams.** The
+  pinned base oracle records the recurrent cached row and teacher-forced
+  chunk-scan row for all 32 decisions. Their top-1 IDs are identical, but their
+  minimum cosine is `0.9215047947571176` at decision 22. Layer traces show a
+  Mamba-originated difference followed by larger MoE-boundary divergence. This
+  source self-consistency observation does not relax the 0.999 Burn-versus-
+  official gate on each corresponding path and does not establish different
+  expert selection.
+- **Nemotron's cache batch property is a sentinel, not physical geometry.** The
+  authenticated `DynamicCache.batch_size` reports `-1` even though every
+  concrete Mamba, convolution, and attention cache tensor has leading extent
+  one. Cache validation must inspect physical layer state while preserving the
+  API-reported sentinel as a separate fact.
 - **FLAN-UL2's LM head is tied.** Its pinned config omits
   `tie_word_embeddings`; the pinned upstream T5 schema and the local Serde
   default both resolve that omission to `true`. FLAN Small and XXL explicitly
@@ -1162,5 +1198,8 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   lets this crate retain only the latent and rotary key.
 - **MTP presence is not ordinary-forward execution.** Base Hugging Face Qwen
   code allowlists the 15 `mtp.*` tensors; the crate and the cited vLLM path
-  explicitly execute them. Nemotron 3.5 has one MTP stage containing two
-  residual blocks, not two prediction stages.
+  explicitly execute them. The pinned official Nemotron base loader likewise
+  filters exactly 270 physical `mtp.*` keys as its sole unexpected-key class
+  and executes none of them. Nemotron 3.5 has one MTP stage containing two
+  residual blocks, not two prediction stages; its parity evidence must come
+  from the separately pinned vLLM graph.
