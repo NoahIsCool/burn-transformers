@@ -2,10 +2,11 @@
 //!
 //! A causal model factorizes a continuation as
 //! `p(y_1, ..., y_T | x) = product_t p(y_t | x, y_<t)`. The coordinator
-//! performs the expensive prompt pass once, then feeds only the previously
-//! selected token through [`CausalLanguageModel::decode`]. Model caches remain
-//! preallocated and architecture-owned; the only dynamically concatenated
-//! tensor is the compact integer history used by repetition penalties.
+//! performs the expensive prompt pass once or in caller-bounded cache-backed
+//! chunks, then feeds only the previously selected token through
+//! [`CausalLanguageModel::decode`]. Model caches remain preallocated and
+//! architecture-owned; the only dynamically concatenated tensor is the compact
+//! integer history used by repetition penalties.
 //!
 //! Batched rows may have different prompt and completion lengths. Every mask in
 //! this module follows the crate-wide `true == valid` rule. Once a row reaches
@@ -31,6 +32,12 @@ pub struct CausalGenerationRequest<B: Backend> {
     pub cache: CacheConfig,
     /// Sampling, penalty, and stopping controls.
     pub generation: GenerationConfig,
+    /// Optional maximum number of physical prompt columns per prefill call.
+    ///
+    /// Chunking bounds temporary attention masks and score tensors for long
+    /// prompts while preserving one shared decode state. `None` evaluates the
+    /// complete prompt in one call. A value of zero is invalid.
+    pub prefill_chunk_size: Option<usize>,
     /// Number of output categories in the model language head.
     pub vocabulary_size: usize,
 }
@@ -107,15 +114,25 @@ where
     } = prepare_request(&request)?;
     let device = request.prompt.token_ids.device();
     let mut history = request.prompt.token_ids.clone();
-    let mut history_mask =
-        Tensor::<B, 2, Bool>::from_data(TensorData::new(prompt_valid, history.dims()), &device);
+    let mut history_mask = Tensor::<B, 2, Bool>::from_data(
+        TensorData::new(prompt_valid.clone(), history.dims()),
+        &device,
+    );
     let mut state = model.new_decode_state(request.cache, batch, &device)?;
     let options = ForwardOptions {
         logits: LogitsSelection::Last,
         ..Default::default()
     };
-    let output = model.prefill(request.prompt, &mut state, &options)?;
-    let mut logits = extract_last_logits(output.logits, batch, request.vocabulary_size)?;
+    let prompt_logits = prefill_prompt(
+        model,
+        request.prompt,
+        &mut state,
+        &options,
+        &prompt_valid,
+        request.prefill_chunk_size,
+        request.vocabulary_size,
+    )?;
+    let mut logits = extract_last_logits(prompt_logits, batch, request.vocabulary_size)?;
     let processor =
         LogitsProcessor::<B>::new(request.generation.clone(), request.vocabulary_size, &device)?;
     let mut tracker =
@@ -228,6 +245,128 @@ where
     finish_output(tracker, prompt_lengths, log_probabilities)
 }
 
+/// Prefills a prompt in bounded physical-column chunks and retains each row's latest logits.
+///
+/// Rectangular batches can place the final valid token in different chunks.
+/// Every chunk is therefore evaluated for validation and cache semantics, but
+/// an inactive row cannot overwrite logits produced by its most recent active
+/// chunk. The generation coordinator owns and drops `state` on any later error,
+/// so a multi-call prefill cannot expose a partially initialized session.
+#[allow(clippy::too_many_arguments)]
+fn prefill_prompt<B, M>(
+    model: &M,
+    prompt: CausalLmInput<B>,
+    state: &mut M::State,
+    options: &ForwardOptions,
+    prompt_valid: &[bool],
+    chunk_size: Option<usize>,
+    vocabulary_size: usize,
+) -> Result<Tensor<B, 3>>
+where
+    B: Backend,
+    M: CausalLanguageModel<B>,
+{
+    let [batch, sequence] = prompt.token_ids.dims();
+    let Some(chunk_size) = chunk_size else {
+        return Ok(model.prefill(prompt, state, options)?.logits);
+    };
+    if chunk_size == 0 {
+        return Err(Error::Generation(
+            "prefill_chunk_size must be greater than zero when present".into(),
+        ));
+    }
+    if chunk_size >= sequence {
+        return Ok(model.prefill(prompt, state, options)?.logits);
+    }
+    let expected_mask_values = batch
+        .checked_mul(sequence)
+        .ok_or_else(|| Error::Generation("prompt mask element count overflows usize".into()))?;
+    if prompt_valid.len() != expected_mask_values {
+        return Err(Error::Generation(format!(
+            "prompt mask contains {} entries, expected {expected_mask_values}",
+            prompt_valid.len()
+        )));
+    }
+
+    let device = prompt.token_ids.device();
+    let mut latest_logits: Option<Tensor<B, 3>> = None;
+    let mut start = 0;
+    while start < sequence {
+        let end = start.saturating_add(chunk_size).min(sequence);
+        let token_ids = prompt.token_ids.clone().slice([0..batch, start..end]);
+        let token_mask = prompt
+            .token_mask
+            .as_ref()
+            .map(|mask| TokenMask::new(mask.as_tensor().clone().slice([0..batch, start..end])));
+        let position_ids = prompt
+            .position_ids
+            .as_ref()
+            .map(|positions| positions.clone().slice([0..batch, start..end]));
+        let mut active = Vec::new();
+        active.try_reserve_exact(batch).map_err(|_| {
+            Error::Generation(format!(
+                "failed to allocate active-row metadata for batch size {batch}"
+            ))
+        })?;
+        for row in 0..batch {
+            let row_start = row
+                .checked_mul(sequence)
+                .and_then(|offset| offset.checked_add(start))
+                .ok_or_else(|| Error::Generation("prompt row offset overflows usize".into()))?;
+            let row_end = row_start
+                .checked_add(end - start)
+                .ok_or_else(|| Error::Generation("prompt row end overflows usize".into()))?;
+            let row_mask = prompt_valid.get(row_start..row_end).ok_or_else(|| {
+                Error::Generation("prompt chunk mask falls outside its rectangular input".into())
+            })?;
+            active.push(row_mask.iter().any(|&valid| valid));
+        }
+        // Architecture prefill contracts reject a completely inactive row,
+        // whereas decode explicitly treats it as a cache no-op. A ragged
+        // physical chunk therefore uses the decode entry point; dense chunks
+        // retain each architecture's optimized prefill implementation.
+        let output = if active.iter().all(|&row_active| row_active) {
+            model.prefill(
+                CausalLmInput {
+                    token_ids,
+                    token_mask,
+                    position_ids,
+                },
+                state,
+                options,
+            )?
+        } else {
+            model.decode(
+                DecodeInput {
+                    token_ids,
+                    token_mask,
+                    position_ids,
+                },
+                state,
+                options,
+            )?
+        };
+        if output.logits.dims() != [batch, 1, vocabulary_size] {
+            return Err(Error::shape(
+                "generation.model_logits",
+                format!("[{batch}, 1, {vocabulary_size}] for prefill chunk {start}..{end}"),
+                format!("{:?}", output.logits.dims()),
+            ));
+        }
+        let active = Tensor::<B, 1, Bool>::from_data(TensorData::new(active, [batch]), &device)
+            .reshape([batch, 1, 1])
+            .expand([batch, 1, vocabulary_size]);
+        latest_logits = Some(match latest_logits {
+            Some(previous) => previous.mask_where(active, output.logits),
+            None => output.logits,
+        });
+        start = end;
+    }
+
+    latest_logits
+        .ok_or_else(|| Error::Generation("a non-empty prompt produced no prefill chunks".into()))
+}
+
 /// Host metadata derived before any model/cache mutation.
 struct PreparedRequest {
     /// Prompt batch width.
@@ -243,6 +382,11 @@ struct PreparedRequest {
 /// Validates all coordinator-owned boundaries and derives compact host metadata.
 fn prepare_request<B: Backend>(request: &CausalGenerationRequest<B>) -> Result<PreparedRequest> {
     request.generation.validate(request.vocabulary_size)?;
+    if request.prefill_chunk_size == Some(0) {
+        return Err(Error::Generation(
+            "prefill_chunk_size must be greater than zero when present".into(),
+        ));
+    }
     let [batch, sequence] = request.prompt.token_ids.dims();
     if batch == 0 || sequence == 0 {
         return Err(Error::shape(
@@ -655,6 +799,7 @@ mod tests {
             },
             cache: CacheConfig::new(1, 8).expect("test cache config"),
             generation,
+            prefill_chunk_size: None,
             vocabulary_size: 32,
         }
     }
@@ -805,6 +950,7 @@ mod tests {
                     presence_penalty: 0.2,
                     ..Default::default()
                 },
+                prefill_chunk_size: None,
                 vocabulary_size: 32,
             },
         )
@@ -818,6 +964,78 @@ mod tests {
                 .iter()
                 .all(|sequence| sequence.token_ids.len() == 2)
         );
+    }
+
+    /// Chunked prefill retains each ragged row's last active logits across padding-only chunks.
+    #[test]
+    fn chunked_prefill_matches_one_shot_for_ragged_batches() {
+        let (model, device) = tiny_model();
+        let request = CausalGenerationRequest {
+            prompt: CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints(
+                    [[1, 2, 3, 31, 31, 31], [31, 31, 4, 5, 31, 6]],
+                    &device,
+                ),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [
+                        [true, true, true, false, false, false],
+                        [false, false, true, true, false, true],
+                    ]
+                    .into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            cache: CacheConfig::new(2, 8).expect("test cache"),
+            generation: GenerationConfig {
+                max_new_tokens: 3,
+                ..Default::default()
+            },
+            prefill_chunk_size: None,
+            vocabulary_size: 32,
+        };
+        let one_shot = generate_causal(&model, request.clone()).expect("one-shot prefill");
+        let mut chunked_request = request;
+        chunked_request.prefill_chunk_size = Some(2);
+        let chunked = generate_causal(&model, chunked_request).expect("chunked prefill");
+
+        assert_eq!(chunked.sequences.len(), one_shot.sequences.len());
+        for (chunked, one_shot) in chunked.sequences.iter().zip(&one_shot.sequences) {
+            assert_eq!(chunked.prompt_length, one_shot.prompt_length);
+            assert_eq!(chunked.token_ids, one_shot.token_ids);
+            assert_eq!(chunked.finish_reason, one_shot.finish_reason);
+            assert_eq!(
+                chunked.log_probabilities.len(),
+                one_shot.log_probabilities.len()
+            );
+            for (&actual, &expected) in chunked
+                .log_probabilities
+                .iter()
+                .zip(&one_shot.log_probabilities)
+            {
+                assert!(
+                    (actual - expected).abs() <= 1.0e-5,
+                    "chunked log probability {actual} differs from one-shot {expected}"
+                );
+            }
+        }
+    }
+
+    /// A zero prefill bound is rejected before any model operation.
+    #[test]
+    fn zero_prefill_chunk_size_is_invalid() {
+        let (model, device) = tiny_model();
+        let mut invalid = request(
+            &device,
+            GenerationConfig {
+                max_new_tokens: 1,
+                ..Default::default()
+            },
+        );
+        invalid.prefill_chunk_size = Some(0);
+
+        let error = generate_causal(&model, invalid).expect_err("zero cannot advance chunks");
+        assert!(error.to_string().contains("prefill_chunk_size"));
     }
 
     /// Explicit prompt positions advance once per committed continuation token.

@@ -290,16 +290,22 @@ reference expands K/V into its generic dynamic cache.
 For query position $i$ and window $W$, local causal attention admits only
 $\max(0,i-W+1)\le j\le i$. A sparse window kernel can reduce prefill work to
 $O(nW)$ once $n\gg W$, and decode needs only the newest $W$ projected K/V
-entries. The current portable Burn path, however, applies a dense $n\times n$
-mask during fresh-prompt prefill, so its prefill compute remains $O(n^2)$; its
-ring-backed decode history is window-bounded. Muse uses window 2,048 in 39 of
-52 text blocks, interleaved with 13 global blocks that restore long-range
-connectivity.
+entries. The one-shot portable Burn path still applies a dense $n\times n$
+mask during fresh-prompt prefill, so its compute remains $O(n^2)$. Causal
+generation can instead split the prompt into cache-backed chunks of at most
+$C$ physical columns. That does not change global attention's total quadratic
+work, but bounds each temporary score/mask to $O(HCn)$ rather than $O(Hn^2)$;
+sliding layers retain only their ring-backed history. Ragged chunks preserve
+each row's latest valid logits even when a later chunk is padding-only. Muse
+uses window 2,048 in 39 of 52 text blocks, interleaved with 13 global blocks
+that restore long-range connectivity.
 
 **Implementation:** masking and layer selection in
 [`muse_glimmer/model.rs`](src/models/muse_glimmer/model.rs), cached execution in
 [`muse_glimmer/model/decode.rs`](src/models/muse_glimmer/model/decode.rs), and
-ring planning in [`cache/ring.rs`](src/cache/ring.rs).
+ring planning in [`cache/ring.rs`](src/cache/ring.rs). Bounded orchestration is
+implemented by `CausalGenerationRequest::prefill_chunk_size` in
+[`generation/causal.rs`](src/generation/causal.rs).
 **Reference:** the [pinned Muse configuration](https://huggingface.co/meta-models/Muse-Glimmer-30B/blob/a4e59da52a7bc87ae7251dd5545c0dd437c44b68/config.json).
 
 <a id="innovation-nope"></a>

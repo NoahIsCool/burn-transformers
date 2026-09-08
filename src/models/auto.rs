@@ -983,6 +983,7 @@ mod tests {
                     max_new_tokens: 2,
                     ..Default::default()
                 },
+                prefill_chunk_size: None,
                 vocabulary_size: 32,
             },
         )

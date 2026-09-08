@@ -167,6 +167,7 @@ fn generate<B: Backend>(root: &Path, device: &B::Device) -> Result<String, Box<d
             prompt,
             cache: CacheConfig::new(batch, capacity)?,
             generation,
+            prefill_chunk_size: None,
             vocabulary_size: loaded.model().config().vocabulary_size(),
         },
     )?;
@@ -182,6 +183,11 @@ Applications that need resumable sessions can bypass the coordinator and call
 `prefill` and `decode` directly with architecture-matched external state. T5
 callers can use `generation::generate_seq2seq_beam_search`, which encodes once
 and reorders both decoder and cross-attention state as beams change parents.
+For long causal prompts, set `prefill_chunk_size` to a bounded value such as
+`Some(256)`: the coordinator advances the same preallocated state segment by
+segment and retains the last valid logits independently for every ragged batch
+row. Leaving it as `None` preserves a single-call prefill for short prompts and
+reference comparisons.
 
 ### Building an experimental topology
 
