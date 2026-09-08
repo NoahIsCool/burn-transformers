@@ -222,9 +222,10 @@ DeepSeek computes the same softmax over an MLA factorization and uses its YaRN-
 adjusted scale
 $\bigl(1/\sqrt{192}\bigr)\operatorname{mscale}(40,0.707)^2$.
 
-**Implementation:** shared attention in [`attention.rs`](src/attention.rs), MLA
-in [`deepseek_v2/mla.rs`](src/models/deepseek_v2/mla.rs), and Muse's specialized
-path in [`muse_glimmer/model.rs`](src/models/muse_glimmer/model.rs).
+**Implementation:** shared attention and its opt-in eager-FP32-softmax precision
+mode in [`attention.rs`](src/attention.rs), MLA in
+[`deepseek_v2/mla.rs`](src/models/deepseek_v2/mla.rs), and Muse's specialized
+selection in [`muse_glimmer/model.rs`](src/models/muse_glimmer/model.rs).
 **Reference:** [Attention Is All You Need](https://arxiv.org/abs/1706.03762).
 
 <a id="innovation-mha"></a>
@@ -366,11 +367,18 @@ and [Qwen3.5 code](https://github.com/huggingface/transformers/blob/cfa309cfa34b
 Muse normalizes Q and K without learned scales, then applies
 $q\leftarrow3.87q$. Standard $1/\sqrt{128}$ scaling is still applied exactly
 once by scaled dot-product attention, so the effective score multiplier is
-$3.87/\sqrt{128}$. Softmax is accumulated in FP32 and cast back to the query
-dtype. The Burn path pre-scales Q by 3.87 but leaves the attention primitive's
-optional scale unset: that selects its mathematically identical default factor
-while preserving fused-kernel eligibility. This changes attention entropy
-without letting raw projection norms determine temperature.
+$3.87/\sqrt{128}$. The pinned eager graph first materializes scores in the query
+dtype, promotes only softmax to FP32, casts the probabilities back, and then
+multiplies by V. Burn 0.21 flash attention instead keeps QK accumulation in
+strict FP32; an adversarial Metal F16 gate confirms that omitting the score
+rounding changes output bits. Muse therefore opts into the shared explicit
+eager mode for F16, accepting an $O(n^2)$ score allocation, while F32 retains
+backend-native dispatch. Its scale remains unset in both cases, selecting the
+mathematically identical default factor and preserving flash eligibility where
+the operation graph is numerically valid. Eligibility does not itself select a
+fused kernel: Burn 0.21's ordinary `metal` feature defaults to fallback, and
+runtime selection requires its separate `autotune` feature. This scaling changes
+attention entropy without letting raw projection norms determine temperature.
 
 **Implementation:** [`MuseGlimmerAttention`](src/models/muse_glimmer/model.rs).
 **Reference:** the [pinned Muse-Glimmer reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/muse_glimmer/modular_muse_glimmer.py).

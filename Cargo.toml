@@ -23,6 +23,10 @@ chat-templates = ["tokenizers", "dep:minijinja"]
 # intentionally separate from `metal`: normal inference builds do not compile
 # tracing instrumentation into the backend.
 kernel-tracing = ["metal", "burn/tracing"]
+# Enables the attention autotuner only for the opt-in fused-attention parity
+# gate. Normal Metal builds retain their reviewed non-autotuned policy, while
+# this feature proves the numerics of a flash candidate selected by dispatch.
+attention-kernel-tracing = ["kernel-tracing", "burn/autotune"]
 
 [dependencies]
 burn = { version = "=0.21.0", default-features = false }

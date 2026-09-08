@@ -9,14 +9,17 @@
 //! Rotary and relative-position transformations are deliberately separate from
 //! projection and attention dispatch. This lets one architecture rotate only a
 //! prefix, another use NoPE layers, and T5 provide an additive relative bias
-//! without duplicating projection code.
+//! without duplicating projection code. Backend-native attention is the default.
+//! Architectures whose pinned eager graphs materialize reduced-precision scores
+//! before an explicit F32 softmax can opt into that exact operation order; the
+//! tradeoff is an unfused quadratic score tensor.
 
 use burn::{
     module::Module,
     nn::{Linear, LinearConfig, LinearLayout},
     tensor::{
-        Bool, Tensor,
-        activation::{sigmoid, silu},
+        Bool, DType, Int, Tensor,
+        activation::{sigmoid, silu, softmax},
         backend::Backend,
         module::attention,
         ops::AttentionModuleOptions,
@@ -37,6 +40,22 @@ pub enum AttentionOutputGate {
     Sigmoid,
     /// Multiply head outputs by `gate * sigmoid(gate)`.
     Silu,
+}
+
+/// Numerical operation graph used to evaluate attention probabilities.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionPrecisionMode {
+    /// Delegate arithmetic and kernel selection to the active Burn backend.
+    #[default]
+    BackendDefault,
+    /// Materialize scores in the query dtype, run softmax in F32, then cast back.
+    ///
+    /// This matches eager reference graphs that explicitly call an FP32 softmax
+    /// on reduced-precision scores. It deliberately uses an `O(query * key)`
+    /// score tensor because flash kernels with strict-F32 QK accumulation omit
+    /// the observable reduced-precision boundary.
+    EagerFp32Softmax,
 }
 
 /// Configuration for full MHA, GQA, or MQA projections and attention dispatch.
@@ -62,6 +81,9 @@ pub struct GroupedQueryAttentionConfig {
     pub scale: Option<f64>,
     /// Optional tanh softcap applied to raw attention logits.
     pub softcap: Option<f64>,
+    /// Numerical operation graph used for score and softmax evaluation.
+    #[serde(default)]
+    pub precision_mode: AttentionPrecisionMode,
 }
 
 impl GroupedQueryAttentionConfig {
@@ -83,7 +105,14 @@ impl GroupedQueryAttentionConfig {
             output_gate: AttentionOutputGate::None,
             scale: None,
             softcap: None,
+            precision_mode: AttentionPrecisionMode::BackendDefault,
         }
+    }
+
+    /// Selects an explicit score/softmax operation graph.
+    pub fn with_precision_mode(mut self, precision_mode: AttentionPrecisionMode) -> Self {
+        self.precision_mode = precision_mode;
+        self
     }
 
     /// Validates projection sizes, GQA grouping, and numerical options.
@@ -200,6 +229,7 @@ impl GroupedQueryAttentionConfig {
             output_gate: self.output_gate,
             scale: self.scale,
             softcap: self.softcap,
+            precision_mode: self.precision_mode,
         })
     }
 }
@@ -246,6 +276,8 @@ pub struct GroupedQueryAttention<B: Backend> {
     pub scale: Option<f64>,
     /// Optional attention-logit softcap.
     pub softcap: Option<f64>,
+    /// Numerical operation graph used for score and softmax evaluation.
+    pub precision_mode: AttentionPrecisionMode,
 }
 
 impl<B: Backend> GroupedQueryAttention<B> {
@@ -343,7 +375,7 @@ impl<B: Backend> GroupedQueryAttention<B> {
         let [batch, _, query_sequence, _] = projection.query.dims();
         let key = repeat_key_value(projection.key, self.query_heads)?;
         let value = repeat_key_value(projection.value, self.query_heads)?;
-        let context = attention(
+        let context = dispatch_attention(
             projection.query,
             key,
             value,
@@ -354,7 +386,8 @@ impl<B: Backend> GroupedQueryAttention<B> {
                 softcap: self.softcap,
                 is_causal: causal,
             },
-        )
+            self.precision_mode,
+        )?
         .swap_dims(1, 2)
         .reshape([batch, query_sequence, self.query_heads * self.head_dim]);
         let context = match (self.output_gate, projection.gate) {
@@ -392,6 +425,118 @@ impl<B: Backend> GroupedQueryAttention<B> {
         )?;
         self.attend(projection, mask, None, causal)
     }
+}
+
+/// Dispatches either backend-native or explicitly ordered eager attention.
+///
+/// The eager mode computes score scaling and optional softcapping in the input
+/// dtype, applies exclusions and additive bias, promotes only the softmax to
+/// F32, casts probabilities back, and multiplies by `V` in the original dtype.
+/// Callers must provide shape-compatible Q/K/V, mask, and bias tensors.
+pub(crate) fn dispatch_attention<B: Backend>(
+    query: Tensor<B, 4>,
+    key: Tensor<B, 4>,
+    value: Tensor<B, 4>,
+    mask: Option<Tensor<B, 4, Bool>>,
+    bias: Option<Tensor<B, 4>>,
+    options: AttentionModuleOptions,
+    precision_mode: AttentionPrecisionMode,
+) -> Result<Tensor<B, 4>> {
+    if precision_mode == AttentionPrecisionMode::BackendDefault {
+        return Ok(attention(query, key, value, mask, bias, options));
+    }
+    let [batch, heads, query_sequence, head_dim] = query.dims();
+    let key_sequence = key.dims()[2];
+    let scale = options
+        .scale
+        .unwrap_or_else(|| (head_dim as f64).sqrt().recip());
+    let scores = query.matmul(key.swap_dims(2, 3)) * scale;
+    let scores = if let Some(softcap) = options.softcap {
+        (scores / softcap).tanh() * softcap
+    } else {
+        scores
+    };
+    let causal_mask = if options.is_causal {
+        Some(bottom_right_causal_mask(
+            batch,
+            heads,
+            query_sequence,
+            key_sequence,
+            &scores.device(),
+        )?)
+    } else {
+        None
+    };
+    let exclusion = match (mask, causal_mask) {
+        (Some(mask), Some(causal_mask)) => Some(mask.bool_or(causal_mask)),
+        (Some(mask), None) => Some(mask),
+        (None, Some(causal_mask)) => Some(causal_mask),
+        (None, None) => None,
+    };
+    let scores = if let Some(exclusion) = &exclusion {
+        scores.mask_fill(exclusion.clone(), f32::NEG_INFINITY)
+    } else {
+        scores
+    };
+    let scores = if let Some(bias) = bias {
+        scores + bias
+    } else {
+        scores
+    };
+    let probabilities = fp32_softmax(scores, exclusion);
+    Ok(probabilities.matmul(value))
+}
+
+/// Applies FP32 softmax and defines fully excluded rows as exact zeros.
+fn fp32_softmax<B: Backend>(
+    scores: Tensor<B, 4>,
+    exclusion: Option<Tensor<B, 4, Bool>>,
+) -> Tensor<B, 4> {
+    let dtype = scores.dtype();
+    let Some(exclusion) = exclusion else {
+        return softmax(scores.cast(DType::F32), 3).cast(dtype);
+    };
+    let shape = scores.dims();
+    let row_has_key = exclusion
+        .clone()
+        .bool_not()
+        .int()
+        .sum_dim(3)
+        .greater_elem(0)
+        .expand(shape);
+    softmax(
+        scores
+            .cast(DType::F32)
+            .mask_fill(row_has_key.bool_not(), 0.0),
+        3,
+    )
+    .mask_fill(exclusion, 0.0)
+    .cast(dtype)
+}
+
+/// Builds the bottom-right causal exclusion `key > query + (K - Q)`.
+///
+/// Bottom-right alignment is essential for cached decoding, where a query
+/// chunk is a suffix of a longer key sequence. `true` excludes a pair.
+fn bottom_right_causal_mask<B: Backend>(
+    batch: usize,
+    heads: usize,
+    query_sequence: usize,
+    key_sequence: usize,
+    device: &B::Device,
+) -> Result<Tensor<B, 4, Bool>> {
+    let query_end = i64::try_from(query_sequence)
+        .map_err(|_| Error::configuration("attention.causal_mask", "query length exceeds i64"))?;
+    let key_end = i64::try_from(key_sequence)
+        .map_err(|_| Error::configuration("attention.causal_mask", "key length exceeds i64"))?;
+    let offset = key_end - query_end;
+    let query = (Tensor::<B, 1, Int>::arange(0..query_end, device) + offset)
+        .reshape([1, 1, query_sequence, 1])
+        .expand([batch, heads, query_sequence, key_sequence]);
+    let key = Tensor::<B, 1, Int>::arange(0..key_end, device)
+        .reshape([1, 1, 1, key_sequence])
+        .expand([batch, heads, query_sequence, key_sequence]);
+    Ok(key.greater(query))
 }
 
 /// Repeats native KV heads into contiguous query-head groups for one attention call.
@@ -592,15 +737,89 @@ pub fn padding_attention_mask<B: Backend>(
 mod tests {
     use burn::{
         backend::Flex,
-        tensor::{Bool, Tensor},
+        tensor::{Bool, Tensor, ops::AttentionModuleOptions},
     };
 
     use crate::architecture::TokenMask;
 
     use super::{
-        AttentionOutputGate, AttentionProjection, GroupedQueryAttentionConfig,
+        AttentionOutputGate, AttentionPrecisionMode, AttentionProjection,
+        GroupedQueryAttentionConfig, bottom_right_causal_mask, dispatch_attention,
         padding_attention_mask, repeat_key_value,
     };
+
+    /// Backend-native attention remains the serialized and construction default.
+    #[test]
+    fn attention_precision_mode_is_explicitly_opt_in() {
+        let device = Default::default();
+        let default = GroupedQueryAttentionConfig::new(8, 2, 1, 4)
+            .init::<Flex>(&device)
+            .expect("default attention should initialize");
+        assert_eq!(
+            default.precision_mode,
+            AttentionPrecisionMode::BackendDefault
+        );
+        let eager = GroupedQueryAttentionConfig::new(8, 2, 1, 4)
+            .with_precision_mode(AttentionPrecisionMode::EagerFp32Softmax)
+            .init::<Flex>(&device)
+            .expect("eager attention should initialize");
+        assert_eq!(
+            eager.precision_mode,
+            AttentionPrecisionMode::EagerFp32Softmax
+        );
+    }
+
+    /// Explicit eager softmax returns zero rather than NaN for an excluded row.
+    #[test]
+    fn eager_fp32_softmax_zeroes_fully_excluded_rows() {
+        let device = Default::default();
+        let query = Tensor::<Flex, 4>::zeros([1, 1, 2, 2], &device);
+        let key = Tensor::<Flex, 4>::zeros([1, 1, 2, 2], &device);
+        let value = Tensor::<Flex, 4>::from_floats([[[[2.0, 3.0], [5.0, 7.0]]]], &device);
+        let exclusion =
+            Tensor::<Flex, 4, Bool>::from_bool([[[[true, true], [false, true]]]].into(), &device);
+        let output = dispatch_attention(
+            query,
+            key,
+            value,
+            Some(exclusion),
+            None,
+            AttentionModuleOptions::default(),
+            AttentionPrecisionMode::EagerFp32Softmax,
+        )
+        .expect("valid eager attention");
+        assert_eq!(
+            output
+                .into_data()
+                .as_slice::<f32>()
+                .expect("Flex output should expose f32"),
+            &[0.0, 0.0, 2.0, 3.0]
+        );
+    }
+
+    /// Cached causal alignment anchors each query row at the key suffix.
+    #[test]
+    fn eager_causal_mask_is_bottom_right_aligned() {
+        let device = Default::default();
+        let suffix = bottom_right_causal_mask::<Flex>(1, 1, 2, 4, &device)
+            .expect("representable suffix mask")
+            .into_data();
+        assert_eq!(
+            suffix
+                .as_slice::<bool>()
+                .expect("boolean mask should expose bool"),
+            &[false, false, false, true, false, false, false, false]
+        );
+        let longer_query = bottom_right_causal_mask::<Flex>(1, 1, 3, 2, &device)
+            .expect("representable negative offset")
+            .into_data();
+        assert_eq!(
+            longer_query
+                .as_slice::<bool>()
+                .expect("boolean mask should expose bool"),
+            &[true, true, false, true, false, false]
+        );
+    }
 
     /// Qwen's projected query width may exceed its residual width.
     #[test]

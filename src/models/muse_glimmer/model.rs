@@ -11,24 +11,23 @@
 //! Attention is grouped-query attention with a distinct gate projection. After
 //! scale-free per-head Q/K normalization, queries are multiplied by
 //! `qk_scale_factor`; dot products still receive the standard `1/sqrt(d)`
-//! factor. Muse's eager reference evaluates the attention softmax in FP32 before
-//! restoring the query dtype. Burn's optimized Flex and CubeCL attention paths
-//! preserve that accumulator precision for half inputs. Passing the conventional
-//! scale as `None` is semantically exact and is also required for Burn 0.21 to
-//! retain fused CubeCL dispatch eligibility. The attention result is multiplied
-//! by `sigmoid(gate_proj(h))` before the output projection. Three local RoPE
-//! layers normally precede each global NoPE layer. Finally, logits follow the
-//! exact bounded map `T * tanh(output_multiplier * raw_logits / T)`.
+//! factor. Muse's eager reference materializes reduced-precision scores, evaluates
+//! softmax in FP32, then restores the query dtype. Burn 0.21 flash attention uses
+//! strict-F32 QK accumulators and therefore omits the first rounding boundary;
+//! Muse uses the shared explicit eager mode for F16/BF16 and retains backend
+//! dispatch for F32. Passing the conventional scale as `None` preserves fused
+//! eligibility, although Burn's ordinary `metal` feature selects its fallback
+//! unless the separate `autotune` feature is enabled. The attention result is
+//! multiplied by `sigmoid(gate_proj(h))` before the output projection. Three
+//! local RoPE layers normally precede each global NoPE layer. Finally, logits
+//! follow the exact bounded map `T * tanh(output_multiplier * raw_logits / T)`.
 
 use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
     tensor::{
-        Bool, DType, ElementConversion, Int, Tensor, TensorData,
-        activation::sigmoid,
-        backend::Backend,
-        module::{attention, linear as tensor_linear},
-        ops::AttentionModuleOptions,
+        Bool, DType, ElementConversion, Int, Tensor, TensorData, activation::sigmoid,
+        backend::Backend, module::linear as tensor_linear, ops::AttentionModuleOptions,
     },
 };
 
@@ -36,7 +35,9 @@ use crate::{
     ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, LogitsSelection,
     Result,
     architecture::TokenMask,
-    attention::{padding_attention_mask, repeat_key_value},
+    attention::{
+        AttentionPrecisionMode, dispatch_attention, padding_attention_mask, repeat_key_value,
+    },
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig, apply_activation},
     normalization::{RmsNorm, RmsNormConfig, RmsNormRootMode},
     operations::linear,
@@ -204,19 +205,35 @@ impl<B: Backend> MuseGlimmerAttention<B> {
                 format!("{:?}", mask.dims()),
             ));
         }
-        let key = repeat_key_value(projection.key, self.query_heads)?;
-        let value = repeat_key_value(projection.value, self.query_heads)?;
-        let context = attention(
-            projection.query,
+        let MuseAttentionProjection {
+            query,
+            key,
+            value,
+            gate,
+        } = projection;
+        let key = repeat_key_value(key, self.query_heads)?;
+        let value = repeat_key_value(value, self.query_heads)?;
+        // The pinned eager graph materializes F16 scores before promoting only
+        // the softmax. CubeCL flash instead retains strict-F32 QK accumulators,
+        // so F16/BF16 selects the shared explicit graph. F32 has no
+        // intervening cast to preserve and remains eligible for fused dispatch.
+        let precision_mode = if matches!(query.dtype(), DType::F16 | DType::BF16) {
+            AttentionPrecisionMode::EagerFp32Softmax
+        } else {
+            AttentionPrecisionMode::BackendDefault
+        };
+        let context = dispatch_attention(
+            query,
             key,
             value,
             mask,
             None,
             muse_attention_options(causal),
-        )
+            precision_mode,
+        )?
         .swap_dims(1, 2)
         .reshape([batch, query_sequence, query_width]);
-        linear(context * sigmoid(projection.gate), &self.o_proj)
+        linear(context * sigmoid(gate), &self.o_proj)
     }
 }
 
@@ -893,10 +910,26 @@ fn checked_product(field: &'static str, left: usize, right: usize) -> Result<usi
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    use burn::backend::Metal;
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    use burn::tensor::module::attention;
     use burn::{
         backend::Flex,
         module::Param,
         tensor::{Int, Tensor, TensorData, Tolerance, backend::BackendTypes, f16},
+    };
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    use tracing::{
+        Event, Metadata, Subscriber,
+        field::{Field, Visit},
+        span::{Attributes, Id, Record},
     };
 
     use super::*;
@@ -906,6 +939,120 @@ mod tests {
     };
 
     type TestBackend = Flex<f32, i32>;
+
+    /// Serializes opt-in GPU work and process-local attention autotuning.
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    static METAL_ATTENTION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Sequence length that makes Burn 0.21 prioritize flash candidates over fallback.
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    const METAL_ATTENTION_SEQUENCE: usize = 4097;
+
+    /// Pinned Muse-Glimmer attention head width.
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    const METAL_ATTENTION_HEAD_DIM: usize = 128;
+
+    /// One CubeCL kernel submitted by the captured Metal attention call.
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct MetalKernelLaunch {
+        /// Generated kernel name.
+        name: String,
+        /// Configuration-bearing kernel identifier.
+        id: String,
+    }
+
+    /// Extracts the two display fields attached to CubeCL's launch span.
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    #[derive(Default)]
+    struct MetalKernelFieldVisitor {
+        /// Generated kernel name when present.
+        name: Option<String>,
+        /// Configuration-bearing kernel identifier when present.
+        id: Option<String>,
+    }
+
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    impl MetalKernelFieldVisitor {
+        /// Stores one tracing field after removing debug-string quotes.
+        fn record_text(&mut self, field: &Field, value: String) {
+            let value = value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .unwrap_or(&value)
+                .to_owned();
+            match field.name() {
+                "kernel.name" => self.name = Some(value),
+                "kernel.id" => self.id = Some(value),
+                _ => {}
+            }
+        }
+    }
+
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    impl Visit for MetalKernelFieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn core::fmt::Debug) {
+            self.record_text(field, format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.record_text(field, value.to_owned());
+        }
+    }
+
+    /// Thread-local tracing subscriber retaining launch names and identifiers.
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    #[derive(Clone, Default)]
+    struct MetalKernelSubscriber {
+        /// Launches shared with the capture caller.
+        launches: Arc<Mutex<Vec<MetalKernelLaunch>>>,
+        /// Non-zero span identifier source.
+        next_span: Arc<AtomicU64>,
+    }
+
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    impl Subscriber for MetalKernelSubscriber {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            metadata.name() == "launch_inner"
+        }
+
+        fn new_span(&self, attributes: &Attributes<'_>) -> Id {
+            let mut visitor = MetalKernelFieldVisitor::default();
+            attributes.record(&mut visitor);
+            if let (Some(name), Some(id)) = (visitor.name, visitor.id) {
+                self.launches
+                    .lock()
+                    .expect("Metal kernel trace mutex must not be poisoned")
+                    .push(MetalKernelLaunch { name, id });
+            }
+            Id::from_u64(self.next_span.fetch_add(1, Ordering::Relaxed) + 1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, _event: &Event<'_>) {}
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
+
+    /// Captures every CubeCL launch submitted while one closure runs.
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    fn capture_metal_kernel_launches<T>(
+        operation: impl FnOnce() -> T,
+    ) -> (T, Vec<MetalKernelLaunch>) {
+        let subscriber = MetalKernelSubscriber::default();
+        let launches = subscriber.launches.clone();
+        let output = tracing::subscriber::with_default(subscriber, operation);
+        let launches = Arc::try_unwrap(launches)
+            .expect("capture must release its only launch-state owner")
+            .into_inner()
+            .expect("Metal kernel trace mutex must not be poisoned");
+        (output, launches)
+    }
 
     /// Builds a four-layer miniature with the released local/local/local/global schedule.
     fn tiny_config() -> MuseGlimmerTextConfig {
@@ -1079,13 +1226,280 @@ mod tests {
         assert_ne!(bits[2], 0x1c6c, "half-precision softmax sentinel");
     }
 
-    /// Default Muse options retain Burn's optimized-attention dispatch contract.
+    /// Builds an official-width Metal fixture whose score rounding changes F16 softmax bits.
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    fn metal_score_rounding_fixture(
+        device: &<Metal as BackendTypes>::Device,
+    ) -> (MuseGlimmerAttention<Metal>, MuseAttentionProjection<Metal>) {
+        const HEADS: usize = 1;
+        const HIDDEN_SIZE: usize = HEADS * METAL_ATTENTION_HEAD_DIM;
+        const VISIBLE_KEYS: usize = 4;
+
+        let config = MuseGlimmerTextConfig {
+            hidden_size: HIDDEN_SIZE,
+            intermediate_size: HIDDEN_SIZE * 2,
+            num_hidden_layers: 1,
+            num_attention_heads: HEADS,
+            num_key_value_heads: HEADS,
+            head_dim: METAL_ATTENTION_HEAD_DIM,
+            max_position_embeddings: METAL_ATTENTION_SEQUENCE,
+            sliding_window: None,
+            layer_types: vec![MuseGlimmerLayerType::FullAttention],
+            layer_rope_theta: vec![0.0],
+            vocab_size: 8,
+            bos_token_id: None,
+            eos_token_id: None,
+            ..Default::default()
+        };
+        let mut muse_attention = MuseGlimmerAttention::<Metal>::init(&config, device).unwrap();
+        let mut identity = vec![0.0_f32; HIDDEN_SIZE * HIDDEN_SIZE];
+        for diagonal in 0..HIDDEN_SIZE {
+            identity[diagonal * HIDDEN_SIZE + diagonal] = 1.0;
+        }
+        muse_attention.o_proj.weight = Param::from_tensor(
+            Tensor::<Metal, 2>::from_data(
+                TensorData::new(identity, [HIDDEN_SIZE, HIDDEN_SIZE]),
+                device,
+            )
+            .cast(DType::F16),
+        );
+
+        let mut query = vec![0.0_f32; HEADS * METAL_ATTENTION_SEQUENCE * METAL_ATTENTION_HEAD_DIM];
+        let mut key = vec![0.0_f32; HEADS * METAL_ATTENTION_SEQUENCE * METAL_ATTENTION_HEAD_DIM];
+        let mut value = vec![0.0_f32; HEADS * METAL_ATTENTION_SEQUENCE * METAL_ATTENTION_HEAD_DIM];
+        for head in 0..HEADS {
+            for row in 0..METAL_ATTENTION_SEQUENCE {
+                query[(head * METAL_ATTENTION_SEQUENCE + row) * METAL_ATTENTION_HEAD_DIM] =
+                    1.730_468_8;
+                key[(head * METAL_ATTENTION_SEQUENCE + row) * METAL_ATTENTION_HEAD_DIM] = -100.0;
+            }
+            for (row, candidate) in [-19.593_75, 7.781_25, -24.937_5, 16.812_5]
+                .into_iter()
+                .enumerate()
+            {
+                key[(head * METAL_ATTENTION_SEQUENCE + row) * METAL_ATTENTION_HEAD_DIM] = candidate;
+            }
+            for row in 0..VISIBLE_KEYS {
+                value[(head * METAL_ATTENTION_SEQUENCE + row) * METAL_ATTENTION_HEAD_DIM + row] =
+                    1.0;
+            }
+        }
+
+        let projection = MuseAttentionProjection {
+            query: Tensor::<Metal, 4>::from_data(
+                TensorData::new(
+                    query,
+                    [1, HEADS, METAL_ATTENTION_SEQUENCE, METAL_ATTENTION_HEAD_DIM],
+                ),
+                device,
+            )
+            .cast(DType::F16),
+            key: Tensor::<Metal, 4>::from_data(
+                TensorData::new(
+                    key,
+                    [1, HEADS, METAL_ATTENTION_SEQUENCE, METAL_ATTENTION_HEAD_DIM],
+                ),
+                device,
+            )
+            .cast(DType::F16),
+            value: Tensor::<Metal, 4>::from_data(
+                TensorData::new(
+                    value,
+                    [1, HEADS, METAL_ATTENTION_SEQUENCE, METAL_ATTENTION_HEAD_DIM],
+                ),
+                device,
+            )
+            .cast(DType::F16),
+            gate: Tensor::<Metal, 3>::full(
+                [1, METAL_ATTENTION_SEQUENCE, HIDDEN_SIZE],
+                80.0,
+                device,
+            )
+            .cast(DType::F16),
+        };
+        (muse_attention, projection)
+    }
+
+    /// Evaluates the pinned eager score-rounding and FP32-softmax operation graph.
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    fn pinned_eager_last_query(projection: &MuseAttentionProjection<Metal>) -> Tensor<Metal, 4> {
+        let query = projection.query.clone().slice([
+            0..1,
+            0..1,
+            METAL_ATTENTION_SEQUENCE - 1..METAL_ATTENTION_SEQUENCE,
+            0..METAL_ATTENTION_HEAD_DIM,
+        ]);
+        let key = projection.key.clone().slice([
+            0..1,
+            0..1,
+            0..METAL_ATTENTION_SEQUENCE,
+            0..METAL_ATTENTION_HEAD_DIM,
+        ]);
+        let value = projection.value.clone().slice([
+            0..1,
+            0..1,
+            0..METAL_ATTENTION_SEQUENCE,
+            0..METAL_ATTENTION_HEAD_DIM,
+        ]);
+        let scores =
+            query.matmul(key.swap_dims(2, 3)) * (METAL_ATTENTION_HEAD_DIM as f64).sqrt().recip();
+        let probabilities =
+            burn::tensor::activation::softmax(scores.cast(DType::F32), 3).cast(DType::F16);
+        probabilities.matmul(value)
+    }
+
+    /// Evaluates flash attention's strict-F32 QK and softmax arithmetic for the sentinel.
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    fn strict_f32_last_query(projection: &MuseAttentionProjection<Metal>) -> Tensor<Metal, 4> {
+        let query = projection
+            .query
+            .clone()
+            .slice([
+                0..1,
+                0..1,
+                METAL_ATTENTION_SEQUENCE - 1..METAL_ATTENTION_SEQUENCE,
+                0..METAL_ATTENTION_HEAD_DIM,
+            ])
+            .cast(DType::F32);
+        let key = projection
+            .key
+            .clone()
+            .slice([
+                0..1,
+                0..1,
+                0..METAL_ATTENTION_SEQUENCE,
+                0..METAL_ATTENTION_HEAD_DIM,
+            ])
+            .cast(DType::F32);
+        let value = projection
+            .value
+            .clone()
+            .slice([
+                0..1,
+                0..1,
+                0..METAL_ATTENTION_SEQUENCE,
+                0..METAL_ATTENTION_HEAD_DIM,
+            ])
+            .cast(DType::F32);
+        let scores =
+            query.matmul(key.swap_dims(2, 3)) * (METAL_ATTENTION_HEAD_DIM as f64).sqrt().recip();
+        burn::tensor::activation::softmax(scores, 3)
+            .matmul(value)
+            .cast(DType::F16)
+    }
+
+    /// Reads the first four channels of one `[1, 1, 1, head_dim]` F16 result.
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    fn first_four_f16_bits(tensor: Tensor<Metal, 4>) -> Vec<u16> {
+        tensor
+            .slice([0..1, 0..1, 0..1, 0..4])
+            .into_data()
+            .to_vec::<f16>()
+            .expect("Metal result must retain F16 storage")
+            .into_iter()
+            .map(f16::to_bits)
+            .collect()
+    }
+
+    /// Muse F16 bypasses flash when its strict-F32 score graph changes results.
+    ///
+    /// Run this opt-in gate alone because it enables process-local autotuning:
+    /// `cargo test --manifest-path crates/transformers/Cargo.toml
+    /// --no-default-features --features std,flex,attention-kernel-tracing
+    /// --lib
+    /// models::muse_glimmer::model::tests::metal_f16_attention_matches_pinned_eager_score_rounding
+    /// -- --ignored --exact --nocapture --test-threads=1`.
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    #[test]
+    #[ignore = "requires a Metal-capable macOS host and serialized attention autotuning"]
+    fn metal_f16_attention_matches_pinned_eager_score_rounding() {
+        let _serial = METAL_ATTENTION_TEST_LOCK
+            .lock()
+            .expect("Metal attention test lock must not be poisoned");
+        let device = Default::default();
+        let (muse_attention, projection) = metal_score_rounding_fixture(&device);
+
+        let eager_bits = first_four_f16_bits(pinned_eager_last_query(&projection));
+        let strict_bits = first_four_f16_bits(strict_f32_last_query(&projection));
+        assert_ne!(
+            eager_bits, strict_bits,
+            "Metal fixture must distinguish the pinned F16 score boundary from strict F32"
+        );
+
+        let warmup = attention(
+            projection.query.clone(),
+            projection.key.clone(),
+            projection.value.clone(),
+            None,
+            None,
+            muse_attention_options(true),
+        );
+        <Metal<f32, i32> as Backend>::sync(&device).expect("synchronize attention autotuning");
+        let _ = warmup.into_data();
+
+        let (fused_bits, launches) = capture_metal_kernel_launches(|| {
+            let output = attention(
+                projection.query.clone(),
+                projection.key.clone(),
+                projection.value.clone(),
+                None,
+                None,
+                muse_attention_options(true),
+            );
+            <Metal<f32, i32> as Backend>::sync(&device).expect("synchronize fused attention");
+            first_four_f16_bits(output.slice([
+                0..1,
+                0..1,
+                METAL_ATTENTION_SEQUENCE - 1..METAL_ATTENTION_SEQUENCE,
+                0..METAL_ATTENTION_HEAD_DIM,
+            ]))
+        });
+        let used_flash = launches.iter().any(|launch| {
+            launch.name.to_ascii_lowercase().contains("attention")
+                || launch.id.to_ascii_lowercase().contains("attention")
+        });
+        assert!(
+            used_flash,
+            "autotuned call must execute an attention kernel: {launches:#?}"
+        );
+        assert_eq!(
+            fused_bits, strict_bits,
+            "Burn 0.21 flash must exercise the strict-F32 discriminator"
+        );
+        assert_ne!(
+            fused_bits, eager_bits,
+            "fixture must expose the missing F16 score-rounding boundary"
+        );
+
+        let muse_bits = muse_attention
+            .attend(projection, None, true)
+            .expect("valid Muse Metal attention")
+            .slice([
+                0..1,
+                METAL_ATTENTION_SEQUENCE - 1..METAL_ATTENTION_SEQUENCE,
+                0..4,
+            ])
+            .into_data()
+            .to_vec::<f16>()
+            .expect("Muse output must retain F16 storage")
+            .into_iter()
+            .map(f16::to_bits)
+            .collect::<Vec<_>>();
+        eprintln!(
+            "Muse Metal score-rounding gate: eager={eager_bits:04x?}, strict={strict_bits:04x?}, fused={fused_bits:04x?}, used_flash={used_flash}"
+        );
+        assert_eq!(muse_bits, eager_bits, "Muse must match pinned eager F16");
+    }
+
+    /// Non-F16 Muse options retain Burn's flash-attention eligibility contract.
     ///
     /// Burn 0.21 CubeCL falls back whenever `scale.is_some()`, even when that
-    /// value redundantly equals `1/sqrt(head_dim)`. This structural assertion
-    /// prevents the family wiring from silently disabling fused kernels again.
+    /// value redundantly equals `1/sqrt(head_dim)`. Its default Metal build also
+    /// chooses fallback because `autotune` is disabled; eligibility and runtime
+    /// selection are distinct. F16 Muse intentionally uses the explicit shared
+    /// eager mode before these options reach a backend kernel.
     #[test]
-    fn attention_options_preserve_fused_dispatch_eligibility() {
+    fn attention_options_preserve_non_f16_flash_eligibility() {
         assert_eq!(
             muse_attention_options(true),
             AttentionModuleOptions {
