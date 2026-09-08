@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "strict_f16_official_reference_and_bounded_attention_gates_verified_pending_quantized_quality_real_32k_and_release_hardening",
+  "phase": "strict_f16_official_reference_bounded_attention_and_synthetic_32k_envelope_gates_verified_pending_quantized_quality_real_32k_and_release_hardening",
   "repository": "meta-models/Muse-Glimmer-30B",
   "revision": "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
   "reference": {
@@ -133,7 +133,7 @@
     "execution_note": "The planner combines the largest shard and largest target tensor for a conservative preflight bound. The release Metal gate completed pass-two application of all 627 text tensors; this analytical value remains a preflight upper bound rather than a measured process peak."
   },
   "attention_execution": {
-    "status": "bounded_exact_eager_policy_implemented_and_component_validated",
+    "status": "bounded_exact_eager_policy_and_synthetic_32k_metal_envelope_validated",
     "precision_graph": "float16_scores_float32_softmax_float16_probabilities",
     "default_policy": "synchronized_query_chunking",
     "maximum_query_tokens": 512,
@@ -153,6 +153,49 @@
       "muse_explicit_path_flash_observed": false,
       "official_eager_f16_output_bits": [6715, 12904, 5503, 14941],
       "burn_flash_output_bits": [6712, 12902, 5502, 14942]
+    },
+    "synthetic_32k_metal_envelope": {
+      "status": "passed",
+      "source_commit": "14b4f7efe863b1e1c52b24347be37b6f7b2e8f9e",
+      "git_tree": "58ae1b5d7d43d948af8e60595fe2435b46d113c6",
+      "transformers_tree": "3e90c6e3233fa5565c16b245225d0326aae66c5d",
+      "test_source_sha256": "fddf43fbbe021c1808b5f2ed65c4867c608e513ddf8dfd817d5f343c0143ef7e",
+      "test_name": "stress_muse_32k_attention_envelope_on_metal",
+      "elapsed_seconds": 0.89,
+      "timing_classification": "synthetic component diagnostic; not a full-model or standardized performance sample",
+      "backend": "metal",
+      "dtype": "float16",
+      "sequence_tokens": 32768,
+      "query_heads": 32,
+      "key_value_heads": 2,
+      "gqa_group_size": 16,
+      "fixture_head_dimension": 4,
+      "checkpoint_head_dimension": 128,
+      "sliding_window_tokens": 2048,
+      "terminal_position_id": 32767,
+      "global_schedule": {
+        "query_chunks": 512,
+        "plane_shape": [1, 32, 64, 32768],
+        "elements_per_plane": 67108864,
+        "executed_suffix_query_tokens": 65,
+        "executed_suffix_key_tokens": 32768
+      },
+      "sliding_schedule": {
+        "query_chunks": 64,
+        "peak_plane_shape": [1, 32, 512, 2559],
+        "peak_elements_per_plane": 41926656,
+        "executed_suffix_query_tokens": 513,
+        "executed_physical_key_tokens": 32768,
+        "first_executed_key_range": [30208, 32767],
+        "terminal_executed_key_range": [30720, 32768]
+      },
+      "position_and_cache_boundaries": {
+        "all_valid_positions_derived_through_terminal": true,
+        "terminal_rope_table_constructed": true,
+        "full_kv_cache_write_read_at_32k_boundary": true,
+        "mirrored_2048_token_ring_write_read_at_32k_boundary": true
+      },
+      "scope_note": "This gate executes real Metal attention against 32K physical keys and validates terminal RoPE and full/mirrored-cache boundaries while preserving official head counts, GQA grouping, F16 precision, and mask geometry. It reduces head width to four, omits all 52 dense decoder blocks, and does not execute the complete 30B graph or establish 32K logits parity, fit, memory, or throughput."
     },
     "scope_note": "Query chunking preserves every row's full allowed key support and bounds score-like temporaries; it does not bound parameters, Q/K/V, outputs, or autodiff tapes. Synthetic full/sliding, cached, padded, and recurrent equivalence plus the Metal flash-discrimination trace passed. The complete 32K real-checkpoint hardware stress gate remains open."
   },
@@ -266,6 +309,7 @@
     "cache_geometry_dtype_lengths_and_positions_validated": true,
     "bounded_query_chunk_policy_validated": true,
     "metal_eager_flash_discrimination_validated": true,
+    "synthetic_long_context_32k_envelope_validated": true,
     "rust_source_toolchain_features_and_trees_recorded": true,
     "quantization_validated": false,
     "long_context_32k_validated": false
