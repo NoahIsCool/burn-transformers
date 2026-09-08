@@ -5,7 +5,10 @@
 //! FP32 is important for F16 inference because squaring and summing a wide
 //! residual stream otherwise loses significant dynamic range. Some recent
 //! checkpoints store a zero-centered learned parameter and define
-//! `scale = 1 + weight`; older checkpoints store `scale` directly.
+//! `scale = 1 + weight`; older checkpoints store `scale` directly. Although
+//! `x / sqrt(m)`, `x * pow(m, -0.5)`, and `x * reciprocal(sqrt(m))` are
+//! algebraically equal, their floating-point operation graphs can round
+//! differently. The root mode therefore belongs to checkpoint compatibility.
 
 use burn::{
     module::{Initializer, Module, Param},
@@ -13,6 +16,25 @@ use burn::{
 };
 
 use crate::{Error, Result};
+
+/// Floating-point operation graph used to apply an inverse RMS denominator.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RmsNormRootMode {
+    /// Divides the activation by `sqrt(mean_square + epsilon)`.
+    #[default]
+    DivideBySqrt,
+    /// Multiplies by `pow(mean_square + epsilon, -0.5)`.
+    ///
+    /// Muse uses this form for its scale-free embedding/Q/K norms and its
+    /// ordinary learned final norm to agree with its JAX reference.
+    MultiplyByPower,
+    /// Multiplies by `reciprocal(sqrt(mean_square + epsilon))`.
+    ///
+    /// This is Burn 0.21's portable expression of the `rsqrt` graph used by
+    /// Muse's zero-centered sandwich norms.
+    MultiplyByReciprocalSqrt,
+}
 
 /// Configuration for checkpoint-compatible RMS normalization.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -31,6 +53,9 @@ pub struct RmsNormConfig {
     /// operations in FP32 and round only the final result.
     #[serde(default)]
     pub round_before_scale: bool,
+    /// Inverse-root operation graph required by the checkpoint implementation.
+    #[serde(default)]
+    pub root_mode: RmsNormRootMode,
 }
 
 impl RmsNormConfig {
@@ -41,6 +66,7 @@ impl RmsNormConfig {
             epsilon: 1e-6,
             zero_centered: false,
             round_before_scale: false,
+            root_mode: RmsNormRootMode::DivideBySqrt,
         }
     }
 
@@ -59,6 +85,12 @@ impl RmsNormConfig {
     /// Selects rounding before learned scaling for architectures that require it.
     pub fn with_round_before_scale(mut self, round_before_scale: bool) -> Self {
         self.round_before_scale = round_before_scale;
+        self
+    }
+
+    /// Selects the inverse-root floating-point operation graph.
+    pub fn with_root_mode(mut self, root_mode: RmsNormRootMode) -> Self {
+        self.root_mode = root_mode;
         self
     }
 
@@ -89,6 +121,7 @@ impl RmsNormConfig {
             epsilon: self.epsilon,
             zero_centered: self.zero_centered,
             round_before_scale: self.round_before_scale,
+            root_mode: self.root_mode,
         })
     }
 }
@@ -104,6 +137,9 @@ pub struct RmsNorm<B: Backend> {
     pub zero_centered: bool,
     /// Whether the normalized activation is rounded before scale multiplication.
     pub round_before_scale: bool,
+    /// Inverse-root operation graph excluded from checkpoint parameters.
+    #[module(skip)]
+    pub root_mode: RmsNormRootMode,
 }
 
 impl<B: Backend> RmsNorm<B> {
@@ -118,13 +154,17 @@ impl<B: Backend> RmsNorm<B> {
     pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
         let dtype = input.dtype();
         let input = input.cast(DType::F32);
-        let rms = (input.clone().square().mean_dim(D - 1) + self.epsilon).sqrt();
+        let mean_square = input.clone().square().mean_dim(D - 1) + self.epsilon;
         let scale = if self.zero_centered {
             self.weight.val().cast(DType::F32) + 1.0
         } else {
             self.weight.val().cast(DType::F32)
         };
-        let normalized = input / rms;
+        let normalized = match self.root_mode {
+            RmsNormRootMode::DivideBySqrt => input / mean_square.sqrt(),
+            RmsNormRootMode::MultiplyByPower => input * mean_square.powf_scalar(-0.5),
+            RmsNormRootMode::MultiplyByReciprocalSqrt => input * mean_square.sqrt().recip(),
+        };
         if self.round_before_scale {
             normalized.cast(dtype) * scale.cast(dtype).unsqueeze()
         } else {
@@ -138,10 +178,10 @@ mod tests {
     use burn::{
         backend::Flex,
         module::Param,
-        tensor::{Tensor, TensorData, Tolerance},
+        tensor::{DType, Tensor, TensorData, Tolerance, f16},
     };
 
-    use super::RmsNormConfig;
+    use super::{RmsNormConfig, RmsNormRootMode};
 
     /// Conventional and zero-centered initialization both begin with unit scale.
     #[test]
@@ -191,8 +231,6 @@ mod tests {
     /// Architectures can round before reduced-precision learned scaling.
     #[test]
     fn round_before_scale_matches_early_rounding_operation_order() {
-        use burn::tensor::DType;
-
         let device = Default::default();
         let mut early = RmsNormConfig::new(3)
             .with_round_before_scale(true)
@@ -212,6 +250,76 @@ mod tests {
         let actual = early.forward(input.clone());
         assert_eq!(actual.to_data(), expected.to_data());
         assert_ne!(actual.to_data(), late.forward(input).to_data());
+    }
+
+    /// Muse inverse-root graphs reproduce adversarial pinned F16 oracle bits.
+    #[test]
+    fn muse_inverse_root_modes_match_pinned_f16_oracles() {
+        let device = Default::default();
+        let input =
+            Tensor::<Flex, 2>::from_floats([[0.096_557_62, 2.664_062_5]], &device).cast(DType::F16);
+
+        let power = RmsNormConfig::new(2)
+            .with_epsilon(1e-5)
+            .with_root_mode(RmsNormRootMode::MultiplyByPower)
+            .init::<Flex>(&device)
+            .unwrap();
+        let divided = RmsNormConfig::new(2)
+            .with_epsilon(1e-5)
+            .init::<Flex>(&device)
+            .unwrap();
+        let power_bits = power
+            .forward(input.clone())
+            .into_data()
+            .to_vec::<f16>()
+            .unwrap()
+            .into_iter()
+            .map(f16::to_bits)
+            .collect::<Vec<_>>();
+        let divided_bits = divided
+            .forward(input.clone())
+            .into_data()
+            .to_vec::<f16>()
+            .unwrap()
+            .into_iter()
+            .map(f16::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(power_bits, [0x2a8f, 0x3da7]);
+        assert_eq!(divided_bits, [0x2a8e, 0x3da7]);
+
+        let centered_weight =
+            Tensor::<Flex, 1>::from_floats([-0.875, 2.529_296_9], &device).cast(DType::F16);
+        let mut reciprocal = RmsNormConfig::new(2)
+            .with_epsilon(1e-5)
+            .with_zero_centered(true)
+            .with_root_mode(RmsNormRootMode::MultiplyByReciprocalSqrt)
+            .init::<Flex>(&device)
+            .unwrap();
+        reciprocal.weight = Param::from_tensor(centered_weight.clone());
+        let mut divided_centered = RmsNormConfig::new(2)
+            .with_epsilon(1e-5)
+            .with_zero_centered(true)
+            .init::<Flex>(&device)
+            .unwrap();
+        divided_centered.weight = Param::from_tensor(centered_weight);
+        let reciprocal_bits = reciprocal
+            .forward(input.clone())
+            .into_data()
+            .to_vec::<f16>()
+            .unwrap()
+            .into_iter()
+            .map(f16::to_bits)
+            .collect::<Vec<_>>();
+        let divided_centered_bits = divided_centered
+            .forward(input)
+            .into_data()
+            .to_vec::<f16>()
+            .unwrap()
+            .into_iter()
+            .map(f16::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(reciprocal_bits, [0x1e8f, 0x44fd]);
+        assert_eq!(divided_centered_bits, [0x1e8e, 0x44fd]);
     }
 
     /// T5 normalization divides by RMS without subtracting the feature mean.

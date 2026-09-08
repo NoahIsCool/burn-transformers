@@ -38,7 +38,7 @@ use crate::{
     architecture::TokenMask,
     attention::{padding_attention_mask, repeat_key_value},
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig, apply_activation},
-    normalization::{RmsNorm, RmsNormConfig},
+    normalization::{RmsNorm, RmsNormConfig, RmsNormRootMode},
     operations::linear,
     position::{
         DynamicNtkScaling, LinearRopeScaling, RopeConfig, RopeScaling, YarnConfig, apply_rotary,
@@ -270,12 +270,14 @@ impl<B: Backend> MuseGlimmerDecoderLayer<B> {
             RmsNormConfig::new(config.hidden_size)
                 .with_epsilon(config.rms_norm_eps)
                 .with_zero_centered(true)
+                .with_root_mode(RmsNormRootMode::MultiplyByReciprocalSqrt)
                 .init(device)
         };
         let post_norm = || {
             RmsNormConfig::new(config.hidden_size)
                 .with_epsilon(config.post_norm_eps)
                 .with_zero_centered(true)
+                .with_root_mode(RmsNormRootMode::MultiplyByReciprocalSqrt)
                 .init(device)
         };
         Ok(Self {
@@ -380,6 +382,7 @@ impl<B: Backend> MuseGlimmerModel<B> {
             layers,
             norm: RmsNormConfig::new(config.hidden_size)
                 .with_epsilon(config.rms_norm_eps)
+                .with_root_mode(RmsNormRootMode::MultiplyByPower)
                 .init(device)?,
             config,
         })
@@ -523,8 +526,8 @@ fn scale_free_rms_norm<B: Backend, const D: usize>(
 ) -> Tensor<B, D> {
     let dtype = input.dtype();
     let input = input.cast(DType::F32);
-    let rms = (input.clone().square().mean_dim(D - 1) + epsilon).sqrt();
-    (input / rms).cast(dtype)
+    let inverse_rms = (input.clone().square().mean_dim(D - 1) + epsilon).powf_scalar(-0.5);
+    (input * inverse_rms).cast(dtype)
 }
 
 /// Applies a tied embedding matrix as a vocabulary projection.
@@ -559,6 +562,14 @@ fn muse_gated_feed_forward<B: Backend, const D: usize>(
 }
 
 /// Combines padding exclusions with an optional left-bounded causal window.
+///
+/// A token mask defines a semantic sequence by removing invalid source columns.
+/// Consequently, the local distance between two valid tokens is the difference
+/// between their cumulative valid-token ordinals, not their rectangular column
+/// indices. This agrees with cached execution, which compacts every row before
+/// appending it to the KV cache. Without that distinction an interior padding
+/// hole would consume one position of the stateless window but no position of
+/// the cached window.
 fn stateless_attention_mask<B: Backend>(
     token_mask: Option<&TokenMask<B>>,
     batch: usize,
@@ -571,11 +582,21 @@ fn stateless_attention_mask<B: Backend>(
     let Some(window) = window else {
         return Ok(padding);
     };
-    let query = Tensor::<B, 1, Int>::arange(0..sequence as i64, device)
-        .reshape([1, 1, sequence, 1])
+    let ordinals = match token_mask {
+        Some(mask) => {
+            let valid = mask.as_tensor().clone();
+            (valid.clone().int().cumsum(1) - 1).mask_fill(valid.bool_not(), 0)
+        }
+        None => Tensor::<B, 1, Int>::arange(0..sequence as i64, device)
+            .reshape([1, sequence])
+            .expand([batch, sequence]),
+    };
+    let query = ordinals
+        .clone()
+        .reshape([batch, 1, sequence, 1])
         .expand([batch, heads, sequence, sequence]);
-    let key = Tensor::<B, 1, Int>::arange(0..sequence as i64, device)
-        .reshape([1, 1, 1, sequence])
+    let key = ordinals
+        .reshape([batch, 1, 1, sequence])
         .expand([batch, heads, sequence, sequence]);
     let too_old = (key + window as i64).lower_equal(query);
     Ok(Some(match padding {
@@ -1074,6 +1095,79 @@ mod tests {
             }
         );
         assert_eq!(muse_attention_options(false).scale, None);
+    }
+
+    /// Muse initialization selects the two inverse-root graphs used upstream.
+    #[test]
+    fn model_selects_pinned_inverse_root_modes() {
+        let (model, _) = tiny_model();
+        assert_eq!(model.model.norm.root_mode, RmsNormRootMode::MultiplyByPower);
+        for layer in &model.model.layers {
+            for mode in [
+                layer.input_layernorm.root_mode,
+                layer.post_attention_layernorm.root_mode,
+                layer.pre_feedforward_layernorm.root_mode,
+                layer.post_feedforward_layernorm.root_mode,
+            ] {
+                assert_eq!(mode, RmsNormRootMode::MultiplyByReciprocalSqrt);
+            }
+        }
+    }
+
+    /// Scale-free Muse norms multiply by `pow(mean_square, -0.5)` before F16 rounding.
+    #[test]
+    fn scale_free_norm_matches_pinned_f16_power_oracle() {
+        let device = Default::default();
+        let input = Tensor::<TestBackend, 2>::from_floats([[0.096_557_62, 2.664_062_5]], &device)
+            .cast(DType::F16);
+        let actual = scale_free_rms_norm(input.clone(), 1e-5)
+            .into_data()
+            .to_vec::<f16>()
+            .unwrap()
+            .into_iter()
+            .map(f16::to_bits)
+            .collect::<Vec<_>>();
+        let fp32 = input.cast(DType::F32);
+        let rms = (fp32.clone().square().mean_dim(1) + 1e-5).sqrt();
+        let division = (fp32 / rms)
+            .cast(DType::F16)
+            .into_data()
+            .to_vec::<f16>()
+            .unwrap()
+            .into_iter()
+            .map(f16::to_bits)
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, [0x2a8f, 0x3da7]);
+        assert_eq!(division, [0x2a8e, 0x3da7]);
+    }
+
+    /// Sliding masks measure an interior hole in semantic rather than physical time.
+    #[test]
+    fn sliding_mask_uses_valid_token_ordinals() {
+        let device = Default::default();
+        let valid = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [[true, true, false, true, true]].into(),
+            &device,
+        ));
+        let excluded = stateless_attention_mask(Some(&valid), 1, 1, 5, Some(3), &device)
+            .unwrap()
+            .unwrap()
+            .reshape([5, 5])
+            .into_data()
+            .to_vec::<bool>()
+            .unwrap();
+
+        assert_eq!(
+            excluded,
+            [
+                false, false, true, false, false, // semantic query 0
+                false, false, true, false, false, // semantic query 1
+                true, true, true, true, true, // invalid query column
+                false, false, true, false, false, // semantic query 2
+                true, false, true, false, false, // semantic query 3
+            ]
+        );
     }
 
     /// Stateless inference emits exact requested shapes and dense diagnostics.

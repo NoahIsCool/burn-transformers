@@ -1297,6 +1297,98 @@ mod tests {
         assert_eq!(state.lengths(), &[4]);
     }
 
+    /// Interior holes and ordinary padding retain semantic cached/stateless parity.
+    #[test]
+    fn semantic_padding_patterns_match_stateless_prefill_and_decode() {
+        let (model, device) = tiny_model();
+        let prompt_tokens = Tensor::from_ints(
+            [[1, 2, 0, 3, 4], [0, 0, 5, 6, 7], [8, 9, 10, 0, 0]],
+            &device,
+        );
+        let prompt_mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [
+                [true, true, false, true, true],
+                [false, false, true, true, true],
+                [true, true, true, false, false],
+            ]
+            .into(),
+            &device,
+        ));
+        let stateless_prompt = model
+            .forward(
+                CausalLmInput {
+                    token_ids: prompt_tokens.clone(),
+                    token_mask: Some(prompt_mask.clone()),
+                    position_ids: None,
+                },
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+        let mut state = model
+            .new_decode_state(CacheConfig::new(3, 8).unwrap(), 3, &device)
+            .unwrap();
+        let cached_prompt = model
+            .prefill(
+                CausalLmInput {
+                    token_ids: prompt_tokens,
+                    token_mask: Some(prompt_mask),
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+        cached_prompt
+            .into_data()
+            .assert_approx_eq::<f32>(&stateless_prompt.into_data(), Tolerance::absolute(3e-4));
+        assert_eq!(state.lengths(), &[4, 3, 3]);
+
+        let cached_suffix = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[11], [12], [13]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+        let stateless_suffix = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints(
+                        [
+                            [1, 2, 0, 3, 4, 11],
+                            [0, 0, 5, 6, 7, 12],
+                            [8, 9, 10, 0, 0, 13],
+                        ],
+                        &device,
+                    ),
+                    token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                        [
+                            [true, true, false, true, true, true],
+                            [false, false, true, true, true, true],
+                            [true, true, true, false, false, true],
+                        ]
+                        .into(),
+                        &device,
+                    ))),
+                    position_ids: None,
+                },
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+        cached_suffix
+            .into_data()
+            .assert_approx_eq::<f32>(&stateless_suffix.into_data(), Tolerance::absolute(3e-4));
+        assert_eq!(state.lengths(), &[5, 4, 4]);
+    }
+
     /// Multi-token cached chunks preserve causality within the appended suffix.
     #[test]
     fn chunked_decode_matches_one_shot_suffix() {

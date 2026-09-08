@@ -298,7 +298,11 @@ work, but bounds each temporary score/mask to $O(HCn)$ rather than $O(Hn^2)$;
 sliding layers retain only their ring-backed history. Ragged chunks preserve
 each row's latest valid logits even when a later chunk is padding-only. Muse
 uses window 2,048 in 39 of 52 text blocks, interleaved with 13 global blocks
-that restore long-range connectivity.
+that restore long-range connectivity. When a valid-token mask contains padding
+or an interior hole, Muse measures $i$ and $j$ in cumulative valid-token
+ordinals. Invalid source columns therefore consume no window distance, matching
+the cache path's semantic row compaction for left padding, right padding, and
+interior holes.
 
 **Implementation:** masking and layer selection in
 [`muse_glimmer/model.rs`](src/models/muse_glimmer/model.rs), cached execution in
@@ -734,7 +738,12 @@ RMSNorm rescales without subtracting a mean:
 $y=x/\sqrt{\operatorname{mean}(x^2)+\epsilon}\odot\gamma$. It preserves the
 directional offset of the vector and avoids LayerNorm's centering reduction.
 The local implementation accumulates the mean square in FP32 for reduced-
-precision inputs and casts according to each checkpoint's ordering.
+precision inputs and casts according to each checkpoint's ordering. Division
+by a square root, multiplication by `pow(mean_square, -0.5)`, and
+multiplication by a reciprocal square root are algebraically equivalent but
+can differ by an F16 ULP. The shared configuration retains these operation
+graphs explicitly: Muse ordinary and scale-free norms use the power form,
+while its centered block norms use the reciprocal-square-root form.
 
 **Implementation:** [`normalization.rs`](src/normalization.rs). **Reference:**
 [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467).
@@ -746,7 +755,9 @@ The normalized activation is conventional, but the checkpoint stores a learned
 offset $w$ and uses scale $\gamma=1+w$. Initializing $w=0$ therefore gives the
 identity scale and keeps learned values centered near zero. Qwen3.5/3.8 uses
 this throughout its text graph. Muse uses it for the four norms inside each
-block, while its final norm stores an ordinary direct scale.
+block, with FP32 `rsqrt` normalization and scale multiplication before the
+final cast, while its final norm stores an ordinary direct scale and uses
+`pow(mean_square, -0.5)`.
 
 **Implementation:** `RmsNormConfig::zero_centered` in
 [`normalization.rs`](src/normalization.rs), selected in
@@ -786,7 +797,9 @@ Before Muse enters its first block, every token embedding is divided by its
 root mean square but receives no learned $\gamma$:
 $e'=e/\sqrt{\operatorname{mean}(e^2)+\epsilon}$. This fixes the residual
 stream's initial scale without adding a vector of parameters or coupling it to
-the embedding table's norm.
+the embedding table's norm. The pinned implementation spells the inverse root
+as `pow(mean_square, -0.5)` to preserve Torch/JAX compiler parity; the same
+operation graph is used by Muse's scale-free per-head Q/K norms.
 
 **Implementation:** `scale_free_rms_norm` in
 [`muse_glimmer/model.rs`](src/models/muse_glimmer/model.rs).
