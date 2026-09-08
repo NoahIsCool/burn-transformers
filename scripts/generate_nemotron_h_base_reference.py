@@ -39,6 +39,7 @@ import json
 import math
 import os
 import platform
+import shutil
 import stat
 import struct
 import subprocess
@@ -366,6 +367,14 @@ ALLOCATOR_WARMUP_REASON = (
 )
 EXPECTED_ALLOCATOR_WARMUP_CALLS = 1
 MINIMUM_MPS_LOAD_HEADROOM_BYTES = 2_000_000_000
+# The first concurrent diagnostic attempt consumed roughly 35 GiB of temporary
+# system-volume space while MPS compiled eager expert graphs. Requiring 40 GiB
+# before authenticating or loading leaves a measured margin above that observed
+# footprint; the independent 10 GiB runtime reserve stops subsequent phases if
+# another process begins consuming the same APFS container.
+MINIMUM_SYSTEM_PREFLIGHT_FREE_BYTES = 40 * 1024**3
+MINIMUM_SYSTEM_RUNTIME_FREE_BYTES = 10 * 1024**3
+MINIMUM_OUTPUT_FREE_BYTES = 1 * 1024**3
 
 
 def sha256_bytes(payload: bytes) -> str:
@@ -1534,6 +1543,45 @@ def ensure_external_paths(
     return model, reference, output, bundle
 
 
+def require_free_space(
+    path: Path, minimum_free_bytes: int, purpose: str
+) -> dict[str, Any]:
+    """Record filesystem capacity and reject an inadequate free-space reserve.
+
+    MPS may compile large eager graphs into temporary files on the macOS system
+    volume even when checkpoint and output files live on an external drive.
+    Consequently the system and output filesystems are checked independently.
+    Repeated runtime samples cannot interrupt a single in-flight kernel build,
+    but they prevent the next expensive forward from starting after the reserve
+    has been breached.
+    """
+
+    if (
+        isinstance(minimum_free_bytes, bool)
+        or not isinstance(minimum_free_bytes, int)
+        or minimum_free_bytes <= 0
+    ):
+        raise ValueError("minimum free-space reserve must be a positive integer")
+    if not isinstance(purpose, str) or not purpose:
+        raise ValueError("free-space purpose must be a nonempty string")
+    resolved = path.expanduser().resolve(strict=True)
+    usage = shutil.disk_usage(resolved)
+    record = {
+        "path": str(resolved),
+        "purpose": purpose,
+        "total_bytes": int(usage.total),
+        "used_bytes": int(usage.used),
+        "free_bytes": int(usage.free),
+        "minimum_free_bytes": minimum_free_bytes,
+    }
+    if record["free_bytes"] < minimum_free_bytes:
+        raise RuntimeError(
+            f"insufficient free space for {purpose}: path={resolved}, "
+            f"free={record['free_bytes']}, required={minimum_free_bytes}"
+        )
+    return record
+
+
 def load_with_verified_mps_warmup(
     modeling_utils: Any,
     torch: Any,
@@ -1946,6 +1994,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     model_dir, transformers_dir, output_dir, bundle = ensure_external_paths(
         arguments.model_dir, arguments.transformers_dir, arguments.output_dir
     )
+    system_space_samples = [
+        require_free_space(
+            Path("/"),
+            MINIMUM_SYSTEM_PREFLIGHT_FREE_BYTES,
+            "Nemotron MPS system-volume preflight",
+        )
+    ]
+    output_space_preflight = require_free_space(
+        output_dir,
+        MINIMUM_OUTPUT_FREE_BYTES,
+        "Nemotron immutable bundle preflight",
+    )
     python_runtime = verify_python_runtime()
     reference_source = verify_transformers_checkout(transformers_dir)
     (
@@ -2199,6 +2259,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
         )
         torch.mps.synchronize()
+        system_space_samples.append(
+            require_free_space(
+                Path("/"),
+                MINIMUM_SYSTEM_RUNTIME_FREE_BYTES,
+                "system reserve after stateless prompt",
+            )
+        )
         stateless_seconds = checked_duration(
             "stateless prompt", time.perf_counter() - stateless_started
         )
@@ -2263,6 +2330,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             row = cached.logits[0, -1].float().cpu().contiguous()
             if list(row.shape) != [VOCAB_SIZE] or not bool(torch.isfinite(row).all()):
                 raise RuntimeError(f"cached vocabulary row invalid at decision {step}")
+            system_space_samples.append(
+                require_free_space(
+                    Path("/"),
+                    MINIMUM_SYSTEM_RUNTIME_FREE_BYTES,
+                    f"system reserve after cached decision {step}",
+                )
+            )
             cached_rows.append(row)
             decision_logical_lengths.append(logical_length)
             decision_position_ids.append(logical_length - 1)
@@ -2346,6 +2420,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
         )
         torch.mps.synchronize()
+        system_space_samples.append(
+            require_free_space(
+                Path("/"),
+                MINIMUM_SYSTEM_RUNTIME_FREE_BYTES,
+                "system reserve after teacher-forced forward",
+            )
+        )
         teacher_seconds = checked_duration(
             "teacher-forced stateless", time.perf_counter() - teacher_started
         )
@@ -2495,6 +2576,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     bytecode_policy = finalize_authenticated_imports(
         bytecode_cache, previous_bytecode_state
     )
+    system_space_samples.append(
+        require_free_space(
+            Path("/"),
+            MINIMUM_SYSTEM_RUNTIME_FREE_BYTES,
+            "system reserve before immutable publication",
+        )
+    )
+    output_space_postflight = require_free_space(
+        output_dir,
+        MINIMUM_OUTPUT_FREE_BYTES,
+        "Nemotron immutable bundle postflight",
+    )
 
     script = Path(__file__).resolve(strict=True)
     now = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -2593,6 +2686,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "recommended_max_memory_bytes": recommended_mps_memory,
                 "required_f16_load_bytes": required_mps_memory,
                 "minimum_load_headroom_bytes": MINIMUM_MPS_LOAD_HEADROOM_BYTES,
+            },
+            "disk_space": {
+                "system_preflight_minimum_free_bytes": (
+                    MINIMUM_SYSTEM_PREFLIGHT_FREE_BYTES
+                ),
+                "system_runtime_minimum_free_bytes": (
+                    MINIMUM_SYSTEM_RUNTIME_FREE_BYTES
+                ),
+                "system_samples": system_space_samples,
+                "output_minimum_free_bytes": MINIMUM_OUTPUT_FREE_BYTES,
+                "output_preflight": output_space_preflight,
+                "output_postflight": output_space_postflight,
             },
             "offline_environment": {
                 name: os.environ[name]

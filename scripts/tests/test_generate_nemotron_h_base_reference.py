@@ -693,6 +693,44 @@ class ReferenceHelperTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 REFERENCE.ensure_external_paths(model, source, output)
 
+    def test_free_space_guard_records_capacity_and_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            usage = types.SimpleNamespace(total=100, used=60, free=40)
+            with mock.patch.object(
+                REFERENCE.shutil, "disk_usage", return_value=usage
+            ) as disk_usage:
+                record = REFERENCE.require_free_space(root, 40, "fixture")
+                self.assertEqual(
+                    record,
+                    {
+                        "path": str(root.resolve()),
+                        "purpose": "fixture",
+                        "total_bytes": 100,
+                        "used_bytes": 60,
+                        "free_bytes": 40,
+                        "minimum_free_bytes": 40,
+                    },
+                )
+                disk_usage.assert_called_once_with(root.resolve())
+                with self.assertRaisesRegex(RuntimeError, "free=40, required=41"):
+                    REFERENCE.require_free_space(root, 41, "fixture")
+            for minimum in (0, -1, True, 1.5):
+                with self.subTest(minimum=minimum):
+                    with self.assertRaisesRegex(ValueError, "positive integer"):
+                        REFERENCE.require_free_space(root, minimum, "fixture")
+            with self.assertRaisesRegex(ValueError, "nonempty string"):
+                REFERENCE.require_free_space(root, 1, "")
+
+    def test_disk_reserves_include_empirical_mps_headroom(self) -> None:
+        self.assertGreaterEqual(
+            REFERENCE.MINIMUM_SYSTEM_PREFLIGHT_FREE_BYTES, 40 * 1024**3
+        )
+        self.assertGreaterEqual(
+            REFERENCE.MINIMUM_SYSTEM_RUNTIME_FREE_BYTES, 10 * 1024**3
+        )
+        self.assertGreaterEqual(REFERENCE.MINIMUM_OUTPUT_FREE_BYTES, 1024**3)
+
     def test_checkpoint_root_inventory_is_closed_over_loader_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
