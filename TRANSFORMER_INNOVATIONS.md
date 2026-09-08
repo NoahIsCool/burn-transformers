@@ -35,7 +35,7 @@ description below.
 | **FLAN-S** | [google/flan-t5-small @ `0fc9dd…`](https://huggingface.co/google/flan-t5-small/blob/0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab/config.json) | [Pinned T5 reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/t5/modeling_t5.py), [T5 paper](https://arxiv.org/abs/1910.10683) | [`t5`](src/models/t5/model.rs) |
 | **FLAN-XXL** | [google/flan-t5-xxl @ `ae7c91…`](https://huggingface.co/google/flan-t5-xxl/blob/ae7c9136adc7555eeccc78cdd960dfd60fb346ce/config.json) | [Pinned T5 reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/t5/modeling_t5.py), [FLAN paper](https://arxiv.org/abs/2210.11416) | [`t5`](src/models/t5/model.rs) |
 | **FLAN-UL2** | [google/flan-ul2 @ `452d74…`](https://huggingface.co/google/flan-ul2/blob/452d74ce28ac4a7f211d6ba3ef0717027f7a8074/config.json) | [Pinned T5 reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/t5/modeling_t5.py), [UL2 paper](https://arxiv.org/abs/2205.05131) | [`t5`](src/models/t5/model.rs) |
-| **Nem-3.5** | [NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 @ `a9904d…`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/blob/a9904d24bcc1d289a1950fa9d2b978c47cf903b9/config.json) | [NVIDIA architecture/recipe](https://docs.nvidia.com/nemotron/nightly/nemotron/lightning35/pretrain.html), [Nemotron-H reference @ `cfa309…`](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/nemotron_h/modeling_nemotron_h.py) | [`nemotron_h`](src/models/nemotron_h/model.rs) |
+| **Nem-3.5** | [NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 @ `a9904d…`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/blob/a9904d24bcc1d289a1950fa9d2b978c47cf903b9/config.json) | [NVIDIA architecture/recipe](https://docs.nvidia.com/nemotron/nightly/nemotron/lightning35/pretrain.html), [Nemotron-H reference @ `cfa309…`](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/nemotron_h/modeling_nemotron_h.py), [vLLM MTP reference @ `6e448d…`](https://github.com/vllm-project/vllm/blob/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/vllm/model_executor/models/nemotron_h_mtp.py) | [`nemotron_h`](src/models/nemotron_h/model.rs) |
 | **Nem-Nano** | [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 @ `bf77c3…`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/bf77c3174f68ad409e1c2aa60daeb46e32d1c606/config.json) | [Pinned NVIDIA reference](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/bf77c3174f68ad409e1c2aa60daeb46e32d1c606/modeling_nemotron_h.py), [technical report](https://research.nvidia.com/labs/nemotron/files/NVIDIA-Nemotron-3-Nano-Technical-Report.pdf) | [`nemotron_h`](src/models/nemotron_h/model.rs) |
 
 Qwen3.8's inner text model is officially serialized as `qwen3_5_text`, not
@@ -104,8 +104,8 @@ mathematical and implementation description.
 | [Sliding ring KV cache](#innovation-ring-cache) | — | — | — | — | ✓ | — | — | — | — | — |
 | [Immutable cross-attention KV cache](#innovation-cross-kv-cache) | — | — | — | — | — | ✓ | ✓ | ✓ | — | — |
 | [External recurrent-state cache](#innovation-recurrent-cache) | Delta | Delta | — | — | — | — | — | — | Mamba2 | Mamba2 |
-| [Transactional speculative cache](#innovation-transactional-cache) | target + MTP | target + MTP | — | — | — | — | — | — | — | — |
-| [Lossless speculative decoding](#innovation-speculative-decoding) | MTP, batch 1 | MTP, batch 1 | — | — | — | — | — | — | — | — |
+| [Transactional speculative cache](#innovation-transactional-cache) | target + MTP | target + MTP | — | — | — | — | — | — | target + MTP | — |
+| [Lossless speculative decoding](#innovation-speculative-decoding) | MTP, batch 1 | MTP, batch 1 | — | — | — | — | — | — | MTP, batch 1 | — |
 | [Cache-aware beam search](#innovation-beam-search) | — | — | — | — | — | ✓ | ✓ | ✓ | — | — |
 
 ## Mathematical and technical descriptions
@@ -947,8 +947,10 @@ attention residual block followed by an MoE residual block. Nemotron Nano has no
 MTP fields. The ordinary pinned Hugging Face Qwen forward ignores `mtp.*`; the
 crate's MTP-aware path is explicit and opt-in.
 
-**Implementation:** [`qwen3_5/model/mtp.rs`](src/models/qwen3_5/model/mtp.rs)
-and [`NemotronHNextTokenHead`](src/models/nemotron_h/model.rs), with exact tensor
+**Implementation:** [`qwen3_5/model/mtp.rs`](src/models/qwen3_5/model/mtp.rs),
+[`NemotronHNextTokenHead`](src/models/nemotron_h/model.rs), and Nemotron's
+independent incremental MTP bank in
+[`nemotron_h/model/mtp.rs`](src/models/nemotron_h/model/mtp.rs), with exact tensor
 contracts in each family's `checkpoint.rs`.
 
 ### Stateful inference and generation
@@ -1015,13 +1017,17 @@ records a mark, stages appends, and then either `commit_prefix(a)` to publish
 only the accepted prefix or `rollback()` to restore the committed logical state.
 Rollback leaves committed cache tensors unchanged and discards staging metadata;
 rejected staging bytes may remain allocated but are no longer addressable. Qwen
-maintains an independent MTP KV cache alongside target GQA/DeltaNet state; cache
-alignment requires the target to remain one token ahead of MTP.
+maintains an independent MTP KV cache alongside target GQA/DeltaNet state;
+Nemotron does the same alongside target GQA/Mamba2 state. Both require the
+target cursor to remain one token ahead of the shifted MTP cursor at stable
+cycle boundaries. Per-token recurrent snapshots make partial Mamba2/DeltaNet
+commits exact even though their terminal recurrences cannot be inverted.
 
 **Implementation:** lifecycle rules in
 [`cache/transaction.rs`](src/cache/transaction.rs), tensor snapshots in
-[`cache/tensor/state.rs`](src/cache/tensor/state.rs), and Qwen integration in
-[`qwen3_5/model/decode.rs`](src/models/qwen3_5/model/decode.rs).
+[`cache/tensor/state.rs`](src/cache/tensor/state.rs), Qwen integration in
+[`qwen3_5/model/decode.rs`](src/models/qwen3_5/model/decode.rs), and Nemotron
+integration in [`nemotron_h/model/decode.rs`](src/models/nemotron_h/model/decode.rs).
 
 <a id="innovation-speculative-decoding"></a>
 ### Lossless speculative decoding
@@ -1032,12 +1038,20 @@ match. Stochastic mode accepts proposed token $y_i$ with
 $a_i=\min(1,p_i(y_i)/q_i(y_i))$; on rejection it samples from normalized
 $(p_i-q_i)_+$. This rejection rule preserves the target model's marginal
 distribution exactly. If all drafts pass, the target emits one bonus token.
-The current Qwen coordinator is intentionally batch-one and defaults to two
-drafts. Nemotron's next-token head exists, but no equivalent coordinator is yet
-implemented for it.
+The current Qwen and Nemotron coordinators are intentionally batch-one and
+default to two drafts. Nemotron follows vLLM's shifted pair convention:
+auxiliary cache position `i` consumes the next-token embedding `E[x_(i+1)]`
+with the preceding target or auxiliary hidden state. Explicit positions must be
+contiguous because vLLM delegates those KV slots to its scheduler, whereas the
+local cache owns them directly.
+Both APIs execute one speculative cycle; their caller still owns the global
+token budget, stop-sequence matching, and padding policy, matching the split
+between vLLM's model-side speculator and scheduler.
 
-**Implementation:** [`qwen3_5/model/speculative.rs`](src/models/qwen3_5/model/speculative.rs).
-**Reference:** [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/abs/2211.17192).
+**Implementation:** [`qwen3_5/model/speculative.rs`](src/models/qwen3_5/model/speculative.rs)
+and [`nemotron_h/model/speculative.rs`](src/models/nemotron_h/model/speculative.rs).
+**Reference:** [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/abs/2211.17192)
+and the [pinned vLLM autoregressive speculator](https://github.com/vllm-project/vllm/blob/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/vllm/v1/worker/gpu/spec_decode/autoregressive/speculator.py).
 
 <a id="innovation-beam-search"></a>
 ### Cache-aware beam search
@@ -1078,9 +1092,12 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   finite stateless, cached-prefill, and recurrent-decode execution, exact
   cache topology, bit-identical stateless/prefill hidden traces, and
   recurrent/teacher top-1 agreement. It also exposed the single-group router
-  edge above. The 270 MTP tensors were installed but not executed, and no
-  official-reference, 32-token, quantized, or 32K claim follows from this
-  internal-consistency gate. See
+  edge above. That recorded real-weight smoke installed but did not execute the
+  270 MTP tensors. Subsequent tiny Flex tests execute the pinned one-stage graph,
+  shifted independent KV cache, and transactional speculative coordinator, but
+  they do not establish official real-weight parity. No official-reference,
+  32-token, quantized, or 32K claim follows from either internal-consistency
+  gate. See
   [`NEMOTRON_H_ACCEPTANCE.md`](NEMOTRON_H_ACCEPTANCE.md).
 - **FLAN-UL2's LM head is tied.** Its pinned config omits
   `tie_word_embeddings`; the pinned upstream T5 schema and the local Serde

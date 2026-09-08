@@ -22,7 +22,7 @@ use crate::{
     architecture::{DecodeState as ArchitectureDecodeState, RouterDiagnostics, TokenMask},
     cache::{
         CacheConfig, DecodeStateError, KvCacheStorage, NativeKvCacheSpec, RecurrentStateSpec,
-        TensorCacheError, TensorDecodeState,
+        TensorCacheError, TensorCacheMark, TensorDecodeState,
     },
 };
 
@@ -32,8 +32,8 @@ use super::{
     nemotron_load_balancing_loss, select_hidden, validate_token_ids,
 };
 
-const KV_GROUP: usize = 0;
-const RECURRENT_GROUP: usize = 0;
+pub(super) const KV_GROUP: usize = 0;
+pub(super) const RECURRENT_GROUP: usize = 0;
 
 /// Stateful operation whose empty-row policy differs intentionally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,9 +54,11 @@ impl StatefulPhase {
 /// External KV, recurrent, convolution, and logical-length state.
 #[derive(Debug)]
 pub struct NemotronHDecodeState<B: Backend> {
-    tensors: TensorDecodeState<B>,
+    pub(super) tensors: TensorDecodeState<B>,
     kv_spec: Option<NativeKvCacheSpec>,
     recurrent_spec: Option<RecurrentStateSpec>,
+    mtp_kv_spec: Option<NativeKvCacheSpec>,
+    staging_capacity: usize,
 }
 
 impl<B: Backend> NemotronHDecodeState<B> {
@@ -65,6 +67,21 @@ impl<B: Backend> NemotronHDecodeState<B> {
         model: &NemotronHForCausalLm<B>,
         config: CacheConfig,
         batch_size: usize,
+        device: &B::Device,
+    ) -> Result<Self> {
+        Self::new_with_staging(model, config, batch_size, 0, device)
+    }
+
+    /// Allocates the main hybrid bank and independent MTP KV bank.
+    ///
+    /// A non-zero `staging_capacity` makes every stateful main component and
+    /// the MTP attention cache transactional. The ordinary decode constructor
+    /// passes zero, so reference inference pays no proposal-storage cost.
+    pub(super) fn new_with_staging(
+        model: &NemotronHForCausalLm<B>,
+        config: CacheConfig,
+        batch_size: usize,
+        staging_capacity: usize,
         device: &B::Device,
     ) -> Result<Self> {
         if config.capacity() > model.config().max_position_embeddings {
@@ -77,7 +94,7 @@ impl<B: Backend> NemotronHDecodeState<B> {
                 ),
             ));
         }
-        let (kv_spec, recurrent_spec) = cache_specs(model)?;
+        let (kv_spec, recurrent_spec, mtp_kv_spec) = cache_specs(model, staging_capacity)?;
         let mut tensors = TensorDecodeState::new(config, batch_size, device)?;
         if let Some(spec) = kv_spec {
             let index = tensors.main_mut().add_native_kv(spec)?;
@@ -95,10 +112,20 @@ impl<B: Backend> NemotronHDecodeState<B> {
                 )));
             }
         }
+        if let Some(spec) = mtp_kv_spec {
+            let index = tensors.enable_mtp()?.add_native_kv(spec)?;
+            if index != KV_GROUP {
+                return Err(Error::Cache(format!(
+                    "Nemotron-H MTP KV group must be {KV_GROUP}, found {index}"
+                )));
+            }
+        }
         Ok(Self {
             tensors,
             kv_spec,
             recurrent_spec,
+            mtp_kv_spec,
+            staging_capacity,
         })
     }
 
@@ -120,11 +147,46 @@ impl<B: Backend> NemotronHDecodeState<B> {
         self.recurrent_spec.map_or(0, RecurrentStateSpec::layers)
     }
 
+    /// Returns the number of independently cached MTP attention blocks.
+    #[must_use]
+    pub fn mtp_layer_count(&self) -> usize {
+        self.mtp_kv_spec.map_or(0, NativeKvCacheSpec::layers)
+    }
+
+    /// Returns the maximum tentative suffix retained per sequence and bank.
+    #[must_use]
+    pub const fn staging_capacity(&self) -> usize {
+        self.staging_capacity
+    }
+
+    /// Begins an atomic target-plus-MTP proposal suffix.
+    pub fn mark(&mut self) -> Result<TensorCacheMark> {
+        self.tensors.begin_transaction().map_err(Into::into)
+    }
+
+    /// Retains independent prefixes of the target and shifted MTP suffixes.
+    pub fn commit_prefixes(
+        &mut self,
+        mark: TensorCacheMark,
+        target_tokens: usize,
+        mtp_tokens: usize,
+    ) -> Result<()> {
+        self.tensors
+            .commit_uniform_prefixes(mark, target_tokens, Some(mtp_tokens))
+            .map_err(Into::into)
+    }
+
+    /// Discards every target and MTP tensor staged after `mark`.
+    pub fn rollback(&mut self, mark: TensorCacheMark) -> Result<()> {
+        self.tensors.rollback(mark).map_err(Into::into)
+    }
+
     /// Proves that a cache was allocated for this model's exact topology.
-    fn validate_for_model(&self, model: &NemotronHForCausalLm<B>) -> Result<()> {
-        let (kv, recurrent) = cache_specs(model)?;
+    pub(super) fn validate_for_model(&self, model: &NemotronHForCausalLm<B>) -> Result<()> {
+        let (kv, recurrent, mtp) = cache_specs(model, self.staging_capacity)?;
         if self.kv_spec != kv
             || self.recurrent_spec != recurrent
+            || self.mtp_kv_spec != mtp
             || self.tensors.main().native_kv_count() != usize::from(kv.is_some())
             || self.tensors.main().recurrent_count() != usize::from(recurrent.is_some())
         {
@@ -145,6 +207,18 @@ impl<B: Backend> NemotronHDecodeState<B> {
             return Err(Error::Cache(
                 "Nemotron-H recurrent cache geometry is incompatible".into(),
             ));
+        }
+        match (mtp, self.tensors.mtp()) {
+            (None, None) => {}
+            (Some(spec), Some(bank))
+                if bank.native_kv_count() == 1
+                    && bank.recurrent_count() == 0
+                    && bank.native_kv(KV_GROUP)?.spec() == spec => {}
+            _ => {
+                return Err(Error::Cache(
+                    "Nemotron-H MTP cache geometry is incompatible".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -255,13 +329,15 @@ impl<B: Backend> NemotronHForCausalLm<B> {
             ));
         }
         state.validate_for_model(self)?;
-        if state.tensors.has_active_transaction() {
-            return Err(TensorCacheError::TransactionActive {
-                operation: "run ordinary Nemotron-H prefill/decode",
-            }
-            .into());
-        }
         let prepared = prepare_stateful_input(self, &input, state, phase)?;
+        if state.tensors.has_active_transaction()
+            && (prepared.batch != 1 || prepared.token_counts != [1])
+        {
+            return Err(Error::Generation(
+                "transactional Nemotron-H target decoding accepts exactly one active batch-one token per call"
+                    .into(),
+            ));
+        }
         let diagnostics = self.model.layers.len() + 2;
         let moe_layers = self
             .model
@@ -322,10 +398,13 @@ impl<B: Backend> NemotronHForCausalLm<B> {
                 .slice([row..row + 1, 0..prepared.sequence])
                 .select(1, selector);
             validate_token_ids(tokens.clone(), self.config().vocab_size)?;
+            let committed_baseline = state.tensors.lengths()[row];
+            let baseline = state.tensors.working_lengths()[row];
             let compact = self.forward_compact_row(
                 tokens,
                 row,
-                state.tensors.lengths()[row],
+                committed_baseline,
+                baseline,
                 state.tensors.main(),
                 &mut pending,
                 options.hidden_states,
@@ -394,6 +473,7 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         &self,
         tokens: Tensor<B, 2, Int>,
         row: usize,
+        committed_baseline: usize,
         baseline: usize,
         bank: &crate::cache::TensorCacheBank<B>,
         pending: &mut PendingHybridWrites<B>,
@@ -420,9 +500,12 @@ impl<B: Backend> NemotronHForCausalLm<B> {
                     let mixer = layer.mamba.as_ref().ok_or_else(|| {
                         Error::Cache("Nemotron-H Mamba block lost its mixer".into())
                     })?;
-                    let cached = bank
-                        .recurrent(RECURRENT_GROUP)?
-                        .read_sequence(mamba_index, row)?;
+                    let cache = bank.recurrent(RECURRENT_GROUP)?;
+                    let cached = if cache.has_active_staging() {
+                        cache.read_working_sequence(mamba_index, row)?
+                    } else {
+                        cache.read_sequence(mamba_index, row)?
+                    };
                     let state = NemotronMamba2State {
                         recurrent: cached.matrix().clone(),
                         convolution: cached.convolution().clone(),
@@ -450,9 +533,12 @@ impl<B: Backend> NemotronHForCausalLm<B> {
                     let keys = projection.key.clone();
                     let values = projection.value.clone();
                     let query = projection.query.dims()[2];
-                    let history =
-                        bank.native_kv(KV_GROUP)?
-                            .read_sequence(attention_index, row, baseline)?;
+                    let cache = bank.native_kv(KV_GROUP)?;
+                    let history = if cache.has_active_staging() {
+                        cache.read_working_sequence(attention_index, row, committed_baseline)?
+                    } else {
+                        cache.read_sequence(attention_index, row, baseline)?
+                    };
                     if history.retained_positions() != (0..baseline) {
                         return Err(Error::Cache(
                             "Nemotron-H full cache unexpectedly evicted history".into(),
@@ -578,6 +664,37 @@ impl<B: Backend> PendingHybridWrites<B> {
             .filter(|layer| layer.block_type == NemotronHBlockType::LinearAttention)
             .count();
         self.validate_coverage(state, token_counts, attention_layers, mamba_layers)?;
+        if state.tensors.has_active_transaction() {
+            // Every speculative target step is exactly one token. Keeping a
+            // snapshot at each call boundary is required for Mamba2 because
+            // its terminal recurrence cannot be inverted after rejection.
+            if token_counts.iter().any(|&count| count > 1) {
+                return Err(Error::Cache(
+                    "transactional Nemotron-H hybrid decode accepts at most one token per row and call"
+                        .into(),
+                ));
+            }
+            let PendingHybridWrites { kv, recurrent } = self;
+            if !kv.is_empty() {
+                let cache = state.tensors.main_mut().native_kv_mut(KV_GROUP)?;
+                for write in kv {
+                    cache.stage_sequence(write.layer, write.row, write.keys, write.values)?;
+                }
+            }
+            if !recurrent.is_empty() {
+                let cache = state.tensors.main_mut().recurrent_mut(RECURRENT_GROUP)?;
+                for write in recurrent {
+                    cache.stage_sequence_snapshots(
+                        write.layer,
+                        write.row,
+                        write.matrix.unsqueeze_dim::<5>(1),
+                        write.convolution.unsqueeze_dim::<4>(1),
+                    )?;
+                }
+            }
+            state.tensors.advance(token_counts)?;
+            return Ok(());
+        }
         let kv = if attention_layers > 0 {
             let cache = state.tensors.main().native_kv(KV_GROUP)?;
             Some((
@@ -656,7 +773,7 @@ impl<B: Backend> PendingHybridWrites<B> {
             let count = token_counts.get(write.row).copied().unwrap_or(0);
             if count == 0
                 || write.layer >= attention_layers
-                || write.start != state.tensors.lengths()[write.row]
+                || write.start != state.tensors.working_lengths()[write.row]
                 || write.keys.dims()[2] != count
                 || write.values.dims()[2] != count
                 || !kv_seen.insert((write.layer, write.row))
@@ -756,7 +873,7 @@ fn prepare_stateful_input<B: Backend>(
     let token_counts = valid_indices.iter().map(Vec::len).collect::<Vec<_>>();
     for (row, (&baseline, &additional)) in state
         .tensors
-        .lengths()
+        .working_lengths()
         .iter()
         .zip(&token_counts)
         .enumerate()
@@ -864,7 +981,7 @@ fn selection_tensor<B: Backend>(
 }
 
 /// Builds `excluded(q,k) = k > q || k + window <= q` for cached attention.
-fn cached_attention_mask<B: Backend>(
+pub(super) fn cached_attention_mask<B: Backend>(
     baseline: usize,
     query_sequence: usize,
     heads: usize,
@@ -973,7 +1090,12 @@ fn scatter_compact_int<B: Backend>(
 /// Derives compact cache geometry from model weights and schedule counts.
 fn cache_specs<B: Backend>(
     model: &NemotronHForCausalLm<B>,
-) -> Result<(Option<NativeKvCacheSpec>, Option<RecurrentStateSpec>)> {
+    staging_capacity: usize,
+) -> Result<(
+    Option<NativeKvCacheSpec>,
+    Option<RecurrentStateSpec>,
+    Option<NativeKvCacheSpec>,
+)> {
     let attention_layers = model
         .model
         .layers
@@ -996,6 +1118,7 @@ fn cache_specs<B: Backend>(
                 KvCacheStorage::Full,
                 dtype,
             )
+            .map(|spec| spec.with_staging_capacity(staging_capacity))
         })
         .transpose()?;
     let recurrent = (mamba_layers > 0)
@@ -1028,10 +1151,25 @@ fn cache_specs<B: Backend>(
                 state_dtype,
                 dtype,
             )
+            .map(|spec| spec.with_staging_capacity(staging_capacity))
             .map_err(Error::from)
         })
         .transpose()?;
-    Ok((kv, recurrent))
+    let mtp = (staging_capacity > 0)
+        .then_some(model.next_token_head.as_ref())
+        .flatten()
+        .map(|_| {
+            NativeKvCacheSpec::new(
+                1,
+                model.config().num_key_value_heads,
+                model.config().head_dim,
+                KvCacheStorage::Full,
+                dtype,
+            )
+            .map(|spec| spec.with_staging_capacity(staging_capacity))
+        })
+        .transpose()?;
+    Ok((kv, recurrent, mtp))
 }
 
 /// Converts NVIDIA's serialized recurrent-cache dtype into Burn's runtime dtype.

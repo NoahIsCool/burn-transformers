@@ -5,8 +5,8 @@ This document defines the artifact and numerical gates for
 `a9904d24bcc1d289a1950fa9d2b978c47cf903b9`. The exact local artifact has now
 passed full-payload authentication, strict source-ordered F16 application, and
 a short Burn Metal base-model smoke. That smoke is internal-consistency
-evidence, not comparison with an official numerical oracle; MTP execution and
-the remaining release gates are still incomplete, so the model is not
+evidence, not comparison with an official numerical oracle; real-weight MTP
+parity and the remaining release gates are still incomplete, so the model is not
 advertised as supported. The machine-readable state is
 [`acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json`](acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json).
 
@@ -119,9 +119,11 @@ all corrected scores directly to expert top-k. A deterministic regression test
 proves that path matches a multi-group configuration in which every group is
 retained.
 
-None of this is official-reference parity. The MTP tensors were installed but
-the MTP body, dedicated cache, and speculative verification protocol were not
-executed. No 32-token generation, quantization, or 32K-context result is implied.
+None of this is official-reference parity. That real-weight smoke installed the
+MTP tensors but did not execute them. The exact one-stage body, dedicated cache,
+and speculative verification protocol now execute in tiny Flex tests only. No
+real MTP result, 32-token generation, quantization, or 32K-context result is
+implied.
 
 ## Split numerical reference
 

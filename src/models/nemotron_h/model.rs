@@ -39,9 +39,15 @@ use super::{NemotronHBlockType, NemotronHConfig};
 
 mod decode;
 pub mod mamba2;
+mod mtp;
+mod speculative;
 
 pub use decode::NemotronHDecodeState;
 use mamba2::{NemotronMamba2, NemotronMamba2Config, NemotronMamba2Mode};
+pub use mtp::NemotronHMtpPrediction;
+pub use speculative::{
+    NemotronHSpeculativeConfig, NemotronHSpeculativeDecoder, NemotronHSpeculativeOutput,
+};
 
 /// Ordinary two-projection MLP used by dense, routed, and shared blocks.
 #[derive(Module, Debug)]
@@ -710,6 +716,33 @@ impl<B: Backend> NemotronHNextTokenHead<B> {
         shifted_embedding: Tensor<B, 3>,
         base_hidden: Tensor<B, 3>,
     ) -> Result<(Tensor<B, 3>, NemotronHMoeOutput<B>)> {
+        let mut hidden = self.fuse(shifted_embedding, base_hidden)?;
+        let residual = hidden.clone();
+        let projection = self
+            .attention
+            .project_self(self.attention_norm.forward(hidden))?;
+        let [batch, _, sequence, _] = projection.query.dims();
+        let mask = stateless_attention_mask(
+            None,
+            batch,
+            self.attention.query_heads,
+            sequence,
+            self.sliding_window,
+            &projection.query.device(),
+        )?;
+        hidden = residual + self.attention.attend(projection, mask, None, true)?;
+        self.finish(hidden)
+    }
+
+    /// Applies the independently normalized embedding/target fusion equation.
+    ///
+    /// The concatenation order is checkpoint-significant: vLLM 0.27.1 forms
+    /// `[enorm(embedding), hnorm(target_hidden)]` before the `2H -> H` map.
+    pub(super) fn fuse(
+        &self,
+        shifted_embedding: Tensor<B, 3>,
+        base_hidden: Tensor<B, 3>,
+    ) -> Result<Tensor<B, 3>> {
         if shifted_embedding.dims() != base_hidden.dims() {
             return Err(Error::shape(
                 "nemotron_h.next_token_head",
@@ -734,24 +767,21 @@ impl<B: Backend> NemotronHNextTokenHead<B> {
             ],
             2,
         );
-        let mut hidden = operations::linear(fused, &self.eh_proj)?;
-        let residual = hidden.clone();
-        let projection = self
-            .attention
-            .project_self(self.attention_norm.forward(hidden))?;
-        let [batch, _, sequence, _] = projection.query.dims();
-        let mask = stateless_attention_mask(
-            None,
-            batch,
-            self.attention.query_heads,
-            sequence,
-            self.sliding_window,
-            &projection.query.device(),
-        )?;
-        hidden = residual + self.attention.attend(projection, mask, None, true)?;
+        operations::linear(fused, &self.eh_proj)
+    }
+
+    /// Applies the MoE residual and terminal normalization after attention.
+    ///
+    /// This is equivalent to vLLM's fused RMSNorm residual bookkeeping: the
+    /// attention residual is materialized before MoE normalization, then the
+    /// MoE result is added and normalized exactly once at the stage boundary.
+    pub(super) fn finish(
+        &self,
+        hidden: Tensor<B, 3>,
+    ) -> Result<(Tensor<B, 3>, NemotronHMoeOutput<B>)> {
         let residual = hidden.clone();
         let routed = self.moe.forward(self.moe_norm.forward(hidden))?;
-        hidden = self
+        let hidden = self
             .final_layer_norm
             .forward(residual + routed.hidden_state.clone());
         Ok((hidden, routed))
