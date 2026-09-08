@@ -356,6 +356,15 @@ impl<B: Backend> MuseGlimmerAttention<B> {
                     .into(),
             ));
         }
+        let chunks = plan_muse_attention_chunks(
+            self.execution_policy,
+            plan,
+            batch,
+            self.query_heads,
+            query_sequence,
+            key_sequence,
+            indexed_window,
+        )?;
         let MuseAttentionProjection {
             query,
             key,
@@ -367,23 +376,18 @@ impl<B: Backend> MuseGlimmerAttention<B> {
         let device = query.device();
         let precision = muse_attention_precision(query.dtype());
         let mut contexts = Vec::with_capacity(plan.chunk_count());
-        for query_start in (0..query_sequence).step_by(plan.query_chunk_size()) {
-            let query_end = query_start
-                .saturating_add(plan.query_chunk_size())
-                .min(query_sequence);
-            let query_range = query_start..query_end;
-            let key_range = match indexed_window {
-                Some(window) => {
-                    aligned_key_range(query_sequence, key_sequence, query_range.clone(), window)?
-                }
-                None => 0..key_sequence,
-            };
-            self.execution_policy.validate_chunk(
-                batch,
-                self.query_heads,
-                query_range.len(),
-                key_range.len(),
-            )?;
+        for chunk in chunks {
+            let MuseAttentionChunk {
+                query_range,
+                key_range,
+                plane_shape,
+                plane_elements,
+            } = chunk;
+            debug_assert_eq!(
+                plane_shape,
+                [batch, self.query_heads, query_range.len(), key_range.len()]
+            );
+            debug_assert_eq!(plane_elements, plane_shape.into_iter().product::<usize>());
             let external = additional_mask(query_range.clone(), key_range.clone())?;
             validate_materialized_mask(
                 external.as_ref(),
@@ -475,6 +479,117 @@ impl<B: Backend> MuseGlimmerAttention<B> {
         }
         Ok([batch, query_sequence, key_sequence])
     }
+}
+
+/// One fully audited Muse query chunk before any score-like tensor is allocated.
+///
+/// Scores, causal or padding masks, the F32 softmax workspace, and the rounded
+/// probability tensor all share `plane_shape`. Retaining that geometry beside
+/// the exact query/key ranges lets tests audit the same schedule consumed by
+/// production execution rather than reconstructing a parallel approximation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MuseAttentionChunk {
+    /// Absolute query rows sliced from the projected query tensor.
+    query_range: Range<usize>,
+    /// Absolute key rows sliced from the projected key and value tensors.
+    key_range: Range<usize>,
+    /// Physical `[batch, query_heads, query_rows, key_rows]` plane shape.
+    plane_shape: [usize; 4],
+    /// Product of `plane_shape`, checked before any backend tensor allocation.
+    plane_elements: usize,
+}
+
+/// Expands one conservative policy plan into every concrete Muse tensor slice.
+///
+/// Full attention retains all keys for every query chunk. Unpadded local
+/// attention narrows each chunk to the union of its row-wise windows. The
+/// function rejects any concrete key union wider than the bound used to choose
+/// the query chunk size, then independently validates every realized plane
+/// against the execution policy. Consequently, successful return proves that
+/// each score, mask, and probability plane passed to the backend is bounded.
+#[allow(clippy::too_many_arguments)]
+fn plan_muse_attention_chunks(
+    policy: AttentionExecutionPolicy,
+    plan: AttentionExecutionPlan,
+    batch: usize,
+    heads: usize,
+    query_sequence: usize,
+    key_sequence: usize,
+    indexed_window: Option<usize>,
+) -> Result<Vec<MuseAttentionChunk>> {
+    if query_sequence != plan.query_sequence() {
+        return Err(Error::configuration(
+            "muse_glimmer.attention_plan",
+            format!(
+                "plan covers {} query rows but execution requested {query_sequence}",
+                plan.query_sequence()
+            ),
+        ));
+    }
+    if key_sequence == 0 {
+        return Err(Error::configuration(
+            "muse_glimmer.attention_plan",
+            "key sequence must be non-zero",
+        ));
+    }
+    let mut chunks = Vec::with_capacity(plan.chunk_count());
+    for query_start in (0..query_sequence).step_by(plan.query_chunk_size()) {
+        let query_end = query_start
+            .checked_add(plan.query_chunk_size())
+            .unwrap_or(query_sequence)
+            .min(query_sequence);
+        let query_range = query_start..query_end;
+        let key_range = match indexed_window {
+            Some(window) => {
+                aligned_key_range(query_sequence, key_sequence, query_range.clone(), window)?
+            }
+            None => 0..key_sequence,
+        };
+        if key_range.len() > plan.key_sequence_bound() {
+            return Err(Error::BackendCapability(format!(
+                "Muse attention key union {} exceeds planned bound {} for query range {query_range:?}",
+                key_range.len(),
+                plan.key_sequence_bound()
+            )));
+        }
+        policy.validate_chunk(batch, heads, query_range.len(), key_range.len())?;
+        let plane_shape = [batch, heads, query_range.len(), key_range.len()];
+        let plane_elements = plane_shape
+            .into_iter()
+            .try_fold(1usize, usize::checked_mul)
+            .ok_or_else(|| {
+                Error::configuration(
+                    "muse_glimmer.attention_plan",
+                    "concrete score-plane dimensions overflow usize",
+                )
+            })?;
+        if plane_elements > plan.peak_score_elements()
+            || plan
+                .score_element_limit()
+                .is_some_and(|limit| plane_elements > limit)
+        {
+            return Err(Error::BackendCapability(format!(
+                "Muse attention plane {plane_shape:?} has {plane_elements} elements, exceeding its immutable execution plan"
+            )));
+        }
+        chunks.push(MuseAttentionChunk {
+            query_range,
+            key_range,
+            plane_shape,
+            plane_elements,
+        });
+    }
+    if chunks.len() != plan.chunk_count() {
+        return Err(Error::configuration(
+            "muse_glimmer.attention_plan",
+            format!(
+                "plan declares {} chunks but concrete expansion produced {}",
+                plan.chunk_count(),
+                chunks.len()
+            ),
+        ));
+    }
+    Ok(chunks)
 }
 
 /// Builds Muse's backend attention options without disguising the default scale.
@@ -1432,13 +1547,15 @@ fn checked_product(field: &'static str, left: usize, right: usize) -> Result<usi
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use std::sync::Mutex;
     #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
     use std::sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     };
 
-    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     use burn::backend::Metal;
     #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
     use burn::tensor::module::attention;
@@ -1455,12 +1572,42 @@ mod tests {
     };
 
     use super::*;
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use crate::cache::{CacheConfig, KvCacheStorage, NativeKvCache, NativeKvCacheSpec};
     use crate::{
         CausalLmInput, ForwardOptions, checkpoint::TensorSink,
         models::muse_glimmer::MuseGlimmerCheckpointOptions,
     };
 
     type TestBackend = Flex<f32, i32>;
+
+    /// Serializes the allocation-heavy 32K Metal envelope with other unit gates.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    static MUSE_32K_METAL_STRESS_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Supported synthetic stress length; this is not the checkpoint's 131K claim.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    const MUSE_32K_STRESS_SEQUENCE: usize = 32_768;
+
+    /// Released Muse query-head count used by the synthetic Metal stress gate.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    const MUSE_32K_STRESS_HEADS: usize = 32;
+
+    /// Released Muse native key/value-head count used by the stress gate.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    const MUSE_32K_STRESS_KV_HEADS: usize = 2;
+
+    /// Reduced synthetic head width that retains QK, RoPE, GQA, and F16 semantics.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    const MUSE_32K_STRESS_HEAD_DIM: usize = 4;
+
+    /// Released local-attention window used by Muse-Glimmer-30B.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    const MUSE_32K_STRESS_WINDOW: usize = 2048;
+
+    /// Production ceiling shared by score, mask, and probability planes.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    const MUSE_32K_STRESS_PLANE_LIMIT: usize = 1 << 26;
 
     /// Serializes opt-in GPU work and process-local attention autotuning.
     #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
@@ -1755,6 +1902,612 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(bits, [0x190b, 0x3bf2, 0x1c6d, 0x0000]);
         assert_ne!(bits[2], 0x1c6c, "half-precision softmax sentinel");
+    }
+
+    /// Builds the reduced-width configuration used only by the 32K Metal gate.
+    ///
+    /// Query and KV head counts, context, window, GQA ratio, dtype boundary,
+    /// masks, and cache positions remain checkpoint-exact. Reducing the head
+    /// width from 128 to four removes irrelevant QK multiply work while leaving
+    /// the `[batch, head, query, key]` workspace dimensions unchanged.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn metal_32k_stress_config() -> MuseGlimmerTextConfig {
+        let hidden_size = MUSE_32K_STRESS_HEADS * MUSE_32K_STRESS_HEAD_DIM;
+        MuseGlimmerTextConfig {
+            vocab_size: 8,
+            hidden_size,
+            intermediate_size: hidden_size * 2,
+            num_hidden_layers: 1,
+            num_attention_heads: MUSE_32K_STRESS_HEADS,
+            num_key_value_heads: MUSE_32K_STRESS_KV_HEADS,
+            head_dim: MUSE_32K_STRESS_HEAD_DIM,
+            max_position_embeddings: MUSE_32K_STRESS_SEQUENCE,
+            sliding_window: Some(MUSE_32K_STRESS_WINDOW),
+            layer_types: vec![MuseGlimmerLayerType::SlidingAttention],
+            layer_rope_theta: vec![500_000.0],
+            bos_token_id: None,
+            eos_token_id: None,
+            ..Default::default()
+        }
+    }
+
+    /// Initializes synthetic official-head-count attention with an F16 identity output.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn metal_32k_stress_attention(
+        config: &MuseGlimmerTextConfig,
+        device: &<Metal as BackendTypes>::Device,
+    ) -> MuseGlimmerAttention<Metal> {
+        let mut attention = MuseGlimmerAttention::<Metal>::init(config, device)
+            .expect("valid synthetic Muse attention");
+        let mut identity = vec![0.0_f32; config.hidden_size * config.hidden_size];
+        for diagonal in 0..config.hidden_size {
+            identity[diagonal * config.hidden_size + diagonal] = 1.0;
+        }
+        attention.o_proj.weight = Param::from_tensor(
+            Tensor::<Metal, 2>::from_data(
+                TensorData::new(identity, [config.hidden_size, config.hidden_size]),
+                device,
+            )
+            .cast(DType::F16),
+        );
+        attention
+    }
+
+    /// Creates a 32K-key global suffix whose last row is an eager-F16 sentinel.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn metal_32k_global_projection(
+        query_sequence: usize,
+        device: &<Metal as BackendTypes>::Device,
+    ) -> MuseAttentionProjection<Metal> {
+        let hidden_size = MUSE_32K_STRESS_HEADS * MUSE_32K_STRESS_HEAD_DIM;
+        let mut query =
+            vec![0.0_f32; MUSE_32K_STRESS_HEADS * query_sequence * MUSE_32K_STRESS_HEAD_DIM];
+        for head in 0..MUSE_32K_STRESS_HEADS {
+            for row in 0..query_sequence {
+                query[(head * query_sequence + row) * MUSE_32K_STRESS_HEAD_DIM] = 2.0;
+            }
+        }
+        let mut key =
+            vec![
+                0.0_f32;
+                MUSE_32K_STRESS_KV_HEADS * MUSE_32K_STRESS_SEQUENCE * MUSE_32K_STRESS_HEAD_DIM
+            ];
+        let mut value = key.clone();
+        for head in 0..MUSE_32K_STRESS_KV_HEADS {
+            for row in 0..MUSE_32K_STRESS_SEQUENCE {
+                key[(head * MUSE_32K_STRESS_SEQUENCE + row) * MUSE_32K_STRESS_HEAD_DIM] = -100.0;
+            }
+            for (offset, score) in [-0.125_f32, 5.875, 0.4375].into_iter().enumerate() {
+                let row = MUSE_32K_STRESS_SEQUENCE - 3 + offset;
+                key[(head * MUSE_32K_STRESS_SEQUENCE + row) * MUSE_32K_STRESS_HEAD_DIM] = score;
+                value
+                    [(head * MUSE_32K_STRESS_SEQUENCE + row) * MUSE_32K_STRESS_HEAD_DIM + offset] =
+                    1.0;
+            }
+        }
+        MuseAttentionProjection {
+            query: Tensor::<Metal, 4>::from_data(
+                TensorData::new(
+                    query,
+                    [
+                        1,
+                        MUSE_32K_STRESS_HEADS,
+                        query_sequence,
+                        MUSE_32K_STRESS_HEAD_DIM,
+                    ],
+                ),
+                device,
+            )
+            .cast(DType::F16),
+            key: Tensor::<Metal, 4>::from_data(
+                TensorData::new(
+                    key,
+                    [
+                        1,
+                        MUSE_32K_STRESS_KV_HEADS,
+                        MUSE_32K_STRESS_SEQUENCE,
+                        MUSE_32K_STRESS_HEAD_DIM,
+                    ],
+                ),
+                device,
+            )
+            .cast(DType::F16),
+            value: Tensor::<Metal, 4>::from_data(
+                TensorData::new(
+                    value,
+                    [
+                        1,
+                        MUSE_32K_STRESS_KV_HEADS,
+                        MUSE_32K_STRESS_SEQUENCE,
+                        MUSE_32K_STRESS_HEAD_DIM,
+                    ],
+                ),
+                device,
+            )
+            .cast(DType::F16),
+            gate: Tensor::<Metal, 3>::full([1, query_sequence, hidden_size], 80.0, device)
+                .cast(DType::F16),
+        }
+    }
+
+    /// Creates terminal 32K-key local attention with three window-boundary probes.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn metal_32k_sliding_projection(
+        query_sequence: usize,
+        device: &<Metal as BackendTypes>::Device,
+    ) -> MuseAttentionProjection<Metal> {
+        let hidden_size = MUSE_32K_STRESS_HEADS * MUSE_32K_STRESS_HEAD_DIM;
+        let query =
+            vec![0.0_f32; MUSE_32K_STRESS_HEADS * query_sequence * MUSE_32K_STRESS_HEAD_DIM];
+        let key =
+            vec![
+                0.0_f32;
+                MUSE_32K_STRESS_KV_HEADS * MUSE_32K_STRESS_SEQUENCE * MUSE_32K_STRESS_HEAD_DIM
+            ];
+        let mut value = key.clone();
+        let query_offset = MUSE_32K_STRESS_SEQUENCE - query_sequence;
+        let first_visible = query_offset - (MUSE_32K_STRESS_WINDOW - 1);
+        let last_visible_start = MUSE_32K_STRESS_SEQUENCE - MUSE_32K_STRESS_WINDOW;
+        for head in 0..MUSE_32K_STRESS_KV_HEADS {
+            for (row, channel) in [
+                (first_visible, 0usize),
+                (last_visible_start, 1usize),
+                (MUSE_32K_STRESS_SEQUENCE - 1, 2usize),
+            ] {
+                value[(head * MUSE_32K_STRESS_SEQUENCE + row) * MUSE_32K_STRESS_HEAD_DIM
+                    + channel] = 1.0;
+            }
+        }
+        MuseAttentionProjection {
+            query: Tensor::<Metal, 4>::from_data(
+                TensorData::new(
+                    query,
+                    [
+                        1,
+                        MUSE_32K_STRESS_HEADS,
+                        query_sequence,
+                        MUSE_32K_STRESS_HEAD_DIM,
+                    ],
+                ),
+                device,
+            )
+            .cast(DType::F16),
+            key: Tensor::<Metal, 4>::from_data(
+                TensorData::new(
+                    key,
+                    [
+                        1,
+                        MUSE_32K_STRESS_KV_HEADS,
+                        MUSE_32K_STRESS_SEQUENCE,
+                        MUSE_32K_STRESS_HEAD_DIM,
+                    ],
+                ),
+                device,
+            )
+            .cast(DType::F16),
+            value: Tensor::<Metal, 4>::from_data(
+                TensorData::new(
+                    value,
+                    [
+                        1,
+                        MUSE_32K_STRESS_KV_HEADS,
+                        MUSE_32K_STRESS_SEQUENCE,
+                        MUSE_32K_STRESS_HEAD_DIM,
+                    ],
+                ),
+                device,
+            )
+            .cast(DType::F16),
+            gate: Tensor::<Metal, 3>::full([1, query_sequence, hidden_size], 80.0, device)
+                .cast(DType::F16),
+        }
+    }
+
+    /// Returns four F16 output channels for one query head and row.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn metal_32k_head_bits(values: &[f16], row: usize, head: usize) -> [u16; 4] {
+        let hidden_size = MUSE_32K_STRESS_HEADS * MUSE_32K_STRESS_HEAD_DIM;
+        let start = row * hidden_size + head * MUSE_32K_STRESS_HEAD_DIM;
+        std::array::from_fn(|channel| values[start + channel].to_bits())
+    }
+
+    /// Executes the bounded 32K Muse allocation envelope on Apple Metal.
+    ///
+    /// This intentionally ignored hardware gate is synthetic, not 30B
+    /// checkpoint acceptance. It keeps the released 32/2 GQA topology, 2048
+    /// window, 32K absolute indices, F16 score/F32-softmax boundary, and exact
+    /// score-plane dimensions, while reducing head width to four and omitting
+    /// the dense decoder/FFN stack. It enumerates every full-context and local
+    /// production chunk, then executes worst-case global and local suffixes.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    #[ignore = "requires a Metal adapter and roughly one GiB of transient workspace"]
+    fn stress_muse_32k_attention_envelope_on_metal() {
+        let _guard = MUSE_32K_METAL_STRESS_LOCK
+            .lock()
+            .expect("32K Metal stress mutex must not be poisoned");
+        let device = Default::default();
+        let probe = Tensor::<Metal, 1>::zeros([1], &device)
+            .into_data()
+            .to_vec::<f32>()
+            .expect("Metal adapter must expose F32 storage");
+        assert_eq!(probe, [0.0]);
+
+        let policy = AttentionExecutionPolicy::default();
+        let global_plan = policy
+            .plan(
+                1,
+                MUSE_32K_STRESS_HEADS,
+                MUSE_32K_STRESS_SEQUENCE,
+                MUSE_32K_STRESS_SEQUENCE,
+            )
+            .expect("32K global plan");
+        let global_chunks = plan_muse_attention_chunks(
+            policy,
+            global_plan,
+            1,
+            MUSE_32K_STRESS_HEADS,
+            MUSE_32K_STRESS_SEQUENCE,
+            MUSE_32K_STRESS_SEQUENCE,
+            None,
+        )
+        .expect("audit all global chunks");
+        assert_eq!(global_chunks.len(), 512);
+        assert!(
+            global_chunks
+                .iter()
+                .all(|chunk| chunk.plane_elements == MUSE_32K_STRESS_PLANE_LIMIT)
+        );
+        assert_contiguous_query_coverage(&global_chunks, MUSE_32K_STRESS_SEQUENCE);
+
+        let local_key_bound =
+            MUSE_32K_STRESS_WINDOW + policy.maximum_query_tokens(MUSE_32K_STRESS_SEQUENCE) - 1;
+        let local_plan = policy
+            .plan(
+                1,
+                MUSE_32K_STRESS_HEADS,
+                MUSE_32K_STRESS_SEQUENCE,
+                local_key_bound,
+            )
+            .expect("32K sliding plan");
+        let local_chunks = plan_muse_attention_chunks(
+            policy,
+            local_plan,
+            1,
+            MUSE_32K_STRESS_HEADS,
+            MUSE_32K_STRESS_SEQUENCE,
+            MUSE_32K_STRESS_SEQUENCE,
+            Some(MUSE_32K_STRESS_WINDOW),
+        )
+        .expect("audit all sliding chunks");
+        assert_eq!(local_chunks.len(), 64);
+        assert_eq!(
+            local_chunks.iter().map(|chunk| chunk.plane_elements).max(),
+            Some(41_926_656)
+        );
+        assert!(
+            local_chunks
+                .iter()
+                .all(|chunk| chunk.plane_elements <= MUSE_32K_STRESS_PLANE_LIMIT)
+        );
+        assert_contiguous_query_coverage(&local_chunks, MUSE_32K_STRESS_SEQUENCE);
+
+        let config = metal_32k_stress_config();
+        let token_mask = TokenMask::new(Tensor::<Metal, 2, Bool>::from_data(
+            TensorData::new(
+                vec![true; MUSE_32K_STRESS_SEQUENCE],
+                [1, MUSE_32K_STRESS_SEQUENCE],
+            ),
+            &device,
+        ));
+        let position_input = CausalLmInput {
+            token_ids: Tensor::<Metal, 2, Int>::zeros([1, MUSE_32K_STRESS_SEQUENCE], &device),
+            token_mask: Some(token_mask),
+            position_ids: None,
+        };
+        let positions = resolve_positions(&position_input, 1, MUSE_32K_STRESS_SEQUENCE)
+            .expect("derive all 32K valid-token positions");
+        validate_position_range(positions.clone(), MUSE_32K_STRESS_SEQUENCE)
+            .expect("position 32767 is inside the 32K capacity");
+        let position_edges = Tensor::cat(
+            vec![
+                positions.clone().slice([0..1, 0..1]),
+                positions
+                    .clone()
+                    .slice([0..1, MUSE_32K_STRESS_SEQUENCE - 1..MUSE_32K_STRESS_SEQUENCE]),
+            ],
+            1,
+        )
+        .into_data()
+        .to_vec::<i32>()
+        .expect("read 32K position edges");
+        assert_eq!(position_edges, [0, 32_767]);
+        let angles = rotary_angles(
+            muse_rope_config(&config, 500_000.0).expect("synthetic Muse RoPE"),
+            positions,
+            MUSE_32K_STRESS_SEQUENCE,
+        )
+        .expect("build 32K Metal RoPE tables");
+        assert_eq!(
+            angles.cosine.dims(),
+            [1, 1, MUSE_32K_STRESS_SEQUENCE, MUSE_32K_STRESS_HEAD_DIM]
+        );
+        let terminal_angles = Tensor::cat(
+            vec![
+                angles.cosine.slice([
+                    0..1,
+                    0..1,
+                    MUSE_32K_STRESS_SEQUENCE - 1..MUSE_32K_STRESS_SEQUENCE,
+                    0..MUSE_32K_STRESS_HEAD_DIM,
+                ]),
+                angles.sine.slice([
+                    0..1,
+                    0..1,
+                    MUSE_32K_STRESS_SEQUENCE - 1..MUSE_32K_STRESS_SEQUENCE,
+                    0..MUSE_32K_STRESS_HEAD_DIM,
+                ]),
+            ],
+            3,
+        )
+        .into_data()
+        .to_vec::<f32>()
+        .expect("read terminal RoPE angles");
+        assert!(terminal_angles.iter().all(|value| value.is_finite()));
+        drop(position_input);
+        <Metal as Backend>::sync(&device).expect("synchronize position checks");
+        <Metal as Backend>::memory_cleanup(&device);
+
+        let full_cache_config =
+            CacheConfig::new(1, MUSE_32K_STRESS_SEQUENCE).expect("32K full cache config");
+        let cache_spec = NativeKvCacheSpec::new(
+            1,
+            MUSE_32K_STRESS_KV_HEADS,
+            MUSE_32K_STRESS_HEAD_DIM,
+            KvCacheStorage::Full,
+            DType::F16,
+        )
+        .expect("full cache spec");
+        let mut full_cache = NativeKvCache::<Metal>::new(full_cache_config, 1, cache_spec, &device)
+            .expect("allocate 32K global KV cache");
+        let full_tail = Tensor::<Metal, 4>::full(
+            [1, MUSE_32K_STRESS_KV_HEADS, 1, MUSE_32K_STRESS_HEAD_DIM],
+            7.0,
+            &device,
+        )
+        .cast(DType::F16);
+        full_cache
+            .write_sequence(
+                0,
+                0,
+                MUSE_32K_STRESS_SEQUENCE - 1,
+                full_tail.clone(),
+                full_tail,
+            )
+            .expect("write global cache position 32767");
+        let full_read = full_cache
+            .read_sequence(0, 0, MUSE_32K_STRESS_SEQUENCE)
+            .expect("read complete 32K global cache");
+        assert_eq!(full_read.retained_positions(), 0..MUSE_32K_STRESS_SEQUENCE);
+        let (full_keys, _) = full_read.materialize().expect("nonempty full cache");
+        assert_eq!(
+            full_keys.dims(),
+            [
+                1,
+                MUSE_32K_STRESS_KV_HEADS,
+                MUSE_32K_STRESS_SEQUENCE,
+                MUSE_32K_STRESS_HEAD_DIM,
+            ]
+        );
+        let full_tail_value = full_keys
+            .slice([
+                0..1,
+                0..1,
+                MUSE_32K_STRESS_SEQUENCE - 1..MUSE_32K_STRESS_SEQUENCE,
+                0..1,
+            ])
+            .into_data()
+            .to_vec::<f16>()
+            .expect("read global cache tail");
+        assert_eq!(full_tail_value[0].to_f32(), 7.0);
+
+        let ring_cache_config = CacheConfig::new(1, MUSE_32K_STRESS_SEQUENCE)
+            .expect("32K ring cache config")
+            .with_sliding_window(MUSE_32K_STRESS_WINDOW)
+            .expect("released sliding window");
+        let ring_spec = NativeKvCacheSpec::new(
+            1,
+            MUSE_32K_STRESS_KV_HEADS,
+            MUSE_32K_STRESS_HEAD_DIM,
+            KvCacheStorage::MirroredSlidingRing,
+            DType::F16,
+        )
+        .expect("mirrored ring cache spec");
+        let mut ring_cache = NativeKvCache::<Metal>::new(ring_cache_config, 1, ring_spec, &device)
+            .expect("allocate 2048-token mirrored ring");
+        let mut ring_tail = vec![0.0_f32; MUSE_32K_STRESS_KV_HEADS * 2 * MUSE_32K_STRESS_HEAD_DIM];
+        for head in 0..MUSE_32K_STRESS_KV_HEADS {
+            for channel in 0..MUSE_32K_STRESS_HEAD_DIM {
+                ring_tail[(head * 2) * MUSE_32K_STRESS_HEAD_DIM + channel] = 11.0;
+                ring_tail[(head * 2 + 1) * MUSE_32K_STRESS_HEAD_DIM + channel] = 13.0;
+            }
+        }
+        let ring_tail = Tensor::<Metal, 4>::from_data(
+            TensorData::new(
+                ring_tail,
+                [1, MUSE_32K_STRESS_KV_HEADS, 2, MUSE_32K_STRESS_HEAD_DIM],
+            ),
+            &device,
+        )
+        .cast(DType::F16);
+        ring_cache
+            .write_sequence(
+                0,
+                0,
+                MUSE_32K_STRESS_SEQUENCE - 2,
+                ring_tail.clone(),
+                ring_tail,
+            )
+            .expect("write mirrored positions 32766 and 32767");
+        let ring_read = ring_cache
+            .read_sequence(0, 0, MUSE_32K_STRESS_SEQUENCE)
+            .expect("read terminal 2048-token window");
+        assert_eq!(
+            ring_read.retained_positions(),
+            MUSE_32K_STRESS_SEQUENCE - MUSE_32K_STRESS_WINDOW..MUSE_32K_STRESS_SEQUENCE
+        );
+        assert_eq!(ring_read.segments().len(), 1);
+        assert_eq!(
+            ring_read.segments()[0].absolute_positions(),
+            MUSE_32K_STRESS_SEQUENCE - MUSE_32K_STRESS_WINDOW..MUSE_32K_STRESS_SEQUENCE
+        );
+        let (ring_keys, _) = ring_read.materialize().expect("nonempty ring cache");
+        assert_eq!(
+            ring_keys.dims(),
+            [
+                1,
+                MUSE_32K_STRESS_KV_HEADS,
+                MUSE_32K_STRESS_WINDOW,
+                MUSE_32K_STRESS_HEAD_DIM,
+            ]
+        );
+        let ring_tail_values = ring_keys
+            .slice([
+                0..1,
+                0..1,
+                MUSE_32K_STRESS_WINDOW - 2..MUSE_32K_STRESS_WINDOW,
+                0..1,
+            ])
+            .into_data()
+            .to_vec::<f16>()
+            .expect("read wrapped ring tail")
+            .into_iter()
+            .map(f16::to_f32)
+            .collect::<Vec<_>>();
+        assert_eq!(ring_tail_values, [11.0, 13.0]);
+        drop(full_read);
+        drop(full_cache);
+        drop(ring_read);
+        drop(ring_cache);
+        <Metal as Backend>::sync(&device).expect("synchronize cache checks");
+        <Metal as Backend>::memory_cleanup(&device);
+
+        let attention = metal_32k_stress_attention(&config, &device);
+        const GLOBAL_QUERY_ROWS: usize = 65;
+        let representative_global_plan = policy
+            .plan(
+                1,
+                MUSE_32K_STRESS_HEADS,
+                GLOBAL_QUERY_ROWS,
+                MUSE_32K_STRESS_SEQUENCE,
+            )
+            .expect("representative global suffix plan");
+        let representative_global_chunks = plan_muse_attention_chunks(
+            policy,
+            representative_global_plan,
+            1,
+            MUSE_32K_STRESS_HEADS,
+            GLOBAL_QUERY_ROWS,
+            MUSE_32K_STRESS_SEQUENCE,
+            None,
+        )
+        .expect("audit representative global suffix");
+        assert_eq!(
+            representative_global_chunks
+                .iter()
+                .map(|chunk| chunk.plane_shape)
+                .collect::<Vec<_>>(),
+            [
+                [1, MUSE_32K_STRESS_HEADS, 64, MUSE_32K_STRESS_SEQUENCE,],
+                [1, MUSE_32K_STRESS_HEADS, 1, MUSE_32K_STRESS_SEQUENCE,],
+            ]
+        );
+        let global_projection = metal_32k_global_projection(GLOBAL_QUERY_ROWS, &device);
+        assert_eq!(
+            muse_attention_precision(global_projection.query.dtype()),
+            AttentionPrecisionMode::EagerFp32Softmax
+        );
+        let global_output = attention
+            .attend_cached(global_projection, None)
+            .expect("execute bounded 32K-key global attention on Metal");
+        assert_eq!(global_output.dtype(), DType::F16);
+        let global_values = global_output
+            .into_data()
+            .to_vec::<f16>()
+            .expect("read global F16 output");
+        assert_eq!(metal_32k_head_bits(&global_values, 0, 0), [0; 4]);
+        for head in [0, 15, 16, 31] {
+            let bits = metal_32k_head_bits(&global_values, GLOBAL_QUERY_ROWS - 1, head);
+            assert_eq!(bits, [0x190b, 0x3bf2, 0x1c6d, 0x0000]);
+            assert_ne!(bits[2], 0x1c6c, "must not run F16 softmax");
+        }
+        drop(global_values);
+        <Metal as Backend>::sync(&device).expect("synchronize global stress attention");
+        <Metal as Backend>::memory_cleanup(&device);
+
+        const LOCAL_QUERY_ROWS: usize = 513;
+        let representative_local_bound =
+            MUSE_32K_STRESS_WINDOW + policy.maximum_query_tokens(LOCAL_QUERY_ROWS) - 1;
+        let representative_local_plan = policy
+            .plan(
+                1,
+                MUSE_32K_STRESS_HEADS,
+                LOCAL_QUERY_ROWS,
+                representative_local_bound,
+            )
+            .expect("representative sliding suffix plan");
+        let representative_local_chunks = plan_muse_attention_chunks(
+            policy,
+            representative_local_plan,
+            1,
+            MUSE_32K_STRESS_HEADS,
+            LOCAL_QUERY_ROWS,
+            MUSE_32K_STRESS_SEQUENCE,
+            Some(MUSE_32K_STRESS_WINDOW),
+        )
+        .expect("audit representative sliding suffix");
+        assert_eq!(representative_local_chunks.len(), 2);
+        assert_eq!(representative_local_chunks[0].key_range, 30_208..32_767);
+        assert_eq!(
+            representative_local_chunks[0].plane_shape,
+            [1, MUSE_32K_STRESS_HEADS, 512, 2559]
+        );
+        assert_eq!(representative_local_chunks[1].key_range, 30_720..32_768);
+        assert_eq!(
+            representative_local_chunks[1].plane_shape,
+            [1, MUSE_32K_STRESS_HEADS, 1, 2048]
+        );
+        let local_output = attention
+            .attend_cached(
+                metal_32k_sliding_projection(LOCAL_QUERY_ROWS, &device),
+                Some(MUSE_32K_STRESS_WINDOW),
+            )
+            .expect("execute bounded 32K-key sliding attention on Metal");
+        assert_eq!(local_output.dtype(), DType::F16);
+        let local_values = local_output
+            .into_data()
+            .to_vec::<f16>()
+            .expect("read local F16 output");
+        for head in [0, 15, 16, 31] {
+            assert_eq!(
+                metal_32k_head_bits(&local_values, 0, head),
+                [0x1000, 0x1000, 0x0000, 0x0000]
+            );
+            assert_eq!(
+                metal_32k_head_bits(&local_values, LOCAL_QUERY_ROWS - 1, head),
+                [0x0000, 0x1000, 0x1000, 0x0000]
+            );
+        }
+        <Metal as Backend>::sync(&device).expect("synchronize sliding stress attention");
+        eprintln!(
+            "synthetic Muse 32K Metal envelope passed: global={}x[1,32,64,32768], local={} chunks with peak {} elements; this is not full 30B 32K acceptance",
+            global_chunks.len(),
+            local_chunks.len(),
+            local_chunks
+                .iter()
+                .map(|chunk| chunk.plane_elements)
+                .max()
+                .unwrap_or(0),
+        );
     }
 
     /// Builds an official-width Metal fixture whose score rounding changes F16 softmax bits.
@@ -2068,6 +2821,119 @@ mod tests {
         assert_eq!(aligned_key_range(2, 5, 0..2, 3).unwrap(), 1..5);
         assert!(aligned_key_range(5, 4, 0..1, 3).is_err());
         assert!(aligned_key_range(5, 5, 0..1, 0).is_err());
+    }
+
+    /// The concrete 32K global and local schedules bound every backend plane.
+    ///
+    /// This enumerates the exact schedule consumed by `attend_chunked`: no
+    /// device allocation is inferred from only the planner's peak. Scores,
+    /// masks, F32 softmax storage, and rounded probabilities all use each
+    /// recorded `[batch, head, query, key]` geometry.
+    #[test]
+    fn official_32k_chunk_schedules_bound_every_realized_plane() {
+        const SEQUENCE: usize = 32_768;
+        const HEADS: usize = 32;
+        const WINDOW: usize = 2048;
+        const LIMIT: usize = 1 << 26;
+
+        let policy = AttentionExecutionPolicy::default();
+        let global_plan = policy
+            .plan(1, HEADS, SEQUENCE, SEQUENCE)
+            .expect("official global plan");
+        let global =
+            plan_muse_attention_chunks(policy, global_plan, 1, HEADS, SEQUENCE, SEQUENCE, None)
+                .expect("expand global chunks");
+        assert_eq!(global.len(), 512);
+        assert_eq!(global.first().unwrap().query_range, 0..64);
+        assert_eq!(global.last().unwrap().query_range, 32_704..32_768);
+        assert!(global.iter().all(|chunk| chunk.key_range == (0..SEQUENCE)));
+        assert!(
+            global
+                .iter()
+                .all(|chunk| chunk.plane_shape == [1, HEADS, 64, SEQUENCE])
+        );
+        assert!(global.iter().all(|chunk| chunk.plane_elements == LIMIT));
+        assert_contiguous_query_coverage(&global, SEQUENCE);
+
+        let local_key_bound = WINDOW + policy.maximum_query_tokens(SEQUENCE) - 1;
+        let local_plan = policy
+            .plan(1, HEADS, SEQUENCE, local_key_bound)
+            .expect("official local plan");
+        let local = plan_muse_attention_chunks(
+            policy,
+            local_plan,
+            1,
+            HEADS,
+            SEQUENCE,
+            SEQUENCE,
+            Some(WINDOW),
+        )
+        .expect("expand local chunks");
+        assert_eq!(local.len(), 64);
+        assert_eq!(local[0].query_range, 0..512);
+        assert_eq!(local[0].key_range, 0..512);
+        assert_eq!(local[4].query_range, 2048..2560);
+        assert_eq!(local[4].key_range, 1..2560);
+        assert_eq!(local.last().unwrap().query_range, 32_256..32_768);
+        assert_eq!(local.last().unwrap().key_range, 30_209..32_768);
+        assert_eq!(
+            local.iter().map(|chunk| chunk.plane_elements).max(),
+            Some(41_926_656)
+        );
+        assert!(local.iter().all(|chunk| chunk.plane_elements <= LIMIT));
+        assert!(
+            local
+                .iter()
+                .all(|chunk| chunk.key_range.len() <= local_key_bound)
+        );
+        assert_contiguous_query_coverage(&local, SEQUENCE);
+    }
+
+    /// Concrete expansion rejects stale plans and underestimated local unions.
+    #[test]
+    fn chunk_schedule_fails_closed_on_plan_drift_and_key_underestimates() {
+        let policy = AttentionExecutionPolicy::query_chunked(4, 1024);
+        let plan = policy.plan(1, 2, 8, 4).expect("small plan");
+        let query_drift = plan_muse_attention_chunks(policy, plan, 1, 2, 7, 8, None)
+            .expect_err("query geometry must match the immutable plan");
+        assert!(query_drift.to_string().contains("covers 8 query rows"));
+
+        let underestimated = plan_muse_attention_chunks(policy, plan, 1, 2, 8, 8, Some(5))
+            .expect_err("later local union is wider than the declared bound");
+        assert!(
+            underestimated
+                .to_string()
+                .contains("exceeds planned bound 4")
+        );
+
+        let plane_drift =
+            plan_muse_attention_chunks(AttentionExecutionPolicy::Unbounded, plan, 1, 3, 8, 4, None)
+                .expect_err("a looser runtime policy cannot widen an immutable plan");
+        assert!(plane_drift.to_string().contains("immutable execution plan"));
+
+        let empty_keys = plan_muse_attention_chunks(policy, plan, 1, 2, 8, 0, None)
+            .expect_err("empty key storage must fail before slicing");
+        assert!(
+            empty_keys
+                .to_string()
+                .contains("key sequence must be non-zero")
+        );
+    }
+
+    /// Verifies complete, gap-free query coverage for an audited chunk schedule.
+    fn assert_contiguous_query_coverage(chunks: &[MuseAttentionChunk], sequence: usize) {
+        let mut expected_start = 0;
+        for chunk in chunks {
+            assert_eq!(chunk.query_range.start, expected_start);
+            assert!(!chunk.query_range.is_empty());
+            assert!(!chunk.key_range.is_empty());
+            assert_eq!(
+                chunk.plane_elements,
+                chunk.plane_shape.into_iter().product::<usize>()
+            );
+            expected_start = chunk.query_range.end;
+        }
+        assert_eq!(expected_start, sequence);
     }
 
     /// Muse defaults to a bounded policy and rejects invalid runtime overrides.

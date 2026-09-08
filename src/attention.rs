@@ -193,6 +193,8 @@ impl AttentionExecutionPolicy {
                 )
             })?;
         Ok(AttentionExecutionPlan {
+            query_sequence,
+            key_sequence_bound,
             query_chunk_size,
             chunk_count,
             peak_score_elements,
@@ -238,6 +240,10 @@ impl AttentionExecutionPolicy {
 /// Immutable allocation plan produced by [`AttentionExecutionPolicy`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AttentionExecutionPlan {
+    /// Complete query length covered by this plan.
+    query_sequence: usize,
+    /// Conservative maximum key length permitted for each planned chunk.
+    key_sequence_bound: usize,
     /// Query rows evaluated in each chunk except possibly the final remainder.
     query_chunk_size: usize,
     /// Number of sequential attention calls.
@@ -249,6 +255,18 @@ pub struct AttentionExecutionPlan {
 }
 
 impl AttentionExecutionPlan {
+    /// Returns the complete query length covered by this plan.
+    #[must_use]
+    pub const fn query_sequence(self) -> usize {
+        self.query_sequence
+    }
+
+    /// Returns the conservative maximum key length permitted for each chunk.
+    #[must_use]
+    pub const fn key_sequence_bound(self) -> usize {
+        self.key_sequence_bound
+    }
+
     /// Returns query rows evaluated per chunk.
     #[must_use]
     pub const fn query_chunk_size(self) -> usize {
@@ -975,6 +993,12 @@ mod tests {
         assert_eq!(global.chunk_count(), 512);
         assert_eq!(global.peak_score_elements(), 1 << 26);
         assert_eq!(global.score_element_limit(), Some(1 << 26));
+        assert_eq!(global.query_sequence(), 32_768);
+        assert_eq!(global.key_sequence_bound(), 32_768);
+        policy
+            .validate_chunk(1, 32, 64, 32_768)
+            .expect("the exact boundary is one valid chunk");
+        assert!(policy.validate_chunk(1, 32, 65, 32_768).is_err());
 
         let local = policy
             .plan(1, 32, 32_768, 2048 + 511)
@@ -982,6 +1006,7 @@ mod tests {
         assert_eq!(local.query_chunk_size(), 512);
         assert_eq!(local.chunk_count(), 64);
         assert_eq!(local.peak_score_elements(), 41_926_656);
+        assert_eq!(local.key_sequence_bound(), 2559);
 
         let oracle = policy
             .plan(1, 32, 67, 67)

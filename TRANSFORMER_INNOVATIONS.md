@@ -409,12 +409,32 @@ The unbounded exact-eager graph would still be impractical at 32K: one
 full-attention score tensor has shape `[1, 32, 32768, 32768]`, or
 34,359,738,368 elements (68,719,476,736 bytes in F16), before the causal mask
 and 137,438,953,472-byte FP32 softmax temporary. The query-chunk policy removes
-that particular release blocker without changing the row-wise attention
-equation. It has passed synthetic full/sliding, cached, padded, and recurrent
-equivalence tests plus the Metal flash-discrimination trace. A real 32K run of
-the complete 55.7 GB F16 language graph is still a separate acceptance gate;
-the analytical workspace bound and component tests do not substitute for that
-hardware stress run.
+that all-at-once allocation without changing the row-wise attention equation.
+
+The ignored `stress_muse_32k_attention_envelope_on_metal` gate separates
+allocation/path evidence from full-checkpoint acceptance. It exhaustively
+expands the same schedule consumed by production: 512 global planes of
+`[1, 32, 64, 32768]` (exactly $2^{26}$ elements each) and 64 local planes whose
+largest shape is `[1, 32, 512, 2559]` (41,926,656 elements). It then actually
+executes two 32K-key Metal suffixes. The global suffix crosses the chunk
+boundary and reproduces the pinned eager-F16/FP32-softmax discriminator; the
+local suffix crosses the 2048-window boundary while slicing absolute key
+positions 30,208 through 32,767. The same gate derives all-valid positions
+through 32,767, constructs the terminal RoPE table, and writes/reads both a
+full KV cache and a mirrored 2048-token ring at the 32K boundary. The fixture
+keeps the official 32 query heads, two KV heads, GQA grouping, F16 dtype, and
+mask geometry, but deliberately reduces head width to four and omits the 52
+dense decoder blocks.
+
+That distinction matters: the synthetic gate proves the per-plane allocation
+ceiling, mask/window arithmetic, cache indexing, and real Metal execution. It
+does **not** prove that the 55.7 GB language graph plus its linear activations
+fits at 32K, execute all 34,359,738,368 global score evaluations for each of 13
+NoPE layers, measure full-model throughput, or establish 30B logits parity at
+that length. Muse therefore still needs a real-weight 32K run before 32K
+checkpoint support can be advertised; this gate cannot upgrade the acceptance
+status by itself. Run it on macOS with `cargo test --features metal
+stress_muse_32k_attention_envelope_on_metal -- --ignored --exact --nocapture`.
 
 **Implementation:** [`MuseGlimmerAttention`](src/models/muse_glimmer/model.rs).
 **Reference:** the [pinned Muse-Glimmer reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/muse_glimmer/modular_muse_glimmer.py).
