@@ -564,6 +564,92 @@ def vector_summary(values: Sequence[float]) -> dict[str, Any]:
     }
 
 
+def vector_comparison_diagnostic(
+    left: Sequence[float],
+    right: Sequence[float],
+    *,
+    comparison: str,
+    left_name: str,
+    right_name: str,
+    gate_cosine: float,
+) -> dict[str, Any]:
+    """Describe a failed vector-parity gate without hiding numerical drift.
+
+    Dot products and norms use :func:`math.fsum` so the diagnostic itself does
+    not inherit device reduction order. Relative error uses the right-hand
+    vector as the reference and clamps only its denominator to ``1e-12``;
+    reporting that convention keeps large near-zero relative errors honest.
+    """
+
+    if not comparison or not left_name or not right_name:
+        raise ValueError("comparison and vector names must be nonempty")
+    if len(left) != len(right) or not left:
+        raise ValueError("comparison vectors must be equally sized and nonempty")
+    left_values = [float(value) for value in left]
+    right_values = [float(value) for value in right]
+    if not math.isfinite(gate_cosine) or not all(
+        math.isfinite(value) for value in [*left_values, *right_values]
+    ):
+        raise ValueError("comparison vectors and gate cosine must be finite")
+    absolute_errors = [
+        abs(left_value - right_value)
+        for left_value, right_value in zip(left_values, right_values, strict=True)
+    ]
+    relative_errors = [
+        error / max(abs(right_value), 1.0e-12)
+        for error, right_value in zip(absolute_errors, right_values, strict=True)
+    ]
+    max_absolute_index = max(
+        range(len(absolute_errors)), key=absolute_errors.__getitem__
+    )
+    max_relative_index = max(
+        range(len(relative_errors)), key=relative_errors.__getitem__
+    )
+    left_norm = math.sqrt(math.fsum(value * value for value in left_values))
+    right_norm = math.sqrt(math.fsum(value * value for value in right_values))
+    dot = math.fsum(
+        left_value * right_value
+        for left_value, right_value in zip(left_values, right_values, strict=True)
+    )
+    if left_norm == 0.0 or right_norm == 0.0:
+        raise ValueError("comparison-vector norms must be nonzero")
+
+    def ranked(values: Sequence[float]) -> dict[str, Any]:
+        """Return the leading two coordinates and their exact score margin."""
+
+        leaders = top_k_records(values, 2)
+        return {
+            "top1_token_id": leaders[0]["token_id"],
+            "top1_logit": leaders[0]["logit"],
+            "top2_token_id": leaders[1]["token_id"],
+            "top2_logit": leaders[1]["logit"],
+            "margin": float(leaders[0]["logit"]) - float(leaders[1]["logit"]),
+        }
+
+    return {
+        "comparison": comparison,
+        "left_name": left_name,
+        "right_name": right_name,
+        "elements": len(left_values),
+        "gate_cosine": gate_cosine,
+        "recomputed_float64_cosine": dot / (left_norm * right_norm),
+        "dot": dot,
+        "left_l2_norm": left_norm,
+        "right_l2_norm": right_norm,
+        "max_absolute_error": absolute_errors[max_absolute_index],
+        "max_absolute_error_index": max_absolute_index,
+        "left_at_max_absolute_error": left_values[max_absolute_index],
+        "right_at_max_absolute_error": right_values[max_absolute_index],
+        "max_relative_error": relative_errors[max_relative_index],
+        "max_relative_error_index": max_relative_index,
+        "left_at_max_relative_error": left_values[max_relative_index],
+        "right_at_max_relative_error": right_values[max_relative_index],
+        "relative_error_denominator": "max(abs(right_reference), 1e-12)",
+        "left_top2": ranked(left_values),
+        "right_top2": ranked(right_values),
+    }
+
+
 def binary16_ulp(value: float) -> float:
     """Return wider adjacent binary16 spacing at an exact finite F16 value."""
 
@@ -2468,19 +2554,73 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cached_rows, teacher_prefix_logits, strict=True
             )
         ]
-        if min(prefix_cosines) < SELF_PARITY_COSINE:
-            raise RuntimeError(f"cached/stateless cosine below {SELF_PARITY_COSINE}")
+        minimum_prefix_cosine = min(prefix_cosines)
+        minimum_prefix_cosine_row = prefix_cosines.index(minimum_prefix_cosine)
+        if minimum_prefix_cosine < SELF_PARITY_COSINE:
+            comparison = vector_comparison_diagnostic(
+                cached_rows[minimum_prefix_cosine_row].tolist(),
+                teacher_prefix_logits[minimum_prefix_cosine_row].tolist(),
+                comparison=(
+                    "cached_prefill_vs_teacher_forced_stateless"
+                    if minimum_prefix_cosine_row == 0
+                    else "cached_recurrent_vs_teacher_forced_stateless"
+                ),
+                left_name="cached_prefix_logits",
+                right_name="teacher_forced_prefix_logits",
+                gate_cosine=minimum_prefix_cosine,
+            )
+            comparison["decision"] = minimum_prefix_cosine_row
+            comparison["cached_binary16_stability"] = decisions[
+                minimum_prefix_cosine_row
+            ]
+            raise RuntimeError(
+                "cached/stateless cosine below "
+                f"{SELF_PARITY_COSINE}: minimum={minimum_prefix_cosine!r}, "
+                f"decision={minimum_prefix_cosine_row}, diagnostic="
+                f"{json.dumps(comparison, allow_nan=False, sort_keys=True)}"
+            )
         prompt_cached_cosine = tensor_cosine(torch, stateless_row, cached_rows[0])
         if prompt_cached_cosine < SELF_PARITY_COSINE:
-            raise RuntimeError("prompt cached/stateless cosine is below the gate")
+            comparison = vector_comparison_diagnostic(
+                stateless_row.tolist(),
+                cached_rows[0].tolist(),
+                comparison="stateless_prompt_vs_cached_prefill",
+                left_name="stateless_prompt_logits",
+                right_name="cached_prefill_logits",
+                gate_cosine=prompt_cached_cosine,
+            )
+            raise RuntimeError(
+                "prompt cached/stateless cosine is below "
+                f"{SELF_PARITY_COSINE}: {prompt_cached_cosine!r}, diagnostic="
+                f"{json.dumps(comparison, allow_nan=False, sort_keys=True)}"
+            )
         cached_prefill_hidden_cosines = [
             tensor_cosine(torch, stateless_row, cached_row)
             for stateless_row, cached_row in zip(
                 hidden_trace, cached_prefill_hidden_trace, strict=True
             )
         ]
-        if min(cached_prefill_hidden_cosines) < SELF_PARITY_COSINE:
-            raise RuntimeError("cached-prefill/stateless hidden cosine is below the gate")
+        minimum_hidden_cosine = min(cached_prefill_hidden_cosines)
+        minimum_hidden_cosine_row = cached_prefill_hidden_cosines.index(
+            minimum_hidden_cosine
+        )
+        if minimum_hidden_cosine < SELF_PARITY_COSINE:
+            comparison = vector_comparison_diagnostic(
+                hidden_trace[minimum_hidden_cosine_row].tolist(),
+                cached_prefill_hidden_trace[minimum_hidden_cosine_row].tolist(),
+                comparison="stateless_prompt_hidden_vs_cached_prefill_hidden",
+                left_name="stateless_prompt_hidden_trace",
+                right_name="cached_prefill_hidden_trace",
+                gate_cosine=minimum_hidden_cosine,
+            )
+            comparison["trace_row"] = minimum_hidden_cosine_row
+            comparison["trace_label"] = trace_labels[minimum_hidden_cosine_row]
+            raise RuntimeError(
+                "cached-prefill/stateless hidden cosine is below "
+                f"{SELF_PARITY_COSINE}: minimum={minimum_hidden_cosine!r}, "
+                f"trace_row={minimum_hidden_cosine_row}, diagnostic="
+                f"{json.dumps(comparison, allow_nan=False, sort_keys=True)}"
+            )
 
     logits_values = [float(value) for value in stateless_row.tolist()]
     logits_payload = tensor_f32le_bytes(torch, stateless_row)
@@ -2768,9 +2908,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 generated, skip_special_tokens=False, clean_up_tokenization_spaces=False
             ),
             "prompt_cached_cosine": prompt_cached_cosine,
-            "minimum_cached_stateless_prefix_cosine": min(prefix_cosines),
-            "minimum_cached_prefill_stateless_hidden_cosine": min(
-                cached_prefill_hidden_cosines
+            "minimum_cached_stateless_prefix_cosine": minimum_prefix_cosine,
+            "minimum_cached_stateless_prefix_cosine_row": (
+                minimum_prefix_cosine_row
+            ),
+            "minimum_cached_prefill_stateless_hidden_cosine": minimum_hidden_cosine,
+            "minimum_cached_prefill_stateless_hidden_cosine_row": (
+                minimum_hidden_cosine_row
             ),
         },
         "timings_seconds": {

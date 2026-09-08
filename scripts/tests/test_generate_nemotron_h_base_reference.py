@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import math
 import struct
 import tempfile
 import types
@@ -105,6 +106,44 @@ class ReferenceHelperTests(unittest.TestCase):
             REFERENCE.top_k_records([1.0, float("nan")], 1)
         with self.assertRaisesRegex(ValueError, "nonempty and finite"):
             REFERENCE.vector_summary([], )
+
+    def test_vector_comparison_diagnostic_exposes_error_and_ranking(self) -> None:
+        diagnostic = REFERENCE.vector_comparison_diagnostic(
+            [3.0, 1.0],
+            [2.0, 1.0],
+            comparison="cached_vs_teacher",
+            left_name="cached",
+            right_name="teacher",
+            gate_cosine=0.99,
+        )
+        self.assertEqual(diagnostic["comparison"], "cached_vs_teacher")
+        self.assertEqual(diagnostic["dot"], 7.0)
+        self.assertEqual(diagnostic["left_l2_norm"], math.sqrt(10.0))
+        self.assertEqual(diagnostic["right_l2_norm"], math.sqrt(5.0))
+        self.assertEqual(diagnostic["max_absolute_error"], 1.0)
+        self.assertEqual(diagnostic["max_absolute_error_index"], 0)
+        self.assertEqual(diagnostic["max_relative_error"], 0.5)
+        self.assertEqual(diagnostic["left_top2"]["top1_token_id"], 0)
+        self.assertEqual(diagnostic["left_top2"]["margin"], 2.0)
+        self.assertEqual(diagnostic["right_top2"]["margin"], 1.0)
+        with self.assertRaisesRegex(ValueError, "equally sized"):
+            REFERENCE.vector_comparison_diagnostic(
+                [1.0],
+                [1.0, 2.0],
+                comparison="bad",
+                left_name="left",
+                right_name="right",
+                gate_cosine=1.0,
+            )
+        with self.assertRaisesRegex(ValueError, "must be finite"):
+            REFERENCE.vector_comparison_diagnostic(
+                [float("nan"), 1.0],
+                [1.0, 2.0],
+                comparison="bad",
+                left_name="left",
+                right_name="right",
+                gate_cosine=1.0,
+            )
 
     def test_json_integer_accepts_exact_values_only(self) -> None:
         for value, expected in ((0, 0), (-0.0, 0), (59_553_253_376.0, 59_553_253_376)):
