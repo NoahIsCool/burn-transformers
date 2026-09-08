@@ -248,12 +248,16 @@ pub(super) fn cosine_similarity(left: &[f32], right: &[f32]) -> f64 {
     cosine
 }
 
-/// Returns a deterministic argmax with lower-index tie breaking.
+/// Returns a deterministic argmax with lower-index numeric tie breaking.
+///
+/// Callers validate finiteness first. Numeric comparison intentionally treats
+/// positive and negative zero as equal, matching the reference runtime's
+/// first-maximum behavior; [`f32::total_cmp`] would order their bit patterns.
 fn stable_top1(values: &[f32]) -> usize {
     assert!(!values.is_empty(), "top-1 values must not be empty");
     let mut best = 0;
     for index in 1..values.len() {
-        if values[index].total_cmp(&values[best]).is_gt() {
+        if values[index] > values[best] {
             best = index;
         }
     }
@@ -409,6 +413,8 @@ mod tests {
     fn top1_ties_select_the_lowest_token_id() {
         assert_eq!(stable_top1(&[2.0, 2.0, 1.0]), 0);
         assert_eq!(stable_top1(&[-2.0, 3.0, 3.0]), 1);
+        assert_eq!(stable_top1(&[-0.0, 0.0]), 0);
+        assert_eq!(stable_top1(&[0.0, -0.0]), 0);
     }
 
     /// Ordered accumulation rejects gaps and reports the true minimum row.
