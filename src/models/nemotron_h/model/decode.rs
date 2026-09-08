@@ -252,7 +252,26 @@ impl<B: Backend> ArchitectureDecodeState<B> for NemotronHDecodeState<B> {
 
     /// Applies only cache-representation-safe logical truncations.
     fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
-        self.tensors.truncate(lengths).map_err(Into::into)
+        let Some(current_mtp) = self.tensors.mtp_lengths() else {
+            return self.tensors.truncate(lengths).map_err(Into::into);
+        };
+        if lengths.len() != current_mtp.len() {
+            return Err(
+                TensorCacheError::Metadata(DecodeStateError::SequenceCountMismatch {
+                    expected: current_mtp.len(),
+                    actual: lengths.len(),
+                })
+                .into(),
+            );
+        }
+        let mtp_lengths = lengths
+            .iter()
+            .zip(current_mtp)
+            .map(|(&target, &mtp)| mtp.min(target.saturating_sub(1)))
+            .collect::<Vec<_>>();
+        self.tensors
+            .truncate_prefixes(lengths, &mtp_lengths)
+            .map_err(Into::into)
     }
 
     /// Returns the device shared by all cache tensors.

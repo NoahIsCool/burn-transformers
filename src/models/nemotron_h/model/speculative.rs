@@ -277,7 +277,9 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
                 output.logits.squeeze_dim::<2>(1),
                 history_tensor(&generated_history, &device)?,
             )?;
-            let probabilities = normalized_probabilities(processed.clone())?;
+            let probabilities = (self.config.generation.strategy == SamplingStrategy::Sample)
+                .then(|| normalized_probabilities(processed.clone()))
+                .transpose()?;
             let proposal = selected_token(self.draft.select(processed)?)?;
             proposals.push(proposal);
             draft_probabilities.push(probabilities);
@@ -300,12 +302,24 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
             let processed = self
                 .target
                 .process(target_output.0, history_tensor(&target_history, &device)?)?;
-            let p = normalized_probabilities(processed)?;
-            if !self.accept(proposal, &p, q)? {
-                let correction = match self.config.generation.strategy {
-                    SamplingStrategy::Greedy => argmax(&p)?,
-                    SamplingStrategy::Sample => self.sample_residual(&p, q)?,
-                };
+            let correction = match self.config.generation.strategy {
+                SamplingStrategy::Greedy => {
+                    let target = selected_token(self.target.select(processed)?)?;
+                    (target != proposal).then_some(target)
+                }
+                SamplingStrategy::Sample => {
+                    let p = normalized_probabilities(processed)?;
+                    let q = q.as_deref().ok_or_else(|| {
+                        Error::Generation(
+                            "Nemotron-H stochastic verification lost its draft distribution".into(),
+                        )
+                    })?;
+                    (!self.accept(proposal, &p, q)?)
+                        .then(|| self.sample_residual(&p, q))
+                        .transpose()?
+                }
+            };
+            if let Some(correction) = correction {
                 emitted.push(correction);
                 let terminated = self.is_eos(correction);
                 return Ok(PendingCycle {
@@ -379,6 +393,9 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
         state: &NemotronHDecodeState<B>,
     ) -> Result<()> {
         state.validate_for_model(model)?;
+        if state.tensor_state().has_active_transaction() {
+            return Err(crate::cache::TensorCacheError::TransactionAlreadyActive.into());
+        }
         if self.vocabulary_size != model.config().vocab_size {
             return Err(Error::Generation(format!(
                 "speculative decoder vocabulary {} does not match Nemotron-H vocabulary {}",
@@ -1056,6 +1073,35 @@ mod tests {
         assert_eq!(state.tensor_state().mtp_lengths(), Some([3].as_slice()));
     }
 
+    /// EOS cannot bypass the ownership check for a caller-open transaction.
+    #[test]
+    fn eos_lead_rejects_a_caller_owned_active_transaction() {
+        let device = Default::default();
+        let model = zero_model(&device);
+        let (mut state, hidden) = aligned_state(&model, &device);
+        let mark = state.mark().unwrap();
+        let mut decoder = NemotronHSpeculativeDecoder::new(
+            NemotronHSpeculativeConfig {
+                generation: GenerationConfig {
+                    eos_token_ids: vec![1],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            model.config().vocab_size,
+            &device,
+        )
+        .unwrap();
+        assert!(matches!(
+            decoder.speculate(&model, 1, hidden, &[2, 3], &mut state),
+            Err(Error::TensorCache(
+                crate::cache::TensorCacheError::TransactionAlreadyActive
+            ))
+        ));
+        assert!(state.tensor_state().has_active_transaction());
+        state.rollback(mark).unwrap();
+    }
+
     /// Inactive rows and post-stage failures are exact retryable no-ops.
     #[test]
     fn inactive_and_recoverable_failure_restore_state_and_rng() {
@@ -1148,6 +1194,17 @@ mod tests {
         assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
     }
 
+    /// A physically rewindable graph clips MTP to the surviving shifted prefix.
+    #[test]
+    fn trait_truncate_rewinds_target_and_mtp_to_independent_lengths() {
+        let device = Default::default();
+        let model = zero_model(&device);
+        let (mut state, _) = aligned_state(&model, &device);
+        crate::architecture::DecodeState::<TestBackend>::truncate(&mut state, &[1]).unwrap();
+        assert_eq!(state.tensor_state().lengths(), &[1]);
+        assert_eq!(state.tensor_state().mtp_lengths(), Some([0].as_slice()));
+    }
+
     /// Monte Carlo rejection sampling recovers the target distribution.
     #[test]
     fn stochastic_rejection_recovers_target_marginal() {
@@ -1212,6 +1269,69 @@ mod tests {
         assert_eq!(
             left_state.tensor_state().mtp_lengths(),
             right_state.tensor_state().mtp_lengths()
+        );
+    }
+
+    /// A failure after draft sampling restores the proposal stream for retry.
+    #[test]
+    fn sampled_failure_after_rng_draw_retries_bit_for_bit() {
+        let device = Default::default();
+        let model = zero_model(&device);
+        let config = NemotronHSpeculativeConfig {
+            generation: GenerationConfig {
+                strategy: SamplingStrategy::Sample,
+                seed: 0x5eed_cafe,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let (mut expected_state, expected_hidden) = aligned_state(&model, &device);
+        let mut expected_decoder =
+            NemotronHSpeculativeDecoder::new(config.clone(), model.config().vocab_size, &device)
+                .unwrap();
+        let expected = expected_decoder
+            .speculate(&model, 1, expected_hidden, &[2, 3], &mut expected_state)
+            .unwrap();
+
+        let (mut retry_state, retry_hidden) = aligned_state(&model, &device);
+        let mut retry_decoder =
+            NemotronHSpeculativeDecoder::new(config.clone(), model.config().vocab_size, &device)
+                .unwrap();
+        retry_decoder.target = LogitsProcessor::new(
+            config.generation.clone(),
+            model.config().vocab_size - 1,
+            &device,
+        )
+        .unwrap();
+        assert!(matches!(
+            retry_decoder.speculate(&model, 1, retry_hidden.clone(), &[2, 3], &mut retry_state,),
+            Err(Error::Shape { .. })
+        ));
+        assert_eq!(retry_state.tensor_state().lengths(), &[2]);
+        assert_eq!(
+            retry_state.tensor_state().mtp_lengths(),
+            Some([1].as_slice())
+        );
+
+        retry_decoder.target =
+            LogitsProcessor::new(config.generation, model.config().vocab_size, &device).unwrap();
+        let retried = retry_decoder
+            .speculate(&model, 1, retry_hidden, &[2, 3], &mut retry_state)
+            .unwrap();
+        assert_eq!(retried.token_ids, expected.token_ids);
+        assert_eq!(
+            retried.accepted_draft_tokens,
+            expected.accepted_draft_tokens
+        );
+        assert_eq!(retried.all_drafts_accepted, expected.all_drafts_accepted);
+        assert_eq!(
+            retry_state.tensor_state().lengths(),
+            expected_state.tensor_state().lengths()
+        );
+        assert_eq!(
+            retry_state.tensor_state().mtp_lengths(),
+            expected_state.tensor_state().mtp_lengths()
         );
     }
 }

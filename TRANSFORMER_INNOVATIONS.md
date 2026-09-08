@@ -1022,6 +1022,9 @@ Nemotron does the same alongside target GQA/Mamba2 state. Both require the
 target cursor to remain one token ahead of the shifted MTP cursor at stable
 cycle boundaries. Per-token recurrent snapshots make partial Mamba2/DeltaNet
 commits exact even though their terminal recurrences cannot be inverted.
+Architecture-level truncation derives the surviving shifted prefix and
+prevalidates both banks before either cursor or physical tensor changes; this
+prevents reset/rewind operations from leaving stale auxiliary KV reachable.
 
 **Implementation:** lifecycle rules in
 [`cache/transaction.rs`](src/cache/transaction.rs), tensor snapshots in
@@ -1046,7 +1049,10 @@ contiguous because vLLM delegates those KV slots to its scheduler, whereas the
 local cache owns them directly.
 Both APIs execute one speculative cycle; their caller still owns the global
 token budget, stop-sequence matching, and padding policy, matching the split
-between vLLM's model-side speculator and scheduler.
+between vLLM's model-side speculator and scheduler. Greedy verification keeps
+the full vocabulary on the backend and compares only selected argmax IDs;
+stochastic rejection still materializes normalized distributions until a
+backend-native verification kernel is justified.
 
 **Implementation:** [`qwen3_5/model/speculative.rs`](src/models/qwen3_5/model/speculative.rs)
 and [`nemotron_h/model/speculative.rs`](src/models/nemotron_h/model/speculative.rs).

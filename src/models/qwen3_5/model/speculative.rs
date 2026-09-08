@@ -290,7 +290,9 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
                 output.logits.squeeze_dim::<2>(1),
                 history_tensor(&generated_history, &device)?,
             )?;
-            let probabilities = normalized_probabilities(processed.clone())?;
+            let probabilities = (self.config.generation.strategy == SamplingStrategy::Sample)
+                .then(|| normalized_probabilities(processed.clone()))
+                .transpose()?;
             let proposal = selected_token(self.draft.select(processed)?)?;
             proposals.push(proposal);
             draft_probabilities.push(probabilities);
@@ -313,12 +315,24 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
             let processed = self
                 .target
                 .process(target_output.0, history_tensor(&target_history, &device)?)?;
-            let p = normalized_probabilities(processed)?;
-            if !self.accept(proposal, &p, q)? {
-                let correction = match self.config.generation.strategy {
-                    SamplingStrategy::Greedy => argmax(&p)?,
-                    SamplingStrategy::Sample => self.sample_residual(&p, q)?,
-                };
+            let correction = match self.config.generation.strategy {
+                SamplingStrategy::Greedy => {
+                    let target = selected_token(self.target.select(processed)?)?;
+                    (target != proposal).then_some(target)
+                }
+                SamplingStrategy::Sample => {
+                    let p = normalized_probabilities(processed)?;
+                    let q = q.as_deref().ok_or_else(|| {
+                        Error::Generation(
+                            "Qwen stochastic verification lost its draft distribution".into(),
+                        )
+                    })?;
+                    (!self.accept(proposal, &p, q)?)
+                        .then(|| self.sample_residual(&p, q))
+                        .transpose()?
+                }
+            };
+            if let Some(correction) = correction {
                 emitted.push(correction);
                 let terminated = self.is_eos(correction);
                 return Ok(PendingCycle {
@@ -393,6 +407,9 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
         state: &Qwen3_5DecodeState<B>,
     ) -> Result<()> {
         state.validate_for_model(model)?;
+        if state.tensor_state().has_active_transaction() {
+            return Err(crate::cache::TensorCacheError::TransactionAlreadyActive.into());
+        }
         if self.vocabulary_size != model.config().vocab_size {
             return Err(Error::Generation(format!(
                 "speculative decoder vocabulary {} does not match model vocabulary {}",
@@ -1076,6 +1093,34 @@ mod tests {
     }
 
     #[test]
+    fn eos_lead_rejects_a_caller_owned_active_transaction() {
+        let device = Default::default();
+        let model = zero_model(&device);
+        let (mut state, hidden) = aligned_state(&model, &device);
+        let mark = state.mark().unwrap();
+        let mut decoder = Qwen3_5SpeculativeDecoder::new(
+            Qwen3_5SpeculativeConfig {
+                generation: GenerationConfig {
+                    eos_token_ids: vec![1],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            model.config().vocab_size,
+            &device,
+        )
+        .unwrap();
+        assert!(matches!(
+            decoder.speculate(&model, 1, hidden, &[2, 3], &mut state),
+            Err(Error::TensorCache(
+                crate::cache::TensorCacheError::TransactionAlreadyActive
+            ))
+        ));
+        assert!(state.tensor_state().has_active_transaction());
+        state.rollback(mark).unwrap();
+    }
+
+    #[test]
     fn inactive_and_recoverable_failure_leave_both_cursors_unchanged() {
         let device = Default::default();
         let model = zero_model(&device);
@@ -1194,6 +1239,42 @@ mod tests {
                 )
                 .is_err()
         );
+        assert_eq!(state.tensor_state().lengths(), &[2]);
+        assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
+    }
+
+    #[test]
+    fn speculative_state_zero_truncate_rewinds_both_shifted_caches() {
+        let device = Default::default();
+        let model = zero_model(&device);
+        let (mut state, _) = aligned_state(&model, &device);
+
+        crate::architecture::DecodeState::<TestBackend>::truncate(&mut state, &[2]).unwrap();
+        assert_eq!(state.tensor_state().lengths(), &[2]);
+        assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
+        crate::architecture::DecodeState::<TestBackend>::truncate(&mut state, &[0]).unwrap();
+        assert_eq!(state.tensor_state().lengths(), &[0]);
+        assert_eq!(state.tensor_state().mtp_lengths(), Some([0].as_slice()));
+
+        let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[2, 3]], &device);
+        let hidden = model
+            .prefill(
+                CausalLmInput {
+                    token_ids: prompt.clone(),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions {
+                    logits: LogitsSelection::All,
+                    hidden_states: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .final_hidden_state
+            .unwrap();
+        model.prefill_mtp_cache(prompt, hidden, &mut state).unwrap();
         assert_eq!(state.tensor_state().lengths(), &[2]);
         assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
     }

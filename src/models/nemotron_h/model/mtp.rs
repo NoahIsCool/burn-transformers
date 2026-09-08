@@ -830,4 +830,37 @@ mod tests {
         );
         assert_eq!(state.tensor_state().mtp_lengths(), Some(before.as_slice()));
     }
+
+    /// Trait truncation never leaves the shifted target and MTP cursors divergent.
+    #[test]
+    fn speculative_state_truncate_is_atomic_and_reusable() {
+        let device = Default::default();
+        let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+        let mut state = model
+            .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+            .unwrap();
+        let target = prefill_target(&model, &mut state, &device);
+        model
+            .prefill_mtp_cache(Tensor::from_ints([[1, 2, 3]], &device), target, &mut state)
+            .unwrap();
+
+        crate::architecture::DecodeState::<TestBackend>::truncate(&mut state, &[3]).unwrap();
+        assert_eq!(state.tensor_state().lengths(), &[3]);
+        assert_eq!(state.tensor_state().mtp_lengths(), Some([2].as_slice()));
+        assert!(
+            crate::architecture::DecodeState::<TestBackend>::truncate(&mut state, &[2]).is_err()
+        );
+        assert_eq!(state.tensor_state().lengths(), &[3]);
+        assert_eq!(state.tensor_state().mtp_lengths(), Some([2].as_slice()));
+
+        crate::architecture::DecodeState::<TestBackend>::truncate(&mut state, &[0]).unwrap();
+        assert_eq!(state.tensor_state().lengths(), &[0]);
+        assert_eq!(state.tensor_state().mtp_lengths(), Some([0].as_slice()));
+        let target = prefill_target(&model, &mut state, &device);
+        model
+            .prefill_mtp_cache(Tensor::from_ints([[1, 2, 3]], &device), target, &mut state)
+            .unwrap();
+        assert_eq!(state.tensor_state().lengths(), &[3]);
+        assert_eq!(state.tensor_state().mtp_lengths(), Some([2].as_slice()));
+    }
 }

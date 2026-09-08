@@ -1390,6 +1390,47 @@ fn mtp_truncate_and_trait_lifecycle_apply_to_auxiliary_storage() {
 }
 
 #[test]
+fn paired_main_mtp_truncate_validates_both_banks_before_mutation() {
+    let device = device();
+    let config = CacheConfig::new(1, 6)
+        .expect("config")
+        .with_sliding_window(2)
+        .expect("window");
+    let mut state = TensorDecodeState::<TestBackend>::new(config, 1, &device).expect("state");
+    state
+        .main_mut()
+        .add_native_kv(scalar_kv_spec(KvCacheStorage::Full, 1))
+        .expect("main cache");
+    state
+        .enable_mtp()
+        .expect("MTP")
+        .add_native_kv(scalar_kv_spec(KvCacheStorage::SlidingRing, 1))
+        .expect("MTP ring");
+    state.advance(&[3]).expect("main length");
+    state.advance_mtp(&[3]).expect("MTP length");
+
+    assert!(matches!(
+        state.truncate_prefixes(&[2], &[2]),
+        Err(TensorCacheError::UnsafeWrappedTruncate { .. })
+    ));
+    assert_eq!(state.lengths(), &[3]);
+    assert_eq!(state.mtp_lengths(), Some([3].as_slice()));
+
+    let mark = state.begin_transaction().expect("transaction");
+    assert!(matches!(
+        state.truncate_prefixes(&[0], &[0]),
+        Err(TensorCacheError::TransactionActive { .. })
+    ));
+    state.rollback(mark).expect("rollback");
+
+    state
+        .truncate_prefixes(&[0], &[0])
+        .expect("paired zero rewind");
+    assert_eq!(state.lengths(), &[0]);
+    assert_eq!(state.mtp_lengths(), Some([0].as_slice()));
+}
+
+#[test]
 fn ragged_batch_transactions_commit_independent_prefix_lengths() {
     let device = device();
     let config = CacheConfig::new(2, 6).expect("config");

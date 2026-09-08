@@ -911,16 +911,7 @@ impl<B: Backend> TensorDecodeState<B> {
         self.ensure_no_transaction("truncate")?;
         validate_count(self.main.batch_size(), lengths.len())?;
         let current = self.metadata.lengths().to_vec();
-        for (sequence, (&from, &to)) in current.iter().zip(lengths).enumerate() {
-            if to > from {
-                return Err(DecodeStateError::CannotExtendByTruncation {
-                    sequence,
-                    current: from,
-                    requested: to,
-                }
-                .into());
-            }
-        }
+        validate_rewind(&current, lengths)?;
         self.main.validate_truncate(&current, lengths)?;
         let next = DecodeMetadata::from_lengths(self.metadata.config(), lengths.to_vec())?;
         self.main.apply_truncate(&current, lengths);
@@ -946,16 +937,7 @@ impl<B: Backend> TensorDecodeState<B> {
             .ok_or(TensorCacheError::MtpNotEnabled)?;
         let bank = self.mtp.as_ref().ok_or(TensorCacheError::MtpNotEnabled)?;
         let current = metadata.lengths().to_vec();
-        for (sequence, (&from, &to)) in current.iter().zip(lengths).enumerate() {
-            if to > from {
-                return Err(DecodeStateError::CannotExtendByTruncation {
-                    sequence,
-                    current: from,
-                    requested: to,
-                }
-                .into());
-            }
-        }
+        validate_rewind(&current, lengths)?;
         bank.validate_truncate(&current, lengths)?;
         let next = DecodeMetadata::from_lengths(metadata.config(), lengths.to_vec())?;
         self.mtp
@@ -963,6 +945,55 @@ impl<B: Backend> TensorDecodeState<B> {
             .expect("MTP bank was validated as present")
             .apply_truncate(&current, lengths);
         self.mtp_metadata = Some(next);
+        Ok(())
+    }
+
+    /// Atomically rewinds the main and MTP banks to independent prefix lengths.
+    ///
+    /// Shifted auxiliary streams generally do not share the target model's
+    /// absolute cursor. Architecture wrappers therefore derive the surviving
+    /// auxiliary prefix and pass both vectors here. Every logical and physical
+    /// rewind is validated before either bank or either metadata record is
+    /// changed, so an unsafe ring/recurrent rewind leaves the complete state
+    /// untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when MTP is disabled, a transaction is active, either
+    /// vector has the wrong batch size, a requested length extends its cursor,
+    /// or any physical representation cannot reconstruct the requested prefix.
+    pub fn truncate_prefixes(
+        &mut self,
+        main_lengths: &[usize],
+        mtp_lengths: &[usize],
+    ) -> TensorCacheResult<()> {
+        self.ensure_no_transaction("truncate main and MTP")?;
+        validate_count(self.batch_size(), main_lengths.len())?;
+        validate_count(self.batch_size(), mtp_lengths.len())?;
+
+        let main_current = self.metadata.lengths().to_vec();
+        validate_rewind(&main_current, main_lengths)?;
+        self.main.validate_truncate(&main_current, main_lengths)?;
+        let next_main =
+            DecodeMetadata::from_lengths(self.metadata.config(), main_lengths.to_vec())?;
+
+        let mtp_metadata = self
+            .mtp_metadata
+            .as_ref()
+            .ok_or(TensorCacheError::MtpNotEnabled)?;
+        let mtp_bank = self.mtp.as_ref().ok_or(TensorCacheError::MtpNotEnabled)?;
+        let mtp_current = mtp_metadata.lengths().to_vec();
+        validate_rewind(&mtp_current, mtp_lengths)?;
+        mtp_bank.validate_truncate(&mtp_current, mtp_lengths)?;
+        let next_mtp = DecodeMetadata::from_lengths(mtp_metadata.config(), mtp_lengths.to_vec())?;
+
+        self.main.apply_truncate(&main_current, main_lengths);
+        self.mtp
+            .as_mut()
+            .expect("MTP bank was validated as present")
+            .apply_truncate(&mtp_current, mtp_lengths);
+        self.metadata = next_main;
+        self.mtp_metadata = Some(next_mtp);
         Ok(())
     }
 
@@ -1061,6 +1092,21 @@ fn validate_count(expected: usize, actual: usize) -> TensorCacheResult<()> {
     } else {
         Err(DecodeStateError::SequenceCountMismatch { expected, actual }.into())
     }
+}
+
+/// Rejects a logical rewind that would extend any sequence cursor.
+fn validate_rewind(current: &[usize], requested: &[usize]) -> TensorCacheResult<()> {
+    for (sequence, (&from, &to)) in current.iter().zip(requested).enumerate() {
+        if to > from {
+            return Err(DecodeStateError::CannotExtendByTruncation {
+                sequence,
+                current: from,
+                requested: to,
+            }
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Advances a tentative cursor atomically without publishing it as committed.
