@@ -15,12 +15,18 @@
 //! softmax in FP32, then restores the query dtype. Burn 0.21 flash attention uses
 //! strict-F32 QK accumulators and therefore omits the first rounding boundary;
 //! Muse uses the shared explicit eager mode for F16/BF16 and retains backend
-//! dispatch for F32. Passing the conventional scale as `None` preserves fused
-//! eligibility, although Burn's ordinary `metal` feature selects its fallback
-//! unless the separate `autotune` feature is enabled. The attention result is
-//! multiplied by `sigmoid(gate_proj(h))` before the output projection. Three
-//! local RoPE layers normally precede each global NoPE layer. Finally, logits
-//! follow the exact bounded map `T * tanh(output_multiplier * raw_logits / T)`.
+//! dispatch for F32. Short calls remain one unchanged eager operation for oracle
+//! parity. Longer calls split only the query axis, synchronize and reclaim each
+//! workspace, and cap every score-like plane; sliding layers additionally slice
+//! the union of locally visible keys when no padding holes are present. This is
+//! the supported memory-bounded Metal path. It deliberately makes no flash claim:
+//! Burn 0.21's ordinary `metal` feature selects fallback, and its opt-in flash
+//! graph changes the pinned F16 score-rounding boundary. The attention result is
+//! multiplied by `sigmoid(gate_proj(h))` before the output projection. Three local
+//! RoPE layers normally precede each global NoPE layer. Finally, logits follow the
+//! exact bounded map `T * tanh(output_multiplier * raw_logits / T)`.
+
+use core::ops::Range;
 
 use burn::{
     module::Module,
@@ -36,7 +42,8 @@ use crate::{
     Result,
     architecture::TokenMask,
     attention::{
-        AttentionPrecisionMode, dispatch_attention, padding_attention_mask, repeat_key_value,
+        AttentionExecutionPlan, AttentionExecutionPolicy, AttentionPrecisionMode,
+        dispatch_attention, padding_attention_mask, repeat_key_value,
     },
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig, apply_activation},
     normalization::{RmsNorm, RmsNormConfig, RmsNormRootMode},
@@ -92,6 +99,9 @@ pub struct MuseGlimmerAttention<B: Backend> {
     pub qk_norm_epsilon: f64,
     /// Multiplier applied to normalized queries before dot products.
     pub qk_scale_factor: f64,
+    /// Peak-workspace policy for score, mask, and probability planes.
+    #[module(skip)]
+    execution_policy: AttentionExecutionPolicy,
 }
 
 impl<B: Backend> MuseGlimmerAttention<B> {
@@ -125,6 +135,7 @@ impl<B: Backend> MuseGlimmerAttention<B> {
             head_dim: config.head_dim,
             qk_norm_epsilon: config.rms_norm_eps,
             qk_scale_factor: config.qk_scale_factor,
+            execution_policy: AttentionExecutionPolicy::default(),
         })
     }
 
@@ -159,12 +170,281 @@ impl<B: Backend> MuseGlimmerAttention<B> {
     /// Evaluates already positioned attention and gates its result before `o_proj`.
     ///
     /// `mask` follows Burn's kernel convention: `true` excludes a query/key pair.
+    /// This entry point can slice score computation but cannot undo an already
+    /// materialized quadratic mask. Stateless and cached model paths use the
+    /// lazy-mask entry points below for long contexts.
+    #[cfg(test)]
     fn attend(
         &self,
         projection: MuseAttentionProjection<B>,
         mask: Option<Tensor<B, 4, Bool>>,
         causal: bool,
     ) -> Result<Tensor<B, 3>> {
+        let [batch, query_sequence, key_sequence] = self.validate_projection(&projection)?;
+        validate_materialized_mask(
+            mask.as_ref(),
+            batch,
+            self.query_heads,
+            query_sequence,
+            key_sequence,
+        )?;
+        let plan =
+            self.execution_policy
+                .plan(batch, self.query_heads, query_sequence, key_sequence)?;
+        if plan.chunk_count() == 1 {
+            return self.attend_unbounded(projection, mask, causal);
+        }
+        self.attend_chunked(projection, plan, causal, None, |query_range, key_range| {
+            Ok(mask.as_ref().map(|mask| {
+                mask.clone()
+                    .slice([0..batch, 0..self.query_heads, query_range, key_range])
+            }))
+        })
+    }
+
+    /// Evaluates stateless self-attention without materializing a full mask.
+    fn attend_stateless(
+        &self,
+        projection: MuseAttentionProjection<B>,
+        token_mask: Option<&TokenMask<B>>,
+        window: Option<usize>,
+    ) -> Result<Tensor<B, 3>> {
+        let [batch, query_sequence, key_sequence] = self.validate_projection(&projection)?;
+        if query_sequence != key_sequence {
+            return Err(Error::shape(
+                "muse_glimmer.stateless_attention",
+                "equal query and key sequence lengths",
+                format!("query={query_sequence}, key={key_sequence}"),
+            ));
+        }
+        let maximum_query = self.execution_policy.maximum_query_tokens(query_sequence);
+        let bounded_keys = if token_mask.is_none() {
+            window
+                .and_then(|window| window.checked_add(maximum_query.saturating_sub(1)))
+                .map_or(key_sequence, |bound| bound.min(key_sequence))
+        } else {
+            key_sequence
+        };
+        let plan =
+            self.execution_policy
+                .plan(batch, self.query_heads, query_sequence, bounded_keys)?;
+        if plan.chunk_count() == 1 {
+            let mask = stateless_attention_mask(
+                token_mask,
+                batch,
+                self.query_heads,
+                query_sequence,
+                window,
+                &projection.query.device(),
+            )?;
+            return self.attend_unbounded(projection, mask, true);
+        }
+        let valid = token_mask.map(|mask| mask.as_tensor().clone());
+        let ordinals = match (&valid, window) {
+            (Some(valid), Some(_)) => {
+                Some((valid.clone().int().cumsum(1) - 1).mask_fill(valid.clone().bool_not(), 0))
+            }
+            _ => None,
+        };
+        let indexed_window = token_mask.is_none().then_some(window).flatten();
+        self.attend_chunked(
+            projection,
+            plan,
+            true,
+            indexed_window,
+            |query_range, key_range| {
+                stateless_attention_mask_chunk(
+                    valid.as_ref(),
+                    ordinals.as_ref(),
+                    batch,
+                    self.query_heads,
+                    query_range,
+                    key_range,
+                    window,
+                )
+            },
+        )
+    }
+
+    /// Evaluates a compact cached suffix without a quadratic absolute-time mask.
+    fn attend_cached(
+        &self,
+        projection: MuseAttentionProjection<B>,
+        window: Option<usize>,
+    ) -> Result<Tensor<B, 3>> {
+        let [batch, query_sequence, key_sequence] = self.validate_projection(&projection)?;
+        if batch != 1 || key_sequence < query_sequence {
+            return Err(Error::shape(
+                "muse_glimmer.cached_attention",
+                "batch one with key sequence at least as long as query sequence",
+                format!("batch={batch}, query={query_sequence}, key={key_sequence}"),
+            ));
+        }
+        let maximum_query = self.execution_policy.maximum_query_tokens(query_sequence);
+        let bounded_keys = window
+            .and_then(|window| window.checked_add(maximum_query.saturating_sub(1)))
+            .map_or(key_sequence, |bound| bound.min(key_sequence));
+        let plan =
+            self.execution_policy
+                .plan(batch, self.query_heads, query_sequence, bounded_keys)?;
+        if plan.chunk_count() == 1 {
+            let mask = aligned_attention_mask(
+                batch,
+                self.query_heads,
+                query_sequence,
+                key_sequence,
+                0..query_sequence,
+                0..key_sequence,
+                true,
+                window,
+                &projection.query.device(),
+            )?;
+            return self.attend_unbounded(projection, mask, false);
+        }
+        self.attend_chunked(projection, plan, true, window, |_, _| Ok(None))
+    }
+
+    /// Runs one unchanged full-query call for short oracle and explicit unbounded paths.
+    fn attend_unbounded(
+        &self,
+        projection: MuseAttentionProjection<B>,
+        mask: Option<Tensor<B, 4, Bool>>,
+        causal: bool,
+    ) -> Result<Tensor<B, 3>> {
+        let [batch, _, query_sequence, _] = projection.query.dims();
+        let query_width = self.query_heads * self.head_dim;
+        let MuseAttentionProjection {
+            query,
+            key,
+            value,
+            gate,
+        } = projection;
+        let key = repeat_key_value(key, self.query_heads)?;
+        let value = repeat_key_value(value, self.query_heads)?;
+        let precision = muse_attention_precision(query.dtype());
+        let context = dispatch_attention(
+            query,
+            key,
+            value,
+            mask,
+            None,
+            muse_attention_options(causal),
+            precision,
+        )?
+        .swap_dims(1, 2)
+        .reshape([batch, query_sequence, query_width]);
+        linear(context * sigmoid(gate), &self.o_proj)
+    }
+
+    /// Sequentially evaluates score-bounded query chunks and reclaims each workspace.
+    fn attend_chunked<Mask>(
+        &self,
+        projection: MuseAttentionProjection<B>,
+        plan: AttentionExecutionPlan,
+        causal: bool,
+        indexed_window: Option<usize>,
+        mut additional_mask: Mask,
+    ) -> Result<Tensor<B, 3>>
+    where
+        Mask: FnMut(Range<usize>, Range<usize>) -> Result<Option<Tensor<B, 4, Bool>>>,
+    {
+        let [batch, _, query_sequence, _] = projection.query.dims();
+        let key_sequence = projection.key.dims()[2];
+        if B::ad_enabled(&projection.query.device()) {
+            return Err(Error::BackendCapability(
+                "bounded multi-chunk Muse attention is inference-only because an autodiff tape retains every chunk workspace; use an explicit unbounded policy for provisioned training"
+                    .into(),
+            ));
+        }
+        let MuseAttentionProjection {
+            query,
+            key,
+            value,
+            gate,
+        } = projection;
+        let key = repeat_key_value(key, self.query_heads)?;
+        let value = repeat_key_value(value, self.query_heads)?;
+        let device = query.device();
+        let precision = muse_attention_precision(query.dtype());
+        let mut contexts = Vec::with_capacity(plan.chunk_count());
+        for query_start in (0..query_sequence).step_by(plan.query_chunk_size()) {
+            let query_end = query_start
+                .saturating_add(plan.query_chunk_size())
+                .min(query_sequence);
+            let query_range = query_start..query_end;
+            let key_range = match indexed_window {
+                Some(window) => {
+                    aligned_key_range(query_sequence, key_sequence, query_range.clone(), window)?
+                }
+                None => 0..key_sequence,
+            };
+            self.execution_policy.validate_chunk(
+                batch,
+                self.query_heads,
+                query_range.len(),
+                key_range.len(),
+            )?;
+            let external = additional_mask(query_range.clone(), key_range.clone())?;
+            validate_materialized_mask(
+                external.as_ref(),
+                batch,
+                self.query_heads,
+                query_range.len(),
+                key_range.len(),
+            )?;
+            let positional = aligned_attention_mask(
+                batch,
+                self.query_heads,
+                query_sequence,
+                key_sequence,
+                query_range.clone(),
+                key_range.clone(),
+                causal,
+                indexed_window,
+                &device,
+            )?;
+            let exclusion = match (external, positional) {
+                (Some(external), Some(positional)) => Some(external.bool_or(positional)),
+                (Some(external), None) => Some(external),
+                (None, Some(positional)) => Some(positional),
+                (None, None) => None,
+            };
+            let context = dispatch_attention(
+                query
+                    .clone()
+                    .slice([0..batch, 0..self.query_heads, query_range, 0..self.head_dim]),
+                key.clone().slice([
+                    0..batch,
+                    0..self.query_heads,
+                    key_range.clone(),
+                    0..self.head_dim,
+                ]),
+                value
+                    .clone()
+                    .slice([0..batch, 0..self.query_heads, key_range, 0..self.head_dim]),
+                exclusion,
+                None,
+                muse_attention_options(false),
+                precision,
+            )?;
+            B::sync(&device).map_err(|error| {
+                Error::BackendCapability(format!(
+                    "failed to synchronize a bounded Muse attention chunk: {error}"
+                ))
+            })?;
+            B::memory_cleanup(&device);
+            contexts.push(context);
+        }
+        let context = Tensor::cat(contexts, 2).swap_dims(1, 2).reshape([
+            batch,
+            query_sequence,
+            self.query_heads * self.head_dim,
+        ]);
+        linear(context * sigmoid(gate), &self.o_proj)
+    }
+
+    /// Validates projected tensor topology and returns batch/query/key lengths.
+    fn validate_projection(&self, projection: &MuseAttentionProjection<B>) -> Result<[usize; 3]> {
         let [batch, query_heads, query_sequence, query_dim] = projection.query.dims();
         let [key_batch, key_value_heads, key_sequence, key_dim] = projection.key.dims();
         let [value_batch, value_heads, value_sequence, value_dim] = projection.value.dims();
@@ -193,47 +473,7 @@ impl<B: Backend> MuseGlimmerAttention<B> {
                 ),
             ));
         }
-        if let Some(mask) = &mask
-            && mask.dims() != [batch, self.query_heads, query_sequence, key_sequence]
-        {
-            return Err(Error::shape(
-                "muse_glimmer.attention_mask",
-                format!(
-                    "[{batch}, {}, {query_sequence}, {key_sequence}]",
-                    self.query_heads
-                ),
-                format!("{:?}", mask.dims()),
-            ));
-        }
-        let MuseAttentionProjection {
-            query,
-            key,
-            value,
-            gate,
-        } = projection;
-        let key = repeat_key_value(key, self.query_heads)?;
-        let value = repeat_key_value(value, self.query_heads)?;
-        // The pinned eager graph materializes F16 scores before promoting only
-        // the softmax. CubeCL flash instead retains strict-F32 QK accumulators,
-        // so F16/BF16 selects the shared explicit graph. F32 has no
-        // intervening cast to preserve and remains eligible for fused dispatch.
-        let precision_mode = if matches!(query.dtype(), DType::F16 | DType::BF16) {
-            AttentionPrecisionMode::EagerFp32Softmax
-        } else {
-            AttentionPrecisionMode::BackendDefault
-        };
-        let context = dispatch_attention(
-            query,
-            key,
-            value,
-            mask,
-            None,
-            muse_attention_options(causal),
-            precision_mode,
-        )?
-        .swap_dims(1, 2)
-        .reshape([batch, query_sequence, query_width]);
-        linear(context * sigmoid(gate), &self.o_proj)
+        Ok([batch, query_sequence, key_sequence])
     }
 }
 
@@ -250,6 +490,159 @@ fn muse_attention_options(causal: bool) -> AttentionModuleOptions {
         softcap: None,
         is_causal: causal,
     }
+}
+
+/// Selects the pinned eager rounding graph only when reduced precision needs it.
+fn muse_attention_precision(dtype: DType) -> AttentionPrecisionMode {
+    if matches!(dtype, DType::F16 | DType::BF16) {
+        AttentionPrecisionMode::EagerFp32Softmax
+    } else {
+        AttentionPrecisionMode::BackendDefault
+    }
+}
+
+/// Validates one materialized exclusion tensor against an attention slice.
+fn validate_materialized_mask<B: Backend>(
+    mask: Option<&Tensor<B, 4, Bool>>,
+    batch: usize,
+    heads: usize,
+    query_sequence: usize,
+    key_sequence: usize,
+) -> Result<()> {
+    if let Some(mask) = mask
+        && mask.dims() != [batch, heads, query_sequence, key_sequence]
+    {
+        return Err(Error::shape(
+            "muse_glimmer.attention_mask",
+            format!("[{batch}, {heads}, {query_sequence}, {key_sequence}]"),
+            format!("{:?}", mask.dims()),
+        ));
+    }
+    Ok(())
+}
+
+/// Computes the union of keys visible to one aligned local-query chunk.
+///
+/// Query row `i` aligns with key row `i + K - Q`, as in bottom-right causal
+/// attention. For a window `W`, the union over `start..end` is therefore
+/// `[max(0, start + K - Q - W + 1), end + K - Q)`. Muse self-attention and
+/// cached suffix attention both satisfy `K >= Q`.
+fn aligned_key_range(
+    query_sequence: usize,
+    key_sequence: usize,
+    query_range: Range<usize>,
+    window: usize,
+) -> Result<Range<usize>> {
+    if window == 0 || query_range.is_empty() || query_range.end > query_sequence {
+        return Err(Error::configuration(
+            "muse_glimmer.attention_chunk",
+            "window and query range must be non-empty and in bounds",
+        ));
+    }
+    let offset = key_sequence.checked_sub(query_sequence).ok_or_else(|| {
+        Error::shape(
+            "muse_glimmer.attention_alignment",
+            "key sequence at least as long as query sequence",
+            format!("query={query_sequence}, key={key_sequence}"),
+        )
+    })?;
+    let first_aligned = offset.checked_add(query_range.start).ok_or_else(|| {
+        Error::configuration(
+            "muse_glimmer.attention_chunk",
+            "aligned query offset overflows usize",
+        )
+    })?;
+    let key_start = first_aligned.saturating_sub(window.saturating_sub(1));
+    let key_end = offset
+        .checked_add(query_range.end)
+        .ok_or_else(|| {
+            Error::configuration(
+                "muse_glimmer.attention_chunk",
+                "aligned query end overflows usize",
+            )
+        })?
+        .min(key_sequence);
+    if key_start >= key_end {
+        return Err(Error::shape(
+            "muse_glimmer.attention_chunk",
+            "a non-empty local key interval",
+            format!("{key_start}..{key_end}"),
+        ));
+    }
+    Ok(key_start..key_end)
+}
+
+/// Builds causal and optional local exclusions for aligned tensor slices.
+#[allow(clippy::too_many_arguments)]
+fn aligned_attention_mask<B: Backend>(
+    batch: usize,
+    heads: usize,
+    total_queries: usize,
+    total_keys: usize,
+    query_range: Range<usize>,
+    key_range: Range<usize>,
+    causal: bool,
+    window: Option<usize>,
+    device: &B::Device,
+) -> Result<Option<Tensor<B, 4, Bool>>> {
+    if !causal && window.is_none() {
+        return Ok(None);
+    }
+    if query_range.is_empty()
+        || key_range.is_empty()
+        || query_range.end > total_queries
+        || key_range.end > total_keys
+    {
+        return Err(Error::configuration(
+            "muse_glimmer.attention_chunk",
+            "query and key ranges must be non-empty and in bounds",
+        ));
+    }
+    if window == Some(0) {
+        return Err(Error::configuration(
+            "muse_glimmer.attention_window",
+            "must be greater than zero",
+        ));
+    }
+    let query_offset = i64::try_from(total_keys)
+        .and_then(|keys| i64::try_from(total_queries).map(|queries| keys - queries))
+        .map_err(|_| {
+            Error::configuration(
+                "muse_glimmer.attention_alignment",
+                "query/key lengths exceed i64",
+            )
+        })?;
+    let query_start = i64::try_from(query_range.start)
+        .map_err(|_| Error::configuration("muse_glimmer.attention_chunk", "offset exceeds i64"))?;
+    let query_end = i64::try_from(query_range.end)
+        .map_err(|_| Error::configuration("muse_glimmer.attention_chunk", "end exceeds i64"))?;
+    let key_start = i64::try_from(key_range.start)
+        .map_err(|_| Error::configuration("muse_glimmer.attention_chunk", "offset exceeds i64"))?;
+    let key_end = i64::try_from(key_range.end)
+        .map_err(|_| Error::configuration("muse_glimmer.attention_chunk", "end exceeds i64"))?;
+    let query_length = query_range.len();
+    let key_length = key_range.len();
+    let query = (Tensor::<B, 1, Int>::arange(query_start..query_end, device) + query_offset)
+        .reshape([1, 1, query_length, 1])
+        .expand([batch, heads, query_length, key_length]);
+    let key = Tensor::<B, 1, Int>::arange(key_start..key_end, device)
+        .reshape([1, 1, 1, key_length])
+        .expand([batch, heads, query_length, key_length]);
+    let mut exclusion = causal.then(|| key.clone().greater(query.clone()));
+    if let Some(window) = window {
+        let window = i64::try_from(window).map_err(|_| {
+            Error::configuration(
+                "muse_glimmer.attention_window",
+                "must fit in signed position arithmetic",
+            )
+        })?;
+        let too_old = (key + window).lower_equal(query);
+        exclusion = Some(match exclusion {
+            Some(exclusion) => exclusion.bool_or(too_old),
+            None => too_old,
+        });
+    }
+    Ok(exclusion)
 }
 
 /// One dense Muse decoder block with sandwich normalization.
@@ -329,7 +722,6 @@ impl<B: Backend> MuseGlimmerDecoderLayer<B> {
             (projection.query, projection.key) =
                 apply_rotary(projection.query, projection.key, &angles)?;
         }
-        let [batch, _, sequence, _] = projection.query.dims();
         let local_window = match self.layer_type {
             MuseGlimmerLayerType::SlidingAttention => Some(sliding_window.ok_or_else(|| {
                 Error::configuration(
@@ -339,15 +731,9 @@ impl<B: Backend> MuseGlimmerDecoderLayer<B> {
             })?),
             MuseGlimmerLayerType::FullAttention => None,
         };
-        let mask = stateless_attention_mask(
-            token_mask,
-            batch,
-            self.self_attn.query_heads,
-            sequence,
-            local_window,
-            &projection.query.device(),
-        )?;
-        let attended = self.self_attn.attend(projection, mask, true)?;
+        let attended = self
+            .self_attn
+            .attend_stateless(projection, token_mask, local_window)?;
         let hidden = residual + self.post_attention_layernorm.forward(attended);
         let residual = hidden.clone();
         let fed =
@@ -415,7 +801,7 @@ impl<B: Backend> MuseGlimmerModel<B> {
         validate_nonempty_input(batch, sequence)?;
         validate_input_devices(input, &self.embed_tokens.weight.lazy_device())?;
         validate_token_ids(input.token_ids.clone(), self.config.vocab_size)?;
-        validate_mask(input.token_mask.as_ref(), batch, sequence, false)?;
+        let mask_is_all_valid = validate_mask(input.token_mask.as_ref(), batch, sequence, false)?;
         let positions = resolve_positions(input, batch, sequence)?;
         validate_position_range(positions.clone(), self.config.max_position_embeddings)?;
         let evaluated_context = evaluated_context(positions.clone())?;
@@ -432,11 +818,32 @@ impl<B: Backend> MuseGlimmerModel<B> {
             hidden_states.push(hidden.clone());
         }
         let window = self.config.resolved_sliding_window();
+        let attention = self.layers.first().ok_or_else(|| {
+            Error::configuration(
+                "muse_glimmer.layers",
+                "validated models must retain at least one decoder layer",
+            )
+        })?;
+        let full_plan = attention.self_attn.execution_policy.plan(
+            batch,
+            self.config.num_attention_heads,
+            sequence,
+            sequence,
+        )?;
+        // Elide a redundant all-valid mask only when bounded execution actually
+        // chunks the prompt. Single-chunk oracle calls retain the exact prior
+        // mask/softmax operation graph; long local layers gain the safe
+        // `window + chunk - 1` key slice.
+        let attention_token_mask = if mask_is_all_valid && full_plan.chunk_count() > 1 {
+            None
+        } else {
+            input.token_mask.as_ref()
+        };
         for layer in &self.layers {
             hidden = layer.forward(
                 hidden,
                 positions.clone(),
-                input.token_mask.as_ref(),
+                attention_token_mask,
                 evaluated_context,
                 window,
             )?;
@@ -479,6 +886,33 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
         })
     }
 
+    /// Applies one validated attention-workspace policy to every decoder layer.
+    ///
+    /// The default is synchronized query chunking. Selecting
+    /// [`AttentionExecutionPolicy::Unbounded`] is an explicit opt-out intended
+    /// for small parity fixtures or externally provisioned training runs.
+    pub fn with_attention_execution_policy(
+        mut self,
+        policy: AttentionExecutionPolicy,
+    ) -> Result<Self> {
+        policy.validate()?;
+        for layer in &mut self.model.layers {
+            layer.self_attn.execution_policy = policy;
+        }
+        Ok(self)
+    }
+
+    /// Returns the common attention-workspace policy used by decoder layers.
+    #[must_use]
+    pub fn attention_execution_policy(&self) -> AttentionExecutionPolicy {
+        self.model
+            .layers
+            .first()
+            .map_or_else(AttentionExecutionPolicy::default, |layer| {
+                layer.self_attn.execution_policy
+            })
+    }
+
     /// Evaluates stateless causal inference and applies Muse's final logit softcap.
     pub fn forward(
         &self,
@@ -487,7 +921,7 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
     ) -> Result<CausalLmOutput<B>> {
         if options.attentions {
             return Err(Error::BackendCapability(
-                "Muse-Glimmer attention-probability capture is not exposed by Burn's fused path"
+                "Muse-Glimmer attention-probability capture is not exposed by its bounded execution path"
                     .into(),
             ));
         }
@@ -622,6 +1056,90 @@ fn stateless_attention_mask<B: Backend>(
     }))
 }
 
+/// Builds only one stateless chunk's padding and semantic-window exclusions.
+///
+/// Causality is added separately from physical tensor indices. When padding is
+/// present, `ordinals` carries cumulative valid-token indices so holes do not
+/// consume local-window capacity.
+#[allow(clippy::too_many_arguments)]
+fn stateless_attention_mask_chunk<B: Backend>(
+    valid: Option<&Tensor<B, 2, Bool>>,
+    ordinals: Option<&Tensor<B, 2, Int>>,
+    batch: usize,
+    heads: usize,
+    query_range: Range<usize>,
+    key_range: Range<usize>,
+    window: Option<usize>,
+) -> Result<Option<Tensor<B, 4, Bool>>> {
+    let query_sequence = query_range.len();
+    let key_sequence = key_range.len();
+    let Some(valid) = valid else {
+        if ordinals.is_some() {
+            return Err(Error::configuration(
+                "muse_glimmer.attention_ordinals",
+                "cannot exist without a token-valid mask",
+            ));
+        }
+        return Ok(None);
+    };
+    if valid.dims()[0] != batch
+        || query_range.end > valid.dims()[1]
+        || key_range.end > valid.dims()[1]
+    {
+        return Err(Error::shape(
+            "muse_glimmer.token_mask",
+            format!("[{batch}, sequence covering both chunk ranges]"),
+            format!("{:?}", valid.dims()),
+        ));
+    }
+    let query_invalid = valid
+        .clone()
+        .slice([0..batch, query_range.clone()])
+        .bool_not()
+        .reshape([batch, 1, query_sequence, 1])
+        .expand([batch, heads, query_sequence, key_sequence]);
+    let key_invalid = valid
+        .clone()
+        .slice([0..batch, key_range.clone()])
+        .bool_not()
+        .reshape([batch, 1, 1, key_sequence])
+        .expand([batch, heads, query_sequence, key_sequence]);
+    let mut exclusion = query_invalid.bool_or(key_invalid);
+    if let Some(window) = window {
+        let ordinals = ordinals.ok_or_else(|| {
+            Error::configuration(
+                "muse_glimmer.attention_ordinals",
+                "are required for a padded sliding-window chunk",
+            )
+        })?;
+        if ordinals.dims() != valid.dims() {
+            return Err(Error::shape(
+                "muse_glimmer.attention_ordinals",
+                format!("{:?}", valid.dims()),
+                format!("{:?}", ordinals.dims()),
+            ));
+        }
+        let window = i64::try_from(window).map_err(|_| {
+            Error::configuration(
+                "muse_glimmer.attention_window",
+                "must fit in signed position arithmetic",
+            )
+        })?;
+        let query = ordinals
+            .clone()
+            .slice([0..batch, query_range])
+            .reshape([batch, 1, query_sequence, 1])
+            .expand([batch, heads, query_sequence, key_sequence]);
+        let key = ordinals
+            .clone()
+            .slice([0..batch, key_range])
+            .reshape([batch, 1, 1, key_sequence])
+            .expand([batch, heads, query_sequence, key_sequence]);
+        exclusion = exclusion.bool_or((key + window).lower_equal(query));
+    }
+    Ok(Some(exclusion))
+}
+
 /// Converts per-layer serialized RoPE metadata to a shared validated config.
 fn muse_rope_config(config: &MuseGlimmerTextConfig, theta: f64) -> Result<RopeConfig> {
     let parameters = config.rope_parameters.clone().unwrap_or_default();
@@ -743,15 +1261,15 @@ fn validate_token_ids<B: Backend>(token_ids: Tensor<B, 2, Int>, vocabulary: usiz
     Ok(())
 }
 
-/// Validates a semantic token mask and its nonempty-row policy.
+/// Validates a semantic token mask and reports whether every entry is valid.
 fn validate_mask<B: Backend>(
     mask: Option<&TokenMask<B>>,
     batch: usize,
     sequence: usize,
     permit_empty_rows: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let Some(mask) = mask else {
-        return Ok(());
+        return Ok(true);
     };
     if mask.as_tensor().dims() != [batch, sequence] {
         return Err(Error::shape(
@@ -760,25 +1278,29 @@ fn validate_mask<B: Backend>(
             format!("{:?}", mask.as_tensor().dims()),
         ));
     }
-    if !permit_empty_rows {
-        let minimum = mask
-            .as_tensor()
-            .clone()
-            .int()
-            .sum_dim(1)
-            .min()
-            .try_into_scalar()
-            .map_err(|error| Error::BackendCapability(format!("failed to inspect mask: {error}")))?
-            .elem::<i64>();
-        if minimum == 0 {
-            return Err(Error::shape(
-                "muse_glimmer.token_mask",
-                "at least one valid token in every prompt row",
-                "a fully masked row",
-            ));
-        }
+    let minimum = mask
+        .as_tensor()
+        .clone()
+        .int()
+        .sum_dim(1)
+        .min()
+        .try_into_scalar()
+        .map_err(|error| Error::BackendCapability(format!("failed to inspect mask: {error}")))?
+        .elem::<i64>();
+    if !permit_empty_rows && minimum == 0 {
+        return Err(Error::shape(
+            "muse_glimmer.token_mask",
+            "at least one valid token in every prompt row",
+            "a fully masked row",
+        ));
     }
-    Ok(())
+    let sequence = i64::try_from(sequence).map_err(|_| {
+        Error::configuration(
+            "muse_glimmer.token_mask",
+            "sequence length exceeds signed mask arithmetic",
+        )
+    })?;
+    Ok(minimum == sequence)
 }
 
 /// Resolves explicit positions or padding-independent cumulative token ordinals.
@@ -1052,6 +1574,15 @@ mod tests {
             .into_inner()
             .expect("Metal kernel trace mutex must not be poisoned");
         (output, launches)
+    }
+
+    /// Identifies Burn 0.21's CubeCL flash-attention kernel by launch identity.
+    #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
+    fn is_flash_attention_launch(launch: &MetalKernelLaunch) -> bool {
+        [&launch.name, &launch.id].into_iter().any(|identity| {
+            let identity = identity.to_ascii_lowercase();
+            identity.contains("cubek_attention") || identity.contains("flash_attention")
+        })
     }
 
     /// Builds a four-layer miniature with the released local/local/local/global schedule.
@@ -1454,10 +1985,7 @@ mod tests {
                 0..METAL_ATTENTION_HEAD_DIM,
             ]))
         });
-        let used_flash = launches.iter().any(|launch| {
-            launch.name.to_ascii_lowercase().contains("attention")
-                || launch.id.to_ascii_lowercase().contains("attention")
-        });
+        let used_flash = launches.iter().any(is_flash_attention_launch);
         assert!(
             used_flash,
             "autotuned call must execute an attention kernel: {launches:#?}"
@@ -1471,22 +1999,37 @@ mod tests {
             "fixture must expose the missing F16 score-rounding boundary"
         );
 
-        let muse_bits = muse_attention
-            .attend(projection, None, true)
-            .expect("valid Muse Metal attention")
-            .slice([
-                0..1,
-                METAL_ATTENTION_SEQUENCE - 1..METAL_ATTENTION_SEQUENCE,
-                0..4,
-            ])
-            .into_data()
-            .to_vec::<f16>()
-            .expect("Muse output must retain F16 storage")
-            .into_iter()
-            .map(f16::to_bits)
-            .collect::<Vec<_>>();
+        let plan = muse_attention
+            .execution_policy
+            .plan(1, 1, METAL_ATTENTION_SEQUENCE, METAL_ATTENTION_SEQUENCE)
+            .expect("default Muse policy must cover the Metal sentinel");
+        assert_eq!(plan.query_chunk_size(), 512);
+        assert_eq!(plan.chunk_count(), 9);
+        let (muse_bits, muse_launches) = capture_metal_kernel_launches(|| {
+            muse_attention
+                .attend(projection, None, true)
+                .expect("valid Muse Metal attention")
+                .slice([
+                    0..1,
+                    METAL_ATTENTION_SEQUENCE - 1..METAL_ATTENTION_SEQUENCE,
+                    0..4,
+                ])
+                .into_data()
+                .to_vec::<f16>()
+                .expect("Muse output must retain F16 storage")
+                .into_iter()
+                .map(f16::to_bits)
+                .collect::<Vec<_>>()
+        });
+        let muse_used_flash = muse_launches.iter().any(is_flash_attention_launch);
+        assert!(
+            !muse_used_flash,
+            "the pinned eager Muse path must not silently dispatch flash: {muse_launches:#?}"
+        );
         eprintln!(
-            "Muse Metal score-rounding gate: eager={eager_bits:04x?}, strict={strict_bits:04x?}, fused={fused_bits:04x?}, used_flash={used_flash}"
+            "Muse Metal score-rounding gate: eager={eager_bits:04x?}, strict={strict_bits:04x?}, fused={fused_bits:04x?}, used_flash={used_flash}, muse_used_flash={muse_used_flash}, muse_chunks={}x{}",
+            plan.chunk_count(),
+            plan.query_chunk_size(),
         );
         assert_eq!(muse_bits, eager_bits, "Muse must match pinned eager F16");
     }
@@ -1509,6 +2052,122 @@ mod tests {
             }
         );
         assert_eq!(muse_attention_options(false).scale, None);
+    }
+
+    /// Sliding query chunks retain precisely the union of row-local key ranges.
+    #[test]
+    fn aligned_local_key_ranges_respect_inclusive_window_boundary() {
+        assert_eq!(
+            aligned_key_range(32_768, 32_768, 0..512, 2048).unwrap(),
+            0..512
+        );
+        assert_eq!(
+            aligned_key_range(32_768, 32_768, 2048..2560, 2048).unwrap(),
+            1..2560
+        );
+        assert_eq!(aligned_key_range(2, 5, 0..2, 3).unwrap(), 1..5);
+        assert!(aligned_key_range(5, 4, 0..1, 3).is_err());
+        assert!(aligned_key_range(5, 5, 0..1, 0).is_err());
+    }
+
+    /// Muse defaults to a bounded policy and rejects invalid runtime overrides.
+    #[test]
+    fn model_exposes_validated_attention_execution_policy() {
+        let (model, _) = tiny_model();
+        assert_eq!(
+            model.attention_execution_policy(),
+            AttentionExecutionPolicy::default()
+        );
+        let error = model
+            .clone()
+            .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(0, 1))
+            .expect_err("zero query chunks are invalid");
+        assert!(error.to_string().contains("max_query_tokens"));
+        let unbounded = model
+            .with_attention_execution_policy(AttentionExecutionPolicy::Unbounded)
+            .expect("explicit unbounded policy");
+        assert_eq!(
+            unbounded.attention_execution_policy(),
+            AttentionExecutionPolicy::Unbounded
+        );
+    }
+
+    /// Query chunking retains full/sliding causal and padded-window semantics.
+    #[test]
+    fn bounded_stateless_attention_matches_unbounded_with_padding_holes() {
+        let (model, device) = tiny_model();
+        let unbounded = model
+            .clone()
+            .with_attention_execution_policy(AttentionExecutionPolicy::Unbounded)
+            .expect("unbounded fixture");
+        let bounded = model
+            .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(2, 20))
+            .expect("two-row chunks");
+        let input = || CausalLmInput {
+            token_ids: Tensor::from_ints([[1, 2, 3, 4, 5]], &device),
+            token_mask: Some(TokenMask::new(Tensor::from_bool(
+                TensorData::from([[true, false, true, true, true]]),
+                &device,
+            ))),
+            position_ids: None,
+        };
+        let options = ForwardOptions {
+            logits: LogitsSelection::All,
+            ..Default::default()
+        };
+        let expected = unbounded
+            .forward(input(), &options)
+            .expect("unbounded forward")
+            .logits;
+        let actual = bounded
+            .forward(input(), &options)
+            .expect("bounded forward")
+            .logits;
+        actual
+            .into_data()
+            .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(2e-6));
+    }
+
+    /// A redundant all-valid mask takes the optimized unpadded sliding path.
+    #[test]
+    fn bounded_stateless_all_valid_mask_matches_absent_mask() {
+        let (model, device) = tiny_model();
+        let model = model
+            .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(2, 20))
+            .expect("two-row chunks");
+        let options = ForwardOptions {
+            logits: LogitsSelection::All,
+            ..Default::default()
+        };
+        let token_ids = || Tensor::from_ints([[1, 2, 3, 4, 5]], &device);
+        let expected = model
+            .forward(
+                CausalLmInput {
+                    token_ids: token_ids(),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &options,
+            )
+            .expect("unmasked forward")
+            .logits;
+        let actual = model
+            .forward(
+                CausalLmInput {
+                    token_ids: token_ids(),
+                    token_mask: Some(TokenMask::new(Tensor::from_bool(
+                        TensorData::from([[true, true, true, true, true]]),
+                        &device,
+                    ))),
+                    position_ids: None,
+                },
+                &options,
+            )
+            .expect("all-valid forward")
+            .logits;
+        actual
+            .into_data()
+            .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(2e-6));
     }
 
     /// Muse initialization selects the two inverse-root graphs used upstream.
@@ -1818,5 +2477,31 @@ mod tests {
             .sum();
         let gradients = loss.backward();
         assert!(model.model.embed_tokens.weight.grad(&gradients).is_some());
+    }
+
+    /// Multi-chunk autodiff fails closed because its tape is not memory-bounded.
+    #[cfg(feature = "autodiff")]
+    #[test]
+    fn bounded_multichunk_autodiff_is_not_mislabeled_as_memory_bounded() {
+        use burn::backend::Autodiff;
+
+        type AdBackend = Autodiff<TestBackend>;
+        let device = Default::default();
+        let model = MuseGlimmerForCausalLm::<AdBackend>::init(tiny_config(), &device)
+            .unwrap()
+            .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(1, 64))
+            .unwrap();
+        let error = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::<AdBackend, 2, Int>::from_ints([[1, 2]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions::default(),
+            )
+            .expect_err("autodiff retains all chunk intermediates");
+        assert!(error.to_string().contains("inference-only"));
+        assert!(error.to_string().contains("autodiff tape"));
     }
 }

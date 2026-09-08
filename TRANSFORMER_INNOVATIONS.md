@@ -372,13 +372,37 @@ dtype, promotes only softmax to FP32, casts the probabilities back, and then
 multiplies by V. Burn 0.21 flash attention instead keeps QK accumulation in
 strict FP32; an adversarial Metal F16 gate confirms that omitting the score
 rounding changes output bits. Muse therefore opts into the shared explicit
-eager mode for F16, accepting an $O(n^2)$ score allocation, while F32 retains
-backend-native dispatch. Its scale remains unset in both cases, selecting the
-mathematically identical default factor and preserving flash eligibility where
-the operation graph is numerically valid. Eligibility does not itself select a
-fused kernel: Burn 0.21's ordinary `metal` feature defaults to fallback, and
-runtime selection requires its separate `autotune` feature. This scaling changes
-attention entropy without letting raw projection norms determine temperature.
+eager mode for F16, while F32 retains backend-native arithmetic.
+
+The production Muse path does not advertise flash attention. Burn 0.21's
+ordinary `metal` feature does not enable its attention autotuner, and the
+opt-in CubeCL flash candidate uses the numerically different strict-FP32 QK
+graph. The opt-in Metal trace gate observes `cubek_attention` for that control,
+observes no flash launch for Muse's explicit path, and distinguishes eager F16
+bits `[1a3b, 3268, 157f, 3a5d]` from flash bits
+`[1a38, 3266, 157e, 3a5e]`. Instead, a validated
+[`AttentionExecutionPolicy`](src/attention.rs)
+keeps short oracle prompts in one unchanged call and splits longer prompts only
+along the query axis. Every query chunk still sees its entire allowed key set,
+so this is exact row-wise softmax rather than an attention approximation.
+Synchronized cleanup between chunks changes peak score-like storage from
+$O(QK)$ to $O(CK)$ for configured query bound $C$; the default caps each plane
+at $2^{26}$ elements and at 512 queries. At Muse's 32 heads and 32K global
+context that produces 512 chunks of 64 queries, each with at most $2^{26}$
+score elements, instead of one 34-billion-element plane. Unmasked or explicitly
+all-valid sliding layers also slice each chunk's union of visible keys, at most
+$W+C-1$ keys for window $W$; genuinely padded inputs retain all physical key
+columns because semantic valid-token
+ordinals can span holes, but remain score-bounded by reducing $C$. Parameters,
+Q/K/V, output activations, and autodiff tapes are outside this bound, and
+multi-chunk autodiff is rejected rather than mislabeled as bounded. Query
+chunking can select a different backend GEMM implementation at long lengths, so
+bit-for-bit claims remain confined to the unchanged single-chunk oracle path.
+
+Its scale remains unset, selecting the mathematically identical default factor
+and preserving fused eligibility only where a future kernel can also reproduce
+the required rounding graph. This scaling changes attention entropy without
+letting raw projection norms determine temperature.
 
 This exact-eager choice currently blocks the real 32K production-path gate on
 the 96 GB M3 Max. One full-attention score tensor at 32K has shape

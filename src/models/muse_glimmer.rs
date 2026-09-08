@@ -12,6 +12,9 @@
 //! vocabulary head while reporting every visual tensor through an explicit
 //! allowlist. Cache state remains external to the Burn parameter graph: local
 //! layers use mirrored sliding rings and global NoPE layers retain full KV history.
+//! Stateless and cached attention share a validated query-chunk policy that
+//! bounds score-like workspace without approximating any softmax row. The
+//! reference eager operation remains unchanged for short single-chunk calls.
 
 mod checkpoint;
 mod load;

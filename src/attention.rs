@@ -12,7 +12,10 @@
 //! without duplicating projection code. Backend-native attention is the default.
 //! Architectures whose pinned eager graphs materialize reduced-precision scores
 //! before an explicit F32 softmax can opt into that exact operation order; the
-//! tradeoff is an unfused quadratic score tensor.
+//! unfused path can be paired with [`AttentionExecutionPolicy`] to cap every
+//! score-like plane by evaluating complete attention rows in synchronized query
+//! chunks. This is a storage bound, not a linear-time attention approximation:
+//! full-attention chunks still visit every key.
 
 use burn::{
     module::Module,
@@ -56,6 +59,219 @@ pub enum AttentionPrecisionMode {
     /// score tensor because flash kernels with strict-F32 QK accumulation omit
     /// the observable reduced-precision boundary.
     EagerFp32Softmax,
+}
+
+/// Controls the peak score-plane size of an attention operation.
+///
+/// A score plane contains one element for every
+/// `[batch, head, query, key]` pair. Query chunking preserves the mathematical
+/// attention rows because every chunk still sees its complete allowed key
+/// range, while changing peak temporary storage from `O(query * key)` to
+/// `O(query_chunk * key)`. Backends are synchronized between chunks so dropped
+/// score, mask, and probability buffers can be reclaimed before the next chunk.
+///
+/// This policy bounds score-like intermediates, not parameters, Q/K/V storage,
+/// the linear-size output, or an autodiff tape. Multi-chunk execution is
+/// therefore rejected on autodiff backends; callers doing training can select
+/// [`Self::Unbounded`] explicitly after provisioning the required memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionExecutionPolicy {
+    /// Evaluate all query rows together without a score-plane bound.
+    ///
+    /// This is useful for small golden-oracle calls and explicitly provisioned
+    /// training runs. Its peak attention workspace is quadratic for self
+    /// attention.
+    Unbounded,
+    /// Split query rows while retaining the complete key support of every row.
+    QueryChunked {
+        /// Hard upper bound on query rows submitted in one attention call.
+        max_query_tokens: usize,
+        /// Hard upper bound on elements in any score-like chunk plane.
+        max_score_elements: usize,
+    },
+}
+
+impl Default for AttentionExecutionPolicy {
+    /// Uses a conservative production bound suitable for 32K Muse inference.
+    fn default() -> Self {
+        Self::QueryChunked {
+            max_query_tokens: 512,
+            max_score_elements: 1 << 26,
+        }
+    }
+}
+
+impl AttentionExecutionPolicy {
+    /// Constructs a synchronized query-chunked policy.
+    #[must_use]
+    pub const fn query_chunked(max_query_tokens: usize, max_score_elements: usize) -> Self {
+        Self::QueryChunked {
+            max_query_tokens,
+            max_score_elements,
+        }
+    }
+
+    /// Validates non-zero chunk and workspace limits.
+    pub fn validate(self) -> Result<()> {
+        if let Self::QueryChunked {
+            max_query_tokens,
+            max_score_elements,
+        } = self
+        {
+            if max_query_tokens == 0 {
+                return Err(Error::configuration(
+                    "attention.execution.max_query_tokens",
+                    "must be greater than zero",
+                ));
+            }
+            if max_score_elements == 0 {
+                return Err(Error::configuration(
+                    "attention.execution.max_score_elements",
+                    "must be greater than zero",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Plans query chunks for a conservative upper bound on keys per chunk.
+    ///
+    /// `key_sequence_bound` may be smaller than the physical key tensor when a
+    /// caller can prove that each chunk slices a local window first. The caller
+    /// remains responsible for checking every concrete key slice against the
+    /// resulting score-element limit.
+    pub fn plan(
+        self,
+        batch: usize,
+        heads: usize,
+        query_sequence: usize,
+        key_sequence_bound: usize,
+    ) -> Result<AttentionExecutionPlan> {
+        self.validate()?;
+        if batch == 0 || heads == 0 || query_sequence == 0 || key_sequence_bound == 0 {
+            return Err(Error::configuration(
+                "attention.execution_shape",
+                "batch, heads, query sequence, and key bound must be non-zero",
+            ));
+        }
+        let elements_per_query = batch
+            .checked_mul(heads)
+            .and_then(|elements| elements.checked_mul(key_sequence_bound))
+            .ok_or_else(|| {
+                Error::configuration(
+                    "attention.execution_shape",
+                    "score-plane dimensions overflow usize",
+                )
+            })?;
+        let (query_chunk_size, score_element_limit) = match self {
+            Self::Unbounded => (query_sequence, None),
+            Self::QueryChunked {
+                max_query_tokens,
+                max_score_elements,
+            } => {
+                if elements_per_query > max_score_elements {
+                    return Err(Error::BackendCapability(format!(
+                        "one attention query row requires {elements_per_query} score elements, exceeding the configured bound of {max_score_elements}"
+                    )));
+                }
+                (
+                    query_sequence
+                        .min(max_query_tokens)
+                        .min(max_score_elements / elements_per_query),
+                    Some(max_score_elements),
+                )
+            }
+        };
+        let chunk_count = query_sequence.div_ceil(query_chunk_size);
+        let peak_score_elements = elements_per_query
+            .checked_mul(query_chunk_size.min(query_sequence))
+            .ok_or_else(|| {
+                Error::configuration(
+                    "attention.execution_shape",
+                    "planned score-plane size overflows usize",
+                )
+            })?;
+        Ok(AttentionExecutionPlan {
+            query_chunk_size,
+            chunk_count,
+            peak_score_elements,
+            score_element_limit,
+        })
+    }
+
+    /// Returns the configured maximum query rows before score-bound reduction.
+    #[must_use]
+    pub const fn maximum_query_tokens(self, query_sequence: usize) -> usize {
+        match self {
+            Self::Unbounded => query_sequence,
+            Self::QueryChunked {
+                max_query_tokens, ..
+            } => {
+                if max_query_tokens < query_sequence {
+                    max_query_tokens
+                } else {
+                    query_sequence
+                }
+            }
+        }
+    }
+
+    /// Checks that one concrete chunk stays within this policy's score bound.
+    pub fn validate_chunk(
+        self,
+        batch: usize,
+        heads: usize,
+        query_sequence: usize,
+        key_sequence: usize,
+    ) -> Result<()> {
+        let plan = self.plan(batch, heads, query_sequence, key_sequence)?;
+        if plan.chunk_count != 1 {
+            return Err(Error::BackendCapability(format!(
+                "attention chunk [{batch}, {heads}, {query_sequence}, {key_sequence}] exceeds the configured single-chunk score bound"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Immutable allocation plan produced by [`AttentionExecutionPolicy`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttentionExecutionPlan {
+    /// Query rows evaluated in each chunk except possibly the final remainder.
+    query_chunk_size: usize,
+    /// Number of sequential attention calls.
+    chunk_count: usize,
+    /// Maximum score elements produced by the planned shape.
+    peak_score_elements: usize,
+    /// Configured bound, or `None` for unbounded execution.
+    score_element_limit: Option<usize>,
+}
+
+impl AttentionExecutionPlan {
+    /// Returns query rows evaluated per chunk.
+    #[must_use]
+    pub const fn query_chunk_size(self) -> usize {
+        self.query_chunk_size
+    }
+
+    /// Returns the number of sequential chunks.
+    #[must_use]
+    pub const fn chunk_count(self) -> usize {
+        self.chunk_count
+    }
+
+    /// Returns the maximum number of elements in one score-like plane.
+    #[must_use]
+    pub const fn peak_score_elements(self) -> usize {
+        self.peak_score_elements
+    }
+
+    /// Returns the configured score-element limit when execution is bounded.
+    #[must_use]
+    pub const fn score_element_limit(self) -> Option<usize> {
+        self.score_element_limit
+    }
 }
 
 /// Configuration for full MHA, GQA, or MQA projections and attention dispatch.
@@ -743,10 +959,79 @@ mod tests {
     use crate::architecture::TokenMask;
 
     use super::{
-        AttentionOutputGate, AttentionPrecisionMode, AttentionProjection,
+        AttentionExecutionPolicy, AttentionOutputGate, AttentionPrecisionMode, AttentionProjection,
         GroupedQueryAttentionConfig, bottom_right_causal_mask, dispatch_attention,
         padding_attention_mask, repeat_key_value,
     };
+
+    /// The production default bounds official-width 32K score planes to 64 queries.
+    #[test]
+    fn execution_policy_plans_official_width_32k_attention() {
+        let policy = AttentionExecutionPolicy::default();
+        let global = policy
+            .plan(1, 32, 32_768, 32_768)
+            .expect("one 32K score row fits the production bound");
+        assert_eq!(global.query_chunk_size(), 64);
+        assert_eq!(global.chunk_count(), 512);
+        assert_eq!(global.peak_score_elements(), 1 << 26);
+        assert_eq!(global.score_element_limit(), Some(1 << 26));
+
+        let local = policy
+            .plan(1, 32, 32_768, 2048 + 511)
+            .expect("Muse's local key-union bound must fit");
+        assert_eq!(local.query_chunk_size(), 512);
+        assert_eq!(local.chunk_count(), 64);
+        assert_eq!(local.peak_score_elements(), 41_926_656);
+
+        let oracle = policy
+            .plan(1, 32, 67, 67)
+            .expect("the pinned Muse oracle prompt is intentionally unchunked");
+        assert_eq!(oracle.query_chunk_size(), 67);
+        assert_eq!(oracle.chunk_count(), 1);
+    }
+
+    /// Invalid or impossible bounds fail before allocating device tensors.
+    #[test]
+    fn execution_policy_rejects_zero_and_oversized_rows() {
+        let zero_queries = AttentionExecutionPolicy::query_chunked(0, 1);
+        assert!(
+            zero_queries
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("max_query_tokens")
+        );
+        let zero_scores = AttentionExecutionPolicy::query_chunked(1, 0);
+        assert!(
+            zero_scores
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("max_score_elements")
+        );
+        let too_small = AttentionExecutionPolicy::query_chunked(8, 63);
+        let error = too_small
+            .plan(1, 2, 8, 32)
+            .expect_err("one row contains 64 score elements");
+        assert!(error.to_string().contains("one attention query row"));
+        assert!(
+            AttentionExecutionPolicy::default()
+                .plan(0, 1, 1, 1)
+                .is_err()
+        );
+    }
+
+    /// Explicit unbounded plans retain a single full-query operation.
+    #[test]
+    fn unbounded_execution_plan_is_transparent() {
+        let plan = AttentionExecutionPolicy::Unbounded
+            .plan(2, 3, 5, 7)
+            .expect("small shape");
+        assert_eq!(plan.query_chunk_size(), 5);
+        assert_eq!(plan.chunk_count(), 1);
+        assert_eq!(plan.peak_score_elements(), 210);
+        assert_eq!(plan.score_element_limit(), None);
+    }
 
     /// Backend-native attention remains the serialized and construction default.
     #[test]

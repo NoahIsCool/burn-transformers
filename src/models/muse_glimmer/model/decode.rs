@@ -16,7 +16,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
+#[cfg(test)]
+use burn::tensor::Bool;
+use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
 
 use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, Result,
@@ -476,7 +478,6 @@ impl<B: Backend> MuseGlimmerDecoderLayer<B> {
         }
         let new_keys = projection.key.clone();
         let new_values = projection.value.clone();
-        let query_sequence = projection.query.dims()[2];
         let (group, group_layer) = cache_slot.coordinates();
         let cache = state.tensors.main().native_kv(group)?;
         let history = cache.read_sequence(group_layer, row, baseline)?;
@@ -492,17 +493,7 @@ impl<B: Backend> MuseGlimmerDecoderLayer<B> {
             projection.key = Tensor::cat(vec![past_keys, projection.key], 2);
             projection.value = Tensor::cat(vec![past_values, projection.value], 2);
         }
-        let key_sequence = projection.key.dims()[2];
-        let mask = cached_attention_mask(
-            baseline,
-            query_sequence,
-            expected_start,
-            key_sequence,
-            self.self_attn.query_heads,
-            local_window,
-            &projection.query.device(),
-        )?;
-        let attended = self.self_attn.attend(projection, Some(mask), false)?;
+        let attended = self.self_attn.attend_cached(projection, local_window)?;
         let hidden = residual + self.post_attention_layernorm.forward(attended);
         let residual = hidden.clone();
         let fed = super::muse_gated_feed_forward(
@@ -955,7 +946,11 @@ fn validate_cached_rope_context<B: Backend>(
     Ok(())
 }
 
-/// Builds `excluded(q,k) = k > q || (local && k + window <= q)` in absolute time.
+/// Builds the complete cached mask only for compact unit-test fixtures.
+///
+/// Production cached execution calls the range-aware builder in the parent
+/// module so long prefills never allocate this full query-by-key plane.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn cached_attention_mask<B: Backend>(
     baseline: usize,
@@ -982,22 +977,22 @@ fn cached_attention_mask<B: Backend>(
             format!("end {key_end}"),
         ));
     }
-    let query_start = i64::try_from(baseline)
-        .map_err(|_| Error::configuration("muse_glimmer.attention_mask", "offset exceeds i64"))?;
-    let query_end = i64::try_from(query_end)
-        .map_err(|_| Error::configuration("muse_glimmer.attention_mask", "length exceeds i64"))?;
-    let key_start = i64::try_from(key_start)
-        .map_err(|_| Error::configuration("muse_glimmer.attention_mask", "offset exceeds i64"))?;
-    let query = Tensor::<B, 1, Int>::arange(query_start..query_end, device)
-        .reshape([1, 1, query_sequence, 1])
-        .expand([1, heads, query_sequence, key_sequence]);
-    let key = Tensor::<B, 1, Int>::arange(key_start..query_end, device)
-        .reshape([1, 1, 1, key_sequence])
-        .expand([1, heads, query_sequence, key_sequence]);
-    let causal = key.clone().greater(query.clone());
-    Ok(match window {
-        Some(window) => causal.bool_or((key + window as i64).lower_equal(query)),
-        None => causal,
+    super::aligned_attention_mask(
+        1,
+        heads,
+        query_sequence,
+        key_sequence,
+        0..query_sequence,
+        0..key_sequence,
+        true,
+        window,
+        device,
+    )?
+    .ok_or_else(|| {
+        Error::configuration(
+            "muse_glimmer.attention_mask",
+            "cached attention must produce a causal exclusion",
+        )
     })
 }
 
@@ -1077,7 +1072,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        DecodeState, checkpoint::TensorSink, models::muse_glimmer::MuseGlimmerCheckpointOptions,
+        DecodeState, attention::AttentionExecutionPolicy, checkpoint::TensorSink,
+        models::muse_glimmer::MuseGlimmerCheckpointOptions,
     };
 
     type TestBackend = Flex<f32, i32>;
@@ -1295,6 +1291,46 @@ mod tests {
             .into_data()
             .assert_approx_eq::<f32>(&full.into_data(), Tolerance::absolute(3e-4));
         assert_eq!(state.lengths(), &[4]);
+    }
+
+    /// Multi-query cached prefill uses the same logits under bounded chunking.
+    #[test]
+    fn bounded_cached_prefill_matches_unbounded_execution() {
+        let (model, device) = tiny_model();
+        let unbounded = model
+            .clone()
+            .with_attention_execution_policy(AttentionExecutionPolicy::Unbounded)
+            .expect("unbounded fixture");
+        let bounded = model
+            .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(2, 20))
+            .expect("two-query chunks");
+        let mut unbounded_state = unbounded
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        let mut bounded_state = bounded
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        let input = || CausalLmInput {
+            token_ids: Tensor::from_ints([[1, 2, 3, 4, 5]], &device),
+            token_mask: None,
+            position_ids: None,
+        };
+        let options = ForwardOptions {
+            logits: crate::LogitsSelection::All,
+            ..Default::default()
+        };
+        let expected = unbounded
+            .prefill(input(), &mut unbounded_state, &options)
+            .expect("unbounded prefill")
+            .logits;
+        let actual = bounded
+            .prefill(input(), &mut bounded_state, &options)
+            .expect("bounded prefill")
+            .logits;
+        actual
+            .into_data()
+            .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(2e-6));
+        assert_eq!(bounded_state.lengths(), unbounded_state.lengths());
     }
 
     /// Interior holes and ordinary padding retain semantic cached/stateless parity.
