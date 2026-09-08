@@ -285,15 +285,18 @@ const REFERENCE_ARTIFACT_MANIFEST_SHA256: &str =
 
 /// JSON output identity to pin only after independent reference-run review.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
-const TRUSTED_MUSE_REFERENCE_JSON_SHA256: Option<&str> = None;
+const TRUSTED_MUSE_REFERENCE_JSON_SHA256: Option<&str> =
+    Some("eac57db2e05e4b9e9366a71ffc3fad71e1ff2f7fd176000950ad1d01d1cbfb33");
 
 /// Numerical prompt-logit identity to pin independently of the JSON claim.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
-const TRUSTED_MUSE_REFERENCE_LOGITS_SHA256: Option<&str> = None;
+const TRUSTED_MUSE_REFERENCE_LOGITS_SHA256: Option<&str> =
+    Some("c384665147d10a255110e9e034ddec557a2b49909e7105d98a5b541ff4c5d189");
 
 /// Numerical hidden-trace identity to pin independently of the JSON claim.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
-const TRUSTED_MUSE_REFERENCE_HIDDEN_SHA256: Option<&str> = None;
+const TRUSTED_MUSE_REFERENCE_HIDDEN_SHA256: Option<&str> =
+    Some("6ce52668e97a612b0bf8c5adbb306eceda0d002aec8ed1726385b5dd11ab9c3f");
 
 /// Resolves the explicitly selected immutable local artifact directory.
 fn pinned_root() -> PathBuf {
