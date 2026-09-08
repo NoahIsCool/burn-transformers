@@ -356,7 +356,7 @@ and [Qwen3.5 code](https://github.com/huggingface/transformers/blob/cfa309cfa34b
 Muse normalizes Q and K without learned scales, then applies
 $q\leftarrow3.87q$. Standard $1/\sqrt{128}$ scaling is still applied exactly
 once by scaled dot-product attention, so the effective score multiplier is
-$3.87/\sqrt{128}$. Softmax is accumulated in FP32 and cast back to the value
+$3.87/\sqrt{128}$. Softmax is accumulated in FP32 and cast back to the query
 dtype. The Burn path pre-scales Q by 3.87 but leaves the attention primitive's
 optional scale unset: that selects its mathematically identical default factor
 while preserving fused-kernel eligibility. This changes attention entropy
@@ -569,8 +569,10 @@ chunked mode in [`nemotron_h/model/mamba2.rs`](src/models/nemotron_h/model/mamba
 SwiGLU uses two input projections and a multiplicative content path:
 $\operatorname{FFN}(x)=W_d(\operatorname{SiLU}(W_gx)\odot W_ux)$, where
 $\operatorname{SiLU}(z)=z\sigma(z)$. It adds a learned gate without recurrent
-state. Qwen and Muse use dense or routed SwiGLU; DeepSeek uses it in its dense,
-routed, and shared branches; FLAN-UL2 selects T5's `gated-silu` variant.
+state. Across the listed Qwen variants, Qwen3.5/3.8 uses dense SwiGLU while
+Qwen3-MoE uses it inside routed experts. Muse uses dense SwiGLU; DeepSeek uses
+it in dense, routed, and shared branches; FLAN-UL2 selects T5's `gated-silu`
+variant.
 
 **Implementation:** [`GatedFeedForward`](src/feed_forward.rs), instantiated by
 the relevant family model files. **Reference:**
@@ -938,6 +940,27 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   set `false`.
 - **Qwen's two gates are different.** Full attention uses a sigmoid output
   gate. The Qwen3.8 `"swish"` field describes DeltaNet's output gated norm.
+- **Qwen3-MoE has two equivalent expert storage layouts.** Its official
+  checkpoint exposes independent gate/up/down tensors for every expert. The
+  pinned Transformers 5.2 loader keeps the `qwen3_moe` architecture but aliases
+  its checkpoint conversion to the `qwen2_moe` rules, stacking those split
+  tensors into packed three-dimensional gate-up and down weights: 18,867
+  physical checkpoint tensors become 531 named parameter tensors. The Burn
+  full-precision graph retains independently addressable expert modules.
+  Separately, `SparseMoe::dispatch_selected_experts` groups assignments and
+  skips experts with no assigned tokens. This storage difference does not
+  change the routed SwiGLU equation. See the pinned
+  [`conversion_mapping.py`](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/conversion_mapping.py)
+  and
+  [`modeling_qwen3_moe.py`](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py),
+  plus [`qwen3_moe/load.rs`](src/models/qwen3_moe/load.rs) and
+  [`moe.rs`](src/moe.rs).
+- **Muse's serialized Transformers version is provenance, not executable
+  identity.** The checkpoint config records `5.15.0.dev0`, while the immutable
+  `cfa309…` source revision used for numerical acceptance identifies itself as
+  `5.17.0.dev0`. Oracle generation therefore authenticates the Git revision and
+  source bytes and records the config value separately; it never substitutes
+  one version string for the other.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

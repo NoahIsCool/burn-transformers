@@ -6,9 +6,11 @@ because its configuration parses: support requires strict weight loading,
 reference-logit parity, cache parity, generation parity, and a recorded hardware
 acceptance run.
 
-The checkpoint revisions below are immutable. Reference fixtures are generated
-from Hugging Face Transformers revision
-`cfa309cfa34b5497a32fd50af49aa97aac94c054`; Qwen multi-token-prediction
+The checkpoint revisions below are immutable. Muse and the current shared
+architecture fixtures pin Hugging Face Transformers revision
+`cfa309cfa34b5497a32fd50af49aa97aac94c054`; Qwen3-MoE's executable oracle
+instead pins the released Transformers 5.2 commit
+`7d9754a05193eb79b1d86aa744b622b8068008cd`. Qwen multi-token-prediction
 semantics are cross-checked against vLLM revision
 `bb363db9a5ec2edc7b39e99b00af363a89d1fb81`. Burn is pinned to the annotated
 `v0.21.0` tag at `546cacb55fe00168854d19bdf0a5d79bd8060e03`.

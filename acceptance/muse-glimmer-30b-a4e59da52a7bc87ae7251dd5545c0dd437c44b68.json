@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "advertised_supported": false,
+  "phase": "authenticated_artifact_and_strict_f16_plan_verified_pending_weight_application_official_reference_generation_and_32k_acceptance",
+  "repository": "meta-models/Muse-Glimmer-30B",
+  "revision": "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
+  "reference": {
+    "repository": "huggingface/transformers",
+    "revision": "cfa309cfa34b5497a32fd50af49aa97aac94c054",
+    "source": "src/transformers/models/muse_glimmer/modeling_muse_glimmer.py",
+    "source_bytes": 53259,
+    "source_sha256": "459498a758446f580fb4a9203c64ab4be68488b40a04acd379dd62658d5bad71"
+  },
+  "artifact_layout": {
+    "safetensors_shards": 2,
+    "physical_tensors": 1436,
+    "dtype_counts": {
+      "BF16": 1436
+    },
+    "checkpoint_tensor_bytes": 59553253376,
+    "artifact_shard_bytes": 59553435272,
+    "control_files_hashed": 7,
+    "weight_shards_hashed": 2,
+    "language_tensors_consumed": 627,
+    "language_tensor_renames": 626,
+    "visual_tensors_allowlisted": 809
+  },
+  "architecture": {
+    "model_type": "muse_glimmer_text",
+    "hidden_layers": 52,
+    "hidden_size": 6656,
+    "intermediate_size": 19968,
+    "attention_heads": 32,
+    "key_value_heads": 2,
+    "head_dim": 128,
+    "sliding_attention_layers": 39,
+    "full_attention_layers": 13,
+    "sliding_window": 2048,
+    "maximum_position_embeddings": 131072,
+    "vocabulary_size": 202048,
+    "query_scale_factor": 3.87,
+    "final_logit_softcap": 20.0,
+    "output_multiplier": 0.19611613513818404
+  },
+  "strict_memory_plan": {
+    "target_parameter_bytes": 55709561856,
+    "logical_model_bytes": 55709561856,
+    "largest_shard_bytes": 49950112952,
+    "largest_source_tensor_bytes": 2689662976,
+    "largest_target_tensor_bytes": 2689662976,
+    "peak_host_staging_bytes": 52639775928,
+    "strategy": "two_pass_header_validation_then_source_ordered_single_shard_streaming",
+    "source_dtype": "bf16",
+    "acceptance_target_dtype": "f16",
+    "estimate_classification": "conservative_upper_bound",
+    "execution_note": "The planner combines the largest shard and largest target tensor for a conservative preflight bound. Pass-two runtime counters remain unrecorded until the complete text graph is applied."
+  },
+  "inventory_digests": {
+    "header_inventory_sha256": "7bf662cfb4142c1f9994926574082e9adf52f9c335f226e46b998a7d9c4547cb",
+    "f16_load_plan_sha256": "fde94638b261fbaee47e53dbf035660e5bd1732a6d92e45c45cddb720ed95d6d"
+  },
+  "sha256": {
+    "chat_template.jinja": "cfc67e5f349f37690dfd31ed1f18bc4442a9dd32fe39a648f993cb4eb3cae678",
+    "config.json": "5a9df2d8a385b3d361ab6ae68d73586f4e775033933bd0cd863fb7f3820e6a14",
+    "generation_config.json": "1fa51889b1f8d3659802dedaa27e005b81e5c58483f13ecf13f2d97306bc6e35",
+    "model.safetensors.index.json": "7d817b4dccb1b123fc6c1939356c65cee3a0ad462a5b821ac88280990a27d1ba",
+    "processor_config.json": "97e2a486dd9866b81f40cf4b8bc0c9ced9a7cd8a5bc65aa4cc2f4de0712dae77",
+    "tokenizer.json": "c9dbee66967b58f31a7c27f723c3760da3526ccd0427578e8905b0abb0031c4d",
+    "tokenizer_config.json": "781e6c74f571642c71202167b67d9255b28cc439bdda1582ff31346182f5a9c5",
+    "model-00001-of-00002.safetensors": "8eef61530e1283642c77ce2e6721feb5c6f348fa055c00e90f2844a136372694",
+    "model-00002-of-00002.safetensors": "b58cc2144ba1ba1af4420f67f4ca3ced7f09298510b80464cc75018a0be14381"
+  },
+  "checks": {
+    "exact_config_validated": true,
+    "all_safetensors_headers_strictly_validated": true,
+    "all_control_files_sha256_validated": true,
+    "all_weight_shards_sha256_validated": true,
+    "tensor_inventory_matches_pinned_fixture": true,
+    "strict_mapping_planned": true,
+    "tokenizer_round_trip_validated": true,
+    "chat_template_exactly_rendered": false,
+    "chat_template_known_minijinja_parser_limitation_validated": true,
+    "all_weights_applied": false,
+    "all_parameters_installed_as_f16": false,
+    "source_ordered_single_shard_streaming_validated": false,
+    "metal_f16_stateless_inference": false,
+    "metal_f16_cached_prefill": false,
+    "metal_f16_recurrent_decode": false,
+    "official_reference_full_vector_logits_compared": false,
+    "official_reference_hidden_trace_compared": false,
+    "official_reference_greedy_32_tokens_compared": false,
+    "cached_stateless_top1_all_prefixes_compared": false,
+    "quantization_validated": false,
+    "long_context_32k_validated": false
+  },
+  "artifact_authentication": {
+    "status": "passed",
+    "result_recorded": true,
+    "source": {
+      "crate_commit": "a0055dff40b93cce5867902e35aabd2892e15365",
+      "commit_subject": "test(transformers): pin muse glimmer artifact gates",
+      "transformer_source_matches_commit": true,
+      "note": "The header and payload tests were built from the recorded transformer commit. An unrelated modification outside crates/transformers was not part of the evidence source."
+    },
+    "header_plan_tokenizer_gate": {
+      "status": "passed",
+      "prompt": "Hello world, cached decoding.",
+      "prompt_token_ids": [19873, 3817, 24, 41346, 63623, 26],
+      "elapsed_seconds": 2.949
+    },
+    "full_payload_gate": {
+      "status": "passed",
+      "bytes_hashed": 59553435272,
+      "rust_test_elapsed_seconds": 2075.753,
+      "profile": "debug",
+      "future_reproduction_profile": "release",
+      "process_exit_note": "The Rust test reported one pass and zero failures. Its sandboxed /usr/bin/time wrapper returned nonzero only because macOS denied the wrapper's kern.clockrate sysctl, so no process-level memory metric is recorded."
+    }
+  },
+  "open_release_gates": [
+    "strict full F16 language-graph weight application",
+    "official Transformers F16 prompt-logit and hidden-trace parity",
+    "32-token cached and stateless greedy parity",
+    "padded and context-boundary tests",
+    "native Q8 and Q4 conversion, quality, and packed-kernel proof",
+    "32K context stress",
+    "standardized latency, throughput, cache, memory, and output-hash benchmarks"
+  ]
+}

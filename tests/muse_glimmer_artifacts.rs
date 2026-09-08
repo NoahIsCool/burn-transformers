@@ -16,7 +16,7 @@
 //! Stream all 59.6 GB through the independent payload identity gate with:
 //!
 //! ```text
-//! cargo test --manifest-path crates/transformers/Cargo.toml \
+//! cargo test --release --manifest-path crates/transformers/Cargo.toml \
 //!   --no-default-features --features std \
 //!   --test muse_glimmer_artifacts \
 //!   validates_pinned_muse_glimmer_full_shard_payload_hashes \
@@ -46,7 +46,7 @@
 //!
 //! ```text
 //! TRANSFORMERS_MUSE_GLIMMER_REFERENCE_DIR=/absolute/external/reference-parent \
-//! cargo test --manifest-path crates/transformers/Cargo.toml \
+//! cargo test --release --manifest-path crates/transformers/Cargo.toml \
 //!   --no-default-features --features std,metal,tokenizers \
 //!   --test muse_glimmer_artifacts \
 //!   matches_pinned_muse_glimmer_official_f16_reference_on_metal \
