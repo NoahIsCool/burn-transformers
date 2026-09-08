@@ -113,8 +113,86 @@ REFERENCE_SOURCE_SHA256 = (
     "459498a758446f580fb4a9203c64ab4be68488b40a04acd379dd62658d5bad71"
 )
 
-PROMPT = "Hello world, cached decoding."
-INPUT_IDS = [19_873, 3_817, 24, 41_346, 63_623, 26]
+# This is the literal, already-rendered chat prompt. Pinning the expansion makes
+# the oracle independent of the template's dynamic current-date default.
+PROMPT = (
+    "<|begin_of_text|><|start|>system<|message|>You are a helpful AI assistant.\n"
+    "Knowledge cutoff: 2026-01-04.\n"
+    "Current date: 2026-09-08.\n\n"
+    "Reasoning strength: high.\n\n"
+    '# Valid recipients: "self", "user".<|eot|>'
+    "<|start|>user<|message|>Explain why the sky appears blue in one concise paragraph."
+    "<|eot|><|start|>assistant"
+)
+INPUT_IDS = [
+    200_000,
+    200_022,
+    15_651,
+    200_023,
+    4_662,
+    583,
+    262,
+    19_933,
+    12_133,
+    43_910,
+    335,
+    111_198,
+    67_059,
+    38,
+    220,
+    837,
+    34,
+    25,
+    1_761,
+    25,
+    2_468,
+    335,
+    8_048,
+    4_282,
+    38,
+    220,
+    837,
+    34,
+    25,
+    2_961,
+    25,
+    2_834,
+    1_574,
+    34_956,
+    300,
+    9_762,
+    38,
+    2_244,
+    1_574,
+    15,
+    14_757,
+    73_965,
+    38,
+    392,
+    2_540,
+    706,
+    392,
+    1_556,
+    4_205,
+    200_008,
+    200_022,
+    1_556,
+    200_023,
+    51_015,
+    5_959,
+    290,
+    21_752,
+    14_774,
+    10_950,
+    310,
+    1_085,
+    81_080,
+    24_429,
+    26,
+    200_008,
+    200_022,
+    140_680,
+]
 VOCAB_SIZE = 202_048
 HIDDEN_SIZE = 6_656
 HIDDEN_TRACE_ROWS = 54

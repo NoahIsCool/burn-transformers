@@ -235,10 +235,35 @@ const LARGEST_TARGET_PAYLOAD_BYTES: u64 = 2_689_662_976;
 const PEAK_HOST_STAGING_BYTES: u64 = 52_639_775_928;
 
 /// Short prompt with a stable six-token representation in the pinned tokenizer.
+#[cfg(feature = "tokenizers")]
 const SMOKE_PROMPT: &str = "Hello world, cached decoding.";
 
 /// Exact token IDs without tokenizer-injected special tokens.
+#[cfg(feature = "tokenizers")]
 const SMOKE_TOKEN_IDS: [u32; 6] = [19_873, 3_817, 24, 41_346, 63_623, 26];
+
+/// Literal rendered chat prompt selected for 32 numerically stable decisions.
+///
+/// The date is intentionally part of the immutable string rather than being
+/// expanded at test time by the checkpoint's dynamic chat template.
+const REFERENCE_PROMPT: &str = concat!(
+    "<|begin_of_text|><|start|>system<|message|>You are a helpful AI assistant.\n",
+    "Knowledge cutoff: 2026-01-04.\n",
+    "Current date: 2026-09-08.\n\n",
+    "Reasoning strength: high.\n\n",
+    "# Valid recipients: \"self\", \"user\".<|eot|>",
+    "<|start|>user<|message|>Explain why the sky appears blue in one concise paragraph.",
+    "<|eot|><|start|>assistant",
+);
+
+/// Exact tokenization of [`REFERENCE_PROMPT`] without injected special tokens.
+const REFERENCE_TOKEN_IDS: [u32; 67] = [
+    200_000, 200_022, 15_651, 200_023, 4_662, 583, 262, 19_933, 12_133, 43_910, 335, 111_198,
+    67_059, 38, 220, 837, 34, 25, 1_761, 25, 2_468, 335, 8_048, 4_282, 38, 220, 837, 34, 25, 2_961,
+    25, 2_834, 1_574, 34_956, 300, 9_762, 38, 2_244, 1_574, 15, 14_757, 73_965, 38, 392, 2_540,
+    706, 392, 1_556, 4_205, 200_008, 200_022, 1_556, 200_023, 51_015, 5_959, 290, 21_752, 14_774,
+    10_950, 310, 1_085, 81_080, 24_429, 26, 200_008, 200_022, 140_680,
+];
 
 /// Fixed create-only directory emitted by the official-reference generator.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
@@ -1053,9 +1078,12 @@ fn validate_reference_schema(reference: &MuseOfficialReference) -> Result<(), St
             && reference.reference.source.sha256 == REFERENCE_SOURCE_SHA256,
         "official Muse source identity changed",
     )?;
-    ensure(reference.prompt == SMOKE_PROMPT, "reference prompt changed")?;
     ensure(
-        reference.input_ids == SMOKE_TOKEN_IDS,
+        reference.prompt == REFERENCE_PROMPT,
+        "reference prompt changed",
+    )?;
+    ensure(
+        reference.input_ids == REFERENCE_TOKEN_IDS,
         "reference tokenization changed",
     )?;
 
@@ -1455,8 +1483,8 @@ fn synthetic_reference_json() -> serde_json::Value {
             },
             "checkout_clean": true,
         },
-        "prompt": SMOKE_PROMPT,
-        "input_ids": SMOKE_TOKEN_IDS,
+        "prompt": REFERENCE_PROMPT,
+        "input_ids": REFERENCE_TOKEN_IDS.as_slice(),
         "execution": {
             "dtype": "float16",
             "device": "mps",
@@ -2405,6 +2433,20 @@ fn validates_pinned_muse_glimmer_config_headers_plan_memory_and_tokenizer() {
             .decode(&SMOKE_TOKEN_IDS, true)
             .expect("the pinned prompt IDs must decode"),
         SMOKE_PROMPT
+    );
+    let reference_encoding = tokenizer
+        .encode(
+            REFERENCE_PROMPT,
+            &EncodeOptions {
+                add_special_tokens: false,
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("the rendered acceptance prompt must encode");
+    assert_eq!(reference_encoding.token_ids()[0], REFERENCE_TOKEN_IDS);
+    assert_eq!(
+        reference_encoding.valid_tokens()[0],
+        [true; REFERENCE_TOKEN_IDS.len()]
     );
 
     #[cfg(feature = "chat-templates")]
