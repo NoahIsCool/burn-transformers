@@ -43,3 +43,12 @@ minijinja = { version = "=2.19.0", default-features = false, features = ["adjace
 proptest = "1.9.0"
 tempfile = "3.27.0"
 tracing = "=0.1.44"
+
+# Checkpoint integrity is part of ordinary local loading, and acceptance gates
+# hash tens of gigabytes. Keep SHA-256 optimized even when the surrounding
+# executable uses a debuggable development or test profile.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.test.package.sha2]
+opt-level = 3
