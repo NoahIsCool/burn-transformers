@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "references": {
+    "base": {
+      "repository": "huggingface/transformers",
+      "revision": "cfa309cfa34b5497a32fd50af49aa97aac94c054",
+      "source": "src/transformers/models/nemotron_h/modeling_nemotron_h.py",
+      "source_bytes": 50797,
+      "source_sha256": "d42067429e3268d1163579f5d257fe0baa9a2b02edba5fcb175fb8d42c9b6af4"
+    },
+    "mtp": {
+      "repository": "vllm-project/vllm",
+      "revision": "6e448d0ea9bf3d88d898b65449ca6dc2aec170ac",
+      "source": "vllm/model_executor/models/nemotron_h_mtp.py",
+      "source_bytes": 18008,
+      "source_sha256": "0a799030f5bda1b564b749aaefe6cc3f479c90ff28bd449070b4bb7a21a10176"
+    }
+  },
+  "producer": {
+    "python": "CPython 3.11.9",
+    "torch": "2.10.0",
+    "device": "cpu",
+    "seed": 0
+  },
+  "rms_norm_f16": {
+    "equation": "float(x) * rsqrt(mean(float(x)^2) + eps), round_to_f16, then multiply f16 weight",
+    "epsilon": 0.00001,
+    "input_f16_bits": ["4775", "b73c"],
+    "weight_f16_bits": ["349f", "c2e0"],
+    "official_output_f16_bits": ["3685", "34b5"],
+    "division_late_round_output_f16_bits": ["3686", "34b5"]
+  },
+  "grouped_gated_rms_norm_f16": {
+    "equation": "float(x) * silu(float(gate)), groupwise rsqrt RMS, round_to_f16, then multiply f16 weight",
+    "groups": 2,
+    "epsilon": 0.000001,
+    "input_f16_bits": ["40a6", "4229", "3b14", "4764"],
+    "gate_f16_bits": ["c4a5", "45c7", "c691", "b227"],
+    "weight_f16_bits": ["3ef5", "c258", "add1", "4236"],
+    "official_output_f16_bits": ["a34c", "c47c", "16af", "c464"],
+    "division_output_f16_bits": ["a34c", "c47c", "16b1", "c464"]
+  },
+  "correction_biased_router_f32": {
+    "equation": "select top groups and experts from sigmoid(logits)+bias, gather weights from unbiased sigmoid(logits), normalize, then scale",
+    "groups": 4,
+    "top_groups": 2,
+    "top_k": 3,
+    "routed_scaling_factor": 2.5,
+    "logits_f32le_hex": ["000000c0", "000080bf", "00000000", "0000803f", "00000040", "0000c03f", "0000003f", "000000bf"],
+    "correction_f32le_hex": ["00008040", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000"],
+    "selected_group_ids": [0, 2],
+    "selected_expert_ids": [0, 4, 5],
+    "normalized_scaled_weights_f32le_hex": ["d1e4273e", "74129b3f", "f2f08f3f"]
+  },
+  "mtp_contract": {
+    "embedding_hidden_concatenation_order": ["normalized_shifted_embedding", "normalized_target_hidden_state"],
+    "schedule": ["full_attention", "moe"],
+    "checkpoint_tensor_count": 270,
+    "checkpoint_shard": "model-00014-of-00014.safetensors",
+    "shares_target_embedding": true,
+    "shares_target_lm_head": true,
+    "attention_residual_starts_after_fusion": true,
+    "final_norm_after_moe_residual": true
+  }
+}

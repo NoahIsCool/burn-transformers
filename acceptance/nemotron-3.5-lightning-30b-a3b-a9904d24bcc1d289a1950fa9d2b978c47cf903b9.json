@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "advertised_supported": false,
+  "phase": "exact_config_index_and_all_safetensors_headers_verified_with_fail_closed_reference_scaffold_pending_provenance_bound_index_exception_full_payload_authentication_weight_application_and_inference",
+  "repository": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+  "revision": "a9904d24bcc1d289a1950fa9d2b978c47cf903b9",
+  "evidence_scope": {
+    "classification": "artifact_metadata_and_oracle_scaffold_only",
+    "weight_payloads_downloaded_for_this_record": false,
+    "weight_payloads_hashed_for_this_record": false,
+    "weights_applied": false,
+    "inference_executed": false,
+    "real_reference_bundle_reviewed": false
+  },
+  "references": {
+    "target_backbone": {
+      "repository": "huggingface/transformers",
+      "revision": "cfa309cfa34b5497a32fd50af49aa97aac94c054",
+      "class": "transformers.NemotronHForCausalLM",
+      "executes_mtp": false,
+      "sources": {
+        "src/transformers/models/nemotron_h/modeling_nemotron_h.py": {
+          "bytes": 50797,
+          "sha256": "d42067429e3268d1163579f5d257fe0baa9a2b02edba5fcb175fb8d42c9b6af4"
+        },
+        "src/transformers/models/nemotron_h/configuration_nemotron_h.py": {
+          "bytes": 13031,
+          "sha256": "00a4c60bd302d796b25c6ae25c608a5ee7e27f9a0adea92911b0c45470232052"
+        }
+      },
+      "limitation": "This pinned class explicitly ignores mtp.* while loading and cannot serve as the MTP oracle.",
+      "excluded_generic_mtp": {
+        "source": "src/transformers/modeling_layers.py",
+        "bytes": 30974,
+        "sha256": "81469b99e3f933ad78eaf5c90d401a95a02a5f569732c6ed2b7020daaed31953",
+        "required_count_field": "num_mtp_layers",
+        "checkpoint_count_field": "num_nextn_predict_layers",
+        "additional_topology_mismatch": "The generic path copies one final decoder-layer class per stage; the checkpoint stores an ordered attention-plus-MoE two-block stage."
+      }
+    },
+    "executable_mtp": {
+      "repository": "vllm-project/vllm",
+      "release": "v0.27.1",
+      "revision": "6e448d0ea9bf3d88d898b65449ca6dc2aec170ac",
+      "class": "vllm.model_executor.models.nemotron_h_mtp.NemotronHMTP",
+      "executes_mtp": true,
+      "sources": {
+        "vllm/model_executor/models/nemotron_h_mtp.py": {
+          "bytes": 18008,
+          "sha256": "0a799030f5bda1b564b749aaefe6cc3f479c90ff28bd449070b4bb7a21a10176"
+        },
+        "vllm/model_executor/models/nemotron_h.py": {
+          "bytes": 32582,
+          "sha256": "4a0d76f7b7b8c9902adb65b0b2700e2924786cf2ba337f3ff0506fe75ff1ae67"
+        },
+        "vllm/transformers_utils/configs/nemotron_h.py": {
+          "bytes": 13414,
+          "sha256": "7cbf03b9d0c1b8734074101d9178cfd5785b1a9191148396f7ca971f7cc709d7"
+        }
+      }
+    }
+  },
+  "artifact_layout": {
+    "safetensors_shards": 14,
+    "physical_tensors": 6513,
+    "backbone_tensors": 6242,
+    "mtp_tensors": 270,
+    "lm_head_tensors": 1,
+    "dtype_counts": {
+      "BF16": 6489,
+      "F32": 24
+    },
+    "physical_tensor_bytes": 65826538624,
+    "physical_tensor_elements": 32913266240,
+    "base_physical_elements_before_mtp": 31577940288,
+    "index_reported_base_parameters": 31577937344,
+    "base_non_trainable_router_correction_elements": 2944,
+    "complete_shard_bytes": 65827374264,
+    "largest_shard_bytes": 4995692816,
+    "largest_tensor_bytes": 704643072
+  },
+  "shard_header_inventory": [
+    {"path":"model-00001-of-00014.safetensors","complete_file_bytes":4991210024,"header_bytes_excluding_prefix":55584,"header_plus_prefix_sha256":"fb38f4b142305784dd21d85d73206656a3a0e928a050336dbc5a565f77af00b5","physical_tensors":435,"tensor_payload_bytes":4991154432},
+    {"path":"model-00002-of-00014.safetensors","complete_file_bytes":4992601016,"header_bytes_excluding_prefix":64432,"header_plus_prefix_sha256":"08ec30982e2c7e084869288cb600c6c9153159db2a94a1696d4656d5048c5f6d","physical_tensors":505,"tensor_payload_bytes":4992536576},
+    {"path":"model-00003-of-00014.safetensors","complete_file_bytes":4992601368,"header_bytes_excluding_prefix":64784,"header_plus_prefix_sha256":"0ca2ca3a63693de596a3757212cb13b634b24bc6d1a955085585017fa3fd4958","physical_tensors":505,"tensor_payload_bytes":4992536576},
+    {"path":"model-00004-of-00014.safetensors","complete_file_bytes":4995692800,"header_bytes_excluding_prefix":65016,"header_plus_prefix_sha256":"891f6df23c1628935d655f93775cd8a0d447a574ffb5e0c5be5db50d703c2a11","physical_tensors":505,"tensor_payload_bytes":4995627776},
+    {"path":"model-00005-of-00014.safetensors","complete_file_bytes":4980553832,"header_bytes_excluding_prefix":64864,"header_plus_prefix_sha256":"89aba226b7c9f8e2220b804f609b7104e3e73578b2c8b85499f4dd035f250079","physical_tensors":504,"tensor_payload_bytes":4980488960},
+    {"path":"model-00006-of-00014.safetensors","complete_file_bytes":4989423536,"header_bytes_excluding_prefix":64808,"header_plus_prefix_sha256":"4829d1fdfeb55765e21995b9d17c888ef3c247f356941c0a256da0aa841d9196","physical_tensors":502,"tensor_payload_bytes":4989358720},
+    {"path":"model-00007-of-00014.safetensors","complete_file_bytes":4992601488,"header_bytes_excluding_prefix":64904,"header_plus_prefix_sha256":"75123a4888d68002af022241a649406cc0f95183c23d9f9b94e218a12a942a85","physical_tensors":505,"tensor_payload_bytes":4992536576},
+    {"path":"model-00008-of-00014.safetensors","complete_file_bytes":4992601520,"header_bytes_excluding_prefix":64936,"header_plus_prefix_sha256":"42e44897a6deb75c8744b0f768400a70f38898f35e8a2c3696fb3088ae0db397","physical_tensors":505,"tensor_payload_bytes":4992536576},
+    {"path":"model-00009-of-00014.safetensors","complete_file_bytes":4995692800,"header_bytes_excluding_prefix":65016,"header_plus_prefix_sha256":"88a8b4f83aeeb4339b15fb3325a652432a1e4ddcc1e174646d1f0b44ca39aa99","physical_tensors":505,"tensor_payload_bytes":4995627776},
+    {"path":"model-00010-of-00014.safetensors","complete_file_bytes":4992601520,"header_bytes_excluding_prefix":64936,"header_plus_prefix_sha256":"e866c97f325cd3ac26c0fe2390e5c70af4a6d06216658af439ea217aa12be429","physical_tensors":505,"tensor_payload_bytes":4992536576},
+    {"path":"model-00011-of-00014.safetensors","complete_file_bytes":4995692800,"header_bytes_excluding_prefix":65016,"header_plus_prefix_sha256":"9899e46c25fd005368c78209f2301b9bf4168ca09b7dc5516b5c2a32b80fc24c","physical_tensors":505,"tensor_payload_bytes":4995627776},
+    {"path":"model-00012-of-00014.safetensors","complete_file_bytes":4995692816,"header_bytes_excluding_prefix":65032,"header_plus_prefix_sha256":"ca949857488ac8cf521b4570e25c6816104db6d84171190c12e7144157a9279e","physical_tensors":505,"tensor_payload_bytes":4995627776},
+    {"path":"model-00013-of-00014.safetensors","complete_file_bytes":3249723504,"header_bytes_excluding_prefix":33128,"header_plus_prefix_sha256":"d4f22cfeb2b0e72ae08ce5ec215b6fa5ea4850ec934cda2a0f77d86d3e3a039e","physical_tensors":257,"tensor_payload_bytes":3249690368},
+    {"path":"model-00014-of-00014.safetensors","complete_file_bytes":2670685240,"header_bytes_excluding_prefix":33072,"header_plus_prefix_sha256":"6c2cabebac913a55562ba8c7730f07818664a6d729bee4b16a010924bb75804d","physical_tensors":270,"tensor_payload_bytes":2670652160}
+  ],
+  "architecture": {
+    "model_type": "nemotron_h",
+    "hidden_layers": 52,
+    "mamba2_layers": 23,
+    "moe_layers": 23,
+    "attention_layers": 6,
+    "hidden_size": 2688,
+    "vocabulary_size": 131072,
+    "maximum_position_embeddings": 262144,
+    "attention_heads": 32,
+    "key_value_heads": 2,
+    "attention_head_dim": 128,
+    "mamba_heads": 64,
+    "mamba_head_dim": 64,
+    "mamba_state_size": 128,
+    "mamba_groups": 8,
+    "mamba_convolution_width": 4,
+    "routed_experts": 128,
+    "selected_experts_per_token": 6,
+    "shared_experts": 1,
+    "expert_intermediate_size": 1856,
+    "shared_expert_intermediate_size": 3712,
+    "expert_activation": "relu2",
+    "routed_scaling_factor": 2.5,
+    "next_token_prediction_stages": 1
+  },
+  "index_total_size_defect": {
+    "index_reported_total_size": 65842365568,
+    "physical_header_tensor_bytes": 65826538624,
+    "overstatement_bytes": 15826944,
+    "base_router_tensor_count": 23,
+    "base_router_dtype": "BF16",
+    "base_router_shape": [128, 2688],
+    "bytes_per_base_router": 688128,
+    "proof": "23 * 128 * 2688 * 2 = 15826944; every base router occurs exactly once in both the index and physical headers.",
+    "mtp_router_bytes": 688128,
+    "mtp_router_in_delta": false,
+    "current_generic_loader_result": "rejected_with_total_size_mismatch",
+    "required_resolution": "A family exception must be bound to this exact checkpoint provenance and the exact 23 router source names. A numeric-delta-only or global relaxation is forbidden."
+  },
+  "mtp_contract": {
+    "checkpoint_shard": "model-00014-of-00014.safetensors",
+    "shard_contains_only_mtp": true,
+    "physical_tensors": 270,
+    "physical_elements": 1335325952,
+    "physical_tensor_bytes": 2670652160,
+    "attention_block_tensors": 8,
+    "moe_block_tensors": 262,
+    "schedule": ["full_attention", "moe"],
+    "embedding_hidden_concatenation_order": [
+      "normalized_shifted_embedding",
+      "normalized_target_hidden_state"
+    ],
+    "shares_target_embedding": true,
+    "shares_target_lm_head": true,
+    "attention_residual_starts_after_fusion": true,
+    "final_norm_after_moe_residual": true
+  },
+  "strict_corrected_metadata_plan": {
+    "classification": "fixture_only_not_runtime_exception_or_weight_application",
+    "parameters": 6513,
+    "aliases": 0,
+    "bf16_to_f16_conversions": 6489,
+    "f32_parameters_retained": 24,
+    "target_parameter_bytes": 65826538624,
+    "logical_model_bytes": 65826538624,
+    "peak_host_staging_upper_bound_bytes": 5700335888,
+    "f16_load_plan_sha256": "a47056d8d8e5ad814f79f4b147c3d7b340362013c31f126b7578e25efb51c906"
+  },
+  "inventory_digests": {
+    "index_name_shard_sha256": "0e3b013820bc7ef347c3daf15f3886a2f3fa8e6e3c38e1859662b624601eda09",
+    "header_name_shard_dtype_shape_range_sha256": "e255cec4fe6d43dfddaed52b3a5ef719c111d6c9821ce7ff53219080b50762c4",
+    "expected_controls_and_full_shards_manifest_sha256": "cb72063ee5b215548d9adbc67052de5f54871f1e28b80a0e0db9782afd4ad759",
+    "synthetic_oracle_sha256": "3b1549cede5872148a452eb8428952e6ed1f4cf56c2dbbd264b56d4f536d08bc"
+  },
+  "control_file_sha256": {
+    "chat_template.jinja": "58933db77d3099b4f78c55a38347a72e1ea05b97d6bd8f38775303dc0194e0a9",
+    "config.json": "a3827a0f5e311547b40943dc081e3ff2f8a277466e8c1a3df2291e8db8a7617c",
+    "generation_config.json": "0ed94823ae737b507aef6af01e837041b7aa2fb0306793a310cd201d89a31ff4",
+    "model.safetensors.index.json": "67f21da80ce245a3e24967f54eef3fa10e67a63eba16ef19a2d0569f06103f50",
+    "special_tokens_map.json": "e9435fefd6d838fd9fcbbc44b97a8e3ff322be7f6dfb7e4fd2468586574bb52b",
+    "tokenizer.json": "623c34567aebb18582765289fbe23d901c62704d6518d71866e0e58db892b5b7",
+    "tokenizer_config.json": "10f93eabcb9b1602fbb991d6308e787ce1df28ee9cd7a1c6d1e8c3f338b957bc"
+  },
+  "expected_weight_payload_sha256": {
+    "status": "pinned_but_not_hashed_for_this_record",
+    "model-00001-of-00014.safetensors": "7a3e74d24969eac6657cb9b6422091fd062b7d30fd4bc90ecee6c3d7f692626a",
+    "model-00002-of-00014.safetensors": "a80c3846e959f6dda34aa031cbb668b766643691ac7e5c9f43f62e6fb1221059",
+    "model-00003-of-00014.safetensors": "996bf3a46668e14075cb82259390267c2b1f71446caeb3a5f1f9e0bd7a079ae7",
+    "model-00004-of-00014.safetensors": "cce1d79e7ff2e2b746b9d97166156aa1dcec796116675cc7fd1aa70a8d73ccb2",
+    "model-00005-of-00014.safetensors": "9338f59d3fd5f074288c71a9559452d5b5c581da00e9ccb9fe7aa2ce9b04d2ad",
+    "model-00006-of-00014.safetensors": "e947fa4097c68263ba3d097fceb32a300a22cebd9d909fb5198af7d18a4022fe",
+    "model-00007-of-00014.safetensors": "c7362630bf4256275ca58354ed8f31506cec67ffab30573e753703fd5ae48795",
+    "model-00008-of-00014.safetensors": "1b33a5a6b5505b25b57c90ddda19e9cd1598176468917df0c56116fa6f6072cb",
+    "model-00009-of-00014.safetensors": "fcc9b48caff427beaf1f87b78cf4ab42bc2a3c43b3c487bccb013ba22d7468b2",
+    "model-00010-of-00014.safetensors": "d1924fd54d1b77a15aff8df591a317e8a82a58e46d6f5742fa21e90e0be3cfa6",
+    "model-00011-of-00014.safetensors": "e9d0b83bcf04bd4d5758b94e6495a3f1595d121d82faffaa27ce6a884e2c8757",
+    "model-00012-of-00014.safetensors": "fce184f112cb0b97024cadc60f993f6f660e365d04e21c240fb3c75747bd3a01",
+    "model-00013-of-00014.safetensors": "f427d037d2a3e4d44323325aa38571e3551e8ad702f469c3dacc4e59ea2e50d1",
+    "model-00014-of-00014.safetensors": "64577b275ca4e7e5266eae0903674f7f46ec2a8cbf4f4f1a3207f80d503cd1d0"
+  },
+  "oracle_scaffold": {
+    "smoke_prompt": "Hello world, cached decoding.",
+    "smoke_token_ids": [22177, 4304, 1044, 57424, 59417, 1046],
+    "synthetic_cases": [
+      "f16_rms_norm_rounding_order",
+      "f16_grouped_gated_rms_norm_rounding_order",
+      "correction_biased_grouped_router_selection_and_unbiased_weights",
+      "mtp_topology_and_sharing_contract"
+    ],
+    "required_real_outputs": {
+      "base_prompt_logits": [1, 1, 131072],
+      "base_hidden_last_trace": [54, 2688],
+      "base_cached_logits": [32, 131072],
+      "base_teacher_logits": [32, 131072],
+      "mtp_draft_logits": [1, 1, 131072],
+      "mtp_hidden_last_trace": [3, 2688]
+    },
+    "trusted_real_bundle_hashes_present": false,
+    "policy": "The real bundle reader rejects every bundle until its JSON and all six f32le outputs are independently reviewed and pinned in code."
+  },
+  "checks": {
+    "exact_config_fixture_sha256_validated": true,
+    "exact_index_fixture_sha256_validated": true,
+    "all_safetensors_headers_strictly_validated": true,
+    "all_6513_index_assignments_match_physical_headers": true,
+    "dtype_shape_and_byte_ranges_validated": true,
+    "mtp_inventory_independently_validated": true,
+    "index_total_size_defect_reproduced": true,
+    "strict_corrected_metadata_f16_plan_validated": true,
+    "adversarial_component_oracle_validated": true,
+    "all_control_files_sha256_validated_against_local_checkpoint": false,
+    "all_weight_shards_sha256_validated": false,
+    "provenance_bound_index_exception_implemented": false,
+    "strict_real_checkpoint_load": false,
+    "all_weights_applied": false,
+    "official_target_reference_bundle_reviewed": false,
+    "executable_mtp_reference_bundle_reviewed": false,
+    "metal_f16_stateless_inference": false,
+    "metal_f16_cached_prefill": false,
+    "metal_f16_recurrent_decode": false,
+    "mtp_inference": false,
+    "cached_stateless_top1_all_prefixes_compared": false,
+    "quantization_validated": false,
+    "long_context_32k_validated": false
+  },
+  "open_release_gates": [
+    "implement and test an exact-provenance-bound exception for the upstream total_size defect without weakening generic checkpoint validation",
+    "download the pinned checkpoint externally and authenticate all seven controls and fourteen full shard payloads",
+    "stream and apply every base and MTP tensor with no unexplained missing or unexpected keys",
+    "produce, independently review, hash-pin, and compare the dual Transformers-base and vLLM-MTP reference bundle",
+    "run Metal F16 stateless, cached-prefill, recurrent-decode, MTP, and 32-token greedy parity",
+    "validate padding, context boundaries, quantized quality and packed kernels, 32K stress, and standardized performance"
+  ]
+}
