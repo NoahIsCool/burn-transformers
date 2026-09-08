@@ -737,7 +737,7 @@ pub(super) fn detect_model_type(json: &str) -> Result<String> {
 mod tests {
     use burn::{
         backend::Flex,
-        tensor::{Int, Tensor},
+        tensor::{Bool, Int, Tensor, Tolerance},
     };
 
     use super::*;
@@ -745,7 +745,9 @@ mod tests {
         muse_glimmer::MuseGlimmerLayerType, nemotron_h::NemotronHBlockType,
         qwen3_5::Qwen3_5LayerType, t5::T5FeedForwardProjection,
     };
-    use crate::{CausalGenerationRequest, GenerationConfig, generate_causal};
+    use crate::{
+        CausalGenerationRequest, GenerationConfig, LogitsSelection, TokenMask, generate_causal,
+    };
 
     type TestBackend = Flex<f32, i32>;
 
@@ -870,6 +872,221 @@ mod tests {
             feed_forward_proj: T5FeedForwardProjection::Relu,
             ..T5Config::default()
         }
+    }
+
+    /// Builds a rectangular prompt whose first chunk is inactive for row zero.
+    ///
+    /// Both rows become active in every later two-column chunk, so the test
+    /// exercises the coordinator's initial decode fallback before returning to
+    /// each family's optimized prefill path.
+    fn staggered_prompt(
+        device: &<TestBackend as burn::tensor::backend::BackendTypes>::Device,
+    ) -> CausalLmInput<TestBackend> {
+        CausalLmInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::from_ints(
+                [[31, 31, 1, 2, 3, 31], [4, 5, 6, 7, 31, 8]],
+                device,
+            ),
+            token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                [
+                    [false, false, true, true, true, false],
+                    [true, true, true, true, false, true],
+                ]
+                .into(),
+                device,
+            ))),
+            position_ids: None,
+        }
+    }
+
+    /// Extracts one physical prompt chunk without changing semantic mask order.
+    fn prompt_chunk(
+        prompt: &CausalLmInput<TestBackend>,
+        start: usize,
+        end: usize,
+    ) -> CausalLmInput<TestBackend> {
+        CausalLmInput {
+            token_ids: prompt.token_ids.clone().slice([0..2, start..end]),
+            token_mask: prompt
+                .token_mask
+                .as_ref()
+                .map(|mask| TokenMask::new(mask.as_tensor().clone().slice([0..2, start..end]))),
+            position_ids: prompt
+                .position_ids
+                .as_ref()
+                .map(|positions| positions.clone().slice([0..2, start..end])),
+        }
+    }
+
+    /// Proves empty-state decode, chunked prefill, and generation parity for one model.
+    fn assert_bounded_prefill_contract<M>(
+        family: &str,
+        model: &M,
+        cache: CacheConfig,
+        device: &<TestBackend as burn::tensor::backend::BackendTypes>::Device,
+    ) where
+        M: CausalLanguageModel<TestBackend>,
+    {
+        let prompt = staggered_prompt(device);
+        let options = ForwardOptions {
+            logits: LogitsSelection::Last,
+            ..Default::default()
+        };
+
+        let mut one_shot_state = model
+            .new_decode_state(cache, 2, device)
+            .unwrap_or_else(|error| panic!("{family} one-shot state: {error}"));
+        let one_shot = model
+            .prefill(prompt.clone(), &mut one_shot_state, &options)
+            .unwrap_or_else(|error| panic!("{family} one-shot prefill: {error}"));
+        assert_eq!(
+            one_shot_state.lengths(),
+            [3, 5],
+            "{family} one-shot lengths"
+        );
+
+        let mut chunked_state = model
+            .new_decode_state(cache, 2, device)
+            .unwrap_or_else(|error| panic!("{family} chunked state: {error}"));
+        let first = prompt_chunk(&prompt, 0, 2);
+        model
+            .decode(
+                DecodeInput {
+                    token_ids: first.token_ids,
+                    token_mask: first.token_mask,
+                    position_ids: first.position_ids,
+                },
+                &mut chunked_state,
+                &options,
+            )
+            .unwrap_or_else(|error| panic!("{family} fresh-state decode fallback: {error}"));
+        assert_eq!(
+            chunked_state.lengths(),
+            [0, 2],
+            "{family} must preserve its initially inactive row"
+        );
+        model
+            .prefill(prompt_chunk(&prompt, 2, 4), &mut chunked_state, &options)
+            .unwrap_or_else(|error| panic!("{family} middle prefill chunk: {error}"));
+        let chunked = model
+            .prefill(prompt_chunk(&prompt, 4, 6), &mut chunked_state, &options)
+            .unwrap_or_else(|error| panic!("{family} final prefill chunk: {error}"));
+        assert_eq!(chunked_state.lengths(), [3, 5], "{family} chunked lengths");
+        chunked.logits.into_data().assert_approx_eq::<f32>(
+            &one_shot.logits.into_data(),
+            Tolerance::rel_abs(5.0e-4, 5.0e-5),
+        );
+
+        let generation = |prefill_chunk_size| CausalGenerationRequest {
+            prompt: prompt.clone(),
+            cache,
+            generation: GenerationConfig {
+                max_new_tokens: 2,
+                ..Default::default()
+            },
+            prefill_chunk_size,
+            vocabulary_size: 32,
+        };
+        let one_shot = generate_causal(model, generation(None))
+            .unwrap_or_else(|error| panic!("{family} one-shot generation: {error}"));
+        let chunked = generate_causal(model, generation(Some(2)))
+            .unwrap_or_else(|error| panic!("{family} chunked generation: {error}"));
+        assert_eq!(chunked.sequences.len(), one_shot.sequences.len());
+        for (row, (chunked, one_shot)) in chunked
+            .sequences
+            .iter()
+            .zip(&one_shot.sequences)
+            .enumerate()
+        {
+            assert_eq!(
+                chunked.token_ids, one_shot.token_ids,
+                "{family} generated row {row}"
+            );
+            assert_eq!(chunked.finish_reason, one_shot.finish_reason);
+            assert_eq!(chunked.prompt_length, one_shot.prompt_length);
+            assert_eq!(
+                chunked.log_probabilities.len(),
+                one_shot.log_probabilities.len()
+            );
+            for (&actual, &expected) in chunked
+                .log_probabilities
+                .iter()
+                .zip(&one_shot.log_probabilities)
+            {
+                assert!(
+                    (actual - expected).abs() <= 5.0e-4,
+                    "{family} row {row} log probability {actual} != {expected}"
+                );
+            }
+        }
+    }
+
+    /// Every concrete causal family supports the bounded-prefill coordinator contract.
+    #[test]
+    fn every_causal_family_matches_bounded_and_one_shot_prefill() {
+        let device = Default::default();
+
+        TestBackend::seed(&device, 10_001);
+        let qwen = Qwen3_5ForCausalLm::init(tiny_qwen(), &device).expect("tiny Qwen");
+        assert_bounded_prefill_contract("Qwen3.5", &qwen, CacheConfig::new(2, 8).unwrap(), &device);
+
+        TestBackend::seed(&device, 10_002);
+        let qwen_moe = Qwen3MoeForCausalLm::init(tiny_qwen_moe(), &device).expect("tiny Qwen MoE");
+        assert_bounded_prefill_contract(
+            "Qwen3-MoE",
+            &qwen_moe,
+            CacheConfig::new(2, 8).unwrap(),
+            &device,
+        );
+
+        let deepseek = crate::models::deepseek_v2::model::tests_support::initialized_model(
+            crate::models::deepseek_v2::model::tests_support::tiny_config(),
+            &device,
+        );
+        assert_bounded_prefill_contract(
+            "DeepSeek-V2",
+            &deepseek,
+            CacheConfig::new(2, 8).unwrap(),
+            &device,
+        );
+
+        TestBackend::seed(&device, 10_003);
+        let muse = MuseGlimmerForCausalLm::init(tiny_muse(), &device).expect("tiny Muse");
+        assert_bounded_prefill_contract(
+            "Muse Glimmer",
+            &muse,
+            CacheConfig::new(2, 8)
+                .unwrap()
+                .with_sliding_window(3)
+                .unwrap(),
+            &device,
+        );
+
+        TestBackend::seed(&device, 10_004);
+        let nemotron =
+            NemotronHForCausalLm::init(tiny_nemotron(), &device).expect("tiny Nemotron-H");
+        assert_bounded_prefill_contract(
+            "Nemotron-H",
+            &nemotron,
+            CacheConfig::new(2, 8).unwrap(),
+            &device,
+        );
+    }
+
+    /// Automatic dispatch preserves the same fresh-state fallback and parity contract.
+    #[test]
+    fn auto_causal_dispatch_matches_bounded_and_one_shot_prefill() {
+        let device = Default::default();
+        TestBackend::seed(&device, 10_005);
+        let model = AutoCausalLm::from(
+            Qwen3MoeForCausalLm::init(tiny_qwen_moe(), &device).expect("tiny auto Qwen MoE"),
+        );
+        assert_bounded_prefill_contract(
+            "AutoCausalLm<Qwen3-MoE>",
+            &model,
+            CacheConfig::new(2, 8).unwrap(),
+            &device,
+        );
     }
 
     /// Wrapped Qwen config detection prefers the language tower and allocates state.
