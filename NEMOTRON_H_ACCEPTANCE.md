@@ -2,10 +2,12 @@
 
 This document defines the artifact and numerical gates for
 `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` at immutable revision
-`a9904d24bcc1d289a1950fa9d2b978c47cf903b9`. The current evidence is an
-artifact-metadata and oracle scaffold only. No weight shard was downloaded for
-this record, no model tensor was applied, no inference was run, and the model
-is not advertised as supported. The machine-readable state is
+`a9904d24bcc1d289a1950fa9d2b978c47cf903b9`. The exact local artifact has now
+passed full-payload authentication, strict source-ordered F16 application, and
+a short Burn Metal base-model smoke. That smoke is internal-consistency
+evidence, not comparison with an official numerical oracle; MTP execution and
+the remaining release gates are still incomplete, so the model is not
+advertised as supported. The machine-readable state is
 [`acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json`](acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json).
 
 ## Pinned evidence
@@ -34,11 +36,12 @@ anchors are:
 - adversarial component oracle:
   `3b1549cede5872148a452eb8428952e6ed1f4cf56c2dbbd264b56d4f536d08bc`.
 
-The corrected-metadata plan is a test-only proof: after substituting the
-physical byte total, the family contract maps all 6,513 source tensors, retains
-the 24 FP32 correction buffers, casts 6,489 BF16 tensors to F16, and has no
-aliases or unexplained keys. It is not a runtime waiver and does not prove
-weight application.
+The corrected-metadata plan remains a test-only independent proof: after
+substituting the physical byte total, the family contract maps all 6,513 source
+tensors, retains the 24 FP32 correction buffers, casts 6,489 BF16 tensors to
+F16, and has no aliases or unexplained keys. Production loading does not mutate
+that metadata. It uses the provenance-bound accounting policy described below,
+then executes the otherwise identical strict plan.
 
 The index's `metadata.total_parameters = 31,577,937,344` is internally
 reconcilable: the base tower plus LM head contain 31,577,940,288 physical
@@ -67,14 +70,58 @@ but including it would not match the discrepancy. Thus the producer appears to
 have counted only the 23 base routers twice in `metadata.total_size`; it did not
 duplicate their keys or payloads.
 
-The generic checkpoint loader correctly rejects this mismatch today. The
-production resolution must be a narrow accounting quirk bound to all of the
-following: the exact repository revision, config SHA-256, index SHA-256, and
-the exact 23 router names as discovered with BF16 `[128, 2688]` payloads. It may
-interpret the reported total as physical bytes plus those exact routers for
-accounting validation only. It must not accept a matching numeric delta alone,
-change the physical inventory, mutate the checkpoint, or weaken generic exact
-size validation.
+The generic checkpoint loader continues to reject this mismatch. The
+implemented Nemotron-only resolution is a narrow accounting policy bound to the
+exact repository revision, raw config SHA-256, raw index SHA-256, both declared
+and physical totals, the exact 23 router names discovered as BF16
+`[128, 2688]`, and the separately required MTP router. It interprets the
+reported total as physical bytes plus those exact base routers for accounting
+validation only. Adversarial tests reject near-miss labels, hashes, totals,
+names, shapes, dtypes, missing routers, and an incorrectly included MTP router.
+The policy does not change the physical inventory, mutate the checkpoint, or
+weaken generic exact-size validation.
+
+## Burn Metal implementation smoke
+
+Commit `7c1f816f520bb05c33c22774452cae434e305784` was executed from a clean
+worktree with repository tree `dd342dc91ff8782cb4d5c97142cf685861f24465`
+and transformer subtree `c37026d9bdf5694a50a7d294c7b52930eb97abd9`.
+The release build used `std,metal,tokenizers` with Rust
+`1.94.0-nightly (4f14395c3 2025-12-22)` on `aarch64-apple-darwin`.
+
+The gate reauthenticated all 65,827,374,264 artifact bytes before loading. It
+then applied all 6,513 tensors, including the 270 MTP tensors, with no alias,
+allowlisted omission, or unexpected key. It converted all 6,489 BF16 tensors
+to F16 and retained all 24 FP32 correction buffers. Pass two read each source
+once, delivered 65,826,538,624 bytes, opened the fourteen shards exactly in
+`00001` through `00014` order, kept at most one shard open, and observed an
+actual peak executor-owned host staging allocation of 704,643,072 bytes. The
+clean run loaded and synchronized parameters in 102.101 seconds.
+
+The base smoke used the fixed six-token prompt `[22177, 4304, 1044, 57424,
+59417, 1046]`. Stateless and cached-prefill logits had cosine `1.0`, while all
+54 semantic last-token hidden rows were bit-identical; their little-endian F32
+hidden-trace SHA-256 was
+`80249a14decaa09f775b5e6bd469d17a5515e6c3cfc54863ef9bb93801cd2f5c`.
+The first greedy token was `1256`. One recurrent decode step produced hidden
+trace SHA-256
+`eac085e4be9796ba5f828ccd27e8caeda7294228333911beaf6bf33b74e4fc3c`
+and matched a stateless teacher-forced prefix at full-vocabulary cosine
+`0.999376514` with identical top-1. Cache inspection proved six F16 GQA layers,
+23 Mamba layers with FP32 recurrent matrices and F16 convolution history, and
+the exact cursor transition `0 -> 6 -> 7`.
+
+The first real run also found a checkpoint-specific runtime defect: Lightning
+sets `n_group = topk_group = 1`, but Burn rejects a one-hot tensor with only one
+class. A sole retained router group makes group pruning mathematically the
+identity, so the production path now bypasses one-hot construction and sends
+all corrected scores directly to expert top-k. A deterministic regression test
+proves that path matches a multi-group configuration in which every group is
+retained.
+
+None of this is official-reference parity. The MTP tensors were installed but
+the MTP body, dedicated cache, and speculative verification protocol were not
+executed. No 32-token generation, quantization, or 32K-context result is implied.
 
 ## Split numerical reference
 
@@ -157,6 +204,17 @@ cargo test --release --manifest-path crates/transformers/Cargo.toml \
   -- --ignored --exact --nocapture
 ```
 
+Strictly apply the complete F16 graph and run the bounded base Metal smoke with:
+
+```sh
+TRANSFORMERS_NEMOTRON_H_DIR=/absolute/path/to/pinned-checkpoint \
+cargo test --release --manifest-path crates/transformers/Cargo.toml \
+  --no-default-features --features std,metal,tokenizers \
+  --test nemotron_h_artifacts \
+  loads_pinned_nemotron_f16_and_smokes_base_inference \
+  -- --ignored --exact --nocapture --test-threads=1
+```
+
 After a dual-runtime reference bundle has been independently reviewed and its
 seven hashes have been pinned in the reader, authenticate it with:
 
@@ -176,16 +234,11 @@ not authorize itself through hashes stored inside its JSON.
 
 Before this checkpoint can be advertised as supported:
 
-1. Implement and adversarially test the exact-provenance-bound index accounting
-   exception described above.
-2. Download the pinned artifact externally and pass all control and full-shard
-   SHA-256 gates.
-3. Stream all 6,513 tensors into the F16 graph with no unexplained missing or
-   unexpected model tensors and record actual staging counters.
-4. Generate the target evidence with pinned Transformers and the MTP evidence
+1. Generate the target evidence with pinned Transformers and the MTP evidence
    with pinned vLLM; independently review and pin every bundle hash.
-5. Match full-vocabulary prompt logits and hidden traces, then match 32-token
+2. Match full-vocabulary prompt logits and hidden traces, then match 32-token
    cached generation and stateless top-1 at every prefix.
-6. Exercise recurrent decode, MTP draft/verification state handling, padding,
-   context boundaries, native Q8/Q4 quality and packed kernels, the 32K stress
-   gate, and standardized memory/latency/throughput reporting.
+3. Exercise official-parity recurrent decode, MTP draft/verification state
+   handling, padding, context boundaries, native Q8/Q4 quality and packed
+   kernels, the 32K stress gate, and standardized
+   memory/latency/throughput reporting.

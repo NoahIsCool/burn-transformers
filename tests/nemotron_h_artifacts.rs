@@ -1104,8 +1104,75 @@ fn acceptance_record_matches_pinned_header_evidence() {
         record["artifact_authentication"]["result"]["artifact_bytes_hashed"],
         PHYSICAL_ARTIFACT_BYTES
     );
-    assert_eq!(record["checks"]["strict_real_checkpoint_load"], false);
+    assert_eq!(
+        record["checks"]["provenance_bound_index_exception_implemented"],
+        true
+    );
+    assert_eq!(record["checks"]["strict_real_checkpoint_load"], true);
+    assert_eq!(record["checks"]["all_weights_applied"], true);
+    assert_eq!(record["checks"]["metal_f16_stateless_inference"], true);
+    assert_eq!(record["checks"]["metal_f16_cached_prefill"], true);
+    assert_eq!(record["checks"]["metal_f16_recurrent_decode"], true);
     assert_eq!(record["checks"]["mtp_inference"], false);
+
+    let smoke = &record["burn_metal_smoke"];
+    assert_eq!(smoke["status"], "passed");
+    assert_eq!(
+        smoke["classification"],
+        "burn_internal_consistency_smoke_not_official_reference_parity"
+    );
+    assert_eq!(
+        smoke["source"]["crate_commit"],
+        "7c1f816f520bb05c33c22774452cae434e305784"
+    );
+    assert_eq!(smoke["source"]["git_dirty"], false);
+    assert_eq!(smoke["load_report"]["strictly_valid"], true);
+    assert_eq!(
+        smoke["load_report"]["applied_tensors"],
+        PHYSICAL_TENSOR_COUNT
+    );
+    assert_eq!(
+        smoke["load_report"]["source_payload_bytes"],
+        PHYSICAL_TENSOR_BYTES
+    );
+    assert_eq!(smoke["load_report"]["shard_opens"], SHARDS.len());
+    assert_eq!(
+        smoke["load_report"]["maximum_simultaneously_open_shards"],
+        1
+    );
+    assert_eq!(
+        smoke["load_report"]["shard_open_order"],
+        serde_json::Value::Array(
+            SHARDS
+                .iter()
+                .map(|shard| serde_json::Value::String(shard.name.to_owned()))
+                .collect::<Vec<_>>()
+        )
+    );
+    let base = &smoke["base_inference"];
+    assert_eq!(base["token_ids"], serde_json::json!(SMOKE_TOKEN_IDS));
+    assert_eq!(base["hidden_trace_rows"], 54);
+    assert_eq!(base["hidden_width"], 2_688);
+    assert_eq!(base["first_greedy_token_id"], 1_256);
+    assert_eq!(
+        base["stateless_hidden_trace_f32le_sha256"],
+        "80249a14decaa09f775b5e6bd469d17a5515e6c3cfc54863ef9bb93801cd2f5c"
+    );
+    assert_eq!(
+        base["cached_prefill_hidden_trace_f32le_sha256"],
+        base["stateless_hidden_trace_f32le_sha256"]
+    );
+    assert_eq!(
+        base["recurrent_decode_hidden_trace_f32le_sha256"],
+        "eac085e4be9796ba5f828ccd27e8caeda7294228333911beaf6bf33b74e4fc3c"
+    );
+    assert_eq!(base["recurrent_decode_teacher_forced_top1_equal"], true);
+    assert_eq!(smoke["limitations"]["mtp_weights_loaded"], true);
+    assert_eq!(smoke["limitations"]["mtp_inference_executed"], false);
+    assert_eq!(
+        smoke["limitations"]["official_transformers_base_parity"],
+        false
+    );
 }
 
 /// Every source key has the independently observed dtype and shape histogram.

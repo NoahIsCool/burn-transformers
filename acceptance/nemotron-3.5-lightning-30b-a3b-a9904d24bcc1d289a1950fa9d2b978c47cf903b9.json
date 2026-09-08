@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "exact_config_index_headers_controls_and_all_weight_payloads_authenticated_with_fail_closed_reference_scaffold_pending_provenance_bound_index_exception_weight_application_and_inference",
+  "phase": "exact_artifacts_authenticated_provenance_bound_index_exception_and_all_weight_application_validated_with_base_metal_f16_smoke_pending_official_reference_mtp_and_release_gates",
   "repository": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
   "revision": "a9904d24bcc1d289a1950fa9d2b978c47cf903b9",
   "evidence_scope": {
-    "classification": "authenticated_local_artifact_and_oracle_scaffold",
+    "classification": "authenticated_local_artifact_strict_f16_weight_application_base_runtime_smoke_and_oracle_scaffold",
     "weight_payloads_downloaded_for_this_record": true,
     "weight_payloads_hashed_for_this_record": true,
-    "weights_applied": false,
-    "inference_executed": false,
+    "weights_applied": true,
+    "inference_executed": true,
     "real_reference_bundle_reviewed": false
   },
   "references": {
@@ -132,8 +132,9 @@
     "proof": "23 * 128 * 2688 * 2 = 15826944; every base router occurs exactly once in both the index and physical headers.",
     "mtp_router_bytes": 688128,
     "mtp_router_in_delta": false,
-    "current_generic_loader_result": "rejected_with_total_size_mismatch",
-    "required_resolution": "A family exception must be bound to this exact checkpoint provenance and the exact 23 router source names. A numeric-delta-only or global relaxation is forbidden."
+    "generic_loader_result": "rejected_with_total_size_mismatch",
+    "nemotron_exact_provenance_policy_result": "accepted_only_after_repository_revision_config_hash_index_hash_declared_and_physical_totals_exact_23_base_router_descriptors_and_excluded_mtp_router_all_match",
+    "implemented_resolution": "The family-owned policy reconciles accounting only. It does not mutate the index, physical inventory, mappings, or generic strict loader behavior."
   },
   "mtp_contract": {
     "checkpoint_shard": "model-00014-of-00014.safetensors",
@@ -180,7 +181,7 @@
     "tokenizer_config.json": "10f93eabcb9b1602fbb991d6308e787ce1df28ee9cd7a1c6d1e8c3f338b957bc"
   },
   "expected_weight_payload_sha256": {
-    "status": "pinned_but_not_hashed_for_this_record",
+    "status": "all_complete_shards_hashed_and_matched",
     "model-00001-of-00014.safetensors": "7a3e74d24969eac6657cb9b6422091fd062b7d30fd4bc90ecee6c3d7f692626a",
     "model-00002-of-00014.safetensors": "a80c3846e959f6dda34aa031cbb668b766643691ac7e5c9f43f62e6fb1221059",
     "model-00003-of-00014.safetensors": "996bf3a46668e14075cb82259390267c2b1f71446caeb3a5f1f9e0bd7a079ae7",
@@ -228,14 +229,14 @@
     "adversarial_component_oracle_validated": true,
     "all_control_files_sha256_validated_against_local_checkpoint": true,
     "all_weight_shards_sha256_validated": true,
-    "provenance_bound_index_exception_implemented": false,
-    "strict_real_checkpoint_load": false,
-    "all_weights_applied": false,
+    "provenance_bound_index_exception_implemented": true,
+    "strict_real_checkpoint_load": true,
+    "all_weights_applied": true,
     "official_target_reference_bundle_reviewed": false,
     "executable_mtp_reference_bundle_reviewed": false,
-    "metal_f16_stateless_inference": false,
-    "metal_f16_cached_prefill": false,
-    "metal_f16_recurrent_decode": false,
+    "metal_f16_stateless_inference": true,
+    "metal_f16_cached_prefill": true,
+    "metal_f16_recurrent_decode": true,
     "mtp_inference": false,
     "cached_stateless_top1_all_prefixes_compared": false,
     "quantization_validated": false,
@@ -269,11 +270,111 @@
       "weights_allocated": false
     }
   },
+  "burn_metal_smoke": {
+    "status": "passed",
+    "classification": "burn_internal_consistency_smoke_not_official_reference_parity",
+    "source": {
+      "crate_commit": "7c1f816f520bb05c33c22774452cae434e305784",
+      "repository_tree": "dd342dc91ff8782cb4d5c97142cf685861f24465",
+      "transformers_subtree": "c37026d9bdf5694a50a7d294c7b52930eb97abd9",
+      "transformer_source_matches_commit": true,
+      "git_dirty": false,
+      "note": "The ignored gate was compiled and executed from this clean isolated worktree commit. The later evidence-record commit intentionally changes only documentation, test assertions, and this record."
+    },
+    "execution": {
+      "cargo_profile": "release",
+      "default_features": false,
+      "features": ["std", "metal", "tokenizers"],
+      "rustc": "rustc 1.94.0-nightly (4f14395c3 2025-12-22)",
+      "cargo": "cargo 1.94.0-nightly (3861f60f6 2025-12-19)",
+      "host": "aarch64-apple-darwin",
+      "backend": "burn::backend::Metal<f32, i32>",
+      "test": "loads_pinned_nemotron_f16_and_smokes_base_inference",
+      "artifact_hash_preflight": true,
+      "test_elapsed_seconds": 319.02,
+      "load_seconds": 102.101,
+      "stateless_seconds": 8.188,
+      "cached_prefill_seconds": 2.002,
+      "recurrent_decode_seconds": 1.536
+    },
+    "load_report": {
+      "strictly_valid": true,
+      "physical_source_tensors": 6513,
+      "applied_tensors": 6513,
+      "transformed_tensors": 6512,
+      "bf16_to_f16_conversions": 6489,
+      "f32_router_correction_buffers_retained": 24,
+      "aliases": 0,
+      "allowlisted_missing": 0,
+      "allowlisted_unexpected": 0,
+      "source_reads": 6513,
+      "source_payload_bytes": 65826538624,
+      "delivered_tensor_bytes": 65826538624,
+      "largest_source_payload_bytes": 704643072,
+      "largest_output_tensor_bytes": 704643072,
+      "peak_executor_host_staging_bytes": 704643072,
+      "shard_opens": 14,
+      "maximum_simultaneously_open_shards": 1,
+      "shard_open_order": [
+        "model-00001-of-00014.safetensors",
+        "model-00002-of-00014.safetensors",
+        "model-00003-of-00014.safetensors",
+        "model-00004-of-00014.safetensors",
+        "model-00005-of-00014.safetensors",
+        "model-00006-of-00014.safetensors",
+        "model-00007-of-00014.safetensors",
+        "model-00008-of-00014.safetensors",
+        "model-00009-of-00014.safetensors",
+        "model-00010-of-00014.safetensors",
+        "model-00011-of-00014.safetensors",
+        "model-00012-of-00014.safetensors",
+        "model-00013-of-00014.safetensors",
+        "model-00014-of-00014.safetensors"
+      ]
+    },
+    "base_inference": {
+      "prompt": "Hello world, cached decoding.",
+      "token_ids": [22177, 4304, 1044, 57424, 59417, 1046],
+      "hidden_trace_rows": 54,
+      "hidden_width": 2688,
+      "first_greedy_token_id": 1256,
+      "stateless_hidden_trace_f32le_sha256": "80249a14decaa09f775b5e6bd469d17a5515e6c3cfc54863ef9bb93801cd2f5c",
+      "cached_prefill_hidden_trace_f32le_sha256": "80249a14decaa09f775b5e6bd469d17a5515e6c3cfc54863ef9bb93801cd2f5c",
+      "recurrent_decode_hidden_trace_f32le_sha256": "eac085e4be9796ba5f828ccd27e8caeda7294228333911beaf6bf33b74e4fc3c",
+      "stateless_cached_prefill_logit_cosine": 1.0,
+      "stateless_cached_prefill_hidden_cosine": 1.0,
+      "recurrent_decode_teacher_forced_logit_cosine": 0.999376514,
+      "recurrent_decode_teacher_forced_top1_equal": true,
+      "cache": {
+        "capacity": 7,
+        "attention_layers": 6,
+        "mamba_layers": 23,
+        "kv_dtype": "F16",
+        "recurrent_matrix_dtype": "F32",
+        "convolution_history_dtype": "F16",
+        "length_after_prefill": 6,
+        "length_after_decode": 7
+      }
+    },
+    "discovered_and_fixed_runtime_blocker": {
+      "symptom": "Burn one_hot panicked when the exact Lightning router requested one class",
+      "checkpoint_condition": "n_group = topk_group = 1",
+      "mathematical_resolution": "A sole retained router group makes group pruning the identity, so the runtime bypasses one-hot construction and sends all corrected expert scores directly to expert top-k.",
+      "regression_test": "moe_single_group_matches_all_groups_retained"
+    },
+    "limitations": {
+      "official_transformers_base_parity": false,
+      "mtp_weights_loaded": true,
+      "mtp_inference_executed": false,
+      "mtp_cache_and_speculative_verification_validated": false,
+      "thirty_two_token_generation_validated": false,
+      "quantization_validated": false,
+      "long_context_32k_validated": false
+    }
+  },
   "open_release_gates": [
-    "implement and test an exact-provenance-bound exception for the upstream total_size defect without weakening generic checkpoint validation",
-    "stream and apply every base and MTP tensor with no unexplained missing or unexpected keys",
     "produce, independently review, hash-pin, and compare the dual Transformers-base and vLLM-MTP reference bundle",
-    "run Metal F16 stateless, cached-prefill, recurrent-decode, MTP, and 32-token greedy parity",
+    "run official-reference Metal F16 stateless, cached-prefill, recurrent-decode, MTP, and 32-token greedy parity",
     "validate padding, context boundaries, quantized quality and packed kernels, 32K stress, and standardized performance"
   ]
 }

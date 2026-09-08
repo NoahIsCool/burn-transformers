@@ -765,7 +765,9 @@ backpropagation—is added only when choosing top-k expert IDs. Mixture weights
 use the corresponding uncorrected scores, renormalize them, and apply scale 2.5.
 This expert-bias mechanism is the aux-loss-free component, although the released
 Nano training and Lightning recipe also use a small sequence-level auxiliary
-loss.
+loss. Lightning sets both group counts to one. Its group-pruning stage is
+therefore the identity, not a one-class one-hot operation: every expert remains
+eligible before the final top-six selection.
 
 **Implementation:** [`NemotronHMoe`](src/models/nemotron_h/model.rs).
 **Reference:** [NVIDIA's Lightning recipe](https://docs.nvidia.com/nemotron/nightly/nemotron/lightning35/pretrain.html).
@@ -1070,6 +1072,16 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   and the separately required MTP router. See
   [`checkpoint/accounting.rs`](src/checkpoint/accounting.rs) and
   [`nemotron_h/checkpoint.rs`](src/models/nemotron_h/checkpoint.rs).
+- **Nemotron's real-weight smoke is not oracle parity.** The authenticated
+  Lightning artifact now strictly applies all 6,513 tensors to the Metal F16
+  graph in fourteen-shard physical order. Its six-token base smoke proves
+  finite stateless, cached-prefill, and recurrent-decode execution, exact
+  cache topology, bit-identical stateless/prefill hidden traces, and
+  recurrent/teacher top-1 agreement. It also exposed the single-group router
+  edge above. The 270 MTP tensors were installed but not executed, and no
+  official-reference, 32-token, quantized, or 32K claim follows from this
+  internal-consistency gate. See
+  [`NEMOTRON_H_ACCEPTANCE.md`](NEMOTRON_H_ACCEPTANCE.md).
 - **FLAN-UL2's LM head is tied.** Its pinned config omits
   `tie_word_embeddings`; the pinned upstream T5 schema and the local Serde
   default both resolve that omission to `true`. FLAN Small and XXL explicitly
