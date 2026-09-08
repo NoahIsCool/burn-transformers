@@ -385,7 +385,9 @@ class ReferenceHelperTests(unittest.TestCase):
         class FakeDynamicCache:
             def __init__(self, length: int) -> None:
                 self.length = length
-                self.batch_size = 1
+                # The pinned DynamicCache reports this sentinel because the
+                # concrete layers do not expose an optional batch_size field.
+                self.batch_size = -1
                 self.layers = [
                     DynamicLayer(length)
                     if kind == "full_attention"
@@ -400,6 +402,12 @@ class ReferenceHelperTests(unittest.TestCase):
         REFERENCE.validate_official_cache(
             types.SimpleNamespace(float16="float16"), cache, FakeDynamicCache, 7
         )
+        cache.layers[17].keys.shape = [2, 2, 7, 128]
+        with self.assertRaisesRegex(RuntimeError, "layer 17 keys geometry changed"):
+            REFERENCE.validate_official_cache(
+                types.SimpleNamespace(float16="float16"), cache, FakeDynamicCache, 7
+            )
+        cache.layers[17].keys.shape = [1, 2, 7, 128]
         cache.layers[31].values.shape = [1, 2, 6, 128]
         with self.assertRaisesRegex(RuntimeError, "layer 31 values geometry changed"):
             REFERENCE.validate_official_cache(

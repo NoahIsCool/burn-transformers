@@ -1046,6 +1046,13 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   lengths/positions. Those checks can certify the short production graph, but
   the F16 exact-eager allocation described above still prevents advertising
   32K support on current hardware.
+- **Muse's pinned `DynamicCache.batch_size` is a sentinel, not physical
+  geometry.** Its concrete dynamic KV layers do not publish the optional
+  `batch_size` attribute, so the aggregate property returns `-1` even after
+  initialization. Oracle validation establishes batch one from every key and
+  value tensor's leading axis and records both that physical fact and the API
+  sentinel; treating `-1` as a real batch size would incorrectly reject the
+  official cached graph.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

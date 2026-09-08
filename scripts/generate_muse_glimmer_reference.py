@@ -1573,7 +1573,16 @@ def validate_official_cache(
     dynamic_cache_class: type,
     expected_length: int,
 ) -> None:
-    """Validate every official KV layer's logical and physical short-run geometry."""
+    """Validate every official KV layer's logical and physical short-run geometry.
+
+    ``DynamicCache.batch_size`` is not an authoritative physical-size query for
+    this pinned model.  Its implementation returns ``-1`` when none of the
+    concrete cache layers publishes an optional ``batch_size`` attribute, even
+    though their initialized key/value tensors have a well-defined batch axis.
+    The exact physical tensor shapes checked below therefore establish that the
+    oracle is batch one; the API property's sentinel is retained only as
+    provenance in the generated record.
+    """
 
     if expected_length <= 0 or expected_length >= 2_048:
         raise ValueError("short oracle cache length must be in 1..2048")
@@ -1581,12 +1590,11 @@ def validate_official_cache(
         raise RuntimeError(f"official cache class changed: {type(cache)!r}")
     if (
         cache.get_seq_length() != expected_length
-        or cache.batch_size != 1
         or len(cache.layers) != len(EXPECTED_LAYER_TYPES)
     ):
         raise RuntimeError(
             "official cache topology changed: "
-            f"length={cache.get_seq_length()}, batch={cache.batch_size}, "
+            f"length={cache.get_seq_length()}, reported_batch={cache.batch_size}, "
             f"layers={len(cache.layers)}"
         )
     for index, (layer, expected_kind) in enumerate(
@@ -2221,6 +2229,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "cache": {
                 "class": "transformers.cache_utils.DynamicCache",
                 "batch_size": 1,
+                "api_reported_batch_size": cache.batch_size,
+                "batch_size_authority": "physical_key_value_tensor_axis_0",
                 "layer_count": len(EXPECTED_LAYER_TYPES),
                 "layer_types": EXPECTED_LAYER_TYPES,
                 "sliding_layers": EXPECTED_LAYER_TYPES.count("sliding_attention"),
