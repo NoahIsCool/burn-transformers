@@ -1,7 +1,7 @@
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "advertised_supported": false,
-  "phase": "authenticated_artifact_and_strict_f16_plan_verified_pending_regenerated_strict_numerical_oracle_weight_application_and_32k_acceptance",
+  "phase": "strict_f16_official_reference_and_bounded_attention_gates_verified_pending_quantized_quality_real_32k_and_release_hardening",
   "repository": "meta-models/Muse-Glimmer-30B",
   "revision": "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
   "reference": {
@@ -13,57 +13,80 @@
   },
   "strict_reference_bundle": {
     "schema_version": 3,
-    "status": "pending_regeneration_and_independent_hash_review",
+    "status": "authenticated_and_numerically_accepted",
+    "artifact_manifest_sha256": "5b8265f3a0fe6b07668caa8e5b949667b8f26f664550dfcc86d35f93fb7971ab",
     "files": [
       {
         "role": "strict_json",
-        "maximum_bytes": 1048576
+        "filename": "muse-glimmer-30b-a4e59da-reference.json",
+        "bytes": 43548,
+        "maximum_bytes": 1048576,
+        "sha256": "cab22352cf833802b4e530b1ad6b6a223481f3a52378ce2c3bfb980e15543f10"
       },
       {
         "role": "stateless_prompt_logits",
+        "filename": "muse-glimmer-30b-a4e59da-prompt-logits.f32le",
         "shape": [202048],
         "source_dtype": "float16",
         "storage_dtype": "float32_le",
-        "bytes": 808192
+        "bytes": 808192,
+        "sha256": "c384665147d10a255110e9e034ddec557a2b49909e7105d98a5b541ff4c5d189"
       },
       {
         "role": "cached_prefix_logits",
+        "filename": "muse-glimmer-30b-a4e59da-cached-prefix-logits.f32le",
         "shape": [32, 202048],
         "source_dtype": "float16",
         "storage_dtype": "float32_le",
-        "bytes": 25862144
+        "bytes": 25862144,
+        "sha256": "864e67fef08cd4dcdd35b4e7181d8b4d9eb6a924d9fec04563ac91c3af719a0d"
       },
       {
         "role": "teacher_prefix_logits",
+        "filename": "muse-glimmer-30b-a4e59da-teacher-prefix-logits.f32le",
         "shape": [32, 202048],
         "source_dtype": "float16",
         "storage_dtype": "float32_le",
-        "bytes": 25862144
+        "bytes": 25862144,
+        "sha256": "ff7eb300361f7ba7d036dacbf56cb8e4f8680ce0c01e427775623f03b09cc89d"
       },
       {
         "role": "stateless_prompt_hidden_trace",
+        "filename": "muse-glimmer-30b-a4e59da-hidden-last.f32le",
         "shape": [54, 6656],
         "source_dtype": "float16",
         "storage_dtype": "float32_le",
-        "bytes": 1437696
+        "bytes": 1437696,
+        "sha256": "6ce52668e97a612b0bf8c5adbb306eceda0d002aec8ed1726385b5dd11ab9c3f"
       },
       {
         "role": "cached_prefill_hidden_trace",
+        "filename": "muse-glimmer-30b-a4e59da-cached-prefill-hidden-last.f32le",
         "shape": [54, 6656],
         "source_dtype": "float16",
         "storage_dtype": "float32_le",
-        "bytes": 1437696
+        "bytes": 1437696,
+        "sha256": "6ce52668e97a612b0bf8c5adbb306eceda0d002aec8ed1726385b5dd11ab9c3f"
       },
       {
         "role": "first_recurrent_decode_hidden_trace",
+        "filename": "muse-glimmer-30b-a4e59da-cached-decode-1-hidden-last.f32le",
         "shape": [54, 6656],
         "source_dtype": "float16",
         "storage_dtype": "float32_le",
-        "bytes": 1437696
+        "bytes": 1437696,
+        "sha256": "76a4b1e3a6a6b0fbb9dcc6696f90131f112b35e2ee9f117c2cca8d71549a80a4"
       }
     ],
     "minimum_per_row_cosine": 0.999,
-    "committed_generated_token_ids": [328, 19669, 200023, 51015, 5959, 290, 21752, 14774, 10950, 310, 1085, 81080, 24429, 1574, 51015, 5959, 21752, 14774, 10950, 310, 1085, 81080, 24429, 1574, 2991, 1657, 81080, 24429, 26, 97147, 10758, 98400]
+    "committed_generated_token_ids": [328, 19669, 200023, 51015, 5959, 290, 21752, 14774, 10950, 310, 1085, 81080, 24429, 1574, 51015, 5959, 21752, 14774, 10950, 310, 1085, 81080, 24429, 1574, 2991, 1657, 81080, 24429, 26, 97147, 10758, 98400],
+    "official_internal_consistency": {
+      "prompt_cached_cosine": 1.0,
+      "minimum_cached_stateless_prefix_cosine": 0.9999990466389038,
+      "minimum_cached_prefill_stateless_hidden_cosine": 0.9999999999999998,
+      "minimum_greedy_margin": 0.421875,
+      "minimum_margin_to_f16_ulp_ratio": 46.0
+    }
   },
   "artifact_layout": {
     "safetensors_shards": 2,
@@ -107,19 +130,55 @@
     "source_dtype": "bf16",
     "acceptance_target_dtype": "f16",
     "estimate_classification": "conservative_upper_bound",
-    "execution_note": "The planner combines the largest shard and largest target tensor for a conservative preflight bound. Pass-two runtime counters remain unrecorded until the complete text graph is applied."
+    "execution_note": "The planner combines the largest shard and largest target tensor for a conservative preflight bound. The release Metal gate completed pass-two application of all 627 text tensors; this analytical value remains a preflight upper bound rather than a measured process peak."
   },
-  "exact_eager_32k_blocker": {
-    "status": "open",
-    "production_path": "Muse float16 explicit eager attention",
-    "full_attention_score_shape": [1, 32, 32768, 32768],
-    "score_elements": 34359738368,
-    "float16_score_bytes": 68719476736,
-    "float32_softmax_bytes": 137438953472,
-    "note": "A single 32K full-attention layer requires about 64 GiB for F16 scores before mask storage and the F32 softmax temporary; this cannot coexist with the 55.7 GB F16 language graph on the current 96 GB machine. Exact-compatible tiled attention or a validated bounded chunked-prefill path is required before the production 32K gate can run. Reducing only the cache allocation does not solve this quadratic activation bound."
+  "attention_execution": {
+    "status": "bounded_exact_eager_policy_implemented_and_component_validated",
+    "precision_graph": "float16_scores_float32_softmax_float16_probabilities",
+    "default_policy": "synchronized_query_chunking",
+    "maximum_query_tokens": 512,
+    "maximum_score_elements": 67108864,
+    "planned_32k_global_query_chunk_tokens": 64,
+    "planned_32k_global_query_chunks": 512,
+    "unbounded_32k_score_elements": 34359738368,
+    "unbounded_32k_float16_score_bytes": 68719476736,
+    "unbounded_32k_float32_softmax_bytes": 137438953472,
+    "metal_trace": {
+      "status": "passed",
+      "sequence_tokens": 4097,
+      "muse_query_chunk_tokens": 512,
+      "muse_query_chunks": 9,
+      "burn_flash_launch_identity": "cubek_attention",
+      "burn_flash_observed": true,
+      "muse_explicit_path_flash_observed": false,
+      "official_eager_f16_output_bits": [6715, 12904, 5503, 14941],
+      "burn_flash_output_bits": [6712, 12902, 5502, 14942]
+    },
+    "scope_note": "Query chunking preserves every row's full allowed key support and bounds score-like temporaries; it does not bound parameters, Q/K/V, outputs, or autodiff tapes. Synthetic full/sliding, cached, padded, and recurrent equivalence plus the Metal flash-discrimination trace passed. The complete 32K real-checkpoint hardware stress gate remains open."
   },
   "rust_acceptance_reproduction": {
-    "status": "pending_regenerated_oracle_and_successful_run",
+    "status": "passed_after_bounded_attention_integration",
+    "prior_successful_gate": {
+      "git_head": "7c6b3d512733de5899ac71a5697fc5572d50fc9b",
+      "scope": "schema_3_oracle_and_unbounded_short_context_graph",
+      "note": "This first complete release-profile gate predated the bounded-attention integration and is retained only as historical evidence, not represented as proof of the integrated graph."
+    },
+    "integrated_successful_gate": {
+      "git_head": "0cdff7fab87fbbc6b399ffa2fddbdf073af988f0",
+      "git_tree": "b27350c3c6445dab1b78ed7c7fce4111fe589182",
+      "transformers_tree": "a824b671d4aff398c1e869fbf3372f8ec2e2f28f",
+      "transformers_tree_dirty": false,
+      "test_source_sha256": "e498be6b6f604ac28dbae8b0efec202b7b15a596ef7f8e3e7b703ed1217c2bf4",
+      "cargo_package_rust_version": "1.92",
+      "rustc": "rustc 1.94.0-nightly (4f14395c3 2025-12-22)",
+      "rustc_commit_hash": "4f14395c37db4c1be874e6b0ace6721674223c22",
+      "llvm_version": "21.1.8",
+      "profile": "release",
+      "target": "aarch64-macos",
+      "features": ["std", "metal", "tokenizers"],
+      "elapsed_seconds": 331.84,
+      "timing_classification": "cold end-to-end correctness diagnostic including checkpoint authentication and loading; not a standardized performance sample"
+    },
     "manifest_path": "crates/transformers/Cargo.toml",
     "test_target": "muse_glimmer_artifacts",
     "test_name": "matches_pinned_muse_glimmer_official_f16_reference_on_metal",
@@ -130,6 +189,38 @@
     "source_clean_scope": "crates/transformers",
     "runtime_record_fields": ["git_head", "git_tree", "transformers_tree", "transformers_tree_dirty", "test_source_sha256", "cargo_package_rust_version", "rustc_verbose", "profile", "target", "features"],
     "command": "TRANSFORMERS_MUSE_GLIMMER_REFERENCE_DIR=/absolute/external/reference-parent cargo test --release --manifest-path crates/transformers/Cargo.toml --no-default-features --features std,metal,tokenizers --test muse_glimmer_artifacts matches_pinned_muse_glimmer_official_f16_reference_on_metal -- --ignored --exact --nocapture"
+  },
+  "strict_f16_application": {
+    "status": "passed",
+    "runtime_tensors_applied": 627,
+    "renames_applied": 626,
+    "bf16_to_f16_conversions": 627,
+    "aliases_applied": 0,
+    "visual_tensors_allowlisted": 809,
+    "missing_tensors": 0,
+    "unexpected_tensors": 0,
+    "allowlisted_missing_tensors": 0,
+    "official_loader_missing_keys": 0,
+    "official_loader_unexpected_keys": 0,
+    "official_loader_mismatched_keys": 0,
+    "official_loader_error_messages": 0,
+    "note": "The official loader consumed all 1,436 physical tensors to generate the oracle. The Rust text-only gate consumed the 627 language tensors and intentionally reported the 809 visual tensors through its explicit allowlist."
+  },
+  "official_f16_reference_acceptance": {
+    "status": "passed",
+    "minimum_required_cosine": 0.999,
+    "prompt_logit_cosine": 0.999999616,
+    "cached_prompt_logit_cosine": 0.999999616,
+    "minimum_stateless_hidden_trace_cosine": 0.999943377,
+    "minimum_cached_prefill_hidden_trace_cosine": 0.999943377,
+    "minimum_burn_cached_prefill_stateless_hidden_trace_cosine": 1.0,
+    "minimum_recurrent_decode_hidden_trace_cosine": 0.999987445,
+    "minimum_cached_prefix_official_cosine": 0.999999616,
+    "minimum_teacher_prefix_official_cosine": 0.999999333,
+    "minimum_burn_cached_teacher_prefix_cosine": 0.999999726,
+    "official_greedy_tokens_compared": 32,
+    "exact_greedy_token_matches": 32,
+    "note": "Each minimum was computed row-wise over its complete committed tensor fixture. The cached-prefix and teacher-prefix fixtures retain all 202,048 vocabulary logits for every one of the 32 decisions."
   },
   "inventory_digests": {
     "header_inventory_sha256": "7bf662cfb4142c1f9994926574082e9adf52f9c335f226e46b998a7d9c4547cb",
@@ -156,23 +247,26 @@
     "tokenizer_round_trip_validated": true,
     "chat_template_exactly_rendered": false,
     "chat_template_known_minijinja_parser_limitation_validated": true,
-    "all_weights_applied": false,
-    "all_parameters_installed_as_f16": false,
+    "strict_reference_bundle_sha256_validated": true,
+    "all_weights_applied": true,
+    "all_parameters_installed_as_f16": true,
     "source_ordered_single_shard_streaming_validated": false,
-    "metal_f16_stateless_inference": false,
-    "metal_f16_cached_prefill": false,
-    "metal_f16_recurrent_decode": false,
-    "official_reference_full_vector_logits_compared": false,
-    "official_reference_hidden_trace_compared": false,
-    "official_reference_cached_prefill_hidden_trace_compared": false,
-    "official_reference_recurrent_decode_hidden_trace_compared": false,
-    "official_reference_greedy_32_tokens_compared": false,
-    "cached_stateless_top1_all_prefixes_compared": false,
-    "cached_full_vector_all_prefixes_compared": false,
-    "teacher_full_vector_all_prefixes_compared": false,
-    "cached_teacher_per_row_cosine_compared": false,
-    "cache_geometry_dtype_lengths_and_positions_validated": false,
-    "rust_source_toolchain_features_and_trees_recorded": false,
+    "metal_f16_stateless_inference": true,
+    "metal_f16_cached_prefill": true,
+    "metal_f16_recurrent_decode": true,
+    "official_reference_full_vector_logits_compared": true,
+    "official_reference_hidden_trace_compared": true,
+    "official_reference_cached_prefill_hidden_trace_compared": true,
+    "official_reference_recurrent_decode_hidden_trace_compared": true,
+    "official_reference_greedy_32_tokens_compared": true,
+    "cached_stateless_top1_all_prefixes_compared": true,
+    "cached_full_vector_all_prefixes_compared": true,
+    "teacher_full_vector_all_prefixes_compared": true,
+    "cached_teacher_per_row_cosine_compared": true,
+    "cache_geometry_dtype_lengths_and_positions_validated": true,
+    "bounded_query_chunk_policy_validated": true,
+    "metal_eager_flash_discrimination_validated": true,
+    "rust_source_toolchain_features_and_trees_recorded": true,
     "quantization_validated": false,
     "long_context_32k_validated": false
   },
@@ -201,13 +295,9 @@
     }
   },
   "open_release_gates": [
-    "strict full F16 language-graph weight application",
-    "regenerate and independently hash-review the strict seven-file official oracle bundle",
-    "official Transformers F16 prompt, cached-prefix, teacher-prefix, and hidden-trace parity",
-    "32-token cached and stateless full-vector parity",
-    "padded and context-boundary tests",
+    "real-checkpoint padded and context-boundary tests",
     "native Q8 and Q4 conversion, quality, and packed-kernel proof",
-    "exact-compatible tiled or bounded chunked-prefill implementation enabling 32K production-path stress",
+    "real full-model 32K production-path stress using the bounded attention policy",
     "standardized latency, throughput, cache, memory, and output-hash benchmarks"
   ]
 }

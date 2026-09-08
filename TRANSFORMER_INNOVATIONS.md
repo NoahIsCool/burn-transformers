@@ -380,7 +380,8 @@ opt-in CubeCL flash candidate uses the numerically different strict-FP32 QK
 graph. The opt-in Metal trace gate observes `cubek_attention` for that control,
 observes no flash launch for Muse's explicit path, and distinguishes eager F16
 bits `[1a3b, 3268, 157f, 3a5d]` from flash bits
-`[1a38, 3266, 157e, 3a5e]`. Instead, a validated
+`[1a38, 3266, 157e, 3a5e]`. The 4,097-token discriminator executes Muse as
+nine chunks of at most 512 queries. Instead, a validated
 [`AttentionExecutionPolicy`](src/attention.rs)
 keeps short oracle prompts in one unchanged call and splits longer prompts only
 along the query axis. Every query chunk still sees its entire allowed key set,
@@ -404,15 +405,16 @@ and preserving fused eligibility only where a future kernel can also reproduce
 the required rounding graph. This scaling changes attention entropy without
 letting raw projection norms determine temperature.
 
-This exact-eager choice currently blocks the real 32K production-path gate on
-the 96 GB M3 Max. One full-attention score tensor at 32K has shape
-`[1, 32, 32768, 32768]`: 34,359,738,368 elements, or 68,719,476,736 bytes in
-F16, before the causal mask and 137,438,953,472-byte FP32 softmax temporary.
-That activation cannot coexist with the 55.7 GB F16 language graph. A tiled
-operation that preserves the pinned F16-score/FP32-softmax semantics, or a
-bounded chunked-prefill path validated against exact eager execution, is a
-release prerequisite; shrinking KV storage alone cannot remove this quadratic
-activation bound.
+The unbounded exact-eager graph would still be impractical at 32K: one
+full-attention score tensor has shape `[1, 32, 32768, 32768]`, or
+34,359,738,368 elements (68,719,476,736 bytes in F16), before the causal mask
+and 137,438,953,472-byte FP32 softmax temporary. The query-chunk policy removes
+that particular release blocker without changing the row-wise attention
+equation. It has passed synthetic full/sliding, cached, padded, and recurrent
+equivalence tests plus the Metal flash-discrimination trace. A real 32K run of
+the complete 55.7 GB F16 language graph is still a separate acceptance gate;
+the analytical workspace bound and component tests do not substitute for that
+hardware stress run.
 
 **Implementation:** [`MuseGlimmerAttention`](src/models/muse_glimmer/model.rs).
 **Reference:** the [pinned Muse-Glimmer reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/muse_glimmer/modular_muse_glimmer.py).
@@ -1075,12 +1077,13 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   `5.17.0.dev0`. Oracle generation therefore authenticates the Git revision and
   source bytes and records the config value separately; it never substitutes
   one version string for the other.
-- **Muse's short-context numerical gate is not its 32K gate.** The strict
-  seven-file oracle now retains every cached and teacher-forced vocabulary row,
+- **Muse's short-context numerical gate is not its 32K gate.** The authenticated
+  seven-file oracle retains every cached and teacher-forced vocabulary row,
   cached-prefill and first recurrent-decode hidden traces, and exact cache
-  lengths/positions. Those checks can certify the short production graph, but
-  the F16 exact-eager allocation described above still prevents advertising
-  32K support on current hardware.
+  lengths/positions. The real F16 graph passed those comparisons and all 32
+  greedy decisions. The bounded query-chunk policy removes the former
+  all-at-once score allocation, but a complete 32K real-checkpoint stress run
+  remains required before advertising long-context support.
 - **Muse's pinned `DynamicCache.batch_size` is a sentinel, not physical
   geometry.** Its concrete dynamic KV layers do not publish the optional
   `batch_size` attribute, so the aggregate property returns `-1` even after
