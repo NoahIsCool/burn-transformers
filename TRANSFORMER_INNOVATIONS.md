@@ -1211,9 +1211,10 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   has independently bound the same sources and F16 plan, reopened all 417
   payloads, and published a `14,911,372,485`-byte v2 sidecar with SHA-256
   `05b69f67799b4dc0228b4298e39d466d753fcc5d6484f61c8920c551017daed3`.
-  Q4 packed-Metal execution, quantized official-reference and quality
-  evaluation, and long-context execution remain pending, so this is not a
-  support claim.
+  A separate Q4 trace also observed all 417 packed matmuls without whole-weight
+  dequantization, with cached/stateless logit cosine `1.0`. Quantized
+  official-reference and quality evaluation plus long-context execution remain
+  pending, so this is not a support claim.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.
