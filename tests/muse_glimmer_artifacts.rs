@@ -4211,11 +4211,19 @@ fn smoke_and_audit_pinned_muse_glimmer_burnpack(
     );
 }
 
+/// Rejects an audit invocation whose binary lacks CubeCL kernel instrumentation.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+fn require_muse_packed_kernel_tracing() {
+    #[cfg(not(feature = "kernel-tracing"))]
+    panic!("Muse packed-kernel audits require the `kernel-tracing` feature");
+}
+
 /// Runs the content-pinned Q8 sidecar and audits all recurrent packed kernels.
 #[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
 #[test]
 #[ignore = "requires pinned Muse weights, reviewed Q8 Burnpack, Metal, and unified memory"]
 fn smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal() {
+    require_muse_packed_kernel_tracing();
     smoke_and_audit_pinned_muse_glimmer_burnpack(SymmetricQuantization::Q8, Q8_BURNPACK_ENV);
 }
 
@@ -4224,6 +4232,7 @@ fn smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal() {
 #[test]
 #[ignore = "requires pinned Muse weights, reviewed Q4 Burnpack, Metal, and unified memory"]
 fn smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal() {
+    require_muse_packed_kernel_tracing();
     smoke_and_audit_pinned_muse_glimmer_burnpack(SymmetricQuantization::Q4, Q4_BURNPACK_ENV);
 }
 
