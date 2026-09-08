@@ -15,6 +15,16 @@
 //! Stateless and cached attention share a validated query-chunk policy that
 //! bounds score-like workspace without approximating any softmax row. The
 //! reference eager operation remains unchanged for short single-chunk calls.
+//!
+//! # Packed inference
+//!
+//! The automatic registry accepts provenance-bound Q8/Q4 Burnpack overlays for
+//! `muse_glimmer_text`. Every attention projection (`q`, `k`, `v`, gate, and
+//! output), all three SwiGLU projections, and an independent LM head execute
+//! through the crate's packed-preserving linear boundary. Embeddings,
+//! normalization scales, and optional attention biases remain at source
+//! precision. Registration records packed-kernel execution evidence; it does
+//! not advertise Muse as release-supported or imply quantized-quality parity.
 
 mod checkpoint;
 mod load;

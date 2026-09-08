@@ -1123,6 +1123,17 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   value tensor's leading axis and records both that physical fact and the API
   sentinel; treating `-1` as a real batch size would incorrectly reject the
   official cached graph.
+- **Muse's native-quantization boundary is projection-only.** The pinned
+  627-tensor F16 plan contains 417 eligible matrices: five attention and three
+  SwiGLU projections in each of 52 layers, plus the independent LM head. The
+  embedding and 209 normalization vectors remain F16; the pinned configuration
+  has no attention biases. Every eligible input width is divisible by the G64
+  group size. Nonzero two-layer fixtures prove that automatic Q8 and Q4 loading
+  keeps all eligible parameters on packed-aware linear paths through stateless,
+  cached-prefill, and recurrent-decode execution. A deliberately row-unaligned
+  Burnpack is rejected as reference-only. Real 30B sidecars, packed-Metal kernel
+  traces, quantized quality, and long-context execution remain pending, so this
+  boundary is not a support claim.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

@@ -49,7 +49,7 @@ const MAX_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_GENERATION_CONFIG_BYTES: u64 = 1024 * 1024;
 
 /// Causal families whose packed installation path has an acceptance contract.
-const PACKED_CAUSAL_MODEL_TYPES: &[&str] = &["qwen3_5_text", "qwen3_moe"];
+const PACKED_CAUSAL_MODEL_TYPES: &[&str] = &["muse_glimmer_text", "qwen3_5_text", "qwen3_moe"];
 
 /// Host-side policy for automatic local model loading.
 #[derive(Debug, Clone)]
@@ -405,9 +405,10 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
         device: &B::Device,
     ) -> Result<LoadedModel<Self>> {
         if options.quantized_burnpack.is_some() {
-            return Err(Error::BackendCapability(
-                "packed Burnpack loading is currently certified only for Qwen causal models".into(),
-            ));
+            return Err(Error::BackendCapability(format!(
+                "packed Burnpack loading is currently certified only for causal model types: {}",
+                PACKED_CAUSAL_MODEL_TYPES.join(", ")
+            )));
         }
         let (root, json) = read_required_config(root.as_ref())?;
         let model_type = detect_model_type(&json)?;
@@ -745,23 +746,31 @@ fn normalize_pad_token_named(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs::File, io::Write, path::Path};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs::File,
+        io::Write,
+        path::Path,
+    };
 
     use burn::{
         backend::Flex,
-        tensor::{DType, Int, Tensor},
+        tensor::{DType, Int, Tensor, TensorData, Tolerance},
     };
     use serde_json::{Map, Value, json};
 
     use super::*;
     use crate::{
-        CausalLmInput, ForwardOptions, Seq2SeqInput,
+        CausalLmInput, DecodeInput, ForwardOptions, LogitsSelection, Seq2SeqInput,
+        cache::CacheConfig,
         checkpoint::{
             CheckpointManifest, ExpectedTensor, LoadReport, MappingPlan, TensorOperation,
             TensorTransform,
             quantization::{
-                BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, QuantizedBurnpackArtifact,
-                QuantizedCheckpointOptions, quantize_local_checkpoint_to_burnpack,
+                BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, PackedExecutionSupport,
+                QuantizationExclusion, QuantizationGroupSize, QuantizedBurnpackArtifact,
+                QuantizedCheckpointOptions, SymmetricQuantization, WeightQuantizationConfig,
+                quantize_local_checkpoint_to_burnpack,
             },
         },
         models::{
@@ -838,6 +847,173 @@ mod tests {
         file.write_all(&header).expect("fixture header bytes");
         file.write_all(&vec![0; offset as usize])
             .expect("fixture tensor bytes");
+    }
+
+    /// Writes a nonzero, quantization-exact F32 checkpoint for a Muse miniature.
+    ///
+    /// Projection groups contain only `{-7/256, 0, 7/256}`. Both symmetric Q4
+    /// and Q8 therefore reconstruct every matrix value exactly: Q4 maps the
+    /// extrema to `+-7`, while Q8 maps them to `+-127`. This makes differences
+    /// between full-precision and packed execution evidence of wiring or cache
+    /// errors rather than expected quantization noise.
+    fn write_patterned_muse_checkpoint(
+        root: &Path,
+        expected: &[ExpectedTensor],
+        mappings: &MappingPlan,
+    ) {
+        let mut tensors = Vec::new();
+        let mut offset = 0_u64;
+        let mut header = Map::new();
+        for operation in mappings.operations() {
+            let TensorOperation::Map {
+                source,
+                target,
+                transform,
+            } = operation
+            else {
+                continue;
+            };
+            assert_eq!(
+                *transform,
+                TensorTransform::Identity,
+                "Muse patterned fixture expects identity source layouts"
+            );
+            let shape = expected
+                .iter()
+                .find(|tensor| tensor.name == *target)
+                .unwrap_or_else(|| panic!("mapping target `{target}` must be expected"))
+                .shape
+                .clone();
+            let elements = shape.iter().copied().product::<u64>();
+            let end = offset
+                .checked_add(elements.checked_mul(4).expect("fixture byte size"))
+                .expect("fixture data offset");
+            assert!(
+                header
+                    .insert(
+                        source.clone(),
+                        json!({"dtype": "F32", "shape": shape, "data_offsets": [offset, end]}),
+                    )
+                    .is_none(),
+                "fixture source `{source}` must be unique"
+            );
+            tensors.push((
+                target.clone(),
+                usize::try_from(elements).expect("host fixture size"),
+            ));
+            offset = end;
+        }
+
+        let mut header = serde_json::to_vec(&Value::Object(header)).expect("fixture header");
+        while !header.len().is_multiple_of(8) {
+            header.push(b' ');
+        }
+        let mut file = File::create(root.join("model.safetensors")).expect("fixture checkpoint");
+        file.write_all(&(header.len() as u64).to_le_bytes())
+            .expect("fixture header length");
+        file.write_all(&header).expect("fixture header bytes");
+        for (target, elements) in tensors {
+            for index in 0..elements {
+                let value = if target == "model.norm.weight" {
+                    1.0_f32
+                } else if target.contains("layernorm") || target.ends_with(".bias") {
+                    0.0
+                } else if target == "model.embed_tokens.weight" {
+                    ((index % 11) as f32 - 5.0) / 64.0
+                } else {
+                    match index % 3 {
+                        0 => -7.0 / 256.0,
+                        1 => 0.0,
+                        _ => 7.0 / 256.0,
+                    }
+                };
+                file.write_all(&value.to_le_bytes())
+                    .expect("fixture tensor value");
+            }
+        }
+    }
+
+    /// Returns a two-layer Muse topology whose every matrix row aligns to G64.
+    fn packed_muse_config() -> MuseGlimmerTextConfig {
+        MuseGlimmerTextConfig {
+            vocab_size: 128,
+            hidden_size: 64,
+            intermediate_size: 64,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            num_key_value_heads: 2,
+            head_dim: 16,
+            max_position_embeddings: 16,
+            sliding_window: Some(4),
+            layer_types: vec![
+                MuseGlimmerLayerType::SlidingAttention,
+                MuseGlimmerLayerType::FullAttention,
+            ],
+            layer_rope_theta: vec![10_000.0, 0.0],
+            bos_token_id: Some(TokenIds::One(1)),
+            eos_token_id: Some(TokenIds::One(5)),
+            pad_token_id: Some(TokenIds::One(0)),
+            tie_word_embeddings: false,
+            attention_bias: true,
+            ..MuseGlimmerTextConfig::default()
+        }
+    }
+
+    /// Executes stateless, cached-prefill, and one-token recurrent Muse paths.
+    fn execute_muse_paths(model: &AutoCausalLm<TestBackend>) -> [TensorData; 4] {
+        let device = Default::default();
+        let options = ForwardOptions {
+            logits: LogitsSelection::All,
+            ..ForwardOptions::default()
+        };
+        let prompt = CausalLmInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device),
+            token_mask: None,
+            position_ids: None,
+        };
+        let stateless = model
+            .forward(prompt.clone(), &options)
+            .expect("stateless Muse fixture")
+            .logits
+            .into_data();
+        let mut state = model
+            .new_decode_state(
+                CacheConfig::new(1, 8).expect("fixture cache geometry"),
+                1,
+                &device,
+            )
+            .expect("Muse fixture decode state");
+        let prefill = model
+            .prefill(prompt, &mut state, &options)
+            .expect("cached Muse fixture prefill")
+            .logits
+            .into_data();
+        let decoded = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[4]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &options,
+            )
+            .expect("recurrent Muse fixture decode")
+            .logits
+            .into_data();
+        let extended = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3, 4]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions::default(),
+            )
+            .expect("extended stateless Muse fixture")
+            .logits
+            .into_data();
+        [stateless, prefill, decoded, extended]
     }
 
     /// Persists one direct architecture config plus deterministic generation metadata.
@@ -1435,6 +1611,283 @@ mod tests {
             0,
         );
         assert_finite_forward(&loaded, config.vocab_size);
+    }
+
+    /// Q8 and Q4 install every Muse projection through the packed execution path.
+    #[test]
+    fn automatic_muse_glimmer_loads_q8_q4_and_preserves_all_execution_paths() {
+        let root = tempfile::tempdir().expect("temporary model root");
+        let config = packed_muse_config();
+        let family_options = MuseGlimmerCheckpointOptions {
+            source: MuseGlimmerCheckpointSource::TextOnly,
+        };
+        let contract = config
+            .checkpoint_contract(family_options)
+            .expect("valid packed Muse contract");
+        write_auto_metadata(root.path(), &config);
+        write_patterned_muse_checkpoint(
+            root.path(),
+            contract.expected_tensors(),
+            contract.mappings(),
+        );
+        let checkpoint = CheckpointManifest::discover(root.path(), &LoadOptions::default())
+            .expect("discover patterned Muse checkpoint");
+        let plan = contract
+            .build_load_plan(&checkpoint, &LoadOptions::default())
+            .expect("plan patterned Muse checkpoint");
+        let expected_quantized = (0..config.num_hidden_layers)
+            .flat_map(|layer| {
+                [
+                    format!("model.layers.{layer}.self_attn.q_proj.weight"),
+                    format!("model.layers.{layer}.self_attn.k_proj.weight"),
+                    format!("model.layers.{layer}.self_attn.v_proj.weight"),
+                    format!("model.layers.{layer}.self_attn.gate_proj.weight"),
+                    format!("model.layers.{layer}.self_attn.o_proj.weight"),
+                    format!("model.layers.{layer}.mlp.gate_proj.weight"),
+                    format!("model.layers.{layer}.mlp.up_proj.weight"),
+                    format!("model.layers.{layer}.mlp.down_proj.weight"),
+                ]
+            })
+            .chain(["lm_head.weight".to_owned()])
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected_quantized.len(), 17);
+
+        let full = AutoCausalLm::<TestBackend>::load_local(
+            root.path(),
+            &fixture_options("meta-models/tiny-muse", "full-precision"),
+            &Default::default(),
+        )
+        .expect("load source-precision Muse fixture");
+        let full_paths = execute_muse_paths(full.model());
+        full_paths[0].assert_approx_eq::<f32>(&full_paths[1], Tolerance::absolute(3e-4));
+        full_paths[2].assert_approx_eq::<f32>(&full_paths[3], Tolerance::absolute(3e-4));
+
+        for scheme in [SymmetricQuantization::Q8, SymmetricQuantization::Q4] {
+            let label = match scheme {
+                SymmetricQuantization::Q8 => "q8",
+                SymmetricQuantization::Q4 => "q4",
+            };
+            let burnpack = root.path().join(format!("muse-{label}.bpk"));
+            let converted = quantize_local_checkpoint_to_burnpack(
+                &checkpoint,
+                &plan,
+                &burnpack,
+                QuantizedCheckpointOptions {
+                    weights: WeightQuantizationConfig {
+                        scheme,
+                        group_size: QuantizationGroupSize::new(64).expect("supported G64"),
+                    },
+                    ..QuantizedCheckpointOptions::default()
+                },
+            )
+            .unwrap_or_else(|error| panic!("convert Muse {label}: {error}"));
+            assert!(converted.report.is_strictly_valid());
+            assert_eq!(converted.report.applied.len(), 35);
+            assert_eq!(converted.report.quantized.len(), 17);
+            assert_eq!(converted.excluded.len(), 18);
+            assert_eq!(
+                converted
+                    .report
+                    .quantized
+                    .iter()
+                    .map(|record| record.target.clone())
+                    .collect::<BTreeSet<_>>(),
+                expected_quantized
+            );
+            let exclusion_count = |reason| {
+                converted
+                    .excluded
+                    .iter()
+                    .filter(|record| record.reason == reason)
+                    .count()
+            };
+            assert_eq!(exclusion_count(QuantizationExclusion::Embedding), 1);
+            assert_eq!(exclusion_count(QuantizationExclusion::Normalization), 9);
+            assert_eq!(exclusion_count(QuantizationExclusion::Bias), 8);
+            for pass in [
+                converted.provenance.pre_execution,
+                converted.provenance.post_execution,
+            ] {
+                let pass = pass.expect("v2 conversion hashes both sides of pass two");
+                assert_eq!(pass.passes_completed, 1);
+                assert_eq!(pass.shards_hashed, 1);
+                assert_eq!(pass.bytes_hashed, checkpoint.artifact_bytes);
+            }
+            let artifact = QuantizedBurnpackArtifact::open(&burnpack)
+                .unwrap_or_else(|error| panic!("open Muse {label}: {error}"));
+            assert_eq!(
+                artifact.manifest().packed_execution,
+                PackedExecutionSupport::BurnQFloatMatmul
+            );
+            assert_eq!(artifact.manifest().tensors.len(), 17);
+            drop(artifact);
+
+            let loaded = AutoCausalLm::<TestBackend>::load_local(
+                root.path(),
+                &AutoLoadOptions {
+                    quantized_burnpack: Some(burnpack.clone()),
+                    ..fixture_options("meta-models/tiny-muse", label)
+                },
+                &Default::default(),
+            )
+            .unwrap_or_else(|error| panic!("automatically load Muse {label}: {error}"));
+            let model = match loaded.model() {
+                AutoCausalLm::MuseGlimmer(model) => model,
+                model => panic!("expected Muse automatic variant, found {model:?}"),
+            };
+            assert_eq!(model.model.embed_tokens.weight.val().dtype(), DType::F32);
+            assert_eq!(model.model.norm.weight.val().dtype(), DType::F32);
+            for (layer_index, layer) in model.model.layers.iter().enumerate() {
+                for (projection, linear) in [
+                    ("attention query", &layer.self_attn.q_proj),
+                    ("attention key", &layer.self_attn.k_proj),
+                    ("attention value", &layer.self_attn.v_proj),
+                    ("attention gate", &layer.self_attn.gate_proj),
+                    ("attention output", &layer.self_attn.o_proj),
+                    ("FFN gate", &layer.mlp.gate_proj),
+                    ("FFN up", &layer.mlp.up_proj),
+                    ("FFN down", &layer.mlp.down_proj),
+                ] {
+                    assert!(
+                        matches!(linear.weight.val().dtype(), DType::QFloat(_)),
+                        "Muse layer {layer_index} {projection} must retain packed storage"
+                    );
+                }
+                for (projection, linear) in [
+                    ("query", &layer.self_attn.q_proj),
+                    ("key", &layer.self_attn.k_proj),
+                    ("value", &layer.self_attn.v_proj),
+                    ("output", &layer.self_attn.o_proj),
+                ] {
+                    assert_eq!(
+                        linear
+                            .bias
+                            .as_ref()
+                            .unwrap_or_else(|| panic!("configured {projection} bias"))
+                            .val()
+                            .dtype(),
+                        DType::F32
+                    );
+                }
+                for norm in [
+                    &layer.input_layernorm,
+                    &layer.post_attention_layernorm,
+                    &layer.pre_feedforward_layernorm,
+                    &layer.post_feedforward_layernorm,
+                ] {
+                    assert_eq!(norm.weight.val().dtype(), DType::F32);
+                }
+            }
+            assert!(matches!(
+                model
+                    .lm_head
+                    .as_ref()
+                    .expect("independent Muse LM head")
+                    .weight
+                    .val()
+                    .dtype(),
+                DType::QFloat(_)
+            ));
+            assert!(loaded.load_report().is_strictly_valid());
+            assert_eq!(loaded.load_report().applied.len(), 35);
+            assert_eq!(loaded.load_report().quantized.len(), 17);
+            let execution = loaded
+                .execution_stats()
+                .expect("packed Muse load retains source counters");
+            assert_eq!(execution.tensors_applied, 35);
+            assert_eq!(execution.source_reads, 18);
+            assert_eq!(execution.source.shard_opens, 1);
+            assert_eq!(execution.source.max_open_shards, 1);
+            let audit = loaded
+                .quantized_load_audit()
+                .expect("packed Muse load retains sidecar counters");
+            assert_eq!(
+                audit.format_version(),
+                BURNPACK_QUANTIZATION_FORMAT_VERSION_V2
+            );
+            assert_eq!(audit.preflight().passes_completed, 1);
+            assert_eq!(audit.preflight().tensor_reads, 17);
+            assert_eq!(audit.packed().tensors_applied, 17);
+            assert_eq!(audit.packed().tensor_reads, 17);
+            assert!(audit.provenance().pre_execution.is_some());
+            assert!(audit.provenance().post_execution.is_some());
+
+            let packed_paths = execute_muse_paths(loaded.model());
+            packed_paths[0].assert_approx_eq::<f32>(&packed_paths[1], Tolerance::absolute(3e-4));
+            packed_paths[2].assert_approx_eq::<f32>(&packed_paths[3], Tolerance::absolute(3e-4));
+            for (packed, source) in packed_paths.iter().zip(&full_paths) {
+                packed.assert_approx_eq::<f32>(source, Tolerance::absolute(5e-4));
+            }
+        }
+    }
+
+    /// A sidecar whose groups cross Muse matrix rows is reference-only, not executable.
+    #[test]
+    fn automatic_muse_glimmer_rejects_unaligned_reference_only_burnpack() {
+        let root = tempfile::tempdir().expect("temporary model root");
+        let config = MuseGlimmerTextConfig {
+            vocab_size: 64,
+            hidden_size: 32,
+            intermediate_size: 32,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 16,
+            max_position_embeddings: 8,
+            sliding_window: Some(4),
+            layer_types: vec![MuseGlimmerLayerType::FullAttention],
+            layer_rope_theta: vec![0.0],
+            tie_word_embeddings: false,
+            bos_token_id: None,
+            eos_token_id: None,
+            ..MuseGlimmerTextConfig::default()
+        };
+        let family_options = MuseGlimmerCheckpointOptions {
+            source: MuseGlimmerCheckpointSource::TextOnly,
+        };
+        let contract = config
+            .checkpoint_contract(family_options)
+            .expect("valid unaligned Muse contract");
+        write_auto_metadata(root.path(), &config);
+        write_patterned_muse_checkpoint(
+            root.path(),
+            contract.expected_tensors(),
+            contract.mappings(),
+        );
+        let checkpoint = CheckpointManifest::discover(root.path(), &LoadOptions::default())
+            .expect("discover unaligned Muse checkpoint");
+        let plan = contract
+            .build_load_plan(&checkpoint, &LoadOptions::default())
+            .expect("plan unaligned Muse checkpoint");
+        let burnpack = root.path().join("unaligned.bpk");
+        quantize_local_checkpoint_to_burnpack(
+            &checkpoint,
+            &plan,
+            &burnpack,
+            QuantizedCheckpointOptions::default(),
+        )
+        .expect("reference conversion remains valid");
+        let artifact = QuantizedBurnpackArtifact::open(&burnpack).expect("open reference sidecar");
+        assert_eq!(
+            artifact.manifest().packed_execution,
+            PackedExecutionSupport::Unavailable
+        );
+        drop(artifact);
+
+        let error = AutoCausalLm::<TestBackend>::load_local(
+            root.path(),
+            &AutoLoadOptions {
+                load_tokenizer: false,
+                quantized_burnpack: Some(burnpack),
+                ..AutoLoadOptions::default()
+            },
+            &Default::default(),
+        )
+        .expect_err("automatic execution must reject row-unaligned sidecars");
+        assert!(
+            matches!(&error, Error::Checkpoint(message) if message.contains("packed quantized execution is unavailable")),
+            "unexpected error: {error}"
+        );
     }
 
     /// The Nemotron branch loads a complete heterogeneous hybrid schedule.

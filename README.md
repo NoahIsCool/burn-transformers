@@ -226,7 +226,8 @@ SafeTensors. Embeddings, norms, biases, router classifiers, recurrent scalars
 and convolutions, MLA latent expansion, and first-generation MTP parameters
 remain in source precision.
 
-Automatic packed loading is enabled for `qwen3_5_text` and `qwen3_moe`.
+Automatic packed loading is enabled for `qwen3_5_text`, `qwen3_moe`, and
+`muse_glimmer_text`.
 Qwen3.5-0.8B Q4 has passed a finite full-model Metal smoke test and exact
 cached/stateless consistency, but its first token differs from F16 and the
 quality corpus has not passed. Qwen3.8-27B Q8 and Q4 have each passed strict
@@ -247,6 +248,16 @@ whole-weight dequantization; the Q8 audit proved the same 1,345-of-1,345 packed
 launch result. Official-reference and 32-token generation parity, quantized
 quality, standardized performance, and 32K stress remain open, so the model is
 not yet advertised as fully supported.
+
+Muse-Glimmer's exact 627-tensor F16 load plan classifies 417 matrices for
+Burnpack (all five attention projections, all three SwiGLU projections in each
+of 52 layers, and the independent LM head) and retains the embedding plus 209
+normalization vectors. Every eligible input width aligns to G64. A nonzero
+two-layer fixture has passed Q8 and Q4 streaming conversion, automatic mixed
+loading, stateless/prefill/recurrent parity, complete dtype accounting, and a
+negative gate proving row-unaligned artifacts remain reference-only. Real
+30B sidecar creation, packed Metal kernel tracing, quantized quality, and 32K
+execution remain pending; Muse is not advertised as supported.
 
 Burn 0.21 can execute compatible Burnpack matrices through packed `QFloat`
 matmul. The only certified packed-Metal build shape is an exact single-backend

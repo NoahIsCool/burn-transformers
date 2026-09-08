@@ -13,6 +13,25 @@
 //!   -- --ignored --exact --nocapture
 //! ```
 //!
+//! Q8 and Q4 conversion use explicit, create-only paths on the checkpoint's
+//! external volume. Conversion and Metal execution are separate gates so a
+//! reviewed sidecar can be reused without rewriting tens of gigabytes:
+//!
+//! ```text
+//! TRANSFORMERS_MUSE_GLIMMER_Q8_BURNPACK=/Volumes/<name>/quantized/muse-q8-g64.bpk \
+//! cargo test --release --manifest-path crates/transformers/Cargo.toml \
+//!   --no-default-features --features std,tokenizers \
+//!   --test muse_glimmer_artifacts \
+//!   quantizes_pinned_muse_glimmer_weights_to_q8_burnpack \
+//!   -- --ignored --exact --nocapture
+//! ```
+//!
+//! Add `metal,kernel-tracing` and select
+//! `smokes_and_audits_pinned_muse_glimmer_q{4,8}_burnpack_on_metal` to prove
+//! that one recurrent decode executes all 417 packed projections without a
+//! whole-weight dequantization launch. These are short correctness diagnostics,
+//! not quantized-quality, 32K, or advertised-support gates.
+//!
 //! Stream all 59.6 GB through the independent payload identity gate with:
 //!
 //! ```text
@@ -56,6 +75,10 @@
 
 #![recursion_limit = "256"]
 
+#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+#[path = "support/kernel_trace.rs"]
+mod kernel_trace;
+
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -86,6 +109,14 @@ use transformers::{
 #[cfg(feature = "tokenizers")]
 use transformers::checkpoint::{
     ArtifactSource, CheckpointManifest, DTypePolicy, LoadOptions, LoadPlan, PlannedTransform,
+    quantization::{
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, PROVENANCE_HASH_BUFFER_BYTES,
+        PackedExecutionSupport, QuantizationEligibility, QuantizationExclusion,
+        QuantizationGroupSize, QuantizedBurnpackArtifact, QuantizedCheckpointOptions,
+        SourceFloatDType, SymmetricQuantization, WeightQuantizationConfig,
+        classify_weight_for_quantization, load_plan_sha256, quantize_local_checkpoint_to_burnpack,
+        validate_sidecar_contract,
+    },
 };
 
 #[cfg(feature = "tokenizers")]
@@ -97,6 +128,7 @@ use transformers::{ChatMessage, ChatTemplateOptions};
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 use burn::{
     backend::Metal,
+    nn::Linear,
     tensor::{Bool, DType, Int, Tensor, TensorData, backend::Backend},
 };
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
@@ -107,8 +139,14 @@ use transformers::{
     cache::{CacheConfig, KvCacheStorage},
     models::{
         AutoCausalDecodeState,
-        muse_glimmer::{MuseGlimmerDecodeState, MuseGlimmerLayerCache},
+        muse_glimmer::{MuseGlimmerDecodeState, MuseGlimmerForCausalLm, MuseGlimmerLayerCache},
     },
+};
+
+#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+use kernel_trace::{
+    calibrated_dequantization_kernel_names, capture_kernel_launches, compact_kernel_id,
+    packed_matmul_launches, whole_weight_dequantization_launches,
 };
 
 /// Immutable upstream repository certified by every local gate.
@@ -220,6 +258,62 @@ const PHYSICAL_TENSOR_COUNT: usize = 1_436;
 
 /// Number of language-tower and vocabulary-head tensors consumed by Burn.
 const CONSUMED_TENSOR_COUNT: usize = 627;
+
+/// Attention, SwiGLU, and independent-head matrices eligible for Burnpack.
+#[cfg(feature = "tokenizers")]
+const QUANTIZED_TENSOR_COUNT: usize = 417;
+
+/// Embedding plus 209 learned normalization vectors retained as F16.
+#[cfg(feature = "tokenizers")]
+const RETAINED_F16_TENSOR_COUNT: usize = 210;
+
+/// F16 bytes read from SafeTensors when a v2 sidecar supplies all matrices.
+#[cfg(feature = "tokenizers")]
+const RETAINED_F16_TENSOR_BYTES: u64 = 2_692_445_184;
+
+/// Packed-value and scale bytes for all 417 Q8/G64 matrices.
+#[cfg(feature = "tokenizers")]
+const Q8_PACKED_PAYLOAD_BYTES: u64 = 28_165_343_232;
+
+/// Packed-value and scale bytes for all 417 Q4/G64 matrices.
+#[cfg(feature = "tokenizers")]
+const Q4_PACKED_PAYLOAD_BYTES: u64 = 14_911_064_064;
+
+/// Largest Q8 payload: the independent `[202048, 6656]` vocabulary head.
+#[cfg(feature = "tokenizers")]
+const Q8_LARGEST_PACKED_TENSOR_BYTES: u64 = 1_428_883_456;
+
+/// Largest Q4 payload: the independent `[202048, 6656]` vocabulary head.
+#[cfg(feature = "tokenizers")]
+const Q4_LARGEST_PACKED_TENSOR_BYTES: u64 = 756_467_712;
+
+/// Every matrix invoked by one batch-one recurrent decode.
+#[cfg(all(feature = "kernel-tracing", feature = "metal", not(feature = "rocm")))]
+const PACKED_DECODE_MATMUL_LAUNCHES: usize = 417;
+
+/// Environment variable selecting the create-only/reused Q8 artifact.
+#[cfg(feature = "tokenizers")]
+const Q8_BURNPACK_ENV: &str = "TRANSFORMERS_MUSE_GLIMMER_Q8_BURNPACK";
+
+/// Environment variable selecting the create-only/reused Q4 artifact.
+#[cfg(feature = "tokenizers")]
+const Q4_BURNPACK_ENV: &str = "TRANSFORMERS_MUSE_GLIMMER_Q4_BURNPACK";
+
+/// Reviewed complete Q8 Burnpack identity; populated only after local creation.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+const Q8_BURNPACK_SHA256: Option<&str> = None;
+
+/// Reviewed complete Q4 Burnpack identity; populated only after local creation.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+const Q4_BURNPACK_SHA256: Option<&str> = None;
+
+/// Reviewed Q8 artifact length; populated with the sidecar hash after creation.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+const Q8_BURNPACK_ARTIFACT_BYTES: Option<u64> = None;
+
+/// Reviewed Q4 artifact length; populated with the sidecar hash after creation.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+const Q4_BURNPACK_ARTIFACT_BYTES: Option<u64> = None;
 
 /// Number of consumed tensors renamed out of the multimodal namespace.
 const RENAMED_TENSOR_COUNT: usize = 626;
@@ -499,6 +593,261 @@ fn f16_plan_digest(plan: &LoadPlan) -> String {
         canonical.push(b'\n');
     }
     sha256_hex(&canonical)
+}
+
+/// Builds the exact F16 text plan shared by conversion and packed execution.
+#[cfg(feature = "tokenizers")]
+fn pinned_muse_f16_plan(root: &Path) -> (CheckpointManifest, LoadPlan) {
+    assert_eq!(
+        fs::read(root.join("config.json")).expect("read pinned Muse config"),
+        include_bytes!("fixtures/muse_glimmer_30b.json")
+    );
+    let config = MuseGlimmerTextConfig::from_json_str(
+        std::str::from_utf8(include_bytes!("fixtures/muse_glimmer_30b.json"))
+            .expect("pinned Muse config UTF-8"),
+    )
+    .expect("pinned Muse config must validate");
+    let options = LoadOptions {
+        dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+        ..LoadOptions::default()
+    };
+    let manifest = CheckpointManifest::discover(root, &options)
+        .expect("discover exact pinned Muse checkpoint");
+    let contract = config
+        .checkpoint_contract(MuseGlimmerCheckpointOptions::default())
+        .expect("derive exact pinned Muse contract");
+    let plan = contract
+        .build_load_plan(&manifest, &options)
+        .expect("build exact pinned Muse F16 plan");
+    assert_eq!(f16_plan_digest(&plan), F16_PLAN_SHA256);
+    (manifest, plan)
+}
+
+/// Returns the exact architecture-declared matrix set that must execute packed.
+#[cfg(feature = "tokenizers")]
+fn expected_muse_quantized_targets() -> Vec<String> {
+    let mut targets = (0..52)
+        .flat_map(|layer| {
+            [
+                format!("model.layers.{layer}.self_attn.q_proj.weight"),
+                format!("model.layers.{layer}.self_attn.k_proj.weight"),
+                format!("model.layers.{layer}.self_attn.v_proj.weight"),
+                format!("model.layers.{layer}.self_attn.gate_proj.weight"),
+                format!("model.layers.{layer}.self_attn.o_proj.weight"),
+                format!("model.layers.{layer}.mlp.gate_proj.weight"),
+                format!("model.layers.{layer}.mlp.up_proj.weight"),
+                format!("model.layers.{layer}.mlp.down_proj.weight"),
+            ]
+        })
+        .chain(["lm_head.weight".to_owned()])
+        .collect::<Vec<_>>();
+    targets.sort();
+    targets
+}
+
+/// Classifies every exact plan target without relying on raw checkpoint names.
+#[cfg(feature = "tokenizers")]
+fn muse_quantization_partition(
+    plan: &LoadPlan,
+) -> (Vec<String>, Vec<(String, QuantizationExclusion)>) {
+    let mut quantized = Vec::new();
+    let mut retained = Vec::new();
+    for tensor in &plan.tensors {
+        let shape = tensor
+            .shape
+            .iter()
+            .map(|dimension| usize::try_from(*dimension).expect("Muse shape must fit usize"))
+            .collect::<Vec<_>>();
+        match classify_weight_for_quantization(&tensor.target, &shape) {
+            QuantizationEligibility::Eligible => quantized.push(tensor.target.clone()),
+            QuantizationEligibility::Excluded(reason) => {
+                retained.push((tensor.target.clone(), reason));
+            }
+        }
+    }
+    quantized.sort();
+    retained.sort_by(|left, right| left.0.cmp(&right.0));
+    (quantized, retained)
+}
+
+/// Proves the exact 417/210 Muse quantization boundary and G64 row alignment.
+#[cfg(feature = "tokenizers")]
+fn assert_muse_quantization_partition(plan: &LoadPlan) -> (Vec<String>, u64) {
+    let (quantized, retained) = muse_quantization_partition(plan);
+    assert_eq!(quantized, expected_muse_quantized_targets());
+    assert_eq!(quantized.len(), QUANTIZED_TENSOR_COUNT);
+    assert_eq!(retained.len(), RETAINED_F16_TENSOR_COUNT);
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|(_, reason)| *reason == QuantizationExclusion::Embedding)
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["model.embed_tokens.weight"]
+    );
+    assert_eq!(
+        retained
+            .iter()
+            .filter(|(_, reason)| *reason == QuantizationExclusion::Normalization)
+            .count(),
+        209
+    );
+    assert!(retained.iter().all(|(_, reason)| matches!(
+        reason,
+        QuantizationExclusion::Embedding | QuantizationExclusion::Normalization
+    )));
+
+    let quantized = quantized.into_iter().collect::<BTreeSet<_>>();
+    let mut elements = 0_u64;
+    for tensor in &plan.tensors {
+        if !quantized.contains(&tensor.target) {
+            continue;
+        }
+        assert_eq!(tensor.shape.len(), 2, "{} must be a matrix", tensor.target);
+        assert_eq!(
+            tensor.shape[1] % 64,
+            0,
+            "{} input width must align to G64",
+            tensor.target
+        );
+        elements = elements
+            .checked_add(tensor.shape.iter().copied().product::<u64>())
+            .expect("Muse eligible element count must fit u64");
+    }
+    assert_eq!(elements, 26_508_558_336);
+    assert_eq!(
+        plan.memory.target_parameter_bytes - elements * 2,
+        RETAINED_F16_TENSOR_BYTES
+    );
+    (quantized.into_iter().collect(), elements)
+}
+
+/// Returns immutable payload geometry for one accepted symmetric precision.
+#[cfg(feature = "tokenizers")]
+fn muse_packed_geometry(scheme: SymmetricQuantization) -> (u64, u64) {
+    match scheme {
+        SymmetricQuantization::Q8 => (Q8_PACKED_PAYLOAD_BYTES, Q8_LARGEST_PACKED_TENSOR_BYTES),
+        SymmetricQuantization::Q4 => (Q4_PACKED_PAYLOAD_BYTES, Q4_LARGEST_PACKED_TENSOR_BYTES),
+    }
+}
+
+/// Resolves an explicit sidecar path and constrains it to the checkpoint volume.
+#[cfg(feature = "tokenizers")]
+fn muse_burnpack_path(root: &Path, environment: &str, must_exist: bool) -> PathBuf {
+    let supplied = PathBuf::from(
+        std::env::var_os(environment)
+            .unwrap_or_else(|| panic!("set {environment} to an absolute .bpk path")),
+    );
+    assert!(supplied.is_absolute(), "Burnpack path must be absolute");
+    assert_eq!(
+        supplied
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some("bpk"),
+        "Burnpack path must end in .bpk"
+    );
+    let file_name = supplied
+        .file_name()
+        .expect("Burnpack path must contain a file name");
+    let parent = supplied
+        .parent()
+        .expect("Burnpack path must have a parent")
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("canonicalize Burnpack parent: {error}"));
+    let resolved = parent.join(file_name);
+    assert_eq!(
+        resolved, supplied,
+        "Burnpack parent must already be canonical"
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(root).expect("checkpoint root metadata").dev(),
+        fs::metadata(&parent)
+            .expect("Burnpack parent metadata")
+            .dev(),
+        "Burnpack and source checkpoint must reside on the same volume"
+    );
+    match fs::symlink_metadata(&resolved) {
+        Ok(metadata) => {
+            assert!(must_exist, "create-only Burnpack path already exists");
+            assert!(
+                !metadata.file_type().is_symlink(),
+                "Burnpack must not be a symlink"
+            );
+            assert!(metadata.is_file(), "Burnpack must be a regular file");
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            assert!(!must_exist, "required Burnpack is unavailable");
+        }
+        Err(error) => panic!("inspect Burnpack path: {error}"),
+    }
+    resolved
+}
+
+/// Reopens one sidecar and proves exact target, payload, and source provenance.
+#[cfg(feature = "tokenizers")]
+fn assert_exact_muse_burnpack(
+    artifact: &mut QuantizedBurnpackArtifact,
+    plan: &LoadPlan,
+    scheme: SymmetricQuantization,
+    expected_quantized: &[String],
+) {
+    let (payload_bytes, largest_payload_bytes) = muse_packed_geometry(scheme);
+    validate_sidecar_contract(plan, artifact).expect("validate Muse sidecar contract");
+    let validation = artifact
+        .validate_all()
+        .expect("decode and validate every Muse sidecar payload");
+    assert_eq!(validation.tensor_count, QUANTIZED_TENSOR_COUNT);
+    assert_eq!(validation.payload_bytes, payload_bytes);
+    let manifest = artifact.manifest();
+    assert_eq!(
+        manifest.format_version,
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_V2
+    );
+    assert_eq!(
+        manifest.packed_execution,
+        PackedExecutionSupport::BurnQFloatMatmul
+    );
+    assert_eq!(
+        manifest.tensors.keys().cloned().collect::<Vec<_>>(),
+        expected_quantized
+    );
+    assert!(manifest.tensors.values().all(|tensor| {
+        tensor.scheme == scheme
+            && tensor.group_size.get() == 64
+            && tensor.source_dtype == SourceFloatDType::F16
+            && tensor.payload_sha256.is_some()
+    }));
+    assert_eq!(
+        manifest
+            .tensors
+            .values()
+            .map(|tensor| tensor.packed_value_bytes + tensor.scale_bytes)
+            .sum::<u64>(),
+        payload_bytes
+    );
+    assert_eq!(
+        manifest
+            .tensors
+            .values()
+            .map(|tensor| tensor.packed_value_bytes + tensor.scale_bytes)
+            .max(),
+        Some(largest_payload_bytes)
+    );
+    let provenance = manifest
+        .provenance
+        .as_ref()
+        .expect("Muse architecture conversion must publish v2 provenance");
+    assert_eq!(provenance.load_plan_sha256, load_plan_sha256(plan));
+    assert_eq!(provenance.checkpoint_shards.len(), SHARDS.len());
+    for (relative_path, bytes, sha256) in SHARDS {
+        let shard = provenance
+            .checkpoint_shards
+            .get(relative_path)
+            .unwrap_or_else(|| panic!("Muse provenance omitted {relative_path}"));
+        assert_eq!(shard.file_bytes, bytes);
+        assert_eq!(shard.sha256, sha256);
+    }
 }
 
 /// Returns the complete physical source-shape histogram for the pinned revision.
@@ -3077,6 +3426,9 @@ fn validates_pinned_muse_glimmer_config_headers_plan_memory_and_tokenizer() {
             && matches!(tensor.transform, PlannedTransform::Identity)
     }));
     assert_eq!(f16_plan_digest(&plan), F16_PLAN_SHA256);
+    let (_, eligible_elements) = assert_muse_quantization_partition(&plan);
+    assert_eq!(eligible_elements * 68 / 64, Q8_PACKED_PAYLOAD_BYTES);
+    assert_eq!(eligible_elements * 36 / 64, Q4_PACKED_PAYLOAD_BYTES);
 
     let planned_sources = plan
         .tensors
@@ -3252,6 +3604,510 @@ fn validates_pinned_muse_glimmer_config_headers_plan_memory_and_tokenizer() {
         encoding.token_ids()[0],
         started.elapsed().as_secs_f64(),
     );
+}
+
+/// Streams one immutable Muse text plan into a create-only Q8/Q4 sidecar.
+#[cfg(feature = "tokenizers")]
+fn quantize_pinned_muse_glimmer(scheme: SymmetricQuantization, output_environment: &str) {
+    let started = Instant::now();
+    let supplied_root = pinned_root();
+    let root = supplied_root
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("canonicalize {}: {error}", supplied_root.display()));
+    assert_control_files(&root);
+    let (manifest, plan) = pinned_muse_f16_plan(&root);
+    let (expected_quantized, _) = assert_muse_quantization_partition(&plan);
+    let output = muse_burnpack_path(&root, output_environment, false);
+    let (expected_payload_bytes, expected_largest_payload) = muse_packed_geometry(scheme);
+    let outcome = quantize_local_checkpoint_to_burnpack(
+        &manifest,
+        &plan,
+        &output,
+        QuantizedCheckpointOptions {
+            weights: WeightQuantizationConfig {
+                scheme,
+                group_size: QuantizationGroupSize::new(64).expect("supported G64"),
+            },
+            ..QuantizedCheckpointOptions::default()
+        },
+    )
+    .unwrap_or_else(|error| panic!("stream Muse {scheme:?} Burnpack conversion: {error}"));
+    assert_eq!(outcome.artifact.path, output);
+    assert_eq!(outcome.artifact.tensor_count, QUANTIZED_TENSOR_COUNT);
+    assert_eq!(
+        outcome.artifact.quantized_payload_bytes,
+        expected_payload_bytes
+    );
+    assert_eq!(
+        outcome.artifact.largest_materialized_tensor_bytes,
+        expected_largest_payload
+    );
+    assert_eq!(outcome.staging.tensor_count, QUANTIZED_TENSOR_COUNT);
+    assert_eq!(outcome.staging.staged_payload_bytes, expected_payload_bytes);
+    assert_eq!(
+        outcome.staging.largest_payload_bytes,
+        expected_largest_payload
+    );
+    assert!(outcome.report.is_strictly_valid());
+    assert_eq!(outcome.report.applied.len(), CONSUMED_TENSOR_COUNT);
+    assert_eq!(outcome.report.transformed.len(), RENAMED_TENSOR_COUNT);
+    assert_eq!(outcome.report.dtype_converted.len(), CONSUMED_TENSOR_COUNT);
+    assert_eq!(
+        outcome.report.allowlisted_ignored.len(),
+        VISUAL_TENSOR_COUNT
+    );
+    assert_eq!(outcome.report.quantized.len(), QUANTIZED_TENSOR_COUNT);
+    assert_eq!(
+        outcome
+            .report
+            .quantized
+            .iter()
+            .map(|record| record.target.clone())
+            .collect::<Vec<_>>(),
+        expected_quantized
+    );
+    assert_eq!(outcome.excluded.len(), RETAINED_F16_TENSOR_COUNT);
+    assert_eq!(outcome.execution.tensors_applied, CONSUMED_TENSOR_COUNT);
+    assert_eq!(outcome.execution.aliases_applied, 0);
+    assert_eq!(outcome.execution.source_reads, CONSUMED_TENSOR_COUNT as u64);
+    assert_eq!(
+        outcome.execution.source_payload_bytes,
+        LANGUAGE_PARAMETER_BYTES
+    );
+    assert_eq!(
+        outcome.execution.delivered_tensor_bytes,
+        LANGUAGE_PARAMETER_BYTES
+    );
+    assert_eq!(outcome.execution.source.shard_opens, SHARDS.len() as u64);
+    assert_eq!(
+        outcome.execution.source.tensor_reads,
+        CONSUMED_TENSOR_COUNT as u64
+    );
+    assert_eq!(
+        outcome.execution.source.payload_bytes_read,
+        LANGUAGE_PARAMETER_BYTES
+    );
+    assert_eq!(outcome.execution.source.max_open_shards, 1);
+    assert_eq!(
+        outcome.execution.source.shard_open_order,
+        SHARDS
+            .iter()
+            .map(|(name, _, _)| (*name).to_owned())
+            .collect::<Vec<_>>()
+    );
+    for (phase, stats) in [
+        ("pre-execution", outcome.provenance.pre_execution),
+        ("post-execution", outcome.provenance.post_execution),
+    ] {
+        let stats = stats.unwrap_or_else(|| panic!("conversion omitted {phase} provenance"));
+        assert_eq!(stats.passes_completed, 1, "{phase} pass count");
+        assert_eq!(stats.shards_hashed, SHARDS.len(), "{phase} shard count");
+        assert_eq!(
+            stats.bytes_hashed, CHECKPOINT_ARTIFACT_BYTES,
+            "{phase} byte count"
+        );
+        assert_eq!(stats.peak_buffer_bytes, PROVENANCE_HASH_BUFFER_BYTES);
+    }
+
+    let mut artifact = QuantizedBurnpackArtifact::open(&output)
+        .unwrap_or_else(|error| panic!("reopen published Muse Burnpack: {error}"));
+    assert_exact_muse_burnpack(&mut artifact, &plan, scheme, &expected_quantized);
+    drop(artifact);
+    let sha256 = sha256_file_hex(&output);
+    eprintln!(
+        "Muse-Glimmer-30B {scheme:?} Burnpack: path={}, tensors={}, retained={}, payload_bytes={}, artifact_bytes={}, largest_payload_bytes={}, sha256={}, elapsed_seconds={:.3}",
+        output.display(),
+        QUANTIZED_TENSOR_COUNT,
+        RETAINED_F16_TENSOR_COUNT,
+        expected_payload_bytes,
+        outcome.artifact.artifact_bytes,
+        expected_largest_payload,
+        sha256,
+        started.elapsed().as_secs_f64(),
+    );
+}
+
+/// Converts the exact Muse language graph to a provenance-bound Q8/G64 sidecar.
+#[cfg(feature = "tokenizers")]
+#[test]
+#[ignore = "streams the pinned 59.6 GB Muse checkpoint into a create-only external Q8 Burnpack"]
+fn quantizes_pinned_muse_glimmer_weights_to_q8_burnpack() {
+    quantize_pinned_muse_glimmer(SymmetricQuantization::Q8, Q8_BURNPACK_ENV);
+}
+
+/// Converts the exact Muse language graph to a provenance-bound Q4/G64 sidecar.
+#[cfg(feature = "tokenizers")]
+#[test]
+#[ignore = "streams the pinned 59.6 GB Muse checkpoint into a create-only external Q4 Burnpack"]
+fn quantizes_pinned_muse_glimmer_weights_to_q4_burnpack() {
+    quantize_pinned_muse_glimmer(SymmetricQuantization::Q4, Q4_BURNPACK_ENV);
+}
+
+/// Requires one Muse linear map to retain packed QFloat storage without a bias.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+fn assert_muse_linear_qfloat(label: &str, linear: &Linear<Metal>) {
+    assert!(
+        matches!(linear.weight.val().dtype(), DType::QFloat(_)),
+        "{label}.weight must retain packed QFloat storage"
+    );
+    assert!(
+        linear.bias.is_none(),
+        "the pinned bias-free Muse graph unexpectedly contains {label}.bias"
+    );
+}
+
+/// Proves every architecture-eligible matrix and exclusion retained its dtype.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+fn assert_muse_mixed_parameter_dtypes(model: &MuseGlimmerForCausalLm<Metal>) {
+    assert_eq!(model.model.embed_tokens.weight.val().dtype(), DType::F16);
+    assert_eq!(model.model.norm.weight.val().dtype(), DType::F16);
+    let mut packed = 0_usize;
+    let mut retained = 2_usize;
+    for (layer_index, layer) in model.model.layers.iter().enumerate() {
+        for (name, linear) in [
+            ("self_attn.q_proj", &layer.self_attn.q_proj),
+            ("self_attn.k_proj", &layer.self_attn.k_proj),
+            ("self_attn.v_proj", &layer.self_attn.v_proj),
+            ("self_attn.gate_proj", &layer.self_attn.gate_proj),
+            ("self_attn.o_proj", &layer.self_attn.o_proj),
+            ("mlp.gate_proj", &layer.mlp.gate_proj),
+            ("mlp.up_proj", &layer.mlp.up_proj),
+            ("mlp.down_proj", &layer.mlp.down_proj),
+        ] {
+            assert_muse_linear_qfloat(&format!("layer {layer_index} {name}"), linear);
+            packed += 1;
+        }
+        for (name, norm) in [
+            ("input", &layer.input_layernorm),
+            ("post_attention", &layer.post_attention_layernorm),
+            ("pre_feedforward", &layer.pre_feedforward_layernorm),
+            ("post_feedforward", &layer.post_feedforward_layernorm),
+        ] {
+            assert_eq!(
+                norm.weight.val().dtype(),
+                DType::F16,
+                "layer {layer_index} {name} norm must remain F16"
+            );
+            retained += 1;
+        }
+    }
+    assert_muse_linear_qfloat(
+        "lm_head",
+        model
+            .lm_head
+            .as_ref()
+            .expect("the pinned Muse graph has an independent LM head"),
+    );
+    packed += 1;
+    assert_eq!(packed, QUANTIZED_TENSOR_COUNT);
+    assert_eq!(retained, RETAINED_F16_TENSOR_COUNT);
+}
+
+/// Loads, executes, and optionally traces one exact Muse packed sidecar.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+fn smoke_and_audit_pinned_muse_glimmer_burnpack(
+    scheme: SymmetricQuantization,
+    output_environment: &str,
+) {
+    let supplied_root = pinned_root();
+    let root = supplied_root
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("canonicalize {}: {error}", supplied_root.display()));
+    let device = Default::default();
+    assert_metal_backend_available(&device);
+    assert_control_files(&root);
+    let (_manifest, plan) = pinned_muse_f16_plan(&root);
+    let (expected_quantized, _) = assert_muse_quantization_partition(&plan);
+    let burnpack = muse_burnpack_path(&root, output_environment, true);
+    let (expected_sha256, expected_artifact_bytes) = match scheme {
+        SymmetricQuantization::Q8 => (Q8_BURNPACK_SHA256, Q8_BURNPACK_ARTIFACT_BYTES),
+        SymmetricQuantization::Q4 => (Q4_BURNPACK_SHA256, Q4_BURNPACK_ARTIFACT_BYTES),
+    };
+    let expected_sha256 = expected_sha256
+        .expect("review and pin the complete Muse Burnpack SHA-256 before Metal execution");
+    let expected_artifact_bytes = expected_artifact_bytes
+        .expect("review and pin the complete Muse Burnpack length before Metal execution");
+    assert_eq!(
+        fs::metadata(&burnpack)
+            .expect("Muse Burnpack metadata")
+            .len(),
+        expected_artifact_bytes
+    );
+    assert_eq!(sha256_file_hex(&burnpack), expected_sha256);
+    let mut artifact = QuantizedBurnpackArtifact::open(&burnpack)
+        .expect("open content-authenticated Muse Burnpack");
+    assert_exact_muse_burnpack(&mut artifact, &plan, scheme, &expected_quantized);
+    drop(artifact);
+
+    let load_started = Instant::now();
+    let loaded = AutoCausalLm::<Metal>::load_local(
+        &root,
+        &AutoLoadOptions {
+            checkpoint: LoadOptions {
+                dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+                ..LoadOptions::default()
+            },
+            load_tokenizer: false,
+            quantized_burnpack: Some(burnpack.clone()),
+            repository: Some(REPOSITORY.to_owned()),
+            revision: Some(REVISION.to_owned()),
+            ..AutoLoadOptions::default()
+        },
+        &device,
+    )
+    .expect("strictly load mixed F16/packed Muse through the automatic registry");
+    <Metal<f32, i32> as Backend>::sync(&device).expect("complete mixed Muse parameter transfers");
+    let load_seconds = load_started.elapsed().as_secs_f64();
+    assert_eq!(loaded.source().model_type(), "muse_glimmer_text");
+    assert_eq!(loaded.source().repository(), Some(REPOSITORY));
+    assert_eq!(loaded.source().revision(), Some(REVISION));
+    let report = loaded.load_report();
+    assert!(report.is_strictly_valid());
+    assert_eq!(report.applied.len(), CONSUMED_TENSOR_COUNT);
+    assert_eq!(report.transformed.len(), RENAMED_TENSOR_COUNT);
+    assert_eq!(report.dtype_converted.len(), CONSUMED_TENSOR_COUNT);
+    assert_eq!(report.quantized.len(), QUANTIZED_TENSOR_COUNT);
+    assert_eq!(report.allowlisted_ignored.len(), VISUAL_TENSOR_COUNT);
+    let expected_scheme = match scheme {
+        SymmetricQuantization::Q8 => "burn-qfloat-symmetric-q8-g64-block-1xg",
+        SymmetricQuantization::Q4 => "burn-qfloat-symmetric-q4-g64-block-1xg",
+    };
+    assert!(
+        report
+            .quantized
+            .iter()
+            .all(|record| record.scheme == expected_scheme)
+    );
+    assert_eq!(
+        report
+            .quantized
+            .iter()
+            .map(|record| record.target.clone())
+            .collect::<Vec<_>>(),
+        expected_quantized
+    );
+    let (packed_payload_bytes, largest_packed_payload) = muse_packed_geometry(scheme);
+    let execution = loaded
+        .execution_stats()
+        .expect("packed Muse load must retain source counters");
+    assert_eq!(execution.tensors_applied, CONSUMED_TENSOR_COUNT);
+    assert_eq!(execution.aliases_applied, 0);
+    assert_eq!(execution.source_reads, RETAINED_F16_TENSOR_COUNT as u64);
+    assert_eq!(execution.source_payload_bytes, RETAINED_F16_TENSOR_BYTES);
+    assert_eq!(
+        execution.delivered_tensor_bytes,
+        RETAINED_F16_TENSOR_BYTES + packed_payload_bytes
+    );
+    assert_eq!(
+        execution.largest_source_payload_bytes,
+        LARGEST_TARGET_PAYLOAD_BYTES
+    );
+    assert_eq!(
+        execution.largest_output_tensor_bytes,
+        LARGEST_TARGET_PAYLOAD_BYTES
+    );
+    assert_eq!(
+        execution.peak_host_staging_bytes,
+        LARGEST_TARGET_PAYLOAD_BYTES
+    );
+    assert_eq!(execution.source.shard_opens, SHARDS.len() as u64);
+    assert_eq!(
+        execution.source.tensor_reads,
+        RETAINED_F16_TENSOR_COUNT as u64
+    );
+    assert_eq!(
+        execution.source.payload_bytes_read,
+        RETAINED_F16_TENSOR_BYTES
+    );
+    assert_eq!(execution.source.max_open_shards, 1);
+    assert_eq!(
+        execution.source.shard_open_order,
+        SHARDS
+            .iter()
+            .map(|(name, _, _)| (*name).to_owned())
+            .collect::<Vec<_>>()
+    );
+    let audit = loaded
+        .quantized_load_audit()
+        .expect("packed Muse load must retain sidecar audit counters");
+    assert_eq!(
+        audit.format_version(),
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_V2
+    );
+    assert_eq!(audit.preflight().passes_started, 1);
+    assert_eq!(audit.preflight().passes_completed, 1);
+    assert_eq!(
+        audit.preflight().tensor_reads,
+        QUANTIZED_TENSOR_COUNT as u64
+    );
+    assert_eq!(audit.preflight().payload_bytes, packed_payload_bytes);
+    assert_eq!(
+        audit.preflight().largest_payload_bytes,
+        largest_packed_payload
+    );
+    assert!(audit.preflight().peak_owned_payload_bytes >= largest_packed_payload);
+    assert_eq!(audit.packed().tensor_reads, QUANTIZED_TENSOR_COUNT as u64);
+    assert_eq!(audit.packed().tensors_applied, QUANTIZED_TENSOR_COUNT);
+    assert_eq!(audit.packed().payload_bytes, packed_payload_bytes);
+    assert_eq!(audit.packed().largest_payload_bytes, largest_packed_payload);
+    for stats in [
+        audit.provenance().pre_execution,
+        audit.provenance().post_execution,
+    ] {
+        let stats = stats.expect("v2 Muse load must hash source before and after execution");
+        assert_eq!(stats.passes_completed, 1);
+        assert_eq!(stats.shards_hashed, SHARDS.len());
+        assert_eq!(stats.bytes_hashed, CHECKPOINT_ARTIFACT_BYTES);
+        assert_eq!(stats.peak_buffer_bytes, PROVENANCE_HASH_BUFFER_BYTES);
+    }
+
+    let model = match loaded.model() {
+        AutoCausalLm::MuseGlimmer(model) => model,
+        model => panic!("expected Muse automatic variant, found {model:?}"),
+    };
+    assert_muse_mixed_parameter_dtypes(model);
+    let sequence = SMOKE_TOKEN_IDS.len();
+    let prompt = CausalLmInput {
+        token_ids: Tensor::<Metal, 2, Int>::from_data(
+            TensorData::new(
+                SMOKE_TOKEN_IDS
+                    .iter()
+                    .copied()
+                    .map(i64::from)
+                    .collect::<Vec<_>>(),
+                [1, sequence],
+            ),
+            &device,
+        ),
+        token_mask: Some(all_valid_metal_mask(sequence, &device)),
+        position_ids: None,
+    };
+    let diagnostics = ForwardOptions {
+        hidden_states: true,
+        ..ForwardOptions::default()
+    };
+    let stateless_started = Instant::now();
+    let stateless = loaded
+        .model()
+        .forward(prompt.clone(), &diagnostics)
+        .expect("execute stateless mixed Muse graph");
+    let stateless_logits = metal_values("quantized Muse stateless logits", &stateless.logits);
+    let stateless_seconds = stateless_started.elapsed().as_secs_f64();
+    assert_eq!(stateless.logits.dims(), [1, 1, 202_048]);
+    assert_eq!(stateless.hidden_states.len(), 54);
+    assert!(stateless_logits.iter().all(|value| value.is_finite()));
+
+    let mut state = loaded
+        .model()
+        .new_decode_state(
+            CacheConfig::new(1, sequence + 1).expect("packed smoke cache geometry"),
+            1,
+            &device,
+        )
+        .expect("allocate packed Muse KV state");
+    let prefill_started = Instant::now();
+    let cached = loaded
+        .model()
+        .prefill(prompt, &mut state, &diagnostics)
+        .expect("execute cached mixed Muse prefill");
+    let cached_logits = metal_values("quantized Muse cached logits", &cached.logits);
+    let prefill_seconds = prefill_started.elapsed().as_secs_f64();
+    assert_eq!(cached.logits.dims(), [1, 1, 202_048]);
+    assert_eq!(cached.hidden_states.len(), 54);
+    assert!(cached_logits.iter().all(|value| value.is_finite()));
+    let cached_cosine = cosine_similarity(&stateless_logits, &cached_logits);
+    assert!(
+        cached_cosine >= 0.999,
+        "packed Muse cached/stateless cosine {cached_cosine} is below 0.999"
+    );
+    let stateless_top = top1_token_id(&stateless_logits);
+    let cached_top = top1_token_id(&cached_logits);
+    assert_eq!(cached_top, stateless_top);
+    assert_eq!(state.lengths(), &[sequence]);
+
+    let decode_input = DecodeInput {
+        token_ids: Tensor::<Metal, 2, Int>::from_data(
+            TensorData::new(
+                vec![i64::try_from(stateless_top).expect("Muse token ID fits i64")],
+                [1, 1],
+            ),
+            &device,
+        ),
+        token_mask: Some(all_valid_metal_mask(1, &device)),
+        position_ids: None,
+    };
+    let decode_started = Instant::now();
+    #[cfg(feature = "kernel-tracing")]
+    let decoded_logits = {
+        let calibration_weight = model.model.layers[0].self_attn.k_proj.weight.val();
+        let (_, calibration_trace) =
+            capture_kernel_launches(|| calibration_weight.dequantize().into_data());
+        let dequantization_names = calibrated_dequantization_kernel_names(&calibration_trace);
+        assert!(
+            !dequantization_names.is_empty(),
+            "installed Muse {scheme:?} weight must calibrate whole-tensor dequantization"
+        );
+        let (decoded_logits, decode_trace) = capture_kernel_launches(|| {
+            let decoded = loaded
+                .model()
+                .decode(decode_input, &mut state, &ForwardOptions::default())
+                .expect("execute recurrent mixed Muse decode");
+            metal_values("quantized Muse decoded logits", &decoded.logits)
+        });
+        let packed = packed_matmul_launches(&decode_trace);
+        assert_eq!(
+            packed.len(),
+            PACKED_DECODE_MATMUL_LAUNCHES,
+            "Muse recurrent decode must execute every architecture-declared packed projection"
+        );
+        let marker = match scheme {
+            SymmetricQuantization::Q8 => "Q8S",
+            SymmetricQuantization::Q4 => "Q4S",
+        };
+        assert!(packed.iter().all(|launch| {
+            launch.name.contains("matmul")
+                && launch.id.contains(marker)
+                && compact_kernel_id(launch).contains("PackedU32(1")
+        }));
+        let dequantizations =
+            whole_weight_dequantization_launches(&decode_trace, &dequantization_names);
+        assert!(
+            dequantizations.is_empty(),
+            "Muse {scheme:?} decode launched whole-weight dequantization: {dequantizations:#?}"
+        );
+        decoded_logits
+    };
+    #[cfg(not(feature = "kernel-tracing"))]
+    let decoded_logits = {
+        let decoded = loaded
+            .model()
+            .decode(decode_input, &mut state, &ForwardOptions::default())
+            .expect("execute recurrent mixed Muse decode");
+        metal_values("quantized Muse decoded logits", &decoded.logits)
+    };
+    let decode_seconds = decode_started.elapsed().as_secs_f64();
+    assert!(decoded_logits.iter().all(|value| value.is_finite()));
+    assert_eq!(state.lengths(), &[sequence + 1]);
+    eprintln!(
+        "Muse-Glimmer-30B {scheme:?} packed Metal smoke: load_seconds={load_seconds:.3}, stateless_seconds={stateless_seconds:.3}, prefill_seconds={prefill_seconds:.3}, decode_seconds={decode_seconds:.3}, cached_cosine={cached_cosine:.9}, prompt_top1={stateless_top}, decode_top1={}",
+        top1_token_id(&decoded_logits),
+    );
+}
+
+/// Runs the content-pinned Q8 sidecar and audits all recurrent packed kernels.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires pinned Muse weights, reviewed Q8 Burnpack, Metal, and unified memory"]
+fn smokes_and_audits_pinned_muse_glimmer_q8_burnpack_on_metal() {
+    smoke_and_audit_pinned_muse_glimmer_burnpack(SymmetricQuantization::Q8, Q8_BURNPACK_ENV);
+}
+
+/// Runs the content-pinned Q4 sidecar and audits all recurrent packed kernels.
+#[cfg(all(feature = "metal", feature = "tokenizers", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires pinned Muse weights, reviewed Q4 Burnpack, Metal, and unified memory"]
+fn smokes_and_audits_pinned_muse_glimmer_q4_burnpack_on_metal() {
+    smoke_and_audit_pinned_muse_glimmer_burnpack(SymmetricQuantization::Q4, Q4_BURNPACK_ENV);
 }
 
 /// Strictly streams the F16 text graph and audits source order and generation defaults.

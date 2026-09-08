@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "strict_f16_official_reference_bounded_attention_and_synthetic_32k_envelope_gates_verified_pending_quantized_quality_real_32k_and_release_hardening",
+  "phase": "strict_f16_official_reference_bounded_attention_synthetic_32k_envelope_and_native_quantization_scaffold_gates_verified_pending_real_quantized_execution_quality_real_32k_and_release_hardening",
   "repository": "meta-models/Muse-Glimmer-30B",
   "revision": "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
   "reference": {
@@ -269,6 +269,28 @@
     "header_inventory_sha256": "7bf662cfb4142c1f9994926574082e9adf52f9c335f226e46b998a7d9c4547cb",
     "f16_load_plan_sha256": "fde94638b261fbaee47e53dbf035660e5bd1732a6d92e45c45cddb720ed95d6d"
   },
+  "native_quantization_scaffold": {
+    "status": "exact_pinned_plan_and_nonzero_synthetic_q8_q4_execution_verified_real_artifacts_pending",
+    "scheme": ["symmetric_q8_g64", "symmetric_q4_g64"],
+    "f16_plan_tensors": 627,
+    "eligible_packed_matrices": 417,
+    "retained_f16_tensors": 210,
+    "retained_f16_bytes": 2692445184,
+    "planned_q8_payload_bytes": 28165343232,
+    "planned_q4_payload_bytes": 14911064064,
+    "eligible_scope": "five attention and three SwiGLU projections in each of 52 layers, plus the independent LM head",
+    "retained_scope": "token embedding and 209 normalization vectors; the pinned configuration has no attention biases",
+    "synthetic_scope": "nonzero two-layer fixture with exactly representable weights",
+    "synthetic_paths": ["stateless", "cached_prefill", "recurrent_decode"],
+    "automatic_mixed_loading_validated": true,
+    "packed_parameter_dtype_accounting_validated": true,
+    "row_unaligned_artifact_rejected_as_reference_only": true,
+    "real_q8_sidecar_created": false,
+    "real_q4_sidecar_created": false,
+    "real_packed_metal_kernel_trace_validated": false,
+    "real_quantized_quality_validated": false,
+    "note": "Payload byte counts are exact shape-and-format arithmetic, not observed artifact sizes. This scaffold is not an advertised-support claim."
+  },
   "sha256": {
     "chat_template.jinja": "cfc67e5f349f37690dfd31ed1f18bc4442a9dd32fe39a648f993cb4eb3cae678",
     "config.json": "5a9df2d8a385b3d361ab6ae68d73586f4e775033933bd0cd863fb7f3820e6a14",
@@ -311,6 +333,9 @@
     "metal_eager_flash_discrimination_validated": true,
     "synthetic_long_context_32k_envelope_validated": true,
     "rust_source_toolchain_features_and_trees_recorded": true,
+    "native_quantization_exact_partition_validated": true,
+    "native_quantization_nonzero_synthetic_q8_q4_execution_validated": true,
+    "native_quantization_real_checkpoint_validated": false,
     "quantization_validated": false,
     "long_context_32k_validated": false
   },
@@ -340,7 +365,7 @@
   },
   "open_release_gates": [
     "real-checkpoint padded and context-boundary tests",
-    "native Q8 and Q4 conversion, quality, and packed-kernel proof",
+    "real native Q8 and Q4 sidecar conversion, quality, and packed-Metal kernel proof",
     "real full-model 32K production-path stress using the bounded attention policy",
     "standardized latency, throughput, cache, memory, and output-hash benchmarks"
   ]
