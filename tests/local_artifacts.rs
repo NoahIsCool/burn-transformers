@@ -41,6 +41,11 @@ use transformers::{
 };
 
 #[cfg(feature = "metal")]
+use transformers::checkpoint::quantization::BURNPACK_QUANTIZATION_FORMAT_VERSION_V2;
+#[cfg(feature = "metal")]
+use transformers::models::AutoCausalDecodeState;
+
+#[cfg(feature = "metal")]
 use burn::{
     backend::Metal,
     tensor::{Bool, DType, Int, Tensor, TensorData},
@@ -50,8 +55,11 @@ use burn::{module::Param, nn::Linear};
 #[cfg(feature = "metal")]
 use transformers::{
     AutoCausalLm, AutoLoadOptions, CausalLanguageModel, DecodeInput, DecodeState, ForwardOptions,
-    LogitsSelection, TokenMask, architecture::CausalLmInput, cache::CacheConfig,
-    checkpoint::execute_local_load_plan, models::qwen3_5::Qwen3_5ForCausalLm,
+    LogitsSelection, TokenMask,
+    architecture::CausalLmInput,
+    cache::{CacheConfig, KvCacheStorage},
+    checkpoint::execute_local_load_plan,
+    models::qwen3_5::Qwen3_5ForCausalLm,
 };
 #[cfg(all(feature = "metal", not(feature = "rocm")))]
 use transformers::{
@@ -2474,6 +2482,8 @@ fn validates_pinned_qwen35_local_artifacts() {
         .expect("official nested text configuration must validate");
     assert_eq!(config.model_type, "qwen3_5_text");
     assert_eq!(config.vocab_size, 248_320);
+    assert_eq!(config.num_hidden_layers, 24);
+    assert_eq!(config.mtp_num_hidden_layers, 1);
 
     let manifest = CheckpointManifest::discover(&root, &LoadOptions::default())
         .expect("official SafeTensors index and header must pass strict discovery");
@@ -2504,8 +2514,60 @@ fn validates_pinned_qwen35_local_artifacts() {
         15
     );
 
+    let contract = config
+        .checkpoint_contract(Qwen3_5CheckpointOptions::default())
+        .expect("official topology must produce the base text checkpoint contract");
+    let plan = contract
+        .build_load_plan(&manifest, &LoadOptions::default())
+        .expect("every base text tensor must map while visual and MTP tensors are allowlisted");
+    assert_eq!(contract.expected_tensors().len(), 321);
+    assert_eq!(plan.tensors.len(), 320);
+    assert_eq!(plan.aliases.len(), 1);
+    assert!(plan.report.is_strictly_valid());
+    assert_eq!(plan.report.allowlisted_ignored.len(), 168);
+    assert_eq!(
+        plan.report
+            .allowlisted_ignored
+            .iter()
+            .filter(|name| name.starts_with("model.visual."))
+            .count(),
+        153
+    );
+    assert_eq!(
+        plan.report
+            .allowlisted_ignored
+            .iter()
+            .filter(|name| name.starts_with("mtp."))
+            .count(),
+        15
+    );
+
     let tokenizer = LocalTokenizer::from_directory(&root)
         .expect("official tokenizer artifacts must load locally");
+    tokenizer
+        .validate_model_vocabulary(config.vocab_size)
+        .expect("every concrete tokenizer ID must address the model embedding table");
+    let metadata = tokenizer.metadata();
+    // The model deliberately pads its embedding table beyond the tokenizer's
+    // concrete 248,070 IDs; compatibility is about the maximum addressable ID,
+    // not equality between the two serialized counts.
+    assert_eq!(metadata.vocabulary_size, 248_070);
+    assert_eq!(
+        metadata
+            .special_tokens
+            .eos
+            .as_ref()
+            .map(|token| (token.content.as_str(), token.id)),
+        Some(("<|im_end|>", 248_046))
+    );
+    assert_eq!(
+        metadata
+            .special_tokens
+            .pad
+            .as_ref()
+            .map(|token| (token.content.as_str(), token.id)),
+        Some(("<|endoftext|>", 248_044))
+    );
     let prompt = "Explain why cached decoding is faster in one sentence.";
     let encoding = tokenizer
         .encode(
@@ -2531,6 +2593,29 @@ fn validates_pinned_qwen35_local_artifacts() {
             .expect("official text-only chat template must render");
         assert!(rendered.contains("<|im_start|>user"));
         assert!(rendered.ends_with("<think>\n\n</think>\n\n"));
+
+        let encoded_chat = tokenizer
+            .encode_chat(
+                &[ChatMessage::text("user", prompt)],
+                &ChatTemplateOptions {
+                    add_generation_prompt: true,
+                    ..ChatTemplateOptions::default()
+                },
+                &EncodeOptions::default(),
+            )
+            .expect("official chat template must encode without double special-token insertion");
+        let manually_encoded = tokenizer
+            .encode(
+                &rendered,
+                &EncodeOptions {
+                    add_special_tokens: false,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("manual rendered-chat encoding must succeed");
+        assert_eq!(encoded_chat, manually_encoded);
+        assert_eq!(encoded_chat.batch_size(), 1);
+        assert!(!encoded_chat.token_ids()[0].is_empty());
     }
 }
 
@@ -3051,6 +3136,194 @@ fn loads_pinned_qwen35_q4_burnpack_and_runs_metal() {
     eprintln!(
         "q4: tensors={quantized_count}, top1={}, cached_cosine={cached_cosine:.9}",
         stateless_top[0]
+    );
+}
+
+/// Exact reviewed identity of the revision-bound Qwen3.5-0.8B Q4/v2 sidecar.
+#[cfg(feature = "metal")]
+const TRUSTED_QWEN35_Q4_V2_BYTES: u64 = 280_044_715;
+
+/// SHA-256 over the complete reviewed Qwen3.5-0.8B Q4/v2 Burnpack file.
+#[cfg(feature = "metal")]
+const TRUSTED_QWEN35_Q4_V2_SHA256: &str =
+    "cca925f24ab3b61a76fbbd5aefb8e0f2052da1b4636de9e996b890859cae5fd5";
+
+/// Canonical architecture plan bound into the reviewed Qwen Q4/v2 manifest.
+#[cfg(feature = "metal")]
+const TRUSTED_QWEN35_Q4_V2_LOAD_PLAN_SHA256: &str =
+    "5be61f117255c794a5e6386196c667a99002d9bbabf7a69fef3a8fbdcc3bdabf";
+
+/// Authenticates Q4/v2 storage and probes the 32K cache/position envelope.
+///
+/// This is deliberately not a 32K-prefill or long-context quality gate. It
+/// proves that the exact reviewed, checkpoint-bound sidecar loads, that a
+/// 32,768-token cache has the model-derived physical geometry and split dtypes,
+/// and that one stateless token executes at absolute position 32,767. Quality
+/// over a populated long history remains a separate release acceptance run.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires the reviewed Qwen3.5-0.8B Q4/v2 Burnpack and about 1 GiB of Metal memory; this is a cache/position envelope, not 32K prefill"]
+fn qwen35_q4_v2_allocates_and_executes_the_32k_envelope_on_metal() {
+    const CONTEXT: usize = 32_768;
+    const SOURCE_SHARD: &str = "model.safetensors-00001-of-00001.safetensors";
+    const SOURCE_SHARD_BYTES: u64 = 1_746_942_600;
+    const SOURCE_SHARD_SHA256: &str =
+        "04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696";
+
+    let root = PathBuf::from(
+        std::env::var_os("TRANSFORMERS_QWEN35_DIR")
+            .expect("set TRANSFORMERS_QWEN35_DIR to the pinned local checkpoint"),
+    );
+    let burnpack = PathBuf::from(
+        std::env::var_os("TRANSFORMERS_QWEN35_Q4_32K_BURNPACK")
+            .expect("set TRANSFORMERS_QWEN35_Q4_32K_BURNPACK to the reviewed v2 sidecar"),
+    );
+
+    let observed_digest = sha256_regular_file(&burnpack, TRUSTED_QWEN35_Q4_V2_BYTES);
+    assert_eq!(
+        observed_digest, TRUSTED_QWEN35_Q4_V2_SHA256,
+        "the Q4/v2 cache-envelope sidecar differs from the reviewed artifact"
+    );
+    let mut artifact =
+        QuantizedBurnpackArtifact::open(&burnpack).expect("reviewed Q4/v2 Burnpack must open");
+    let manifest = artifact.manifest();
+    assert_eq!(
+        manifest.format_version, BURNPACK_QUANTIZATION_FORMAT_VERSION_V2,
+        "legacy v1 sidecars cannot authenticate the source checkpoint"
+    );
+    assert_eq!(manifest.tensors.len(), 186);
+    assert!(
+        manifest
+            .tensors
+            .values()
+            .all(|tensor| tensor.scheme == SymmetricQuantization::Q4
+                && tensor.group_size.get() == 64
+                && tensor.payload_sha256.is_some()),
+        "the reviewed envelope requires digest-bound group-64 Q4 payloads"
+    );
+    let provenance = manifest
+        .provenance
+        .as_ref()
+        .expect("format v2 must bind checkpoint and load-plan provenance");
+    assert_eq!(
+        provenance.load_plan_sha256,
+        TRUSTED_QWEN35_Q4_V2_LOAD_PLAN_SHA256
+    );
+    assert_eq!(provenance.checkpoint_shards.len(), 1);
+    let source = provenance
+        .checkpoint_shards
+        .get(SOURCE_SHARD)
+        .expect("v2 provenance must bind the one pinned checkpoint shard");
+    assert_eq!(source.file_bytes, SOURCE_SHARD_BYTES);
+    assert_eq!(source.sha256, SOURCE_SHARD_SHA256);
+    let validation = artifact
+        .validate_all()
+        .expect("every digest-bound Q4 payload must validate before model mutation");
+    assert_eq!(validation.tensor_count, 186);
+    assert_eq!(validation.payload_bytes, 279_908_352);
+    drop(artifact);
+
+    let device = Default::default();
+    let loaded = AutoCausalLm::<Metal>::load_local(
+        &root,
+        &AutoLoadOptions {
+            checkpoint: LoadOptions {
+                dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+                ..LoadOptions::default()
+            },
+            load_tokenizer: false,
+            quantized_burnpack: Some(burnpack),
+            repository: Some("Qwen/Qwen3.5-0.8B".into()),
+            revision: Some("2fc06364715b967f1860aea9cf38778875588b17".into()),
+            ..AutoLoadOptions::default()
+        },
+        &device,
+    )
+    .expect("the exact v2 sidecar must load against its provenance-bound checkpoint");
+    assert_eq!(loaded.load_report().quantized.len(), 186);
+
+    let state = loaded
+        .model()
+        .new_decode_state(
+            CacheConfig::new(1, CONTEXT).expect("32K cache geometry"),
+            1,
+            &device,
+        )
+        .expect("the Qwen hybrid cache must allocate at the 32K envelope");
+    assert_eq!(state.capacity(), CONTEXT);
+    let AutoCausalDecodeState::Qwen3_5(state) = &state else {
+        panic!("Qwen checkpoint must construct Qwen hybrid decode state");
+    };
+    assert_eq!(state.full_attention_layer_count(), 6);
+    assert_eq!(state.delta_net_layer_count(), 18);
+    assert_eq!(state.mtp_layer_count(), 0);
+    let bank = state.tensor_state().main();
+    assert_eq!(bank.config().capacity(), CONTEXT);
+    assert_eq!(bank.native_kv_count(), 1);
+    assert_eq!(bank.recurrent_count(), 1);
+
+    let native = bank.native_kv(0).expect("one homogeneous Qwen KV group");
+    let native_spec = native.spec();
+    assert_eq!(native_spec.layers(), 6);
+    assert_eq!(native_spec.key_value_heads(), 2);
+    assert_eq!(native_spec.head_dimension(), 256);
+    assert_eq!(native_spec.storage(), KvCacheStorage::Full);
+    assert_eq!(native_spec.dtype(), DType::F16);
+    assert_eq!(native.committed_time_slots(), CONTEXT);
+    for layer in 0..native_spec.layers() {
+        let keys = native.keys(layer).expect("allocated KV key layer");
+        let values = native.values(layer).expect("allocated KV value layer");
+        assert_eq!(keys.dims(), [1, 2, CONTEXT, 256]);
+        assert_eq!(values.dims(), [1, 2, CONTEXT, 256]);
+        assert_eq!(keys.dtype(), DType::F16);
+        assert_eq!(values.dtype(), DType::F16);
+    }
+
+    let recurrent = bank
+        .recurrent(0)
+        .expect("one homogeneous Qwen DeltaNet state group");
+    let recurrent_spec = recurrent.spec();
+    assert_eq!(recurrent_spec.layers(), 18);
+    assert_eq!(recurrent_spec.state_heads(), 16);
+    assert_eq!(recurrent_spec.state_rows(), 128);
+    assert_eq!(recurrent_spec.state_columns(), 128);
+    assert_eq!(recurrent_spec.convolution_channels(), 6_144);
+    assert_eq!(recurrent_spec.convolution_width(), 3);
+    assert_eq!(recurrent_spec.matrix_dtype(), DType::F32);
+    assert_eq!(recurrent_spec.convolution_dtype(), DType::F16);
+    for layer in 0..recurrent_spec.layers() {
+        let matrix = recurrent.matrix(layer).expect("allocated recurrent matrix");
+        let convolution = recurrent
+            .convolution(layer)
+            .expect("allocated convolution history");
+        assert_eq!(matrix.dims(), [1, 16, 128, 128]);
+        assert_eq!(convolution.dims(), [1, 6_144, 3]);
+        assert_eq!(matrix.dtype(), DType::F32);
+        assert_eq!(convolution.dtype(), DType::F16);
+    }
+
+    let output = loaded
+        .model()
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(vec![9_419_i64], [1, 1]),
+                    &device,
+                ),
+                token_mask: None,
+                position_ids: Some(Tensor::<Metal, 2, Int>::from_data(
+                    TensorData::new(vec![32_767_i64], [1, 1]),
+                    &device,
+                )),
+            },
+            &ForwardOptions::default(),
+        )
+        .expect("one Q4 token must execute at explicit position 32,767");
+    assert_eq!(output.logits.dims(), [1, 1, 248_320]);
+    assert!(
+        metal_tensor_values("Qwen Q4 position-32,767 logits", &output.logits)
+            .iter()
+            .all(|value| value.is_finite())
     );
 }
 

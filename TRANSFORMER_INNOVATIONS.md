@@ -1168,7 +1168,29 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   is covered in [`architecture/types.rs`](src/architecture/types.rs), and the
   cache-aware FLAN gate exercises both tokenization and repeated beam reorders.
 - **Qwen's two gates are different.** Full attention uses a sigmoid output
-  gate. The Qwen3.8 `"swish"` field describes DeltaNet's output gated norm.
+  gate. The Qwen3.8 `"swish"` field describes DeltaNet's output gated norm. The
+  pinned reference hard-codes SiLU for that norm, so the local configuration
+  accepts only the equivalent `silu`/`swish` spellings instead of pretending a
+  serialized sigmoid variant is implemented.
+- **Qwen runtime-affecting compatibility fields fail closed.** The released
+  Qwen3.5/3.8 recurrent association state is FP32, the inherited
+  `mlp_only_layers` option is removed by the pinned reference, and no released
+  dedicated-MTP-embedding tensor contract exists. Non-FP32 state requests,
+  non-empty MLP-only schedules, and dedicated MTP embeddings are rejected
+  during config validation. Stateless explicit positions now share the cached
+  path's declared-context bound and derive scaled-RoPE context from their actual
+  maximum rather than physical sequence width.
+- **Qwen3.5-0.8B Q4 execution and its 32K envelope are separate claims.** The
+  reviewed group-64 Q4 sidecar is format v2, binds the exact source checkpoint
+  and F16 load plan, contains 186 packed matrices, and has complete-file SHA-256
+  `cca925f24ab3b61a76fbbd5aefb8e0f2052da1b4636de9e996b890859cae5fd5`.
+  Its one-token stateless/cached Metal smoke reached cosine `1.0`. A distinct
+  ignored gate authenticates that sidecar, allocates the six full-attention KV
+  layers at capacity 32,768, checks eighteen DeltaNet matrices remain FP32 while
+  convolution history remains F16, and places one stateless token at position
+  32,767. The envelope is compile-validated but not yet executed; it does not
+  populate 32K history and therefore cannot establish long-context numerical
+  quality or promote Q4 beyond experimental status.
 - **Qwen3-MoE has two equivalent expert storage layouts.** Its official
   checkpoint exposes independent gate/up/down tensors for every expert. The
   pinned Transformers 5.2 loader keeps the `qwen3_moe` architecture but aliases

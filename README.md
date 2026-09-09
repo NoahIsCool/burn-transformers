@@ -17,13 +17,15 @@ The pinned architecture research and release criteria live in
 [ARCHITECTURES.md](ARCHITECTURES.md). The narrower
 [configuration compatibility matrix](ARCHITECTURE_COMPATIBILITY.md) records
 which upstream schemas can be represented without implying weight or inference
-acceptance.
+acceptance. The bounded first-release usage contract for the smallest Qwen
+checkpoint is documented separately in
+[Qwen3.5-0.8B v0.1 profile](QWEN3_5_0_8B_RELEASE.md).
 
 ## Current status
 
 | Runtime | Implemented surface | Real-checkpoint status |
 | --- | --- | --- |
-| Qwen3.5 / Qwen3.8 hybrid | DeltaNet/full-attention schedules, gated GQA, partial RoPE, SwiGLU, external recurrent/KV caches, batch-one MTP speculation, and strict text-tower mapping | [Qwen3.5-0.8B](acceptance/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17.json) passed reference-logit, 32-token greedy, cached-parity, and packed-Q4 gates. [Qwen3.8-27B](acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json) strictly applied all 866 text/MTP tensors, matched the official F16 full-vocabulary logits at `0.999999881` cosine and all 32 greedy tokens, and passed mixed Q8/F16 and Q4/F16 stateless, cached, MTP, and recurrent-decode smokes. Neither is advertised: quantized corpus quality, standardized throughput and output hashing, and 32K stress gates remain open. |
+| Qwen3.5 / Qwen3.8 hybrid | DeltaNet/full-attention schedules, gated GQA, partial RoPE, SwiGLU, external recurrent/KV caches, batch-one MTP speculation, and strict text-tower mapping | [Qwen3.5-0.8B](acceptance/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17.json) passed reference-logit, 32-token greedy, cached-parity, and packed-Q4 smokes. Its reviewed 186-matrix Q4/G64 v2 sidecar is source/plan bound and passed stateless/cached Metal execution at cosine `1.0`; Q4 quality remains experimental, the historical full-vector oracle must be regenerated as a retained pinned bundle, and the compiled 32K cache/position envelope is not a populated-history stress result. [Qwen3.8-27B](acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json) strictly applied all 866 text/MTP tensors, matched the official F16 full-vocabulary logits at `0.999999881` cosine and all 32 greedy tokens, and passed mixed Q8/F16 and Q4/F16 stateless, cached, MTP, and recurrent-decode smokes. Neither is advertised: quantized corpus quality, standardized throughput and output hashing, and real 32K stress gates remain open. |
 | Qwen3 MoE | GQA with Q/K normalization, sparse selected-expert dispatch, top-k routing, and cached decode | [Qwen3-30B-A3B](acceptance/qwen3-30b-a3b-ad44e777bcd18fa416d9da3bd8f70d33ebb85d39.json) strictly applied all 18,867 BF16-derived F16 tensors and passed six-token F16, mixed Q8/F16, and mixed Q4/F16 Metal stateless, cached-prefill, hidden-trace, and recurrent-decode smokes. Both packed decode audits observed all 1,345 architecture-declared matmuls without whole-weight dequantization. Official reference logits, 32-token generation, quantized quality, standardized performance, and 32K stress remain open; not advertised. |
 | DeepSeek V2 | YaRN, MLA reference prefill, compressed latent-cache absorbed decode, routed and shared experts | [DeepSeek-V2-Lite](acceptance/deepseek-v2-lite-604d5664dddd88a0433dbae533b7fe9472482de0.json) strictly applied all 5,291 BF16-derived F16 tensors and passed a six-token Metal stateless, reference-prefill, compressed-cache, and absorbed-decode smoke. Cached/stateless cosine was `1.0`; absorbed decode matched the internal stateless path at `0.999998964`. This is internal Burn-path parity, not comparison with the official implementation. Official reference logits, 32-token generation, quantization, and 32K stress remain open; not advertised. |
 | Muse Glimmer | Sliding/full hybrid attention, RoPE/NoPE schedule, sandwich norms, output gates, final-logit softcap, and exact eager-F16 attention with a bounded query-chunk policy | The exact [Muse-Glimmer-30B artifact](acceptance/muse-glimmer-30b-a4e59da52a7bc87ae7251dd5545c0dd437c44b68.json) authenticated both weight shards and a seven-file schema-3 official oracle, then strictly applied all 627 text tensors as F16 on Metal with no unexplained load diagnostics. The real graph matched official prompt, cached-prefix, teacher-prefix, and hidden-trace fixtures with minimum official/Burn cosine `0.999943377` and reproduced all 32 greedy tokens. Real Q8/G64 and Q4/G64 sidecars have both passed create-only conversion, full reopen, and mixed F16/packed Metal inference; each traced decode launched all 417 packed projections with no whole-weight dequantization. A synthetic 32-head F16 Metal envelope exercised actual 32K keys, terminal RoPE, and full/mirrored cache boundaries with a reduced four-channel head; it is not full-model 32K evidence. Quantized reference/quality, a real 32K stress run, real-checkpoint padded/context-boundary coverage, and standardized performance remain open; not advertised. |
@@ -160,10 +162,16 @@ use transformers::{
     AutoCausalLm, AutoLoadOptions, CausalGenerationRequest, EncodeOptions,
     generate_causal,
     cache::CacheConfig,
+    checkpoint::{DTypePolicy, LoadOptions, TensorDType},
 };
 
 fn generate<B: Backend>(root: &Path, device: &B::Device) -> Result<String, Box<dyn Error>> {
     let options = AutoLoadOptions {
+        checkpoint: LoadOptions {
+            // The accepted M3 Metal profile streams BF16 source tensors into F16.
+            dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+            ..LoadOptions::default()
+        },
         repository: Some("Qwen/Qwen3.5-0.8B".into()),
         revision: Some("2fc06364715b967f1860aea9cf38778875588b17".into()),
         ..AutoLoadOptions::default()
@@ -180,7 +188,7 @@ fn generate<B: Backend>(root: &Path, device: &B::Device) -> Result<String, Box<d
     let mut generation = loaded.generation_defaults().clone();
     generation.max_new_tokens = 32;
     let capacity = prompt_length
-        .checked_add(generation.max_new_tokens)
+        .checked_add(generation.max_new_tokens.saturating_sub(1))
         .ok_or_else(|| io::Error::other("context capacity overflow"))?;
     let output = generate_causal(
         loaded.model(),
@@ -199,6 +207,11 @@ fn generate<B: Backend>(root: &Path, device: &B::Device) -> Result<String, Box<d
     Ok(tokenizer.decode(&sequence.token_ids, true)?)
 }
 ```
+
+A complete macOS chat program is available as
+[`examples/qwen35_chat.rs`](examples/qwen35_chat.rs). It uses
+`LocalTokenizer::encode_chat` so the checkpoint template and tokenizer
+post-processor cannot insert special delimiters twice.
 
 Applications that need resumable sessions can bypass the coordinator and call
 `prefill` and `decode` directly with architecture-matched external state. T5

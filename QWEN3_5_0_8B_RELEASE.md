@@ -1,0 +1,149 @@
+# Qwen3.5-0.8B v0.1 profile
+
+This pre-advertisement profile defines the intended bounded Qwen support claim
+for the first crate release. It applies to `Qwen/Qwen3.5-0.8B` at immutable revision
+`2fc06364715b967f1860aea9cf38778875588b17` and to text inference only. The
+repository contains a vision tower and a one-layer multi-token-prediction (MTP)
+head; neither is part of the default v0.1 execution graph.
+
+The machine-readable record intentionally remains `advertised_supported=false`.
+Promotion still requires a retained, independently reviewed official-reference
+bundle and the long-context gate described below; historical results alone are
+not a reproducible release gate.
+
+The detailed tensor map is recorded in
+[QWEN3_5_CHECKPOINT_MAPPING.md](QWEN3_5_CHECKPOINT_MAPPING.md), and machine-readable
+real-checkpoint evidence is in
+[the acceptance record](acceptance/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17.json).
+
+## Artifact preparation
+
+The Rust runtime performs no network access. Download the exact revision with
+an external Hugging Face CLI:
+
+```sh
+hf download Qwen/Qwen3.5-0.8B \
+  --revision 2fc06364715b967f1860aea9cf38778875588b17 \
+  --local-dir /Volumes/models/qwen3.5-0.8b
+```
+
+The local root must contain `config.json`, `model.safetensors.index.json`, its
+single referenced SafeTensors shard, and—when text tokenization or chat
+rendering is requested—`tokenizer.json`, `tokenizer_config.json`, and
+`chat_template.jinja`. The loader canonicalizes the root and rejects escaping
+shard or tokenizer symlinks.
+
+The official checkpoint stores BF16 parameters. On the accepted M3 Metal path,
+select `DTypePolicy::Cast(TensorDType::F16)`. Conversion occurs one mapped
+tensor at a time; the loader does not stage a second full copy of the model.
+`DTypePolicy::Auto` is appropriate only when the selected backend can execute
+the checkpoint's source dtype faithfully.
+
+## Runnable chat example
+
+On macOS, the packaged example performs strict loading, renders the checkpoint
+chat template without thinking tokens, tokenizes it without duplicating special
+delimiters, prefills an external cache, and decodes a continuation:
+
+```sh
+cargo run --release \
+  --manifest-path crates/transformers/Cargo.toml \
+  --no-default-features \
+  --features std,metal,chat-templates \
+  --example qwen35_chat -- \
+  /Volumes/models/qwen3.5-0.8b \
+  "Explain why a KV cache speeds up decoding in one sentence." \
+  64
+```
+
+The example uses prefill chunks of at most 256 physical token columns. The
+cache capacity is the valid prompt width plus `max_new_tokens - 1`: logits from
+the prompt select the first new token, so the final emitted token never needs
+to be decoded back into cache state.
+
+## Strict load contract
+
+For the default base-only profile, a successful load has these exact logical
+outcomes:
+
+- 320 text storage tensors are read and applied;
+- one LM-head alias reuses the tied token embedding;
+- 153 visual tensors and 15 MTP tensors are explicitly allowlisted and reported;
+- no unexplained missing or unexpected tensors remain;
+- tokenizer IDs, when attached, are checked against the 248,320-row embedding;
+- normalized generation EOS IDs are checked against the same vocabulary.
+
+`LoadedModel` retains the final `LoadReport`, source-read counters, tokenizer,
+generation defaults, canonical local root, and optional caller-supplied upstream
+identity. Repository and revision strings are provenance labels; callers that
+need content authentication should verify the hashes in the acceptance record
+before loading.
+
+## Inference and cache semantics
+
+Qwen3.5-0.8B contains eighteen Gated DeltaNet layers and six full-attention
+layers in a three-to-one schedule. Decode state therefore combines FP32
+recurrent association matrices and convolution history with native GQA KV
+caches. State lives outside model parameters and supports reset, reorder with
+duplication, truncate, and failure-atomic prefill/decode.
+
+Both stateless and cached paths reject empty batches, out-of-vocabulary IDs,
+malformed masks, fully masked prefill rows, negative positions, positions at or
+beyond the declared context, and requests that exceed cache capacity. A false
+decode mask entry is an exact no-op for a finished batch row. `true` always
+means a valid token.
+
+The high-level generation coordinator supports greedy and seeded stochastic
+selection, temperature, top-k, top-p, repetition and presence penalties,
+multiple EOS IDs, token stop sequences, log probabilities, streaming callbacks,
+ragged rectangular batches, and optional bounded prefill chunks. Use
+`LocalTokenizer::encode_chat` for checkpoint chat templates; it deliberately
+disables tokenizer post-processing after rendering so role delimiters appear
+exactly once.
+
+## Validated evidence and explicit exclusions
+
+The historical real F16 Metal run strictly loaded the exact checkpoint, matched
+the official full-vocabulary prompt logits at cosine `0.999998221`, reproduced
+the official top ten IDs, generated the same 32 greedy tokens, and matched
+cached and stateless top-1 decisions at every tested prefix. Its 993,280-byte
+raw official logit vector was not retained, however, so a new create-only,
+digest-pinned external reference bundle must be generated and replayed before
+release promotion. The committed small JSON fixture remains useful regression
+evidence but is not a replacement for that full-vector gate.
+
+A separately reviewed Q4/G64 format-v2 sidecar is exactly `280,044,715` bytes
+with SHA-256
+`cca925f24ab3b61a76fbbd5aefb8e0f2052da1b4636de9e996b890859cae5fd5`.
+It binds the source checkpoint and load plan, contains 186 packed matrices and
+keeps 134 tensors in F16, and passed stateless/cached Metal smoke execution with
+top-1 token 13 and cosine `1.000000000`. The ignored 32K envelope gate pins this
+exact artifact, revalidates every payload and provenance record, allocates six
+full-GQA KV layers plus eighteen FP32-DeltaNet recurrent layers at capacity
+32,768, and executes one stateless token at explicit position 32,767. That gate
+has not yet been run and, even when green, is deliberately not a 32K prefill or
+long-context quality result.
+
+Tiny deterministic tests cover hybrid prefill/decode equivalence, ragged
+padding, cache lifecycle and failure atomicity, MTP transaction restoration,
+and invalid public inputs.
+
+The following remain experimental and are not part of the v0.1 Qwen support
+claim:
+
+- the vision tower and multimodal position inputs;
+- MTP/speculative decoding with real weights, despite the implemented
+  batch-one transaction API;
+- Q4 and Q8 quality guarantees (the authenticated packed Q4 result is execution
+  smoke only);
+- training loops and dropout behavior;
+- long-context performance or numerical guarantees pending the coordinated 32K
+  cache/position envelope and a separate populated-history stress run;
+- dynamic-NTK cached decoding after the original context, which would require
+  re-rotating stored keys.
+
+Configuration values that would select an unimplemented graph fail closed.
+Specifically, the recurrent state must be FP32, the inherited `mlp_only_layers`
+list must be empty, dedicated MTP embeddings are rejected, and DeltaNet output
+gating accepts only the equivalent `silu` and `swish` spellings used by the
+pinned reference and released metadata.
