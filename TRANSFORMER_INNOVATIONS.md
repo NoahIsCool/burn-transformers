@@ -1186,14 +1186,21 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   create-only producer now authenticates the exact checkpoint, Transformers
   5.2 package files and executed Qwen sources, then writes full prompt, 32-row
   cached, and 32-row teacher-forced F32 payloads. Its Rust consumer fails closed
-  until all four external files receive independent digest anchors and, once
-  pinned, requires every full-vector cosine plus all 32 top-1 decisions. The
+  unless all four external files match independent digest anchors and requires
+  every full-vector cosine plus all 32 top-1 decisions. The
   small committed JSON fixture cannot silently substitute for that bundle.
   The Burn replay also authenticates all six target checkpoint artifacts before
   load and after inference; matching headers alone do not prove checkpoint
   identity. Failed producer runs print separate historical-token, cached versus
   teacher-token, full-vector cosine, and top-two-margin diagnostics before
   rejecting the run, without publishing an accepted bundle or relaxing gates.
+  The completed official-only prompt selection and producer run now retain a
+  stable 23-token non-thinking chat oracle: all 32 margins exceed two F16 ULPs
+  (minimum six). The reviewed four-file bundle passes Burn Metal with minimum
+  official/Burn full-vector cosine `0.999996242` and all 32 cached/stateless
+  decisions identical. The old `Hello` near-tie remains a sampled-logit
+  diagnostic. This closes the retained-reference gap, not the remaining 32K,
+  coverage, or standardized-performance gates.
 - **Qwen3.5-0.8B Q4 execution and its 32K envelope are separate claims.** The
   reviewed group-64 Q4 sidecar is format v2, binds the exact source checkpoint
   and F16 load plan, contains 186 packed matrices, and has complete-file SHA-256
@@ -1287,6 +1294,9 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   also found a modular seq2seq cross-attention width multiplication overflow;
   checked arithmetic now rejects the wrap-to-valid-width case in debug and
   optimized builds.
+  Five independent bounded sanitizer fuzz targets now cover configuration,
+  artifacts, masks/positions, cache transactions, and generation. Each completed
+  10,000 inputs without a crash; this finite campaign is not exhaustive coverage.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

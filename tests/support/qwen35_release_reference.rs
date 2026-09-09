@@ -40,13 +40,16 @@ const EXPECTED_GREEDY_TOKEN_IDS: [i64; ROWS] = [
     310, 1141, 62409, 10709, 11, 13969, 279, 11247, 310, 381, 11784, 310, 279, 7806,
 ];
 
-// These anchors intentionally remain absent in the producer commit. A reviewed
-// create-only run must pin all four in one subsequent commit before this ignored
-// release gate can execute.
-const TRUSTED_JSON_SHA256: Option<&str> = None;
-const TRUSTED_PROMPT_SHA256: Option<&str> = None;
-const TRUSTED_CACHED_SHA256: Option<&str> = None;
-const TRUSTED_TEACHER_SHA256: Option<&str> = None;
+// Independently rehashed after create-only generation at commit 06f39e7, with
+// exact package/source inventories, checkpoint bytes, and all 32 margins reviewed.
+const TRUSTED_JSON_SHA256: Option<&str> =
+    Some("1a1fb75e193f82c48ef0494f3d64066d32133f7654e5c485cb193adc54acd20a");
+const TRUSTED_PROMPT_SHA256: Option<&str> =
+    Some("96c1291aebb1c36c15b42ad684a0a5bed5917c40808ad8cbbe82a03deb646df1");
+const TRUSTED_CACHED_SHA256: Option<&str> =
+    Some("a100338b3b1c6f755b3ef3c1925c090fe9cf5b2a38b8ca2df42d57bc8b9ae4c9");
+const TRUSTED_TEACHER_SHA256: Option<&str> =
+    Some("ec7786b3f837c97b7ee13c16a9fc742333075a84bf3da126b81191ec4a190f03");
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

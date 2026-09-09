@@ -7,9 +7,10 @@ repository contains a vision tower and a one-layer multi-token-prediction (MTP)
 head; neither is part of the default v0.1 execution graph.
 
 The machine-readable record intentionally remains `advertised_supported=false`.
-Promotion still requires a retained, independently reviewed official-reference
-bundle and the long-context gate described below; historical results alone are
-not a reproducible release gate.
+The retained, independently reviewed official-reference bundle now passes its
+Metal replay. Promotion still requires the long-context gate described below
+and the crate-wide [release gates](RELEASE_GATES.md); numerical parity alone is
+not a complete release qualification.
 
 The detailed tensor map is recorded in
 [QWEN3_5_CHECKPOINT_MAPPING.md](QWEN3_5_CHECKPOINT_MAPPING.md), and machine-readable
@@ -195,7 +196,11 @@ minimum official cached/teacher cosine **0.999997463582**. The external
 `qwen3.5-0.8b-2fc06364-prompt-selection.bundle/selection.json` retains the fixed
 candidate list and all nine attempted results: **152,690 bytes**, SHA-256
 `015dad3595c817252f3e776b148f1af34105de2351d70237a004091260be31cb`.
-Producer and consumer now pin this separate release prompt and correctly slice
-teacher-forced logits starting at `prompt_length - 1`. Full-vector bundle
-production, independent digest pinning, and Burn replay are still required;
-prompt-selection evidence alone is not checkpoint acceptance.
+Producer and consumer pin this separate release prompt and correctly slice
+teacher-forced logits starting at `prompt_length - 1`. The four-file oracle was
+generated at `06f39e7`, independently rehashed, and replayed on Burn Metal F16.
+It matches all 32 greedy decisions on cached and teacher-forced paths; minimum
+full-vocabulary reference cosine is **0.999996242** (gate **0.999**). The acceptance
+record pins every payload and its producer provenance. Both target checkpoint
+and reference sources are authenticated; this result still does not establish
+32K stress, standardized performance, or crate-wide release completion.

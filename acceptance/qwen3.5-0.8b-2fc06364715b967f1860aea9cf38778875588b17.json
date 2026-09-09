@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "full_precision_and_q4_packed_metal_smoke_verified_pending_quantized_quality_and_32k_stress",
+  "phase": "authenticated_stable_prompt_f16_reference_parity_verified_pending_release_coverage_performance_and_32k_stress",
   "repository": "Qwen/Qwen3.5-0.8B",
   "revision": "2fc06364715b967f1860aea9cf38778875588b17",
   "artifact_layout": {
@@ -33,6 +33,8 @@
     "reference_greedy_32_tokens_compared": true,
     "cached_generation_compared": true,
     "cached_stateless_top1_all_prefixes_compared": true,
+    "retained_authenticated_official_reference_replayed": true,
+    "target_checkpoint_authenticated_before_and_after_inference": true,
     "cache_failure_atomicity_hardened": true,
     "inactive_decode_rows_supported": true,
     "q8_burnpack_conversion_validated": true,
@@ -69,6 +71,39 @@
       "full_vector_cosine_gate": 0.999,
       "full_vector_cosine_pending": false
     }
+  },
+  "release_reference_acceptance": {
+    "date": "2026-09-09",
+    "producer_commit": "06f39e77758a6eaf94b1583de60c531b94de872c",
+    "producer_sha256": "d4305f8b3c13085899e60144f58bb60bdf2bd7ba992ed1ee82a79f33611efc98",
+    "reference_backend": "transformers_5_2_0_mps_eager_f16",
+    "target_backend": "burn_0_21_metal_f16",
+    "features": "std,metal,tokenizers,chat-templates",
+    "user_prompt": "Explain why the seasons change in four complete sentences.",
+    "prompt_tokens": 23,
+    "chat_template_enable_thinking": false,
+    "reference_only_selection_candidate_index": 8,
+    "selection_report_sha256": "015dad3595c817252f3e776b148f1af34105de2351d70237a004091260be31cb",
+    "minimum_reference_margin_in_f16_ulps": 6.0,
+    "minimum_reference_cached_teacher_cosine": 0.9999974635817755,
+    "bundle_directory": "qwen3.5-0.8b-2fc06364-reference.bundle",
+    "bundle_files": {
+      "qwen3.5-0.8b-2fc06364-reference.json": {"bytes": 27138, "sha256": "1a1fb75e193f82c48ef0494f3d64066d32133f7654e5c485cb193adc54acd20a"},
+      "qwen3.5-0.8b-2fc06364-prompt-logits.f32le": {"bytes": 993280, "sha256": "96c1291aebb1c36c15b42ad684a0a5bed5917c40808ad8cbbe82a03deb646df1"},
+      "qwen3.5-0.8b-2fc06364-cached-logits-32x248320.f32le": {"bytes": 31784960, "sha256": "a100338b3b1c6f755b3ef3c1925c090fe9cf5b2a38b8ca2df42d57bc8b9ae4c9"},
+      "qwen3.5-0.8b-2fc06364-teacher-logits-32x248320.f32le": {"bytes": 31784960, "sha256": "ec7786b3f837c97b7ee13c16a9fc742333075a84bf3da126b81191ec4a190f03"}
+    },
+    "prompt_reference_cosine": 0.999998613,
+    "minimum_cached_reference_cosine": 0.999997815,
+    "minimum_teacher_reference_cosine": 0.999996242,
+    "cosine_gate": 0.999,
+    "exact_greedy_tokens": 32,
+    "cached_stateless_top1_identical": true,
+    "output_hash_encoding": "UTF-8 compact JSON array of the 32 exactly matched token IDs, followed by LF",
+    "output_sha256": "689780991aa7ec97999ced97dd64c00c5f95ef4a8388b2084ba25105c7c72450",
+    "test_wall_seconds_including_authentication_and_load": 11.95,
+    "standardized_benchmark": false,
+    "historical_hello_fixture_policy": "retained as sampled-logit smoke; its one-ULP continuation tie is not the stable release oracle"
   },
   "burnpack_conversion_acceptance": {
     "source_parameter_dtype": "bf16",

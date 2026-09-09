@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "authenticated_cpu_f32_oracle_full_vector_cached_generation_padding_and_context_boundary_verified_on_flex_and_metal_pending_integrated_support_promotion",
+  "phase": "integrated_strict_f32_reference_parity_verified_on_flex_and_metal_pending_release_coverage_performance_and_packaging",
   "repository": "google/flan-t5-small",
   "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
   "artifact_layout": {
@@ -47,6 +47,24 @@
     "context_boundary_stress_validated": true,
     "context_boundary_tokens": 512,
     "quantized_quality_applicable_to_advertised_f32_profile": false
+  },
+  "integration_replay": {
+    "date": "2026-09-09",
+    "integration_commit": "a519780",
+    "acceptance_test_sha256": "74e399ae91a64847b1f2ea9f1f15dafd79185a3ea33cbf3758bc1b3df1ca29c8",
+    "backend": "Metal",
+    "dtype": "F32",
+    "cargo_profile": "release",
+    "features": "std,metal,tokenizers",
+    "elementwise_tolerance_failures_enforced_zero": true,
+    "minimum_reference_cosine": 0.999999999999,
+    "maximum_absolute_error": 0.000076294,
+    "all_seven_output_hashes_equal_recorded_metal_outputs": true,
+    "exact_greedy_tokens": 32,
+    "exact_beam_continuation": true,
+    "padded_batch_and_512_boundary_passed": true,
+    "test_wall_seconds_including_authentication_and_load": 3.90,
+    "standardized_benchmark": false
   },
   "reference_acceptance": {
     "oracle": {
