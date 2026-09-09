@@ -1269,6 +1269,16 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   official/quantized top-one agreement and minimum full-vector cosine as
   diagnostics. Neither quality gate has run; quantized quality and long-context
   execution remain pending, so this is not a support claim.
+- **Release coverage is measured separately from feature presence.** The first
+  Flex/tokenizer/template/autodiff unit-suite baseline passes 764 tests but
+  reaches only 87.7084% LLVM line coverage crate-wide and 90.5207% shared/core,
+  below the required 90%/95%. Inline test bodies and macro expansions are still
+  counted; these are not production-only or branch-coverage claims. The
+  [executable release gates](RELEASE_GATES.md) preserve experimental source in
+  the denominator and track the remaining acceptance requirements. Fuzz review
+  also found a modular seq2seq cross-attention width multiplication overflow;
+  checked arithmetic now rejects the wrap-to-valid-width case in debug and
+  optimized builds.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

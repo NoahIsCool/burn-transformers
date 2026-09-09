@@ -1,0 +1,112 @@
+# Executable v0.1 release gates
+
+The release candidate targets **Qwen3.5-0.8B and FLAN-T5-small**. Larger
+implemented families remain experimental. This checklist supplements
+[RELEASING.md](RELEASING.md); a green source check does not promote a checkpoint,
+publish an archive, or waive any real-weight gate.
+
+## Reproducible source checks
+
+The standard-library-only [runner](scripts/check_release.py) executes explicit
+groups, fails on the first failed command, and records command arrays, exit
+statuses, elapsed times, logs, and coverage summaries in a new directory under
+`target/release-gates/`. It never runs a shell, changes Git refs, or downloads
+models. `--dry-run` prints its command plan without writing files.
+
+```sh
+python3 scripts/check_release.py --gate source --offline
+python3 scripts/check_release.py --gate msrv --msrv-toolchain 1.92.0 --offline
+python3 scripts/check_release.py --gate coverage --toolchain nightly --offline
+python3 scripts/check_release.py --gate dependencies
+python3 scripts/check_release.py --gate accelerator-compile --offline
+python3 scripts/check_release.py --gate package --offline
+```
+
+Run from this crate or use its full script path from the repository root. Install
+tools separately; the runner does not install or update them. The reviewed tool
+versions are `cargo-llvm-cov 0.6.21`, `cargo-audit 0.22.2`, `cargo-deny 0.20.2`,
+and `cargo-fuzz 0.13.2`. LLVM tools must match the selected Rust toolchain.
+The MSRV gate checks `rustc --version` exactly: `--msrv-toolchain stable` is
+permitted only while that local alias actually resolves to Rust **1.92.0**.
+Source checks use Flex, tokenizers, templates, and autodiff; accelerator compile
+checks select Metal, CUDA, and ROCm separately and execute no kernels. Also run
+all-feature Clippy on the equipped build host before release:
+
+```sh
+cargo clippy --manifest-path Cargo.toml --locked --all-targets --all-features -- -D warnings
+```
+
+Cargo's usual target location is retained. Check at least 20 GiB free before
+building a new profile; external model artifacts are never a cleanup target.
+The package gate requires clean tracked crate sources and includes verification.
+An unrelated change outside this standalone crate is not permission to stage it.
+
+## Coverage is a failing gate, not a badge
+
+The runner measures all compiled `src/**/*.rs` at **90%** line coverage and
+shared/core source (everything outside `src/models/`) at **95%**, with exact
+integer threshold comparisons. Experimental model source is retained in the
+crate denominator. Integration-test harnesses, examples, dependency source, and
+external acceptance payloads are not part of those denominators.
+
+LLVM currently also counts inline unit-test bodies and generated expansions in
+these file summaries. The numbers are **not production-only coverage** and are
+not branch coverage. Do not represent this baseline as satisfying the intended
+reachable-branch policy; a refined production-only measurement and targeted
+uncovered-path tests remain release work. Hardware-only paths receive separate
+opt-in runs, not invented coverage percentages.
+
+The first baseline at integration commit `050f18d`, with
+`std,flex,tokenizers,chat-templates,autodiff`, ran **764 passed / 3 ignored** unit
+tests. LLVM reported **55,080 / 62,799 lines (87.7084%)** across the crate and
+**25,640 / 28,325 (90.5207%)** in shared/core files. Both gates fail. This baseline
+used `--lib`; the runner also includes ordinary integration tests. It must be
+rerun on the final candidate, and baseline results must not be recycled across
+source changes.
+
+## Dependency policy
+
+`deny.toml` rejects unknown registries and Git sources, and checks licenses of
+the resolved all-feature graph, including build and development dependencies.
+The small version-specific exceptions cover unchanged `colored 3.1.1` and
+`option-ext 0.2.0` under MPL-2.0 and `webpki-roots 1.0.9` under
+CDLA-Permissive-2.0. These are not blanket exceptions for future packages or
+versions. Downstream binary distributions must retain the applicable dependency
+licenses and notices; the crate's own MIT/Apache license does not replace them.
+The [cargo-deny license policy documentation](https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html)
+describes how these exact-version exceptions are applied.
+
+The 2026-09-09 audit of the 636-entry lockfile found **zero known vulnerabilities**
+using RustSec database commit `b50980aad8b8f14f77e25a97b32dd94bf008b0af`.
+Two maintenance notices remain explicitly tracked:
+
+- `RUSTSEC-2025-0141`: `bincode 2.0.1`, inherited from pinned Burn Core.
+- `RUSTSEC-2024-0436`: `paste 1.0.15`, inherited from CubeCL, Flex/GEMM, and
+  tokenizers. This is a build-time macro dependency.
+
+The runner waives only these two unmaintained-package notices, not new warnings
+or vulnerabilities. Revisit them when upgrading Burn or tokenizers; do not fork
+the inference stack merely to suppress an informational notice. A fresh
+connected audit is required before release. `--offline` explicitly skips the
+registry's yanked-version lookup and uses the already-fetched advisory database;
+it is useful locally but is not a substitute for that final connected audit.
+
+## Gates that the source runner does not substitute for
+
+- Execute bounded sanitizer fuzz campaigns for configuration, shard indexes,
+  masks/positions, cache transactions, and generation. Preserve minimized bugs
+  as ordinary regression tests; finite campaigns are not exhaustive proofs.
+- Replay authenticated Qwen and FLAN official full-vector references on their
+  declared backend/precision, 32 exact stable greedy decisions, cached versus
+  uncached top-1, tokenization/templates, padding, and context boundaries.
+- Run the real Qwen quantized 32K populated-history stress test. Allocating
+  32K capacity or evaluating a single token at position 32767 is insufficient.
+- Exercise both public small-model examples from the final candidate.
+- Record synchronized warmup/repeated load, prefill, and decode timings, peak
+  host/device memory, cache bytes per token, and output hashes. Existing
+  diagnostic timings are not standardized regression baselines.
+- Reconcile support records and documents only after all applicable gates pass.
+  In particular, successful FLAN numerical parity alone does not establish
+  completion of crate-wide coverage, dependency, packaging, or performance gates.
+
+No expensive acceptance runs for larger families belong to this v0.1 phase.
