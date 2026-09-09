@@ -266,6 +266,15 @@ pub(super) struct ReferenceBundle {
 }
 
 impl ReferenceBundle {
+    /// Authenticates the target files Burn will consume against the official source.
+    ///
+    /// Shape-compatible files are not necessarily the pinned checkpoint. Hash
+    /// each complete artifact through a bounded streaming reader before loading
+    /// and after inference so the acceptance claim covers the target bytes too.
+    pub(super) fn validate_checkpoint(&self, root: &Path) {
+        validate_checkpoint_artifacts(root, &self.record.provenance.artifacts);
+    }
+
     /// Returns the exact tokenized prompt consumed by the official graph.
     pub(super) fn input_ids(&self) -> &[i64] {
         &self.record.input_ids
@@ -289,6 +298,20 @@ impl ReferenceBundle {
     /// Returns one corresponding official stateless teacher-forced row.
     pub(super) fn teacher_row(&self, row: usize) -> &[f32] {
         matrix_row(&self.teacher, row)
+    }
+}
+
+/// Streams the authenticated source inventory from a target checkpoint root.
+fn validate_checkpoint_artifacts(root: &Path, artifacts: &[Artifact]) {
+    for artifact in artifacts {
+        let path = root.join(&artifact.relative_path);
+        let observed = super::sha256_regular_file(&path, artifact.bytes);
+        assert_eq!(
+            observed,
+            artifact.sha256,
+            "target checkpoint artifact {} differs from the authenticated official source",
+            path.display()
+        );
     }
 }
 
@@ -856,7 +879,8 @@ fn assert_git_oid(value: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        MATRIX_BYTES, PROMPT_BYTES, assert_sha256, decode_f32, matrix_row, require_trusted_anchor,
+        Artifact, MATRIX_BYTES, PROMPT_BYTES, assert_sha256, decode_f32, matrix_row,
+        require_trusted_anchor, sha256, validate_checkpoint_artifacts,
     };
 
     #[test]
@@ -895,5 +919,27 @@ mod tests {
     #[should_panic(expected = "contains non-finite value")]
     fn non_finite_reference_value_is_rejected() {
         decode_f32(&f32::NAN.to_le_bytes(), "fixture");
+    }
+
+    /// Identically shaped checkpoint bytes must still match the reviewed digest.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn target_checkpoint_authentication_rejects_same_size_mutation() {
+        let temporary = tempfile::tempdir().expect("temporary checkpoint");
+        let path = temporary.path().join("weights.bin");
+        std::fs::write(&path, b"original").expect("fixture bytes");
+        let artifacts = [Artifact {
+            relative_path: "weights.bin".into(),
+            bytes: 8,
+            sha256: sha256(b"original"),
+        }];
+        validate_checkpoint_artifacts(temporary.path(), &artifacts);
+        std::fs::write(&path, b"modified").expect("mutated bytes");
+        assert!(
+            std::panic::catch_unwind(|| {
+                validate_checkpoint_artifacts(temporary.path(), &artifacts);
+            })
+            .is_err()
+        );
     }
 }

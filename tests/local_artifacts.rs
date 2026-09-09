@@ -3369,6 +3369,7 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         std::env::var_os("TRANSFORMERS_QWEN35_DIR")
             .expect("set TRANSFORMERS_QWEN35_DIR to the pinned local checkout"),
     );
+    official_reference.validate_checkpoint(&root);
     let config_path = root.join("config.json");
     let config_json = fs::read_to_string(&config_path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", config_path.display()));
@@ -3649,6 +3650,7 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         stateless_greedy, expected_greedy,
         "cached and stateless top-1 continuations must match at every step"
     );
+    official_reference.validate_checkpoint(&root);
 }
 
 /// Authenticates all official Qwen reference evidence without loading model weights.

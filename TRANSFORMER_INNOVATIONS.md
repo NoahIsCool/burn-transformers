@@ -1189,6 +1189,11 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   until all four external files receive independent digest anchors and, once
   pinned, requires every full-vector cosine plus all 32 top-1 decisions. The
   small committed JSON fixture cannot silently substitute for that bundle.
+  The Burn replay also authenticates all six target checkpoint artifacts before
+  load and after inference; matching headers alone do not prove checkpoint
+  identity. Failed producer runs print separate historical-token, cached versus
+  teacher-token, full-vector cosine, and top-two-margin diagnostics before
+  rejecting the run, without publishing an accepted bundle or relaxing gates.
 - **Qwen3.5-0.8B Q4 execution and its 32K envelope are separate claims.** The
   reviewed group-64 Q4 sidecar is format v2, binds the exact source checkpoint
   and F16 load plan, contains 186 packed matrices, and has complete-file SHA-256

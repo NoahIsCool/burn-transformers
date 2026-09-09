@@ -89,6 +89,30 @@ class Qwen35ReferenceGeneratorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "file set changed"):
                 MODULE.publish_bundle(Path(temporary), {MODULE.JSON_FILENAME: b"{}"})
 
+    def test_diagnostics_separate_historic_drift_from_self_parity(self) -> None:
+        cached = list(MODULE.EXPECTED_GREEDY_TOKEN_IDS)
+        cached[13] = 33_922
+        teacher = list(cached)
+        teacher[20] = 11
+        decisions = [
+            {"step": step, "margin": 0.5, "margin_to_epsilon_ratio": 4.0,
+             "stable_under_budget": step != 7}
+            for step in range(MODULE.GREEDY_TOKENS)
+        ]
+        report = MODULE.reference_diagnostics(
+            cached, decisions, teacher, [0.25] * 32, [0.9999] * 32, 1.0
+        )
+        self.assertEqual(report["kind"], "unaccepted-reference-diagnostics")
+        self.assertEqual(report["historical_mismatch_steps"], [13])
+        self.assertEqual(report["cached_teacher_mismatch_steps"], [20])
+        self.assertEqual(report["unstable_cached_steps"], [7])
+        self.assertEqual(report["minimum_cached_teacher_cosine"], 0.9999)
+        self.assertEqual(report["teacher_top_two_margins"], [0.25] * 32)
+
+    def test_diagnostics_require_complete_rows(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "every greedy decision"):
+            MODULE.reference_diagnostics([], [], [], [], [], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -400,6 +400,57 @@ def checked_duration(label: str, value: float) -> float:
     return value
 
 
+def reference_diagnostics(
+    generated_ids: Sequence[int],
+    decisions: Sequence[Mapping[str, Any]],
+    teacher_ids: Sequence[int],
+    teacher_margins: Sequence[float],
+    cached_teacher_cosines: Sequence[float],
+    prompt_cached_cosine: float,
+) -> dict[str, Any]:
+    """Describe every decision before any acceptance check discards a failed run.
+
+    This diagnostic record is printed to stderr only. It is not an accepted
+    oracle, does not bypass a numerical gate, and never creates a bundle.
+    """
+
+    if any(
+        len(values) != GREEDY_TOKENS
+        for values in (
+            generated_ids, decisions, teacher_ids, teacher_margins, cached_teacher_cosines
+        )
+    ):
+        raise RuntimeError("diagnostic evidence must cover every greedy decision")
+    return {
+        "kind": "unaccepted-reference-diagnostics",
+        "cached_token_ids": list(generated_ids),
+        "teacher_token_ids": list(teacher_ids),
+        "historical_mismatch_steps": [
+            step for step, (actual, expected) in enumerate(
+                zip(generated_ids, EXPECTED_GREEDY_TOKEN_IDS, strict=True)
+            ) if actual != expected
+        ],
+        "cached_teacher_mismatch_steps": [
+            step for step, (cached, teacher) in enumerate(
+                zip(generated_ids, teacher_ids, strict=True)
+            ) if cached != teacher
+        ],
+        "cached_decision_stability": list(decisions),
+        "teacher_top_two_margins": list(teacher_margins),
+        "unstable_cached_steps": [
+            int(decision["step"]) for decision in decisions
+            if not decision["stable_under_budget"]
+        ],
+        "minimum_cached_margin": min(float(decision["margin"]) for decision in decisions),
+        "minimum_cached_margin_to_epsilon_ratio": min(
+            float(decision["margin_to_epsilon_ratio"]) for decision in decisions
+        ),
+        "prompt_cached_cosine": prompt_cached_cosine,
+        "cached_teacher_cosines": list(cached_teacher_cosines),
+        "minimum_cached_teacher_cosine": min(cached_teacher_cosines),
+    }
+
+
 def checked_f32_payload(tensor: Any, expected_elements: int, label: str) -> bytes:
     """Serialize one finite contiguous CPU F32 tensor into canonical LE bytes."""
 
@@ -694,17 +745,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError(f"teacher logit matrix changed shape: {list(teacher_rows.shape)}")
     if not bool(torch.isfinite(teacher_rows).all().item()):
         raise RuntimeError("teacher logit matrix contains non-finite values")
-    if generated_ids != EXPECTED_GREEDY_TOKEN_IDS:
-        raise RuntimeError(f"official greedy continuation changed: {generated_ids}")
     teacher_top1 = [int(value) for value in teacher_rows.argmax(dim=-1).tolist()]
-    if teacher_top1 != generated_ids:
-        raise RuntimeError("official cached and teacher-forced top-1 rows differ")
-    minimum_margin, minimum_margin_to_epsilon = COMMON.validate_decision_stability(decisions)
     cached_teacher_cosines = [
         COMMON.tensor_cosine(torch, cached_row, teacher_rows[index])
         for index, cached_row in enumerate(cached_rows)
     ]
     prompt_cached_cosine = COMMON.tensor_cosine(torch, stateless_row, cached_rows[0])
+    teacher_top2 = torch.topk(teacher_rows, k=2, dim=-1, largest=True, sorted=True).values
+    teacher_margins = [float(value) for value in (teacher_top2[:, 0] - teacher_top2[:, 1]).tolist()]
+    diagnostics = reference_diagnostics(
+        generated_ids, decisions, teacher_top1, teacher_margins,
+        cached_teacher_cosines, prompt_cached_cosine,
+    )
+    print(json.dumps(diagnostics, sort_keys=True, allow_nan=False), file=sys.stderr, flush=True)
+    if generated_ids != EXPECTED_GREEDY_TOKEN_IDS:
+        raise RuntimeError(f"official greedy continuation changed: {generated_ids}")
+    if teacher_top1 != generated_ids:
+        raise RuntimeError("official cached and teacher-forced top-1 rows differ")
+    minimum_margin, minimum_margin_to_epsilon = COMMON.validate_decision_stability(decisions)
     if min(cached_teacher_cosines) < SELF_PARITY_COSINE or prompt_cached_cosine < SELF_PARITY_COSINE:
         raise RuntimeError("official cached/stateless full-vector parity fell below 0.999")
 
