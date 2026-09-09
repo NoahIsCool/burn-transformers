@@ -144,6 +144,11 @@ it is useful locally but is not a substitute for that final connected audit.
 - Replay authenticated Qwen and FLAN official full-vector references on their
   declared backend/precision, 32 exact stable greedy decisions, cached versus
   uncached top-1, tokenization/templates, padding, and context boundaries.
+  The [integrated Rust 1.92/release replay at `6226170`](acceptance/measurements/small-model-functional-replay-6226170-20260909.json)
+  passed all four real-checkpoint test cases and both unchanged public examples
+  after the parameter-storage, attention-shape, and beam-score fixes. Exact
+  commands, source/executable/log hashes, and numerical results are retained;
+  subsequent runtime changes still require replay.
 - Run the real Qwen quantized 32K populated-history stress test. Allocating
   32K capacity or evaluating a single token at position 32767 is insufficient.
   The [2026-09-09 Q4/v2 run](acceptance/measurements/qwen3.5-0.8b-q4-32k-stress-20260909.json)

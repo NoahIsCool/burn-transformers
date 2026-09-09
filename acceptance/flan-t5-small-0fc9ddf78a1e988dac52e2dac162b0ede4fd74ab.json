@@ -52,6 +52,7 @@
     "per_phase_memory_high_water_recorded": false
   },
   "repeated_metal_benchmark_record": "measurements/flan-t5-small-metal-benchmark-20260909-run.json",
+  "integrated_functional_replay_record": "measurements/small-model-functional-replay-6226170-20260909.json",
   "integration_replay": {
     "date": "2026-09-09",
     "integration_commit": "a519780",

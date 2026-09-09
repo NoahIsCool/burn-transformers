@@ -1347,6 +1347,9 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   remains unsupported: active top-k/top-p filters fail with a capability error,
   while native Metal Flex32 greedy/unfiltered sampling has an executed test.
   Both small-model public examples also passed [local Rust 1.92 execution](acceptance/measurements/public-examples-20260909.json).
+  The later [integrated replay](acceptance/measurements/small-model-functional-replay-6226170-20260909.json)
+  reconfirms both families' official vectors, exact decisions, public APIs and
+  examples after the latest storage, attention, and beam-score validation fixes.
 - **Memory measurements distinguish storage from observed process footprint.**
   The test-only Darwin supervisor brackets synchronized phases, samples a real
   idle baseline, and retains raw timestamps, gaps, and errors. Sampled maxima

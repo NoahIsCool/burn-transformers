@@ -54,6 +54,7 @@
   },
   "quantized_32k_execution_record": "measurements/qwen3.5-0.8b-q4-32k-stress-20260909.json",
   "repeated_metal_benchmark_record": "measurements/qwen3.5-0.8b-metal-benchmark-20260909-run.json",
+  "integrated_functional_replay_record": "measurements/small-model-functional-replay-6226170-20260909.json",
   "public_api_acceptance": {
     "date": "2026-09-09",
     "source_tree_equivalent_to_commit": "5fe7014",

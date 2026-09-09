@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "scope": "functional_replay_not_benchmark",
+  "date": "2026-09-09",
+  "source_commit": "6226170f25a4760d59ba1b391d86e3bce46a1bb7",
+  "source_branch": "codex/tfm-rc-replay",
+  "workdir": "/private/tmp/hmm-tfm-qwen-release-api",
+  "source_worktree_clean": true,
+  "source_edits": [],
+  "toolchain": {
+    "selector": "+stable",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)",
+    "profile": "release",
+    "locked": true,
+    "offline": true
+  },
+  "checkpoint_paths": {
+    "qwen": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "flan": "/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab"
+  },
+  "reference_paths": {
+    "qwen_parent": "/Volumes/bag of holding/models/transformers-acceptance",
+    "qwen_bundle": "/Volumes/bag of holding/models/transformers-acceptance/qwen3.5-0.8b-2fc06364-reference.bundle",
+    "flan_bundle": "/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle"
+  },
+  "source_sha256": {
+    "crates/transformers/Cargo.lock": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+    "crates/transformers/Cargo.toml": "611324dc1855ff8ebd37910589ba9ce7b306cd68fdef996c7c9e2831e0d24695",
+    "crates/transformers/tests/local_artifacts.rs": "d304d5ed42ed903c1b6add57a43f0e5e272bb2dfed6ac4d8eab424b73c240abf",
+    "crates/transformers/tests/qwen35_release_api.rs": "f62d801893b04a0af4574b78341bfe247b9f2fa1d298e37bc0e4c8367760faa2",
+    "crates/transformers/tests/support/qwen35_release_reference.rs": "83fd59277d825b9721779a8f827d46fcfd9033641529bcbd6fcdbbc91639d5ba",
+    "crates/transformers/tests/flan_t5_small.rs": "74e399ae91a64847b1f2ea9f1f15dafd79185a3ea33cbf3758bc1b3df1ca29c8",
+    "crates/transformers/examples/flan_t5_small.rs": "926c998ab129060989eaab7f8529af72bfccf906307759f19f1070b665a06ef4",
+    "crates/transformers/examples/qwen35_chat.rs": "0cc93373e6bb61f3ae4da09bbe8183fe93bf1954d995e54727128aaf79309194"
+  },
+  "runs": [
+    {
+      "name": "qwen_official_inference",
+      "command": "set -o pipefail\nTRANSFORMERS_QWEN35_DIR='/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17' TRANSFORMERS_QWEN35_REFERENCE_DIR='/Volumes/bag of holding/models/transformers-acceptance' cargo +stable test --locked --offline --release --manifest-path crates/transformers/Cargo.toml --target-dir /Users/nover/repos/hmm_compression/crates/transformers/target --no-default-features --features std,metal,tokenizers,chat-templates --test local_artifacts loads_pinned_qwen35_weights_and_runs_metal_inference -- --ignored --exact --nocapture --test-threads=1 2>&1 | tee /private/tmp/tfm-rc622-qwen-local.log",
+      "features": [
+        "std",
+        "metal",
+        "tokenizers",
+        "chat-templates"
+      ],
+      "exit_code": 0,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "filtered": 25
+      },
+      "log": "/private/tmp/tfm-rc622-qwen-local.log",
+      "log_sha256": "cb96c683c393fac2402242d07fbe5eff5c481d55c6e560701b1c32c73781855e",
+      "executable": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/local_artifacts-1a1f2f190955cf81",
+      "executable_sha256": "9614295d534afc1ce5dc616918ed27600c8b60d52b900891e6ebeef98a78a7e1",
+      "results": {
+        "prompt_official_full_vocabulary_cosine": 0.999998613,
+        "minimum_cached_official_full_vocabulary_cosine": 0.999997815,
+        "minimum_teacher_official_full_vocabulary_cosine": 0.999996242,
+        "exact_cached_and_stateless_official_greedy_tokens": 32
+      }
+    },
+    {
+      "name": "qwen_public_api",
+      "command": "set -o pipefail\nTRANSFORMERS_QWEN35_DIR='/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17' TRANSFORMERS_QWEN35_REFERENCE_DIR='/Volumes/bag of holding/models/transformers-acceptance' cargo +stable test --locked --offline --release --manifest-path crates/transformers/Cargo.toml --target-dir /Users/nover/repos/hmm_compression/crates/transformers/target --no-default-features --features std,metal,tokenizers,chat-templates --test qwen35_release_api -- --ignored --nocapture --test-threads=1 2>&1 | tee /private/tmp/tfm-rc622-qwen-api.log",
+      "features": [
+        "std",
+        "metal",
+        "tokenizers",
+        "chat-templates"
+      ],
+      "exit_code": 0,
+      "tests": {
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "filtered": 8
+      },
+      "log": "/private/tmp/tfm-rc622-qwen-api.log",
+      "log_sha256": "3eb5f53a0ca5fbbe81021e63cd4b131e10b465c7e49f6a3efc21878a7ae38b86",
+      "executable": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_release_api-c84486b3bddad94a",
+      "executable_sha256": "e7200850f782722aad130eef755d2376af80a378a02c0b58b1d05eb88d348df9",
+      "results": {
+        "exact_public_chat_streamed_official_tokens": 32,
+        "genuine_left_and_right_padding": true,
+        "padded_vs_independent_prefill_decode_and_generation": true,
+        "full_vector_cosine_gate": 0.999,
+        "precise_api_cosines_logged": false
+      }
+    },
+    {
+      "name": "flan_official_metal_oracle",
+      "command": "set -o pipefail\nTRANSFORMERS_FLAN_T5_SMALL_DIR='/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab' TRANSFORMERS_FLAN_T5_SMALL_REFERENCE_DIR='/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle' cargo +stable test --locked --offline --release --manifest-path crates/transformers/Cargo.toml --target-dir /Users/nover/repos/hmm_compression/crates/transformers/target --no-default-features --features std,metal,tokenizers,chat-templates --test flan_t5_small flan_t5_small_metal_matches_official_reference -- --ignored --exact --nocapture --test-threads=1 2>&1 | tee /private/tmp/tfm-rc622-flan-metal.log",
+      "features": [
+        "std",
+        "metal",
+        "tokenizers",
+        "chat-templates"
+      ],
+      "exit_code": 0,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "filtered": 3
+      },
+      "log": "/private/tmp/tfm-rc622-flan-metal.log",
+      "log_sha256": "ce81d9c45923b35159024e3f375f344bcfae4718413c732d1d3c65c4a2428fb7",
+      "executable": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/flan_t5_small-2f4181cb08abf0db",
+      "executable_sha256": "b2c507ec143f950c8698c71945f964fff189d5d495f0113e4d8af18f751f772b",
+      "results": {
+        "minimum_full_vector_cosine": 0.999999999999,
+        "maximum_absolute_error": 0.000076294,
+        "tolerance_failures_1e_4": 0,
+        "exact_greedy_official_tokens": 32,
+        "exact_four_beam_ids": [
+          644,
+          4598,
+          229,
+          9685,
+          5,
+          1
+        ],
+        "full_vectors": [
+          "encoder",
+          "decoder",
+          "first",
+          "cached",
+          "teacher",
+          "padded",
+          "boundary"
+        ],
+        "vector_details": [
+          {
+            "name": "encoder",
+            "cosine": 1,
+            "max_abs": 4.32e-7,
+            "failures_1e_4": 0,
+            "actual_f32le_sha256": "0338e69c5259299636d22597d8bf667cf326ceda8a35b78119698ddcadc27f26"
+          },
+          {
+            "name": "decoder",
+            "cosine": 0.999999999999,
+            "max_abs": 0.000010252,
+            "failures_1e_4": 0,
+            "actual_f32le_sha256": "c120253f75b47286be35d4dbff9dc0177d533d197315700773dbcb62d265ce83"
+          },
+          {
+            "name": "first",
+            "cosine": 1,
+            "max_abs": 0.000045776,
+            "failures_1e_4": 0,
+            "actual_f32le_sha256": "fe8c24615690911bb5b9e7bf11dc5a8524367742fe9292e568d2993367c1108d"
+          },
+          {
+            "name": "cached",
+            "cosine": 1,
+            "max_abs": 0.000045776,
+            "failures_1e_4": 0,
+            "actual_f32le_sha256": "6c065beeb7e405185fa7633d8d958a7ffc79ef0c3c914c65eab409d7f5b8aacc"
+          },
+          {
+            "name": "teacher",
+            "cosine": 1,
+            "max_abs": 0.000022888,
+            "failures_1e_4": 0,
+            "actual_f32le_sha256": "38ed24cd1bbf31acfb8fe7d167525562b9e6642f871abbf855815ca0a8fbb07b"
+          },
+          {
+            "name": "padded",
+            "cosine": 1,
+            "max_abs": 0.000030518,
+            "failures_1e_4": 0,
+            "actual_f32le_sha256": "cfaa7d8309d7c46ef919218736c59dbdb39a1f87bda47fe6fec9411ec4321ff1"
+          },
+          {
+            "name": "boundary",
+            "cosine": 1,
+            "max_abs": 0.000076294,
+            "failures_1e_4": 0,
+            "actual_f32le_sha256": "5a4cb95431905b37b85d7fade4d21f5e21532a9fac95dda2414992818f645cd6"
+          }
+        ]
+      }
+    },
+    {
+      "name": "flan_public_example",
+      "command": "set -o pipefail\ncargo +stable run --locked --offline --release --manifest-path crates/transformers/Cargo.toml --target-dir /Users/nover/repos/hmm_compression/crates/transformers/target --no-default-features --features std,flex,tokenizers --example flan_t5_small -- '/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab' 2>&1 | tee /private/tmp/tfm-rc622-flan-example.log",
+      "features": [
+        "std",
+        "flex",
+        "tokenizers"
+      ],
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-rc622-flan-example.log",
+      "log_sha256": "69ecfff834ae75b88894c093635911842c35549a3d7d7a62937f9b5366991be1",
+      "executable": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/examples/flan_t5_small",
+      "executable_sha256": "fed32a2172cf994520a4a412c7a7adb4b122b452de267be00882110296bea2bb",
+      "results": {
+        "output": "Das Haus ist schön.",
+        "output_utf8_line_sha256": "973bf9cbbec86b22b1be507d3ce8f79953d2a8bb4389c9d1b79cf0dc3ffcdc73",
+        "finish": "EndOfSequence",
+        "eos_token_id": 1,
+        "score": -0.601039,
+        "generated_tokens": 6
+      }
+    },
+    {
+      "name": "qwen_public_example",
+      "command": "set -o pipefail\ncargo +stable run --locked --offline --release --manifest-path crates/transformers/Cargo.toml --target-dir /Users/nover/repos/hmm_compression/crates/transformers/target --no-default-features --features std,metal,tokenizers,chat-templates --example qwen35_chat -- '/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17' 'Explain why the seasons change in four complete sentences.' 32 2>&1 | tee /private/tmp/tfm-rc622-qwen-example.log",
+      "features": [
+        "std",
+        "metal",
+        "tokenizers",
+        "chat-templates"
+      ],
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-rc622-qwen-example.log",
+      "log_sha256": "fa36307e81b2784fce822a032a67ef10c43c854a95cc3cfc80527ef10ed15bac",
+      "executable": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/examples/qwen35_chat",
+      "executable_sha256": "a6eb9de3acee1ccc5663e68fea36a35f03e6a896fd0781a45b1b444cd13d8046",
+      "results": {
+        "prompt": "Explain why the seasons change in four complete sentences.",
+        "requested_new_tokens": 32,
+        "output": "The Earth's axis is tilted at an angle of approximately 23.5 degrees relative to its orbital plane, causing the planet to be closer to the Sun",
+        "output_matches_authenticated_oracle_decoded_text": true,
+        "output_utf8_line_sha256": "44ffd45f2751a5a5a5fa8bb99c5dd973dad64a96c2e70211f2de438f7964757f"
+      }
+    }
+  ],
+  "summary": {
+    "terminal_runs": 5,
+    "passed_test_cases": 4,
+    "failed_test_cases": 0,
+    "public_examples_passed": 2,
+    "source_edits": 0,
+    "all_exit_codes_zero": true,
+    "gpu_released_to": "/root/review_flan_rc",
+    "performance_claims": false
+  },
+  "notes": [
+    "These are functional replays, not controlled benchmarks. Build/test timings present in logs are intentionally not reported as performance evidence.",
+    "Checkpoint/reference authentication is enforced by the three integration-test binaries. The unchanged public examples are additionally exercised end to end against the same local checkpoints.",
+    "Source is exact integration 6226170; later root commit 9f37b33 is reported by root as test-only cfg cleanup and was not part of this replay.",
+    "The Qwen public-example output is reported verbatim as model output, not endorsed as a factual scientific explanation."
+  ]
+}
