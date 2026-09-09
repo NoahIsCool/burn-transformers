@@ -46,9 +46,9 @@ use transformers::{
     },
 };
 
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
 use transformers::checkpoint::quantization::BURNPACK_QUANTIZATION_FORMAT_VERSION_V2;
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
 use transformers::models::AutoCausalDecodeState;
 
 #[cfg(feature = "metal")]
@@ -61,14 +61,12 @@ use burn::{module::Param, nn::Linear};
 #[cfg(feature = "metal")]
 use transformers::{
     AutoCausalLm, AutoLoadOptions, CausalLanguageModel, DecodeInput, DecodeState, ForwardOptions,
-    LogitsSelection, TokenMask,
-    architecture::CausalLmInput,
-    cache::{CacheConfig, KvCacheStorage},
-    checkpoint::execute_local_load_plan,
-    models::qwen3_5::Qwen3_5ForCausalLm,
+    LogitsSelection, TokenMask, architecture::CausalLmInput, cache::CacheConfig,
+    checkpoint::execute_local_load_plan, models::qwen3_5::Qwen3_5ForCausalLm,
 };
 #[cfg(all(feature = "metal", not(feature = "rocm")))]
 use transformers::{
+    cache::KvCacheStorage,
     delta_net::{DeltaNetMode, GatedDeltaNetState},
     operations,
 };
@@ -3146,16 +3144,16 @@ fn loads_pinned_qwen35_q4_burnpack_and_runs_metal() {
 }
 
 /// Exact reviewed identity of the revision-bound Qwen3.5-0.8B Q4/v2 sidecar.
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
 const TRUSTED_QWEN35_Q4_V2_BYTES: u64 = 280_044_715;
 
 /// SHA-256 over the complete reviewed Qwen3.5-0.8B Q4/v2 Burnpack file.
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
 const TRUSTED_QWEN35_Q4_V2_SHA256: &str =
     "cca925f24ab3b61a76fbbd5aefb8e0f2052da1b4636de9e996b890859cae5fd5";
 
 /// Canonical architecture plan bound into the reviewed Qwen Q4/v2 manifest.
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
 const TRUSTED_QWEN35_Q4_V2_LOAD_PLAN_SHA256: &str =
     "5be61f117255c794a5e6386196c667a99002d9bbabf7a69fef3a8fbdcc3bdabf";
 
