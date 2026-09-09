@@ -218,8 +218,8 @@ fn sha256_regular_file(path: &std::path::Path, expected_bytes: u64) -> String {
 ))]
 mod qwen {
     use super::benchmark_metrics::{
-        DECODE_STEPS, MEASURED_REPETITIONS, RunEnvironment, WARMUP_REPETITIONS, summarize,
-        token_hash,
+        DECODE_STEPS, MEASURED_REPETITIONS, MemoryPhase, RunEnvironment, WARMUP_REPETITIONS,
+        memory_profiling_enabled, summarize, token_hash,
     };
     use super::{
         MAX_CONTEXT, PREFILL_CHUNK, cache_accounting, capacity_for, cosine, product,
@@ -420,6 +420,7 @@ mod qwen {
         let source = input(&ids, device);
         let mut state = new_state(model, ids.len() + 32, device);
         synchronize(device);
+        let phase = MemoryPhase::begin("cold_prefill");
         let start = Instant::now();
         let mut logits = model
             .prefill(source, &mut state, &options())
@@ -428,6 +429,7 @@ mod qwen {
         let first = select(logits.clone());
         synchronize(device);
         let seconds = start.elapsed().as_secs_f64();
+        phase.finish();
         let prompt_cosine = cosine(&values(logits.clone()), reference.prompt_logits()).unwrap();
         assert!(prompt_cosine >= 0.999);
         let mut minimum_cached_cosine = 1.0_f64;
@@ -488,6 +490,8 @@ mod qwen {
     ) -> Sample {
         let mut state = new_state(model, capacity, device);
         synchronize(device);
+        let source_length = capacity - forced.len();
+        let prefill_phase = MemoryPhase::begin(&format!("warm_source_{source_length}_prefill"));
         let start = Instant::now();
         let mut last = None;
         for chunk in chunks {
@@ -504,8 +508,11 @@ mod qwen {
         let first = select(final_logits.clone());
         synchronize(device);
         let first_token = start.elapsed().as_secs_f64();
+        prefill_phase.finish();
         let mut predictions = vec![first];
         let mut decode_model = 0.0;
+        let decode_phase = (!forced.is_empty())
+            .then(|| MemoryPhase::begin(&format!("warm_source_{source_length}_decode_128")));
         let start = Instant::now();
         for token in forced {
             synchronize(device);
@@ -528,6 +535,9 @@ mod qwen {
         }
         synchronize(device);
         let decode_inclusive = start.elapsed().as_secs_f64();
+        if let Some(phase) = decode_phase {
+            phase.finish();
+        }
         // Inspect the complete terminal vocabulary outside timed intervals. A
         // repeatable argmax alone cannot prove long-context logits stayed finite.
         assert!(values(final_logits).iter().all(|value| value.is_finite()));
@@ -555,6 +565,7 @@ mod qwen {
         let mut finish = "length";
         for repetition in 0..WARMUP_REPETITIONS + MEASURED_REPETITIONS {
             synchronize(device);
+            let phase = MemoryPhase::begin("natural_greedy");
             let start = Instant::now();
             let mut state = new_state(model, source_ids.len() + 32, device);
             let mut logits = model
@@ -589,6 +600,7 @@ mod qwen {
             }
             synchronize(device);
             let seconds = start.elapsed().as_secs_f64();
+            phase.finish();
             if let Some(expected) = &expected {
                 assert_eq!(&ids, expected);
             }
@@ -662,6 +674,7 @@ mod qwen {
         let device = Default::default();
         let mut memory = vec![rss_snapshot("before_load")];
         synchronize(&device);
+        let phase = MemoryPhase::begin("strict_load");
         let start = Instant::now();
         let loaded = AutoCausalLm::<Metal>::load_local(
             &root,
@@ -680,6 +693,7 @@ mod qwen {
         .unwrap();
         synchronize(&device);
         let load_seconds = start.elapsed().as_secs_f64();
+        phase.finish();
         let report = loaded.load_report();
         assert!(report.is_strictly_valid());
         assert_eq!(report.applied.len(), 321);
@@ -789,6 +803,7 @@ mod qwen {
             },
         );
         let result = json!({"schema_version":1,"benchmark":if prefill_only {"qwen35_08b_f16_long_prefill_only"} else {"qwen35_08b_f16_baseline"},
+            "process_memory_instrumentation_enabled":memory_profiling_enabled(),"timing_comparable_to_uninstrumented_series":!memory_profiling_enabled(),
             "provenance":{"repository":REPOSITORY,"revision":REVISION,"checkpoint_artifacts":reference_record["provenance"]["artifacts"],"reference_manifest_sha256":file_hash(&reference_json),"reference_payloads":reference_record["payloads"],"crate_commit":command_text("git",&["rev-parse","HEAD"]),"crate_worktree_status":command_text("git",&["status","--porcelain","--untracked-files=all","--","."]),"rustc":compiler,"compiled_rustup_toolchain":toolchain,"cargo_lock_sha256":file_hash(&manifest_dir.join("Cargo.lock")),"benchmark_source_sha256":source_hash,"metric_helper_sha256":helper_hash,"reference_helper_sha256":reference_helper_hash,"benchmark_executable_sha256":file_hash(&std::env::current_exe().unwrap()),"burn_version":"0.21.0","profile":"release (debug assertions disabled)","backend_profile":"Metal/F16","backend_name":Metal::name(&device),"parameter_dtype":"F16","recurrent_matrix_dtype":"F32","quantization":null,"cargo_features":features(),"environment":environment},
             "protocol":{"warmup_repetitions":WARMUP_REPETITIONS,"measured_repetitions":MEASURED_REPETITIONS,"decode_mode":if prefill_only {"none: prefill-only"} else {"teacher_forced_with_greedy_predictions"},"decode_steps":forced.len(),"forced_decode_token_ids":forced_ids,"forced_decode_tokens_u32le_sha256":token_hash(&forced_ids),"maximum_total_context":MAX_CONTEXT,"seed":0,"tokenization_included":false,"prefill_cache_allocation_included":false,"synchronization":"Backend::sync at timing boundaries and every prefill chunk; readback included only in selection-inclusive intervals"},
             "artifact_authentication_seconds_separate_from_load":authentication_seconds,"post_run_artifact_authentication_seconds":final_authentication_seconds,"strict_load_seconds":load_seconds,"strict_load_report":report,"cold_first_token":cold,"warm_series":series,"natural_greedy":natural,

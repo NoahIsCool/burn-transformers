@@ -60,8 +60,8 @@ mod flan {
     };
 
     use super::benchmark_metrics::{
-        DECODE_STEPS, MEASURED_REPETITIONS, RunEnvironment, WARMUP_REPETITIONS, summarize,
-        t5_cache_accounting, token_hash,
+        DECODE_STEPS, MEASURED_REPETITIONS, MemoryPhase, RunEnvironment, WARMUP_REPETITIONS,
+        memory_profiling_enabled, summarize, t5_cache_accounting, token_hash,
     };
 
     /// Pinned official artifact identity shared with the reference acceptance record.
@@ -292,6 +292,8 @@ mod flan {
         };
         let start_token = input::<B>(&[0], device);
         synchronize::<B>(device);
+        let source_length = source.token_ids.dims()[1];
+        let prefill_phase = MemoryPhase::begin(&format!("warm_source_{source_length}_prefill"));
         let start = Instant::now();
         let encoder = model.encode(source, &ForwardOptions::default()).unwrap();
         let prefill = model
@@ -302,8 +304,10 @@ mod flan {
         let first = select_token(prefill.decoder.logits);
         synchronize::<B>(device);
         let first_token_seconds = start.elapsed().as_secs_f64();
+        prefill_phase.finish();
         let mut predictions = vec![first];
         let mut decode_model_seconds = 0.0;
+        let decode_phase = MemoryPhase::begin(&format!("warm_source_{source_length}_decode_128"));
         let start = Instant::now();
         for token in forced {
             synchronize::<B>(device);
@@ -326,6 +330,7 @@ mod flan {
         }
         synchronize::<B>(device);
         let decode_inclusive_seconds = start.elapsed().as_secs_f64();
+        decode_phase.finish();
         assert_eq!(state.lengths(), [DECODE_STEPS + 1]);
         assert_eq!(predictions.len(), DECODE_STEPS + 1);
         assert!(first_token_seconds >= prefill_seconds);
@@ -359,6 +364,7 @@ mod flan {
         };
         let start_token = input::<B>(&[0], device);
         synchronize::<B>(device);
+        let phase = MemoryPhase::begin("cold_prefill");
         let start = Instant::now();
         let encoder = model.encode(source, &ForwardOptions::default()).unwrap();
         let output = model
@@ -367,6 +373,7 @@ mod flan {
         let first = select_token(output.decoder.logits.clone());
         synchronize::<B>(device);
         let seconds = start.elapsed().as_secs_f64();
+        phase.finish();
         let first_values = values(output.decoder.logits);
         assert_reference(&first_values, &expected_first);
         assert_reference(&first_values, &expected_cached[..model.config().vocab_size]);
@@ -459,6 +466,7 @@ mod flan {
         let reference: Value = serde_json::from_slice(&fs::read(reference_path).unwrap()).unwrap();
         let mut memory = vec![rss_snapshot("before_load")];
         synchronize::<B>(device);
+        let phase = MemoryPhase::begin("strict_load");
         let start = Instant::now();
         let loaded = AutoSeq2SeqLm::<B>::load_local(
             &root,
@@ -472,6 +480,7 @@ mod flan {
         .unwrap();
         synchronize::<B>(device);
         let load_seconds = start.elapsed().as_secs_f64();
+        phase.finish();
         let report = loaded.load_report();
         assert_eq!(report.applied.len(), 190);
         assert_eq!(report.transformed.len(), 145);
@@ -565,6 +574,7 @@ mod flan {
         let mut natural_finish = String::new();
         for repetition in 0..WARMUP_REPETITIONS + MEASURED_REPETITIONS {
             synchronize::<B>(device);
+            let phase = MemoryPhase::begin("natural_greedy");
             let start = Instant::now();
             let output = generate_t5_beam_search(
                 model,
@@ -578,6 +588,7 @@ mod flan {
             .unwrap();
             synchronize::<B>(device);
             let seconds = start.elapsed().as_secs_f64();
+            phase.finish();
             let sequence = &output.sequences[0][0];
             if let Some(expected) = &natural_tokens {
                 assert_eq!(&sequence.token_ids, expected);
@@ -634,6 +645,7 @@ mod flan {
         });
         let result = json!({
             "schema_version":1,"benchmark":"flan_t5_small_f32","provenance":provenance,"protocol":protocol,
+            "process_memory_instrumentation_enabled":memory_profiling_enabled(),"timing_comparable_to_uninstrumented_series":!memory_profiling_enabled(),
             "artifact_authentication_seconds_separate_from_load":authentication_seconds,
             "strict_load_seconds":load_seconds,"strict_load_report":report,"cold_first_token":cold,"warm_series":series,
             "natural_greedy":natural,

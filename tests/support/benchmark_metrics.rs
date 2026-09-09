@@ -199,9 +199,309 @@ impl RunEnvironment {
     }
 }
 
+/// Returns whether this is a separate, timing-incomparable process-memory run.
+///
+/// The private Unix socket is test-harness instrumentation only. Caching the
+/// optional endpoint means normal benchmark iterations never probe the environment
+/// or perform IPC. No network behavior is added to the runtime library.
+pub fn memory_profiling_enabled() -> bool {
+    memory_endpoint().is_some()
+}
+
+/// Resolves the opt-in supervisor endpoint once for this benchmark process.
+fn memory_endpoint() -> &'static Option<std::path::PathBuf> {
+    static ENDPOINT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    ENDPOINT.get_or_init(|| std::env::var_os("TRANSFORMERS_BENCH_MEMORY_SOCKET").map(Into::into))
+}
+
+/// One synchronized memory phase; callers must finish it after backend completion.
+///
+/// Starting a phase first blocks while the supervisor samples an idle baseline.
+/// The begin/end acknowledgements conservatively bracket the completed operation.
+/// This changes scheduling even when outside a timer, so instrumented timing
+/// samples must never be compared with the normal benchmark series.
+#[must_use = "finish the memory phase after the backend synchronization boundary"]
+pub struct MemoryPhase {
+    /// Serial protocol identity, absent for completely uninstrumented execution.
+    id: Option<u64>,
+}
+
+impl MemoryPhase {
+    /// Samples idle memory before releasing the child to execute the named phase.
+    pub fn begin(label: &str) -> Self {
+        if !memory_profiling_enabled() {
+            return Self { id: None };
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut channel = memory_channel().lock().expect("memory channel mutex");
+            Self {
+                id: Some(channel.begin(label).expect("memory supervisor phase begin")),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        panic!("process-memory phase instrumentation is macOS-only: {label}");
+    }
+
+    /// Records the completed phase after the caller has synchronized its backend.
+    pub fn finish(self) {
+        if let Some(id) = self.id {
+            #[cfg(target_os = "macos")]
+            memory_channel()
+                .lock()
+                .expect("memory channel mutex")
+                .finish(id)
+                .expect("memory supervisor phase end");
+            #[cfg(not(target_os = "macos"))]
+            panic!("unexpected memory phase {id} on a non-macOS host");
+        }
+    }
+}
+
+/// Connects once to the supervisor's private socket; stale endpoints fail closed.
+#[cfg(target_os = "macos")]
+fn memory_channel() -> &'static std::sync::Mutex<MemoryChannel> {
+    static CHANNEL: std::sync::OnceLock<std::sync::Mutex<MemoryChannel>> =
+        std::sync::OnceLock::new();
+    CHANNEL.get_or_init(|| {
+        std::sync::Mutex::new(
+            MemoryChannel::connect(memory_endpoint().as_ref().unwrap())
+                .expect("connect memory supervisor"),
+        )
+    })
+}
+
+/// Serial, bounded newline-JSON protocol used only by opt-in benchmark tests.
+#[cfg(target_os = "macos")]
+struct MemoryChannel {
+    /// One locally connected stream; no listener is created by the child.
+    stream: std::os::unix::net::UnixStream,
+    /// Monotonically increasing identity prevents accidental cross-phase ACK reuse.
+    next_id: u64,
+    /// Nested phases are rejected so each baseline belongs to precisely one phase.
+    active: Option<u64>,
+}
+
+#[cfg(target_os = "macos")]
+impl MemoryChannel {
+    /// Applies bounded reads/writes so a failed supervisor cannot hang inference.
+    fn connect(path: &std::path::Path) -> std::io::Result<Self> {
+        let stream = std::os::unix::net::UnixStream::connect(path)?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
+        Ok(Self {
+            stream,
+            next_id: 0,
+            active: None,
+        })
+    }
+
+    /// Sends one bounded event and requires an exact matching positive ACK.
+    fn request(&mut self, id: u64, event: &str, label: &str) -> std::io::Result<()> {
+        use std::io::{Read, Write};
+        let request = serde_json::json!({"schema_version":1,"id":id,"event":event,"phase":label});
+        let mut encoded = serde_json::to_vec(&request)?;
+        encoded.push(b'\n');
+        let timeout = self
+            .stream
+            .read_timeout()?
+            .unwrap_or(std::time::Duration::from_secs(5));
+        // Nonblocking reads enforce one total deadline, including fragmented
+        // replies. Mutating Darwin SO_RCVTIMEO after a peer closes can reject a
+        // perfectly buffered final ACK; no socket timeout is changed mid-reply.
+        self.stream.set_nonblocking(true)?;
+        let started = std::time::Instant::now();
+        self.stream.write_all(&encoded)?;
+        let mut response = Vec::new();
+        loop {
+            if started.elapsed() >= timeout {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "memory ACK deadline exceeded",
+                ));
+            }
+            let mut buffer = [0_u8; 4097];
+            let count = match self.stream.read(&mut buffer) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "memory supervisor closed",
+                    ));
+                }
+                Ok(count) => count,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            response.extend_from_slice(&buffer[..count]);
+            if response.len() > 4096 {
+                return Err(std::io::Error::other("oversized memory ACK"));
+            }
+            if let Some(newline) = response.iter().position(|&byte| byte == b'\n') {
+                if newline + 1 != response.len() {
+                    return Err(std::io::Error::other("pipelined memory ACK"));
+                }
+                response.pop();
+                break;
+            }
+        }
+        let ack: serde_json::Value = serde_json::from_slice(&response)?;
+        if ack != serde_json::json!({"ok":true,"id":id,"event":event}) {
+            return Err(std::io::Error::other("invalid memory supervisor ACK"));
+        }
+        Ok(())
+    }
+
+    /// Enforces non-nested phase ordering and samples idle before the begin boundary.
+    fn begin(&mut self, label: &str) -> std::io::Result<u64> {
+        if self.active.is_some()
+            || label.is_empty()
+            || label.len() > 128
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+        {
+            return Err(std::io::Error::other("invalid or nested memory phase"));
+        }
+        let id = self.next_id;
+        self.next_id = id
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("memory phase ID overflow"))?;
+        self.request(id, "idle", label)?;
+        self.request(id, "begin", label)?;
+        self.active = Some(id);
+        Ok(id)
+    }
+
+    /// Ends only the currently active phase; the supervisor resolves its sampled maximum.
+    fn finish(&mut self, id: u64) -> std::io::Result<()> {
+        if self.active != Some(id) {
+            return Err(std::io::Error::other("memory phase ID mismatch"));
+        }
+        self.request(id, "end", "")?;
+        self.active = None;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Disabled instrumentation has no external side effects or required supervisor.
+    #[test]
+    fn disabled_memory_phase_is_a_noop() {
+        MemoryPhase { id: None }.finish();
+    }
+
+    /// Exercises the actual supervisor handshake and a touched CPU allocation, never a GPU.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "CPU-only IPC smoke: run this exact test under scripts/profile_process_memory.py"]
+    fn memory_marker_supervised_cpu_smoke() {
+        assert!(
+            memory_profiling_enabled(),
+            "start the private memory supervisor first"
+        );
+        let phase = MemoryPhase::begin("synthetic_cpu_allocation");
+        let mut allocation = vec![0_u8; 8 * 1024 * 1024];
+        for page in allocation.chunks_mut(4096) {
+            page[0] = 1;
+        }
+        std::hint::black_box(&allocation);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        phase.finish();
+        std::hint::black_box(allocation);
+    }
+
+    /// Exact serial ACKs prevent nested or mismatched phase boundaries.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn memory_channel_enforces_identity_and_order() {
+        use std::io::{BufRead, BufReader, Write};
+        let (client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let responder = std::thread::spawn(move || {
+            let mut reader = BufReader::new(server.try_clone().unwrap());
+            for action in ["idle", "begin", "end"] {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let event: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(event["event"], action);
+                assert_eq!(event["id"], 0);
+                let ack = serde_json::json!({"ok":true,"id":0,"event":action});
+                writeln!(server, "{ack}").unwrap();
+            }
+        });
+        let mut channel = MemoryChannel {
+            stream: client,
+            next_id: 0,
+            active: None,
+        };
+        let id = channel.begin("warm_source_128_decode_128").unwrap();
+        assert!(channel.begin("nested").is_err());
+        assert!(channel.finish(id + 1).is_err());
+        channel.finish(id).unwrap();
+        assert_eq!(channel.next_id, 1);
+        assert!(channel.active.is_none());
+        responder.join().unwrap();
+    }
+
+    /// Stale sockets, malformed ACKs, EOF and timeouts fail closed without hanging.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn memory_channel_failure_boundaries_are_bounded() {
+        use std::io::{Read, Write};
+        let directory = tempfile::tempdir().unwrap();
+        assert!(MemoryChannel::connect(&directory.path().join("stale.sock")).is_err());
+        let stale = directory.path().join("stale.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        assert!(MemoryChannel::connect(&stale).is_err());
+        for reply in [b"{}\n".to_vec(), vec![b'x'; 4097]] {
+            let (client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+            let responder = std::thread::spawn(move || {
+                let mut byte = [0_u8; 1];
+                loop {
+                    server.read_exact(&mut byte).unwrap();
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                }
+                server.write_all(&reply).unwrap();
+            });
+            let mut channel = MemoryChannel {
+                stream: client,
+                next_id: 0,
+                active: None,
+            };
+            assert!(channel.begin("strict_load").is_err());
+            responder.join().unwrap();
+        }
+        let (client, _silent_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_millis(10)))
+            .unwrap();
+        let mut channel = MemoryChannel {
+            stream: client,
+            next_id: 0,
+            active: None,
+        };
+        assert!(channel.begin("timeout").is_err());
+        for invalid in ["", "contains space", &"x".repeat(129)] {
+            assert!(channel.begin(invalid).is_err());
+        }
+        channel.next_id = u64::MAX;
+        assert!(channel.begin("overflow").is_err());
+        let (client, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(peer);
+        let mut channel = MemoryChannel {
+            stream: client,
+            next_id: 0,
+            active: None,
+        };
+        assert!(channel.begin("closed").is_err());
+    }
 
     /// Median interpolation and nearest-rank p95 remain fixed for both odd and even counts.
     #[test]
