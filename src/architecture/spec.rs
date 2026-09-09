@@ -570,8 +570,10 @@ impl Seq2SeqSpec {
         }
         if self.cross_attention_heads == 0
             || self.cross_attention_head_dim == 0
-            || self.cross_attention_heads * self.cross_attention_head_dim
-                != self.decoder.hidden_size
+            || self
+                .cross_attention_heads
+                .checked_mul(self.cross_attention_head_dim)
+                != Some(self.decoder.hidden_size)
         {
             return Err(Error::configuration(
                 "cross_attention",
@@ -703,6 +705,36 @@ mod tests {
         };
         let error = spec.validate().expect_err("mismatched stacks must fail");
         assert!(error.to_string().contains("encoder.hidden_size"));
+    }
+
+    /// Rejects overflow before it can panic or wrap into a valid residual width.
+    #[test]
+    fn seq2seq_rejects_overflowing_cross_attention_width() {
+        let spec = Seq2SeqSpec {
+            encoder: decoder(),
+            decoder: decoder(),
+            // On every supported usize width this product wraps to 32, matching
+            // the fixture's hidden size and bypassing unchecked release builds.
+            cross_attention_heads: usize::MAX / 2 + 17,
+            cross_attention_head_dim: 2,
+        };
+        let error = spec.validate().expect_err("overflow must be rejected");
+        assert!(error.to_string().contains("cross_attention"));
+    }
+
+    /// Accepts exact dimensions but rejects zero and mismatched products.
+    #[test]
+    fn seq2seq_checks_cross_attention_width() {
+        for (heads, head_dim, valid) in [(4, 8, true), (0, 8, false), (4, 0, false), (3, 8, false)]
+        {
+            let spec = Seq2SeqSpec {
+                encoder: decoder(),
+                decoder: decoder(),
+                cross_attention_heads: heads,
+                cross_attention_head_dim: head_dim,
+            };
+            assert_eq!(spec.validate().is_ok(), valid);
+        }
     }
 
     proptest::proptest! {
