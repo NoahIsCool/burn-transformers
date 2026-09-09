@@ -18,6 +18,9 @@
 //! random thresholds and small categorical masses; native F64 scores remain
 //! F64. Penalties and returned scores retain their input runtime dtype, which
 //! need not equal the backend's default float element type.
+//! Flex32 requests F32 probability arithmetic, but a backend may retain its
+//! compatible F32 storage alias. Flex32 top-k and active top-p filters fail
+//! contextually: Burn 0.21's fallback sort cannot safely read that storage tag.
 
 mod causal;
 mod seq2seq;
@@ -244,6 +247,14 @@ impl<B: Backend> LogitsProcessor<B> {
         history_mask: Option<TokenMask<B>>,
     ) -> Result<Tensor<B, 2>> {
         let batch = self.validate_logits_shape(&logits)?;
+
+        if logits.dtype() == DType::Flex32
+            && (self.config.top_k.is_some() || self.config.top_p.is_some_and(|p| p < 1.0))
+        {
+            return Err(Error::BackendCapability(
+                "Burn 0.21 does not support Flex32 top-k/top-p sorting; use F32 logits or disable those filters explicitly".into(),
+            ));
+        }
 
         let mut logits = if let Some(history) = history {
             let [history_batch, history_length] = history.dims();
@@ -491,14 +502,15 @@ impl<B: Backend> LogitsProcessor<B> {
     }
 }
 
-/// Chooses at least F32 precision for cumulative probability arithmetic.
+/// Requests at least F32 precision for cumulative probability arithmetic.
 ///
 /// Half-precision cumulative sums can lose small masses or reach one early.
 /// F32 also exactly represents every seeded uniform; F64 scores are never
 /// narrowed, so backends with native double precision keep that precision.
+/// CubeCL may retain the Flex32 storage tag when casting its F32-backed alias.
 fn probability_accumulation_dtype(dtype: DType) -> DType {
     match dtype {
-        DType::F16 | DType::BF16 => DType::F32,
+        DType::F16 | DType::BF16 | DType::Flex32 => DType::F32,
         _ => dtype,
     }
 }
@@ -1026,7 +1038,7 @@ mod tests {
                 .expect("masked mixed-dtype penalties");
             assert_eq!(penalized.dtype(), dtype);
             assert_eq!(
-                super::causal::host_float_data_f64(&penalized.clone().into_data(), "penalties")
+                super::causal::host_float_data_f64(penalized.clone().into_data(), "penalties")
                     .expect("floating output"),
                 [1.5, -6.5, 2.0, 1.0, -1.0, 1.5, 2.0, 0.0],
                 "runtime dtype {dtype:?}"
@@ -1048,7 +1060,7 @@ mod tests {
                 .expect("runtime dtype filters");
             assert_eq!(processed.dtype(), dtype);
             let values = super::causal::host_float_data_f64(
-                &processed.clone().into_data(),
+                processed.clone().into_data(),
                 "probability filters",
             )
             .expect("floating filtered output");
@@ -1066,6 +1078,65 @@ mod tests {
         assert_eq!(
             super::probability_accumulation_dtype(DType::F64),
             DType::F64
+        );
+    }
+
+    /// Unsupported Flex32 filters fail before reaching Burn's panicking sort fallback.
+    #[test]
+    fn flex32_sort_filters_fail_closed_before_backend_operations() {
+        let device = Default::default();
+        for strategy in [SamplingStrategy::Greedy, SamplingStrategy::Sample] {
+            for (top_k, top_p) in [
+                (Some(1), None),
+                (Some(4), None),
+                (None, Some(0.7)),
+                (Some(2), Some(1.0)),
+            ] {
+                let processor = LogitsProcessor::<TestBackend>::new(
+                    GenerationConfig {
+                        strategy,
+                        top_k,
+                        top_p,
+                        ..Default::default()
+                    },
+                    4,
+                    &device,
+                )
+                .expect("valid sampling configuration");
+                let mut data = TensorData::from([[1.0_f32, 2.0, 3.0, 4.0]]);
+                data.dtype = DType::Flex32;
+                let logits = Tensor::from_data(data, (&device, DType::Flex32));
+                let error = processor
+                    .process(logits, None)
+                    .expect_err("Flex32 sort must fail before unsupported CPU tensor math");
+                assert!(matches!(error, crate::Error::BackendCapability(_)));
+                assert!(error.to_string().contains("Flex32 top-k/top-p"));
+            }
+        }
+        for top_p in [None, Some(1.0)] {
+            let processor = LogitsProcessor::<TestBackend>::new(
+                GenerationConfig {
+                    top_p,
+                    ..Default::default()
+                },
+                4,
+                &device,
+            )
+            .expect("unfiltered greedy configuration");
+            let mut data = TensorData::from([[1.0_f32, 2.0, 3.0, 4.0]]);
+            data.dtype = DType::Flex32;
+            let logits = Tensor::from_data(data, (&device, DType::Flex32));
+            assert_eq!(
+                processor
+                    .process(logits, None)
+                    .expect("no sort requested")
+                    .dtype(),
+                DType::Flex32
+            );
+        }
+        assert_eq!(
+            super::probability_accumulation_dtype(DType::Flex32),
+            DType::F32
         );
     }
 

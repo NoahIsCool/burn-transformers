@@ -633,22 +633,28 @@ fn tensor_f64_values<B: Backend>(tensor: Tensor<B, 1>, label: &str) -> Result<Ve
     let data = tensor.try_into_data().map_err(|error| {
         Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
     })?;
-    host_float_data_f64(&data, label)
+    host_float_data_f64(data, label)
 }
 
 /// Converts floating host storage directly to F64 without a lower-precision stage.
 ///
-/// F16, BF16, and F32 values have exact F64 representations; existing F64 values
-/// therefore retain their precision too. Typed borrowed slices validate byte
+/// F16, BF16, F32, and Flex32 storage have exact F64 representations; existing
+/// F64 values therefore retain their precision too. Typed borrowed slices validate byte
 /// alignment and length without allocating a second source buffer. Quantized
 /// or integer payloads are not log probabilities and fail contextually rather
 /// than being reinterpreted or dequantized.
-pub(super) fn host_float_data_f64(data: &TensorData, label: &str) -> Result<Vec<f64>> {
+pub(super) fn host_float_data_f64(mut data: TensorData, label: &str) -> Result<Vec<f64>> {
+    // Burn's Flex32 is F32 host storage with a reduced-precision compute policy.
+    // Normalizing its tag is lossless and moves ownership without cloning bytes;
+    // unlike `iter`, the checked typed slice below reports malformed storage.
+    if data.dtype == DType::Flex32 {
+        data.dtype = DType::F32;
+    }
     match data.dtype {
-        DType::F16 => float_slice_f64::<f16>(data, label),
-        DType::BF16 => float_slice_f64::<bf16>(data, label),
-        DType::F32 => float_slice_f64::<f32>(data, label),
-        DType::F64 => float_slice_f64::<f64>(data, label),
+        DType::F16 => float_slice_f64::<f16>(&data, label),
+        DType::BF16 => float_slice_f64::<bf16>(&data, label),
+        DType::F32 => float_slice_f64::<f32>(&data, label),
+        DType::F64 => float_slice_f64::<f64>(&data, label),
         dtype => Err(Error::BackendCapability(format!(
             "failed to read {label} from backend: unsupported probability dtype {dtype:?}"
         ))),
@@ -819,19 +825,92 @@ mod tests {
         let exact = -1.0_f64 - 2.0_f64.powi(-40);
         let data = TensorData::new(vec![exact], [1]);
         assert_eq!(
-            super::host_float_data_f64(&data, "F64 fixture").expect("native F64"),
+            super::host_float_data_f64(data, "F64 fixture").expect("native F64"),
             [exact]
         );
         let integer = TensorData::new(vec![1_i32], [1]);
-        let error = super::host_float_data_f64(&integer, "integer fixture")
+        let error = super::host_float_data_f64(integer, "integer fixture")
             .expect_err("probabilities must use float storage");
         assert!(matches!(error, Error::BackendCapability(_)));
         assert!(error.to_string().contains("integer fixture"));
         let mut malformed = TensorData::new(vec![0_u8; 3], [3]);
         malformed.dtype = DType::F32;
-        let error = super::host_float_data_f64(&malformed, "truncated fixture")
+        let error = super::host_float_data_f64(malformed, "truncated fixture")
             .expect_err("bad element size must not panic");
         assert!(error.to_string().contains("truncated fixture"));
+    }
+
+    /// Flex32 uses exact F32 host bytes even though its dtype tag is distinct.
+    #[test]
+    fn flex32_host_probability_storage_is_lossless_and_checked() {
+        use burn::tensor::{DType, TensorData};
+
+        let values = [-1.0_f32 - 2.0_f32.powi(-20), -0.0, f32::MIN_POSITIVE];
+        let mut data = TensorData::new(values.to_vec(), [values.len()]);
+        // This is CubeCL's host-data contract; Flex CPU cannot execute Flex32
+        // casts, so ordinary CPU CI covers storage independently of GPU kernels.
+        data.dtype = DType::Flex32;
+        let actual = super::host_float_data_f64(data, "Flex32 fixture")
+            .expect("Flex32 is supported floating storage");
+        assert_eq!(actual, values.map(f64::from));
+        assert!(actual[1].is_sign_negative());
+        let mut malformed = TensorData::new(vec![0_u8; 3], [3]);
+        malformed.dtype = DType::Flex32;
+        let error = super::host_float_data_f64(malformed, "truncated Flex32 fixture")
+            .expect_err("invalid Flex32 element size is recoverable");
+        assert!(error.to_string().contains("truncated Flex32 fixture"));
+    }
+
+    /// The native Flex32 Metal backend supports selection, penalties, and host readback.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    #[ignore = "requires serialized Metal execution"]
+    fn native_flex32_generation_readback() {
+        use burn::{
+            backend::{Metal, wgpu::flex32},
+            tensor::DType,
+        };
+
+        type NativeFlex32 = Metal<flex32>;
+        let device = Default::default();
+        for strategy in [SamplingStrategy::Greedy, SamplingStrategy::Sample] {
+            let processor = crate::LogitsProcessor::<NativeFlex32>::new(
+                GenerationConfig {
+                    strategy,
+                    repetition_penalty: 2.0,
+                    presence_penalty: 0.5,
+                    temperature: 0.5,
+                    ..GenerationConfig::default()
+                },
+                4,
+                &device,
+            )
+            .expect("native Flex32 processor");
+            // Keep sorting out of this readback regression: Burn 0.21's generic
+            // Flex32 sort fallback currently reinterprets its tag as F32.
+            let logits = Tensor::<NativeFlex32, 2>::from_floats([[4.0, -3.0, 32.0, 1.0]], &device)
+                // CubeCL aliases a direct F32->Flex32 cast without changing
+                // its tag; F16->Flex32 allocates genuinely Flex32-typed storage.
+                .cast(DType::F16)
+                .cast(DType::Flex32);
+            assert_eq!(logits.dtype(), DType::Flex32);
+            assert_eq!(logits.clone().cast(DType::F32).dtype(), DType::Flex32);
+            let history = Tensor::<NativeFlex32, 2, Int>::from_ints([[0, 1]], &device);
+            let selected = processor
+                .process_and_select_with_log_probs(logits, Some(history))
+                .expect("native Flex32 probability processing");
+            assert_eq!(selected.log_probabilities.dtype(), DType::Flex32);
+            assert_eq!(
+                super::tensor_i64_values(selected.token_ids, "Flex32 selection")
+                    .expect("selected ID"),
+                [2]
+            );
+            let values =
+                super::tensor_f64_values(selected.log_probabilities, "Flex32 log probability")
+                    .expect("native Flex32 host readback");
+            assert_eq!(values.len(), 1);
+            assert!(values[0].is_finite() && values[0] <= 0.0);
+        }
     }
 
     /// Builds a deterministic tiny model with a real external KV cache.

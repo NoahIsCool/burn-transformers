@@ -936,7 +936,7 @@ fn host_log_probabilities<B: Backend>(
                 "failed to read beam-search log probabilities from backend: {error}"
             ))
         })?;
-    host_float_data_f64(&data, "beam-search log probabilities")
+    host_float_data_f64(data, "beam-search log probabilities")
 }
 
 /// Materializes a token mask or an all-valid rectangle on the host.
