@@ -125,6 +125,37 @@ def require_msrv(toolchain: str) -> None:
         raise ValueError(f"MSRV alias {toolchain!r} resolves to {' '.join(version)}, not rustc 1.92.0")
 
 
+def validate_package_listing(listing: str) -> int:
+    """Fail before packaging if Cargo follows an artifact path or includes weights.
+
+    Cargo's slash-free include patterns match at any depth, even below a local
+    symlink. Check its actual listing instead of assuming `.gitignore` prevails
+    over an explicit package include. Compiler metadata warnings are not paths.
+    """
+
+    allowed_files = {"Cargo.toml", "Cargo.toml.orig", "Cargo.lock", "deny.toml",
+                     "LICENSE-MIT", "LICENSE-APACHE", ".cargo_vcs_info.json"}
+    allowed_roots = {"src", "examples", "tests", "scripts", "acceptance"}
+    files = set()
+    for raw in listing.splitlines():
+        if not raw.strip() or raw.startswith("warning:") or raw.lstrip().startswith(("|", "= note:")):
+            continue
+        path = Path(raw)
+        if path.is_absolute() or ".." in path.parts or "__pycache__" in path.parts:
+            raise ValueError(f"unsafe package entry: {raw}")
+        if path.suffix.lower() in {".safetensors", ".bin", ".pt", ".pth", ".bpk", ".gguf", ".pyc", ".pyo"}:
+            raise ValueError(f"runtime artifact in source package: {raw}")
+        root_doc = len(path.parts) == 1 and path.suffix == ".md"
+        if raw not in allowed_files and not root_doc and path.parts[0] not in allowed_roots:
+            raise ValueError(f"unallowlisted package entry: {raw}")
+        if raw in files:
+            raise ValueError(f"duplicate package entry: {raw}")
+        files.add(raw)
+    if not {"Cargo.toml", "Cargo.lock", "README.md", "src/lib.rs"}.issubset(files):
+        raise ValueError("incomplete Cargo package listing")
+    return len(files)
+
+
 def main() -> int:
     """Execute only requested gate groups and record failures without promotion."""
 
@@ -164,6 +195,8 @@ def main() -> int:
             row["coverage"] = coverage_summary(json.loads((output / "coverage.json").read_text()), CRATE)
             if not row["coverage"]["passed"]:
                 row["exit_code"] = 1
+        if completed.returncode == 0 and gate == "package" and "--list" in command:
+            row["package_files"] = validate_package_listing(log.read_text())
         # A successfully executed prefix is not completion: an interruption or
         # missing tool at the next step must never leave a passing manifest.
         results["passed"] = index + 1 == len(plan) and all(item["exit_code"] == 0 for item in results["gates"])

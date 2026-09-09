@@ -114,9 +114,10 @@ producer creates one immutable external bundle containing the prompt row, all
 32 cached decision rows, all 32 teacher-forced rows, and strict provenance. The
 Rust consumer requires independent SHA-256 anchors for all four files and then
 makes every full-vector comparison mandatory; there is no optional-oracle
-fallback. The producer still needs to be run, reviewed, pinned, and replayed
-before release promotion. The committed small JSON fixture remains useful
-regression evidence but is not a replacement for that gate.
+fallback. The stable-prompt bundle has now been generated, independently pinned,
+and replayed successfully as described below. The committed small `Hello` JSON
+fixture remains useful sampled-logit regression evidence but is not a replacement
+for the full-vector gate.
 
 Generate the bundle into an existing external parent only after installing the
 package versions authenticated by the producer:

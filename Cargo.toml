@@ -9,15 +9,15 @@ readme = "README.md"
 keywords = ["burn", "transformer", "inference", "llm"]
 categories = ["science", "algorithms"]
 include = [
-    "src/**",
-    "examples/**",
-    "tests/**",
-    "scripts/**/*.py",
-    "acceptance/**",
-    "*.md",
-    "LICENSE-*",
-    "deny.toml",
-    "Cargo.lock",
+    "/src/**",
+    "/examples/**",
+    "/tests/**",
+    "/scripts/**/*.py",
+    "/acceptance/**",
+    "/*.md",
+    "/LICENSE-*",
+    "/deny.toml",
+    "/Cargo.lock",
 ]
 
 [features]
