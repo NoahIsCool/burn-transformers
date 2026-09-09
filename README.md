@@ -53,6 +53,10 @@ schedules, and tensor names. Shared modules own the reusable operations:
   beam search. Sampling supports temperature, top-k, top-p, repetition and
   presence penalties, deterministic seeds, EOS/PAD handling, token stop
   sequences, per-token log probabilities, and synchronous streaming callbacks.
+  Runtime F16/BF16/F32/F64 probabilities are handled independently of the
+  backend's default dtype. Flex32 supports greedy and unfiltered sampling;
+  active Flex32 top-k/top-p requests return a capability error because Burn
+  0.21's fallback sort cannot handle that storage tag safely.
 - `models::custom` constructs experimental causal or encoder-decoder graphs
   from serializable topology specifications.
 
@@ -141,6 +145,11 @@ cargo run --release --manifest-path crates/transformers/Cargo.toml \
   --example flan_t5_small -- /Volumes/models/flan-t5-small \
   "translate English to German: The house is wonderful."
 ```
+
+Both this example and `qwen35_chat` passed their unchanged public entry points
+on Rust 1.92 with local checkpoints. The [execution record](acceptance/measurements/public-examples-20260909.json)
+retains exact commands, source/output hashes, and scope. These functional runs
+include compilation time and are not throughput measurements.
 
 `generate_t5_beam_search` reads decoder-start, EOS, and PAD IDs from the loaded
 T5 configuration. It allocates decoder state for `source_batch * num_beams`,

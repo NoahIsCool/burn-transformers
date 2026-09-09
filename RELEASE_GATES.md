@@ -131,6 +131,9 @@ it is useful locally but is not a substitute for that final connected audit.
   passes. This closes the execution stress gate for this exact artifact, not
   long-context official parity, quantized corpus quality, or warm performance.
 - Exercise both public small-model examples from the final candidate.
+  The [2026-09-09 public-example run](acceptance/measurements/public-examples-20260909.json)
+  passed unchanged FLAN/Flex and Qwen/Metal entry points on Rust 1.92; final
+  candidate replay is still required after subsequent implementation changes.
 - Record synchronized warmup/repeated load, prefill, and decode timings, peak
   host/device memory, cache bytes per token, and output hashes. Existing
   diagnostic timings are not standardized regression baselines.

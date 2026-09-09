@@ -1340,6 +1340,13 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   decisions. Its observed hybrid-cache storage matches the separate KV-per-token
   and fixed DeltaNet formulas. Compiled longer-prefill timings remain unexecuted;
   they are not inferred from the already-passing Q4 32K stress.
+- **Generation honors runtime float storage.** Selected F16/BF16/F32/F64 and
+  Flex32 log probabilities are read by their actual dtype, preserving F64
+  precision without transferring a new full-vocabulary buffer. Half-precision
+  probability accumulation requests F32. Burn 0.21's Flex32 sorting fallback
+  remains unsupported: active top-k/top-p filters fail with a capability error,
+  while native Metal Flex32 greedy/unfiltered sampling has an executed test.
+  Both small-model public examples also passed [local Rust 1.92 execution](acceptance/measurements/public-examples-20260909.json).
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.
