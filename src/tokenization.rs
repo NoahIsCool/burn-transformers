@@ -18,14 +18,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
+use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "chat-templates")]
 use serde_json::Map;
 use serde_json::Value;
 use tokenizers::Tokenizer;
 
-use crate::{CausalLmInput, Error, Result, architecture::TokenMask};
+use crate::{
+    CausalLmInput, Error, Result,
+    architecture::{TokenMask, bool_tensor_from_values},
+};
 
 const MAX_TOKENIZER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
@@ -265,8 +268,9 @@ impl BatchEncoding {
                 TensorData::new(ids, [batch, sequence]),
                 device,
             ),
-            token_mask: Some(TokenMask::new(Tensor::<B, 2, Bool>::from_data(
-                TensorData::new(valid, [batch, sequence]),
+            token_mask: Some(TokenMask::new(bool_tensor_from_values(
+                valid,
+                [batch, sequence],
                 device,
             ))),
             position_ids: None,
@@ -1011,6 +1015,15 @@ mod tests {
             .to_causal_input::<Flex>(&Default::default())
             .expect("rectangular batch converts");
         assert_eq!(input.token_ids.dims(), [2, 2]);
+        let invalid = input
+            .token_mask
+            .expect("batch conversion always supplies a validity mask")
+            .into_tensor()
+            .bool_not();
+        assert_eq!(
+            crate::architecture::tensor_bool_values(invalid, "inverted tokenizer mask").unwrap(),
+            [true, false, false, false]
+        );
     }
 
     /// Both truncation directions are explicit and fixed padding never truncates silently.

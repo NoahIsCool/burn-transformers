@@ -1099,8 +1099,7 @@ pub(super) fn token_mask_from_values<B: Backend>(
     shape: [usize; 2],
     device: &B::Device,
 ) -> TokenMask<B> {
-    TokenMask::new(Tensor::<B, 2, Bool>::from_data(
-        TensorData::new(values, shape),
-        device,
+    TokenMask::new(crate::architecture::bool_tensor_from_values(
+        values, shape, device,
     ))
 }

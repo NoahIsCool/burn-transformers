@@ -191,29 +191,32 @@ impl<B: Backend> T5CrossAttentionCache<B> {
     /// Produces a reordered cache without mutating the current binding.
     fn reordered(&self, indices: &[usize]) -> Result<Self> {
         let selector = batch_selector::<B>(indices, &self.encoder.hidden_state.device())?;
-        let encoder =
-            EncoderOutput {
-                hidden_state: self
-                    .encoder
-                    .hidden_state
-                    .clone()
-                    .select(0, selector.clone()),
-                token_mask: self.encoder.token_mask.as_ref().map(|mask| {
-                    TokenMask::new(mask.as_tensor().clone().select(0, selector.clone()))
-                }),
-                hidden_states: self
-                    .encoder
-                    .hidden_states
-                    .iter()
-                    .map(|hidden| hidden.clone().select(0, selector.clone()))
-                    .collect(),
-                attentions: self
-                    .encoder
-                    .attentions
-                    .iter()
-                    .map(|attention| attention.clone().select(0, selector.clone()))
-                    .collect(),
-            };
+        let encoder = EncoderOutput {
+            hidden_state: self
+                .encoder
+                .hidden_state
+                .clone()
+                .select(0, selector.clone()),
+            token_mask: self.encoder.token_mask.as_ref().map(|mask| {
+                TokenMask::new(crate::architecture::select_bool_tensor(
+                    mask.as_tensor().clone(),
+                    0,
+                    selector.clone(),
+                ))
+            }),
+            hidden_states: self
+                .encoder
+                .hidden_states
+                .iter()
+                .map(|hidden| hidden.clone().select(0, selector.clone()))
+                .collect(),
+            attentions: self
+                .encoder
+                .attentions
+                .iter()
+                .map(|attention| attention.clone().select(0, selector.clone()))
+                .collect(),
+        };
         Ok(Self {
             encoder,
             keys: self

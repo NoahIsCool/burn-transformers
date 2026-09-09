@@ -22,13 +22,15 @@
 //! can implement the same public semantics later without changing model code.
 
 use burn::tensor::{
-    Bool, ElementConversion, Int, Tensor, TensorData, activation::log_softmax, backend::Backend,
+    ElementConversion, Int, Tensor, TensorData, activation::log_softmax, backend::Backend,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     CausalLmInput, DecodeInput, DecodeState, EncoderOutput, Error, FinishReason, ForwardOptions,
-    LogitsSelection, Result, Seq2SeqLanguageModel, TokenMask, cache::CacheConfig,
+    LogitsSelection, Result, Seq2SeqLanguageModel, TokenMask,
+    architecture::{bool_tensor_from_values, select_bool_tensor},
+    cache::CacheConfig,
 };
 
 /// Deterministic beam width, termination, and ranking controls.
@@ -353,10 +355,7 @@ where
             TensorData::new(next_tokens, [prepared.expanded_batch, 1]),
             &device,
         );
-        let valid = Tensor::<B, 2, Bool>::from_data(
-            TensorData::new(next_valid, [prepared.expanded_batch, 1]),
-            &device,
-        );
+        let valid = bool_tensor_from_values(next_valid, [prepared.expanded_batch, 1], &device);
         let position_ids = decode_positions.map(|positions| {
             Tensor::<B, 2, Int>::from_data(
                 TensorData::new(positions, [prepared.expanded_batch, 1]),
@@ -759,9 +758,9 @@ fn select_encoder<B: Backend>(
     let selector = batch_selector::<B>(indices, &encoder.hidden_state.device())?;
     Ok(EncoderOutput {
         hidden_state: encoder.hidden_state.select(0, selector.clone()),
-        token_mask: encoder
-            .token_mask
-            .map(|mask| TokenMask::new(mask.into_tensor().select(0, selector.clone()))),
+        token_mask: encoder.token_mask.map(|mask| {
+            TokenMask::new(select_bool_tensor(mask.into_tensor(), 0, selector.clone()))
+        }),
         hidden_states: encoder
             .hidden_states
             .into_iter()
@@ -783,9 +782,9 @@ fn select_input<B: Backend>(
     let selector = batch_selector::<B>(indices, &input.token_ids.device())?;
     Ok(CausalLmInput {
         token_ids: input.token_ids.select(0, selector.clone()),
-        token_mask: input
-            .token_mask
-            .map(|mask| TokenMask::new(mask.into_tensor().select(0, selector.clone()))),
+        token_mask: input.token_mask.map(|mask| {
+            TokenMask::new(select_bool_tensor(mask.into_tensor(), 0, selector.clone()))
+        }),
         position_ids: input
             .position_ids
             .map(|positions| positions.select(0, selector)),
@@ -924,8 +923,7 @@ fn host_log_probabilities<B: Backend>(
     }
     let device = logits.device();
     let active_mask =
-        Tensor::<B, 2, Bool>::from_data(TensorData::new(active.to_vec(), [batch, 1]), &device)
-            .expand([batch, vocabulary]);
+        bool_tensor_from_values(active.to_vec(), [batch, 1], &device).expand([batch, vocabulary]);
     log_softmax(logits.mask_fill(active_mask.bool_not(), 0.0), 1)
         .try_into_data()
         .map_err(|error| {

@@ -18,7 +18,7 @@ use burn::tensor::{Bool, ElementConversion, Int, Tensor, TensorData, backend::Ba
 
 use crate::{
     CausalLanguageModel, CausalLmInput, DecodeInput, Error, ForwardOptions, LogitsSelection,
-    Result, TokenMask, cache::CacheConfig,
+    Result, TokenMask, architecture::bool_tensor_from_values, cache::CacheConfig,
 };
 
 use super::{FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, TokenSelection};
@@ -114,10 +114,7 @@ where
     } = prepare_request(&request)?;
     let device = request.prompt.token_ids.device();
     let mut history = request.prompt.token_ids.clone();
-    let mut history_mask = Tensor::<B, 2, Bool>::from_data(
-        TensorData::new(prompt_valid.clone(), history.dims()),
-        &device,
-    );
+    let mut history_mask = bool_tensor_from_values(prompt_valid.clone(), history.dims(), &device);
     let mut state = model.new_decode_state(request.cache, batch, &device)?;
     let options = ForwardOptions {
         logits: LogitsSelection::Last,
@@ -212,10 +209,7 @@ where
             break;
         }
 
-        let decode_mask = Tensor::<B, 2, Bool>::from_data(
-            TensorData::new(still_active.clone(), [batch, 1]),
-            &device,
-        );
+        let decode_mask = bool_tensor_from_values(still_active.clone(), [batch, 1], &device);
         let decode_ids = token_ids
             .reshape([batch, 1])
             .mask_fill(decode_mask.clone().bool_not(), padding);
@@ -353,7 +347,7 @@ where
                 format!("{:?}", output.logits.dims()),
             ));
         }
-        let active = Tensor::<B, 1, Bool>::from_data(TensorData::new(active, [batch]), &device)
+        let active = bool_tensor_from_values(active, [batch], &device)
             .reshape([batch, 1, 1])
             .expand([batch, 1, vocabulary_size]);
         latest_logits = Some(match latest_logits {
@@ -596,8 +590,7 @@ fn neutralize_inactive_logits<B: Backend>(
     }
     let device = logits.device();
     let valid =
-        Tensor::<B, 2, Bool>::from_data(TensorData::new(active.to_vec(), [batch, 1]), &device)
-            .expand([batch, vocabulary]);
+        bool_tensor_from_values(active.to_vec(), [batch, 1], &device).expand([batch, vocabulary]);
     Ok(logits.mask_fill(valid.bool_not(), 0.0))
 }
 

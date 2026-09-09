@@ -1,8 +1,40 @@
 //! Typed model inputs, outputs, masks, and diagnostic requests.
 
-use burn::tensor::{Bool, ElementConversion, Int, Tensor, backend::Backend};
+use burn::tensor::{Bool, ElementConversion, Int, Tensor, TensorData, backend::Backend};
 
 use crate::{Error, Result};
+
+/// Creates a backend Boolean tensor from dynamically shaped host validity metadata.
+///
+/// A logical mask is the indicator function `m(i) in {0, 1}`. Constructing the indicator as an
+/// integer tensor and comparing it with zero delegates the physical Boolean representation to the
+/// backend. This matters for backends such as Flex, where directly importing a dynamically built
+/// `Vec<bool>` can retain a plain `U8` dtype tag that later Boolean operations reject.
+pub(crate) fn bool_tensor_from_values<B: Backend, const D: usize>(
+    values: Vec<bool>,
+    shape: [usize; D],
+    device: &B::Device,
+) -> Tensor<B, D, Bool> {
+    let indicators = values
+        .into_iter()
+        .map(|value| if value { 1_i64 } else { 0_i64 })
+        .collect::<Vec<_>>();
+    Tensor::<B, D, Int>::from_data(TensorData::new(indicators, shape), device).bool()
+}
+
+/// Selects Boolean rows while preserving a backend-supported logical dtype.
+///
+/// Selection is mathematically a gather `y[j] = x[indices[j]]`. Burn 0.21's Flex Boolean gather
+/// currently returns bytes tagged as numeric `U8`, so a subsequent logical operation can panic.
+/// The reversible Boolean-to-integer conversion performs the same gather and then reconstructs a
+/// backend-native Boolean result by comparing every selected indicator with zero.
+pub(crate) fn select_bool_tensor<B: Backend, const D: usize>(
+    tensor: Tensor<B, D, Bool>,
+    dim: usize,
+    indices: Tensor<B, 1, Int>,
+) -> Tensor<B, D, Bool> {
+    tensor.int().select(dim, indices).bool()
+}
 
 /// Copies a small Boolean metadata tensor to the host without assuming its storage encoding.
 ///
@@ -200,7 +232,9 @@ mod tests {
     #[cfg(feature = "metal")]
     use burn::backend::Metal;
     #[cfg(any(feature = "flex", feature = "metal"))]
-    use burn::tensor::{Bool, Tensor, TensorData};
+    use burn::tensor::Tensor;
+    #[cfg(feature = "metal")]
+    use burn::tensor::{Bool, TensorData};
 
     #[cfg(feature = "flex")]
     type TestBackend = Flex<f32, i32>;
@@ -210,12 +244,38 @@ mod tests {
     #[test]
     fn boolean_metadata_uses_backend_portable_integer_conversion() {
         let device = Default::default();
-        let tensor = Tensor::<TestBackend, 2, Bool>::from_data(
-            TensorData::new(vec![true, false, false, true], [2, 2]),
+        let tensor = super::bool_tensor_from_values::<TestBackend, 2>(
+            vec![true, false, false, true],
+            [2, 2],
             &device,
         );
         assert_eq!(
-            super::tensor_bool_values(tensor, "test mask").unwrap(),
+            super::tensor_bool_values(tensor.clone(), "test mask").unwrap(),
+            [true, false, false, true]
+        );
+        assert_eq!(
+            super::tensor_bool_values(tensor.bool_not(), "inverted test mask").unwrap(),
+            [false, true, true, false]
+        );
+    }
+
+    /// Boolean selection preserves a logical dtype accepted by later Flex Boolean operations.
+    #[cfg(feature = "flex")]
+    #[test]
+    fn boolean_selection_normalizes_backend_storage() {
+        let device = Default::default();
+        let tensor = super::bool_tensor_from_values::<TestBackend, 2>(
+            vec![true, false, false, true],
+            [2, 2],
+            &device,
+        );
+        let selected = super::select_bool_tensor(
+            tensor,
+            0,
+            Tensor::<TestBackend, 1, burn::tensor::Int>::from_data([1_i32, 0], &device),
+        );
+        assert_eq!(
+            super::tensor_bool_values(selected.bool_not(), "selected inverted mask").unwrap(),
             [true, false, false, true]
         );
     }
