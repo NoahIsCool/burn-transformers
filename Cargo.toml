@@ -12,7 +12,7 @@ include = [
     "src/**",
     "examples/**",
     "tests/**",
-    "scripts/**",
+    "scripts/**/*.py",
     "acceptance/**",
     "*.md",
     "LICENSE-*",
