@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "purpose": "Isolated native LLVM physical-line counter differential; no model or release-gate acceptance claim.",
+  "rustc": [
+    "rustc 1.94.0-nightly (4f14395c3 2025-12-22)",
+    "binary: rustc",
+    "commit-hash: 4f14395c37db4c1be874e6b0ace6721674223c22",
+    "commit-date: 2025-12-22",
+    "host: aarch64-apple-darwin",
+    "release: 1.94.0-nightly",
+    "LLVM version: 21.1.8"
+  ],
+  "llvm_revision": "llvmorg-21.1.8",
+  "measurement_helper_commit": "cd4a91c",
+  "profile_environment": {
+    "LLVM_PROFILE_FILE": "<fixture-dir>/pinned.profraw"
+  },
+  "commands": [
+    [
+      "rustc",
+      "+nightly",
+      "--edition=2024",
+      "-C",
+      "instrument-coverage",
+      "-C",
+      "opt-level=0",
+      "--remap-path-prefix",
+      "<fixture-dir>=/coverage-lines-fixture",
+      "<fixture-dir>/fixture.rs",
+      "-o",
+      "<fixture-dir>/pinned-fixture"
+    ],
+    [
+      "<fixture-dir>/pinned-fixture"
+    ],
+    [
+      "<llvm-bin>/llvm-profdata",
+      "merge",
+      "-sparse",
+      "<fixture-dir>/pinned.profraw",
+      "-o",
+      "<fixture-dir>/pinned.profdata"
+    ],
+    [
+      "<llvm-bin>/llvm-cov",
+      "export",
+      "<fixture-dir>/pinned-fixture",
+      "--instr-profile",
+      "<fixture-dir>/pinned.profdata",
+      "--format=text",
+      "--skip-functions"
+    ],
+    [
+      "<llvm-bin>/llvm-cov",
+      "export",
+      "<fixture-dir>/pinned-fixture",
+      "--instr-profile",
+      "<fixture-dir>/pinned.profdata",
+      "--format=lcov",
+      "--skip-functions"
+    ]
+  ],
+  "all_exit_codes": 0,
+  "compiler_program_merge_export_stderr": "",
+  "files_sha256": {
+    "fixture.rs": "45be7569614440133f331f18b8342e3ab024cc69ed15389856db1bdd7f3a9aa7",
+    "llvm-export.json": "f4625821ec5e76649acdb745a38abf8c6640446819536e8062079ebe5b2b7550",
+    "native.lcov": "15c559c2a114b711e5f773f59e112ebc2ca2d2b1c9e54de2652801cbf52fda04"
+  },
+  "expected_physical_lines": {
+    "mapped": 30,
+    "covered": 26
+  },
+  "llvm_function_summary_lines": {
+    "mapped": 33,
+    "covered": 27
+  },
+  "cases": [
+    "unused function",
+    "generic instantiations taking distinct branches",
+    "nested closures",
+    "Unicode raw string with fake cfg/module syntax",
+    "comments",
+    "column-one delimiters",
+    "two functions on one physical line"
+  ],
+  "limitations": "This Rust fixture does not produce gap-region or zero-length skipped-marker pairs; those remain covered by synthetic segment tests.",
+  "raw_export_sha256": {
+    "text": "482dec0255d230be8546d020959903c120001b2b21e680957e369d8ad14e0dde",
+    "lcov": "15c559c2a114b711e5f773f59e112ebc2ca2d2b1c9e54de2652801cbf52fda04"
+  },
+  "storage_normalization": "One trailing newline is appended to JSON when absent; source path is compiler-remapped to /coverage-lines-fixture, not rewritten after export."
+}

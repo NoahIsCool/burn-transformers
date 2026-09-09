@@ -1,7 +1,9 @@
 """LLVM physical-line semantics and malformed-input tests; no compilers or GPU."""
 
+import hashlib
 import importlib.util
 from itertools import islice
+import json
 from pathlib import Path
 import unittest
 
@@ -235,6 +237,52 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(all(measured[name].mapped_lines == measured[name].covered_lines == 1 for name in names))
         self.assertEqual(measured["empty.rs"].mapped_lines, 0)
         self.assertEqual(LINES.report_line_coverage(report()), {})
+
+
+class NativeFixtureTests(unittest.TestCase):
+    """Replay compact exports from a warning-free isolated Rust/LLVM 21 run."""
+
+    def test_native_lcov_line_records_match_json_reconstruction(self):
+        """Compare every physical line/count without trusting LLVM LF/LH totals."""
+
+        directory = Path(__file__).resolve().parent / "fixtures/coverage_lines"
+        exported = json.loads((directory / "llvm-export.json").read_text())
+        measured = LINES.report_line_coverage(exported)
+        expected = {}
+        current = None
+        for record in (directory / "native.lcov").read_text().splitlines():
+            if record.startswith("SF:"):
+                current = record[3:]
+                self.assertNotIn(current, expected)
+                expected[current] = {}
+            elif record.startswith("DA:"):
+                line, count = map(int, record[3:].split(","))
+                self.assertNotIn(line, expected[current])
+                expected[current][line] = count
+        self.assertEqual(set(measured), set(expected))
+        for filename, result in measured.items():
+            self.assertEqual(dict(result.iter_lines()), expected[filename])
+        result = measured["/coverage-lines-fixture/fixture.rs"]
+        self.assertEqual((result.mapped_lines, result.covered_lines), (30, 26))
+        # Distinct instantiations aggregate execution counts at one source line.
+        self.assertEqual(expected["/coverage-lines-fixture/fixture.rs"][10], 2)
+        # An unused function stays mapped; two same-line functions count once.
+        self.assertEqual(expected["/coverage-lines-fixture/fixture.rs"][5], 0)
+        self.assertEqual(expected["/coverage-lines-fixture/fixture.rs"][41], 1)
+        summary = exported["data"][0]["files"][0]["summary"]["lines"]
+        self.assertEqual((summary["count"], summary["covered"]), (33, 27))
+
+    def test_fixture_bytes_and_tool_provenance_are_pinned(self):
+        """Changes to source or native exports require explicit evidence updates."""
+
+        directory = Path(__file__).resolve().parent / "fixtures/coverage_lines"
+        provenance = json.loads((directory / "provenance.json").read_text())
+        self.assertEqual(provenance["llvm_revision"], LINES.LLVM_REVISION)
+        self.assertEqual(provenance["all_exit_codes"], 0)
+        self.assertEqual(provenance["compiler_program_merge_export_stderr"], "")
+        for filename, expected in provenance["files_sha256"].items():
+            with self.subTest(filename=filename):
+                self.assertEqual(hashlib.sha256((directory / filename).read_bytes()).hexdigest(), expected)
 
 
 if __name__ == "__main__":
