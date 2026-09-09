@@ -93,9 +93,19 @@ pub enum ParameterInstallError {
         /// Human-readable Burn dtype name.
         dtype: String,
     },
+    /// The shape and ordinary float dtype cannot describe a host-sized payload.
+    PayloadSizeOverflow,
+    /// Ordinary float bytes disagree with the declared shape and dtype.
+    PayloadLength {
+        /// Required bytes, computed without allocating or initializing the parameter.
+        expected: usize,
+        /// Bytes actually owned by the supplied tensor data.
+        actual: usize,
+    },
 }
 
 impl fmt::Display for ParameterInstallError {
+    /// Describes the rejected storage contract without inspecting tensor values.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Rank { expected, actual } => {
@@ -116,6 +126,15 @@ impl fmt::Display for ParameterInstallError {
             Self::UnsupportedStorage { dtype } => {
                 write!(formatter, "backend cannot store checkpoint dtype {dtype}")
             }
+            Self::PayloadSizeOverflow => {
+                write!(formatter, "checkpoint float payload size overflows usize")
+            }
+            Self::PayloadLength { expected, actual } => {
+                write!(
+                    formatter,
+                    "expected {expected} checkpoint float bytes, received {actual}"
+                )
+            }
         }
     }
 }
@@ -135,6 +154,11 @@ impl Error for ParameterInstallError {}
 /// the layout mapper finishes: marking it trainable before a transpose would
 /// turn a column-layout weight into a non-leaf and make Burn's subsequent
 /// gradient-policy restoration panic on an autodiff backend.
+///
+/// Ordinary float storage is checked against `product(shape) * dtype_bytes`
+/// before any backend call. Packed inputs must already have passed their
+/// format-specific payload validation, as in the crate's QFloat adapter; their
+/// codes and scale blocks do not follow that ordinary byte-count equation.
 ///
 /// The temporary parameter clone shares the incoming backend allocation; it is
 /// used solely to move the existing parameter out of `&mut` safely and is
@@ -160,10 +184,13 @@ pub fn install_float_parameter<B: Backend, const D: usize>(
             dtype: format!("{:?}", data.dtype),
         });
     }
+    if !is_quantized_float {
+        validate_float_payload_length(&actual, data.dtype, data.bytes.len())?;
+    }
 
     let device = parameter.lazy_device();
     let dtype = data.dtype;
-    if is_quantized_float && !B::dtype_usage(&device, dtype).contains(DTypeUsage::Storage) {
+    if !B::dtype_usage(&device, dtype).contains(DTypeUsage::Storage) {
         return Err(ParameterInstallError::UnsupportedStorage {
             dtype: format!("{dtype:?}"),
         });
@@ -172,6 +199,29 @@ pub fn install_float_parameter<B: Backend, const D: usize>(
     let record = Param::initialized(ParamId::new(), tensor);
     let existing = std::mem::replace(parameter, record.clone());
     *parameter = existing.load_record(record);
+    Ok(())
+}
+
+/// Checks dense floating storage before a backend can retain malformed metadata.
+///
+/// This equation deliberately excludes packed QFloat, whose scale and code
+/// regions are validated by the quantization layer. Overflow is an error even
+/// for tiny owned buffers; no allocation is attempted to test representability.
+fn validate_float_payload_length(
+    shape: &[usize],
+    dtype: DType,
+    actual: usize,
+) -> std::result::Result<(), ParameterInstallError> {
+    let elements = shape
+        .iter()
+        .try_fold(1_usize, |count, &dimension| count.checked_mul(dimension))
+        .ok_or(ParameterInstallError::PayloadSizeOverflow)?;
+    let expected = elements
+        .checked_mul(dtype.size())
+        .ok_or(ParameterInstallError::PayloadSizeOverflow)?;
+    if expected != actual {
+        return Err(ParameterInstallError::PayloadLength { expected, actual });
+    }
     Ok(())
 }
 

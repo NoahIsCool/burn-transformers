@@ -2200,3 +2200,76 @@ fn parameter_install_rejects_bad_metadata_before_initialization() {
     assert!(matches!(error, ParameterInstallError::NonFloat { .. }));
     assert!(!linear.weight.is_initialized());
 }
+
+/// Public TensorData fields cannot smuggle truncated float storage past lazy-shape checks.
+#[test]
+fn parameter_install_rejects_truncated_float_storage_without_mutation() {
+    let device = Default::default();
+    let mut linear = LinearConfig::new(2, 3)
+        .with_bias(false)
+        .with_layout(LinearLayout::Col)
+        .init::<Flex>(&device);
+    for elements in [0, 5, 7] {
+        let mut malformed = TensorData::new(vec![0.0_f32; elements], [elements]);
+        malformed.shape = vec![3, 2].into();
+        let error = install_float_parameter(&mut linear.weight, malformed)
+            .expect_err("invalid byte length must be a recoverable error");
+        assert_eq!(
+            error,
+            ParameterInstallError::PayloadLength {
+                expected: 24,
+                actual: elements * 4,
+            }
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("expected 24 checkpoint float bytes")
+        );
+        assert!(!linear.weight.is_initialized());
+    }
+    let mut unsupported = TensorData::new(vec![0.0_f32; 6], [3, 2]);
+    unsupported.dtype = DType::Flex32;
+    let error = install_float_parameter(&mut linear.weight, unsupported)
+        .expect_err("Flex does not advertise Flex32 storage");
+    assert!(matches!(
+        error,
+        ParameterInstallError::UnsupportedStorage { .. }
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("cannot store checkpoint dtype Flex32")
+    );
+    assert!(!linear.weight.is_initialized());
+}
+
+/// Dense byte equations cover scalar, empty, half, double, and overflow boundaries.
+#[test]
+fn dense_parameter_payload_equations_fail_before_allocation() {
+    for dtype in [
+        DType::F16,
+        DType::BF16,
+        DType::F32,
+        DType::Flex32,
+        DType::F64,
+    ] {
+        for (shape, elements) in [(vec![], 1), (vec![0, 4], 0), (vec![2, 3], 6)] {
+            let bytes = elements * dtype.size();
+            validate_float_payload_length(&shape, dtype, bytes).unwrap();
+            let error = validate_float_payload_length(&shape, dtype, bytes + 1).unwrap_err();
+            assert_eq!(
+                error,
+                ParameterInstallError::PayloadLength {
+                    expected: bytes,
+                    actual: bytes + 1
+                }
+            );
+        }
+    }
+    for shape in [vec![usize::MAX, 2], vec![usize::MAX]] {
+        let error = validate_float_payload_length(&shape, DType::F32, 0).unwrap_err();
+        assert_eq!(error, ParameterInstallError::PayloadSizeOverflow);
+        assert!(error.to_string().contains("overflows usize"));
+    }
+}
