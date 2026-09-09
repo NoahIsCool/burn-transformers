@@ -27,7 +27,7 @@ acceptance.
 | Qwen3 MoE | GQA with Q/K normalization, sparse selected-expert dispatch, top-k routing, and cached decode | [Qwen3-30B-A3B](acceptance/qwen3-30b-a3b-ad44e777bcd18fa416d9da3bd8f70d33ebb85d39.json) strictly applied all 18,867 BF16-derived F16 tensors and passed six-token F16, mixed Q8/F16, and mixed Q4/F16 Metal stateless, cached-prefill, hidden-trace, and recurrent-decode smokes. Both packed decode audits observed all 1,345 architecture-declared matmuls without whole-weight dequantization. Official reference logits, 32-token generation, quantized quality, standardized performance, and 32K stress remain open; not advertised. |
 | DeepSeek V2 | YaRN, MLA reference prefill, compressed latent-cache absorbed decode, routed and shared experts | [DeepSeek-V2-Lite](acceptance/deepseek-v2-lite-604d5664dddd88a0433dbae533b7fe9472482de0.json) strictly applied all 5,291 BF16-derived F16 tensors and passed a six-token Metal stateless, reference-prefill, compressed-cache, and absorbed-decode smoke. Cached/stateless cosine was `1.0`; absorbed decode matched the internal stateless path at `0.999998964`. This is internal Burn-path parity, not comparison with the official implementation. Official reference logits, 32-token generation, quantization, and 32K stress remain open; not advertised. |
 | Muse Glimmer | Sliding/full hybrid attention, RoPE/NoPE schedule, sandwich norms, output gates, final-logit softcap, and exact eager-F16 attention with a bounded query-chunk policy | The exact [Muse-Glimmer-30B artifact](acceptance/muse-glimmer-30b-a4e59da52a7bc87ae7251dd5545c0dd437c44b68.json) authenticated both weight shards and a seven-file schema-3 official oracle, then strictly applied all 627 text tensors as F16 on Metal with no unexplained load diagnostics. The real graph matched official prompt, cached-prefix, teacher-prefix, and hidden-trace fixtures with minimum official/Burn cosine `0.999943377` and reproduced all 32 greedy tokens. Real Q8/G64 and Q4/G64 sidecars have both passed create-only conversion, full reopen, and mixed F16/packed Metal inference; each traced decode launched all 417 packed projections with no whole-weight dequantization. A synthetic 32-head F16 Metal envelope exercised actual 32K keys, terminal RoPE, and full/mirrored cache boundaries with a reduced four-channel head; it is not full-model 32K evidence. Quantized reference/quality, a real 32K stress run, real-checkpoint padded/context-boundary coverage, and standardized performance remain open; not advertised. |
-| T5 / FLAN / UL2 | Bidirectional encoder, causal decoder, cross-attention cache, relative-position bias, shared encoder/decoder embeddings with a configurable tied or independent LM head, and cached beam search | [FLAN-T5-small](acceptance/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab.json) passed strict F32 loading, cached parity, and a beam fixture on Flex. [FLAN-T5-XXL](acceptance/flan-t5-xxl-ae7c9136adc7555eeccc78cdd960dfd60fb346ce.json) strictly applied all 558 runtime tensors on Metal and matched official Transformers/MPS F32 encoder, decoder-hidden, first-logit, 32-row cached and teacher-forced fixtures at minimum cosine `0.999999999998`, plus exact greedy and four-beam tokens. Neither is advertised; XXL still needs padded/context-boundary, quantized quality/32K, and standardized performance gates. UL2 is pending. |
+| T5 / FLAN / UL2 | Bidirectional encoder, causal decoder, cross-attention cache, relative-position bias, shared encoder/decoder embeddings with a configurable tied or independent LM head, and cached beam search | [FLAN-T5-small](acceptance/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab.json) now has a content-authenticated Transformers 5.2/CPU F32 oracle. Flex strictly applies all 190 tensors, matches complete encoder, decoder-hidden, first-logit, 32-row cached and teacher-forced, padded-batch, and 512-token boundary vectors with minimum cosine `0.999999999999` and zero `1e-4` tolerance failures, and reproduces all 32 greedy decisions plus the exact four-beam continuation. Accelerator acceptance remains pending. [FLAN-T5-XXL](acceptance/flan-t5-xxl-ae7c9136adc7555eeccc78cdd960dfd60fb346ce.json) strictly applied all 558 runtime tensors on Metal and matched official Transformers/MPS F32 encoder, decoder-hidden, first-logit, 32-row cached and teacher-forced fixtures at minimum cosine `0.999999999998`, plus exact greedy and four-beam tokens. Neither is advertised yet; UL2 is pending. |
 | Nemotron-H | Interleaved Mamba2, GQA, dense/MoE blocks, ReLU-squared experts, shared experts, and next-token-head mapping | The exact [Nemotron 3.5 Lightning artifact](acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json) authenticated and strictly applied all 6,513 tensors, including 270 MTP tensors, then passed Metal F16 stateless, cached-prefill, and one-token recurrent base-model execution. Stateless and prefill hidden traces were bit-identical; recurrent and teacher-forced logits had cosine `0.999376514` and identical top-1. The exact one-stage MTP body and transactional batch-one speculator pass exhaustive tiny Flex tests. This remains internal-consistency evidence: official base parity, real-weight MTP parity, 32-token generation, quantization, and 32K are open; not advertised. |
 | Custom modular models | Serializable causal and seq2seq specifications using full/sliding attention, causal DeltaNet, dense gated FFNs, sparse MoE, configurable normalization, and cross-attention | Intended for controlled experiments, not compatibility with an upstream checkpoint. Custom MLA, Mamba2, bidirectional DeltaNet/sliding attention, and learned gated residuals currently fail with explicit capability errors. |
 
@@ -125,6 +125,27 @@ normalized generation defaults, provenance metadata, Qwen MTP loading, and an
 optional quantized Burnpack sidecar. A successful call returns `LoadedModel`,
 which keeps the executable module, tokenizer, generation defaults, canonical
 source metadata, and finalized `LoadReport` together.
+
+### FLAN-T5-small loading and generation
+
+The [complete FLAN-T5-small example](examples/flan_t5_small.rs) loads the
+pinned official SafeTensors checkpoint through `AutoSeq2SeqLm`, tokenizes one
+instruction locally, encodes its source once, and runs cache-aware four-beam
+decoding. No Python environment or network access is used at inference time:
+
+```sh
+cargo run --release --manifest-path crates/transformers/Cargo.toml \
+  --no-default-features --features std,flex,tokenizers \
+  --example flan_t5_small -- /Volumes/models/flan-t5-small \
+  "translate English to German: The house is wonderful."
+```
+
+`generate_t5_beam_search` reads decoder-start, EOS, and PAD IDs from the loaded
+T5 configuration. It allocates decoder state for `source_batch * num_beams`,
+keeps encoder computation outside the token loop, and reorders decoder self-KV,
+encoder rows, and immutable cross-attention KV together whenever beams change
+parents. Set `num_beams = 1` for deterministic greedy decoding through the same
+cached coordinator.
 
 ### Causal loading and generation
 

@@ -1,0 +1,106 @@
+//! Loads the pinned official FLAN-T5-small artifact and runs cached beam search.
+//!
+//! The runtime is deliberately local-only. Download the immutable checkpoint outside the program,
+//! enable the `tokenizers` feature, and pass the resulting directory as the first argument:
+//!
+//! ```text
+//! cargo run --release --manifest-path crates/transformers/Cargo.toml \
+//!   --no-default-features --features std,flex,tokenizers \
+//!   --example flan_t5_small -- /path/to/flan-t5-small \
+//!   "translate English to German: The house is wonderful."
+//! ```
+
+#[cfg(feature = "tokenizers")]
+use std::{error::Error as StdError, ffi::OsString, io, path::PathBuf};
+
+#[cfg(feature = "tokenizers")]
+use burn::backend::Flex;
+#[cfg(feature = "tokenizers")]
+use transformers::{
+    AutoLoadOptions, AutoSeq2SeqLm, EncodeOptions,
+    models::t5::{T5BeamSearchOptions, generate_t5_beam_search},
+};
+
+/// Explains the feature requirement when Cargo builds all examples without tokenization.
+#[cfg(not(feature = "tokenizers"))]
+fn main() {
+    eprintln!("enable the `tokenizers` feature to run the FLAN-T5-small example");
+}
+
+/// Loads, tokenizes, generates, and decodes through the public release surface.
+#[cfg(feature = "tokenizers")]
+fn main() -> Result<(), Box<dyn StdError>> {
+    let mut arguments = std::env::args_os().skip(1);
+    let root = arguments.next().map(PathBuf::from).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "usage: flan_t5_small MODEL_DIRECTORY [PROMPT]",
+        )
+    })?;
+    let prompt = arguments
+        .next()
+        .unwrap_or_else(|| OsString::from("translate English to German: The house is wonderful."));
+    let prompt = prompt
+        .into_string()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "prompt must be UTF-8"))?;
+    if arguments.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected at most one prompt argument",
+        )
+        .into());
+    }
+
+    let device = Default::default();
+    let loaded = AutoSeq2SeqLm::<Flex<f32, i32>>::load_local(
+        &root,
+        &AutoLoadOptions {
+            repository: Some("google/flan-t5-small".into()),
+            revision: Some("0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab".into()),
+            ..AutoLoadOptions::default()
+        },
+        &device,
+    )?;
+    let tokenizer = loaded.tokenizer().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the local directory does not contain tokenizer.json",
+        )
+    })?;
+    let source = tokenizer
+        .encode(&prompt, &EncodeOptions::default())?
+        .to_causal_input::<Flex<f32, i32>>(&device)?;
+    let model = match loaded.model() {
+        AutoSeq2SeqLm::T5(model) => model,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "automatic seq2seq loading returned a non-T5 model",
+            )
+            .into());
+        }
+    };
+    let generated = generate_t5_beam_search(
+        model,
+        source,
+        T5BeamSearchOptions {
+            max_new_tokens: 64,
+            num_beams: 4,
+            num_return_sequences: 1,
+            ..T5BeamSearchOptions::default()
+        },
+    )?;
+    let best = generated
+        .sequences
+        .first()
+        .and_then(|sequences| sequences.first())
+        .ok_or_else(|| io::Error::other("beam search returned no hypothesis"))?;
+    println!("{}", tokenizer.decode(&best.token_ids, true)?);
+    eprintln!(
+        "finish={:?} score={:.6} tokens={}",
+        best.finish_reason,
+        best.score,
+        best.token_ids.len()
+    );
+    Ok(())
+}

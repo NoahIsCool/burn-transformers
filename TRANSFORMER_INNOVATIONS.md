@@ -1150,10 +1150,23 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   concrete Mamba, convolution, and attention cache tensor has leading extent
   one. Cache validation must inspect physical layer state while preserving the
   API-reported sentinel as a separate fact.
-- **FLAN-UL2's LM head is tied.** Its pinned config omits
-  `tie_word_embeddings`; the pinned upstream T5 schema and the local Serde
-  default both resolve that omission to `true`. FLAN Small and XXL explicitly
-  set `false`.
+- **A normalized T5 flag is not proof of physical weight tying.** FLAN-UL2's
+  pinned config omits `tie_word_embeddings`; the pinned upstream T5 schema and
+  the local Serde default both resolve that omission to `true`. FLAN Small and
+  XXL explicitly serialize `false`. Transformers 5.2 normalizes the loaded
+  FLAN-Small runtime flag back to `true`, yet the loaded `lm_head` remains
+  physically independent and the decoder output is not divided by
+  $\sqrt{d_{model}}$. The Burn contract therefore follows the serialized
+  checkpoint, tensor inventory, storage identity, and executed scaling path
+  together rather than trusting that post-load Boolean in isolation.
+- **Burn 0.21 Flex Boolean gathers require dtype normalization.** Importing a
+  dynamic host `Vec<bool>` or selecting rows from a Boolean tensor can leave a
+  numeric `U8` dtype tag even though the Rust tensor kind is Boolean; a later
+  `bool_not` then rejects it. Host masks and beam/cache row gathers therefore
+  pass through integer indicators and a nonzero comparison, which asks the
+  active backend to construct its own logical representation. The regression
+  is covered in [`architecture/types.rs`](src/architecture/types.rs), and the
+  cache-aware FLAN gate exercises both tokenization and repeated beam reorders.
 - **Qwen's two gates are different.** Full attention uses a sigmoid output
   gate. The Qwen3.8 `"swish"` field describes DeltaNet's output gated norm.
 - **Qwen3-MoE has two equivalent expert storage layouts.** Its official

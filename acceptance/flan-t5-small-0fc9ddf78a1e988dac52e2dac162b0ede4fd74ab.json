@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "strict_f32_load_sampled_reference_logit_probes_cached_parity_and_beam_fixture_verified_pending_full_vector_generation_and_accelerator_acceptance",
+  "phase": "authenticated_cpu_f32_oracle_full_vector_cached_generation_padding_and_context_boundary_verified_on_flex_pending_metal_acceptance",
   "repository": "google/flan-t5-small",
   "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
   "artifact_layout": {
@@ -23,54 +23,110 @@
     "model.safetensors": "495fa51e204676f1a857a9fc13c4c89f3f5ba9f480b898cebca02add25e6d749"
   },
   "checks": {
+    "closed_artifact_inventory_authenticated": true,
+    "all_artifact_sha256_verified_before_model_allocation": true,
     "config_parsed": true,
     "tokenizer_loaded_through_auto_api": true,
     "safetensors_header_strictly_validated": true,
     "mapping_plan_strict": true,
     "weights_applied": true,
-    "reference_top10_and_sampled_f32_logits_compared": true,
-    "full_vector_reference_logit_cosine_validated": false,
-    "reference_logit_output_hash_recorded": false,
+    "zero_unexplained_missing_or_unexpected_tensors": true,
+    "full_encoder_hidden_vector_compared": true,
+    "full_decoder_hidden_vector_compared": true,
+    "full_vector_reference_logits_compared": true,
+    "full_vector_reference_logit_cosine_validated": true,
+    "reference_logit_output_hash_recorded": true,
     "cached_prefill_matches_stateless": true,
     "cached_decode_matches_stateless": true,
+    "cached_and_teacher_forced_32_rows_compared": true,
+    "right_padded_batch_compared": true,
     "reference_beam_tokens_compared": true,
     "accelerator_inference_validated": false,
-    "reference_generation_32_tokens_compared": false,
-    "context_boundary_stress_validated": false
+    "reference_generation_32_tokens_compared": true,
+    "context_boundary_stress_validated": true,
+    "context_boundary_tokens": 512,
+    "quantized_quality_applicable_to_advertised_f32_profile": false
   },
   "reference_acceptance": {
-    "implementation": "transformers==5.2.0",
-    "backend": "torch_cpu_f32",
-    "burn_backend": "burn_flex_f32",
-    "logit_fixture": {
-      "encoder_token_ids": [71, 8, 57],
-      "decoder_token_ids": [0],
-      "top10_ids_identical": true,
-      "sampled_logit_absolute_tolerance": 0.001,
-      "cached_stateless_absolute_tolerance": 0.0001
+    "oracle": {
+      "implementation": "transformers==5.2.0",
+      "backend": "torch_cpu_f32",
+      "reference_class": "transformers.T5ForConditionalGeneration",
+      "bundle_manifest_sha256": "f031fa015480699ce85f099f5112feb682a6ffc9ca61757377780329c336229e",
+      "artifact_manifest_sha256": "bbfad80d704b2e9d1a02b8fc3350847c3a165dc563c91d425bf8a7e3ad1d1412",
+      "checkpoint_header_inventory_sha256": "501913dd79c6780c1c92f40b103c4f2d141fd11aea2e6ac29b047c21e0dea4b2",
+      "generator_commit": "2dcf44c283dbc48377249b79c82f5483b912b2a7",
+      "generator_sha256": "7d76915b38fbae0f8a744025cd3579937ea975a8f02d5197e8d09d2cc114dcea",
+      "modeling_t5_source_sha256": "8b3ee9af023292d10ca63071799bd5174a613a2eba13135c3f80efbd9b983e54",
+      "generation_source_sha256": "fc980c5ce0e6e45ffcaf2a37135e01afe657df91b99d684af145130608419652",
+      "tokenization_source_sha256": "3d908a608063d522052be778a7617a447c491f180f36348954b6d85709fac342",
+      "deterministic_algorithms": true,
+      "local_files_only": true,
+      "minimum_greedy_margin": 0.4534416198730469
     },
-    "beam_fixture": {
-      "prompt": "translate English to German: The house is wonderful.",
-      "encoder_token_ids": [13959, 1566, 12, 2968, 10, 37, 629, 19, 1627, 5, 1],
-      "decoder_start_token_id": 0,
-      "num_beams": 4,
-      "max_new_tokens": 16,
-      "generated_token_ids": [644, 4598, 229, 9685, 5, 1],
-      "decoded_text": "Das Haus ist schön.",
-      "finish_reason": "eos:1",
-      "tokens_identical": true,
-      "burn_wall_seconds_including_load": 15.33,
+    "burn": {
+      "backend": "Flex<f32, i32>",
+      "dtype": "F32",
+      "burn_version": "0.21.0",
+      "rustc": "1.94.0-nightly (4f14395c3 2025-12-22)",
+      "platform": "macOS 15.7.9 arm64, Apple M3 Max, 96 GB unified memory",
+      "runtime_commit": "11838884c2e400798f0af446c6c0143b1aa2c14d",
+      "acceptance_test_commit": "33f39d7ac8933b4223be5085f54d8aea202981fd",
+      "acceptance_test_sha256": "7b275f0a55db29204baf65520ee25e3e54b58c6c77b1d59f8b878657929d6c64",
+      "cargo_profile": "test",
+      "cargo_features": ["std", "flex", "tokenizers"],
+      "command": "cargo test --offline --manifest-path crates/transformers/Cargo.toml --no-default-features --features std,flex,tokenizers --test flan_t5_small flan_t5_small_flex_matches_official_reference -- --ignored --exact --nocapture --test-threads=1",
+      "strict_load": {
+        "applied": 190,
+        "transformed": 145,
+        "missing": 0,
+        "unexpected": 0,
+        "source_shard_opens": 1,
+        "maximum_concurrently_open_shards": 1
+      },
+      "comparison": {
+        "required_cosine": 0.999999,
+        "absolute_tolerance": 0.0001,
+        "relative_tolerance": 0.0001,
+        "minimum_cosine": 0.999999999999,
+        "maximum_absolute_error": 0.000076294,
+        "total_tolerance_failures": 0
+      },
+      "actual_f32le_sha256": {
+        "encoder_final": "9c22bccd522675cac1e0c769b8d8e7c662de7ad41dc1307018a7df9d73cafcad",
+        "decoder_first_final": "25e79fffc50a4dbc7a9da46a10c42db3e789350603f8ad5bd0d1a98c7d1893cf",
+        "first_logits": "0a3af6aa88fff0b78948b214b6c80d649b6b21c65e3f5b2c86cf2a085a049de4",
+        "cached_logits_32": "79379dce8eb8b3fd1f066787df840b0b05bf6ca83242dd8d8bdb1127ee917cca",
+        "teacher_logits_32": "bf62fdd81af5773b982941db8e99af7aeda0837d4f6322896cd09fa76a542f54",
+        "right_padded_first_logits": "4d0fa7f974a94926ec37a4547e472e78e7b5e84c6eff7986c10a93f32414c5bf",
+        "boundary_512_first_logits": "b48b0cca10f425fd95a6aacd5e11d5bc51be21913609d81032a43b6c511f61ce"
+      },
+      "generation": {
+        "greedy_tokens_identical": true,
+        "greedy_token_ids": [86, 74, 13558, 35, 20147, 3, 49, 3, 49, 3, 49, 3, 49, 3, 49, 3, 49, 3, 49, 3, 49, 3, 49, 3, 49, 3, 49, 3, 49, 3, 49, 3],
+        "cached_and_teacher_top1_identical_at_every_step": true,
+        "beam_tokens_identical": true,
+        "beam_token_ids": [644, 4598, 229, 9685, 5, 1],
+        "beam_decoded_text": "Das Haus ist schön.",
+        "beam_finish_reason": "eos:1"
+      },
+      "cache_accounting": {
+        "decoder_self_kv_bytes_per_token_per_sequence": 24576,
+        "cross_kv_bytes_per_source_token_per_decoder_sequence": 24576,
+        "formula": "8 layers * 2 (K,V) * 6 heads * 64 channels * 4 F32 bytes"
+      },
+      "diagnostic_timings_seconds": {
+        "load": 3.674,
+        "stateless_prompt": 3.659,
+        "cached_generation_32": 7.440,
+        "teacher_forced_32": 6.911,
+        "context_boundary_512": 37.934,
+        "beam_search": 12.674
+      },
       "timing_classification": "non_benchmark_diagnostic",
-      "timing_reproducible": false,
-      "timing_missing_metadata": [
-        "crate_commit",
-        "rust_and_burn_versions",
-        "cargo_profile_features_and_exact_command",
-        "machine_and_operating_system",
-        "synchronization_and_timing_boundaries",
-        "raw_samples",
-        "output_hash"
-      ]
+      "timing_samples": 1,
+      "standardized_performance_gate_complete": false,
+      "peak_memory_recorded": false
     }
   }
 }
