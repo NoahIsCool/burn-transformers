@@ -100,6 +100,19 @@ impl SparseMoeConfig {
                 "hidden_size, intermediate_size, and routed_experts must be non-zero",
             ));
         }
+        // Burn parameters are lazy, so initialization alone cannot reject a
+        // matrix whose logical element count will overflow at first use.
+        for (width, projection) in [
+            (self.intermediate_size, "expert"),
+            (self.routed_experts, "router"),
+        ] {
+            if self.hidden_size.checked_mul(width).is_none() {
+                return Err(Error::configuration(
+                    "moe.projection_shape",
+                    format!("{projection} matrix element count overflows usize"),
+                ));
+            }
+        }
         if self.experts_per_token == 0 || self.experts_per_token > self.routed_experts {
             return Err(Error::configuration(
                 "moe.experts_per_token",
@@ -1029,5 +1042,254 @@ mod tests {
         let error = load_balancing_loss(logits, selected, None)
             .expect_err("an out-of-range expert ID must fail cleanly");
         assert!(error.to_string().contains("expert IDs in 0..4"));
+    }
+
+    /// Rejects every zero cardinality and invalid routed-output scaling value.
+    #[test]
+    fn config_validates_dimensions_top_k_and_finite_positive_scale() {
+        for field in ["hidden", "intermediate", "experts", "top_k"] {
+            let mut config = SparseMoeConfig::new(2, 2, 2, 1);
+            match field {
+                "hidden" => config.hidden_size = 0,
+                "intermediate" => config.intermediate_size = 0,
+                "experts" => config.routed_experts = 0,
+                "top_k" => config.experts_per_token = 0,
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                config.validate(),
+                Err(crate::Error::Configuration { .. })
+            ));
+        }
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut config = SparseMoeConfig::new(2, 2, 2, 1);
+            config.routed_scale = scale;
+            assert!(
+                matches!(config.validate(), Err(crate::Error::Configuration { field, .. }) if field == "moe.routed_scale")
+            );
+        }
+        let device = Default::default();
+        assert!(
+            SparseMoeConfig::new(usize::MAX, 2, 1, 1)
+                .init::<Flex>(&device)
+                .is_err()
+        );
+        assert!(
+            matches!(SparseMoeConfig::new(2, 1, usize::MAX, 1).validate(),
+            Err(crate::Error::Configuration { field, reason })
+            if field == "moe.projection_shape" && reason.contains("router"))
+        );
+    }
+
+    /// Empty routing axes and upper-bound IDs fail before host dispatch indexing.
+    #[test]
+    fn grouping_rejects_empty_metadata_and_positive_out_of_range_ids() {
+        let device = Default::default();
+        for (tokens, slots, experts) in [(0, 1, 2), (1, 0, 2), (1, 1, 0)] {
+            let ids = Tensor::<Flex, 2, Int>::zeros([tokens, slots], &device);
+            assert!(
+                matches!(group_selected_experts(ids, experts), Err(crate::Error::Shape { tensor, .. }) if tensor == "moe.selected_experts")
+            );
+        }
+        let ids = Tensor::<Flex, 2, Int>::from_ints([[0, 2]], &device);
+        let error = group_selected_experts(ids, 2).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("expert ID 2 at flattened assignment 1")
+        );
+    }
+
+    /// Dispatcher input, route axes, cardinalities, and precision fail separately.
+    #[test]
+    fn dispatcher_validates_each_independent_shape_and_expert_boundary() {
+        let device = Default::default();
+        let module = deterministic_module(SparseMoeConfig::new(2, 2, 2, 1), &device);
+        for (input, weights, ids, field) in [
+            ([0, 2], [0, 1], [0, 1], "moe.dispatch.input"),
+            ([2, 3], [2, 1], [2, 1], "moe.dispatch.input"),
+            ([2, 2], [1, 1], [2, 1], "moe.dispatch.routes"),
+            ([2, 2], [2, 1], [1, 1], "moe.dispatch.routes"),
+            ([2, 2], [2, 1], [2, 2], "moe.dispatch.routes"),
+        ] {
+            let error = module
+                .dispatch_selected_experts(
+                    Tensor::zeros(input, &device),
+                    Tensor::zeros(weights, &device),
+                    Tensor::zeros(ids, &device),
+                    DType::F32,
+                )
+                .unwrap_err();
+            assert!(matches!(error, crate::Error::Shape { tensor, .. } if tensor == field));
+        }
+        for top_k in [0, 3] {
+            let mut changed = module.clone();
+            changed.experts_per_token = top_k;
+            let error = changed
+                .dispatch_selected_experts(
+                    Tensor::zeros([1, 2], &device),
+                    Tensor::zeros([1, top_k], &device),
+                    Tensor::zeros([1, top_k], &device),
+                    DType::F32,
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, crate::Error::Configuration { field, .. } if field == "moe.dispatch.experts_per_token")
+            );
+        }
+        let mut empty = module.clone();
+        empty.routed.clear();
+        assert!(
+            matches!(empty.dispatch_selected_experts(Tensor::zeros([1, 2], &device),
+            Tensor::zeros([1, 1], &device), Tensor::zeros([1, 1], &device), DType::F32),
+            Err(crate::Error::Configuration { field, .. }) if field == "moe.dispatch.experts_per_token")
+        );
+        for (multiplication_dtype, accumulation_dtype) in
+            [(DType::I32, DType::F32), (DType::F32, DType::I32)]
+        {
+            let precision = RoutedExpertPrecision {
+                multiplication_dtype,
+                accumulation_dtype,
+            };
+            assert!(
+                matches!(precision.validate(), Err(crate::Error::Configuration { field, .. }) if field == "moe.dispatch.precision")
+            );
+        }
+    }
+
+    /// Manually edited modules still reject invalid routing before top-k executes.
+    #[test]
+    fn forward_rejects_empty_inputs_and_mutated_expert_cardinalities() {
+        let device = Default::default();
+        let module = deterministic_module(SparseMoeConfig::new(2, 2, 2, 1), &device);
+        for shape in [[0, 1, 2], [1, 0, 2]] {
+            assert!(matches!(module.forward(Tensor::zeros(shape, &device)),
+                Err(crate::Error::Shape { tensor, .. }) if tensor == "moe.input"));
+        }
+        for top_k in [0, 3] {
+            let mut changed = module.clone();
+            changed.experts_per_token = top_k;
+            assert!(matches!(changed.forward(Tensor::zeros([1, 1, 2], &device)),
+                Err(crate::Error::Configuration { field, .. }) if field == "moe.experts_per_token"));
+        }
+    }
+
+    /// Biased shared experts add independently of routed scaling and sparse choice.
+    #[test]
+    fn shared_experts_add_exact_values_while_unselected_nan_experts_are_skipped() {
+        let device = Default::default();
+        let mut config = SparseMoeConfig::new(1, 1, 3, 1);
+        config.shared_experts = 2;
+        config.expert_bias = true;
+        config.activation = crate::architecture::Activation::Relu;
+        config.routed_scale = 2.0;
+        config.weighting_precision = RoutedWeightingPrecision::Fp32ThenResidual;
+        let mut module = deterministic_module(config, &device);
+        for (expert, coefficient) in module
+            .routed
+            .iter_mut()
+            .chain(module.shared.iter_mut())
+            .zip([1.0, 1.0, 1.0, 3.0, 5.0])
+        {
+            expert.gate_proj.weight = Param::from_tensor(Tensor::ones([1, 1], &device));
+            expert.up_proj.weight = Param::from_tensor(Tensor::ones([1, 1], &device));
+            expert.down_proj.weight =
+                Param::from_tensor(Tensor::from_floats([[coefficient]], &device));
+            expert.gate_proj.bias = Some(Param::from_tensor(Tensor::ones([1], &device)));
+            expert.up_proj.bias = Some(Param::from_tensor(Tensor::zeros([1], &device)));
+            expert.down_proj.bias = Some(Param::from_tensor(Tensor::zeros([1], &device)));
+        }
+        module.routed[1].up_proj.weight =
+            Param::from_tensor(Tensor::from_floats([[f32::NAN]], &device));
+        module.routed[2].up_proj.weight =
+            Param::from_tensor(Tensor::from_floats([[f32::NAN]], &device));
+        let output = module
+            .forward(Tensor::from_floats([[[1.0], [2.0]]], &device))
+            .unwrap();
+        // Each live expert is c * ReLU(x+1) * x: (2*1 + 3 + 5) * x*(x+1).
+        assert_eq!(
+            output.hidden_state.into_data().to_vec::<f32>().unwrap(),
+            [20.0, 60.0]
+        );
+        assert_eq!(
+            output.selected_weights.into_data().to_vec::<f32>().unwrap(),
+            [2.0, 2.0]
+        );
+        assert_eq!(output.expert_token_counts, [2, 0, 0]);
+        assert_eq!(output.evaluated_experts, 1);
+    }
+
+    /// Selected/shared expert parameter errors remain contextual instead of panicking.
+    #[test]
+    fn malformed_selected_and_shared_experts_propagate_linear_shape_errors() {
+        let device = Default::default();
+        for shared in [false, true] {
+            let mut config = SparseMoeConfig::new(2, 2, 2, 1);
+            config.shared_experts = usize::from(shared);
+            let mut module = deterministic_module(config, &device);
+            let expert = if shared {
+                &mut module.shared[0]
+            } else {
+                &mut module.routed[0]
+            };
+            expert.up_proj.weight = Param::from_tensor(Tensor::zeros([3, 2], &device));
+            assert!(matches!(
+                module.forward(Tensor::ones([1, 1, 2], &device)),
+                Err(crate::Error::Shape { .. })
+            ));
+        }
+    }
+
+    /// Balancing loss obeys the masked means, including the all-padding zero case.
+    #[test]
+    fn load_balancing_loss_matches_two_expert_probability_oracle() {
+        use crate::architecture::TokenMask;
+        use burn::tensor::Bool;
+
+        let device = Default::default();
+        let logits =
+            Tensor::<Flex, 3>::from_floats([[[3.0_f32.ln(), 0.0]], [[0.0, 3.0_f32.ln()]]], &device);
+        let selected = Tensor::<Flex, 3, Int>::from_ints([[[0]], [[1]]], &device);
+        let unmasked = load_balancing_loss(logits.clone(), selected.clone(), None)
+            .unwrap()
+            .into_scalar();
+        assert!((unmasked - 1.0).abs() < 1e-6);
+        for (mask, expected) in [([[true], [false]], 1.5), ([[false], [false]], 0.0)] {
+            let mask = TokenMask::new(Tensor::<Flex, 2, Bool>::from_bool(mask.into(), &device));
+            let loss = load_balancing_loss(logits.clone(), selected.clone(), Some(&mask))
+                .unwrap()
+                .into_scalar();
+            assert!((loss - expected).abs() < 1e-6);
+        }
+        let all_experts = Tensor::<Flex, 3, Int>::from_ints([[[0, 1]], [[1, 0]]], &device);
+        let loss = load_balancing_loss(logits, all_experts, None)
+            .unwrap()
+            .into_scalar();
+        assert!((loss - 2.0).abs() < 1e-6);
+    }
+
+    /// Diagnostics reject empty axes, unequal token axes, and negative IDs.
+    #[test]
+    fn load_balancing_loss_validates_all_external_diagnostic_axes() {
+        let device = Default::default();
+        for (logits, ids, field) in [
+            ([0, 1, 2], [0, 1, 1], "moe.router_diagnostics"),
+            ([1, 0, 2], [1, 0, 1], "moe.router_diagnostics"),
+            ([1, 1, 0], [1, 1, 1], "moe.router_diagnostics"),
+            ([1, 1, 2], [1, 1, 0], "moe.router_diagnostics"),
+            ([1, 2, 2], [2, 2, 1], "moe.selected_experts"),
+            ([1, 2, 2], [1, 1, 1], "moe.selected_experts"),
+        ] {
+            assert!(
+                matches!(load_balancing_loss(Tensor::<Flex, 3>::zeros(logits, &device),
+                Tensor::<Flex, 3, Int>::zeros(ids, &device), None),
+                Err(crate::Error::Shape { tensor, .. }) if tensor == field)
+            );
+        }
+        assert!(
+            matches!(load_balancing_loss(Tensor::<Flex, 3>::zeros([1, 1, 2], &device),
+            Tensor::<Flex, 3, Int>::from_ints([[[-1]]], &device), None),
+            Err(crate::Error::Shape { tensor, actual, .. }) if tensor == "moe.selected_experts" && actual.contains("-1"))
+        );
     }
 }
