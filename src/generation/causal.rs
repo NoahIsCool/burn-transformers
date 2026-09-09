@@ -14,7 +14,9 @@
 //! calls carry a padding ID with a false mask entry, so that row neither changes
 //! its cache nor influences token penalties.
 
-use burn::tensor::{Bool, ElementConversion, Int, Tensor, TensorData, backend::Backend};
+use burn::tensor::{
+    Bool, DType, Element, ElementConversion, Int, Tensor, TensorData, backend::Backend, bf16, f16,
+};
 
 use crate::{
     CausalLanguageModel, CausalLmInput, DecodeInput, Error, ForwardOptions, LogitsSelection,
@@ -621,20 +623,42 @@ fn tensor_i64_values<B: Backend, const D: usize>(
         })
 }
 
-/// Copies selected log probabilities to the host without transferring logits.
+/// Copies selected log probabilities using their runtime storage dtype.
+///
+/// Burn backends may execute F16/BF16 tensors even when their default
+/// `FloatElem` is F32. Reading with that associated type would reject valid
+/// mixed-precision output. Only the already-selected `[batch]` values cross
+/// the device boundary here; the vocabulary logits remain on the backend.
 fn tensor_f64_values<B: Backend>(tensor: Tensor<B, 1>, label: &str) -> Result<Vec<f64>> {
-    tensor
-        .try_into_data()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
-        })?
-        .to_vec::<B::FloatElem>()
-        .map(|values| {
-            values
-                .into_iter()
-                .map(|value| value.elem::<f64>())
-                .collect()
-        })
+    let data = tensor.try_into_data().map_err(|error| {
+        Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
+    })?;
+    host_float_data_f64(&data, label)
+}
+
+/// Converts floating host storage directly to F64 without a lower-precision stage.
+///
+/// F16, BF16, and F32 values have exact F64 representations; existing F64 values
+/// therefore retain their precision too. Typed borrowed slices validate byte
+/// alignment and length without allocating a second source buffer. Quantized
+/// or integer payloads are not log probabilities and fail contextually rather
+/// than being reinterpreted or dequantized.
+pub(super) fn host_float_data_f64(data: &TensorData, label: &str) -> Result<Vec<f64>> {
+    match data.dtype {
+        DType::F16 => float_slice_f64::<f16>(data, label),
+        DType::BF16 => float_slice_f64::<bf16>(data, label),
+        DType::F32 => float_slice_f64::<f32>(data, label),
+        DType::F64 => float_slice_f64::<f64>(data, label),
+        dtype => Err(Error::BackendCapability(format!(
+            "failed to read {label} from backend: unsupported probability dtype {dtype:?}"
+        ))),
+    }
+}
+
+/// Borrows a validated concrete float representation and promotes its values.
+fn float_slice_f64<E: Element>(data: &TensorData, label: &str) -> Result<Vec<f64>> {
+    data.as_slice::<E>()
+        .map(|values| values.iter().map(|&value| value.elem::<f64>()).collect())
         .map_err(|error| {
             Error::BackendCapability(format!("failed to read {label} from backend: {error}"))
         })
@@ -746,6 +770,69 @@ mod tests {
     };
 
     type TestBackend = Flex<f32, i32>;
+
+    /// Runtime half-precision selected values cannot be decoded as the backend's default F32.
+    #[test]
+    fn selected_log_probabilities_respect_runtime_float_dtype() {
+        use burn::tensor::DType;
+
+        let device = Default::default();
+        for strategy in [SamplingStrategy::Greedy, SamplingStrategy::Sample] {
+            let processor = crate::LogitsProcessor::<TestBackend>::new(
+                GenerationConfig {
+                    strategy,
+                    ..GenerationConfig::default()
+                },
+                2,
+                &device,
+            )
+            .expect("token processor");
+            for dtype in [DType::F16, DType::BF16, DType::F32, DType::F64] {
+                let logits =
+                    Tensor::<TestBackend, 2>::from_floats([[0.0, 0.0], [0.0, 0.0]], &device)
+                        .cast(dtype);
+                let selected = processor
+                    .select_with_log_probs(logits)
+                    .expect("selected probabilities");
+                assert_eq!(selected.log_probabilities.dtype(), dtype);
+                assert_eq!(selected.log_probabilities.dims(), [2]);
+                let values = super::tensor_f64_values(
+                    selected.log_probabilities,
+                    "selected probability fixture",
+                )
+                .expect("runtime dtype-aware host conversion");
+                assert_eq!(values.len(), 2);
+                assert!(
+                    values
+                        .iter()
+                        .all(|value| (*value + core::f64::consts::LN_2).abs() < 0.01)
+                );
+            }
+        }
+    }
+
+    /// F64 values keep sub-F32 precision, and malformed or non-floating storage is recoverable.
+    #[test]
+    fn host_probability_conversion_preserves_f64_and_rejects_invalid_storage() {
+        use burn::tensor::{DType, TensorData};
+
+        let exact = -1.0_f64 - 2.0_f64.powi(-40);
+        let data = TensorData::new(vec![exact], [1]);
+        assert_eq!(
+            super::host_float_data_f64(&data, "F64 fixture").expect("native F64"),
+            [exact]
+        );
+        let integer = TensorData::new(vec![1_i32], [1]);
+        let error = super::host_float_data_f64(&integer, "integer fixture")
+            .expect_err("probabilities must use float storage");
+        assert!(matches!(error, Error::BackendCapability(_)));
+        assert!(error.to_string().contains("integer fixture"));
+        let mut malformed = TensorData::new(vec![0_u8; 3], [3]);
+        malformed.dtype = DType::F32;
+        let error = super::host_float_data_f64(&malformed, "truncated fixture")
+            .expect_err("bad element size must not panic");
+        assert!(error.to_string().contains("truncated fixture"));
+    }
 
     /// Builds a deterministic tiny model with a real external KV cache.
     fn tiny_model() -> (

@@ -26,6 +26,8 @@ use burn::tensor::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::causal::host_float_data_f64;
+
 use crate::{
     CausalLmInput, DecodeInput, DecodeState, EncoderOutput, Error, FinishReason, ForwardOptions,
     LogitsSelection, Result, Seq2SeqLanguageModel, TokenMask,
@@ -909,7 +911,10 @@ fn extract_last_logits<B: Backend>(
     Ok(logits.squeeze_dim::<2>(1))
 }
 
-/// Computes row-wise log-softmax and transfers the exact candidate matrix.
+/// Computes row-wise log-softmax and transfers the existing beam candidate matrix.
+///
+/// Host decoding follows the tensor's runtime float dtype, preserving F64 values
+/// and accepting F16/BF16 results from backends whose default element type is F32.
 fn host_log_probabilities<B: Backend>(
     logits: Tensor<B, 2>,
     active: &[bool],
@@ -924,25 +929,14 @@ fn host_log_probabilities<B: Backend>(
     let device = logits.device();
     let active_mask =
         bool_tensor_from_values(active.to_vec(), [batch, 1], &device).expand([batch, vocabulary]);
-    log_softmax(logits.mask_fill(active_mask.bool_not(), 0.0), 1)
+    let data = log_softmax(logits.mask_fill(active_mask.bool_not(), 0.0), 1)
         .try_into_data()
         .map_err(|error| {
             Error::BackendCapability(format!(
                 "failed to read beam-search log probabilities from backend: {error}"
             ))
-        })?
-        .to_vec::<B::FloatElem>()
-        .map(|values| {
-            values
-                .into_iter()
-                .map(|value| value.elem::<f64>())
-                .collect()
-        })
-        .map_err(|error| {
-            Error::BackendCapability(format!(
-                "failed to read beam-search log probabilities from backend: {error}"
-            ))
-        })
+        })?;
+    host_float_data_f64(&data, "beam-search log probabilities")
 }
 
 /// Materializes a token mask or an all-valid rectangle on the host.
@@ -1103,6 +1097,27 @@ mod tests {
 
     type TestBackend = Flex<f32, i32>;
     type TestDevice = <TestBackend as BackendTypes>::Device;
+
+    /// Half-precision beam probabilities retain masking and match the F32 reference.
+    #[test]
+    fn beam_host_probabilities_respect_runtime_float_dtype() {
+        use burn::tensor::DType;
+
+        let device = Default::default();
+        let logits = Tensor::<TestBackend, 2>::from_floats([[0.0, 1.0], [-1.0, 2.0]], &device);
+        let reference = super::host_log_probabilities(logits.clone(), &[true, false], 2, 2)
+            .expect("F32 beam reference");
+        assert_eq!(reference.len(), 4);
+        for dtype in [DType::F16, DType::BF16, DType::F32, DType::F64] {
+            let actual =
+                super::host_log_probabilities(logits.clone().cast(dtype), &[true, false], 2, 2)
+                    .expect("runtime dtype-aware beam conversion");
+            assert_eq!(actual.len(), reference.len());
+            for (actual, reference) in actual.into_iter().zip(&reference) {
+                assert!(actual.is_finite() && (actual - reference).abs() < 0.02);
+            }
+        }
+    }
 
     /// Minimal configuration for the coordinator's scripted model.
     #[derive(Clone, Debug)]

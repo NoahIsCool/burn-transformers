@@ -14,7 +14,10 @@
 //! prefix whose probability mass reaches `p`; equivalently, a sorted item is
 //! retained when the cumulative mass *before* it is less than `p`. All filtering
 //! happens before the final softmax, with rejected scores set to negative
-//! infinity.
+//! infinity. Probability sums promote F16/BF16 scores to F32 to retain interior
+//! random thresholds and small categorical masses; native F64 scores remain
+//! F64. Penalties and returned scores retain their input runtime dtype, which
+//! need not equal the backend's default float element type.
 
 mod causal;
 mod seq2seq;
@@ -32,7 +35,7 @@ use core::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use burn::tensor::{
-    Bool, ElementConversion, IndexingUpdateOp, Int, Shape, Tensor, TensorData,
+    Bool, DType, ElementConversion, IndexingUpdateOp, Int, Shape, Tensor, TensorData,
     activation::{log_softmax, softmax},
     backend::Backend,
 };
@@ -318,9 +321,14 @@ impl<B: Backend> LogitsProcessor<B> {
         })?;
         let uniforms = self.next_uniforms(batch)?;
         let device = logits.device();
+        let probability_dtype = probability_accumulation_dtype(logits.dtype());
         let thresholds = Tensor::<B, 2>::from_data(TensorData::new(uniforms, [batch, 1]), &device)
+            .cast(probability_dtype)
             .expand([batch, self.vocabulary_size]);
-        let cumulative = softmax(logits, 1).cumsum(1);
+        // Keep the exact seeded F32 uniforms: casting them to F16/BF16 could
+        // round an interior draw to zero or one. Promote probability arithmetic
+        // instead, while retaining F64 inputs and transferring no vocabulary.
+        let cumulative = softmax(logits.cast(probability_dtype), 1).cumsum(1);
 
         // The number of CDF entries strictly below u is the first category
         // whose inclusive cumulative mass reaches u. Clamp only protects
@@ -475,10 +483,23 @@ impl<B: Backend> LogitsProcessor<B> {
             let penalty = observed
                 .int()
                 .float()
+                .cast(logits.dtype())
                 .mul_scalar(self.config.presence_penalty);
             logits = logits - penalty;
         }
         logits
+    }
+}
+
+/// Chooses at least F32 precision for cumulative probability arithmetic.
+///
+/// Half-precision cumulative sums can lose small masses or reach one early.
+/// F32 also exactly represents every seeded uniform; F64 scores are never
+/// narrowed, so backends with native double precision keep that precision.
+fn probability_accumulation_dtype(dtype: DType) -> DType {
+    match dtype {
+        DType::F16 | DType::BF16 => DType::F32,
+        _ => dtype,
     }
 }
 
@@ -510,7 +531,12 @@ fn filter_top_k<B: Backend>(logits: Tensor<B, 2>, top_k: usize) -> Tensor<B, 2> 
 /// Keeps the minimal descending-probability prefix whose mass reaches `top_p`.
 fn filter_top_p<B: Backend>(logits: Tensor<B, 2>, top_p: f64) -> Tensor<B, 2> {
     let [batch, vocabulary] = logits.dims();
-    let probabilities = softmax(logits.clone(), 1);
+    let probabilities = softmax(
+        logits
+            .clone()
+            .cast(probability_accumulation_dtype(logits.dtype())),
+        1,
+    );
     let (sorted, indices) = probabilities.sort_descending_with_indices(1);
     let mass_before = sorted.clone().cumsum(1) - sorted;
     let keep_sorted = mass_before.lower_elem(top_p);
@@ -715,7 +741,7 @@ impl GenerationTracker {
 #[cfg(test)]
 mod tests {
     use burn::backend::Flex;
-    use burn::tensor::{Int, Tensor, TensorData, Tolerance};
+    use burn::tensor::{DType, Int, Tensor, TensorData, Tolerance};
 
     use super::{
         FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, SamplingStrategy,
@@ -936,6 +962,111 @@ mod tests {
                 .into_data();
             assert_eq!(first_ids, second_ids);
         }
+    }
+
+    /// Runtime float casts retain the same uniform stream and inverse-CDF bins.
+    #[test]
+    fn sampling_runtime_dtypes_preserve_seeded_uniforms() {
+        let device = Default::default();
+        for dtype in [DType::F16, DType::BF16, DType::F32, DType::F64] {
+            let processor = LogitsProcessor::<TestBackend>::new(
+                GenerationConfig {
+                    strategy: SamplingStrategy::Sample,
+                    seed: 91,
+                    ..Default::default()
+                },
+                4,
+                &device,
+            )
+            .expect("valid processor");
+            for step in 0..3 {
+                let actual = processor
+                    .select(Tensor::<TestBackend, 2>::zeros([64, 4], &device).cast(dtype))
+                    .expect("runtime dtype selection")
+                    .into_data()
+                    .to_vec::<i32>()
+                    .expect("integer selections");
+                let expected: Vec<i32> = (0..64)
+                    .map(|row| {
+                        let uniform = splitmix64_uniform(91, step * 64 + row);
+                        // Uniform logits have exact quarter-interval bins.
+                        (1..=4).filter(|&bin| (bin as f32) * 0.25 < uniform).count() as i32
+                    })
+                    .collect();
+                assert_eq!(actual, expected, "dtype {dtype:?}, draw {step}");
+            }
+        }
+    }
+
+    /// Masked penalties, temperature, top-k, top-p, and sampling compose in each dtype.
+    #[test]
+    fn runtime_dtypes_support_penalties_and_probability_filters() {
+        let device = Default::default();
+        for dtype in [DType::F16, DType::BF16, DType::F32, DType::F64] {
+            let penalty_processor = LogitsProcessor::<TestBackend>::new(
+                GenerationConfig {
+                    repetition_penalty: 2.0,
+                    presence_penalty: 0.5,
+                    ..Default::default()
+                },
+                4,
+                &device,
+            )
+            .expect("valid penalties");
+            let history = Tensor::from_ints([[0, 1, 99], [1, 1, 99]], &device);
+            let mask = TokenMask::new(Tensor::from_bool(
+                [[true, true, false], [true, true, false]].into(),
+                &device,
+            ));
+            let logits =
+                Tensor::from_floats([[4.0, -3.0, 2.0, 1.0], [-1.0, 4.0, 2.0, 0.0]], &device)
+                    .cast(dtype);
+            let penalized = penalty_processor
+                .process_with_mask(logits, Some(history), Some(mask))
+                .expect("masked mixed-dtype penalties");
+            assert_eq!(penalized.dtype(), dtype);
+            assert_eq!(
+                super::causal::host_float_data_f64(&penalized.clone().into_data(), "penalties")
+                    .expect("floating output"),
+                [1.5, -6.5, 2.0, 1.0, -1.0, 1.5, 2.0, 0.0],
+                "runtime dtype {dtype:?}"
+            );
+            let sampler = LogitsProcessor::<TestBackend>::new(
+                GenerationConfig {
+                    strategy: SamplingStrategy::Sample,
+                    temperature: 0.5,
+                    top_k: Some(2),
+                    top_p: Some(0.7),
+                    ..Default::default()
+                },
+                4,
+                &device,
+            )
+            .expect("valid filters");
+            let processed = sampler
+                .process(penalized, None)
+                .expect("runtime dtype filters");
+            assert_eq!(processed.dtype(), dtype);
+            let values = super::causal::host_float_data_f64(
+                &processed.clone().into_data(),
+                "probability filters",
+            )
+            .expect("floating filtered output");
+            // After temperature, the largest two scores differ by one, so
+            // their larger probability exceeds 0.7 and only token two remains.
+            assert_eq!(values.iter().filter(|value| value.is_finite()).count(), 2);
+            assert_eq!(values[2], 4.0);
+            assert_eq!(values[6], 4.0);
+            sampler
+                .select(processed)
+                .expect("runtime dtype sample")
+                .into_data()
+                .assert_eq(&TensorData::from([2_i32, 2]), false);
+        }
+        assert_eq!(
+            super::probability_accumulation_dtype(DType::F64),
+            DType::F64
+        );
     }
 
     /// Stream cloning snapshots state, uniforms stay interior, and exhaustion is safe.
