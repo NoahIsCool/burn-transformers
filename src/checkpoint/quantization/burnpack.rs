@@ -1373,6 +1373,7 @@ fn record_validation_read(
     Ok(())
 }
 
+/// Rejects mapped storage whose physical axes or dtype contradict the manifest.
 fn validate_store_descriptors(
     store: &mut BurnpackStore,
     manifest: &BurnpackQuantizationManifest,
@@ -1415,6 +1416,7 @@ fn validate_store_descriptors(
     Ok(())
 }
 
+/// Bounds the manifest's one-dimensional U8 storage before reading its JSON.
 fn validate_manifest_descriptor(
     store: &mut BurnpackStore,
     max_manifest_bytes: usize,
@@ -1453,6 +1455,7 @@ fn validate_manifest_descriptor(
     Ok(*manifest_bytes)
 }
 
+/// Requires exact physical/manifest key agreement apart from the reserved metadata tensor.
 fn validate_key_sets(keys: &[String], manifest: &BurnpackQuantizationManifest) -> Result<()> {
     for name in manifest.tensors.keys() {
         if keys.binary_search(name).is_err() {
@@ -1473,6 +1476,7 @@ fn validate_key_sets(keys: &[String], manifest: &BurnpackQuantizationManifest) -
     Ok(())
 }
 
+/// Materializes one mapped snapshot and preserves lookup/read operation context.
 fn materialize_store_tensor(store: &mut BurnpackStore, name: &str) -> Result<Option<TensorData>> {
     store
         .get_snapshot(name)
@@ -1491,6 +1495,7 @@ fn materialize_store_tensor(store: &mut BurnpackStore, name: &str) -> Result<Opt
         .transpose()
 }
 
+/// Checks dtype, logical byte-vector shape, and actual storage length independently.
 fn validate_u8_payload_descriptor(name: &str, data: &TensorData, expected: usize) -> Result<()> {
     if data.dtype != DType::U8 {
         return Err(QuantizationError::InvalidArtifactTensor {
@@ -1519,6 +1524,7 @@ fn validate_u8_payload_descriptor(name: &str, data: &TensorData, expected: usize
     Ok(())
 }
 
+/// Validates portable metadata before converting its complete payload length to a host index.
 fn payload_len_usize(metadata: &QuantizedTensorMetadata) -> Result<usize> {
     metadata.validate()?;
     let bytes = metadata
@@ -1757,5 +1763,231 @@ impl Drop for TemporaryOutput {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
         let _ = fs::remove_dir(&self.directory);
+    }
+}
+
+#[cfg(test)]
+mod validation_edge_tests {
+    use super::*;
+    use crate::checkpoint::quantization::{QuantizationGroupSize, SymmetricQuantization};
+
+    /// Produces one small row-aligned payload with valid codes and positive scales.
+    fn packed_fixture() -> (QuantizedTensorMetadata, Vec<u8>) {
+        let weight = quantize_tensor_data(
+            &TensorData::new((0..64).map(|index| index as f32 - 31.0).collect(), [2, 32]),
+            WeightQuantizationConfig {
+                scheme: SymmetricQuantization::Q4,
+                group_size: QuantizationGroupSize::new(32).unwrap(),
+            },
+        )
+        .unwrap();
+        let mut payload = Vec::new();
+        weight.write_burnpack_payload(&mut payload).unwrap();
+        (weight.metadata().clone(), payload)
+    }
+
+    /// Rejects each upstream storage limit before any file or model allocation.
+    #[test]
+    fn independent_session_maxima_and_open_limit_are_enforced() {
+        let defaults = BurnpackSessionLimits::default();
+        for (field, limits) in [
+            (
+                "max_tensors",
+                BurnpackSessionLimits {
+                    max_tensors: UPSTREAM_MAX_TENSORS,
+                    ..defaults
+                },
+            ),
+            (
+                "max_staged_bytes",
+                BurnpackSessionLimits {
+                    max_staged_bytes: DEFAULT_MAX_STAGED_BYTES + 1,
+                    ..defaults
+                },
+            ),
+            (
+                "max_tensor_payload_bytes",
+                BurnpackSessionLimits {
+                    max_tensor_payload_bytes: UPSTREAM_MAX_TENSOR_BYTES + 1,
+                    ..defaults
+                },
+            ),
+            (
+                "max_manifest_bytes",
+                BurnpackSessionLimits {
+                    max_manifest_bytes: DEFAULT_MAX_MANIFEST_BYTES + 1,
+                    ..defaults
+                },
+            ),
+            (
+                "max_tensor_name_bytes",
+                BurnpackSessionLimits {
+                    max_tensor_name_bytes: DEFAULT_MAX_TENSOR_NAME_BYTES + 1,
+                    ..defaults
+                },
+            ),
+        ] {
+            assert!(
+                matches!(limits.validate(), Err(QuantizationError::InvalidSessionLimit { field: actual, .. }) if actual == field)
+            );
+        }
+        assert!(matches!(
+            QuantizedBurnpackArtifact::open_with_manifest_limit(
+                "never-opened.bpk",
+                DEFAULT_MAX_MANIFEST_BYTES + 1
+            ),
+            Err(QuantizationError::InvalidSessionLimit {
+                field: "max_manifest_bytes",
+                ..
+            })
+        ));
+    }
+
+    /// Dtype, shape and byte count remain separate errors, including mutated TensorData metadata.
+    #[test]
+    fn payload_descriptor_rejects_each_physical_inconsistency() {
+        let mut wrong_storage_length = TensorData::new(vec![1_u8, 2], [2]);
+        wrong_storage_length.shape = Shape::new([4]);
+        for (data, expected, fragment) in [
+            (TensorData::new(vec![1_f32], [1]), 1, "physical dtype"),
+            (
+                TensorData::new(vec![1_u8, 2, 3, 4], [2, 2]),
+                4,
+                "physical shape",
+            ),
+            (wrong_storage_length, 4, "physical payload has 2 bytes"),
+        ] {
+            match validate_u8_payload_descriptor("layer.weight", &data, expected).unwrap_err() {
+                QuantizationError::InvalidArtifactTensor { name, reason } => {
+                    assert_eq!(name, "layer.weight");
+                    assert!(reason.contains(fragment), "{reason}");
+                }
+                other => panic!("unexpected descriptor error: {other}"),
+            }
+        }
+        validate_u8_payload_descriptor("empty", &TensorData::new(Vec::<u8>::new(), [0]), 0)
+            .unwrap();
+    }
+
+    /// Missing/truncated input fails before ownership and does not invent read progress.
+    #[test]
+    fn decoder_rejects_length_and_arithmetic_errors_before_copying() {
+        let (metadata, bytes) = packed_fixture();
+        let failure = decode_payload("layer.weight", metadata.clone(), &bytes[..bytes.len() - 1])
+            .expect_err("short payload");
+        assert!(matches!(
+            failure.error,
+            QuantizationError::InvalidArtifactTensor { .. }
+        ));
+        assert_eq!(failure.stats.tensor_reads, 0);
+        assert_eq!(failure.stats.payload_bytes, 0);
+        assert_eq!(failure.stats.peak_owned_payload_bytes, 0);
+
+        let impossible = QuantizedTensorMetadata {
+            packed_value_bytes: u64::MAX,
+            scale_bytes: 4,
+            ..metadata
+        };
+        let failure = decode_payload("overflow", impossible, &[]).expect_err("length overflow");
+        assert!(matches!(
+            failure.error,
+            QuantizationError::ByteLengthOverflow { .. }
+        ));
+        assert_eq!(failure.stats.tensor_reads, 0);
+    }
+
+    /// Digest and scale-layout failures retain the exact completed owned-byte prefix.
+    #[test]
+    fn decoder_audit_distinguishes_copied_digest_and_scale_failures() {
+        let (mut metadata, bytes) = packed_fixture();
+        metadata.payload_sha256 = Some("0".repeat(64));
+        let failure =
+            decode_payload("digest", metadata.clone(), &bytes).expect_err("digest mismatch");
+        assert!(matches!(
+            failure.error,
+            QuantizationError::PackedPayloadDigestMismatch { .. }
+        ));
+        assert_eq!(failure.stats.tensor_reads, 1);
+        assert_eq!(failure.stats.payload_bytes, bytes.len() as u64);
+        assert!(failure.stats.peak_owned_payload_bytes >= bytes.len() as u64);
+
+        metadata.payload_sha256 = None;
+        metadata.scale_bytes = 3;
+        let invalid_bytes = &bytes[..metadata.packed_value_bytes as usize + 3];
+        let failure =
+            decode_payload("scales", metadata, invalid_bytes).expect_err("unaligned scales");
+        assert!(
+            matches!(failure.error, QuantizationError::InvalidMetadata { ref reason } if reason.contains("divisible by four"))
+        );
+        assert_eq!(failure.stats.tensor_reads, 1);
+        assert_eq!(failure.stats.payload_bytes, invalid_bytes.len() as u64);
+    }
+
+    /// Owned-byte accounting measures concurrent buffers and rejects both overflow factors.
+    #[test]
+    fn owned_memory_accounting_is_checked() {
+        assert_eq!(owned_payload_bytes(40, 2).unwrap(), 48);
+        assert_eq!(owned_payload_bytes(0, 0).unwrap(), 0);
+        assert!(matches!(
+            owned_payload_bytes(0, usize::MAX),
+            Err(QuantizationError::ByteLengthOverflow {
+                context: "owned packed-scale capacity"
+            })
+        ));
+        #[cfg(target_pointer_width = "64")]
+        assert!(matches!(
+            owned_payload_bytes(usize::MAX, 1),
+            Err(QuantizationError::ByteLengthOverflow {
+                context: "owned packed decoder high-water mark"
+            })
+        ));
+    }
+
+    /// Aggregation rejects either overflowing counter without changing any audit field.
+    #[test]
+    fn validation_read_accumulation_is_atomic_and_keeps_high_water() {
+        let read = BurnpackPayloadReadStats {
+            tensor_reads: 1,
+            payload_bytes: 40,
+            peak_owned_payload_bytes: 48,
+        };
+        let snapshot = |audit: &BurnpackValidationAudit| {
+            [
+                audit.tensor_reads,
+                audit.tensors_validated as u64,
+                audit.payload_bytes,
+                audit.largest_payload_bytes,
+                audit.peak_owned_payload_bytes,
+            ]
+        };
+        for (reads, bytes, context) in [
+            (u64::MAX, 0, "Burnpack validation tensor reads"),
+            (0, u64::MAX, "Burnpack validation payload bytes"),
+        ] {
+            let mut audit = BurnpackValidationAudit {
+                tensor_reads: reads,
+                tensors_validated: 7,
+                payload_bytes: bytes,
+                largest_payload_bytes: 20,
+                peak_owned_payload_bytes: 32,
+            };
+            let before = snapshot(&audit);
+            assert!(
+                matches!(record_validation_read(&mut audit, read), Err(QuantizationError::ByteLengthOverflow { context: actual }) if actual == context)
+            );
+            assert_eq!(snapshot(&audit), before);
+        }
+        let mut audit = BurnpackValidationAudit::default();
+        record_validation_read(&mut audit, read).unwrap();
+        record_validation_read(
+            &mut audit,
+            BurnpackPayloadReadStats {
+                payload_bytes: 8,
+                peak_owned_payload_bytes: 12,
+                ..read
+            },
+        )
+        .unwrap();
+        assert_eq!(snapshot(&audit), [2, 0, 48, 40, 48]);
     }
 }
