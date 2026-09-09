@@ -23,3 +23,13 @@ versioning, with the additional pre-1.0 compatibility policy documented in
 - Experimental model-family implementations and native Q4/Q8 Burnpack tooling;
   exact advertised checkpoint support remains governed by the committed
   acceptance records rather than by architecture presence alone.
+- A content-authenticated FLAN-T5-small F32 release profile on Flex and Metal,
+  covering strict loading, local tokenization, complete official-reference
+  vectors, cached 32-token decoding, beam search, right padding, and the
+  checkpoint's 512-token source boundary.
+
+### Fixed
+
+- Preserve backend-native Boolean dtype tags when importing dynamic token masks
+  and gathering beam/cache rows, avoiding Burn 0.21 Flex panics in logical mask
+  operations.

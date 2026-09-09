@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "authenticated_cpu_f32_oracle_full_vector_cached_generation_padding_and_context_boundary_verified_on_flex_pending_metal_acceptance",
+  "phase": "authenticated_cpu_f32_oracle_full_vector_cached_generation_padding_and_context_boundary_verified_on_flex_and_metal_pending_integrated_support_promotion",
   "repository": "google/flan-t5-small",
   "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
   "artifact_layout": {
@@ -41,7 +41,8 @@
     "cached_and_teacher_forced_32_rows_compared": true,
     "right_padded_batch_compared": true,
     "reference_beam_tokens_compared": true,
-    "accelerator_inference_validated": false,
+    "accelerator_inference_validated": true,
+    "metal_f32_inference_validated": true,
     "reference_generation_32_tokens_compared": true,
     "context_boundary_stress_validated": true,
     "context_boundary_tokens": 512,
@@ -127,6 +128,54 @@
       "timing_samples": 1,
       "standardized_performance_gate_complete": false,
       "peak_memory_recorded": false
+    },
+    "metal": {
+      "backend": "Metal",
+      "dtype": "F32",
+      "burn_version": "0.21.0",
+      "rustc": "1.94.0-nightly (4f14395c3 2025-12-22)",
+      "platform": "macOS 15.7.9 arm64, Apple M3 Max, 96 GB unified memory",
+      "crate_commit": "3c344f2505f5bf6ed49a25e229a5f0ecb2945ca9",
+      "acceptance_test_commit": "31ecbe8c2d5263091ef4ba2600df43097f8c86d8",
+      "acceptance_test_sha256": "7b275f0a55db29204baf65520ee25e3e54b58c6c77b1d59f8b878657929d6c64",
+      "cargo_profile": "test",
+      "cargo_features": ["std", "metal", "tokenizers"],
+      "command": "CARGO_TARGET_DIR=<external-target> cargo test --offline --manifest-path crates/transformers/Cargo.toml --no-default-features --features std,metal,tokenizers --test flan_t5_small flan_t5_small_metal_matches_official_reference -- --ignored --exact --nocapture --test-threads=1",
+      "comparison": {
+        "required_cosine": 0.999999,
+        "absolute_tolerance": 0.0001,
+        "relative_tolerance": 0.0001,
+        "minimum_cosine": 0.999999999999,
+        "maximum_absolute_error": 0.000076294,
+        "total_tolerance_failures": 0
+      },
+      "actual_f32le_sha256": {
+        "encoder_final": "0338e69c5259299636d22597d8bf667cf326ceda8a35b78119698ddcadc27f26",
+        "decoder_first_final": "c120253f75b47286be35d4dbff9dc0177d533d197315700773dbcb62d265ce83",
+        "first_logits": "fe8c24615690911bb5b9e7bf11dc5a8524367742fe9292e568d2993367c1108d",
+        "cached_logits_32": "6c065beeb7e405185fa7633d8d958a7ffc79ef0c3c914c65eab409d7f5b8aacc",
+        "teacher_logits_32": "38ed24cd1bbf31acfb8fe7d167525562b9e6642f871abbf855815ca0a8fbb07b",
+        "right_padded_first_logits": "cfaa7d8309d7c46ef919218736c59dbdb39a1f87bda47fe6fec9411ec4321ff1",
+        "boundary_512_first_logits": "5a4cb95431905b37b85d7fade4d21f5e21532a9fac95dda2414992818f645cd6"
+      },
+      "generation": {
+        "greedy_tokens_identical": true,
+        "cached_and_teacher_top1_identical_at_every_step": true,
+        "beam_tokens_identical": true
+      },
+      "diagnostic_timings_seconds": {
+        "load": 3.106,
+        "stateless_prompt": 0.602,
+        "cached_generation_32": 2.383,
+        "teacher_forced_32": 0.649,
+        "context_boundary_512": 0.240,
+        "beam_search": 4.911,
+        "gate_total_excluding_compilation": 13.08
+      },
+      "timing_classification": "non_benchmark_diagnostic",
+      "timing_samples": 1,
+      "standardized_performance_gate_complete": false,
+      "peak_unified_memory_recorded": false
     }
   }
 }
