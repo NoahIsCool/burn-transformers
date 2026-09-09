@@ -1,7 +1,10 @@
 """Pure release-runner tests: no Cargo commands, network, or GPU required."""
 
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 import tomllib
 from unittest import mock
@@ -61,6 +64,65 @@ class ReleaseGateTests(unittest.TestCase):
         entry = file_entry("src/cache.rs", 100, 100)
         with self.assertRaisesRegex(ValueError, "duplicate"):
             GATES.coverage_summary({"data": [{"files": [entry]}, {"files": [entry]}]}, GATES.CRATE)
+
+    def test_successful_export_with_warnings_is_not_qualified(self):
+        """LLVM's zero status does not excuse stale, mismatched, or partial data."""
+
+        for diagnostic in (
+            "warning: 30 functions have mismatched data",
+            "  warning: profile data may be out of date",
+            "llvm-cov: warning: malformed profile",
+            "/tmp/source.rs:12:3: warning: incomplete coverage",
+            "warning[unused]: instrumentation issue",
+            "\x1b[33mwarning\x1b[0m: stale profile",
+            "error: failed to merge",
+            "llvm-profdata: error: corrupt counters",
+            "WARNING: partial data",
+        ):
+            with self.subTest(diagnostic=diagnostic), self.assertRaisesRegex(ValueError, "unqualified"):
+                GATES.require_clean_coverage_log(f"running 10 tests\n{diagnostic}\nfinished\n")
+        GATES.require_clean_coverage_log(
+            "test source::warning::context ... ok\n"
+            "test errors::tests::error_is_contextual ... ok\n"
+            "Finished test profile\nSummary: 30 functions\n"
+        )
+
+    def test_coverage_validation_failure_records_native_success_separately(self):
+        """An invalid export must leave a failed manifest and skip later gates."""
+
+        cases = (
+            ("warning: 30 functions have mismatched data\n", None, "unqualified"),
+            ("finished\n", "{", "Expecting"),
+            ("finished\n", None, "coverage.json"),
+            ("finished\n", '{"data": []}', "empty coverage"),
+        )
+        for log, report, expected in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as temporary:
+                crate = Path(temporary)
+
+                def run(command, **kwargs):
+                    """Emit a synthetic native result without running Cargo or LLVM."""
+
+                    kwargs["stdout"].write(log)
+                    if report is not None:
+                        (Path(kwargs["stdout"].name).parent / "coverage.json").write_text(report)
+                    return subprocess.CompletedProcess(command, 0)
+
+                with (
+                    mock.patch.object(GATES, "CRATE", crate),
+                    mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "coverage", "--gate", "source"]),
+                    mock.patch.object(GATES.subprocess, "run", side_effect=run) as process,
+                    mock.patch("builtins.print"),
+                ):
+                    self.assertEqual(GATES.main(), 1)
+                self.assertEqual(process.call_count, 1)
+                manifest, = (crate / "target/release-gates").glob("*/results.json")
+                result = json.loads(manifest.read_text())
+                self.assertFalse(result["passed"])
+                self.assertEqual(result["gates"][0]["process_exit_code"], 0)
+                self.assertEqual(result["gates"][0]["exit_code"], 1)
+                self.assertIn(expected, result["gates"][0]["validation_error"])
+                self.assertNotIn("coverage", result["gates"][0])
 
     def test_all_command_groups_are_scoped(self):
         """Build every group without shell interpolation or mutable lockfiles."""

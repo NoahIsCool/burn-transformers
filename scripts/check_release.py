@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -23,6 +24,22 @@ FEATURES = "std,flex,tokenizers,chat-templates,autodiff"
 GATES = ("source", "msrv", "coverage", "dependencies", "accelerator-compile", "package")
 # These are maintenance notices, not vulnerability waivers. New IDs fail.
 MAINTENANCE_NOTICES = ("RUSTSEC-2025-0141", "RUSTSEC-2024-0436")
+
+
+def require_clean_coverage_log(log: str) -> None:
+    """Reject compiler/exporter warnings even when the native process exits zero.
+
+    LLVM may export partial coverage after reporting mismatched function data.
+    Such counters must not enter a gate. No warning is allowlisted here: a new
+    diagnostic requires review instead of silently accepting weaker evidence.
+    ANSI terminal styling is ignored so it cannot hide a diagnostic prefix.
+    """
+
+    plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log)
+    diagnostic = re.compile(r"^\s*(?:.*?:\s+)?(?:warning|error)(?:\[[^]\n]+\])?:(?:\s|$)", re.IGNORECASE)
+    for line in plain.splitlines():
+        if diagnostic.match(line):
+            raise ValueError(f"unqualified coverage diagnostic: {line.strip()}")
 
 
 def coverage_summary(report: dict, crate: Path) -> dict:
@@ -180,6 +197,7 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=False)
     environment = dict(os.environ)
     environment.setdefault("CARGO_INCREMENTAL", "0")
+    environment["CARGO_TERM_COLOR"] = "never"
     environment["RUSTDOCFLAGS"] = environment.get("RUSTDOCFLAGS", "") + " -D warnings"
     results = {"schema_version": 1, "created_utc": stamp, "gates": [], "passed": False}
     for index, (gate, command) in enumerate(plan):
@@ -189,14 +207,23 @@ def main() -> int:
         with log.open("x") as stream:
             completed = subprocess.run(command, cwd=CRATE, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=False)
         row = {"gate": gate, "command": command, "exit_code": completed.returncode,
+               "process_exit_code": completed.returncode,
                "seconds": (datetime.now(timezone.utc) - started).total_seconds(), "log": log.name}
         results["gates"].append(row)
-        if completed.returncode == 0 and gate == "coverage":
-            row["coverage"] = coverage_summary(json.loads((output / "coverage.json").read_text()), CRATE)
-            if not row["coverage"]["passed"]:
-                row["exit_code"] = 1
-        if completed.returncode == 0 and gate == "package" and "--list" in command:
-            row["package_files"] = validate_package_listing(log.read_text())
+        try:
+            if completed.returncode == 0 and gate == "coverage":
+                require_clean_coverage_log(log.read_text())
+                row["coverage"] = coverage_summary(json.loads((output / "coverage.json").read_text()), CRATE)
+                if not row["coverage"]["passed"]:
+                    row["exit_code"] = 1
+            if completed.returncode == 0 and gate == "package" and "--list" in command:
+                row["package_files"] = validate_package_listing(log.read_text())
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            # Preserve the distinction between a successful native process and
+            # invalid evidence, including a malformed/missing export or unsafe
+            # package inventory. Never leave an interrupted validation green.
+            row["validation_error"] = str(error)
+            row["exit_code"] = 1
         # A successfully executed prefix is not completion: an interruption or
         # missing tool at the next step must never leave a passing manifest.
         results["passed"] = index + 1 == len(plan) and all(item["exit_code"] == 0 for item in results["gates"])

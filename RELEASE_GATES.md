@@ -28,6 +28,9 @@ versions are `cargo-llvm-cov 0.6.21`, `cargo-audit 0.22.2`, `cargo-deny 0.20.2`,
 and `cargo-fuzz 0.13.2`. LLVM tools must match the selected Rust toolchain.
 The MSRV gate checks `rustc --version` exactly: `--msrv-toolchain stable` is
 permitted only while that local alias actually resolves to Rust **1.92.0**.
+Coverage export warnings (including mismatched profile data) fail validation
+even if LLVM exits zero. The manifest retains the native exit status separately
+from evidence-validation failure; a partial export is never a passing gate.
 Source checks use Flex, tokenizers, templates, and autodiff; accelerator compile
 checks select Metal, CUDA, and ROCm separately and execute no kernels. Also run
 all-feature Clippy on the equipped build host before release:
