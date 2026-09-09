@@ -735,4 +735,313 @@ mod tests {
         assert_eq!(failure.provenance, Default::default());
         assert_eq!(std::fs::read(&output).unwrap(), b"original");
     }
+
+    /// Creates a strict identity plan for arbitrary small conversion targets.
+    fn identity_fixture(root: &Path, names: &[&'static str]) -> (CheckpointManifest, LoadPlan) {
+        let tensors = names
+            .iter()
+            .map(|&name| FixtureTensor {
+                name,
+                shape: vec![4, 8],
+                values: vec![1.0; 32],
+            })
+            .collect::<Vec<_>>();
+        write_checkpoint(root, &tensors);
+        let manifest = discover_checkpoint(root, &LoadOptions::default()).unwrap();
+        let expected = names
+            .iter()
+            .map(|&name| ExpectedTensor::new(name, [4, 8]))
+            .collect::<Vec<_>>();
+        let plan = build_load_plan(
+            &manifest,
+            &expected,
+            &MappingPlan::identity(&expected),
+            &LoadOptions::default(),
+        )
+        .unwrap();
+        (manifest, plan)
+    }
+
+    /// Seeds stale runtime categories to ensure failed conversions do not inherit them.
+    fn stale_report(plan: &mut LoadPlan) {
+        plan.report.applied.push("old".into());
+        plan.report.quantized.push(QuantizationRecord {
+            target: "old".into(),
+            scheme: "old".into(),
+            bytes: 1,
+        });
+        plan.report
+            .equivalence_verified
+            .push(crate::checkpoint::CheckpointEquivalenceRecord::new(
+                "old", "owner",
+            ));
+    }
+
+    /// Setup errors avoid hashing and preserve the source error's inspectable chain.
+    #[test]
+    fn invalid_conversion_limits_reset_stale_progress_before_checkpoint_access() {
+        let root = tempfile::tempdir().unwrap();
+        let (manifest, mut plan) = identity_fixture(root.path(), &["weight"]);
+        stale_report(&mut plan);
+        std::fs::remove_file(&manifest.shards[0].path).unwrap();
+        let output = root.path().join("invalid-limit.bpk");
+        let failure = quantize_local_checkpoint_to_burnpack(
+            &manifest,
+            &plan,
+            &output,
+            QuantizedCheckpointOptions {
+                limits: BurnpackSessionLimits {
+                    max_tensors: 0,
+                    ..BurnpackSessionLimits::default()
+                },
+                ..QuantizedCheckpointOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(failure.failed_target.is_none());
+        assert_eq!(failure.provenance, ProvenanceExecutionStats::default());
+        assert_eq!(failure.execution, ExecutionStats::default());
+        assert!(failure.report.applied.is_empty());
+        assert!(failure.report.quantized.is_empty());
+        assert!(failure.report.equivalence_verified.is_empty());
+        assert!(
+            failure
+                .to_string()
+                .starts_with("checkpoint quantization failed for")
+        );
+        let cause = StdError::source(failure.as_ref()).unwrap();
+        assert!(
+            cause
+                .source()
+                .unwrap()
+                .downcast_ref::<QuantizationError>()
+                .is_some()
+        );
+        assert!(matches!(
+            failure.cause,
+            CheckpointQuantizationFailureCause::Quantization(
+                QuantizationError::InvalidSessionLimit {
+                    field: "max_tensors",
+                    ..
+                }
+            )
+        ));
+        assert!(!output.exists());
+    }
+
+    /// A failed initial hash reports its completed prefix without staging a tensor.
+    #[test]
+    fn initial_provenance_failure_records_partial_hashing_without_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut manifest, plan) = identity_fixture(root.path(), &["weight"]);
+        let mut absent = manifest.shards[0].clone();
+        absent.relative_path = "missing.safetensors".into();
+        absent.path = manifest.root.join(&absent.relative_path);
+        manifest.shards.push(absent);
+        let output = root.path().join("missing-source.bpk");
+        let failure = quantize_local_checkpoint_to_burnpack(
+            &manifest,
+            &plan,
+            &output,
+            QuantizedCheckpointOptions::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            failure.cause,
+            CheckpointQuantizationFailureCause::Quantization(QuantizationError::ArtifactIo {
+                operation: "canonicalize checkpoint shard for provenance",
+                ..
+            })
+        ));
+        let pre = failure.provenance.pre_execution.unwrap();
+        assert_eq!(pre.shards_hashed, 1);
+        assert_eq!(pre.bytes_hashed, manifest.shards[0].file_bytes);
+        assert_eq!(pre.passes_completed, 0);
+        assert_eq!(failure.provenance.post_execution, None);
+        assert_eq!(failure.execution, ExecutionStats::default());
+        assert_eq!(failure.staging.tensor_count, 0);
+        assert!(failure.report.applied.is_empty());
+        assert!(!output.exists());
+    }
+
+    /// Invalid public plans remain checkpoint errors after the initial source hash.
+    #[test]
+    fn malformed_conversion_plan_never_reaches_the_quantization_sink() {
+        let root = tempfile::tempdir().unwrap();
+        let (manifest, mut plan) = identity_fixture(root.path(), &["weight"]);
+        plan.tensors[0].sources[0].data_offsets[1] -= 1;
+        let output = root.path().join("bad-plan.bpk");
+        let failure = quantize_local_checkpoint_to_burnpack(
+            &manifest,
+            &plan,
+            &output,
+            QuantizedCheckpointOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(failure.cause, CheckpointQuantizationFailureCause::Checkpoint(
+            CheckpointError::InvalidMapping { ref message }) if message.contains("offsets describe"))
+        );
+        assert!(failure.failed_target.is_none());
+        assert!(failure.report.applied.is_empty());
+        assert!(failure.report.quantized.is_empty());
+        assert_eq!(failure.execution.source_reads, 0);
+        assert_eq!(failure.staging.tensor_count, 0);
+        assert_eq!(
+            failure.provenance.pre_execution.unwrap().bytes_hashed,
+            manifest.artifact_bytes
+        );
+        assert_eq!(failure.provenance.post_execution, None);
+        let cause = StdError::source(failure.as_ref()).unwrap();
+        assert!(
+            cause
+                .source()
+                .unwrap()
+                .downcast_ref::<CheckpointError>()
+                .is_some()
+        );
+        assert!(!output.exists());
+    }
+
+    /// A late checkpoint failure retains quantized and excluded successful targets.
+    #[test]
+    fn checkpoint_failure_keeps_exact_partial_quantized_and_exclusion_reports() {
+        let root = tempfile::tempdir().unwrap();
+        let (manifest, mut plan) = identity_fixture(
+            root.path(),
+            &["a.weight", "b.embed_tokens.weight", "z.weight"],
+        );
+        plan.tensors
+            .iter_mut()
+            .find(|tensor| tensor.target == "z.weight")
+            .unwrap()
+            .sources[0]
+            .name = "missing".into();
+        let output = root.path().join("partial.bpk");
+        let failure = quantize_local_checkpoint_to_burnpack(
+            &manifest,
+            &plan,
+            &output,
+            QuantizedCheckpointOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(failure.cause, CheckpointQuantizationFailureCause::Checkpoint(
+            CheckpointError::PlanManifestMismatch { ref tensor, .. }) if tensor == "missing")
+        );
+        assert_eq!(failure.failed_target.as_deref(), Some("z.weight"));
+        assert_eq!(
+            failure.report.applied,
+            ["a.weight", "b.embed_tokens.weight"]
+        );
+        assert_eq!(failure.report.quantized.len(), 1);
+        assert_eq!(failure.report.quantized[0].target, "a.weight");
+        assert_eq!(
+            failure.excluded,
+            [QuantizationExclusionRecord {
+                target: "b.embed_tokens.weight".into(),
+                reason: QuantizationExclusion::Embedding
+            }]
+        );
+        assert_eq!(failure.execution.source_reads, 2);
+        assert_eq!(failure.execution.tensors_applied, 2);
+        assert_eq!(failure.staging.tensor_count, 1);
+        assert_eq!(
+            failure.staging.staged_payload_bytes,
+            failure.report.quantized[0].bytes
+        );
+        assert_eq!(failure.provenance.post_execution, None);
+        assert!(failure.to_string().contains("failed at `z.weight`"));
+        assert!(failure.cause.to_string().contains("missing"));
+        assert!(!output.exists());
+    }
+
+    /// Binding limits fail only after both hash passes and retain excluded targets.
+    #[test]
+    fn provenance_binding_limit_preserves_complete_conversion_progress() {
+        let root = tempfile::tempdir().unwrap();
+        let (manifest, plan) = identity_fixture(root.path(), &["embed_tokens.weight"]);
+        let output = root.path().join("bound-limit.bpk");
+        let failure = quantize_local_checkpoint_to_burnpack(
+            &manifest,
+            &plan,
+            &output,
+            QuantizedCheckpointOptions {
+                limits: BurnpackSessionLimits {
+                    max_manifest_bytes: 1,
+                    ..BurnpackSessionLimits::default()
+                },
+                ..QuantizedCheckpointOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            failure.cause,
+            CheckpointQuantizationFailureCause::Quantization(
+                QuantizationError::SessionLimitExceeded {
+                    kind: "estimated manifest",
+                    limit: 1,
+                    ..
+                }
+            )
+        ));
+        assert!(failure.failed_target.is_none());
+        assert_eq!(failure.report.applied, ["embed_tokens.weight"]);
+        assert!(failure.report.quantized.is_empty());
+        assert_eq!(
+            failure.excluded,
+            [QuantizationExclusionRecord {
+                target: "embed_tokens.weight".into(),
+                reason: QuantizationExclusion::Embedding
+            }]
+        );
+        assert_eq!(failure.execution.tensors_applied, 1);
+        assert_eq!(failure.staging.tensor_count, 0);
+        for stats in [
+            failure.provenance.pre_execution.unwrap(),
+            failure.provenance.post_execution.unwrap(),
+        ] {
+            assert_eq!(stats.passes_completed, 1);
+            assert_eq!(stats.bytes_hashed, manifest.artifact_bytes);
+        }
+        assert!(!output.exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    /// Change diagnostics distinguish removed, added, modified, and plan-only state.
+    #[test]
+    fn changed_shard_diagnostic_identifies_membership_digest_and_plan_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let (manifest, plan) = identity_fixture(root.path(), &["weight"]);
+        let (before, _) = super::super::hash_local_checkpoint_provenance(&manifest, &plan).unwrap();
+        for case in ["remove", "add", "digest", "plan"] {
+            let mut after = before.clone();
+            match case {
+                "remove" => after.checkpoint_shards.clear(),
+                "add" => {
+                    after.checkpoint_shards.insert(
+                        "new.safetensors".into(),
+                        before.checkpoint_shards["model.safetensors"].clone(),
+                    );
+                }
+                "digest" => {
+                    after
+                        .checkpoint_shards
+                        .get_mut("model.safetensors")
+                        .unwrap()
+                        .sha256 = "0".repeat(64)
+                }
+                "plan" => after.load_plan_sha256 = "0".repeat(64),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                first_changed_shard(&before, &after),
+                match case {
+                    "add" => "new.safetensors",
+                    "plan" => "<load-plan>",
+                    _ => "model.safetensors",
+                }
+            );
+        }
+    }
 }
