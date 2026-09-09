@@ -94,10 +94,12 @@ impl<B: Backend> Qwen3_5Mtp<B> {
             .map(|_| Qwen3_5DecoderLayer::init(config, Qwen3_5LayerType::FullAttention, device))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
-            fc: LinearConfig::new(concatenated_width, config.hidden_size)
-                .with_bias(false)
-                .with_layout(LinearLayout::Col)
-                .init(device),
+            fc: operations::init_linear(
+                &LinearConfig::new(concatenated_width, config.hidden_size)
+                    .with_bias(false)
+                    .with_layout(LinearLayout::Col),
+                device,
+            ),
             layers,
             norm: norm()?,
             pre_fc_norm_embedding: norm()?,

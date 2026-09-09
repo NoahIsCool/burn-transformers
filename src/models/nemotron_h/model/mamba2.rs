@@ -162,10 +162,12 @@ impl NemotronMamba2Config {
         let intermediate = self.intermediate_size()?;
         let convolution_channels = self.convolution_channels()?;
         let linear = |input, output, bias| {
-            LinearConfig::new(input, output)
-                .with_bias(bias)
-                .with_layout(LinearLayout::Col)
-                .init(device)
+            operations::init_linear(
+                &LinearConfig::new(input, output)
+                    .with_bias(bias)
+                    .with_layout(LinearLayout::Col),
+                device,
+            )
         };
         let a = (1..=self.num_heads)
             .map(|value| value as f32)

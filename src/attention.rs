@@ -431,10 +431,12 @@ impl GroupedQueryAttentionConfig {
             })?
         };
         let linear = |input, output| {
-            LinearConfig::new(input, output)
-                .with_bias(self.bias)
-                .with_layout(LinearLayout::Col)
-                .init(device)
+            operations::init_linear(
+                &LinearConfig::new(input, output)
+                    .with_bias(self.bias)
+                    .with_layout(LinearLayout::Col),
+                device,
+            )
         };
         let query_key_norm = |epsilon| {
             RmsNormConfig::new(self.head_dim)

@@ -96,10 +96,12 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
                 device,
             )?,
             lm_head: (!spec.decoder.tie_word_embeddings).then(|| {
-                LinearConfig::new(spec.decoder.hidden_size, spec.decoder.vocabulary_size)
-                    .with_bias(false)
-                    .with_layout(LinearLayout::Col)
-                    .init(device)
+                crate::operations::init_linear(
+                    &LinearConfig::new(spec.decoder.hidden_size, spec.decoder.vocabulary_size)
+                        .with_bias(false)
+                        .with_layout(LinearLayout::Col),
+                    device,
+                )
             }),
             spec,
         })

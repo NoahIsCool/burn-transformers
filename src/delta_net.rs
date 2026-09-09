@@ -200,10 +200,12 @@ impl GatedDeltaNetConfig {
         let value_width = self.value_heads * self.value_head_dim;
         let convolution_channels = self.convolution_channels()?;
         let linear = |output| {
-            LinearConfig::new(self.hidden_size, output)
-                .with_bias(false)
-                .with_layout(LinearLayout::Col)
-                .init(device)
+            operations::init_linear(
+                &LinearConfig::new(self.hidden_size, output)
+                    .with_bias(false)
+                    .with_layout(LinearLayout::Col),
+                device,
+            )
         };
         let convolution = Conv1dConfig::new(
             convolution_channels,
@@ -231,10 +233,12 @@ impl GatedDeltaNetConfig {
             norm: RmsNormConfig::new(self.value_head_dim)
                 .with_epsilon(self.normalization_epsilon)
                 .init(device)?,
-            out_proj: LinearConfig::new(value_width, self.hidden_size)
-                .with_bias(false)
-                .with_layout(LinearLayout::Col)
-                .init(device),
+            out_proj: operations::init_linear(
+                &LinearConfig::new(value_width, self.hidden_size)
+                    .with_bias(false)
+                    .with_layout(LinearLayout::Col),
+                device,
+            ),
             key_heads: self.key_heads,
             value_heads: self.value_heads,
             key_head_dim: self.key_head_dim,

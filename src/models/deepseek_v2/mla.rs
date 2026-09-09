@@ -169,10 +169,12 @@ impl MultiLatentAttentionConfig {
             Error::configuration("mla.query_width", "head product overflows usize")
         })?;
         let projection = |input, output, bias| {
-            LinearConfig::new(input, output)
-                .with_bias(bias)
-                .with_layout(LinearLayout::Col)
-                .init(device)
+            operations::init_linear(
+                &LinearConfig::new(input, output)
+                    .with_bias(bias)
+                    .with_layout(LinearLayout::Col),
+                device,
+            )
         };
         let (q_proj, q_a_proj, q_a_layernorm, q_b_proj) = match self.q_lora_rank {
             None => (

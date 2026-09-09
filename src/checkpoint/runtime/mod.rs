@@ -25,7 +25,7 @@ use std::{
 
 use burn::tensor::{DType, TensorData};
 use burn::{
-    module::{Module, Param},
+    module::{Module, Param, ParamId},
     tensor::{
         Tensor,
         backend::{Backend, DTypeUsage},
@@ -131,7 +131,10 @@ impl Error for ParameterInstallError {}
 /// incorrectly oriented projections. This helper validates against
 /// [`Param::lazy_shape`], constructs the tensor at its checkpoint dtype, and
 /// delegates to Burn's ordinary record-loading path so device, gradient, and
-/// layout policies remain intact.
+/// layout policies remain intact. Incoming checkpoint data is untracked until
+/// the layout mapper finishes: marking it trainable before a transpose would
+/// turn a column-layout weight into a non-leaf and make Burn's subsequent
+/// gradient-policy restoration panic on an autodiff backend.
 ///
 /// The temporary parameter clone shares the incoming backend allocation; it is
 /// used solely to move the existing parameter out of `&mut` safely and is
@@ -166,7 +169,7 @@ pub fn install_float_parameter<B: Backend, const D: usize>(
         });
     }
     let tensor = Tensor::<B, D>::from_data(data, (&device, dtype));
-    let record = Param::from_tensor(tensor);
+    let record = Param::initialized(ParamId::new(), tensor);
     let existing = std::mem::replace(parameter, record.clone());
     *parameter = existing.load_record(record);
     Ok(())

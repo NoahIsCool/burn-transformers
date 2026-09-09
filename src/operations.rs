@@ -14,11 +14,47 @@
 //! weight block boundaries and packing dimensions unchanged.
 
 use burn::{
-    nn::Linear,
+    module::Param,
+    nn::{Linear, LinearConfig, LinearLayout},
     tensor::{DType, Tensor, backend::Backend},
 };
 
 use crate::{Error, Result};
+
+/// Initializes a lazy projection whose stored weight is an autodiff leaf.
+///
+/// Burn 0.21 applies the column-layout transpose after marking its random
+/// initializer as trainable. That makes the stored `[in, out]` weight an
+/// intermediate node, whose gradient is consumed during backward rather than
+/// retained for the optimizer. Initialization defines a parameter, not part of
+/// the learned function: detaching after that layout transform establishes the
+/// correct leaf without detaching any subsequent forward computation. The
+/// mapper remains lazy and retains the column layout's checkpoint transpose.
+/// The outer initializer receives Burn's current gradient policy so freezing
+/// the parameter before its first use is respected as well.
+/// Ordinary inference backends retain exactly Burn's original initialization.
+pub(crate) fn init_linear<B: Backend>(config: &LinearConfig, device: &B::Device) -> Linear<B> {
+    let mut projection = config.init::<B>(device);
+    if B::ad_enabled(device) && matches!(config.layout, LinearLayout::Col) {
+        let initialized_weight = projection.weight.set_require_grad(false);
+        let shape = initialized_weight.lazy_shape();
+        projection.weight = Param::uninitialized(
+            initialized_weight.id,
+            move |_, require_grad| {
+                initialized_weight
+                    .val()
+                    .detach()
+                    .set_require_grad(require_grad)
+            },
+            device.clone(),
+            true,
+            shape,
+        )
+        .save_mapper(|tensor| tensor.transpose())
+        .load_mapper(|tensor| tensor.transpose());
+    }
+    projection
+}
 
 /// Applies a Burn linear module without dequantizing a packed weight up front.
 ///
@@ -123,6 +159,78 @@ mod tests {
         QuantizationGroupSize, SymmetricQuantization, WeightQuantizationConfig,
         quantize_tensor_data,
     };
+
+    /// Lazy row/column projections retain exact forward values and optimizer leaves.
+    #[cfg(feature = "autodiff")]
+    #[test]
+    fn autodiff_linear_initialization_preserves_layout_values_and_gradients() {
+        use burn::{backend::Autodiff, module::Initializer, nn::LinearLayout};
+
+        type AdBackend = Autodiff<Flex>;
+        let device = Default::default();
+        for layout in [LinearLayout::Row, LinearLayout::Col] {
+            let config = LinearConfig::new(2, 3)
+                .with_layout(layout)
+                .with_initializer(Initializer::Constant { value: 0.25 });
+            let projection = super::init_linear::<AdBackend>(&config, &device);
+            assert!(!projection.weight.is_initialized());
+            let weight_data = projection.weight.to_data();
+            assert_eq!(weight_data, config.init::<Flex>(&device).weight.to_data());
+
+            let input = Tensor::<AdBackend, 2>::from_floats([[1.0, 2.0], [3.0, 4.0]], &device)
+                .require_grad();
+            let gradients = linear(input.clone(), &projection).unwrap().sum().backward();
+            assert_eq!(
+                projection.weight.grad(&gradients).unwrap().to_data(),
+                TensorData::from([[4.0_f32, 4.0, 4.0], [6.0, 6.0, 6.0]])
+            );
+            assert_eq!(
+                projection
+                    .bias
+                    .as_ref()
+                    .unwrap()
+                    .grad(&gradients)
+                    .unwrap()
+                    .to_data(),
+                TensorData::from([2.0_f32, 2.0, 2.0])
+            );
+            assert!(
+                input.grad(&gradients).is_some(),
+                "the activation graph stays connected"
+            );
+        }
+    }
+
+    /// Freezing before or after lazy materialization never re-enables gradients.
+    #[cfg(feature = "autodiff")]
+    #[test]
+    fn autodiff_linear_initializer_respects_frozen_parameters() {
+        use burn::{backend::Autodiff, nn::LinearLayout};
+
+        type AdBackend = Autodiff<Flex>;
+        let device = Default::default();
+        for materialize_before_freeze in [false, true] {
+            let mut projection = super::init_linear::<AdBackend>(
+                &LinearConfig::new(2, 3).with_layout(LinearLayout::Col),
+                &device,
+            );
+            if materialize_before_freeze {
+                let _ = projection.weight.val();
+            }
+            projection.weight = projection.weight.set_require_grad(false);
+            projection.bias = projection.bias.map(|bias| bias.set_require_grad(false));
+            assert_eq!(
+                projection.weight.is_initialized(),
+                materialize_before_freeze
+            );
+            let input = Tensor::<AdBackend, 2>::from_floats([[1.0, 2.0]], &device).require_grad();
+            let gradients = linear(input.clone(), &projection).unwrap().sum().backward();
+            assert!(!projection.weight.val().is_require_grad());
+            assert!(projection.weight.grad(&gradients).is_none());
+            assert!(projection.bias.as_ref().unwrap().grad(&gradients).is_none());
+            assert!(input.grad(&gradients).is_some());
+        }
+    }
 
     /// Quantization-preserving dispatch is numerically identical for float weights.
     #[test]

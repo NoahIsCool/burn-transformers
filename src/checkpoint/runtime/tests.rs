@@ -2082,6 +2082,52 @@ fn parameter_install_uses_burns_checkpoint_layout_mapper() {
     );
 }
 
+/// Loading applies the checkpoint transpose before restoring trainable-leaf policy.
+#[cfg(feature = "autodiff")]
+#[test]
+fn parameter_install_preserves_autodiff_leaf_and_frozen_layouts() {
+    use burn::{backend::Autodiff, module::Module};
+
+    type AdBackend = Autodiff<Flex>;
+    let device = Default::default();
+    for layout in [LinearLayout::Row, LinearLayout::Col] {
+        for frozen in [false, true] {
+            let mut projection = crate::operations::init_linear::<AdBackend>(
+                &LinearConfig::new(2, 3).with_bias(false).with_layout(layout),
+                &device,
+            );
+            if frozen {
+                projection.weight = projection.weight.set_require_grad(false);
+            }
+            assert!(!projection.weight.is_initialized());
+            let source_shape = match layout {
+                LinearLayout::Row => [2, 3],
+                LinearLayout::Col => [3, 2],
+            };
+            let source = TensorData::new(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], source_shape);
+            install_float_parameter(&mut projection.weight, source.clone()).unwrap();
+            assert_eq!(projection.weight.val().dims(), [2, 3]);
+            assert_eq!(projection.weight.val().is_require_grad(), !frozen);
+            assert_eq!(projection.weight.clone().into_record().to_data(), source);
+
+            let input = Tensor::<AdBackend, 2>::from_floats([[1.0, 2.0]], &device).require_grad();
+            let gradients = crate::operations::linear(input.clone(), &projection)
+                .unwrap()
+                .sum()
+                .backward();
+            if frozen {
+                assert!(projection.weight.grad(&gradients).is_none());
+            } else {
+                assert_eq!(
+                    projection.weight.grad(&gradients).unwrap().to_data(),
+                    TensorData::from([[1.0_f32, 1.0, 1.0], [2.0, 2.0, 2.0]])
+                );
+            }
+            assert!(input.grad(&gradients).is_some());
+        }
+    }
+}
+
 #[test]
 fn parameter_install_preserves_native_quantized_float_data() {
     let device = Default::default();

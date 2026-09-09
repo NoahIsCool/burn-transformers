@@ -312,10 +312,12 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
         Ok(Self {
             model: Qwen3MoeModel::init(config, device)?,
             lm_head: (!tied).then(|| {
-                LinearConfig::new(hidden, vocabulary)
-                    .with_bias(false)
-                    .with_layout(LinearLayout::Col)
-                    .init(device)
+                operations::init_linear(
+                    &LinearConfig::new(hidden, vocabulary)
+                        .with_bias(false)
+                        .with_layout(LinearLayout::Col),
+                    device,
+                )
             }),
         })
     }

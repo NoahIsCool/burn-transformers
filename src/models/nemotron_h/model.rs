@@ -80,10 +80,12 @@ impl<B: Backend> NemotronHDense<B> {
             ));
         }
         let linear = |input, output| {
-            LinearConfig::new(input, output)
-                .with_bias(bias)
-                .with_layout(LinearLayout::Col)
-                .init(device)
+            operations::init_linear(
+                &LinearConfig::new(input, output)
+                    .with_bias(bias)
+                    .with_layout(LinearLayout::Col),
+                device,
+            )
         };
         Ok(Self {
             up_proj: linear(hidden_size, intermediate_size),
@@ -227,16 +229,20 @@ impl<B: Backend> NemotronHMoe<B> {
             })
             .collect::<Result<Vec<_>>>()?;
         let projection = |input, output| {
-            LinearConfig::new(input, output)
-                .with_bias(config.mlp_bias)
-                .with_layout(LinearLayout::Col)
-                .init(device)
+            operations::init_linear(
+                &LinearConfig::new(input, output)
+                    .with_bias(config.mlp_bias)
+                    .with_layout(LinearLayout::Col),
+                device,
+            )
         };
         Ok(Self {
-            router: LinearConfig::new(config.hidden_size, config.n_routed_experts)
-                .with_bias(false)
-                .with_layout(LinearLayout::Col)
-                .init(device),
+            router: operations::init_linear(
+                &LinearConfig::new(config.hidden_size, config.n_routed_experts)
+                    .with_bias(false)
+                    .with_layout(LinearLayout::Col),
+                device,
+            ),
             // NVIDIA declares this as an FP32 buffer: it changes the discrete
             // top-k decision but is not optimized by back-propagation.
             correction_bias: Param::from_tensor(Tensor::zeros(
@@ -697,10 +703,12 @@ impl<B: Backend> NemotronHNextTokenHead<B> {
         Ok(Self {
             embedding_norm: norm()?,
             hidden_norm: norm()?,
-            eh_proj: LinearConfig::new(fusion_width, config.hidden_size)
-                .with_bias(false)
-                .with_layout(LinearLayout::Col)
-                .init(device),
+            eh_proj: operations::init_linear(
+                &LinearConfig::new(fusion_width, config.hidden_size)
+                    .with_bias(false)
+                    .with_layout(LinearLayout::Col),
+                device,
+            ),
             attention_norm: norm()?,
             attention: attention.init(device)?,
             moe_norm: norm()?,
@@ -814,10 +822,12 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         Ok(Self {
             model: NemotronHModel::init(config, device)?,
             lm_head: (!tied).then(|| {
-                LinearConfig::new(hidden, vocabulary)
-                    .with_bias(false)
-                    .with_layout(LinearLayout::Col)
-                    .init(device)
+                operations::init_linear(
+                    &LinearConfig::new(hidden, vocabulary)
+                        .with_bias(false)
+                        .with_layout(LinearLayout::Col),
+                    device,
+                )
             }),
             next_token_head,
         })

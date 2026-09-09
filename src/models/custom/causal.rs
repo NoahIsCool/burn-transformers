@@ -58,10 +58,12 @@ impl<B: Backend> ModularCausalLm<B> {
             layers,
             final_norm: ModularNorm::init(spec.final_norm, spec.hidden_size, device)?,
             lm_head: (!spec.tie_word_embeddings).then(|| {
-                LinearConfig::new(spec.hidden_size, spec.vocabulary_size)
-                    .with_bias(false)
-                    .with_layout(LinearLayout::Col)
-                    .init(device)
+                crate::operations::init_linear(
+                    &LinearConfig::new(spec.hidden_size, spec.vocabulary_size)
+                        .with_bias(false)
+                        .with_layout(LinearLayout::Col),
+                    device,
+                )
             }),
             spec,
         })

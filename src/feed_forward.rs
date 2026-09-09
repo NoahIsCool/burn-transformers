@@ -58,14 +58,18 @@ impl DenseFeedForwardConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> Result<DenseFeedForward<B>> {
         self.validate()?;
         Ok(DenseFeedForward {
-            up_proj: LinearConfig::new(self.hidden_size, self.intermediate_size)
-                .with_bias(self.bias)
-                .with_layout(LinearLayout::Col)
-                .init(device),
-            down_proj: LinearConfig::new(self.intermediate_size, self.hidden_size)
-                .with_bias(self.bias)
-                .with_layout(LinearLayout::Col)
-                .init(device),
+            up_proj: operations::init_linear(
+                &LinearConfig::new(self.hidden_size, self.intermediate_size)
+                    .with_bias(self.bias)
+                    .with_layout(LinearLayout::Col),
+                device,
+            ),
+            down_proj: operations::init_linear(
+                &LinearConfig::new(self.intermediate_size, self.hidden_size)
+                    .with_bias(self.bias)
+                    .with_layout(LinearLayout::Col),
+                device,
+            ),
             activation: self.activation,
         })
     }
@@ -141,9 +145,9 @@ impl GatedFeedForwardConfig {
             .with_bias(self.bias)
             .with_layout(LinearLayout::Col);
         Ok(GatedFeedForward {
-            gate_proj: input_projection.init(device),
-            up_proj: input_projection.init(device),
-            down_proj: output_projection.init(device),
+            gate_proj: operations::init_linear(&input_projection, device),
+            up_proj: operations::init_linear(&input_projection, device),
+            down_proj: operations::init_linear(&output_projection, device),
             activation: self.activation,
         })
     }

@@ -118,10 +118,12 @@ impl<B: Backend> MuseGlimmerAttention<B> {
             config.head_dim,
         )?;
         let projected = |input, output, bias| {
-            LinearConfig::new(input, output)
-                .with_bias(bias)
-                .with_layout(LinearLayout::Col)
-                .init(device)
+            crate::operations::init_linear(
+                &LinearConfig::new(input, output)
+                    .with_bias(bias)
+                    .with_layout(LinearLayout::Col),
+                device,
+            )
         };
         Ok(Self {
             q_proj: projected(config.hidden_size, query_width, config.attention_bias),
@@ -993,10 +995,12 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
         Ok(Self {
             model: MuseGlimmerModel::init(config, device)?,
             lm_head: (!tied).then(|| {
-                LinearConfig::new(hidden, vocabulary)
-                    .with_bias(false)
-                    .with_layout(LinearLayout::Col)
-                    .init(device)
+                crate::operations::init_linear(
+                    &LinearConfig::new(hidden, vocabulary)
+                        .with_bias(false)
+                        .with_layout(LinearLayout::Col),
+                    device,
+                )
             }),
         })
     }

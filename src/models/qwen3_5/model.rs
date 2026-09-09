@@ -285,10 +285,12 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
                 .transpose()?,
             model: Qwen3_5TextModel::init(config, device)?,
             lm_head: (!tie_word_embeddings).then(|| {
-                LinearConfig::new(hidden_size, vocabulary_size)
-                    .with_bias(false)
-                    .with_layout(LinearLayout::Col)
-                    .init(device)
+                operations::init_linear(
+                    &LinearConfig::new(hidden_size, vocabulary_size)
+                        .with_bias(false)
+                        .with_layout(LinearLayout::Col),
+                    device,
+                )
             }),
         })
     }
@@ -728,6 +730,154 @@ mod tests {
             )
             .expect("embedding-backed vocabulary projection must run");
         assert_eq!(output.logits.dims(), [1, 1, 32]);
+    }
+
+    /// A gradient must reach its leaf parameter and contain a finite learning signal.
+    #[cfg(feature = "autodiff")]
+    fn assert_finite_nonzero_gradient<const D: usize>(
+        gradient: Option<Tensor<TestBackend, D>>,
+        parameter: &str,
+    ) {
+        let values = gradient
+            .unwrap_or_else(|| panic!("{parameter} is disconnected from the stateless loss"))
+            .into_data()
+            .to_vec::<f32>()
+            .expect("Flex gradients are F32");
+        assert!(
+            values.iter().all(|value| value.is_finite()),
+            "{parameter} has a non-finite gradient"
+        );
+        assert!(
+            values.iter().any(|value| *value != 0.0),
+            "{parameter} has an entirely zero gradient"
+        );
+    }
+
+    /// The complete 3:1 hybrid graph propagates gradients through both mixer families.
+    ///
+    /// A tied vocabulary head matches the 0.8B checkpoint; the untied case also
+    /// proves that embedding gradients pass through the backbone rather than
+    /// only its shared output head. Partial RoPE exercises both rotated and
+    /// unrotated attention channels. Four causal
+    /// positions make the DeltaNet decay parameters affect retained history;
+    /// a single-token example could not prove that recurrent learning signal.
+    /// Squared logit loss is used only to probe connectivity and finite values,
+    /// not to prescribe an eventual training objective.
+    #[cfg(feature = "autodiff")]
+    #[test]
+    fn stateless_hybrid_graph_has_finite_nonzero_parameter_gradients() {
+        use burn::backend::Autodiff;
+
+        type AdBackend = Autodiff<TestBackend>;
+        let device = Default::default();
+        for tied in [false, true] {
+            AdBackend::seed(&device, 29);
+            let mut config = tiny_config();
+            config.tie_word_embeddings = tied;
+            config.partial_rotary_factor = Some(0.5);
+            let model = Qwen3_5ForCausalLm::<AdBackend>::init(config, &device)
+                .expect("tiny differentiable hybrid model initializes");
+            assert_eq!(model.lm_head.is_none(), tied);
+            let output = model
+                .forward(
+                    CausalLmInput {
+                        token_ids: Tensor::<AdBackend, 2, Int>::from_ints([[1, 2, 3, 4]], &device),
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                    &ForwardOptions {
+                        logits: LogitsSelection::All,
+                        ..ForwardOptions::default()
+                    },
+                )
+                .expect("stateless hybrid autodiff forward succeeds");
+            let gradients = output.logits.square().mean().backward();
+            assert_finite_nonzero_gradient(
+                model.model.embed_tokens.weight.grad(&gradients),
+                "embedding and tied vocabulary head",
+            );
+            assert_finite_nonzero_gradient(model.model.norm.weight.grad(&gradients), "final norm");
+            if let Some(head) = &model.lm_head {
+                assert_finite_nonzero_gradient(
+                    head.weight.grad(&gradients),
+                    "untied vocabulary head",
+                );
+            }
+
+            for (index, layer) in model.model.layers.iter().enumerate() {
+                for (name, projection) in [
+                    ("ffn.gate", &layer.mlp.gate_proj),
+                    ("ffn.up", &layer.mlp.up_proj),
+                    ("ffn.down", &layer.mlp.down_proj),
+                ] {
+                    assert_finite_nonzero_gradient(
+                        projection.weight.grad(&gradients),
+                        &format!("layer {index} {name}"),
+                    );
+                }
+                for (name, norm) in [
+                    ("input norm", &layer.input_layernorm),
+                    ("post-attention norm", &layer.post_attention_layernorm),
+                ] {
+                    assert_finite_nonzero_gradient(
+                        norm.weight.grad(&gradients),
+                        &format!("layer {index} {name}"),
+                    );
+                }
+                if let Some(delta) = &layer.linear_attn {
+                    for (name, projection) in [
+                        ("delta.qkv", &delta.in_proj_qkv),
+                        ("delta.output_gate", &delta.in_proj_z),
+                        ("delta.beta", &delta.in_proj_b),
+                        ("delta.decay", &delta.in_proj_a),
+                        ("delta.output", &delta.out_proj),
+                    ] {
+                        assert_finite_nonzero_gradient(
+                            projection.weight.grad(&gradients),
+                            &format!("layer {index} {name}"),
+                        );
+                    }
+                    assert_finite_nonzero_gradient(
+                        delta.conv1d.weight.grad(&gradients),
+                        &format!("layer {index} delta.convolution"),
+                    );
+                    for (name, parameter) in [
+                        ("delta.dt_bias", &delta.dt_bias),
+                        ("delta.a_log", &delta.a_log),
+                        ("delta.norm", &delta.norm.weight),
+                    ] {
+                        assert_finite_nonzero_gradient(
+                            parameter.grad(&gradients),
+                            &format!("layer {index} {name}"),
+                        );
+                    }
+                }
+                if let Some(attention) = &layer.self_attn {
+                    for (name, projection) in [
+                        ("attention.query_and_gate", &attention.q_proj),
+                        ("attention.key", &attention.k_proj),
+                        ("attention.value", &attention.v_proj),
+                        ("attention.output", &attention.o_proj),
+                    ] {
+                        assert_finite_nonzero_gradient(
+                            projection.weight.grad(&gradients),
+                            &format!("layer {index} {name}"),
+                        );
+                    }
+                    for (name, norm) in [
+                        ("attention.query_norm", attention.query_norm.as_ref()),
+                        ("attention.key_norm", attention.key_norm.as_ref()),
+                    ] {
+                        assert_finite_nonzero_gradient(
+                            norm.expect("Qwen enables Q/K normalization")
+                                .weight
+                                .grad(&gradients),
+                            &format!("layer {index} {name}"),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Last-logit selection follows each row's last valid token under padding.

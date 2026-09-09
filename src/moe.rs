@@ -127,10 +127,12 @@ impl SparseMoeConfig {
         let shared = (0..self.shared_experts)
             .map(|_| expert_config.init(device))
             .collect::<Result<Vec<_>>>()?;
-        let router = LinearConfig::new(self.hidden_size, self.routed_experts)
-            .with_bias(false)
-            .with_layout(LinearLayout::Col)
-            .init(device);
+        let router = operations::init_linear(
+            &LinearConfig::new(self.hidden_size, self.routed_experts)
+                .with_bias(false)
+                .with_layout(LinearLayout::Col),
+            device,
+        );
         Ok(SparseMoe {
             router,
             routed,
