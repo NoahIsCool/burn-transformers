@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "authenticated_f16_reference_parity_and_q4_32k_execution_verified_pending_release_api_coverage_performance_and_quantized_quality",
+  "phase": "authenticated_f16_reference_public_api_and_q4_32k_execution_verified_pending_release_coverage_performance_and_quantized_quality",
   "repository": "Qwen/Qwen3.5-0.8B",
   "revision": "2fc06364715b967f1860aea9cf38778875588b17",
   "artifact_layout": {
@@ -37,6 +37,9 @@
     "target_checkpoint_authenticated_before_and_after_inference": true,
     "cache_failure_atomicity_hardened": true,
     "inactive_decode_rows_supported": true,
+    "public_chat_streaming_32_tokens_validated": true,
+    "real_left_and_right_padded_batch_validated": true,
+    "public_chunked_generation_validated": true,
     "q8_burnpack_conversion_validated": true,
     "q4_burnpack_conversion_validated": true,
     "packed_kernel_execution_validated": true,
@@ -47,6 +50,40 @@
     "quantized_long_context_quality_validated": false
   },
   "quantized_32k_execution_record": "measurements/qwen3.5-0.8b-q4-32k-stress-20260909.json",
+  "public_api_acceptance": {
+    "date": "2026-09-09",
+    "source_tree_equivalent_to_commit": "5fe7014",
+    "integrated_test_commit": "df3bea5",
+    "integrated_generation_fix_commit": "160da6e",
+    "test_file": "tests/qwen35_release_api.rs",
+    "test_file_sha256": "f62d801893b04a0af4574b78341bfe247b9f2fa1d298e37bc0e4c8367760faa2",
+    "log_sha256": "7540ceec2bcf8ee7fa23fc61bc04eb72e311b25df4098b9a4c5f3e1dfbe5ab24",
+    "rustc": "1.94.0-nightly (4f14395c3 2025-12-22)",
+    "profile": "test, unoptimized with debuginfo",
+    "features": "std,metal,chat-templates (tokenizers transitively enabled)",
+    "backend": "Metal/F16",
+    "command": "cargo test --locked --offline --manifest-path crates/transformers/Cargo.toml --target-dir /private/tmp/hmm-tfm-qwen08-oracle-review/crates/transformers/target --no-default-features --features std,metal,chat-templates --test qwen35_release_api -- --ignored --test-threads=1 --nocapture",
+    "environment": {
+      "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+      "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+    },
+    "real_tests_passed": 2,
+    "helper_tests_passed": 8,
+    "test_wall_seconds": 79.41,
+    "process_wall_seconds": 79.73,
+    "standardized_benchmark": false,
+    "exact_official_streamed_tokens": 32,
+    "stream_event_log_probabilities_and_finish_reasons_checked": true,
+    "minimum_sufficient_cache_capacity_checked": true,
+    "actual_padding_sides": ["left", "right"],
+    "padding_comparison": "Two unequal valid-length rows, complete-vocabulary cosine >=0.999 and exact top1 against independent unpadded full/prefill/decode, exact logical lengths, and public seven-column-chunked generation.",
+    "runtime_fixes": [
+      "Read selected F16/BF16 probabilities by actual TensorData dtype, preserving native F64 precision and transferring no extra vocabulary.",
+      "Match presence-penalty tensors to score dtype.",
+      "Promote half-precision softmax/CDF and nucleus accumulation to F32 without changing the seeded uniform stream."
+    ],
+    "checkpoint_pad_semantics": "Tokenizer PAD is248044; the checkpoint's optional model/generation PAD may remain unspecified and inactive placeholder positions remain masked."
+  },
   "smoke_acceptance": {
     "backend": "burn_metal",
     "parameter_dtype_policy": "f16",

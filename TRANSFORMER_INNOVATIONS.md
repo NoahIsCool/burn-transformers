@@ -1201,6 +1201,16 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   decisions identical. The old `Hello` near-tie remains a sampled-logit
   diagnostic. This closes the retained-reference gap, not the remaining API,
   coverage, or standardized-performance gates.
+- **Mixed-precision generation uses runtime storage types.** Backend defaults
+  do not determine the dtype of loaded model outputs. Real F16 Qwen API tests
+  exposed selected-log-probability readback and sampling-threshold type errors.
+  Readback now dispatches on storage dtype, penalties match logits, and half
+  probability/CDF sums use F32 while preserving native F64 and the seeded RNG
+  stream. The public Auto-load/chat/streaming path now matches all 32 official
+  tokens. Real left/right-padded unequal-length batches match independent
+  unpadded full/cached execution and chunked public generation; padding neither
+  consumes recurrent history nor shifts logical positions. These tests do not
+  change the architecture matrix or relax oracle tolerances.
 - **Qwen3.5-0.8B Q4 execution and its 32K envelope are separate claims.** The
   reviewed group-64 Q4 sidecar is format v2, binds the exact source checkpoint
   and F16 load plan, contains 186 packed matrices, and has complete-file SHA-256
@@ -1311,6 +1321,9 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   malformed serialized dimensions return a contextual configuration error
   before dispatch. Targeted normalization, position, recurrent, MoE, tokenizer,
   and template boundary tests supplement the baseline without changing gates.
+  The later integrated `df3bea5` snapshot runs 814 unit tests plus ordinary
+  integrations and improves measured line coverage to 88.7276% crate-wide and
+  92.4763% shared/core. Both gates still fail and remain release requirements.
   Five independent bounded sanitizer fuzz targets now cover configuration,
   artifacts, masks/positions, cache transactions, and generation. Each completed
   10,000 inputs without a crash; this finite campaign is not exhaustive coverage.

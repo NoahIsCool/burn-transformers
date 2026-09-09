@@ -68,6 +68,14 @@ used `--lib`; the runner also includes ordinary integration tests. It must be
 rerun on the final candidate, and baseline results must not be recycled across
 source changes.
 
+The integrated snapshot at `df3bea5` ran **814 passed / 3 ignored** unit tests
+plus all ordinary integration tests. It measured **57,350 / 64,636 lines
+(88.7276%)** crate-wide and **27,766 / 30,025 (92.4763%)** shared/core. Both
+thresholds still fail; added tests have not changed the 90%/95% requirements.
+This snapshot precedes the next checkpoint-transform test milestone and is
+not a final-candidate coverage claim. Its raw report is retained locally under
+`target/release-gates/20260909T155105.885161Z/`.
+
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is
 `819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d`.
