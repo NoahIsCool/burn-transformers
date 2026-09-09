@@ -1,7 +1,7 @@
 //! Loads the pinned official FLAN-T5-small artifact and runs cached beam search.
 //!
 //! The runtime is deliberately local-only. Download the immutable checkpoint outside the program,
-//! enable the `tokenizers` feature, and pass the resulting directory as the first argument:
+//! enable the `flex` and `tokenizers` features, and pass its directory as the first argument:
 //!
 //! ```text
 //! cargo run --release --manifest-path crates/transformers/Cargo.toml \
@@ -10,25 +10,25 @@
 //!   "translate English to German: The house is wonderful."
 //! ```
 
-#[cfg(feature = "tokenizers")]
+#[cfg(all(feature = "flex", feature = "tokenizers"))]
 use std::{error::Error as StdError, ffi::OsString, io, path::PathBuf};
 
-#[cfg(feature = "tokenizers")]
+#[cfg(all(feature = "flex", feature = "tokenizers"))]
 use burn::backend::Flex;
-#[cfg(feature = "tokenizers")]
+#[cfg(all(feature = "flex", feature = "tokenizers"))]
 use transformers::{
     AutoLoadOptions, AutoSeq2SeqLm, EncodeOptions,
     models::t5::{T5BeamSearchOptions, generate_t5_beam_search},
 };
 
-/// Explains the feature requirement when Cargo builds all examples without tokenization.
-#[cfg(not(feature = "tokenizers"))]
+/// Explains the requirements when the Flex backend or local tokenization is disabled.
+#[cfg(not(all(feature = "flex", feature = "tokenizers")))]
 fn main() {
-    eprintln!("enable the `tokenizers` feature to run the FLAN-T5-small example");
+    eprintln!("enable the `flex` and `tokenizers` features to run the FLAN-T5-small example");
 }
 
 /// Loads, tokenizes, generates, and decodes through the public release surface.
-#[cfg(feature = "tokenizers")]
+#[cfg(all(feature = "flex", feature = "tokenizers"))]
 fn main() -> Result<(), Box<dyn StdError>> {
     let mut arguments = std::env::args_os().skip(1);
     let root = arguments.next().map(PathBuf::from).ok_or_else(|| {

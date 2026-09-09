@@ -553,6 +553,10 @@ fn compare(label: &str, actual: &[f32], expected: &[f32]) -> Comparison {
         cosine >= 0.999_999,
         "{label} cosine {cosine} is below 0.999999"
     );
+    assert_eq!(
+        tolerance_failures, 0,
+        "{label} has values outside atol=rtol=1e-4; maximum absolute error {maximum_absolute_error}"
+    );
     Comparison {
         cosine,
         maximum_absolute_error,
@@ -978,4 +982,14 @@ fn reference_math_contract_is_stable() {
     assert_eq!(comparison.cosine, 1.0);
     assert_eq!(comparison.maximum_absolute_error, 0.0);
     assert_eq!(comparison.tolerance_failures, 0);
+}
+
+/// A proportional logit error preserves cosine and top-1 but must fail F32 elementwise parity.
+#[test]
+#[should_panic(expected = "has values outside atol=rtol=1e-4")]
+fn reference_parity_rejects_scaled_logits_with_perfect_cosine() {
+    let expected = [1.0_f32, -2.0, 3.0];
+    let actual = expected.map(|value| value * 1.001);
+    assert_eq!(stable_top1(&actual), stable_top1(&expected));
+    compare("scaled logits", &actual, &expected);
 }
