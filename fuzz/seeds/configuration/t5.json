@@ -1,0 +1,1 @@
+{"model_type":"t5","num_layers":2,"num_decoder_layers":2,"d_model":16,"d_kv":4,"num_heads":4,"d_ff":32}

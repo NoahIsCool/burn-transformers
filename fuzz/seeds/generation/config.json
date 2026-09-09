@@ -1,0 +1,1 @@
+{"temperature":1.0,"top_k":8,"top_p":0.9,"stop_sequences":[[1,2],[2]],"eos_token_ids":[3],"max_new_tokens":16}
