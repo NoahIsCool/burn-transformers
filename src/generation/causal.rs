@@ -1267,4 +1267,260 @@ mod tests {
         );
         assert_eq!(calls, 1);
     }
+
+    /// Malformed positions and impossible logical capacity fail before any token event.
+    #[test]
+    fn request_position_and_capacity_boundaries_are_contextual() {
+        let (model, device) = tiny_model();
+        let generation = GenerationConfig {
+            max_new_tokens: 3,
+            ..Default::default()
+        };
+        for (positions, expected) in [
+            (vec![7], "generation.prompt.position_ids"),
+            (vec![7, -1], "negative last valid position"),
+            (vec![7, i32::MAX], "portable signed index range"),
+        ] {
+            let length = positions.len();
+            let mut invalid = request(&device, generation.clone());
+            invalid.prompt.position_ids = Some(Tensor::from_data(
+                burn::tensor::TensorData::new(positions, [1, length]),
+                &device,
+            ));
+            let error = generate_causal_streaming(&model, invalid, |_| {
+                panic!("invalid request must not emit a token")
+            })
+            .expect_err("invalid explicit positions");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        let mut overflow = request(&device, generation);
+        overflow.generation.max_new_tokens = usize::MAX;
+        let error = generate_causal(&model, overflow).expect_err("capacity sum overflows");
+        assert!(
+            error
+                .to_string()
+                .contains("required cache capacity overflows")
+        );
+    }
+
+    /// Last-logit selection enforces every axis, including a wrong vocabulary declaration.
+    #[test]
+    fn model_output_shape_errors_are_contextual_in_every_prefill_mode() {
+        let (model, device) = tiny_model();
+        for chunk_size in [None, Some(1), Some(2), Some(usize::MAX)] {
+            let mut invalid = request(
+                &device,
+                GenerationConfig {
+                    max_new_tokens: 1,
+                    ..Default::default()
+                },
+            );
+            invalid.vocabulary_size = 33;
+            invalid.prefill_chunk_size = chunk_size;
+            let error = generate_causal(&model, invalid).expect_err("model has 32 logits");
+            assert!(error.to_string().contains("generation.model_logits"));
+            assert!(error.to_string().contains("33"));
+        }
+        for shape in [[2, 1, 32], [1, 2, 32], [1, 1, 31]] {
+            let error =
+                super::extract_last_logits(Tensor::<TestBackend, 3>::zeros(shape, &device), 1, 32)
+                    .expect_err("one wrong output axis");
+            assert!(error.to_string().contains("generation.model_logits"));
+        }
+    }
+
+    /// Chunk-size fast paths preserve exact greedy results and full prompt position IDs.
+    #[test]
+    fn dense_chunking_and_unbounded_fast_paths_preserve_positions() {
+        let (model, device) = tiny_model();
+        let mut input = request(
+            &device,
+            GenerationConfig {
+                max_new_tokens: 3,
+                ..Default::default()
+            },
+        );
+        input.prompt.position_ids = Some(Tensor::from_ints([[4, 7]], &device));
+        let baseline = generate_causal(&model, input.clone()).expect("one-shot positioned prompt");
+        for chunk in [1, 2, usize::MAX] {
+            let mut chunked = input.clone();
+            chunked.prefill_chunk_size = Some(chunk);
+            let output = generate_causal(&model, chunked).expect("bounded positioned prompt");
+            assert_eq!(
+                output.sequences[0].token_ids,
+                baseline.sequences[0].token_ids
+            );
+            for (actual, expected) in output.sequences[0]
+                .log_probabilities
+                .iter()
+                .zip(&baseline.sequences[0].log_probabilities)
+            {
+                assert!((actual - expected).abs() < 1.0e-5);
+            }
+        }
+    }
+
+    /// Helper preflight rejects rectangular metadata errors before invoking a model.
+    #[test]
+    fn chunked_prefill_rejects_invalid_compact_metadata() {
+        use crate::{CausalLanguageModel, DecodeState, ForwardOptions};
+
+        let (model, device) = tiny_model();
+        let request = request(
+            &device,
+            GenerationConfig {
+                max_new_tokens: 1,
+                ..Default::default()
+            },
+        );
+        let mut state = model
+            .new_decode_state(request.cache, 1, &device)
+            .expect("state");
+        for (mask, size, expected) in [
+            (vec![true, true], 0, "prefill_chunk_size"),
+            (vec![true], 1, "prompt mask contains 1 entries, expected 2"),
+        ] {
+            let error = super::prefill_prompt(
+                &model,
+                request.prompt.clone(),
+                &mut state,
+                &ForwardOptions::default(),
+                &mask,
+                Some(size),
+                32,
+            )
+            .expect_err("bad prefill metadata");
+            assert!(error.to_string().contains(expected), "{error}");
+            assert_eq!(state.lengths(), [0]);
+        }
+    }
+
+    /// Position planning validates overflow, signed bounds, ragged inputs, and padding.
+    #[test]
+    fn compact_position_metadata_has_checked_boundaries() {
+        let error = super::prompt_lengths(&[], usize::MAX, 2).expect_err("product overflow");
+        assert!(error.to_string().contains("element count overflows"));
+        let error = super::prompt_lengths(&[true], 1, 2).expect_err("ragged mask");
+        assert!(error.to_string().contains("expected 2"));
+        assert_eq!(
+            super::prompt_lengths(&[true, false, true, false], 2, 2).expect("valid rows"),
+            [1, 1]
+        );
+        for (positions, valid, batch, sequence, tokens, message) in [
+            (vec![], vec![], usize::MAX, 2, 1, "element count overflows"),
+            (vec![0], vec![true, true], 1, 2, 1, "not rectangular"),
+            (
+                vec![0],
+                vec![true],
+                1,
+                1,
+                usize::MAX,
+                "signed position domain",
+            ),
+            (vec![0], vec![false], 1, 1, 1, "no valid position"),
+            (
+                vec![-1],
+                vec![true],
+                1,
+                1,
+                1,
+                "negative last valid position",
+            ),
+            (
+                vec![i64::MAX],
+                vec![true],
+                1,
+                1,
+                2,
+                "explicit positions overflow",
+            ),
+            (
+                vec![i64::from(i32::MAX)],
+                vec![true],
+                1,
+                1,
+                2,
+                "portable signed index range",
+            ),
+        ] {
+            let error = super::next_explicit_positions(&positions, &valid, batch, sequence, tokens)
+                .expect_err("invalid compact position metadata");
+            assert!(error.to_string().contains(message), "{error}");
+        }
+        assert_eq!(
+            super::next_explicit_positions(
+                &[i64::MAX, 7, -1, i64::from(i32::MAX)],
+                &[false, true, false, true],
+                2,
+                2,
+                1,
+            )
+            .expect("masked sentinels are ignored and last sampled token is not decoded"),
+            [8, i64::from(i32::MAX) + 1]
+        );
+        let mut positions = [5, i64::MAX];
+        super::advance_positions(&mut positions, &[true, false])
+            .expect("inactive row is untouched");
+        assert_eq!(positions, [6, i64::MAX]);
+        let error = super::advance_positions(&mut positions, &[true]).expect_err("ragged activity");
+        assert!(error.to_string().contains("position batch"));
+        assert_eq!(positions, [6, i64::MAX]);
+        let error =
+            super::advance_positions(&mut [i64::MAX], &[true]).expect_err("signed overflow");
+        assert!(
+            error
+                .to_string()
+                .contains("explicit position overflow for row 0")
+        );
+    }
+
+    /// Inactive nonfinite logits are zeroed without modifying still-active rows.
+    #[test]
+    fn neutralization_is_row_local_and_checks_batch_metadata() {
+        let device = Default::default();
+        let logits = Tensor::<TestBackend, 2>::from_floats(
+            [[f32::NAN, f32::INFINITY], [1.0, -2.0]],
+            &device,
+        );
+        let values = super::neutralize_inactive_logits(logits.clone(), &[false, true])
+            .expect("inactive nonfinite row")
+            .into_data()
+            .to_vec::<f32>()
+            .expect("F32 values");
+        assert_eq!(values, [0.0, 0.0, 1.0, -2.0]);
+        let error = super::neutralize_inactive_logits(logits, &[false])
+            .expect_err("activity must cover the batch");
+        assert!(error.to_string().contains("active-row count 1"));
+    }
+
+    /// Public output assembly rejects incomplete tracking or misaligned log probabilities.
+    #[test]
+    fn output_assembly_never_fabricates_terminal_metadata() {
+        let config = GenerationConfig {
+            max_new_tokens: 1,
+            ..Default::default()
+        };
+        let tracker = super::GenerationTracker::new(config, 32, 1).expect("tracker");
+        for (lengths, probabilities, expected) in [
+            (vec![], vec![vec![]], "inconsistent batch dimensions"),
+            (vec![2], vec![], "inconsistent batch dimensions"),
+            (
+                vec![2],
+                vec![vec![-1.0]],
+                "0 tokens but 1 log probabilities",
+            ),
+            (vec![2], vec![vec![]], "sequence 0 did not finish"),
+        ] {
+            let error = super::finish_output(tracker.clone(), lengths, probabilities)
+                .expect_err("inconsistent output must fail");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        let mut completed = tracker;
+        completed.push(0, 7).expect("terminal token");
+        let output = super::finish_output(completed, vec![2], vec![vec![-0.5]])
+            .expect("aligned completed metadata");
+        assert_eq!(output.sequences[0].token_ids, [7]);
+        assert_eq!(output.sequences[0].log_probabilities, [-0.5]);
+        assert_eq!(output.sequences[0].finish_reason, FinishReason::Length);
+    }
 }
