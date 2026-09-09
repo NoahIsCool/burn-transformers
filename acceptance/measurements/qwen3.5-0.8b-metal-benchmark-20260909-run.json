@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "advertised_supported": false,
+  "measurement_passed": true,
+  "date": "2026-09-09",
+  "scope": "Repeated F16 Metal model execution timings; public coordinator performance, per-phase memory, longer prefill series and final integrated replay remain separate gates.",
+  "raw_report": {
+    "file": "qwen3.5-0.8b-metal-benchmark-20260909.json",
+    "sha256": "ab57e476a224a329eda2cd303ee3ce2664eb3f7922550c4659dac26eea824946"
+  },
+  "source_commit": "1e4f836632b46d072bd3ea1ec2200ec1d365a1ff",
+  "integrated_harness_commit": "1aa5ee9",
+  "primary_acceptance": "qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17.json",
+  "protocol": {
+    "warmups_per_shape": 3,
+    "measured_repetitions_per_shape": 10,
+    "source_lengths": [
+      32,
+      128,
+      512
+    ],
+    "forced_decode_steps": 128,
+    "cold_and_load_repetitions": 1,
+    "token_id_encoding": "little-endian u32",
+    "maximum_total_context": 32768,
+    "long_prefill_series_executed": false
+  },
+  "load_accounting": {
+    "applied": 321,
+    "storage_tensors": 320,
+    "tied_aliases": 1,
+    "dtype_converted": 320,
+    "allowlisted_visual": 153,
+    "allowlisted_optional_mtp": 15,
+    "unexplained_missing": 0,
+    "unexplained_unexpected": 0
+  },
+  "timing_summary": [
+    {
+      "source_tokens": 32,
+      "prefill_median_seconds": 0.0577266045,
+      "warm_ttft_median_seconds": 0.065539104,
+      "decode_model_median_tokens_per_second": 35.678507667165945,
+      "decode_including_readback_median_tokens_per_second": 27.912229177609913,
+      "cache_tensor_payload_bytes": 21504000,
+      "cache_kv_bytes_per_token": 12288
+    },
+    {
+      "source_tokens": 128,
+      "prefill_median_seconds": 0.13083097900000001,
+      "warm_ttft_median_seconds": 0.138604125,
+      "decode_model_median_tokens_per_second": 35.978296517057565,
+      "decode_including_readback_median_tokens_per_second": 28.09541869787828,
+      "cache_tensor_payload_bytes": 22683648,
+      "cache_kv_bytes_per_token": 12288
+    },
+    {
+      "source_tokens": 512,
+      "prefill_median_seconds": 0.5178310835,
+      "warm_ttft_median_seconds": 0.5254637085,
+      "decode_model_median_tokens_per_second": 35.70250731367536,
+      "decode_including_readback_median_tokens_per_second": 27.937823446297223,
+      "cache_tensor_payload_bytes": 27402240,
+      "cache_kv_bytes_per_token": 12288
+    }
+  ],
+  "strict_load_seconds": 1.3480695,
+  "cold_first_token_seconds": 0.415529667,
+  "natural_greedy": {
+    "mode": "greedy_model_api_loop",
+    "tokens": [
+      760,
+      8964,
+      579,
+      7772,
+      369,
+      82951,
+      506,
+      449,
+      8937,
+      314,
+      12805,
+      220,
+      17,
+      18,
+      13,
+      20,
+      11995,
+      8410,
+      310,
+      1141,
+      62409,
+      10709,
+      11,
+      13969,
+      279,
+      11247,
+      310,
+      381,
+      11784,
+      310,
+      279,
+      7806
+    ],
+    "finish": "length",
+    "median_seconds": 1.1382426250000002,
+    "sha256": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
+  },
+  "external_memory": {
+    "tool": "macOS /usr/bin/time -l wrapped around the already-built test executable",
+    "process_wall_seconds": 215.54,
+    "maximum_resident_set_size_bytes": 2463891456,
+    "peak_process_memory_footprint_bytes": 2907412480,
+    "phase_specific": false,
+    "idle_baseline_subtracted": false,
+    "host_device_split": false,
+    "timing_log_sha256": "c6242f34b0e60a7b4f16179bce5569b6a3cf495da4d7ef4c7ce4519d3f1fd8d7"
+  },
+  "regression_policy": {
+    "first_series_baseline": true,
+    "comparison_with_prior_controlled_run": false,
+    "alert_percent": 5,
+    "confirmed_failure_percent": 10
+  },
+  "notes": [
+    "Source is authenticated before and after execution; the strict load follows authentication and is not cold-disk I/O.",
+    "Every timed series uses fixed128forcedtokens and checks finite full-vocabulary terminal logits outside timing.",
+    "Natural greedy uses model API plus argmax/readback, not the public generate_causal coordinator. It stops at32tokens here, with EOS handling enabled.",
+    "The separately compiled2048/8192/32768-prefill-only gate has not run. At32768it forbids any decode suffix.",
+    "Whole-process memory measurements do not close per-phase high-water-above-idle requirements."
+  ]
+}

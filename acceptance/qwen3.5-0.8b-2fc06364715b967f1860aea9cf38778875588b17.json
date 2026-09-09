@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "authenticated_f16_reference_public_api_and_q4_32k_execution_verified_pending_release_coverage_performance_and_quantized_quality",
+  "phase": "reference_public_api_repeated_metal_timings_and_q4_32k_execution_verified_pending_coverage_phase_memory_long_timings_and_quantized_quality",
   "repository": "Qwen/Qwen3.5-0.8B",
   "revision": "2fc06364715b967f1860aea9cf38778875588b17",
   "artifact_layout": {
@@ -40,6 +40,9 @@
     "public_chat_streaming_32_tokens_validated": true,
     "real_left_and_right_padded_batch_validated": true,
     "public_chunked_generation_validated": true,
+    "repeated_metal_warm_latency_throughput_measured": true,
+    "whole_process_memory_high_water_recorded": true,
+    "per_phase_memory_high_water_recorded": false,
     "q8_burnpack_conversion_validated": true,
     "q4_burnpack_conversion_validated": true,
     "packed_kernel_execution_validated": true,
@@ -50,6 +53,7 @@
     "quantized_long_context_quality_validated": false
   },
   "quantized_32k_execution_record": "measurements/qwen3.5-0.8b-q4-32k-stress-20260909.json",
+  "repeated_metal_benchmark_record": "measurements/qwen3.5-0.8b-metal-benchmark-20260909-run.json",
   "public_api_acceptance": {
     "date": "2026-09-09",
     "source_tree_equivalent_to_commit": "5fe7014",

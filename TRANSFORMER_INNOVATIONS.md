@@ -1335,6 +1335,11 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   timing, fixed cross-attention versus per-token self-attention cache bytes,
   and output hashes are separate metrics. Whole-process high-water memory is
   reported without claiming per-phase or discrete host/device measurements.
+  The matching [Qwen F16 baseline](acceptance/measurements/qwen3.5-0.8b-metal-benchmark-20260909-run.json)
+  also passes repeated 32/128/512-token source measurements and all 32 official
+  decisions. Its observed hybrid-cache storage matches the separate KV-per-token
+  and fixed DeltaNet formulas. Compiled longer-prefill timings remain unexecuted;
+  they are not inferred from the already-passing Q4 32K stress.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

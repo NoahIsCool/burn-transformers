@@ -16,6 +16,8 @@ MEASUREMENTS = ACCEPTANCE / "measurements"
 class FlanBenchmarkRecordTests(unittest.TestCase):
     """Validate reporting independently from the expensive inference benchmark."""
 
+    prefill_field = "encoder_decoder_prefill"
+
     def setUp(self):
         """Authenticate the retained raw report before inspecting its contents."""
         self.run = json.loads((MEASUREMENTS / "flan-t5-small-metal-benchmark-20260909-run.json").read_text())
@@ -46,7 +48,7 @@ class FlanBenchmarkRecordTests(unittest.TestCase):
         self.assertEqual(self.report["protocol"]["decode_steps"], 128)
         self.assertEqual([series["source_length"] for series in self.report["warm_series"]], [32, 128, 512])
         for series in self.report["warm_series"]:
-            for name in ("encoder_decoder_prefill", "first_token_latency", "decode_model_only", "decode_including_greedy_readback"):
+            for name in (self.prefill_field, "first_token_latency", "decode_model_only", "decode_including_greedy_readback"):
                 phase = series[name]
                 samples = phase["samples_seconds"]
                 self.assertEqual(len(samples), 10)
@@ -75,6 +77,64 @@ class FlanBenchmarkRecordTests(unittest.TestCase):
             self.assertEqual(cache["cross_kv_bytes"], per_token * series["source_length"])
             self.assertEqual(cache["retained_encoder_hidden_bytes"], 512 * 4 * series["source_length"])
             self.assertEqual(cache["total_tensor_payload_bytes"], cache["self_kv_allocated_bytes"] + cache["cross_kv_bytes"] + cache["retained_encoder_hidden_bytes"])
+
+
+class QwenBenchmarkRecordTests(FlanBenchmarkRecordTests):
+    """Apply the same measurement rules to Qwen's distinct hybrid cache."""
+
+    prefill_field = "prefill"
+
+    def setUp(self):
+        """Verify the exact original Qwen report bytes before parsing evidence."""
+        self.run = json.loads((MEASUREMENTS / "qwen3.5-0.8b-metal-benchmark-20260909-run.json").read_text())
+        raw = (MEASUREMENTS / self.run["raw_report"]["file"]).read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), self.run["raw_report"]["sha256"])
+        self.report = json.loads(raw)
+
+    def test_primary_checkpoint_identity_and_scope(self):
+        """Retain all source identities and distinguish optional MTP from vision."""
+        primary = json.loads((ACCEPTANCE / self.run["primary_acceptance"]).read_text())
+        provenance = self.report["provenance"]
+        self.assertEqual(primary["repository"], provenance["repository"])
+        self.assertEqual(primary["revision"], provenance["revision"])
+        self.assertEqual(primary["sha256"], {entry["relative_path"]: entry["sha256"] for entry in provenance["checkpoint_artifacts"]})
+        self.assertEqual(self.run["source_commit"], provenance["crate_commit"]["value"])
+        self.assertEqual(provenance["crate_worktree_status"]["value"], "")
+        report = self.report["strict_load_report"]
+        self.assertEqual(len(report["applied"]), 321)
+        self.assertEqual(len(report["aliased"]), 1)
+        self.assertEqual(len(report["dtype_converted"]), 320)
+        self.assertEqual(len(report["allowlisted_ignored"]), 168)
+        self.assertEqual(sum(name.startswith("mtp.") for name in report["allowlisted_ignored"]), 15)
+        self.assertFalse(report["missing"])
+        self.assertFalse(report["unexpected"])
+        self.assertFalse(self.run["advertised_supported"])
+        self.assertFalse(self.run["external_memory"]["phase_specific"])
+        self.assertFalse(self.run["protocol"]["long_prefill_series_executed"])
+        self.assertEqual(self.run["natural_greedy"]["mode"], "greedy_model_api_loop")
+        self.assertGreaterEqual(self.report["cold_first_token"]["minimum_cached_reference_cosine"], 0.999)
+        self.assertGreaterEqual(self.report["cold_first_token"]["minimum_teacher_reference_cosine"], 0.999)
+
+    def test_canonical_ids_and_cache_accounting(self):
+        """Reconstruct prediction hashes and F16 KV/F32 recurrent physical bytes."""
+        for series in self.report["warm_series"]:
+            for key, hash_key in (("source_token_ids", "source_tokens_u32le_sha256"), ("predicted_token_ids", "predicted_tokens_u32le_sha256")):
+                canonical = b"".join(struct.pack("<I", token) for token in series[key])
+                self.assertEqual(hashlib.sha256(canonical).hexdigest(), series[hash_key])
+            self.assertEqual(series["per_repetition_prediction_hashes"], [series["predicted_tokens_u32le_sha256"]] * 10)
+            self.assertEqual(len(series["predicted_token_ids"]), 129)
+            self.assertEqual(series["cache_capacity"], series["source_length"] + 128)
+            cache = series["cache"]["analytical"]
+            kv = 6 * 2 * 2 * 256 * 2 * series["cache_capacity"]
+            matrix = 18 * 16 * 128 * 128 * 4
+            convolution = 18 * 6144 * 3 * 2
+            self.assertEqual(cache["kv_allocated_bytes"], kv)
+            self.assertEqual(cache["recurrent_matrix_bytes"], matrix)
+            self.assertEqual(cache["convolution_history_bytes"], convolution)
+            self.assertEqual(cache["total_tensor_payload_bytes"], kv + matrix + convolution)
+            self.assertEqual(series["cache"]["observed_kv_bytes"], kv)
+            self.assertEqual(series["cache"]["observed_recurrent_matrix_bytes"], matrix)
+            self.assertEqual(series["cache"]["observed_convolution_history_bytes"], convolution)
 
 
 if __name__ == "__main__":

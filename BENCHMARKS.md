@@ -172,6 +172,29 @@ and the report does not invent separate host/device figures. This first series
 is retained for later controlled comparisons; final integrated replay, CPU
 series, per-phase memory, and crate-wide release gates remain outstanding.
 
+The [Qwen3.5-0.8B Metal/F16 baseline](acceptance/measurements/qwen3.5-0.8b-metal-benchmark-20260909-run.json)
+uses the same three-warmup/ten-sample/128-forced-step protocol, with complete
+source authentication before and after the run. Its official prompt/cached/
+teacher references and all 32 greedy decisions passed before timing; minimum
+compared cosine was `0.999997815`. [Raw samples](acceptance/measurements/qwen3.5-0.8b-metal-benchmark-20260909.json)
+include exact hashes and executable/toolchain metadata.
+
+| Valid source tokens | Median warm first token | Model-only decode | Including greedy readback |
+| ---: | ---: | ---: | ---: |
+| 32 | 65.54 ms | 35.68 tokens/s | 27.91 tokens/s |
+| 128 | 138.60 ms | 35.98 tokens/s | 28.10 tokens/s |
+| 512 | 525.46 ms | 35.70 tokens/s | 27.94 tokens/s |
+
+Single-sample strict load was 1.348 s and cold first-token latency 415.53 ms.
+The separate natural greedy **model-API loop** took median 1.13824 s for 32
+tokens, ending at its length bound. That loop is not a benchmark of the public
+`generate_causal` coordinator. Actual exposed cache tensors confirm 12,288 KV
+bytes per token plus 19,537,920 fixed recurrent bytes. Whole-process maximum
+RSS was 2,463,891,456 bytes and peak footprint 2,907,412,480 bytes; phase-specific
+peaks above idle remain unmeasured. The compiled 2K/8K/32K chunked-prefill-only
+runner has **not run** and cannot contribute latency claims. It forbids decode
+beyond a total 32K context.
+
 ## Current smoke evidence
 
 These values establish correctness progress only. They include cold loading or

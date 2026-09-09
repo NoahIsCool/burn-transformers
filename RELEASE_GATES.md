@@ -36,6 +36,11 @@ all-feature Clippy on the equipped build host before release:
 cargo clippy --manifest-path Cargo.toml --locked --all-targets --all-features -- -D warnings
 ```
 
+The Rust 1.92 source run at `1aa5ee9` passed 827 unit tests, all ordinary
+integration tests, warning-denied Clippy/docs, feature-minimal builds, and 179
+Python tests. Its logs are in `target/release-gates/20260909T160336.140259Z/`.
+Later changes still require replay; this source gate does not waive coverage.
+
 Cargo's usual target location is retained. Check at least 20 GiB free before
 building a new profile; external model artifacts are never a cleanup target.
 The package gate requires clean tracked crate sources and includes verification.
@@ -133,6 +138,9 @@ it is useful locally but is not a substitute for that final connected audit.
   with three warmups and ten samples at 32/128/512 source tokens, 128 forced
   decode steps, canonical hashes, and separate whole-process high-water
   memory. Phase-specific peaks and final integrated replay are still open.
+  The matching [Qwen Metal/F16 baseline](acceptance/measurements/qwen3.5-0.8b-metal-benchmark-20260909-run.json)
+  now passes the same repeated protocol and records actual hybrid cache bytes.
+  Its optional 2K/8K/32K prefill-only timing series has not yet run.
 - Reconcile support records and documents only after all applicable gates pass.
   In particular, successful FLAN numerical parity alone does not establish
   completion of crate-wide coverage, dependency, packaging, or performance gates.
