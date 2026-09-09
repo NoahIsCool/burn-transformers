@@ -15,8 +15,6 @@ pub use model::{
     Qwen3_5SpeculativeOutput, Qwen3_5TextModel,
 };
 
-use std::collections::HashSet;
-
 use serde::{Deserialize, Serialize};
 
 use super::config::{
@@ -88,7 +86,11 @@ pub struct Qwen3_5TextConfig {
     pub attention_dropout: f64,
     /// Whether each query projection also emits a head-wise output gate.
     pub attn_output_gate: bool,
-    /// Gate nonlinearity used by released hybrid checkpoints.
+    /// DeltaNet output-gate metadata used by released hybrid checkpoints.
+    ///
+    /// The pinned reference implements SiLU unconditionally. `swish` is accepted
+    /// as the equivalent spelling serialized by Qwen3.8; any other value fails
+    /// validation instead of being silently ignored.
     pub output_gate_type: Option<String>,
     /// Interval used to derive the three-linear/one-full schedule when omitted.
     pub full_attention_interval: usize,
@@ -105,12 +107,19 @@ pub struct Qwen3_5TextConfig {
     /// Number of value heads in gated-delta layers.
     pub linear_num_value_heads: usize,
     /// Accumulator/cache dtype requested for the recurrent state.
+    ///
+    /// The current runtime deliberately keeps the association matrix in FP32,
+    /// matching the released Qwen3.5 and Qwen3.8 checkpoints.
     pub mamba_ssm_dtype: Option<String>,
     /// Number of appended multi-token-prediction decoder layers.
     pub mtp_num_hidden_layers: usize,
     /// Whether MTP owns an embedding rather than reusing the target embedding.
     pub mtp_use_dedicated_embeddings: bool,
-    /// Dense-only layer indices retained for forward-compatible checkpoint parsing.
+    /// Legacy dense-only layer indices retained for fail-closed config parsing.
+    ///
+    /// Qwen3.5 removes this inherited Qwen3-Next option and all released values
+    /// are empty. Non-empty lists are rejected because the dense runtime has no
+    /// alternate mixer-free decoder block.
     pub mlp_only_layers: Vec<usize>,
     /// Padding token, if the checkpoint defines one.
     pub pad_token_id: Option<TokenIds>,
@@ -237,21 +246,21 @@ impl Validate for Qwen3_5TextConfig {
         }
         if let Some(gate) = &self.output_gate_type
             && gate != "swish"
-            && gate != "sigmoid"
+            && gate != "silu"
         {
             return Err(ConfigError::new(
                 FAMILY,
                 "output_gate_type",
-                "must be `swish` or `sigmoid`",
+                "the pinned DeltaNet graph supports only equivalent `swish` or `silu` spellings",
             ));
         }
         if let Some(dtype) = &self.mamba_ssm_dtype
-            && !["float32", "float16", "bfloat16"].contains(&dtype.as_str())
+            && dtype != "float32"
         {
             return Err(ConfigError::new(
                 FAMILY,
                 "mamba_ssm_dtype",
-                "must be float32, float16, or bfloat16",
+                "the recurrent association state is implemented only in float32",
             ));
         }
 
@@ -263,15 +272,19 @@ impl Validate for Qwen3_5TextConfig {
                 "length must equal num_hidden_layers",
             ));
         }
-        let mut seen = HashSet::new();
-        for index in &self.mlp_only_layers {
-            if *index >= self.num_hidden_layers || !seen.insert(*index) {
-                return Err(ConfigError::new(
-                    FAMILY,
-                    "mlp_only_layers",
-                    "indices must be unique and within the decoder schedule",
-                ));
-            }
+        if !self.mlp_only_layers.is_empty() {
+            return Err(ConfigError::new(
+                FAMILY,
+                "mlp_only_layers",
+                "Qwen3.5 removes the inherited MLP-only schedule; released configs must use an empty list",
+            ));
+        }
+        if self.mtp_use_dedicated_embeddings {
+            return Err(ConfigError::new(
+                FAMILY,
+                "mtp_use_dedicated_embeddings",
+                "no released Qwen3.5 tensor contract defines a dedicated MTP embedding",
+            ));
         }
 
         let mut rope = self.rope_parameters.clone().unwrap_or_default();
@@ -394,5 +407,57 @@ mod tests {
             ..Qwen3_5TextConfig::default()
         };
         assert_eq!(config.query_projection_width(), 12_288);
+    }
+
+    /// Serialized aliases for the implemented SiLU DeltaNet gate remain compatible.
+    #[test]
+    fn accepts_only_implemented_delta_gate_spellings() {
+        for gate in [None, Some("silu"), Some("swish")] {
+            let config = Qwen3_5TextConfig {
+                output_gate_type: gate.map(str::to_owned),
+                ..Qwen3_5TextConfig::default()
+            };
+            config.validate().expect("SiLU spelling must validate");
+        }
+
+        let config = Qwen3_5TextConfig {
+            output_gate_type: Some("sigmoid".into()),
+            ..Qwen3_5TextConfig::default()
+        };
+        let error = config
+            .validate()
+            .expect_err("an unimplemented gate must fail closed");
+        assert_eq!(error.field, "output_gate_type");
+    }
+
+    /// Runtime-affecting legacy fields cannot be accepted and then ignored.
+    #[test]
+    fn rejects_unimplemented_recurrent_and_layer_topologies() {
+        let cases = [
+            Qwen3_5TextConfig {
+                mamba_ssm_dtype: Some("float16".into()),
+                ..Qwen3_5TextConfig::default()
+            },
+            Qwen3_5TextConfig {
+                mlp_only_layers: vec![0],
+                ..Qwen3_5TextConfig::default()
+            },
+            Qwen3_5TextConfig {
+                mtp_use_dedicated_embeddings: true,
+                ..Qwen3_5TextConfig::default()
+            },
+        ];
+        let expected_fields = [
+            "mamba_ssm_dtype",
+            "mlp_only_layers",
+            "mtp_use_dedicated_embeddings",
+        ];
+
+        for (config, expected_field) in cases.into_iter().zip(expected_fields) {
+            let error = config
+                .validate()
+                .expect_err("unimplemented topology must fail closed");
+            assert_eq!(error.field, expected_field);
+        }
     }
 }

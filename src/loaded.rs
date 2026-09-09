@@ -276,6 +276,10 @@ impl<M> LoadedModel<M> {
             quantized: quantized_load_audit,
         } = retained_audit;
         generation_defaults.validate(vocabulary_size)?;
+        #[cfg(feature = "tokenizers")]
+        if let Some(tokenizer) = &tokenizer {
+            tokenizer.validate_model_vocabulary(vocabulary_size)?;
+        }
         load_report.finalize();
         if !load_report.is_strictly_valid() {
             return Err(Error::Checkpoint(format!(
@@ -729,6 +733,44 @@ mod tests {
                 .is_err()
         );
         assert!(source.with_revision("bad\nrevision").is_err());
+    }
+
+    /// A successful model bundle cannot retain a tokenizer with out-of-range IDs.
+    #[cfg(feature = "tokenizers")]
+    #[test]
+    fn loaded_model_cross_validates_tokenizer_vocabulary() {
+        use std::collections::HashMap;
+
+        use tokenizers::{Tokenizer, models::wordlevel::WordLevel};
+
+        let directory = tempfile::tempdir().expect("temporary tokenizer root");
+        let vocabulary = HashMap::from([("zero".to_owned(), 0_u32), ("one".to_owned(), 1_u32)])
+            .into_iter()
+            .collect();
+        let model = WordLevel::builder()
+            .vocab(vocabulary)
+            .unk_token("zero".into())
+            .build()
+            .expect("word-level tokenizer");
+        Tokenizer::new(model)
+            .save(directory.path().join("tokenizer.json"), false)
+            .expect("save tokenizer fixture");
+        let tokenizer = crate::LocalTokenizer::from_directory(directory.path())
+            .expect("load tokenizer fixture");
+        let source = ModelSourceMetadata::local(directory.path(), "qwen3_5_text")
+            .expect("valid source root");
+
+        let error = LoadedModel::new(
+            (),
+            Some(tokenizer),
+            Default::default(),
+            source,
+            LoadReport::new(),
+            1,
+        )
+        .expect_err("tokenizer ID one cannot index a one-row model vocabulary");
+        assert!(matches!(error, crate::Error::Tokenizer(_)));
+        assert!(error.to_string().contains("ID 1"));
     }
 
     /// Construction finalizes a strict report and round-trips every component.

@@ -344,6 +344,34 @@ impl LocalTokenizer {
         &self.metadata
     }
 
+    /// Verifies that every locally declared token can index a model embedding row.
+    ///
+    /// A model vocabulary may be larger than the tokenizer vocabulary because
+    /// checkpoint matrices are often padded for accelerator alignment. The
+    /// reverse relationship is unsafe: tokenization could then produce an ID
+    /// outside the embedding table. This method therefore validates the greatest
+    /// concrete vocabulary ID rather than requiring the two reported counts to
+    /// be equal.
+    pub fn validate_model_vocabulary(&self, model_vocabulary_size: usize) -> Result<()> {
+        if model_vocabulary_size == 0 {
+            return Err(Error::Tokenizer(
+                "model vocabulary size must be greater than zero".into(),
+            ));
+        }
+        let maximum_id = self
+            .tokenizer
+            .get_vocab(true)
+            .into_values()
+            .max()
+            .ok_or_else(|| Error::Tokenizer("tokenizer vocabulary must not be empty".into()))?;
+        if maximum_id as usize >= model_vocabulary_size {
+            return Err(Error::Tokenizer(format!(
+                "tokenizer emits ID {maximum_id}, outside model vocabulary size {model_vocabulary_size}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Encodes one input without adding artificial batch padding.
     pub fn encode(&self, text: &str, options: &EncodeOptions) -> Result<BatchEncoding> {
         self.encode_batch(&[text], options)
@@ -512,6 +540,26 @@ impl LocalTokenizer {
         environment
             .render_str(template, Value::Object(context))
             .map_err(|error| Error::Tokenizer(format!("chat template `{name}` failed: {error}")))
+    }
+
+    /// Renders and tokenizes a chat prompt with checkpoint delimiters exactly once.
+    ///
+    /// Hugging Face chat templates normally emit their own beginning, role, and
+    /// end markers. Applying a tokenizer post-processor afterward may duplicate
+    /// those special tokens, so this helper always disables
+    /// [`EncodeOptions::add_special_tokens`] after rendering. Truncation and
+    /// padding controls supplied in `encode_options` remain unchanged.
+    #[cfg(feature = "chat-templates")]
+    pub fn encode_chat(
+        &self,
+        messages: &[ChatMessage],
+        template_options: &ChatTemplateOptions,
+        encode_options: &EncodeOptions,
+    ) -> Result<BatchEncoding> {
+        let prompt = self.render_chat(messages, template_options)?;
+        let mut encode_options = encode_options.clone();
+        encode_options.add_special_tokens = false;
+        self.encode(&prompt, &encode_options)
     }
 }
 
@@ -989,6 +1037,18 @@ mod tests {
             })
         );
         assert!(tokenizer.root().is_absolute());
+        tokenizer
+            .validate_model_vocabulary(6)
+            .expect("equal tokenizer and model vocabularies must be compatible");
+        tokenizer
+            .validate_model_vocabulary(8)
+            .expect("an accelerator-padded model vocabulary must be compatible");
+        let error = tokenizer
+            .validate_model_vocabulary(5)
+            .expect_err("a tokenizer ID outside the model embedding must fail");
+        assert!(error.to_string().contains("ID 5"));
+        assert!(error.to_string().contains("vocabulary size 5"));
+        assert!(tokenizer.validate_model_vocabulary(0).is_err());
     }
 
     /// Left padding produces a rectangular `true == valid` tensor batch.
@@ -1137,6 +1197,30 @@ mod tests {
             )
             .expect("render template");
         assert_eq!(rendered, "user=hello;assistant=");
+
+        let encoded = tokenizer
+            .encode_chat(
+                &[ChatMessage::text("user", "hello")],
+                &ChatTemplateOptions {
+                    add_generation_prompt: true,
+                    ..ChatTemplateOptions::default()
+                },
+                &EncodeOptions {
+                    add_special_tokens: true,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("rendered chat must tokenize without a second special-token pass");
+        let manual = tokenizer
+            .encode(
+                &rendered,
+                &EncodeOptions {
+                    add_special_tokens: false,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("manual reference encoding");
+        assert_eq!(encoded, manual);
 
         let mut failing = base_config();
         failing["chat_template"] = Value::String("{{ raise_exception('stop') }}".into());

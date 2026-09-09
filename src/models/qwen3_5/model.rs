@@ -226,6 +226,8 @@ impl<B: Backend> Qwen3_5TextModel<B> {
         validate_token_ids(input.token_ids.clone(), self.config.vocab_size)?;
         validate_mask(input.token_mask.as_ref(), batch, sequence)?;
         let positions = resolve_positions(input, batch, sequence)?;
+        decode::validate_position_range(positions.clone(), self.config.max_position_embeddings)?;
+        let evaluated_context = decode::evaluated_context(positions.clone())?;
         let mut hidden = self.embed_tokens.forward(input.token_ids.clone());
         let mut hidden_states = Vec::with_capacity(if retain_hidden_states {
             self.layers.len() + 2
@@ -241,7 +243,7 @@ impl<B: Backend> Qwen3_5TextModel<B> {
                 positions.clone(),
                 input.token_mask.as_ref(),
                 self.rope,
-                sequence,
+                evaluated_context,
             )?;
             if retain_hidden_states {
                 hidden_states.push(hidden.clone());
@@ -775,6 +777,30 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// Stateless execution enforces the same declared context as cached decoding.
+    #[test]
+    fn stateless_positions_fail_before_embedding_or_attention_outside_context() {
+        let device = Default::default();
+        let model = Qwen3_5ForCausalLm::<TestBackend>::init(tiny_config(), &device)
+            .expect("tiny model must initialize");
+        let token_ids = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device);
+
+        for positions in [[0, -1], [0, 64]] {
+            let error = model
+                .forward(
+                    CausalLmInput {
+                        token_ids: token_ids.clone(),
+                        token_mask: None,
+                        position_ids: Some(Tensor::from_ints([positions], &device)),
+                    },
+                    &ForwardOptions::default(),
+                )
+                .expect_err("invalid stateless positions must be recoverable");
+            assert!(matches!(error, Error::Shape { .. }));
+            assert!(error.to_string().contains("qwen.position_ids"));
+        }
     }
 
     /// Stateless device preflight identifies every independently supplied tensor.
