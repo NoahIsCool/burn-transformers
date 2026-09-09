@@ -1176,6 +1176,496 @@ mod tests {
         assert!(parse_chat_templates(Some(&Value::String("  ".into()))).is_err());
     }
 
+    /// Invalid limits fail before encoding, while explicit right-side controls preserve masks.
+    #[test]
+    fn validates_encoding_limits_and_right_padding_boundaries() {
+        let directory = fixture(base_config());
+        let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+        for (options, expected) in [
+            (
+                EncodeOptions {
+                    max_length: Some(0),
+                    ..Default::default()
+                },
+                "max_length",
+            ),
+            (
+                EncodeOptions {
+                    padding: Padding::Fixed(0),
+                    ..Default::default()
+                },
+                "fixed padding length",
+            ),
+            (
+                EncodeOptions {
+                    padding: Padding::Fixed(1),
+                    max_length: Some(2),
+                    ..Default::default()
+                },
+                "exceeds fixed padding width",
+            ),
+        ] {
+            let error = tokenizer.encode("hello", &options).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        let error = tokenizer
+            .encode_batch::<&str>(&[], &EncodeOptions::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("at least one input"));
+        let error = tokenizer
+            .encode(
+                "",
+                &EncodeOptions {
+                    add_special_tokens: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("batch row 0 encoded to no tokens")
+        );
+        let encoded = tokenizer
+            .encode_batch(
+                &["hello world hello", "world"],
+                &EncodeOptions {
+                    add_special_tokens: false,
+                    max_length: Some(2),
+                    padding: Padding::Fixed(2),
+                    padding_side: Some(PaddingSide::Right),
+                    truncation_side: Some(TruncationSide::Right),
+                },
+            )
+            .unwrap();
+        assert_eq!(encoded.token_ids(), &[vec![4, 5], vec![5, 1]]);
+        assert_eq!(
+            encoded.valid_tokens(),
+            &[vec![true, true], vec![true, false]]
+        );
+        assert_eq!(encoded.batch_size(), 2);
+        assert_eq!(tokenizer.decode(&[4, 5], false).unwrap(), "hello world");
+    }
+
+    /// Empty host encodings fail before tensor allocation and empty vocabularies fail validation.
+    #[test]
+    fn rejects_empty_host_batches_and_tokenizer_vocabulary() {
+        for token_ids in [vec![], vec![vec![]]] {
+            let encoding = BatchEncoding {
+                token_ids,
+                valid_tokens: vec![],
+            };
+            assert!(
+                encoding
+                    .to_causal_input::<Flex>(&Default::default())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("empty token batch")
+            );
+        }
+        let directory = fixture(base_config());
+        let mut tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+        tokenizer.tokenizer = Tokenizer::new(WordLevel::default());
+        assert!(
+            tokenizer
+                .validate_model_vocabulary(6)
+                .unwrap_err()
+                .to_string()
+                .contains("vocabulary must not be empty")
+        );
+    }
+
+    /// Missing, malformed, oversized and non-file artifacts retain their local path.
+    #[test]
+    fn local_artifact_errors_identify_the_failing_file() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let missing = LocalTokenizer::from_directory(&root).unwrap_err();
+        assert!(matches!(missing, Error::Io { ref path, .. } if path.ends_with("tokenizer.json")));
+        let artifact = root.join("tokenizer.json");
+        fs::write(&artifact, b"not tokenizer json").unwrap();
+        assert!(
+            LocalTokenizer::from_directory(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("failed to decode")
+        );
+        assert!(matches!(
+            LocalTokenizer::from_directory(&artifact).unwrap_err(),
+            Error::Artifact { .. }
+        ));
+        assert!(
+            matches!(contained_file(&root, "tokenizer.json", true, 3).unwrap_err(), Error::Artifact { reason, .. } if reason.contains("exceeds safety limit"))
+        );
+        fs::create_dir(root.join("directory.json")).unwrap();
+        assert!(
+            matches!(contained_file(&root, "directory.json", true, 100).unwrap_err(), Error::Artifact { reason, .. } if reason.contains("regular file"))
+        );
+        assert!(
+            contained_file(&root, "absent.json", false, 100)
+                .unwrap()
+                .is_none()
+        );
+
+        let directory = fixture(base_config());
+        fs::write(directory.path().join("tokenizer_config.json"), b"{").unwrap();
+        assert!(
+            matches!(LocalTokenizer::from_directory(directory.path()).unwrap_err(), Error::Json { path, .. } if path.ends_with("tokenizer_config.json"))
+        );
+    }
+
+    /// Symlink containment is enforced for tokenizer and optional metadata files alike.
+    #[cfg(unix)]
+    #[test]
+    fn local_artifacts_reject_escaping_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let outside = fixture(base_config());
+        let root = TempDir::new().unwrap();
+        symlink(
+            outside.path().join("tokenizer.json"),
+            root.path().join("tokenizer.json"),
+        )
+        .unwrap();
+        let error = LocalTokenizer::from_directory(root.path()).unwrap_err();
+        assert!(
+            matches!(error, Error::Artifact { reason, .. } if reason.contains("symlink escapes"))
+        );
+
+        let inside = fixture(base_config());
+        symlink(
+            outside.path().join("tokenizer_config.json"),
+            inside.path().join("special_tokens_map.json"),
+        )
+        .unwrap();
+        let error = LocalTokenizer::from_directory(inside.path()).unwrap_err();
+        assert!(
+            matches!(error, Error::Artifact { path, reason } if path.ends_with("special_tokens_map.json") && reason.contains("symlink escapes"))
+        );
+    }
+
+    /// Metadata objects, sides and standalone template files are validated independently.
+    #[test]
+    fn validates_metadata_objects_and_standalone_chat_templates() {
+        for value in [Value::Null, serde_json::json!([]), Value::Bool(true)] {
+            let directory = fixture(value.clone());
+            assert!(
+                matches!(LocalTokenizer::from_directory(directory.path()).unwrap_err(), Error::Artifact { path, .. } if path.ends_with("tokenizer_config.json"))
+            );
+            let directory = fixture(base_config());
+            fs::write(
+                directory.path().join("special_tokens_map.json"),
+                value.to_string(),
+            )
+            .unwrap();
+            assert!(
+                matches!(LocalTokenizer::from_directory(directory.path()).unwrap_err(), Error::Artifact { path, .. } if path.ends_with("special_tokens_map.json"))
+            );
+        }
+        let mut config = base_config();
+        config["truncation_side"] = serde_json::json!(17);
+        let directory = fixture(config);
+        assert!(
+            LocalTokenizer::from_directory(directory.path())
+                .unwrap_err()
+                .to_string()
+                .contains("truncation_side")
+        );
+        let mut config = base_config();
+        config["truncation_side"] = serde_json::json!("left");
+        config["padding_side"] = serde_json::json!("right");
+        let directory = fixture(config);
+        fs::write(
+            directory.path().join("chat_template.jinja"),
+            "hello {{ messages[0].content }}",
+        )
+        .unwrap();
+        let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+        assert_eq!(tokenizer.metadata().truncation_side, TruncationSide::Left);
+        assert_eq!(tokenizer.metadata().padding_side, PaddingSide::Right);
+        assert_eq!(
+            tokenizer.metadata().chat_templates["default"],
+            "hello {{ messages[0].content }}"
+        );
+        fs::write(directory.path().join("chat_template.jinja"), " \n ").unwrap();
+        assert!(
+            matches!(LocalTokenizer::from_directory(directory.path()).unwrap_err(), Error::Artifact { path, reason } if path.ends_with("chat_template.jinja") && reason.contains("must not be empty"))
+        );
+    }
+
+    /// Special-token IDs and strings cannot disagree, and null declarations allow fallback.
+    #[test]
+    fn special_metadata_resolves_ids_precedence_and_rejects_conflicts() {
+        let directory = fixture(base_config());
+        let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+        let special_map = serde_json::json!({"eos_token": {"content": "<eos>"}});
+        for config in [
+            serde_json::json!({"eos_token_id": 3}),
+            serde_json::json!({"eos_token": null}),
+        ] {
+            assert_eq!(
+                resolve_special(
+                    "eos_token",
+                    Some(&config),
+                    Some(&special_map),
+                    &tokenizer.tokenizer
+                )
+                .unwrap(),
+                Some(SpecialToken {
+                    content: "<eos>".into(),
+                    id: 3
+                })
+            );
+        }
+        for (config, expected) in [
+            (
+                serde_json::json!({"eos_token": {"content": 7}}),
+                "could not resolve",
+            ),
+            (serde_json::json!({"eos_token_id": 99}), "could not resolve"),
+            (
+                serde_json::json!({"eos_token": "unknown-special"}),
+                "absent from the vocabulary",
+            ),
+            (
+                serde_json::json!({"eos_token": "<eos>", "eos_token_id": 2}),
+                "conflicts with tokenizer vocabulary",
+            ),
+        ] {
+            let error = resolve_special("eos_token", Some(&config), None, &tokenizer.tokenizer)
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        let config =
+            serde_json::json!({"additional_special_tokens": ["<bos>", {"content": "<eos>"}]});
+        assert_eq!(
+            resolve_additional(None, Some(&config), &tokenizer.tokenizer).unwrap(),
+            vec![
+                SpecialToken {
+                    content: "<bos>".into(),
+                    id: 2
+                },
+                SpecialToken {
+                    content: "<eos>".into(),
+                    id: 3
+                },
+            ]
+        );
+        for (tokens, expected) in [
+            (serde_json::json!(true), "must be an array"),
+            (serde_json::json!([17]), "must be a string or AddedToken"),
+            (serde_json::json!(["missing"]), "absent from the vocabulary"),
+            (
+                serde_json::json!(["<eos>", {"content": "<eos>"}]),
+                "duplicate additional special token",
+            ),
+        ] {
+            let config = serde_json::json!({"additional_special_tokens": tokens});
+            let error = resolve_additional(Some(&config), None, &tokenizer.tokenizer).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    /// All supported template metadata shapes normalize identically and malformed entries fail.
+    #[test]
+    fn named_template_metadata_validates_each_entry() {
+        let expected = BTreeMap::from([("chat".into(), "hello".into())]);
+        for value in [
+            serde_json::json!({"chat": "hello"}),
+            serde_json::json!([{"name": "chat", "template": "hello"}]),
+        ] {
+            assert_eq!(parse_chat_templates(Some(&value)).unwrap(), expected);
+        }
+        for (value, expected) in [
+            (
+                serde_json::json!([{"template": "hello"}]),
+                ".name must be a string",
+            ),
+            (
+                serde_json::json!([{"name": "chat"}]),
+                ".template must be a string",
+            ),
+            (serde_json::json!({"chat": 17}), "must be a string"),
+            (
+                serde_json::json!({"": "hello"}),
+                "name and source must not be empty",
+            ),
+        ] {
+            let error = parse_chat_templates(Some(&value)).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    /// Rendering chooses only an explicit, default, or unambiguous sole template.
+    #[cfg(feature = "chat-templates")]
+    #[test]
+    fn chat_rendering_validates_selection_and_reserved_context() {
+        let directory = fixture(base_config());
+        let mut tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+        let messages = [ChatMessage::text("user", "hello")];
+        assert!(
+            tokenizer
+                .render_chat(&[], &ChatTemplateOptions::default())
+                .unwrap_err()
+                .to_string()
+                .contains("at least one message")
+        );
+        assert!(
+            tokenizer
+                .render_chat(&messages, &ChatTemplateOptions::default())
+                .unwrap_err()
+                .to_string()
+                .contains("does not provide a chat template")
+        );
+        tokenizer.metadata.chat_templates = BTreeMap::from([("chat".into(), "hello".into())]);
+        assert_eq!(
+            tokenizer
+                .render_chat(&messages, &ChatTemplateOptions::default())
+                .unwrap(),
+            "hello"
+        );
+        tokenizer
+            .metadata
+            .chat_templates
+            .insert("tools".into(), "world".into());
+        assert!(
+            tokenizer
+                .render_chat(&messages, &ChatTemplateOptions::default())
+                .unwrap_err()
+                .to_string()
+                .contains("multiple chat templates")
+        );
+        assert_eq!(
+            tokenizer
+                .render_chat(
+                    &messages,
+                    &ChatTemplateOptions {
+                        template_name: Some("tools".into()),
+                        ..Default::default()
+                    }
+                )
+                .unwrap(),
+            "world"
+        );
+        assert!(
+            tokenizer
+                .render_chat(
+                    &messages,
+                    &ChatTemplateOptions {
+                        template_name: Some("missing".into()),
+                        ..Default::default()
+                    }
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("was not found")
+        );
+        tokenizer.metadata.chat_templates.insert(
+            "default".into(),
+            "{{ bos_token }}{{ extra }}{{ eos_token }}".into(),
+        );
+        assert_eq!(
+            tokenizer
+                .render_chat(
+                    &messages,
+                    &ChatTemplateOptions {
+                        extra_context: BTreeMap::from([(
+                            "extra".into(),
+                            serde_json::json!("hello")
+                        )]),
+                        ..Default::default()
+                    }
+                )
+                .unwrap(),
+            "<bos>hello<eos>"
+        );
+        for reserved in [
+            "messages",
+            "add_generation_prompt",
+            "tools",
+            "add_vision_id",
+            "enable_thinking",
+            "bos_token",
+            "eos_token",
+            "pad_token",
+            "unk_token",
+        ] {
+            let error = tokenizer
+                .render_chat(
+                    &messages,
+                    &ChatTemplateOptions {
+                        extra_context: BTreeMap::from([(reserved.into(), Value::Null)]),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("reserved variable `{reserved}`")),
+                "{error}"
+            );
+        }
+    }
+
+    /// The bounded Python-string-method adapter validates values and argument arity.
+    #[cfg(feature = "chat-templates")]
+    #[test]
+    fn chat_python_string_methods_match_supported_semantics() {
+        let directory = fixture(base_config());
+        let mut tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+        let messages = [ChatMessage::text("user", "hello")];
+        for (expression, expected) in [
+            ("'Hello'.startswith('He')", "true"),
+            ("'Hello'.endswith('lo')", "true"),
+            ("'a:b::c'.split(':') | join('|')", "a|b||c"),
+            ("'  x  '.lstrip()", "x  "),
+            ("'  x  '.rstrip()", "  x"),
+            ("'  x  '.strip()", "x"),
+            ("'xyhelloyx'.lstrip('xy')", "helloyx"),
+            ("'xyhelloyx'.rstrip('xy')", "xyhello"),
+            ("'xyhelloyx'.strip('xy')", "hello"),
+            ("'hello'.strip('')", "hello"),
+            ("'HeLLo'.lower()", "hello"),
+            ("'HeLLo'.upper()", "HELLO"),
+        ] {
+            tokenizer
+                .metadata
+                .chat_templates
+                .insert("default".into(), format!("{{{{ {expression} }}}}"));
+            assert_eq!(
+                tokenizer
+                    .render_chat(&messages, &ChatTemplateOptions::default())
+                    .unwrap(),
+                expected,
+                "{expression}"
+            );
+        }
+        for expression in [
+            "'x'.startswith()",
+            "'x'.endswith('a','b')",
+            "'x'.startswith(1)",
+            "'x'.split()",
+            "'x'.strip(1)",
+            "'x'.strip('a','b')",
+            "'x'.lower(1)",
+            "'x'.unsupported()",
+            "17.startswith('1')",
+        ] {
+            tokenizer
+                .metadata
+                .chat_templates
+                .insert("default".into(), format!("{{{{ {expression} }}}}"));
+            let error = tokenizer
+                .render_chat(&messages, &ChatTemplateOptions::default())
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("chat template `default` failed"),
+                "{expression}: {error}"
+            );
+        }
+    }
+
     /// Bounded MiniJinja rendering exposes only intended chat variables.
     #[cfg(feature = "chat-templates")]
     #[test]

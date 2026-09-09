@@ -325,10 +325,17 @@ impl MixerSpec {
                         "MLA dimensions must be non-zero",
                     ));
                 }
-                spec.position.validate(
-                    spec.content_head_dim + spec.rotary_head_dim,
-                    &format!("{field}.position"),
-                )
+                let head_dim = spec
+                    .content_head_dim
+                    .checked_add(spec.rotary_head_dim)
+                    .ok_or_else(|| {
+                        Error::configuration(
+                            format!("{field}.head_dim"),
+                            "MLA content and rotary dimensions overflow usize",
+                        )
+                    })?;
+                spec.position
+                    .validate(head_dim, &format!("{field}.position"))
             }
             Self::DeltaNet {
                 key_heads,
@@ -640,6 +647,382 @@ mod tests {
     #[test]
     fn decoder_validation_accepts_valid_spec() {
         decoder().validate().expect("valid decoder must pass");
+    }
+
+    /// Configuration errors retain the exact nested field a caller can repair.
+    fn assert_configuration_field(result: Result<()>, expected: &str) {
+        match result.expect_err("invalid configuration must return an error") {
+            Error::Configuration { field, reason } => {
+                assert_eq!(field, expected);
+                assert!(!reason.is_empty());
+            }
+            error => panic!("expected configuration error for {expected}, got {error}"),
+        }
+    }
+
+    /// Both normalization variants reject non-positive and non-finite stabilizers.
+    #[test]
+    fn normalization_validates_each_epsilon_boundary() {
+        for epsilon in [0.0, -1.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            for norm in [
+                NormalizationSpec::Rms {
+                    epsilon,
+                    zero_centered: true,
+                },
+                NormalizationSpec::Layer {
+                    epsilon,
+                    bias: true,
+                },
+            ] {
+                assert_configuration_field(norm.validate("norm"), "norm.epsilon");
+            }
+        }
+        NormalizationSpec::Layer {
+            epsilon: f64::MIN_POSITIVE,
+            bias: false,
+        }
+        .validate("norm")
+        .unwrap();
+    }
+
+    /// Rotary pairs and their geometric base are validated independently of head grouping.
+    #[test]
+    fn position_encoding_rejects_invalid_base_width_and_bucket_distance() {
+        for theta in [0.0, -10.0, f64::NAN, f64::INFINITY] {
+            assert_configuration_field(
+                PositionEncodingSpec::Rope {
+                    theta,
+                    rotary_dim: 2,
+                    scaling: RopeScaling::None,
+                }
+                .validate(4, "position"),
+                "position.theta",
+            );
+        }
+        for rotary_dim in [0, 3, 6] {
+            assert_configuration_field(
+                PositionEncodingSpec::Rope {
+                    theta: 10_000.0,
+                    rotary_dim,
+                    scaling: RopeScaling::None,
+                }
+                .validate(4, "position"),
+                "position.rotary_dim",
+            );
+        }
+        for buckets in [0, 1] {
+            assert_configuration_field(
+                PositionEncodingSpec::T5RelativeBias {
+                    buckets,
+                    max_distance: 16,
+                    bidirectional: false,
+                }
+                .validate(4, "position"),
+                "position.buckets",
+            );
+        }
+        for max_distance in [0, 15, 16] {
+            assert_configuration_field(
+                PositionEncodingSpec::T5RelativeBias {
+                    buckets: 32,
+                    max_distance,
+                    bidirectional: false,
+                }
+                .validate(4, "position"),
+                "position.max_distance",
+            );
+        }
+        PositionEncodingSpec::None.validate(0, "position").unwrap();
+        PositionEncodingSpec::T5RelativeBias {
+            buckets: 32,
+            max_distance: 17,
+            bidirectional: false,
+        }
+        .validate(4, "position")
+        .unwrap();
+    }
+
+    /// YaRN rejects each singular interpolation/temperature boundary with its own field.
+    #[test]
+    fn yarn_validation_reports_expansion_temperature_and_transition_errors() {
+        let validate = |factor, original_max_positions, attention_factor, beta_slow, beta_fast| {
+            PositionEncodingSpec::Rope {
+                theta: 10_000.0,
+                rotary_dim: 4,
+                scaling: RopeScaling::Yarn {
+                    factor,
+                    original_max_positions,
+                    attention_factor,
+                    beta_slow,
+                    beta_fast,
+                },
+            }
+            .validate(4, "position")
+        };
+        validate(2.0, 128, None, 1.0, 32.0).unwrap();
+        validate(2.0, 128, Some(1.0), 1.0, 32.0).unwrap();
+        for factor in [1.0, 0.0, f64::NAN, f64::INFINITY] {
+            assert_configuration_field(
+                validate(factor, 128, None, 1.0, 32.0),
+                "position.scaling.factor",
+            );
+        }
+        assert_configuration_field(
+            validate(2.0, 0, None, 1.0, 32.0),
+            "position.scaling.original_max_positions",
+        );
+        for factor in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_configuration_field(
+                validate(2.0, 128, Some(factor), 1.0, 32.0),
+                "position.scaling.attention_factor",
+            );
+        }
+        for (slow, fast) in [
+            (0.0, 32.0),
+            (1.0, 1.0),
+            (2.0, 1.0),
+            (f64::NAN, 32.0),
+            (1.0, f64::INFINITY),
+        ] {
+            assert_configuration_field(
+                validate(2.0, 128, None, slow, fast),
+                "position.scaling.beta",
+            );
+        }
+    }
+
+    /// Every attention and recurrent-state axis must be nonzero before shape arithmetic.
+    #[test]
+    fn mixers_validate_zero_dimensions_and_grouping() {
+        for index in 0..3 {
+            let mut axes = [2, 1, 4];
+            axes[index] = 0;
+            assert_configuration_field(
+                AttentionSpec {
+                    query_heads: axes[0],
+                    key_value_heads: axes[1],
+                    head_dim: axes[2],
+                    query_key_norm: false,
+                    output_gate: false,
+                    position: PositionEncodingSpec::None,
+                }
+                .validate("attention"),
+                "attention",
+            );
+        }
+        let attention = AttentionSpec {
+            query_heads: 2,
+            key_value_heads: 1,
+            head_dim: 4,
+            query_key_norm: false,
+            output_gate: false,
+            position: PositionEncodingSpec::None,
+        };
+        assert_configuration_field(
+            MixerSpec::SlidingAttention(SlidingWindowSpec {
+                attention: attention.clone(),
+                window: 0,
+            })
+            .validate("mixer"),
+            "mixer.window",
+        );
+        MixerSpec::SlidingAttention(SlidingWindowSpec {
+            attention,
+            window: 1,
+        })
+        .validate("mixer")
+        .unwrap();
+        for index in 0..5 {
+            let mut axes = [1, 2, 4, 4, 3];
+            axes[index] = 0;
+            assert_configuration_field(
+                MixerSpec::DeltaNet {
+                    key_heads: axes[0],
+                    value_heads: axes[1],
+                    key_head_dim: axes[2],
+                    value_head_dim: axes[3],
+                    convolution_kernel: axes[4],
+                }
+                .validate("delta"),
+                "delta",
+            );
+        }
+        assert_configuration_field(
+            MixerSpec::DeltaNet {
+                key_heads: 2,
+                value_heads: 3,
+                key_head_dim: 4,
+                value_head_dim: 4,
+                convolution_kernel: 3,
+            }
+            .validate("delta"),
+            "delta.value_heads",
+        );
+        for index in 0..5 {
+            let mut axes = [4, 4, 8, 3, 2];
+            axes[index] = 0;
+            assert_configuration_field(
+                MixerSpec::Mamba2(Mamba2Spec {
+                    heads: axes[0],
+                    head_dim: axes[1],
+                    state_dim: axes[2],
+                    convolution_kernel: axes[3],
+                    group_size: axes[4],
+                })
+                .validate("mamba"),
+                "mamba",
+            );
+        }
+        for group_size in [1, 2, 3, 4, 5] {
+            let result = MixerSpec::Mamba2(Mamba2Spec {
+                heads: 4,
+                head_dim: 4,
+                state_dim: 8,
+                convolution_kernel: 3,
+                group_size,
+            })
+            .validate("mamba");
+            if [1, 2, 4].contains(&group_size) {
+                result.unwrap();
+            } else {
+                assert_configuration_field(result, "mamba");
+            }
+        }
+    }
+
+    /// Serialized MLA dimensions cannot overflow even before a runtime rejects the mixer.
+    #[test]
+    fn mla_validation_rejects_zero_ranks_and_overflowing_head_width() {
+        let valid = MlaSpec {
+            query_heads: 2,
+            content_head_dim: 4,
+            rotary_head_dim: 2,
+            value_head_dim: 4,
+            key_value_lora_rank: 2,
+            query_lora_rank: None,
+            position: PositionEncodingSpec::Rope {
+                theta: 10_000.0,
+                rotary_dim: 2,
+                scaling: RopeScaling::None,
+            },
+        };
+        MixerSpec::Mla(valid.clone()).validate("mla").unwrap();
+        for index in 0..6 {
+            let mut invalid = valid.clone();
+            match index {
+                0 => invalid.query_heads = 0,
+                1 => invalid.content_head_dim = 0,
+                2 => invalid.rotary_head_dim = 0,
+                3 => invalid.value_head_dim = 0,
+                4 => invalid.key_value_lora_rank = 0,
+                _ => invalid.query_lora_rank = Some(0),
+            }
+            assert_configuration_field(MixerSpec::Mla(invalid).validate("mla"), "mla");
+        }
+        let mut invalid = valid;
+        invalid.content_head_dim = usize::MAX;
+        assert_configuration_field(MixerSpec::Mla(invalid).validate("mla"), "mla.head_dim");
+    }
+
+    /// Dense widths, routed cardinalities and scaling each have recoverable diagnostics.
+    #[test]
+    fn feed_forward_validation_covers_empty_experts_and_invalid_scales() {
+        assert_configuration_field(
+            FeedForwardSpec::Dense(DenseFeedForwardSpec {
+                intermediate_size: 0,
+                activation: Activation::Silu,
+                bias: false,
+            })
+            .validate("ffn"),
+            "ffn.intermediate_size",
+        );
+        let valid = MixtureOfExpertsSpec {
+            routed_experts: 4,
+            experts_per_token: 2,
+            shared_experts: 1,
+            expert_intermediate_size: 8,
+            activation: Activation::ReluSquared,
+            renormalize_selected: true,
+            routed_scale: 1.0,
+        };
+        FeedForwardSpec::MixtureOfExperts(valid.clone())
+            .validate("ffn")
+            .unwrap();
+        for index in 0..3 {
+            let mut invalid = valid.clone();
+            match index {
+                0 => invalid.routed_experts = 0,
+                1 => invalid.expert_intermediate_size = 0,
+                _ => invalid.experts_per_token = 0,
+            }
+            assert_configuration_field(
+                FeedForwardSpec::MixtureOfExperts(invalid).validate("ffn"),
+                if index == 2 {
+                    "ffn.experts_per_token"
+                } else {
+                    "ffn"
+                },
+            );
+        }
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut invalid = valid.clone();
+            invalid.routed_scale = scale;
+            assert_configuration_field(
+                FeedForwardSpec::MixtureOfExperts(invalid).validate("ffn"),
+                "ffn.routed_scale",
+            );
+        }
+    }
+
+    /// Global and later-layer validation errors retain precise field paths.
+    #[test]
+    fn decoder_reports_global_and_nested_normalization_fields() {
+        for (index, expected) in [
+            "vocabulary_size",
+            "hidden_size",
+            "layers",
+            "max_position_embeddings",
+            "final_norm.epsilon",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut invalid = decoder();
+            match index {
+                0 => invalid.vocabulary_size = 0,
+                1 => invalid.hidden_size = 0,
+                2 => invalid.layers.clear(),
+                3 => invalid.max_position_embeddings = 0,
+                _ => {
+                    invalid.final_norm = NormalizationSpec::Layer {
+                        epsilon: 0.0,
+                        bias: false,
+                    }
+                }
+            }
+            assert_configuration_field(invalid.validate(), expected);
+        }
+        for mixer_side in [true, false] {
+            let mut invalid = decoder();
+            invalid.layers.push(dense_layer());
+            let invalid_norm = NormalizationSpec::Rms {
+                epsilon: 0.0,
+                zero_centered: false,
+            };
+            if mixer_side {
+                invalid.layers[1].mixer_norm = invalid_norm;
+            } else {
+                invalid.layers[1].feed_forward_norm = invalid_norm;
+            }
+            assert_configuration_field(
+                invalid.validate(),
+                if mixer_side {
+                    "layers[1].mixer_norm.epsilon"
+                } else {
+                    "layers[1].feed_forward_norm.epsilon"
+                },
+            );
+        }
     }
 
     /// Rejects KV head counts that cannot be repeated evenly across query heads.
