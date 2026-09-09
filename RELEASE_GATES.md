@@ -64,6 +64,13 @@ used `--lib`; the runner also includes ordinary integration tests. It must be
 rerun on the final candidate, and baseline results must not be recycled across
 source changes.
 
+The standalone runtime lockfile is now tracked explicitly (overriding only the
+crate-local parent ignore rule). Its reviewed initial SHA-256 is
+`819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d`.
+This pins the exact tested development graph without constraining downstream
+applications to this library's lockfile. The independent fuzz package also keeps
+its own lockfile and [campaign evidence](fuzz/CAMPAIGNS.md).
+
 ## Dependency policy
 
 `deny.toml` rejects unknown registries and Git sources, and checks licenses of

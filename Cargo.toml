@@ -17,6 +17,7 @@ include = [
     "*.md",
     "LICENSE-*",
     "deny.toml",
+    "Cargo.lock",
 ]
 
 [features]
