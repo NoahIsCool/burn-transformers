@@ -3416,7 +3416,7 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         .iter()
         .map(|token| i64::from(*token))
         .collect::<Vec<_>>();
-    assert_eq!(tokens, official_reference.input_ids());
+    assert_eq!(tokens, [9_419], "preserve historical Hello tokenization");
     let sequence = tokens.len();
     let input_ids =
         Tensor::<Metal, 2, Int>::from_data(TensorData::new(tokens.clone(), [1, sequence]), &device);
@@ -3480,6 +3480,36 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         );
     }
 
+    // Hello remains a historical sampled-logit smoke above. Its continuation
+    // contains a one-ULP tie, so exact release decisions use the independently
+    // selected stable prompt and authenticated full-vocabulary bundle below.
+    let encoding = tokenizer
+        .encode(
+            official_reference.prompt(),
+            &EncodeOptions {
+                add_special_tokens: false,
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("release prompt must tokenize");
+    let tokens = encoding.token_ids()[0]
+        .iter()
+        .map(|token| i64::from(*token))
+        .collect::<Vec<_>>();
+    assert_eq!(tokens, official_reference.input_ids());
+    let sequence = tokens.len();
+    let input_ids =
+        Tensor::<Metal, 2, Int>::from_data(TensorData::new(tokens.clone(), [1, sequence]), &device);
+    let output = model
+        .forward(
+            CausalLmInput {
+                token_ids: input_ids.clone(),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .expect("loaded model must execute the stable release prompt");
     let prompt_stateless = metal_tensor_values("stateless prompt logits", &output.logits);
     let official_prompt_cosine =
         cosine_similarity(&prompt_stateless, official_reference.prompt_logits());
@@ -3497,27 +3527,12 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         .expect("top-k returns one result for a non-empty vocabulary");
     assert!((0..248_320).contains(&(top_token as usize)));
 
-    let fixture_greedy = reference["greedy_token_ids"]
-        .as_array()
-        .expect("reference must contain a greedy continuation")
-        .iter()
-        .map(|value| value.as_i64().expect("greedy token IDs must be integers") as i32)
-        .collect::<Vec<_>>();
     let expected_greedy = official_reference
         .greedy_token_ids()
         .iter()
         .map(|token| i32::try_from(*token).expect("reference token IDs fit Metal i32 storage"))
         .collect::<Vec<_>>();
-    assert_eq!(
-        fixture_greedy, expected_greedy,
-        "the compact regression fixture and authenticated official bundle must agree"
-    );
-    assert_eq!(
-        expected_greedy.len(),
-        reference["greedy_max_new_tokens"]
-            .as_u64()
-            .expect("reference generation length must be an integer") as usize
-    );
+    assert_eq!(expected_greedy.len(), 32);
     let cache_config = CacheConfig::new(1, sequence + expected_greedy.len())
         .expect("reference generation cache geometry must be valid");
     let mut state = model
@@ -3621,9 +3636,13 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
             },
         )
         .expect("teacher-forced stateless forward must execute");
+    let generation_logits =
+        teacher_output
+            .logits
+            .slice([0..1, sequence - 1..teacher_sequence, 0..248_320]);
     let teacher_logits = metal_tensor_values(
         "teacher-forced official-comparison logits",
-        &teacher_output.logits,
+        &generation_logits,
     );
     let teacher_rows = teacher_logits.chunks_exact(248_320).collect::<Vec<_>>();
     assert_eq!(teacher_rows.len(), expected_greedy.len());
@@ -3640,8 +3659,7 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
     eprintln!(
         "minimum teacher-forced/official full-vocabulary cosine similarity: {minimum_teacher_reference_cosine:.9}"
     );
-    let stateless_greedy = teacher_output
-        .logits
+    let stateless_greedy = generation_logits
         .argmax(2)
         .to_data()
         .to_vec::<i32>()
@@ -3664,7 +3682,7 @@ fn validates_pinned_qwen35_official_reference_bundle() {
         ),
     );
     let reference = qwen35_release_reference::load(&reference_parent);
-    assert_eq!(reference.input_ids(), [9_419]);
+    assert_eq!(reference.input_ids().len(), 23);
     assert_eq!(reference.greedy_token_ids().len(), 32);
 }
 

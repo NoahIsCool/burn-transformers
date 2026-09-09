@@ -1269,6 +1269,14 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   official/quantized top-one agreement and minimum full-vector cosine as
   diagnostics. Neither quality gate has run; quantized quality and long-context
   execution remain pending, so this is not a support claim.
+- **Full-precision training safety includes parameter initialization.** Burn
+  0.21's column-layout initializer can transpose an already tracked tensor into
+  a non-leaf. Shared lazy initialization now establishes the leaf after this
+  layout transform; checkpoint installation similarly postpones gradient policy
+  until after mapping. No forward computation is detached. Tests check row/column
+  values, frozen parameters, checkpoint loading, and finite nonzero gradients
+  through all projections, norms, recurrent scalars, and convolutions in tied
+  and untied tiny 3:1 Qwen hybrid graphs. Training loops remain out of scope.
 - **Release coverage is measured separately from feature presence.** The first
   Flex/tokenizer/template/autodiff unit-suite baseline passes 764 tests but
   reaches only 87.7084% LLVM line coverage crate-wide and 90.5207% shared/core,

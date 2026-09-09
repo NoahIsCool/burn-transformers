@@ -94,8 +94,20 @@ exec(
 REPOSITORY = "Qwen/Qwen3.5-0.8B"
 REVISION = "2fc06364715b967f1860aea9cf38778875588b17"
 REFERENCE_CLASS = "transformers.Qwen3_5ForCausalLM"
-PROMPT = "Hello"
-INPUT_IDS = [9_419]
+# Selected before any Burn comparison: fixed candidate 8 was the first to pass
+# all 32 >2-ULP margins and exact official cached/teacher decisions. Preserve
+# the older Hello fixture as a near-tie diagnostic, not a stable release oracle.
+# Selection report: 152690 bytes, SHA-256
+# 015dad3595c817252f3e776b148f1af34105de2351d70237a004091260be31cb.
+USER_PROMPT = "Explain why the seasons change in four complete sentences."
+PROMPT = (
+    "<|im_start|>user\n" + USER_PROMPT
+    + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+)
+INPUT_IDS = [
+    248045, 846, 198, 814, 20139, 3069, 279, 15127, 2222, 303, 2943,
+    4434, 22157, 13, 248046, 198, 248045, 74455, 198, 248068, 271, 248069, 271,
+]
 VOCAB_SIZE = 248_320
 GREEDY_TOKENS = 32
 EXPECTED_EOS_TOKEN_IDS = [248_044]
@@ -103,38 +115,9 @@ EXPECTED_PARAMETER_COUNT = 752_393_024
 EXPECTED_PHYSICAL_TENSORS = 488
 EXPECTED_TENSOR_BYTES = 1_746_882_752
 EXPECTED_GREEDY_TOKEN_IDS = [
-    11,
-    271,
-    40,
-    1_044,
-    3_133,
-    440,
-    264,
-    12_654,
-    5_148,
-    421,
-    5_533,
-    279,
-    1_510,
-    2_311,
-    22_233,
-    71_962,
-    63,
-    4_536,
-    310,
-    11_290,
-    264,
-    2_397,
-    59_229,
-    22_868,
-    13,
-    561,
-    5_148,
-    369,
-    5_995,
-    310,
-    1_423,
-    279,
+    760, 8964, 579, 7772, 369, 82951, 506, 449, 8937, 314, 12805, 220,
+    17, 18, 13, 20, 11995, 8410, 310, 1141, 62409, 10709, 11, 13969,
+    279, 11247, 310, 381, 11784, 310, 279, 7806,
 ]
 SELF_PARITY_COSINE = 0.999
 
@@ -650,6 +633,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         revision=REVISION,
         use_fast=True,
     )
+    rendered_prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": USER_PROMPT}], tokenize=False,
+        add_generation_prompt=True, enable_thinking=False,
+    )
+    if rendered_prompt != PROMPT:
+        raise RuntimeError("pinned non-thinking chat template rendering changed")
     observed_ids = tokenizer.encode(PROMPT, add_special_tokens=False)
     if observed_ids != INPUT_IDS:
         raise RuntimeError(f"pinned prompt tokenization changed: {observed_ids}")
@@ -737,7 +726,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         teacher_seconds = checked_duration(
             "teacher-forced forward", time.perf_counter() - teacher_started
         )
-        teacher_rows = teacher.logits[0].float().cpu().contiguous()
+        teacher_rows = teacher.logits[0, len(INPUT_IDS) - 1:].float().cpu().contiguous()
 
     if stateless_row.numel() != VOCAB_SIZE or not bool(torch.isfinite(stateless_row).all()):
         raise RuntimeError("invalid stateless prompt row")

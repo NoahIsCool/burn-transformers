@@ -23,7 +23,9 @@ class Qwen35ReferenceGeneratorTests(unittest.TestCase):
         self.assertEqual(
             MODULE.REVISION, "2fc06364715b967f1860aea9cf38778875588b17"
         )
-        self.assertEqual(MODULE.INPUT_IDS, [9_419])
+        self.assertEqual(len(MODULE.INPUT_IDS), 23)
+        self.assertIn(MODULE.USER_PROMPT, MODULE.PROMPT)
+        self.assertEqual(MODULE.INPUT_IDS[-4:], [248_068, 271, 248_069, 271])
         self.assertEqual(len(MODULE.EXPECTED_GREEDY_TOKEN_IDS), MODULE.GREEDY_TOKENS)
         self.assertFalse(
             set(MODULE.EXPECTED_GREEDY_TOKEN_IDS) & set(MODULE.EXPECTED_EOS_TOKEN_IDS)

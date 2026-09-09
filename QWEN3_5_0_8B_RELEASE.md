@@ -179,3 +179,23 @@ Specifically, the recurrent state must be FP32, the inherited `mlp_only_layers`
 list must be empty, dedicated MTP embeddings are rejected, and DeltaNet output
 gating accepts only the equivalent `silu` and `swish` spellings used by the
 pinned reference and released metadata.
+
+## Stable reference prompt selection
+
+The original `Hello` continuation contains a one-binary16-ULP decision at token
+14 and is retained as a historical sampled-logit diagnostic, not a stable exact
+generation oracle. The reference-only selector in commit `3a94d3d` fixes twelve
+ordinary explanatory chat prompts before evaluation. Candidate 8, “Explain why
+the seasons change in four complete sentences.”, is the first to satisfy all
+32 greater-than-two-ULP margins, exact official cached/teacher decisions, and
+full-vector self-cosine of at least 0.999. No Burn outputs participate in selection.
+
+Its 23-token non-thinking chat prompt has minimum margin/ULP ratio **6.0** and
+minimum official cached/teacher cosine **0.999997463582**. The external
+`qwen3.5-0.8b-2fc06364-prompt-selection.bundle/selection.json` retains the fixed
+candidate list and all nine attempted results: **152,690 bytes**, SHA-256
+`015dad3595c817252f3e776b148f1af34105de2351d70237a004091260be31cb`.
+Producer and consumer now pin this separate release prompt and correctly slice
+teacher-forced logits starting at `prompt_length - 1`. Full-vector bundle
+production, independent digest pinning, and Burn replay are still required;
+prompt-selection evidence alone is not checkpoint acceptance.

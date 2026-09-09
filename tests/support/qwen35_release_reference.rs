@@ -30,10 +30,14 @@ const MATRIX_BYTES: u64 = (ROWS * VOCABULARY * size_of::<f32>()) as u64;
 const MAX_JSON_BYTES: u64 = 2 * 1024 * 1024;
 const DISTRIBUTION_MANIFEST_SHA256: &str =
     "b814bb3254d51a28c6d74e80c04c3532c9836a0aadc4fab0eed410d6612d59dd";
+const EXPECTED_PROMPT: &str = "<|im_start|>user\nExplain why the seasons change in four complete sentences.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+const EXPECTED_INPUT_IDS: [i64; 23] = [
+    248045, 846, 198, 814, 20139, 3069, 279, 15127, 2222, 303, 2943, 4434, 22157, 13, 248046, 198,
+    248045, 74455, 198, 248068, 271, 248069, 271,
+];
 const EXPECTED_GREEDY_TOKEN_IDS: [i64; ROWS] = [
-    11, 271, 40, 1_044, 3_133, 440, 264, 12_654, 5_148, 421, 5_533, 279, 1_510, 2_311, 22_233,
-    71_962, 63, 4_536, 310, 11_290, 264, 2_397, 59_229, 22_868, 13, 561, 5_148, 369, 5_995, 310,
-    1_423, 279,
+    760, 8964, 579, 7772, 369, 82951, 506, 449, 8937, 314, 12805, 220, 17, 18, 13, 20, 11995, 8410,
+    310, 1141, 62409, 10709, 11, 13969, 279, 11247, 310, 381, 11784, 310, 279, 7806,
 ];
 
 // These anchors intentionally remain absent in the producer commit. A reviewed
@@ -280,6 +284,11 @@ impl ReferenceBundle {
         &self.record.input_ids
     }
 
+    /// Returns the exact rendered non-thinking chat prompt, without retokenizing it.
+    pub(super) fn prompt(&self) -> &str {
+        &self.record.prompt
+    }
+
     /// Returns the exact official 32-token greedy continuation.
     pub(super) fn greedy_token_ids(&self) -> &[i64] {
         &self.record.generation.token_ids
@@ -414,8 +423,8 @@ fn validate_record(record: &ReferenceRecord) {
     assert_eq!(record.repository, REPOSITORY);
     assert_eq!(record.revision, REVISION);
     assert_eq!(record.reference_class, "transformers.Qwen3_5ForCausalLM");
-    assert_eq!(record.prompt, "Hello");
-    assert_eq!(record.input_ids, [9_419]);
+    assert_eq!(record.prompt, EXPECTED_PROMPT);
+    assert_eq!(record.input_ids, EXPECTED_INPUT_IDS);
     let execution = &record.execution;
     assert_eq!(execution.dtype, "float16");
     assert_eq!(execution.device, "mps");
