@@ -1180,6 +1180,15 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   during config validation. Stateless explicit positions now share the cached
   path's declared-context bound and derive scaled-RoPE context from their actual
   maximum rather than physical sequence width.
+- **Qwen3.5-0.8B official parity now has a reproducible evidence path.** The
+  earlier Metal result's full-vocabulary vector was not retained, so it remains
+  historical evidence rather than a releasable oracle. A local-only,
+  create-only producer now authenticates the exact checkpoint, Transformers
+  5.2 package files and executed Qwen sources, then writes full prompt, 32-row
+  cached, and 32-row teacher-forced F32 payloads. Its Rust consumer fails closed
+  until all four external files receive independent digest anchors and, once
+  pinned, requires every full-vector cosine plus all 32 top-1 decisions. The
+  small committed JSON fixture cannot silently substitute for that bundle.
 - **Qwen3.5-0.8B Q4 execution and its 32K envelope are separate claims.** The
   reviewed group-64 Q4 sidecar is format v2, binds the exact source checkpoint
   and F16 load plan, contains 186 packed matrices, and has complete-file SHA-256

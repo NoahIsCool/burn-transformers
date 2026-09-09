@@ -2,9 +2,15 @@
 //!
 //! Ordinary CI never assumes a model directory exists. Maintainers can point
 //! `TRANSFORMERS_QWEN35_DIR` at an immutable local checkout and explicitly run
-//! ignored tests when certifying a checkpoint revision.
+//! ignored tests when certifying a checkpoint revision. The full-vector Qwen
+//! gate also requires `TRANSFORMERS_QWEN35_REFERENCE_DIR`, which names the
+//! external parent containing the fixed, digest-pinned reference bundle.
 
 #![cfg(feature = "tokenizers")]
+
+#[cfg(feature = "metal")]
+#[path = "support/qwen35_release_reference.rs"]
+mod qwen35_release_reference;
 
 #[cfg(feature = "metal")]
 use sha2::{Digest, Sha256};
@@ -3351,8 +3357,14 @@ fn metal_tensor_values<const D: usize>(label: &str, tensor: &Tensor<Metal, D>) -
 /// Streams the pinned language weights into Metal F16 and executes one prompt.
 #[cfg(feature = "metal")]
 #[test]
-#[ignore = "requires a pinned external Qwen3.5 artifact directory and Metal GPU"]
+#[ignore = "requires a pinned external Qwen3.5 artifact directory, authenticated reference bundle, and Metal GPU"]
 fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
+    let reference_parent = PathBuf::from(
+        std::env::var_os("TRANSFORMERS_QWEN35_REFERENCE_DIR").expect(
+            "set TRANSFORMERS_QWEN35_REFERENCE_DIR to the external parent containing the pinned reference bundle",
+        ),
+    );
+    let official_reference = qwen35_release_reference::load(&reference_parent);
     let root = PathBuf::from(
         std::env::var_os("TRANSFORMERS_QWEN35_DIR")
             .expect("set TRANSFORMERS_QWEN35_DIR to the pinned local checkout"),
@@ -3403,6 +3415,7 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         .iter()
         .map(|token| i64::from(*token))
         .collect::<Vec<_>>();
+    assert_eq!(tokens, official_reference.input_ids());
     let sequence = tokens.len();
     let input_ids =
         Tensor::<Metal, 2, Int>::from_data(TensorData::new(tokens.clone(), [1, sequence]), &device);
@@ -3466,41 +3479,16 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         );
     }
 
-    if let Some(reference_path) = std::env::var_os("TRANSFORMERS_QWEN35_REFERENCE_LOGITS") {
-        let reference_path = PathBuf::from(reference_path);
-        let bytes = fs::read(&reference_path).unwrap_or_else(|error| {
-            panic!(
-                "failed to read raw little-endian f32 reference logits from {}: {error}",
-                reference_path.display()
-            )
-        });
-        let expected_bytes = 248_320_usize
-            .checked_mul(size_of::<f32>())
-            .expect("the fixed reference vocabulary byte length must fit usize");
-        assert_eq!(
-            bytes.len(),
-            expected_bytes,
-            "reference logit file must contain exactly one little-endian f32 vocabulary vector"
-        );
-        let reference_logits = bytes
-            .chunks_exact(size_of::<f32>())
-            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
-            .collect::<Vec<_>>();
-        let actual_logits = output
-            .logits
-            .clone()
-            .cast(DType::F32)
-            .to_data()
-            .to_vec::<f32>()
-            .expect("Metal logits must convert to an f32 host vector");
-        assert_eq!(actual_logits.len(), reference_logits.len());
-        let cosine = cosine_similarity(&actual_logits, &reference_logits);
-        eprintln!("full-vocabulary reference-logit cosine similarity: {cosine:.9}");
-        assert!(
-            cosine >= 0.999,
-            "full-vocabulary cosine similarity {cosine} is below the 0.999 acceptance gate"
-        );
-    }
+    let prompt_stateless = metal_tensor_values("stateless prompt logits", &output.logits);
+    let official_prompt_cosine =
+        cosine_similarity(&prompt_stateless, official_reference.prompt_logits());
+    eprintln!(
+        "official full-vocabulary prompt-logit cosine similarity: {official_prompt_cosine:.9}"
+    );
+    assert!(
+        official_prompt_cosine >= 0.999,
+        "official prompt cosine similarity {official_prompt_cosine} is below the 0.999 acceptance gate"
+    );
 
     let top_token = top_ids
         .first()
@@ -3508,12 +3496,21 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         .expect("top-k returns one result for a non-empty vocabulary");
     assert!((0..248_320).contains(&(top_token as usize)));
 
-    let expected_greedy = reference["greedy_token_ids"]
+    let fixture_greedy = reference["greedy_token_ids"]
         .as_array()
         .expect("reference must contain a greedy continuation")
         .iter()
         .map(|value| value.as_i64().expect("greedy token IDs must be integers") as i32)
         .collect::<Vec<_>>();
+    let expected_greedy = official_reference
+        .greedy_token_ids()
+        .iter()
+        .map(|token| i32::try_from(*token).expect("reference token IDs fit Metal i32 storage"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fixture_greedy, expected_greedy,
+        "the compact regression fixture and authenticated official bundle must agree"
+    );
     assert_eq!(
         expected_greedy.len(),
         reference["greedy_max_new_tokens"]
@@ -3536,13 +3533,6 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
             &ForwardOptions::default(),
         )
         .expect("cached prompt prefill must execute");
-    let prompt_stateless = output
-        .logits
-        .clone()
-        .cast(DType::F32)
-        .to_data()
-        .to_vec::<f32>()
-        .expect("stateless prompt logits must convert to f32");
     let prompt_cached = cached
         .logits
         .clone()
@@ -3557,7 +3547,17 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
     );
 
     let mut generated = Vec::with_capacity(expected_greedy.len());
+    let mut minimum_cached_reference_cosine = f64::INFINITY;
     for (step, expected) in expected_greedy.iter().copied().enumerate() {
+        let cached_logits =
+            metal_tensor_values("cached official-comparison logits", &cached.logits);
+        let official_cosine =
+            cosine_similarity(&cached_logits, official_reference.cached_row(step));
+        minimum_cached_reference_cosine = minimum_cached_reference_cosine.min(official_cosine);
+        assert!(
+            official_cosine >= 0.999,
+            "cached official cosine similarity {official_cosine} at step {step} is below the 0.999 gate"
+        );
         let selected = cached
             .logits
             .clone()
@@ -3590,6 +3590,9 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
                 .unwrap_or_else(|error| panic!("cached decode step {step} failed: {error}"));
         }
     }
+    eprintln!(
+        "minimum cached/official full-vocabulary cosine similarity: {minimum_cached_reference_cosine:.9}"
+    );
     assert_eq!(generated, expected_greedy);
     assert_eq!(state.lengths(), &[sequence + expected_greedy.len() - 1]);
 
@@ -3617,6 +3620,25 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
             },
         )
         .expect("teacher-forced stateless forward must execute");
+    let teacher_logits = metal_tensor_values(
+        "teacher-forced official-comparison logits",
+        &teacher_output.logits,
+    );
+    let teacher_rows = teacher_logits.chunks_exact(248_320).collect::<Vec<_>>();
+    assert_eq!(teacher_rows.len(), expected_greedy.len());
+    assert!(teacher_logits.chunks_exact(248_320).remainder().is_empty());
+    let mut minimum_teacher_reference_cosine = f64::INFINITY;
+    for (step, actual) in teacher_rows.into_iter().enumerate() {
+        let official_cosine = cosine_similarity(actual, official_reference.teacher_row(step));
+        minimum_teacher_reference_cosine = minimum_teacher_reference_cosine.min(official_cosine);
+        assert!(
+            official_cosine >= 0.999,
+            "teacher-forced official cosine similarity {official_cosine} at step {step} is below the 0.999 gate"
+        );
+    }
+    eprintln!(
+        "minimum teacher-forced/official full-vocabulary cosine similarity: {minimum_teacher_reference_cosine:.9}"
+    );
     let stateless_greedy = teacher_output
         .logits
         .argmax(2)
@@ -3627,6 +3649,21 @@ fn loads_pinned_qwen35_weights_and_runs_metal_inference() {
         stateless_greedy, expected_greedy,
         "cached and stateless top-1 continuations must match at every step"
     );
+}
+
+/// Authenticates all official Qwen reference evidence without loading model weights.
+#[cfg(feature = "metal")]
+#[test]
+#[ignore = "requires the independently reviewed external Qwen3.5-0.8B reference bundle"]
+fn validates_pinned_qwen35_official_reference_bundle() {
+    let reference_parent = PathBuf::from(
+        std::env::var_os("TRANSFORMERS_QWEN35_REFERENCE_DIR").expect(
+            "set TRANSFORMERS_QWEN35_REFERENCE_DIR to the external parent containing the pinned reference bundle",
+        ),
+    );
+    let reference = qwen35_release_reference::load(&reference_parent);
+    assert_eq!(reference.input_ids(), [9_419]);
+    assert_eq!(reference.greedy_token_ids().len(), 32);
 }
 
 /// Computes cosine similarity with f64 accumulation for acceptance diagnostics.

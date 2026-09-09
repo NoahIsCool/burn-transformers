@@ -107,10 +107,42 @@ The historical real F16 Metal run strictly loaded the exact checkpoint, matched
 the official full-vocabulary prompt logits at cosine `0.999998221`, reproduced
 the official top ten IDs, generated the same 32 greedy tokens, and matched
 cached and stateless top-1 decisions at every tested prefix. Its 993,280-byte
-raw official logit vector was not retained, however, so a new create-only,
-digest-pinned external reference bundle must be generated and replayed before
-release promotion. The committed small JSON fixture remains useful regression
-evidence but is not a replacement for that full-vector gate.
+raw official logit vector was not retained, however. The committed offline
+[`generate_qwen35_08b_reference.py`](scripts/generate_qwen35_08b_reference.py)
+producer creates one immutable external bundle containing the prompt row, all
+32 cached decision rows, all 32 teacher-forced rows, and strict provenance. The
+Rust consumer requires independent SHA-256 anchors for all four files and then
+makes every full-vector comparison mandatory; there is no optional-oracle
+fallback. The producer still needs to be run, reviewed, pinned, and replayed
+before release promotion. The committed small JSON fixture remains useful
+regression evidence but is not a replacement for that gate.
+
+Generate the bundle into an existing external parent only after installing the
+package versions authenticated by the producer:
+
+```sh
+python3 crates/transformers/scripts/generate_qwen35_08b_reference.py \
+  --model-dir /Volumes/models/qwen3.5-0.8b \
+  --output-dir /Volumes/models/transformers-acceptance
+```
+
+After a second maintainer reviews and pins the four printed digests, the bundle
+can be authenticated without loading weights and then replayed against Burn:
+
+```sh
+TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/models/transformers-acceptance \
+cargo test --release --manifest-path crates/transformers/Cargo.toml \
+  --no-default-features --features std,metal,chat-templates \
+  --test local_artifacts validates_pinned_qwen35_official_reference_bundle \
+  -- --ignored --exact
+
+TRANSFORMERS_QWEN35_DIR=/Volumes/models/qwen3.5-0.8b \
+TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/models/transformers-acceptance \
+cargo test --release --manifest-path crates/transformers/Cargo.toml \
+  --no-default-features --features std,metal,chat-templates \
+  --test local_artifacts loads_pinned_qwen35_weights_and_runs_metal_inference \
+  -- --ignored --exact
+```
 
 A separately reviewed Q4/G64 format-v2 sidecar is exactly `280,044,715` bytes
 with SHA-256
