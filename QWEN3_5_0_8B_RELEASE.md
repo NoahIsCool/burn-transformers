@@ -8,8 +8,9 @@ head; neither is part of the default v0.1 execution graph.
 
 The machine-readable record intentionally remains `advertised_supported=false`.
 The retained, independently reviewed official-reference bundle now passes its
-Metal replay. Promotion still requires the long-context gate described below
-and the crate-wide [release gates](RELEASE_GATES.md); numerical parity alone is
+Metal replay. The separate populated Q4 32K execution stress also passes.
+Promotion still requires the crate-wide [release gates](RELEASE_GATES.md);
+numerical parity and stress execution alone are
 not a complete release qualification.
 
 The detailed tensor map is recorded in
@@ -151,12 +152,17 @@ with SHA-256
 `cca925f24ab3b61a76fbbd5aefb8e0f2052da1b4636de9e996b890859cae5fd5`.
 It binds the source checkpoint and load plan, contains 186 packed matrices and
 keeps 134 tensors in F16, and passed stateless/cached Metal smoke execution with
-top-1 token 13 and cosine `1.000000000`. The ignored 32K envelope gate pins this
+top-1 token 13 and cosine `1.000000000`. The opt-in 32K envelope gate pins this
 exact artifact, revalidates every payload and provenance record, allocates six
 full-GQA KV layers plus eighteen FP32-DeltaNet recurrent layers at capacity
 32,768, and executes one stateless token at explicit position 32,767. That gate
-has not yet been run and, even when green, is deliberately not a 32K prefill or
-long-context quality result.
+has now passed, and is deliberately not a 32K prefill or long-context quality
+result. A separate [populated-history stress run](acceptance/measurements/qwen3.5-0.8b-q4-32k-stress-20260909.json)
+consumed 32,767 tokens in bounded chunks and decoded the final token against the
+complete history. Terminal logits and recurrent states were finite; a 32,769th
+position failed without changing cached state, and reset matched a fresh model
+path. These tests validate execution and storage invariants, not quantized
+corpus quality or official long-context logits.
 
 Tiny deterministic tests cover hybrid prefill/decode equivalence, ragged
 padding, cache lifecycle and failure atomicity, MTP transaction restoration,
@@ -171,8 +177,8 @@ claim:
 - Q4 and Q8 quality guarantees (the authenticated packed Q4 result is execution
   smoke only);
 - training loops and dropout behavior;
-- long-context performance or numerical guarantees pending the coordinated 32K
-  cache/position envelope and a separate populated-history stress run;
+- long-context performance or official numerical parity, beyond the now-passing
+  32K cache/position envelope and populated-history execution stress;
 - dynamic-NTK cached decoding after the original context, which would require
   re-rotating stored keys.
 
@@ -203,5 +209,6 @@ generated at `06f39e7`, independently rehashed, and replayed on Burn Metal F16.
 It matches all 32 greedy decisions on cached and teacher-forced paths; minimum
 full-vocabulary reference cosine is **0.999996242** (gate **0.999**). The acceptance
 record pins every payload and its producer provenance. Both target checkpoint
-and reference sources are authenticated; this result still does not establish
-32K stress, standardized performance, or crate-wide release completion.
+and reference sources are authenticated. Separate [warm timing measurements](acceptance/measurements/qwen3.5-0.8b-metal-benchmark-20260909-run.json)
+now cover 32/128/512-token prompts. Neither those measurements nor the separate
+32K stress waive the remaining crate-wide release gates.

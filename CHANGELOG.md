@@ -27,9 +27,17 @@ versioning, with the additional pre-1.0 compatibility policy documented in
   covering strict loading, local tokenization, complete official-reference
   vectors, cached 32-token decoding, beam search, right padding, and the
   checkpoint's 512-token source boundary.
+- Authenticated Qwen3.5-0.8B stable-prompt F16 references, public streaming and
+  padded-batch checks, populated Q4 32K stress, and repeated small-model Metal
+  timing records. These remain bounded evidence, not a full release promotion.
 
 ### Fixed
 
 - Preserve backend-native Boolean dtype tags when importing dynamic token masks
   and gathering beam/cache rows, avoiding Burn 0.21 Flex panics in logical mask
   operations.
+- Respect actual runtime float dtypes in selected generation probabilities,
+  preserve F64 precision, and fail contextually for unsupported Flex32 sorting.
+- Reject empty attention projections, overflowing lazy projection shapes,
+  noncanonical provenance paths, and malformed dense parameter byte lengths
+  before backend execution or parameter mutation.

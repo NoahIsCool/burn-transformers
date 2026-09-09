@@ -57,8 +57,8 @@ First inspect the exact allow-listed file set, then build and verify the source
 archive:
 
 ```text
-cargo package --manifest-path crates/transformers/Cargo.toml --allow-dirty --no-verify --list
-cargo package --manifest-path crates/transformers/Cargo.toml --allow-dirty
+cargo +stable package --manifest-path crates/transformers/Cargo.toml --locked --list
+cargo +stable package --manifest-path crates/transformers/Cargo.toml --locked
 ```
 
 The list may contain source, examples, compact test fixtures, reference scripts,
@@ -66,8 +66,9 @@ documentation, and acceptance metadata. It must not contain `models/`,
 `target/`, SafeTensors or PyTorch weights, Burnpack sidecars, authentication
 material, or generated reference payloads intended for external storage.
 
-Repeat packaging without `--allow-dirty` from the final release commit. Record
-the commit ID and archive checksum beside any separately distributed release
+Package from the clean, committed transformer source tree. Preserve unrelated
+changes outside this standalone crate. Record the commit ID and archive checksum
+beside any separately distributed release
 artifact. Publishing, tagging, or pushing remains a distinct, explicitly
 authorized operation.
 
