@@ -1,0 +1,23 @@
+{
+  "integration_commit": "6226170f25a4760d59ba1b391d86e3bce46a1bb7",
+  "runtime_source_tree_git_oid": "11d33a072124025fba5048f8a49d58a23aa057a6",
+  "branch": "codex/tfm-memory-replay",
+  "worktree": "/private/tmp/hmm-tfm-small-bench",
+  "worktree_status_before_compile": "clean",
+  "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+  "profile": "release",
+  "features": ["std", "metal", "tokenizers", "chat-templates"],
+  "memory_runs_are_timing_incomparable": true,
+  "release_compilation_completed": true,
+  "benchmark_executable_sha256": {
+    "small_model_benchmarks-236633a5f7ca6ef5": "14ac1cd3fb38b3caf078e74269cb974c3210160035ccdaa3f29883f42e664841",
+    "qwen35_benchmarks-22bed2ca193cb209": "2746a8680eb4276a3b26820b0d66e44b28410dd05a9aeb3ba8c485014d9ff51d"
+  },
+  "sha256": {
+    "Cargo.lock": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+    "tests/support/benchmark_metrics.rs": "c5a7b8860ddea572eae4d10c47edf03e2709a9da02592029eaeee3c4bf74e4e3",
+    "tests/small_model_benchmarks.rs": "0f626ad10d11e39e3aeae887c7b4a35828e235174c8e2c23d60e817e731a7b5d",
+    "tests/qwen35_benchmarks.rs": "3bcf9d285dea8f26a69d566f89db8478bfd6615a93ea72caf5fdd3d35894f698",
+    "scripts/profile_process_memory.py": "a27aa56f09ff4571a7371f72fe2d5b5130267a928d1cc8892e165e0954b71e03"
+  }
+}

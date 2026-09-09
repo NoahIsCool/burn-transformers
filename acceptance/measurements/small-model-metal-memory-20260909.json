@@ -1,0 +1,2043 @@
+{
+  "advertised_supported": false,
+  "evidence_kind": "separate_instrumented_sampled_process_memory",
+  "host_device_memory_split": null,
+  "limitations": [
+    "Requested 1 ms polling is not guaranteed; actual intervals and maximum sampling/edge gaps are recorded.",
+    "Brief transients can occur between successful samples; reported phase maxima are observed lower bounds.",
+    "IPC-conservative phase brackets and idle-baseline handshakes perturb execution, so this series must not be compared to uninstrumented timing baselines.",
+    "Kernel-reported lifetime maximum footprint is recorded separately, not substituted for a phase maximum.",
+    "Cache allocation excluded by the warm benchmark protocol remains outside that prefill phase; whole-process observations still include it.",
+    "Ordinary desktop graphics and background applications remained active; other model inference and task-agent compiler/analysis bursts were paused.",
+    "No 2K, 8K or 32K long-prefill memory series was executed."
+  ],
+  "models": {
+    "flan-t5-small": {
+      "exact_command": "env TRANSFORMERS_FLAN_T5_SMALL_DIR='/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab' TRANSFORMERS_FLAN_T5_SMALL_REFERENCE_DIR='/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle' TRANSFORMERS_BENCH_METADATA_JSON='/private/tmp/tfm-memory-replay.PXkKW9/flan-environment.json' TRANSFORMERS_BENCH_OUTPUT_JSON='/private/tmp/tfm-memory-replay.PXkKW9/flan/benchmark.json' /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 /private/tmp/hmm-tfm-small-bench/crates/transformers/scripts/profile_process_memory.py --output-dir /private/tmp/tfm-memory-replay.PXkKW9/flan --interval-ms 1 --baseline-ms 10 --timeout-seconds 900 -- /Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/small_model_benchmarks-236633a5f7ca6ef5 flan::flan_small_metal_benchmark --ignored --exact --nocapture --test-threads=1 > /private/tmp/tfm-memory-replay.PXkKW9/flan-supervisor.stdout.log 2> /private/tmp/tfm-memory-replay.PXkKW9/flan-supervisor.stderr.log",
+      "generated_at_utc": "2026-09-09T16:48:55.288559+00:00",
+      "identity": {
+        "pid": 58184,
+        "process_start_abstime": 5671298161150
+      },
+      "instrumented_benchmark_report": {
+        "bytes": 51964,
+        "file": "flan-t5-small-metal-memory-20260909-run.json",
+        "sha256": "4a5824067a9247e5971868254c9b5f9e854b6972aa37530c979b3a061776a989"
+      },
+      "observed_executable_uuids": [
+        "092dafbeebd83785aebc56d48bf90f0f"
+      ],
+      "observed_kernel_reported_lifetime_max_physical_footprint_bytes": 797838528,
+      "phase_count": 93,
+      "phase_groups": [
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236305153343833,
+              "idle_median_bytes": 8766912.0,
+              "idle_start_ns": 236305142654416,
+              "maximum_successful_sampling_or_edge_gap_ns": 1175083,
+              "observed_end_ns": 236305317106666,
+              "observed_start_ns": 236305153849708,
+              "phase_id": 0,
+              "sampled_maximum_bytes": 580455424,
+              "sampled_maximum_minus_idle_median_bytes": 571688512.0,
+              "successful_samples": 145
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236305153343833,
+              "idle_median_bytes": 18251776.0,
+              "idle_start_ns": 236305142654416,
+              "maximum_successful_sampling_or_edge_gap_ns": 1175083,
+              "observed_end_ns": 236305317106666,
+              "observed_start_ns": 236305153849708,
+              "phase_id": 0,
+              "sampled_maximum_bytes": 627818496,
+              "sampled_maximum_minus_idle_median_bytes": 609566720.0,
+              "successful_samples": 145
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1175083,
+          "maximum_idle_sampling_or_edge_gap_ns": 1142167,
+          "occurrence_indices_zero_based": [
+            0
+          ],
+          "phase_ids": [
+            0
+          ],
+          "phase_name": "strict_load",
+          "probe_errors": 0,
+          "role": "single",
+          "successful_active_samples": 145,
+          "successful_idle_samples": 10
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236305360170750,
+              "idle_median_bytes": 616401792.0,
+              "idle_start_ns": 236305349866541,
+              "maximum_successful_sampling_or_edge_gap_ns": 1158959,
+              "observed_end_ns": 236305653642791,
+              "observed_start_ns": 236305360977041,
+              "phase_id": 1,
+              "sampled_maximum_bytes": 589318976,
+              "sampled_maximum_minus_idle_median_bytes": -27082816.0,
+              "successful_samples": 261
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236305360170750,
+              "idle_median_bytes": 502104064.0,
+              "idle_start_ns": 236305349866541,
+              "maximum_successful_sampling_or_edge_gap_ns": 1158959,
+              "observed_end_ns": 236305653642791,
+              "observed_start_ns": 236305360977041,
+              "phase_id": 1,
+              "sampled_maximum_bytes": 460521472,
+              "sampled_maximum_minus_idle_median_bytes": -41582592.0,
+              "successful_samples": 261
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1158959,
+          "maximum_idle_sampling_or_edge_gap_ns": 1147417,
+          "occurrence_indices_zero_based": [
+            0
+          ],
+          "phase_ids": [
+            1
+          ],
+          "phase_name": "cold_prefill",
+          "probe_errors": 0,
+          "role": "single",
+          "successful_active_samples": 261,
+          "successful_idle_samples": 10
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236310755152916,
+              "idle_median_bytes": 597920640.0,
+              "idle_start_ns": 236310744337583,
+              "maximum_successful_sampling_or_edge_gap_ns": 1150125,
+              "observed_end_ns": 236310806990541,
+              "observed_start_ns": 236310755630166,
+              "phase_id": 6,
+              "sampled_maximum_bytes": 615123840,
+              "sampled_maximum_minus_idle_median_bytes": 17203200.0,
+              "successful_samples": 47
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236310755152916,
+              "idle_median_bytes": 492830720.0,
+              "idle_start_ns": 236310744337583,
+              "maximum_successful_sampling_or_edge_gap_ns": 1150125,
+              "observed_end_ns": 236310806990541,
+              "observed_start_ns": 236310755630166,
+              "phase_id": 6,
+              "sampled_maximum_bytes": 493256704,
+              "sampled_maximum_minus_idle_median_bytes": 425984.0,
+              "successful_samples": 47
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1153667,
+          "maximum_idle_sampling_or_edge_gap_ns": 1145666,
+          "occurrence_indices_zero_based": [
+            0,
+            1,
+            2
+          ],
+          "phase_ids": [
+            2,
+            4,
+            6
+          ],
+          "phase_name": "warm_source_32_prefill",
+          "probe_errors": 0,
+          "role": "warmup",
+          "successful_active_samples": 341,
+          "successful_idle_samples": 29
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236331593191625,
+              "idle_median_bytes": 620268480.0,
+              "idle_start_ns": 236331582352291,
+              "maximum_successful_sampling_or_edge_gap_ns": 1152292,
+              "observed_end_ns": 236331644192291,
+              "observed_start_ns": 236331593667708,
+              "phase_id": 26,
+              "sampled_maximum_bytes": 628526016,
+              "sampled_maximum_minus_idle_median_bytes": 8257536.0,
+              "successful_samples": 46
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236331593191625,
+              "idle_median_bytes": 505511936.0,
+              "idle_start_ns": 236331582352291,
+              "maximum_successful_sampling_or_edge_gap_ns": 1152292,
+              "observed_end_ns": 236331644192291,
+              "observed_start_ns": 236331593667708,
+              "phase_id": 26,
+              "sampled_maximum_bytes": 505675776,
+              "sampled_maximum_minus_idle_median_bytes": 163840.0,
+              "successful_samples": 46
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1193042,
+          "maximum_idle_sampling_or_edge_gap_ns": 1166417,
+          "occurrence_indices_zero_based": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "phase_ids": [
+            8,
+            10,
+            12,
+            14,
+            16,
+            18,
+            20,
+            22,
+            24,
+            26
+          ],
+          "phase_name": "warm_source_32_prefill",
+          "probe_errors": 0,
+          "role": "measured",
+          "successful_active_samples": 473,
+          "successful_idle_samples": 99
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236308797636416,
+              "idle_median_bytes": 612371328,
+              "idle_start_ns": 236308787435708,
+              "maximum_successful_sampling_or_edge_gap_ns": 1516292,
+              "observed_end_ns": 236310741517750,
+              "observed_start_ns": 236308798581916,
+              "phase_id": 5,
+              "sampled_maximum_bytes": 738167680,
+              "sampled_maximum_minus_idle_median_bytes": 125796352,
+              "successful_samples": 1708
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236310818651458,
+              "idle_median_bytes": 493125632.0,
+              "idle_start_ns": 236310808230416,
+              "maximum_successful_sampling_or_edge_gap_ns": 1391625,
+              "observed_end_ns": 236312817257208,
+              "observed_start_ns": 236310819526833,
+              "phase_id": 7,
+              "sampled_maximum_bytes": 497811456,
+              "sampled_maximum_minus_idle_median_bytes": 4685824.0,
+              "successful_samples": 1749
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1516292,
+          "maximum_idle_sampling_or_edge_gap_ns": 1155125,
+          "occurrence_indices_zero_based": [
+            0,
+            1,
+            2
+          ],
+          "phase_ids": [
+            3,
+            5,
+            7
+          ],
+          "phase_name": "warm_source_32_decode_128",
+          "probe_errors": 0,
+          "role": "warmup",
+          "successful_active_samples": 5200,
+          "successful_idle_samples": 29
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236312896163208,
+              "idle_median_bytes": 619449280.0,
+              "idle_start_ns": 236312885809250,
+              "maximum_successful_sampling_or_edge_gap_ns": 1312917,
+              "observed_end_ns": 236314977106916,
+              "observed_start_ns": 236312897042166,
+              "phase_id": 9,
+              "sampled_maximum_bytes": 771132352,
+              "sampled_maximum_minus_idle_median_bytes": 151683072.0,
+              "successful_samples": 1820
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236329647935666,
+              "idle_median_bytes": 505479168.0,
+              "idle_start_ns": 236329636817708,
+              "maximum_successful_sampling_or_edge_gap_ns": 1308000,
+              "observed_end_ns": 236331579782416,
+              "observed_start_ns": 236329648138833,
+              "phase_id": 25,
+              "sampled_maximum_bytes": 505659392,
+              "sampled_maximum_minus_idle_median_bytes": 180224.0,
+              "successful_samples": 1699
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1695542,
+          "maximum_idle_sampling_or_edge_gap_ns": 1180250,
+          "occurrence_indices_zero_based": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "phase_ids": [
+            9,
+            11,
+            13,
+            15,
+            17,
+            19,
+            21,
+            23,
+            25,
+            27
+          ],
+          "phase_name": "warm_source_32_decode_128",
+          "probe_errors": 0,
+          "role": "measured",
+          "successful_active_samples": 17546,
+          "successful_idle_samples": 96
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236337862030208,
+              "idle_median_bytes": 604081088.0,
+              "idle_start_ns": 236337851450875,
+              "maximum_successful_sampling_or_edge_gap_ns": 1144500,
+              "observed_end_ns": 236337885851458,
+              "observed_start_ns": 236337862739541,
+              "phase_id": 32,
+              "sampled_maximum_bytes": 621366208,
+              "sampled_maximum_minus_idle_median_bytes": 17285120.0,
+              "successful_samples": 23
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236337862030208,
+              "idle_median_bytes": 508313600.0,
+              "idle_start_ns": 236337851450875,
+              "maximum_successful_sampling_or_edge_gap_ns": 1144500,
+              "observed_end_ns": 236337885851458,
+              "observed_start_ns": 236337862739541,
+              "phase_id": 32,
+              "sampled_maximum_bytes": 508395520,
+              "sampled_maximum_minus_idle_median_bytes": 81920.0,
+              "successful_samples": 23
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1179208,
+          "maximum_idle_sampling_or_edge_gap_ns": 1192250,
+          "occurrence_indices_zero_based": [
+            0,
+            1,
+            2
+          ],
+          "phase_ids": [
+            28,
+            30,
+            32
+          ],
+          "phase_name": "warm_source_128_prefill",
+          "probe_errors": 0,
+          "role": "warmup",
+          "successful_active_samples": 114,
+          "successful_idle_samples": 29
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236345940611750,
+              "idle_median_bytes": 610307008.0,
+              "idle_start_ns": 236345929788125,
+              "maximum_successful_sampling_or_edge_gap_ns": 1150417,
+              "observed_end_ns": 236345965732833,
+              "observed_start_ns": 236345941079875,
+              "phase_id": 40,
+              "sampled_maximum_bytes": 627461120,
+              "sampled_maximum_minus_idle_median_bytes": 17154112.0,
+              "successful_samples": 24
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236356436473875,
+              "idle_median_bytes": 509378560,
+              "idle_start_ns": 236356426240625,
+              "maximum_successful_sampling_or_edge_gap_ns": 1160250,
+              "observed_end_ns": 236356460602083,
+              "observed_start_ns": 236356436912666,
+              "phase_id": 50,
+              "sampled_maximum_bytes": 509460480,
+              "sampled_maximum_minus_idle_median_bytes": 81920,
+              "successful_samples": 23
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1164834,
+          "maximum_idle_sampling_or_edge_gap_ns": 1172333,
+          "occurrence_indices_zero_based": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "phase_ids": [
+            34,
+            36,
+            38,
+            40,
+            42,
+            44,
+            46,
+            48,
+            50,
+            52
+          ],
+          "phase_name": "warm_source_128_prefill",
+          "probe_errors": 0,
+          "role": "measured",
+          "successful_active_samples": 234,
+          "successful_idle_samples": 98
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236335787793458,
+              "idle_median_bytes": 620678080.0,
+              "idle_start_ns": 236335776733250,
+              "maximum_successful_sampling_or_edge_gap_ns": 1315209,
+              "observed_end_ns": 236337848647291,
+              "observed_start_ns": 236335789024125,
+              "phase_id": 31,
+              "sampled_maximum_bytes": 687934400,
+              "sampled_maximum_minus_idle_median_bytes": 67256320.0,
+              "successful_samples": 1798
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236337897124333,
+              "idle_median_bytes": 508313600,
+              "idle_start_ns": 236337886915541,
+              "maximum_successful_sampling_or_edge_gap_ns": 1190375,
+              "observed_end_ns": 236339857413541,
+              "observed_start_ns": 236337898068791,
+              "phase_id": 33,
+              "sampled_maximum_bytes": 508428288,
+              "sampled_maximum_minus_idle_median_bytes": 114688,
+              "successful_samples": 1726
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1378000,
+          "maximum_idle_sampling_or_edge_gap_ns": 1181250,
+          "occurrence_indices_zero_based": [
+            0,
+            1,
+            2
+          ],
+          "phase_ids": [
+            29,
+            31,
+            33
+          ],
+          "phase_name": "warm_source_128_decode_128",
+          "probe_errors": 0,
+          "role": "warmup",
+          "successful_active_samples": 5292,
+          "successful_idle_samples": 29
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236350124309958,
+              "idle_median_bytes": 621906944.0,
+              "idle_start_ns": 236350113498541,
+              "maximum_successful_sampling_or_edge_gap_ns": 1211792,
+              "observed_end_ns": 236352145193083,
+              "observed_start_ns": 236350125268750,
+              "phase_id": 45,
+              "sampled_maximum_bytes": 790072320,
+              "sampled_maximum_minus_idle_median_bytes": 168165376.0,
+              "successful_samples": 1773
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236348098173958,
+              "idle_median_bytes": 509313024,
+              "idle_start_ns": 236348087955833,
+              "maximum_successful_sampling_or_edge_gap_ns": 1332333,
+              "observed_end_ns": 236350071187291,
+              "observed_start_ns": 236348099260000,
+              "phase_id": 43,
+              "sampled_maximum_bytes": 509542400,
+              "sampled_maximum_minus_idle_median_bytes": 229376,
+              "successful_samples": 1734
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 6553042,
+          "maximum_idle_sampling_or_edge_gap_ns": 1152666,
+          "occurrence_indices_zero_based": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "phase_ids": [
+            35,
+            37,
+            39,
+            41,
+            43,
+            45,
+            47,
+            49,
+            51,
+            53
+          ],
+          "phase_name": "warm_source_128_decode_128",
+          "probe_errors": 0,
+          "role": "measured",
+          "successful_active_samples": 17748,
+          "successful_idle_samples": 97
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236364961297708,
+              "idle_median_bytes": 640699456.0,
+              "idle_start_ns": 236364950625291,
+              "maximum_successful_sampling_or_edge_gap_ns": 1172417,
+              "observed_end_ns": 236364998369291,
+              "observed_start_ns": 236364961794458,
+              "phase_id": 58,
+              "sampled_maximum_bytes": 642681920,
+              "sampled_maximum_minus_idle_median_bytes": 1982464.0,
+              "successful_samples": 34
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236364961297708,
+              "idle_median_bytes": 517734400.0,
+              "idle_start_ns": 236364950625291,
+              "maximum_successful_sampling_or_edge_gap_ns": 1172417,
+              "observed_end_ns": 236364998369291,
+              "observed_start_ns": 236364961794458,
+              "phase_id": 58,
+              "sampled_maximum_bytes": 522027008,
+              "sampled_maximum_minus_idle_median_bytes": 4292608.0,
+              "successful_samples": 34
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1185250,
+          "maximum_idle_sampling_or_edge_gap_ns": 1151792,
+          "occurrence_indices_zero_based": [
+            0,
+            1,
+            2
+          ],
+          "phase_ids": [
+            54,
+            56,
+            58
+          ],
+          "phase_name": "warm_source_512_prefill",
+          "probe_errors": 0,
+          "role": "warmup",
+          "successful_active_samples": 106,
+          "successful_idle_samples": 30
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236385979490291,
+              "idle_median_bytes": 643320896.0,
+              "idle_start_ns": 236385969239125,
+              "maximum_successful_sampling_or_edge_gap_ns": 1147709,
+              "observed_end_ns": 236386013215250,
+              "observed_start_ns": 236385980551333,
+              "phase_id": 78,
+              "sampled_maximum_bytes": 646548544,
+              "sampled_maximum_minus_idle_median_bytes": 3227648.0,
+              "successful_samples": 31
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236385979490291,
+              "idle_median_bytes": 529006592.0,
+              "idle_start_ns": 236385969239125,
+              "maximum_successful_sampling_or_edge_gap_ns": 1147709,
+              "observed_end_ns": 236386013215250,
+              "observed_start_ns": 236385980551333,
+              "phase_id": 78,
+              "sampled_maximum_bytes": 534429696,
+              "sampled_maximum_minus_idle_median_bytes": 5423104.0,
+              "successful_samples": 31
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1184541,
+          "maximum_idle_sampling_or_edge_gap_ns": 1144000,
+          "occurrence_indices_zero_based": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "phase_ids": [
+            60,
+            62,
+            64,
+            66,
+            68,
+            70,
+            72,
+            74,
+            76,
+            78
+          ],
+          "phase_name": "warm_source_512_prefill",
+          "probe_errors": 0,
+          "role": "measured",
+          "successful_active_samples": 326,
+          "successful_idle_samples": 100
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236360681944375,
+              "idle_median_bytes": 640961536,
+              "idle_start_ns": 236360671782125,
+              "maximum_successful_sampling_or_edge_gap_ns": 1340875,
+              "observed_end_ns": 236362741295583,
+              "observed_start_ns": 236360682588291,
+              "phase_id": 55,
+              "sampled_maximum_bytes": 695634944,
+              "sampled_maximum_minus_idle_median_bytes": 54673408,
+              "successful_samples": 1811
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236365010074208,
+              "idle_median_bytes": 520880128.0,
+              "idle_start_ns": 236364999598916,
+              "maximum_successful_sampling_or_edge_gap_ns": 1331417,
+              "observed_end_ns": 236367120053125,
+              "observed_start_ns": 236365010537583,
+              "phase_id": 59,
+              "sampled_maximum_bytes": 521011200,
+              "sampled_maximum_minus_idle_median_bytes": 131072.0,
+              "successful_samples": 1844
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1346958,
+          "maximum_idle_sampling_or_edge_gap_ns": 1157333,
+          "occurrence_indices_zero_based": [
+            0,
+            1,
+            2
+          ],
+          "phase_ids": [
+            55,
+            57,
+            59
+          ],
+          "phase_name": "warm_source_512_decode_128",
+          "probe_errors": 0,
+          "role": "warmup",
+          "successful_active_samples": 5534,
+          "successful_idle_samples": 29
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236375566827541,
+              "idle_median_bytes": 643370048,
+              "idle_start_ns": 236375556547458,
+              "maximum_successful_sampling_or_edge_gap_ns": 1313792,
+              "observed_end_ns": 236377647151916,
+              "observed_start_ns": 236375567634583,
+              "phase_id": 69,
+              "sampled_maximum_bytes": 777587776,
+              "sampled_maximum_minus_idle_median_bytes": 134217728,
+              "successful_samples": 1827
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236386024770125,
+              "idle_median_bytes": 533282816.0,
+              "idle_start_ns": 236386014440416,
+              "maximum_successful_sampling_or_edge_gap_ns": 1188292,
+              "observed_end_ns": 236387996319000,
+              "observed_start_ns": 236386024923208,
+              "phase_id": 79,
+              "sampled_maximum_bytes": 533413888,
+              "sampled_maximum_minus_idle_median_bytes": 131072.0,
+              "successful_samples": 1737
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 2322500,
+          "maximum_idle_sampling_or_edge_gap_ns": 1182250,
+          "occurrence_indices_zero_based": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "phase_ids": [
+            61,
+            63,
+            65,
+            67,
+            69,
+            71,
+            73,
+            75,
+            77,
+            79
+          ],
+          "phase_name": "warm_source_512_decode_128",
+          "probe_errors": 0,
+          "role": "measured",
+          "successful_active_samples": 17830,
+          "successful_idle_samples": 97
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236388012406250,
+              "idle_median_bytes": 628493376.0,
+              "idle_start_ns": 236388001713625,
+              "maximum_successful_sampling_or_edge_gap_ns": 1288125,
+              "observed_end_ns": 236389173066416,
+              "observed_start_ns": 236388013639125,
+              "phase_id": 80,
+              "sampled_maximum_bytes": 656624768,
+              "sampled_maximum_minus_idle_median_bytes": 28131392.0,
+              "successful_samples": 1022
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236390352135208,
+              "idle_median_bytes": 538836992.0,
+              "idle_start_ns": 236390341812458,
+              "maximum_successful_sampling_or_edge_gap_ns": 1392042,
+              "observed_end_ns": 236391514011958,
+              "observed_start_ns": 236390353097083,
+              "phase_id": 82,
+              "sampled_maximum_bytes": 538968064,
+              "sampled_maximum_minus_idle_median_bytes": 131072.0,
+              "successful_samples": 1023
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1392042,
+          "maximum_idle_sampling_or_edge_gap_ns": 1139917,
+          "occurrence_indices_zero_based": [
+            0,
+            1,
+            2
+          ],
+          "phase_ids": [
+            80,
+            81,
+            82
+          ],
+          "phase_name": "natural_greedy",
+          "probe_errors": 0,
+          "role": "warmup",
+          "successful_active_samples": 3065,
+          "successful_idle_samples": 29
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236398583679875,
+              "idle_median_bytes": 652905664.0,
+              "idle_start_ns": 236398573506833,
+              "maximum_successful_sampling_or_edge_gap_ns": 1190250,
+              "observed_end_ns": 236399763259041,
+              "observed_start_ns": 236398584386000,
+              "phase_id": 89,
+              "sampled_maximum_bytes": 781061312,
+              "sampled_maximum_minus_idle_median_bytes": 128155648.0,
+              "successful_samples": 1040
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236402147260583,
+              "idle_median_bytes": 545865728.0,
+              "idle_start_ns": 236402137040125,
+              "maximum_successful_sampling_or_edge_gap_ns": 1846667,
+              "observed_end_ns": 236403300138333,
+              "observed_start_ns": 236402148166583,
+              "phase_id": 92,
+              "sampled_maximum_bytes": 545980416,
+              "sampled_maximum_minus_idle_median_bytes": 114688.0,
+              "successful_samples": 1016
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1846667,
+          "maximum_idle_sampling_or_edge_gap_ns": 1151375,
+          "occurrence_indices_zero_based": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "phase_ids": [
+            83,
+            84,
+            85,
+            86,
+            87,
+            88,
+            89,
+            90,
+            91,
+            92
+          ],
+          "phase_name": "natural_greedy",
+          "probe_errors": 0,
+          "role": "measured",
+          "successful_active_samples": 10277,
+          "successful_idle_samples": 100
+        }
+      ],
+      "provenance": {
+        "artifact_sha256": {
+          "config.json": "439aa0fecf5a5546a1def68b1fc45e538e2c94528ce805378daf091e2bf6e4de",
+          "generation_config.json": "f5a1c7e2be8092018d8835128987edf0111637dd98e90599cc80310fef75d95a",
+          "model.safetensors": "495fa51e204676f1a857a9fc13c4c89f3f5ba9f480b898cebca02add25e6d749",
+          "special_tokens_map.json": "5c87151ef0f72a99d1f766a4c418bd2a1f90aaa30a8e22fe5eca9641daebb64f",
+          "spiece.model": "d60acb128cf7b7f2536e8f38a5b18a05535c9e14c7a355904270e15b0945ea86",
+          "tokenizer.json": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+          "tokenizer_config.json": "fcde0f79bffda3688119c94330866a8fbf8de20ae65a8c492c9bd47c704655a0"
+        },
+        "backend_name": "cubecl<wgpu<msl>>",
+        "backend_profile": "Metal/F32",
+        "benchmark_executable_sha256": "14ac1cd3fb38b3caf078e74269cb974c3210160035ccdaa3f29883f42e664841",
+        "benchmark_source_sha256": "0f626ad10d11e39e3aeae887c7b4a35828e235174c8e2c23d60e817e731a7b5d",
+        "burn_version": "0.21.0",
+        "cargo_features": [
+          "std",
+          "metal",
+          "tokenizers",
+          "chat-templates"
+        ],
+        "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+        "compiled_rustup_toolchain": "stable-aarch64-apple-darwin",
+        "crate_commit": {
+          "error": null,
+          "value": "6226170f25a4760d59ba1b391d86e3bce46a1bb7"
+        },
+        "crate_worktree_status": {
+          "error": null,
+          "value": ""
+        },
+        "environment": {
+          "accelerator": "Apple M3 Max, 30 GPU cores",
+          "accelerator_exclusive": true,
+          "command": "env TRANSFORMERS_FLAN_T5_SMALL_DIR='/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab' TRANSFORMERS_FLAN_T5_SMALL_REFERENCE_DIR='/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle' TRANSFORMERS_BENCH_METADATA_JSON='/private/tmp/tfm-memory-replay.PXkKW9/flan-environment.json' TRANSFORMERS_BENCH_OUTPUT_JSON='/private/tmp/tfm-memory-replay.PXkKW9/flan/benchmark.json' /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 /private/tmp/hmm-tfm-small-bench/crates/transformers/scripts/profile_process_memory.py --output-dir /private/tmp/tfm-memory-replay.PXkKW9/flan --interval-ms 1 --baseline-ms 10 --timeout-seconds 900 -- /Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/small_model_benchmarks-236633a5f7ca6ef5 flan::flan_small_metal_benchmark --ignored --exact --nocapture --test-threads=1 > /private/tmp/tfm-memory-replay.PXkKW9/flan-supervisor.stdout.log 2> /private/tmp/tfm-memory-replay.PXkKW9/flan-supervisor.stderr.log",
+          "cpu": "Apple M3 Max",
+          "driver_runtime": "OS-provided Metal 3, macOS build 24G830",
+          "machine_model": "Mac15,11",
+          "operating_system": "macOS 15.7.9, build 24G830",
+          "other_workloads": "Model-inference GPU reserved for this run; ordinary desktop graphics remain active: ChatGPT/Codex, Firefox including its GPU helper, WindowServer, coreaudiod and Safari support agents. Task agents paused compilers and inference during sampling. This memory run is timing-incomparable with uninstrumented benchmarks.",
+          "physical_memory_bytes": 103079215104,
+          "power_mode": "AC power; pmset powermode=0"
+        },
+        "metric_helper_sha256": "c5a7b8860ddea572eae4d10c47edf03e2709a9da02592029eaeee3c4bf74e4e3",
+        "parameter_dtype": "F32",
+        "profile": "release (debug assertions disabled)",
+        "quantization": null,
+        "reference_bundle_sha256": "f031fa015480699ce85f099f5112feb682a6ffc9ca61757377780329c336229e",
+        "repository": "google/flan-t5-small",
+        "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
+        "rustc": {
+          "error": null,
+          "value": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3"
+        }
+      },
+      "raw_trace": {
+        "bytes": 34491330,
+        "external_path": "/private/tmp/tfm-memory-replay.PXkKW9/flan/samples.jsonl",
+        "sha256": "1b41c600ff3d2b88f3dccfd5f3775ae16b6c80c558c35ec700ce013c1d82aa49",
+        "streaming_identity_count_and_hash_revalidated": true
+      },
+      "sample_count": 87349,
+      "sampling_errors": [],
+      "status": "passed",
+      "supervised_command_argv": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/small_model_benchmarks-236633a5f7ca6ef5",
+        "flan::flan_small_metal_benchmark",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "supervisor_abi": {
+        "field_order": [
+          "ri_uuid",
+          "ri_user_time",
+          "ri_system_time",
+          "ri_pkg_idle_wkups",
+          "ri_interrupt_wkups",
+          "ri_pageins",
+          "ri_wired_size",
+          "ri_resident_size",
+          "ri_phys_footprint",
+          "ri_proc_start_abstime",
+          "ri_proc_exit_abstime",
+          "ri_child_user_time",
+          "ri_child_system_time",
+          "ri_child_pkg_idle_wkups",
+          "ri_child_interrupt_wkups",
+          "ri_child_pageins",
+          "ri_child_elapsed_abstime",
+          "ri_diskio_bytesread",
+          "ri_diskio_byteswritten",
+          "ri_cpu_time_qos_default",
+          "ri_cpu_time_qos_maintenance",
+          "ri_cpu_time_qos_background",
+          "ri_cpu_time_qos_utility",
+          "ri_cpu_time_qos_legacy",
+          "ri_cpu_time_qos_user_initiated",
+          "ri_cpu_time_qos_user_interactive",
+          "ri_billed_system_time",
+          "ri_serviced_system_time",
+          "ri_logical_writes",
+          "ri_lifetime_max_phys_footprint",
+          "ri_instructions",
+          "ri_cycles",
+          "ri_billed_energy",
+          "ri_serviced_energy",
+          "ri_interval_max_phys_footprint",
+          "ri_runnable_time"
+        ],
+        "flavor": 4,
+        "headers": {
+          "usr/include/libproc.h": {
+            "bytes": 7575,
+            "sha256": "246d87709fc6b9157ce5cf3c475656ac48e0e1ae8bbdc46cf45acd34294448cd"
+          },
+          "usr/include/sys/resource.h": {
+            "bytes": 20152,
+            "sha256": "7d16930e6b75f11ba203238faa5580d31d48fcd4230f2b3f604aaa5fd7e86b58"
+          }
+        },
+        "sdk": "/Library/Developer/CommandLineTools/SDKs/MacOSX26.2.sdk",
+        "structure_bytes": 296
+      },
+      "supervisor_report": {
+        "bytes": 119315,
+        "file": "flan-t5-small-metal-memory-20260909-supervisor.json",
+        "sha256": "d5b7affbb419592c7d0bc6cbae2a64884c4aa26dae2c733d42cd2619485294df"
+      },
+      "supervisor_script_sha256": "a27aa56f09ff4571a7371f72fe2d5b5130267a928d1cc8892e165e0954b71e03",
+      "validation_failures": [],
+      "whole_observation_window": {
+        "duration_ns": 99349518459,
+        "end_ns": 236403438993000,
+        "exact_unsampled_peak": false,
+        "first_successful_sample_ns": 236304092898166,
+        "last_successful_sample_ns": 236403438183125,
+        "maximum_successful_sampling_or_edge_gap_ns": 6553042,
+        "mean_successful_sample_interval_ns": 1137350.4254132893,
+        "probe_errors": 0,
+        "sampled_maximum_bytes": {
+          "physical_footprint_bytes": 790072320,
+          "resident_bytes": 630079488
+        },
+        "start_ns": 236304089474541,
+        "successful_samples": 87349
+      }
+    },
+    "qwen3.5-0.8b": {
+      "exact_command": "env TRANSFORMERS_QWEN35_DIR='/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17' TRANSFORMERS_QWEN35_REFERENCE_DIR='/Volumes/bag of holding/models/transformers-acceptance' TRANSFORMERS_BENCH_METADATA_JSON='/private/tmp/tfm-memory-replay.PXkKW9/qwen-environment.json' TRANSFORMERS_BENCH_OUTPUT_JSON='/private/tmp/tfm-memory-replay.PXkKW9/qwen/benchmark.json' /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 /private/tmp/hmm-tfm-small-bench/crates/transformers/scripts/profile_process_memory.py --output-dir /private/tmp/tfm-memory-replay.PXkKW9/qwen --interval-ms 1 --baseline-ms 10 --timeout-seconds 900 -- /Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-22bed2ca193cb209 qwen::qwen35_metal_baseline_benchmark --ignored --exact --nocapture --test-threads=1 > /private/tmp/tfm-memory-replay.PXkKW9/qwen-supervisor.stdout.log 2> /private/tmp/tfm-memory-replay.PXkKW9/qwen-supervisor.stderr.log",
+      "generated_at_utc": "2026-09-09T16:46:37.173220+00:00",
+      "identity": {
+        "pid": 57742,
+        "process_start_abstime": 5664723055684
+      },
+      "instrumented_benchmark_report": {
+        "bytes": 119744,
+        "file": "qwen3.5-0.8b-metal-memory-20260909-run.json",
+        "sha256": "8bf1218997e6bc8187a292afe95db1fc8dfdb9d251ddc4df9eb14c45d43dd4a0"
+      },
+      "observed_executable_uuids": [
+        "556719e6b92e3daa8692c12b6b087c39"
+      ],
+      "observed_kernel_reported_lifetime_max_physical_footprint_bytes": 3014105216,
+      "phase_count": 93,
+      "phase_groups": [
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236034664048666,
+              "idle_median_bytes": 139823168,
+              "idle_start_ns": 236034653774000,
+              "maximum_successful_sampling_or_edge_gap_ns": 1215791,
+              "observed_end_ns": 236036216284916,
+              "observed_start_ns": 236034664595125,
+              "phase_id": 0,
+              "sampled_maximum_bytes": 2780519168,
+              "sampled_maximum_minus_idle_median_bytes": 2640696000,
+              "successful_samples": 1357
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236034664048666,
+              "idle_median_bytes": 149487616,
+              "idle_start_ns": 236034653774000,
+              "maximum_successful_sampling_or_edge_gap_ns": 1215791,
+              "observed_end_ns": 236036216284916,
+              "observed_start_ns": 236034664595125,
+              "phase_id": 0,
+              "sampled_maximum_bytes": 2517663744,
+              "sampled_maximum_minus_idle_median_bytes": 2368176128,
+              "successful_samples": 1357
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1215791,
+          "maximum_idle_sampling_or_edge_gap_ns": 1166084,
+          "occurrence_indices_zero_based": [
+            0
+          ],
+          "phase_ids": [
+            0
+          ],
+          "phase_name": "strict_load",
+          "probe_errors": 0,
+          "role": "single",
+          "successful_active_samples": 1357,
+          "successful_idle_samples": 9
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236036234825333,
+              "idle_median_bytes": 2593331264.0,
+              "idle_start_ns": 236036224357125,
+              "maximum_successful_sampling_or_edge_gap_ns": 1299084,
+              "observed_end_ns": 236036619766375,
+              "observed_start_ns": 236036235501375,
+              "phase_id": 1,
+              "sampled_maximum_bytes": 2622019648,
+              "sampled_maximum_minus_idle_median_bytes": 28688384.0,
+              "successful_samples": 339
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236036234825333,
+              "idle_median_bytes": 2083749888.0,
+              "idle_start_ns": 236036224357125,
+              "maximum_successful_sampling_or_edge_gap_ns": 1299084,
+              "observed_end_ns": 236036619766375,
+              "observed_start_ns": 236036235501375,
+              "phase_id": 1,
+              "sampled_maximum_bytes": 2077949952,
+              "sampled_maximum_minus_idle_median_bytes": -5799936.0,
+              "successful_samples": 339
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1299084,
+          "maximum_idle_sampling_or_edge_gap_ns": 1163916,
+          "occurrence_indices_zero_based": [
+            0
+          ],
+          "phase_ids": [
+            1
+          ],
+          "phase_name": "cold_prefill",
+          "probe_errors": 0,
+          "role": "single",
+          "successful_active_samples": 339,
+          "successful_idle_samples": 10
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236049089656750,
+              "idle_median_bytes": 2638256256,
+              "idle_start_ns": 236049079427916,
+              "maximum_successful_sampling_or_edge_gap_ns": 1182167,
+              "observed_end_ns": 236049172514208,
+              "observed_start_ns": 236049090400958,
+              "phase_id": 6,
+              "sampled_maximum_bytes": 2655541376,
+              "sampled_maximum_minus_idle_median_bytes": 17285120,
+              "successful_samples": 74
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236049089656750,
+              "idle_median_bytes": 2095595520,
+              "idle_start_ns": 236049079427916,
+              "maximum_successful_sampling_or_edge_gap_ns": 1182167,
+              "observed_end_ns": 236049172514208,
+              "observed_start_ns": 236049090400958,
+              "phase_id": 6,
+              "sampled_maximum_bytes": 2095644672,
+              "sampled_maximum_minus_idle_median_bytes": 49152,
+              "successful_samples": 74
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1192042,
+          "maximum_idle_sampling_or_edge_gap_ns": 1158667,
+          "occurrence_indices_zero_based": [
+            0,
+            1,
+            2
+          ],
+          "phase_ids": [
+            2,
+            4,
+            6
+          ],
+          "phase_name": "warm_source_32_prefill",
+          "probe_errors": 0,
+          "role": "warmup",
+          "successful_active_samples": 427,
+          "successful_idle_samples": 28
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236091359964583,
+              "idle_median_bytes": 2648856704,
+              "idle_start_ns": 236091349793166,
+              "maximum_successful_sampling_or_edge_gap_ns": 1147084,
+              "observed_end_ns": 236091427184416,
+              "observed_start_ns": 236091360314791,
+              "phase_id": 22,
+              "sampled_maximum_bytes": 2665764992,
+              "sampled_maximum_minus_idle_median_bytes": 16908288,
+              "successful_samples": 61
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236101463290250,
+              "idle_median_bytes": 2101723136.0,
+              "idle_start_ns": 236101452363916,
+              "maximum_successful_sampling_or_edge_gap_ns": 1191459,
+              "observed_end_ns": 236101538116041,
+              "observed_start_ns": 236101463555666,
+              "phase_id": 26,
+              "sampled_maximum_bytes": 2101755904,
+              "sampled_maximum_minus_idle_median_bytes": 32768.0,
+              "successful_samples": 67
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1233125,
+          "maximum_idle_sampling_or_edge_gap_ns": 1177667,
+          "occurrence_indices_zero_based": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "phase_ids": [
+            8,
+            10,
+            12,
+            14,
+            16,
+            18,
+            20,
+            22,
+            24,
+            26
+          ],
+          "phase_name": "warm_source_32_prefill",
+          "probe_errors": 0,
+          "role": "measured",
+          "successful_active_samples": 668,
+          "successful_idle_samples": 99
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236049184819583,
+              "idle_median_bytes": 2655541376.0,
+              "idle_start_ns": 236049173770041,
+              "maximum_successful_sampling_or_edge_gap_ns": 2365625,
+              "observed_end_ns": 236054364126375,
+              "observed_start_ns": 236049185888166,
+              "phase_id": 7,
+              "sampled_maximum_bytes": 2806536320,
+              "sampled_maximum_minus_idle_median_bytes": 150994944.0,
+              "successful_samples": 4512
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236049184819583,
+              "idle_median_bytes": 2095595520.0,
+              "idle_start_ns": 236049173770041,
+              "maximum_successful_sampling_or_edge_gap_ns": 2365625,
+              "observed_end_ns": 236054364126375,
+              "observed_start_ns": 236049185888166,
+              "phase_id": 7,
+              "sampled_maximum_bytes": 2098282496,
+              "sampled_maximum_minus_idle_median_bytes": 2686976.0,
+              "successful_samples": 4512
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 2365625,
+          "maximum_idle_sampling_or_edge_gap_ns": 1154334,
+          "occurrence_indices_zero_based": [
+            0,
+            1,
+            2
+          ],
+          "phase_ids": [
+            3,
+            5,
+            7
+          ],
+          "phase_name": "warm_source_32_decode_128",
+          "probe_errors": 0,
+          "role": "warmup",
+          "successful_active_samples": 13649,
+          "successful_idle_samples": 29
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236081300817916,
+              "idle_median_bytes": 2660145280.0,
+              "idle_start_ns": 236081289864916,
+              "maximum_successful_sampling_or_edge_gap_ns": 1373875,
+              "observed_end_ns": 236086433018791,
+              "observed_start_ns": 236081301704750,
+              "phase_id": 19,
+              "sampled_maximum_bytes": 2817890432,
+              "sampled_maximum_minus_idle_median_bytes": 157745152.0,
+              "successful_samples": 4491
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236101549527291,
+              "idle_median_bytes": 2101723136,
+              "idle_start_ns": 236101539377291,
+              "maximum_successful_sampling_or_edge_gap_ns": 4536833,
+              "observed_end_ns": 236106795339833,
+              "observed_start_ns": 236101550691875,
+              "phase_id": 27,
+              "sampled_maximum_bytes": 2103246848,
+              "sampled_maximum_minus_idle_median_bytes": 1523712,
+              "successful_samples": 4531
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 4536833,
+          "maximum_idle_sampling_or_edge_gap_ns": 1172250,
+          "occurrence_indices_zero_based": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "phase_ids": [
+            9,
+            11,
+            13,
+            15,
+            17,
+            19,
+            21,
+            23,
+            25,
+            27
+          ],
+          "phase_name": "warm_source_32_decode_128",
+          "probe_errors": 0,
+          "role": "measured",
+          "successful_active_samples": 44888,
+          "successful_idle_samples": 96
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236112230956208,
+              "idle_median_bytes": 2658670720.0,
+              "idle_start_ns": 236112220697250,
+              "maximum_successful_sampling_or_edge_gap_ns": 1184125,
+              "observed_end_ns": 236112376924458,
+              "observed_start_ns": 236112231922583,
+              "phase_id": 30,
+              "sampled_maximum_bytes": 2675464320,
+              "sampled_maximum_minus_idle_median_bytes": 16793600.0,
+              "successful_samples": 130
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236117163498541,
+              "idle_median_bytes": 2104901632,
+              "idle_start_ns": 236117153278041,
+              "maximum_successful_sampling_or_edge_gap_ns": 1321875,
+              "observed_end_ns": 236117321843041,
+              "observed_start_ns": 236117163605708,
+              "phase_id": 32,
+              "sampled_maximum_bytes": 2104950784,
+              "sampled_maximum_minus_idle_median_bytes": 49152,
+              "successful_samples": 140
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1321875,
+          "maximum_idle_sampling_or_edge_gap_ns": 1157959,
+          "occurrence_indices_zero_based": [
+            0,
+            1,
+            2
+          ],
+          "phase_ids": [
+            28,
+            30,
+            32
+          ],
+          "phase_name": "warm_source_128_prefill",
+          "probe_errors": 0,
+          "role": "warmup",
+          "successful_active_samples": 539,
+          "successful_idle_samples": 29
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236137981109291,
+              "idle_median_bytes": 2661931136.0,
+              "idle_start_ns": 236137970011708,
+              "maximum_successful_sampling_or_edge_gap_ns": 1176792,
+              "observed_end_ns": 236138150728208,
+              "observed_start_ns": 236137982023125,
+              "phase_id": 40,
+              "sampled_maximum_bytes": 2678708352,
+              "sampled_maximum_minus_idle_median_bytes": 16777216.0,
+              "successful_samples": 150
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236153917593875,
+              "idle_median_bytes": 2106114048.0,
+              "idle_start_ns": 236153906464958,
+              "maximum_successful_sampling_or_edge_gap_ns": 1192541,
+              "observed_end_ns": 236154091503666,
+              "observed_start_ns": 236153918070458,
+              "phase_id": 46,
+              "sampled_maximum_bytes": 2106179584,
+              "sampled_maximum_minus_idle_median_bytes": 65536.0,
+              "successful_samples": 153
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1201834,
+          "maximum_idle_sampling_or_edge_gap_ns": 1178416,
+          "occurrence_indices_zero_based": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "phase_ids": [
+            34,
+            36,
+            38,
+            40,
+            42,
+            44,
+            46,
+            48,
+            50,
+            52
+          ],
+          "phase_name": "warm_source_128_prefill",
+          "probe_errors": 0,
+          "role": "measured",
+          "successful_active_samples": 1486,
+          "successful_idle_samples": 95
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236107131064125,
+              "idle_median_bytes": 2670336128.0,
+              "idle_start_ns": 236107120766083,
+              "maximum_successful_sampling_or_edge_gap_ns": 1318459,
+              "observed_end_ns": 236112216221666,
+              "observed_start_ns": 236107131796000,
+              "phase_id": 29,
+              "sampled_maximum_bytes": 2826868864,
+              "sampled_maximum_minus_idle_median_bytes": 156532736.0,
+              "successful_samples": 4451
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236112388977166,
+              "idle_median_bytes": 2104508416.0,
+              "idle_start_ns": 236112378161500,
+              "maximum_successful_sampling_or_edge_gap_ns": 1293291,
+              "observed_end_ns": 236117148811333,
+              "observed_start_ns": 236112389032375,
+              "phase_id": 31,
+              "sampled_maximum_bytes": 2105081856,
+              "sampled_maximum_minus_idle_median_bytes": 573440.0,
+              "successful_samples": 4182
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1318459,
+          "maximum_idle_sampling_or_edge_gap_ns": 1155709,
+          "occurrence_indices_zero_based": [
+            0,
+            1,
+            2
+          ],
+          "phase_ids": [
+            29,
+            31,
+            33
+          ],
+          "phase_name": "warm_source_128_decode_128",
+          "probe_errors": 0,
+          "role": "warmup",
+          "successful_active_samples": 12794,
+          "successful_idle_samples": 29
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236138162658333,
+              "idle_median_bytes": 2671089792.0,
+              "idle_start_ns": 236138151956125,
+              "maximum_successful_sampling_or_edge_gap_ns": 1344459,
+              "observed_end_ns": 236143245718875,
+              "observed_start_ns": 236138163248750,
+              "phase_id": 41,
+              "sampled_maximum_bytes": 2810517632,
+              "sampled_maximum_minus_idle_median_bytes": 139427840.0,
+              "successful_samples": 4448
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236154103203000,
+              "idle_median_bytes": 2106130432.0,
+              "idle_start_ns": 236154092738000,
+              "maximum_successful_sampling_or_edge_gap_ns": 1316208,
+              "observed_end_ns": 236159222591416,
+              "observed_start_ns": 236154104059541,
+              "phase_id": 47,
+              "sampled_maximum_bytes": 2106277888,
+              "sampled_maximum_minus_idle_median_bytes": 147456.0,
+              "successful_samples": 4483
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 8236042,
+          "maximum_idle_sampling_or_edge_gap_ns": 1217709,
+          "occurrence_indices_zero_based": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "phase_ids": [
+            35,
+            37,
+            39,
+            41,
+            43,
+            45,
+            47,
+            49,
+            51,
+            53
+          ],
+          "phase_name": "warm_source_128_decode_128",
+          "probe_errors": 0,
+          "role": "measured",
+          "successful_active_samples": 44331,
+          "successful_idle_samples": 96
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236185481659583,
+              "idle_median_bytes": 2805143680.0,
+              "idle_start_ns": 236185471208708,
+              "maximum_successful_sampling_or_edge_gap_ns": 1166708,
+              "observed_end_ns": 236186017441458,
+              "observed_start_ns": 236185482496250,
+              "phase_id": 58,
+              "sampled_maximum_bytes": 2842531968,
+              "sampled_maximum_minus_idle_median_bytes": 37388288.0,
+              "successful_samples": 471
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236185481659583,
+              "idle_median_bytes": 2116435968.0,
+              "idle_start_ns": 236185471208708,
+              "maximum_successful_sampling_or_edge_gap_ns": 1166708,
+              "observed_end_ns": 236186017441458,
+              "observed_start_ns": 236185482496250,
+              "phase_id": 58,
+              "sampled_maximum_bytes": 2120400896,
+              "sampled_maximum_minus_idle_median_bytes": 3964928.0,
+              "successful_samples": 471
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1198125,
+          "maximum_idle_sampling_or_edge_gap_ns": 1158333,
+          "occurrence_indices_zero_based": [
+            0,
+            1,
+            2
+          ],
+          "phase_ids": [
+            54,
+            56,
+            58
+          ],
+          "phase_name": "warm_source_512_prefill",
+          "probe_errors": 0,
+          "role": "warmup",
+          "successful_active_samples": 1450,
+          "successful_idle_samples": 29
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236233867717666,
+              "idle_median_bytes": 2818742400.0,
+              "idle_start_ns": 236233857420625,
+              "maximum_successful_sampling_or_edge_gap_ns": 1175333,
+              "observed_end_ns": 236234426213333,
+              "observed_start_ns": 236233868487666,
+              "phase_id": 76,
+              "sampled_maximum_bytes": 2920913024,
+              "sampled_maximum_minus_idle_median_bytes": 102170624.0,
+              "successful_samples": 491
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236233867717666,
+              "idle_median_bytes": 2130100224.0,
+              "idle_start_ns": 236233857420625,
+              "maximum_successful_sampling_or_edge_gap_ns": 1175333,
+              "observed_end_ns": 236234426213333,
+              "observed_start_ns": 236233868487666,
+              "phase_id": 76,
+              "sampled_maximum_bytes": 2130984960,
+              "sampled_maximum_minus_idle_median_bytes": 884736.0,
+              "successful_samples": 491
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1322375,
+          "maximum_idle_sampling_or_edge_gap_ns": 1154208,
+          "occurrence_indices_zero_based": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "phase_ids": [
+            60,
+            62,
+            64,
+            66,
+            68,
+            70,
+            72,
+            74,
+            76,
+            78
+          ],
+          "phase_name": "warm_source_512_prefill",
+          "probe_errors": 0,
+          "role": "measured",
+          "successful_active_samples": 4834,
+          "successful_idle_samples": 96
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236186028734125,
+              "idle_median_bytes": 2842384512,
+              "idle_start_ns": 236186018681000,
+              "maximum_successful_sampling_or_edge_gap_ns": 1383334,
+              "observed_end_ns": 236190779037333,
+              "observed_start_ns": 236186029279166,
+              "phase_id": 59,
+              "sampled_maximum_bytes": 2867107968,
+              "sampled_maximum_minus_idle_median_bytes": 24723456,
+              "successful_samples": 4170
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236186028734125,
+              "idle_median_bytes": 2120138752,
+              "idle_start_ns": 236186018681000,
+              "maximum_successful_sampling_or_edge_gap_ns": 1383334,
+              "observed_end_ns": 236190779037333,
+              "observed_start_ns": 236186029279166,
+              "phase_id": 59,
+              "sampled_maximum_bytes": 2120876032,
+              "sampled_maximum_minus_idle_median_bytes": 737280,
+              "successful_samples": 4170
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 2934416,
+          "maximum_idle_sampling_or_edge_gap_ns": 1145417,
+          "occurrence_indices_zero_based": [
+            0,
+            1,
+            2
+          ],
+          "phase_ids": [
+            55,
+            57,
+            59
+          ],
+          "phase_name": "warm_source_512_decode_128",
+          "probe_errors": 0,
+          "role": "warmup",
+          "successful_active_samples": 12591,
+          "successful_idle_samples": 28
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236201937704375,
+              "idle_median_bytes": 2848790656.0,
+              "idle_start_ns": 236201927332625,
+              "maximum_successful_sampling_or_edge_gap_ns": 1299875,
+              "observed_end_ns": 236206811405083,
+              "observed_start_ns": 236201938589916,
+              "phase_id": 65,
+              "sampled_maximum_bytes": 3000309888,
+              "sampled_maximum_minus_idle_median_bytes": 151519232.0,
+              "successful_samples": 4280
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236234437395458,
+              "idle_median_bytes": 2130673664,
+              "idle_start_ns": 236234427244750,
+              "maximum_successful_sampling_or_edge_gap_ns": 1287750,
+              "observed_end_ns": 236239357736416,
+              "observed_start_ns": 236234437981458,
+              "phase_id": 77,
+              "sampled_maximum_bytes": 2130886656,
+              "sampled_maximum_minus_idle_median_bytes": 212992,
+              "successful_samples": 4314
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1985708,
+          "maximum_idle_sampling_or_edge_gap_ns": 1154209,
+          "occurrence_indices_zero_based": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "phase_ids": [
+            61,
+            63,
+            65,
+            67,
+            69,
+            71,
+            73,
+            75,
+            77,
+            79
+          ],
+          "phase_name": "warm_source_512_decode_128",
+          "probe_errors": 0,
+          "role": "measured",
+          "successful_active_samples": 42317,
+          "successful_idle_samples": 95
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236244774476875,
+              "idle_median_bytes": 2825410688.0,
+              "idle_start_ns": 236244763434375,
+              "maximum_successful_sampling_or_edge_gap_ns": 1372500,
+              "observed_end_ns": 236245936911500,
+              "observed_start_ns": 236244774625041,
+              "phase_id": 80,
+              "sampled_maximum_bytes": 2877560960,
+              "sampled_maximum_minus_idle_median_bytes": 52150272.0,
+              "successful_samples": 1023
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236244774476875,
+              "idle_median_bytes": 2130673664.0,
+              "idle_start_ns": 236244763434375,
+              "maximum_successful_sampling_or_edge_gap_ns": 1372500,
+              "observed_end_ns": 236245936911500,
+              "observed_start_ns": 236244774625041,
+              "phase_id": 80,
+              "sampled_maximum_bytes": 2130919424,
+              "sampled_maximum_minus_idle_median_bytes": 245760.0,
+              "successful_samples": 1023
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 1372500,
+          "maximum_idle_sampling_or_edge_gap_ns": 1141666,
+          "occurrence_indices_zero_based": [
+            0,
+            1,
+            2
+          ],
+          "phase_ids": [
+            80,
+            81,
+            82
+          ],
+          "phase_name": "natural_greedy",
+          "probe_errors": 0,
+          "role": "warmup",
+          "successful_active_samples": 3126,
+          "successful_idle_samples": 29
+        },
+        {
+          "maxima": {
+            "physical_footprint_bytes": {
+              "idle_end_ns": 236254973890333,
+              "idle_median_bytes": 2837420160.0,
+              "idle_start_ns": 236254963472375,
+              "maximum_successful_sampling_or_edge_gap_ns": 1283666,
+              "observed_end_ns": 236256268038916,
+              "observed_start_ns": 236254974714541,
+              "phase_id": 88,
+              "sampled_maximum_bytes": 3014105216,
+              "sampled_maximum_minus_idle_median_bytes": 176685056.0,
+              "successful_samples": 1134
+            },
+            "resident_bytes": {
+              "idle_end_ns": 236259950076125,
+              "idle_median_bytes": 2130755584.0,
+              "idle_start_ns": 236259939724875,
+              "maximum_successful_sampling_or_edge_gap_ns": 1317375,
+              "observed_end_ns": 236261185765000,
+              "observed_start_ns": 236259951041791,
+              "phase_id": 92,
+              "sampled_maximum_bytes": 2130919424,
+              "sampled_maximum_minus_idle_median_bytes": 163840.0,
+              "successful_samples": 1086
+            }
+          },
+          "maximum_active_sampling_or_edge_gap_ns": 2802583,
+          "maximum_idle_sampling_or_edge_gap_ns": 1165417,
+          "occurrence_indices_zero_based": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "phase_ids": [
+            83,
+            84,
+            85,
+            86,
+            87,
+            88,
+            89,
+            90,
+            91,
+            92
+          ],
+          "phase_name": "natural_greedy",
+          "probe_errors": 0,
+          "role": "measured",
+          "successful_active_samples": 11135,
+          "successful_idle_samples": 100
+        }
+      ],
+      "provenance": {
+        "backend_name": "cubecl<wgpu<msl>>",
+        "backend_profile": "Metal/F16",
+        "benchmark_executable_sha256": "2746a8680eb4276a3b26820b0d66e44b28410dd05a9aeb3ba8c485014d9ff51d",
+        "benchmark_source_sha256": "3bcf9d285dea8f26a69d566f89db8478bfd6615a93ea72caf5fdd3d35894f698",
+        "burn_version": "0.21.0",
+        "cargo_features": [
+          "std",
+          "metal",
+          "tokenizers",
+          "chat-templates"
+        ],
+        "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+        "checkpoint_artifacts": [
+          {
+            "bytes": 7755,
+            "relative_path": "chat_template.jinja",
+            "sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80"
+          },
+          {
+            "bytes": 2907,
+            "relative_path": "config.json",
+            "sha256": "b90b86f35c8e6925ef74ee04d0e758f0a845c83a42089ad82bbaa948de9b4204"
+          },
+          {
+            "bytes": 1746942600,
+            "relative_path": "model.safetensors-00001-of-00001.safetensors",
+            "sha256": "04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696"
+          },
+          {
+            "bytes": 50900,
+            "relative_path": "model.safetensors.index.json",
+            "sha256": "d8a08838a613b025eb7952ed9db11696213e57e76a375661ef5c12f9dd5dcf4e"
+          },
+          {
+            "bytes": 12807982,
+            "relative_path": "tokenizer.json",
+            "sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+          },
+          {
+            "bytes": 16709,
+            "relative_path": "tokenizer_config.json",
+            "sha256": "49e2b6e395f959f077f1e992b338919c0d4a9732fc6e613995e06557f843500c"
+          }
+        ],
+        "compiled_rustup_toolchain": "stable-aarch64-apple-darwin",
+        "crate_commit": {
+          "error": null,
+          "value": "6226170f25a4760d59ba1b391d86e3bce46a1bb7"
+        },
+        "crate_worktree_status": {
+          "error": null,
+          "value": ""
+        },
+        "environment": {
+          "accelerator": "Apple M3 Max, 30 GPU cores",
+          "accelerator_exclusive": true,
+          "command": "env TRANSFORMERS_QWEN35_DIR='/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17' TRANSFORMERS_QWEN35_REFERENCE_DIR='/Volumes/bag of holding/models/transformers-acceptance' TRANSFORMERS_BENCH_METADATA_JSON='/private/tmp/tfm-memory-replay.PXkKW9/qwen-environment.json' TRANSFORMERS_BENCH_OUTPUT_JSON='/private/tmp/tfm-memory-replay.PXkKW9/qwen/benchmark.json' /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 /private/tmp/hmm-tfm-small-bench/crates/transformers/scripts/profile_process_memory.py --output-dir /private/tmp/tfm-memory-replay.PXkKW9/qwen --interval-ms 1 --baseline-ms 10 --timeout-seconds 900 -- /Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-22bed2ca193cb209 qwen::qwen35_metal_baseline_benchmark --ignored --exact --nocapture --test-threads=1 > /private/tmp/tfm-memory-replay.PXkKW9/qwen-supervisor.stdout.log 2> /private/tmp/tfm-memory-replay.PXkKW9/qwen-supervisor.stderr.log",
+          "cpu": "Apple M3 Max",
+          "driver_runtime": "OS-provided Metal 3, macOS build 24G830",
+          "machine_model": "Mac15,11",
+          "operating_system": "macOS 15.7.9, build 24G830",
+          "other_workloads": "Model-inference GPU reserved for this run; ordinary desktop graphics remain active: ChatGPT/Codex, Firefox including its GPU helper, WindowServer, coreaudiod and Safari support agents. Task agents paused compilers and inference during sampling. This memory run is timing-incomparable with uninstrumented benchmarks.",
+          "physical_memory_bytes": 103079215104,
+          "power_mode": "AC power; pmset powermode=0"
+        },
+        "metric_helper_sha256": "c5a7b8860ddea572eae4d10c47edf03e2709a9da02592029eaeee3c4bf74e4e3",
+        "parameter_dtype": "F16",
+        "profile": "release (debug assertions disabled)",
+        "quantization": null,
+        "recurrent_matrix_dtype": "F32",
+        "reference_helper_sha256": "83fd59277d825b9721779a8f827d46fcfd9033641529bcbd6fcdbbc91639d5ba",
+        "reference_manifest_sha256": "1a1fb75e193f82c48ef0494f3d64066d32133f7654e5c485cb193adc54acd20a",
+        "reference_payloads": {
+          "cached": {
+            "bytes": 31784960,
+            "elements": 7946240,
+            "encoding": "ieee754-f32-little-endian",
+            "relative_path": "qwen3.5-0.8b-2fc06364-cached-logits-32x248320.f32le",
+            "sha256": "a100338b3b1c6f755b3ef3c1925c090fe9cf5b2a38b8ca2df42d57bc8b9ae4c9",
+            "shape": [
+              32,
+              248320
+            ]
+          },
+          "prompt": {
+            "bytes": 993280,
+            "elements": 248320,
+            "encoding": "ieee754-f32-little-endian",
+            "relative_path": "qwen3.5-0.8b-2fc06364-prompt-logits.f32le",
+            "sha256": "96c1291aebb1c36c15b42ad684a0a5bed5917c40808ad8cbbe82a03deb646df1",
+            "shape": [
+              248320
+            ]
+          },
+          "teacher": {
+            "bytes": 31784960,
+            "elements": 7946240,
+            "encoding": "ieee754-f32-little-endian",
+            "relative_path": "qwen3.5-0.8b-2fc06364-teacher-logits-32x248320.f32le",
+            "sha256": "ec7786b3f837c97b7ee13c16a9fc742333075a84bf3da126b81191ec4a190f03",
+            "shape": [
+              32,
+              248320
+            ]
+          }
+        },
+        "repository": "Qwen/Qwen3.5-0.8B",
+        "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+        "rustc": {
+          "error": null,
+          "value": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3"
+        }
+      },
+      "raw_trace": {
+        "bytes": 81949875,
+        "external_path": "/private/tmp/tfm-memory-replay.PXkKW9/qwen/samples.jsonl",
+        "sha256": "6ac4dc6f7525cac1e06f7b03dcbc490672364e94b5f37e5ec1d6d1dd3f6959e4",
+        "streaming_identity_count_and_hash_revalidated": true
+      },
+      "sample_count": 205985,
+      "sampling_errors": [],
+      "status": "passed",
+      "supervised_command_argv": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+        "qwen::qwen35_metal_baseline_benchmark",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "supervisor_abi": {
+        "field_order": [
+          "ri_uuid",
+          "ri_user_time",
+          "ri_system_time",
+          "ri_pkg_idle_wkups",
+          "ri_interrupt_wkups",
+          "ri_pageins",
+          "ri_wired_size",
+          "ri_resident_size",
+          "ri_phys_footprint",
+          "ri_proc_start_abstime",
+          "ri_proc_exit_abstime",
+          "ri_child_user_time",
+          "ri_child_system_time",
+          "ri_child_pkg_idle_wkups",
+          "ri_child_interrupt_wkups",
+          "ri_child_pageins",
+          "ri_child_elapsed_abstime",
+          "ri_diskio_bytesread",
+          "ri_diskio_byteswritten",
+          "ri_cpu_time_qos_default",
+          "ri_cpu_time_qos_maintenance",
+          "ri_cpu_time_qos_background",
+          "ri_cpu_time_qos_utility",
+          "ri_cpu_time_qos_legacy",
+          "ri_cpu_time_qos_user_initiated",
+          "ri_cpu_time_qos_user_interactive",
+          "ri_billed_system_time",
+          "ri_serviced_system_time",
+          "ri_logical_writes",
+          "ri_lifetime_max_phys_footprint",
+          "ri_instructions",
+          "ri_cycles",
+          "ri_billed_energy",
+          "ri_serviced_energy",
+          "ri_interval_max_phys_footprint",
+          "ri_runnable_time"
+        ],
+        "flavor": 4,
+        "headers": {
+          "usr/include/libproc.h": {
+            "bytes": 7575,
+            "sha256": "246d87709fc6b9157ce5cf3c475656ac48e0e1ae8bbdc46cf45acd34294448cd"
+          },
+          "usr/include/sys/resource.h": {
+            "bytes": 20152,
+            "sha256": "7d16930e6b75f11ba203238faa5580d31d48fcd4230f2b3f604aaa5fd7e86b58"
+          }
+        },
+        "sdk": "/Library/Developer/CommandLineTools/SDKs/MacOSX26.2.sdk",
+        "structure_bytes": 296
+      },
+      "supervisor_report": {
+        "bytes": 120098,
+        "file": "qwen3.5-0.8b-metal-memory-20260909-supervisor.json",
+        "sha256": "f9e68ae922a10f92e620d8885506964b0a6405e0e400af5215a0d4c9dc8bcb34"
+      },
+      "supervisor_script_sha256": "a27aa56f09ff4571a7371f72fe2d5b5130267a928d1cc8892e165e0954b71e03",
+      "validation_failures": [],
+      "whole_observation_window": {
+        "duration_ns": 235197369000,
+        "end_ns": 236265323889000,
+        "exact_unsampled_peak": false,
+        "first_successful_sample_ns": 236030129364208,
+        "last_successful_sample_ns": 236265322853000,
+        "maximum_successful_sampling_or_edge_gap_ns": 8236042,
+        "mean_successful_sample_interval_ns": 1141804.6488659314,
+        "probe_errors": 0,
+        "sampled_maximum_bytes": {
+          "physical_footprint_bytes": 3014105216,
+          "resident_bytes": 2517663744
+        },
+        "start_ns": 236030126520000,
+        "successful_samples": 205985
+      }
+    }
+  },
+  "phase_maximum_semantics": "Each metric maximum selects one actual phase and retains that same phase idle median, signed delta, timestamp bracket and sampling gap. The maximum RSS and maximum physical footprint may select different phases. A group maximum is not the maximum delta; deltas can be negative. Non-contiguous grouped phases must not be treated as one continuous observation interval.",
+  "phase_partition": "Each repeated phase name has 13 occurrences: zero-based 0..2 are warmups and 3..12 are measured. The single strict_load and cold_prefill phases remain separate. Full per-phase timestamps and actual sampling gaps are retained in authenticated supervisor reports.",
+  "sampled_maxima_are_exact_unsampled_peaks": false,
+  "schema_version": 1,
+  "scope": "OS-accounted child-process unified physical footprint and RSS, including runtime and allocator effects; not a host/device allocation split or exact unsampled phase peak",
+  "source_commit": "6226170f25a4760d59ba1b391d86e3bce46a1bb7",
+  "source_preflight": {
+    "bytes": 1304,
+    "file": "small-model-metal-memory-20260909-source-preflight.json",
+    "sha256": "b85d96e5a00c6980db602fb64a35946d012fae344b528f120a1b35a76aac0ad4"
+  },
+  "timing_comparable_to_uninstrumented_series": false
+}
