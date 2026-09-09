@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "advertised_supported": false,
+  "measurement_passed": true,
+  "date": "2026-09-09",
+  "scope": "Repeated F32 Metal timing series with separate whole-process memory evidence. Per-phase high-water memory, final integrated replay and release coverage remain open.",
+  "raw_report": {
+    "file": "flan-t5-small-metal-benchmark-20260909.json",
+    "sha256": "12d10126ab6b75642e817520a845301e4004ee9024bb6c31b87763392a3d71df"
+  },
+  "source_commit": "e08fe3c744fda07a185f51bb67ec26b4ed183daa",
+  "integrated_harness_commit": "c20641c",
+  "primary_acceptance": "flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab.json",
+  "protocol": {
+    "warmups_per_shape": 3,
+    "measured_repetitions_per_shape": 10,
+    "source_lengths": [
+      32,
+      128,
+      512
+    ],
+    "forced_decode_steps": 128,
+    "forced_decode_excludes_eos_shortening": true,
+    "cold_and_load_repetitions": 1,
+    "token_id_encoding": "little-endian u32",
+    "natural_greedy_uses_normal_eos": true
+  },
+  "timing_summary": [
+    {
+      "source_tokens": 32,
+      "prefill_median_seconds": 0.046316292,
+      "warm_ttft_median_seconds": 0.0482652295,
+      "decode_model_median_tokens_per_second": 77.6825130518009,
+      "decode_including_readback_median_tokens_per_second": 67.07202666032573,
+      "cache_tensor_payload_bytes": 4022272,
+      "cache_self_kv_bytes_per_token": 24576
+    },
+    {
+      "source_tokens": 128,
+      "prefill_median_seconds": 0.0202936455,
+      "warm_ttft_median_seconds": 0.0218737915,
+      "decode_model_median_tokens_per_second": 76.6514676986493,
+      "decode_including_readback_median_tokens_per_second": 66.89947772021998,
+      "cache_tensor_payload_bytes": 6578176,
+      "cache_self_kv_bytes_per_token": 24576
+    },
+    {
+      "source_tokens": 512,
+      "prefill_median_seconds": 0.0303502915,
+      "warm_ttft_median_seconds": 0.032780271,
+      "decode_model_median_tokens_per_second": 74.80909634731373,
+      "decode_including_readback_median_tokens_per_second": 66.08321413145507,
+      "cache_tensor_payload_bytes": 16801792,
+      "cache_self_kv_bytes_per_token": 24576
+    }
+  ],
+  "strict_load_seconds": 0.154718041,
+  "cold_first_token_seconds": 0.288610166,
+  "natural_greedy": {
+    "tokens": [
+      644,
+      4598,
+      229,
+      9685,
+      5,
+      1
+    ],
+    "finish": "EndOfSequence { token_id: 1 }",
+    "median_seconds": 1.1409435415,
+    "sha256": "d2f5e49a5fa086efaab7a7896ae11ccbf757707a1b56797b8c40e5e6142ae1a9"
+  },
+  "external_memory": {
+    "tool": "macOS /usr/bin/time -l wrapped around the already-built test executable",
+    "process_wall_seconds": 94.19,
+    "maximum_resident_set_size_bytes": 620298240,
+    "peak_process_memory_footprint_bytes": 790564288,
+    "phase_specific": false,
+    "idle_baseline_subtracted": false,
+    "host_device_split": false,
+    "timing_log_sha256": "d1568a4aaf8a1fcc83ff43b6efb7437a382e5be3e52b9bb95b10bcac3c062aef"
+  },
+  "regression_policy": {
+    "first_series_baseline": true,
+    "comparison_with_prior_controlled_run": false,
+    "alert_percent": 5,
+    "confirmed_failure_percent": 10
+  },
+  "notes": [
+    "No concurrent agent compiler or inference work during measured phases; normal desktop/background processes remained.",
+    "Source32 and source128 have different compiled shapes and dispatch costs; the timings are reported as observed, not smoothed to imply monotonic scaling.",
+    "Public sampling is outside the forced-decoding microbenchmark; natural greedy uses the existing T5 generation path.",
+    "Single strict-load/cold samples are diagnostic; repeated warm phases have all raw samples.",
+    "Whole-process memory high-water is not a per-phase peak above idle baseline."
+  ]
+}

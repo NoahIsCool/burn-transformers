@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "integrated_strict_f32_reference_parity_verified_on_flex_and_metal_pending_release_coverage_performance_and_packaging",
+  "phase": "f32_reference_parity_and_repeated_metal_timings_verified_pending_release_coverage_phase_memory_and_final_replay",
   "repository": "google/flan-t5-small",
   "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
   "artifact_layout": {
@@ -46,8 +46,12 @@
     "reference_generation_32_tokens_compared": true,
     "context_boundary_stress_validated": true,
     "context_boundary_tokens": 512,
-    "quantized_quality_applicable_to_advertised_f32_profile": false
+    "quantized_quality_applicable_to_advertised_f32_profile": false,
+    "repeated_metal_warm_latency_throughput_measured": true,
+    "whole_process_memory_high_water_recorded": true,
+    "per_phase_memory_high_water_recorded": false
   },
+  "repeated_metal_benchmark_record": "measurements/flan-t5-small-metal-benchmark-20260909-run.json",
   "integration_replay": {
     "date": "2026-09-09",
     "integration_commit": "a519780",

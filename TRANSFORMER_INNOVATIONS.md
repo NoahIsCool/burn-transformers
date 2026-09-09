@@ -1218,7 +1218,7 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   terminal DeltaNet matrix/convolution value, overflow failure atomicity, and
   reset-versus-stateless equivalence. Input and output hashes, per-chunk times,
   and analytical fixed/per-token cache bytes are emitted. The
-  [completed Metal stress record](acceptance/qwen3.5-0.8b-q4-32k-stress-20260909.json)
+  [completed Metal stress record](acceptance/measurements/qwen3.5-0.8b-q4-32k-stress-20260909.json)
   reports all 32,768 positions committed, finite state throughout, atomic
   overflow rejection, and exact reset-versus-stateless logits. KV storage uses
   12,288 bytes per token plus 19,537,920 fixed recurrent bytes: 422,191,104
@@ -1314,6 +1314,14 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   Five independent bounded sanitizer fuzz targets now cover configuration,
   artifacts, masks/positions, cache transactions, and generation. Each completed
   10,000 inputs without a crash; this finite campaign is not exhaustive coverage.
+- **Performance evidence is separate from architecture correctness.** FLAN's
+  first [repeated Metal/F32 series](acceptance/measurements/flan-t5-small-metal-benchmark-20260909-run.json)
+  validates official vectors before three warmups and ten measured runs per
+  32/128/512-token source. Each decode sample commits 128 forced tokens so EOS
+  cannot shorten the work denominator. Model-only and greedy-readback-inclusive
+  timing, fixed cross-attention versus per-token self-attention cache bytes,
+  and output hashes are separate metrics. Whole-process high-water memory is
+  reported without claiming per-phase or discrete host/device measurements.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

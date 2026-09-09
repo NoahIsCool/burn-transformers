@@ -12,7 +12,7 @@ import unittest
 
 
 ACCEPTANCE = Path(__file__).resolve().parents[2] / "acceptance"
-RECORD = "qwen3.5-0.8b-q4-32k-stress-20260909.json"
+RECORD = "measurements/qwen3.5-0.8b-q4-32k-stress-20260909.json"
 
 
 class QwenStressRecordTests(unittest.TestCase):
