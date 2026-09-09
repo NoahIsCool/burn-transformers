@@ -3159,18 +3159,9 @@ const TRUSTED_QWEN35_Q4_V2_SHA256: &str =
 const TRUSTED_QWEN35_Q4_V2_LOAD_PLAN_SHA256: &str =
     "5be61f117255c794a5e6386196c667a99002d9bbabf7a69fef3a8fbdcc3bdabf";
 
-/// Authenticates Q4/v2 storage and probes the 32K cache/position envelope.
-///
-/// This is deliberately not a 32K-prefill or long-context quality gate. It
-/// proves that the exact reviewed, checkpoint-bound sidecar loads, that a
-/// 32,768-token cache has the model-derived physical geometry and split dtypes,
-/// and that one stateless token executes at absolute position 32,767. Quality
-/// over a populated long history remains a separate release acceptance run.
+/// Authenticates and loads the exact source-bound Q4/v2 artifact for 32K tests.
 #[cfg(all(feature = "metal", not(feature = "rocm")))]
-#[test]
-#[ignore = "requires the reviewed Qwen3.5-0.8B Q4/v2 Burnpack and about 1 GiB of Metal memory; this is a cache/position envelope, not 32K prefill"]
-fn qwen35_q4_v2_allocates_and_executes_the_32k_envelope_on_metal() {
-    const CONTEXT: usize = 32_768;
+fn load_reviewed_qwen35_q4_v2() -> transformers::LoadedModel<AutoCausalLm<Metal>> {
     const SOURCE_SHARD: &str = "model.safetensors-00001-of-00001.safetensors";
     const SOURCE_SHARD_BYTES: u64 = 1_746_942_600;
     const SOURCE_SHARD_SHA256: &str =
@@ -3247,6 +3238,23 @@ fn qwen35_q4_v2_allocates_and_executes_the_32k_envelope_on_metal() {
     )
     .expect("the exact v2 sidecar must load against its provenance-bound checkpoint");
     assert_eq!(loaded.load_report().quantized.len(), 186);
+    loaded
+}
+
+/// Authenticates Q4/v2 storage and probes the 32K cache/position envelope.
+///
+/// This is deliberately not a 32K-prefill or long-context quality gate. It
+/// proves that the exact reviewed, checkpoint-bound sidecar loads, that a
+/// 32,768-token cache has the model-derived physical geometry and split dtypes,
+/// and that one stateless token executes at absolute position 32,767. Quality
+/// over a populated long history remains a separate release acceptance run.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires the reviewed Qwen3.5-0.8B Q4/v2 Burnpack and about 1 GiB of Metal memory; this is a cache/position envelope, not 32K prefill"]
+fn qwen35_q4_v2_allocates_and_executes_the_32k_envelope_on_metal() {
+    const CONTEXT: usize = 32_768;
+    let loaded = load_reviewed_qwen35_q4_v2();
+    let device = Default::default();
 
     let state = loaded
         .model()
@@ -3331,6 +3339,243 @@ fn qwen35_q4_v2_allocates_and_executes_the_32k_envelope_on_metal() {
             .iter()
             .all(|value| value.is_finite())
     );
+}
+
+/// Populates all 32K positions with bounded prefill and a final recurrent step.
+///
+/// A repeated, committed 23-token prompt is an indexing/numerical stress input,
+/// not a language-quality corpus. Each prefill call writes at most 256 tokens;
+/// the final token uses recurrent decode and attends to 32,767 cached positions.
+/// Thus score planes grow as `O(chunk * history)`, not a single `O(context²)`
+/// allocation. Every chunk's logits and each layer's terminal state must remain
+/// finite. Samples at the beginning, middle and end of every KV layer must be
+/// populated. Capacity rejection is checked against exact tensor snapshots.
+///
+/// Times are synchronized, one-shot stress diagnostics, not warmed benchmarks.
+/// Passing does not establish agreement with an official 32K oracle or Q4 NLL.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+#[test]
+#[ignore = "requires pinned Qwen checkpoint/reference/Q4-v2 artifacts and exclusive Metal; executes a populated 32,768-token history"]
+fn qwen35_q4_v2_populates_and_decodes_the_32k_history_on_metal() {
+    use burn::tensor::backend::Backend;
+
+    const CONTEXT: usize = 32_768;
+    const CHUNK: usize = 256;
+    const PATTERN: [i64; 23] = [
+        248_045, 846, 198, 814, 20_139, 3_069, 279, 15_127, 2_222, 303, 2_943, 4_434, 22_157, 13,
+        248_046, 198, 248_045, 74_455, 198, 248_068, 271, 248_069, 271,
+    ];
+    let root = PathBuf::from(std::env::var_os("TRANSFORMERS_QWEN35_DIR").expect("checkpoint"));
+    let reference_parent = PathBuf::from(
+        std::env::var_os("TRANSFORMERS_QWEN35_REFERENCE_DIR").expect("reference bundle parent"),
+    );
+    let reference = qwen35_release_reference::load(&reference_parent);
+    reference.validate_checkpoint(&root);
+    let device = Default::default();
+    <Metal as Backend>::sync(&device).expect("synchronize before load");
+    let started = Instant::now();
+    let loaded = load_reviewed_qwen35_q4_v2();
+    <Metal as Backend>::sync(&device).expect("synchronize after load");
+    let authenticated_load_seconds = started.elapsed().as_secs_f64();
+    let mut state = loaded
+        .model()
+        .new_decode_state(CacheConfig::new(1, CONTEXT).expect("capacity"), 1, &device)
+        .expect("32K cache allocation");
+    let tokens: Vec<i64> = PATTERN.into_iter().cycle().take(CONTEXT).collect();
+    let input_bytes: Vec<u8> = tokens
+        .iter()
+        .flat_map(|token| token.to_le_bytes())
+        .collect();
+    let input_sha256 = format!("{:x}", Sha256::digest(&input_bytes));
+    let options = ForwardOptions {
+        logits: LogitsSelection::Last,
+        ..ForwardOptions::default()
+    };
+    <Metal as Backend>::sync(&device).expect("synchronize allocation");
+    let prefill_started = Instant::now();
+    let mut chunk_seconds = Vec::new();
+    for start in (0..CONTEXT - 1).step_by(CHUNK) {
+        let end = (start + CHUNK).min(CONTEXT - 1);
+        let input = CausalLmInput {
+            token_ids: Tensor::from_data(
+                TensorData::new(tokens[start..end].to_vec(), [1, end - start]),
+                &device,
+            ),
+            token_mask: None,
+            position_ids: None,
+        };
+        <Metal as Backend>::sync(&device).expect("synchronize before chunk");
+        let chunk_started = Instant::now();
+        let output = loaded
+            .model()
+            .prefill(input, &mut state, &options)
+            .unwrap_or_else(|error| panic!("prefill {start}..{end}: {error}"));
+        assert_eq!(output.logits.dims(), [1, 1, 248_320]);
+        assert_metal_tensor_finite("32K prefill chunk logits", &output.logits);
+        <Metal as Backend>::sync(&device).expect("synchronize after chunk");
+        chunk_seconds.push(chunk_started.elapsed().as_secs_f64());
+        assert_eq!(state.lengths(), [end]);
+        if end.is_multiple_of(2_048) || end == CONTEXT - 1 {
+            eprintln!(
+                "Qwen Q4 populated {end}/{CONTEXT} tokens in {:.3}s",
+                prefill_started.elapsed().as_secs_f64()
+            );
+        }
+    }
+    let prefill_seconds = prefill_started.elapsed().as_secs_f64();
+    let last_token = || DecodeInput {
+        token_ids: Tensor::<Metal, 2, Int>::from_data([[tokens[CONTEXT - 1]]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    <Metal as Backend>::sync(&device).expect("synchronize before final decode");
+    let decode_started = Instant::now();
+    let output = loaded
+        .model()
+        .decode(last_token(), &mut state, &options)
+        .expect("the final recurrent step must fill slot 32,767");
+    let logits = metal_tensor_values("32K final decode logits", &output.logits);
+    assert_eq!(output.logits.dims(), [1, 1, 248_320]);
+    assert!(logits.iter().all(|value| value.is_finite()));
+    <Metal as Backend>::sync(&device).expect("synchronize after final decode");
+    let final_decode_seconds = decode_started.elapsed().as_secs_f64();
+    assert_eq!(state.lengths(), [CONTEXT]);
+    let logits_bytes: Vec<u8> = logits
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let logits_sha256 = format!("{:x}", Sha256::digest(&logits_bytes));
+    let final_top1 = logits
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .expect("nonempty vocabulary")
+        .0;
+    let snapshots = qwen35_stress_cache_snapshots(&state);
+    let error = loaded
+        .model()
+        .decode(last_token(), &mut state, &options)
+        .expect_err("the 32,769th token must fail before cache mutation");
+    assert!(
+        matches!(
+            error,
+            transformers::Error::TensorCache(transformers::cache::TensorCacheError::Metadata(
+                transformers::cache::DecodeStateError::CapacityExceeded {
+                    sequence: 0,
+                    requested: 32_769,
+                    capacity: 32_768,
+                }
+            ))
+        ),
+        "{error}"
+    );
+    assert_eq!(state.lengths(), [CONTEXT]);
+    assert_eq!(qwen35_stress_cache_snapshots(&state), snapshots);
+    state.reset().expect("reset the populated hybrid cache");
+    assert_eq!(state.lengths(), [0]);
+    let restarted = loaded
+        .model()
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data([[PATTERN[0]]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &options,
+        )
+        .expect("reuse the same allocation after reset");
+    let fresh = loaded
+        .model()
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::<Metal, 2, Int>::from_data([[PATTERN[0]]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &options,
+        )
+        .expect("stateless reset oracle");
+    assert_eq!(
+        metal_tensor_values("reset logits", &restarted.logits),
+        metal_tensor_values("fresh logits", &fresh.logits),
+        "old recurrent or KV history must not survive reset"
+    );
+    reference.validate_checkpoint(&root);
+    eprintln!(
+        "QWEN35_Q4_32K_STRESS {}",
+        serde_json::json!({
+            "context_tokens": CONTEXT,
+            "prefill_tokens": CONTEXT - 1,
+            "chunk_tokens": CHUNK,
+            "input_i64_le_sha256": input_sha256,
+            "final_logits_f32_le_sha256": logits_sha256,
+            "final_top1": final_top1,
+            "authenticated_load_seconds": authenticated_load_seconds,
+            "prefill_including_logit_validation_seconds": prefill_seconds,
+            "chunk_seconds": chunk_seconds,
+            "final_decode_including_logit_readback_seconds": final_decode_seconds,
+            "kv_bytes_per_token": 6 * 2 * 2 * 256 * 2,
+            "recurrent_fixed_bytes": 18 * (16 * 128 * 128 * 4 + 6_144 * 3 * 2),
+            "cache_payload_bytes": 6 * 2 * 2 * CONTEXT * 256 * 2 + 18 * (16 * 128 * 128 * 4 + 6_144 * 3 * 2),
+            "overflow_atomic": true,
+            "reset_matches_stateless": true,
+            "quality_gate": false,
+            "standardized_benchmark": false,
+        })
+    );
+}
+
+/// Checks all recurrent values and three written KV positions per layer.
+///
+/// Returned host snapshots compare bit-exactly before/after rejected decode.
+/// KV sampling avoids duplicating the entire 384 MiB cache on the host; the
+/// accumulated logical lengths separately prove all 128 chunks were committed.
+#[cfg(all(feature = "metal", not(feature = "rocm")))]
+fn qwen35_stress_cache_snapshots(state: &AutoCausalDecodeState<Metal>) -> Vec<Vec<f32>> {
+    let AutoCausalDecodeState::Qwen3_5(state) = state else {
+        panic!("Qwen hybrid state required");
+    };
+    let bank = state.tensor_state().main();
+    let native = bank.native_kv(0).expect("KV cache");
+    let mut snapshots = Vec::new();
+    for layer in 0..native.spec().layers() {
+        for tensor in [
+            native.keys(layer).expect("keys"),
+            native.values(layer).expect("values"),
+        ] {
+            assert_eq!(tensor.dims(), [1, 2, 32_768, 256]);
+            for position in [0, 16_384, 32_767] {
+                let sample = tensor
+                    .clone()
+                    .slice([0..1, 0..2, position..position + 1, 0..256]);
+                let values = metal_tensor_values("populated KV sample", &sample);
+                assert!(values.iter().all(|value| value.is_finite()));
+                assert!(
+                    values.iter().any(|value| *value != 0.0),
+                    "KV position {position}, layer {layer} was not populated"
+                );
+                snapshots.push(values);
+            }
+        }
+    }
+    let recurrent = bank.recurrent(0).expect("recurrent cache");
+    for layer in 0..recurrent.spec().layers() {
+        let matrix = metal_tensor_values(
+            "32K recurrent state",
+            recurrent.matrix(layer).expect("matrix"),
+        );
+        let convolution = metal_tensor_values(
+            "32K convolution history",
+            recurrent.convolution(layer).expect("convolution"),
+        );
+        for values in [matrix, convolution] {
+            assert!(values.iter().all(|value| value.is_finite()));
+            assert!(values.iter().any(|value| *value != 0.0));
+            snapshots.push(values);
+        }
+    }
+    snapshots
 }
 
 /// Synchronizes one Metal tensor and rejects the first non-finite component result.

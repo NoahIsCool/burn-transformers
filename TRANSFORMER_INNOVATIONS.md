@@ -1212,6 +1212,15 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   32,767. The envelope is compile-validated but not yet executed; it does not
   populate 32K history and therefore cannot establish long-context numerical
   quality or promote Q4 beyond experimental status.
+  The separate `qwen35_q4_v2_populates_and_decodes_the_32k_history_on_metal`
+  acceptance test fills 32,767 positions through bounded 256-token prefill
+  calls, then writes the last position through recurrent decode. It checks
+  finite chunk logits, populated KV positions in all six global layers, every
+  terminal DeltaNet matrix/convolution value, overflow failure atomicity, and
+  reset-versus-stateless equivalence. Input and output hashes, per-chunk times,
+  and analytical fixed/per-token cache bytes are emitted. Execution evidence
+  is recorded separately; neither this stress input nor the envelope is an
+  official-reference or quantized-NLL quality corpus.
 - **Qwen3-MoE has two equivalent expert storage layouts.** Its official
   checkpoint exposes independent gate/up/down tensors for every expert. The
   pinned Transformers 5.2 loader keeps the `qwen3_moe` architecture but aliases
