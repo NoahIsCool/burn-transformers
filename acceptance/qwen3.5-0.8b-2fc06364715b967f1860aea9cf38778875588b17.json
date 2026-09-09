@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "authenticated_stable_prompt_f16_reference_parity_verified_pending_release_coverage_performance_and_32k_stress",
+  "phase": "authenticated_f16_reference_parity_and_q4_32k_execution_verified_pending_release_api_coverage_performance_and_quantized_quality",
   "repository": "Qwen/Qwen3.5-0.8B",
   "revision": "2fc06364715b967f1860aea9cf38778875588b17",
   "artifact_layout": {
@@ -43,8 +43,10 @@
     "q4_packed_full_model_metal_validated": true,
     "q8_packed_single_backend_metal_validated": false,
     "quantized_quality_corpus_validated": false,
-    "quantized_long_context_32k_validated": false
+    "quantized_long_context_32k_validated": true,
+    "quantized_long_context_quality_validated": false
   },
+  "quantized_32k_execution_record": "qwen3.5-0.8b-q4-32k-stress-20260909.json",
   "smoke_acceptance": {
     "backend": "burn_metal",
     "parameter_dtype_policy": "f16",

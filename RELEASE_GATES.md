@@ -112,6 +112,11 @@ it is useful locally but is not a substitute for that final connected audit.
   uncached top-1, tokenization/templates, padding, and context boundaries.
 - Run the real Qwen quantized 32K populated-history stress test. Allocating
   32K capacity or evaluating a single token at position 32767 is insufficient.
+  The [2026-09-09 Q4/v2 run](acceptance/qwen3.5-0.8b-q4-32k-stress-20260909.json)
+  now passes actual 32,768-position execution, finite terminal states, overflow
+  atomicity, and reset equivalence. Its separate cache-geometry envelope also
+  passes. This closes the execution stress gate for this exact artifact, not
+  long-context official parity, quantized corpus quality, or warm performance.
 - Exercise both public small-model examples from the final candidate.
 - Record synchronized warmup/repeated load, prefill, and decode timings, peak
   host/device memory, cache bytes per token, and output hashes. Existing

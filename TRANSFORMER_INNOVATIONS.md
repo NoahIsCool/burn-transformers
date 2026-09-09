@@ -1199,7 +1199,7 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   (minimum six). The reviewed four-file bundle passes Burn Metal with minimum
   official/Burn full-vector cosine `0.999996242` and all 32 cached/stateless
   decisions identical. The old `Hello` near-tie remains a sampled-logit
-  diagnostic. This closes the retained-reference gap, not the remaining 32K,
+  diagnostic. This closes the retained-reference gap, not the remaining API,
   coverage, or standardized-performance gates.
 - **Qwen3.5-0.8B Q4 execution and its 32K envelope are separate claims.** The
   reviewed group-64 Q4 sidecar is format v2, binds the exact source checkpoint
@@ -1209,18 +1209,22 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   ignored gate authenticates that sidecar, allocates the six full-attention KV
   layers at capacity 32,768, checks eighteen DeltaNet matrices remain FP32 while
   convolution history remains F16, and places one stateless token at position
-  32,767. The envelope is compile-validated but not yet executed; it does not
-  populate 32K history and therefore cannot establish long-context numerical
-  quality or promote Q4 beyond experimental status.
+  32,767. That envelope now passes on Metal, but cannot by itself establish
+  populated-history execution or promote Q4 beyond experimental status.
   The separate `qwen35_q4_v2_populates_and_decodes_the_32k_history_on_metal`
   acceptance test fills 32,767 positions through bounded 256-token prefill
   calls, then writes the last position through recurrent decode. It checks
   finite chunk logits, populated KV positions in all six global layers, every
   terminal DeltaNet matrix/convolution value, overflow failure atomicity, and
   reset-versus-stateless equivalence. Input and output hashes, per-chunk times,
-  and analytical fixed/per-token cache bytes are emitted. Execution evidence
-  is recorded separately; neither this stress input nor the envelope is an
-  official-reference or quantized-NLL quality corpus.
+  and analytical fixed/per-token cache bytes are emitted. The
+  [completed Metal stress record](acceptance/qwen3.5-0.8b-q4-32k-stress-20260909.json)
+  reports all 32,768 positions committed, finite state throughout, atomic
+  overflow rejection, and exact reset-versus-stateless logits. KV storage uses
+  12,288 bytes per token plus 19,537,920 fixed recurrent bytes: 422,191,104
+  bytes at 32K. Neither this stress input nor the envelope is an
+  official-reference or quantized-NLL quality corpus. One-shot synchronized
+  timings and whole-process memory high-water marks are not warm benchmarks.
 - **Qwen3-MoE has two equivalent expert storage layouts.** Its official
   checkpoint exposes independent gate/up/down tensors for every expert. The
   pinned Transformers 5.2 loader keeps the `qwen3_moe` architecture but aliases
@@ -1303,6 +1307,10 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   also found a modular seq2seq cross-attention width multiplication overflow;
   checked arithmetic now rejects the wrap-to-valid-width case in debug and
   optimized builds.
+  Modular MLA's content-plus-rotary head width now also uses checked addition;
+  malformed serialized dimensions return a contextual configuration error
+  before dispatch. Targeted normalization, position, recurrent, MoE, tokenizer,
+  and template boundary tests supplement the baseline without changing gates.
   Five independent bounded sanitizer fuzz targets now cover configuration,
   artifacts, masks/positions, cache transactions, and generation. Each completed
   10,000 inputs without a crash; this finite campaign is not exhaustive coverage.
