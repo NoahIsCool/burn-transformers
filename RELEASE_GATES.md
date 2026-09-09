@@ -41,6 +41,12 @@ integration tests, warning-denied Clippy/docs, feature-minimal builds, and 179
 Python tests. Its logs are in `target/release-gates/20260909T160336.140259Z/`.
 Later changes still require replay; this source gate does not waive coverage.
 
+The subsequent `9cd6667` source run passed 870 unit tests, ordinary integrations,
+warning-denied Clippy/docs, minimal builds, and 183 Python tests at
+`target/release-gates/20260909T162545.804663Z/`. All-target, all-feature Clippy
+also passed on Rust 1.92 at `9f37b33`, including accelerator feature compilation.
+These are intermediate source snapshots, not final release promotion.
+
 Cargo's usual target location is retained. Check at least 20 GiB free before
 building a new profile; external model artifacts are never a cleanup target.
 The package gate requires clean tracked crate sources and includes verification.
@@ -80,6 +86,21 @@ thresholds still fail; added tests have not changed the 90%/95% requirements.
 This snapshot precedes the next checkpoint-transform test milestone and is
 not a final-candidate coverage claim. Its raw report is retained locally under
 `target/release-gates/20260909T155105.885161Z/`.
+
+At `c2937b8`, the same legacy counters reached **60,313 / 67,007 (90.0100%)**
+crate-wide and **30,729 / 32,396 (94.8543%)** shared/core. The combined gate still
+fails. Raw evidence is in `target/release-gates/20260909T162807.171028Z/`.
+
+A separate read-only audit of the immutable `211dc24` source/report found that
+LLVM's JSON `summary.lines` aggregates function/instantiation groups; it is not
+the count of unique physical source lines. Removing 79 compiler-confirmed
+literal `#[cfg(test)]` item spans and six verified test-only module files gave
+an **exploratory**, non-promoting result of 31,003 / 36,402 (85.1684%) crate-wide
+and 14,915 / 16,287 (91.5761%) shared/core. Generated and unknown classifications
+were retained. These numbers are not a fully qualified production-only gate:
+the source-classification and line-count tooling still needs independent tests,
+source/report identity checks, and differential validation against LLVM.
+Neither this diagnostic nor a future legacy-counter pass waives that work.
 
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is

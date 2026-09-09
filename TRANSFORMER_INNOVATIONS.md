@@ -1347,6 +1347,12 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   remains unsupported: active top-k/top-p filters fail with a capability error,
   while native Metal Flex32 greedy/unfiltered sampling has an executed test.
   Both small-model public examples also passed [local Rust 1.92 execution](acceptance/measurements/public-examples-20260909.json).
+- **Memory measurements distinguish storage from observed process footprint.**
+  The test-only Darwin supervisor brackets synchronized phases, samples a real
+  idle baseline, and retains raw timestamps, gaps, and errors. Sampled maxima
+  are not exact transient peaks; kernel lifetime high-water and analytical
+  cache bytes remain distinct. Instrumentation is excluded from comparable
+  timing series and adds no runtime networking or dependencies.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

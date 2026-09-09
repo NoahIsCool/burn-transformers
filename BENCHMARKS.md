@@ -195,6 +195,30 @@ peaks above idle remain unmeasured. The compiled 2K/8K/32K chunked-prefill-only
 runner has **not run** and cannot contribute latency claims. It forbids decode
 beyond a total 32K context.
 
+### Separate sampled process-memory runs
+
+The development-only [macOS supervisor](scripts/profile_process_memory.py)
+observes an already-built benchmark child using `proc_pid_rusage` with a
+content-verified Darwin V4 ABI. Opt-in Unix-socket markers bracket strict load,
+cold prefill, each complete warm prefill and 128-step decode loop, and natural
+generation. No socket or sampler enters the Rust runtime library.
+
+Each phase first waits for an idle window (10 ms and at least five observations
+by default). At a requested 1 ms sampling interval, the supervisor records RSS
+and physical footprint, absolute sampled maxima, signed differences from idle
+medians, query durations, actual sampling/edge gaps, and errors. PID plus kernel
+process-start identity is checked throughout. Kernel lifetime high-water is
+retained separately. These sampled maxima are **lower bounds on transient
+peaks**, not exact peaks and not separate host/device allocations on unified
+memory. Raw timestamped JSONL is authenticated by the compact report.
+
+Instrumented runs are explicitly **not timing-comparable** to the uninstrumented
+baselines above. The supervisor rejects incomplete phases, stale/invalid
+handshakes, probe errors, identity changes, and timed-out children; it never
+replaces a failed observation with zero. Its Python/Rust synthetic checks and
+an end-to-end 8MiB allocation smoke passed. Real-model memory evidence is
+recorded separately only after each supervised run succeeds.
+
 ## Current smoke evidence
 
 These values establish correctness progress only. They include cold loading or
