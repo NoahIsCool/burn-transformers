@@ -1302,3 +1302,409 @@ fn sequential_failure_audit_preserves_prior_success_and_skips_later_tensors() {
         );
     }
 }
+
+/// Reopening preserves each supported source dtype and every persisted group size.
+#[test]
+fn burnpack_boundary_source_dtypes_and_groups_survive_v2_reopen() {
+    use burn::tensor::{DType, bf16, f16};
+
+    let directory = tempdir().unwrap();
+    for scheme in [SymmetricQuantization::Q4, SymmetricQuantization::Q8] {
+        for group_size in [32, 64, 128] {
+            let shape = [2, group_size];
+            let values: Vec<_> = (0..2 * group_size)
+                .map(|index| (index % 17) as f32 - 8.0)
+                .collect();
+            let f32_source = TensorData::new(values.clone(), shape);
+            // Flex32 has the same F32 byte representation, but a distinct source tag.
+            let mut flex32_source = f32_source.clone();
+            flex32_source.dtype = DType::Flex32;
+            for (source, dtype) in [
+                (f32_source, SourceFloatDType::F32),
+                (flex32_source, SourceFloatDType::Flex32),
+                (
+                    TensorData::new(values.iter().copied().map(f16::from_f32).collect(), shape),
+                    SourceFloatDType::F16,
+                ),
+                (
+                    TensorData::new(values.iter().copied().map(bf16::from_f32).collect(), shape),
+                    SourceFloatDType::Bf16,
+                ),
+                (
+                    TensorData::new(values.iter().copied().map(f64::from).collect(), shape),
+                    SourceFloatDType::F64,
+                ),
+            ] {
+                let configuration = WeightQuantizationConfig {
+                    scheme,
+                    group_size: QuantizationGroupSize::new(group_size).unwrap(),
+                };
+                let expected = quantize_tensor_data(&source, configuration).unwrap();
+                let bytes = payload(&expected);
+                let output = directory
+                    .path()
+                    .join(format!("{scheme:?}-{group_size}-{dtype:?}.bpk"));
+                let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+                session.append("q.weight", &source, configuration).unwrap();
+                session.bind_provenance(fixture_provenance()).unwrap();
+                session.finalize().unwrap();
+                drop(session);
+
+                for _ in 0..2 {
+                    let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+                    assert_eq!(
+                        artifact.manifest().packed_execution,
+                        PackedExecutionSupport::BurnQFloatMatmul
+                    );
+                    let restored = artifact.read_weight("q.weight").unwrap();
+                    let mut metadata = expected.metadata().clone();
+                    metadata.payload_sha256 = Some(packed_payload_sha256(&bytes));
+                    assert_eq!(restored.metadata(), &metadata);
+                    assert_eq!(restored.metadata().source_dtype, dtype);
+                    assert_eq!(restored.packed_values(), expected.packed_values());
+                    assert_eq!(restored.scales(), expected.scales());
+                    assert_eq!(
+                        restored.dequantize_f32().unwrap(),
+                        expected.dequantize_f32().unwrap()
+                    );
+                    assert_eq!(
+                        artifact.tensor_payload("q.weight").unwrap().as_bytes(),
+                        bytes
+                    );
+                    assert_eq!(
+                        artifact.validate_all().unwrap().payload_bytes,
+                        bytes.len() as u64
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Row alignment, not the flattened element count, controls packed execution eligibility.
+#[test]
+fn burnpack_boundary_row_axes_and_partial_groups_keep_their_wire_layout() {
+    let directory = tempdir().unwrap();
+    for scheme in [SymmetricQuantization::Q4, SymmetricQuantization::Q8] {
+        for (shape, packed) in [([2, 32], true), ([32, 2], false), ([1, 65], false)] {
+            let source = TensorData::new(
+                (0..shape[0] * shape[1])
+                    .map(|index| index as f32 - 13.0)
+                    .collect(),
+                shape,
+            );
+            let expected = quantize_tensor_data(&source, config(scheme)).unwrap();
+            let output = directory
+                .path()
+                .join(format!("{scheme:?}-{}-{}.bpk", shape[0], shape[1]));
+            let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+            session
+                .append_quantized("q.weight", expected.clone())
+                .unwrap();
+            session.bind_provenance(fixture_provenance()).unwrap();
+            let manifest = session.manifest().clone();
+            session.finalize().unwrap();
+            let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+            assert_eq!(artifact.manifest(), &manifest);
+            assert_eq!(
+                manifest.packed_execution,
+                if packed {
+                    PackedExecutionSupport::BurnQFloatMatmul
+                } else {
+                    PackedExecutionSupport::Unavailable
+                }
+            );
+            let restored = artifact.read_weight("q.weight").unwrap();
+            assert_eq!(restored.packed_values(), expected.packed_values());
+            assert_eq!(restored.scales(), expected.scales());
+            assert_eq!(restored.metadata().host_shape().unwrap(), shape);
+            assert_eq!(restored.clone().into_burn_qfloat_data().is_ok(), packed);
+            assert_eq!(artifact.validate_all().unwrap().tensor_count, 1);
+        }
+    }
+}
+
+/// A mapped payload retains its original inode across publication of a new path owner.
+#[cfg(unix)]
+#[test]
+fn burnpack_boundary_mapped_payload_outlives_reader_and_path_replacement() {
+    let directory = tempdir().unwrap();
+    let output = directory.path().join("current.bpk");
+    let publish = |value| {
+        let source = TensorData::new(vec![value; 32], [1, 32]);
+        let expected = quantize_tensor_data(&source, config(SymmetricQuantization::Q4)).unwrap();
+        let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+        session
+            .append_quantized("q.weight", expected.clone())
+            .unwrap();
+        session.bind_provenance(fixture_provenance()).unwrap();
+        session.finalize().unwrap();
+        payload(&expected)
+    };
+    let original = publish(1.0_f32);
+    let mut old_reader = QuantizedBurnpackArtifact::open(&output).unwrap();
+    let retained = old_reader.tensor_payload("q.weight").unwrap();
+    let archived = directory.path().join("old.bpk");
+    fs::rename(&output, &archived).unwrap();
+    let replacement = publish(-3.0_f32);
+    assert_ne!(original, replacement);
+    // Unlinking an owned fixture is safe: the old mapping holds the original inode.
+    fs::remove_file(&archived).unwrap();
+    assert_eq!(
+        old_reader.tensor_payload("q.weight").unwrap().as_bytes(),
+        original
+    );
+    assert_eq!(
+        old_reader
+            .read_weight("q.weight")
+            .unwrap()
+            .dequantize_f32()
+            .unwrap(),
+        TensorData::new(vec![1.0_f32; 32], [1, 32])
+    );
+    drop(old_reader);
+    assert_eq!(retained.as_bytes(), original);
+    let mut new_reader = QuantizedBurnpackArtifact::open(&output).unwrap();
+    assert_eq!(
+        new_reader.tensor_payload("q.weight").unwrap().as_bytes(),
+        replacement
+    );
+    assert_eq!(new_reader.validate_all().unwrap().tensor_count, 1);
+    assert_eq!(retained.as_bytes(), original);
+}
+
+/// Valid SHA-256 binds bytes but cannot make an invalid quantized code semantically valid.
+#[test]
+fn burnpack_boundary_valid_digest_does_not_approve_bad_codes_or_q4_padding() {
+    let directory = tempdir().unwrap();
+    for case in ["q8-code", "q4-code", "q4-padding"] {
+        let scheme = if case == "q8-code" {
+            SymmetricQuantization::Q8
+        } else {
+            SymmetricQuantization::Q4
+        };
+        let weight =
+            quantize_tensor_data(&TensorData::new(vec![1.0_f32; 33], [1, 33]), config(scheme))
+                .unwrap();
+        let mut bytes = payload(&weight);
+        match case {
+            "q8-code" => bytes[32] = 0x80,
+            "q4-code" => bytes[16] = 0x08,
+            "q4-padding" => bytes[16] |= 0x10,
+            _ => unreachable!("fixed corruption cases"),
+        }
+        let mut metadata = weight.metadata().clone();
+        metadata.payload_sha256 = Some(packed_payload_sha256(&bytes));
+        let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
+        manifest.insert("q.weight", metadata).unwrap();
+        manifest.bind_provenance(fixture_provenance()).unwrap();
+        let output = directory.path().join(format!("{case}.bpk"));
+        let length = bytes.len();
+        write_official(
+            &output,
+            vec![
+                (BURNPACK_MANIFEST_TENSOR, manifest_tensor(&manifest)),
+                ("q.weight", TensorData::new(bytes.clone(), [length])),
+            ],
+        );
+        let before = fs::read(&output).unwrap();
+        let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+        assert_eq!(
+            artifact.tensor_payload("q.weight").unwrap().as_bytes(),
+            bytes
+        );
+        for _ in 0..2 {
+            let failure = artifact.read_weight_audited("q.weight").err().unwrap();
+            match (case, failure.error) {
+                (
+                    "q8-code",
+                    QuantizationError::InvalidQuantizedValue {
+                        index: 32,
+                        value: -128,
+                    },
+                )
+                | (
+                    "q4-code",
+                    QuantizationError::InvalidQuantizedValue {
+                        index: 32,
+                        value: -8,
+                    },
+                ) => {}
+                ("q4-padding", QuantizationError::InvalidMetadata { reason }) => {
+                    assert_eq!(reason, "unused final Q4 high nibble must be zero")
+                }
+                (_, other) => panic!("unexpected {case} error: {other}"),
+            }
+            assert_eq!(failure.stats.tensor_reads, 1);
+            assert_eq!(failure.stats.payload_bytes, length as u64);
+            assert!(
+                failure.stats.peak_owned_payload_bytes
+                    >= length as u64 + weight.metadata().scale_bytes
+            );
+        }
+        assert_eq!(fs::read(output).unwrap(), before);
+    }
+}
+
+/// Integrity-valid payloads still reject a non-positive or non-finite second-group scale.
+#[test]
+fn burnpack_boundary_valid_digest_does_not_approve_invalid_group_scales() {
+    let directory = tempdir().unwrap();
+    let weight = quantize_tensor_data(
+        &TensorData::new(vec![1.0_f32; 64], [2, 32]),
+        config(SymmetricQuantization::Q8),
+    )
+    .unwrap();
+    for (index, scale) in [
+        0.0_f32,
+        -0.0,
+        -1.0,
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut bytes = payload(&weight);
+        let second_scale = weight.packed_values().len() + size_of::<f32>();
+        bytes[second_scale..second_scale + size_of::<f32>()].copy_from_slice(&scale.to_le_bytes());
+        let mut metadata = weight.metadata().clone();
+        metadata.payload_sha256 = Some(packed_payload_sha256(&bytes));
+        let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
+        manifest.insert("q.weight", metadata).unwrap();
+        manifest.bind_provenance(fixture_provenance()).unwrap();
+        let output = directory.path().join(format!("scale-{index}.bpk"));
+        let length = bytes.len();
+        write_official(
+            &output,
+            vec![
+                (BURNPACK_MANIFEST_TENSOR, manifest_tensor(&manifest)),
+                ("q.weight", TensorData::new(bytes.clone(), [length])),
+            ],
+        );
+        let before = fs::read(&output).unwrap();
+        let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+        assert_eq!(
+            artifact.tensor_payload("q.weight").unwrap().as_bytes(),
+            bytes
+        );
+        let failure = artifact.validate_all_audited().unwrap_err();
+        match failure.error {
+            QuantizationError::InvalidScale {
+                group: 1,
+                scale: actual,
+            } => assert_eq!(actual.to_bits(), scale.to_bits()),
+            other => panic!("unexpected scale {scale:?} error: {other}"),
+        }
+        assert_eq!(failure.audit.tensor_reads, 1);
+        assert_eq!(failure.audit.tensors_validated, 0);
+        assert_eq!(failure.audit.payload_bytes, length as u64);
+        assert_eq!(fs::read(output).unwrap(), before);
+    }
+}
+
+/// A legacy artifact cannot publish malformed staging; restoring its code permits a retry.
+#[test]
+fn burnpack_boundary_legacy_semantic_publication_failure_is_retryable() {
+    let directory = tempdir().unwrap();
+    let output = directory.path().join("legacy-retry.bpk");
+    let source = TensorData::new(vec![1.0_f32; 32], [1, 32]);
+    let expected = quantize_tensor_data(&source, config(SymmetricQuantization::Q4)).unwrap();
+    let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+    session
+        .append_quantized("q.weight", expected.clone())
+        .unwrap();
+    let stats = session.stats();
+    // Q4's first 0x7 code becomes the forbidden -8 without changing payload length.
+    session.xor_staging_byte_for_test(0, 0x0f);
+    for _ in 0..2 {
+        assert!(matches!(
+            session.finalize(),
+            Err(QuantizationError::InvalidQuantizedValue {
+                index: 0,
+                value: -8
+            })
+        ));
+        assert_eq!(session.stats(), stats);
+        assert_eq!(session.staging_len_for_test(), stats.staged_payload_bytes);
+        assert_eq!(session.manifest().format_version, 1);
+        assert!(!output.exists());
+        assert!(fs::read_dir(directory.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".partial")
+        }));
+    }
+    session.xor_staging_byte_for_test(0, 0x0f);
+    session.finalize().unwrap();
+    let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+    assert_eq!(artifact.read_weight("q.weight").unwrap(), expected);
+    assert_eq!(artifact.validate_all().unwrap().tensor_count, 1);
+}
+
+/// Invalid file-path spellings fail before creation, while an OS name error preserves neighbors.
+#[test]
+fn burnpack_boundary_invalid_paths_and_long_name_errors_are_contextual() {
+    for path in [Path::new(""), Path::new("/"), Path::new(".")] {
+        for error in [
+            QuantizedBurnpackSession::new(path).err().unwrap(),
+            QuantizedBurnpackArtifact::open(path).err().unwrap(),
+        ] {
+            assert!(
+                matches!(error, QuantizationError::InvalidArtifactPath { path: actual, reason: "expected a file path" } if actual == path)
+            );
+        }
+    }
+    let directory = tempdir().unwrap();
+    let sentinel = directory.path().join("existing.bpk");
+    fs::write(&sentinel, b"unrelated owner").unwrap();
+    let output = directory.path().join(format!("{}.bpk", "x".repeat(300)));
+    let error = QuantizedBurnpackSession::new(&output).err().unwrap();
+    let canonical_parent = fs::canonicalize(directory.path()).unwrap();
+    assert!(
+        matches!(error, QuantizationError::ArtifactIo { operation: "create private Burnpack temporary file", path, .. } if path.parent() == Some(canonical_parent.as_path()) && path.file_name().unwrap().to_string_lossy().contains("quant-stage"))
+    );
+    assert_eq!(fs::read(&sentinel).unwrap(), b"unrelated owner");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+/// Canonicalizing the destination parent pins publication before an alias is retargeted.
+#[cfg(unix)]
+#[test]
+fn burnpack_boundary_parent_alias_retargeting_cannot_redirect_publication() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir().unwrap();
+    let canonical_parent = fs::canonicalize(directory.path()).unwrap();
+    let original = canonical_parent.join("original");
+    let other = canonical_parent.join("other");
+    fs::create_dir(&original).unwrap();
+    fs::create_dir(&other).unwrap();
+    let alias = directory.path().join("alias");
+    symlink(&original, &alias).unwrap();
+    let mut session = QuantizedBurnpackSession::new(alias.join("weights.bpk")).unwrap();
+    assert_eq!(session.output_path(), original.join("weights.bpk"));
+    fs::remove_file(&alias).unwrap();
+    symlink(&other, &alias).unwrap();
+    let source = TensorData::new(vec![1.0_f32; 32], [1, 32]);
+    session
+        .append("q.weight", &source, config(SymmetricQuantization::Q8))
+        .unwrap();
+    session.bind_provenance(fixture_provenance()).unwrap();
+    let summary = session.finalize().unwrap();
+    assert_eq!(summary.path, original.join("weights.bpk"));
+    assert_eq!(fs::read_link(alias).unwrap(), other);
+    assert_eq!(fs::read_dir(&other).unwrap().count(), 0);
+    let mut artifact = QuantizedBurnpackArtifact::open(summary.path).unwrap();
+    assert_eq!(
+        artifact
+            .read_weight("q.weight")
+            .unwrap()
+            .dequantize_f32()
+            .unwrap(),
+        source
+    );
+}
