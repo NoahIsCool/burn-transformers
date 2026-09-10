@@ -4,6 +4,16 @@
 //! order. The architecture sink expands each validated packed tensor into the
 //! three ordinary attention projections without changing its floating dtype.
 //! The plan and load report name those component transformations explicitly.
+//!
+//! Unlike GPT-2 Conv1D storage, source linear weights use `[output, input]`.
+//! Burn Col-layout parameters retain that checkpoint/record convention while their
+//! runtime tensors use `[input, output]`. Affine norm vectors map directly; input
+//! and vocabulary embeddings have independent owners. Packed component staging is
+//! included in the host-memory plan, but backend transfer storage is not.
+//!
+//! Only exact configured legacy mask and rotary buffers are allowlisted. Strict
+//! metadata validation precedes payload writes. A QKV source installs atomically as
+//! a group; unrelated prior writes can remain after a later streaming failure.
 
 use std::path::Path;
 
@@ -22,6 +32,8 @@ use crate::checkpoint::{
 };
 
 use super::{GptNeoXConfig, GptNeoXLayer, GptNeoXModel};
+
+// Metadata contracts and deterministic shape accounting.
 
 /// Expected source shapes, parameter mappings, and derived-buffer exceptions.
 ///
@@ -227,6 +239,7 @@ impl GptNeoXConfig {
 }
 
 impl GptNeoXCheckpointContract {
+    /// Registers a source-to-runtime rename and its exact checkpoint-facing parameter shape.
     fn add(&mut self, source: &str, target: &str, shape: Vec<u64>) {
         self.expected.push(ExpectedTensor::new(target, shape));
         self.mappings.map(source, target);
@@ -339,9 +352,12 @@ impl<B: Backend> GptNeoXModel<B> {
     }
 }
 
+// Exact target routing and atomic packed-projection installation.
+
 impl<B: Backend> TensorSink for GptNeoXModel<B> {
     type Error = GptNeoXLoadError;
 
+    /// Dispatches exact parameter targets, checking layer bounds before ordinary or packed installation.
     fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
         match target {
             "embed_in.weight" => install(target, &mut self.embed_in.weight, data),
@@ -365,6 +381,7 @@ impl<B: Backend> TensorSink for GptNeoXModel<B> {
         }
     }
 
+    /// Rejects checkpoint aliases because this graph requires independent input and output embeddings.
     fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error> {
         Err(GptNeoXLoadError::UnsupportedAlias {
             target: target.into(),
@@ -373,6 +390,7 @@ impl<B: Backend> TensorSink for GptNeoXModel<B> {
     }
 }
 
+/// Parses only `layers.<decimal index>.<nonempty suffix>` with contextual malformed-index errors.
 fn parse_layer_target(target: &str) -> Result<(usize, &str), GptNeoXLoadError> {
     let remainder = target
         .strip_prefix("layers.")
@@ -399,6 +417,7 @@ fn parse_layer_target(target: &str) -> Result<(usize, &str), GptNeoXLoadError> {
     Ok((index, suffix))
 }
 
+/// Routes a validated block suffix to norms, dense projections, or head-major packed QKV.
 fn install_layer<B: Backend>(
     layer: &mut GptNeoXLayer<B>,
     target: &str,
@@ -432,6 +451,11 @@ fn install_layer<B: Backend>(
     }
 }
 
+/// Unpacks head-major QKV rows without floating conversion and commits all three projections together.
+///
+/// Source weights are `[heads, 3, head_channel, input]`; bias omits the input axis.
+/// Selecting component `c` gathers rows `(head * 3 + c) * head_dim..+head_dim`.
+/// Cloned targets prevent a failed component from partially replacing the live Q/K/V group.
 fn install_packed<B: Backend>(
     layer: &mut GptNeoXLayer<B>,
     target: &str,
@@ -525,6 +549,7 @@ fn install_packed<B: Backend>(
     Ok(())
 }
 
+/// Requires an affine LayerNorm beta before installing its channelwise bias payload.
 fn install_norm_bias<B: Backend>(
     target: &str,
     norm: &mut LayerNorm<B>,
@@ -539,6 +564,7 @@ fn install_norm_bias<B: Backend>(
     install(target, bias, data)
 }
 
+/// Requires an existing projection bias before installing its rank-one payload.
 fn install_bias<B: Backend>(
     target: &str,
     linear: &mut Linear<B>,
@@ -553,6 +579,7 @@ fn install_bias<B: Backend>(
     install(target, bias, data)
 }
 
+/// Installs floating data with the parameter's save/load layout and adds the target to errors.
 fn install<B: Backend, const D: usize>(
     target: &str,
     parameter: &mut Param<Tensor<B, D>>,
@@ -561,6 +588,7 @@ fn install<B: Backend, const D: usize>(
     install_float_parameter(parameter, data).map_err(|source| parameter_error(target, source))
 }
 
+/// Attaches an architecture target to the shared parameter-installation diagnostic.
 fn parameter_error(target: &str, source: ParameterInstallError) -> GptNeoXLoadError {
     GptNeoXLoadError::Parameter {
         target: target.into(),
@@ -568,12 +596,16 @@ fn parameter_error(target: &str, source: ParameterInstallError) -> GptNeoXLoadEr
     }
 }
 
+/// Constructs the contextual error for a target outside this architecture's exact inventory.
 fn unknown(target: &str) -> GptNeoXLoadError {
     GptNeoXLoadError::UnknownTarget {
         target: target.into(),
     }
 }
 
+// Logical parameter reporting for packed staging targets.
+
+/// Expands a packed QKV weight or bias target into ordered Q, K, and V parameter names.
 fn component_targets(target: &str) -> Option<[String; 3]> {
     for suffix in ["weight", "bias"] {
         if let Some(prefix) = target.strip_suffix(&format!(".query_key_value.{suffix}")) {
@@ -586,6 +618,10 @@ fn component_targets(target: &str) -> Option<[String; 3]> {
     None
 }
 
+/// Replaces packed staging names with actual Q/K/V targets in applied and conversion records.
+///
+/// The executor's payload-write counters remain packed-source counts; report names describe
+/// logical installed parameters and are finalized into deterministic order.
 fn expand_report_targets(report: &mut LoadReport) {
     let expand_names = |names: &mut Vec<String>| {
         *names = std::mem::take(names)

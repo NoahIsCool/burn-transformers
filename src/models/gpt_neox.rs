@@ -9,6 +9,15 @@
 //! this configuration or applied to the graph. Autodiff can optimize its
 //! floating parameters, but does not enable the source model's training-time
 //! regularization. Compose any stochastic training operations explicitly.
+//!
+//! With residual width `d`, each head has width `d / num_attention_heads`.
+//! Only the configured even prefix of each Q/K head receives split-half RoPE;
+//! unrotated channels remain unchanged. Parallel residual mode computes both
+//! branches from separately normalized copies of the same residual, while sequential
+//! mode normalizes the attention-updated residual before its MLP. Exact GELU is
+//! required; this graph does not infer activations or rotary choices from weights.
+//! The historical Pythia checkpoint and reference equations are pinned in
+//! `examples/mechanistic/tuned_lens/README.md`.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +30,8 @@ mod model;
 pub use model::{GptNeoXLayer, GptNeoXModel};
 mod load;
 pub use load::{GptNeoXCheckpointContract, GptNeoXCheckpointLoadError, GptNeoXLoadError};
+
+// Source topology, rotary dimensions, and allocation preflight.
 
 /// Serialized GPT-NeoX topology. Defaults match Pythia-160M.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -57,6 +68,7 @@ pub struct GptNeoXConfig {
 }
 
 impl Default for GptNeoXConfig {
+    /// Describes Pythia-160M with parallel residual branches and one-quarter-head rotary encoding.
     fn default() -> Self {
         Self {
             model_type: "gpt_neox".into(),
@@ -155,6 +167,7 @@ impl GptNeoXConfig {
         self.hidden_size / self.num_attention_heads.max(1)
     }
 
+    /// Builds the validated even partial rotary width from the configured head width and fraction.
     pub(super) fn rope(&self) -> Result<RopeConfig> {
         RopeConfig::from_partial_factor(
             self.head_dim(),

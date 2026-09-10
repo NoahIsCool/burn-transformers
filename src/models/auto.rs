@@ -10,6 +10,12 @@
 //! for families still under construction remain available from their family
 //! modules, but are intentionally rejected here until their forward and
 //! checkpoint paths meet the same contract.
+//!
+//! The dispatcher does not alter tensor axes, floating precision, masks, or attention
+//! equations. Causal inputs remain `[batch, token]`, residuals `[batch, token, hidden]`,
+//! and logits `[batch, selected_token, vocabulary]`. Family implementations own
+//! validation and numerical contracts. Parameter enums stay separate from external
+//! state enums; mismatched causal model/state variants fail before execution.
 
 use burn::{module::Module, tensor::backend::Backend};
 
@@ -34,6 +40,8 @@ use crate::models::config::ModelConfig;
 mod load;
 
 pub use load::AutoLoadOptions;
+
+// Configuration discriminators and borrowed family views.
 
 /// Registry-level configuration associated with [`CausalLanguageModel`].
 ///
@@ -155,6 +163,8 @@ impl AutoSeq2SeqConfigRef<'_> {
     }
 }
 
+// External state dispatch; no caches participate in Burn parameter traversal.
+
 /// External decode state paired with an [`AutoCausalLm`] variant.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -172,6 +182,7 @@ pub enum AutoCausalDecodeState<B: Backend> {
 }
 
 impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
+    /// Returns the selected state's batch width, without inspecting parameter tensors.
     fn batch_size(&self) -> usize {
         match self {
             Self::DeepseekV2(state) => state.batch_size(),
@@ -182,6 +193,7 @@ impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
         }
     }
 
+    /// Returns the selected architecture's declared decode capacity in tokens.
     fn capacity(&self) -> usize {
         match self {
             Self::DeepseekV2(state) => state.capacity(),
@@ -192,6 +204,7 @@ impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
         }
     }
 
+    /// Borrows committed per-row logical lengths from the concrete decode state.
     fn lengths(&self) -> &[usize] {
         match self {
             Self::DeepseekV2(state) => state.lengths(),
@@ -202,6 +215,7 @@ impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
         }
     }
 
+    /// Delegates reset to the concrete state, preserving its architecture-specific invariants.
     fn reset(&mut self) -> Result<()> {
         match self {
             Self::DeepseekV2(state) => state.reset(),
@@ -212,6 +226,7 @@ impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
         }
     }
 
+    /// Reorders batch rows through the concrete state's validation and update path.
     fn reorder(&mut self, indices: &[usize]) -> Result<()> {
         match self {
             Self::DeepseekV2(state) => state.reorder(indices),
@@ -222,6 +237,7 @@ impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
         }
     }
 
+    /// Delegates truncation to the architecture; unsupported recurrent rewinds remain errors.
     fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
         match self {
             Self::DeepseekV2(state) => state.truncate(lengths),
@@ -232,6 +248,7 @@ impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
         }
     }
 
+    /// Borrows the device on which the concrete decode state is allocated.
     fn device(&self) -> &B::Device {
         match self {
             Self::DeepseekV2(state) => state.device(),
@@ -252,48 +269,57 @@ pub enum AutoSeq2SeqDecodeState<B: Backend> {
 }
 
 impl<B: Backend> DecodeState<B> for AutoSeq2SeqDecodeState<B> {
+    /// Returns the selected state's batch width, without inspecting parameter tensors.
     fn batch_size(&self) -> usize {
         match self {
             Self::T5(state) => state.batch_size(),
         }
     }
 
+    /// Returns the selected architecture's declared decode capacity in tokens.
     fn capacity(&self) -> usize {
         match self {
             Self::T5(state) => state.capacity(),
         }
     }
 
+    /// Borrows committed per-row logical lengths from the concrete decode state.
     fn lengths(&self) -> &[usize] {
         match self {
             Self::T5(state) => state.lengths(),
         }
     }
 
+    /// Delegates reset to the concrete state, preserving its architecture-specific invariants.
     fn reset(&mut self) -> Result<()> {
         match self {
             Self::T5(state) => DecodeState::reset(state),
         }
     }
 
+    /// Reorders batch rows through the concrete state's validation and update path.
     fn reorder(&mut self, indices: &[usize]) -> Result<()> {
         match self {
             Self::T5(state) => DecodeState::reorder(state, indices),
         }
     }
 
+    /// Delegates truncation to the architecture; unsupported recurrent rewinds remain errors.
     fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
         match self {
             Self::T5(state) => DecodeState::truncate(state, lengths),
         }
     }
 
+    /// Borrows the device on which the concrete decode state is allocated.
     fn device(&self) -> &B::Device {
         match self {
             Self::T5(state) => state.device(),
         }
     }
 }
+
+// Executable module dispatch and architecture-trait adapters.
 
 /// Automatic dispatch over all causal architectures with executable graphs.
 #[derive(Module, Debug)]
@@ -423,6 +449,7 @@ impl<B: Backend> AutoCausalLm<B> {
         }
     }
 
+    /// Names the selected family when its stateless intervention capability is unavailable.
     fn unsupported_hooks_error(&self) -> Error {
         Error::BackendCapability(format!(
             "activation interventions are not implemented for model_type `{}`; the automatic causal registry currently supports Qwen3.5/Qwen3.8",
@@ -529,6 +556,7 @@ impl<B: Backend> CausalLanguageModel<B> for AutoCausalLm<B> {
     type Config = AutoCausalConfig;
     type State = AutoCausalDecodeState<B>;
 
+    /// Delegates the causal trait entry point to the checked enum dispatch.
     fn forward(
         &self,
         input: CausalLmInput<B>,
@@ -537,6 +565,7 @@ impl<B: Backend> CausalLanguageModel<B> for AutoCausalLm<B> {
         AutoCausalLm::forward(self, input, options)
     }
 
+    /// Allocates external state through the checked inherent method without registering caches as parameters.
     fn new_decode_state(
         &self,
         config: CacheConfig,
@@ -546,6 +575,7 @@ impl<B: Backend> CausalLanguageModel<B> for AutoCausalLm<B> {
         AutoCausalLm::new_decode_state(self, config, batch_size, device)
     }
 
+    /// Dispatches prompt prefill and rejects a state belonging to another architecture.
     fn prefill(
         &self,
         input: CausalLmInput<B>,
@@ -555,6 +585,7 @@ impl<B: Backend> CausalLanguageModel<B> for AutoCausalLm<B> {
         AutoCausalLm::prefill(self, input, state, options)
     }
 
+    /// Dispatches continuation tokens with architecture-matched causal decode state.
     fn decode(
         &self,
         input: DecodeInput<B>,
@@ -566,30 +597,35 @@ impl<B: Backend> CausalLanguageModel<B> for AutoCausalLm<B> {
 }
 
 impl<B: Backend> From<DeepseekV2ForCausalLm<B>> for AutoCausalLm<B> {
+    /// Wraps the concrete module without copying, loading, or transforming its parameters.
     fn from(model: DeepseekV2ForCausalLm<B>) -> Self {
         Self::DeepseekV2(model)
     }
 }
 
 impl<B: Backend> From<MuseGlimmerForCausalLm<B>> for AutoCausalLm<B> {
+    /// Wraps the concrete module without copying, loading, or transforming its parameters.
     fn from(model: MuseGlimmerForCausalLm<B>) -> Self {
         Self::MuseGlimmer(model)
     }
 }
 
 impl<B: Backend> From<NemotronHForCausalLm<B>> for AutoCausalLm<B> {
+    /// Wraps the concrete module without copying, loading, or transforming its parameters.
     fn from(model: NemotronHForCausalLm<B>) -> Self {
         Self::NemotronH(model)
     }
 }
 
 impl<B: Backend> From<Qwen3_5ForCausalLm<B>> for AutoCausalLm<B> {
+    /// Wraps the concrete module without copying, loading, or transforming its parameters.
     fn from(model: Qwen3_5ForCausalLm<B>) -> Self {
         Self::Qwen3_5(model)
     }
 }
 
 impl<B: Backend> From<Qwen3MoeForCausalLm<B>> for AutoCausalLm<B> {
+    /// Wraps the concrete module without copying, loading, or transforming its parameters.
     fn from(model: Qwen3MoeForCausalLm<B>) -> Self {
         Self::Qwen3Moe(model)
     }
@@ -725,6 +761,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for AutoSeq2SeqLm<B> {
     type Config = AutoSeq2SeqConfig;
     type State = AutoSeq2SeqDecodeState<B>;
 
+    /// Dispatches bidirectional source encoding through the sequence-to-sequence trait.
     fn encode(
         &self,
         source: CausalLmInput<B>,
@@ -733,6 +770,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for AutoSeq2SeqLm<B> {
         AutoSeq2SeqLm::encode(self, source, options)
     }
 
+    /// Delegates the sequence-to-sequence trait entry point to the concrete graph.
     fn forward(
         &self,
         input: Seq2SeqInput<B>,
@@ -741,6 +779,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for AutoSeq2SeqLm<B> {
         AutoSeq2SeqLm::forward(self, input, options)
     }
 
+    /// Allocates external state through the checked inherent method without registering caches as parameters.
     fn new_decode_state(
         &self,
         config: CacheConfig,
@@ -750,6 +789,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for AutoSeq2SeqLm<B> {
         AutoSeq2SeqLm::new_decode_state(self, config, batch_size, device)
     }
 
+    /// Dispatches decoder prompt prefill using reusable encoder output and external state.
     fn prefill_decoder(
         &self,
         encoder: &EncoderOutput<B>,
@@ -760,6 +800,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for AutoSeq2SeqLm<B> {
         AutoSeq2SeqLm::prefill_decoder(self, encoder, decoder, state, options)
     }
 
+    /// Dispatches continuation tokens with the reusable encoder output and decoder state.
     fn decode(
         &self,
         encoder: &EncoderOutput<B>,
@@ -772,6 +813,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for AutoSeq2SeqLm<B> {
 }
 
 impl<B: Backend> From<T5ForConditionalGeneration<B>> for AutoSeq2SeqLm<B> {
+    /// Wraps the concrete module without copying, loading, or transforming its parameters.
     fn from(model: T5ForConditionalGeneration<B>) -> Self {
         Self::T5(model)
     }

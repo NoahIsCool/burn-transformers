@@ -1,3 +1,24 @@
+//! GPT-2 stateless blocks, explicit activation boundaries, and tied vocabulary readout.
+//!
+//! # Equations and axes
+//!
+//! Embeddings add learned token and absolute-position vectors in `[batch, token, d]`.
+//! Each block computes `y = x + Attention(LN_a(x))`, then
+//! `z = y + GELU(LN_m(y) W_up + b_up) W_down + b_down`.
+//! Affine LayerNorm uses the channel mean and variance with configured epsilon.
+//! Attention exposes `[batch, head, query, key]` scores and
+//! `[batch, head, token, head_channel]` projections. The configured score scale is
+//! optionally `1 / sqrt(head_channel)` and optionally also `1 / (layer + 1)`.
+//!
+//! # Precision and visibility
+//!
+//! Shared eager attention requests F32 softmax; weights and residuals retain their
+//! backend dtype. Configuration chooses exact or tanh GELU explicitly. Causality
+//! and padding are independent: padding excludes keys, while padded queries still
+//! execute. Every batch row needs a valid token; physical positions include padding.
+//! There is no decode cache or implicit dropout. The final readout is `LN(z) E^T`,
+//! reusing the single registered token embedding `E` without a second weight owner.
+
 use burn::{
     module::Module,
     nn::{
@@ -19,6 +40,8 @@ use crate::{
 };
 
 use super::Gpt2Config;
+
+// Editable block equations and intermediate activation boundaries.
 
 /// One GPT-2 block: `x + attention(LN(x))`, then `x + MLP(LN(x))`.
 #[derive(Module, Debug)]
@@ -107,6 +130,9 @@ impl<B: Backend> Gpt2Block<B> {
         self.forward_inner(hidden, mask, 0, None)
     }
 
+    /// Runs validated pre-norm attention and MLP residual updates with optional ordered hooks.
+    ///
+    /// Attention padding masks keys only; the causal flag independently limits future keys.
     fn forward_inner(
         &self,
         hidden: Tensor<B, 3>,
@@ -172,6 +198,8 @@ impl<B: Backend> Gpt2Block<B> {
         emit(&mut hooks, layer.residual_post(), hidden)
     }
 }
+
+// Embedding/backbone composition and tied vocabulary readout.
 
 /// Hidden representations returned independently of any task head.
 #[derive(Clone, Debug)]
@@ -271,6 +299,9 @@ impl<B: Backend> Gpt2Model<B> {
         })
     }
 
+    /// Validates IDs and masks, adds token and absolute-position embeddings, then runs all blocks.
+    ///
+    /// Retained states include the embedding, every block output, and final affine normalization.
     fn forward_inner(
         &self,
         input: &CausalLmInput<B>,
@@ -432,6 +463,7 @@ impl<B: Backend> Gpt2ForCausalLm<B> {
         })
     }
 
+    /// Selects requested normalized token positions before the tied vocabulary projection.
     fn finish(
         &self,
         input: &CausalLmInput<B>,
@@ -454,6 +486,9 @@ impl<B: Backend> Gpt2ForCausalLm<B> {
     }
 }
 
+// Boundary validation and rank-preserving selection.
+
+/// Applies a rank-preserving activation intervention, or returns the connected tensor unchanged.
 fn emit<B: Backend, const D: usize>(
     hooks: &mut Option<&mut Hooks<'_, B>>,
     point: crate::intervention::Point<D>,
@@ -465,6 +500,7 @@ fn emit<B: Backend, const D: usize>(
     }
 }
 
+/// Rejects attention diagnostics that must instead be requested through pattern hooks.
 fn validate_options(options: &ForwardOptions) -> Result<()> {
     if options.attentions {
         return Err(Error::BackendCapability(
@@ -475,6 +511,7 @@ fn validate_options(options: &ForwardOptions) -> Result<()> {
     Ok(())
 }
 
+/// Returns a contextual error before combining tensors from different devices.
 fn ensure_device<D: PartialEq>(name: &str, actual: &D, expected: &D) -> Result<()> {
     if actual != expected {
         return Err(Error::configuration(
@@ -485,6 +522,7 @@ fn ensure_device<D: PartialEq>(name: &str, actual: &D, expected: &D) -> Result<(
     Ok(())
 }
 
+/// Checks a nonempty `[batch, token, width]` residual and its parameter device.
 fn validate_hidden<B: Backend>(
     hidden: &Tensor<B, 3>,
     width: usize,
@@ -501,6 +539,7 @@ fn validate_hidden<B: Backend>(
     ensure_device("gpt2.hidden", &hidden.device(), device)
 }
 
+/// Checks affine LayerNorm vector widths, floating dtypes, and devices against the residual.
 fn validate_norm<B: Backend>(hidden: &Tensor<B, 3>, norm: &LayerNorm<B>, name: &str) -> Result<()> {
     let width = hidden.dims()[2];
     let gamma = norm.gamma.val();
@@ -524,6 +563,7 @@ fn validate_norm<B: Backend>(hidden: &Tensor<B, 3>, norm: &LayerNorm<B>, name: &
     Ok(())
 }
 
+/// Reads extrema to reject negative or out-of-range embedding indices before backend lookup.
 fn validate_indices<B: Backend>(name: &str, ids: Tensor<B, 2, Int>, limit: usize) -> Result<()> {
     let minimum = ids
         .clone()
@@ -545,6 +585,9 @@ fn validate_indices<B: Backend>(name: &str, ids: Tensor<B, 2, Int>, limit: usize
     Ok(())
 }
 
+/// Checks `[batch, token]` mask shape and device and rejects rows without any valid token.
+///
+/// Valid entries mark visible keys; padded query positions remain part of the stateless graph.
 fn validate_mask<B: Backend>(
     mask: Option<&TokenMask<B>>,
     batch: usize,
@@ -579,6 +622,9 @@ fn validate_mask<B: Backend>(
     Ok(())
 }
 
+/// Selects all, explicit, or per-row last valid token states while preserving rank three.
+///
+/// Explicit positions retain caller order; last-token selection accounts for padding holes.
 fn select_hidden<B: Backend>(
     hidden: Tensor<B, 3>,
     mask: Option<&TokenMask<B>>,

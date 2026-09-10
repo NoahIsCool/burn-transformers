@@ -1,5 +1,16 @@
 //! Strict local GPT-2 SafeTensors mapping. HF Conv1D matrices are `[in, out]`;
 //! the fused QKV output axis is split without an implicit transpose.
+//!
+//! The contract separates source namespace selection, shape/alias preflight, and
+//! parameter installation. A fused weight `[d, 3*d]` splits its output axis into
+//! Q/K/V `[d, d]`; its `[3*d]` bias splits on axis zero. MLP weights remain
+//! `[d, m]` and `[m, d]`. Affine LayerNorm vectors map to gamma/beta, and the
+//! vocabulary head aliases the sole `[vocabulary, d]` token-embedding owner.
+//!
+//! All planned tensors must be floating point; conversion policy belongs to shared
+//! load options. Exact legacy causal-mask buffers may be ignored because masks are
+//! reconstructed from the graph. Metadata preflight precedes writes, but a later
+//! streaming failure can leave earlier parameters installed: discard that model.
 
 use std::path::Path;
 
@@ -21,6 +32,8 @@ use crate::{
 
 use super::{Gpt2Config, Gpt2ForCausalLm, Gpt2Model};
 
+// Explicit source namespaces and metadata planning.
+
 /// Exact external namespaces used by official GPT-2 backbone and LM checkpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gpt2CheckpointLayout {
@@ -31,6 +44,7 @@ pub enum Gpt2CheckpointLayout {
 }
 
 impl Gpt2CheckpointLayout {
+    /// Returns the exact checkpoint namespace prefix for this embedding storage owner.
     fn prefix(self) -> &'static str {
         match self {
             Self::Backbone => "",
@@ -163,6 +177,7 @@ impl Gpt2CheckpointContract {
         Ok(contract)
     }
 
+    /// Registers one source rename and its expected native runtime/record dimensions.
     fn map(&mut self, source: String, target: String, shape: Vec<u64>) {
         self.expected.push(ExpectedTensor::new(&target, shape));
         self.mappings.map(source, target);
@@ -289,9 +304,14 @@ impl<B: Backend> Gpt2ForCausalLm<B> {
     }
 }
 
+// Checked installation into existing parameter owners.
+
 impl<B: Backend> TensorSink for Gpt2Model<B> {
     type Error = Gpt2LoadError;
 
+    /// Installs one preplanned embedding, affine normalization, or split projection target.
+    ///
+    /// Layer indices and suffixes remain checked even when the sink is invoked without a load plan.
     fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
         match target {
             "token_embedding.weight" => install(target, &mut self.token_embedding.weight, data),
@@ -335,6 +355,9 @@ impl<B: Backend> TensorSink for Gpt2Model<B> {
         }
     }
 
+    /// Verifies that the vocabulary head reuses an initialized token-embedding owner.
+    ///
+    /// No second parameter is created, so the tied weight has one optimizer registration.
     fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error> {
         if target != "lm_head.weight"
             || source_target != "token_embedding.weight"
@@ -349,6 +372,7 @@ impl<B: Backend> TensorSink for Gpt2Model<B> {
     }
 }
 
+/// Installs floating data using the parameter's layout contract and adds its target to errors.
 fn install<B: Backend, const D: usize>(
     target: &str,
     parameter: &mut Param<Tensor<B, D>>,
@@ -360,6 +384,7 @@ fn install<B: Backend, const D: usize>(
     })
 }
 
+/// Requires the declared bias to exist before installing its rank-one floating payload.
 fn install_optional<B: Backend>(
     target: &str,
     parameter: &mut Option<Param<Tensor<B, 1>>>,
@@ -374,6 +399,7 @@ fn install_optional<B: Backend>(
     )
 }
 
+/// Dispatches an exact `gamma` or `beta` normalization target without accepting extra fields.
 fn install_norm<B: Backend>(
     target: &str,
     norm: &mut LayerNorm<B>,
@@ -387,6 +413,7 @@ fn install_norm<B: Backend>(
     }
 }
 
+/// Installs a projection weight or bias in the existing checkpoint-native Row layout.
 fn install_linear<B: Backend>(
     target: &str,
     linear: &mut Linear<B>,

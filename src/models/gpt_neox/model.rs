@@ -1,4 +1,18 @@
 //! Stateless GPT-NeoX execution using shared transformer mathematics.
+//!
+//! Residuals use `[batch, token, hidden]`; attention projections use
+//! `[batch, head, token, head_channel]`. Each block uses two affine LayerNorms,
+//! scaled dot-product attention, and a dense exact-GELU MLP. In parallel mode
+//! `x_next = MLP(LN_m(x)) + Attention(LN_a(x)) + x`, preserving source addition
+//! order; sequential mode feeds the attention-updated residual into `LN_m`.
+//!
+//! RoPE rotates an even prefix of each actual head width using physical positions.
+//! Padding removes keys but retains query computations; empty-valid-token rows are
+//! rejected. Causal and bidirectional entry points share this padding contract.
+//! Eager attention requests F32 softmax; parameter and residual dtype/device must
+//! agree. Source dropout and decode caches are absent from this explicit graph.
+//! The untied vocabulary projection follows final normalization and can be called
+//! independently for logit-lens or trainable tuned-lens experiments.
 
 use burn::{
     module::{Initializer, Module},
@@ -22,6 +36,8 @@ use crate::{
 };
 
 use super::GptNeoXConfig;
+
+// Editable transformer blocks and model composition.
 
 /// One public GPT-NeoX block. Attention and MLP parameters can be edited separately.
 #[derive(Module, Debug)]
@@ -95,6 +111,10 @@ impl<B: Backend> GptNeoXLayer<B> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Runs one block with post-RoPE Q/K hooks and explicit causal or bidirectional visibility.
+    ///
+    /// Parallel mode computes `MLP(LN_m(x)) + Attention(LN_a(x)) + x` in upstream order;
+    /// sequential mode feeds `x + Attention(LN_a(x))` into the MLP normalization.
     fn forward_scoped(
         &self,
         hidden: Tensor<B, 3>,
@@ -292,6 +312,7 @@ impl<B: Backend> GptNeoXModel<B> {
         self.forward_direction(input, options, false, hooks)
     }
 
+    /// Validates diagnostic requests and scopes hooks around backbone execution and selected readout.
     fn forward_direction(
         &self,
         input: CausalLmInput<B>,
@@ -346,6 +367,7 @@ impl<B: Backend> GptNeoXModel<B> {
         self.readout(self.normalize_hidden(hidden)?)
     }
 
+    /// Checks nonempty `[batch, token, hidden]` states and the final norm's dtype/device contract.
     fn validate_hidden(&self, hidden: &Tensor<B, 3>) -> Result<()> {
         let [batch, sequence, width] = hidden.dims();
         if batch == 0 || sequence == 0 || width != self.config.hidden_size {
@@ -372,6 +394,10 @@ impl<B: Backend> GptNeoXModel<B> {
         Ok(())
     }
 
+    /// Embeds validated tokens, runs editable layers with their actual rotary widths, and normalizes.
+    ///
+    /// Each layer derives RoPE from its current head width; retained states follow the source
+    /// convention of pre-block residuals followed by the final normalized output.
     fn backbone(
         &self,
         input: &CausalLmInput<B>,
@@ -563,6 +589,9 @@ impl<B: Backend> GptNeoXModel<B> {
     }
 }
 
+// Public-edit safety checks, initialization, and input/output boundaries.
+
+/// Checks an exact parameter shape and common dtype/device before backend arithmetic.
 fn validate_tensor<B: Backend, const D: usize>(
     tensor: &Tensor<B, D>,
     shape: [usize; D],
@@ -586,6 +615,7 @@ fn validate_tensor<B: Backend, const D: usize>(
     Ok(())
 }
 
+/// Checks channelwise affine LayerNorm parameters against the residual width and storage.
 fn validate_norm<B: Backend>(
     norm: &LayerNorm<B>,
     width: usize,
@@ -600,6 +630,7 @@ fn validate_norm<B: Backend>(
     Ok(())
 }
 
+/// Checks runtime `[input, output]` weights and optional `[output]` bias storage.
 fn validate_linear<B: Backend>(
     linear: &Linear<B>,
     input: usize,
@@ -615,6 +646,10 @@ fn validate_linear<B: Backend>(
     Ok(())
 }
 
+/// Initializes Gaussian weights and zero bias with checkpoint-facing Col record layout.
+///
+/// Shared initialization keeps runtime `[input, output]` tensors autodiff-safe while
+/// preserving the source `[output, input]` save/load convention.
 fn normal_linear<B: Backend>(
     input: usize,
     output: usize,
@@ -635,6 +670,9 @@ fn normal_linear<B: Backend>(
     layer
 }
 
+/// Validates token and position ranges, padding rows, sequence capacity, and device agreement.
+///
+/// Absent position IDs use physical `0..sequence` positions, including padded slots.
 fn validate_input<B: Backend>(
     input: &CausalLmInput<B>,
     config: &GptNeoXConfig,
@@ -710,6 +748,7 @@ fn validate_input<B: Backend>(
     Ok(positions)
 }
 
+/// Reads extrema and rejects indices outside `0..limit` before embedding or rotary lookup.
 fn validate_indices<B: Backend>(
     indices: Tensor<B, 2, Int>,
     limit: usize,
@@ -735,6 +774,9 @@ fn validate_indices<B: Backend>(
     Ok(())
 }
 
+/// Selects all, explicit, or per-row last valid states without changing the residual width.
+///
+/// The mask-aware last-token path gathers the greatest visible physical position on device.
 fn select_hidden<B: Backend>(
     hidden: Tensor<B, 3>,
     mask: Option<&TokenMask<B>>,

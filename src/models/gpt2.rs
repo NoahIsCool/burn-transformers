@@ -36,6 +36,14 @@
 //! assert_eq!(output.logits.dims(), [1, 1, 20]);
 //! # Ok::<(), transformers::Error>(())
 //! ```
+//!
+//! For residual width `d` and MLP width `m`, each block applies affine LayerNorm
+//! over the last axis, scaled dot-product attention, then
+//! `GELU(x W_up + b_up) W_down + b_down`.
+//! The exact nonlinearity is `x * (1 + erf(x / sqrt(2))) / 2`; `gelu_new` uses
+//! the source tanh approximation. Head count divides `d`, while `m` is independently
+//! configurable. See `src/models/gpt2/README.md` for the pinned checkpoint,
+//! reference implementation versions, and measured F32 tolerances.
 
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +54,8 @@ mod model;
 
 pub use checkpoint::{Gpt2CheckpointContract, Gpt2CheckpointLayout, Gpt2LoadError};
 pub use model::{Gpt2Block, Gpt2ForCausalLm, Gpt2Model, Gpt2ModelOutput};
+
+// Explicit graph choices; checkpoint data never selects a different nonlinearity.
 
 /// The exact nonlinearity used by the source model's computation graph.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +70,7 @@ pub enum Gpt2Activation {
 }
 
 impl Gpt2Activation {
+    /// Maps the explicit checkpoint nonlinearity to shared exact-erf or tanh-approximate GELU.
     fn activation(self) -> Activation {
         match self {
             Self::Gelu => Activation::Gelu,
@@ -67,6 +78,8 @@ impl Gpt2Activation {
         }
     }
 }
+
+// Source configuration translation and allocation preflight.
 
 /// GPT-2 configuration using the public checkpoint's field names.
 ///
@@ -112,6 +125,7 @@ pub struct Gpt2Config {
 }
 
 impl Default for Gpt2Config {
+    /// Describes the causal, tied-readout GPT-2 small evaluation graph with tanh GELU.
     fn default() -> Self {
         Self {
             model_type: "gpt2".into(),

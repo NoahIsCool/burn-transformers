@@ -5,6 +5,13 @@
 //! contract. No filename heuristics select individual parameters. Qwen's two
 //! published namespace layouts are distinguished only after complete SafeTensors
 //! header discovery by checking which exact language prefix is present.
+//!
+//! Loading is a host-side boundary: canonical contained paths and bounded JSON are
+//! validated before tensor installation. Explicit generation defaults take precedence
+//! over local generation metadata, which overrides model token IDs. EOS IDs are
+//! sorted and deduplicated; padding identifies at most one in-vocabulary token.
+//! Floating casts, packed layouts, aliases, and tensor shapes remain the responsibility
+//! of the selected architecture contract and shared checkpoint planner.
 
 use std::{
     fs,
@@ -51,6 +58,8 @@ const MAX_GENERATION_CONFIG_BYTES: u64 = 1024 * 1024;
 /// Causal families whose packed installation path has an acceptance contract.
 const PACKED_CAUSAL_MODEL_TYPES: &[&str] = &["muse_glimmer_text", "qwen3_5_text", "qwen3_moe"];
 
+// User policy and family-specific strict loading.
+
 /// Host-side policy for automatic local model loading.
 #[derive(Debug, Clone)]
 pub struct AutoLoadOptions {
@@ -71,6 +80,7 @@ pub struct AutoLoadOptions {
 }
 
 impl Default for AutoLoadOptions {
+    /// Selects strict local loading, optional tokenizer discovery, and no packed overlay or MTP graph.
     fn default() -> Self {
         Self {
             checkpoint: LoadOptions::default(),
@@ -516,6 +526,8 @@ fn source_metadata(
     }
     Ok(source)
 }
+
+// Contained artifact discovery and generation-default normalization.
 
 /// Reads a required bounded `config.json` and returns its canonical root.
 fn read_required_config(root: &Path) -> Result<(PathBuf, String)> {
