@@ -23,6 +23,9 @@ use super::{ModularCausalLm, ModularSeq2SeqLm, common::relative_bias_from_positi
 
 type TestBackend = Flex<f32, i32>;
 
+#[path = "state_contracts_tests.rs"]
+mod state_contracts;
+
 /// Standard scale-only normalization for compact fixtures.
 fn rms() -> NormalizationSpec {
     NormalizationSpec::Rms {
