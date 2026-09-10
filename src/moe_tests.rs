@@ -543,3 +543,51 @@ fn load_balancing_loss_validates_all_external_diagnostic_axes() {
         Err(crate::Error::Shape { tensor, actual, .. }) if tensor == "moe.selected_experts" && actual.contains("-1"))
     );
 }
+
+#[test]
+fn expert_grouping_rejects_extreme_backend_i32_ids() {
+    let device = Default::default();
+    for id in [i32::MIN, i32::MAX] {
+        let ids = Tensor::<Flex, 2, Int>::from_data(
+            burn::tensor::TensorData::new(vec![0_i32, id], [1, 2]),
+            &device,
+        );
+        let error = group_selected_experts(ids, 2).unwrap_err();
+        assert!(matches!(error, crate::Error::Shape { tensor, actual, .. }
+            if tensor == "moe.selected_experts" && actual.contains(&format!("expert ID {id} at flattened assignment 1"))));
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(48))]
+
+    #[test]
+    fn expert_grouping_preserves_every_assignment_and_its_token_slot_order(
+        experts in 1usize..=8,
+        slots in 1usize..=5,
+        input in proptest::collection::vec(0usize..100, 1..=40),
+    ) {
+        let device = Default::default();
+        let tokens = input.len();
+        // Repeated expert IDs within a token are valid metadata; no assignment may disappear.
+        let ids = input.iter().flat_map(|&seed| (0..slots).map(move |slot| ((seed + slot / 2) % experts) as i64)).collect::<Vec<_>>();
+        let tensor = Tensor::<Flex, 2, Int>::from_data(
+            burn::tensor::TensorData::new(ids.clone(), [tokens, slots]), &device,
+        );
+        let groups = group_selected_experts(tensor, experts).unwrap();
+        proptest::prop_assert_eq!(groups.len(), experts);
+        let mut visited = vec![false; ids.len()];
+        for (expert, group) in groups.iter().enumerate() {
+            proptest::prop_assert_eq!(group.token_indices.len(), group.weight_indices.len());
+            proptest::prop_assert!(group.weight_indices.windows(2).all(|pair| pair[0] < pair[1]));
+            for (&token, &weight) in group.token_indices.iter().zip(&group.weight_indices) {
+                let weight = usize::try_from(weight).unwrap();
+                proptest::prop_assert!(!visited[weight]);
+                visited[weight] = true;
+                proptest::prop_assert_eq!(token, (weight / slots) as i64);
+                proptest::prop_assert_eq!(ids[weight], expert as i64);
+            }
+        }
+        proptest::prop_assert!(visited.into_iter().all(|seen| seen));
+    }
+}
