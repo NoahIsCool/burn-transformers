@@ -171,6 +171,14 @@ encoder rows, and immutable cross-attention KV together whenever beams change
 parents. Set `num_beams = 1` for deterministic greedy decoding through the same
 cached coordinator.
 
+When supplying an `EncoderOutput` to T5 directly, its hidden-state dtype must
+match the model's actual projection dtype, not the backend's default element
+type. Dtype mismatches return a contextual error before cross-attention or
+cache mutation; states are not silently cast. Once prefilled, a decode state
+uses its retained encoder output and cross-KV. Subsequent encoder arguments
+must preserve that binding's shape, device, dtype, and mask layout; matching
+structure is not a check that their tensor values are identical.
+
 ### Causal loading and generation
 
 With the `tokenizers` feature enabled, the same API works for any backend that

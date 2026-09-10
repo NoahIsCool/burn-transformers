@@ -1017,6 +1017,14 @@ reorders or shares their batch rows together with the corresponding encoder
 output.
 
 **Implementation:** [`T5CrossAttentionCache`](src/models/t5/model/decode.rs).
+T5 validates caller-supplied encoder dtype before these matrix products, using
+the actual model parameters rather than the backend's default floating type.
+F16/F64 matrix parameters with F32 normalization scales are valid on the tested
+Flex path. An incompatible encoder dtype returns a contextual error without
+mutating cache state; the runtime does not silently convert it. After prefill,
+the retained encoder and cross-KV remain authoritative, including after beam
+reordering. Later encoder arguments are checked for structural compatibility
+(including dtype), not full tensor-value identity.
 
 <a id="innovation-recurrent-cache"></a>
 ### External recurrent-state cache
