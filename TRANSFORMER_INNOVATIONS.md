@@ -1464,6 +1464,15 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   cache transactions and binding, and artifact/packed-payload integrity. Their
   worktree tests and warning-denied Clippy pass without runtime changes. The
   combined suite is measured separately before making any new coverage claim.
+- **Sparse-model parity fixtures must materialize dormant experts before cloning.**
+  Burn 0.21 deliberately gives a cloned uninitialized parameter an independent
+  initialization cell. A sparse prompt initializes only selected experts, so
+  later tokens can give two apparently identical fixture clones different
+  weights. The combined run at `b5ca317` exposed this on the first MoE decode;
+  its failed run is not coverage evidence. The corrected test fixture visits
+  every parameter before cloning. A counter-valued lazy initializer proves the
+  skipped-expert failure deterministically, without relying on random seeds.
+  Runtime expert dispatch and parity tolerances are unchanged.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.
