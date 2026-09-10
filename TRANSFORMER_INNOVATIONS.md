@@ -1386,8 +1386,21 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   times actual `generate_causal` calls through automatic model dispatch, including
   cache allocation, selection, log-probability readback, and stopping. It validates
   all 32 oracle tokens in each of three warmups and ten measured repetitions.
-  Compilation and pure protocol tests pass; measured hardware execution is still
-  pending and is not inferred from the older model-loop baseline.
+  The [hardware correctness run](acceptance/measurements/small-model-rc-refresh-20260910.json)
+  now passes all thirteen complete calls with exact oracle tokens and finite
+  log probabilities. Its timings are explicitly rejected: the operator metadata
+  incorrectly declared AC power while observed power changed around the run.
+  A stable-power performance run remains pending; these observations do not
+  replace the older model-loop baseline.
+- **Small-model release checks distinguish correctness from performance.**
+  The same refresh passes both Qwen public-API tests, all seven FLAN Flex/F32
+  oracle comparisons, the genuinely populated Q4 32K history (including atomic
+  overflow and reset equivalence), and both unchanged public examples. Runtime
+  source/executable hashes and raw native output are retained. The connected
+  [dependency audit](acceptance/measurements/connected-dependency-audit-20260910/manifest.json)
+  also passes advisory, yanked-version, license and source checks without new
+  waivers. None of these results promotes experimental families or substitutes
+  for production-only coverage and refreshed performance/memory gates.
 - **Memory measurements distinguish storage from observed process footprint.**
   The test-only Darwin supervisor brackets synchronized phases, samples a real
   idle baseline, and retains raw timestamps, gaps, and errors. The [executed Qwen/FLAN series](acceptance/measurements/small-model-metal-memory-20260909.json)

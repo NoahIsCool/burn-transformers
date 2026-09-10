@@ -249,7 +249,11 @@ Two maintenance notices remain explicitly tracked:
 The runner waives only these two unmaintained-package notices, not new warnings
 or vulnerabilities. Revisit them when upgrading Burn or tokenizers; do not fork
 the inference stack merely to suppress an informational notice. A fresh
-connected audit is required before release. `--offline` explicitly skips the
+connected audit is required before release. The [2026-09-10 connected audit](acceptance/measurements/connected-dependency-audit-20260910/manifest.json)
+passes with zero vulnerabilities/new warnings, completed yanked lookup, and
+zero license/source errors or warnings. It binds the exact unchanged lockfile,
+manifest and policy hashes and retains the two existing maintenance notices;
+it is not a waiver of newly reported advisories. `--offline` explicitly skips the
 registry's yanked-version lookup and uses the already-fetched advisory database;
 it is useful locally but is not a substitute for that final connected audit.
 
@@ -299,5 +303,15 @@ it is useful locally but is not a substitute for that final connected audit.
 - Reconcile support records and documents only after all applicable gates pass.
   In particular, successful FLAN numerical parity alone does not establish
   completion of crate-wide coverage, dependency, packaging, or performance gates.
+
+The [runtime correctness refresh at `50c80a2`](acceptance/measurements/small-model-rc-refresh-20260910.json)
+closes the post-loader-change replay for both Qwen public-API tests, FLAN's seven
+Flex/F32 reference vectors, the populated Q4 32K stress path, and both unchanged
+examples. The earlier parameter-reload record remains the corresponding Metal
+full-vector replay. The new public-coordinator hardware run validates thirteen
+exact continuations but is **excluded from performance comparisons** because
+the observed power state contradicted its supplied AC metadata. Repeated timing
+and sampled phase-memory refreshes, production-only coverage qualification,
+bounded fuzz refresh and final packaging remain separate release work.
 
 No expensive acceptance runs for larger families belong to this v0.1 phase.

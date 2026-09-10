@@ -3,9 +3,8 @@
 This document defines how performance and numerical results for the
 `transformers` crate must be collected. It is a protocol, not a claim that every
 listed model has been benchmarked. No public benchmark CLI or stable benchmark
-harness exists yet; current real-weight evidence comes from opt-in acceptance
-tests and is intentionally reported as smoke data rather than a throughput
-baseline.
+API exists yet. Opt-in internal tests provide repeated small-model baselines
+and separate correctness smoke data; the sections below distinguish them.
 
 The architecture targets and immutable upstream revisions are recorded in
 [ARCHITECTURES.md](ARCHITECTURES.md). A checkpoint becomes advertised only when
@@ -194,6 +193,18 @@ RSS was 2,463,891,456 bytes and peak footprint 2,907,412,480 bytes; phase-specif
 peaks above idle remain unmeasured. The compiled 2K/8K/32K chunked-prefill-only
 runner has **not run** and cannot contribute latency claims. It forbids decode
 beyond a total 32K context.
+
+The [latest correctness refresh](acceptance/measurements/small-model-rc-refresh-20260910.json)
+also executes the separate public `generate_causal` benchmark: all three warmups
+and ten measured-partition calls produce the same 32 oracle tokens. This does
+**not** establish a new timing baseline. The initially supplied metadata said
+AC power, but native observations found battery power before the run and AC
+afterward; the guarded follow-up attempt refused to start on battery. The
+unchanged raw report is retained with an explicit rejection that overrides its
+incorrect power/comparability labels. A stable-power run remains required.
+Public-API, FLAN CPU oracle, populated Q4 32K, and unchanged example replays in
+that record pass as correctness checks only. Agent CPU compilation was allowed
+during those non-timing checks.
 
 ### Separate sampled process-memory runs
 

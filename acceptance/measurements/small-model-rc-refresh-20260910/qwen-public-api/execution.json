@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "name": "qwen-public-api",
+  "mode": "acceptance",
+  "source_before": {
+    "commit": "50c80a246bc52706acdb44f8dea116dd48a21467",
+    "runtime_src_tree": "b4d4a96ca38fdb709bce07b6fd384d497e523f98",
+    "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+    "cargo_manifest_sha256": "c3636d2468707ddbf33d7c3278f87bf087204e07dfd3da69f886fd3ee018f4e7",
+    "transformer_worktree_status": ""
+  },
+  "source_after": {
+    "commit": "50c80a246bc52706acdb44f8dea116dd48a21467",
+    "runtime_src_tree": "b4d4a96ca38fdb709bce07b6fd384d497e523f98",
+    "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+    "cargo_manifest_sha256": "c3636d2468707ddbf33d7c3278f87bf087204e07dfd3da69f886fd3ee018f4e7",
+    "transformer_worktree_status": ""
+  },
+  "command": "env 'TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17' 'TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance' 'TRANSFORMERS_FLAN_T5_SMALL_DIR=/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab' 'TRANSFORMERS_FLAN_T5_SMALL_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle' 'TRANSFORMERS_QWEN35_Q4_32K_BURNPACK=/Volumes/bag of holding/models/transformers-acceptance/qwen3.5-0.8b-q4-2fc06364-v2/qwen3.5-0.8b-q4.bpk' /usr/bin/time -l /Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_release_api-84fa0a14e50d89c1 --ignored --nocapture --test-threads=1 > /private/tmp/tfm-small-rc-refresh.jr6J7x/qwen-public-api/stdout.log 2> /private/tmp/tfm-small-rc-refresh.jr6J7x/qwen-public-api/stderr.log",
+  "argv": [
+    "/usr/bin/time",
+    "-l",
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_release_api-84fa0a14e50d89c1",
+    "--ignored",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "started_utc": "2026-09-10T02:05:16.234002+00:00",
+  "completed_utc": "2026-09-10T02:05:42.374282+00:00",
+  "wall_seconds": 26.14014745800523,
+  "process_exit_code": 0,
+  "executable": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_release_api-84fa0a14e50d89c1",
+  "executable_sha256_before": "d8a91930879c24bf71ff3163e1381611dafab4878390ca5b5f62ebb4d7566586",
+  "executable_sha256_after": "d8a91930879c24bf71ff3163e1381611dafab4878390ca5b5f62ebb4d7566586",
+  "power": {
+    "before": "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=35389539)\t43%; discharging; 1:50 remaining present: true",
+    "after": "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=35389539)\t42%; discharging; 1:40 remaining present: true",
+    "settings": "Battery Power:\n Sleep On Power Button 1\n powermode            0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         2\n womp                 0\n networkoversleep     0\n sleep                1\n lessbright           1\n tcpkeepalive         1\n disksleep            10\nAC Power:\n Sleep On Power Button 1\n powermode            0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         10\n womp                 1\n networkoversleep     0\n sleep                0\n tcpkeepalive         1\n disksleep            10",
+    "continuous_monitoring": false
+  },
+  "timing_power_endpoints_valid": true,
+  "logs": {
+    "stdout.log": {
+      "sha256": "86c723147c77724fb4d20beb54208626650312abb8df91a0d80b025dcc13c6c8",
+      "bytes": 265
+    },
+    "stderr.log": {
+      "sha256": "6d1ce511fd862dac203dfcd8b91562c10455f61656836039b31b1a1056ca441d",
+      "bytes": 777
+    }
+  }
+}

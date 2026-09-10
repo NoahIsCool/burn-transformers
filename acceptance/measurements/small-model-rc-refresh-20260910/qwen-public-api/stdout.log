@@ -1,0 +1,7 @@
+
+running 2 tests
+test qwen35_padded_batch_matches_independent_prefill_decode_and_generation ... ok
+test qwen35_public_chat_generation_matches_official_32_tokens ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 25.63s
+

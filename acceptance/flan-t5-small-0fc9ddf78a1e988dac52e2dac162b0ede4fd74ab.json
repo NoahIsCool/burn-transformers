@@ -1,9 +1,11 @@
 {
+  "rc_correctness_refresh_record": "measurements/small-model-rc-refresh-20260910.json",
+  "parameter_reload_replay_record": "measurements/small-model-parameter-reload-replay-20260910.json",
   "post_json_validation_replay_record": "measurements/small-model-post-json-validation-replay-20260910.json",
   "sampled_phase_memory_record": "measurements/small-model-metal-memory-20260909.json",
   "schema_version": 1,
   "advertised_supported": false,
-  "phase": "f32_reference_parity_and_repeated_metal_timings_verified_pending_release_coverage_phase_memory_and_final_replay",
+  "phase": "correctness_and_historical_measurements_verified_pending_production_coverage_and_refreshed_performance_memory_release_gates",
   "repository": "google/flan-t5-small",
   "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
   "artifact_layout": {
@@ -51,7 +53,9 @@
     "quantized_quality_applicable_to_advertised_f32_profile": false,
     "repeated_metal_warm_latency_throughput_measured": true,
     "whole_process_memory_high_water_recorded": true,
-    "per_phase_memory_high_water_recorded": false
+    "per_phase_memory_high_water_recorded": false,
+    "sampled_per_phase_process_memory_recorded": true,
+    "latest_runtime_sampled_memory_refreshed": false
   },
   "repeated_metal_benchmark_record": "measurements/flan-t5-small-metal-benchmark-20260909-run.json",
   "integrated_functional_replay_record": "measurements/small-model-functional-replay-6226170-20260909.json",

@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "name": "qwen-example",
+  "mode": "acceptance",
+  "source_before": {
+    "commit": "50c80a246bc52706acdb44f8dea116dd48a21467",
+    "runtime_src_tree": "b4d4a96ca38fdb709bce07b6fd384d497e523f98",
+    "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+    "cargo_manifest_sha256": "c3636d2468707ddbf33d7c3278f87bf087204e07dfd3da69f886fd3ee018f4e7",
+    "transformer_worktree_status": ""
+  },
+  "source_after": {
+    "commit": "50c80a246bc52706acdb44f8dea116dd48a21467",
+    "runtime_src_tree": "b4d4a96ca38fdb709bce07b6fd384d497e523f98",
+    "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+    "cargo_manifest_sha256": "c3636d2468707ddbf33d7c3278f87bf087204e07dfd3da69f886fd3ee018f4e7",
+    "transformer_worktree_status": ""
+  },
+  "command": "env 'TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17' 'TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance' 'TRANSFORMERS_FLAN_T5_SMALL_DIR=/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab' 'TRANSFORMERS_FLAN_T5_SMALL_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle' 'TRANSFORMERS_QWEN35_Q4_32K_BURNPACK=/Volumes/bag of holding/models/transformers-acceptance/qwen3.5-0.8b-q4-2fc06364-v2/qwen3.5-0.8b-q4.bpk' /usr/bin/time -l /Users/nover/repos/hmm_compression/crates/transformers/target/release/examples/qwen35_chat '/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17' 'Explain why the seasons change in four complete sentences.' 32 > /private/tmp/tfm-small-rc-refresh.jr6J7x/qwen-example/stdout.log 2> /private/tmp/tfm-small-rc-refresh.jr6J7x/qwen-example/stderr.log",
+  "argv": [
+    "/usr/bin/time",
+    "-l",
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release/examples/qwen35_chat",
+    "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "Explain why the seasons change in four complete sentences.",
+    "32"
+  ],
+  "started_utc": "2026-09-10T02:07:50.451076+00:00",
+  "completed_utc": "2026-09-10T02:07:54.791051+00:00",
+  "wall_seconds": 4.339815874991473,
+  "process_exit_code": 0,
+  "executable": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/examples/qwen35_chat",
+  "executable_sha256_before": "a92d7a9b3e5856355bb827d90a41929b3a8623640284b6c52682ce4671082023",
+  "executable_sha256_after": "a92d7a9b3e5856355bb827d90a41929b3a8623640284b6c52682ce4671082023",
+  "power": {
+    "before": "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=35389539)\t38%; discharging; 0:54 remaining present: true",
+    "after": "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=35389539)\t38%; discharging; 0:54 remaining present: true",
+    "settings": "Battery Power:\n Sleep On Power Button 1\n powermode            0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         2\n womp                 0\n networkoversleep     0\n sleep                1\n lessbright           1\n tcpkeepalive         1\n disksleep            10\nAC Power:\n Sleep On Power Button 1\n powermode            0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         10\n womp                 1\n networkoversleep     0\n sleep                0\n tcpkeepalive         1\n disksleep            10",
+    "continuous_monitoring": false
+  },
+  "timing_power_endpoints_valid": true,
+  "logs": {
+    "stdout.log": {
+      "sha256": "44ffd45f2751a5a5a5fa8bb99c5dd973dad64a96c2e70211f2de438f7964757f",
+      "bytes": 143
+    },
+    "stderr.log": {
+      "sha256": "0694debc995f7447574adaf472e703e2e07b03f9d38afbd1f3c991a9c9951eeb",
+      "bytes": 777
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "name": "qwen-public",
+  "mode": "benchmark",
+  "source_before": {
+    "commit": "50c80a246bc52706acdb44f8dea116dd48a21467",
+    "runtime_src_tree": "b4d4a96ca38fdb709bce07b6fd384d497e523f98",
+    "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+    "cargo_manifest_sha256": "c3636d2468707ddbf33d7c3278f87bf087204e07dfd3da69f886fd3ee018f4e7",
+    "transformer_worktree_status": ""
+  },
+  "source_after": {
+    "commit": "50c80a246bc52706acdb44f8dea116dd48a21467",
+    "runtime_src_tree": "b4d4a96ca38fdb709bce07b6fd384d497e523f98",
+    "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+    "cargo_manifest_sha256": "c3636d2468707ddbf33d7c3278f87bf087204e07dfd3da69f886fd3ee018f4e7",
+    "transformer_worktree_status": ""
+  },
+  "command": "env 'TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17' 'TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance' 'TRANSFORMERS_FLAN_T5_SMALL_DIR=/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab' 'TRANSFORMERS_FLAN_T5_SMALL_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle' 'TRANSFORMERS_QWEN35_Q4_32K_BURNPACK=/Volumes/bag of holding/models/transformers-acceptance/qwen3.5-0.8b-q4-2fc06364-v2/qwen3.5-0.8b-q4.bpk' TRANSFORMERS_BENCH_METADATA_JSON=/private/tmp/tfm-small-rc-refresh.jr6J7x/qwen-public/environment.json TRANSFORMERS_BENCH_OUTPUT_JSON=/private/tmp/tfm-small-rc-refresh.jr6J7x/qwen-public/benchmark.json /usr/bin/time -l /Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-22bed2ca193cb209 qwen::qwen35_metal_public_causal_greedy_benchmark --ignored --exact --nocapture --test-threads=1 > /private/tmp/tfm-small-rc-refresh.jr6J7x/qwen-public/stdout.log 2> /private/tmp/tfm-small-rc-refresh.jr6J7x/qwen-public/stderr.log",
+  "argv": [
+    "/usr/bin/time",
+    "-l",
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "started_utc": "2026-09-10T02:03:18.766838+00:00",
+  "completed_utc": "2026-09-10T02:03:51.221159+00:00",
+  "wall_seconds": 32.45422787498683,
+  "process_exit_code": 0,
+  "executable": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+  "executable_sha256_before": "db2e9a77d6fedb42281d3ba32576bfc5ffeffa994182ac7dcddf6fcd28f72945",
+  "executable_sha256_after": "db2e9a77d6fedb42281d3ba32576bfc5ffeffa994182ac7dcddf6fcd28f72945",
+  "logs": {
+    "stdout.log": {
+      "sha256": "8757c9414da3a388d87271e9ac023898ff33cd24eba5042e761b2a77653244ca",
+      "bytes": 176
+    },
+    "stderr.log": {
+      "sha256": "0cd001e76c6826f189d4cbb837c09d41433a1f83be0c14781dadf8f679aba894",
+      "bytes": 777
+    }
+  },
+  "benchmark": {
+    "file": "benchmark.json",
+    "sha256": "37a9df242a7f3f76478f306520b1a97699096ace29fe309a447062fed53880f3"
+  }
+}

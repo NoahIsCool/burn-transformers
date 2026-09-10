@@ -1,0 +1,19 @@
+finish=EndOfSequence { token_id: 1 } score=-0.601039 tokens=6
+        1.57 real         1.28 user         0.11 sys
+           469942272  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               28947  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                   5  involuntary context switches
+         17172549554  instructions retired
+          5231627495  cycles elapsed
+           395888640  peak memory footprint

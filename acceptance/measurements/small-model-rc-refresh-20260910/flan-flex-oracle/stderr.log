@@ -1,0 +1,26 @@
+FLAN-T5-small Flex/F32: load=0.140s stateless=0.062s cached32=0.207s teacher32=0.107s boundary512=0.589s beam=0.480s
+FLAN-T5-small Flex/F32 encoder: cosine=1.000000000000 max_abs=0.000000499 failures_1e-4=0 actual_f32le_sha256=f3dea396ae668196da38289ac288c4ece231fd206069f99b8487b3511be131b4
+FLAN-T5-small Flex/F32 decoder: cosine=0.999999999999 max_abs=0.000010967 failures_1e-4=0 actual_f32le_sha256=66d6c9f0f95092a80aab97ce06a7e14b48c1978d7932ff24885f432e96244502
+FLAN-T5-small Flex/F32 first: cosine=1.000000000000 max_abs=0.000049591 failures_1e-4=0 actual_f32le_sha256=7e87aa2d2daeb9242b1e2b8ceb4cff2f91554554f3d4d853a4e52bf204c7d6be
+FLAN-T5-small Flex/F32 cached: cosine=1.000000000000 max_abs=0.000072479 failures_1e-4=0 actual_f32le_sha256=774d0c77c66705856db30e4697807e86184a6095a01d590007ccb8e293f0a04b
+FLAN-T5-small Flex/F32 teacher: cosine=1.000000000000 max_abs=0.000034332 failures_1e-4=0 actual_f32le_sha256=a138e7c73565d9b634e20ba621856810df755e6e6649b1ea3941351ce06d4b61
+FLAN-T5-small Flex/F32 padded: cosine=1.000000000000 max_abs=0.000034332 failures_1e-4=0 actual_f32le_sha256=d493c450080ae8c85c53f88243846dc3a8422574dacbc0c24386921ac4c02435
+FLAN-T5-small Flex/F32 boundary: cosine=1.000000000000 max_abs=0.000076294 failures_1e-4=0 actual_f32le_sha256=9cac2b6f5432b905da781dea75c0876b058d554e20b56b7f4e18152e6f898dfe
+        3.17 real         2.08 user         0.36 sys
+           654409728  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               40238  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   6  voluntary context switches
+                4942  involuntary context switches
+         28075122271  instructions retired
+          8318188949  cycles elapsed
+           420334080  peak memory footprint
