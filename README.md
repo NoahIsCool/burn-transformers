@@ -140,6 +140,11 @@ needs tokenization. Discovery rejects escaping shard paths and symlinks,
 duplicates, mapping collisions, unsupported dtypes, invalid byte ranges,
 missing shards, and shape mismatches before parameter application.
 
+Special-token declarations must resolve to the tokenizer's actual vocabulary.
+An explicit token ID cannot authorize absent or malformed token text; present
+IDs must be unsigned 32-bit integers (or null for an absent override). This
+keeps padding and other special IDs inside the validated model vocabulary.
+
 `AutoLoadOptions` controls strict checkpoint policy, tokenizer attachment,
 normalized generation defaults, provenance metadata, Qwen MTP loading, and an
 optional quantized Burnpack sidecar. A successful call returns `LoadedModel`,

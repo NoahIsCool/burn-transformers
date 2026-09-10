@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use transformers::{
     AutoLoadOptions, AutoSeq2SeqLm, CausalLmInput, DecodeInput, DecodeState, EncodeOptions,
-    FinishReason, ForwardOptions, LogitsSelection, Padding, Seq2SeqInput,
+    FinishReason, ForwardOptions, LocalTokenizer, LogitsSelection, Padding, Seq2SeqInput,
     cache::CacheConfig,
     models::t5::{T5BeamSearchOptions, generate_t5_beam_search},
 };
@@ -71,6 +71,81 @@ const BEAM_IDS: &[u32] = &[644, 4_598, 229, 9_685, 5, 1];
 const LONG_PROMPT: &str = "translate English to German: In the early morning, the scientist walked slowly through the quiet garden, carefully recording how sunlight touched every leaf, how birds moved between the branches, and how the cool air changed as the city began to wake around her.";
 const TRANSLATION_PROMPT: &str = "translate English to German: The house is wonderful.";
 const PADDED_SECOND_PROMPT: &str = "summarize: Transformers use attention.";
+
+/// Authenticates local artifacts and checks exact token IDs without loading model tensors.
+#[test]
+#[ignore = "requires the pinned external FLAN-T5-small artifacts; executes no model graph"]
+fn flan_t5_small_tokenizer_matches_pinned_reference_ids() {
+    let root = authenticate_checkpoint(&checkpoint_root());
+    let tokenizer = LocalTokenizer::from_directory(&root).expect("official local tokenizer");
+    tokenizer
+        .validate_model_vocabulary(VOCABULARY_SIZE)
+        .unwrap();
+    let specials = &tokenizer.metadata().special_tokens;
+    assert_eq!(
+        specials
+            .pad
+            .as_ref()
+            .map(|token| (token.content.as_str(), token.id)),
+        Some(("<pad>", 0))
+    );
+    assert_eq!(
+        specials
+            .eos
+            .as_ref()
+            .map(|token| (token.content.as_str(), token.id)),
+        Some(("</s>", 1))
+    );
+    assert_eq!(
+        specials
+            .unk
+            .as_ref()
+            .map(|token| (token.content.as_str(), token.id)),
+        Some(("<unk>", 2))
+    );
+    for (prompt, ids) in [
+        (LONG_PROMPT, LONG_SOURCE_IDS),
+        (TRANSLATION_PROMPT, TRANSLATION_IDS),
+        (PADDED_SECOND_PROMPT, PADDED_SECOND_IDS),
+    ] {
+        let encoded = tokenizer.encode(prompt, &EncodeOptions::default()).unwrap();
+        assert_eq!(
+            encoded.token_ids(),
+            &[ids.iter().map(|id| *id as u32).collect::<Vec<_>>()]
+        );
+        assert_eq!(encoded.valid_tokens(), &[vec![true; ids.len()]]);
+    }
+    let padded = tokenizer
+        .encode_batch(
+            &[TRANSLATION_PROMPT, PADDED_SECOND_PROMPT],
+            &EncodeOptions {
+                padding: Padding::Longest,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut second = PADDED_SECOND_IDS
+        .iter()
+        .map(|id| *id as u32)
+        .collect::<Vec<_>>();
+    second.resize(TRANSLATION_IDS.len(), 0);
+    let mut second_mask = vec![true; PADDED_SECOND_IDS.len()];
+    second_mask.resize(TRANSLATION_IDS.len(), false);
+    assert_eq!(
+        padded.token_ids(),
+        &[
+            TRANSLATION_IDS
+                .iter()
+                .map(|id| *id as u32)
+                .collect::<Vec<_>>(),
+            second
+        ]
+    );
+    assert_eq!(
+        padded.valid_tokens(),
+        &[vec![true; TRANSLATION_IDS.len()], second_mask]
+    );
+}
 
 /// Exact local checkpoint file identity required by the acceptance gate.
 #[derive(Clone, Copy)]

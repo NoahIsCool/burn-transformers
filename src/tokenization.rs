@@ -286,6 +286,7 @@ pub struct LocalTokenizer {
 }
 
 impl fmt::Debug for LocalTokenizer {
+    /// Formats metadata without dumping the tokenizer implementation or vocabulary.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LocalTokenizer")
@@ -695,6 +696,11 @@ fn parse_truncation_side(value: Option<&Value>) -> Result<TruncationSide> {
 }
 
 /// Resolves a declared token from either metadata file and validates its ID.
+///
+/// Metadata cannot create a vocabulary row: the tokenizer's concrete text-to-ID
+/// mapping is authoritative. Every accepted special ID must name that same row,
+/// so later padding cannot bypass the model-vocabulary bounds check. Null IDs
+/// are absent overrides; malformed present IDs or text are not silently absent.
 fn resolve_special(
     field: &str,
     tokenizer_config: Option<&Value>,
@@ -711,33 +717,44 @@ fn resolve_special(
         });
     let declared_id = tokenizer_config
         .and_then(|value| value.get(format!("{field}_id")))
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok());
-    let content = declared
-        .and_then(token_content)
-        .or_else(|| declared_id.and_then(|id| tokenizer.id_to_token(id)));
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    Error::Tokenizer(format!(
+                        "{field}_id must be an unsigned 32-bit integer or null, found {value}"
+                    ))
+                })
+        })
+        .transpose()?;
+    let content = match declared {
+        Some(value) => Some(token_content(value).ok_or_else(|| {
+            Error::Tokenizer(format!("could not resolve declared {field} to token text"))
+        })?),
+        None => declared_id.and_then(|id| tokenizer.id_to_token(id)),
+    };
     let Some(content) = content else {
-        if declared.is_some() || declared_id.is_some() {
+        if declared_id.is_some() {
             return Err(Error::Tokenizer(format!(
                 "could not resolve declared {field} to token text"
             )));
         }
         return Ok(None);
     };
-    let vocabulary_id = tokenizer.token_to_id(&content);
-    let id = match (declared_id, vocabulary_id) {
-        (Some(declared), Some(vocabulary)) if declared != vocabulary => {
-            return Err(Error::Tokenizer(format!(
-                "{field}_id {declared} conflicts with tokenizer vocabulary ID {vocabulary}"
-            )));
-        }
-        (Some(id), _) | (None, Some(id)) => id,
-        (None, None) => {
-            return Err(Error::Tokenizer(format!(
-                "declared {field} token `{content}` is absent from the vocabulary"
-            )));
-        }
-    };
+    let id = tokenizer.token_to_id(&content).ok_or_else(|| {
+        Error::Tokenizer(format!(
+            "declared {field} token `{content}` is absent from the vocabulary"
+        ))
+    })?;
+    if let Some(declared) = declared_id
+        && declared != id
+    {
+        return Err(Error::Tokenizer(format!(
+            "{field}_id {declared} conflicts with tokenizer vocabulary ID {id}"
+        )));
+    }
     Ok(Some(SpecialToken { content, id }))
 }
 

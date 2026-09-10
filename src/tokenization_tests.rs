@@ -80,6 +80,60 @@ fn loads_only_local_artifacts_and_resolves_special_ids() {
     assert!(tokenizer.validate_model_vocabulary(0).is_err());
 }
 
+/// Debug output identifies the local artifact without dumping tokenizer internals.
+#[test]
+fn debug_reports_local_metadata_without_the_vocabulary_model() {
+    let directory = fixture(base_config());
+    let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+    let debug = format!("{tokenizer:?}");
+    assert!(debug.starts_with("LocalTokenizer {"));
+    assert!(debug.contains(&format!("root: {:?}", tokenizer.root())));
+    assert!(debug.contains("vocabulary_size: 6"));
+    assert!(debug.contains("FixtureTokenizer"));
+    assert!(!debug.contains("WordLevel"));
+    assert!(!debug.contains("\"hello\":"));
+    assert!(!debug.contains("\"world\":"));
+}
+
+/// A valid tokenizer model may fail on one input; row context and reuse survive.
+#[test]
+fn encoding_failure_reports_the_row_and_allows_a_later_valid_batch() {
+    let directory = fixture(serde_json::json!({}));
+    // WordLevel permits loading a vocabulary without an unknown-token entry.
+    // Known words still encode, while an unknown word returns a normal error.
+    let model = WordLevel::builder()
+        .vocab(
+            [("hello".into(), 0), ("world".into(), 1)]
+                .into_iter()
+                .collect(),
+        )
+        .unk_token("missing-unknown-token".into())
+        .build()
+        .unwrap();
+    let mut raw = Tokenizer::new(model);
+    raw.with_pre_tokenizer(Some(Whitespace {}));
+    raw.save(directory.path().join("tokenizer.json"), false)
+        .unwrap();
+    let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+    let options = EncodeOptions {
+        add_special_tokens: false,
+        ..Default::default()
+    };
+    let error = tokenizer
+        .encode_batch(&["hello", "absent", "world"], &options)
+        .expect_err("unknown words cannot be encoded without an unknown-token entry");
+    assert!(matches!(error, Error::Tokenizer(ref reason)
+        if reason.starts_with("failed to encode batch row 1: ") && reason.len() > 30));
+    let recovered = tokenizer
+        .encode_batch(&["hello world", "world hello"], &options)
+        .unwrap();
+    assert_eq!(recovered.token_ids(), &[vec![0, 1], vec![1, 0]]);
+    assert_eq!(
+        recovered.valid_tokens(),
+        &[vec![true, true], vec![true, true]]
+    );
+}
+
 /// Left padding produces a rectangular `true == valid` tensor batch.
 #[test]
 fn batches_with_semantic_left_padding_and_backend_conversion() {
@@ -490,6 +544,99 @@ fn special_metadata_resolves_ids_precedence_and_rejects_conflicts() {
         let error = resolve_additional(Some(&config), None, &tokenizer.tokenizer).unwrap_err();
         assert!(error.to_string().contains(expected), "{error}");
     }
+}
+
+/// An explicit ID cannot make absent special-token text into a vocabulary member.
+#[test]
+fn local_special_tokens_reject_unbacked_text_even_with_a_declared_id() {
+    for field in ["bos_token", "eos_token", "pad_token", "unk_token"] {
+        for id in [1, 99] {
+            let mut config = base_config();
+            config[field] = Value::String("missing-special".into());
+            config[format!("{field}_id")] = Value::from(id);
+            let directory = fixture(config);
+            let error = LocalTokenizer::from_directory(directory.path())
+                .expect_err("an ID must not authorize text absent from the actual vocabulary");
+            assert!(matches!(error, Error::Tokenizer(ref reason)
+                if reason.contains(field) && reason.contains("absent from the vocabulary")));
+        }
+    }
+}
+
+/// Declared special IDs must be losslessly representable, not silently discarded.
+#[test]
+fn local_special_tokens_reject_invalid_id_types_and_ranges() {
+    for field in ["bos_token", "eos_token", "pad_token", "unk_token"] {
+        for id in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("1"),
+            serde_json::json!(true),
+            serde_json::json!([]),
+            serde_json::json!(4_294_967_296_u64),
+        ] {
+            let mut config = base_config();
+            config[format!("{field}_id")] = id;
+            let directory = fixture(config);
+            let error = LocalTokenizer::from_directory(directory.path())
+                .expect_err("present invalid special IDs must not become absent IDs");
+            assert!(matches!(error, Error::Tokenizer(ref reason)
+                if reason.contains(&format!("{field}_id")) && reason.contains("unsigned 32-bit integer")));
+        }
+    }
+    // A null ID remains an ordinary absent override, and a matching integer
+    // remains valid. In either case emitted padding must index the vocabulary.
+    for id in [Value::Null, Value::from(1)] {
+        let mut config = base_config();
+        config["pad_token_id"] = id;
+        let directory = fixture(config);
+        let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+        tokenizer.validate_model_vocabulary(6).unwrap();
+        let encoding = tokenizer
+            .encode_batch(
+                &["hello", "hello world"],
+                &EncodeOptions {
+                    padding: Padding::Longest,
+                    add_special_tokens: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(encoding.token_ids(), &[vec![1, 4], vec![4, 5]]);
+        assert_eq!(
+            encoding.valid_tokens(),
+            &[vec![false, true], vec![true, true]]
+        );
+    }
+}
+
+/// ID-only metadata is supported, but an explicitly malformed text declaration is not.
+#[test]
+fn local_special_token_text_errors_cannot_be_hidden_by_valid_ids() {
+    for declaration in [
+        serde_json::json!(7),
+        serde_json::json!(false),
+        serde_json::json!([]),
+        serde_json::json!({"content": 7}),
+    ] {
+        let mut config = base_config();
+        config["pad_token"] = declaration;
+        config["pad_token_id"] = Value::from(1);
+        let directory = fixture(config);
+        let error = LocalTokenizer::from_directory(directory.path())
+            .expect_err("an explicit malformed text field is not an ID-only declaration");
+        assert!(matches!(error, Error::Tokenizer(ref reason)
+            if reason.contains("could not resolve declared pad_token to token text")));
+    }
+    let directory = fixture(serde_json::json!({"pad_token_id": 1}));
+    let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+    assert_eq!(
+        tokenizer.metadata().special_tokens.pad,
+        Some(SpecialToken {
+            content: "<pad>".into(),
+            id: 1
+        })
+    );
 }
 
 /// All supported template metadata shapes normalize identically and malformed entries fail.

@@ -40,6 +40,10 @@ versioning, with the additional pre-1.0 compatibility policy documented in
 
 ### Fixed
 
+- Validate special-token metadata against the concrete tokenizer vocabulary.
+  Reject absent/malformed token text paired with an ID and invalid explicit ID
+  types or ranges, while preserving ID-only declarations and null overrides.
+  This prevents padding IDs from bypassing model-vocabulary validation.
 - Preserve backend-native Boolean dtype tags when importing dynamic token masks
   and gathering beam/cache rows, avoiding Burn 0.21 Flex panics in logical mask
   operations.
