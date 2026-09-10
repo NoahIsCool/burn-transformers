@@ -44,14 +44,17 @@ capture = run / "whole-test-file-classifier"  # must not already exist
 capture_classifier(crate, snapshot, Path("/absolute/path/to/trusted-classifier"),
                    capture, target_entries(binding["targets"], crate))
 diagnostic = qualify_capture(setup, snapshot, capture / "invocation.json", crate,
-                             coverage_log=run / "00-coverage.log")
+                             coverage_log=run / "00-coverage.log",
+                             run_results=run / "results.json")
 write_json(run / "whole-test-file-diagnostic.json", diagnostic)
 ```
 
 Choose the actual coverage log from that run's `results.json`; `00-coverage.log`
 applies when coverage was its first command. Do not reuse an old capture against
 edited source, even if only fixtures or scripts changed. Qualification rechecks
-the native binding, exact log diagnostic policy, classifier command and outputs,
+the successful coverage row's exact indexed log name and retained hash, original
+command/input/setup/binding records, native status, strict log diagnostic policy,
+classifier command and outputs,
 tool/source hashes, native report, and source inventory. It requires the pinned
 nightly/LLVM and cargo-llvm-cov identities already enforced by the native binder.
 Only the one exact unfiltered-option notice is permitted; other warnings fail.
@@ -82,3 +85,5 @@ TFM_WHOLE_FILE_COVERAGE_NATIVE_TESTS=1 python3 -m unittest discover -s scripts/t
 It verifies real compiler-discovered macro/include/alias inputs veto candidate
 exclusions, whole test files qualify, unknown cfg and conditional paths remain,
 and an added coverage warning invalidates previously acceptable evidence.
+It also exercises the actual release runner's retained result records: another
+clean log in the same directory cannot substitute for its real coverage log.

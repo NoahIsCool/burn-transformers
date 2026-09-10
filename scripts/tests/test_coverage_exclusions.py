@@ -253,6 +253,99 @@ class ClassifierCaptureTests(unittest.TestCase):
 
         WholeFileTests.setUp(self)
 
+    def retained_run(self):
+        """Construct synthetic retained-row contracts, never native artifact proof."""
+
+        root = self.crate / "target/run"
+        setup = {"compiler_root": str(root / "compiler"), "export_root": str(root / "llvm-export"),
+                 "artifact_root": str(self.crate / "target/llvm-cov-target")}
+        binding = {"artifact_binding_verified": True, "native_report": {"fixture": "separately revalidated"}}
+        command = ["cargo", "+nightly", "llvm-cov", "--disable-default-ignore-filename-regex"]
+        before = {"sources": self.snapshot, "working_directory": str(self.crate), "command": command,
+                  "runner_inputs": {}, "tool_versions": [], "compiler_environment": {
+                      "TFM_COVERAGE_CAPTURE_ROOT": setup["compiler_root"],
+                      "TFM_COVERAGE_ARTIFACT_ROOT": setup["artifact_root"],
+                      "RUSTC_WORKSPACE_WRAPPER": str(root / "rustc-workspace-wrapper")}}
+        for name, value in (("compiler-capture-setup.json", setup), ("compiler-binding.json", binding),
+                            ("coverage-inputs-before.json", before), ("coverage-inputs-after.json", before)):
+            put(root / name, json.dumps(value))
+        log = root / "01-coverage.log"
+        log_identity = put(log, check_release.UNFILTERED_OPTION_NOTICE + "\n")
+        report_identity = put(root / "coverage.json", json.dumps(self.native))
+        row = {"gate": "coverage", "command": command, "exit_code": 0, "process_exit_code": 0,
+               "log": log.name, "log_identity": log_identity, "report_identity": report_identity,
+               "compiler_evidence": {"setup": "compiler-capture-setup.json", "binding": "compiler-binding.json",
+                    "artifact_binding_verified": True, "compiler_reported_inputs_verified": True, "no_export_filter_verified": True},
+               "input_evidence": {"before": "coverage-inputs-before.json", "after": "coverage-inputs-after.json", "sources_unchanged": True}}
+        results_path = root / "results.json"
+        put(results_path, json.dumps({"schema_version": 1, "gates": [{"gate": "source"}, row], "passed": True}))
+        return setup, binding, results_path, log
+
+    def test_run_row_binds_exact_log_identity_and_all_retained_scope_records(self):
+        """Success identifies the row's log plus command/setup/input/binding evidence."""
+
+        setup, binding, results, log = self.retained_run()
+        identities = E._validated_run_results(results, log, setup, self.snapshot, binding, self.crate)
+        self.assertEqual(identities[str(log)], fingerprint_file(log))
+        self.assertEqual(len(identities), 7)
+        self.assertIn(str(results), identities)
+
+    def test_clean_sibling_cannot_replace_the_actual_coverage_log(self):
+        """A warning-bearing original is never rescued by a different clean sibling."""
+
+        setup, binding, results, log = self.retained_run()
+        sibling = log.parent / "clean-sibling.log"
+        put(sibling, log.read_text())
+        with log.open("a") as stream:
+            stream.write("warning: mismatched profile fixture\n")
+        with self.assertRaisesRegex(ValueError, "actual retained command log"):
+            E._validated_run_results(results, sibling, setup, self.snapshot, binding, self.crate)
+        with self.assertRaisesRegex(ValueError, "identity changed"):
+            E._validated_run_results(results, log, setup, self.snapshot, binding, self.crate)
+
+    def test_failed_native_validation_and_changed_retained_scope_are_rejected(self):
+        """Native nonzero, bool statuses, invented success and stale records all fail."""
+
+        for case in ("native_failure", "native_bool", "validation_failure", "validation_error", "duplicate_coverage",
+                     "renamed_log", "changed_setup", "changed_binding", "changed_command", "changed_after",
+                     "changed_environment", "changed_report", "different_results"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                original_crate, original_snapshot = self.crate, self.snapshot
+                self.crate = Path(directory).resolve()
+                self.snapshot, _, _, _ = fixture(self.crate)
+                try:
+                    setup, binding, results, log = self.retained_run()
+                    value = E.read_json(results)
+                    row = value["gates"][1]
+                    if case == "native_failure": row["process_exit_code"] = 7
+                    elif case == "native_bool": row["process_exit_code"] = False
+                    elif case == "validation_failure": row["exit_code"] = 1
+                    elif case == "validation_error": row["validation_error"] = "mismatched profile"
+                    elif case == "duplicate_coverage": value["gates"].append(copy.deepcopy(row))
+                    elif case == "renamed_log": row["log"] = "clean-sibling.log"
+                    elif case == "changed_setup": put(results.parent / "compiler-capture-setup.json", "{}")
+                    elif case == "changed_binding": put(results.parent / "compiler-binding.json", "{}")
+                    elif case == "changed_command": row["command"].append("--unexpected")
+                    elif case in ("changed_after", "changed_environment"):
+                        path = results.parent / "coverage-inputs-after.json"
+                        context = E.read_json(path)
+                        context["working_directory"] = "/different"
+                        if case == "changed_environment":
+                            context["working_directory"] = str(self.crate)
+                            context["compiler_environment"]["TFM_COVERAGE_CAPTURE_ROOT"] = "/other/compiler"
+                            put(results.parent / "coverage-inputs-before.json", json.dumps(context))
+                        put(path, json.dumps(context))
+                    elif case == "changed_report": put(results.parent / "coverage.json", "{}")
+                    put(results, json.dumps(value))
+                    if case == "different_results":
+                        replacement = results.parent / "other-results.json"
+                        put(replacement, results.read_text())
+                        results = replacement
+                    with self.assertRaises(ValueError):
+                        E._validated_run_results(results, log, setup, self.snapshot, binding, self.crate)
+                finally:
+                    self.crate, self.snapshot = original_crate, original_snapshot
+
     def capture(self, *, mode="success"):
         """Simulate native outputs explicitly; this helper is not a compiler fixture."""
 
@@ -373,22 +466,26 @@ pub fn value() -> u32 { production::value() + production_alias::value() + macro_
             for name in ("unit only.rs", "feature_test.rs"):
                 put(crate / "src" / name, '#[test] fn check() { assert_eq!(super::value(), 4); }\n')
             put(crate / "tests/integration.rs", '#[test] fn check() { assert_eq!(whole_file_fixture::value(), 4); }\n')
-            output = crate / "target/evidence"
-            output.mkdir(parents=True)
-            configured, setup = B.prepare_capture(crate, output, "nightly", "fixture", environment)
-            before = capture_sources(crate)
-            log = output / "coverage.log"
-            command = ["cargo", "+nightly", "llvm-cov", "--manifest-path", str(crate / "Cargo.toml"), "--locked", "--offline",
-                       "--no-default-features", "--features", "fixture", "--lib", "--tests", "--json",
-                       "--output-path", str(output / "coverage.json"), "--disable-default-ignore-filename-regex"]
-            with log.open("xb") as stream:
-                run = subprocess.run(command, cwd=crate, env=configured, stdout=stream, stderr=subprocess.STDOUT, timeout=120)
-            self.assertEqual(run.returncode, 0, log.read_text())
+            # Use the real runner, not a synthesized success manifest. Its exact
+            # indexed command log and retained native status are part of proof.
+            with mock.patch.object(check_release, "CRATE", crate), mock.patch.object(check_release, "FEATURES", "fixture"), \
+                    mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(sys, "argv", [
+                        "check_release", "--gate", "coverage", "--toolchain", "nightly", "--offline", "--coverage-compiler-evidence",
+                    ]), mock.patch("builtins.print"):
+                code = check_release.main()
+            results_path = next((crate / "target/release-gates").glob("*/results.json"))
+            output = results_path.parent
+            results = E.read_json(results_path)
+            self.assertEqual(code, 0, json.dumps(results))
+            log = output / results["gates"][0]["log"]
+            setup = E.read_json(output / "compiler-capture-setup.json")
+            before = E.read_json(output / "coverage-inputs-before.json")["sources"]
             require_same_sources(before, capture_sources(crate))
             binding = B.validate_capture(setup, before, crate)
             capture_dir = output / "classifier"
             E.capture_classifier(crate, before, executable, capture_dir, E.target_entries(binding["targets"], crate))
-            result = E.qualify_capture(setup, before, capture_dir / "invocation.json", crate, coverage_log=log)
+            result = E.qualify_capture(setup, before, capture_dir / "invocation.json", crate,
+                                       coverage_log=log, run_results=results_path)
             rows = {row["path"]: row for row in result["files"]}
             self.assertEqual({name for name, row in rows.items() if row["excluded"]}, {"src/unit only.rs", "src/feature_test.rs"})
             for name in ("tests/production.rs", "aliased.rs", "macro_module.rs", "included.rs", "raw_input.rs"):
@@ -398,9 +495,22 @@ pub fn value() -> u32 { production::value() + production_alias::value() + macro_
             self.assertTrue(result["whole_test_file_exclusions_qualified"])
             self.assertFalse(result["production_only_exclusions_qualified"])
             self.assertFalse(result["release_gate_promotion"])
+            clean_sibling = output / "clean-sibling.log"
+            put(clean_sibling, log.read_text())
             with log.open("a") as stream: stream.write("warning: mismatched profile fixture\n")
+            with self.assertRaisesRegex(ValueError, "actual retained command log"):
+                E.qualify_capture(setup, before, capture_dir / "invocation.json", crate,
+                                  coverage_log=clean_sibling, run_results=results_path)
+            with self.assertRaisesRegex(ValueError, "identity changed"):
+                E.qualify_capture(setup, before, capture_dir / "invocation.json", crate,
+                                  coverage_log=log, run_results=results_path)
+            # Even a modified manifest claiming the warning-bearing bytes are
+            # original cannot bypass the independent strict diagnostic reader.
+            results["gates"][0]["log_identity"] = fingerprint_file(log)
+            put(results_path, json.dumps(results))
             with self.assertRaisesRegex(ValueError, "unqualified coverage diagnostic"):
-                E.qualify_capture(setup, before, capture_dir / "invocation.json", crate, coverage_log=log)
+                E.qualify_capture(setup, before, capture_dir / "invocation.json", crate,
+                                  coverage_log=log, run_results=results_path)
 
 
 if __name__ == "__main__":

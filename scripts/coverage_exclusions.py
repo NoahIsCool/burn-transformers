@@ -347,8 +347,89 @@ def whole_file_diagnostic(snapshot: dict, classification: dict, targets: list[di
             "files": rows}
 
 
+def _validated_run_results(run_results: Path, coverage_log: Path, setup: dict,
+                           snapshot: dict, binding: dict, crate: Path) -> dict:
+    """Bind the exact log to the successful row written by the existing runner.
+
+    A clean sibling is not evidence for the actual coverage command. Require
+    that row's native/validation status, indexed log name and retained hash,
+    command/input context, setup and independently revalidated artifact binding.
+    Every read record is fingerprinted for a second check after measurement.
+    """
+
+    from check_release import require_same_coverage_context
+
+    root = Path(setup["compiler_root"]).parent
+    if (run_results.absolute() != root / "results.json"
+            or Path(setup["compiler_root"]) != root / "compiler"
+            or Path(setup["export_root"]) != root / "llvm-export"):
+        raise ValueError("run results are outside the bound native capture scope")
+    identities = {}
+
+    def retained(name: str, maximum: int = 8 * 1024 * 1024) -> dict:
+        """Read an exact known sibling and retain its original byte identity."""
+
+        path = root / name
+        identity = fingerprint_file(path, maximum_bytes=maximum)
+        value = read_json(path, maximum)
+        require_identity(path, identity, maximum)
+        identities[str(path)] = identity
+        return value
+
+    results = retained("results.json")
+    gates = results.get("gates")
+    if (type(results.get("schema_version")) is not int or results["schema_version"] != 1
+            or not isinstance(gates, list) or not 1 <= len(gates) <= 512
+            or any(not isinstance(row, dict) for row in gates)):
+        raise ValueError("invalid retained release-run result schema")
+    selected = [(index, row) for index, row in enumerate(gates) if row.get("gate") == "coverage"]
+    if len(selected) != 1:
+        raise ValueError("run results need exactly one coverage command row")
+    index, row = selected[0]
+    if (any(type(row.get(field)) is not int or row[field] != 0
+            for field in ("exit_code", "process_exit_code")) or "validation_error" in row):
+        raise ValueError("retained coverage command did not succeed natively and validate")
+    log_name = f"{index:02d}-coverage.log"
+    if row.get("log") != log_name or coverage_log.absolute() != root / log_name:
+        raise ValueError("coverage log is not the actual retained command log")
+    require_identity(coverage_log, row["log_identity"], 512 * 1024 * 1024)
+    identities[str(coverage_log)] = row["log_identity"]
+    compiler = row.get("compiler_evidence")
+    inputs = row.get("input_evidence")
+    if (not isinstance(compiler, dict) or compiler.get("setup") != "compiler-capture-setup.json"
+            or compiler.get("binding") != "compiler-binding.json"
+            or any(compiler.get(field) is not True for field in (
+                "artifact_binding_verified", "compiler_reported_inputs_verified", "no_export_filter_verified"))
+            or not isinstance(inputs, dict) or inputs.get("before") != "coverage-inputs-before.json"
+            or inputs.get("after") != "coverage-inputs-after.json" or inputs.get("sources_unchanged") is not True):
+        raise ValueError("coverage row lacks the required native setup and source evidence")
+    if retained("compiler-capture-setup.json") != setup:
+        raise ValueError("coverage row setup differs from the revalidated compiler setup")
+    original_binding = retained("compiler-binding.json")
+    if any(original_binding.get(key) != value for key, value in binding.items()):
+        raise ValueError("coverage row binding differs from independently revalidated artifacts")
+    before, after = retained("coverage-inputs-before.json"), retained("coverage-inputs-after.json")
+    require_same_coverage_context(before, after)
+    command = row.get("command")
+    if (before["sources"] != snapshot or before.get("working_directory") != str(crate)
+            or command != before.get("command") or not isinstance(command, list)
+            or any(not isinstance(value, str) for value in command)
+            or len(command) < 3 or command[0] != "cargo" or not command[1].startswith("+")
+            or command[2] != "llvm-cov" or command.count("--disable-default-ignore-filename-regex") != 1):
+        raise ValueError("coverage command differs from its retained input context")
+    environment = before.get("compiler_environment", {})
+    if (environment.get("TFM_COVERAGE_CAPTURE_ROOT") != setup["compiler_root"]
+            or environment.get("TFM_COVERAGE_ARTIFACT_ROOT") != setup["artifact_root"]
+            or environment.get("RUSTC_WORKSPACE_WRAPPER") != str(root / "rustc-workspace-wrapper")):
+        raise ValueError("coverage command input context refers to another capture setup")
+    report = root / "coverage.json"
+    require_identity(report, row["report_identity"], MAX_EXPORT_BYTES)
+    identities[str(report)] = row["report_identity"]
+    return identities
+
+
 def qualify_capture(setup: dict, snapshot: dict, capture_path: Path, crate: Path,
-                    *, coverage_log: Path) -> dict:
+                    *, coverage_log: Path, run_results: Path) -> dict:
     """Revalidate native evidence and qualify only the explicitly scoped file join.
 
     No caller-provided boolean can substitute for actual artifact revalidation.
@@ -364,8 +445,7 @@ def qualify_capture(setup: dict, snapshot: dict, capture_path: Path, crate: Path
     crate = crate.resolve(strict=True)
     require_same_sources(snapshot, capture_sources(crate))
     binding = validate_capture(setup, snapshot, crate)
-    if coverage_log.resolve(strict=True).parent != Path(setup["compiler_root"]).parent:
-        raise ValueError("coverage log is outside the bound run directory")
+    run_identities = _validated_run_results(run_results, coverage_log, setup, snapshot, binding, crate)
     log_identity = fingerprint_file(coverage_log, maximum_bytes=512 * 1024 * 1024)
     require_clean_coverage_log(read_coverage_log(coverage_log), allow_unfiltered_option_notice=(
         binding["no_export_filter_verified"] is True))
@@ -379,10 +459,13 @@ def qualify_capture(setup: dict, snapshot: dict, capture_path: Path, crate: Path
     validated_classifier(capture_path, snapshot, entries)
     require_identity(capture_path, capture_identity)
     require_identity(coverage_log, log_identity, 512 * 1024 * 1024)
+    for path, identity in run_identities.items():
+        require_identity(Path(path), identity, MAX_EXPORT_BYTES)
     require_same_sources(snapshot, capture_sources(crate))
     result["whole_test_file_exclusions_qualified"] = True
     result["classifier_capture"] = {"path": str(capture_path), "identity": capture_identity}
     result["native_report"] = binding["native_report"]
     result["coverage_log"] = {"path": str(coverage_log), "identity": log_identity}
+    result["retained_run_evidence"] = run_identities
     result["source_inventory_sha256"] = snapshot["inventory_sha256"]
     return result
