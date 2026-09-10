@@ -4,8 +4,17 @@
 //! Reference: python3 examples/mechanistic/tuned_lens/reference.py
 //! Run: cargo run --release --locked --features tokenizers --example tuned_lens
 //! The short held-out fixture is an adaptation; no model or lens is trained.
+//!
+//! The raw lens projects a residual h through the frozen final LayerNorm and
+//! vocabulary readout. The tuned lens first applies h + Wh + b; translator zero
+//! sees embeddings and translator i sees the residual after block i - 1.
+//! Activations are `[batch, token, hidden]` and logits `[batch, token, vocabulary]`.
+//! Causal, unpadded F32 forwards use detached observations. Full-vocabulary
+//! `KL(final || lens)` and shifted next-token CE measure predictive quality;
+//! changing this decoder alone does not establish a causal effect on the model.
 
 #[cfg(not(all(feature = "flex", feature = "tokenizers")))]
+/// Explain the required Cargo features and exit before accessing local artifacts.
 fn main() {
     eprintln!("enable the `flex` and `tokenizers` features to run this example");
     std::process::exit(1);
@@ -16,6 +25,7 @@ fn main() {
 mod study;
 
 #[cfg(all(feature = "flex", feature = "tokenizers"))]
+/// Run the fixed local experiment, retaining measurements and numerical controls.
 fn main() -> study::Result<()> {
     use burn::{module::Initializer, nn::LinearConfig};
     use std::{path::PathBuf, time::Instant};

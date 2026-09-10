@@ -2,8 +2,18 @@
 //!
 //! This is a new distillation extension, not the Greater-Than paper's training.
 //! See mechanistic/greater_than_training/protocol.json before running the study.
+//!
+//! The student computes up(tanh(down(h_clean))) with widths 768 → 32 → 768,
+//! replacing block 10's MLP output at token twelve in a corrupted causal forward.
+//! It minimizes full-vocabulary `KL(oracle-patched || student-patched)` using
+//! native Burn Adam. Frozen later components transmit activation gradients.
+//! Clean input features explicitly supply year information removed by corruption;
+//! this is conditioned distillation, not recovery from corrupted information alone.
+//! All training uses F32; host F64 metrics compare the fixed development/held-out
+//! split only after the predetermined endpoint, without validation-driven selection.
 
 #[cfg(not(all(feature = "flex", feature = "autodiff")))]
+/// Explain the required Cargo features and exit before accessing local artifacts.
 fn main() {
     eprintln!("greater_than_train requires flex and autodiff");
     std::process::exit(1);
@@ -14,12 +24,18 @@ fn main() {
 mod support;
 
 #[cfg(all(feature = "flex", feature = "autodiff"))]
+/// Run the fixed conditioned replacement experiment and propagate artifact errors.
 fn main() -> support::Result<()> {
     experiment::run()
 }
 
 #[cfg(all(feature = "flex", feature = "autodiff"))]
 mod experiment {
+    //! Registered student ownership and native Adam execution for the fixed protocol.
+    //!
+    //! Freeze the backbone parameters while retaining gradients through its suffix.
+    //! Clean-source caches are inputs, and teacher logits are detached KL targets.
+
     use super::support::{self, Cpu, Result};
     use burn::{
         backend::Autodiff,
@@ -50,6 +66,9 @@ mod experiment {
     }
 
     impl<B: Backend> Student<B> {
+        /// Initialize the two registered projections of the 768 → 32 → 768 student.
+        ///
+        /// The caller seeds Burn before construction; both biases and weights learn.
         fn init(device: &B::Device) -> Self {
             Self {
                 down: LinearConfig::new(768, 32).init(device),
@@ -57,6 +76,10 @@ mod experiment {
             }
         }
 
+        /// Map clean features `[batch, 1, 768]` through `up(tanh(down(h)))`.
+        ///
+        /// The 32-channel bottleneck limits capacity without changing the selected
+        /// MLP output shape expected by the downstream transformer.
         fn forward(&self, clean_mlp_input: Tensor<B, 3>) -> Tensor<B, 3> {
             self.up.forward(self.down.forward(clean_mlp_input).tanh())
         }
@@ -69,6 +92,11 @@ mod experiment {
     }
 
     impl<B: Backend> Experiment<B> {
+        /// Replace MLP 10 at token 12 and return `[batch, 50257]` final logits.
+        ///
+        /// Clean features provide the missing year information to the student; the
+        /// ordinary destination run remains corrupted. Frozen block 11 and readout
+        /// remain differentiable with respect to the replacement activation.
         fn forward(
             &self,
             corrupted: CausalLmInput<B>,
@@ -89,6 +117,11 @@ mod experiment {
         }
     }
 
+    /// Train for the protocol endpoint using native Adam and evaluate both frozen splits.
+    ///
+    /// Only four student parameter tensors receive gradients. Save and restore
+    /// student parameters and optimizer state halfway through, require the next
+    /// update to match exactly, and check frozen backbone bytes after training.
     pub fn run() -> Result<()> {
         let started = Instant::now();
         let options = support::Options::parse()?;

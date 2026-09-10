@@ -1,4 +1,22 @@
 //! Pinned local artifacts and reporting; model/intervention execution stays in main.
+//!
+//! # Probability and intervention contracts
+//!
+//! The fixed corpus contains 194 pairs of 13-token prompts. Only token eight
+//! changes to the corrupted suffix; all conditions read token twelve and retain
+//! the original clean suffix y as their cutoff. F32 causal forwards have no
+//! padding or decode cache. Analyze full-vocabulary logits in F64 before selecting
+//! the 100 numeric tokens: preference is `sum(p[y+1..]) - sum(p[..=y])`, sharpness
+//! is `p[y+1] - p[y-1]`, and numeric mass is `sum(p)` without renormalization.
+//!
+//! # Measurement boundaries
+//!
+//! Node recovery divides the change from corrupt by the signed clean/corrupt gap,
+//! unless that gap is negligible. Direct MLP-to-readout changes are separate from
+//! node interventions. Clean prompts are disjoint across splits, but corrupted
+//! prompts repeat; sample standard deviations are descriptive, not iid uncertainty.
+//! Pinned F32 oracles, exact GELU wiring, identity controls, and source inventories
+//! validate this bounded adaptation without claiming the paper's complete circuit.
 
 use burn::{
     backend::Flex,
@@ -115,6 +133,11 @@ pub struct Study {
 }
 
 impl Study {
+    /// Verify pinned checkpoint, fixture, and oracle artifacts before constructing GPT-2.
+    ///
+    /// Select the author graph's exact GELU explicitly, preserving all pretrained
+    /// weights. Require the complete independent condition inventory and capture
+    /// source/binary identities before any intervention measurement.
     pub fn load(root: &Path) -> Result<(Gpt2ForCausalLm<B>, Self)> {
         let source_inventory = source_inventory()?;
         let executable_sha256 = file_hash(&std::env::current_exe()?)?;
@@ -237,10 +260,15 @@ impl Study {
         ))
     }
 
+    /// Return the number of aligned clean/corrupt prompt pairs in the fixed fixture.
     pub fn len(&self) -> usize {
         self.fixture.entries.len()
     }
 
+    /// Build `[batch, 13]` clean or corrupted IDs for the same prompt range.
+    ///
+    /// All positions are real tokens; causal attention and default positions apply
+    /// without padding, and the corrupted year suffix occupies token eight.
     pub fn input(&self, range: Range<usize>, corrupt: bool) -> CausalLmInput<B> {
         let batch = range.len();
         let ids: Vec<i32> = range
@@ -263,6 +291,11 @@ impl Study {
         }
     }
 
+    /// Validate `[batch, 1, 50257]` logits and record one frozen condition per prompt.
+    ///
+    /// Normalize over the full vocabulary in F64, compare reference logits and
+    /// metrics, and retain same-run identity controls. Selected conditions also
+    /// retain the full curve of 100 numeric suffix probabilities.
     pub fn record(&mut self, condition: &str, start: usize, logits: Tensor<B, 3>) -> Result<()> {
         let [batch, sequence, vocab] = logits.dims();
         if sequence != 1 || vocab != 50_257 || start + batch > self.len() {
@@ -371,6 +404,10 @@ impl Study {
         Ok(())
     }
 
+    /// Compare selected `[batch, 1, 768]` MLP outputs with the pinned F32 oracle.
+    ///
+    /// Each element must satisfy `abs(error) <= atol + rtol * abs(reference)`;
+    /// record failures and comparison counts for the final validation report.
     pub fn check_capture(
         &mut self,
         source: &str,
@@ -402,6 +439,7 @@ impl Study {
         Ok(())
     }
 
+    /// Compare projection of the clean final residual with ordinary clean logits.
     pub fn check_readout(&mut self, start: usize, logits: Tensor<B, 3>) -> Result<()> {
         for (offset, actual) in tensor_values(logits)?.chunks_exact(50_257).enumerate() {
             self.validation.maximum_readout_identity_error = self
@@ -417,6 +455,7 @@ impl Study {
         Ok(())
     }
 
+    /// Release cached clean and final-node control logits after all batch conditions run.
     pub fn finish_batch(&mut self, range: Range<usize>) {
         for index in range {
             self.clean_logits.remove(&index);
@@ -424,6 +463,11 @@ impl Study {
         }
     }
 
+    /// Finalize signed effects and numerical controls, then persist all measurements.
+    ///
+    /// Require unchanged crate sources and a complete condition inventory. Node
+    /// recovery is measured relative to the clean/corrupt gap; direct-path changes
+    /// remain separate. Failed numerical gates retain their raw result before erroring.
     pub fn finish(mut self, root: &Path, wall_seconds: f64) -> Result<()> {
         if source_inventory()? != self.source_inventory {
             return Err(
@@ -600,6 +644,10 @@ impl Study {
     }
 }
 
+/// Check all 194 aligned pairs, bounded IDs, year cutoffs, and clean split uniqueness.
+///
+/// Only token eight may differ, every sequence has 13 tokens, and readout
+/// occurs at token twelve. Repeated corrupted prompts are allowed by the protocol.
 fn validate_fixture(fixture: &Fixture) -> Result<()> {
     if fixture.entries.len() != 194 {
         return Err("fixture must contain 194 fixed pairs".into());
@@ -661,6 +709,11 @@ fn numeric_probabilities(logits: &[f32], indices: &[usize]) -> Result<Vec<f64>> 
         .collect())
 }
 
+/// Compute probability difference, cutoff sharpness, and total numeric mass.
+///
+/// For original clean suffix y, return `sum(p[y+1..]) - sum(p[..=y])`,
+/// `p[y+1] - p[y-1]`, and `sum(p)`. Keep probabilities unrenormalized over
+/// the 100 numeric tokens and require the valid cutoff range 02..98.
 fn metrics(p: &[f64], suffix: usize) -> Result<(f64, f64, f64)> {
     if p.len() != 100 || !(2..=98).contains(&suffix) {
         return Err(
@@ -673,10 +726,18 @@ fn metrics(p: &[f64], suffix: usize) -> Result<(f64, f64, f64)> {
         p.iter().sum(),
     ))
 }
+/// Return `(patched - corrupt) / (clean - corrupt)` when the gap is resolvable.
+///
+/// Use the absolute gap only for the threshold check; preserve its sign and
+/// allow recovery outside [0, 1]. A negligible gap produces an absent value.
 fn recovery(patched: f64, clean: f64, corrupt: f64, threshold: f64) -> Option<f64> {
     let gap = clean - corrupt;
     (gap.abs() > threshold).then(|| (patched - corrupt) / gap)
 }
+/// Summarize count, arithmetic mean, and sample standard deviation in F64.
+///
+/// Empty populations yield null statistics; a singleton has zero descriptive
+/// spread. These are prompt variation summaries, not confidence intervals.
 fn statistics(values: &[f64]) -> Value {
     if values.is_empty() {
         return json!({"mean": null, "sd": null, "count": 0});
@@ -689,6 +750,7 @@ fn statistics(values: &[f64]) -> Value {
     };
     json!({"mean": mean, "sd": sd, "count": values.len()})
 }
+/// Aggregate one split/condition while keeping undefined and inapplicable recovery distinct.
 fn summary(rows: &[&Row]) -> Value {
     let pd = statistics(&rows.iter().map(|r| r.pd).collect::<Vec<_>>());
     let sharpness = statistics(&rows.iter().map(|r| r.sharpness).collect::<Vec<_>>());
@@ -710,6 +772,10 @@ struct Oracle {
     bytes: Vec<u8>,
 }
 impl Oracle {
+    /// Read a bounded leading-axis range from a finite F32 oracle tensor.
+    ///
+    /// Require its complete expected shape before decoding contiguous
+    /// little-endian rows; trailing axes determine each row's element stride.
     fn rows(&self, name: &str, shape: &[usize], start: usize, count: usize) -> Result<Vec<f32>> {
         let tensors = SafeTensors::deserialize(&self.bytes)?;
         let view = tensors.tensor(name)?;
@@ -728,12 +794,14 @@ impl Oracle {
         Ok(values)
     }
 }
+/// Read a Flex tensor as row-major F32 host values with a contextual conversion error.
 fn tensor_values<const D: usize>(tensor: Tensor<B, D>) -> Result<Vec<f32>> {
     Ok(tensor
         .into_data()
         .to_vec::<f32>()
         .map_err(|error| format!("tensor data read: {error:?}"))?)
 }
+/// Compute F64 maximum absolute error after checking equal lengths and finite values.
 fn max_error(a: &[f32], b: &[f32]) -> Result<f64> {
     if a.len() != b.len() || a.iter().chain(b).any(|x| !x.is_finite()) {
         return Err("numerical comparison needs equal finite vectors".into());
@@ -743,9 +811,11 @@ fn max_error(a: &[f32], b: &[f32]) -> Result<f64> {
         .map(|(&a, &b)| (a as f64 - b as f64).abs())
         .fold(0.0, f64::max))
 }
+/// Hash embedded protocol, fixture, or source bytes with SHA-256.
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+/// Stream a local file into SHA-256 with a bounded 1 MiB buffer.
 fn file_hash(path: &Path) -> Result<String> {
     let mut source = fs::File::open(path)?;
     let mut digest = Sha256::new();
@@ -759,12 +829,17 @@ fn file_hash(path: &Path) -> Result<String> {
     }
     Ok(format!("{:x}", digest.finalize()))
 }
+/// Require exact string equality for a named pinned provenance field.
 fn check_string(actual: &Value, expected: &str, label: &str) -> Result<()> {
     if actual.as_str() != Some(expected) {
         return Err(format!("{label}: stale or mismatched pinned provenance").into());
     }
     Ok(())
 }
+/// Reject non-normal path components, then check the local artifact size and hash.
+///
+/// The lexical check excludes absolute paths and parent traversal; the
+/// prepared directory itself is trusted, including its existing symlinks.
 fn verify_artifact(root: &Path, relative: &str, expected: &Value) -> Result<()> {
     if Path::new(relative)
         .components()
@@ -778,6 +853,7 @@ fn verify_artifact(root: &Path, relative: &str, expected: &Value) -> Result<()> 
     }
     check_string(&expected["sha256"], &file_hash(&path)?, relative)
 }
+/// Read the local HEAD identity, returning absence when Git cannot report it.
 fn git_revision() -> Option<String> {
     std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -787,6 +863,7 @@ fn git_revision() -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().into())
 }
 
+/// Record whether Git reports tracked or ordinary untracked changes when available.
 fn git_changes_present() -> Option<bool> {
     std::process::Command::new("git")
         .args(["status", "--porcelain", "--untracked-files=normal"])
@@ -798,6 +875,7 @@ fn git_changes_present() -> Option<bool> {
 
 /// Bind the run to every crate source, including the shared transformer mechanics.
 fn source_inventory() -> Result<BTreeMap<String, String>> {
+    /// Recursively inventory Rust files under the crate source directory using relative paths.
     fn visit(root: &Path, directory: &Path, files: &mut BTreeMap<String, String>) -> Result<()> {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;

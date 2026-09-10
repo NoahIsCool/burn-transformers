@@ -1,4 +1,22 @@
 //! Artifact checks, fixed data, and numerical reporting for the learned replacement.
+//!
+//! # Conditioned latent replacement
+//!
+//! Cache clean MLP 10 input `[batch, 1, 768]` and oracle-patched teacher logits
+//! `[batch, 50257]`. The teacher inserts clean MLP output at token twelve into a
+//! corrupted causal forward; a trainable bottleneck predicts a substitute from
+//! the clean input features. This makes the missing information source explicit.
+//! No padding or decode cache is used, and detached caches keep the fixed backbone
+//! out of feature extraction gradients while its later blocks remain differentiable.
+//!
+//! # Evaluation and protocol boundaries
+//!
+//! Train in F32 and compute host F64 `KL(oracle || candidate)` over the entire
+//! vocabulary. Numeric preference and cutoff sharpness use the clean year and
+//! retain full-vocabulary probability mass. SHA-256 fixes artifact identities and
+//! batch order; create-only output directories preserve earlier runs. The 97/97
+//! clean-prompt split is fixed, although corrupted controls can repeat. Report
+//! this as a new small distillation experiment, not paper training reproduction.
 
 use burn::{
     backend::Flex,
@@ -27,6 +45,10 @@ pub struct Options {
 }
 
 impl Options {
+    /// Read local paths and the smoke flag, creating a new output directory.
+    ///
+    /// Reject unknown or incomplete options and existing result directories.
+    /// Smoke mode uses development examples only and cannot establish held-out results.
     pub fn parse() -> Result<Self> {
         let mut prepared = PathBuf::from("target/mechanistic/greater_than");
         let mut output = None;
@@ -105,20 +127,25 @@ pub struct Cached {
 }
 
 impl Cached {
+    /// Return the number of prompt pairs retained in this split cache.
     pub fn len(&self) -> usize {
         self.indices.len()
     }
+    /// Map cache-local batch indices back to the immutable fixture row indices.
     pub fn source_indices(&self, indices: &[usize]) -> Vec<usize> {
         indices.iter().map(|&i| self.indices[i]).collect()
     }
+    /// Select cached clean MLP inputs as `[batch, 1, 768]` F32 features.
     pub fn features(&self, indices: &[usize]) -> Tensor<Cpu, 3> {
         self.features.clone().select(0, selection(indices))
     }
+    /// Select oracle-patched full-vocabulary logits as `[batch, 50257]` F32 targets.
     pub fn teacher(&self, indices: &[usize]) -> Tensor<Cpu, 2> {
         self.teacher.clone().select(0, selection(indices))
     }
 }
 
+/// Convert in-range cache row indices to a rank-one Flex integer selection tensor.
 fn selection(indices: &[usize]) -> Tensor<Cpu, 1, Int> {
     Tensor::from_data(
         TensorData::new(indices.iter().map(|&i| i as i32).collect(), [indices.len()]),
@@ -127,6 +154,10 @@ fn selection(indices: &[usize]) -> Tensor<Cpu, 1, Int> {
 }
 
 impl Study {
+    /// Verify the fixed fixture and checkpoint hashes and preserve this run's protocol.
+    ///
+    /// Require 97 examples per split and the declared token alignment before
+    /// loading weights; record source and executable identities separately.
     pub fn load(options: &Options) -> Result<Self> {
         let protocol: Value = serde_json::from_slice(include_bytes!("protocol.json"))?;
         let bytes = fs::read(options.prepared.join("fixture.json"))?;
@@ -184,6 +215,10 @@ impl Study {
         })
     }
 
+    /// Strictly load the pinned 768-wide, twelve-block GPT-2 small checkpoint.
+    ///
+    /// Use exact GELU from the author's graph rather than the config's GELU
+    /// approximation; this explicit graph translation leaves checkpoint values intact.
     pub fn load_model(&self) -> Result<Gpt2ForCausalLm<Cpu>> {
         let mut config: Gpt2Config =
             serde_json::from_slice(&fs::read(self.prepared.join("model/config.json"))?)?;
@@ -196,6 +231,10 @@ impl Study {
         Ok(model)
     }
 
+    /// Gather selected clean or corrupted fixture rows into `[batch, 13]` token IDs.
+    ///
+    /// The caller supplies valid row indices. These unpadded sequences use
+    /// causal attention and ordinary positions on the requested backend.
     pub fn input<B: Backend>(&self, indices: &[usize], corrupt: bool) -> CausalLmInput<B> {
         let ids = indices
             .iter()
@@ -218,6 +257,11 @@ impl Study {
         }
     }
 
+    /// Cache one split's clean features and clean, corrupted, and oracle-patched logits.
+    ///
+    /// The oracle inserts clean MLP 10 output at token twelve into a corrupted
+    /// forward. The student instead receives clean MLP input at that point; cached
+    /// features and targets are detached on the non-autodiff CPU backend.
     pub fn prepare(
         &self,
         model: &Gpt2ForCausalLm<Cpu>,
@@ -287,6 +331,11 @@ impl Study {
         })
     }
 
+    /// Compare five conditions using F64 probabilities over the full 50,257-token vocabulary.
+    ///
+    /// Teacher KL is `KL(oracle || condition)`. Numeric metrics retain the
+    /// original clean year cutoff, and recovery is absent for a negligible
+    /// clean/corrupt gap. Input logits must match the selected cache batch.
     pub fn metrics(
         &self,
         cache: &Cached,
@@ -364,6 +413,10 @@ impl Study {
         Ok(rows)
     }
 
+    /// Write raw rows, descriptive split summaries, artifact hashes, and training evidence.
+    ///
+    /// Record source drift explicitly and keep engineering checks separate from
+    /// scientific effect sizes; the fixed training endpoint is not selected by results.
     pub fn finish(&self, options: &Options, rows: Vec<Row>, training: Value) -> Result<()> {
         let mut groups: BTreeMap<String, Vec<&Row>> = BTreeMap::new();
         for row in &rows {
@@ -421,6 +474,10 @@ pub struct Row {
     numeric_probabilities: Vec<f64>,
 }
 
+/// Compute stable F64 log-softmax for exactly 50,257 finite F32 logits.
+///
+/// Subtract the row maximum before exponentiation; numeric token subsets
+/// must use this full-vocabulary denominator rather than renormalizing themselves.
 fn log_probabilities(values: &[f32]) -> Result<Vec<f64>> {
     if values.len() != 50_257 || values.iter().any(|value| !value.is_finite()) {
         return Err("expected 50257 finite F32 logits".into());
@@ -437,6 +494,11 @@ fn log_probabilities(values: &[f32]) -> Result<Vec<f64>> {
         .collect())
 }
 
+/// Return signed greater-than preference, local cutoff sharpness, numeric mass, and curve.
+///
+/// The protocol supplies 100 numeric token IDs and an original clean suffix
+/// in 02..98. Difference is upper-tail mass minus mass at or below the cutoff;
+/// sharpness is `p[y+1] - p[y-1]` without numeric-subset renormalization.
 fn numeric_metrics(log_probs: &[f64], ids: &[usize], suffix: usize) -> (f64, f64, f64, Vec<f64>) {
     let probabilities = ids
         .iter()
@@ -452,6 +514,9 @@ fn numeric_metrics(log_probs: &[f64], ids: &[usize], suffix: usize) -> (f64, f64
     )
 }
 
+/// Compute count, mean, and sample standard deviation without treating prompts as iid.
+///
+/// Empty samples have null statistics; a singleton reports zero spread.
 fn statistics(values: Vec<f64>) -> Value {
     if values.is_empty() {
         return json!({"count": 0, "mean": null, "sample_sd": null});
@@ -470,6 +535,7 @@ fn statistics(values: Vec<f64>) -> Value {
     json!({"count": values.len(), "mean": mean, "sample_sd": sd})
 }
 
+/// Sort row indices by a fixed SHA-256 key to avoid backend-dependent shuffling.
 pub fn training_order(count: usize) -> Vec<usize> {
     let mut indices = (0..count).collect::<Vec<_>>();
     indices.sort_by_key(|index| {
@@ -478,6 +544,10 @@ pub fn training_order(count: usize) -> Vec<usize> {
     indices
 }
 
+/// Require finite, nonzero F32 gradients on the selected student matrix.
+///
+/// The reported Euclidean norm proves a parameter receives signal through
+/// the frozen suffix; it is measured before the optimizer's per-tensor clipping.
 pub fn gradient_norm(gradients: &GradientsParams, id: ParamId) -> f32 {
     let values = gradients
         .get::<Cpu, 2>(id)
@@ -491,12 +561,14 @@ pub fn gradient_norm(gradients: &GradientsParams, id: ParamId) -> f32 {
     norm
 }
 
+/// Hash registered float layouts and bytes, optionally asserting all parameters are frozen.
 pub fn fingerprint<B: Backend>(model: &impl Module<B>, frozen: bool) -> String {
     struct Visitor {
         hash: Sha256,
         frozen: bool,
     }
     impl<B: Backend> ModuleVisitor<B> for Visitor {
+        /// Check the requested freeze invariant and hash one tensor's shape, dtype, and raw values.
         fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
             let value = param.val();
             if self.frozen {
@@ -516,6 +588,10 @@ pub fn fingerprint<B: Backend>(model: &impl Module<B>, frozen: bool) -> String {
     format!("{:x}", visitor.hash.finalize())
 }
 
+/// Hash the declared graph, protocol, fixture, and lockfile paths for this run.
+///
+/// This explicit dependency inventory complements the executable hash; it
+/// is not a claim that every repository file participates in the experiment.
 fn source_inventory() -> Result<BTreeMap<String, String>> {
     [
         "examples/greater_than_train.rs",
@@ -539,10 +615,12 @@ fn source_inventory() -> Result<BTreeMap<String, String>> {
     .collect()
 }
 
+/// Return SHA-256 for bytes, including deterministic training-order keys.
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// Stream SHA-256 with a 1 MiB buffer to bound memory for the large backbone file.
 fn file_hash(path: &std::path::Path) -> Result<String> {
     let mut stream = fs::File::open(path)?;
     let mut digest = Sha256::new();

@@ -1,4 +1,20 @@
 //! Local artifact loading and small reporting helpers for `tuned_lens.rs`.
+//!
+//! # Residual decoding and precision
+//!
+//! Released affine corrections act on `[batch, token, hidden]` residual states
+//! before the frozen final normalization and readout. Compare their full-vocabulary
+//! `KL(final || candidate)` and shifted next-token cross entropy. Each document is
+//! unpadded, causal, and independent; there is no decode cache to reset or reorder.
+//! The graph stays F32. Pairwise vocabulary reductions limit Flex tail-mass error,
+//! while host F64 aggregation keeps per-document and dataset totals distinct.
+//!
+//! # Artifact and evidence boundaries
+//!
+//! Validate checkpoint, translator, tokenizer, fixture, and independent oracle
+//! identities before measurement. Parameter import explicitly transposes PyTorch
+//! `[output, input]` matrices. The short fixed fixture evaluates released weights;
+//! it does not train translators or reproduce the paper's full data population.
 
 use std::{fs, io::Read, path::Path};
 
@@ -28,6 +44,11 @@ pub struct Experiment<B: Backend> {
 }
 
 impl Experiment<B> {
+    /// Verify pinned files, strictly load the backbone, and import released translators.
+    ///
+    /// PyTorch affine weights `[output, input]` are transposed into Burn
+    /// `[input, output]` matrices. The four unpadded records must retain the
+    /// protocol token bounds, vocabulary, and BOS token.
     pub fn load(root: &Path) -> Result<(Self, Fixture, serde_json::Value)> {
         let preparation: serde_json::Value =
             serde_json::from_slice(&fs::read(root.join("preparation.json"))?)?;
@@ -152,6 +173,7 @@ pub struct Record {
 }
 
 impl Record {
+    /// Build unpadded `[1, tokens]` IDs with causal model attention and default positions.
     pub fn input(&self) -> CausalLmInput<B> {
         CausalLmInput {
             token_ids: Tensor::from_data(
@@ -169,12 +191,17 @@ pub struct Tensors {
 }
 
 impl Tensors {
+    /// Read a local safetensors container without interpreting tensor contents yet.
     pub fn load(path: &Path) -> Result<Self> {
         Ok(Self {
             bytes: fs::read(path)?,
         })
     }
 
+    /// Read one finite F32 tensor with exactly the requested name, rank, and axes.
+    ///
+    /// Safetensors stores little-endian row-major values; reject shape or dtype
+    /// mismatches before constructing the Flex tensor.
     pub fn tensor<const D: usize>(&self, name: &str, shape: [usize; D]) -> Result<Tensor<B, D>> {
         let tensors = SafeTensors::deserialize(&self.bytes)?;
         let view = tensors.tensor(name)?;
@@ -201,6 +228,7 @@ impl Tensors {
     }
 }
 
+/// Stream a local artifact through SHA-256 using a bounded 1 MiB host buffer.
 pub fn file_hash(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)?;
     let mut digest = Sha256::new();
@@ -215,6 +243,7 @@ pub fn file_hash(path: &Path) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+/// Hash embedded source bytes so the report identifies the compiled example.
 fn source_hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -229,6 +258,11 @@ pub fn log_probabilities(logits: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
 // Flex's scalar path sums a row sequentially. At 50,304 terms it loses enough
 // tail mass to bias KL. Pairwise F32 reductions retain the original dtype and
 // mathematical definition; the backbone and independent oracle stay unchanged.
+/// Reduce `[batch, token, 50304]` to `[batch, token, 1]` with pairwise F32 sums.
+///
+/// Pad odd intermediate widths with additive zeros. Balanced addition limits
+/// tail-mass loss compared with one long sequential reduction without changing
+/// the distribution, dtype, or pinned vocabulary.
 fn sum_vocabulary(mut values: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
     let [batch, tokens, vocabulary] = values.dims();
     if vocabulary != 50_304 {
@@ -282,6 +316,7 @@ pub fn losses(
     Ok((sum(kl)?, sum(ce)?))
 }
 
+/// Return the finite maximum absolute F32 logit difference, rejecting unequal shapes.
 pub fn max_error(left: Tensor<B, 3>, right: Tensor<B, 3>) -> Result<f32> {
     if left.dims() != right.dims() {
         return Err("parity tensor shape mismatch".into());
@@ -316,6 +351,11 @@ pub struct Measurements {
     pub wall_seconds: f64,
 }
 
+/// Normalize token totals, check frozen parity tolerances, and retain the result JSON.
+///
+/// KL uses every prediction position; next-token CE excludes each document
+/// final position. A failed reference or identity check returns an error only
+/// after writing the measured values and their artifact/source provenance.
 pub fn write_report(
     root: &Path,
     mut measured: Measurements,
@@ -449,6 +489,10 @@ pub fn prediction_cells(
         .collect()
 }
 
+/// Write an escaped HTML table of next-token predictions and their probabilities.
+///
+/// Color reflects full-vocabulary confidence; the display is a predictive
+/// decoder comparison and does not establish a causal circuit.
 pub fn write_prediction_table(
     root: &Path,
     labels: &[String],

@@ -3,6 +3,14 @@
 //! Prepare the pinned backbone with `examples/mechanistic/tuned_lens/prepare.py`.
 //! Run: cargo run --release --locked --features autodiff,tokenizers --example tuned_lens_train
 //! The companion protocol explains the deliberately small, disjoint data split.
+//!
+//! Each correction learns h + Wh + b from zero parameters, minimizing
+//! `KL(teacher || lens)` over the full 50,304-token vocabulary. Detached residuals
+//! have axes `[tokens=32, hidden=768]`; the frozen final decoder still propagates
+//! gradients into the correction. Native Nesterov SGD runs for a fixed endpoint
+//! on twelve documents, with four disjoint documents reserved for evaluation.
+//! F32 graph arithmetic and global gradient clipping are paired with F64 host
+//! evaluation. This small protocol is an adaptation of the paper's training scale.
 
 #[cfg(not(all(
     feature = "std",
@@ -10,6 +18,7 @@
     feature = "autodiff",
     feature = "tokenizers"
 )))]
+/// Explain the required Cargo features and exit before accessing local artifacts.
 fn main() {
     eprintln!("enable std,flex,autodiff,tokenizers to run this example");
     std::process::exit(1);
@@ -30,6 +39,10 @@ mod study;
     feature = "autodiff",
     feature = "tokenizers"
 ))]
+/// Fit each registered affine correction with native Burn SGD, then evaluate held-out data.
+///
+/// The frozen backbone supplies detached residuals and teacher logits. A midpoint
+/// record round trip must reproduce the next weight and momentum update.
 fn main() -> study::Result<()> {
     use burn::{module::Module, optim::Optimizer};
     use std::time::Instant;

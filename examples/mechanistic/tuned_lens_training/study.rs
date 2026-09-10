@@ -1,4 +1,22 @@
 //! Artifact verification, fixed protocol, and numerical/checkpoint controls.
+//!
+//! # Learning a residual decoder
+//!
+//! A lens maps h to `readout(LayerNorm(h + Wh + b))`. Zero W and b initialize the
+//! raw lens. Residuals `[tokens=32, hidden=768]` and teacher logits
+//! `[tokens=32, vocabulary=50304]` are cached without gradients; the frozen final
+//! normalization/readout preserve input gradients while only W and b learn.
+//! Native SGD minimizes `KL(teacher || lens)`, with one global gradient norm
+//! across weight and bias before Nesterov momentum and weight decay.
+//!
+//! # Bounded protocol and numerical evidence
+//!
+//! The causal backbone sees no padding or decode cache. Twelve disjoint documents
+//! train for 100 steps and four evaluate, a smaller adaptation of paper training.
+//! Graph arithmetic stays F32; host F64 log-sum-exp computes held-out metrics.
+//! Independent first-step exports, parameter fingerprints, and native momentum
+//! record round trips test numerical and training compatibility without fitting
+//! tolerances or selecting checkpoints from held-out outcomes.
 
 use burn::{
     backend::{Autodiff, Flex},
@@ -41,6 +59,10 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// Read the embedded protocol and optional artifact/output directories.
+    ///
+    /// Use stages 0, 6, and 11, twelve training documents, and 100 updates;
+    /// reject the same base and output path to protect the reference directory.
     pub fn read() -> Result<Self> {
         let protocol: Value = serde_json::from_str(include_str!("manifest.json"))?;
         let base = std::env::args()
@@ -67,6 +89,7 @@ impl Settings {
         })
     }
 
+    /// Return `0.02 * (1 - step / steps)` for zero-based steps before the endpoint.
     pub fn learning_rate(&self, step: usize) -> f64 {
         0.02 * (1.0 - step as f64 / self.steps as f64)
     }
@@ -80,6 +103,10 @@ pub struct Lens<B: Backend> {
 }
 
 impl<T: Backend> Lens<T> {
+    /// Initialize `h + Wh + b` as identity and register a frozen final decoder.
+    ///
+    /// Only the correction has trainable parameters; the LayerNorm and
+    /// unembedding remain in the graph so their input gradients reach it.
     pub fn new(backbone: &GptNeoXModel<T>) -> Self {
         let width = backbone.embed_out.weight.val().dims()[0];
         Self {
@@ -93,12 +120,17 @@ impl<T: Backend> Lens<T> {
 }
 
 impl<T: Backend> Lens<T> {
+    /// Decode `[tokens, hidden]` residuals into `[tokens, vocabulary]` logits.
+    ///
+    /// Apply the residual affine correction before the frozen final LayerNorm
+    /// and unembedding, matching the raw lens when the correction is zero.
     pub fn forward(&self, hidden: Tensor<T, 2>) -> Tensor<T, 2> {
         let translated = hidden.clone() + self.translator.forward(hidden);
         self.unembedding
             .forward(self.final_norm.forward(translated))
     }
 
+    /// Hash the final LayerNorm and readout separately to detect accidental updates.
     pub fn frozen_fingerprint(&self) -> (String, String) {
         (
             fingerprint(&self.final_norm),
@@ -107,6 +139,9 @@ impl<T: Backend> Lens<T> {
     }
 }
 
+/// Construct native SGD with Nesterov momentum 0.9 and weight decay 0.001.
+///
+/// Global gradient clipping is applied separately before this optimizer step.
 pub fn optimizer() -> SgdOptimizer {
     SgdConfig::new()
         .with_momentum(Some(
@@ -125,6 +160,10 @@ pub struct Record {
     pub input_ids: Vec<i32>,
 }
 
+/// Verify protocol hashes and load a frozen backbone with sixteen fixed documents.
+///
+/// Records 4..15 train and records 16..19 validate; each receives BOS and is
+/// truncated to 32 tokens. Save their exact IDs and the compiled-source hashes.
 pub fn load(settings: &Settings) -> Result<(GptNeoXModel<B>, Vec<Record>, Value)> {
     let mut artifacts = serde_json::Map::new();
     for (name, expected) in settings.protocol["base_artifacts"].as_object().unwrap() {
@@ -184,6 +223,11 @@ pub struct CachedRecord {
     pub tokens: Vec<i32>,
 }
 
+/// Cache detached `[32, 768]` residuals and `[32, 50304]` teacher logits per document.
+///
+/// Stage zero selects embeddings; stage i selects the residual after block
+/// i - 1. Inputs have no padding, and the backbone retains causal attention.
+/// Caching reduces compute because neither backbone nor data changes during fitting.
 pub fn capture(
     backbone: &GptNeoXModel<B>,
     records: &[Record],
@@ -275,6 +319,11 @@ pub struct Metrics {
     pub ce_tokens: usize,
 }
 
+/// Measure mean `KL(teacher || lens)` and next-token CE using host F64 arithmetic.
+///
+/// The F32 decoder runs on the inference backend. KL counts all 32 positions
+/// per record; CE counts 31 shifted targets, with no target after the final token.
+/// The caller supplies a nonempty split and an existing residual slot.
 pub fn evaluate(lens: &Lens<B>, data: &[CachedRecord], slot: usize) -> Result<Metrics> {
     use burn::module::AutodiffModule;
     let lens = lens.valid();
@@ -306,6 +355,7 @@ pub fn evaluate(lens: &Lens<B>, data: &[CachedRecord], slot: usize) -> Result<Me
     })
 }
 
+/// Compute `max(x) + ln(sum(exp(x - max(x))))` in F64 from a finite F32 row.
 fn logsumexp(row: &[f32]) -> f64 {
     let maximum = row.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
     maximum
@@ -316,6 +366,10 @@ fn logsumexp(row: &[f32]) -> f64 {
             .ln()
 }
 
+/// Round-trip affine parameters and SGD momentum through native Burn recorders.
+///
+/// Restore the translator into a fresh registered module so parameter IDs and
+/// optimizer state align; retain the same frozen decoder without serializing it.
 pub fn checkpoint(
     settings: &Settings,
     stage: usize,
@@ -341,6 +395,10 @@ pub fn checkpoint(
     Ok((restored, resumed))
 }
 
+/// Apply the same KL batch and SGD step to uninterrupted and restored states.
+///
+/// Return the largest absolute difference across translator weight and bias;
+/// this validates optimizer momentum continuation as well as parameter loading.
 pub fn compare_next_step(
     mut original: Lens<B>,
     mut original_optim: SgdOptimizer,
@@ -372,6 +430,7 @@ pub fn compare_next_step(
     Ok(weight.max(bias))
 }
 
+/// Save final affine and momentum records without copying the frozen backbone.
 pub fn save_final(
     settings: &Settings,
     stage: usize,
@@ -390,14 +449,20 @@ pub fn save_final(
     Ok(())
 }
 
+/// Read the first element of the expected one-element F32 loss tensor as F64.
 pub fn scalar(tensor: Tensor<B, 1>) -> Result<f64> {
     Ok(f64::from(tensor.into_data().to_vec::<f32>()?[0]))
 }
 
+/// Return the maximum absolute difference of same-shaped F32 tensors.
 fn max_difference<const D: usize>(left: Tensor<B, D>, right: Tensor<B, D>) -> Result<f32> {
     Ok((left - right).abs().max().into_data().to_vec::<f32>()?[0])
 }
 
+/// Compare a newly zero-initialized lens with the backbone raw residual readout.
+///
+/// Both paths receive the same 32-token residual; the maximum logit error
+/// checks correction placement, final normalization, and unembedding order.
 pub fn identity_error(
     lens: &Lens<B>,
     backbone: &GptNeoXModel<B>,
@@ -412,9 +477,11 @@ pub fn identity_error(
     )
 }
 
+/// Hash each registered float tensor in traversal order, including its shape and dtype.
 pub fn fingerprint<T: Backend, M: Module<T>>(model: &M) -> String {
     struct HashParameters(Sha256);
     impl<T: Backend> ModuleVisitor<T> for HashParameters {
+        /// Append one parameter layout and raw values without including unstable parameter IDs.
         fn visit_float<const D: usize>(&mut self, parameter: &Param<Tensor<T, D>>) {
             let data = parameter.val().into_data();
             self.0
@@ -427,10 +494,12 @@ pub fn fingerprint<T: Backend, M: Module<T>>(model: &M) -> String {
     format!("{:x}", visitor.0.finalize())
 }
 
+/// Return SHA-256 for embedded protocol or source bytes.
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// Stream SHA-256 with a 1 MiB buffer so checkpoint size does not dictate host memory.
 fn file_hash(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)?;
     let mut digest = Sha256::new();
@@ -445,11 +514,16 @@ fn file_hash(path: &Path) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+/// Serialize readable JSON with a trailing newline to the experiment output path.
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     fs::write(path, format!("{}\n", serde_json::to_string_pretty(value)?))?;
     Ok(())
 }
 
+/// Export the initial batch, frozen decoder, and globally clipped gradients as F32.
+///
+/// The independent Python oracle can reproduce one loss and update without
+/// rerunning Pythia; metrics record `[tokens, hidden, vocabulary] = [32, 768, 50304]`.
 pub fn export_gradient_oracle(
     settings: &Settings,
     stage: usize,
@@ -495,6 +569,7 @@ pub fn export_gradient_oracle(
     )
 }
 
+/// Write the first updated affine tensors for the independent optimizer comparison.
 pub fn export_first_update(settings: &Settings, stage: usize, lens: &Lens<B>) -> Result<()> {
     let prefix = settings.output.join(format!("stage_{stage}_first_step"));
     fs::write(
@@ -514,6 +589,10 @@ pub fn export_first_update(settings: &Settings, stage: usize, lens: &Lens<B>) ->
     Ok(())
 }
 
+/// Retain per-stage metrics and require frozen parameters, resume parity, and lower held-out KL.
+///
+/// A failed check returns an error after saving its measurements; the endpoint
+/// and tolerances stay fixed rather than selecting a favorable checkpoint.
 pub fn report(
     settings: &Settings,
     provenance: Value,

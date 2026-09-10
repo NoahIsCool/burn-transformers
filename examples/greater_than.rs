@@ -2,8 +2,17 @@
 //!
 //! Prepare/reference separately; this executable reads only local pinned artifacts.
 //! See examples/mechanistic/greater_than/README.md for the bounded paper adaptation.
+//!
+//! A node patch substitutes clean MLP output `[batch, 1, hidden=768]` into a
+//! corrupted causal forward. A direct-path test instead changes the contribution
+//! to the final residual while keeping later components at their clean values.
+//! F32 model logits are normalized in host F64 over all 50,257 vocabulary items.
+//! For clean suffix y, preference is P(suffix > y) - P(suffix <= y); numeric-token
+//! probabilities retain their full-vocabulary mass. The fixed 194 prompt pairs
+//! provide a bounded adaptation, with clean-disjoint splits and reused corruptions.
 
 #[cfg(not(feature = "flex"))]
+/// Explain the required Cargo features and exit before accessing local artifacts.
 fn main() {
     eprintln!("enable the flex feature to run this CPU example");
     std::process::exit(1);
@@ -14,6 +23,10 @@ fn main() {
 mod study;
 
 #[cfg(feature = "flex")]
+/// Execute the pinned clean/corrupt node interventions and separate direct-path controls.
+///
+/// All metrics keep the original clean year cutoff; each mini-batch is released
+/// after its full condition inventory has been measured.
 fn main() -> study::Result<()> {
     use std::{path::PathBuf, time::Instant};
     use study::Study;
