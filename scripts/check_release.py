@@ -91,6 +91,10 @@ def command_plan(gate: str, output: Path, toolchain: str, msrv: str, offline: bo
     manifest = ["--manifest-path", str(CRATE / "Cargo.toml")]
     locked = ["--locked"] + (["--offline"] if offline else [])
     feature_args = ["--no-default-features", "--features", FEATURES]
+    layout_manifest = ["--manifest-path", str(CRATE / "scripts/coverage-layout/Cargo.toml")]
+    # Both standalone packages share the runtime crate's normal target location.
+    # This avoids creating a nested build directory inside packaged tool sources.
+    layout_target = ["--target-dir", str(CRATE / "target")]
     if gate == "source":
         return [
             cargo + ["fmt"] + manifest + ["--check"],
@@ -100,9 +104,15 @@ def command_plan(gate: str, output: Path, toolchain: str, msrv: str, offline: bo
             cargo + ["check"] + manifest + locked + ["--no-default-features", "--features", "std"],
             cargo + ["doc"] + manifest + locked + feature_args + ["--no-deps"],
             [sys.executable, "-m", "unittest", "discover", "-s", str(CRATE / "scripts/tests"), "-v"],
+            cargo + ["fmt"] + layout_manifest + ["--check"],
+            cargo + ["clippy"] + layout_manifest + locked + layout_target + ["--all-targets", "--", "-D", "warnings"],
+            cargo + ["test"] + layout_manifest + locked + layout_target,
         ]
     if gate == "msrv":
-        return [["cargo", f"+{msrv}", "test"] + manifest + locked + feature_args]
+        return [
+            ["cargo", f"+{msrv}", "test"] + manifest + locked + feature_args,
+            ["cargo", f"+{msrv}", "test"] + layout_manifest + locked + layout_target,
+        ]
     if gate == "coverage":
         return [cargo + ["llvm-cov"] + manifest + locked + feature_args + [
             "--lib", "--tests", "--json", "--output-path", str(output / "coverage.json"),
@@ -158,7 +168,7 @@ def validate_package_listing(listing: str) -> int:
         if not raw.strip() or raw.startswith("warning:") or raw.lstrip().startswith(("|", "= note:")):
             continue
         path = Path(raw)
-        if path.is_absolute() or ".." in path.parts or "__pycache__" in path.parts:
+        if path.is_absolute() or any(part in {"..", "__pycache__", "target", ".git"} for part in path.parts):
             raise ValueError(f"unsafe package entry: {raw}")
         if path.suffix.lower() in {".safetensors", ".bin", ".pt", ".pth", ".bpk", ".gguf", ".pyc", ".pyo"}:
             raise ValueError(f"runtime artifact in source package: {raw}")

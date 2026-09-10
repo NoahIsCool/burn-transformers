@@ -152,6 +152,23 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual(command.count("--ignore"), 2)
         self.assertIn("--deny", command)
 
+    def test_standalone_classifier_has_separate_source_and_msrv_checks(self):
+        """The dev-only parser has its own lockfile, tests and warning-denied lint."""
+
+        for gate, expected_count in (("source", 3), ("msrv", 1)):
+            commands = GATES.command_plan(gate, Path("/tmp/output"), "stable", "1.92.0", True)
+            selected = [command for command in commands if str(GATES.CRATE / "scripts/coverage-layout/Cargo.toml") in command]
+            self.assertEqual(len(selected), expected_count)
+            for command in selected:
+                if command[2] != "fmt":
+                    self.assertIn("--locked", command)
+                    self.assertIn("--offline", command)
+                    self.assertEqual(command[command.index("--target-dir") + 1], str(GATES.CRATE / "target"))
+                if gate == "msrv":
+                    self.assertEqual(command[1], "+1.92.0")
+            if gate == "source":
+                self.assertEqual([command[2] for command in selected], ["fmt", "clippy", "test"])
+
     def test_msrv_alias_is_checked_exactly(self):
         """A rolling stable alias must never silently substitute a newer MSRV."""
 
@@ -179,7 +196,7 @@ class ReleaseGateTests(unittest.TestCase):
         base = "Cargo.toml\nCargo.lock\nREADME.md\nsrc/lib.rs\n"
         self.assertEqual(GATES.validate_package_listing(base + "src/models/t5.rs\n"), 5)
         self.assertEqual(GATES.validate_package_listing("warning: manifest has no homepage\n  |\n  = note: docs\n" + base), 4)
-        for entry in ("models/model/README.md", "target/package.md", "fuzz/README.md", "nested/Cargo.lock", "tests/weights.safetensors", "tests/weights.bpk", "scripts/__pycache__/x.pyc", "/tmp/README.md", "src/../secret.md", "Cargo.lock"):
+        for entry in ("models/model/README.md", "target/package.md", "fuzz/README.md", "nested/Cargo.lock", "tests/weights.safetensors", "tests/weights.bpk", "scripts/__pycache__/x.pyc", "scripts/coverage-layout/target/debug/build.rs", "scripts/.git/config", "/tmp/README.md", "src/../secret.md", "Cargo.lock"):
             with self.subTest(entry=entry), self.assertRaises(ValueError):
                 GATES.validate_package_listing(base + entry + "\n")
         with self.assertRaisesRegex(ValueError, "incomplete"):
