@@ -2273,3 +2273,522 @@ fn dense_parameter_payload_equations_fail_before_allocation() {
         assert!(error.to_string().contains("overflows usize"));
     }
 }
+
+/// Reinstallation must compare checkpoint layout, not an initialized runtime shape.
+#[test]
+fn runtime_coverage_initialized_column_parameter_keeps_checkpoint_shape_contract() {
+    let device = Default::default();
+    let mut projection = LinearConfig::new(2, 3)
+        .with_bias(false)
+        .with_layout(LinearLayout::Col)
+        .init::<Flex>(&device);
+    let original = TensorData::new(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], [3, 2]);
+    install_float_parameter(&mut projection.weight, original.clone()).unwrap();
+    let before = projection.weight.val().to_data();
+
+    let error = install_float_parameter(
+        &mut projection.weight,
+        TensorData::new(vec![9.0_f32; 6], [2, 3]),
+    )
+    .expect_err("runtime-oriented metadata must not be treated as checkpoint layout");
+    assert_eq!(
+        error,
+        ParameterInstallError::Shape {
+            expected: vec![3, 2],
+            actual: vec![2, 3],
+        }
+    );
+    assert_eq!(projection.weight.val().to_data(), before);
+
+    let replacement = TensorData::new(vec![6.0_f32, 5.0, 4.0, 3.0, 2.0, 1.0], [3, 2]);
+    install_float_parameter(&mut projection.weight, replacement.clone()).unwrap();
+    assert_eq!(projection.weight.val().dims(), [2, 3]);
+    assert_eq!(
+        projection.weight.clone().into_record().to_data(),
+        replacement
+    );
+    assert_eq!(
+        projection
+            .forward(Tensor::<Flex, 2>::from_floats([[10.0, 100.0]], &device))
+            .to_data(),
+        TensorData::from([[560.0_f32, 340.0, 120.0]])
+    );
+}
+
+/// Checkpoint installation uses runtime dtype without executing lazy initialization.
+#[test]
+fn runtime_coverage_lazy_parameter_install_preserves_each_native_float_dtype() {
+    let device = Default::default();
+    for dtype in [DType::F16, DType::BF16, DType::F32, DType::F64] {
+        let initialized = Arc::new(AtomicBool::new(false));
+        let observed = initialized.clone();
+        let mut parameter = Param::<Tensor<Flex, 2>>::uninitialized(
+            ParamId::new(),
+            move |device, _| {
+                observed.store(true, Ordering::SeqCst);
+                Tensor::zeros([2, 2], device)
+            },
+            device,
+            false,
+            [2, 2].into(),
+        );
+        let expected = TensorData::new(
+            vec![1.0_f64 + 2.0_f64.powi(-40), -0.0, -1.5, 65504.0],
+            [2, 2],
+        )
+        .convert_dtype(dtype);
+        install_float_parameter(&mut parameter, expected.clone()).unwrap();
+        assert!(!initialized.load(Ordering::SeqCst));
+        assert_eq!(parameter.val().dtype(), dtype);
+        assert_eq!(parameter.val().to_data(), expected);
+    }
+}
+
+/// Public shape overflow is recoverable before a lazy allocation or backend call.
+#[test]
+fn runtime_coverage_parameter_size_overflow_leaves_lazy_storage_uninitialized() {
+    let initialized = Arc::new(AtomicBool::new(false));
+    let observed = initialized.clone();
+    let mut parameter = Param::<Tensor<Flex, 2>>::uninitialized(
+        ParamId::new(),
+        move |device, _| {
+            observed.store(true, Ordering::SeqCst);
+            Tensor::zeros([1, 1], device)
+        },
+        Default::default(),
+        false,
+        [usize::MAX, 2].into(),
+    );
+    let mut data = TensorData::new(Vec::<f32>::new(), [0, 0]);
+    data.shape = vec![usize::MAX, 2].into();
+    assert_eq!(
+        install_float_parameter(&mut parameter, data).unwrap_err(),
+        ParameterInstallError::PayloadSizeOverflow
+    );
+    assert!(!parameter.is_initialized());
+    assert!(!initialized.load(Ordering::SeqCst));
+}
+
+/// A real malformed fused Boolean slice fails after only the valid sibling write.
+#[test]
+fn runtime_coverage_fused_transform_failure_preserves_successful_slice_prefix() {
+    let tensors = [FixtureTensor::new(
+        "fused",
+        TensorDType::BOOL,
+        [4],
+        vec![1, 0, 2, 0],
+    )];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let expected = [
+        ExpectedTensor::new("a", [2]).with_dtype(TensorDType::BOOL),
+        ExpectedTensor::new("b", [2]).with_dtype(TensorDType::BOOL),
+    ];
+    let mut mapping = MappingPlan::new();
+    mapping.split("fused", 0, [("a".into(), 2), ("b".into(), 2)]);
+    let plan = build_load_plan(&manifest, &expected, &mapping, &LoadOptions::default()).unwrap();
+    let mut source = MemorySource {
+        tensors: BTreeMap::from([(
+            "fused".into(),
+            SourceTensor::new("fused", [4], TensorDType::BOOL, vec![1, 0, 2, 0]).unwrap(),
+        )]),
+        ..MemorySource::default()
+    };
+    let mut sink = CollectingSink::default();
+    let failure = execute_load_plan(&plan, &mut source, &mut sink).unwrap_err();
+    assert_eq!(failure.failed_target.as_deref(), Some("b"));
+    assert!(matches!(
+        failure.cause,
+        ExecutionFailureCause::Checkpoint(CheckpointError::InvalidTensorPayload { ref tensor, .. })
+        if tensor == "b"
+    ));
+    assert_eq!(failure.report.applied, ["a"]);
+    assert_eq!(failure.stats.tensors_applied, 1);
+    assert_eq!(failure.stats.source_reads, 1);
+    assert_eq!(failure.stats.source_payload_bytes, 4);
+    assert_eq!(source.close_calls, 1);
+    assert_eq!(sink.events, ["write:a"]);
+    assert_eq!(sink.tensors["a"].to_vec::<bool>().unwrap(), [true, false]);
+}
+
+/// Closing a failed source cannot mask the original payload failure or prior writes.
+#[test]
+fn runtime_coverage_payload_failure_keeps_primary_cause_when_close_also_fails() {
+    let tensors = [
+        FixtureTensor::new("a", TensorDType::F32, [1], f32_bytes(&[1.0])),
+        FixtureTensor::new("b", TensorDType::F32, [1], f32_bytes(&[2.0])),
+    ];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let plan = identity_plan(&manifest, &tensors);
+    let closed = Arc::new(AtomicBool::new(false));
+    let mut source = CloseAwareSource {
+        inner: MemorySource {
+            tensors: BTreeMap::from([(
+                "a".into(),
+                SourceTensor::new("a", [1], TensorDType::F32, f32_bytes(&[1.0])).unwrap(),
+            )]),
+            fail_at: Some("b".into()),
+            ..MemorySource::default()
+        },
+        closed: closed.clone(),
+        fail_close: true,
+    };
+    let mut sink = CollectingSink::default();
+    let failure = execute_load_plan(&plan, &mut source, &mut sink).unwrap_err();
+    assert!(closed.load(Ordering::SeqCst));
+    assert_eq!(failure.failed_target.as_deref(), Some("b"));
+    assert_eq!(failure.report.applied, ["a"]);
+    assert_eq!(failure.stats.source_reads, 1);
+    assert_eq!(sink.events, ["write:a"]);
+    assert!(matches!(
+        failure.cause,
+        ExecutionFailureCause::Checkpoint(CheckpointError::InvalidTensorPayload { ref reason, .. })
+        if reason == "synthetic read failure"
+    ));
+    assert!(!failure.to_string().contains("synthetic close failure"));
+}
+
+/// Empty explicit work still closes resources and clears stale execution records.
+#[test]
+fn runtime_coverage_empty_plan_runs_no_callbacks_and_finalizes_clean_progress() {
+    let plan = LoadPlan {
+        tensors: Vec::new(),
+        aliases: Vec::new(),
+        equivalences: Vec::new(),
+        report: LoadReport {
+            applied: vec!["stale".into()],
+            quantized: vec![QuantizationRecord {
+                target: "stale".into(),
+                scheme: "stale".into(),
+                bytes: 9,
+            }],
+            ..LoadReport::default()
+        },
+        memory: Default::default(),
+    };
+    let mut source = MemorySource::default();
+    let mut sink = CollectingSink::default();
+    let predicate_calls = std::cell::Cell::new(0);
+    let provider_calls = std::cell::Cell::new(0);
+    let outcome = execute_load_plan_with_overrides(
+        &plan,
+        &mut source,
+        &mut sink,
+        |_, _| {
+            predicate_calls.set(predicate_calls.get() + 1);
+            true
+        },
+        |_, _| {
+            provider_calls.set(provider_calls.get() + 1);
+            Ok(None)
+        },
+    )
+    .unwrap();
+    assert_eq!(predicate_calls.get(), 0);
+    assert_eq!(provider_calls.get(), 0);
+    assert_eq!(source.close_calls, 1);
+    assert!(outcome.report.applied.is_empty());
+    assert!(outcome.report.quantized.is_empty());
+    assert_eq!(outcome.stats, ExecutionStats::default());
+    assert!(sink.events.is_empty());
+}
+
+/// Equivalent physical owners must be fully verified before any override callback.
+#[test]
+fn runtime_coverage_equivalence_read_failures_preserve_verified_prefix_before_overrides() {
+    let tensors = [
+        FixtureTensor::new("owner", TensorDType::F32, [1], f32_bytes(&[7.0])),
+        FixtureTensor::new("a.copy", TensorDType::F32, [1], f32_bytes(&[7.0])),
+        FixtureTensor::new("z.copy", TensorDType::F32, [1], f32_bytes(&[7.0])),
+    ];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let expected = [ExpectedTensor::new("owner", [1])];
+    let options = LoadOptions {
+        index_aliases: vec![
+            IndexTensorAlias::new("a.copy", "owner"),
+            IndexTensorAlias::new("z.copy", "owner"),
+        ],
+        ..LoadOptions::default()
+    };
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &options,
+    )
+    .unwrap();
+    for failed in ["owner", "a.copy", "z.copy"] {
+        let mut source = MemorySource {
+            tensors: tensors
+                .iter()
+                .map(|tensor| {
+                    (
+                        tensor.name.clone(),
+                        SourceTensor::new(
+                            &tensor.name,
+                            tensor.shape.clone(),
+                            tensor.dtype,
+                            tensor.bytes.clone(),
+                        )
+                        .unwrap(),
+                    )
+                })
+                .collect(),
+            fail_at: Some(failed.into()),
+            ..MemorySource::default()
+        };
+        let mut sink = CollectingSink::default();
+        let predicates = std::cell::Cell::new(0);
+        let providers = std::cell::Cell::new(0);
+        let failure = execute_load_plan_with_overrides(
+            &plan,
+            &mut source,
+            &mut sink,
+            |_, _| {
+                predicates.set(predicates.get() + 1);
+                true
+            },
+            |_, _| {
+                providers.set(providers.get() + 1);
+                Ok(None)
+            },
+        )
+        .unwrap_err();
+        let (target, reads, verified) = match failed {
+            "owner" => ("a.copy", 0, 0),
+            "a.copy" => ("a.copy", 1, 0),
+            _ => ("z.copy", 3, 1),
+        };
+        assert_eq!(failure.failed_target.as_deref(), Some(target));
+        assert_eq!(failure.stats.source_reads, reads);
+        assert_eq!(failure.stats.equivalence_source_reads, reads);
+        assert_eq!(failure.stats.equivalence_source_payload_bytes, reads * 4);
+        assert_eq!(failure.stats.equivalences_verified, verified);
+        assert_eq!(failure.report.equivalence_verified.len(), verified);
+        if verified == 1 {
+            assert_eq!(
+                failure.report.equivalence_verified[0],
+                CheckpointEquivalenceRecord::new("a.copy", "owner")
+            );
+        }
+        assert_eq!(source.close_calls, 1);
+        assert_eq!(predicates.get(), 0);
+        assert_eq!(providers.get(), 0);
+        assert!(sink.events.is_empty());
+        assert!(failure.report.applied.is_empty());
+    }
+}
+
+/// A failed shared read occurs before its override provider and preserves earlier groups.
+#[test]
+fn runtime_coverage_shared_source_failure_precedes_override_and_keeps_prior_group() {
+    let tensors = [
+        FixtureTensor::new("primary", TensorDType::F32, [1], f32_bytes(&[7.0])),
+        FixtureTensor::new(
+            "fused",
+            TensorDType::F32,
+            [4],
+            f32_bytes(&[1.0, 2.0, 3.0, 4.0]),
+        ),
+    ];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let expected = [
+        ExpectedTensor::new("prior", [1]),
+        ExpectedTensor::new("left", [2]),
+        ExpectedTensor::new("right", [2]),
+    ];
+    let mut mapping = MappingPlan::new();
+    mapping
+        .map("primary", "prior")
+        .split("fused", 0, [("left".into(), 2), ("right".into(), 2)]);
+    let plan = build_load_plan(&manifest, &expected, &mapping, &LoadOptions::default()).unwrap();
+    let mut source = MemorySource {
+        tensors: BTreeMap::from([
+            (
+                "primary".into(),
+                SourceTensor::new("primary", [1], TensorDType::F32, f32_bytes(&[7.0])).unwrap(),
+            ),
+            (
+                "fused".into(),
+                SourceTensor::new("fused", [2], TensorDType::F32, f32_bytes(&[1.0, 2.0])).unwrap(),
+            ),
+        ]),
+        ..MemorySource::default()
+    };
+    let mut sink = CollectingSink::default();
+    let providers = std::cell::Cell::new(0);
+    let failure = execute_load_plan_with_overrides(
+        &plan,
+        &mut source,
+        &mut sink,
+        |_, tensor| tensor.target == "left",
+        |_, _| {
+            providers.set(providers.get() + 1);
+            Ok(Some(TensorData::new(vec![9.0_f32; 2], [2])))
+        },
+    )
+    .unwrap_err();
+    assert_eq!(failure.failed_target.as_deref(), Some("left"));
+    assert_eq!(failure.report.applied, ["prior"]);
+    assert_eq!(failure.stats.source_reads, 1);
+    assert_eq!(failure.stats.tensors_applied, 1);
+    assert_eq!(providers.get(), 0);
+    assert_eq!(source.close_calls, 1);
+    assert_eq!(sink.events, ["write:prior"]);
+    assert!(matches!(failure.cause,
+        ExecutionFailureCause::Checkpoint(CheckpointError::InvalidTensorPayload { ref tensor, ref reason })
+        if tensor == "fused" && reason.contains("shape")));
+}
+
+/// Repeated initialized Row/Col loads preserve autodiff leaf policy and reject mutation.
+#[cfg(feature = "autodiff")]
+#[test]
+fn runtime_coverage_initialized_reload_preserves_autodiff_and_parameter_identity_on_error() {
+    type AdBackend = burn::backend::Autodiff<Flex>;
+    let device = Default::default();
+    for layout in [LinearLayout::Row, LinearLayout::Col] {
+        for frozen in [false, true] {
+            let mut projection = crate::operations::init_linear::<AdBackend>(
+                &LinearConfig::new(2, 3).with_bias(false).with_layout(layout),
+                &device,
+            );
+            if frozen {
+                projection.weight = projection.weight.set_require_grad(false);
+            }
+            let _initialized = projection.weight.val();
+            let checkpoint_shape = match layout {
+                LinearLayout::Row => [2, 3],
+                LinearLayout::Col => [3, 2],
+            };
+            for value in [2.0_f32, 3.0] {
+                let replacement = TensorData::new(vec![value; 6], checkpoint_shape);
+                install_float_parameter(&mut projection.weight, replacement.clone()).unwrap();
+                assert_eq!(projection.weight.val().dims(), [2, 3]);
+                assert_eq!(
+                    projection.weight.clone().into_record().to_data(),
+                    replacement
+                );
+                let before_id = projection.weight.id;
+                let before_value = projection.weight.val().to_data();
+                let malformed = TensorData::new(vec![0.0_f32; 6], [1, 6]);
+                let error = install_float_parameter(&mut projection.weight, malformed).unwrap_err();
+                assert!(matches!(error, ParameterInstallError::Shape { .. }));
+                assert_eq!(projection.weight.id, before_id);
+                assert_eq!(projection.weight.val().to_data(), before_value);
+                assert_eq!(projection.weight.val().is_require_grad(), !frozen);
+
+                let input =
+                    Tensor::<AdBackend, 2>::from_floats([[1.0, 2.0]], &device).require_grad();
+                let gradients = crate::operations::linear(input.clone(), &projection)
+                    .unwrap()
+                    .sum()
+                    .backward();
+                assert_eq!(
+                    input.grad(&gradients).unwrap().to_data(),
+                    TensorData::from([[3.0 * value, 3.0 * value]])
+                );
+                if frozen {
+                    assert!(projection.weight.grad(&gradients).is_none());
+                } else {
+                    assert_eq!(
+                        projection.weight.grad(&gradients).unwrap().to_data(),
+                        TensorData::from([[1.0_f32, 1.0, 1.0], [2.0, 2.0, 2.0]])
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Initialized Q4/Q8 reloads fail before mapper work and preserve mapped/unmapped state.
+#[test]
+fn runtime_coverage_initialized_quantized_reload_rejects_before_mapper_without_mutation() {
+    let device = Default::default();
+    for scheme in [SymmetricQuantization::Q4, SymmetricQuantization::Q8] {
+        let full = TensorData::new(
+            (0..192)
+                .map(|value| value as f32 / 32.0 - 3.0)
+                .collect::<Vec<_>>(),
+            [3, 64],
+        );
+        let packed = quantize_tensor_data(
+            &full,
+            WeightQuantizationConfig {
+                scheme,
+                group_size: QuantizationGroupSize::new(32).unwrap(),
+            },
+        )
+        .unwrap()
+        .into_burn_qfloat_data()
+        .unwrap();
+        for mapped in [false, true] {
+            let mapper_called = Arc::new(AtomicBool::new(false));
+            let mut parameter = if mapped {
+                let sentinel = mapper_called.clone();
+                LinearConfig::new(64, 3)
+                    .with_bias(false)
+                    .with_layout(LinearLayout::Col)
+                    .init::<Flex>(&device)
+                    .weight
+                    .save_mapper(move |value| {
+                        sentinel.store(true, Ordering::SeqCst);
+                        value.transpose()
+                    })
+            } else {
+                Param::uninitialized(
+                    ParamId::new(),
+                    |device, _| Tensor::<Flex, 2>::zeros([3, 64], device),
+                    device,
+                    false,
+                    [3, 64].into(),
+                )
+            };
+            assert!(!parameter.is_initialized());
+            install_float_parameter(&mut parameter, packed.clone()).unwrap();
+            assert!(!mapper_called.load(Ordering::SeqCst));
+            let before_id = parameter.id;
+            let before = parameter.val().to_data();
+            let before_dtype = parameter.val().dtype();
+            assert!(matches!(before_dtype, DType::QFloat(_)));
+            assert_eq!(
+                parameter.val().dims(),
+                if mapped { [64, 3] } else { [3, 64] }
+            );
+
+            // Replacing with floats must also reject based on existing storage,
+            // not accidentally bypass the guard because the incoming dtype differs.
+            for replacement in [packed.clone(), full.clone()] {
+                let error = install_float_parameter(&mut parameter, replacement).unwrap_err();
+                assert_eq!(error, ParameterInstallError::InitializedQuantized);
+                assert!(error.to_string().contains("fresh lazy parameter"));
+                assert!(!mapper_called.load(Ordering::SeqCst));
+                assert_eq!(parameter.id, before_id);
+                assert_eq!(parameter.val().dtype(), before_dtype);
+                assert_eq!(parameter.val().to_data(), before);
+            }
+        }
+    }
+}
+
+/// Inspecting a caller-defined save mapper must not mutate the initialized value.
+#[test]
+fn runtime_coverage_save_mapper_shape_inspection_preserves_original_on_error() {
+    let device = Default::default();
+    let source = Tensor::<Flex, 2>::from_floats([[1.0, 2.0], [3.0, 4.0]], &device);
+    let mut parameter = Param::from_tensor(source.clone())
+        .save_mapper(|value| (value * 2.0).reshape([1, 4]))
+        .load_mapper(|value| (value / 2.0).reshape([2, 2]));
+    let before_id = parameter.id;
+    let error =
+        install_float_parameter(&mut parameter, TensorData::from([[0.0_f32; 2]; 2])).unwrap_err();
+    assert_eq!(
+        error,
+        ParameterInstallError::Shape {
+            expected: vec![1, 4],
+            actual: vec![2, 2]
+        }
+    );
+    assert_eq!(parameter.id, before_id);
+    assert_eq!(parameter.val().to_data(), source.to_data());
+    install_float_parameter(&mut parameter, TensorData::from([[2.0_f32, 4.0, 6.0, 8.0]])).unwrap();
+    assert_eq!(parameter.val().to_data(), source.to_data());
+}

@@ -76,7 +76,7 @@ pub enum ParameterInstallError {
         /// Rank carried by the checkpoint tensor.
         actual: usize,
     },
-    /// The checkpoint shape differs from the parameter's lazy saved shape.
+    /// The checkpoint shape differs from the parameter's saved shape.
     Shape {
         /// Saved/checkpoint-facing shape declared by the Burn parameter.
         expected: Vec<usize>,
@@ -93,6 +93,12 @@ pub enum ParameterInstallError {
         /// Human-readable Burn dtype name.
         dtype: String,
     },
+    /// Reloading existing QFloat storage cannot inspect its saved shape cheaply.
+    ///
+    /// The save mapper may dequantize the complete weight, and Burn exposes no
+    /// shape-only mapper inverse. Initial loading into a lazy parameter remains
+    /// supported; this rejects only replacement of an initialized QFloat value.
+    InitializedQuantized,
     /// The shape and ordinary float dtype cannot describe a host-sized payload.
     PayloadSizeOverflow,
     /// Ordinary float bytes disagree with the declared shape and dtype.
@@ -126,6 +132,10 @@ impl fmt::Display for ParameterInstallError {
             Self::UnsupportedStorage { dtype } => {
                 write!(formatter, "backend cannot store checkpoint dtype {dtype}")
             }
+            Self::InitializedQuantized => write!(
+                formatter,
+                "reloading an initialized QFloat parameter is unsupported without saved-shape metadata; load checkpoint data into a fresh lazy parameter"
+            ),
             Self::PayloadSizeOverflow => {
                 write!(formatter, "checkpoint float payload size overflows usize")
             }
@@ -141,14 +151,32 @@ impl fmt::Display for ParameterInstallError {
 
 impl Error for ParameterInstallError {}
 
-/// Installs checkpoint-shaped data into a lazy Burn floating-point parameter.
+/// Installs checkpoint-shaped data into a Burn floating-point parameter.
 ///
 /// Burn's parameter mapper is semantically important: for example, a
 /// `LinearLayout::Col` weight is serialized as `[out, in]`, then transposed to
 /// `[in, out]` when loaded for matrix multiplication. Replacing the field with
 /// `Param::from_tensor` would discard that mapper and produce a model with
-/// incorrectly oriented projections. This helper validates against
-/// [`Param::lazy_shape`], constructs the tensor at its checkpoint dtype, and
+/// incorrectly oriented projections. For an uninitialized parameter this helper
+/// validates against [`Param::lazy_shape`]. Once initialized, Burn reports the
+/// runtime shape instead, so the helper obtains the checkpoint-facing shape by
+/// applying [`Param::transform_for_save`] to a shared tensor handle. Burn 0.21
+/// exposes no shape-only mapper inverse. Its ordinary column-layout mapper is a
+/// transpose, but a caller-defined save mapper may allocate or perform backend
+/// work; that is the cost of validating an already initialized mapped parameter.
+/// The lazy path never invokes the initializer or save mapper. Shape inspection
+/// itself requests no host tensor readback or dtype conversion and does not
+/// replace the original parameter before validation succeeds.
+///
+/// Reloading an already initialized QFloat parameter returns
+/// [`ParameterInstallError::InitializedQuantized`] before invoking any save
+/// mapper. Burn Flex may implement a block-quantized transpose through complete
+/// dequantization and requantization, and Burn provides neither a shape-only
+/// inverse nor a way to identify unmapped parameters. The guard therefore also
+/// covers unmapped initialized QFloat values. This narrow unsupported reload
+/// boundary does not restrict initial lazy packed loading or quantized inference.
+///
+/// The helper constructs the tensor at its checkpoint dtype and
 /// delegates to Burn's ordinary record-loading path so device, gradient, and
 /// layout policies remain intact. Incoming checkpoint data is untracked until
 /// the layout mapper finishes: marking it trainable before a transpose would
@@ -156,8 +184,8 @@ impl Error for ParameterInstallError {}
 /// gradient-policy restoration panic on an autodiff backend.
 ///
 /// Ordinary float storage is checked against `product(shape) * dtype_bytes`
-/// before any backend call. Packed inputs must already have passed their
-/// format-specific payload validation, as in the crate's QFloat adapter; their
+/// before constructing the incoming backend tensor. Packed inputs must already
+/// have passed their format-specific payload validation, as in the crate's QFloat adapter; their
 /// codes and scale blocks do not follow that ordinary byte-count equation.
 ///
 /// The temporary parameter clone shares the incoming backend allocation; it is
@@ -174,7 +202,15 @@ pub fn install_float_parameter<B: Backend, const D: usize>(
             actual: actual.len(),
         });
     }
-    let expected = parameter.lazy_shape().to_vec();
+    let initialized = parameter.is_initialized();
+    if initialized && matches!(parameter.val().dtype(), DType::QFloat(_)) {
+        return Err(ParameterInstallError::InitializedQuantized);
+    }
+    let expected = if initialized {
+        parameter.transform_for_save().val().shape().to_vec()
+    } else {
+        parameter.lazy_shape().to_vec()
+    };
     if actual != expected {
         return Err(ParameterInstallError::Shape { expected, actual });
     }
