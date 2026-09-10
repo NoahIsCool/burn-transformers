@@ -1488,6 +1488,15 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   1,099 tests and raises shared/core coverage to 94.3962% (87.8478% crate-wide)
   with unchanged denominators. Runtime code, support claims, coverage targets,
   and qualification requirements are unchanged.
+- **Generation owns its failed session, not the caller's next request.** New
+  public-contract tests execute real tiny Qwen cache updates before injecting a
+  model error or malformed returned logits. They verify no premature streaming
+  tokens, session destruction, and a fresh cache when the same model is reused.
+  Beam tests retain exact encoder/cache/decoder error categories and reject
+  malformed returned encoder diagnostics before another step. Together with
+  two JSON map-type tests, the combined suite now passes 1,107 tests; all-feature
+  Clippy is warning-free. These are test-only safeguards, not a new coverage
+  measurement or hardware acceptance claim.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

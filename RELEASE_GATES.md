@@ -374,6 +374,16 @@ cache were used; the exact capture remains at
 `target/release-gates/20260910T053138.635172Z/`. The separately replayed development
 suite also passes all 354 Python/native tests without skips.
 
+The later `0602c03` boundary-contract snapshot adds two artifact JSON map-type
+tests and six generation tests. Its isolated release-mode combined run passes
+**1,107 tests, zero failures, 29 existing ignores** (1,005 unit passes), and
+isolated all-target/all-feature Clippy passes with warnings denied on Rust 1.92.
+Formatting also passes. These tests validate public error propagation, malformed
+model outputs, cache-session destruction and retry, beam error ordering, and
+unchanged artifacts after malformed metadata. Production sources are unchanged.
+This final small batch has not been remeasured for coverage or repackaged; the
+preceding source/package and coverage snapshots remain explicitly separate.
+
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is
 `819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d`.
