@@ -74,6 +74,19 @@ passed Qwen F16/Q4 and FLAN against the pinned local artifacts; the unsuccessful
 sandbox/GPU-discovery attempt is retained separately. These functional checks
 are not new performance, Q4 quality, or production-only coverage measurements.
 
+The clean `43e1cac` snapshot passes all 17 source, exact Rust 1.92, accelerator
+compile-only, and package commands at
+`target/release-gates/20260910T054040.035347Z/`. Both Rust test runs pass 997 unit
+tests plus ordinary integrations and doctests; the standalone classifier passes
+29 tests on both toolchains. Python discovery runs 355 tests with eight native
+opt-ins skipped. Metal, CUDA, and ROCm compile separately without executing
+kernels. Cargo verifies the 377-file archive; its informational warning about
+unset documentation/homepage/repository URLs remains. Rustup provisioned the
+named `1.92.0` toolchain before these checks; Cargo dependency resolution was
+offline and the dependency lockfile is unchanged. This is an intermediate
+snapshot: later test edits need replay and no coverage or performance gate is
+waived by successful packaging.
+
 Cargo's usual target location is retained. Check at least 20 GiB free before
 building a new profile; external model artifacts are never a cleanup target.
 The current host needed a [documented cache fallback](acceptance/measurements/local-build-cache-relocation-20260910.json)
