@@ -81,3 +81,41 @@ fn validation_rejects_zero_invalid_and_overflowing_inputs() {
     assert!(bias.forward(1, 0, 0, &device).is_err());
     assert!(bias.forward(2, 1, usize::MAX, &device).is_err());
 }
+
+/// Query/key multiplication rejects overflow even when the query end fits usize.
+#[test]
+fn query_key_product_overflow_is_contextual_before_allocation() {
+    let device = Default::default();
+    let bias = T5RelativePositionBiasConfig::new(1, 8, 32, false)
+        .init::<Flex>(&device)
+        .expect("valid bias");
+    let error = bias
+        .forward(usize::MAX, 2, 0, &device)
+        .expect_err("query times key must not wrap to a smaller allocation");
+    assert!(matches!(
+        error,
+        Error::Configuration { field, reason }
+            if field == "t5_relative_bias.shape"
+                && reason == "query length times key length overflows usize"
+    ));
+}
+
+/// A representable element count can still exceed Vec<i64>'s byte capacity.
+#[test]
+fn host_index_capacity_overflow_is_contextual_before_iteration() {
+    let device = Default::default();
+    let bias = T5RelativePositionBiasConfig::new(1, 8, 32, false)
+        .init::<Flex>(&device)
+        .expect("valid bias");
+    let error = bias
+        .forward(1, usize::MAX, 0, &device)
+        .expect_err("unrepresentable Vec<i64> capacity must not allocate or iterate");
+    assert!(matches!(
+        error,
+        Error::BackendCapability(reason)
+            if reason == format!(
+                "could not reserve {} host indices for T5 relative bias",
+                usize::MAX,
+            )
+    ));
+}

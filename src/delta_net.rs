@@ -1172,4 +1172,93 @@ mod tests {
             .expect_err("wrong recurrent width must fail");
         assert!(error.to_string().contains("state.recurrent"));
     }
+
+    /// Malformed input axes fail before either nonzero state buffer is replaced.
+    #[test]
+    fn projected_mixer_shape_rejections_preserve_both_state_buffers() {
+        let device = Default::default();
+        let config = GatedDeltaNetConfig::new(4, 1, 2, 2, 2);
+        let mixer = config
+            .init::<TestBackend>(&device)
+            .expect("valid mixer must initialize");
+        let valid_convolution = [1, config.convolution_channels().unwrap(), 3];
+        let cases = [
+            ("delta_net.hidden", [0, 2, 4], None, valid_convolution),
+            ("delta_net.hidden", [1, 0, 4], None, valid_convolution),
+            ("delta_net.hidden", [1, 2, 3], None, valid_convolution),
+            (
+                "delta_net.token_mask",
+                [1, 2, 4],
+                Some([2, 2]),
+                valid_convolution,
+            ),
+            (
+                "delta_net.token_mask",
+                [1, 2, 4],
+                Some([1, 3]),
+                valid_convolution,
+            ),
+            ("delta_net.state.convolution", [1, 2, 4], None, [2, 8, 3]),
+            ("delta_net.state.convolution", [1, 2, 4], None, [1, 9, 3]),
+            ("delta_net.state.convolution", [1, 2, 4], None, [1, 8, 2]),
+        ];
+        for mode in [DeltaNetMode::Recurrent, DeltaNetMode::ChunkedPrefill] {
+            for (context, hidden_shape, mask_shape, convolution_shape) in cases {
+                let mut state =
+                    GatedDeltaNetState::zeros(&config, 1, &device).expect("valid state");
+                state.convolution = Tensor::full(convolution_shape, 0.25, &device);
+                state.recurrent = Tensor::full([1, 2, 2, 2], -0.5, &device);
+                // Own independent host bytes: a shared tensor clone alone could
+                // conceal an accidental in-place mutation of the same storage.
+                let convolution_before = TensorData::new(
+                    vec![0.25_f32; convolution_shape.iter().product()],
+                    convolution_shape,
+                );
+                let recurrent_before = TensorData::new(vec![-0.5_f32; 8], [1, 2, 2, 2]);
+                let mask = mask_shape.map(|shape| {
+                    TokenMask::new(Tensor::<TestBackend, 2, Int>::ones(shape, &device).bool())
+                });
+                let error = mixer
+                    .forward_with_state(
+                        Tensor::zeros(hidden_shape, &device),
+                        mask.as_ref(),
+                        &mut state,
+                        mode,
+                    )
+                    .expect_err("invalid shape must fail before computation");
+                let crate::Error::Shape {
+                    tensor,
+                    expected,
+                    actual,
+                } = error
+                else {
+                    panic!("expected contextual shape error for {context}: {error}");
+                };
+                assert_eq!(tensor, context);
+                let (expected_shape, actual_shape) = match context {
+                    "delta_net.hidden" => (
+                        "[batch>0, sequence>0, 4]".to_owned(),
+                        format!("{hidden_shape:?}"),
+                    ),
+                    "delta_net.token_mask" => {
+                        ("[1, 2]".to_owned(), format!("{:?}", mask_shape.unwrap()))
+                    }
+                    _ => (
+                        format!("{valid_convolution:?}"),
+                        format!("{convolution_shape:?}"),
+                    ),
+                };
+                assert_eq!(expected, expected_shape);
+                assert_eq!(actual, actual_shape);
+                state
+                    .convolution
+                    .into_data()
+                    .assert_eq(&convolution_before, true);
+                state
+                    .recurrent
+                    .into_data()
+                    .assert_eq(&recurrent_before, true);
+            }
+        }
+    }
 }
