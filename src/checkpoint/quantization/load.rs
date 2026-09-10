@@ -956,8 +956,8 @@ mod tests {
 
     use super::*;
     use crate::checkpoint::quantization::{
-        QuantizationGroupSize, QuantizedCheckpointOptions, WeightQuantizationConfig,
-        quantize_local_checkpoint_to_burnpack,
+        QuantizationGroupSize, QuantizedBurnpackSession, QuantizedCheckpointOptions,
+        WeightQuantizationConfig, quantize_local_checkpoint_to_burnpack, quantize_tensor_data,
     };
     use crate::checkpoint::{
         CheckpointEquivalenceRecord, CheckpointError, DTypePolicy, ExpectedTensor,
@@ -1033,6 +1033,45 @@ mod tests {
             Ok(())
         }
 
+        fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error> {
+            self.inner.alias_tensor(target, source_target)
+        }
+    }
+
+    /// Changes a checkpoint pathname only after every fixture tensor is installed.
+    struct FinalWritePathMutatingSink {
+        inner: RecordingSink,
+        checkpoint: PathBuf,
+        final_write_count: usize,
+        replacement_length: Option<u64>,
+        mutated: bool,
+    }
+
+    impl TensorSink for FinalWritePathMutatingSink {
+        type Error = SinkError;
+
+        /// Leaves an existing mapped inode intact while removing or replacing its path.
+        fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
+            self.inner.write_tensor(target, data)?;
+            if self.inner.tensors.len() == self.final_write_count && !self.mutated {
+                if let Some(length) = self.replacement_length {
+                    // Never truncate a possibly live mapping: retain the original inode
+                    // under a fixture-only backup name and create a distinct replacement.
+                    fs::rename(&self.checkpoint, self.checkpoint.with_extension("original"))
+                        .map_err(|error| SinkError(error.to_string()))?;
+                    File::create(&self.checkpoint)
+                        .and_then(|file| file.set_len(length))
+                        .map_err(|error| SinkError(error.to_string()))?;
+                } else {
+                    fs::remove_file(&self.checkpoint)
+                        .map_err(|error| SinkError(error.to_string()))?;
+                }
+                self.mutated = true;
+            }
+            Ok(())
+        }
+
+        /// Forwards aliases without introducing another mutation boundary.
         fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error> {
             self.inner.alias_tensor(target, source_target)
         }
@@ -1283,6 +1322,25 @@ mod tests {
             stats.peak_buffer_bytes,
             crate::checkpoint::quantization::PROVENANCE_HASH_BUFFER_BYTES
         );
+    }
+
+    /// Requires a legacy contract rejection to precede all payload I/O and model writes.
+    fn assert_unstarted_legacy_load(
+        audited: &AuditedQuantizedExecutionFailure<SinkError>,
+        sink: &RecordingSink,
+    ) {
+        assert_eq!(audited.format_version, 1);
+        assert_eq!(audited.preflight, PackedPreflightStats::default());
+        let failure = &audited.execution;
+        assert_eq!(failure.failed_target, None);
+        assert_eq!(failure.execution, ExecutionStats::default());
+        assert_eq!(failure.packed, PackedLoadStats::default());
+        assert_eq!(failure.provenance, ProvenanceExecutionStats::default());
+        assert!(failure.report.applied.is_empty());
+        assert!(failure.report.quantized.is_empty());
+        assert!(sink.operations.is_empty());
+        assert!(sink.tensors.is_empty());
+        assert!(sink.aliases.is_empty());
     }
 
     /// Content-verified local overlays bypass packed sources after whole-shard hashing.
@@ -1567,6 +1625,111 @@ mod tests {
                 QuantizationError::CheckpointProvenanceDigestMismatch { .. }
             ))
         ));
+    }
+
+    /// Post-execution path loss or size drift retains the complete successful load audit.
+    #[test]
+    fn local_overlay_postflight_rejects_source_path_changes_with_full_progress() {
+        for length_delta in [None, Some(-1_i64), Some(1)] {
+            let directory = tempfile::tempdir().unwrap();
+            let (manifest, plan, output) = executable_sidecar(&directory);
+            let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+            let mut unchanged_sink = RecordingSink::default();
+            let unchanged = execute_local_quantized_load_plan_audited(
+                &manifest,
+                &plan,
+                &mut artifact,
+                &mut unchanged_sink,
+            )
+            .unwrap();
+            let checkpoint = manifest.shards[0].path.clone();
+            let original_length = fs::metadata(&checkpoint).unwrap().len();
+            let replacement_length =
+                length_delta.map(|delta| original_length.checked_add_signed(delta).unwrap());
+            let mut sink = FinalWritePathMutatingSink {
+                inner: RecordingSink::default(),
+                checkpoint: checkpoint.clone(),
+                final_write_count: plan.tensors.len(),
+                replacement_length,
+                mutated: false,
+            };
+
+            let audited = execute_local_quantized_load_plan_audited(
+                &manifest,
+                &plan,
+                &mut artifact,
+                &mut sink,
+            )
+            .unwrap_err();
+            let failure = &audited.execution;
+
+            assert!(sink.mutated);
+            assert_eq!(audited.format_version, unchanged.format_version);
+            assert_eq!(audited.preflight, unchanged.preflight);
+            assert_eq!(failure.failed_target, None);
+            assert_eq!(failure.execution, unchanged.execution.execution);
+            assert_eq!(failure.packed, unchanged.execution.packed);
+            assert_eq!(failure.report, unchanged.execution.report);
+            assert_eq!(failure.execution.tensors_applied, 3);
+            assert_eq!(failure.execution.source_reads, 2);
+            assert_eq!(failure.execution.source_payload_bytes, 384);
+            assert_eq!(failure.packed.tensors_applied, 1);
+            assert_eq!(failure.report.applied.len(), 3);
+            assert_eq!(failure.report.quantized.len(), 1);
+            assert_eq!(sink.inner.operations, unchanged_sink.operations);
+            assert_eq!(sink.inner.tensors, unchanged_sink.tensors);
+            assert_complete_hash_pass(failure.provenance.pre_execution, &manifest);
+            // The second pathname preflight fails before a post-execution hash
+            // pass begins; retained pre-execution work must not imply a rehash.
+            assert_eq!(failure.provenance.post_execution, None);
+            assert_eq!(
+                failure.provenance.bytes_hashed(),
+                u128::from(manifest.artifact_bytes)
+            );
+
+            match (&failure.cause, replacement_length) {
+                (
+                    ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(
+                        QuantizationError::ArtifactIo {
+                            operation,
+                            path,
+                            source,
+                        },
+                    )),
+                    None,
+                ) => {
+                    assert_eq!(
+                        *operation,
+                        "inspect checkpoint shard before provenance hashing"
+                    );
+                    assert_eq!(path, &checkpoint);
+                    assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+                    assert!(!checkpoint.exists());
+                }
+                (
+                    ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(
+                        QuantizationError::CheckpointProvenanceLengthMismatch {
+                            shard,
+                            expected,
+                            actual,
+                        },
+                    )),
+                    Some(length),
+                ) => {
+                    assert_eq!(shard, "model.safetensors");
+                    assert_eq!(*expected, original_length);
+                    assert_eq!(*actual, length);
+                    assert_eq!(fs::metadata(&checkpoint).unwrap().len(), length);
+                    assert_eq!(
+                        fs::metadata(checkpoint.with_extension("original"))
+                            .unwrap()
+                            .len(),
+                        original_length
+                    );
+                }
+                (cause, _) => panic!("unexpected post-execution failure: {cause:?}"),
+            }
+        }
     }
 
     /// Packed size is rejected from metadata before source or sidecar payload I/O.
@@ -2419,6 +2582,102 @@ mod tests {
             failure.cause,
             ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(
                 QuantizationError::SidecarContract { .. }
+            ))
+        ));
+    }
+
+    /// Equal element counts do not excuse a wrong logical shape for a known target.
+    #[test]
+    fn sidecar_same_name_wrong_shape_is_rejected_before_payload_io() {
+        let directory = tempfile::tempdir().unwrap();
+        let (manifest, plan, _) = executable_sidecar(&directory);
+        let target = "model.layers.0.self_attn.q_proj.weight";
+        let output = directory.path().join("wrong-shape-v1.bpk");
+        write_sidecar(&output, &[(target, vec![16, 64])]);
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        assert_eq!(artifact.manifest().tensors[target].shape, [16, 64]);
+        let mut sink = RecordingSink::default();
+
+        let audited =
+            execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+                .unwrap_err();
+
+        assert_unstarted_legacy_load(&audited, &sink);
+        assert!(matches!(
+            &audited.execution.cause,
+            ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(
+                QuantizationError::SidecarContract { name, reason }
+            )) if name == target
+                && reason == "logical shape [16, 64] does not match planned post-transform shape [32, 32]"
+        ));
+    }
+
+    /// Low-level packed storage cannot bypass the embedding exclusion at model load time.
+    #[test]
+    fn sidecar_policy_excluded_storage_owner_is_rejected_before_payload_io() {
+        let directory = tempfile::tempdir().unwrap();
+        let (manifest, plan, _) = executable_sidecar(&directory);
+        let target = "model.embed_tokens.weight";
+        let output = directory.path().join("excluded-owner-v1.bpk");
+        let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+        let weight = quantize_tensor_data(
+            &TensorData::new(vec![1.0_f32; 2 * 32], [2, 32]),
+            WeightQuantizationConfig {
+                group_size: QuantizationGroupSize::new(32).unwrap(),
+                ..WeightQuantizationConfig::default()
+            },
+        )
+        .unwrap();
+        session.append_quantized(target, weight).unwrap();
+        session.finalize().unwrap();
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        assert_eq!(artifact.manifest().tensors[target].shape, [2, 32]);
+        assert_eq!(
+            artifact.manifest().packed_execution,
+            PackedExecutionSupport::BurnQFloatMatmul
+        );
+        let mut sink = RecordingSink::default();
+
+        let audited =
+            execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+                .unwrap_err();
+
+        assert_unstarted_legacy_load(&audited, &sink);
+        assert!(matches!(
+            &audited.execution.cause,
+            ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(
+                QuantizationError::SidecarContract { name, reason }
+            )) if name == target
+                && reason == "tensor is excluded by the conservative weight-only policy"
+        ));
+    }
+
+    /// A valid empty storage artifact is not an executable model sidecar or a load no-op.
+    #[test]
+    fn sidecar_empty_contract_is_rejected_before_payload_io() {
+        let directory = tempfile::tempdir().unwrap();
+        let (manifest, plan, _) = executable_sidecar(&directory);
+        let output = directory.path().join("empty-v1.bpk");
+        write_sidecar(&output, &[]);
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        assert!(artifact.manifest().tensors.is_empty());
+        assert_eq!(
+            artifact.manifest().packed_execution,
+            PackedExecutionSupport::Unavailable
+        );
+        let mut sink = RecordingSink::default();
+
+        let audited =
+            execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+                .unwrap_err();
+
+        assert_unstarted_legacy_load(&audited, &sink);
+        // Empty artifacts are rejected by the earlier capability guard, before
+        // the defensive empty-manifest check can be reached through this API.
+        assert!(matches!(
+            audited.execution.cause,
+            ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(
+                QuantizationError::PackedExecutionUnavailable
             ))
         ));
     }
