@@ -1,0 +1,390 @@
+{
+  "schema_version": 1,
+  "scope": "Read-only historical Qwen3.5-0.8B Metal/F16 warm-inference attribution audit; no new benchmark and no established hardware or software cause.",
+  "audit_repository_base": "ca9738a8b2f761edeb3491fd8030e3107600880d",
+  "recorded_utc": "2026-09-10T06:04:32.198404+00:00",
+  "advertised_supported": false,
+  "release_gate_promotion": false,
+  "new_benchmark_executed": false,
+  "cause_established": false,
+  "historical_failure_waived": false,
+  "performance_policy_decision": null,
+  "historical_timing_gate": "confirmed_failure_unresolved",
+  "committed_record_identities": {
+    "qwen3.5-0.8b-metal-benchmark-20260909.json": {
+      "bytes": 119168,
+      "sha256": "ab57e476a224a329eda2cd303ee3ce2664eb3f7922550c4659dac26eea824946"
+    },
+    "qwen3.5-0.8b-metal-benchmark-20260909-run.json": {
+      "bytes": 4315,
+      "sha256": "fcbbbb37411135e8540a1db64207cfdc056a2918cebd832be9547b14167f6704"
+    },
+    "small-model-performance-20260910/qwen-baseline-summary.json": {
+      "bytes": 51259,
+      "sha256": "97e0e02d23220c5cd644b29755e7ce4d1309843fc8dd5d66b056866064fed1a1"
+    },
+    "small-model-performance-20260910/qwen-controlled-current-summary.json": {
+      "bytes": 50151,
+      "sha256": "1a1c989ad9fe1b4d0ee87b8d35e0c41a4005ca61f6677ffc58b711a844cee899"
+    },
+    "small-model-performance-20260910/qwen-controlled-historical-comparison.json": {
+      "bytes": 15526,
+      "sha256": "794398e422e7f7c0ef8c4ded122570fc9ea0519078a08360e4f7212bfc03cdda"
+    },
+    "small-model-performance-20260910/historical-source-build.json": {
+      "bytes": 60008,
+      "sha256": "13611939f7dd9f5545ff578fb10d409c6dff9776aadb614108cae9d3fdceaac1"
+    },
+    "small-model-performance-20260910/metal-build.json": {
+      "bytes": 6000,
+      "sha256": "124c041cab359ca224e2de7804d79ec82c09902f6b1c9cfbdf6147c593ae07e5"
+    }
+  },
+  "raw_record_identities": {
+    "original_report": {
+      "path": "/private/tmp/qwen35-metal-benchmark.l5jhv3/report.json",
+      "bytes": 119168,
+      "sha256": "ab57e476a224a329eda2cd303ee3ce2664eb3f7922550c4659dac26eea824946"
+    },
+    "original_environment": {
+      "path": "/private/tmp/qwen35-metal-benchmark.l5jhv3/environment.json",
+      "bytes": 1204,
+      "sha256": "d2536b5e11988189075c61da1258105f3ebfbba86b14273987fbe858f3c50695"
+    },
+    "rebuilt_report": {
+      "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-baseline/benchmark.json",
+      "bytes": 120626,
+      "sha256": "0cd62f3aa8842f24962fe57d3e8a5d1b28077be99b23456495a9f2974325d23a"
+    },
+    "rebuilt_execution": {
+      "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-baseline/execution.json",
+      "bytes": 5022,
+      "sha256": "061ba4ad91c132b9d3522b15dc1703c6d47355862c476bf8be0cca02fc3eebb1"
+    },
+    "rebuilt_runtime_controls": {
+      "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-baseline/runtime-controls.json",
+      "bytes": 6355,
+      "sha256": "7d909ced24aea79e6bffe7e041f4ce622b0a57b5fd1d3de81271357c4d341da5"
+    },
+    "rebuilt_build": {
+      "path": "/private/tmp/tfm-perf-baseline-capture.tJeVLq/build/build.json",
+      "bytes": 60008,
+      "sha256": "13611939f7dd9f5545ff578fb10d409c6dff9776aadb614108cae9d3fdceaac1"
+    },
+    "current_report": {
+      "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/benchmark.json",
+      "bytes": 120911,
+      "sha256": "3fb37022413ab89eb04c8fe097fef8c588f46bcc22053b496784a64c50088da3"
+    },
+    "current_execution": {
+      "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/execution.json",
+      "bytes": 4369,
+      "sha256": "53806d76459112aaff8fe55627116985288e3d37c0fc63ed87db7d040570eee2"
+    },
+    "current_runtime_controls": {
+      "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/runtime-controls.json",
+      "bytes": 6355,
+      "sha256": "7d909ced24aea79e6bffe7e041f4ce622b0a57b5fd1d3de81271357c4d341da5"
+    },
+    "current_build": {
+      "path": "/private/tmp/tfm-small-model-final.GlGmEt/build/build.json",
+      "bytes": 6000,
+      "sha256": "124c041cab359ca224e2de7804d79ec82c09902f6b1c9cfbdf6147c593ae07e5"
+    }
+  },
+  "source_and_boundary_matches": {
+    "historical_commit": "1e4f836632b46d072bd3ea1ec2200ec1d365a1ff",
+    "controlled_current_commit": "3d5220a3cc2a0ac91ffc70d1b4089b8fe4d0fb58",
+    "original_and_rebuilt_benchmark_sources": {
+      "benchmark_source_sha256": "e997d591b47b482c5ebeab67c2dcadc440530821a9b50095aa899db781e739f1",
+      "metric_helper_sha256": "2cdc35be3a48126e439a9a69525aa82b4b8ba3329b00d5d63ac51a9a1c17e8d9",
+      "reference_helper_sha256": "83fd59277d825b9721779a8f827d46fcfd9033641529bcbd6fcdbbc91639d5ba",
+      "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+      "compiled_rustup_toolchain": "stable-aarch64-apple-darwin",
+      "rustc": {
+        "error": null,
+        "value": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3"
+      },
+      "backend_name": "cubecl<wgpu<msl>>",
+      "backend_profile": "Metal/F16",
+      "cargo_features": [
+        "std",
+        "metal",
+        "tokenizers",
+        "chat-templates"
+      ],
+      "parameter_dtype": "F16",
+      "recurrent_matrix_dtype": "F32",
+      "quantization": null,
+      "profile": "release (debug assertions disabled)"
+    },
+    "original_vs_rebuilt_provenance_differing_keys": [
+      "benchmark_executable_sha256",
+      "environment"
+    ],
+    "original_vs_rebuilt_protocol_identical": true,
+    "test_filter": "qwen::qwen35_metal_baseline_benchmark",
+    "test_arguments": [
+      "--ignored",
+      "--exact",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "native_test_count": 1,
+    "native_filtered_test_count": 15,
+    "cargo_build_inside_timed_process": false,
+    "warmup_repetitions_per_shape": 3,
+    "measured_repetitions_per_shape": 10,
+    "source_lengths": [
+      32,
+      128,
+      512
+    ],
+    "forced_decode_steps": 128,
+    "cold_reference_rows": 32,
+    "natural_warmup_repetitions": 3,
+    "natural_measured_repetitions": 10,
+    "natural_generated_tokens": 32,
+    "native_process_scope": "The already-built native test and its metadata subprocesses: checkpoint/reference authentication, strict load, cold lazy-kernel work and reference validation, identical warmup/measured inference, cache/terminal-logit checks, natural greedy, final authentication and report construction. Cargo/rustc compilation is not timed; the benchmark queries rustc --version for provenance.",
+    "per_shape_work_fields_identical": [
+      "batch_size",
+      "padding",
+      "source_token_ids",
+      "source_tokens_u32le_sha256",
+      "valid_source_tokens",
+      "prefill_chunk_size",
+      "prefill_chunks",
+      "decode_steps",
+      "cache_capacity",
+      "cache_window",
+      "cache",
+      "predicted_token_ids",
+      "predicted_tokens_u32le_sha256",
+      "per_repetition_prediction_hashes"
+    ],
+    "original_and_rebuilt_natural_hash": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
+    "timer_source": {
+      "commit": "1e4f836632b46d072bd3ea1ec2200ec1d365a1ff",
+      "path": "crates/transformers/tests/qwen35_benchmarks.rs",
+      "sample_function_line": 482,
+      "run_function_line": 614
+    },
+    "build_limit": "Matching reported Rust 1.92/LLVM 21.1.3, release assertions and root features is not a capture of every original compiler flag or the original transitive artifact bytes."
+  },
+  "processes": {
+    "original": {
+      "timing_log": {
+        "path": "/private/tmp/qwen35-metal-benchmark.l5jhv3/timing.log",
+        "bytes": 777,
+        "sha256": "c6242f34b0e60a7b4f16179bce5569b6a3cf495da4d7ef4c7ce4519d3f1fd8d7",
+        "utf8": "      215.54 real       255.52 user        60.87 sys\n          2463891456  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n              259295  page reclaims\n                 200  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  27  voluntary context switches\n             3351039  involuntary context switches\n       2415449029004  instructions retired\n       1098588041966  cycles elapsed\n          2907412480  peak memory footprint\n"
+      },
+      "native_stdout": {
+        "path": "/private/tmp/qwen35-metal-benchmark.l5jhv3/stdout.log",
+        "bytes": 165,
+        "sha256": "4879a5565ed54d79092470c7840e7a4929d9394f4fcc672aaec2ffe8b17fb0de",
+        "utf8": "\nrunning 1 test\ntest qwen::qwen35_metal_baseline_benchmark ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 215.48s\n\n"
+      },
+      "counters": {
+        "wall_seconds": 215.54,
+        "user_seconds": 255.52,
+        "system_seconds": 60.87,
+        "cpu_seconds": 316.39,
+        "instructions_retired": 2415449029004,
+        "cycles_elapsed": 1098588041966,
+        "involuntary_context_switches": 3351039,
+        "swaps": 0,
+        "peak_memory_footprint_bytes": 2907412480
+      },
+      "command": "env TRANSFORMERS_QWEN35_DIR='/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17' TRANSFORMERS_QWEN35_REFERENCE_DIR='/Volumes/bag of holding/models/transformers-acceptance' TRANSFORMERS_BENCH_METADATA_JSON='/private/tmp/qwen35-metal-benchmark.l5jhv3/environment.json' TRANSFORMERS_BENCH_OUTPUT_JSON='/private/tmp/qwen35-metal-benchmark.l5jhv3/report.json' /usr/bin/time -l /Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-22bed2ca193cb209 qwen::qwen35_metal_baseline_benchmark --ignored --exact --nocapture --test-threads=1 > /private/tmp/qwen35-metal-benchmark.l5jhv3/stdout.log 2> /private/tmp/qwen35-metal-benchmark.l5jhv3/timing.log",
+      "benchmark_executable_sha256": "dd8a19df6c672a3d023a40585d24710d4ef8a08b8d49651947414380a0c8e861",
+      "benchmark_source_commit": "1e4f836632b46d072bd3ea1ec2200ec1d365a1ff"
+    },
+    "rebuilt_historical": {
+      "timing_log": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-baseline/stderr.log",
+        "bytes": 777,
+        "sha256": "10e47aac6fa9f34c030a639da2658984f42c4ca5c64315a8a85aef510751d93e",
+        "utf8": "      269.25 real       343.58 user        70.22 sys\n          2467872768  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n              252410  page reclaims\n                  65  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  26  voluntary context switches\n             3554973  involuntary context switches\n       3141533014789  instructions retired\n       1444908912315  cycles elapsed\n          3015481216  peak memory footprint\n"
+      },
+      "native_stdout": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-baseline/stdout.log",
+        "bytes": 165,
+        "sha256": "e22680ed4ee03b3a76865cc2717a953c827ca8ca9a777f24b3096f14445b378d",
+        "utf8": "\nrunning 1 test\ntest qwen::qwen35_metal_baseline_benchmark ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 268.87s\n\n"
+      },
+      "counters": {
+        "wall_seconds": 269.25,
+        "user_seconds": 343.58,
+        "system_seconds": 70.22,
+        "cpu_seconds": 413.79999999999995,
+        "instructions_retired": 3141533014789,
+        "cycles_elapsed": 1444908912315,
+        "involuntary_context_switches": 3554973,
+        "swaps": 0,
+        "peak_memory_footprint_bytes": 3015481216
+      },
+      "command": "env 'TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17' 'TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance' 'TRANSFORMERS_FLAN_T5_SMALL_DIR=/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab' 'TRANSFORMERS_FLAN_T5_SMALL_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle' 'TRANSFORMERS_QWEN35_Q4_32K_BURNPACK=/Volumes/bag of holding/models/transformers-acceptance/qwen3.5-0.8b-q4-2fc06364-v2/qwen3.5-0.8b-q4.bpk' TRANSFORMERS_BENCH_METADATA_JSON=/private/tmp/tfm-small-model-final.GlGmEt/qwen-baseline/environment.json TRANSFORMERS_BENCH_OUTPUT_JSON=/private/tmp/tfm-small-model-final.GlGmEt/qwen-baseline/benchmark.json /usr/bin/time -l /Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-f528fcca2d213ee1 qwen::qwen35_metal_baseline_benchmark --ignored --exact --nocapture --test-threads=1 > /private/tmp/tfm-small-model-final.GlGmEt/qwen-baseline/stdout.log 2> /private/tmp/tfm-small-model-final.GlGmEt/qwen-baseline/stderr.log",
+      "benchmark_executable_sha256": "6ff3b08574d73907621d262e37acfc4ef8772702d9d0a73993270ff4456989e2",
+      "benchmark_source_commit": "1e4f836632b46d072bd3ea1ec2200ec1d365a1ff"
+    }
+  },
+  "phase_accounting": {
+    "original": {
+      "prefill": 7.086972254000001,
+      "first_token_latency": 7.3220734190000005,
+      "decode_model_only": 107.74631771000001,
+      "decode_including_greedy_readback": 137.67852229300001,
+      "natural_greedy": 11.436542916,
+      "nonoverlapping_measured_inference": 156.437138628,
+      "decode_outside_model_intervals": 29.932204583,
+      "artifact_authentication_seconds_separate_from_load": 3.921294583,
+      "post_run_artifact_authentication_seconds": 3.877429584,
+      "strict_load_seconds": 1.3480695,
+      "cold_first_token": 0.415529667
+    },
+    "rebuilt_historical": {
+      "prefill": 8.808607501000001,
+      "first_token_latency": 9.068298296,
+      "decode_model_only": 143.455003009,
+      "decode_including_greedy_readback": 174.681630836,
+      "natural_greedy": 14.244498961999998,
+      "nonoverlapping_measured_inference": 197.994428094,
+      "decode_outside_model_intervals": 31.226627827000016,
+      "artifact_authentication_seconds_separate_from_load": 3.835063334,
+      "post_run_artifact_authentication_seconds": 3.836785833,
+      "strict_load_seconds": 1.4020745,
+      "cold_first_token": 0.233354291
+    },
+    "delta_seconds": {
+      "prefill": 1.721635247,
+      "first_token_latency": 1.7462248769999995,
+      "decode_model_only": 35.70868529899998,
+      "decode_including_greedy_readback": 37.003108542999996,
+      "natural_greedy": 2.8079560459999975,
+      "nonoverlapping_measured_inference": 41.557289465999986,
+      "decode_outside_model_intervals": 1.294423244000015,
+      "artifact_authentication_seconds_separate_from_load": -0.0862312489999999,
+      "post_run_artifact_authentication_seconds": -0.04064375100000017,
+      "strict_load_seconds": 0.05400499999999986,
+      "cold_first_token": -0.182175376
+    },
+    "total_process_wall_delta_seconds": 53.71000000000001,
+    "measured_inference_share_of_wall_delta_percent": 77.37346763358775,
+    "measured_model_decode_share_of_wall_delta_percent": 66.4842399906907,
+    "wall_delta_outside_retained_measured_inference_seconds": 12.152710534000022,
+    "counter_delta_percent": {
+      "wall_seconds": 24.91880857381461,
+      "user_seconds": 34.463055729492794,
+      "system_seconds": 15.360604567110236,
+      "cpu_seconds": 30.78795157874774,
+      "instructions_retired": 30.060000317390156,
+      "cycles_elapsed": 31.52417986720797
+    },
+    "conventions": {
+      "sums": "Sum all ten measured samples at each of the three source lengths; natural_greedy sums its ten measured samples separately.",
+      "nonoverlapping": "first_token_latency + decode_including_greedy_readback + natural_greedy; do not add prefill or decode_model_only again because these are contained intervals.",
+      "decode_model_only": "Each interval encloses model.decode plus the following Backend::sync; the preceding sync and subsequent argmax/readback are outside. This is not pure GPU kernel time.",
+      "unassigned": "Warmup samples, reference validation, cache allocation outside timers, authentication, report/metadata work and process overhead are not assigned per-phase CPU counters."
+    }
+  },
+  "controlled_pair": {
+    "summary": "Historical source rebuilt and current source match within the retained controlled median comparisons; this does not erase the original historical failure.",
+    "largest_absolute_warm_median_change_percent": 1.2464253775571699,
+    "p95_five_percent_alert_count": 3
+  },
+  "binary_path_observation": {
+    "observed_utc": "2026-09-10T06:04:32.198404+00:00",
+    "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "bytes": 39198656,
+    "sha256": "db2e9a77d6fedb42281d3ba32576bfc5ffeffa994182ac7dcddf6fcd28f72945",
+    "original_recorded_sha256": "dd8a19df6c672a3d023a40585d24710d4ef8a08b8d49651947414380a0c8e861",
+    "matches_original": false,
+    "scope": "Only this named path was rehashed at the observation time; no claim that a different copy of the original binary cannot exist. Its current contents must not be used as an exact replay of the original dd8a19df executable."
+  },
+  "profiler_discovery": {
+    "observed_utc": "2026-09-10T06:04:32.198404+00:00",
+    "active_developer_directory": {
+      "command": [
+        "/usr/bin/xcode-select",
+        "-p"
+      ],
+      "exit_code": 0,
+      "stdout": "/Library/Developer/CommandLineTools\n",
+      "stderr": ""
+    },
+    "xctrace_lookup": {
+      "command": [
+        "/usr/bin/xcrun",
+        "--find",
+        "xctrace"
+      ],
+      "exit_code": 72,
+      "stdout": "",
+      "stderr": "xcrun: error: unable to find utility \"xctrace\", not a developer tool or in PATH\n"
+    },
+    "xctrace_shim": {
+      "command": [
+        "/usr/bin/xctrace",
+        "help"
+      ],
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "xcode-select: error: tool 'xctrace' requires Xcode, but active developer directory '/Library/Developer/CommandLineTools' is a command line tools instance\n"
+    },
+    "sample": {
+      "path": "/usr/bin/sample",
+      "usage_confirmed": "sample <pid | partial-process-name> [duration [samplingInterval]] [options...]",
+      "duration_units": "seconds",
+      "interval_units": "milliseconds",
+      "available_for_future_cpu_stack_sampling": true
+    },
+    "powermetrics": {
+      "path": "/usr/bin/powermetrics",
+      "help_confirmed_samplers": [
+        "tasks",
+        "cpu_power",
+        "gpu_power",
+        "thermal"
+      ],
+      "help_confirmed_options": [
+        "--show-process-gpu",
+        "--show-process-ipc",
+        "--sample-rate",
+        "--sample-count",
+        "--output-file"
+      ],
+      "sampling_not_started": true,
+      "sampling_privileges_not_tested": true
+    },
+    "full_metal_timeline_available_through_active_developer_directory": false,
+    "system_configuration_changed": false
+  },
+  "limitations": [
+    "Retired instructions, CPU cycles and CPU seconds are whole-process counters, not counters for the timed decode intervals. The phase sums localize wall time only.",
+    "Increased host work can reflect submission/dispatch, synchronization polling or waiting on slower GPU execution. It does not establish CPU causation or a specific Metal kernel regression.",
+    "The original and rebuilt records describe the same hardware, OS build, backend name and AC powermode=0. They do not capture continuous GPU clocks, thermal state, kernel selections, tuning-cache contents or exact competing desktop GPU load.",
+    "The newer environment explicitly lists ordinary desktop GPU consumers; the older description is less specific. That documentation difference is not proof that those processes were absent before.",
+    "No swapping is recorded, but this does not establish absence of memory pressure or bandwidth contention.",
+    "Rebuilt/current runtime-control endpoints match and are unchanged, but the original run has no equivalent captured runtime-control file. Same configuration discovery is not a frozen runtime/tuning cache.",
+    "All observations and binary hashes describe their recorded historical times, not an arbitrary future HEAD or filesystem state."
+  ],
+  "minimal_follow_up_protocol": {
+    "executed": false,
+    "diagnostic_only": true,
+    "requires_new_policy_decision": false,
+    "waives_historical_failure": false,
+    "preserve": [
+      "already-built source/binary-bound native benchmark",
+      "exact test filter and one test thread",
+      "identical checkpoint/reference hashes and greedy oracle",
+      "three warmups and ten measured repetitions at each existing shape",
+      "128 forced decode tokens, cache capacities and all existing synchronization/timer boundaries"
+    ],
+    "cpu_sampling": "During a timestamped warm forced-decode interval, attach /usr/bin/sample PID 10 1 -mayDie -file NEW_OUTPUT_PATH; do not interpret its sampled stack counts as retired-instruction counters.",
+    "telemetry": "For the diagnostic run, collect continuous 1000 ms powermetrics tasks,cpu_power,gpu_power,thermal with per-process GPU and IPC observations, subject to sampling privileges. Record competing GPU use, frequencies and thermal pressure without changing power settings.",
+    "phase_alignment": "Add only opt-in nonblocking diagnostic timestamps outside the existing timers if exact alignment is needed; the current ordinary timing report lacks absolute phase timestamps. Do not substitute the memory-supervisor ACK protocol, which perturbs scheduling.",
+    "full_gpu_trace_requirement": "A per-kernel Metal timeline requires making full Xcode/xctrace available through a developer directory. Nothing was installed or selected during this audit.",
+    "interpretation": "CPU stacks plus GPU activity distinguish where present warm-loop time is spent; they cannot retrospectively identify the original run cause without comparable historical evidence. Retain profiled results separately from acceptance timings and keep the historical failure unresolved."
+  }
+}

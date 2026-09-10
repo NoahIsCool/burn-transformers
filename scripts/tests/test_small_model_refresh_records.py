@@ -10,6 +10,8 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
+import shlex
 import statistics
 import struct
 import unittest
@@ -189,6 +191,193 @@ class SmallModelRefreshRecords(unittest.TestCase):
                         self.assertEqual(maximum["sampled_maximum_minus_idle_median_bytes"],
                                          maximum["sampled_maximum_bytes"] - maximum["baseline_median_bytes"])
             self.assertEqual(sorted(phase_ids), list(range(93)))
+
+
+class HistoricalWarmInferenceAudit(unittest.TestCase):
+    """Authenticate the diagnostic arithmetic without touching live host artifacts."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Load only committed fixtures; historical absolute paths are evidence labels."""
+        cls.audit = json.loads((MEASUREMENTS / "qwen-historical-warm-inference-audit-20260910.json").read_text())
+        cls.original = json.loads((MEASUREMENTS / "qwen3.5-0.8b-metal-benchmark-20260909.json").read_text())
+        cls.original_run = json.loads((MEASUREMENTS / "qwen3.5-0.8b-metal-benchmark-20260909-run.json").read_text())
+        cls.rebuilt = read_record("qwen-baseline-summary.json")
+        cls.current = read_record("qwen-controlled-current-summary.json")
+
+    def test_committed_and_raw_record_identities_are_cross_bound(self):
+        """Derived observations stay bound to exact committed sources and raw hashes."""
+        expected = {
+            "qwen3.5-0.8b-metal-benchmark-20260909.json",
+            "qwen3.5-0.8b-metal-benchmark-20260909-run.json",
+            *("small-model-performance-20260910/" + name for name in (
+                "qwen-baseline-summary.json", "qwen-controlled-current-summary.json",
+                "qwen-controlled-historical-comparison.json", "historical-source-build.json",
+                "metal-build.json")),
+        }
+        records = self.audit["committed_record_identities"]
+        self.assertEqual(set(records), expected)
+        for name in expected:
+            payload = (MEASUREMENTS / name).read_bytes()
+            self.assertEqual(records[name], {
+                "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+            })
+        raw = self.audit["raw_record_identities"]
+        self.assertEqual(raw["original_report"]["sha256"], self.original_run["raw_report"]["sha256"])
+        self.assertEqual(raw["original_report"]["bytes"], records["qwen3.5-0.8b-metal-benchmark-20260909.json"]["bytes"])
+        for label, record in (("rebuilt", self.rebuilt), ("current", self.current)):
+            for kind, filename in (("report", "benchmark.json"), ("execution", "execution.json"),
+                                   ("runtime_controls", "runtime-controls.json")):
+                self.assertEqual(raw[label + "_" + kind], record["evidence"]["records"][filename])
+            self.assertEqual(raw[label + "_build"], record["build"]["record"])
+        # The committed build copies are exact originals, not newly synthesized builds.
+        for label, filename in (("rebuilt", "historical-source-build.json"), ("current", "metal-build.json")):
+            self.assertEqual({key: raw[label + "_build"][key] for key in ("bytes", "sha256")},
+                             records["small-model-performance-20260910/" + filename])
+
+    def test_native_boundaries_protocol_and_work_are_matched(self):
+        """A native-only process counter comparison cannot silently become Cargo timing."""
+        boundary = self.audit["source_and_boundary_matches"]
+        rebuilt = self.rebuilt["benchmark"]
+        self.assertFalse(boundary["cargo_build_inside_timed_process"])
+        self.assertTrue(boundary["original_vs_rebuilt_protocol_identical"])
+        self.assertEqual(self.original["protocol"], rebuilt["protocol"])
+        protocol = self.original["protocol"]
+        self.assertEqual(boundary["warmup_repetitions_per_shape"], protocol["warmup_repetitions"])
+        self.assertEqual(boundary["measured_repetitions_per_shape"], protocol["measured_repetitions"])
+        self.assertEqual(boundary["forced_decode_steps"], protocol["decode_steps"])
+        self.assertEqual(boundary["historical_commit"], self.original["provenance"]["crate_commit"]["value"])
+        self.assertEqual(boundary["controlled_current_commit"], self.current["execution"]["source_before"]["commit"])
+        for key, value in boundary["original_and_rebuilt_benchmark_sources"].items():
+            self.assertEqual(value, self.original["provenance"][key], key)
+            self.assertEqual(value, rebuilt["provenance"][key], key)
+        differing = [key for key, value in self.original["provenance"].items()
+                     if value != rebuilt["provenance"][key]]
+        self.assertEqual(differing, boundary["original_vs_rebuilt_provenance_differing_keys"])
+        self.assertEqual(differing, ["benchmark_executable_sha256", "environment"])
+        for name, report in (("original", self.original), ("rebuilt_historical", rebuilt)):
+            process = self.audit["processes"][name]
+            self.assertEqual(process["command"], report["provenance"]["environment"]["command"])
+            self.assertEqual(process["benchmark_executable_sha256"], report["provenance"]["benchmark_executable_sha256"])
+            self.assertEqual(process["benchmark_source_commit"], boundary["historical_commit"])
+            command = shlex.split(process["command"])
+            position = command.index("/usr/bin/time")
+            self.assertEqual(command[position + 1], "-l")
+            self.assertIn("/target/release/deps/qwen35_benchmarks-", command[position + 2])
+            self.assertEqual(command[position + 3:position + 8],
+                             [boundary["test_filter"], *boundary["test_arguments"]])
+            self.assertIn("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out;",
+                          process["native_stdout"]["utf8"])
+        self.assertEqual((boundary["native_test_count"], boundary["native_filtered_test_count"]), (1, 15))
+        self.assertEqual(boundary["cold_reference_rows"], self.original["cold_first_token"]["reference_cached_decisions"])
+        self.assertEqual(boundary["natural_generated_tokens"], len(self.original["natural_greedy"]["token_ids"]))
+        self.assertEqual((boundary["natural_warmup_repetitions"], boundary["natural_measured_repetitions"]), (3, 10))
+        self.assertEqual(self.original["natural_greedy"]["tokens_u32le_sha256"], boundary["original_and_rebuilt_natural_hash"])
+        self.assertEqual(rebuilt["natural_greedy"]["tokens_u32le_sha256"], boundary["original_and_rebuilt_natural_hash"])
+        self.assertEqual(boundary["source_lengths"], [row["source_length"] for row in rebuilt["warm_series"]])
+        for left, right in zip(self.original["warm_series"], rebuilt["warm_series"], strict=True):
+            for key in boundary["per_shape_work_fields_identical"]:
+                if key in ("source_token_ids", "predicted_token_ids"):
+                    # The compact record omits large vectors but retains their exact hash.
+                    hash_key = "source_tokens_u32le_sha256" if key == "source_token_ids" else "predicted_tokens_u32le_sha256"
+                    payload = b"".join(struct.pack("<I", token) for token in left[key])
+                    self.assertEqual(hashlib.sha256(payload).hexdigest(), right[hash_key])
+                else:
+                    self.assertEqual(left[key], right[key], key)
+
+    def test_embedded_native_logs_authenticate_and_reproduce_process_counters(self):
+        """Retired instructions and CPU totals come from exact whole-process logs."""
+        labels = {
+            "instructions_retired": "instructions retired", "cycles_elapsed": "cycles elapsed",
+            "involuntary_context_switches": "involuntary context switches", "swaps": "swaps",
+            "peak_memory_footprint_bytes": "peak memory footprint",
+        }
+        for name, process in self.audit["processes"].items():
+            for key in ("timing_log", "native_stdout"):
+                payload = process[key]["utf8"].encode()
+                self.assertEqual(len(payload), process[key]["bytes"])
+                self.assertEqual(hashlib.sha256(payload).hexdigest(), process[key]["sha256"])
+            log = process["timing_log"]["utf8"]
+            wall, user, system = map(float, re.search(
+                r"([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys", log).groups())
+            expected = {"wall_seconds": wall, "user_seconds": user, "system_seconds": system,
+                        "cpu_seconds": user + system,
+                        **{key: int(re.search(r"(\d+)\s+" + label, log)[1]) for key, label in labels.items()}}
+            self.assertEqual(process["counters"], expected, name)
+            self.assertEqual(expected["swaps"], 0)
+        original = self.audit["processes"]["original"]["timing_log"]
+        self.assertEqual(original["sha256"], self.original_run["external_memory"]["timing_log_sha256"])
+        rebuilt = self.audit["processes"]["rebuilt_historical"]
+        for embedded, filename in (("timing_log", "stderr.log"), ("native_stdout", "stdout.log")):
+            self.assertEqual({key: rebuilt[embedded][key] for key in ("sha256", "bytes")},
+                             self.rebuilt["execution"]["logs"][filename])
+
+    def test_disjoint_phase_sums_and_contributions_recompute_from_native_samples(self):
+        """Nested prefill/decode intervals are never counted twice as wall time."""
+        accounting = self.audit["phase_accounting"]
+        for name, report in (("original", self.original), ("rebuilt_historical", self.rebuilt["benchmark"])):
+            expected = {key: sum(sum(row[key]["samples_seconds"]) for row in report["warm_series"])
+                        for key in ("prefill", "first_token_latency", "decode_model_only", "decode_including_greedy_readback")}
+            expected["natural_greedy"] = sum(report["natural_greedy"]["total_time"]["samples_seconds"])
+            expected["nonoverlapping_measured_inference"] = (expected["first_token_latency"]
+                + expected["decode_including_greedy_readback"] + expected["natural_greedy"])
+            expected["decode_outside_model_intervals"] = expected["decode_including_greedy_readback"] - expected["decode_model_only"]
+            for key in ("artifact_authentication_seconds_separate_from_load", "post_run_artifact_authentication_seconds", "strict_load_seconds"):
+                expected[key] = report[key]
+            expected["cold_first_token"] = report["cold_first_token"]["seconds"]
+            self.assertEqual(set(accounting[name]), set(expected))
+            for key, value in expected.items():
+                self.assertAlmostEqual(accounting[name][key], value, places=12, msg=key)
+        before = self.audit["processes"]["original"]["counters"]
+        after = self.audit["processes"]["rebuilt_historical"]["counters"]
+        wall_delta = after["wall_seconds"] - before["wall_seconds"]
+        self.assertAlmostEqual(accounting["total_process_wall_delta_seconds"], wall_delta, places=12)
+        for key, delta in accounting["delta_seconds"].items():
+            self.assertAlmostEqual(delta, accounting["rebuilt_historical"][key] - accounting["original"][key], places=12)
+        for key, delta in accounting["counter_delta_percent"].items():
+            self.assertAlmostEqual(delta, 100 * (after[key] / before[key] - 1), places=12)
+        for field, phase in (("measured_inference_share_of_wall_delta_percent", "nonoverlapping_measured_inference"),
+                             ("measured_model_decode_share_of_wall_delta_percent", "decode_model_only")):
+            self.assertAlmostEqual(accounting[field], 100 * accounting["delta_seconds"][phase] / wall_delta, places=12)
+        self.assertAlmostEqual(accounting["wall_delta_outside_retained_measured_inference_seconds"],
+                               wall_delta - accounting["delta_seconds"]["nonoverlapping_measured_inference"], places=12)
+        self.assertLess(accounting["delta_seconds"]["cold_first_token"], 0)
+        self.assertIn("not pure GPU kernel time", accounting["conventions"]["decode_model_only"])
+
+    def test_observations_and_follow_up_do_not_establish_cause_or_waive_failure(self):
+        """Host discovery and a proposed diagnostic are not new benchmark evidence."""
+        audit = self.audit
+        for flag in ("advertised_supported", "release_gate_promotion", "new_benchmark_executed",
+                     "cause_established", "historical_failure_waived"):
+            self.assertFalse(audit[flag])
+        self.assertEqual(audit["historical_timing_gate"], "confirmed_failure_unresolved")
+        self.assertIsNone(audit["performance_policy_decision"])
+        comparison = read_record("qwen-controlled-historical-comparison.json")
+        self.assertEqual(audit["controlled_pair"]["largest_absolute_warm_median_change_percent"],
+                         comparison["controlled_comparison"]["largest_absolute_warm_median_change_percent"])
+        self.assertEqual(audit["controlled_pair"]["p95_five_percent_alert_count"],
+                         len(comparison["controlled_comparison"]["p95_five_percent_alerts"]))
+        observation = audit["binary_path_observation"]
+        self.assertFalse(observation["matches_original"])
+        self.assertEqual(observation["original_recorded_sha256"], self.original["provenance"]["benchmark_executable_sha256"])
+        self.assertNotEqual(observation["sha256"], observation["original_recorded_sha256"])
+        self.assertEqual(observation["observed_utc"], audit["recorded_utc"])
+        self.assertIn(observation["path"], self.original["provenance"]["environment"]["command"])
+        discovery = audit["profiler_discovery"]
+        self.assertEqual(discovery["active_developer_directory"]["stdout"].strip(), "/Library/Developer/CommandLineTools")
+        self.assertNotEqual(discovery["xctrace_lookup"]["exit_code"], 0)
+        self.assertNotEqual(discovery["xctrace_shim"]["exit_code"], 0)
+        self.assertIn("requires Xcode", discovery["xctrace_shim"]["stderr"])
+        self.assertFalse(discovery["full_metal_timeline_available_through_active_developer_directory"])
+        self.assertFalse(discovery["system_configuration_changed"])
+        self.assertTrue(discovery["powermetrics"]["sampling_not_started"])
+        self.assertTrue(discovery["powermetrics"]["sampling_privileges_not_tested"])
+        follow_up = audit["minimal_follow_up_protocol"]
+        self.assertFalse(follow_up["executed"])
+        self.assertTrue(follow_up["diagnostic_only"])
+        self.assertFalse(follow_up["waives_historical_failure"])
+        self.assertIn("Do not substitute the memory-supervisor ACK", follow_up["phase_alignment"])
+        self.assertIn("not counters for the timed decode intervals", audit["limitations"][0])
 
 
 class WholeFileCoverageRecords(unittest.TestCase):
