@@ -405,3 +405,166 @@ fn projected_mixer_shape_rejections_preserve_both_state_buffers() {
         }
     }
 }
+
+/// Both algorithms reject the same supplied shape before consuming caller state.
+fn assert_rule_shape_contract(
+    mut input: DeltaRuleInput<TestBackend>,
+    context: &str,
+    expected_shape: &str,
+    actual_shape: &str,
+) {
+    let device = Default::default();
+    let initial = Tensor::<TestBackend, 4>::full([2, 2, 3, 2], 0.25, &device);
+    input.initial_state = Some(initial.clone());
+    let expected_state = TensorData::new(vec![0.25_f32; 24], [2, 2, 3, 2]);
+    for execute in [
+        recurrent_gated_delta_rule::<TestBackend>,
+        chunked_gated_delta_rule::<TestBackend>,
+    ] {
+        let error = execute(input.clone(), DeltaRuleConfig::default())
+            .expect_err("invalid external geometry must fail before tensor math");
+        let crate::Error::Shape {
+            tensor,
+            expected,
+            actual,
+        } = error
+        else {
+            panic!("expected shape context {context}, got {error}");
+        };
+        assert_eq!(tensor, context);
+        assert_eq!(expected, expected_shape);
+        assert_eq!(actual, actual_shape);
+        // Compare against independent host values, not another tensor alias.
+        assert_eq!(initial.dims(), [2, 2, 3, 2]);
+        assert_eq!(initial.dtype(), DType::F32);
+        initial.to_data().assert_eq(&expected_state, true);
+    }
+}
+
+/// Empty batches are invalid, while a unit-width convolution needs no history.
+#[test]
+fn delta_public_contract_state_construction_checks_batch_and_zero_history() {
+    let device = Default::default();
+    let mut config = GatedDeltaNetConfig::new(5, 2, 6, 3, 2);
+    let error = GatedDeltaNetState::<TestBackend>::zeros(&config, 0, &device)
+        .expect_err("a recurrent state must have at least one batch row");
+    assert!(
+        matches!(error, crate::Error::Configuration { field, reason }
+        if field == "delta_net.batch_size" && reason == "must be non-zero")
+    );
+
+    // Two key heads feed six value heads. The convolution holds Q, K and V,
+    // hence 2*(2*3) + 6*2 = 24 channels, independent of batch and kernel width.
+    for batch in [1, 3] {
+        for kernel in [1, 4] {
+            config.convolution_kernel = kernel;
+            let state = GatedDeltaNetState::<TestBackend>::zeros(&config, batch, &device)
+                .expect("valid grouped-head state");
+            assert_eq!(state.convolution.dims(), [batch, 24, kernel - 1]);
+            assert_eq!(state.convolution.dtype(), DType::F32);
+            assert_eq!(state.recurrent.dims(), [batch, 6, 3, 2]);
+            assert_eq!(state.recurrent.dtype(), DType::F32);
+            assert_eq!(
+                state.convolution.to_data().to_vec::<f32>().unwrap(),
+                vec![0.0; batch * 24 * (kernel - 1)]
+            );
+            assert_eq!(
+                state.recurrent.to_data().to_vec::<f32>().unwrap(),
+                vec![0.0; batch * 6 * 3 * 2]
+            );
+        }
+    }
+}
+
+/// Every empty query axis is rejected identically by recurrence and chunked prefill.
+#[test]
+fn delta_public_contract_rule_rejects_each_empty_query_axis() {
+    let device = Default::default();
+    for axis in 0..4 {
+        let mut input = fixture(2);
+        let mut shape = [2, 2, 2, 3];
+        shape[axis] = 0;
+        input.query = Tensor::from_data(TensorData::new(Vec::<f32>::new(), shape), &device);
+        assert_rule_shape_contract(
+            input,
+            "delta_net.query",
+            "non-empty [batch, sequence, heads, key_width]",
+            &format!("{shape:?}"),
+        );
+    }
+}
+
+/// Value batch/time/head axes must align, and its independent value width is nonzero.
+#[test]
+fn delta_public_contract_rule_rejects_value_alignment_and_empty_width() {
+    let device = Default::default();
+    for shape in [[1, 2, 2, 2], [2, 1, 2, 2], [2, 2, 1, 2], [2, 2, 2, 0]] {
+        let mut input = fixture(2);
+        input.value = Tensor::from_data(
+            TensorData::new(vec![0.5_f32; shape.iter().product()], shape),
+            &device,
+        );
+        assert_rule_shape_contract(
+            input,
+            "delta_net.value",
+            "[2, 2, 2, value_width>0]",
+            &format!("{shape:?}"),
+        );
+    }
+}
+
+/// Decay axes cannot broadcast accidentally; a corrected scalar input has a host oracle.
+#[test]
+fn delta_public_contract_decay_shape_validation_and_scalar_recurrence() {
+    let device = Default::default();
+    for shape in [[1, 2, 2], [2, 1, 2], [2, 2, 1]] {
+        let mut input = fixture(2);
+        input.log_decay = Tensor::full(shape, -0.2, &device);
+        assert_rule_shape_contract(
+            input,
+            "delta_net.log_decay",
+            "[2, 2, 2]",
+            &format!("{shape:?}"),
+        );
+    }
+
+    let log_decay = 0.8_f32.ln();
+    let initial = Tensor::<TestBackend, 4>::full([1, 1, 1, 1], 1.25, &device);
+    let input = DeltaRuleInput {
+        query: Tensor::full([1, 1, 1, 1], 2.0, &device),
+        key: Tensor::full([1, 1, 1, 1], 3.0, &device),
+        value: Tensor::full([1, 1, 1, 1], 4.0, &device),
+        log_decay: Tensor::full([1, 1, 1], log_decay, &device),
+        beta: Tensor::full([1, 1, 1], 0.5, &device),
+        initial_state: Some(initial.clone()),
+        token_mask: None,
+    };
+    // For scalar normalized q,k, S' = exp(g)S + k*beta*(v-k*exp(g)S)
+    // and y=q*S'. Use host f64 arithmetic, independently of either tensor path.
+    let epsilon = DeltaRuleConfig::default().normalization_epsilon;
+    let q = 2.0 / (4.0 + epsilon).sqrt();
+    let k = 3.0 / (9.0 + epsilon).sqrt();
+    let decayed = f64::from(log_decay).exp() * 1.25;
+    let expected_state = decayed + k * 0.5 * (4.0 - k * decayed);
+    let expected_value = q * expected_state;
+    for execute in [
+        recurrent_gated_delta_rule::<TestBackend>,
+        chunked_gated_delta_rule::<TestBackend>,
+    ] {
+        let output = execute(input.clone(), DeltaRuleConfig::default()).unwrap();
+        assert_eq!(output.values.dims(), [1, 1, 1, 1]);
+        assert_eq!(output.values.dtype(), DType::F32);
+        assert_eq!(output.final_state.dims(), [1, 1, 1, 1]);
+        assert_eq!(output.final_state.dtype(), DType::F32);
+        for (tensor, expected) in [
+            (output.values, expected_value),
+            (output.final_state, expected_state),
+        ] {
+            let values = tensor.to_data().to_vec::<f32>().unwrap();
+            assert_eq!(values.len(), 1);
+            assert!(values[0].is_finite());
+            assert!((f64::from(values[0]) - expected).abs() < 1e-6);
+        }
+        assert_eq!(initial.to_data().to_vec::<f32>().unwrap(), [1.25]);
+    }
+}
