@@ -200,13 +200,24 @@ avoids guessing output identities from Rust's ambiguous Makefile target spelling
 Its tiny native tests cover direct stable/nightly rustc and an actual Cargo
 workspace library/unit build. Enable them with `TFM_COMPILER_CAPTURE_NATIVE_TESTS=1`.
 
-The wrapper is not yet automatically used by the release runner. It requires
-explicit existing capture/build-output directories and a Cargo workspace-wrapper
-selection; preexisting cache hits are **not** empty compiler input inventories.
-Later integration must require complete compiler-invocation coverage, supported
-producer identities, source hashes, and matches to the exact binaries consumed
-by LLVM. `capture_valid` means observed artifact bytes were retained consistently,
-not that dependencies, warnings or exclusions have been qualified.
+The runner now offers [opt-in native compiler evidence](scripts/COVERAGE_EVIDENCE.md)
+with `--coverage-compiler-evidence`. This requires fresh captures for every selected
+target, unchanged compiler-reported inputs, and exact identities for the production
+library and test binaries consumed by LLVM. It removes upstream filename filters;
+exactly one pinned cargo-llvm-cov option notice is retained, while every compiler
+or LLVM warning still fails. Tiny native fixtures exercise the complete runner,
+including production code under a directory named `tests`. A full-crate run of
+this mode remains pending. Neither this integration nor `capture_valid` qualifies
+production-only exclusions or arbitrary procedural-macro input closure.
+
+Shared-target worktree validation needs special care. During parallel test-only
+edits, ordinary Cargo reused another worktree's test executable and omitted a new
+test while reporting `Fresh`. Distinct `RUSTC_WORKSPACE_WRAPPER` paths partition
+workspace artifacts while retaining dependency caches; verify the actual test
+inventory and dep-info checkout identity. Do not treat a fast cache hit as proof
+of the intended source. `cargo clippy` replaces that environment variable with
+its own driver, so setting it alone does **not** isolate Clippy. The opt-in coverage
+runner creates its own unique wrapper and rejects inherited compiler overrides.
 
 The first restricted structural extraction (`ab47117`) moves only terminal
 `cfg(test)` modules in `error.rs`, `checkpoint/dtype.rs`, and `cache/config.rs`

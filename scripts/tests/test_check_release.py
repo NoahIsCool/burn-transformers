@@ -497,12 +497,15 @@ class ReleaseGateTests(unittest.TestCase):
 
         manifest = tomllib.loads((GATES.CRATE / "Cargo.toml").read_text())
         self.assertTrue(all(pattern.startswith("/") for pattern in manifest["package"]["include"]))
+        self.assertIn("/scripts/COVERAGE_EVIDENCE.md", manifest["package"]["include"])
+        self.assertTrue((GATES.CRATE / "scripts/COVERAGE_EVIDENCE.md").is_file())
 
     def test_package_listing_checks_the_actual_cargo_inventory(self):
         """Allow model source but reject artifact trees, weights, and bytecode."""
 
         base = "Cargo.toml\nCargo.lock\nREADME.md\nsrc/lib.rs\n"
         self.assertEqual(GATES.validate_package_listing(base + "src/models/t5.rs\n"), 5)
+        self.assertEqual(GATES.validate_package_listing(base + "scripts/COVERAGE_EVIDENCE.md\n"), 5)
         self.assertEqual(GATES.validate_package_listing("warning: manifest has no homepage\n  |\n  = note: docs\n" + base), 4)
         for entry in ("models/model/README.md", "target/package.md", "fuzz/README.md", "nested/Cargo.lock", "tests/weights.safetensors", "tests/weights.bpk", "scripts/__pycache__/x.pyc", "scripts/coverage-layout/target/debug/build.rs", "scripts/coverage-layout/Cargo.toml", "scripts/coverage-layout/src/lib.rs", "scripts/.git/config", "/tmp/README.md", "src/../secret.md", "Cargo.lock"):
             with self.subTest(entry=entry), self.assertRaises(ValueError):

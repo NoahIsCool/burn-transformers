@@ -1381,6 +1381,13 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   Initial test-module separation preserves production dependencies and test
   identities, and native compiler-artifact capture now has isolated Cargo/rustc
   fixtures. These development tools do not yet authorize coverage exclusions.
+  The [opt-in runner](scripts/COVERAGE_EVIDENCE.md) now binds fresh production
+  and test artifacts to compiler-reported inputs and the exact native LLVM
+  export, without upstream filename filters. Native fixture success is not a
+  full-crate production-only qualification. Parallel work also exposed Cargo
+  reusing another worktree's test binary in a shared target directory; distinct
+  workspace wrappers and explicit test/dep-info identities protect ordinary
+  test runs. Clippy overrides that wrapper setting and needs separate validation.
 - **Public generation overhead has its own benchmark protocol.** Qwen's
   existing model-API loop remains unchanged; a separate ignored benchmark now
   times actual `generate_causal` calls through automatic model dispatch, including
