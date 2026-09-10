@@ -112,6 +112,9 @@ class SmallModelRefreshRecords(unittest.TestCase):
         self.assertEqual(natural["mode"], "greedy_public_generate_causal_coordinator")
         self.assertIsNone(natural["first_token_latency"])
         self.assertIsNone(natural["model_only_time"])
+        summary = read_record("manifest.json")["results"]["qwen_public"]
+        self.assertEqual(summary["total_call_median_seconds"], natural["total_time"]["median_seconds"])
+        self.assertEqual(summary["total_call_p95_seconds"], natural["total_time"]["p95_seconds"])
         rows = natural["per_repetition_outputs"]
         self.assertEqual(len(rows), 13)
         self.assertEqual([row["partition"] for row in rows], ["warmup"] * 3 + ["measured"] * 10)
@@ -172,6 +175,9 @@ class SmallModelRefreshRecords(unittest.TestCase):
             self.assertFalse(report["timing_comparable_to_uninstrumented_series"])
             self.assertIsNone(report["host_device_memory_split"])
             self.assertEqual(report["phase_count"], 93)
+            manifest_memory = read_record("manifest.json")["results"]["memory"]
+            self.assertEqual(manifest_memory[model + "_observed_kernel_lifetime_high_water_bytes"],
+                             report["observed_kernel_reported_lifetime_max_physical_footprint_bytes"])
             phase_ids = []
             for group in report["phase_groups"]:
                 phase_ids.extend(group["phase_ids"])

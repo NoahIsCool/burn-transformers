@@ -319,6 +319,17 @@ failure propagation, and mid-batch callback cancellation. The CPU unit suite
 passes 914 tests with three existing ignores, and isolated all-target Clippy
 passes with warnings denied. No runtime inference code changed in this batch.
 
+The following parallel, test-only batches add 24 automatic-model/loader tests,
+22 Qwen/T5 cache-contract tests, and 12 artifact/packed-load integrity tests.
+They cover every automatic dispatch variant, live reset/reorder/truncate parity,
+foreign-cache rejection, byte-preserving failure of malformed pending writes,
+encoder binding, missing index-alias storage, duplicate escaped JSON keys,
+invalid manifest provenance, corrupted packed payloads, and source-close errors.
+Each worktree's applicable tests and isolated warning-denied Clippy pass. Together
+with the three generation regressions, this adds 61 tests without changing any
+runtime inference code. The combined snapshot requires a fresh coverage run;
+the previously recorded diagnostic must not be reused against these new tests.
+
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is
 `819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d`.

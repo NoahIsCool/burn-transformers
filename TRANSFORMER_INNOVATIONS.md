@@ -1460,6 +1460,10 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   nonfinite logits only for that inactive row. Model-boundary errors and a
   callback failure midway through a batch stop subsequent emissions and decode
   calls. These are deterministic API/state tests, not a new hardware benchmark.
+  A further 58 parallel regressions exercise automatic dispatch/loading, Qwen/T5
+  cache transactions and binding, and artifact/packed-payload integrity. Their
+  worktree tests and warning-denied Clippy pass without runtime changes. The
+  combined suite is measured separately before making any new coverage claim.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.
