@@ -23,9 +23,9 @@ checkpoint is documented separately in
 
 The v0.1 candidate is limited to **Qwen3.5-0.8B and FLAN-T5-small**; other
 families remain experimental. Both have refreshed local correctness evidence.
-The latest [boundary-contract coverage review](acceptance/measurements/boundary-contract-coverage-20260910.json)
-exposes a gap: 88.27% crate-wide and 94.69% shared/core after excluding 79 verified
-test-only files, measured at `311fe3a` with 1,149 passing tests. Manual review
+The latest [tokenizer/cache-contract coverage review](acceptance/measurements/tokenizer-contract-coverage-20260910.json)
+exposes a gap: 89.48% crate-wide and 94.90% shared/core after excluding 79 verified
+test-only files, measured at `820d460` with 1,173 passing tests. Manual review
 binds every retained native region to authored production function items for
 that exact source/configuration; it adds no generated-code exclusions. This is
 not a general macro-closure proof, and both numerical coverage gates still fail.

@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "scope": "Tokenizer metadata fix and public checkpoint/cache contracts; exact captured Flex configuration, not release promotion",
+  "source_commit": "820d460e398cdc076a2da78311c4fa0f59e70ed0",
+  "src_tree_git_oid_including_test_sources": "bf6da39ba8f310df784a6dc6cd244286fb43ac99",
+  "features": ["std", "flex", "tokenizers", "chat-templates", "autodiff"],
+  "advertised_supported": false,
+  "release_gate_promotion": false,
+  "changes": {
+    "previous_coverage_commit": "311fe3a5769825401e97337b5f48d2f960bd93b4",
+    "new_unit_tests": 24,
+    "new_opt_in_integration_tests": 1,
+    "runtime_fix_commit": "06943a7",
+    "runtime_fix": "Special-token text must resolve to the actual tokenizer vocabulary; explicit IDs must be lossless u32 values and agree with that vocabulary. Malformed or absent text cannot be authorized by a supplied ID.",
+    "reproduction": "Three new public local-file regressions failed before the fix and passed afterward. Failure output was observed in the execution transcript, not archived as a separate raw log.",
+    "only_changed_production_source": "src/tokenization.rs",
+    "dependencies_changed": false,
+    "other_contracts": [
+      "DeltaNet tensor validation and independent scalar recurrence",
+      "Checkpoint read failure, descriptor validation, partial-progress reporting and corrected retry",
+      "Sparse and hybrid decoder mask/position validation with unchanged populated caches on error",
+      "Compacted valid-token parity and zero inactive diagnostics",
+      "Nemotron new-token auxiliary-loss oracle distinct from full-prefix loss",
+      "Empty generation batches and tokenizer encoding recovery"
+    ]
+  },
+  "tests": {
+    "unit_passed": 1071,
+    "unit_ignored": 3,
+    "ordinary_integration_passed": 102,
+    "ordinary_integration_ignored": 27,
+    "total_passed": 1173,
+    "total_ignored": 30,
+    "failed": 0,
+    "all_prior_unit_identities_and_statuses_retained": true,
+    "all_target_all_feature_clippy": "Passed with warnings denied using the isolated direct-driver wrapper",
+    "format_check": "Passed",
+    "fresh_full_model_inference_or_performance": false,
+    "fresh_package_verification": false
+  },
+  "local_artifact_checks": {
+    "qwen": "Existing validates_pinned_qwen35_local_artifacts test passed against Qwen3.5-0.8B revision 2fc06364715b967f1860aea9cf38778875588b17: strict config/header mapping, tokenizer special IDs and chat-template encoding",
+    "flan": "New flan_t5_small_tokenizer_matches_pinned_reference_ids test passed against official FLAN-T5-small revision 0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab: authenticated inventory, exact pinned prompt IDs, special IDs and padded masks",
+    "scope": "Local artifact/tokenizer checks only; neither run allocated model parameters or supplied new logit, throughput or memory evidence"
+  },
+  "capture": {
+    "directory": "target/release-gates/20260910T075656.339428Z",
+    "rustc_release": "1.94.0-nightly",
+    "rustc_commit": "4f14395c37db4c1be874e6b0ace6721674223c22",
+    "llvm_version": "21.1.8",
+    "source_inventory_sha256": "5bb61879d46989898a4c658e82d735cff990994db295a289796f7d936350fa18",
+    "production_inputs": 101,
+    "unit_inputs": 188,
+    "reported_files": 168,
+    "excluded_whole_test_files": 79,
+    "retained_production_files": 89,
+    "native_export": {
+      "file": "llvm-export/native-coverage.json",
+      "bytes": 83577094,
+      "sha256": "fe1af0b07a4758581bffcaaad0ed84b682209a28bb5c3cdc3b1bc12dbd6b138a"
+    },
+    "native_log": {
+      "file": "00-coverage.log",
+      "bytes": 118375,
+      "sha256": "df0579a69c958dbdc54abfc55e0b3eb4f599aa040cea04be846538439a1a70be"
+    },
+    "diagnostic": {
+      "file": "whole-test-file-diagnostic.json",
+      "bytes": 139759,
+      "sha256": "e3985cde42ffa9161eb5d979619afb6d68845a69a790c1a2e4accb96097b0cb5"
+    }
+  },
+  "authored_production_ownership": {
+    "qualified": true,
+    "scope": "Manual review of exact source/configuration/native capture under the trusted compiler/tool boundary; not arbitrary procedural-macro I/O attestation",
+    "native_function_instantiations": 9021,
+    "native_regions": 159675,
+    "unmatched_regions": 0,
+    "mapped_lines_outside_function_item_spans": 0,
+    "ownership_includes_signatures": true,
+    "burn_module_declarations_reviewed": 48,
+    "burn_module_declaration_native_regions": 0,
+    "new_generated_code_exclusions": 0,
+    "test_dependent_external_module_sites": 78,
+    "generic_gate_flags_changed": false,
+    "independent_reauthentication": {
+      "path": "/private/tmp/tfm-coverage-reauth-20260910-tokenizer.OaGS28/proof.json",
+      "bytes": 83866,
+      "sha256": "d769e7bc318180cbb7ff2e2b943bb63f31bb27df8f5f1e979a6184929b5a4c9e",
+      "binding_exactly_reproduced": true,
+      "diagnostic_exactly_reproduced": true
+    }
+  },
+  "physical_coverage": {
+    "crate": {"covered": 32687, "lines": 36530, "percent": 89.47987955105393, "minimum_percent": 90, "meets_threshold": false},
+    "shared": {"covered": 15542, "lines": 16377, "percent": 94.90138609024852, "minimum_percent": 95, "meets_threshold": false},
+    "newly_covered_lines": {"crate": 455, "shared": 47},
+    "denominator_change_from_previous_capture": 13,
+    "denominator_change_source": "Authored tokenizer validation, retained without exclusions",
+    "branch_coverage_claim": false
+  }
+}

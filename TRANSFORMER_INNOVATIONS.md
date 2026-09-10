@@ -829,6 +829,14 @@ the raw diagnostic; the 0.0001 shown in the matrix is recipe provenance, not a
 multiplier silently applied at inference. None of these losses changes inference
 logits internally.
 
+Cached diagnostics describe only the newly valid tokens, not the complete
+retained prefix. Tiny Nemotron regressions independently evaluate its sigmoid
+load-balancing formula in host F64 and distinguish new-token loss from a
+full-history loss. Qwen-MoE and DeepSeek regressions likewise compare gapped
+input masks with compact stateless inputs and require inactive diagnostic rows
+to remain zero. These are synthetic contract tests, not additional real-weight
+or training acceptance.
+
 **Implementation:** Qwen's pinned stack function in
 [`qwen3_moe/model.rs`](src/models/qwen3_moe/model.rs), shared
 [`load_balancing_loss`](src/moe.rs), and DeepSeek's sequence variant and
