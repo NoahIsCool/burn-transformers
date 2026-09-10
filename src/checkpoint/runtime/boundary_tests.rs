@@ -398,3 +398,147 @@ fn invalid_plan_has_no_target_and_preserves_checkpoint_error_chain() {
     assert_eq!(source.reads, 0);
     assert_eq!(source.closes, 1);
 }
+
+/// A minimal public source deliberately inherits every optional resource hook.
+struct ContractPayloadSource {
+    /// Independently valid payload whose descriptor may disagree with the plan.
+    payload: SourceTensor,
+    /// A transient read error consumed by exactly one attempt.
+    fail_next: bool,
+    /// Physical attempts, including rejected payloads and the transient failure.
+    attempts: usize,
+}
+
+impl TensorSource for ContractPayloadSource {
+    /// Returns a fallible payload without requiring resource or statistics hooks.
+    fn read_tensor(&mut self, source: &PlannedSource) -> crate::checkpoint::Result<SourceTensor> {
+        self.attempts += 1;
+        if std::mem::take(&mut self.fail_next) {
+            return Err(CheckpointError::Io {
+                operation: "read contract source",
+                path: source.shard.clone().into(),
+                source: io::Error::new(io::ErrorKind::Interrupted, "transient payload read"),
+            });
+        }
+        Ok(self.payload.clone())
+    }
+}
+
+/// One legal standalone slice does not require another split target or alias.
+fn contract_single_slice() -> LoadPlan {
+    plan(
+        vec![PlannedTensor {
+            target: "middle".into(),
+            sources: vec![descriptor("fused", 4, 0)],
+            transform: PlannedTransform::Slice {
+                axis: 0,
+                start: 1,
+                length: 2,
+            },
+            shape: vec![2],
+            dtype: TensorDType::F32,
+        }],
+        24,
+    )
+}
+
+/// Supplies four finite values with exact F32 representation and wire ordering.
+fn contract_fused_payload() -> SourceTensor {
+    SourceTensor::new(
+        "fused",
+        [4],
+        TensorDType::F32,
+        [1.0_f32, 2.0, 3.0, 4.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect(),
+    )
+    .unwrap()
+}
+
+/// Default source hooks permit retry without conflating optional and executor stats.
+#[test]
+fn checkpoint_contract_minimal_source_retries_a_lone_slice_after_io_failure() {
+    let plan = contract_single_slice();
+    let mut source = ContractPayloadSource {
+        payload: contract_fused_payload(),
+        fail_next: true,
+        attempts: 0,
+    };
+    let mut sink = RecordingSink::default();
+    assert!(
+        !source
+            .validate_tensor_descriptor(&plan.tensors[0].sources[0])
+            .unwrap()
+    );
+    let failure = execute_load_plan(&plan, &mut source, &mut sink).unwrap_err();
+    assert_eq!(failure.failed_target.as_deref(), Some("middle"));
+    assert!(matches!(&failure.cause, ExecutionFailureCause::Checkpoint(
+        CheckpointError::Io { operation: "read contract source", path, source })
+        if path == std::path::Path::new("model.safetensors") && source.kind() == io::ErrorKind::Interrupted));
+    assert_eq!(failure.stats, ExecutionStats::default());
+    assert!(failure.report.applied.is_empty());
+    assert!(sink.0.is_empty());
+    assert_eq!(source.attempts, 1);
+
+    let outcome = execute_load_plan(&plan, &mut source, &mut sink).unwrap();
+    assert_eq!(source.attempts, 2);
+    assert_eq!(outcome.report.applied, ["middle"]);
+    assert_eq!(outcome.stats.source_reads, 1);
+    assert_eq!(outcome.stats.source_payload_bytes, 16);
+    assert_eq!(outcome.stats.delivered_tensor_bytes, 8);
+    assert_eq!(outcome.stats.peak_host_staging_bytes, 24);
+    assert_eq!(outcome.stats.source, SourceStats::default());
+    assert_eq!(sink.0.len(), 1);
+    assert_eq!(sink.0[0].1.shape.to_vec(), [2]);
+    assert_eq!(sink.0[0].1.to_vec::<f32>().unwrap(), [2.0, 3.0]);
+    assert!(plan.report.applied.is_empty());
+}
+
+/// Valid source buffers with wrong shape or dtype never count as verified reads.
+#[test]
+fn checkpoint_contract_source_metadata_rejection_permits_corrected_retry() {
+    let plan = contract_single_slice();
+    let original = contract_fused_payload();
+    for payload in [
+        SourceTensor::new("fused", [2, 2], TensorDType::F32, original.bytes().to_vec()).unwrap(),
+        SourceTensor::new(
+            "fused",
+            [4],
+            TensorDType::F64,
+            [1.0_f64, 2.0, 3.0, 4.0]
+                .into_iter()
+                .flat_map(f64::to_le_bytes)
+                .collect(),
+        )
+        .unwrap(),
+    ] {
+        let expected_reason = format!(
+            "source returned name `fused`, shape {:?}, dtype {}; expected name `fused`, shape [4], dtype F32",
+            payload.shape(),
+            payload.dtype()
+        );
+        let mut source = ContractPayloadSource {
+            payload,
+            fail_next: false,
+            attempts: 0,
+        };
+        let mut sink = RecordingSink::default();
+        let failure = execute_load_plan(&plan, &mut source, &mut sink).unwrap_err();
+        assert_eq!(failure.failed_target.as_deref(), Some("middle"));
+        assert!(matches!(failure.cause, ExecutionFailureCause::Checkpoint(
+            CheckpointError::InvalidTensorPayload { tensor, reason })
+            if tensor == "fused" && reason == expected_reason));
+        assert!(failure.report.applied.is_empty());
+        assert_eq!(failure.stats, ExecutionStats::default());
+        assert!(sink.0.is_empty());
+        source.payload = original.clone();
+        let outcome = execute_load_plan(&plan, &mut source, &mut sink).unwrap();
+        assert_eq!(source.attempts, 2);
+        assert_eq!(outcome.report.applied, ["middle"]);
+        assert_eq!(outcome.stats.source_reads, 1);
+        assert_eq!(outcome.stats.source_payload_bytes, 16);
+        assert_eq!(sink.0.len(), 1);
+        assert_eq!(sink.0[0].1.to_vec::<f32>().unwrap(), [2.0, 3.0]);
+    }
+}

@@ -2372,6 +2372,192 @@ fn mapping_contract_split_casts_respect_mixed_precision_and_alias_storage() {
     assert_eq!(plan.report.aliased.len(), 1);
 }
 
+/// A small real destination retains writes and aliases in publication order.
+#[derive(Default)]
+struct CheckpointContractSink {
+    /// Only successfully installed targets are represented here.
+    tensors: BTreeMap<String, std::sync::Arc<burn::tensor::TensorData>>,
+    /// Distinguishes writes from tied aliases and detects premature publication.
+    events: Vec<String>,
+}
+
+impl TensorSink for CheckpointContractSink {
+    type Error = std::io::Error;
+
+    /// Stores a completed target; a retry may replace an earlier complete value.
+    fn write_tensor(
+        &mut self,
+        target: &str,
+        data: burn::tensor::TensorData,
+    ) -> std::io::Result<()> {
+        self.tensors
+            .insert(target.into(), std::sync::Arc::new(data));
+        self.events.push(format!("write:{target}"));
+        Ok(())
+    }
+
+    /// Shares the owner's allocation only after it exists in the destination.
+    fn alias_tensor(&mut self, target: &str, owner: &str) -> std::io::Result<()> {
+        let data = self
+            .tensors
+            .get(owner)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("missing alias owner"))?;
+        self.tensors.insert(target.into(), data);
+        self.events.push(format!("alias:{target}:{owner}"));
+        Ok(())
+    }
+}
+
+/// A lost later shard preserves exact strict diagnostics and supports disk repair.
+#[test]
+fn checkpoint_contract_missing_second_shard_keeps_partial_report_then_retries() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "a.safetensors",
+        &[FixtureTensor::new("first", TensorDType::F32, [1])],
+    );
+    write_shard(
+        temp.path(),
+        "z.safetensors",
+        &[
+            FixtureTensor::new("second", TensorDType::F32, [1]),
+            FixtureTensor::new("vision.weight", TensorDType::F32, [1]),
+        ],
+    );
+    write_index(
+        temp.path(),
+        &[
+            ("first", "a.safetensors"),
+            ("second", "z.safetensors"),
+            ("vision.weight", "z.safetensors"),
+        ],
+        Some(12),
+    );
+    let options = LoadOptions {
+        allow_missing: vec![KeyMatcher::exact("optional")],
+        allow_unexpected: vec![KeyMatcher::prefix("vision.")],
+        ..LoadOptions::default()
+    };
+    let manifest = discover_checkpoint(temp.path(), &options).unwrap();
+    let expected =
+        ["first", "second", "tied", "optional"].map(|name| ExpectedTensor::new(name, [1]));
+    let mut mapping = MappingPlan::new();
+    mapping
+        .map("first", "first")
+        .map("second", "second")
+        .alias("first", "tied");
+    let plan = build_load_plan(&manifest, &expected, &mapping, &options).unwrap();
+    assert!(plan.report.is_strictly_valid());
+    let original_report = plan.report.clone();
+    let missing_path = &manifest.shard("z.safetensors").unwrap().path;
+    let bytes = fs::read(missing_path).unwrap();
+    fs::remove_file(missing_path).unwrap();
+
+    let mut sink = CheckpointContractSink::default();
+    let failure = execute_local_load_plan(&manifest, &plan, &mut sink).unwrap_err();
+    assert_eq!(failure.failed_target.as_deref(), Some("second"));
+    assert!(matches!(&failure.cause, ExecutionFailureCause::Checkpoint(
+        CheckpointError::ArtifactChanged { path, reason })
+        if path == missing_path && reason.contains("cannot canonicalize")));
+    assert_eq!(failure.report.applied, ["first"]);
+    assert_eq!(failure.report.allowlisted_missing, ["optional"]);
+    assert_eq!(failure.report.allowlisted_ignored, ["vision.weight"]);
+    assert_eq!(failure.report.aliased, original_report.aliased);
+    assert!(failure.report.is_strictly_valid());
+    assert_eq!(failure.stats.tensors_applied, 1);
+    assert_eq!(failure.stats.aliases_applied, 0);
+    assert_eq!(failure.stats.source_reads, 1);
+    assert_eq!(failure.stats.source_payload_bytes, 4);
+    assert_eq!(failure.stats.source.shard_open_order, ["a.safetensors"]);
+    assert_eq!(sink.events, ["write:first"]);
+    assert_eq!(sink.tensors.len(), 1);
+    assert_eq!(sink.tensors["first"].to_vec::<f32>().unwrap(), [0.0]);
+
+    fs::write(missing_path, bytes).unwrap();
+    let outcome = execute_local_load_plan(&manifest, &plan, &mut sink).unwrap();
+    let mut expected_report = original_report.clone();
+    expected_report.applied = vec!["first".into(), "second".into(), "tied".into()];
+    assert_eq!(outcome.report, expected_report);
+    assert_eq!(outcome.stats.tensors_applied, 2);
+    assert_eq!(outcome.stats.aliases_applied, 1);
+    assert_eq!(outcome.stats.source_reads, 2);
+    assert_eq!(outcome.stats.source_payload_bytes, 8);
+    assert_eq!(
+        outcome.stats.source.shard_open_order,
+        ["a.safetensors", "z.safetensors"]
+    );
+    assert_eq!(outcome.stats.source.max_open_shards, 1);
+    assert_eq!(
+        sink.events,
+        [
+            "write:first",
+            "write:first",
+            "write:second",
+            "alias:tied:first"
+        ]
+    );
+    assert_eq!(sink.tensors.len(), 3);
+    assert_eq!(sink.tensors["tied"], sink.tensors["first"]);
+    assert!(std::sync::Arc::ptr_eq(
+        &sink.tensors["tied"],
+        &sink.tensors["first"]
+    ));
+    assert_eq!(plan.report, original_report);
+}
+
+/// A malformed preferred index must not silently select another valid checkpoint.
+#[test]
+fn checkpoint_contract_bad_preferred_index_requires_explicit_selection_or_repair() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "model.safetensors",
+        &[FixtureTensor::new("single", TensorDType::F32, [1])],
+    );
+    write_shard(
+        temp.path(),
+        "part.safetensors",
+        &[FixtureTensor::new("indexed", TensorDType::F32, [1])],
+    );
+    let index = temp.path().join("model.safetensors.index.json");
+    fs::write(&index, br#"{"weight_map": ["not-an-object"]}"#).unwrap();
+    let before = fs::read(&index).unwrap();
+    let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
+    assert_unique_map_type_error(error, "checkpoint index", &index, "sequence", before.len());
+    let single = discover_checkpoint(
+        temp.path(),
+        &LoadOptions {
+            artifact: ArtifactSelection::Single("model.safetensors".into()),
+            ..LoadOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(single.tensor("single").is_some());
+    assert!(single.tensor("indexed").is_none());
+    assert_eq!(fs::read(&index).unwrap(), before);
+
+    write_index(temp.path(), &[("indexed", "part.safetensors")], Some(4));
+    let repaired = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap();
+    assert!(matches!(repaired.source, ArtifactSource::Index { .. }));
+    assert!(repaired.tensor("indexed").is_some());
+    assert!(repaired.tensor("single").is_none());
+    let expected = [ExpectedTensor::new("indexed", [1])];
+    let plan = build_load_plan(
+        &repaired,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &LoadOptions::default(),
+    )
+    .unwrap();
+    let mut sink = CheckpointContractSink::default();
+    let outcome = execute_local_load_plan(&repaired, &plan, &mut sink).unwrap();
+    assert_eq!(outcome.report.applied, ["indexed"]);
+    assert!(outcome.report.is_strictly_valid());
+    assert_eq!(sink.events, ["write:indexed"]);
+}
+
 proptest! {
     #[test]
     fn dtype_storage_bytes_scale_linearly(elements in 0_u64..1_000_000) {
