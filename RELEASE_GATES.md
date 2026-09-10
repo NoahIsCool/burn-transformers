@@ -182,12 +182,42 @@ test binaries, or qualify test-only exclusions. Both qualification flags remain
 false, and neither coverage threshold nor denominator policy changes here.
 
 The independent [dep-info parser](scripts/coverage_dependencies.py) is tested
-against four tiny Rust 1.92 compiler fixtures. It preserves escaped-space
+against eight tiny native compilations spanning exact Rust 1.92 and the pinned
+Rust 1.94 nightly coverage compiler. Their filename/environment escaping and
+rule-writing code are byte-identical; their source-input collection differs and
+is documented separately. The parser preserves escaped-space
 dependencies and separates environment comments while rejecting unsupported or
 ambiguous native path spellings. It does not resolve paths, identify output
 executables, or prove exclusions. Enable its exact-compiler differentials with
-`TFM_DEPINFO_NATIVE_TESTS=1`; its producer pin must not be silently generalized
-to another coverage toolchain. No dependency-derived exclusions are adopted yet.
+`TFM_DEPINFO_NATIVE_TESTS=1`; its two producer pins must not be silently generalized
+to another toolchain. No dependency-derived exclusions are adopted yet.
+
+The [development compiler wrapper](scripts/coverage_compiler.py) records rustc's
+native JSON artifact messages, including the actual dep-info and compiled-output
+paths. It forwards stderr, bounds protocol reads, hashes output bytes, retains
+dep-info, and preserves native failures separately from capture errors. This
+avoids guessing output identities from Rust's ambiguous Makefile target spelling.
+Its tiny native tests cover direct stable/nightly rustc and an actual Cargo
+workspace library/unit build. Enable them with `TFM_COMPILER_CAPTURE_NATIVE_TESTS=1`.
+
+The wrapper is not yet automatically used by the release runner. It requires
+explicit existing capture/build-output directories and a Cargo workspace-wrapper
+selection; preexisting cache hits are **not** empty compiler input inventories.
+Later integration must require complete compiler-invocation coverage, supported
+producer identities, source hashes, and matches to the exact binaries consumed
+by LLVM. `capture_valid` means observed artifact bytes were retained consistently,
+not that dependencies, warnings or exclusions have been qualified.
+
+The first restricted structural extraction (`ab47117`) moves only terminal
+`cfg(test)` modules in `error.rs`, `checkpoint/dtype.rs`, and `cache/config.rs`
+to explicit sibling paths. The reviewed worktree comparison preserves all
+production-prefix bytes, 101 production dependencies, and 906 unit-test identities;
+unit dependencies change only from 115 to 118 for the three new files. The full
+release CPU suite passes 999 tests with 29 existing ignores. Exact before/after
+commands and hashes remain locally in `/private/tmp/tfm-extract-comparison.json`
+and `/private/tmp/tfm-extract-validation.json`. That comparison records a Cargo
+cache-bookkeeping warning and is structural evidence, not a warning-free coverage
+run. No inline spans or new files are excluded by the gate yet.
 
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is

@@ -1378,6 +1378,16 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   A fresh `9ff597f` run passes the unchanged legacy 90%/95% thresholds
   (90.1704% crate-wide, 95.0594% shared/core). Those counts still include inline
   tests and expansions; production-only qualification remains open.
+  Initial test-module separation preserves production dependencies and test
+  identities, and native compiler-artifact capture now has isolated Cargo/rustc
+  fixtures. These development tools do not yet authorize coverage exclusions.
+- **Public generation overhead has its own benchmark protocol.** Qwen's
+  existing model-API loop remains unchanged; a separate ignored benchmark now
+  times actual `generate_causal` calls through automatic model dispatch, including
+  cache allocation, selection, log-probability readback, and stopping. It validates
+  all 32 oracle tokens in each of three warmups and ten measured repetitions.
+  Compilation and pure protocol tests pass; measured hardware execution is still
+  pending and is not inferred from the older model-loop baseline.
 - **Memory measurements distinguish storage from observed process footprint.**
   The test-only Darwin supervisor brackets synchronized phases, samples a real
   idle baseline, and retains raw timestamps, gaps, and errors. The [executed Qwen/FLAN series](acceptance/measurements/small-model-metal-memory-20260909.json)
