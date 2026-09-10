@@ -1,0 +1,28 @@
+{
+  "latest_unchanged": true,
+  "cases": [
+    {
+      "command": [
+        "target/release/examples/grokking_train",
+        "--resume",
+        "--output",
+        "target/mechanistic/grokking-final-source-smoke",
+        "--steps",
+        "1"
+      ],
+      "exit_code": 1,
+      "stderr": "Error: \"--steps 1 is below saved step 3; use --analyze for a read-only replay\"\n"
+    },
+    {
+      "command": [
+        "target/release/examples/grokking_train",
+        "--resume",
+        "--output",
+        "target/mechanistic/grokking-final-source-smoke",
+        "--benchmark"
+      ],
+      "exit_code": 1,
+      "stderr": "Error: \"benchmark runs are disposable timing probes and cannot resume\"\n"
+    }
+  ]
+}

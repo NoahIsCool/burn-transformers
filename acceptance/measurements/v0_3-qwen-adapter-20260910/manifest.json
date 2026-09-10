@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-10",
+  "scope": "Native Burn training-task smoke on eight synthetic token-label pairs; no held-out quality, sentiment, new checkpoint-support, or performance qualification",
+  "accepted_for_performance": false,
+  "held_out_evaluation": false,
+  "build_command": [
+    "cargo",
+    "build",
+    "--release",
+    "--locked",
+    "--offline",
+    "--features",
+    "autodiff",
+    "--example",
+    "train_qwen_adapter"
+  ],
+  "binary_sha256": "ff17144fe82123854313cf1c65424e7b3492e73e18ed810cbb417b4af0e0d65d",
+  "source_sha256": {
+    "examples/train_qwen_adapter.rs": "ede98239a84116aa9ead57ecd1e6f58000e8fd5e7fb4510b9c118ed2957122b9",
+    "examples/training/qwen_adapter_support.rs": "6bfdd97350739c45ddbd2b03b7fac099aaa8d6029fbbc81473ba73479d1241bb",
+    "src/training.rs": "1c8fbfec52216614d9aad23959a1a7ce3679759393eaf05f4cbf858f84d9b532",
+    "src/models/qwen3_5/model.rs": "ede77a72314c975a31b72a034b4ca3cfcef1d0370504c27221e388c024ce22e4",
+    "src/intervention.rs": "47fa79ac7e19e3a84dd1c071115ce2e2ab8eda2260febfdfc21f8f141b64e454",
+    "Cargo.toml": "1a30f3b3a5bedea787358fde10d16ea8694ed3810415f5f34cd533f9d1e4eddb",
+    "Cargo.lock": "7c57f9830fb5b93195fb8ac765106dd9db91234f9130e9f66494fbec0d808b9d"
+  },
+  "runs": {
+    "random": {
+      "execution_record": "random-execution.json",
+      "report": "random-report.json",
+      "generated_directory": "/var/folders/hh/541wrb613833x7hpvqymn_rc0000gn/T/qwen-adapter-training-Dj3fRz",
+      "generated_artifacts": {
+        "report.json": {
+          "bytes": 1191,
+          "sha256": "9d33598c6adbcbd9047f7ca9d924da531de77447afc95bba612b6934fb2f3380"
+        },
+        "trainable-midpoint.bin": {
+          "bytes": 623,
+          "sha256": "6f23d8eac258b8dfdf9007bde0952dda62c82168e0cf8f802bc8e21c26a4f23b"
+        },
+        "backbone_recipe.json": {
+          "bytes": 2939,
+          "sha256": "27e95ae45cba206f47f412c78cec57bf1b6ae9f082b30e0f0a7eec90a0d4664c"
+        },
+        "adam-final.bin": {
+          "bytes": 1048,
+          "sha256": "516f118ba10a17988a327786220fc2e471df2c391acfcb8483ee0278a82db4d0"
+        },
+        "adam-midpoint.bin": {
+          "bytes": 1048,
+          "sha256": "a5cb29595ee33b4b8f5be5bcd551ea00c7ca0757ddc8c9f8beb1aee46399480e"
+        },
+        "trainable-final.bin": {
+          "bytes": 623,
+          "sha256": "1a3bd1769b7b10773828f9b993f856123b1ca8b08112f9be47fa0633ba5eb7a2"
+        }
+      },
+      "accepted": true
+    },
+    "pretrained": {
+      "execution_record": "pretrained-execution.json",
+      "report": "pretrained-report.json",
+      "generated_directory": "/var/folders/hh/541wrb613833x7hpvqymn_rc0000gn/T/qwen-adapter-training-LUYBlk",
+      "generated_artifacts": {
+        "report.json": {
+          "bytes": 1198,
+          "sha256": "78dd398e41a2c4ac0f8d4111bf3fd8b346384871df5a04991f5bbcda30a8cdfe"
+        },
+        "trainable-midpoint.bin": {
+          "bytes": 143699,
+          "sha256": "ed5b973d998dc15cbae428167edeef528044af7eaeb1c0d63a0c1aea8640296b"
+        },
+        "backbone_recipe.json": {
+          "bytes": 5187,
+          "sha256": "53e16d4019a29d7328ec253b0aeb82bf7bb9f0c6e1dfb9466325e83d67b71d2a"
+        },
+        "adam-final.bin": {
+          "bytes": 287200,
+          "sha256": "b8fa5eb90d61041d58a33d65a4b0e7399101b634dca16de8194f91c8e949f0cb"
+        },
+        "adam-midpoint.bin": {
+          "bytes": 287200,
+          "sha256": "df7b35bc12e32aa97f76538c41d8f8a0ce9ea8fcb09eea0fad6e1d806f7ccb59"
+        },
+        "trainable-final.bin": {
+          "bytes": 143699,
+          "sha256": "4e4c6daa09a23ec9e3439327765248abf6da15aaf299589198da46e86bca9c1d"
+        }
+      },
+      "accepted": true
+    }
+  },
+  "checkpoint_provenance": "../qwen-prefix-v02-20260910.json",
+  "source_unchanged_during_execution": true,
+  "artifacts": {
+    "pretrained-report.json": {
+      "bytes": 1198,
+      "sha256": "78dd398e41a2c4ac0f8d4111bf3fd8b346384871df5a04991f5bbcda30a8cdfe"
+    },
+    "random-execution.json": {
+      "bytes": 491,
+      "sha256": "c0bf36ccd971e42cda2bc0128d3eb953fef98949b9bbe05818955973d4216963"
+    },
+    "pretrained-execution.json": {
+      "bytes": 659,
+      "sha256": "a35f861fd97e669b288db0dfee1305d8e03ee49dbbd0934c94530ed89efcafad"
+    },
+    "random-report.json": {
+      "bytes": 1191,
+      "sha256": "9d33598c6adbcbd9047f7ca9d924da531de77447afc95bba612b6934fb2f3380"
+    },
+    "README.md": {
+      "bytes": 1338,
+      "sha256": "f19d9b93726c7d46514ae5bfb0ce898e2556d841e197a623c40cf74235e4bb7f"
+    },
+    "random-backbone_recipe.json": {
+      "bytes": 2939,
+      "sha256": "27e95ae45cba206f47f412c78cec57bf1b6ae9f082b30e0f0a7eec90a0d4664c"
+    },
+    "pretrained-backbone_recipe.json": {
+      "bytes": 5187,
+      "sha256": "53e16d4019a29d7328ec253b0aeb82bf7bb9f0c6e1dfb9466325e83d67b71d2a"
+    },
+    "executed-source/Cargo.toml": {
+      "bytes": 2907,
+      "sha256": "1a30f3b3a5bedea787358fde10d16ea8694ed3810415f5f34cd533f9d1e4eddb"
+    },
+    "executed-source/Cargo.lock": {
+      "bytes": 165947,
+      "sha256": "7c57f9830fb5b93195fb8ac765106dd9db91234f9130e9f66494fbec0d808b9d"
+    },
+    "executed-source/examples/train_qwen_adapter.rs": {
+      "bytes": 11892,
+      "sha256": "ede98239a84116aa9ead57ecd1e6f58000e8fd5e7fb4510b9c118ed2957122b9"
+    },
+    "executed-source/examples/training/qwen_adapter_support.rs": {
+      "bytes": 6386,
+      "sha256": "6bfdd97350739c45ddbd2b03b7fac099aaa8d6029fbbc81473ba73479d1241bb"
+    },
+    "executed-source/src/training.rs": {
+      "bytes": 7646,
+      "sha256": "1c8fbfec52216614d9aad23959a1a7ce3679759393eaf05f4cbf858f84d9b532"
+    },
+    "executed-source/src/intervention.rs": {
+      "bytes": 31225,
+      "sha256": "47fa79ac7e19e3a84dd1c071115ce2e2ab8eda2260febfdfc21f8f141b64e454"
+    },
+    "executed-source/src/models/qwen3_5/model.rs": {
+      "bytes": 46668,
+      "sha256": "ede77a72314c975a31b72a034b4ca3cfcef1d0370504c27221e388c024ce22e4"
+    }
+  }
+}

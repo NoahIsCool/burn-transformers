@@ -16,7 +16,9 @@ use burn::{module::Module, tensor::backend::Backend};
 use crate::{
     ArchitectureConfig, CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput,
     DecodeState, EncoderOutput, Error, ForwardOptions, Result, Seq2SeqInput, Seq2SeqLanguageModel,
-    Seq2SeqOutput, cache::CacheConfig,
+    Seq2SeqOutput,
+    cache::CacheConfig,
+    intervention::{Hooks, PointInfo},
 };
 
 use super::{
@@ -388,6 +390,46 @@ impl<B: Backend> AutoCausalLm<B> {
         }
     }
 
+    /// Lists the stateless activation points supported by the selected model.
+    ///
+    /// Qwen3.5/Qwen3.8 currently supports interventions. Other registered causal
+    /// families return a capability error rather than an empty, misleading catalog.
+    /// Loaded checkpoints expose this method through `loaded.model()`.
+    pub fn activation_points(&self) -> Result<Vec<PointInfo>> {
+        match self {
+            Self::Qwen3_5(model) => Ok(model.activation_points()),
+            _ => Err(self.unsupported_hooks_error()),
+        }
+    }
+
+    /// Observes or changes activations during the selected model's stateless forward.
+    ///
+    /// Qwen3.5/Qwen3.8 delegates to its concrete intervention implementation.
+    /// Other families fail before callbacks or model computation, including when
+    /// the collection is empty. Use [`Self::forward`] for ordinary execution.
+    /// Failed calls invalidate captures left from earlier runs of these hooks.
+    pub fn forward_with_hooks(
+        &self,
+        input: CausalLmInput<B>,
+        options: &ForwardOptions,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<CausalLmOutput<B>> {
+        match self {
+            Self::Qwen3_5(model) => model.forward_with_hooks(input, options, hooks),
+            _ => hooks
+                .run(Vec::new(), |_| Err(self.unsupported_hooks_error()))
+                // Add family context even when preflight rejects a named point.
+                .map_err(|_| self.unsupported_hooks_error()),
+        }
+    }
+
+    fn unsupported_hooks_error(&self) -> Error {
+        Error::BackendCapability(format!(
+            "activation interventions are not implemented for model_type `{}`; the automatic causal registry currently supports Qwen3.5/Qwen3.8",
+            self.config().model_type()
+        ))
+    }
+
     /// Allocates architecture-matched external decode state.
     pub fn new_decode_state(
         &self,
@@ -607,6 +649,29 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
     ) -> Result<Seq2SeqOutput<B>> {
         match self {
             Self::T5(model) => Seq2SeqLanguageModel::forward(model, input, options),
+        }
+    }
+
+    /// Lists the selected model's encoder and decoder activation points.
+    /// Loaded checkpoints expose this method through `loaded.model()`.
+    pub fn activation_points(&self) -> Result<Vec<PointInfo>> {
+        match self {
+            Self::T5(model) => Ok(model.activation_points()),
+        }
+    }
+
+    /// Observes or changes tensors during the complete stateless encoder-decoder graph.
+    ///
+    /// Delegates to T5's public intervention path, including its documented mask
+    /// and cache restrictions; see [`T5ForConditionalGeneration::forward_with_hooks`].
+    pub fn forward_with_hooks(
+        &self,
+        input: Seq2SeqInput<B>,
+        options: &ForwardOptions,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<Seq2SeqOutput<B>> {
+        match self {
+            Self::T5(model) => model.forward_with_hooks(input, options, hooks),
         }
     }
 

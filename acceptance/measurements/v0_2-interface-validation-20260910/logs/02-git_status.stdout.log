@@ -1,0 +1,151 @@
+ M CHANGELOG.md
+ M README.md
+ M RELEASE_GATES.md
+ M TRANSFORMER_INNOVATIONS.md
+ M scripts/check_release.py
+ M scripts/tests/test_check_release.py
+ M src/attention.rs
+ M src/lib.rs
+ M src/models/auto.rs
+ M src/models/auto_tests.rs
+ M src/models/custom.rs
+ M src/models/custom/causal.rs
+ M src/models/custom/common.rs
+ M src/models/custom/seq2seq.rs
+ M src/models/custom/tests.rs
+ M src/models/deepseek_v2/mla.rs
+ D src/models/deepseek_v2/mla_tests.rs
+ M src/models/deepseek_v2/model.rs
+ M src/models/deepseek_v2/model/decode.rs
+ M src/models/mod.rs
+ M src/models/qwen3_5.rs
+ M src/models/qwen3_5/load.rs
+ M src/models/qwen3_5/load_tests.rs
+ M src/models/qwen3_5/model.rs
+ M src/models/qwen3_5/model/decode.rs
+ M src/models/t5.rs
+ M src/models/t5/model.rs
+ M src/operations.rs
+ M src/operations_tests.rs
+ M tests/flan_t5_small.rs
+?? AGENTS.md
+?? EXPERIMENTS.md
+?? ROADMAP.md
+?? V0_2_INTERFACE.md
+?? acceptance/measurements/qwen-prefix-v02-20260910.json
+?? acceptance/measurements/qwen-prefix-v02-20260910/README.md
+?? acceptance/measurements/qwen-prefix-v02-20260910/compare_prefix.rs
+?? acceptance/measurements/qwen-prefix-v02-20260910/comparison_execution.json
+?? acceptance/measurements/qwen-prefix-v02-20260910/comparison_report.json
+?? acceptance/measurements/qwen-prefix-v02-20260910/example_execution.json
+?? acceptance/measurements/qwen-prefix-v02-20260910/example_execution_direct.json
+?? acceptance/measurements/qwen-prefix-v02-20260910/harness_build.json
+?? acceptance/measurements/qwen-prefix-v02-20260910/link_libraries.json
+?? acceptance/measurements/qwen-prefix-v02-20260910/replay.py
+?? acceptance/measurements/qwen-prefix-v02-20260910/replay_verification.json
+?? acceptance/measurements/qwen-prefix-v02-20260910/source_metadata.json
+?? acceptance/measurements/v0_2-flan-t5-small-flex-20260910/manifest.json
+?? acceptance/measurements/v0_2-flan-t5-small-flex-20260910/source-inventory.json
+?? acceptance/measurements/v0_2-flan-t5-small-flex-20260910/stderr.log
+?? acceptance/measurements/v0_2-flan-t5-small-flex-20260910/stdout.log
+?? acceptance/measurements/v0_2-interface-validation-20260910/logs/01-git_revision.stderr.log
+?? acceptance/measurements/v0_2-interface-validation-20260910/logs/01-git_revision.stdout.log
+?? acceptance/measurements/v0_2-interface-validation-20260910/logs/02-git_status.stderr.log
+?? acceptance/measurements/v0_2-interface-validation-20260910/logs/02-git_status.stdout.log
+?? acceptance/measurements/v0_2-interface-validation-20260910/manifest.json
+?? acceptance/measurements/v0_2-interface-validation-20260910/source-inventory-before.json
+?? acceptance/measurements/v0_2-interface-validation-20260910/validation_runner.py
+?? examples/README.md
+?? examples/activation_workbench.rs
+?? examples/attention_head_attribution.rs
+?? examples/clock_and_pizza.rs
+?? examples/custom_composition.rs
+?? examples/greater_than.rs
+?? examples/grokking_fourier.rs
+?? examples/mechanistic/attention_head_attribution.result.json
+?? examples/mechanistic/clock_and_pizza/README.md
+?? examples/mechanistic/clock_and_pizza/embedding_circles.png
+?? examples/mechanistic/clock_and_pizza/embedding_circles.svg
+?? examples/mechanistic/clock_and_pizza/manifest.json
+?? examples/mechanistic/clock_and_pizza/measure.rs
+?? examples/mechanistic/clock_and_pizza/model.rs
+?? examples/mechanistic/clock_and_pizza/plot.py
+?? examples/mechanistic/clock_and_pizza/prepare.py
+?? examples/mechanistic/clock_and_pizza/reference.py
+?? examples/mechanistic/clock_and_pizza/result.json
+?? examples/mechanistic/greater_than/README.md
+?? examples/mechanistic/greater_than/fixture.json
+?? examples/mechanistic/greater_than/manifest.json
+?? examples/mechanistic/greater_than/plot.py
+?? examples/mechanistic/greater_than/prepare.py
+?? examples/mechanistic/greater_than/reference.py
+?? examples/mechanistic/greater_than/result.json
+?? examples/mechanistic/greater_than/study.rs
+?? examples/mechanistic/greater_than/test_reference.py
+?? examples/mechanistic/greater_than/year_probabilities.png
+?? examples/mechanistic/greater_than/year_probabilities.svg
+?? examples/mechanistic/grokking.md
+?? examples/mechanistic/grokking_fourier.result.json
+?? examples/mechanistic/grokking_manifest.json
+?? examples/mechanistic/grokking_model.rs
+?? examples/mechanistic/grokking_prepare.py
+?? examples/mechanistic/grokking_reference.py
+?? examples/mechanistic/grokking_reference_logits.json
+?? examples/mechanistic/tuned_lens/README.md
+?? examples/mechanistic/tuned_lens/diagnose_reductions.py
+?? examples/mechanistic/tuned_lens/manifest.json
+?? examples/mechanistic/tuned_lens/plot.py
+?? examples/mechanistic/tuned_lens/prediction_quality.png
+?? examples/mechanistic/tuned_lens/prediction_quality.svg
+?? examples/mechanistic/tuned_lens/prepare.py
+?? examples/mechanistic/tuned_lens/reference.py
+?? examples/mechanistic/tuned_lens/reference_tests.py
+?? examples/mechanistic/tuned_lens/result.json
+?? examples/mechanistic/tuned_lens/study.rs
+?? examples/mechanistic/v0_2_examples.result.json
+?? examples/mla_encoder_decoder.rs
+?? examples/planned/README.md
+?? examples/planned/greater_than_protocol.md
+?? examples/planned/tuned_lens_protocol.md
+?? examples/qwen_prefix.rs
+?? examples/t5_classifier.rs
+?? examples/tuned_lens.rs
+?? src/attention_intervention_tests.rs
+?? src/experiment.rs
+?? src/experiment/block.rs
+?? src/experiment_tests.rs
+?? src/intervention.rs
+?? src/intervention/validity.rs
+?? src/intervention/validity_tests.rs
+?? src/intervention_tests.rs
+?? src/mla.rs
+?? src/mla_tests.rs
+?? src/models/auto/intervention_tests.rs
+?? src/models/custom/composition_tests.rs
+?? src/models/custom/intervention_tests.rs
+?? src/models/gpt2.rs
+?? src/models/gpt2/README.md
+?? src/models/gpt2/checkpoint.rs
+?? src/models/gpt2/compare_author_weights.py
+?? src/models/gpt2/fixtures/pretrained_validation.json
+?? src/models/gpt2/fixtures/tiny_reference.json
+?? src/models/gpt2/model.rs
+?? src/models/gpt2/model_tests.rs
+?? src/models/gpt2/prepare_reference.py
+?? src/models/gpt_neox.rs
+?? src/models/gpt_neox/fixtures/oracle.json
+?? src/models/gpt_neox/fixtures/reference.py
+?? src/models/gpt_neox/load.rs
+?? src/models/gpt_neox/load_tests.rs
+?? src/models/gpt_neox/model.rs
+?? src/models/gpt_neox/tests.rs
+?? src/models/qwen3_5/execution_tests.rs
+?? src/models/qwen3_5/intervention_tests.rs
+?? src/models/qwen3_5/recipe.rs
+?? src/models/qwen3_5/recipe_tests.rs
+?? src/models/t5/model/intervention_tests.rs
+?? src/models/t5/model/padded_hooks.rs
+?? src/models/t5/model/recipe.rs
+?? src/models/t5/model/recipe_tests.rs
+?? src/transfer.rs
+?? src/transfer_tests.rs

@@ -1,0 +1,29 @@
+{
+  "id": "rust-std-only",
+  "attempt": 2,
+  "command": [
+    "cargo",
+    "+nightly",
+    "check",
+    "--release",
+    "--locked",
+    "--offline",
+    "--lib",
+    "--no-default-features",
+    "--features",
+    "std"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "runner_sha256": "11d91924fc218ebeafc49cfd22cd8691d61d4aa3d1dc353223dc6744916e4654",
+  "started_utc": "2026-09-10T20:39:41.168885+00:00",
+  "finished_utc": "2026-09-10T20:39:47.825858+00:00",
+  "seconds": 6.6570076670031995,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "rust-std-only-attempt-02/inputs-before.json",
+  "inputs_after": "rust-std-only-attempt-02/inputs-after.json",
+  "output": "rust-std-only-attempt-02/output.log",
+  "output_sha256": "651c4f4563c5e91c95880c7a4b361b836d9bbde85dc8e95101e51ad1dfdc458b",
+  "passed": true
+}

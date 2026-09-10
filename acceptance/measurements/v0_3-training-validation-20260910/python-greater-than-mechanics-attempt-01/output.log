@@ -1,0 +1,10 @@
+test_callbacks_edit_only_selected_token_restore_in_order_and_clean_up (test_reference.ReferenceMechanicsTests.test_callbacks_edit_only_selected_token_restore_in_order_and_clean_up) ... ok
+test_condition_dispatch_preserves_patch_direction_and_direct_readout (test_reference.ReferenceMechanicsTests.test_condition_dispatch_preserves_patch_direction_and_direct_readout) ... ok
+test_full_vocabulary_mass_and_cutoff_are_not_numeric_renormalization (test_reference.ReferenceMechanicsTests.test_full_vocabulary_mass_and_cutoff_are_not_numeric_renormalization) ... ok
+test_non_finite_logits_are_rejected_before_analysis (test_reference.ReferenceMechanicsTests.test_non_finite_logits_are_rejected_before_analysis) ... ok
+test_protocol_rejects_missing_condition_and_wrong_corruption_position (test_reference.ReferenceMechanicsTests.test_protocol_rejects_missing_condition_and_wrong_corruption_position) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.010s
+
+OK

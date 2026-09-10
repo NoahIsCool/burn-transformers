@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "recorded_utc": "2026-09-10T20:31:48.550760+00:00",
+  "paper": "https://arxiv.org/html/2306.17844v2",
+  "protocol_sha256": "258850ba10f914e207f1fd4bf3bc1faf947aa9cc3e20e984fc6b4d85869905fb",
+  "claim": "Two native Burn training runs from random weights under the published architecture, initialization distributions, optimizer and update budget. New seed/split and F32 loss are explicit adaptations. No seed selection or outcome-filtered retries.",
+  "runs": {
+    "alpha0-paper": {
+      "command": "target/release/examples/clock_and_pizza_train --backend metal --paper --alpha 0 --output target/mechanistic/clock_and_pizza_training/alpha0-paper",
+      "exit_code": 0,
+      "final_measurement": {
+        "distance_irrelevance": 0.8629479872017262,
+        "seconds": 252.07884,
+        "step": 20000,
+        "test_accuracy": 1.0,
+        "test_cross_entropy": 5.82225317972005e-05,
+        "train_accuracy": 1.0,
+        "train_cross_entropy": 1.6310146394729575e-05
+      },
+      "capture_max_logit_error": 0.0,
+      "record_round_trip_max_logit_error": 0.0,
+      "ignored_artifact_hashes": {
+        "model.bin": "177399143860c489a7bb5ded36b4fec8a45b4f045dce770d420caf0dacac738d",
+        "learning_curve.json": "17a4f88ee4820a250a1c9afa303f1bded3399af86e41befc7ce4f6c73fa0134e",
+        "result.json": "b95b384ee21cc9556a3d08a18b6fd9148c056e62ea9846e675a027408f162a1e",
+        "gradient_symmetry.json": "2effdd7d2f78f29470f62933d65bb1f0a11ffe1b7fba40fbbdbdf861e403ee75",
+        "attention.f32": "d9f0ccd4b1302ae3866243b029155a3e98dcde2e62fb09cd97585cbff4f74a3a",
+        "neurons.f32": "0069f02a40058fa1b76f59ba092dbbbecbb4348ebc40f7f5e15eaa8eb41fc390",
+        "logits.f32": "30b5115e66c6a3254cafd93ce00ec82bb86224a22509d613b8839974762e4746",
+        "optimizer.bin": "9962953a22b0d821bed335c5b3c6f1e9c57225052c871d3367306023bbdcb3c3",
+        "protocol.json": "f6934f4461df1ab687df5ff0782e9d7d8155165fba9872e9ce85feb8cef34e33",
+        "embedding.f32": "2154c4e578acd97314e96a1930e3059964cfc6587485191ace4d8f8103f02421"
+      },
+      "evidence_hashes": {
+        "learning_curve.json": "17a4f88ee4820a250a1c9afa303f1bded3399af86e41befc7ce4f6c73fa0134e",
+        "result.json": "b95b384ee21cc9556a3d08a18b6fd9148c056e62ea9846e675a027408f162a1e",
+        "gradient_symmetry.json": "2effdd7d2f78f29470f62933d65bb1f0a11ffe1b7fba40fbbdbdf861e403ee75",
+        "stdout.log": "70f3b98a6ffe9ee7c1eba4dcb87ce7c4e1f1ff4a7091c7f7596cbeae48ad2a6d",
+        "protocol.json": "f6934f4461df1ab687df5ff0782e9d7d8155165fba9872e9ce85feb8cef34e33",
+        "timing.log": "f6c8201c141fe5dfea5edcb89e44516491b52ad55b327f2bf60f5535e2d4bb38"
+      }
+    },
+    "alpha1-paper": {
+      "command": "target/release/examples/clock_and_pizza_train --backend metal --paper --alpha 1 --output target/mechanistic/clock_and_pizza_training/alpha1-paper",
+      "exit_code": 0,
+      "final_measurement": {
+        "distance_irrelevance": 0.9824622577079708,
+        "seconds": 231.318391208,
+        "step": 20000,
+        "test_accuracy": 1.0,
+        "test_cross_entropy": 0.00037843726557111227,
+        "train_accuracy": 1.0,
+        "train_cross_entropy": 6.826502850195717e-07
+      },
+      "capture_max_logit_error": 0.0,
+      "record_round_trip_max_logit_error": 0.0,
+      "ignored_artifact_hashes": {
+        "model.bin": "5cda9d3a2fc85a99f55a85bfc681934969a196510d45eb8c387a941299fb5ba1",
+        "learning_curve.json": "ac37425008845c476e50b7c504bd3c8b16147645e66c3fd5cb3cf8dc0e9e77b3",
+        "result.json": "230ac9dbbf81c69d977fd59aaede8c83e1c7d0ef4f359c2892cbd5a07baf879c",
+        "gradient_symmetry.json": "312a68c234c0353f0afc5d227b3cc9d0f036dbac987b5bf9ee0e0880f0dcdeff",
+        "attention.f32": "c95558da66ae41035c6e8a76748ad7242162e5353db692781f3c99d017e63c19",
+        "neurons.f32": "3c0ce8ed73e87a262b209e4915ccaab3b8f691fc62391864527bef1ab4083879",
+        "logits.f32": "4a7fa84280325c02bf9644d181bea3dabf0d09c4f41246d82dcac13c908c46aa",
+        "optimizer.bin": "a44ac23320598e63fd984cb6c9ad012a92916b1c38e1f9adddfbd4c28d3ed323",
+        "protocol.json": "59114aee953373baa67978e13db2c126005995e1b013bc9b778eddf689af017d",
+        "embedding.f32": "3db990d5a12d19a004d50ab67a281d8aea9fdc60a2d9269319dd6228e3e60fb5"
+      },
+      "evidence_hashes": {
+        "learning_curve.json": "ac37425008845c476e50b7c504bd3c8b16147645e66c3fd5cb3cf8dc0e9e77b3",
+        "result.json": "230ac9dbbf81c69d977fd59aaede8c83e1c7d0ef4f359c2892cbd5a07baf879c",
+        "gradient_symmetry.json": "312a68c234c0353f0afc5d227b3cc9d0f036dbac987b5bf9ee0e0880f0dcdeff",
+        "stdout.log": "8ebd02ea8dc3483790e2e95e716a13adf6f7d119eccb92b86c79fcaa9a91ff26",
+        "protocol.json": "59114aee953373baa67978e13db2c126005995e1b013bc9b778eddf689af017d",
+        "timing.log": "58ed7ad4066f83f5c60e7770556b956786a75f2a533963a050e8b21ee4f22003"
+      }
+    }
+  },
+  "mechanisms": [
+    {
+      "distance_irrelevance": 0.8629479872017258,
+      "circularity_first_four_pcs": 0.4392150627780026,
+      "dominant_frequency_first_six_pcs": [
+        8,
+        11,
+        11,
+        17,
+        11,
+        29
+      ],
+      "circularity_first_six_pcs": [
+        0.543397390611727,
+        0.39211762494306124,
+        0.4789499365474638,
+        0.3423952990097582,
+        0.841635611739347,
+        0.46999220434451344
+      ],
+      "variance_fraction_first_six_pcs": [
+        0.1074201899261969,
+        0.1024556878872183,
+        0.1001740872557422,
+        0.09248189686735528,
+        0.08794933075602797,
+        0.08256226182767949
+      ],
+      "paper_circular_threshold": 0.995,
+      "interpretation": "q and circularity are descriptions, not forced alpha-derived mechanism labels",
+      "gradient_symmetricity": 0.9931194033341151,
+      "options": {
+        "alpha": 0.0,
+        "backend": "metal",
+        "evaluate_every": 100,
+        "output": "target/mechanistic/clock_and_pizza_training/alpha0-paper",
+        "seed": 20260910,
+        "smoke": false,
+        "steps": 20000
+      },
+      "final_measurement": {
+        "distance_irrelevance": 0.8629479872017262,
+        "seconds": 252.07884,
+        "step": 20000,
+        "test_accuracy": 1.0,
+        "test_cross_entropy": 5.82225317972005e-05,
+        "train_accuracy": 1.0,
+        "train_cross_entropy": 1.6310146394729575e-05
+      }
+    },
+    {
+      "distance_irrelevance": 0.98246225770797,
+      "circularity_first_four_pcs": 0.9235483317530372,
+      "dominant_frequency_first_six_pcs": [
+        8,
+        8,
+        2,
+        2,
+        17,
+        17
+      ],
+      "circularity_first_six_pcs": [
+        0.9719776958321537,
+        0.8785582872397603,
+        0.8932109192705,
+        0.950446424669735,
+        0.9347075864237875,
+        0.9808779320811594
+      ],
+      "variance_fraction_first_six_pcs": [
+        0.17135863501167148,
+        0.1416696305343425,
+        0.1389098198901548,
+        0.1328624449123805,
+        0.10761667606646479,
+        0.1055911817344275
+      ],
+      "paper_circular_threshold": 0.995,
+      "interpretation": "q and circularity are descriptions, not forced alpha-derived mechanism labels",
+      "gradient_symmetricity": 0.24246813306591558,
+      "options": {
+        "alpha": 1.0,
+        "backend": "metal",
+        "evaluate_every": 100,
+        "output": "target/mechanistic/clock_and_pizza_training/alpha1-paper",
+        "seed": 20260910,
+        "smoke": false,
+        "steps": 20000
+      },
+      "final_measurement": {
+        "distance_irrelevance": 0.9824622577079708,
+        "seconds": 231.318391208,
+        "step": 20000,
+        "test_accuracy": 1.0,
+        "test_cross_entropy": 0.00037843726557111227,
+        "train_accuracy": 1.0,
+        "train_cross_entropy": 6.826502850195717e-07
+      }
+    }
+  ],
+  "engineering_trials": [
+    {
+      "directory": "benchmark-flex-alpha0",
+      "steps": 20,
+      "purpose": "initial backend benchmark; original batched MLP"
+    },
+    {
+      "directory": "benchmark-metal-alpha0",
+      "steps": 20,
+      "purpose": "initial GPU benchmark; original batched MLP; sandbox hid GPU adapter, approved host retry succeeded"
+    },
+    {
+      "directory": "benchmark-metal-flatten-alpha0",
+      "steps": 100,
+      "purpose": "equivalent flattened MLP benchmark"
+    },
+    {
+      "directory": "benchmark-flex-flatten-alpha0",
+      "steps": 100,
+      "purpose": "portable backend benchmark after equivalent flattening"
+    },
+    {
+      "directory": "smoke-metal-final",
+      "steps": 5,
+      "outcome": "failed after updates: reshaped hook capture was not the exact leaf needed for Burn gradient lookup; fixed by retaining the original leaf in the callback before scientific runs"
+    },
+    {
+      "directory": "smoke-flex-final",
+      "steps": 5,
+      "outcome": "passed final portable smoke and derivative/record checks; not learning evidence"
+    }
+  ],
+  "limitations": [
+    "Neither fixed run satisfies the paper circularity threshold of 0.995: alpha0=.439215, alpha1=.923548. Both reach 100% task accuracy, but representative circular Clock/Pizza mechanisms are not reproduced. Both runs remain visible.",
+    "The paper uses F64 training cross entropy; these Metal runs use differentiable pairwise F32 cross entropy. Recurrent confident-loss and q fluctuations remain in all recorded curves.",
+    "The author seeds and exact split memberships are unpublished; a single seed per condition does not estimate the paper's phase diagram.",
+    "Historical checkpoint Table 2/q reproductions remain a separate reference experiment."
+  ]
+}

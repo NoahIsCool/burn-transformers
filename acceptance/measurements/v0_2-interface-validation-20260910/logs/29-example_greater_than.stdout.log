@@ -1,0 +1,11 @@
+Held-out clean prompts: probability difference, sharpness, signed change from clean
+clean                  PD=0.820572 sharpness=0.056313 change=0.000000
+corrupt                PD=-0.439525 sharpness=-0.001192 change=-1.260097
+node_patch_2           PD=-0.446848 sharpness=-0.001228 change=-1.267421
+node_patch_8           PD=-0.148105 sharpness=0.002355 change=-0.968677
+node_patch_9           PD=0.229694 sharpness=0.010470 change=-0.590879
+node_patch_10          PD=0.271874 sharpness=0.003687 change=-0.548698
+node_patch_11          PD=-0.235055 sharpness=0.000204 change=-1.055627
+node_patch_all_late    PD=0.744512 sharpness=0.020393 change=-0.076060
+direct_10              PD=0.494905 sharpness=0.062415 change=-0.325667
+wrote target/mechanistic/greater_than/result.json; runtime 195.22s; numerical validation passed

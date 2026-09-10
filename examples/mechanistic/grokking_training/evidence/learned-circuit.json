@@ -1,0 +1,49 @@
+{
+  "analysis_classes": 113,
+  "claim": "Mechanistic analysis of this freshly trained run; not reproduction of the archived seed-zero Table 1 entries",
+  "conditions": [
+    {
+      "accuracy": 1.0,
+      "cross_entropy": 0.00005097762506750056,
+      "name": "baseline"
+    },
+    {
+      "accuracy": 1.0,
+      "cross_entropy": 0.00004539756226948827,
+      "name": "keep_learned_10d"
+    },
+    {
+      "accuracy": 0.09601378338162737,
+      "cross_entropy": 4.129668048909752,
+      "name": "remove_learned_10d"
+    },
+    {
+      "accuracy": 1.0,
+      "cross_entropy": 0.00005097762552393536,
+      "name": "remove_then_restore"
+    }
+  ],
+  "evaluation_pairs": 12769,
+  "fourier_variance_explained": [
+    0.7590352576985936,
+    0.8780853143489223,
+    0.9606965007156455,
+    -0.6464019440781656,
+    0.8392610970757284,
+    0.7831719199044471,
+    0.9651899434523952,
+    0.18443820152311363,
+    -2.1660866595350012,
+    -0.47434684616712297
+  ],
+  "frequencies": [
+    10,
+    7,
+    49,
+    13,
+    42
+  ],
+  "frequency_selection": "top five final neuron-to-logit Fourier pair powers; no checkpoint frequencies reused",
+  "identity_max_logit_error": 0.0,
+  "restoration_max_logit_error": 0.000030517578125
+}

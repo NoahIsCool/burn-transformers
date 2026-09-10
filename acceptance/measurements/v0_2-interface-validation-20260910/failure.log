@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/tmp/transformers-v02-final-validation.py", line 303, in execute
+    raise RuntimeError(f"Source/protocol/test-fixture inputs changed during {step['name']}")
+RuntimeError: Source/protocol/test-fixture inputs changed during example_greater_than

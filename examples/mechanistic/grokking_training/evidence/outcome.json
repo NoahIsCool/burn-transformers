@@ -1,0 +1,6 @@
+{
+  "claim": "One from-scratch Burn run, not the original seeded training curve",
+  "delayed_generalization_observed": true,
+  "generalization_step": 7500,
+  "memorization_step": 200
+}

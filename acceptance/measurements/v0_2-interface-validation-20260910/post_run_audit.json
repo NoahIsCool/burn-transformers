@@ -1,0 +1,52 @@
+{
+  "status": "execution_passed_inventory_rejected",
+  "manifest_unchanged": true,
+  "reason": "Only generated plot_validation.json was added during the run; no existing source/protocol file changed. The runner correctly rejected its complete input inventory.",
+  "input_changes": {
+    "source_and_protocol_inputs": {
+      "added": [
+        "examples/mechanistic/greater_than/plot_validation.json"
+      ],
+      "modified": [],
+      "removed": []
+    }
+  },
+  "example_exit_code": 0,
+  "numerical_validation": {
+    "control_errors": {
+      "empty_clean": 0.0,
+      "identity_10": 0.0,
+      "identity_11": 0.0,
+      "identity_2": 0.0,
+      "identity_8": 0.0,
+      "identity_9": 0.0,
+      "observe_clean": 0.0,
+      "restore_10": 0.0,
+      "restore_11": 0.0,
+      "restore_2": 0.0,
+      "restore_8": 0.0,
+      "restore_9": 0.0
+    },
+    "maximum_control_logit_error": 0.0,
+    "maximum_final_layer_path_node_error": 0.0001068115234375,
+    "maximum_mlp_error": 0.0005950927734375,
+    "maximum_numeric_mass_error": 1.0794244085232663e-06,
+    "maximum_numeric_probability_error": 2.2416972057848206e-05,
+    "maximum_oracle_logit_error": 0.000396728515625,
+    "maximum_pd_error": 3.7137806932541206e-05,
+    "maximum_readout_identity_error": 0.0,
+    "maximum_sharpness_error": 2.017198093129391e-05,
+    "metric_rows_compared": 8148,
+    "mlp_elements_compared": 3575808,
+    "mlp_tolerance_failures": 0,
+    "oracle_elements_compared": 21107940,
+    "passed": true
+  },
+  "preserved_result": {
+    "path": "replayed_results/greater_than.numerically-passed.json",
+    "sha256": "98f233c1d159503692f59cc24fbee8a6779727a7db3ab41f0b8c0d00ebe4a3d8"
+  },
+  "peak_process_rss_bytes": 872873984,
+  "measurement_source": "logs/29-example_greater_than.stderr.log; macOS /usr/bin/time -l",
+  "follow_up": "Repeat the full runner with every report file frozen in ../v0_2-interface-validation-20260910-retry; this rejected attempt is not promoted to a passed inventory run."
+}

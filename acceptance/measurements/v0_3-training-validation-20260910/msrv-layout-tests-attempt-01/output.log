@@ -1,0 +1,66 @@
+   Compiling quote v1.0.47
+   Compiling proc-macro2 v1.0.107
+   Compiling serde_core v1.0.229
+   Compiling libc v0.2.189
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling syn v2.0.119
+   Compiling syn v3.0.5
+   Compiling cpufeatures v0.2.17
+   Compiling sha2 v0.10.9
+   Compiling serde_derive v1.0.229
+   Compiling transformers-coverage-layout v0.1.0 (/Users/nover/repos/transformers/scripts/coverage-layout)
+    Finished `release` profile [optimized] target(s) in 5.23s
+     Running unittests src/lib.rs (target/release/deps/transformers_coverage_layout-fa04f5ac5dd6347a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/release/deps/transformers_coverage_layout-ff9be22b7edf75c5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/layout.rs (target/release/deps/layout-0223c38b9b333be7)
+
+running 29 tests
+test associated_items_and_nested_local_items_have_independent_ownership ... ok
+test cfg_attr_implication_is_conservative_and_recursive ... ok
+test invalid_inputs_fail_without_synthesizing_a_successful_layout ... ok
+test malformed_and_unsupported_cfg_remain_visible_and_retained ... ok
+test cfg_proofs_do_not_guess_other_atoms_or_module_names ... ok
+test active_path_cycle_is_explicit_and_bounded ... ok
+test canonical_symlinks_cannot_escape_the_source_root ... ok
+test empty_blank_and_unterminated_files_have_complete_physical_line_runs ... ok
+test multiline_cfg_nested_inheritance_and_multiple_attributes ... ok
+test equivalent_aliases_are_reported_but_not_mistaken_for_cycles ... ok
+test raw_strings_comments_and_character_literals_cannot_forge_syntax ... ok
+test missing_and_traversing_paths_are_unresolved_without_outside_reads ... ok
+test conditional_paths_never_choose_one_feature_assignment ... ok
+test same_line_items_are_mixed_and_never_exclusively_test_only ... ok
+test conflicting_default_module_files_are_both_retained ... ok
+test report_json_is_versioned_and_never_encodes_a_coverage_gate_result ... ok
+test opaque_production_edges_keep_candidate_reports_explicitly_unqualified ... ok
+test structural_test_audit_covers_associated_items_expressions_and_statements ... ok
+test unicode_crlf_bom_shebang_coordinates_hash_exact_original_bytes ... ok
+test parse_errors_and_macro_expansion_remain_visible_without_generated_exclusions ... ok
+test structural_test_audit_ignores_runtime_cfg_macro_tokens_strings_and_comments ... ok
+test shared_files_merge_production_and_test_contexts_in_both_orders ... ok
+test external_test_modules_inherit_test_only_and_inner_file_cfg ... ok
+test multiple_explicit_entries_merge_shared_physical_sources ... ok
+test structural_test_audit_distinguishes_external_inline_and_harness_owners ... ok
+test structural_test_audit_does_not_resolve_test_sensitive_uncertainty ... ok
+test default_mod_rs_and_non_mod_rs_nested_paths_follow_rust_layout ... ok
+test explicit_paths_respect_inline_and_noninline_base_directories ... ok
+test structural_test_audit_records_file_cfg_and_fails_incomplete_syntax ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests transformers_coverage_layout
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

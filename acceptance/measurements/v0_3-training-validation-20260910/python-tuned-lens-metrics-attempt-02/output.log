@@ -1,0 +1,12 @@
+test_aggregation_weights_actual_token_counts (reference_tests.MetricProtocolTests.test_aggregation_weights_actual_token_counts) ... ok
+test_ce_predicts_the_next_token_and_omits_the_final_position (reference_tests.MetricProtocolTests.test_ce_predicts_the_next_token_and_omits_the_final_position) ... ok
+test_fixture_counts_and_source_order_are_enforced (reference_tests.MetricProtocolTests.test_fixture_counts_and_source_order_are_enforced) ... ok
+test_identical_distributions_have_zero_kl (reference_tests.MetricProtocolTests.test_identical_distributions_have_zero_kl) ... ok
+test_kl_direction_is_final_to_lens (reference_tests.MetricProtocolTests.test_kl_direction_is_final_to_lens) ... ok
+test_long_vocabulary_tail_matches_analytical_kl (reference_tests.MetricProtocolTests.test_long_vocabulary_tail_matches_analytical_kl) ... ok
+test_metrics_reject_accidental_broadcasting_and_empty_records (reference_tests.MetricProtocolTests.test_metrics_reject_accidental_broadcasting_and_empty_records) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.001s
+
+OK

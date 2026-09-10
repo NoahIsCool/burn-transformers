@@ -1,0 +1,48 @@
+{
+  "runs": [
+    {
+      "artifact": "first_run_result.json",
+      "sha256": "c0544890461c067f779ced185db6b50ab75a1ba1f211db027fa0110e9eda8881",
+      "internal_wall_seconds": 69.091165666,
+      "matches_final_all_training_curves_metrics_and_controls": true,
+      "protocol_sha256": "7a7aee09fbd8b15ca01b6fdc04f4288f0e7b94ab86bf7540b64af82a1f0c9497",
+      "study_source_sha256": "9e44da1a20be8006fee986f1c6a30f88a137ca6d38a8ac1fd14cd85261a752d6"
+    },
+    {
+      "artifact": "second_run_result.json",
+      "sha256": "54ea9300e748691a9fa72965f65785112f78cfdcc3597f3aefe256e045edffd9",
+      "internal_wall_seconds": 56.674517,
+      "matches_final_all_training_curves_metrics_and_controls": true,
+      "protocol_sha256": "7a7aee09fbd8b15ca01b6fdc04f4288f0e7b94ab86bf7540b64af82a1f0c9497",
+      "study_source_sha256": "9e44da1a20be8006fee986f1c6a30f88a137ca6d38a8ac1fd14cd85261a752d6"
+    },
+    {
+      "artifact": "result.json",
+      "sha256": "a1b5682defd294747aadc31a357ce99e8b1a9c543dd0b985a03672ba24c2f393",
+      "internal_wall_seconds": 61.994410958,
+      "matches_final_all_training_curves_metrics_and_controls": true,
+      "protocol_sha256": "7a7aee09fbd8b15ca01b6fdc04f4288f0e7b94ab86bf7540b64af82a1f0c9497",
+      "study_source_sha256": "8f731fc27450a4f280aa7292862252b7018001624d0d0468d29f3c74b78dcfb2"
+    }
+  ],
+  "protocol_or_optimizer_changes_between_runs": false,
+  "changes_after_first_two_runs": "Only two needless borrows around Hooks::capture removed to satisfy Clippy; no numerical changes.",
+  "initial_timing_wrapper": "The program completed and wrote a passed result, but macOS time -l exited1 because restricted kern.clockrate sysctl was unavailable. Subsequent Python resource wrapper executions exited0.",
+  "final_measurement_source_changes": [
+    "Cargo.toml"
+  ],
+  "compiled_example_and_study_hashes_match_current_files": true,
+  "verification": {
+    "rust_example_tests": {
+      "passed": 2,
+      "command": "cargo test --release --locked --offline --no-default-features --features std,flex,autodiff,tokenizers --example tuned_lens_train"
+    },
+    "clippy": {
+      "passed": true,
+      "command": "cargo clippy --release --locked --offline --no-default-features --features std,flex,autodiff,tokenizers --example tuned_lens_train -- -D warnings"
+    },
+    "independent_reference": "reference.json",
+    "independent_semantic_review": "No blocking issue; clarified combined-gradient wording.",
+    "plot": "PNG visually inspected; no clipped labels or overlapping data annotations."
+  }
+}

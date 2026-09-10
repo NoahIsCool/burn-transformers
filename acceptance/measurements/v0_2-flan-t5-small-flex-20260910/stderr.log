@@ -1,0 +1,11 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 2.88s
+     Running tests/flan_t5_small.rs (target/release/deps/flan_t5_small-d7f9b5df4e6fac67)
+FLAN-T5-small Flex/F32: load=0.113s stateless=0.044s cached32=0.150s teacher32=0.081s boundary512=0.389s beam=0.320s
+FLAN-T5-small Flex/F32 encoder: cosine=1.000000000000 max_abs=0.000000566 failures_1e-4=0 actual_f32le_sha256=9c22bccd522675cac1e0c769b8d8e7c662de7ad41dc1307018a7df9d73cafcad
+FLAN-T5-small Flex/F32 decoder: cosine=0.999999999999 max_abs=0.000011921 failures_1e-4=0 actual_f32le_sha256=25e79fffc50a4dbc7a9da46a10c42db3e789350603f8ad5bd0d1a98c7d1893cf
+FLAN-T5-small Flex/F32 first: cosine=1.000000000000 max_abs=0.000038147 failures_1e-4=0 actual_f32le_sha256=0a3af6aa88fff0b78948b214b6c80d649b6b21c65e3f5b2c86cf2a085a049de4
+FLAN-T5-small Flex/F32 cached: cosine=1.000000000000 max_abs=0.000068665 failures_1e-4=0 actual_f32le_sha256=79379dce8eb8b3fd1f066787df840b0b05bf6ca83242dd8d8bdb1127ee917cca
+FLAN-T5-small Flex/F32 teacher: cosine=1.000000000000 max_abs=0.000040054 failures_1e-4=0 actual_f32le_sha256=bf62fdd81af5773b982941db8e99af7aeda0837d4f6322896cd09fa76a542f54
+FLAN-T5-small Flex/F32 padded: cosine=1.000000000000 max_abs=0.000045776 failures_1e-4=0 actual_f32le_sha256=4d0fa7f974a94926ec37a4547e472e78e7b5e84c6eff7986c10a93f32414c5bf
+FLAN-T5-small Flex/F32 boundary: cosine=1.000000000000 max_abs=0.000076294 failures_1e-4=0 actual_f32le_sha256=b48b0cca10f425fd95a6aacd5e11d5bc51be21913609d81032a43b6c511f61ce

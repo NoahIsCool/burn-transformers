@@ -1,0 +1,28 @@
+{
+  "id": "rust-all-targets",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "test",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,flex,autodiff,train,tokenizers,chat-templates",
+    "--all-targets"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "started_utc": "2026-09-10T20:32:01.758756+00:00",
+  "finished_utc": "2026-09-10T20:33:17.416814+00:00",
+  "seconds": 75.65847270900849,
+  "exit_code": 101,
+  "changed_inputs": [],
+  "inputs_before": "rust-all-targets-attempt-01/inputs-before.json",
+  "inputs_after": "rust-all-targets-attempt-01/inputs-after.json",
+  "output": "rust-all-targets-attempt-01/output.log",
+  "output_sha256": "75b063f56bdad34662c68bccc2503b1cf79d65c664c8a33f24da93252d996b66",
+  "passed": false
+}

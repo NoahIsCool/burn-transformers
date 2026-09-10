@@ -1,0 +1,33 @@
+{
+  "id": "train-mla_encoder_decoder",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "run",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,flex,autodiff,train,tokenizers,chat-templates",
+    "--example",
+    "mla_encoder_decoder",
+    "--",
+    "--train"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "started_utc": "2026-09-10T20:37:36.700637+00:00",
+  "finished_utc": "2026-09-10T20:37:37.887876+00:00",
+  "seconds": 1.1872423340100795,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "train-mla_encoder_decoder-attempt-01/inputs-before.json",
+  "inputs_after": "train-mla_encoder_decoder-attempt-01/inputs-after.json",
+  "output": "train-mla_encoder_decoder-attempt-01/output.log",
+  "output_sha256": "cd55b28c7b1a5c824260a8f2c8770143a6053ab801a1ddfd6008723558ec3219",
+  "passed": true,
+  "replay_report": "train-mla_encoder_decoder-attempt-01/replay-report.json",
+  "replay_report_sha256": "f6bd8bb9da8bb673b983282d1d355c0b06a6d89ceb6285670c1fba7920da64a4"
+}

@@ -1,0 +1,43 @@
+Greater-Than: measured 8/194 paired prompts
+Greater-Than: measured 16/194 paired prompts
+Greater-Than: measured 24/194 paired prompts
+Greater-Than: measured 32/194 paired prompts
+Greater-Than: measured 40/194 paired prompts
+Greater-Than: measured 48/194 paired prompts
+Greater-Than: measured 56/194 paired prompts
+Greater-Than: measured 64/194 paired prompts
+Greater-Than: measured 72/194 paired prompts
+Greater-Than: measured 80/194 paired prompts
+Greater-Than: measured 88/194 paired prompts
+Greater-Than: measured 96/194 paired prompts
+Greater-Than: measured 104/194 paired prompts
+Greater-Than: measured 112/194 paired prompts
+Greater-Than: measured 120/194 paired prompts
+Greater-Than: measured 128/194 paired prompts
+Greater-Than: measured 136/194 paired prompts
+Greater-Than: measured 144/194 paired prompts
+Greater-Than: measured 152/194 paired prompts
+Greater-Than: measured 160/194 paired prompts
+Greater-Than: measured 168/194 paired prompts
+Greater-Than: measured 176/194 paired prompts
+Greater-Than: measured 184/194 paired prompts
+Greater-Than: measured 192/194 paired prompts
+Greater-Than: measured 194/194 paired prompts
+      195.49 real       192.30 user         3.02 sys
+           872873984  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               58065  page reclaims
+                  18  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   1  voluntary context switches
+                3218  involuntary context switches
+       2914390554783  instructions retired
+        731735840381  cycles elapsed
+           619842048  peak memory footprint

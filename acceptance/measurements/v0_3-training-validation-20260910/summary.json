@@ -1,0 +1,109 @@
+{
+  "final_status": "passed",
+  "required_checks": 30,
+  "retained_attempts": 48,
+  "latest_checks_have_stable_inputs": true,
+  "rust": {
+    "rust-all-targets": {
+      "passed": 1400,
+      "failed": 0,
+      "ignored": 32,
+      "result_sections": 33
+    },
+    "rust-doctests": {
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "result_sections": 1
+    },
+    "msrv-all-targets": {
+      "passed": 1400,
+      "failed": 0,
+      "ignored": 32,
+      "result_sections": 33
+    },
+    "msrv-doctests": {
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "result_sections": 1
+    },
+    "layout-tests": {
+      "passed": 29,
+      "failed": 0,
+      "ignored": 0,
+      "result_sections": 4
+    },
+    "msrv-layout-tests": {
+      "passed": 29,
+      "failed": 0,
+      "ignored": 0,
+      "result_sections": 4
+    }
+  },
+  "python": {
+    "python-tooling": {
+      "passed": 360,
+      "skipped": 14,
+      "failures": 0,
+      "errors": 0,
+      "actual_read_inputs_unchanged_at_finalization": true
+    },
+    "python-grokking-protocol": {
+      "passed": 8,
+      "skipped": 0,
+      "failures": 0,
+      "errors": 0,
+      "actual_read_inputs_unchanged_at_finalization": true
+    },
+    "python-clock-diagnostics": {
+      "passed": 2,
+      "skipped": 0,
+      "failures": 0,
+      "errors": 0,
+      "actual_read_inputs_unchanged_at_finalization": true
+    },
+    "python-greater-than-mechanics": {
+      "passed": 5,
+      "skipped": 0,
+      "failures": 0,
+      "errors": 0,
+      "actual_read_inputs_unchanged_at_finalization": true
+    },
+    "python-tuned-lens-metrics": {
+      "passed": 7,
+      "skipped": 0,
+      "failures": 0,
+      "errors": 0,
+      "actual_read_inputs_unchanged_at_finalization": true
+    }
+  },
+  "training_replays": {
+    "train-t5_classifier": {
+      "path": "train-t5_classifier-attempt-01/replay-report.json",
+      "sha256": "8af80e5aa470cf5d81aa946ec0067216e13bb647a7c6f9d12bc815273bfce910"
+    },
+    "train-custom_composition": {
+      "path": "train-custom_composition-attempt-01/replay-report.json",
+      "sha256": "64414704377e51ab367c30d2a225670de019c4693ec433fe46dcdcd146b44294"
+    },
+    "train-mla_encoder_decoder": {
+      "path": "train-mla_encoder_decoder-attempt-01/replay-report.json",
+      "sha256": "f6bd8bb9da8bb673b983282d1d355c0b06a6d89ceb6285670c1fba7920da64a4"
+    },
+    "train-random-qwen-adapter": {
+      "path": "train-random-qwen-adapter-attempt-02/replay-report.json",
+      "sha256": "c6741b94c5aac0764022d08ec04072c993dcd9ae651b52ca33e558d323669230"
+    },
+    "train-native-burn-learner": {
+      "path": "train-native-burn-learner-attempt-01/replay-report.json",
+      "sha256": "f66717e3e3669eaeccfd90bdcab54ccdd04174eb5cd42d93179fe47486a73744"
+    }
+  },
+  "counting_note": "Rust test cases repeat on nightly and exact 1.92.0; do not count the two executions as distinct tests. Doctests and ignored cases are reported separately. Python unittest tests_run includes skipped cases.",
+  "python_package_versions": {
+    "numpy": "2.4.3",
+    "torch": "2.10.0",
+    "transformers": "5.2.0"
+  }
+}

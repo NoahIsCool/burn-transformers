@@ -1,0 +1,100 @@
+[
+  {
+    "distance_irrelevance": 0.8629479872017258,
+    "circularity_first_four_pcs": 0.4392150627780026,
+    "dominant_frequency_first_six_pcs": [
+      8,
+      11,
+      11,
+      17,
+      11,
+      29
+    ],
+    "circularity_first_six_pcs": [
+      0.543397390611727,
+      0.39211762494306124,
+      0.4789499365474638,
+      0.3423952990097582,
+      0.841635611739347,
+      0.46999220434451344
+    ],
+    "variance_fraction_first_six_pcs": [
+      0.1074201899261969,
+      0.1024556878872183,
+      0.1001740872557422,
+      0.09248189686735528,
+      0.08794933075602797,
+      0.08256226182767949
+    ],
+    "paper_circular_threshold": 0.995,
+    "interpretation": "q and circularity are descriptions, not forced alpha-derived mechanism labels",
+    "gradient_symmetricity": 0.9931194033341151,
+    "options": {
+      "alpha": 0.0,
+      "backend": "metal",
+      "evaluate_every": 100,
+      "output": "target/mechanistic/clock_and_pizza_training/alpha0-paper",
+      "seed": 20260910,
+      "smoke": false,
+      "steps": 20000
+    },
+    "final_measurement": {
+      "distance_irrelevance": 0.8629479872017262,
+      "seconds": 252.07884,
+      "step": 20000,
+      "test_accuracy": 1.0,
+      "test_cross_entropy": 5.82225317972005e-05,
+      "train_accuracy": 1.0,
+      "train_cross_entropy": 1.6310146394729575e-05
+    }
+  },
+  {
+    "distance_irrelevance": 0.98246225770797,
+    "circularity_first_four_pcs": 0.9235483317530372,
+    "dominant_frequency_first_six_pcs": [
+      8,
+      8,
+      2,
+      2,
+      17,
+      17
+    ],
+    "circularity_first_six_pcs": [
+      0.9719776958321537,
+      0.8785582872397603,
+      0.8932109192705,
+      0.950446424669735,
+      0.9347075864237875,
+      0.9808779320811594
+    ],
+    "variance_fraction_first_six_pcs": [
+      0.17135863501167148,
+      0.1416696305343425,
+      0.1389098198901548,
+      0.1328624449123805,
+      0.10761667606646479,
+      0.1055911817344275
+    ],
+    "paper_circular_threshold": 0.995,
+    "interpretation": "q and circularity are descriptions, not forced alpha-derived mechanism labels",
+    "gradient_symmetricity": 0.24246813306591558,
+    "options": {
+      "alpha": 1.0,
+      "backend": "metal",
+      "evaluate_every": 100,
+      "output": "target/mechanistic/clock_and_pizza_training/alpha1-paper",
+      "seed": 20260910,
+      "smoke": false,
+      "steps": 20000
+    },
+    "final_measurement": {
+      "distance_irrelevance": 0.9824622577079708,
+      "seconds": 231.318391208,
+      "step": 20000,
+      "test_accuracy": 1.0,
+      "test_cross_entropy": 0.00037843726557111227,
+      "train_accuracy": 1.0,
+      "train_cross_entropy": 6.826502850195717e-07
+    }
+  }
+]

@@ -7,6 +7,59 @@ versioning, with the additional pre-1.0 compatibility policy documented in
 
 ## [Unreleased]
 
+### Added
+
+- A v0.2 intervention interface: typed computation points, token/head/
+  channel selections, scoped capture and observation, ordered edits and patches,
+  shape/dtype/device validation, and explicit capture gradient policy.
+- Stateless activation hooks and discoverable catalogs for Qwen3.5/3.8, T5,
+  custom causal/seq2seq models, and shared grouped-query attention. Score and
+  pattern access requires explicit eager attention; pattern edits preserve
+  causal and padding exclusions.
+- Explicit hidden-state embed/run/normalize stages for custom, T5 encoder, and
+  Qwen backbones; separate self/cross-attention policies with per-layer overrides,
+  custom connectivity and bias; padded T5 decoder hooks with original token indices.
+- Editable T5 encoder and Qwen backbone recipes, selective pretrained prefix
+  loading, and transactional parameter transfer with shape and tie policies.
+- Open residual blocks and registered width adapters for user-defined sequence
+  mixers; reusable MLA projection/attention with compressed-state interventions.
+- Architecture examples for a heterogeneous T5 classifier, Qwen prefix,
+  custom sequence mixer, and MLA encoder-decoder, with native Burn training
+  paths for the classifier, composition, MLA, and frozen Qwen adapter.
+- A consumer activation guide and download-free workbench demonstrating a
+  registered Burn adapter. Grokking's checkpoint-level Fourier reproduction
+  now uses the public intervention interface.
+- Clock and Pizza's released-model Table 2 and distance measurements, with
+  independent reference parity, embedding-circle figures, intervention controls,
+  pinned artifacts, and explicit unresolved published accuracy discrepancies.
+- A bounded Tuned Lens study with the exact released Pythia/lens pair, registered
+  auxiliary translators, layerwise metrics, and a prediction table; independent
+  metric references and documented scalar-reduction corrections validate analysis.
+- A bounded Greater-Than study with pinned GPT-2 weights and aligned prompts,
+  clean/corrupt MLP patches, ablation/restoration controls, separate direct-path
+  measurements, and independent full-vocabulary numerical comparisons.
+- Experimental stateless GPT-NeoX and GPT-2 modules with strict local imports,
+  public activation boundaries, and independent full-weight numerical evidence.
+- v0.3 training compatibility: native Burn optimizer loops and an optional
+  `train` feature exposing Burn's own Learner, with a runnable supervised example.
+- Differentiable stable cross-entropy, log-softmax, and teacher-to-student KL
+  losses, plus an optional duplicate-parameter-owner preflight.
+- Actual Grokking and Clock/Pizza training, new Tuned Lens translators, and a
+  separately labeled Greater-Than distillation extension; fixed protocols,
+  learning curves, checkpoint controls, and bounded reproduction claims.
+- Training documentation covering connected activation losses, frozen suffixes,
+  initialization, dropout, native records, and packed quantization limits.
+
+### Fixed
+
+- Keep fully excluded eager-attention rows finite and zero, including rows
+  excluded through additive negative-infinity bias.
+- Restore autodiff linear parameters as leaves after checkpoint-layout
+  transposition, preserving the target's gradient policy and enabling a
+  registered experiment to survive serialization and reloading.
+- Reject packed quantized autodiff before unsupported Burn operations panic,
+  including checkpoint installation; validate the explicit dequantized path.
+
 ## [0.1.0] - 2026-09-10
 
 ### Added

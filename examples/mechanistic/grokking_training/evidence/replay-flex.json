@@ -1,0 +1,80 @@
+{
+  "affine_sinusoid_variance_explained": [
+    0.8078074758437543,
+    0.8791792842795557,
+    0.961486595596129,
+    0.8567420844377207,
+    0.9277720846747673,
+    0.9191584433476798,
+    0.9683154160661741,
+    0.7837017655644634,
+    0.00004243101407815178,
+    6.8624090690653786e-6
+  ],
+  "analysis_backend": "flex",
+  "analysis_classes": 113,
+  "analysis_source_sha256": {
+    "analysis": "c3d51cc074bb68f8fe2d5bae5c6aaec4117d0ff7ee5196a7c184c9e0aea011b8",
+    "attention": "48636e834d13302a0ca21f3655030c76b64d05f9af80c2bbfadb1818bbb741c4",
+    "cargo_lock": "7c57f9830fb5b93195fb8ac765106dd9db91234f9130e9f66494fbec0d808b9d",
+    "entrypoint": "170302677774c03eba0fea67a6277473e9afc3d455b6acf55e127711e6c2c000",
+    "intervention": "47fa79ac7e19e3a84dd1c071115ce2e2ab8eda2260febfdfc21f8f141b64e454",
+    "model": "36414277d0ce2c5702488f75163bfd77611ce8c1525daf031896fac15d9951cb",
+    "operations": "1aefd61fd9561c7266fd2f48ffc1420a680f0ee201f3a3db1ce5ada6ecd6fe1c",
+    "training_loop": "3fcc87f92d018b03f1786e97bd1174cf34c1a88e3276e2de1454770920cafadb"
+  },
+  "checkpoint_step": 40000,
+  "claim": "Mechanistic analysis of this freshly trained run; not reproduction of the archived seed-zero Table 1 entries",
+  "conditions": [
+    {
+      "accuracy": 1.0,
+      "cross_entropy": 0.0000509777511392987,
+      "name": "baseline"
+    },
+    {
+      "accuracy": 1.0,
+      "cross_entropy": 0.00004539761824105133,
+      "name": "keep_learned_10d"
+    },
+    {
+      "accuracy": 0.09601378338162737,
+      "cross_entropy": 4.129668045701663,
+      "name": "remove_learned_10d"
+    },
+    {
+      "accuracy": 1.0,
+      "cross_entropy": 0.000050977744233147444,
+      "name": "remove_then_restore"
+    }
+  ],
+  "evaluation_pairs": 12769,
+  "fit_note": "The legacy archived-model diagnostic fits y=A*x without an intercept but divides by centered variance; a nonzero activation mean can make it negative. The affine diagnostic fits y=mean(y)+A*x and reports explained centered variance. Both are disclosed; neither was a training success criterion.",
+  "frequencies": [
+    10,
+    7,
+    49,
+    13,
+    42
+  ],
+  "frequency_selection": "top five final neuron-to-logit Fourier pair powers; no checkpoint frequencies reused",
+  "identity_max_logit_error": 0.0,
+  "legacy_zero_intercept_fve": [
+    0.7590352517736604,
+    0.8780853099945216,
+    0.9606965001702865,
+    -0.6464019605259719,
+    0.8392610934786628,
+    0.7831719200635927,
+    0.9651899417587387,
+    0.18443820168765002,
+    -2.1660866546419677,
+    -0.47434683859545435
+  ],
+  "restoration_max_logit_error": 0.000030517578125,
+  "trained_backend": "metal",
+  "trained_source_sha256": {
+    "entrypoint": "9e83ef556dd979a026ba6e8c4614d855c703cbe1f1bd41ef327473338d5679e5",
+    "model": "36414277d0ce2c5702488f75163bfd77611ce8c1525daf031896fac15d9951cb",
+    "training_loop": "3db1814c1d42f4e333f1cc28431cd343bc45fa910c9b00ca3df95ecb80023652"
+  }
+}

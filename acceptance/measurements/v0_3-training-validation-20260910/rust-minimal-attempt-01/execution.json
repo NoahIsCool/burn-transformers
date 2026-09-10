@@ -1,0 +1,26 @@
+{
+  "id": "rust-minimal",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "check",
+    "--release",
+    "--locked",
+    "--offline",
+    "--lib",
+    "--no-default-features"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "started_utc": "2026-09-10T20:33:34.042692+00:00",
+  "finished_utc": "2026-09-10T20:33:40.555849+00:00",
+  "seconds": 6.513194833009038,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "rust-minimal-attempt-01/inputs-before.json",
+  "inputs_after": "rust-minimal-attempt-01/inputs-after.json",
+  "output": "rust-minimal-attempt-01/output.log",
+  "output_sha256": "43331206c1103b4cfbe8f69cf56191c20de5250b2903a40a3dde31f32052a82e",
+  "passed": true
+}

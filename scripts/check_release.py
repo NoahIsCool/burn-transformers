@@ -25,6 +25,17 @@ from coverage_binding import prepare_capture, validate_capture, read_json, requi
 CRATE = Path(__file__).resolve().parents[1]
 FEATURES = "std,flex,tokenizers,chat-templates,autodiff"
 GATES = ("source", "msrv", "coverage", "dependencies", "accelerator-compile", "package")
+# Public experiments with fixed/random fixtures and numerical assertions. Paper
+# checkpoints have separate explicit preparation/replay protocols; never fetch
+# artifacts as a side effect of checking source code.
+SOURCE_EXPERIMENTS = (
+    ("activation_workbench", ()),
+    ("attention_head_attribution", ()),
+    ("custom_composition", ()),
+    ("t5_classifier", ()),
+    ("mla_encoder_decoder", ()),
+    ("qwen_prefix", ("--random",)),
+)
 # These are maintenance notices, not vulnerability waivers. New IDs fail.
 MAINTENANCE_NOTICES = ("RUSTSEC-2025-0141", "RUSTSEC-2024-0436")
 UNFILTERED_OPTION_NOTICE = "warning: --disable-default-ignore-filename-regex option is unstable"
@@ -203,10 +214,14 @@ def command_plan(gate: str, output: Path, toolchain: str, msrv: str, offline: bo
     # This avoids creating a nested build directory inside packaged tool sources.
     layout_target = ["--target-dir", str(CRATE / "target")]
     if gate == "source":
+        # Compile and exercise the optional native Burn Learner integration.
+        # Keep the separately bound coverage feature profile explicit above.
+        feature_args = ["--no-default-features", "--features", f"{FEATURES},train"]
         return [
             cargo + ["fmt"] + manifest + ["--check"],
             cargo + ["clippy"] + manifest + locked + ["--all-targets"] + feature_args + ["--", "-D", "warnings"],
-            cargo + ["test"] + manifest + locked + feature_args,
+            cargo + ["test"] + manifest + locked + feature_args + ["--all-targets"],
+            cargo + ["test"] + manifest + locked + feature_args + ["--doc"],
             cargo + ["check"] + manifest + locked + ["--no-default-features"],
             cargo + ["check"] + manifest + locked + ["--no-default-features", "--features", "std"],
             cargo + ["doc"] + manifest + locked + feature_args + ["--no-deps"],
@@ -214,6 +229,13 @@ def command_plan(gate: str, output: Path, toolchain: str, msrv: str, offline: bo
             cargo + ["fmt"] + layout_manifest + ["--check"],
             cargo + ["clippy"] + layout_manifest + locked + layout_target + ["--all-targets", "--", "-D", "warnings"],
             cargo + ["test"] + layout_manifest + locked + layout_target,
+            *[
+                cargo + ["run", "--release"] + manifest + locked + feature_args
+                + ["--example", name] + (["--", *arguments] if arguments else [])
+                for name, arguments in SOURCE_EXPERIMENTS
+            ],
+            cargo + ["run", "--release"] + manifest + locked + feature_args
+            + ["--example", "burn_training", "--", str(output / "burn_training")],
         ]
     if gate == "msrv":
         return [

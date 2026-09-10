@@ -1,0 +1,26 @@
+{
+  "experiment": "attention_head_attribution",
+  "scope": "numerical reproduction of an analytical identity on fixed weights; not learned-circuit discovery",
+  "paper": "https://transformer-circuits.pub/2021/framework/index.html#architecture-attn-independent",
+  "recorded_at_utc": "2026-09-10T14:18:43Z",
+  "command": [
+    "cargo",
+    "run",
+    "--release",
+    "--locked",
+    "--offline",
+    "--example",
+    "attention_head_attribution"
+  ],
+  "backend": "Burn Flex F32",
+  "platform": "Darwin 24.6.0 arm64",
+  "runtime_seconds_excluding_build": 0.003198583028279245,
+  "max_rss_bytes": 2310144,
+  "measurement": "single process; elapsed includes process startup; macOS child ru_maxrss, not device-separated memory; not a benchmark baseline",
+  "source_sha256": "b4fd19694bc8e6eb5e07e3ea094a11ece888c4b7edd1ba6313be1b6cc2e18958",
+  "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+  "absolute_error_tolerance": 2e-05,
+  "minimum_intervention_effect": 0.1,
+  "exit_code": 0,
+  "stdout": "Elhage et al. (2021): exact head decomposition on a fixed tiny transformer\nordinary/instrumented max error: 0.00000024\nadditive decomposition max error: 0.00000024\nhead-zero ablation effect: 1.000000\npredicted/observed ablation max error: 0.00000030\nclean-patch restoration max error: 0.00000000\nwrong-head patch effect: 1.000000\nfuture-token effect, causal/bidirectional: 0.000000 / 4.502468\nPASS: mathematical reproduction and intervention controls; no learned-circuit claim.\n"
+}

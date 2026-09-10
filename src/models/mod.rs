@@ -9,6 +9,8 @@ mod auto;
 pub mod config;
 pub mod custom;
 pub mod deepseek_v2;
+pub mod gpt2;
+pub mod gpt_neox;
 pub mod muse_glimmer;
 pub mod nemotron_h;
 pub mod qwen3_5;

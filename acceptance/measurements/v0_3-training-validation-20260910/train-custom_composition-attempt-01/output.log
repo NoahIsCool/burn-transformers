@@ -1,0 +1,5 @@
+    Finished `release` profile [optimized] target(s) in 0.19s
+     Running `target/release/examples/custom_composition --train`
+Custom mixer color majority: held-out loss 0.6612 → 0.0000; accuracy 50.0% → 100.0%; 120 Adam steps in 0.08s
+Training loss 0.0000, accuracy 100.0%; learning rate 0.01
+6 parameter groups changed; reload error 0.00e0; records: target/training/custom_composition

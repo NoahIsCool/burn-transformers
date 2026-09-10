@@ -1,0 +1,4 @@
+{
+  "sha256": "c2f9abd2e99303e43f0f8fe635c3f0840a96a1d57b3aa622ddbeddb29c2d4ca1",
+  "command": "target/release/examples/grokking_train --backend metal --analyze --output target/mechanistic/grokking-training-metal-seed0"
+}

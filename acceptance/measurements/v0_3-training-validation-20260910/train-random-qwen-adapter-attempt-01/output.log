@@ -1,0 +1,4 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 2.99s
+     Running `target/release/examples/train_qwen_adapter --output-dir /Users/nover/repos/transformers/target/v0_3-training-validation/20260910T203200/qwen-adapter`
+Error: Os { code: 2, kind: NotFound, message: "No such file or directory" }

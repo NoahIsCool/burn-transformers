@@ -6,7 +6,7 @@
 //! The crate separates reusable transformer mathematics from checkpoint-family
 //! wiring. Models are generic over a [`burn::tensor::backend::Backend`], while
 //! autoregressive caches remain external mutable state. This split preserves a
-//! stateless, differentiable forward graph for future training without forcing
+//! stateless, differentiable forward graph for native Burn training without forcing
 //! inference sessions into the serialized parameter tree.
 //!
 //! # Tensor conventions
@@ -22,9 +22,12 @@ pub mod cache;
 pub mod checkpoint;
 pub mod delta_net;
 pub mod error;
+pub mod experiment;
 pub mod feed_forward;
 pub mod generation;
+pub mod intervention;
 pub mod loaded;
+pub mod mla;
 pub mod models;
 pub mod moe;
 pub mod normalization;
@@ -32,6 +35,10 @@ pub mod operations;
 pub mod position;
 #[cfg(feature = "tokenizers")]
 pub mod tokenization;
+pub mod training;
+#[cfg(all(test, feature = "autodiff", feature = "flex"))]
+mod training_capability_tests;
+pub mod transfer;
 
 pub use architecture::{
     ArchitectureConfig, CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput,

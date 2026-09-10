@@ -1,0 +1,5 @@
+Captured activation shape: [1, 1, 12]
+Ablation: maximum logit change = 0.044201
+Restoration: maximum logit error = 0.000000
+Inserted module: maximum logit change = 0.036027
+Bidirectional attention: first-token logit change = 0.148692

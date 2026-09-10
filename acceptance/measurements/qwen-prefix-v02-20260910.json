@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-10",
+  "passed": true,
+  "advertised_supported": false,
+  "accepted_for_performance": false,
+  "all_captured_and_hidden_values_finite": true,
+  "backend": "Flex CPU",
+  "blocks": [
+    0,
+    1
+  ],
+  "capture_dtype": "F32",
+  "capture_shape": [
+    1,
+    1,
+    3584
+  ],
+  "compared_hidden_values": 3072,
+  "comparison": "Same first two individually executed blocks from the full text model, followed by its final normalization",
+  "full_model_load_seconds": 8.886994583,
+  "full_model_prefix_forward_seconds": 0.023352625,
+  "full_model_source_payload_bytes": 1504791232,
+  "hidden_dtype": "F32",
+  "hidden_exact_equal": true,
+  "hidden_max_absolute_error": 0.0,
+  "hidden_shape": [
+    1,
+    3,
+    1024
+  ],
+  "prefix_forward_seconds": 0.023410041,
+  "prefix_load_seconds": 3.680621333,
+  "prefix_report": {
+    "newly_initialized": 0,
+    "omitted": 459,
+    "preserved_ties": 0,
+    "reused": 4,
+    "transformed": 26,
+    "untied": 0
+  },
+  "scope": "Local pinned-checkpoint selective-load and hidden-state parity smoke; no new support, task-quality, or performance qualification",
+  "source_payload_bytes": 594783424,
+  "token_ids": [
+    [
+      1,
+      2,
+      3
+    ]
+  ],
+  "total_checkpoint_payload_bytes": 1746882752,
+  "source": {
+    "repository": "Qwen/Qwen3.5-0.8B",
+    "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+    "source_root": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "files": [
+      {
+        "file": "config.json",
+        "bytes": 2907,
+        "sha256": "b90b86f35c8e6925ef74ee04d0e758f0a845c83a42089ad82bbaa948de9b4204"
+      },
+      {
+        "file": "model.safetensors.index.json",
+        "bytes": 50900,
+        "sha256": "d8a08838a613b025eb7952ed9db11696213e57e76a375661ef5c12f9dd5dcf4e"
+      },
+      {
+        "file": "model.safetensors-00001-of-00001.safetensors",
+        "bytes": 1746942600,
+        "sha256": "04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696"
+      }
+    ],
+    "rustc": "rustc 1.94.0-nightly (4f14395c3 2025-12-22)",
+    "build_command": [
+      "cargo",
+      "build",
+      "--release",
+      "--locked",
+      "--offline",
+      "--example",
+      "qwen_prefix"
+    ],
+    "source_file_hashes": {
+      "Cargo.lock": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+      "examples/qwen_prefix.rs": "d09cbc380e91738b8f6972bbde019a299cda4aca2c0ccc3158467888a403ffd7",
+      "src/models/qwen3_5/recipe.rs": "9b89e11d2b99f3b3d04bfa0824c3705eac415d3e1e14f278a7cbaf992d2eed57",
+      "src/models/qwen3_5/model.rs": "ede77a72314c975a31b72a034b4ca3cfcef1d0370504c27221e388c024ce22e4",
+      "src/intervention.rs": "47fa79ac7e19e3a84dd1c071115ce2e2ab8eda2260febfdfc21f8f141b64e454",
+      "src/experiment.rs": "e855a43ba3d1c5e90c772b9b6db4e89d8a9cc0a317f26336d4572b324b74049d"
+    }
+  },
+  "example_execution": {
+    "command": [
+      "target/release/examples/qwen_prefix",
+      "models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+      "2"
+    ],
+    "exit_code": 0,
+    "wall_seconds": 3.63113641703967,
+    "stdout": "Loaded 4 reused and 26 converted parameters; omitted 459 source parameters; initialized 0 new parameters.\nRead 594783424 checkpoint payload bytes; later blocks and the vocabulary head were not loaded.\nCaptured last-block neurons: [1, 1, 3584]\nUntrained two-class logits: [-0.03758703, 1.3661304]\n"
+  },
+  "timing_note": "Single local smoke measurements; no warmup protocol, benchmark qualification, memory measurement, or throughput claim.",
+  "payload_fraction_of_full_text_model": 0.3952597618537958,
+  "payload_fraction_of_complete_multimodal_checkpoint": 0.3404827389354177,
+  "comparison_execution": {
+    "command": [
+      "/private/tmp/qwen-prefix-v02-real-8bfamav1/compare_prefix",
+      "models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17"
+    ],
+    "exit_code": 0,
+    "wall_seconds": 12.946592457999941,
+    "stderr": "",
+    "stdout_file": "comparison_report.json",
+    "stdout_sha256": "2cf53defbc9698c8625740f63488e306a1c22041220803893c9436275c1fe815",
+    "record": "qwen-prefix-v02-20260910/comparison_execution.json"
+  },
+  "evidence_directory": "qwen-prefix-v02-20260910",
+  "harness_source": "qwen-prefix-v02-20260910/compare_prefix.rs",
+  "harness_compilation_record": "qwen-prefix-v02-20260910/harness_build.json",
+  "full_transfer_report": "qwen-prefix-v02-20260910/comparison_report.json",
+  "historical_command_note": "Actual commands retain the original temporary harness and build-library paths. The preserved replay.py resolves current Cargo artifact filenames and runs the identical preserved harness from this repository.",
+  "artifacts": {
+    "README.md": {
+      "bytes": 2202,
+      "sha256": "34495b95e75ba9c343a7a5bf1dc99c96053594da0525dd95c5648d23610660db"
+    },
+    "compare_prefix.rs": {
+      "bytes": 4585,
+      "sha256": "6b875f4a6746029b740790e552bf5c36e6f064798c4ec81ded5a99ccd66fc4ed"
+    },
+    "comparison_execution.json": {
+      "bytes": 357,
+      "sha256": "5d810abd436f7d564aeaa871e791d9af9d544d177d326a3142fd69ad42419048"
+    },
+    "comparison_report.json": {
+      "bytes": 96885,
+      "sha256": "2cf53defbc9698c8625740f63488e306a1c22041220803893c9436275c1fe815"
+    },
+    "example_execution.json": {
+      "bytes": 669,
+      "sha256": "f27b9af9154fed1bae70fd2e719f3580bcce43fdda198730ec8caa46635dc0cf"
+    },
+    "example_execution_direct.json": {
+      "bytes": 645,
+      "sha256": "977fd688af61dfd5ef6aa8559e911520ec389461a1be44be53fd5dd214af116d"
+    },
+    "harness_build.json": {
+      "bytes": 685,
+      "sha256": "47c6c3e6fab984bacdc755541e2e8e15e1b45d2e68e583918db788550cc70594"
+    },
+    "link_libraries.json": {
+      "bytes": 316,
+      "sha256": "40cc6fda025b630b51fe55f850b0011e60061fa89d0f7612ead3dbe9563e0747"
+    },
+    "replay.py": {
+      "bytes": 4029,
+      "sha256": "7770b01b5894fea750fef076157e11d9b3a1e3494c71588b10e466567c2bac94"
+    },
+    "replay_verification.json": {
+      "bytes": 1935,
+      "sha256": "ec53bbdd3fdaab2f997eecdf92e9678b9292cae02ce41a5c919048a2f58e6670"
+    },
+    "source_metadata.json": {
+      "bytes": 1520,
+      "sha256": "2b0e32728acd790448374bed485cd4102ae4c1af50a2cffa271a8c0b4fa295bf"
+    }
+  },
+  "replay_command": [
+    "python3",
+    "acceptance/measurements/qwen-prefix-v02-20260910/replay.py",
+    "/path/to/Qwen3.5-0.8B"
+  ],
+  "replay_checks": "Checkpoint SHA-256 validation, release/offline Cargo build, preserved harness compilation, finite tensor values, and exact equality of all 3072 normalized hidden values.",
+  "original_harness_executable_sha256": "b5830b33cf9edb3c4e0bda7b3b9c98e3ed49444115a1546dca55dfec613c77a7",
+  "replay_validation": {
+    "record": "qwen-prefix-v02-20260910/replay_verification.json",
+    "passed": true,
+    "hidden_exact_equal": true,
+    "hidden_max_absolute_error": 0.0
+  }
+}

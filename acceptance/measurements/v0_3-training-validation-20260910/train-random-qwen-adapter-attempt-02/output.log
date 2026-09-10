@@ -1,0 +1,5 @@
+    Finished `release` profile [optimized] target(s) in 0.24s
+     Running `target/release/examples/train_qwen_adapter --output-dir /Users/nover/repos/transformers/target/v0_3-training-validation/20260910T203832/qwen-adapter`
+Task loss: 0.584186 -> 0.020753; synthetic training accuracy: 100.0%
+Frozen backbone unchanged; adapter/head updated; restored Adam step matched exactly.
+Records and report: /Users/nover/repos/transformers/target/v0_3-training-validation/20260910T203832/qwen-adapter

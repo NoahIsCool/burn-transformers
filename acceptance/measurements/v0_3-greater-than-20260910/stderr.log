@@ -1,0 +1,13 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 3.07s
+     Running `target/release/examples/greater_than_train`
+Cached 97 development clean-source features and oracle targets
+Learned replacement: 32/256 steps
+Learned replacement: 64/256 steps
+Learned replacement: 96/256 steps
+Learned replacement: 128/256 steps
+Learned replacement: 160/256 steps
+Learned replacement: 192/256 steps
+Learned replacement: 224/256 steps
+Learned replacement: 256/256 steps
+Cached 97 held_out clean-source features and oracle targets

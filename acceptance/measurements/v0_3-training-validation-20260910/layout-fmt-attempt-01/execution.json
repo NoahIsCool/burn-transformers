@@ -1,0 +1,24 @@
+{
+  "id": "layout-fmt",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "fmt",
+    "--manifest-path",
+    "/Users/nover/repos/transformers/scripts/coverage-layout/Cargo.toml",
+    "--check"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "layout",
+  "started_utc": "2026-09-10T20:36:56.617942+00:00",
+  "finished_utc": "2026-09-10T20:36:56.730603+00:00",
+  "seconds": 0.11266308295307681,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "layout-fmt-attempt-01/inputs-before.json",
+  "inputs_after": "layout-fmt-attempt-01/inputs-after.json",
+  "output": "layout-fmt-attempt-01/output.log",
+  "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "passed": true
+}

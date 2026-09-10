@@ -27,6 +27,7 @@ mod seq2seq;
 mod state;
 
 pub use causal::ModularCausalLm;
+pub use common::{ModularLayer, ModularNorm, NormLayout};
 pub use seq2seq::ModularSeq2SeqLm;
 pub use state::ModularDecodeState;
 

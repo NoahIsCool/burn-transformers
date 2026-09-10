@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "paper": {
+    "title": "Eliciting Latent Predictions from Transformers with the Tuned Lens",
+    "version": "2303.08112v4",
+    "url": "https://arxiv.org/abs/2303.08112v4",
+    "target": "Figure 5 comparison method and direction; bounded short-context adaptation, not its full numeric curve",
+    "author_code_revision": "65f3135ad1e849e2e5b0f7c5adbd857c787bfb64",
+    "backbone_equations_revision": "transformers-v4.28.1",
+    "backbone_source": "https://github.com/huggingface/transformers/blob/v4.28.1/src/transformers/models/gpt_neox/modeling_gpt_neox.py"
+  },
+  "sources": {
+    "historical_model": {
+      "url": "https://huggingface.co/EleutherAI/pythia-160m-deduped-v0/resolve/7e57cc978f5da949f028f36b5baf8f5d6c3281b1/pytorch_model.bin",
+      "cache_filename": "historical_model.bin",
+      "bytes": 375035089,
+      "sha256": "2949767274300e90904f58f0c6cf9ff6c174a35e29d07b2784c3051c459ea410"
+    },
+    "later_model": {
+      "url": "https://huggingface.co/EleutherAI/pythia-160m-deduped-v0/resolve/26b9eeef106f66faf9b45930f92430a8a77c8799/model.safetensors",
+      "cache_filename": "later_model.safetensors",
+      "bytes": 374998696,
+      "sha256": "8c134a441807d1614c36959b81fce3596f7e0dd6e5c43c903ad38f4cf9198cf0"
+    },
+    "config": {
+      "url": "https://huggingface.co/EleutherAI/pythia-160m-deduped-v0/resolve/7e57cc978f5da949f028f36b5baf8f5d6c3281b1/config.json",
+      "cache_filename": "config.json",
+      "bytes": 569,
+      "sha256": "76eb275107220e450d31258f792a2efcbee109d8b62ae0088260057dec06362f"
+    },
+    "lens": {
+      "url": "https://huggingface.co/spaces/AlignmentResearch/tuned-lens/resolve/1ac7285852a22309f571c2555efc37375d0c4cda/lens/EleutherAI/pythia-160m-deduped-v0/params.pt",
+      "cache_filename": "lens.pt",
+      "bytes": 28353795,
+      "sha256": "9644fe7196ae4ab63ce2ce1c7a22f63ae548021a27bac57c4c1cdd200d982cf8"
+    },
+    "lens_config": {
+      "url": "https://huggingface.co/spaces/AlignmentResearch/tuned-lens/resolve/1ac7285852a22309f571c2555efc37375d0c4cda/lens/EleutherAI/pythia-160m-deduped-v0/config.json",
+      "cache_filename": "lens_config.json",
+      "bytes": 220,
+      "sha256": "6d1e47917f86bb031e2eb6ea6099a32f914b052fa343061ba62eacb32ddfd364"
+    },
+    "tokenizer": {
+      "url": "https://huggingface.co/EleutherAI/pythia-160m-deduped-v0/resolve/7e57cc978f5da949f028f36b5baf8f5d6c3281b1/tokenizer.json",
+      "cache_filename": "tokenizer.json",
+      "bytes": 2113710,
+      "sha256": "c24618a1b3e6a38167beff1c72cffd126c3a66254347304b50547d12c5f25624"
+    },
+    "tokenizer_config": {
+      "url": "https://huggingface.co/EleutherAI/pythia-160m-deduped-v0/resolve/7e57cc978f5da949f028f36b5baf8f5d6c3281b1/tokenizer_config.json",
+      "cache_filename": "tokenizer_config.json",
+      "bytes": 394,
+      "sha256": "8defb5be8326267ec32e183c1460ecbd6f8868c079ef3ed18877096f20371ff4"
+    },
+    "special_tokens_map": {
+      "url": "https://huggingface.co/EleutherAI/pythia-160m-deduped-v0/resolve/7e57cc978f5da949f028f36b5baf8f5d6c3281b1/special_tokens_map.json",
+      "cache_filename": "special_tokens_map.json",
+      "bytes": 99,
+      "sha256": "6f50ab5a5a509a1c309d6171f339b196a900dc9c99ad0408ff23bb615fdae7ad"
+    },
+    "pile_prefix": {
+      "url": "https://huggingface.co/datasets/EleutherAI/pile_val_test/resolve/05b327037e6301f256d8df32193756edc4c8e3bd/test.jsonl",
+      "cache_filename": "pile_test_prefix.bin",
+      "bytes": 65536,
+      "sha256": "9ca7b4cc0e0689a185365ad657ae8b451083d7089d27b115c9e90c03962afe92",
+      "http_range": "bytes=0-65535",
+      "full_file_bytes": 1372688804,
+      "full_file_sha256": "f87cb69612a54c672cb5afb0f3221ec15c05fae1f34798ae8973561a4b6074da"
+    }
+  },
+  "expected_model_config": {
+    "architectures": [
+      "GPTNeoXForCausalLM"
+    ],
+    "bos_token_id": 0,
+    "eos_token_id": 0,
+    "hidden_act": "gelu",
+    "hidden_size": 768,
+    "initializer_range": 0.02,
+    "intermediate_size": 3072,
+    "layer_norm_eps": 1e-05,
+    "max_position_embeddings": 2048,
+    "model_type": "gpt_neox",
+    "num_attention_heads": 12,
+    "num_hidden_layers": 12,
+    "rotary_emb_base": 10000,
+    "rotary_pct": 0.25,
+    "tie_word_embeddings": false,
+    "torch_dtype": "float16",
+    "transformers_version": "4.24.0",
+    "use_cache": true,
+    "use_parallel_residual": true,
+    "vocab_size": 50304
+  },
+  "expected_lens_config": {
+    "base_model_name_or_path": "EleutherAI/pythia-160m-deduped-v0",
+    "d_model": 768,
+    "num_hidden_layers": 12,
+    "bias": true,
+    "base_model_revision": "7e57cc978f5da949f028f36b5baf8f5d6c3281b1",
+    "lens_type": "linear_tuned_lens"
+  },
+  "protocol": {
+    "records": 4,
+    "complete_source_records": 25,
+    "max_input_tokens": 128,
+    "reference_positions": 8,
+    "eos_token_id": 0,
+    "prepend_eos": true,
+    "add_special_tokens": false,
+    "selection": "First four complete Pile test records, in source order; tokenize each independently, prepend EOS, keep first 128 input tokens. No selection based on outcomes.",
+    "adaptation": "short-context bounded adaptation",
+    "units": "nats_per_token",
+    "kl_direction": "final||lens",
+    "ce_shift": 1,
+    "aggregate": "token-weighted across all selected records; KL includes last input position, CE excludes last prediction",
+    "lens_input_boundaries": "translator 0: embeddings; translators 1..11: residual outputs after blocks 0..10",
+    "translator": "h + linear(h), then pretrained final LayerNorm and vocabulary projection",
+    "rotary": "Reconstruct FP32 inverse frequencies from config, matching initial HF 4.28.1 rotary cache; do not use the saved F16 inv_freq buffer."
+  },
+  "parity": {
+    "logits_atol": 0.005,
+    "logits_rtol": 0.0,
+    "metrics_atol": 0.0002,
+    "metrics_rtol": 0.0
+  },
+  "export": {
+    "model_dtype": "F32",
+    "lens_dtype": "F32",
+    "source_equivalence": "Compare all 184 tensors by name, dtype, shape, and raw bytes before exporting historical parameters.",
+    "model_parameter_count": 148,
+    "excluded_buffer_count": 36,
+    "lens_parameter_count": 24,
+    "legacy_buffers": "All 36 buffers remain in the source equivalence proof but are excluded from the F32 parameter dump; causal masks and RoPE are derived from configuration."
+  }
+}

@@ -1,0 +1,15 @@
+    Blocking waiting for file lock on artifact directory
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 1m 10s
+     Running unittests examples/grokking_train.rs (target/release/examples/grokking_train-bfe7d1c9270de433)
+
+running 6 tests
+test study::analyze::tests::affine_sinusoid_fit_retains_a_nonzero_activation_mean ... ok
+test study::tests::fourier_power_identifies_a_known_frequency_and_ignores_dc ... ok
+test study::tests::resume_rejects_earlier_targets_benchmarks_and_changed_training_sources ... ok
+test study::tests::connected_activation_loss_reaches_the_prefix_without_the_readout ... ok
+test study::tests::native_optimizer_discovers_every_parameter_and_updates_the_transformer ... ok
+test study::tests::burn_model_and_optimizer_records_resume_the_next_update_exactly ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

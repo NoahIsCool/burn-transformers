@@ -1,0 +1,32 @@
+{
+  "id": "train-random-qwen-adapter",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "run",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,flex,autodiff,train,tokenizers,chat-templates",
+    "--example",
+    "train_qwen_adapter",
+    "--",
+    "--output-dir",
+    "/Users/nover/repos/transformers/target/v0_3-training-validation/20260910T203200/qwen-adapter"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "started_utc": "2026-09-10T20:37:37.937784+00:00",
+  "finished_utc": "2026-09-10T20:37:41.227772+00:00",
+  "seconds": 3.290012540994212,
+  "exit_code": 1,
+  "changed_inputs": [],
+  "inputs_before": "train-random-qwen-adapter-attempt-01/inputs-before.json",
+  "inputs_after": "train-random-qwen-adapter-attempt-01/inputs-after.json",
+  "output": "train-random-qwen-adapter-attempt-01/output.log",
+  "output_sha256": "21b75b52a9bb854a3167edb27b97301266744235f5eb0a7b7eab7b2ec90fbf74",
+  "passed": false
+}

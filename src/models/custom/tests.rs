@@ -947,7 +947,7 @@ fn modular_spec_round_trips_through_json() {
     assert_eq!(decoded, spec);
 }
 
-/// MLA, Mamba2, and underspecified learned residual gates fail explicitly before allocation.
+/// Invalid MLA rotary dimensions, unsupported Mamba2, and undefined residual gates fail explicitly.
 #[test]
 fn unavailable_or_ambiguous_components_are_rejected() {
     let device = Default::default();
@@ -965,8 +965,8 @@ fn unavailable_or_ambiguous_components_are_rejected() {
         },
     });
     let error = ModularCausalLm::<TestBackend>::init(decoder(vec![layer(mla)]), &device)
-        .expect_err("MLA kernel is not executable yet");
-    assert!(error.to_string().contains("requests MLA"));
+        .expect_err("MLA rotary dimension exceeds its rotary channel width");
+    assert!(error.to_string().contains("rotary"));
 
     let mamba = MixerSpec::Mamba2(Mamba2Spec {
         heads: 2,

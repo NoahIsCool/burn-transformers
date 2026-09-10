@@ -1037,6 +1037,108 @@ fn flan_t5_small_flex_matches_official_reference() {
     run_reference_gate::<Flex<f32, i32>>(&Default::default(), "Flex/F32");
 }
 
+/// Real checkpoint extraction and staged hooks preserve the accepted encoder tensor.
+#[cfg(feature = "flex")]
+#[test]
+#[ignore = "requires the pinned FLAN-T5-small checkpoint and reference bundle"]
+fn flan_t5_small_flex_encoder_extraction_and_staged_hooks_are_exact() {
+    use transformers::intervention::{Hooks, Layer, Stack};
+
+    type B = Flex<f32, i32>;
+    let device = Default::default();
+    let reference = ReferenceBundle::open(&reference_root());
+    let root = authenticate_checkpoint(&checkpoint_root());
+    let loaded = AutoSeq2SeqLm::<B>::load_local(
+        &root,
+        &AutoLoadOptions {
+            repository: Some(REPOSITORY.into()),
+            revision: Some(REVISION.into()),
+            ..AutoLoadOptions::default()
+        },
+        &device,
+    )
+    .expect("strictly load the pinned checkpoint");
+    let source = input::<B>(LONG_SOURCE_IDS, &device);
+    let options = ForwardOptions::default();
+    let baseline = loaded
+        .model()
+        .encode(source.clone(), &options)
+        .expect("full model encoder");
+    let expected = f32_values(baseline.hidden_state.into_data(), "full encoder");
+    let model = match loaded.into_model() {
+        AutoSeq2SeqLm::T5(model) => model,
+        _ => panic!("pinned T5 checkpoint must load as T5"),
+    };
+    let embedding_id = model.shared.weight.id;
+    let encoder = model.into_encoder().expect("extract the loaded encoder");
+    assert_eq!(encoder.shared.weight.id, embedding_id);
+    let extracted = encoder.encode(source.clone(), &options).unwrap();
+    assert_eq!(
+        f32_values(extracted.hidden_state.into_data(), "extracted encoder"),
+        expected
+    );
+
+    let depth = encoder.recipe.layers.len();
+    let split = depth / 2;
+    assert!(split > 0 && split < depth);
+    let mut hooks = Hooks::new();
+    hooks.edit(Layer::encoder(split).mlp_activation(), |activation| {
+        activation
+    });
+    let activation = hooks.capture(Layer::encoder(split).mlp_activation().token(0));
+    let hooked = encoder
+        .encode_with_hooks(source.clone(), &options, &mut hooks)
+        .unwrap();
+    assert_eq!(
+        hooks.get(&activation).unwrap().dims(),
+        [1, 1, encoder.recipe.layers[split].feed_forward_width]
+    );
+    assert_eq!(
+        f32_values(hooked.hidden_state.into_data(), "hooked encoder"),
+        expected
+    );
+
+    let mut embedding_hooks = Hooks::new();
+    let embedding = embedding_hooks.capture(Stack::Encoder.embedding());
+    let state = encoder
+        .embed_with_hooks(source, &mut embedding_hooks)
+        .unwrap();
+    assert_eq!(
+        embedding_hooks.get(&embedding).unwrap().dims(),
+        [1, LONG_SOURCE_IDS.len(), HIDDEN_SIZE]
+    );
+    let state = encoder.run_layers(state, 0..split).unwrap();
+    let state = encoder
+        .run_layers_with_hooks(state, split..depth, &mut hooks)
+        .unwrap();
+    let mut final_hooks = Hooks::new();
+    let final_hidden = final_hooks.capture(Stack::Encoder.final_norm());
+    let state = encoder
+        .normalize_with_hooks(state, &mut final_hooks)
+        .unwrap();
+    assert_eq!(
+        f32_values(
+            final_hooks.get(&final_hidden).unwrap().into_data(),
+            "captured final"
+        ),
+        expected
+    );
+    let actual = f32_values(state.hidden.into_data(), "staged encoder");
+    assert_eq!(actual, expected);
+    let comparison = compare(
+        "staged encoder final",
+        &actual,
+        &reference.tensor("encoder_final"),
+    );
+    println!(
+        "FLAN-T5-small Flex/F32 encoder extraction: depth={depth} split={split} exact_extracted=true exact_noop_hooks=true exact_staged=true max_abs_vs_full=0 cosine={:.12} max_abs={:.9} failures_1e-4={} actual_f32le_sha256={}",
+        comparison.cosine,
+        comparison.maximum_absolute_error,
+        comparison.tolerance_failures,
+        comparison.actual_sha256,
+    );
+}
+
 /// Strictly loads FLAN-T5-small on Metal and matches every official F32 path.
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[test]

@@ -1,0 +1,43 @@
+{
+  "recorded_at": "2026-09-10",
+  "command": "cargo run --release --locked --example grokking_fourier",
+  "measured_command": "target/release/examples/grokking_fourier",
+  "backend": "Burn 0.21 Flex F32",
+  "host": "macOS-15.7.9-arm64-arm-64bit",
+  "runtime_seconds_excluding_build": 0.2956669580307789,
+  "peak_rss_bytes": 18710528,
+  "input_pairs": 12769,
+  "checkpoint_sha256": "28f7212abd53937bc85ee0558536d89b0b882b3cfbec77d6942f605f7d2d4116",
+  "reference_logits_sha256": "a71b8ee19f96ecf7e39262bae9f640a00fb5a71c7c68df491522e9ac5744e3a0",
+  "exit_code": 0,
+  "stdout": "Published seed-0 checkpoint, epoch 40,000; all 12769 input pairs\nTable 1: fraction of variance explained by cos/sin(2\u03c0k(a+b)/113)\nk=14 cos: 93.156% (paper 93.2%)\nk=14 sin: 93.499% (paper 93.5%)\nk=35 cos: 96.822% (paper 96.8%)\nk=35 sin: 96.497% (paper 96.5%)\nk=41 cos: 97.023% (paper 97.0%)\nk=41 sin: 96.962% (paper 97.0%)\nk=42 cos: 96.431% (paper 96.4%)\nk=42 sin: 96.489% (paper 96.4%)\nk=52 cos: 97.374% (paper 97.4%)\nk=52 sin: 98.164% (paper 98.2%)\nAdditional experiment: intervene on the full model, retaining residual and biases\nMLP intervention           accuracy  cross entropy\nunchanged                 100.0000%  2.41220307e-7\nkeep 10D subspace         100.0000%  2.40480520e-7\nremove 10D subspace        13.7286%   3.97949458e0\nremove then restore       100.0000%  2.41220355e-7\nno-op max error: 0.00e0; reference max error: 1.53e-5; restoration max error: 7.63e-6\n",
+  "stderr": "",
+  "measurement_scope": "Two successful local executions of the already-built binary; top-level timing and memory describe the final independent replay, with initial figures retained separately. Runtime excludes compilation and preparation/download. macOS ru_maxrss reports bytes; these are process peak RSS measurements, not a portable performance guarantee or benchmark baseline.",
+  "source_sha256": {
+    "examples/grokking_fourier.rs": "62677a7e48040be07530ccce67d387f0e26c062cf82d188eca212539b702aae3",
+    "examples/mechanistic/grokking_model.rs": "4345610e5f457d503531c9b25730f34f2c03540e731bd282df99a6a6ee9b40b6",
+    "examples/mechanistic/grokking_prepare.py": "e6162af22473bcaf9a9dd3b57103ea46ce895e32098bc78b07f11e8ada8f1ec6",
+    "examples/mechanistic/grokking_reference.py": "4fda5c6a4af94326ac3b1eeb8d03a7f1db2d588db71869432d536f3b042c7466",
+    "examples/mechanistic/grokking_reference_logits.json": "a71b8ee19f96ecf7e39262bae9f640a00fb5a71c7c68df491522e9ac5744e3a0",
+    "examples/mechanistic/grokking_manifest.json": "836a107083f0583c6008c9911cb6639d1696b96444dfa368b8a5068584421231",
+    "Cargo.lock": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d"
+  },
+  "validation": [
+    "python3 examples/mechanistic/grokking_prepare.py",
+    "cargo build --release --locked --example grokking_fourier",
+    "target/release/examples/grokking_fourier",
+    "cargo clippy --release --locked --example grokking_fourier -- -D warnings",
+    "rustfmt --edition 2024 examples/grokking_fourier.rs examples/mechanistic/grokking_model.rs",
+    "Fresh bounded download verified after atomic-file-write change"
+  ],
+  "replayed_at_utc": "2026-09-10T14:21:28Z",
+  "negative_checks": {
+    "rust_corrupt_checkpoint_rejected": true,
+    "prepare_corrupt_existing_output_rejected_without_modification": true
+  },
+  "initial_smoke_measurement": {
+    "runtime_seconds_excluding_build": 0.527341292006895,
+    "peak_rss_bytes": 24920064,
+    "stdout_matches_replay": true
+  }
+}

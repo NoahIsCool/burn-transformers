@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "frozen_before_training_utc": "2026-09-10T20:02:39.848043+00:00",
+  "paper": "https://arxiv.org/html/2303.08112v4#S3",
+  "base_artifacts": {
+    "model/model.safetensors": {
+      "bytes": 649308920,
+      "sha256": "feb5482a118890935e57762108fc50c2153d7d0fc9ff4405e4eaaa53c98607d3"
+    },
+    "model/config.json": {
+      "bytes": 569,
+      "sha256": "76eb275107220e450d31258f792a2efcbee109d8b62ae0088260057dec06362f"
+    },
+    "model/tokenizer.json": {
+      "bytes": 2113710,
+      "sha256": "c24618a1b3e6a38167beff1c72cffd126c3a66254347304b50547d12c5f25624"
+    },
+    "pile_test_first25.jsonl": {
+      "bytes": 64707,
+      "sha256": "e22e54ec651c197e4695ded586c5a0556553e24de82f2538e46b31d1b3b4e93e"
+    }
+  },
+  "protocol": {
+    "stages": [
+      0,
+      6,
+      11
+    ],
+    "stage_definition": "0 is embedding; i>0 is residual_post at decoder block i-1, before the next block; raw residual before final LayerNorm",
+    "train_records": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "validation_records": [
+      16,
+      17,
+      18,
+      19
+    ],
+    "max_tokens_per_record": 32,
+    "eos_token_id": 0,
+    "steps_per_stage": 100,
+    "batch_tokens": 32,
+    "batch_order": "Cycle training records in ascending order; each record is one batch with independent causal context",
+    "initialization": "h + Linear(h), Linear weight and bias zero; no released lens weights are read",
+    "optimizer": {
+      "name": "Burn SGD",
+      "base_learning_rate": 0.02,
+      "schedule": "linear decay: lr=base*(1-step/steps), zero-indexed step",
+      "momentum": 0.9,
+      "dampening": 0.0,
+      "nesterov": true,
+      "weight_decay": 0.001,
+      "global_gradient_norm_clip": 1.0
+    },
+    "loss": "mean KL(teacher final distribution || translated distribution), full 50304-token vocabulary, natural logs; frozen teacher, final normalization and vocabulary readout",
+    "metrics": "held-out KL and next-token CE before and after fixed training; validation never used for stopping/model selection",
+    "validation_policy": "Only initial and final held-out evaluations. No fitted effect-size threshold; require final held-out KL lower than initial raw lens separately at each selected stage. Report CE independently, including failures.",
+    "checkpoint": "save ordinary Burn translator and optimizer records halfway, reload, compare one resumed optimizer step against uninterrupted control, then finish from loaded state",
+    "adaptation": "3 of 12 translators; 384 training and128 held-out tokens from disjoint records of pinned Pile test prefix, independently truncated32-token contexts; original used250steps,2^18tokens/step,2048contexts,LR1.0,16.4M evaluation tokens. This does not reproduce original quantitative benchmark or language-model pretraining."
+  },
+  "tolerances": {
+    "identity_logits_max_abs": 1e-06,
+    "resume_parameters_max_abs": 1e-06,
+    "frozen_backbone": "bitwise SHA256 unchanged",
+    "finite_nonzero_translator_gradients": true,
+    "reference_loss_abs": 0.0002,
+    "reference_gradient_max_abs": 0.0002
+  }
+}

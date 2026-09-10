@@ -1,0 +1,12 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 0.97s
+     Running `target/release/examples/attention_head_attribution`
+Elhage et al. (2021): exact head decomposition on a fixed tiny transformer
+ordinary/instrumented max error: 0.00000024
+additive decomposition max error: 0.00000024
+head-zero ablation effect: 1.000000
+predicted/observed ablation max error: 0.00000030
+clean-patch restoration max error: 0.00000000
+wrong-head patch effect: 1.000000
+future-token effect, causal/bidirectional: 0.000000 / 4.502468
+PASS: mathematical reproduction and intervention controls; no learned-circuit claim.

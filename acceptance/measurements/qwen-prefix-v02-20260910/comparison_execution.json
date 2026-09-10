@@ -1,0 +1,11 @@
+{
+  "command": [
+    "/private/tmp/qwen-prefix-v02-real-8bfamav1/compare_prefix",
+    "models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17"
+  ],
+  "exit_code": 0,
+  "wall_seconds": 12.946592457999941,
+  "stderr": "",
+  "stdout_file": "comparison_report.json",
+  "stdout_sha256": "2cf53defbc9698c8625740f63488e306a1c22041220803893c9436275c1fe815"
+}

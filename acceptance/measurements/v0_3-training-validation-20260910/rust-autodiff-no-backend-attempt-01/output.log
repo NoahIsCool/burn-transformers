@@ -1,0 +1,12 @@
+    Checking cubecl-common v0.10.0
+    Checking burn-std v0.21.0
+    Checking burn-backend v0.21.0
+    Checking burn-tensor v0.21.0
+    Checking burn-autodiff v0.21.0
+    Checking burn-core v0.21.0
+    Checking burn-nn v0.21.0
+    Checking burn-optim v0.21.0
+    Checking burn-store v0.21.0
+    Checking burn v0.21.0
+    Checking transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 10.22s

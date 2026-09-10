@@ -1,0 +1,124 @@
+{
+  "url": "https://huggingface.co/smithjessk/grokking-saved-runs/resolve/3799fe7b4c6abd4d81df7e55972fbefc6a9f0c3f/original_architecture/deprecated/seed_0/trained_model.pth",
+  "archive_sha256": "a151f02125a33d6647d7b27fce99ae145ff3b83abc0586a883acc73e8318d828",
+  "checkpoint_index": 400,
+  "epoch": 40000,
+  "metadata_sha256": "4e066d4e312e741dca66d07c084fccdf02aae1d8037b4094495779e6dba9ba20",
+  "range_start": 321599888,
+  "range_end": 322510480,
+  "range_sha256": "151569facc78a374b3800fa5c47f7d24bb9fe8d7467e5d16b529ff30c6be85af",
+  "tensors": {
+    "embed.W_E": {
+      "shape": [
+        128,
+        114
+      ],
+      "range_offset": 112,
+      "length": 58368,
+      "sha256": "cd8c3eb41aae5bb9e4c52a956c5fb34701c9e676a603d599ff77fba042bdb261"
+    },
+    "pos_embed.W_pos": {
+      "shape": [
+        3,
+        128
+      ],
+      "range_offset": 58608,
+      "length": 1536,
+      "sha256": "4c882bc3291454511ecb8668b413811682f557502ab6f4693a4bb43f9a9fb223"
+    },
+    "blocks.0.attn.W_K": {
+      "shape": [
+        4,
+        32,
+        128
+      ],
+      "range_offset": 60272,
+      "length": 65536,
+      "sha256": "3cb86eea62709d6518dc551dfedf8c2ee4d4038e008ed52859d235c85a1abada"
+    },
+    "blocks.0.attn.W_Q": {
+      "shape": [
+        4,
+        32,
+        128
+      ],
+      "range_offset": 125936,
+      "length": 65536,
+      "sha256": "76f33a9d544daf3bf8d9b17cb7e0b81891ab9937f5d3e5bebb5a2df48ff9c2c8"
+    },
+    "blocks.0.attn.W_V": {
+      "shape": [
+        4,
+        32,
+        128
+      ],
+      "range_offset": 191600,
+      "length": 65536,
+      "sha256": "5d178aee80866c6446134fa9c67ab42a754e0513c62ebe72338a1bd5f9f1001c"
+    },
+    "blocks.0.attn.W_O": {
+      "shape": [
+        128,
+        128
+      ],
+      "range_offset": 257264,
+      "length": 65536,
+      "sha256": "34247e5efbeb4a97d6923460cca5f28f637ef57c9fb4592b4ed04ee29643a07f"
+    },
+    "blocks.0.attn.mask": {
+      "shape": [
+        3,
+        3
+      ],
+      "range_offset": 322928,
+      "length": 36,
+      "sha256": "3903fafd51e93ff15303ecf6c979432f719ddc574d067f1a63e8966ea287e467"
+    },
+    "blocks.0.mlp.W_in": {
+      "shape": [
+        512,
+        128
+      ],
+      "range_offset": 323056,
+      "length": 262144,
+      "sha256": "ee1c7c71c60573342a1750c45d524109e64f177ad8bbb7d20d3e11041bc1b808"
+    },
+    "blocks.0.mlp.b_in": {
+      "shape": [
+        512
+      ],
+      "range_offset": 585328,
+      "length": 2048,
+      "sha256": "f17e09487f4a532bd14b9b5a3d4290843e7a173a7611a262611012e4cd9aa637"
+    },
+    "blocks.0.mlp.W_out": {
+      "shape": [
+        128,
+        512
+      ],
+      "range_offset": 587504,
+      "length": 262144,
+      "sha256": "03ccaa53ff6fbea54ffcfe8ed2ef7d37e3459996cb9ce60dfe8fd3c363634969"
+    },
+    "blocks.0.mlp.b_out": {
+      "shape": [
+        128
+      ],
+      "range_offset": 851440,
+      "length": 512,
+      "sha256": "404f8a54ba0a9381b529b3231099d5e624f7f01169eb34f1f09b4b08a7ffb762"
+    },
+    "unembed.W_U": {
+      "shape": [
+        128,
+        114
+      ],
+      "range_offset": 852080,
+      "length": 58368,
+      "sha256": "5151bd8cc67957e1946e99b97d79c251124e2370aede02f390af4c6a947b76d7"
+    }
+  },
+  "analysis_notebook_commit": "23d2c64dd1f8a5ca65efaf27e15c2b2cd47dedf1",
+  "selection": "full_run_data['state_dicts'][400]",
+  "output_sha256": "28f7212abd53937bc85ee0558536d89b0b882b3cfbec77d6942f605f7d2d4116"
+}

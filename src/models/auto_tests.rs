@@ -15,6 +15,9 @@ use crate::{
 
 type TestBackend = Flex<f32, i32>;
 
+#[path = "auto/intervention_tests.rs"]
+mod intervention_tests;
+
 /// Constructs a tiny validated hybrid configuration for registry tests.
 fn tiny_qwen() -> Qwen3_5TextConfig {
     Qwen3_5TextConfig {

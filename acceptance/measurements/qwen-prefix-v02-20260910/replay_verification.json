@@ -1,0 +1,54 @@
+{
+  "command": [
+    "python3",
+    "acceptance/measurements/qwen-prefix-v02-20260910/replay.py",
+    "models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17"
+  ],
+  "exit_code": 0,
+  "harness_compilation": {
+    "command": [
+      "rustc",
+      "--edition=2024",
+      "-C",
+      "opt-level=3",
+      "/Users/nover/repos/transformers/acceptance/measurements/qwen-prefix-v02-20260910/compare_prefix.rs",
+      "-L",
+      "dependency=/Users/nover/repos/transformers/target/release/deps",
+      "-o",
+      "/var/folders/hh/541wrb613833x7hpvqymn_rc0000gn/T/qwen-prefix-replay-t3oshb52/compare_prefix",
+      "--extern",
+      "serde_json=/Users/nover/repos/transformers/target/release/deps/libserde_json-9450ebc1d6ce3ed3.rlib",
+      "--extern",
+      "burn=/Users/nover/repos/transformers/target/release/deps/libburn-e9fa18f46b884c6b.rlib",
+      "--extern",
+      "transformers=/Users/nover/repos/transformers/target/release/deps/libtransformers-43f697aba411fb83.rlib"
+    ],
+    "cwd": "/Users/nover/repos/transformers",
+    "exit_code": 0,
+    "wall_seconds": 1.386316624993924,
+    "stdout": "",
+    "stderr": ""
+  },
+  "comparison_execution": {
+    "command": [
+      "/var/folders/hh/541wrb613833x7hpvqymn_rc0000gn/T/qwen-prefix-replay-t3oshb52/compare_prefix",
+      "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17"
+    ],
+    "cwd": "/Users/nover/repos/transformers",
+    "exit_code": 0,
+    "wall_seconds": 12.770572417008225,
+    "stderr": ""
+  },
+  "example_exit_code": 0,
+  "hidden_exact_equal": true,
+  "hidden_max_absolute_error": 0.0,
+  "compared_hidden_values": 3072,
+  "source_payload_bytes": 594783424,
+  "capture_shape": [
+    1,
+    1,
+    3584
+  ],
+  "capture_dtype": "F32",
+  "note": "Replayed the preserved harness from its repository location and authenticated the checkpoint against preserved hashes. Original measurement timings remain in the sibling summary."
+}

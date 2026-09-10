@@ -1,0 +1,36 @@
+{
+  "command": [
+    "cargo",
+    "run",
+    "--release",
+    "--locked",
+    "--offline",
+    "--features",
+    "autodiff",
+    "--example",
+    "greater_than_train"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "started_utc": "2026-09-10T20:27:38.362091+00:00",
+  "exit_code": 0,
+  "wall_seconds_including_cargo": 139.87742391601205,
+  "source_sha256": {
+    "examples/greater_than_train.rs": "4595f3963a28bb14fb98b584a65f8c60bb25b46ddeec713746a5e0889056a82a",
+    "examples/mechanistic/greater_than_training/support.rs": "6f47c6924b318f3a970f51329d6b0ad9d1f579760555f1eab74293c1eb17e312",
+    "examples/mechanistic/greater_than_training/protocol.json": "6e3ec845d2e35d2f8c955c4f6a6db699c9fa4c7aa475826a77b9a1a1a6bddd48",
+    "examples/mechanistic/greater_than/fixture.json": "82620130e2483f70ef14bedce36555f3e963fbf38f0be36c163b217a37e30503",
+    "src/models/gpt2.rs": "d3d03c7e94e2789da266ef604b79814d03aa447b3fed05f7e10635cda26c8518",
+    "src/models/gpt2/model.rs": "19f08845511a621d85a38874c048be12c783abc3ea06dd25711107cd4f3e0116",
+    "src/models/gpt2/checkpoint.rs": "521eeb88e7dd0a0d141f416f742c584f63fe2c65d2eaf279df545e2d35098322",
+    "src/intervention.rs": "47fa79ac7e19e3a84dd1c071115ce2e2ab8eda2260febfdfc21f8f141b64e454",
+    "src/training.rs": "75580349fe96af07e2a449c19b3b680df76a18bb17f5740ea6378c4feb5b8613",
+    "Cargo.toml": "ae741cefb94773d81d6fcd7833d865ddc33f002ecd7c274e1419de0ac748942a",
+    "Cargo.lock": "7c57f9830fb5b93195fb8ac765106dd9db91234f9130e9f66494fbec0d808b9d"
+  },
+  "source_unchanged_during_execution": true,
+  "binary_sha256": "ef13f7aedb475761ac1d0dfc73da794954980e506e2b504f1ee0351b48a2120b",
+  "execution_wrapper_sha256": "ea4e303b648983a256fc631ff0db4074e20db3769ac2e5a7fabb35d6a83666c6",
+  "stdout_sha256": "6024043989989efd1e825e9b88635a8f98585e9b3927015f3dd43f5d953af225",
+  "stderr_sha256": "b17f1899551bc80f81eeb37ecc0bbacdb47e23e45d3fddfd3714e72461c760bf",
+  "result_sha256": "b55293d1c70888b7803be435d84260ecffcf1a30a3cc9ff7d178c4a51bdb1e43"
+}

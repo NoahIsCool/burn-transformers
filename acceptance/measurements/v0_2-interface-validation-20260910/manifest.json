@@ -1,0 +1,2115 @@
+{
+  "commands": [
+    {
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "finished_at_utc": "2026-09-10T17:41:17.547298+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "name": "git_revision",
+      "parse": null,
+      "returncode": 0,
+      "runtime_seconds": 0.005124791990965605,
+      "started_at_utc": "2026-09-10T17:41:17.541741+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 0,
+        "path": "logs/01-git_revision.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 41,
+        "path": "logs/01-git_revision.stdout.log",
+        "sha256": "189256fe9f24648fef556e59d30aea26ca7a37a16f90e82fe938452c12d9e994"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "git",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all"
+      ],
+      "finished_at_utc": "2026-09-10T17:41:17.579829+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "git",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all"
+      ],
+      "name": "git_status",
+      "parse": null,
+      "returncode": 0,
+      "runtime_seconds": 0.007799750019330531,
+      "started_at_utc": "2026-09-10T17:41:17.571688+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 0,
+        "path": "logs/02-git_status.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 6539,
+        "path": "logs/02-git_status.stdout.log",
+        "sha256": "fea8724b8bfef888b6608db55c85294d9c3f10e59a9c58a446fe1efe2674ed7c"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "rustc",
+        "--version",
+        "--verbose"
+      ],
+      "finished_at_utc": "2026-09-10T17:41:17.638802+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "rustc",
+        "--version",
+        "--verbose"
+      ],
+      "name": "rustc_version",
+      "parse": null,
+      "returncode": 0,
+      "runtime_seconds": 0.035192541021388024,
+      "started_at_utc": "2026-09-10T17:41:17.603279+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 0,
+        "path": "logs/03-rustc_version.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 208,
+        "path": "logs/03-rustc_version.stdout.log",
+        "sha256": "48d15fae5bc3c29981b8f3b43e075ea2c3f8213f8811699acb867de1d1fb2e16"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "cargo",
+        "--version",
+        "--verbose"
+      ],
+      "finished_at_utc": "2026-09-10T17:41:17.695775+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "cargo",
+        "--version",
+        "--verbose"
+      ],
+      "name": "cargo_version",
+      "parse": null,
+      "returncode": 0,
+      "runtime_seconds": 0.03301600000122562,
+      "started_at_utc": "2026-09-10T17:41:17.662398+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 0,
+        "path": "logs/04-cargo_version.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 352,
+        "path": "logs/04-cargo_version.stdout.log",
+        "sha256": "ffd42f65fe96b9ea0f8f7333da0817da2697d5ea195f5429e42564fae2c1a90a"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "rustc",
+        "--version",
+        "--verbose"
+      ],
+      "finished_at_utc": "2026-09-10T17:41:17.840714+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "rustc",
+        "--version",
+        "--verbose"
+      ],
+      "name": "msrv_version",
+      "parse": "msrv",
+      "returncode": 0,
+      "runtime_seconds": 0.12072608398739249,
+      "started_at_utc": "2026-09-10T17:41:17.719635+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 0,
+        "path": "logs/05-msrv_version.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 192,
+        "path": "logs/05-msrv_version.stdout.log",
+        "sha256": "58c12481ab6ca64f223a3d873e8d32b30fdf2c200be485065372adcd9ddf23d8"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "/usr/local/bin/python3",
+        "--version"
+      ],
+      "finished_at_utc": "2026-09-10T17:41:17.873090+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "/usr/local/bin/python3",
+        "--version"
+      ],
+      "name": "python_version",
+      "parse": null,
+      "returncode": 0,
+      "runtime_seconds": 0.008130749978590757,
+      "started_at_utc": "2026-09-10T17:41:17.864586+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 0,
+        "path": "logs/06-python_version.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 14,
+        "path": "logs/06-python_version.stdout.log",
+        "sha256": "bc470e08cfeae31ebc8be9f6a8b9e86e415842ad13f9afb19828ca2ac42e81b5"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "/usr/local/bin/python3",
+        "-c",
+        "import json,sys,torch,safetensors,numpy; print(json.dumps({'executable':sys.executable,'python':sys.version,'torch':str(torch.__version__),'safetensors':safetensors.__version__,'numpy':numpy.__version__},sort_keys=True))"
+      ],
+      "finished_at_utc": "2026-09-10T17:41:18.473895+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "/usr/local/bin/python3",
+        "-c",
+        "import json,sys,torch,safetensors,numpy; print(json.dumps({'executable':sys.executable,'python':sys.version,'torch':str(torch.__version__),'safetensors':safetensors.__version__,'numpy':numpy.__version__},sort_keys=True))"
+      ],
+      "name": "paper_python_versions",
+      "parse": null,
+      "returncode": 0,
+      "runtime_seconds": 0.5763745410367846,
+      "started_at_utc": "2026-09-10T17:41:17.897119+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 0,
+        "path": "logs/07-paper_python_versions.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 202,
+        "path": "logs/07-paper_python_versions.stdout.log",
+        "sha256": "5522c894d0b2f42b81886bc4ef664f0f9cd67bdee1f25d94f742b660bb636d7b"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--all-targets"
+      ],
+      "finished_at_utc": "2026-09-10T17:41:24.379622+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "cargo",
+        "test",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--all-targets"
+      ],
+      "name": "rust_all_targets",
+      "parse": "rust",
+      "returncode": 0,
+      "runtime_seconds": 5.880576333031058,
+      "started_at_utc": "2026-09-10T17:41:18.498694+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 2917,
+        "path": "logs/08-rust_all_targets.stderr.log",
+        "sha256": "a887229b684175f7fb3314f6c45f65bc648d3839883c219a5cc62ed0e62fc3b0"
+      },
+      "stdout": {
+        "bytes": 138434,
+        "path": "logs/08-rust_all_targets.stdout.log",
+        "sha256": "4a0d15ecafad4f9cdae5b81f612eec018b25106c7807536a40efca3d379fa524"
+      },
+      "test_counts": {
+        "format": "Rust libtest",
+        "suite_summaries": [
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 4,
+            "measured": 0,
+            "passed": 1257,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 3,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 1,
+            "measured": 0,
+            "passed": 1,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 4,
+            "measured": 0,
+            "passed": 2,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 8,
+            "measured": 0,
+            "passed": 1,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 9,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 4,
+            "measured": 0,
+            "passed": 29,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 3,
+            "measured": 0,
+            "passed": 30,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 0,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 1,
+            "measured": 0,
+            "passed": 17,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 0,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 2,
+            "measured": 0,
+            "passed": 6,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 2,
+            "measured": 0,
+            "passed": 7,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 2,
+            "measured": 0,
+            "passed": 1,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 1,
+            "measured": 0,
+            "passed": 0,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 0,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 0,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 0,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 0,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 0,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 4,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 0,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 0,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 0,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 0,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 0,
+            "status": "ok"
+          },
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 1,
+            "status": "ok"
+          }
+        ],
+        "totals": {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 32,
+          "measured": 0,
+          "passed": 1368
+        }
+      }
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--doc"
+      ],
+      "finished_at_utc": "2026-09-10T17:41:26.537633+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "cargo",
+        "test",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--doc"
+      ],
+      "name": "rust_doctests",
+      "parse": "rust",
+      "returncode": 0,
+      "runtime_seconds": 2.1159659170079976,
+      "started_at_utc": "2026-09-10T17:41:24.421044+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 88,
+        "path": "logs/09-rust_doctests.stderr.log",
+        "sha256": "612001bf4ff247d35f99b67d95c8fb56bde4c4df2a580e244051073d69ac4e73"
+      },
+      "stdout": {
+        "bytes": 339,
+        "path": "logs/09-rust_doctests.stdout.log",
+        "sha256": "9208f3c62fc93d2749dbfc660c09c97827542137ab9100c617f624a816a8fc01"
+      },
+      "test_counts": {
+        "format": "Rust libtest",
+        "suite_summaries": [
+          {
+            "failed": 0,
+            "filtered_out": 0,
+            "ignored": 0,
+            "measured": 0,
+            "passed": 3,
+            "status": "ok"
+          }
+        ],
+        "totals": {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 3
+        }
+      }
+    },
+    {
+      "argv": [
+        "cargo",
+        "clippy",
+        "--release",
+        "--locked",
+        "--offline",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "finished_at_utc": "2026-09-10T17:41:39.309877+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "cargo",
+        "clippy",
+        "--release",
+        "--locked",
+        "--offline",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "name": "clippy_all_features",
+      "parse": null,
+      "returncode": 0,
+      "runtime_seconds": 12.734509292000439,
+      "started_at_utc": "2026-09-10T17:41:26.574847+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 130,
+        "path": "logs/10-clippy_all_features.stderr.log",
+        "sha256": "a308fb6add65ad7408468d561c8f39570b1f0e3e9a412d75b3a36de1af06c08f"
+      },
+      "stdout": {
+        "bytes": 0,
+        "path": "logs/10-clippy_all_features.stdout.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "finished_at_utc": "2026-09-10T17:41:40.508100+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "name": "rustfmt",
+      "parse": null,
+      "returncode": 0,
+      "runtime_seconds": 1.1693739999900572,
+      "started_at_utc": "2026-09-10T17:41:39.338162+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 0,
+        "path": "logs/11-rustfmt.stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 0,
+        "path": "logs/11-rustfmt.stdout.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "cargo",
+        "check",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features"
+      ],
+      "finished_at_utc": "2026-09-10T17:41:46.835291+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "cargo",
+        "check",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features"
+      ],
+      "name": "minimal_features",
+      "parse": null,
+      "returncode": 0,
+      "runtime_seconds": 6.301659999997355,
+      "started_at_utc": "2026-09-10T17:41:40.533067+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 129,
+        "path": "logs/12-minimal_features.stderr.log",
+        "sha256": "104084230bbd1b8ee7c162737d88eff6d4faac9005a082e5912de3513d5f9a9e"
+      },
+      "stdout": {
+        "bytes": 0,
+        "path": "logs/12-minimal_features.stdout.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "cargo",
+        "check",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std"
+      ],
+      "finished_at_utc": "2026-09-10T17:41:53.148329+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "cargo",
+        "check",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std"
+      ],
+      "name": "std_features",
+      "parse": null,
+      "returncode": 0,
+      "runtime_seconds": 6.283941707981285,
+      "started_at_utc": "2026-09-10T17:41:46.863833+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 129,
+        "path": "logs/13-std_features.stderr.log",
+        "sha256": "f865b9830a5cbd593509fefe1cc5e185d6b8d309b6a29347619622f7da2ab2c7"
+      },
+      "stdout": {
+        "bytes": 0,
+        "path": "logs/13-std_features.stdout.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "cargo",
+        "doc",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--no-deps"
+      ],
+      "finished_at_utc": "2026-09-10T17:41:57.907978+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "cargo",
+        "doc",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--no-deps"
+      ],
+      "name": "rustdoc",
+      "parse": null,
+      "returncode": 0,
+      "runtime_seconds": 4.730692707991693,
+      "started_at_utc": "2026-09-10T17:41:53.176689+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 209,
+        "path": "logs/14-rustdoc.stderr.log",
+        "sha256": "85ecbcd8f7d97420408eaa5c0983921f28f91285ab9b2ce54b2262ab03fe313a"
+      },
+      "stdout": {
+        "bytes": 0,
+        "path": "logs/14-rustdoc.stdout.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "check",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--all-targets"
+      ],
+      "finished_at_utc": "2026-09-10T17:42:07.065430+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "check",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--all-targets"
+      ],
+      "name": "msrv_all_targets",
+      "parse": null,
+      "returncode": 0,
+      "runtime_seconds": 9.127529666002374,
+      "started_at_utc": "2026-09-10T17:41:57.936764+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 129,
+        "path": "logs/15-msrv_all_targets.stderr.log",
+        "sha256": "8562a19073386b81aea2fccafd3409f0a46a8e99e1d8b6a6c721a2849256dbc3"
+      },
+      "stdout": {
+        "bytes": 0,
+        "path": "logs/15-msrv_all_targets.stdout.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "/usr/local/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts/tests",
+        "-v"
+      ],
+      "finished_at_utc": "2026-09-10T17:42:10.782192+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "/usr/local/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts/tests",
+        "-v"
+      ],
+      "name": "python_unittest",
+      "parse": "python",
+      "returncode": 0,
+      "runtime_seconds": 3.6875069169909693,
+      "started_at_utc": "2026-09-10T17:42:07.094087+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 81705,
+        "path": "logs/16-python_unittest.stderr.log",
+        "sha256": "9f0fda1028611728111fba0d20bd8c11da8ad4881e9defc5170291f8495e30b7"
+      },
+      "stdout": {
+        "bytes": 0,
+        "path": "logs/16-python_unittest.stdout.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "test_counts": {
+        "errors": 0,
+        "expected_failures": 0,
+        "failures": 0,
+        "format": "Python unittest",
+        "normal_passed": 359,
+        "reported_runtime_seconds": 3.392,
+        "skipped": 14,
+        "status": "OK",
+        "tests_run": 373,
+        "unexpected_successes": 0
+      }
+    },
+    {
+      "argv": [
+        "/usr/local/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "examples/mechanistic/tuned_lens",
+        "-p",
+        "*_tests.py",
+        "-v"
+      ],
+      "finished_at_utc": "2026-09-10T17:42:11.433378+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "/usr/local/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "examples/mechanistic/tuned_lens",
+        "-p",
+        "*_tests.py",
+        "-v"
+      ],
+      "name": "tuned_lens_python_unittest",
+      "parse": "python",
+      "returncode": 0,
+      "runtime_seconds": 0.6217482500360347,
+      "started_at_utc": "2026-09-10T17:42:10.810988+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 1099,
+        "path": "logs/17-tuned_lens_python_unittest.stderr.log",
+        "sha256": "5a11d98138082fe522b09350baa725b94e5117fadd758037a875aec40a63049e"
+      },
+      "stdout": {
+        "bytes": 0,
+        "path": "logs/17-tuned_lens_python_unittest.stdout.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "test_counts": {
+        "errors": 0,
+        "expected_failures": 0,
+        "failures": 0,
+        "format": "Python unittest",
+        "normal_passed": 7,
+        "reported_runtime_seconds": 0.002,
+        "skipped": 0,
+        "status": "OK",
+        "tests_run": 7,
+        "unexpected_successes": 0
+      }
+    },
+    {
+      "argv": [
+        "/usr/local/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "examples/mechanistic/greater_than",
+        "-p",
+        "test_*.py",
+        "-v"
+      ],
+      "finished_at_utc": "2026-09-10T17:42:13.148844+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "/usr/local/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "examples/mechanistic/greater_than",
+        "-p",
+        "test_*.py",
+        "-v"
+      ],
+      "name": "greater_than_python_unittest",
+      "parse": "python",
+      "returncode": 0,
+      "runtime_seconds": 1.686168499989435,
+      "started_at_utc": "2026-09-10T17:42:11.462030+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 998,
+        "path": "logs/18-greater_than_python_unittest.stderr.log",
+        "sha256": "3477150381cf27cc8e96cf3b4fed41065e0fcc1ec098ecd2d499532309c2002f"
+      },
+      "stdout": {
+        "bytes": 0,
+        "path": "logs/18-greater_than_python_unittest.stdout.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "test_counts": {
+        "errors": 0,
+        "expected_failures": 0,
+        "failures": 0,
+        "format": "Python unittest",
+        "normal_passed": 5,
+        "reported_runtime_seconds": 0.014,
+        "skipped": 0,
+        "status": "OK",
+        "tests_run": 5,
+        "unexpected_successes": 0
+      }
+    },
+    {
+      "argv": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--examples"
+      ],
+      "finished_at_utc": "2026-09-10T17:42:16.650149+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--examples"
+      ],
+      "name": "build_examples",
+      "parse": null,
+      "returncode": 0,
+      "runtime_seconds": 3.4746417499845847,
+      "started_at_utc": "2026-09-10T17:42:13.174851+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 129,
+        "path": "logs/19-build_examples.stderr.log",
+        "sha256": "4c1d746277ff75e1a4865fc778bc81de585004f1a17f29c75d9c1223b91e89c9"
+      },
+      "stdout": {
+        "bytes": 0,
+        "path": "logs/19-build_examples.stdout.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/activation_workbench"
+      ],
+      "executable": {
+        "bytes": 3808464,
+        "sha256": "098ead616fb4e89ede63c723341ada29db27f29b90b5fa058b563105f428598d"
+      },
+      "finished_at_utc": "2026-09-10T17:42:16.944237+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/nover/repos/transformers/target/release/examples/activation_workbench"
+      ],
+      "memory_method": "macOS /usr/bin/time -l child maximum resident set size; bytes, not system footprint",
+      "name": "example_activation_workbench",
+      "parse": "example",
+      "peak_process_rss_bytes": 2981888,
+      "returncode": 0,
+      "runtime_seconds": 0.22491162497317418,
+      "started_at_utc": "2026-09-10T17:42:16.716923+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 777,
+        "path": "logs/20-example_activation_workbench.stderr.log",
+        "sha256": "2aa036e68a9082beef9d3eecd1472482f7c6f20be87188ebbb1da97b4b8dcde9"
+      },
+      "stdout": {
+        "bytes": 234,
+        "path": "logs/20-example_activation_workbench.stdout.log",
+        "sha256": "23585f12563103e497975544e51d8bb0ea51cc294f2e787b76392383c6662f1a"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/attention_head_attribution"
+      ],
+      "executable": {
+        "bytes": 2260368,
+        "sha256": "455f7cdd91f497197e1b652ee8af6f25f9cb9def8f31ddc36312f5f55e24ec48"
+      },
+      "finished_at_utc": "2026-09-10T17:42:17.113001+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/nover/repos/transformers/target/release/examples/attention_head_attribution"
+      ],
+      "memory_method": "macOS /usr/bin/time -l child maximum resident set size; bytes, not system footprint",
+      "name": "example_attention_head_attribution",
+      "parse": "example",
+      "peak_process_rss_bytes": 2310144,
+      "returncode": 0,
+      "runtime_seconds": 0.12600191700039431,
+      "started_at_utc": "2026-09-10T17:42:16.984746+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 777,
+        "path": "logs/21-example_attention_head_attribution.stderr.log",
+        "sha256": "203583959ce7b19ffd3003f0a6021bb482bdcd447a826cbb5cb6d782b50ed955"
+      },
+      "stdout": {
+        "bytes": 478,
+        "path": "logs/21-example_attention_head_attribution.stdout.log",
+        "sha256": "eae508b9ba6909f4a47d5cd48268b47f5214f1e7d6d1bef973115519f51f989c"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/custom_composition"
+      ],
+      "executable": {
+        "bytes": 2638448,
+        "sha256": "14e7c94def0ed1055e5246a41fc7d530f2ac3af15711a886eb3c723946742222"
+      },
+      "finished_at_utc": "2026-09-10T17:42:17.272692+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/nover/repos/transformers/target/release/examples/custom_composition"
+      ],
+      "memory_method": "macOS /usr/bin/time -l child maximum resident set size; bytes, not system footprint",
+      "name": "example_custom_composition",
+      "parse": "example",
+      "peak_process_rss_bytes": 2670592,
+      "returncode": 0,
+      "runtime_seconds": 0.11964241700479761,
+      "started_at_utc": "2026-09-10T17:42:17.150705+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 777,
+        "path": "logs/22-example_custom_composition.stderr.log",
+        "sha256": "2f8208d78c7bbc20d748bc27dabea82aaa37246c8484ba53b98cb6a3eb0f6f3d"
+      },
+      "stdout": {
+        "bytes": 239,
+        "path": "logs/22-example_custom_composition.stdout.log",
+        "sha256": "bf8732a9b34892543f8bca921b4cc2d8ea2d7496da95d35da7424cce09d6f245"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/t5_classifier"
+      ],
+      "executable": {
+        "bytes": 2586288,
+        "sha256": "b5bfe7e94a9cbec72faf7f65b83b3be6f01e1b1b9d78bb9391deaed0b6986c55"
+      },
+      "finished_at_utc": "2026-09-10T17:42:17.423821+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/nover/repos/transformers/target/release/examples/t5_classifier"
+      ],
+      "memory_method": "macOS /usr/bin/time -l child maximum resident set size; bytes, not system footprint",
+      "name": "example_t5_classifier",
+      "parse": "example",
+      "peak_process_rss_bytes": 2752512,
+      "returncode": 0,
+      "runtime_seconds": 0.11843041598331183,
+      "started_at_utc": "2026-09-10T17:42:17.302996+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 777,
+        "path": "logs/23-example_t5_classifier.stderr.log",
+        "sha256": "bd60c7bef51cb22017966d1806112ccf1e53c2465d075c8189b87978368470e8"
+      },
+      "stdout": {
+        "bytes": 247,
+        "path": "logs/23-example_t5_classifier.stdout.log",
+        "sha256": "ec5df55e55e9be3f83b3b140a706b94a5bed38bdb68f0e23cf531e656e02ee3f"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/mla_encoder_decoder"
+      ],
+      "executable": {
+        "bytes": 2525168,
+        "sha256": "1e507ab88070c82e3b957ca04dc58b3e43fa44fd68a4feb9003d11f004397ae2"
+      },
+      "finished_at_utc": "2026-09-10T17:42:17.582275+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/nover/repos/transformers/target/release/examples/mla_encoder_decoder"
+      ],
+      "memory_method": "macOS /usr/bin/time -l child maximum resident set size; bytes, not system footprint",
+      "name": "example_mla_encoder_decoder",
+      "parse": "example",
+      "peak_process_rss_bytes": 2572288,
+      "returncode": 0,
+      "runtime_seconds": 0.12032341602025554,
+      "started_at_utc": "2026-09-10T17:42:17.459535+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 777,
+        "path": "logs/24-example_mla_encoder_decoder.stderr.log",
+        "sha256": "1c01e02c696d24e843c79c4d58836203732f912a42fe8ffc26391f40496c433a"
+      },
+      "stdout": {
+        "bytes": 171,
+        "path": "logs/24-example_mla_encoder_decoder.stdout.log",
+        "sha256": "c4a81eb1ca2c8531bfbf55aaf88ba4845d941a353ac63455dca70aac447674b4"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/qwen_prefix",
+        "--random"
+      ],
+      "executable": {
+        "bytes": 4179728,
+        "sha256": "39d235d67597b7fc51a014b84f86cbde7b3dc3e4ed62426536584bb0c9cb2025"
+      },
+      "finished_at_utc": "2026-09-10T17:42:17.876762+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/nover/repos/transformers/target/release/examples/qwen_prefix",
+        "--random"
+      ],
+      "memory_method": "macOS /usr/bin/time -l child maximum resident set size; bytes, not system footprint",
+      "name": "example_qwen_prefix",
+      "parse": "example",
+      "peak_process_rss_bytes": 3473408,
+      "returncode": 0,
+      "runtime_seconds": 0.2583730000187643,
+      "started_at_utc": "2026-09-10T17:42:17.615523+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 777,
+        "path": "logs/25-example_qwen_prefix.stderr.log",
+        "sha256": "4973cfc484688e983c823a04b781ac29ad39d6022fae2a112f107e93d6fde0b0"
+      },
+      "stdout": {
+        "bytes": 151,
+        "path": "logs/25-example_qwen_prefix.stdout.log",
+        "sha256": "1a51cd1057d5f6b6b06272bfe18ddbea4418813fc84ad0f7f8854deaeeacecc5"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/grokking_fourier"
+      ],
+      "executable": {
+        "bytes": 2509504,
+        "sha256": "67aa7e02b0ef310af83af59283e853fef8c0613cf1c5b874b373cb6fd05a711e"
+      },
+      "finished_at_utc": "2026-09-10T17:42:18.357068+00:00",
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/nover/repos/transformers/target/release/examples/grokking_fourier"
+      ],
+      "memory_method": "macOS /usr/bin/time -l child maximum resident set size; bytes, not system footprint",
+      "name": "example_grokking_fourier",
+      "parse": "example",
+      "peak_process_rss_bytes": 33128448,
+      "returncode": 0,
+      "runtime_seconds": 0.44793274998664856,
+      "started_at_utc": "2026-09-10T17:42:17.906759+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 777,
+        "path": "logs/26-example_grokking_fourier.stderr.log",
+        "sha256": "390e8bb3b11c379c725049834f510695defa05030284e98718577d68977e909c"
+      },
+      "stdout": {
+        "bytes": 874,
+        "path": "logs/26-example_grokking_fourier.stdout.log",
+        "sha256": "d8a115cc3e1c9b3c7c13e912f927ba964c8a9997737bc9b09ebf98ff410fab2b"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/clock_and_pizza"
+      ],
+      "executable": {
+        "bytes": 2710000,
+        "sha256": "1ceeaaf5347f603aa87ba9dbec4e1deaf754999e7607da3497eb11a08bdcb437"
+      },
+      "finished_at_utc": "2026-09-10T17:42:20.332679+00:00",
+      "fresh_result": {
+        "bytes": 3412,
+        "original_path": "target/mechanistic/clock_and_pizza/rust_results.json",
+        "path": "replayed_results/clock_and_pizza.json",
+        "sha256": "22d7f5ad13333b7873b98d9a34e1d43dcd0c041294ea5e8e69fb649f3a496fed"
+      },
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/nover/repos/transformers/target/release/examples/clock_and_pizza"
+      ],
+      "memory_method": "macOS /usr/bin/time -l child maximum resident set size; bytes, not system footprint",
+      "name": "example_clock_and_pizza",
+      "parse": "example",
+      "peak_process_rss_bytes": 162037760,
+      "returncode": 0,
+      "runtime_seconds": 1.9466849159798585,
+      "started_at_utc": "2026-09-10T17:42:18.383926+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 777,
+        "path": "logs/27-example_clock_and_pizza.stderr.log",
+        "sha256": "fe89bf6d4248bc5c9a1b008fb4d8c9304b2ed6ab75661ba0a42a5095690bd79d"
+      },
+      "stdout": {
+        "bytes": 1603,
+        "path": "logs/27-example_clock_and_pizza.stdout.log",
+        "sha256": "4a72c38dce67de3a9a35444c0a4e90b17b0ad07cb8e66829ae35cb7d94de6e23"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/tuned_lens"
+      ],
+      "executable": {
+        "bytes": 6356592,
+        "sha256": "164fff75bf4d2a42c66801b76628cd760985e7ff4f422b7e575f057e62c65664"
+      },
+      "finished_at_utc": "2026-09-10T17:42:45.690730+00:00",
+      "fresh_result": {
+        "bytes": 5899,
+        "original_path": "target/mechanistic/tuned_lens/rust_result.json",
+        "path": "replayed_results/tuned_lens.json",
+        "sha256": "e4e5a4def8800805fb38093760c9d13aa8bf6544b8c4504b0fea1314be51e2f7"
+      },
+      "input_snapshot_sha256_after": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+      "launch_argv": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/nover/repos/transformers/target/release/examples/tuned_lens"
+      ],
+      "memory_method": "macOS /usr/bin/time -l child maximum resident set size; bytes, not system footprint",
+      "name": "example_tuned_lens",
+      "parse": "example",
+      "peak_process_rss_bytes": 1276870656,
+      "returncode": 0,
+      "runtime_seconds": 25.32765808404656,
+      "started_at_utc": "2026-09-10T17:42:20.359650+00:00",
+      "status": "passed",
+      "stderr": {
+        "bytes": 777,
+        "path": "logs/28-example_tuned_lens.stderr.log",
+        "sha256": "131d32067fb406721cea790ee98265dcdfd77d8e8ff0fca47ba4d4bd71d71c22"
+      },
+      "stdout": {
+        "bytes": 942,
+        "path": "logs/28-example_tuned_lens.stdout.log",
+        "sha256": "c0178a9bc373f2d0b0f90300c119af9c7836a74a8b715612822459fecca42306"
+      },
+      "test_counts": null
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/greater_than"
+      ],
+      "executable": {
+        "bytes": 4067952,
+        "sha256": "99991e9953f2d878de546b7d2af91cdc68350ba91c773a5277603e10ce5f389a"
+      },
+      "finished_at_utc": "2026-09-10T17:46:01.227599+00:00",
+      "input_changes": {
+        "source_and_protocol_inputs": {
+          "added": [
+            "examples/mechanistic/greater_than/plot_validation.json"
+          ],
+          "modified": [],
+          "removed": []
+        }
+      },
+      "input_snapshot_sha256_after": "398eef1639e7fd7d2739f036e73332193d6fc4d655668c77922ead15dba56a0d",
+      "launch_argv": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/nover/repos/transformers/target/release/examples/greater_than"
+      ],
+      "name": "example_greater_than",
+      "parse": "example",
+      "returncode": 0,
+      "runtime_seconds": 195.5034494579886,
+      "started_at_utc": "2026-09-10T17:42:45.722807+00:00",
+      "status": "failed",
+      "stderr": {
+        "bytes": 1914,
+        "path": "logs/29-example_greater_than.stderr.log",
+        "sha256": "2a418636546707c7f9dd840c32aee51c301316f20c2f3dbdc35f2afc9f97e898"
+      },
+      "stdout": {
+        "bytes": 824,
+        "path": "logs/29-example_greater_than.stdout.log",
+        "sha256": "75da0c2da8a55fbe6adb7271e3fd5cbe21891c83737c010c876f5e724fe38a83"
+      }
+    }
+  ],
+  "compiler_environment": {
+    "CARGO_BUILD_TARGET": null,
+    "CARGO_ENCODED_RUSTFLAGS": null,
+    "RUSTC": null,
+    "RUSTC_WORKSPACE_WRAPPER": null,
+    "RUSTC_WRAPPER": null,
+    "RUSTDOCFLAGS": null,
+    "RUSTFLAGS": null,
+    "RUSTUP_TOOLCHAIN": null
+  },
+  "completed_commands": 28,
+  "cwd": "/Users/nover/repos/transformers",
+  "environment_overrides": {
+    "CARGO_NET_OFFLINE": "true",
+    "CARGO_TARGET_DIR": "/Users/nover/repos/transformers/target",
+    "CARGO_TERM_COLOR": "never",
+    "PYTHONDONTWRITEBYTECODE": "1"
+  },
+  "example_binaries_after_build": {
+    "activation_workbench": {
+      "bytes": 3808464,
+      "sha256": "098ead616fb4e89ede63c723341ada29db27f29b90b5fa058b563105f428598d"
+    },
+    "attention_head_attribution": {
+      "bytes": 2260368,
+      "sha256": "455f7cdd91f497197e1b652ee8af6f25f9cb9def8f31ddc36312f5f55e24ec48"
+    },
+    "clock_and_pizza": {
+      "bytes": 2710000,
+      "sha256": "1ceeaaf5347f603aa87ba9dbec4e1deaf754999e7607da3497eb11a08bdcb437"
+    },
+    "custom_composition": {
+      "bytes": 2638448,
+      "sha256": "14e7c94def0ed1055e5246a41fc7d530f2ac3af15711a886eb3c723946742222"
+    },
+    "greater_than": {
+      "bytes": 4067952,
+      "sha256": "99991e9953f2d878de546b7d2af91cdc68350ba91c773a5277603e10ce5f389a"
+    },
+    "grokking_fourier": {
+      "bytes": 2509504,
+      "sha256": "67aa7e02b0ef310af83af59283e853fef8c0613cf1c5b874b373cb6fd05a711e"
+    },
+    "mla_encoder_decoder": {
+      "bytes": 2525168,
+      "sha256": "1e507ab88070c82e3b957ca04dc58b3e43fa44fd68a4feb9003d11f004397ae2"
+    },
+    "qwen_prefix": {
+      "bytes": 4179728,
+      "sha256": "39d235d67597b7fc51a014b84f86cbde7b3dc3e4ed62426536584bb0c9cb2025"
+    },
+    "t5_classifier": {
+      "bytes": 2586288,
+      "sha256": "b5bfe7e94a9cbec72faf7f65b83b3be6f01e1b1b9d78bb9391deaed0b6986c55"
+    },
+    "tuned_lens": {
+      "bytes": 6356592,
+      "sha256": "164fff75bf4d2a42c66801b76628cd760985e7ff4f422b7e575f057e62c65664"
+    }
+  },
+  "exit_code": 1,
+  "failure": {
+    "message": "Source/protocol/test-fixture inputs changed during example_greater_than",
+    "type": "RuntimeError"
+  },
+  "finished_at_utc": "2026-09-10T17:46:01.279219+00:00",
+  "host": "macOS-15.7.9-arm64-arm-64bit",
+  "input_changes": {
+    "source_and_protocol_inputs": {
+      "added": [
+        "examples/mechanistic/greater_than/plot_validation.json"
+      ],
+      "modified": [],
+      "removed": []
+    }
+  },
+  "input_snapshot_sha256": "ad12df20501bfb2c81957d4c62cce97f01bffc65e947c0d9b85b4a8142ef328d",
+  "inputs_unchanged": false,
+  "plan": [
+    {
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "name": "git_revision",
+      "parse": null
+    },
+    {
+      "argv": [
+        "git",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all"
+      ],
+      "name": "git_status",
+      "parse": null
+    },
+    {
+      "argv": [
+        "rustc",
+        "--version",
+        "--verbose"
+      ],
+      "name": "rustc_version",
+      "parse": null
+    },
+    {
+      "argv": [
+        "cargo",
+        "--version",
+        "--verbose"
+      ],
+      "name": "cargo_version",
+      "parse": null
+    },
+    {
+      "argv": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "rustc",
+        "--version",
+        "--verbose"
+      ],
+      "name": "msrv_version",
+      "parse": "msrv"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/python3",
+        "--version"
+      ],
+      "name": "python_version",
+      "parse": null
+    },
+    {
+      "argv": [
+        "/usr/local/bin/python3",
+        "-c",
+        "import json,sys,torch,safetensors,numpy; print(json.dumps({'executable':sys.executable,'python':sys.version,'torch':str(torch.__version__),'safetensors':safetensors.__version__,'numpy':numpy.__version__},sort_keys=True))"
+      ],
+      "name": "paper_python_versions",
+      "parse": null
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--all-targets"
+      ],
+      "name": "rust_all_targets",
+      "parse": "rust"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--doc"
+      ],
+      "name": "rust_doctests",
+      "parse": "rust"
+    },
+    {
+      "argv": [
+        "cargo",
+        "clippy",
+        "--release",
+        "--locked",
+        "--offline",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "name": "clippy_all_features",
+      "parse": null
+    },
+    {
+      "argv": [
+        "cargo",
+        "fmt",
+        "--check"
+      ],
+      "name": "rustfmt",
+      "parse": null
+    },
+    {
+      "argv": [
+        "cargo",
+        "check",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features"
+      ],
+      "name": "minimal_features",
+      "parse": null
+    },
+    {
+      "argv": [
+        "cargo",
+        "check",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std"
+      ],
+      "name": "std_features",
+      "parse": null
+    },
+    {
+      "argv": [
+        "cargo",
+        "doc",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--no-deps"
+      ],
+      "name": "rustdoc",
+      "parse": null
+    },
+    {
+      "argv": [
+        "rustup",
+        "run",
+        "1.92.0",
+        "cargo",
+        "check",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--all-targets"
+      ],
+      "name": "msrv_all_targets",
+      "parse": null
+    },
+    {
+      "argv": [
+        "/usr/local/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts/tests",
+        "-v"
+      ],
+      "name": "python_unittest",
+      "parse": "python"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "examples/mechanistic/tuned_lens",
+        "-p",
+        "*_tests.py",
+        "-v"
+      ],
+      "name": "tuned_lens_python_unittest",
+      "parse": "python"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "examples/mechanistic/greater_than",
+        "-p",
+        "test_*.py",
+        "-v"
+      ],
+      "name": "greater_than_python_unittest",
+      "parse": "python"
+    },
+    {
+      "argv": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--examples"
+      ],
+      "name": "build_examples",
+      "parse": null
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/activation_workbench"
+      ],
+      "name": "example_activation_workbench",
+      "parse": "example"
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/attention_head_attribution"
+      ],
+      "name": "example_attention_head_attribution",
+      "parse": "example"
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/custom_composition"
+      ],
+      "name": "example_custom_composition",
+      "parse": "example"
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/t5_classifier"
+      ],
+      "name": "example_t5_classifier",
+      "parse": "example"
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/mla_encoder_decoder"
+      ],
+      "name": "example_mla_encoder_decoder",
+      "parse": "example"
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/qwen_prefix",
+        "--random"
+      ],
+      "name": "example_qwen_prefix",
+      "parse": "example"
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/grokking_fourier"
+      ],
+      "name": "example_grokking_fourier",
+      "parse": "example"
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/clock_and_pizza"
+      ],
+      "name": "example_clock_and_pizza",
+      "parse": "example"
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/tuned_lens"
+      ],
+      "name": "example_tuned_lens",
+      "parse": "example"
+    },
+    {
+      "argv": [
+        "/Users/nover/repos/transformers/target/release/examples/greater_than"
+      ],
+      "name": "example_greater_than",
+      "parse": "example"
+    }
+  ],
+  "runner": {
+    "bytes": 22064,
+    "path": "validation_runner.py",
+    "sha256": "767b63ad6aac13bb52a9de080e2c3b1210df02946dc08b84387c5d978a64f6c4"
+  },
+  "runtime_seconds": 283.7720698749763,
+  "schema_version": 1,
+  "scope": {
+    "artifact_records": "Separate historical study/checkpoint evidence, linked and hashed for context; not relabeled as fresh checks.",
+    "clippy_features": "all features, compile/lint only",
+    "examples": "Six download-free examples and four already-prepared mechanistic studies.",
+    "exclusions": "Markdown, generated example results/figures, this validation output, other v0.2 validation outputs, target/, root models/, .git/, Python bytecode. This is not a hermetic dependency/toolchain attestation.",
+    "fresh_build_meaning": "Direct binaries are hashed after a successful cargo build --examples; Cargo may reuse its validated build cache.",
+    "inventory": "Source, Cargo metadata, fixtures and structured protocols; historical measurement records are included separately because Python tests consume them as fixtures.",
+    "purpose": "One fixed local v0.2 source/interface validation and prepared CPU example replay.",
+    "qualification": "No coverage measurement, accelerator runtime validation, package qualification, training validation, or release/support promotion is performed or claimed.",
+    "rust_test_features": "std,flex,tokenizers,chat-templates,autodiff"
+  },
+  "separate_artifact_records": {
+    "clock_and_pizza": {
+      "bytes": 17298,
+      "link_from_record": "../../../examples/mechanistic/clock_and_pizza/result.json",
+      "repository_path": "examples/mechanistic/clock_and_pizza/result.json",
+      "sha256": "e680efa82a2dcf268fabc3fb8eecd744b50eeffa5751a6e0f84e2497d4512099"
+    },
+    "flan_t5_small": {
+      "bytes": 6298,
+      "link_from_record": "../v0_2-flan-t5-small-flex-20260910/manifest.json",
+      "repository_path": "acceptance/measurements/v0_2-flan-t5-small-flex-20260910/manifest.json",
+      "sha256": "17643a0887ba7c261028843e7f1362de62348dcf21e01386dcc687afe897ab19"
+    },
+    "greater_than": {
+      "bytes": 5251555,
+      "link_from_record": "../../../examples/mechanistic/greater_than/result.json",
+      "repository_path": "examples/mechanistic/greater_than/result.json",
+      "sha256": "4325d91680374b5f8546720d228fa4ec264a93e249d4e45ec05137ea0cf07257"
+    },
+    "grokking": {
+      "bytes": 3482,
+      "link_from_record": "../../../examples/mechanistic/grokking_fourier.result.json",
+      "repository_path": "examples/mechanistic/grokking_fourier.result.json",
+      "sha256": "e82ac5823802818acbaac0e3061d60763dbd39488b9ea4da70cd0d1e2a877265"
+    },
+    "qwen_prefix": {
+      "bytes": 6893,
+      "link_from_record": "../qwen-prefix-v02-20260910.json",
+      "repository_path": "acceptance/measurements/qwen-prefix-v02-20260910.json",
+      "sha256": "be04c0412cf4ad089685e432abc6610295a23828a16c3e42236936484ac3cecc"
+    },
+    "qwen_prefix_replay": {
+      "bytes": 1935,
+      "link_from_record": "../qwen-prefix-v02-20260910/replay_verification.json",
+      "repository_path": "acceptance/measurements/qwen-prefix-v02-20260910/replay_verification.json",
+      "sha256": "ec53bbdd3fdaab2f997eecdf92e9678b9292cae02ce41a5c919048a2f58e6670"
+    },
+    "tuned_lens": {
+      "bytes": 196272,
+      "link_from_record": "../../../examples/mechanistic/tuned_lens/result.json",
+      "repository_path": "examples/mechanistic/tuned_lens/result.json",
+      "sha256": "252c4e3486bfcd9cc94ccf30b7ba06be41c3f3bbfc13518d13d9fc488768e5ea"
+    }
+  },
+  "started_at_utc": "2026-09-10T17:41:17.499574+00:00",
+  "status": "failed",
+  "test_counts_by_command": {
+    "greater_than_python_unittest": {
+      "errors": 0,
+      "expected_failures": 0,
+      "failures": 0,
+      "format": "Python unittest",
+      "normal_passed": 5,
+      "reported_runtime_seconds": 0.014,
+      "skipped": 0,
+      "status": "OK",
+      "tests_run": 5,
+      "unexpected_successes": 0
+    },
+    "python_unittest": {
+      "errors": 0,
+      "expected_failures": 0,
+      "failures": 0,
+      "format": "Python unittest",
+      "normal_passed": 359,
+      "reported_runtime_seconds": 3.392,
+      "skipped": 14,
+      "status": "OK",
+      "tests_run": 373,
+      "unexpected_successes": 0
+    },
+    "rust_all_targets": {
+      "format": "Rust libtest",
+      "suite_summaries": [
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 4,
+          "measured": 0,
+          "passed": 1257,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 3,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 1,
+          "measured": 0,
+          "passed": 1,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 4,
+          "measured": 0,
+          "passed": 2,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 8,
+          "measured": 0,
+          "passed": 1,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 9,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 4,
+          "measured": 0,
+          "passed": 29,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 3,
+          "measured": 0,
+          "passed": 30,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 0,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 1,
+          "measured": 0,
+          "passed": 17,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 0,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 2,
+          "measured": 0,
+          "passed": 6,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 2,
+          "measured": 0,
+          "passed": 7,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 2,
+          "measured": 0,
+          "passed": 1,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 1,
+          "measured": 0,
+          "passed": 0,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 0,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 0,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 0,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 0,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 0,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 4,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 0,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 0,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 0,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 0,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 0,
+          "status": "ok"
+        },
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 1,
+          "status": "ok"
+        }
+      ],
+      "totals": {
+        "failed": 0,
+        "filtered_out": 0,
+        "ignored": 32,
+        "measured": 0,
+        "passed": 1368
+      }
+    },
+    "rust_doctests": {
+      "format": "Rust libtest",
+      "suite_summaries": [
+        {
+          "failed": 0,
+          "filtered_out": 0,
+          "ignored": 0,
+          "measured": 0,
+          "passed": 3,
+          "status": "ok"
+        }
+      ],
+      "totals": {
+        "failed": 0,
+        "filtered_out": 0,
+        "ignored": 0,
+        "measured": 0,
+        "passed": 3
+      }
+    },
+    "tuned_lens_python_unittest": {
+      "errors": 0,
+      "expected_failures": 0,
+      "failures": 0,
+      "format": "Python unittest",
+      "normal_passed": 7,
+      "reported_runtime_seconds": 0.002,
+      "skipped": 0,
+      "status": "OK",
+      "tests_run": 7,
+      "unexpected_successes": 0
+    }
+  }
+}

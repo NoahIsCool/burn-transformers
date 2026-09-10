@@ -1,0 +1,20 @@
+[
+  {
+    "step": 0,
+    "seconds": 0.247295375,
+    "train_accuracy": 0.017241379310344827,
+    "test_accuracy": 0.020086083213773313,
+    "train_cross_entropy": 4.150645421848047,
+    "test_cross_entropy": 4.144182208180965,
+    "distance_irrelevance": 0.9914560439492971
+  },
+  {
+    "step": 5,
+    "seconds": 0.604571083,
+    "train_accuracy": 0.016522988505747127,
+    "test_accuracy": 0.02582496413199426,
+    "train_cross_entropy": 4.139994033787316,
+    "test_cross_entropy": 4.1398317866686085,
+    "distance_irrelevance": 0.9919309922007593
+  }
+]

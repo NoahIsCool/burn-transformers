@@ -1,0 +1,158 @@
+//! Original-token-coordinate hook execution for padded T5 decoder batches.
+
+use burn::tensor::Bool;
+
+use super::*;
+use crate::intervention::PointValidity;
+
+impl<B: Backend> T5ForConditionalGeneration<B> {
+    /// Declares padding invariants without registering extra capture/edit actions.
+    pub(super) fn decoder_hook_validity(
+        &self,
+        input: &Seq2SeqInput<B>,
+    ) -> Result<Vec<PointValidity<B>>> {
+        let Some(mask) = &input.decoder.token_mask else {
+            return Ok(Vec::new());
+        };
+        let [batch, targets] = input.decoder.token_ids.dims();
+        let [source_batch, sources] = input.encoder.token_ids.dims();
+        // Preserve the existing contextual input errors inside the hook scope.
+        // Invalid shapes must not be transformed or broadcast while making masks.
+        let device = self.shared.weight.lazy_device();
+        if mask.as_tensor().device() != device
+            || input
+                .encoder
+                .token_mask
+                .as_ref()
+                .is_some_and(|mask| mask.as_tensor().device() != device)
+            || batch == 0
+            || targets == 0
+            || sources == 0
+            || source_batch != batch
+            || mask.as_tensor().dims() != [batch, targets]
+            || input
+                .encoder
+                .token_mask
+                .as_ref()
+                .is_some_and(|mask| mask.as_tensor().dims() != [batch, sources])
+        {
+            return Ok(Vec::new());
+        }
+        let target = mask.as_tensor().clone().int().bool();
+        let source = input
+            .encoder
+            .token_mask
+            .as_ref()
+            .map(|mask| mask.as_tensor().clone().int().bool())
+            .unwrap_or_else(|| Tensor::<B, 2, Bool>::ones([batch, sources], &target.device()));
+        let hidden_mask = target.clone().unsqueeze_dim::<3>(2);
+        let mut validity = vec![
+            PointValidity::new(Stack::Decoder.embedding(), hidden_mask.clone())?,
+            PointValidity::new(Stack::Decoder.final_norm(), hidden_mask.clone())?,
+        ];
+        for (index, block) in self.decoder.block.iter().enumerate() {
+            let layer = Layer::decoder(index);
+            for point in [
+                layer.residual_pre(),
+                layer.attention_input(),
+                layer.attention_output(),
+                layer.mlp_input(),
+                layer.mlp_pre_activation(),
+                layer.mlp_activation(),
+                layer.mlp_output(),
+                layer.residual_post(),
+            ] {
+                validity.push(PointValidity::new(point, hidden_mask.clone())?);
+            }
+            attention_validity(
+                &mut validity,
+                layer.self_attention(),
+                &target,
+                &target,
+                block.self_attention.self_attention.attention.precision_mode,
+            )?;
+            if let Some(cross) = &block.cross_attention {
+                validity.push(PointValidity::new(
+                    layer.cross_attention_input(),
+                    hidden_mask.clone(),
+                )?);
+                validity.push(PointValidity::new(
+                    layer.cross_attention_output(),
+                    hidden_mask.clone(),
+                )?);
+                attention_validity(
+                    &mut validity,
+                    layer.cross_attention(),
+                    &target,
+                    &source,
+                    cross.enc_dec_attention.attention.precision_mode,
+                )?;
+            }
+        }
+        Ok(validity)
+    }
+}
+
+fn attention_validity<B: Backend>(
+    validity: &mut Vec<PointValidity<B>>,
+    points: AttentionPoints,
+    query: &Tensor<B, 2, Bool>,
+    key: &Tensor<B, 2, Bool>,
+    precision: AttentionPrecisionMode,
+) -> Result<()> {
+    let [batch, queries] = query.dims();
+    let keys = key.dims()[1];
+    let query_mask = query.clone().reshape([batch, 1, queries, 1]);
+    let key_mask = key.clone().reshape([batch, 1, keys, 1]);
+    validity.extend([
+        PointValidity::new(points.query(), query_mask.clone())?,
+        PointValidity::new(points.key(), key_mask.clone())?,
+        PointValidity::new(points.value(), key_mask)?,
+        PointValidity::new(points.head_context(), query_mask.clone())?,
+    ]);
+    if precision == AttentionPrecisionMode::EagerFp32Softmax {
+        let plane = query_mask.bool_and(key.clone().reshape([batch, 1, 1, keys]));
+        validity.extend([
+            PointValidity::new(points.scores(), plane.clone())?,
+            PointValidity::new(points.pattern(), plane)?,
+        ]);
+    }
+    Ok(())
+}
+
+/// Valid target tokens advance relative positions; padding never consumes one.
+pub(super) fn logical_decoder_positions<B: Backend>(
+    mask: &TokenMask<B>,
+) -> Result<Tensor<B, 2, Int>> {
+    let [batch, sequence] = mask.as_tensor().dims();
+    if batch == 0 || sequence == 0 {
+        return Err(Error::configuration(
+            "t5.decoder.token_mask",
+            "mask must be nonempty",
+        ));
+    }
+    let valid = mask
+        .as_tensor()
+        .clone()
+        .into_data()
+        .to_vec::<bool>()
+        .map_err(|error| {
+            Error::BackendCapability(format!("failed to inspect T5 decoder padding: {error}"))
+        })?;
+    let mut positions = Vec::with_capacity(valid.len());
+    for row in valid.chunks_exact(sequence) {
+        let mut next = 0_i64;
+        for &is_valid in row {
+            positions.push(next);
+            if is_valid {
+                next = next.checked_add(1).ok_or_else(|| {
+                    Error::configuration("t5.decoder.positions", "logical position overflows i64")
+                })?;
+            }
+        }
+    }
+    Ok(Tensor::<B, 2, Int>::from_data(
+        TensorData::new(positions, [batch, sequence]),
+        &mask.as_tensor().device(),
+    ))
+}

@@ -1,0 +1,30 @@
+{
+  "id": "python-grokking-protocol",
+  "attempt": 2,
+  "command": [
+    "/usr/local/bin/python3",
+    "/tmp/v0_3_python_validation.py",
+    "--root",
+    "/Users/nover/repos/transformers",
+    "--start",
+    "examples/mechanistic/grokking_training",
+    "--pattern",
+    "test_*.py",
+    "--audit",
+    "/Users/nover/repos/transformers/acceptance/measurements/v0_3-training-validation-20260910/python-grokking-protocol-attempt-02/python-reads.json"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "python",
+  "runner_sha256": "11d91924fc218ebeafc49cfd22cd8691d61d4aa3d1dc353223dc6744916e4654",
+  "started_utc": "2026-09-10T20:41:42.093356+00:00",
+  "finished_utc": "2026-09-10T20:41:42.196502+00:00",
+  "seconds": 0.10314704198390245,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "python-grokking-protocol-attempt-02/inputs-before.json",
+  "inputs_after": "python-grokking-protocol-attempt-02/inputs-after.json",
+  "output": "python-grokking-protocol-attempt-02/output.log",
+  "output_sha256": "a69db9b17e187db8f5bfb70678544a2a26eec077fa2e75341798bd729637603f",
+  "passed": true,
+  "python_read_audit": "python-grokking-protocol-attempt-02/python-reads.json"
+}

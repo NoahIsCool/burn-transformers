@@ -1,0 +1,17 @@
+{
+  "initial_model_sha256": "54fb2afdb723fc7d17aab0a14c2ec099791f72454d3409f9a17742cf60d12efa",
+  "protocol_sha256": "76bd595bf2923b9e337c2efed3815d18ed7bd69813a2d6971d5bd4f9e87c59cd",
+  "settings": {
+    "backend": "metal",
+    "benchmark": false,
+    "output": "target/mechanistic/grokking-training-metal-seed0",
+    "resume": false,
+    "seed": 0,
+    "steps": 40000
+  },
+  "source_sha256": {
+    "entrypoint": "9e83ef556dd979a026ba6e8c4614d855c703cbe1f1bd41ef327473338d5679e5",
+    "model": "36414277d0ce2c5702488f75163bfd77611ce8c1525daf031896fac15d9951cb",
+    "training_loop": "3db1814c1d42f4e333f1cc28431cd343bc45fa910c9b00ca3df95ecb80023652"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "id": "rust-fmt",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "fmt",
+    "--check"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "started_utc": "2026-09-10T20:32:00.450970+00:00",
+  "finished_utc": "2026-09-10T20:32:01.711701+00:00",
+  "seconds": 1.2607365419971757,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "rust-fmt-attempt-01/inputs-before.json",
+  "inputs_after": "rust-fmt-attempt-01/inputs-after.json",
+  "output": "rust-fmt-attempt-01/output.log",
+  "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "passed": true
+}

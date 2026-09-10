@@ -1,0 +1,19 @@
+Published seed-0 checkpoint, epoch 40,000; all 12769 input pairs
+Table 1: fraction of variance explained by cos/sin(2πk(a+b)/113)
+k=14 cos: 93.156% (paper 93.2%)
+k=14 sin: 93.499% (paper 93.5%)
+k=35 cos: 96.822% (paper 96.8%)
+k=35 sin: 96.497% (paper 96.5%)
+k=41 cos: 97.023% (paper 97.0%)
+k=41 sin: 96.962% (paper 97.0%)
+k=42 cos: 96.431% (paper 96.4%)
+k=42 sin: 96.489% (paper 96.4%)
+k=52 cos: 97.374% (paper 97.4%)
+k=52 sin: 98.164% (paper 98.2%)
+Additional experiment: intervene on the full model, retaining residual and biases
+MLP intervention           accuracy  cross entropy
+unchanged                 100.0000%  2.41220307e-7
+keep 10D subspace         100.0000%  2.40480520e-7
+remove 10D subspace        13.7286%   3.97949458e0
+remove then restore       100.0000%  2.41220355e-7
+no-op max error: 0.00e0; reference max error: 1.53e-5; restoration max error: 7.63e-6

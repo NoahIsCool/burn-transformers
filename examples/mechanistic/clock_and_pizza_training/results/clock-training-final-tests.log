@@ -1,0 +1,11 @@
+    Blocking waiting for file lock on artifact directory
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 56.55s
+     Running unittests examples/clock_and_pizza_train.rs (target/release/examples/clock_and_pizza_train-a03836a4c4cef41e)
+
+running 2 tests
+test study::tests::split_is_deterministic_disjoint_and_complete ... ok
+test study::tests::optimizer_discovers_recipe_parameters_and_hooks_preserve_learning ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

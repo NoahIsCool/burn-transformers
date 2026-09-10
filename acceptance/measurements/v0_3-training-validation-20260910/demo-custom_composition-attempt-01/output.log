@@ -1,0 +1,6 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 2.52s
+     Running `target/release/examples/custom_composition`
+Two blocks, two mixer algorithms, widths 8 -> 12 -> 6, two task outputs.
+Selected neurons: [2, 1, 24]; ablation effect: 0.016772; restoration error: 0.000000.
+Registered parameters: 1634. Add --features autodiff and -- --train to learn the synthetic task.

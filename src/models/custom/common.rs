@@ -16,16 +16,19 @@ use burn::{
 use crate::{
     CausalLmInput, CausalLmOutput, Error, ForwardOptions, LogitsSelection, Result,
     architecture::{
-        AttentionSpec, DecoderLayerSpec, DecoderSpec, FeedForwardSpec, MixerSpec, NormPlacement,
-        NormalizationSpec, PositionEncodingSpec, ResidualTopology, RopeScaling as SpecRopeScaling,
-        RouterDiagnostics, TokenMask,
+        AttentionSpec, DecoderLayerSpec, DecoderSpec, FeedForwardSpec, MixerSpec, MlaSpec,
+        NormPlacement, NormalizationSpec, PositionEncodingSpec, ResidualTopology,
+        RopeScaling as SpecRopeScaling, RouterDiagnostics, TokenMask,
     },
     attention::{
-        AttentionOutputGate, GroupedQueryAttention, GroupedQueryAttentionConfig,
-        padding_attention_mask,
+        AttentionOutputGate, AttentionPrecisionMode, GroupedQueryAttention,
+        GroupedQueryAttentionConfig, padding_attention_mask,
     },
     delta_net::{GatedDeltaNet, GatedDeltaNetConfig},
-    feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
+    experiment::{AttentionPolicy, ExecutionContext, HiddenTransform},
+    feed_forward::{GatedFeedForward, GatedFeedForwardConfig, apply_activation},
+    intervention::{AttentionPoints, Hooks, Layer, PointInfo, Stack},
+    mla::{MultiLatentAttention, MultiLatentAttentionConfig},
     moe::{SparseMoe, SparseMoeConfig, SparseMoeOutput, load_balancing_loss},
     normalization::{RmsNorm, RmsNormConfig},
     position::{
@@ -52,7 +55,7 @@ impl AttentionDirection {
 
 /// Runtime normalization supporting both scale-only RMS and mean-subtracting LayerNorm.
 #[derive(Module, Debug)]
-pub(super) enum ModularNorm<B: Backend> {
+pub enum ModularNorm<B: Backend> {
     /// Crate-native RMS normalization, including zero-centered checkpoint weights.
     Rms(RmsNorm<B>),
     /// Burn LayerNorm with an optional learned additive bias.
@@ -61,11 +64,14 @@ pub(super) enum ModularNorm<B: Backend> {
 
 impl<B: Backend> ModularNorm<B> {
     /// Initializes the exact normalization convention requested by a specification.
-    pub(super) fn init(
-        spec: NormalizationSpec,
-        hidden_size: usize,
-        device: &B::Device,
-    ) -> Result<Self> {
+    pub fn init(spec: NormalizationSpec, hidden_size: usize, device: &B::Device) -> Result<Self> {
+        spec.validate("custom.normalization")?;
+        if hidden_size == 0 {
+            return Err(Error::configuration(
+                "custom.normalization.hidden_size",
+                "must be non-zero",
+            ));
+        }
         match spec {
             NormalizationSpec::Rms {
                 epsilon,
@@ -85,7 +91,7 @@ impl<B: Backend> ModularNorm<B> {
     }
 
     /// Normalizes the final channel of a `[batch, sequence, hidden]` tensor.
-    pub(super) fn forward(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
         match self {
             Self::Rms(norm) => norm.forward(hidden),
             Self::Layer(norm) => norm.forward(hidden),
@@ -95,7 +101,7 @@ impl<B: Backend> ModularNorm<B> {
 
 /// Before/after normalization parameters for one residual sublayer.
 #[derive(Module, Debug)]
-struct NormLayout<B: Backend> {
+pub struct NormLayout<B: Backend> {
     /// Independent pre-sublayer normalization when requested.
     before: Option<ModularNorm<B>>,
     /// Independent post-sublayer normalization when requested.
@@ -103,11 +109,14 @@ struct NormLayout<B: Backend> {
     /// Algebraic placement retained outside the parameter record.
     #[module(skip)]
     placement: NormPlacement,
+    /// Explicitly bypasses normalization for an attention/MLP-only experiment.
+    #[module(skip)]
+    identity: bool,
 }
 
 impl<B: Backend> NormLayout<B> {
     /// Allocates exactly the normalization parameters implied by one placement.
-    fn init(
+    pub fn init(
         spec: NormalizationSpec,
         placement: NormPlacement,
         hidden_size: usize,
@@ -123,11 +132,25 @@ impl<B: Backend> NormLayout<B> {
             before,
             after,
             placement,
+            identity: false,
         })
     }
 
+    /// Creates an explicit unnormalized residual branch, `x + F(x)`.
+    pub fn identity() -> Self {
+        Self {
+            before: None,
+            after: None,
+            placement: NormPlacement::Pre,
+            identity: true,
+        }
+    }
+
     /// Applies the optional normalization immediately before a sublayer.
-    fn prepare(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
+    pub fn prepare(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
+        if self.identity {
+            return Ok(hidden);
+        }
         match (&self.before, self.placement) {
             (Some(norm), NormPlacement::Pre | NormPlacement::Sandwich) => Ok(norm.forward(hidden)),
             (None, NormPlacement::Post) => Ok(hidden),
@@ -143,7 +166,10 @@ impl<B: Backend> NormLayout<B> {
     /// `Pre` computes `x + F(N(x))`; conventional `Post` computes `N(x + F(x))`;
     /// sandwich normalization computes `x + N_post(F(N_pre(x)))`, the form used by modern
     /// sandwich-normalized decoders such as Muse Glimmer.
-    fn finish(&self, residual: Tensor<B, 3>, mixed: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
+    pub fn finish(&self, residual: Tensor<B, 3>, mixed: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
+        if self.identity {
+            return Ok(residual + mixed);
+        }
         match (&self.after, self.placement) {
             (None, NormPlacement::Pre) => Ok(residual + mixed),
             (Some(norm), NormPlacement::Post) => Ok(norm.forward(residual + mixed)),
@@ -238,7 +264,22 @@ impl<B: Backend> ModularAttention<B> {
         })
     }
 
+    /// Advertises score planes only when the configured arithmetic can expose them.
+    fn activation_points(&self, points: AttentionPoints) -> Vec<PointInfo> {
+        if self.attention.precision_mode == AttentionPrecisionMode::EagerFp32Softmax {
+            points.all()
+        } else {
+            vec![
+                points.query().info(),
+                points.key().info(),
+                points.value().info(),
+                points.head_context().info(),
+            ]
+        }
+    }
+
     /// Evaluates position-aware self-attention over a complete stateless sequence.
+    #[allow(clippy::too_many_arguments)]
     fn forward_self(
         &self,
         hidden: Tensor<B, 3>,
@@ -246,6 +287,9 @@ impl<B: Backend> ModularAttention<B> {
         token_mask: Option<&TokenMask<B>>,
         direction: AttentionDirection,
         evaluated_context: usize,
+        layer: Layer,
+        hooks: &mut Hooks<'_, B>,
+        policy: Option<&AttentionPolicy<B>>,
     ) -> Result<Tensor<B, 3>> {
         let mut projection = self.attention.project_self(hidden)?;
         if let Some(rope) = self.rope {
@@ -268,7 +312,11 @@ impl<B: Backend> ModularAttention<B> {
             batch,
             self.attention.query_heads,
             sequence,
-            self.sliding_window,
+            if policy.is_some() {
+                None
+            } else {
+                self.sliding_window
+            },
             &projection.query.device(),
         );
         let bias = self
@@ -276,19 +324,36 @@ impl<B: Backend> ModularAttention<B> {
             .as_ref()
             .map(|bias| relative_bias_from_positions(bias, positions))
             .transpose()?;
-        let output = self
-            .attention
-            .attend(projection, mask, bias, direction.is_causal())?;
+        let (mask, bias, causal) = resolve_attention_policy(
+            policy,
+            mask,
+            bias,
+            [batch, self.attention.query_heads, sequence, sequence],
+            &projection.query.device(),
+            direction.is_causal(),
+        )?;
+        let output = self.attention.attend_with_hooks(
+            projection,
+            mask,
+            bias,
+            causal,
+            layer.self_attention(),
+            hooks,
+        )?;
         Ok(mask_padded_queries(output, token_mask))
     }
 
     /// Evaluates ordinary decoder-to-encoder cross attention.
+    #[allow(clippy::too_many_arguments)]
     fn forward_cross(
         &self,
         query: Tensor<B, 3>,
         source: Tensor<B, 3>,
         query_mask: Option<&TokenMask<B>>,
         source_mask: Option<&TokenMask<B>>,
+        layer: Layer,
+        hooks: &mut Hooks<'_, B>,
+        policy: Option<&AttentionPolicy<B>>,
     ) -> Result<Tensor<B, 3>> {
         let projection = self.attention.project(query, source)?;
         let [batch, _, query_sequence, _] = projection.query.dims();
@@ -301,8 +366,154 @@ impl<B: Backend> ModularAttention<B> {
             query_sequence,
             key_sequence,
         )?;
-        let output = self.attention.attend(projection, mask, None, false)?;
+        let (mask, bias, causal) = resolve_attention_policy(
+            policy,
+            mask,
+            None,
+            [
+                batch,
+                self.attention.query_heads,
+                query_sequence,
+                key_sequence,
+            ],
+            &projection.query.device(),
+            false,
+        )?;
+        let output = self.attention.attend_with_hooks(
+            projection,
+            mask,
+            bias,
+            causal,
+            layer.cross_attention(),
+            hooks,
+        )?;
         Ok(mask_padded_queries(output, query_mask))
+    }
+}
+
+/// Shared latent attention with independently selected position encoding.
+#[derive(Module, Debug)]
+struct ModularMla<B: Backend> {
+    attention: MultiLatentAttention<B>,
+    relative_bias: Option<T5RelativePositionBias<B>>,
+    #[module(skip)]
+    rope: Option<RopeConfig>,
+}
+
+impl<B: Backend> ModularMla<B> {
+    fn init(
+        spec: &MlaSpec,
+        hidden_size: usize,
+        norm: NormalizationSpec,
+        device: &B::Device,
+    ) -> Result<Self> {
+        let mut config = MultiLatentAttentionConfig::new(
+            hidden_size,
+            spec.query_heads,
+            spec.content_head_dim,
+            spec.rotary_head_dim,
+            spec.value_head_dim,
+            spec.key_value_lora_rank,
+            spec.query_lora_rank,
+        );
+        config.rms_norm_epsilon = norm_epsilon(norm);
+        let (rope, relative_bias) = match &spec.position {
+            PositionEncodingSpec::None => (None, None),
+            PositionEncodingSpec::Rope {
+                theta,
+                rotary_dim,
+                scaling,
+            } => (
+                Some(build_rope(
+                    spec.rotary_head_dim,
+                    *rotary_dim,
+                    *theta,
+                    *scaling,
+                )?),
+                None,
+            ),
+            PositionEncodingSpec::T5RelativeBias {
+                buckets,
+                max_distance,
+                bidirectional,
+            } => (
+                None,
+                Some(
+                    T5RelativePositionBiasConfig::new(
+                        spec.query_heads,
+                        *buckets,
+                        *max_distance,
+                        *bidirectional,
+                    )
+                    .init(device)?,
+                ),
+            ),
+        };
+        Ok(Self {
+            attention: config.init(device)?,
+            relative_bias,
+            rope,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward(
+        &self,
+        hidden: Tensor<B, 3>,
+        positions: Tensor<B, 2, Int>,
+        token_mask: Option<&TokenMask<B>>,
+        direction: AttentionDirection,
+        evaluated_context: usize,
+        layer: Layer,
+        hooks: &mut Hooks<'_, B>,
+        policy: Option<&AttentionPolicy<B>>,
+    ) -> Result<Tensor<B, 3>> {
+        let [batch, sequence, _] = hidden.dims();
+        let projection = self.attention.project_with_hooks(
+            hidden.clone(),
+            hidden,
+            layer.self_attention(),
+            hooks,
+        )?;
+        let projection = match self.rope {
+            Some(rope) => projection.with_rotary(
+                positions.clone(),
+                positions.clone(),
+                rope,
+                evaluated_context,
+            )?,
+            None => projection,
+        };
+        let mask = padding_attention_mask(
+            None,
+            token_mask,
+            batch,
+            self.attention.config.num_heads,
+            sequence,
+            sequence,
+        )?;
+        let bias = self
+            .relative_bias
+            .as_ref()
+            .map(|bias| relative_bias_from_positions(bias, positions))
+            .transpose()?;
+        let (mask, bias, causal) = resolve_attention_policy(
+            policy,
+            mask,
+            bias,
+            [batch, self.attention.config.num_heads, sequence, sequence],
+            &projection.query_content.device(),
+            direction.is_causal(),
+        )?;
+        let output = self.attention.attend_with_hooks(
+            projection,
+            mask,
+            bias,
+            causal,
+            layer.self_attention(),
+            hooks,
+        )?;
+        Ok(mask_padded_queries(output, token_mask))
     }
 }
 
@@ -315,6 +526,8 @@ impl<B: Backend> ModularAttention<B> {
 enum ModularMixer<B: Backend> {
     /// Full or sliding projected attention.
     Attention(ModularAttention<B>),
+    /// Multi-head latent attention, reusable in either stack.
+    Mla(ModularMla<B>),
     /// Gated DeltaNet linear attention.
     DeltaNet(GatedDeltaNet<B>),
 }
@@ -358,13 +571,15 @@ impl<B: Backend> ModularMixer<B> {
                 config.normalization_epsilon = norm_epsilon(norm);
                 config.init(device).map(Self::DeltaNet)
             }
-            MixerSpec::Mla(_) | MixerSpec::Mamba2(_) => Err(Error::BackendCapability(
+            MixerSpec::Mla(mla) => ModularMla::init(mla, hidden_size, norm, device).map(Self::Mla),
+            MixerSpec::Mamba2(_) => Err(Error::BackendCapability(
                 "custom mixer passed validation without an executable shared kernel".into(),
             )),
         }
     }
 
     /// Applies a stateless mixer while preserving its exact causal direction.
+    #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
         hidden: Tensor<B, 3>,
@@ -372,11 +587,31 @@ impl<B: Backend> ModularMixer<B> {
         token_mask: Option<&TokenMask<B>>,
         direction: AttentionDirection,
         evaluated_context: usize,
+        layer: Layer,
+        hooks: &mut Hooks<'_, B>,
+        policy: Option<&AttentionPolicy<B>>,
     ) -> Result<Tensor<B, 3>> {
         match self {
-            Self::Attention(attention) => {
-                attention.forward_self(hidden, positions, token_mask, direction, evaluated_context)
-            }
+            Self::Attention(attention) => attention.forward_self(
+                hidden,
+                positions,
+                token_mask,
+                direction,
+                evaluated_context,
+                layer,
+                hooks,
+                policy,
+            ),
+            Self::Mla(mla) => mla.forward(
+                hidden,
+                positions,
+                token_mask,
+                direction,
+                evaluated_context,
+                layer,
+                hooks,
+                policy,
+            ),
             Self::DeltaNet(delta) => delta.forward(hidden, token_mask),
         }
     }
@@ -421,9 +656,24 @@ impl<B: Backend> ModularFeedForward<B> {
     }
 
     /// Evaluates the MLP and returns sparse-routing state only for an MoE layer.
-    fn forward(&self, hidden: Tensor<B, 3>) -> Result<(Tensor<B, 3>, Option<SparseMoeOutput<B>>)> {
+    fn forward(
+        &self,
+        hidden: Tensor<B, 3>,
+        layer: Layer,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<(Tensor<B, 3>, Option<SparseMoeOutput<B>>)> {
         match self {
-            Self::Dense(dense) => Ok((dense.forward(hidden)?, None)),
+            Self::Dense(dense) => {
+                let gate = crate::operations::linear(hidden.clone(), &dense.gate_proj)?;
+                let gate = hooks.apply(layer.mlp_pre_activation(), gate)?;
+                let gate = apply_activation(gate, dense.activation);
+                let gate = hooks.apply(layer.mlp_activation(), gate)?;
+                let content = crate::operations::linear(hidden, &dense.up_proj)?;
+                Ok((
+                    crate::operations::linear(gate * content, &dense.down_proj)?,
+                    None,
+                ))
+            }
             Self::MixtureOfExperts(moe) => {
                 let output = moe.forward(hidden)?;
                 Ok((output.hidden_state.clone(), Some(output)))
@@ -434,7 +684,7 @@ impl<B: Backend> ModularFeedForward<B> {
 
 /// One heterogeneous residual block and optional seq2seq cross-attention branch.
 #[derive(Module, Debug)]
-pub(super) struct ModularLayer<B: Backend> {
+pub struct ModularLayer<B: Backend> {
     /// Sequence mixer.
     mixer: ModularMixer<B>,
     /// Dense or sparse feed-forward operation.
@@ -447,16 +697,26 @@ pub(super) struct ModularLayer<B: Backend> {
     cross_attention: Option<ModularAttention<B>>,
     /// Independent cross-attention normalization using the mixer convention.
     cross_attention_norm: Option<NormLayout<B>>,
+    /// Residual width consumed and returned by this block.
+    #[module(skip)]
+    hidden_size: usize,
 }
 
 impl<B: Backend> ModularLayer<B> {
     /// Initializes one layer and an optional plain cross-attention branch.
-    pub(super) fn init(
+    pub fn init(
         spec: &DecoderLayerSpec,
         hidden_size: usize,
         cross_attention: Option<(usize, usize)>,
         device: &B::Device,
     ) -> Result<Self> {
+        spec.validate(0)?;
+        if hidden_size == 0 || spec.residual == ResidualTopology::Gated {
+            return Err(Error::configuration(
+                "custom.layer",
+                "width must be positive and residual gates require explicitly defined custom computation",
+            ));
+        }
         let (cross_attention, cross_attention_norm) = match cross_attention {
             Some((heads, head_dim)) => {
                 let cross = AttentionSpec {
@@ -502,10 +762,182 @@ impl<B: Backend> ModularLayer<B> {
             )?,
             cross_attention,
             cross_attention_norm,
+            hidden_size,
         })
     }
 
-    /// Evaluates self mixing, optional cross attention, and feed-forward residual branches.
+    /// Returns this block's residual width, independent of other blocks in an experiment.
+    pub fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
+
+    /// Executes one independently constructed block using explicit positions and policy.
+    pub fn run(
+        &self,
+        hidden: Tensor<B, 3>,
+        context: &ExecutionContext<B>,
+        layer: Layer,
+    ) -> Result<Tensor<B, 3>> {
+        self.run_with_hooks(hidden, context, layer, &mut Hooks::new())
+    }
+
+    /// Executes one block with a scope containing exactly its supported activation points.
+    ///
+    /// An explicit attention policy replaces causal/trailing-window defaults, keeps padding
+    /// excluded, and adds its bias to any learned position bias. DeltaNet accepts only its
+    /// ordinary causal policy. Cross-attention reads `context.encoder` with source padding.
+    pub fn run_with_hooks(
+        &self,
+        hidden: Tensor<B, 3>,
+        context: &ExecutionContext<B>,
+        layer: Layer,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<Tensor<B, 3>> {
+        hooks.run(self.activation_points(layer), |hooks| {
+            <Self as HiddenTransform<B>>::forward(self, hidden, context, layer, hooks)
+        })
+    }
+
+    /// Validates a staged call before any callback or parameter operation executes.
+    pub(super) fn validate_context(
+        &self,
+        hidden: &Tensor<B, 3>,
+        context: &ExecutionContext<B>,
+        layer: Layer,
+    ) -> Result<()> {
+        let [batch, tokens, width] = hidden.dims();
+        if width != self.hidden_size {
+            return Err(Error::shape(
+                "custom.layer.hidden",
+                format!("[batch, token, {}]", self.hidden_size),
+                format!("{:?}", hidden.dims()),
+            ));
+        }
+        let projection = match &self.mixer {
+            ModularMixer::Attention(attention) => attention.attention.q_proj.weight.val(),
+            ModularMixer::Mla(mla) => mla.attention.kv_a_proj_with_mqa.weight.val(),
+            ModularMixer::DeltaNet(delta) => delta.in_proj_qkv.weight.val(),
+        };
+        let packed_weight = matches!(projection.dtype(), burn::tensor::DType::QFloat(_));
+        if projection.device() != hidden.device()
+            || matches!(hidden.dtype(), burn::tensor::DType::QFloat(_))
+            || (!packed_weight && projection.dtype() != hidden.dtype())
+        {
+            return Err(Error::configuration(
+                "custom.layer.hidden",
+                "hidden states must share this block's device and floating projection dtype; packed weights accept floating activations",
+            ));
+        }
+        context.validate([batch, tokens], &hidden.device())?;
+        if matches!(&self.mixer, ModularMixer::DeltaNet(_)) {
+            let policy = context.attention_for(layer, layer.stack() == Stack::Decoder);
+            if !policy.causal || policy.allowed.is_some() || policy.bias.is_some() {
+                return Err(Error::BackendCapability("DeltaNet requires ordinary causal execution; choose another mixer for bidirectional or custom connectivity".into()));
+            }
+        }
+        if let Some(policy) = explicit_policy(context, layer) {
+            match &self.mixer {
+                ModularMixer::Attention(attention) => policy.validate(
+                    [batch, attention.attention.query_heads, tokens, tokens],
+                    &hidden.device(),
+                )?,
+                ModularMixer::Mla(mla) => policy.validate(
+                    [batch, mla.attention.config.num_heads, tokens, tokens],
+                    &hidden.device(),
+                )?,
+                ModularMixer::DeltaNet(_) => {}
+            }
+            if policy
+                .bias
+                .as_ref()
+                .is_some_and(|bias| bias.dtype() != hidden.dtype())
+            {
+                return Err(Error::configuration(
+                    "custom.attention.bias",
+                    "score bias must use the hidden-state dtype",
+                ));
+            }
+        }
+        if let Some(attention) = &self.cross_attention {
+            let source = context.encoder.as_ref().ok_or_else(|| {
+                Error::configuration(
+                    "custom.cross_attention",
+                    "this block requires context.encoder",
+                )
+            })?;
+            let cross_policy = context.cross_attention_for(layer);
+            cross_policy.validate(
+                [
+                    batch,
+                    attention.attention.query_heads,
+                    tokens,
+                    source.hidden.dims()[1],
+                ],
+                &hidden.device(),
+            )?;
+            if cross_policy
+                .bias
+                .as_ref()
+                .is_some_and(|bias| bias.dtype() != hidden.dtype())
+            {
+                return Err(Error::configuration(
+                    "custom.cross_attention.bias",
+                    "score bias must use the hidden-state dtype",
+                ));
+            }
+            if source.hidden.dims()[2] != self.hidden_size
+                || source.hidden.dtype() != hidden.dtype()
+            {
+                return Err(Error::configuration(
+                    "custom.cross_attention",
+                    "source width and dtype must match this block; insert an explicit source adapter otherwise",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Selects numerical execution for attention branches; recurrent mixers are unchanged.
+    pub(super) fn set_attention_precision(&mut self, mode: AttentionPrecisionMode) {
+        if let ModularMixer::Attention(attention) = &mut self.mixer {
+            attention.attention.precision_mode = mode;
+        }
+        if let Some(attention) = &mut self.cross_attention {
+            attention.attention.precision_mode = mode;
+        }
+    }
+
+    /// Returns only the intervention points implemented by this block's actual operators.
+    pub fn activation_points(&self, layer: Layer) -> Vec<PointInfo> {
+        let mut points = vec![layer.residual_pre().info(), layer.attention_input().info()];
+        match &self.mixer {
+            ModularMixer::Attention(attention) => {
+                points.extend(attention.activation_points(layer.self_attention()))
+            }
+            ModularMixer::Mla(mla) => {
+                points.extend(mla.attention.activation_points(layer.self_attention()))
+            }
+            ModularMixer::DeltaNet(_) => {}
+        }
+        points.push(layer.attention_output().info());
+        if let Some(attention) = &self.cross_attention {
+            points.push(layer.cross_attention_input().info());
+            points.extend(attention.activation_points(layer.cross_attention()));
+            points.push(layer.cross_attention_output().info());
+        }
+        points.push(layer.mlp_input().info());
+        if matches!(&self.feed_forward, ModularFeedForward::Dense(_)) {
+            points.extend([
+                layer.mlp_pre_activation().info(),
+                layer.mlp_activation().info(),
+            ]);
+        }
+        points.extend([layer.mlp_output().info(), layer.residual_post().info()]);
+        points
+    }
+
+    /// Evaluates residual branches, applying interventions before dependent computation.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn forward(
         &self,
         hidden: Tensor<B, 3>,
@@ -514,26 +946,42 @@ impl<B: Backend> ModularLayer<B> {
         direction: AttentionDirection,
         evaluated_context: usize,
         encoder: Option<(&Tensor<B, 3>, Option<&TokenMask<B>>)>,
+        layer: Layer,
+        hooks: &mut Hooks<'_, B>,
+        policy: Option<&AttentionPolicy<B>>,
+        cross_policy: Option<&AttentionPolicy<B>>,
     ) -> Result<(Tensor<B, 3>, Option<SparseMoeOutput<B>>)> {
+        let hidden = hooks.apply(layer.residual_pre(), hidden)?;
         let residual = hidden.clone();
+        let prepared = self.mixer_norm.prepare(hidden)?;
+        let prepared = hooks.apply(layer.attention_input(), prepared)?;
         let mixed = self.mixer.forward(
-            self.mixer_norm.prepare(hidden)?,
+            prepared,
             positions,
             token_mask,
             direction,
             evaluated_context,
+            layer,
+            hooks,
+            policy,
         )?;
+        let mixed = hooks.apply(layer.attention_output(), mixed)?;
         let mut hidden = self.mixer_norm.finish(residual, mixed)?;
 
         match (&self.cross_attention, &self.cross_attention_norm, encoder) {
             (Some(attention), Some(norm), Some((source, source_mask))) => {
                 let residual = hidden.clone();
+                let prepared = hooks.apply(layer.cross_attention_input(), norm.prepare(hidden)?)?;
                 let attended = attention.forward_cross(
-                    norm.prepare(hidden)?,
+                    prepared,
                     source.clone(),
                     token_mask,
                     source_mask,
+                    layer,
+                    hooks,
+                    cross_policy,
                 )?;
+                let attended = hooks.apply(layer.cross_attention_output(), attended)?;
                 hidden = norm.finish(residual, attended)?;
             }
             (None, None, None) => {}
@@ -552,11 +1000,94 @@ impl<B: Backend> ModularLayer<B> {
         }
 
         let residual = hidden.clone();
-        let (projected, router) = self
-            .feed_forward
-            .forward(self.feed_forward_norm.prepare(hidden)?)?;
-        Ok((self.feed_forward_norm.finish(residual, projected)?, router))
+        let prepared = hooks.apply(layer.mlp_input(), self.feed_forward_norm.prepare(hidden)?)?;
+        let (projected, router) = self.feed_forward.forward(prepared, layer, hooks)?;
+        let projected = hooks.apply(layer.mlp_output(), projected)?;
+        let hidden = self.feed_forward_norm.finish(residual, projected)?;
+        Ok((hooks.apply(layer.residual_post(), hidden)?, router))
     }
+}
+
+impl<B: Backend> HiddenTransform<B> for ModularLayer<B> {
+    fn activation_points(&self, layer: Layer) -> Vec<PointInfo> {
+        ModularLayer::activation_points(self, layer)
+    }
+
+    fn forward(
+        &self,
+        hidden: Tensor<B, 3>,
+        context: &ExecutionContext<B>,
+        layer: Layer,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<Tensor<B, 3>> {
+        self.validate_context(&hidden, context, layer)?;
+        let direction = match layer.stack() {
+            Stack::Encoder => AttentionDirection::Bidirectional,
+            Stack::Decoder => AttentionDirection::Causal,
+        };
+        let encoder = if self.cross_attention.is_some() {
+            context
+                .encoder
+                .as_ref()
+                .map(|source| (&source.hidden, source.token_mask.as_ref()))
+        } else {
+            None
+        };
+        let policy = explicit_policy(context, layer);
+        let cross_policy = context.cross_attention_for(layer);
+        Ok(self
+            .forward(
+                hidden,
+                context.positions.clone(),
+                context.token_mask.as_ref(),
+                direction,
+                context.evaluated_context,
+                encoder,
+                layer,
+                hooks,
+                policy.as_ref(),
+                Some(&cross_policy),
+            )?
+            .0)
+    }
+}
+
+/// Resolves only intentional overrides, preserving structural sliding-window defaults otherwise.
+fn explicit_policy<B: Backend>(
+    context: &ExecutionContext<B>,
+    layer: Layer,
+) -> Option<AttentionPolicy<B>> {
+    context
+        .layer_attention
+        .iter()
+        .rev()
+        .find(|(candidate, _)| *candidate == layer)
+        .map(|(_, policy)| policy.clone())
+        .or_else(|| context.attention.clone())
+}
+
+/// Adds explicit connectivity and bias to ordinary padding and learned position bias.
+#[allow(clippy::type_complexity)]
+fn resolve_attention_policy<B: Backend>(
+    policy: Option<&AttentionPolicy<B>>,
+    mask: Option<Tensor<B, 4, Bool>>,
+    bias: Option<Tensor<B, 4>>,
+    shape: [usize; 4],
+    device: &B::Device,
+    default_causal: bool,
+) -> Result<(Option<Tensor<B, 4, Bool>>, Option<Tensor<B, 4>>, bool)> {
+    let Some(policy) = policy else {
+        return Ok((mask, bias, default_causal));
+    };
+    let mask = policy
+        .exclusion_mask(mask, shape, device)?
+        .map(|mask| mask.expand(shape));
+    let bias = match (bias, policy.expanded_bias(shape, device)?) {
+        (Some(existing), Some(extra)) => Some(existing + extra),
+        (None, Some(extra)) => Some(extra),
+        (existing, None) => existing,
+    };
+    Ok((mask, bias, policy.causal))
 }
 
 /// Complete hidden-state result retained before vocabulary projection.
@@ -590,11 +1121,6 @@ pub(super) fn validate_decoder_execution(
             )));
         }
         match (&layer.mixer, direction) {
-            (MixerSpec::Mla(_), _) => {
-                return Err(Error::BackendCapability(format!(
-                    "{layer_field}.mixer requests MLA; the reusable absorbed/unabsorbed MLA kernel is not executable yet"
-                )));
-            }
             (MixerSpec::Mamba2(_), _) => {
                 return Err(Error::BackendCapability(format!(
                     "{layer_field}.mixer requests Mamba2; the reusable selective state-space kernel is not executable yet"
@@ -1039,7 +1565,7 @@ fn validate_mask<B: Backend>(
 }
 
 /// Checks that absolute positions fit the model's declared context.
-fn validate_positions<B: Backend>(
+pub(super) fn validate_positions<B: Backend>(
     positions: Tensor<B, 2, Int>,
     capacity: usize,
     field: &str,

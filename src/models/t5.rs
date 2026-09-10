@@ -6,6 +6,11 @@
 //! bias table, whose logarithmic bucket count and maximum distance determine all
 //! later attention biases. FLAN changes training, while UL2 and T5 v1.1 primarily
 //! select gated feed-forward variants, so one exact schema covers the family.
+//!
+//! The runtime uses a deterministic graph, including with an autodiff backend.
+//! `dropout_rate` and `classifier_dropout` preserve checkpoint metadata; they do
+//! not currently activate stochastic dropout. Experiments must compose their
+//! training-time regularization explicitly.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,8 +28,9 @@ pub use checkpoint::{T5CheckpointContract, T5CheckpointPlan};
 pub use generation::{T5BeamSearchOptions, generate_t5_beam_search};
 pub use load::{T5CheckpointLoadError, T5LoadError};
 pub use model::{
-    T5Attention, T5Block, T5DecodeState, T5ForConditionalGeneration, T5LayerCrossAttention,
-    T5LayerFeedForward, T5LayerSelfAttention, T5Stack,
+    T5Attention, T5Block, T5DecodeState, T5Encoder, T5EncoderLayerSpec, T5EncoderRecipe,
+    T5ForConditionalGeneration, T5LayerCrossAttention, T5LayerFeedForward, T5LayerSelfAttention,
+    T5Stack,
 };
 
 /// Feed-forward projection layout and activation stored by T5 checkpoints.

@@ -1,0 +1,124 @@
+{
+  "clock": {
+    "attention_row_sum": 1.0,
+    "circle_fve_clock_pizza": [],
+    "normalized_pattern_logit_change": 0.0,
+    "observation_max_error": 0.0,
+    "random_control_scale": 4.425668239593506,
+    "random_control_seed": 1729,
+    "reference_max_error": 0.00003814697265625,
+    "restoration_max_error": 0.0,
+    "rows": [
+      {
+        "accuracy": 1.0,
+        "distance_irrelevance_q": 0.8482599583738406,
+        "intervention": "baseline"
+      },
+      {
+        "accuracy": 0.1350186727951738,
+        "distance_irrelevance_q": 0.9946888895423304,
+        "intervention": "first2"
+      },
+      {
+        "accuracy": 0.1453605285837403,
+        "distance_irrelevance_q": 0.9994264423092181,
+        "intervention": "circle2"
+      },
+      {
+        "accuracy": 0.04395288710140764,
+        "distance_irrelevance_q": 0.9901186465623605,
+        "intervention": "circle3"
+      },
+      {
+        "accuracy": 1.0,
+        "distance_irrelevance_q": 0.5819712346629644,
+        "intervention": "first6"
+      },
+      {
+        "accuracy": 0.01694915254237288,
+        "distance_irrelevance_q": 0.9996888632945131,
+        "intervention": "random2 (matched energy)"
+      },
+      {
+        "accuracy": 0.19419706980752657,
+        "distance_irrelevance_q": 0.9993259689405405,
+        "intervention": "remove first circle"
+      },
+      {
+        "accuracy": 1.0,
+        "distance_irrelevance_q": 0.8482599583738406,
+        "intervention": "restore clean embeddings"
+      }
+    ]
+  },
+  "pizza": {
+    "attention_row_sum": 2.0,
+    "circle_fve_clock_pizza": [
+      [
+        0.7540791213750522,
+        0.9917885440023011
+      ],
+      [
+        0.7561610311617111,
+        0.9917723397032685
+      ],
+      [
+        0.7537671177934144,
+        0.9927799824205197
+      ]
+    ],
+    "normalized_pattern_logit_change": 25.010303497314453,
+    "observation_max_error": 0.0,
+    "random_control_scale": 4.010620594024658,
+    "random_control_seed": 1729,
+    "reference_max_error": 0.00003814697265625,
+    "restoration_max_error": 0.0,
+    "rows": [
+      {
+        "accuracy": 1.0,
+        "distance_irrelevance_q": 0.1717364594313671,
+        "intervention": "baseline"
+      },
+      {
+        "accuracy": 0.34817581154840566,
+        "distance_irrelevance_q": 0.07198743582602563,
+        "intervention": "first2"
+      },
+      {
+        "accuracy": 0.3283539212869865,
+        "distance_irrelevance_q": 0.07308806377091995,
+        "intervention": "circle2"
+      },
+      {
+        "accuracy": 0.2599827635736857,
+        "distance_irrelevance_q": 0.06520348117498713,
+        "intervention": "circle3"
+      },
+      {
+        "accuracy": 0.9965527147371445,
+        "distance_irrelevance_q": 0.024734301127946827,
+        "intervention": "first6"
+      },
+      {
+        "accuracy": 0.021545532892846882,
+        "distance_irrelevance_q": 0.9040177610317716,
+        "intervention": "random2 (matched energy)"
+      },
+      {
+        "accuracy": 0.4906636024130997,
+        "distance_irrelevance_q": 0.055830836173641804,
+        "intervention": "remove first circle"
+      },
+      {
+        "accuracy": 1.0,
+        "distance_irrelevance_q": 0.1717364594313671,
+        "intervention": "restore clean embeddings"
+      },
+      {
+        "accuracy": 1.0,
+        "distance_irrelevance_q": 0.21025726115619717,
+        "intervention": "normalize J (control)"
+      }
+    ]
+  }
+}

@@ -1,0 +1,81 @@
+    Blocking waiting for file lock on artifact directory
+   Compiling bytemuck v1.25.2
+   Compiling aho-corasick v1.1.5
+   Compiling crossbeam-utils v0.8.22
+   Compiling portable-atomic v1.15.0
+   Compiling either v1.18.0
+   Compiling raw-cpuid v11.6.0
+   Compiling sysctl v0.6.0
+   Compiling hashbrown v0.13.2
+   Compiling proptest v1.11.0
+   Compiling itertools v0.14.0
+   Compiling half v2.7.1
+   Compiling num-complex v0.4.6
+   Compiling wgpu-types v29.0.4
+   Compiling dyn-stack v0.13.2
+   Compiling spin v0.10.1
+   Compiling text_placeholder v0.5.1
+   Compiling num v0.4.3
+   Compiling pulp v0.22.3
+   Compiling float8 v0.7.0
+   Compiling naga v29.0.4
+   Compiling ciborium-ll v0.2.2
+   Compiling concurrent-queue v2.5.0
+   Compiling ciborium v0.2.2
+   Compiling async-channel v2.5.0
+   Compiling regex-automata v0.4.18
+   Compiling regex v1.13.1
+   Compiling sanitize-filename v0.6.0
+   Compiling cubecl-common v0.10.0
+   Compiling gemm-common v0.19.0
+   Compiling cubecl-ir v0.10.0
+   Compiling gemm-f32 v0.19.0
+   Compiling gemm-c64 v0.19.0
+   Compiling gemm-c32 v0.19.0
+   Compiling gemm-f64 v0.19.0
+   Compiling gemm-f16 v0.19.0
+   Compiling gemm v0.19.0
+   Compiling cubecl-runtime v0.10.0
+   Compiling wgpu-naga-bridge v29.0.4
+   Compiling wgpu-hal v29.0.4
+   Compiling cubecl-core v0.10.0
+   Compiling wgpu-core-deps-apple v29.0.4
+   Compiling wgpu-core v29.0.4
+   Compiling cubecl-opt v0.10.0
+   Compiling cubecl-std v0.10.0
+   Compiling cubecl-cpp v0.10.0
+   Compiling wgpu v29.0.4
+   Compiling cubecl-wgpu v0.10.0
+   Compiling cubecl v0.10.0
+   Compiling burn-std v0.21.0
+   Compiling cubek-std v0.2.0
+   Compiling cubek-random v0.2.0
+   Compiling cubek-quant v0.2.0
+   Compiling cubek-fft v0.2.0
+   Compiling burn-backend v0.21.0
+   Compiling cubek-matmul v0.2.0
+   Compiling burn-tensor v0.21.0
+   Compiling burn-ir v0.21.0
+   Compiling cubek-reduce v0.2.0
+   Compiling burn-autodiff v0.21.0
+   Compiling burn-core v0.21.0
+   Compiling burn-nn v0.21.0
+   Compiling burn-optim v0.21.0
+   Compiling burn-store v0.21.0
+   Compiling burn-flex v0.21.0
+   Compiling cubek-convolution v0.2.0
+   Compiling cubek-attention v0.2.0
+   Compiling cubek v0.2.0
+   Compiling burn-cubecl v0.21.0
+   Compiling burn-wgpu v0.21.0
+   Compiling burn v0.21.0
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 1m 21s
+     Running `target/release/examples/grokking_train --backend metal --steps 10 --benchmark --output target/mechanistic/grokking-benchmark-metal`
+
+thread 'DSD-4-0' (9764952) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubecl-wgpu-0.10.0/src/runtime.rs:510:10:
+No possible adapter available for backend. Falling back to first available.: NotFound { active_backends: Backends(METAL), requested_backends: Backends(METAL), supported_backends: Backends(VULKAN | METAL), no_fallback_backends: Backends(0x0), no_adapter_backends: Backends(METAL), incompatible_surface_backends: Backends(0x0) }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'main' (9764926) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubecl-common-0.10.0/src/device/handle/channel.rs:327:35:
+called `Result::unwrap()` on an `Err` value: RecvError

@@ -1,0 +1,131 @@
+{
+  "status": "completed_from_scratch",
+  "recorded_utc": "2026-09-10T20:23:01.273648+00:00",
+  "claim": "One fixed-seed Burn run reproduces delayed generalization and a causal learned Fourier subspace; not original weights, seed-aggregate curves or Table 1 entries.",
+  "protocol_sha256": "76bd595bf2923b9e337c2efed3815d18ed7bd69813a2d6971d5bd4f9e87c59cd",
+  "run_protocol_sha256": "76bd595bf2923b9e337c2efed3815d18ed7bd69813a2d6971d5bd4f9e87c59cd",
+  "training_command": "/usr/bin/time -l target/release/examples/grokking_train --backend metal --steps 40000 --output target/mechanistic/grokking-training-metal-seed0",
+  "build_command": "cargo build --release --locked --offline --features autodiff,metal --example grokking_train",
+  "training_binary_sha256": "63186dd878ae3dc81ff272b02254a24907c7caa88d5e94cef4e593226fa47f89",
+  "backend": "Burn 0.21 Autodiff<Metal>, F32",
+  "updates": 40000,
+  "initial": {
+    "step": 0,
+    "train_accuracy": 0.0060052219321148825,
+    "test_accuracy": 0.009732632285490548,
+    "train_loss": 4.777722030550204,
+    "test_loss": 4.777751590572668
+  },
+  "memorization_observation": {
+    "step": 200,
+    "train_accuracy": 1.0,
+    "test_accuracy": 0.08591565052019241,
+    "train_loss": 0.018923330059409577,
+    "test_loss": 14.805721114594565
+  },
+  "training_accuracy_above_99_percent": {
+    "lower_exclusive_step": 100,
+    "upper_inclusive_step": 200,
+    "accuracy": 1.0
+  },
+  "heldout_accuracy_above_99_percent": {
+    "lower_exclusive_step": 7000,
+    "upper_inclusive_step": 7500,
+    "accuracy": 0.9956370958720214
+  },
+  "final": {
+    "step": 40000,
+    "train_accuracy": 1.0,
+    "test_accuracy": 1.0,
+    "train_loss": 2.403567266313987e-06,
+    "test_loss": 7.180744113878238e-05
+  },
+  "grokking_criterion_passed": true,
+  "performance": {
+    "wall_seconds_including_initialization_records_and_analysis": 394.84,
+    "training_loop_seconds": 393.063,
+    "maximum_resident_set_bytes": 141803520,
+    "peak_memory_footprint_bytes": 527681920,
+    "scope": "one local Apple Silicon Metal run; no portable throughput claim"
+  },
+  "model_and_optimizer_sha256": {
+    "initial_model": "54fb2afdb723fc7d17aab0a14c2ec099791f72454d3409f9a17742cf60d12efa",
+    "final_model": "653a99796989b20a1f7bedc801a120d804f661df461a6586a185f4e4a994dea7",
+    "final_optimizer": "49ca4ff656f0e28b3aa62197a500ef165b4c6711de25af83b750c5af01f8bfb2"
+  },
+  "learned_circuit": {
+    "analysis_classes": 113,
+    "claim": "Mechanistic analysis of this freshly trained run; not reproduction of the archived seed-zero Table 1 entries",
+    "conditions": [
+      {
+        "accuracy": 1.0,
+        "cross_entropy": 5.097762506750056e-05,
+        "name": "baseline"
+      },
+      {
+        "accuracy": 1.0,
+        "cross_entropy": 4.539756226948827e-05,
+        "name": "keep_learned_10d"
+      },
+      {
+        "accuracy": 0.09601378338162737,
+        "cross_entropy": 4.129668048909752,
+        "name": "remove_learned_10d"
+      },
+      {
+        "accuracy": 1.0,
+        "cross_entropy": 5.097762552393536e-05,
+        "name": "remove_then_restore"
+      }
+    ],
+    "evaluation_pairs": 12769,
+    "fourier_variance_explained": [
+      0.7590352576985936,
+      0.8780853143489223,
+      0.9606965007156455,
+      -0.6464019440781656,
+      0.8392610970757284,
+      0.7831719199044471,
+      0.9651899434523952,
+      0.18443820152311363,
+      -2.1660866595350012,
+      -0.47434684616712297
+    ],
+    "frequencies": [
+      10,
+      7,
+      49,
+      13,
+      42
+    ],
+    "frequency_selection": "top five final neuron-to-logit Fourier pair powers; no checkpoint frequencies reused",
+    "identity_max_logit_error": 0.0,
+    "restoration_max_logit_error": 3.0517578125e-05
+  },
+  "source_provenance": {
+    "snapshot_timing": "after run start; exact compile-time model/entrypoint/study hashes also embedded in run.json",
+    "captured_utc": "2026-09-10T20:12:35.640758+00:00",
+    "modified_after_binary_build": [
+      "src/training_capability_tests.rs",
+      "src/training_tests.rs"
+    ],
+    "drift_explanation": "Only two test-source files changed before snapshot; neither is compiled into this example. The training graph remained frozen through the complete run.",
+    "archive": "evidence/executed-source.tar.gz",
+    "archive_sha256": "0f266f543e50dfb7699d7b74b732c2c56209b907b1b84fc4c9ff07296f08fe00"
+  },
+  "post_run_changes": [
+    "Resume now rejects earlier step horizons, benchmark state, and changed protocol/training-source fingerprints.",
+    "Read-only --analyze loads the learned checkpoint and writes a separate replay report.",
+    "The legacy zero-intercept FVE diagnostic is retained; an explicit affine fit was added after detecting nonzero activation means. This does not change training, frequency selection, or intervention results."
+  ],
+  "retained_evidence": {
+    "evidence/executed-source.tar.gz": "0f266f543e50dfb7699d7b74b732c2c56209b907b1b84fc4c9ff07296f08fe00",
+    "evidence/learned-circuit.json": "ac6be4a586c1b89c840c57e476d716f1a3fd7042487a7a34a346ff1bb150c8b3",
+    "evidence/outcome.json": "eb69e7409d8c6b00b1972fcba4f45a11746974606b9073ba81c3a64a47983946",
+    "evidence/progress.json": "fbe4b3d298a9a8cbc5202c19358e3abcccb5c364b1bd38cc2b5f28b25c430922",
+    "evidence/run.json": "8ab0635628897421c79ce5e57dff3c2f7119c73a5b26cff8b60a8ed96ca00f30",
+    "evidence/source-inventory.json": "cecef6db6d8e086d32b8f2e514f56a0768a2f08354523a33f16213a20dee7de4",
+    "evidence/stdout.log": "ab3ea029c5cf6ffa12ae4a66f87a76d124122200ed0e3d08b1b4268f0f5d030b",
+    "evidence/timing.log": "eece57ba41e6da5b5c6c436396ee3f76657ba4e35685497a980495c9d971ce4e"
+  }
+}

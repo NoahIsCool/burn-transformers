@@ -1,0 +1,12 @@
+{
+  "command": [
+    "target/release/examples/qwen_prefix",
+    "models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "2"
+  ],
+  "exit_code": 0,
+  "wall_seconds": 3.63113641703967,
+  "stdout": "Loaded 4 reused and 26 converted parameters; omitted 459 source parameters; initialized 0 new parameters.\nRead 594783424 checkpoint payload bytes; later blocks and the vocabulary head were not loaded.\nCaptured last-block neurons: [1, 1, 3584]\nUntrained two-class logits: [-0.03758703, 1.3661304]\n",
+  "stderr": "",
+  "note": "Python monotonic wall time; the earlier macOS time -l wrapper could not read sandboxed sysctl metadata."
+}

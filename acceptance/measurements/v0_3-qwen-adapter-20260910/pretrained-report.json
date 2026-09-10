@@ -1,0 +1,31 @@
+{
+  "adapter_changed": true,
+  "auxiliary_weight": 0.009999999776482582,
+  "capture_dtype": "F32",
+  "capture_shape": [
+    8,
+    1,
+    8
+  ],
+  "data_order": "same fixed batch of eight examples on every optimizer step",
+  "final_auxiliary_loss": 0.05820988118648529,
+  "final_task_loss": -0.0,
+  "final_total_loss": 0.0005820987862534821,
+  "frozen_parameters_sha256_after": "45dcf9fe26c9fd85e7b29642ab5bc32d46e0701723dd1a89a82cdc05fe7b50ba",
+  "frozen_parameters_sha256_before": "45dcf9fe26c9fd85e7b29642ab5bc32d46e0701723dd1a89a82cdc05fe7b50ba",
+  "head_changed": true,
+  "held_out_evaluation": false,
+  "initial_auxiliary_loss": 0.08035075664520264,
+  "initial_task_loss": 2.306121349334717,
+  "initial_total_loss": 2.306924819946289,
+  "learning_rate": 0.01,
+  "resume_next_step_exact": true,
+  "saved_step": 20,
+  "scope": "Synthetic training and serialization smoke; no sentiment or pretrained-model quality claim",
+  "seed": 42,
+  "selected_auxiliary_gradient_through_frozen_block": 0.047981131821870804,
+  "source": "models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+  "steps": 40,
+  "task_gradient_through_frozen_block": 2.3448543548583984,
+  "training_set_accuracy": 1.0
+}

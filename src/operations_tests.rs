@@ -10,6 +10,33 @@ use crate::checkpoint::quantization::{
     QuantizationGroupSize, SymmetricQuantization, WeightQuantizationConfig, quantize_tensor_data,
 };
 
+/// Open user modules receive contextual errors rather than a backend matmul panic.
+#[test]
+fn projection_rejects_mixed_float_dtypes_and_accepts_explicit_conversion() {
+    let device = Default::default();
+    let input = Tensor::<Flex, 2>::ones([1, 2], &device).cast(DType::F64);
+    let mut projection = LinearConfig::new(2, 3).init::<Flex>(&device);
+    assert!(
+        linear(input.clone(), &projection)
+            .unwrap_err()
+            .to_string()
+            .contains("linear.weight dtype")
+    );
+    projection.weight = Param::from_tensor(projection.weight.val().cast(DType::F64));
+    assert!(
+        linear(input.clone(), &projection)
+            .unwrap_err()
+            .to_string()
+            .contains("linear.bias dtype")
+    );
+    projection.bias = projection
+        .bias
+        .map(|bias| Param::from_tensor(bias.val().cast(DType::F64)));
+    let output = linear(input, &projection).unwrap();
+    assert_eq!(output.dims(), [1, 3]);
+    assert_eq!(output.dtype(), DType::F64);
+}
+
 /// Lazy row/column projections retain exact forward values and optimizer leaves.
 #[cfg(feature = "autodiff")]
 #[test]
@@ -79,6 +106,86 @@ fn autodiff_linear_initializer_respects_frozen_parameters() {
         assert!(projection.weight.grad(&gradients).is_none());
         assert!(projection.bias.as_ref().unwrap().grad(&gradients).is_none());
         assert!(input.grad(&gradients).is_some());
+    }
+}
+
+/// Loading a checkpoint establishes fresh parameter leaves after layout mapping.
+#[cfg(feature = "autodiff")]
+#[test]
+fn autodiff_linear_record_reload_preserves_values_gradients_and_freezing() {
+    use burn::{backend::Autodiff, module::Module, nn::LinearLayout};
+
+    type AdBackend = Autodiff<Flex>;
+    let device = Default::default();
+    let config = LinearConfig::new(2, 3)
+        .with_bias(false)
+        .with_layout(LinearLayout::Col);
+    let original = super::init_linear::<AdBackend>(&config, &device);
+    let expected = linear(
+        Tensor::<AdBackend, 2>::from_floats([[1.0, 2.0], [3.0, 4.0]], &device),
+        &original,
+    )
+    .expect("original projection")
+    .to_data();
+    for frozen in [false, true] {
+        let restored = super::init_linear::<AdBackend>(&config, &device);
+        let restored = if frozen { restored.no_grad() } else { restored };
+        let restored = restored.load_record(original.clone().into_record());
+        let input =
+            Tensor::<AdBackend, 2>::from_floats([[1.0, 2.0], [3.0, 4.0]], &device).require_grad();
+        let output = linear(input.clone(), &restored).expect("restored projection");
+        assert_eq!(output.to_data(), expected);
+        let gradients = output.sum().backward();
+        if frozen {
+            assert!(!restored.weight.val().is_require_grad());
+            assert!(restored.weight.grad(&gradients).is_none());
+        } else {
+            assert_eq!(
+                restored
+                    .weight
+                    .grad(&gradients)
+                    .expect("restored optimizer leaf")
+                    .to_data(),
+                TensorData::from([[4.0_f32, 4.0, 4.0], [6.0, 6.0, 6.0]])
+            );
+        }
+        assert!(
+            input.grad(&gradients).is_some(),
+            "forward inputs stay connected"
+        );
+        assert!(
+            original.weight.grad(&gradients).is_none(),
+            "loading severs the source parameter graph"
+        );
+    }
+}
+
+/// The autodiff-only load fix leaves ordinary row/column records unchanged.
+#[test]
+fn inference_linear_records_preserve_layout_and_values() {
+    use burn::{module::Module, nn::LinearLayout};
+
+    let device = Default::default();
+    for layout in [LinearLayout::Row, LinearLayout::Col] {
+        let config = LinearConfig::new(2, 3).with_layout(layout);
+        let original = super::init_linear::<Flex>(&config, &device);
+        let input = Tensor::<Flex, 2>::from_floats([[1.0, 2.0], [3.0, 4.0]], &device);
+        let expected = linear(input.clone(), &original)
+            .expect("original")
+            .to_data();
+        let record = original.into_record();
+        assert_eq!(
+            record.weight.lazy_shape().to_vec(),
+            match layout {
+                LinearLayout::Row => vec![2, 3],
+                LinearLayout::Col => vec![3, 2],
+            }
+        );
+        let restored = super::init_linear::<Flex>(&config, &device).load_record(record);
+        assert_eq!(
+            linear(input, &restored).expect("restored").to_data(),
+            expected
+        );
     }
 }
 

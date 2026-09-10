@@ -1,0 +1,23 @@
+{
+  "result_sha256": "b55293d1c70888b7803be435d84260ecffcf1a30a3cc9ff7d178c4a51bdb1e43",
+  "protocol_sha256": "6e3ec845d2e35d2f8c955c4f6a6db699c9fa4c7aa475826a77b9a1a1a6bddd48",
+  "plot_source_sha256": "2747bafda0416fc298a7ce2fdfbb4b9219ad12eb50581856eea637505f0c7ea4",
+  "artifacts_sha256": {
+    "training.png": "88b38f1e1b8cff94e33e5a67f51d478719332d9e30413d83dca74fb42a384a9d",
+    "training.svg": "4fd41d2cadcd698cc8092eefff654d73d6515af1e98c72426917ad6ecebf1cb6"
+  },
+  "matplotlib": "3.11.1",
+  "numpy": "2.4.6",
+  "training_updates": 256,
+  "held_out_rows_per_condition": 97,
+  "cutoff_curve_rows_per_condition_and_offset": 80,
+  "error_bars": "descriptive sample standard deviation, not confidence intervals",
+  "probabilities": "F64 analysis of F32 full-vocabulary logits; numeric subset not renormalized",
+  "plot_command": "PYTHONPATH=target/mechanistic/clock_and_pizza/plot-deps MPLCONFIGDIR=/private/tmp/greater-than-training-matplotlib python3 examples/mechanistic/greater_than_training/plot.py",
+  "independent_svg_render_command": "rsvg-convert -w 2160 -h 1440 examples/mechanistic/greater_than_training/training.svg -o /private/tmp/greater-than-training-svg-check.png",
+  "independent_svg_render_sha256": "ce50df6e507e19e8ee8651dc6603c8ce363c7954061589b8d237d326d30e7b10",
+  "visual_checks": {
+    "png": "Inspected all four panels, labels, legends, error bars, and conditioning/sampling footnotes; no clipping or overlap",
+    "svg": "Independently rendered with librsvg and visually inspected all panels, labels, legends, error bars, and footnotes; no clipping or overlap"
+  }
+}

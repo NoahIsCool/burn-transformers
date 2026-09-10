@@ -1,0 +1,29 @@
+{
+  "id": "python-clock-diagnostics",
+  "attempt": 1,
+  "command": [
+    "/usr/local/bin/python3",
+    "/tmp/v0_3_python_validation.py",
+    "--root",
+    "/Users/nover/repos/transformers",
+    "--start",
+    "examples/mechanistic/clock_and_pizza_training",
+    "--pattern",
+    "*_tests.py",
+    "--audit",
+    "/Users/nover/repos/transformers/acceptance/measurements/v0_3-training-validation-20260910/python-clock-diagnostics-attempt-01/python-reads.json"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "python",
+  "started_utc": "2026-09-10T20:36:53.651650+00:00",
+  "finished_utc": "2026-09-10T20:36:53.765140+00:00",
+  "seconds": 0.11349237500689924,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "python-clock-diagnostics-attempt-01/inputs-before.json",
+  "inputs_after": "python-clock-diagnostics-attempt-01/inputs-after.json",
+  "output": "python-clock-diagnostics-attempt-01/output.log",
+  "output_sha256": "fc5ce82ad33f53df3c8f74f8d79be97e9efdaf450715c5fd9dd14fa67f9a99cf",
+  "passed": true,
+  "python_read_audit": "python-clock-diagnostics-attempt-01/python-reads.json"
+}

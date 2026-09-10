@@ -289,7 +289,7 @@ impl<B: Backend> DeepseekV2DecoderLayer<B> {
         retain_attention: bool,
     ) -> Result<LayerOutput<B>> {
         let residual = hidden.clone();
-        let projection = self.self_attn.project(
+        let projection = self.self_attn.project_rotary(
             self.input_layernorm.forward(hidden),
             positions,
             rope,

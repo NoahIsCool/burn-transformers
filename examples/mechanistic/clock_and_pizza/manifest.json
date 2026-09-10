@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "paper": {
+    "title": "The Clock and the Pizza: Two Stories in Mechanistic Explanation of Neural Networks",
+    "url": "https://arxiv.org/abs/2306.17844v2",
+    "venue": "NeurIPS 2023",
+    "repository": "https://github.com/fjzzq2002/pizza",
+    "commit": "4c7f2f31d215a51522b33f3ae2ef35f9c254ef6f",
+    "repository_license": "MIT",
+    "paper_license": "CC BY 4.0"
+  },
+  "models": {
+    "pizza": {
+      "paper_name": "Model A",
+      "run_id": "p99zdpze5l",
+      "attention_coefficient": 0,
+      "checkpoint": {
+        "filename": "model_p99zdpze5l.pt",
+        "bytes": 854465,
+        "sha256": "eb58a5a059f05f9f8a434f8f6d62405c6194dc353abf9843cb56382183820e25"
+      },
+      "config": {
+        "filename": "config_p99zdpze5l.json",
+        "bytes": 326,
+        "sha256": "92904f1cc48463c99098eac3657480122d6118707322f9b25840ec28847185df"
+      }
+    },
+    "clock": {
+      "paper_name": "Model B",
+      "run_id": "l8k1hzciux",
+      "attention_coefficient": 1,
+      "checkpoint": {
+        "filename": "model_l8k1hzciux.pt",
+        "bytes": 854465,
+        "sha256": "9c45340a4ce253239687349f690a3687116ef14c35e64f77b69c5abdf6086929"
+      },
+      "config": {
+        "filename": "config_l8k1hzciux.json",
+        "bytes": 334,
+        "sha256": "11642799caf013e073872312fd425207c82252f0254d2e0012214c22e161b73c"
+      }
+    }
+  },
+  "raw_tensor_shapes": {
+    "embed.W_E": [128, 59],
+    "pos_embed.W_pos": [2, 128],
+    "unembed.W_U": [128, 59],
+    "blocks.0.attn.W_K": [4, 32, 128],
+    "blocks.0.attn.W_Q": [4, 32, 128],
+    "blocks.0.attn.W_V": [4, 32, 128],
+    "blocks.0.attn.W_O": [128, 128],
+    "blocks.0.attn.mask": [2, 2],
+    "blocks.0.mlp.W_in": [512, 128],
+    "blocks.0.mlp.b_in": [512],
+    "blocks.0.mlp.W_out": [128, 512],
+    "blocks.0.mlp.b_out": [128]
+  },
+  "derived_tensor_shapes": {
+    "pca.mean": [1, 128],
+    "pca.components": [128, 20],
+    "pca.scores": [59, 20],
+    "reference.baseline": [3481, 59],
+    "reference.first2": [3481, 59],
+    "reference.first6": [3481, 59],
+    "reference.circle2": [3481, 59],
+    "reference.circle3": [3481, 59]
+  },
+  "protocol": {
+    "modulus": 59,
+    "dtype": "float32",
+    "input_order": "All (a,b) pairs: a=0..58 outer, b=0..58 inner; last-token logits, classes c=0..58.",
+    "attention": "Unmasked alpha*softmax(QK^T/sqrt(32))+(1-alpha)*J, where J is all ones. The stored triangular mask is unused.",
+    "architecture": "Token plus learned position embeddings; one attention residual; one 512-wide biased ReLU MLP residual; unembedding. No normalization.",
+    "pca": "Center [59,128] token embeddings; full SVD; retain 20 components. Selected-coordinate reconstructions include the original mean.",
+    "interventions": {
+      "baseline": null,
+      "first2": [0, 1],
+      "first6": [0, 1, 2, 3, 4, 5],
+      "circle2": [2, 3],
+      "circle3": [4, 5]
+    },
+    "circle_frequencies": {"first2": 17, "circle2": 3, "circle3": 44},
+    "clock_formula": "C(a,b,c)=cos(2*pi*k*(a+b-c)/59)",
+    "pizza_formula": "P(a,b,c)=abs(cos(pi*k*(a-b)/59))*C(a,b,c)",
+    "fve": "Standardize each full [59,59,59] tensor independently to mean 0 and population std 1; FVE=1-population_variance(observed-predicted). No fitting.",
+    "q": "Arrange correct logits as L[(a+b)%59,(a-b)%59]; q=mean(std(L,axis=0,ddof=0))/std(L,ddof=0).",
+    "training": "No retraining. Published training configurations report 20,000 epochs and 80% training data. Original seeds and split membership are unpublished; evaluate all 3,481 pairs.",
+    "caveats": [
+      "The notebook's alternative ob expression differs from the paper's Pizza equation; Table 2 is compared against the paper equation.",
+      "The paper has inconsistent first-six-PC accuracy claims (91.4% versus 99.7%); report the observed accuracy descriptively, without selecting a target.",
+      "The circle frequencies and Table 2 comparisons concern Pizza Model A; Clock Model B supplies the baseline distance-irrelevance control."
+    ]
+  },
+  "predeclared_checks": {
+    "pizza_table2": {
+      "first2": {"clock_fve_percent": 75.41, "pizza_fve_percent": 99.18},
+      "circle2": {"clock_fve_percent": 75.62, "pizza_fve_percent": 99.18},
+      "circle3": {"clock_fve_percent": 75.38, "pizza_fve_percent": 99.28}
+    },
+    "fve_tolerance_percentage_points": 0.02,
+    "baseline_q": {"pizza": 0.17, "clock": 0.85},
+    "q_absolute_tolerance": 0.01,
+    "rust_reference_logits_absolute_tolerance": 0.002,
+    "rust_reference_logits_relative_tolerance": 0.00002,
+    "rust_reference_metrics_absolute_tolerance": 0.00002
+  }
+}

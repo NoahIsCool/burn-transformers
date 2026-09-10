@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "paper": "https://arxiv.org/html/2306.17844v2",
+  "author_training_source": "https://github.com/fjzzq2002/pizza/blob/4c7f2f31d215a51522b33f3ae2ef35f9c254ef6f/code/train-main.py",
+  "protocol_before_runs": {
+    "task": "addition modulo59; all3481 pairs; floor(0.8*3481)=2784 train,697 held out",
+    "split": "descending Fisher-Yates with SplitMix64 draws modulo(index+1); seed20260910; exact memberships serialized before updates",
+    "initialization": "Burn backend RNG seed20260910; independent Gaussian matrices matching author's standard deviations, zero MLP biases; RNG/layout differs from PyTorch",
+    "architecture": "one block, width128, four heads with32channels, 512biasedReLU neurons, learned token/position, no normalization, two residuals, untied readout",
+    "attention_conditions": [
+      0.0,
+      1.0
+    ],
+    "attention": "unmasked alpha*softmax(QK^T/sqrt32)+(1-alpha)*J; J entries are1",
+    "optimizer": "Burn AdamW beta1=.9 beta2=.98 eps1e-8 weight_decay2, lr=.001*min(zero_based_update/10,1)",
+    "loss": "F32 differentiable pairwise-reduced CE; author F64 CE is an explicit numerical difference; heldout metrics use hostF64",
+    "default_steps": 2000,
+    "paper_steps": 20000,
+    "evaluation_every": 100,
+    "smoke": "5steps over first32 training pairs; not learning/reproduction evidence",
+    "analyses": "complete-grid train/test accuracy and CE, correct-logit distance irrelevance q, centered embedding PCA/circularity, attention maps and last-token neuron activity; no threshold-selected restarts",
+    "claim": "fresh seeded bounded training adaptation, not reproduction of unpublished author seeds or phase-diagram population; alpha labels describe configured attention, not guaranteed learned mechanism",
+    "gradient_symmetry": "PaperDefinition4.1:100 independent(a,b,c) triples fromSplitMix64 seed20260911; token activation detached into diagnostic gradient leaf only; mean cosine dlogit/dtoken0 versus dlogit/dtoken1; no optimizer step in analysis"
+  }
+}

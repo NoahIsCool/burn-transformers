@@ -18,7 +18,10 @@ class PublicExampleRecordTests(unittest.TestCase):
         self.assertFalse(record["standardized_benchmark"])
         self.assertFalse(record["final_candidate_replay"])
         self.assertFalse(record["network_access"])
-        self.assertEqual(record["cargo_lock_sha256"], hashlib.sha256((CRATE / "Cargo.lock").read_bytes()).hexdigest())
+        # Authenticate the measured dependency graph. New optional features may
+        # change the current lock without rewriting historical execution claims.
+        historical_lock = CRATE / "acceptance/measurements/public-examples-20260909/Cargo.lock"
+        self.assertEqual(record["cargo_lock_sha256"], hashlib.sha256(historical_lock.read_bytes()).hexdigest())
         self.assertEqual(len(record["runs"]), 2)
         for run in record["runs"]:
             with self.subTest(example=run["example"]):

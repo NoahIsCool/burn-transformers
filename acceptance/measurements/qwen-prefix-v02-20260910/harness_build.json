@@ -1,0 +1,22 @@
+{
+  "command": [
+    "rustc",
+    "--edition=2024",
+    "-C",
+    "opt-level=3",
+    "/private/tmp/qwen-prefix-v02-real-8bfamav1/compare_prefix.rs",
+    "-L",
+    "dependency=target/release/deps",
+    "-o",
+    "/private/tmp/qwen-prefix-v02-real-8bfamav1/compare_prefix",
+    "--extern",
+    "serde_json=/Users/nover/repos/transformers/target/release/deps/libserde_json-9450ebc1d6ce3ed3.rlib",
+    "--extern",
+    "burn=/Users/nover/repos/transformers/target/release/deps/libburn-e9fa18f46b884c6b.rlib",
+    "--extern",
+    "transformers=/Users/nover/repos/transformers/target/release/deps/libtransformers-43f697aba411fb83.rlib"
+  ],
+  "exit_code": 0,
+  "stdout": "",
+  "stderr": ""
+}

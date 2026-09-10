@@ -1,0 +1,2195 @@
+{
+  "all_captured_and_hidden_values_finite": true,
+  "backend": "Flex CPU",
+  "blocks": [
+    0,
+    1
+  ],
+  "capture_dtype": "F32",
+  "capture_shape": [
+    1,
+    1,
+    3584
+  ],
+  "compared_hidden_values": 3072,
+  "comparison": "Same first two individually executed blocks from the full text model, followed by its final normalization",
+  "full_model_load_seconds": 8.886994583,
+  "full_model_prefix_forward_seconds": 0.023352625,
+  "full_model_source_payload_bytes": 1504791232,
+  "hidden_dtype": "F32",
+  "hidden_exact_equal": true,
+  "hidden_max_absolute_error": 0.0,
+  "hidden_shape": [
+    1,
+    3,
+    1024
+  ],
+  "prefix_forward_seconds": 0.023410041,
+  "prefix_load_seconds": 3.680621333,
+  "prefix_report": {
+    "newly_initialized": [],
+    "omitted": [
+      {
+        "name": "lm_head.weight",
+        "reason": "tied vocabulary view omitted; its embedding storage owner remains available to the backbone"
+      },
+      {
+        "name": "model.language_model.layers.10.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.10.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.10.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.10.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.10.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.10.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.10.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.10.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.10.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.10.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.10.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.10.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.10.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.10.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.11.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.11.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.11.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.11.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.11.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.11.self_attn.k_norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.11.self_attn.k_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.11.self_attn.o_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.11.self_attn.q_norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.11.self_attn.q_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.11.self_attn.v_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.12.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.12.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.12.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.12.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.12.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.12.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.12.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.12.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.12.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.12.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.12.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.12.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.12.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.12.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.13.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.13.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.13.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.13.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.13.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.13.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.13.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.13.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.13.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.13.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.13.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.13.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.13.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.13.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.14.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.14.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.14.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.14.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.14.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.14.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.14.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.14.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.14.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.14.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.14.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.14.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.14.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.14.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.15.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.15.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.15.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.15.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.15.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.15.self_attn.k_norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.15.self_attn.k_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.15.self_attn.o_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.15.self_attn.q_norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.15.self_attn.q_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.15.self_attn.v_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.16.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.16.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.16.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.16.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.16.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.16.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.16.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.16.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.16.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.16.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.16.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.16.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.16.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.16.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.17.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.17.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.17.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.17.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.17.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.17.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.17.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.17.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.17.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.17.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.17.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.17.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.17.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.17.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.18.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.18.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.18.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.18.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.18.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.18.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.18.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.18.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.18.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.18.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.18.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.18.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.18.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.18.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.19.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.19.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.19.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.19.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.19.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.19.self_attn.k_norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.19.self_attn.k_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.19.self_attn.o_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.19.self_attn.q_norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.19.self_attn.q_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.19.self_attn.v_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.2.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.2.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.2.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.2.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.2.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.2.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.2.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.2.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.2.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.2.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.2.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.2.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.2.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.2.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.20.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.20.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.20.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.20.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.20.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.20.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.20.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.20.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.20.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.20.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.20.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.20.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.20.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.20.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.21.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.21.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.21.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.21.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.21.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.21.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.21.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.21.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.21.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.21.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.21.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.21.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.21.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.21.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.22.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.22.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.22.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.22.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.22.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.22.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.22.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.22.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.22.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.22.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.22.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.22.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.22.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.22.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.23.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.23.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.23.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.23.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.23.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.23.self_attn.k_norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.23.self_attn.k_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.23.self_attn.o_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.23.self_attn.q_norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.23.self_attn.q_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.23.self_attn.v_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.3.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.3.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.3.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.3.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.3.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.3.self_attn.k_norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.3.self_attn.k_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.3.self_attn.o_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.3.self_attn.q_norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.3.self_attn.q_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.3.self_attn.v_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.4.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.4.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.4.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.4.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.4.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.4.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.4.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.4.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.4.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.4.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.4.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.4.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.4.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.4.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.5.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.5.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.5.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.5.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.5.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.5.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.5.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.5.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.5.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.5.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.5.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.5.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.5.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.5.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.6.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.6.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.6.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.6.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.6.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.6.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.6.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.6.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.6.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.6.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.6.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.6.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.6.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.6.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.7.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.7.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.7.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.7.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.7.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.7.self_attn.k_norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.7.self_attn.k_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.7.self_attn.o_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.7.self_attn.q_norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.7.self_attn.q_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.7.self_attn.v_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.8.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.8.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.8.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.8.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.8.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.8.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.8.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.8.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.8.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.8.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.8.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.8.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.8.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.8.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.9.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.9.linear_attn.A_log",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.9.linear_attn.conv1d.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.9.linear_attn.dt_bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.9.linear_attn.in_proj_a.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.9.linear_attn.in_proj_b.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.9.linear_attn.in_proj_qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.9.linear_attn.in_proj_z.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.9.linear_attn.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.9.linear_attn.out_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.9.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.9.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.9.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.language_model.layers.9.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.0.attn.proj.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.0.attn.proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.0.attn.qkv.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.0.attn.qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.0.mlp.linear_fc1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.0.mlp.linear_fc1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.0.mlp.linear_fc2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.0.mlp.linear_fc2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.0.norm1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.0.norm1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.0.norm2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.0.norm2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.1.attn.proj.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.1.attn.proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.1.attn.qkv.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.1.attn.qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.1.mlp.linear_fc1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.1.mlp.linear_fc1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.1.mlp.linear_fc2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.1.mlp.linear_fc2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.1.norm1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.1.norm1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.1.norm2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.1.norm2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.10.attn.proj.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.10.attn.proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.10.attn.qkv.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.10.attn.qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.10.mlp.linear_fc1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.10.mlp.linear_fc1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.10.mlp.linear_fc2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.10.mlp.linear_fc2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.10.norm1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.10.norm1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.10.norm2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.10.norm2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.11.attn.proj.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.11.attn.proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.11.attn.qkv.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.11.attn.qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.11.mlp.linear_fc1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.11.mlp.linear_fc1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.11.mlp.linear_fc2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.11.mlp.linear_fc2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.11.norm1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.11.norm1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.11.norm2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.11.norm2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.2.attn.proj.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.2.attn.proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.2.attn.qkv.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.2.attn.qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.2.mlp.linear_fc1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.2.mlp.linear_fc1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.2.mlp.linear_fc2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.2.mlp.linear_fc2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.2.norm1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.2.norm1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.2.norm2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.2.norm2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.3.attn.proj.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.3.attn.proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.3.attn.qkv.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.3.attn.qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.3.mlp.linear_fc1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.3.mlp.linear_fc1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.3.mlp.linear_fc2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.3.mlp.linear_fc2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.3.norm1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.3.norm1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.3.norm2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.3.norm2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.4.attn.proj.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.4.attn.proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.4.attn.qkv.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.4.attn.qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.4.mlp.linear_fc1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.4.mlp.linear_fc1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.4.mlp.linear_fc2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.4.mlp.linear_fc2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.4.norm1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.4.norm1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.4.norm2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.4.norm2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.5.attn.proj.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.5.attn.proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.5.attn.qkv.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.5.attn.qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.5.mlp.linear_fc1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.5.mlp.linear_fc1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.5.mlp.linear_fc2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.5.mlp.linear_fc2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.5.norm1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.5.norm1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.5.norm2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.5.norm2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.6.attn.proj.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.6.attn.proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.6.attn.qkv.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.6.attn.qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.6.mlp.linear_fc1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.6.mlp.linear_fc1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.6.mlp.linear_fc2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.6.mlp.linear_fc2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.6.norm1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.6.norm1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.6.norm2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.6.norm2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.7.attn.proj.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.7.attn.proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.7.attn.qkv.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.7.attn.qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.7.mlp.linear_fc1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.7.mlp.linear_fc1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.7.mlp.linear_fc2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.7.mlp.linear_fc2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.7.norm1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.7.norm1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.7.norm2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.7.norm2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.8.attn.proj.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.8.attn.proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.8.attn.qkv.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.8.attn.qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.8.mlp.linear_fc1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.8.mlp.linear_fc1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.8.mlp.linear_fc2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.8.mlp.linear_fc2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.8.norm1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.8.norm1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.8.norm2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.8.norm2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.9.attn.proj.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.9.attn.proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.9.attn.qkv.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.9.attn.qkv.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.9.mlp.linear_fc1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.9.mlp.linear_fc1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.9.mlp.linear_fc2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.9.mlp.linear_fc2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.9.norm1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.9.norm1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.9.norm2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.blocks.9.norm2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.merger.linear_fc1.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.merger.linear_fc1.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.merger.linear_fc2.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.merger.linear_fc2.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.merger.norm.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.merger.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.patch_embed.proj.bias",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.patch_embed.proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "model.visual.pos_embed.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.fc.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.layers.0.input_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.layers.0.mlp.down_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.layers.0.mlp.gate_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.layers.0.mlp.up_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.layers.0.post_attention_layernorm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.layers.0.self_attn.k_norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.layers.0.self_attn.k_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.layers.0.self_attn.o_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.layers.0.self_attn.q_norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.layers.0.self_attn.q_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.layers.0.self_attn.v_proj.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.norm.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.pre_fc_norm_embedding.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      },
+      {
+        "name": "mtp.pre_fc_norm_hidden.weight",
+        "reason": "outside the selected backbone, or superseded by an explicitly reinitialized parameter"
+      }
+    ],
+    "preserved_ties": [],
+    "reused": [
+      {
+        "shape": [
+          16
+        ],
+        "source": "model.language_model.layers.0.linear_attn.A_log",
+        "target": "model.layers.0.linear_attn.A_log"
+      },
+      {
+        "shape": [
+          128
+        ],
+        "source": "model.language_model.layers.0.linear_attn.norm.weight",
+        "target": "model.layers.0.linear_attn.norm.weight"
+      },
+      {
+        "shape": [
+          16
+        ],
+        "source": "model.language_model.layers.1.linear_attn.A_log",
+        "target": "model.layers.1.linear_attn.A_log"
+      },
+      {
+        "shape": [
+          128
+        ],
+        "source": "model.language_model.layers.1.linear_attn.norm.weight",
+        "target": "model.layers.1.linear_attn.norm.weight"
+      }
+    ],
+    "transformed": [
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          248320,
+          1024
+        ],
+        "sources": [
+          "model.language_model.embed_tokens.weight"
+        ],
+        "target": "model.embed_tokens.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.0.input_layernorm.weight"
+        ],
+        "target": "model.layers.0.input_layernorm.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          6144,
+          1,
+          4
+        ],
+        "sources": [
+          "model.language_model.layers.0.linear_attn.conv1d.weight"
+        ],
+        "target": "model.layers.0.linear_attn.conv1d.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          16
+        ],
+        "sources": [
+          "model.language_model.layers.0.linear_attn.dt_bias"
+        ],
+        "target": "model.layers.0.linear_attn.dt_bias"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          16,
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.0.linear_attn.in_proj_a.weight"
+        ],
+        "target": "model.layers.0.linear_attn.in_proj_a.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          16,
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.0.linear_attn.in_proj_b.weight"
+        ],
+        "target": "model.layers.0.linear_attn.in_proj_b.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          6144,
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.0.linear_attn.in_proj_qkv.weight"
+        ],
+        "target": "model.layers.0.linear_attn.in_proj_qkv.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          2048,
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.0.linear_attn.in_proj_z.weight"
+        ],
+        "target": "model.layers.0.linear_attn.in_proj_z.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          1024,
+          2048
+        ],
+        "sources": [
+          "model.language_model.layers.0.linear_attn.out_proj.weight"
+        ],
+        "target": "model.layers.0.linear_attn.out_proj.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          1024,
+          3584
+        ],
+        "sources": [
+          "model.language_model.layers.0.mlp.down_proj.weight"
+        ],
+        "target": "model.layers.0.mlp.down_proj.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          3584,
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.0.mlp.gate_proj.weight"
+        ],
+        "target": "model.layers.0.mlp.gate_proj.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          3584,
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.0.mlp.up_proj.weight"
+        ],
+        "target": "model.layers.0.mlp.up_proj.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.0.post_attention_layernorm.weight"
+        ],
+        "target": "model.layers.0.post_attention_layernorm.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.1.input_layernorm.weight"
+        ],
+        "target": "model.layers.1.input_layernorm.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          6144,
+          1,
+          4
+        ],
+        "sources": [
+          "model.language_model.layers.1.linear_attn.conv1d.weight"
+        ],
+        "target": "model.layers.1.linear_attn.conv1d.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          16
+        ],
+        "sources": [
+          "model.language_model.layers.1.linear_attn.dt_bias"
+        ],
+        "target": "model.layers.1.linear_attn.dt_bias"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          16,
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.1.linear_attn.in_proj_a.weight"
+        ],
+        "target": "model.layers.1.linear_attn.in_proj_a.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          16,
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.1.linear_attn.in_proj_b.weight"
+        ],
+        "target": "model.layers.1.linear_attn.in_proj_b.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          6144,
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.1.linear_attn.in_proj_qkv.weight"
+        ],
+        "target": "model.layers.1.linear_attn.in_proj_qkv.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          2048,
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.1.linear_attn.in_proj_z.weight"
+        ],
+        "target": "model.layers.1.linear_attn.in_proj_z.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          1024,
+          2048
+        ],
+        "sources": [
+          "model.language_model.layers.1.linear_attn.out_proj.weight"
+        ],
+        "target": "model.layers.1.linear_attn.out_proj.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          1024,
+          3584
+        ],
+        "sources": [
+          "model.language_model.layers.1.mlp.down_proj.weight"
+        ],
+        "target": "model.layers.1.mlp.down_proj.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          3584,
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.1.mlp.gate_proj.weight"
+        ],
+        "target": "model.layers.1.mlp.gate_proj.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          3584,
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.1.mlp.up_proj.weight"
+        ],
+        "target": "model.layers.1.mlp.up_proj.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          1024
+        ],
+        "sources": [
+          "model.language_model.layers.1.post_attention_layernorm.weight"
+        ],
+        "target": "model.layers.1.post_attention_layernorm.weight"
+      },
+      {
+        "operation": "dtype conversion BF16 to F32",
+        "shape": [
+          1024
+        ],
+        "sources": [
+          "model.language_model.norm.weight"
+        ],
+        "target": "model.norm.weight"
+      }
+    ],
+    "untied": []
+  },
+  "scope": "Local pinned-checkpoint selective-load and hidden-state parity smoke; no new support, task-quality, or performance qualification",
+  "source_payload_bytes": 594783424,
+  "token_ids": [
+    [
+      1,
+      2,
+      3
+    ]
+  ],
+  "total_checkpoint_payload_bytes": 1746882752
+}

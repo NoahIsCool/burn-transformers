@@ -1,0 +1,30 @@
+{
+  "id": "python-tuned-lens-metrics",
+  "attempt": 2,
+  "command": [
+    "/usr/local/bin/python3",
+    "/tmp/v0_3_python_validation.py",
+    "--root",
+    "/Users/nover/repos/transformers",
+    "--start",
+    "examples/mechanistic/tuned_lens",
+    "--pattern",
+    "*_tests.py",
+    "--audit",
+    "/Users/nover/repos/transformers/acceptance/measurements/v0_3-training-validation-20260910/python-tuned-lens-metrics-attempt-02/python-reads.json"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "python",
+  "runner_sha256": "11d91924fc218ebeafc49cfd22cd8691d61d4aa3d1dc353223dc6744916e4654",
+  "started_utc": "2026-09-10T20:41:44.455794+00:00",
+  "finished_utc": "2026-09-10T20:41:45.261623+00:00",
+  "seconds": 0.8058281670091674,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "python-tuned-lens-metrics-attempt-02/inputs-before.json",
+  "inputs_after": "python-tuned-lens-metrics-attempt-02/inputs-after.json",
+  "output": "python-tuned-lens-metrics-attempt-02/output.log",
+  "output_sha256": "625bf19e79f0dfb0a7ad6a4d097421f8ca89928e391ee9e304f09debd2ab939a",
+  "passed": true,
+  "python_read_audit": "python-tuned-lens-metrics-attempt-02/python-reads.json"
+}

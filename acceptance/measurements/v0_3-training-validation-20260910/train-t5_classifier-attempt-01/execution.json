@@ -1,0 +1,33 @@
+{
+  "id": "train-t5_classifier",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "run",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,flex,autodiff,train,tokenizers,chat-templates",
+    "--example",
+    "t5_classifier",
+    "--",
+    "--train"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "started_utc": "2026-09-10T20:37:35.432032+00:00",
+  "finished_utc": "2026-09-10T20:37:36.060442+00:00",
+  "seconds": 0.6284150420106016,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "train-t5_classifier-attempt-01/inputs-before.json",
+  "inputs_after": "train-t5_classifier-attempt-01/inputs-after.json",
+  "output": "train-t5_classifier-attempt-01/output.log",
+  "output_sha256": "0a6ece86112b4975594c67c9f42e219816aa4c66037ae1c7d707d81f3fe7f139",
+  "passed": true,
+  "replay_report": "train-t5_classifier-attempt-01/replay-report.json",
+  "replay_report_sha256": "8af80e5aa470cf5d81aa946ec0067216e13bb647a7c6f9d12bc815273bfce910"
+}

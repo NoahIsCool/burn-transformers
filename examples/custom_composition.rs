@@ -1,0 +1,202 @@
+//! Change the sequence mixer, residual width, normalization, and task head in ordinary Rust.
+//!
+//! Run: cargo run --release --locked --example custom_composition
+//!
+//! By default this is an architecture demonstration with random weights.
+//! Train a warm-color majority classifier with native Burn Adam:
+//! `cargo run --release --features autodiff --example custom_composition -- --train`
+//! Read training/custom_composition.rs for the differentiable capture and learning loop.
+
+#[cfg(not(feature = "flex"))]
+fn main() {
+    eprintln!("enable the `flex` feature to run this example");
+    std::process::exit(1);
+}
+
+#[cfg(all(feature = "flex", feature = "autodiff", feature = "std"))]
+#[path = "training/custom_composition.rs"]
+mod training;
+
+#[cfg(feature = "flex")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("--train") {
+        #[cfg(all(feature = "autodiff", feature = "std"))]
+        return training::run();
+        #[cfg(not(all(feature = "autodiff", feature = "std")))]
+        return Err("training requires --features std,autodiff".into());
+    }
+    Ok(experiment::run()?)
+}
+
+#[cfg(feature = "flex")]
+mod experiment {
+    use burn::{
+        backend::Flex,
+        module::Module,
+        nn::{Embedding, EmbeddingConfig, Linear, LinearConfig},
+        tensor::{Int, Tensor, backend::Backend},
+    };
+    use transformers::{
+        Result,
+        architecture::{NormPlacement, NormalizationSpec},
+        attention::{GroupedQueryAttention, GroupedQueryAttentionConfig},
+        experiment::{
+            AttentionPolicy, ExecutionContext, HiddenTransform, ResidualBlock, WidthAdapter,
+        },
+        feed_forward::{DenseFeedForward, DenseFeedForwardConfig},
+        intervention::{Hooks, Layer, PointInfo, Stack},
+        operations,
+    };
+
+    // This custom mixer has no attention scores or softmax. It projects the sequence
+    // mean and shares that context with every token. This example has no padding.
+    #[derive(Module, Debug)]
+    struct MeanMixer<B: Backend> {
+        projection: Linear<B>,
+    }
+
+    impl<B: Backend> HiddenTransform<B> for MeanMixer<B> {
+        fn forward(
+            &self,
+            hidden: Tensor<B, 3>,
+            _context: &ExecutionContext<B>,
+            _layer: Layer,
+            _hooks: &mut Hooks<'_, B>,
+        ) -> Result<Tensor<B, 3>> {
+            let shape = hidden.dims();
+            operations::linear(hidden.mean_dim(1).expand(shape), &self.projection)
+        }
+    }
+
+    type AttentionBlock<B> = ResidualBlock<B, GroupedQueryAttention<B>, DenseFeedForward<B>>;
+    type ChangedBlock<B> = WidthAdapter<B, ResidualBlock<B, MeanMixer<B>, DenseFeedForward<B>>>;
+
+    // All new modules, width adapters, and the task head are owned here. Burn records
+    // and optimizers can therefore see their parameters without inspecting callbacks.
+    #[derive(Module, Debug)]
+    pub(super) struct Classifier<B: Backend> {
+        embeddings: Embedding<B>,
+        first: AttentionBlock<B>,
+        changed: ChangedBlock<B>,
+        head: Linear<B>,
+    }
+
+    impl<B: Backend> Classifier<B> {
+        pub(super) fn init(device: &B::Device) -> Result<Self> {
+            let attention = GroupedQueryAttentionConfig::new(8, 2, 1, 4).init(device)?;
+            let first = ResidualBlock::new(
+                8,
+                attention,
+                DenseFeedForwardConfig::new(8, 16).init(device)?,
+                NormalizationSpec::Rms {
+                    epsilon: 1e-6,
+                    zero_centered: false,
+                },
+                NormPlacement::Pre,
+                device,
+            )?;
+            let mixer = MeanMixer {
+                projection: LinearConfig::new(12, 12).init(device),
+            };
+            let second = ResidualBlock::without_normalization(
+                12,
+                mixer,
+                DenseFeedForwardConfig::new(12, 24).init(device)?,
+            )?;
+            Ok(Self {
+                embeddings: EmbeddingConfig::new(32, 8).init(device),
+                first,
+                // Explicit learned boundaries: 8 -> 12 -> custom block -> 6 channels.
+                changed: WidthAdapter::new(second, 8, 12, 6, device)?,
+                head: LinearConfig::new(6, 2).init(device),
+            })
+        }
+
+        #[cfg(all(feature = "autodiff", feature = "std"))]
+        pub(super) fn training_weights(
+            &self,
+        ) -> Vec<(&'static str, &burn::module::Param<Tensor<B, 2>>)> {
+            vec![
+                ("embedding", &self.embeddings.weight),
+                ("attention", &self.first.mixer.q_proj.weight),
+                (
+                    "width input",
+                    &self.changed.input_projection.as_ref().unwrap().weight,
+                ),
+                (
+                    "custom mean mixer",
+                    &self.changed.transform.mixer.projection.weight,
+                ),
+                (
+                    "width output",
+                    &self.changed.output_projection.as_ref().unwrap().weight,
+                ),
+                ("task head", &self.head.weight),
+            ]
+        }
+
+        fn activation_points(&self) -> Vec<PointInfo> {
+            let mut points = vec![Stack::Encoder.embedding().info()];
+            points.extend(self.first.activation_points(Layer::encoder(0)));
+            points.extend(self.changed.activation_points(Layer::encoder(1)));
+            points
+        }
+
+        pub(super) fn forward(
+            &self,
+            tokens: Tensor<B, 2, Int>,
+            hooks: &mut Hooks<'_, B>,
+        ) -> Result<Tensor<B, 2>> {
+            let [batch, sequence] = tokens.dims();
+            let positions = Tensor::<B, 1, Int>::arange(0..sequence as i64, &tokens.device())
+                .reshape([1, sequence])
+                .expand([batch, sequence]);
+            let context = ExecutionContext::new(positions, None)?
+                .with_attention(AttentionPolicy::bidirectional());
+            hooks.run(self.activation_points(), |hooks| {
+                let hidden =
+                    hooks.apply(Stack::Encoder.embedding(), self.embeddings.forward(tokens))?;
+                let hidden = self
+                    .first
+                    .forward(hidden, &context, Layer::encoder(0), hooks)?;
+                let hidden = self
+                    .changed
+                    .forward(hidden, &context, Layer::encoder(1), hooks)?;
+                let pooled = hidden.mean_dim(1).squeeze_dim::<2>(1);
+                operations::linear(pooled, &self.head)
+            })
+        }
+    }
+
+    pub fn run() -> Result<()> {
+        type B = Flex<f32, i32>;
+        let device = Default::default();
+        B::seed(&device, 42);
+        let model = Classifier::<B>::init(&device)?;
+        let tokens = Tensor::from_ints([[1, 2, 3], [4, 5, 6]], &device);
+        let point = Layer::encoder(1).mlp_activation().token(0);
+        let mut hooks = Hooks::new();
+        let neurons = hooks.capture(point.clone());
+        let clean = model.forward(tokens.clone(), &mut hooks)?;
+        let saved = hooks.get(&neurons)?;
+        assert_eq!(saved.dims(), [2, 1, 24]);
+
+        hooks.edit(point.clone(), |activation| activation * 0.0);
+        let ablated = model.forward(tokens.clone(), &mut hooks)?;
+        let effect = (ablated - clean.clone()).abs().max().into_scalar();
+        assert!(effect > 1e-6);
+        hooks.replace(point, saved);
+        let restored = model.forward(tokens, &mut hooks)?;
+        let error = (restored - clean).abs().max().into_scalar();
+        assert!(error < 1e-6);
+        println!("Two blocks, two mixer algorithms, widths 8 -> 12 -> 6, two task outputs.");
+        println!(
+            "Selected neurons: [2, 1, 24]; ablation effect: {effect:.6}; restoration error: {error:.6}."
+        );
+        println!(
+            "Registered parameters: {}. Add --features autodiff and -- --train to learn the synthetic task.",
+            model.num_params()
+        );
+        Ok(())
+    }
+}

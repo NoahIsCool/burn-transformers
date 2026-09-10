@@ -9,9 +9,10 @@
 //! Unlike most modern decoder-only transformers, T5 does **not** divide dot
 //! products by `sqrt(d_kv)`: attention uses `softmax(QK^T + bias)`. The shared
 //! attention primitive is therefore configured with an explicit scale of one.
-//! This module intentionally omits stochastic dropout during inference. All
-//! parameterized operations remain ordinary Burn tensors and are suitable for
-//! a future training-mode wrapper. Stateful inference keeps decoder self-KV and
+//! This graph omits stochastic dropout during both inference and autodiff
+//! execution, regardless of configured dropout metadata. Its floating parameters
+//! can be optimized; training-time regularization must be composed explicitly.
+//! Stateful inference keeps decoder self-KV and
 //! immutable encoder cross-KV outside this parameter graph in [`T5DecodeState`].
 
 use burn::{
@@ -23,10 +24,16 @@ use burn::{
 use crate::{CausalLmInput, CausalLmOutput, Error, ForwardOptions, LogitsSelection, Result};
 use crate::{
     architecture::{EncoderOutput, Seq2SeqInput, Seq2SeqOutput, TokenMask},
-    attention::{GroupedQueryAttention, GroupedQueryAttentionConfig, padding_attention_mask},
+    attention::{
+        AttentionPrecisionMode, GroupedQueryAttention, GroupedQueryAttentionConfig,
+        padding_attention_mask,
+    },
+    experiment::AttentionPolicy,
     feed_forward::{
         DenseFeedForward, DenseFeedForwardConfig, GatedFeedForward, GatedFeedForwardConfig,
+        apply_activation,
     },
+    intervention::{AttentionPoints, Hooks, Layer, PointInfo, Stack},
     normalization::{RmsNorm, RmsNormConfig},
     operations,
     position::{T5RelativePositionBias, T5RelativePositionBiasConfig},
@@ -35,8 +42,11 @@ use crate::{
 use super::{T5Config, T5FeedForwardProjection};
 
 mod decode;
+mod padded_hooks;
+mod recipe;
 
 pub use decode::T5DecodeState;
+pub use recipe::{T5Encoder, T5EncoderLayerSpec, T5EncoderRecipe};
 
 /// T5 multi-head attention projections plus an optional learned bias table.
 #[derive(Module, Debug)]
@@ -146,6 +156,51 @@ impl<B: Backend> T5Attention<B> {
         position_bias: Option<Tensor<B, 4>>,
         causal: bool,
     ) -> Result<Tensor<B, 3>> {
+        self.forward_impl(
+            query_hidden,
+            key_value_hidden,
+            key_mask,
+            position_bias,
+            causal,
+            None,
+        )
+    }
+
+    /// Runs validated attention with optional projection and head-level hooks.
+    fn forward_impl(
+        &self,
+        query_hidden: Tensor<B, 3>,
+        key_value_hidden: Tensor<B, 3>,
+        key_mask: Option<&TokenMask<B>>,
+        position_bias: Option<Tensor<B, 4>>,
+        causal: bool,
+        intervention: Option<(AttentionPoints, &mut Hooks<'_, B>)>,
+    ) -> Result<Tensor<B, 3>> {
+        let policy = if causal {
+            AttentionPolicy::causal()
+        } else {
+            AttentionPolicy::bidirectional()
+        };
+        self.forward_policy(
+            query_hidden,
+            key_value_hidden,
+            key_mask,
+            position_bias,
+            policy,
+            intervention,
+        )
+    }
+
+    /// Applies an explicit per-pass visibility policy without changing parameters.
+    fn forward_policy(
+        &self,
+        query_hidden: Tensor<B, 3>,
+        key_value_hidden: Tensor<B, 3>,
+        key_mask: Option<&TokenMask<B>>,
+        position_bias: Option<Tensor<B, 4>>,
+        policy: AttentionPolicy<B>,
+        intervention: Option<(AttentionPoints, &mut Hooks<'_, B>)>,
+    ) -> Result<Tensor<B, 3>> {
         let [batch, query_sequence, query_width] = query_hidden.dims();
         let [key_batch, key_sequence, key_width] = key_value_hidden.dims();
         if batch == 0 || query_sequence == 0 || key_sequence == 0 {
@@ -183,8 +238,67 @@ impl<B: Backend> T5Attention<B> {
             query_sequence,
             key_sequence,
         )?;
-        self.attention
-            .attend(projection, mask, position_bias, causal)
+        let mask = policy.exclusion_mask(
+            mask,
+            [
+                batch,
+                self.attention.query_heads,
+                query_sequence,
+                key_sequence,
+            ],
+            &projection.query.device(),
+        )?;
+        if policy
+            .bias
+            .as_ref()
+            .is_some_and(|bias| bias.dtype() != projection.query.dtype())
+        {
+            return Err(Error::configuration(
+                "t5.attention.bias",
+                "bias dtype must match attention projections",
+            ));
+        }
+        let explicit_bias = policy.expanded_bias(
+            [
+                batch,
+                self.attention.query_heads,
+                query_sequence,
+                key_sequence,
+            ],
+            &projection.query.device(),
+        )?;
+        let position_bias = match (position_bias, explicit_bias) {
+            (Some(relative), Some(extra)) => Some(relative + extra),
+            (Some(relative), None) => Some(relative),
+            (None, extra) => extra,
+        };
+        match intervention {
+            Some((points, hooks)) => self.attention.attend_with_hooks(
+                projection,
+                mask,
+                position_bias,
+                policy.causal,
+                points,
+                hooks,
+            ),
+            None => self
+                .attention
+                .attend(projection, mask, position_bias, policy.causal),
+        }
+    }
+
+    /// Lists only attention tensors supported by the configured numerical path.
+    fn activation_points(&self, points: AttentionPoints) -> Vec<PointInfo> {
+        let mut available = vec![
+            points.query().info(),
+            points.key().info(),
+            points.value().info(),
+        ];
+        if self.attention.precision_mode == AttentionPrecisionMode::EagerFp32Softmax {
+            available.extend([points.scores().info(), points.pattern().info()]);
+        }
+        available.push(points.head_context().info());
+        available
     }
 }
 
@@ -382,6 +496,15 @@ pub struct T5Block<B: Backend> {
     pub feed_forward: T5LayerFeedForward<B>,
 }
 
+/// Per-pass block inputs kept outside the parameter graph.
+struct T5BlockContext<'a, B: Backend> {
+    token_mask: Option<&'a TokenMask<B>>,
+    position_bias: Tensor<B, 4>,
+    encoder: Option<(&'a Tensor<B, 3>, Option<&'a TokenMask<B>>)>,
+    layer: Layer,
+    attention_policy: Option<AttentionPolicy<B>>,
+}
+
 impl<B: Backend> T5Block<B> {
     /// Initializes one block, placing the learned position table only when requested.
     fn init(
@@ -402,6 +525,172 @@ impl<B: Backend> T5Block<B> {
                 .transpose()?,
             feed_forward: T5LayerFeedForward::init(config, device)?,
         })
+    }
+
+    /// Lists the tensors visited by this block in forward execution order.
+    fn activation_points(&self, layer: Layer) -> Vec<PointInfo> {
+        let mut points = vec![layer.residual_pre().info(), layer.attention_input().info()];
+        points.extend(
+            self.self_attention
+                .self_attention
+                .activation_points(layer.self_attention()),
+        );
+        points.push(layer.attention_output().info());
+        if let Some(cross_attention) = &self.cross_attention {
+            points.push(layer.cross_attention_input().info());
+            points.extend(
+                cross_attention
+                    .enc_dec_attention
+                    .activation_points(layer.cross_attention()),
+            );
+            points.push(layer.cross_attention_output().info());
+        }
+        points.extend([
+            layer.mlp_input().info(),
+            layer.mlp_pre_activation().info(),
+            layer.mlp_activation().info(),
+            layer.mlp_output().info(),
+            layer.residual_post().info(),
+        ]);
+        points
+    }
+
+    /// Runs the ordinary block graph with shape-preserving tensor interventions.
+    fn forward_with_hooks(
+        &self,
+        hidden: Tensor<B, 3>,
+        token_mask: Option<&TokenMask<B>>,
+        position_bias: Tensor<B, 4>,
+        encoder: Option<(&Tensor<B, 3>, Option<&TokenMask<B>>)>,
+        layer: Layer,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<Tensor<B, 3>> {
+        self.forward_context_with_hooks(
+            hidden,
+            T5BlockContext {
+                token_mask,
+                position_bias,
+                encoder,
+                layer,
+                attention_policy: None,
+            },
+            hooks,
+        )
+    }
+
+    /// Runs a block with context-owned attention behavior and activation hooks.
+    fn forward_context_with_hooks(
+        &self,
+        hidden: Tensor<B, 3>,
+        context: T5BlockContext<'_, B>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<Tensor<B, 3>> {
+        let T5BlockContext {
+            token_mask,
+            position_bias,
+            encoder,
+            layer,
+            attention_policy,
+        } = context;
+        match (
+            encoder.is_some(),
+            self.cross_attention.is_some(),
+            self.self_attention.causal,
+        ) {
+            (false, false, false) | (true, true, true) => {}
+            _ => {
+                return Err(Error::configuration(
+                    "t5.block",
+                    "encoder/decoder context disagrees with block sublayers",
+                ));
+            }
+        }
+        let hidden = hooks.apply(layer.residual_pre(), hidden)?;
+        let residual = hidden.clone();
+        let normalized = hooks.apply(
+            layer.attention_input(),
+            self.self_attention.layer_norm.forward(hidden),
+        )?;
+        let policy = attention_policy.unwrap_or_else(|| {
+            if self.self_attention.causal {
+                AttentionPolicy::causal()
+            } else {
+                AttentionPolicy::bidirectional()
+            }
+        });
+        let attended = self.self_attention.self_attention.forward_policy(
+            normalized.clone(),
+            normalized,
+            token_mask,
+            Some(position_bias),
+            policy,
+            Some((layer.self_attention(), hooks)),
+        )?;
+        let mut hidden = residual + hooks.apply(layer.attention_output(), attended)?;
+        if let Some((source, source_mask)) = encoder {
+            let cross_attention = self.cross_attention.as_ref().ok_or_else(|| {
+                Error::configuration(
+                    "t5.decoder.cross_attention",
+                    "missing cross-attention module",
+                )
+            })?;
+            let residual = hidden.clone();
+            let query = hooks.apply(
+                layer.cross_attention_input(),
+                cross_attention.layer_norm.forward(hidden),
+            )?;
+            let attended = cross_attention.enc_dec_attention.forward_impl(
+                query,
+                source.clone(),
+                source_mask,
+                None,
+                false,
+                Some((layer.cross_attention(), hooks)),
+            )?;
+            hidden = residual + hooks.apply(layer.cross_attention_output(), attended)?;
+        }
+        let residual = hidden.clone();
+        let normalized = hooks.apply(
+            layer.mlp_input(),
+            self.feed_forward.layer_norm.forward(hidden),
+        )?;
+        let projected = match (
+            &self.feed_forward.dense,
+            &self.feed_forward.gated,
+            self.feed_forward.projection.is_gated(),
+        ) {
+            (Some(dense), None, false) => {
+                let pre_activation = hooks.apply(
+                    layer.mlp_pre_activation(),
+                    operations::linear(normalized, &dense.up_proj)?,
+                )?;
+                let activation = hooks.apply(
+                    layer.mlp_activation(),
+                    apply_activation(pre_activation, dense.activation),
+                )?;
+                operations::linear(activation, &dense.down_proj)?
+            }
+            (None, Some(gated), true) => {
+                let pre_activation = hooks.apply(
+                    layer.mlp_pre_activation(),
+                    operations::linear(normalized.clone(), &gated.gate_proj)?,
+                )?;
+                let gate = hooks.apply(
+                    layer.mlp_activation(),
+                    apply_activation(pre_activation, gated.activation),
+                )?;
+                let content = operations::linear(normalized, &gated.up_proj)?;
+                operations::linear(gate * content, &gated.down_proj)?
+            }
+            _ => {
+                return Err(Error::configuration(
+                    "t5.feed_forward",
+                    "active dense/gated module disagrees with checkpoint projection",
+                ));
+            }
+        };
+        let hidden = residual + hooks.apply(layer.mlp_output(), projected)?;
+        hooks.apply(layer.residual_post(), hidden)
     }
 
     /// Evaluates one encoder block using bidirectional self-attention.
@@ -503,6 +792,106 @@ impl<B: Backend> T5Stack<B> {
             .self_attention
             .self_attention
             .position_bias(query_length, key_length, 0, device)
+    }
+
+    /// Lists every tensor address for this stack, including embedding boundaries.
+    fn activation_points(&self) -> Vec<PointInfo> {
+        let stack = if self.is_decoder {
+            Stack::Decoder
+        } else {
+            Stack::Encoder
+        };
+        let mut points = vec![stack.embedding().info()];
+        for (index, block) in self.block.iter().enumerate() {
+            let layer = if self.is_decoder {
+                Layer::decoder(index)
+            } else {
+                Layer::encoder(index)
+            };
+            points.extend(block.activation_points(layer));
+        }
+        points.push(stack.final_norm().info());
+        points
+    }
+
+    /// Executes an embedded stack while preserving T5's shared relative bias.
+    fn forward_with_hooks(
+        &self,
+        hidden: Tensor<B, 3>,
+        token_mask: Option<&TokenMask<B>>,
+        encoder: Option<(&Tensor<B, 3>, Option<&TokenMask<B>>)>,
+        retain_hidden_states: bool,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<T5StackOutput<B>> {
+        if self.is_decoder != encoder.is_some() {
+            return Err(Error::configuration(
+                "t5.stack",
+                "only decoder stacks accept and require encoder states",
+            ));
+        }
+        let stack = if self.is_decoder {
+            Stack::Decoder
+        } else {
+            Stack::Encoder
+        };
+        let mut hidden = hooks.apply(stack.embedding(), hidden)?;
+        let [_, sequence, _] = hidden.dims();
+        let position_bias = if self.is_decoder {
+            if let Some(mask) = token_mask {
+                let positions = padded_hooks::logical_decoder_positions(mask)?;
+                let table = self
+                    .block
+                    .first()
+                    .and_then(|block| {
+                        block
+                            .self_attention
+                            .self_attention
+                            .relative_attention_bias
+                            .as_ref()
+                    })
+                    .ok_or_else(|| {
+                        Error::configuration(
+                            "t5.decoder.relative_bias",
+                            "missing shared relative-position table",
+                        )
+                    })?;
+                recipe::relative_bias_for_positions(table, &positions)?
+            } else {
+                self.position_bias(sequence, sequence, &hidden.device())?
+            }
+        } else {
+            self.position_bias(sequence, sequence, &hidden.device())?
+        };
+        let mut hidden_states = diagnostic_buffer(self.block.len(), retain_hidden_states);
+        if retain_hidden_states {
+            hidden_states.push(hidden.clone());
+        }
+        for (index, block) in self.block.iter().enumerate() {
+            let layer = if self.is_decoder {
+                Layer::decoder(index)
+            } else {
+                Layer::encoder(index)
+            };
+            hidden = block.forward_with_hooks(
+                hidden,
+                token_mask,
+                position_bias.clone(),
+                encoder,
+                layer,
+                hooks,
+            )?;
+            if retain_hidden_states {
+                hidden_states.push(hidden.clone());
+            }
+        }
+        hidden = hooks.apply(stack.final_norm(), self.final_layer_norm.forward(hidden))?;
+        if retain_hidden_states {
+            hidden_states.push(hidden.clone());
+        }
+        Ok(T5StackOutput {
+            hidden,
+            hidden_states,
+        })
     }
 
     /// Evaluates the bidirectional encoder stack.
@@ -673,6 +1062,181 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
             decoder,
             encoder,
             cross_attentions: Vec::new(),
+        })
+    }
+
+    /// Returns the stateless encoder and decoder activation addresses in execution order.
+    ///
+    /// Attention and MLP inputs are normalized; their outputs are residual branches
+    /// before addition. For gated MLPs, `mlp_pre_activation` and `mlp_activation`
+    /// refer to the gate branch before and after its nonlinearity, respectively.
+    /// Q/K/V and head-context tensors are available in both stacks. Attention
+    /// scores and patterns appear only when the corresponding attention module
+    /// uses [`AttentionPrecisionMode::EagerFp32Softmax`].
+    #[must_use]
+    pub fn activation_points(&self) -> Vec<PointInfo> {
+        let mut points = self.encoder.activation_points();
+        points.extend(self.decoder.activation_points());
+        points
+    }
+
+    /// Encodes source tokens with selective activation capture or intervention.
+    ///
+    /// This is the natural entry point for encoder classifiers and representation
+    /// experiments. Hooks can call any ordinary Burn module and retain gradients.
+    /// Decoder hook addresses are rejected before execution. Padding follows the
+    /// same `true == valid` convention as [`Self::encode`].
+    pub fn encode_with_hooks(
+        &self,
+        source: CausalLmInput<B>,
+        options: &ForwardOptions,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<EncoderOutput<B>> {
+        if !hooks.has_work() {
+            return self.encode(source, options);
+        }
+        hooks.run(self.encoder.activation_points(), |hooks| {
+            self.encode_hooked(source, options, hooks)
+        })
+    }
+
+    /// Executes the complete stateless graph with selective tensor interventions.
+    ///
+    /// Register callbacks using addresses such as `Layer::encoder(0).mlp_activation()`
+    /// or `Layer::decoder(0).cross_attention_output()`. Replacements must preserve
+    /// shape, dtype, and device; subsequent operations consume the returned tensor.
+    /// Edits preserve the autodiff graph. Captures and observation callbacks
+    /// detach by default; use [`Hooks::capture_with_grad`] to retain connectivity.
+    ///
+    /// Decoder hooks retain the original batch and token coordinates, including
+    /// left, right, and interior padding. Padded decoder activations are zero
+    /// before observation and after edits; padding cannot be revived by a callback.
+    /// Valid tokens use logical relative positions that exclude padding. Source
+    /// padding retains ordinary encoder semantics and is excluded in cross-attention.
+    /// Stateful decode caches do not participate in stateless interventions.
+    /// Empty hook collections delegate to [`Self::forward`].
+    pub fn forward_with_hooks(
+        &self,
+        input: Seq2SeqInput<B>,
+        options: &ForwardOptions,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<Seq2SeqOutput<B>> {
+        if !hooks.has_work() {
+            return self.forward(input, options);
+        }
+        let validity = match self.decoder_hook_validity(&input) {
+            Ok(validity) => validity,
+            // Even validity-plan failures belong to a run and invalidate old
+            // captures. This error-only scope executes no model or user callback.
+            Err(error) => return hooks.run(self.activation_points(), |_| Err(error)),
+        };
+        hooks.run_with_validity(self.activation_points(), validity, |hooks| {
+            let decoder_input = self.prepare_hooked_decoder_input(input.decoder)?;
+            let encoder = self.encode_hooked(input.encoder, options, hooks)?;
+            let decoder = self.decode_stateless_hooked(&encoder, decoder_input, options, hooks)?;
+            Ok(Seq2SeqOutput {
+                decoder,
+                encoder,
+                cross_attentions: Vec::new(),
+            })
+        })
+    }
+
+    /// Implements encoder execution inside an already validated hook session.
+    fn encode_hooked(
+        &self,
+        source: CausalLmInput<B>,
+        options: &ForwardOptions,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<EncoderOutput<B>> {
+        validate_options(options)?;
+        let model_device = self.shared.weight.lazy_device();
+        validate_input_devices(&source, "encoder", &model_device)?;
+        validate_token_input(&source, self.config.vocab_size, "encoder")?;
+        let hidden = self.shared.forward(source.token_ids.clone());
+        let output = self.encoder.forward_with_hooks(
+            hidden,
+            source.token_mask.as_ref(),
+            None,
+            options.hidden_states,
+            hooks,
+        )?;
+        Ok(EncoderOutput {
+            hidden_state: output.hidden,
+            token_mask: source.token_mask,
+            hidden_states: output.hidden_states,
+            attentions: Vec::new(),
+        })
+    }
+
+    /// Validates target inputs before any user callback can execute.
+    fn prepare_hooked_decoder_input(
+        &self,
+        mut decoder: CausalLmInput<B>,
+    ) -> Result<CausalLmInput<B>> {
+        let model_device = self.shared.weight.lazy_device();
+        validate_input_devices(&decoder, "decoder", &model_device)?;
+        validate_token_input(&decoder, self.config.vocab_size, "decoder")?;
+        if let Some(mask) = &decoder.token_mask {
+            // Tokenizers commonly emit an all-valid mask for an unpadded batch.
+            // Validate it above before normalization so malformed shapes/devices
+            // retain the same contextual errors as ordinary decoder execution.
+            let all_valid = mask
+                .as_tensor()
+                .clone()
+                .all()
+                .try_into_scalar()
+                .map_err(|error| {
+                    Error::BackendCapability(format!(
+                        "failed to validate T5 decoder token mask for hooks: {error}"
+                    ))
+                })?
+                .elem::<bool>();
+            if all_valid {
+                decoder.token_mask = None;
+            }
+        }
+        Ok(decoder)
+    }
+
+    /// Implements rectangular decoder execution inside the same hook session.
+    fn decode_stateless_hooked(
+        &self,
+        encoder: &EncoderOutput<B>,
+        decoder: CausalLmInput<B>,
+        options: &ForwardOptions,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<CausalLmOutput<B>> {
+        validate_options(options)?;
+        let model_device = self.shared.weight.lazy_device();
+        validate_encoder_devices(encoder, &model_device)?;
+        let batch = decoder.token_ids.dims()[0];
+        validate_encoder_output(
+            encoder,
+            batch,
+            self.config.d_model,
+            self.shared.weight.val().dtype(),
+        )?;
+        let hidden = self.shared.forward(decoder.token_ids.clone());
+        let output = self.decoder.forward_with_hooks(
+            hidden,
+            decoder.token_mask.as_ref(),
+            Some((&encoder.hidden_state, encoder.token_mask.as_ref())),
+            options.hidden_states,
+            hooks,
+        )?;
+        let selected = select_hidden(
+            output.hidden.clone(),
+            decoder.token_mask.as_ref(),
+            &options.logits,
+        )?;
+        Ok(CausalLmOutput {
+            logits: self.project_logits(selected)?,
+            final_hidden_state: options.hidden_states.then_some(output.hidden),
+            hidden_states: output.hidden_states,
+            attentions: Vec::new(),
+            routers: Vec::new(),
+            load_balancing_loss: None,
         })
     }
 
@@ -1064,3 +1628,7 @@ fn select_hidden<B: Backend>(
 #[cfg(test)]
 #[path = "model_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "model/intervention_tests.rs"]
+mod intervention_tests;

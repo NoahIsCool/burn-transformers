@@ -1,0 +1,2 @@
+step     2: train 1.07% loss 4.765016, test 0.87% loss 4.766372, 0.4s
+2 updates in 0.598s (0.2989s/update); records: target/mechanistic/grokking-final-source-smoke

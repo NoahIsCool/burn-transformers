@@ -1,0 +1,13 @@
+   Compiling quote v1.0.47
+   Compiling proc-macro2 v1.0.107
+   Compiling serde_core v1.0.229
+   Compiling libc v0.2.189
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+    Checking syn v2.0.119
+   Compiling syn v3.0.5
+    Checking cpufeatures v0.2.17
+    Checking sha2 v0.10.9
+   Compiling serde_derive v1.0.229
+    Checking transformers-coverage-layout v0.1.0 (/Users/nover/repos/transformers/scripts/coverage-layout)
+    Finished `release` profile [optimized] target(s) in 2.97s

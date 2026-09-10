@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "scope": "v0.2 FLAN-T5-small Flex/F32 oracle replay plus real loaded encoder extraction, activation capture/identity edit, and split/resume parity; no support promotion",
+  "release_gate_promotion": false,
+  "primary_acceptance": "flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab.json",
+  "checkpoint": {
+    "repository": "google/flan-t5-small",
+    "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
+    "local_directory": "/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
+    "model_safetensors_sha256": "495fa51e204676f1a857a9fc13c4c89f3f5ba9f480b898cebca02add25e6d749"
+  },
+  "reference": {
+    "local_directory": "/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle",
+    "manifest_sha256": "f031fa015480699ce85f099f5112feb682a6ffc9ca61757377780329c336229e",
+    "closed_bundle_and_all_payload_hashes_authenticated_by_test": true
+  },
+  "backend": "Flex<f32, i32>",
+  "git_head": "cc56333b4bd35083013f85406defb483d9a737aa",
+  "dirty_worktree": true,
+  "source_inventory_sha256_before": "1c795c9f4199778b7186045e6f7292338b6c29cd936fae91932d8abc8cc26c6d",
+  "source_inventory_sha256_after": "1c795c9f4199778b7186045e6f7292338b6c29cd936fae91932d8abc8cc26c6d",
+  "source_unchanged_during_command": true,
+  "rustc": "rustc 1.94.0-nightly (4f14395c3 2025-12-22)\nbinary: rustc\ncommit-hash: 4f14395c37db4c1be874e6b0ace6721674223c22\ncommit-date: 2025-12-22\nhost: aarch64-apple-darwin\nrelease: 1.94.0-nightly\nLLVM version: 21.1.8",
+  "argv": [
+    "cargo",
+    "test",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,flex,tokenizers",
+    "--test",
+    "flan_t5_small",
+    "flan_t5_small_flex_",
+    "--",
+    "--ignored",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "environment": {
+    "TRANSFORMERS_FLAN_T5_SMALL_DIR": "/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
+    "TRANSFORMERS_FLAN_T5_SMALL_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle"
+  },
+  "started_utc": "2026-09-10T17:14:35.887589+00:00",
+  "completed_utc": "2026-09-10T17:14:42.048760+00:00",
+  "wall_seconds": 6.1119489169796,
+  "process_exit_code": 0,
+  "executable": "target/release/deps/flan_t5_small-d7f9b5df4e6fac67",
+  "executable_sha256": "a979bfc769f4b34a0da6a3ba606dce7d7a029934b264e30389b300ab96fc6d9c",
+  "native_tests": {
+    "passed": 2,
+    "failed": 0
+  },
+  "vectors": [
+    {
+      "label": "encoder",
+      "cosine": 1.0,
+      "maximum_absolute_error": 5.66e-07,
+      "tolerance_failures": 0,
+      "actual_f32le_sha256": "9c22bccd522675cac1e0c769b8d8e7c662de7ad41dc1307018a7df9d73cafcad"
+    },
+    {
+      "label": "decoder",
+      "cosine": 0.999999999999,
+      "maximum_absolute_error": 1.1921e-05,
+      "tolerance_failures": 0,
+      "actual_f32le_sha256": "25e79fffc50a4dbc7a9da46a10c42db3e789350603f8ad5bd0d1a98c7d1893cf"
+    },
+    {
+      "label": "first",
+      "cosine": 1.0,
+      "maximum_absolute_error": 3.8147e-05,
+      "tolerance_failures": 0,
+      "actual_f32le_sha256": "0a3af6aa88fff0b78948b214b6c80d649b6b21c65e3f5b2c86cf2a085a049de4"
+    },
+    {
+      "label": "cached",
+      "cosine": 1.0,
+      "maximum_absolute_error": 6.8665e-05,
+      "tolerance_failures": 0,
+      "actual_f32le_sha256": "79379dce8eb8b3fd1f066787df840b0b05bf6ca83242dd8d8bdb1127ee917cca"
+    },
+    {
+      "label": "teacher",
+      "cosine": 1.0,
+      "maximum_absolute_error": 4.0054e-05,
+      "tolerance_failures": 0,
+      "actual_f32le_sha256": "bf62fdd81af5773b982941db8e99af7aeda0837d4f6322896cd09fa76a542f54"
+    },
+    {
+      "label": "padded",
+      "cosine": 1.0,
+      "maximum_absolute_error": 4.5776e-05,
+      "tolerance_failures": 0,
+      "actual_f32le_sha256": "4d0fa7f974a94926ec37a4547e472e78e7b5e84c6eff7986c10a93f32414c5bf"
+    },
+    {
+      "label": "boundary",
+      "cosine": 1.0,
+      "maximum_absolute_error": 7.6294e-05,
+      "tolerance_failures": 0,
+      "actual_f32le_sha256": "b48b0cca10f425fd95a6aacd5e11d5bc51be21913609d81032a43b6c511f61ce"
+    }
+  ],
+  "real_encoder_extraction": {
+    "shape": [
+      1,
+      51,
+      512
+    ],
+    "layers": 8,
+    "split": 4,
+    "embedding_parameter_identity_preserved": true,
+    "extracted_vs_full_max_abs": 0,
+    "no_op_hooks_vs_full_max_abs": 0,
+    "staged_vs_full_max_abs": 0,
+    "all_three_paths_exact_elementwise": true,
+    "raw_result": "test flan_t5_small_flex_encoder_extraction_and_staged_hooks_are_exact ... FLAN-T5-small Flex/F32 encoder extraction: depth=8 split=4 exact_extracted=true exact_noop_hooks=true exact_staged=true max_abs_vs_full=0 cosine=1.000000000000 max_abs=0.000000566 failures_1e-4=0 actual_f32le_sha256=9c22bccd522675cac1e0c769b8d8e7c662de7ad41dc1307018a7df9d73cafcad"
+  },
+  "additional_existing_assertions": [
+    "190 applied and 145 transformed tensors, no missing/unexpected tensors",
+    "Exact tokenization IDs",
+    "32 exact greedy decisions",
+    "Teacher forcing and cached logits",
+    "Right-padded source batch",
+    "512-token source boundary",
+    "Exact four-beam output IDs"
+  ],
+  "artifacts": [
+    {
+      "file": "stdout.log",
+      "bytes": 529,
+      "sha256": "282ab775fb99c951a813a9bfa79de13a0c0e783bc9367efef0ed12b0822fcf99"
+    },
+    {
+      "file": "stderr.log",
+      "bytes": 1557,
+      "sha256": "10b2ec1ddef698046b343d43332012a846b5fbb8b92f1279eb5ded6086d9362d"
+    },
+    {
+      "file": "source-inventory.json",
+      "bytes": 46246,
+      "sha256": "216c027eeb2f0fe06ed30d1abc6a15856f1bcbe8ea3cb6089e17bd06cc82d61d"
+    }
+  ],
+  "limitations": [
+    "This is one pinned checkpoint on Flex/F32 only; it does not validate Metal, other dtypes, quantization, other checkpoints, or training.",
+    "The new encoder stage check uses the unpadded 51-token reference source; synthetic unit tests cover stage policies and padding separately.",
+    "Reported wall times are replay context, not benchmark or memory evidence.",
+    "The source inventory includes Rust source and relevant Cargo/test files; it is not a compiler dependency-closure attestation.",
+    "Source hashes describe an uncommitted worktree snapshot, not the Git HEAD alone."
+  ]
+}

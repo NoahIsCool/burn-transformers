@@ -1,0 +1,8 @@
+
+running 2 tests
+test flan_t5_small_flex_encoder_extraction_and_staged_hooks_are_exact ... FLAN-T5-small Flex/F32 encoder extraction: depth=8 split=4 exact_extracted=true exact_noop_hooks=true exact_staged=true max_abs_vs_full=0 cosine=1.000000000000 max_abs=0.000000566 failures_1e-4=0 actual_f32le_sha256=9c22bccd522675cac1e0c769b8d8e7c662de7ad41dc1307018a7df9d73cafcad
+ok
+test flan_t5_small_flex_matches_official_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 2.89s
+

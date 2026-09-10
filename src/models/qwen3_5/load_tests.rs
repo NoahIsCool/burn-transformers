@@ -270,6 +270,28 @@ fn qfloat_qwen_graph_matches_its_full_precision_reference() {
         token_mask: None,
         position_ids: None,
     };
+    let embedded = packed.model.embed(&input).unwrap();
+    let mut individual = embedded.clone();
+    for (index, block) in packed.model.layers.iter().enumerate() {
+        individual.hidden = block
+            .forward(
+                individual.hidden,
+                individual.context.positions.clone(),
+                individual.context.token_mask.as_ref(),
+                packed.model.layer_rope[index],
+                individual.context.evaluated_context,
+            )
+            .unwrap();
+        individual.next_layer = index + 1;
+    }
+    let ranged = packed
+        .model
+        .run_layers(embedded, 0..packed.model.layers.len())
+        .unwrap();
+    assert_eq!(
+        packed.model.normalize(individual).unwrap().hidden.to_data(),
+        packed.model.normalize(ranged).unwrap().hidden.to_data()
+    );
     let expected = reference
         .forward(input.clone(), &ForwardOptions::default())
         .expect("reference forward")

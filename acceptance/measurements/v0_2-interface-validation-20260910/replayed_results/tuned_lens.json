@@ -1,0 +1,181 @@
+{
+  "backend": "Burn Flex",
+  "controls": {
+    "observation_logit_error": 0.0,
+    "passed": true,
+    "replacement_translator": 6,
+    "zero_translator_logit_error": 0.0
+  },
+  "dtype": "F32",
+  "metrics": {
+    "ce_tokens": 508,
+    "final_ce": 2.9588381401349686,
+    "input_tokens": 512,
+    "layers": [
+      {
+        "index": 0,
+        "point": "decoder.embedding",
+        "raw_ce": 13.540502105172225,
+        "raw_kl": 10.43435721565038,
+        "tuned_ce": 6.710544894999407,
+        "tuned_kl": 3.5903976932750084
+      },
+      {
+        "index": 1,
+        "point": "decoder.layers.0.residual.post",
+        "raw_ce": 9.908407957447091,
+        "raw_kl": 6.9608418752322905,
+        "tuned_ce": 6.095677258065484,
+        "tuned_kl": 3.056335659508477
+      },
+      {
+        "index": 2,
+        "point": "decoder.layers.1.residual.post",
+        "raw_ce": 9.2833363708314,
+        "raw_kl": 6.326249420410022,
+        "tuned_ce": 5.874646585068013,
+        "tuned_kl": 2.8270756395941135
+      },
+      {
+        "index": 3,
+        "point": "decoder.layers.2.residual.post",
+        "raw_ce": 8.633665707722713,
+        "raw_kl": 5.627464817475811,
+        "tuned_ce": 5.509712928202092,
+        "tuned_kl": 2.455768399129738
+      },
+      {
+        "index": 4,
+        "point": "decoder.layers.3.residual.post",
+        "raw_ce": 7.844254932041816,
+        "raw_kl": 5.020003497642392,
+        "tuned_ce": 5.250302066227172,
+        "tuned_kl": 2.267850306117907
+      },
+      {
+        "index": 5,
+        "point": "decoder.layers.4.residual.post",
+        "raw_ce": 7.608862526942133,
+        "raw_kl": 4.763307430405803,
+        "tuned_ce": 5.005451593862473,
+        "tuned_kl": 2.039106147041821
+      },
+      {
+        "index": 6,
+        "point": "decoder.layers.5.residual.post",
+        "raw_ce": 6.836727155592498,
+        "raw_kl": 4.004638138905648,
+        "tuned_ce": 4.732756754575942,
+        "tuned_kl": 1.7812867012489733
+      },
+      {
+        "index": 7,
+        "point": "decoder.layers.6.residual.post",
+        "raw_ce": 5.951127294504508,
+        "raw_kl": 3.0806049258687835,
+        "tuned_ce": 4.35143140762014,
+        "tuned_kl": 1.379143915755776
+      },
+      {
+        "index": 8,
+        "point": "decoder.layers.7.residual.post",
+        "raw_ce": 5.567027218903246,
+        "raw_kl": 2.724969828556368,
+        "tuned_ce": 4.1540666420650245,
+        "tuned_kl": 1.2263816967133607
+      },
+      {
+        "index": 9,
+        "point": "decoder.layers.8.residual.post",
+        "raw_ce": 4.660658877308765,
+        "raw_kl": 1.8630903007272082,
+        "tuned_ce": 3.689623154688065,
+        "tuned_kl": 0.7699873255949115
+      },
+      {
+        "index": 10,
+        "point": "decoder.layers.9.residual.post",
+        "raw_ce": 4.325330822637478,
+        "raw_kl": 1.4704617365031254,
+        "tuned_ce": 3.4969777980091807,
+        "tuned_kl": 0.5431680614112793
+      },
+      {
+        "index": 11,
+        "point": "decoder.layers.10.residual.post",
+        "raw_ce": 3.666398307810438,
+        "raw_kl": 0.7253737024001339,
+        "tuned_ce": 3.221504051006127,
+        "tuned_kl": 0.2412403953607054
+      }
+    ]
+  },
+  "parity": {
+    "logit_tolerance": 0.005,
+    "maximum_logit_error": 0.0005050599575042725,
+    "maximum_metric_error": 7.70120951987252e-6,
+    "metric_tolerance": 0.0002,
+    "passed": true
+  },
+  "provenance": {
+    "compiled_source_sha256": {
+      "examples/mechanistic/tuned_lens/study.rs": "e379788a184cbca748fb83329e39997c898651435dacb09d7cd40f924eb2630f",
+      "examples/tuned_lens.rs": "28dbe9502911ff9aaa1df1c8ae043071815ef46432d9f2dbc8452ba48db123c8",
+      "src/models/gpt_neox/load.rs": "6f1f4a040e950c4db9f7daf971268fe6ea7b9f5eccfdf09806137ded277fc955",
+      "src/models/gpt_neox/model.rs": "9a5520ac72bb5c20a2bfe422e448f3d0caad2429a460991ee20c2cebc448dab8"
+    },
+    "preparation_sha256": "b2e96b9e3108b8b8c5c0fa0bc5e977dcd1f90fc53ebc2be31a6b3be8a6e9a587",
+    "prepared_outputs": {
+      "config": {
+        "bytes": 569,
+        "path": "model/config.json",
+        "sha256": "76eb275107220e450d31258f792a2efcbee109d8b62ae0088260057dec06362f"
+      },
+      "fixture": {
+        "bytes": 13009,
+        "path": "fixture.json",
+        "sha256": "e5bb571602aac02739ec4962e78760c44bbfbc5add1f89a8079b70146ab52f31"
+      },
+      "lens": {
+        "bytes": 28350760,
+        "path": "lens.safetensors",
+        "sha256": "0189133ed9b568e26563337fc579453f709ab7dadeea40bf371fcd88b12ef681"
+      },
+      "model": {
+        "bytes": 649308920,
+        "path": "model/model.safetensors",
+        "sha256": "feb5482a118890935e57762108fc50c2153d7d0fc9ff4405e4eaaa53c98607d3"
+      },
+      "pile_records": {
+        "bytes": 64707,
+        "path": "pile_test_first25.jsonl",
+        "sha256": "e22e54ec651c197e4695ded586c5a0556553e24de82f2538e46b31d1b3b4e93e"
+      },
+      "special_tokens_map": {
+        "bytes": 99,
+        "path": "model/special_tokens_map.json",
+        "sha256": "6f50ab5a5a509a1c309d6171f339b196a900dc9c99ad0408ff23bb615fdae7ad"
+      },
+      "tensor_equivalence": {
+        "bytes": 92373,
+        "path": "tensor_equivalence.json",
+        "sha256": "ccf6224ca9f9ec04c666bc3e6aac4f04f24fdeea4fd563b82a5ab7857667320a"
+      },
+      "tokenizer": {
+        "bytes": 2113710,
+        "path": "model/tokenizer.json",
+        "sha256": "c24618a1b3e6a38167beff1c72cffd126c3a66254347304b50547d12c5f25624"
+      },
+      "tokenizer_config": {
+        "bytes": 394,
+        "path": "model/tokenizer_config.json",
+        "sha256": "8defb5be8326267ec32e183c1460ecbd6f8868c079ef3ed18877096f20371ff4"
+      }
+    },
+    "reference_sha256": "6d8191c9e2ae76915f9ba7d707122b2b7483828509923c8281c46d8a83d79b8e"
+  },
+  "schema_version": 1,
+  "scope": "short-context bounded adaptation; released lens, no fitting",
+  "visualization": "predictions.html",
+  "wall_seconds": 25.1235145
+}

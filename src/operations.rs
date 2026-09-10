@@ -32,6 +32,10 @@ use crate::{Error, Result};
 /// mapper remains lazy and retains the column layout's checkpoint transpose.
 /// The outer initializer receives Burn's current gradient policy so freezing
 /// the parameter before its first use is respected as well.
+/// Loading likewise defines new parameter leaves: Burn deserializes trainable
+/// tensors before applying the checkpoint-layout transpose, so the load mapper
+/// detaches that layout transformation before Burn restores the target's
+/// gradient policy. This does not detach any model forward computation.
 /// Ordinary inference backends retain exactly Burn's original initialization.
 pub(crate) fn init_linear<B: Backend>(config: &LinearConfig, device: &B::Device) -> Linear<B> {
     let mut projection = config.init::<B>(device);
@@ -51,7 +55,7 @@ pub(crate) fn init_linear<B: Backend>(config: &LinearConfig, device: &B::Device)
             shape,
         )
         .save_mapper(|tensor| tensor.transpose())
-        .load_mapper(|tensor| tensor.transpose());
+        .load_mapper(|tensor| tensor.transpose().detach());
     }
     projection
 }
@@ -62,7 +66,15 @@ pub(crate) fn init_linear<B: Backend>(config: &LinearConfig, device: &B::Device)
 /// weight reaches the backend's quantized matmul dispatch, which CubeCL can
 /// execute from packed Q8/Q4 storage. Activations deliberately remain floating
 /// point in v1; quantized activations are rejected because reshaping sub-byte
-/// tensors is not generally implemented by Burn 0.21.
+/// tensors is not generally implemented by Burn 0.21. Floating weights and bias
+/// must match the activation dtype, and all operands must share a device.
+///
+/// Packed weights are inference-only in Burn 0.21: its autodiff backend cannot
+/// differentiate even the activation input of a frozen packed projection. This
+/// boundary rejects such execution before backend dispatch. To train an adapter
+/// before a quantized checkpoint weight, explicitly dequantize that weight on
+/// the inner backend, lift the floating tensor into autodiff, and freeze it.
+/// That workflow uses floating storage and computation during training.
 pub fn linear<B: Backend, const D: usize>(
     input: Tensor<B, D>,
     projection: &Linear<B>,
@@ -90,6 +102,25 @@ pub fn linear<B: Backend, const D: usize>(
     }
 
     let weight = projection.weight.val();
+    if matches!(weight.dtype(), DType::QFloat(_)) && B::ad_enabled(&input.device()) {
+        return Err(Error::BackendCapability(
+            "Burn 0.21 autodiff does not support packed Q4/Q8 linear weights, including input gradients through frozen weights; explicitly dequantize on the inner backend before constructing the autodiff parameter"
+                .into(),
+        ));
+    }
+    if weight.device() != input.device() {
+        return Err(Error::configuration(
+            "linear.weight",
+            "projection weight and activations must share a device",
+        ));
+    }
+    if !matches!(weight.dtype(), DType::QFloat(_)) && weight.dtype() != input.dtype() {
+        return Err(Error::BackendCapability(format!(
+            "linear.weight dtype {:?} must match activation dtype {:?}; cast parameters or activations explicitly",
+            weight.dtype(),
+            input.dtype()
+        )));
+    }
     #[cfg(all(feature = "metal", feature = "rocm"))]
     if packed_metal_autotune_is_unavailable(weight.dtype(), &B::name(&weight.device())) {
         return Err(Error::BackendCapability(
@@ -114,6 +145,19 @@ pub fn linear<B: Backend, const D: usize>(
                 format!("[{weight_output}]"),
                 format!("[{bias_width}]"),
             ));
+        }
+        if bias.lazy_device() != input.device() {
+            return Err(Error::configuration(
+                "linear.bias",
+                "projection bias and activations must share a device",
+            ));
+        }
+        if bias.val().dtype() != input.dtype() {
+            return Err(Error::BackendCapability(format!(
+                "linear.bias dtype {:?} must match activation dtype {:?}",
+                bias.val().dtype(),
+                input.dtype()
+            )));
         }
     }
     let rows = output_shape[..D - 1]

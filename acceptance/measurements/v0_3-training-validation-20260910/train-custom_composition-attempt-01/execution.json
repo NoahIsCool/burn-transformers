@@ -1,0 +1,33 @@
+{
+  "id": "train-custom_composition",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "run",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,flex,autodiff,train,tokenizers,chat-templates",
+    "--example",
+    "custom_composition",
+    "--",
+    "--train"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "started_utc": "2026-09-10T20:37:36.110237+00:00",
+  "finished_utc": "2026-09-10T20:37:36.651621+00:00",
+  "seconds": 0.5413849580218084,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "train-custom_composition-attempt-01/inputs-before.json",
+  "inputs_after": "train-custom_composition-attempt-01/inputs-after.json",
+  "output": "train-custom_composition-attempt-01/output.log",
+  "output_sha256": "381db923f4f2c00753ac4173e79bd82064a74ace4c8b14dec9640d87f29fc3e2",
+  "passed": true,
+  "replay_report": "train-custom_composition-attempt-01/replay-report.json",
+  "replay_report_sha256": "64414704377e51ab367c30d2a225670de019c4693ec433fe46dcdcd146b44294"
+}

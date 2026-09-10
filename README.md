@@ -1,10 +1,40 @@
 # Burn transformer architectures
 
-`transformers` is a backend-generic, inference-first library for modern text
-transformers built directly on [Burn](https://burn.dev/). It separates reusable
-mathematics from checkpoint-family wiring so attention, recurrent mixers,
-mixture-of-experts layers, position encodings, caches, loading, and generation
-can be tested independently and recombined in experimental models.
+`transformers` is a Rust/Burn toolkit for experiments with transformer
+architectures and mechanisms, using either random initialization or selected
+pretrained weights. The priority is making intermediate activations easy to
+inspect, modify, and process with additional modules, alongside changes to
+attention rules, layer dimensions, topology, and task heads.
+
+The **v0.2** experiment interface supports selective activation capture,
+edits, clean-run patches, and inserted Burn modules; staged execution;
+editable T5/Qwen recipes; selective weight transfer; custom sequence mixers and
+width adapters; and shared MLA for encoder-decoder experiments. Start with the
+[activation guide](EXPERIMENTS.md) and its
+[runnable workbench](examples/activation_workbench.rs):
+
+```sh
+cargo run --release --locked --example activation_workbench
+```
+
+The **v0.3** [training guide](TRAINING.md) shows how these experiments use native
+Burn autodiff, optimizers, freezing, records, and its optional Learner. Start
+with a small classifier that trains without downloads:
+
+```sh
+cargo run --release --locked --features autodiff --example t5_classifier -- --train
+```
+
+[Grokking](examples/mechanistic/grokking_training/README.md) now trains from random
+weights, measures delayed generalization, and tests its learned Fourier circuit.
+[Clock and Pizza](examples/mechanistic/clock_and_pizza_training/README.md) trains
+different attention rules; [Tuned Lens](examples/mechanistic/tuned_lens_training/README.md)
+learns new translators on a frozen backbone. [Greater-Than](examples/mechanistic/greater_than_training/README.md)
+adds a learned replacement experiment. The [examples index](examples/README.md)
+distinguishes these training studies from retained analyses of published weights.
+Each declares its data, compute, and reproduction limits. Follow the
+[roadmap](ROADMAP.md) for implementation and validation status. The package
+version and bounded checkpoint support remain v0.1.
 
 This is a standalone repository. Run the commands below from its root, where
 `Cargo.toml` lives. [Migration and historical reproduction](MIGRATION.md)
@@ -28,8 +58,8 @@ checkpoint is documented separately in
 
 The v0.1 release is limited to **Qwen3.5-0.8B and FLAN-T5-small**; other
 families remain experimental. Both have refreshed local correctness evidence.
-The latest [source-gate and public-example replay](acceptance/measurements/v0_1-source-gates-20260910.json)
-passes both line-coverage thresholds: 90.005% crate-wide and 95.011% shared/core.
+The recorded [v0.1 source-gate and public-example replay](acceptance/measurements/v0_1-source-gates-20260910.json)
+passes both line-coverage thresholds at that snapshot: 90.005% crate-wide and 95.011% shared/core.
 This excludes 79 verified test-only files and was measured at `b4d6410` with
 1,184 passing tests. Manual review
 binds every retained native region to authored production function items for
@@ -54,7 +84,7 @@ confirmed 10% failure thresholds. See [the release gates](RELEASE_GATES.md).
 | Muse Glimmer | Sliding/full hybrid attention, RoPE/NoPE schedule, sandwich norms, output gates, final-logit softcap, and exact eager-F16 attention with a bounded query-chunk policy | The exact [Muse-Glimmer-30B artifact](acceptance/muse-glimmer-30b-a4e59da52a7bc87ae7251dd5545c0dd437c44b68.json) authenticated both weight shards and a seven-file schema-3 official oracle, then strictly applied all 627 text tensors as F16 on Metal with no unexplained load diagnostics. The real graph matched official prompt, cached-prefix, teacher-prefix, and hidden-trace fixtures with minimum official/Burn cosine `0.999943377` and reproduced all 32 greedy tokens. Real Q8/G64 and Q4/G64 sidecars have both passed create-only conversion, full reopen, and mixed F16/packed Metal inference; each traced decode launched all 417 packed projections with no whole-weight dequantization. A synthetic 32-head F16 Metal envelope exercised actual 32K keys, terminal RoPE, and full/mirrored cache boundaries with a reduced four-channel head; it is not full-model 32K evidence. Quantized reference/quality, a real 32K stress run, real-checkpoint padded/context-boundary coverage, and standardized performance remain open; not advertised. |
 | T5 / FLAN / UL2 | Bidirectional encoder, causal decoder, cross-attention cache, relative-position bias, shared encoder/decoder embeddings with a configurable tied or independent LM head, and cached beam search | [FLAN-T5-small](acceptance/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab.json) now has a content-authenticated Transformers 5.2/CPU F32 oracle. Flex and Metal both strictly apply all 190 tensors, match complete encoder, decoder-hidden, first-logit, 32-row cached and teacher-forced, padded-batch, and 512-token boundary vectors with minimum cosine `0.999999999999` and zero `1e-4` tolerance failures, and reproduce all 32 greedy decisions plus the exact four-beam continuation. The [refreshed Metal/Flex timing and sampled-memory series](acceptance/measurements/small-model-performance-20260910/manifest.json) covers 32/128/512-token sources with 128 forced decode steps and 93 separate memory phases. Its bounded Flex/F32 and Metal/F32 profiles are supported for v0.1; quantized quality and unvalidated execution combinations are excluded. [FLAN-T5-XXL](acceptance/flan-t5-xxl-ae7c9136adc7555eeccc78cdd960dfd60fb346ce.json) strictly applied all 558 runtime tensors on Metal and matched official Transformers/MPS F32 encoder, decoder-hidden, first-logit, 32-row cached and teacher-forced fixtures at minimum cosine `0.999999999998`, plus exact greedy and four-beam tokens. XXL is not advertised; UL2 is pending. |
 | Nemotron-H | Interleaved Mamba2, GQA, dense/MoE blocks, ReLU-squared experts, shared experts, and next-token-head mapping | The exact [Nemotron 3.5 Lightning artifact](acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json) authenticated and strictly applied all 6,513 tensors, including 270 MTP tensors, then passed Metal F16 stateless, cached-prefill, and one-token recurrent base-model execution. Stateless and prefill hidden traces were bit-identical; recurrent and teacher-forced logits had cosine `0.999376514` and identical top-1. The exact one-stage MTP body and transactional batch-one speculator pass exhaustive tiny Flex tests. This remains internal-consistency evidence: official base parity, real-weight MTP parity, 32-token generation, quantization, and 32K are open; not advertised. |
-| Custom modular models | Serializable causal and seq2seq specifications using full/sliding attention, causal DeltaNet, dense gated FFNs, sparse MoE, configurable normalization, and cross-attention | Intended for controlled experiments, not compatibility with an upstream checkpoint. Custom MLA, Mamba2, bidirectional DeltaNet/sliding attention, and learned gated residuals currently fail with explicit capability errors. |
+| Custom modular models | Serializable causal and seq2seq specifications using full/sliding attention, shared MLA, causal DeltaNet, dense gated FFNs, sparse MoE, configurable normalization, cross-attention, and staged execution; open Rust modules and width adapters permit additional compositions | Intended for controlled experiments, not compatibility with an upstream checkpoint. Explicit policies support noncausal full-sequence attention. Mamba2, bidirectional DeltaNet, and learned gated residual specifications return capability errors. |
 
 Qwen MTP speculative generation currently requires batch size one and defaults
 to two draft tokens per cycle; callers may configure a different positive draft
@@ -65,7 +95,7 @@ count. Ordinary Qwen inference retains rectangular batched execution.
 Family code under `src/models` translates exact upstream configuration, layer
 schedules, and tensor names. Shared modules own the reusable operations:
 
-- `attention`, `delta_net`, `feed_forward`, `moe`, `normalization`, and
+- `attention`, `mla`, `delta_net`, `feed_forward`, `moe`, `normalization`, and
   `position` implement transformer mathematics without model-name branches.
 - `cache` provides preallocated KV, sliding-ring, recurrent, cross-attention,
   and transactional state. Cache tensors are external to model parameters.
@@ -82,15 +112,25 @@ schedules, and tensor names. Shared modules own the reusable operations:
   0.21's fallback sort cannot handle that storage tag safely.
 - `models::custom` constructs experimental causal or encoder-decoder graphs
   from serializable topology specifications.
+- `intervention` provides typed activation addresses, rank-preserving selections,
+  scoped captures and edits, and custom computation points. See
+  [EXPERIMENTS.md](EXPERIMENTS.md) for ordering, gradients, and capabilities.
+- `experiment` provides explicit hidden-state boundaries, attention policies,
+  open residual blocks, and registered width adapters. `transfer` reuses selected
+  parameters with validated shape/tie policies and auditable reports.
 
-The principal contracts are `CausalLanguageModel` and `Seq2SeqLanguageModel`.
+Experiments use `HiddenState`, `ExecutionContext`, `Hooks`, and ordinary Burn
+modules to expose the computation directly. Inference compatibility uses the
+`CausalLanguageModel` and `Seq2SeqLanguageModel` contracts.
 Both expose a stateless full-precision `forward` path and explicit
 `new_decode_state`, prefill, and decode operations. `DecodeState` exposes
 capacity, per-sequence lengths, reset, reorder/duplication, and truncation.
 Inputs use `[batch, sequence]` token IDs and optional explicit positions; a
 `TokenMask` always means `true == valid token`. `ForwardOptions` projects only
-the last valid position by default and makes hidden states, attention data,
-router logits, and auxiliary losses opt-in.
+the last valid position by default and makes hidden states, router logits, and
+auxiliary losses opt-in where supported. For selective attention tensors on
+Qwen3.5/3.8, T5, and custom models, use activation hooks; these models reject the
+legacy `options.attentions` request.
 
 `AutoCausalLm` dispatches `deepseek_v2`, `muse_glimmer_text`, `nemotron_h`,
 `qwen3_5_text`, and `qwen3_moe`. `AutoSeq2SeqLm` dispatches `t5`. These enum
@@ -111,7 +151,8 @@ The crate declares Rust 1.92 as its minimum supported Rust version and pins Burn
 | `metal` | Enables Burn Metal. |
 | `cuda` | Enables Burn CUDA. |
 | `rocm` | Enables Burn ROCm. |
-| `autodiff` | Enables Burn autodiff for full-precision stateless graphs. Training loops are not included. |
+| `autodiff` | Enables Burn autodiff for floating-point stateless graphs and the explicit training examples. |
+| `train` | Adds Burn's native Learner/TrainStep framework; implies `std` and `autodiff`. |
 | `tokenizers` | Adds local `tokenizer.json` loading through the `tokenizers` crate. |
 | `chat-templates` | Adds bounded local chat-template rendering with MiniJinja and implies `tokenizers`. |
 
@@ -374,8 +415,8 @@ that untracked combination is not certified.
 - Vision or audio towers, even when their tensors are present in a checkpoint.
 - GGUF, AWQ, GPTQ, external FP8 formats, or importing third-party quantized
   artifacts.
-- Training loops, optimizers, datasets, or quantized training. Full-precision
-  stateless graphs remain the future training surface.
+- A separate trainer, optimizer, or dataset framework. Experiments use native
+  Burn training; packed quantized autodiff remains unsupported in Burn 0.21.
 - A CLI, HTTP server, continuous batching, tensor/model parallelism, or
   distributed execution.
 - Claims beyond 32K context on the current acceptance hardware.

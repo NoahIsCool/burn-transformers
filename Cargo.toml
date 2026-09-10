@@ -28,6 +28,9 @@ include = [
 default = ["std", "flex"]
 std = ["burn/std"]
 autodiff = ["burn/autodiff"]
+# Optional access to Burn's own Learner and TrainStep APIs. Ordinary optimizer
+# loops require only `autodiff`; the crate does not provide a separate trainer.
+train = ["std", "autodiff", "burn/train"]
 cpu = ["burn/cpu"]
 flex = ["burn/flex"]
 metal = ["burn/metal"]
@@ -59,6 +62,30 @@ minijinja = { version = "=2.19.0", default-features = false, features = ["adjace
 proptest = "1.9.0"
 tempfile = "3.27.0"
 tracing = "=0.1.44"
+
+[[example]]
+name = "burn_training"
+required-features = ["train", "flex"]
+
+[[example]]
+name = "grokking_train"
+required-features = ["std", "flex", "autodiff"]
+
+[[example]]
+name = "clock_and_pizza_train"
+required-features = ["std", "flex", "autodiff"]
+
+[[example]]
+name = "tuned_lens_train"
+required-features = ["std", "flex", "autodiff", "tokenizers"]
+
+[[example]]
+name = "greater_than_train"
+required-features = ["std", "flex", "autodiff"]
+
+[[example]]
+name = "train_qwen_adapter"
+required-features = ["std", "flex", "autodiff"]
 
 # Checkpoint integrity is part of ordinary local loading, and acceptance gates
 # hash tens of gigabytes. Keep SHA-256 optimized even when the surrounding

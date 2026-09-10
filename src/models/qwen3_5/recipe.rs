@@ -1,0 +1,564 @@
+//! Editable Qwen backbones with explicit random or selective pretrained initialization.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::Read,
+    path::Path,
+};
+
+use burn::{
+    module::{Module, ModuleMapper, Param},
+    nn::EmbeddingConfig,
+    tensor::{DType, Tensor, backend::Backend},
+};
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    ArchitectureConfig, Error, Result,
+    checkpoint::{
+        CheckpointManifest, ExecutionOutcome, ExpectedTensor, KeyMatcher, LoadOptions, MappingPlan,
+        TensorDType, TensorOperation, build_load_plan, execute_local_load_plan,
+    },
+    normalization::RmsNormConfig,
+    transfer::{
+        ParameterDisposition, ReusedParameter, ShapeChangePolicy, TransferReport,
+        TransformedParameter,
+    },
+};
+
+use super::{
+    Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5DecoderLayer, Qwen3_5LayerType,
+    Qwen3_5TextConfig, Qwen3_5TextModel, model::qwen_rope_config,
+};
+use crate::models::config::ModelConfig;
+
+/// Editable dimensions and sequence mixer for one Qwen block.
+///
+/// Residual width and family numerical conventions come from the recipe's
+/// `config`. Different residual widths can be joined with an explicit adapter
+/// between independently executed block ranges.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Qwen3_5LayerRecipe {
+    /// Original checkpoint layer to reuse; `None` initializes this block anew.
+    pub source_layer: Option<usize>,
+    /// Full softmax attention or the original gated DeltaNet mixer.
+    pub layer_type: Qwen3_5LayerType,
+    /// Query heads in a full-attention block.
+    pub num_attention_heads: usize,
+    /// Native shared key/value heads in a full-attention block.
+    pub num_key_value_heads: usize,
+    /// Width of each full-attention head, independently of the residual width.
+    pub head_dim: usize,
+    /// SwiGLU gate/content intermediate width.
+    pub intermediate_size: usize,
+    /// DeltaNet query/key head count.
+    pub linear_num_key_heads: usize,
+    /// DeltaNet value head count.
+    pub linear_num_value_heads: usize,
+    /// DeltaNet query/key head width.
+    pub linear_key_head_dim: usize,
+    /// DeltaNet value head width.
+    pub linear_value_head_dim: usize,
+    /// Causal DeltaNet convolution kernel size.
+    pub linear_conv_kernel_dim: usize,
+}
+
+impl Qwen3_5LayerRecipe {
+    fn from_config(config: &Qwen3_5TextConfig, index: usize, layer_type: Qwen3_5LayerType) -> Self {
+        Self {
+            source_layer: Some(index),
+            layer_type,
+            num_attention_heads: config.num_attention_heads,
+            num_key_value_heads: config.num_key_value_heads,
+            head_dim: config.head_dim,
+            intermediate_size: config.intermediate_size,
+            linear_num_key_heads: config.linear_num_key_heads,
+            linear_num_value_heads: config.linear_num_value_heads,
+            linear_key_head_dim: config.linear_key_head_dim,
+            linear_value_head_dim: config.linear_value_head_dim,
+            linear_conv_kernel_dim: config.linear_conv_kernel_dim,
+        }
+    }
+
+    fn config(&self, base: &Qwen3_5TextConfig) -> Qwen3_5TextConfig {
+        let mut config = base.clone();
+        config.num_hidden_layers = 1;
+        config.layer_types = vec![self.layer_type];
+        config.mtp_num_hidden_layers = 0;
+        config.num_attention_heads = self.num_attention_heads;
+        config.num_key_value_heads = self.num_key_value_heads;
+        config.head_dim = self.head_dim;
+        config.intermediate_size = self.intermediate_size;
+        config.linear_num_key_heads = self.linear_num_key_heads;
+        config.linear_num_value_heads = self.linear_num_value_heads;
+        config.linear_key_head_dim = self.linear_key_head_dim;
+        config.linear_value_head_dim = self.linear_value_head_dim;
+        config.linear_conv_kernel_dim = self.linear_conv_kernel_dim;
+        config
+    }
+}
+
+/// A faithful Qwen starting point whose individual blocks can be edited.
+///
+/// `init_random` never reads weights. `load_pretrained` validates a local source
+/// checkpoint and streams only the compatible parameters selected by this
+/// recipe. Both return a stateless backbone with embeddings and final norm;
+/// task heads and cached generation are separate choices.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Qwen3_5BackboneRecipe {
+    /// Shared residual width, vocabulary, norm, rotary, and family conventions.
+    pub config: Qwen3_5TextConfig,
+    /// Blocks in execution order. Remove, reorder, or edit entries directly.
+    pub layers: Vec<Qwen3_5LayerRecipe>,
+    source_config: Qwen3_5TextConfig,
+}
+
+/// Policy for selectively initializing a recipe from a local checkpoint.
+#[derive(Clone, Debug, Default)]
+pub struct Qwen3_5RecipeLoadOptions {
+    /// Artifact bounds and dtype conversion policy.
+    pub checkpoint: LoadOptions,
+    /// Namespace override; `None` detects one unambiguous embedding namespace.
+    pub source: Option<Qwen3_5CheckpointSource>,
+    /// Changed shapes fail unless retaining random target initialization is explicit.
+    /// New parameters use the checkpoint plan's resolved embedding dtype.
+    pub shape_changes: ShapeChangePolicy,
+}
+
+/// A successfully initialized backbone and its complete transfer audit.
+#[derive(Debug)]
+pub struct LoadedQwen3_5Backbone<B: Backend> {
+    /// The selected graph, ready for stateless execution and a custom task head.
+    pub model: Qwen3_5TextModel<B>,
+    /// Parameters reused, converted, omitted, or initialized anew.
+    pub report: TransferReport,
+    /// Source bytes read and the strict checkpoint executor's detailed report.
+    pub checkpoint: ExecutionOutcome,
+}
+
+impl Qwen3_5BackboneRecipe {
+    /// Starts with exactly the configured Qwen block schedule and conventions.
+    pub fn from_config(config: Qwen3_5TextConfig) -> Result<Self> {
+        ArchitectureConfig::validate(&config)?;
+        let layers = config
+            .resolved_layer_types()
+            .into_iter()
+            .enumerate()
+            .map(|(index, kind)| Qwen3_5LayerRecipe::from_config(&config, index, kind))
+            .collect();
+        Ok(Self {
+            source_config: config.clone(),
+            config,
+            layers,
+        })
+    }
+
+    /// Reads only `config.json` from a local model directory; no weights are loaded.
+    pub fn from_local_config(root: impl AsRef<Path>) -> Result<Self> {
+        Self::from_config(read_config(root.as_ref())?)
+    }
+
+    /// Retains the first `count` blocks, preserving their original source indices.
+    pub fn prefix(mut self, count: usize) -> Result<Self> {
+        if count == 0 || count > self.layers.len() {
+            return Err(Error::configuration(
+                "qwen.recipe.prefix",
+                format!("count must be in 1..={}", self.layers.len()),
+            ));
+        }
+        self.layers.truncate(count);
+        Ok(self)
+    }
+
+    /// Returns the immutable source configuration used to interpret pretrained weights.
+    pub fn source_config(&self) -> &Qwen3_5TextConfig {
+        &self.source_config
+    }
+
+    /// Builds an editable backbone with new parameters and no checkpoint I/O.
+    pub fn init_random<B: Backend>(&self, device: &B::Device) -> Result<Qwen3_5TextModel<B>> {
+        let configurations = self.validate(false)?;
+        let mut config = self.config.clone();
+        config.num_hidden_layers = self.layers.len();
+        config.layer_types = self.layers.iter().map(|layer| layer.layer_type).collect();
+        config.mtp_num_hidden_layers = 0;
+        let layer_rope = configurations
+            .iter()
+            .map(qwen_rope_config)
+            .collect::<Result<Vec<_>>>()?;
+        let layers = configurations
+            .iter()
+            .zip(&self.layers)
+            .map(|(config, layer)| Qwen3_5DecoderLayer::init(config, layer.layer_type, device))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Qwen3_5TextModel {
+            embed_tokens: EmbeddingConfig::new(config.vocab_size, config.hidden_size).init(device),
+            layers,
+            norm: RmsNormConfig::new(config.hidden_size)
+                .with_epsilon(config.rms_norm_eps)
+                .with_zero_centered(true)
+                .init(device)?,
+            rope: layer_rope[0],
+            layer_rope,
+            config,
+            supports_family_cache: false,
+        })
+    }
+
+    /// Streams compatible selected parameters from a local SafeTensors checkpoint.
+    ///
+    /// The original complete checkpoint is checked at the metadata level before
+    /// allocating a target graph. Unselected blocks, MTP, and the language-model
+    /// head are never materialized. The returned model is published only after
+    /// every selected tensor has loaded successfully. Shape changes never slice
+    /// or reshape pretrained weights implicitly. New parameters follow the
+    /// resolved embedding dtype, including an explicit checkpoint dtype cast.
+    pub fn load_pretrained<B: Backend>(
+        &self,
+        root: impl AsRef<Path>,
+        options: &Qwen3_5RecipeLoadOptions,
+        device: &B::Device,
+    ) -> Result<LoadedQwen3_5Backbone<B>> {
+        let configurations = self.validate(true)?;
+        let root = root.as_ref();
+        if read_config(root)? != self.source_config {
+            return Err(Error::configuration(
+                "qwen.recipe.source_config",
+                "local checkpoint config differs from this recipe's original source configuration",
+            ));
+        }
+        if !options.checkpoint.allow_missing.is_empty()
+            || !options.checkpoint.allow_unexpected.is_empty()
+        {
+            return Err(Error::configuration(
+                "qwen.recipe.checkpoint",
+                "recipe loading owns its explicit parameter exceptions; remove broad missing/unexpected allowlists",
+            ));
+        }
+        let manifest = CheckpointManifest::discover(root, &options.checkpoint)
+            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+        let source = source_namespace(&manifest, options.source)?;
+        let source_contract = self
+            .source_config
+            .checkpoint_contract(Qwen3_5CheckpointOptions {
+                source,
+                include_mtp: false,
+            })
+            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+        let source_plan = source_contract
+            .build_load_plan(&manifest, &options.checkpoint)
+            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+        let initialization_dtype = source_plan
+            .tensors
+            .iter()
+            .find(|tensor| tensor.target == "model.embed_tokens.weight")
+            .map(|tensor| tensor.dtype)
+            .ok_or_else(|| {
+                Error::Checkpoint("Qwen source plan lacks its embedding owner".into())
+            })?;
+        let initialization_dtype = match initialization_dtype {
+            TensorDType::F16 => DType::F16,
+            TensorDType::BF16 => DType::BF16,
+            TensorDType::F32 => DType::F32,
+            TensorDType::F64 => DType::F64,
+            dtype => {
+                return Err(Error::BackendCapability(format!(
+                    "Qwen recipe initialization requires a supported floating dtype, found {dtype}"
+                )));
+            }
+        };
+        let source_operations = source_contract
+            .mappings()
+            .operations()
+            .iter()
+            .filter_map(|operation| match operation {
+                TensorOperation::Map {
+                    source,
+                    target,
+                    transform,
+                } => Some((target.clone(), (source.clone(), *transform))),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let source_expected = source_contract
+            .expected_tensors()
+            .iter()
+            .map(|tensor| (tensor.name.clone(), tensor))
+            .collect::<BTreeMap<_, _>>();
+        let mut expected = Vec::new();
+        let mut mappings = MappingPlan::new();
+        let mut consumed = BTreeSet::new();
+        let mut report = TransferReport::default();
+        for (target, source_target) in self.parameter_selection(&configurations)? {
+            let source_entry = source_target
+                .as_ref()
+                .and_then(|source| source_expected.get(source));
+            let compatible = source_entry.is_some_and(|source| source.shape == target.shape);
+            if !compatible {
+                if let Some(source_entry) = source_entry
+                    && options.shape_changes == ShapeChangePolicy::Reject
+                {
+                    return Err(Error::shape(
+                        &target.name,
+                        format!("checkpoint shape {:?}", source_entry.shape),
+                        format!(
+                            "edited shape {:?}; choose ShapeChangePolicy::Reinitialize explicitly",
+                            target.shape
+                        ),
+                    ));
+                }
+                let reason = if source_entry.is_some() {
+                    "retained new initialization because the edited shape differs from the checkpoint"
+                } else {
+                    "new block or component has no selected pretrained source"
+                };
+                report
+                    .newly_initialized
+                    .push(ParameterDisposition::new(&target.name, reason));
+                continue;
+            }
+            let source_target = source_target.expect("compatible source");
+            let Some((source, transform)) = source_operations.get(&source_target) else {
+                return Err(Error::configuration(
+                    "qwen.recipe.mapping",
+                    format!("missing physical source for {source_target}"),
+                ));
+            };
+            if !consumed.insert(source.clone()) {
+                return Err(Error::configuration(
+                    "qwen.recipe.source_layer",
+                    "a checkpoint layer may be selected once; duplicate a loaded module explicitly to choose sharing or independent copies",
+                ));
+            }
+            mappings.push(TensorOperation::Map {
+                source: source.clone(),
+                target: target.name.clone(),
+                transform: *transform,
+            });
+            report.reused.push(ReusedParameter::new(
+                source,
+                &target.name,
+                target
+                    .shape
+                    .iter()
+                    .map(|&dim| dim as usize)
+                    .collect::<Vec<_>>(),
+            ));
+            expected.push(target);
+        }
+        let mut load_options = options.checkpoint.clone();
+        source_contract.configure_load_options(&mut load_options);
+        for source in manifest
+            .tensors
+            .keys()
+            .filter(|name| !consumed.contains(*name))
+        {
+            load_options
+                .allow_unexpected
+                .push(KeyMatcher::exact(source));
+            report.omitted.push(ParameterDisposition::new(source, "outside the selected backbone, or superseded by an explicitly reinitialized parameter"));
+        }
+        if self.source_config.tie_word_embeddings {
+            report.omitted.push(ParameterDisposition::new("lm_head.weight", "tied vocabulary view omitted; its embedding storage owner remains available to the backbone"));
+        }
+        let plan = build_load_plan(&manifest, &expected, &mappings, &load_options)
+            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+        let new_parameters = report
+            .newly_initialized
+            .iter_mut()
+            .map(|parameter| {
+                parameter.reason.push_str(&format!(
+                    "; initialized in the resolved embedding dtype {initialization_dtype:?}"
+                ));
+                parameter.name.clone()
+            })
+            .collect();
+        let mut model = self.init_random(device)?.map(&mut InitializeDtype {
+            path: Vec::new(),
+            new_parameters,
+            dtype: initialization_dtype,
+        });
+        let checkpoint = execute_local_load_plan(&manifest, &plan, &mut model)
+            .map_err(|error| Error::Checkpoint(error.to_string()))?;
+        for conversion in &checkpoint.report.dtype_converted {
+            if let Some(index) = report
+                .reused
+                .iter()
+                .position(|parameter| parameter.target == conversion.target)
+            {
+                let reused = report.reused.remove(index);
+                report.transformed.push(TransformedParameter {
+                    sources: vec![reused.source],
+                    target: reused.target,
+                    shape: reused.shape,
+                    operation: format!(
+                        "dtype conversion {:?} to {:?}",
+                        conversion.source, conversion.target_dtype
+                    ),
+                });
+            }
+        }
+        report.finalize();
+        Ok(LoadedQwen3_5Backbone {
+            model,
+            report,
+            checkpoint,
+        })
+    }
+
+    fn validate(&self, pretrained: bool) -> Result<Vec<Qwen3_5TextConfig>> {
+        ArchitectureConfig::validate(&self.source_config)?;
+        if self.layers.is_empty() {
+            return Err(Error::configuration(
+                "qwen.recipe.layers",
+                "at least one block is required",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        let mut configurations = Vec::with_capacity(self.layers.len());
+        for (index, layer) in self.layers.iter().enumerate() {
+            if pretrained
+                && let Some(source) = layer.source_layer
+                && (source >= self.source_config.num_hidden_layers || !seen.insert(source))
+            {
+                return Err(Error::configuration(
+                    format!("qwen.recipe.layers.{index}.source_layer"),
+                    "source index must be in range and selected only once; None selects new initialization",
+                ));
+            }
+            let config = layer.config(&self.config);
+            ArchitectureConfig::validate(&config)?;
+            qwen_rope_config(&config)?;
+            configurations.push(config);
+        }
+        Ok(configurations)
+    }
+
+    fn parameter_selection(
+        &self,
+        configurations: &[Qwen3_5TextConfig],
+    ) -> Result<Vec<(ExpectedTensor, Option<String>)>> {
+        let mut selection = vec![
+            (
+                ExpectedTensor::new(
+                    "model.embed_tokens.weight",
+                    vec![
+                        self.config.vocab_size as u64,
+                        self.config.hidden_size as u64,
+                    ],
+                ),
+                Some("model.embed_tokens.weight".into()),
+            ),
+            (
+                ExpectedTensor::new("model.norm.weight", vec![self.config.hidden_size as u64]),
+                Some("model.norm.weight".into()),
+            ),
+        ];
+        for (index, config) in configurations.iter().enumerate() {
+            let contract = config
+                .checkpoint_contract(Qwen3_5CheckpointOptions {
+                    source: Qwen3_5CheckpointSource::TextOnly,
+                    include_mtp: false,
+                })
+                .map_err(|error| Error::Checkpoint(error.to_string()))?;
+            for tensor in contract.expected_tensors() {
+                let Some(suffix) = tensor.name.strip_prefix("model.layers.0.") else {
+                    continue;
+                };
+                let mut target = tensor.clone();
+                target.name = format!("model.layers.{index}.{suffix}");
+                let source = self.layers[index]
+                    .source_layer
+                    .map(|source| format!("model.layers.{source}.{suffix}"));
+                selection.push((target, source));
+            }
+        }
+        Ok(selection)
+    }
+}
+
+/// Cast only new parameters, leaving overwritten pretrained parameters lazy.
+struct InitializeDtype {
+    path: Vec<String>,
+    new_parameters: BTreeSet<String>,
+    dtype: DType,
+}
+
+impl<B: Backend> ModuleMapper<B> for InitializeDtype {
+    fn enter_module(&mut self, name: &str, _: &str) {
+        self.path.push(name.into());
+    }
+
+    fn exit_module(&mut self, _: &str, _: &str) {
+        self.path.pop();
+    }
+
+    fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
+        let name = format!("model.{}", self.path.join("."));
+        if !self.new_parameters.contains(&name) {
+            return param;
+        }
+        param.map(|value| {
+            let trainable = value.is_require_grad();
+            value.cast(self.dtype).detach().set_require_grad(trainable)
+        })
+    }
+}
+
+fn source_namespace(
+    manifest: &CheckpointManifest,
+    explicit: Option<Qwen3_5CheckpointSource>,
+) -> Result<Qwen3_5CheckpointSource> {
+    if let Some(source) = explicit {
+        return Ok(source);
+    }
+    match (
+        manifest.tensor("model.embed_tokens.weight").is_some(),
+        manifest
+            .tensor("model.language_model.embed_tokens.weight")
+            .is_some(),
+    ) {
+        (true, false) => Ok(Qwen3_5CheckpointSource::TextOnly),
+        (false, true) => Ok(Qwen3_5CheckpointSource::Multimodal),
+        _ => Err(Error::configuration(
+            "qwen.recipe.source",
+            "expected exactly one Qwen embedding namespace",
+        )),
+    }
+}
+
+fn read_config(root: &Path) -> Result<Qwen3_5TextConfig> {
+    let path = root.join("config.json");
+    let metadata = fs::metadata(&path).map_err(|source| Error::Io {
+        path: path.clone(),
+        source,
+    })?;
+    if metadata.len() > 16 * 1024 * 1024 {
+        return Err(Error::configuration(
+            "qwen.recipe.config",
+            "config.json exceeds 16 MiB",
+        ));
+    }
+    let mut json = String::new();
+    fs::File::open(&path)
+        .map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?
+        .take(16 * 1024 * 1024 + 1)
+        .read_to_string(&mut json)
+        .map_err(|source| Error::Io { path, source })?;
+    if json.len() > 16 * 1024 * 1024 {
+        return Err(Error::configuration(
+            "qwen.recipe.config",
+            "config.json exceeds 16 MiB",
+        ));
+    }
+    Qwen3_5TextConfig::from_json_str(&json)
+        .map_err(|error| Error::configuration("qwen.recipe.config", error.to_string()))
+}
+
+#[cfg(test)]
+#[path = "recipe_tests.rs"]
+mod tests;

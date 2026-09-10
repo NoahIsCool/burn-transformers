@@ -1,0 +1,42 @@
+{
+  "status": "passed",
+  "source_frozen": true,
+  "artifacts": {
+    "plot.py": {
+      "bytes": 14534,
+      "sha256": "39e6f2c3dcbc8d7989426425d29fbf49d0af0c88a4986d630cbba3700fcdb957"
+    },
+    "result.json": {
+      "bytes": 5251555,
+      "sha256": "4325d91680374b5f8546720d228fa4ec264a93e249d4e45ec05137ea0cf07257"
+    },
+    "year_probabilities.png": {
+      "bytes": 327127,
+      "sha256": "1509792bb7e989b0e81dd4059fd53be1f0580fbf66fb7336cbf364a2bc5d565d"
+    },
+    "year_probabilities.svg": {
+      "bytes": 43048,
+      "sha256": "edba8cecd8f14985bf88e6402204f116c330c377977a1c6b21d532cd008e1ea7"
+    }
+  },
+  "command": "PYTHONPATH=target/mechanistic/clock_and_pizza/plot-deps MPLCONFIGDIR=/tmp/greater-than-matplotlib python3 examples/mechanistic/greater_than/plot.py",
+  "versions": {
+    "numpy": "2.4.6",
+    "matplotlib": "3.11.1"
+  },
+  "checks": [
+    "Result validation passed before plotting.",
+    "Result manifest and fixture fingerprints matched actual frozen files.",
+    "Rows matched fixture indices, split labels and suffixes.",
+    "Scalar bounds and retained probability metrics agreed.",
+    "Node recovery and direct change matched paired baselines.",
+    "PNG 2700x1116 visually inspected after correcting legend overlap.",
+    "SVG XML parsed and rsvg-convert rasterization visually inspected."
+  ],
+  "notes": [
+    "All plotted outcomes came from the measured result; no synthetic scientific figure was generated.",
+    "Prompt SD is descriptive; some corrupted controls repeat.",
+    "Mean \u00b1 SD bands are not truncated at zero; negative band edges do not represent negative probabilities.",
+    "Result provenance or runtime can change after final runner replay; rerun unchanged plotting source and refresh artifact hashes afterward."
+  ]
+}

@@ -29,8 +29,11 @@ use burn::{
     },
 };
 
+use crate::intervention::{AttentionPoints, Hooks};
 use crate::normalization::RmsNorm;
 use crate::{Error, Result, architecture::TokenMask, normalization::RmsNormConfig, operations};
+
+type PatternTransform<'a, B> = dyn FnMut(Tensor<B, 4>) -> Result<Tensor<B, 4>> + 'a;
 
 /// Multiplicative gate emitted alongside Qwen/Muse query projections.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -608,6 +611,9 @@ impl<B: Backend> GroupedQueryAttention<B> {
     ///
     /// `mask` follows Burn's low-level convention: `true` means excluded. Public
     /// token-valid masks should first pass through [`padding_attention_mask`].
+    /// Projected tensors and additive bias must share a dense floating dtype and
+    /// device; the mask and output projection must also use that device. No
+    /// implicit dtype conversions are performed.
     pub fn attend(
         &self,
         projection: AttentionProjection<B>,
@@ -634,6 +640,217 @@ impl<B: Backend> GroupedQueryAttention<B> {
         )?
         .swap_dims(1, 2)
         .reshape([batch, query_sequence, self.query_heads * self.head_dim]);
+        let context = match (self.output_gate, projection.gate) {
+            (AttentionOutputGate::None, None) => context,
+            (AttentionOutputGate::Sigmoid, Some(gate)) => context * sigmoid(gate),
+            (AttentionOutputGate::Silu, Some(gate)) => context * silu(gate),
+            _ => {
+                return Err(Error::shape(
+                    "attention.gate",
+                    format!("a gate matching {:?}", self.output_gate),
+                    "a mismatched gate payload",
+                ));
+            }
+        };
+        operations::linear(context, &self.o_proj)
+    }
+
+    /// Evaluates attention with selected Q/K/V, score, pattern, or head edits.
+    ///
+    /// Q/K/V points observe the supplied projection: after any normalization
+    /// and positional transforms already performed by the caller, with native
+    /// KV heads before grouped-query repetition. Head context is
+    /// `[batch, query_head, query_token, head_dim]` before the output gate and
+    /// projection. These points preserve the configured attention dispatch.
+    ///
+    /// Scores and patterns require [`AttentionPrecisionMode::EagerFp32Softmax`]
+    /// because backend-native kernels do not expose a portable intermediate
+    /// arithmetic graph. Scores are scaled and softcapped, before exclusion
+    /// masks and additive bias. Patterns follow softmax and the cast back to
+    /// the query dtype. Selecting either point materializes the full quadratic
+    /// score plane; callers must provision memory for it.
+    ///
+    /// Pattern edits need not remain normalized or positive, allowing direct
+    /// ablation and other experiments. Excluded links are zeroed again after
+    /// each edit, so later captures observe the effective pattern and edits
+    /// cannot undo causal or padding exclusions. Change
+    /// `causal` or `mask` explicitly to change visibility. Fully excluded rows
+    /// are zero before a head-context callback, which can intentionally inject
+    /// a new context. Without requested points, this calls [`Self::attend`].
+    /// Model wrappers supply the surrounding [`Hooks::run`] scope; direct
+    /// callers should do the same using their supported point catalog.
+    pub fn attend_with_hooks(
+        &self,
+        projection: AttentionProjection<B>,
+        mask: Option<Tensor<B, 4, Bool>>,
+        bias: Option<Tensor<B, 4>>,
+        causal: bool,
+        points: AttentionPoints,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<Tensor<B, 3>> {
+        self.attend_with_transform(projection, mask, bias, causal, points, hooks, None)
+    }
+
+    /// Builds a modified attention operation with a structural pattern transform.
+    ///
+    /// Unlike an experimental observer, `transform` runs on every call, even
+    /// with empty hooks. It receives the post-softmax weights and must preserve
+    /// shape, dtype, and device. Its result need not be normalized or positive.
+    /// Exclusions are restored before user pattern captures and edits, so those
+    /// actions observe the transformed weights actually used by this model.
+    ///
+    /// This operation requires [`AttentionPrecisionMode::EagerFp32Softmax`] and
+    /// materializes a full score plane. Use it to implement altered attention
+    /// mathematics in a module, while retaining independent experimental hooks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attend_with_pattern(
+        &self,
+        projection: AttentionProjection<B>,
+        mask: Option<Tensor<B, 4, Bool>>,
+        bias: Option<Tensor<B, 4>>,
+        causal: bool,
+        points: AttentionPoints,
+        hooks: &mut Hooks<'_, B>,
+        mut transform: impl FnMut(Tensor<B, 4>) -> Result<Tensor<B, 4>>,
+    ) -> Result<Tensor<B, 3>> {
+        self.attend_with_transform(
+            projection,
+            mask,
+            bias,
+            causal,
+            points,
+            hooks,
+            Some(&mut transform),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn attend_with_transform(
+        &self,
+        mut projection: AttentionProjection<B>,
+        mask: Option<Tensor<B, 4, Bool>>,
+        bias: Option<Tensor<B, 4>>,
+        causal: bool,
+        points: AttentionPoints,
+        hooks: &mut Hooks<'_, B>,
+        transform: Option<&mut PatternTransform<'_, B>>,
+    ) -> Result<Tensor<B, 3>> {
+        if !hooks.has_work() && transform.is_none() {
+            return self.attend(projection, mask, bias, causal);
+        }
+        let inspect_scores = hooks.needs_point(points.scores().info());
+        let inspect_pattern = hooks.needs_point(points.pattern().info());
+        let materialize = inspect_scores || inspect_pattern || transform.is_some();
+        let inspect_projection = [points.query(), points.key(), points.value()]
+            .into_iter()
+            .any(|point| hooks.needs_point(point.info()));
+        if !inspect_projection && !materialize && !hooks.needs_point(points.head_context().info()) {
+            return self.attend(projection, mask, bias, causal);
+        }
+        if materialize && self.precision_mode != AttentionPrecisionMode::EagerFp32Softmax {
+            return Err(Error::BackendCapability(
+                "attention score/pattern access and structural pattern transforms require AttentionPrecisionMode::EagerFp32Softmax; backend-native kernels have no portable intermediate score graph"
+                    .into(),
+            ));
+        }
+        validate_projection(self, &projection, mask.as_ref(), bias.as_ref())?;
+        projection.query = hooks.apply(points.query(), projection.query)?;
+        projection.key = hooks.apply(points.key(), projection.key)?;
+        projection.value = hooks.apply(points.value(), projection.value)?;
+        if !materialize && !hooks.needs_point(points.head_context().info()) {
+            return self.attend(projection, mask, bias, causal);
+        }
+
+        let [batch, _, query_sequence, head_dim] = projection.query.dims();
+        let key_sequence = projection.key.dims()[2];
+        let key = repeat_key_value(projection.key, self.query_heads)?;
+        let value = repeat_key_value(projection.value, self.query_heads)?;
+        let context = if materialize {
+            let scale = self
+                .scale
+                .unwrap_or_else(|| (head_dim as f64).sqrt().recip());
+            let scores = projection.query.matmul(key.swap_dims(2, 3)) * scale;
+            let scores = if let Some(softcap) = self.softcap {
+                (scores / softcap).tanh() * softcap
+            } else {
+                scores
+            };
+            let scores = hooks.apply(points.scores(), scores)?;
+            let exclusion = if causal {
+                let causal_mask = bottom_right_causal_mask(
+                    batch,
+                    self.query_heads,
+                    query_sequence,
+                    key_sequence,
+                    &scores.device(),
+                )?;
+                Some(mask.map_or(causal_mask.clone(), |mask| mask.bool_or(causal_mask)))
+            } else {
+                mask
+            };
+            let scores = if let Some(exclusion) = &exclusion {
+                scores.mask_fill(exclusion.clone(), f32::NEG_INFINITY)
+            } else {
+                scores
+            };
+            let scores = if let Some(bias) = bias {
+                scores + bias
+            } else {
+                scores
+            };
+            let pattern = fp32_softmax(scores, exclusion.clone());
+            let pattern = if let Some(transform) = transform {
+                let shape = pattern.dims();
+                let dtype = pattern.dtype();
+                let device = pattern.device();
+                let pattern = transform(pattern).map_err(|error| {
+                    Error::configuration(
+                        "attention.pattern_transform",
+                        format!("structural transform failed: {error}"),
+                    )
+                })?;
+                if pattern.dims() != shape || pattern.dtype() != dtype || pattern.device() != device
+                {
+                    return Err(Error::configuration(
+                        "attention.pattern_transform",
+                        "structural transform must preserve pattern shape, dtype, and device",
+                    ));
+                }
+                if let Some(exclusion) = &exclusion {
+                    pattern.mask_fill(exclusion.clone(), 0.0)
+                } else {
+                    pattern
+                }
+            } else {
+                pattern
+            };
+            let pattern = hooks.apply_constrained(points.pattern(), pattern, |pattern| {
+                Ok(if let Some(exclusion) = &exclusion {
+                    pattern.mask_fill(exclusion.clone(), 0.0)
+                } else {
+                    pattern
+                })
+            })?;
+            pattern.matmul(value)
+        } else {
+            dispatch_attention(
+                projection.query,
+                key,
+                value,
+                mask,
+                bias,
+                AttentionModuleOptions {
+                    scale: self.scale,
+                    softcap: self.softcap,
+                    is_causal: causal,
+                },
+                self.precision_mode,
+            )?
+        };
+        let context = hooks
+            .apply(points.head_context(), context)?
+            .swap_dims(1, 2)
+            .reshape([batch, query_sequence, self.query_heads * self.head_dim]);
         let context = match (self.output_gate, projection.gate) {
             (AttentionOutputGate::None, None) => context,
             (AttentionOutputGate::Sigmoid, Some(gate)) => context * sigmoid(gate),
@@ -732,15 +949,26 @@ pub(crate) fn dispatch_attention<B: Backend>(
 }
 
 /// Applies FP32 softmax and defines fully excluded rows as exact zeros.
-fn fp32_softmax<B: Backend>(
+///
+/// Additive bias and score interventions can also remove all row support by
+/// producing only negative infinities, even without a boolean exclusion mask.
+pub(crate) fn fp32_softmax<B: Backend>(
     scores: Tensor<B, 4>,
     exclusion: Option<Tensor<B, 4, Bool>>,
 ) -> Tensor<B, 4> {
     let dtype = scores.dtype();
-    let Some(exclusion) = exclusion else {
-        return softmax(scores.cast(DType::F32), 3).cast(dtype);
-    };
     let shape = scores.dims();
+    let unsupported_row = scores
+        .clone()
+        .equal_elem(f32::NEG_INFINITY)
+        .all_dim(3)
+        .expand(shape);
+    let scores = scores.mask_fill(unsupported_row.clone(), 0.0);
+    let Some(exclusion) = exclusion else {
+        return softmax(scores.cast(DType::F32), 3)
+            .mask_fill(unsupported_row, 0.0)
+            .cast(dtype);
+    };
     let row_has_key = exclusion
         .clone()
         .bool_not()
@@ -755,6 +983,7 @@ fn fp32_softmax<B: Backend>(
         3,
     )
     .mask_fill(exclusion, 0.0)
+    .mask_fill(unsupported_row, 0.0)
     .cast(dtype)
 }
 
@@ -762,7 +991,7 @@ fn fp32_softmax<B: Backend>(
 ///
 /// Bottom-right alignment is essential for cached decoding, where a query
 /// chunk is a suffix of a longer key sequence. `true` excludes a pair.
-fn bottom_right_causal_mask<B: Backend>(
+pub(crate) fn bottom_right_causal_mask<B: Backend>(
     batch: usize,
     heads: usize,
     query_sequence: usize,
@@ -927,6 +1156,66 @@ fn validate_projection<B: Backend>(
             ));
         }
     }
+
+    let dtype = projection.query.dtype();
+    let device = projection.query.device();
+    if matches!(dtype, DType::QFloat(_)) {
+        return Err(Error::BackendCapability(
+            "attention projections must be dense floating tensors; quantized projection weights remain supported".into(),
+        ));
+    }
+    let validate_type = |field: &str, actual_dtype: DType, actual_device: &B::Device| {
+        if actual_dtype != dtype || actual_device != &device {
+            return Err(Error::configuration(
+                field,
+                format!(
+                    "must share query dtype {dtype:?} and device {device:?}; found {actual_dtype:?} on {actual_device:?}"
+                ),
+            ));
+        }
+        Ok(())
+    };
+    validate_type(
+        "attention.key",
+        projection.key.dtype(),
+        &projection.key.device(),
+    )?;
+    validate_type(
+        "attention.value",
+        projection.value.dtype(),
+        &projection.value.device(),
+    )?;
+    if let Some(gate) = &projection.gate {
+        validate_type("attention.gate", gate.dtype(), &gate.device())?;
+    }
+    if let Some(mask) = mask
+        && mask.device() != device
+    {
+        return Err(Error::configuration(
+            "attention.mask",
+            "mask must share the query device",
+        ));
+    }
+    if let Some(bias) = bias {
+        validate_type("attention.bias", bias.dtype(), &bias.device())?;
+    }
+    let output_weight = attention.o_proj.weight.val();
+    if output_weight.device() != device
+        || (!matches!(output_weight.dtype(), DType::QFloat(_)) && output_weight.dtype() != dtype)
+    {
+        return Err(Error::configuration(
+            "attention.output_projection",
+            "output projection must share the query device and, for dense weights, its dtype",
+        ));
+    }
+    if let Some(bias) = &attention.o_proj.bias {
+        let bias = bias.val();
+        validate_type(
+            "attention.output_projection.bias",
+            bias.dtype(),
+            &bias.device(),
+        )?;
+    }
     Ok(())
 }
 
@@ -994,3 +1283,7 @@ pub fn padding_attention_mask<B: Backend>(
 #[cfg(test)]
 #[path = "attention_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "attention_intervention_tests.rs"]
+mod intervention_tests;

@@ -78,6 +78,21 @@ all-feature Clippy on the equipped build host before release:
 cargo clippy --manifest-path Cargo.toml --locked --all-targets --all-features -- -D warnings
 ```
 
+The source group also runs tests embedded in examples, retains a separate
+doctest pass, and executes the six download-free experiments listed in
+`SOURCE_EXPERIMENTS` in the runner. Their assertions check public workflows as
+well as compilation. Paper checkpoint preparation and measured reproductions
+remain explicit commands in [examples/README.md](examples/README.md); the source
+gate never downloads their artifacts. These additions do not refresh or waive
+the historical coverage, hardware, or checkpoint qualifications above.
+
+The [v0.2 interface validation](acceptance/measurements/v0_2-interface-validation-20260910-retry/README.md)
+passes its 29 recorded local steps, including 1,368 Rust tests, 3 doctests,
+371 Python tests, and ten example replays. It binds the final implementation
+and protocol inputs by hash; 32 Rust ignores and 14 Python skips remain explicit.
+This development record uses release builds because of the local debug-target
+symlink. It does not replace the coverage, hardware, or package release gates.
+
 The Rust 1.92 source run at `1aa5ee9` passed 827 unit tests, all ordinary
 integration tests, warning-denied Clippy/docs, feature-minimal builds, and 179
 Python tests. Its logs are in `target/release-gates/20260909T160336.140259Z/`.

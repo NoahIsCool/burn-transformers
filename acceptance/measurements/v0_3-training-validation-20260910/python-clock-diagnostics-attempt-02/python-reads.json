@@ -1,0 +1,16 @@
+{
+  "scope": "Actual read opens in this Python process beneath the repository; nested subprocesses additionally covered by the runner source/fixture inventory. Build outputs, models, git internals, bytecode caches and this validation output are excluded.",
+  "inputs_before_first_read": {
+    "examples/mechanistic/clock_and_pizza_training/analyze_tests.py": "444197e5be0ee0e6dc5470332c91e43c48fe0a475fbca35f90f6e18d7499604e",
+    "examples/mechanistic/clock_and_pizza_training/analyze.py": "54422d1b538e3e03235f113e0dae0d449c41bbd1959d76ac3a4a5d25410b03e7"
+  },
+  "inputs_after": {
+    "examples/mechanistic/clock_and_pizza_training/analyze_tests.py": "444197e5be0ee0e6dc5470332c91e43c48fe0a475fbca35f90f6e18d7499604e",
+    "examples/mechanistic/clock_and_pizza_training/analyze.py": "54422d1b538e3e03235f113e0dae0d449c41bbd1959d76ac3a4a5d25410b03e7"
+  },
+  "changed_inputs": [],
+  "tests_run": 2,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0
+}

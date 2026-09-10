@@ -1,0 +1,17 @@
+Pythia-160M-v0 / released Tuned Lens: 512 KL positions, 508 CE targets
+Stage       raw KL  tuned KL   raw CE  tuned CE  (nats/token)
+    0        10.434     3.590   13.541     6.711
+    1         6.961     3.056    9.908     6.096
+    2         6.326     2.827    9.283     5.875
+    3         5.627     2.456    8.634     5.510
+    4         5.020     2.268    7.844     5.250
+    5         4.763     2.039    7.609     5.005
+    6         4.005     1.781    6.837     4.733
+    7         3.081     1.379    5.951     4.351
+    8         2.725     1.226    5.567     4.154
+    9         1.863     0.770    4.661     3.690
+   10         1.470     0.543    4.325     3.497
+   11         0.725     0.241    3.666     3.222
+Final-model CE: 2.958838; maximum reference logit error: 0.000505
+Maximum metric error: 0.00000770; observe/identity errors: 0.00000000/0.00000000
+Wrote target/mechanistic/tuned_lens/predictions.html and rust_result.json

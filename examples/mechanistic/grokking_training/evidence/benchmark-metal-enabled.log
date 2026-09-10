@@ -1,0 +1,11 @@
+step 1: elapsed 0.997s
+step 2: elapsed 1.019s
+step 3: elapsed 1.033s
+step 4: elapsed 1.046s
+step 5: elapsed 1.059s
+step 6: elapsed 1.072s
+step 7: elapsed 1.085s
+step 8: elapsed 1.099s
+step 9: elapsed 1.111s
+step 10: elapsed 1.125s
+10 updates in 1.182s (0.1182s/update); records: target/mechanistic/grokking-benchmark-metal-enabled

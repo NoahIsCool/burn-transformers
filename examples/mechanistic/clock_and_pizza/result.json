@@ -1,0 +1,452 @@
+{
+  "experiment": "clock_and_pizza",
+  "scope": "Paper Table2 and distance irrelevance on released representative checkpoints; section3.3 accuracy discrepancy reported separately; no training",
+  "recorded_at_utc": "2026-09-10T16:41:49Z",
+  "command": "cargo run --release --locked --offline --example clock_and_pizza",
+  "measured_command": "target/release/examples/clock_and_pizza",
+  "backend": "Burn0.21 FlexF32",
+  "host": "macOS-15.7.9-arm64-arm-64bit",
+  "runtime_seconds_excluding_build": 1.802100166969467,
+  "peak_rss_bytes": 220184576,
+  "measurement_scope": "Two successful local executions; final replay shown above, initial measurement retained separately. Elapsed includes process startup and JSON output, excludes preparation and compilation. macOS child ru_maxrss bytes; not a portable benchmark.",
+  "input_pairs_per_case": 3481,
+  "logits_per_case": 205379,
+  "paper": {
+    "title": "The Clock and the Pizza: Two Stories in Mechanistic Explanation of Neural Networks",
+    "url": "https://arxiv.org/abs/2306.17844v2",
+    "venue": "NeurIPS 2023",
+    "repository": "https://github.com/fjzzq2002/pizza",
+    "commit": "4c7f2f31d215a51522b33f3ae2ef35f9c254ef6f",
+    "repository_license": "MIT",
+    "paper_license": "CC BY 4.0"
+  },
+  "expected": {
+    "pizza_table2": {
+      "first2": {
+        "clock_fve_percent": 75.41,
+        "pizza_fve_percent": 99.18
+      },
+      "circle2": {
+        "clock_fve_percent": 75.62,
+        "pizza_fve_percent": 99.18
+      },
+      "circle3": {
+        "clock_fve_percent": 75.38,
+        "pizza_fve_percent": 99.28
+      }
+    },
+    "fve_tolerance_percentage_points": 0.02,
+    "baseline_q": {
+      "pizza": 0.17,
+      "clock": 0.85
+    },
+    "q_absolute_tolerance": 0.01,
+    "rust_reference_logits_absolute_tolerance": 0.002,
+    "rust_reference_logits_relative_tolerance": 2e-05,
+    "rust_reference_metrics_absolute_tolerance": 2e-05
+  },
+  "observed": {
+    "clock": {
+      "attention_row_sum": 1.0,
+      "circle_fve_clock_pizza": [],
+      "normalized_pattern_logit_change": 0.0,
+      "observation_max_error": 0.0,
+      "random_control_scale": 4.425668239593506,
+      "random_control_seed": 1729,
+      "reference_max_error": 3.814697265625e-05,
+      "restoration_max_error": 0.0,
+      "rows": [
+        {
+          "accuracy": 1.0,
+          "distance_irrelevance_q": 0.8482599583738406,
+          "intervention": "baseline"
+        },
+        {
+          "accuracy": 0.1350186727951738,
+          "distance_irrelevance_q": 0.9946888895423304,
+          "intervention": "first2"
+        },
+        {
+          "accuracy": 0.1453605285837403,
+          "distance_irrelevance_q": 0.9994264423092181,
+          "intervention": "circle2"
+        },
+        {
+          "accuracy": 0.04395288710140764,
+          "distance_irrelevance_q": 0.9901186465623605,
+          "intervention": "circle3"
+        },
+        {
+          "accuracy": 1.0,
+          "distance_irrelevance_q": 0.5819712346629644,
+          "intervention": "first6"
+        },
+        {
+          "accuracy": 0.01694915254237288,
+          "distance_irrelevance_q": 0.9996888632945131,
+          "intervention": "random2 (matched energy)"
+        },
+        {
+          "accuracy": 0.19419706980752657,
+          "distance_irrelevance_q": 0.9993259689405405,
+          "intervention": "remove first circle"
+        },
+        {
+          "accuracy": 1.0,
+          "distance_irrelevance_q": 0.8482599583738406,
+          "intervention": "restore clean embeddings"
+        }
+      ]
+    },
+    "pizza": {
+      "attention_row_sum": 2.0,
+      "circle_fve_clock_pizza": [
+        [
+          0.7540791213750522,
+          0.9917885440023011
+        ],
+        [
+          0.7561610311617111,
+          0.9917723397032685
+        ],
+        [
+          0.7537671177934144,
+          0.9927799824205197
+        ]
+      ],
+      "normalized_pattern_logit_change": 25.010303497314453,
+      "observation_max_error": 0.0,
+      "random_control_scale": 4.010620594024658,
+      "random_control_seed": 1729,
+      "reference_max_error": 3.814697265625e-05,
+      "restoration_max_error": 0.0,
+      "rows": [
+        {
+          "accuracy": 1.0,
+          "distance_irrelevance_q": 0.1717364594313671,
+          "intervention": "baseline"
+        },
+        {
+          "accuracy": 0.34817581154840566,
+          "distance_irrelevance_q": 0.07198743582602563,
+          "intervention": "first2"
+        },
+        {
+          "accuracy": 0.3283539212869865,
+          "distance_irrelevance_q": 0.07308806377091995,
+          "intervention": "circle2"
+        },
+        {
+          "accuracy": 0.2599827635736857,
+          "distance_irrelevance_q": 0.06520348117498713,
+          "intervention": "circle3"
+        },
+        {
+          "accuracy": 0.9965527147371445,
+          "distance_irrelevance_q": 0.024734301127946827,
+          "intervention": "first6"
+        },
+        {
+          "accuracy": 0.021545532892846882,
+          "distance_irrelevance_q": 0.9040177610317716,
+          "intervention": "random2 (matched energy)"
+        },
+        {
+          "accuracy": 0.4906636024130997,
+          "distance_irrelevance_q": 0.055830836173641804,
+          "intervention": "remove first circle"
+        },
+        {
+          "accuracy": 1.0,
+          "distance_irrelevance_q": 0.1717364594313671,
+          "intervention": "restore clean embeddings"
+        },
+        {
+          "accuracy": 1.0,
+          "distance_irrelevance_q": 0.21025726115619717,
+          "intervention": "normalize J (control)"
+        }
+      ]
+    }
+  },
+  "prepared_artifacts": {
+    "pizza": {
+      "filename": "pizza.safetensors",
+      "bytes": 4975164,
+      "sha256": "04e19b083ceb116ba11a7b7202085ed2575307501ac4f8a59f6733f5368efe30",
+      "sources": {
+        "checkpoint": {
+          "filename": "model_p99zdpze5l.pt",
+          "bytes": 854465,
+          "sha256": "eb58a5a059f05f9f8a434f8f6d62405c6194dc353abf9843cb56382183820e25"
+        },
+        "config": {
+          "filename": "config_p99zdpze5l.json",
+          "bytes": 326,
+          "sha256": "92904f1cc48463c99098eac3657480122d6118707322f9b25840ec28847185df"
+        }
+      },
+      "author_config": {
+        "name": "modadd_59",
+        "funcs": "lambda x: (x[0]+x[1])%59",
+        "C": 59,
+        "n_heads": 4,
+        "d_model": 128,
+        "n_layers": 1,
+        "attention_dir": "casual",
+        "act_fn": "ReLU",
+        "epoch": 20000,
+        "batch_size": 3481,
+        "lr": 0.001,
+        "weight_decay": 2.0,
+        "frac": 0.8,
+        "attn_coeff": 0,
+        "runid": "p99zdpze5l",
+        "diff_vocab": 0,
+        "eqn_sign": 0,
+        "func": null
+      },
+      "original_training_seed": null,
+      "original_split_membership": null,
+      "measurements": {
+        "baseline": {
+          "accuracy": 1.0,
+          "correct_predictions": 3481,
+          "input_pairs": 3481,
+          "distance_irrelevance_q": 0.17173645844461008
+        },
+        "first2": {
+          "accuracy": 0.34817581154840566,
+          "correct_predictions": 1212,
+          "input_pairs": 3481,
+          "distance_irrelevance_q": 0.07198747931915987,
+          "frequency": 17,
+          "clock_fve": 0.7540791149050178,
+          "pizza_fve": 0.9917885383917444
+        },
+        "first6": {
+          "accuracy": 0.9965527147371445,
+          "correct_predictions": 3469,
+          "input_pairs": 3481,
+          "distance_irrelevance_q": 0.024734325646727624
+        },
+        "circle2": {
+          "accuracy": 0.3283539212869865,
+          "correct_predictions": 1143,
+          "input_pairs": 3481,
+          "distance_irrelevance_q": 0.07308805929409773,
+          "frequency": 3,
+          "clock_fve": 0.7561610302222601,
+          "pizza_fve": 0.9917723398333699
+        },
+        "circle3": {
+          "accuracy": 0.2599827635736857,
+          "correct_predictions": 905,
+          "input_pairs": 3481,
+          "distance_irrelevance_q": 0.0652035115592815,
+          "frequency": 44,
+          "clock_fve": 0.7537671161457443,
+          "pizza_fve": 0.9927799789127522
+        }
+      }
+    },
+    "clock": {
+      "filename": "clock.safetensors",
+      "bytes": 4975164,
+      "sha256": "ba65d92f3c50b71e45ff6d5e5b796d98865d423777cd5a1ea2efa2445ebc2fcf",
+      "sources": {
+        "checkpoint": {
+          "filename": "model_l8k1hzciux.pt",
+          "bytes": 854465,
+          "sha256": "9c45340a4ce253239687349f690a3687116ef14c35e64f77b69c5abdf6086929"
+        },
+        "config": {
+          "filename": "config_l8k1hzciux.json",
+          "bytes": 334,
+          "sha256": "11642799caf013e073872312fd425207c82252f0254d2e0012214c22e161b73c"
+        }
+      },
+      "author_config": {
+        "name": "modadd_59",
+        "funcs": "lambda x: (x[0]+x[1])%59",
+        "C": 59,
+        "n_heads": 4,
+        "d_model": 128,
+        "n_layers": 1,
+        "attention_dir": "casual",
+        "act_fn": "ReLU",
+        "epoch": 20000,
+        "batch_size": 3481,
+        "lr": 0.001,
+        "weight_decay": 2.0,
+        "frac": 0.8,
+        "attn_coeff": 1,
+        "runid": "l8k1hzciux",
+        "diff_vocab": false,
+        "eqn_sign": false,
+        "func": null
+      },
+      "original_training_seed": null,
+      "original_split_membership": null,
+      "measurements": {
+        "baseline": {
+          "accuracy": 1.0,
+          "correct_predictions": 3481,
+          "input_pairs": 3481,
+          "distance_irrelevance_q": 0.8482599489778151
+        },
+        "first2": {
+          "accuracy": 0.1350186727951738,
+          "correct_predictions": 470,
+          "input_pairs": 3481,
+          "distance_irrelevance_q": 0.9946888913028235
+        },
+        "first6": {
+          "accuracy": 1.0,
+          "correct_predictions": 3481,
+          "input_pairs": 3481,
+          "distance_irrelevance_q": 0.5819713095772563
+        },
+        "circle2": {
+          "accuracy": 0.1453605285837403,
+          "correct_predictions": 506,
+          "input_pairs": 3481,
+          "distance_irrelevance_q": 0.9994264424468319
+        },
+        "circle3": {
+          "accuracy": 0.04395288710140764,
+          "correct_predictions": 153,
+          "input_pairs": 3481,
+          "distance_irrelevance_q": 0.9901186466762099
+        }
+      }
+    }
+  },
+  "accuracy_diagnostics": {
+    "leading_centered_singular_values": [
+      3.2043540477752686,
+      3.201395034790039,
+      3.1495885848999023,
+      3.1431093215942383,
+      2.9368460178375244,
+      2.9297244548797607,
+      1.9123328924179077,
+      1.898449420928955
+    ],
+    "diagnostics": {
+      "centered_pca_with_mean_first2": {
+        "accuracy": 0.34817581154840566,
+        "correct_predictions": 1212,
+        "input_pairs": 3481,
+        "distance_irrelevance_q": 0.07198747931915987
+      },
+      "centered_pca_without_mean_first2": {
+        "accuracy": 0.3378339557598391,
+        "correct_predictions": 1176,
+        "input_pairs": 3481,
+        "distance_irrelevance_q": 0.07438072628080546
+      },
+      "uncentered_svd_first2": {
+        "accuracy": 0.33582303935650676,
+        "correct_predictions": 1169,
+        "input_pairs": 3481,
+        "distance_irrelevance_q": 0.07436401765072556
+      },
+      "float64_centered_pca_with_mean_first2": {
+        "accuracy": 0.34817581154840566,
+        "correct_predictions": 1212,
+        "input_pairs": 3481,
+        "distance_irrelevance_q": 0.07198745902877002
+      },
+      "centered_pca_with_mean_first6": {
+        "accuracy": 0.9965527147371445,
+        "correct_predictions": 3469,
+        "input_pairs": 3481,
+        "distance_irrelevance_q": 0.024734325646727624
+      },
+      "centered_pca_without_mean_first6": {
+        "accuracy": 0.9945417983338122,
+        "correct_predictions": 3462,
+        "input_pairs": 3481,
+        "distance_irrelevance_q": 0.026945899556624752
+      },
+      "uncentered_svd_first6": {
+        "accuracy": 0.9945417983338122,
+        "correct_predictions": 3462,
+        "input_pairs": 3481,
+        "distance_irrelevance_q": 0.026011990336066843
+      },
+      "float64_centered_pca_with_mean_first6": {
+        "accuracy": 0.9965527147371445,
+        "correct_predictions": 3469,
+        "input_pairs": 3481,
+        "distance_irrelevance_q": 0.024734327156625106
+      }
+    },
+    "author_einsum_parity": {
+      "pizza": {
+        "full_pair_max_absolute_error": 0.0
+      },
+      "clock": {
+        "full_pair_max_absolute_error": 0.0
+      }
+    }
+  },
+  "source_sha256": {
+    "examples/clock_and_pizza.rs": "948c69dc784bfaf40263dc40e5e7a37e891b480d2d65df115f9be94e4997af15",
+    "examples/mechanistic/clock_and_pizza/measure.rs": "8587c2bb0ebb462a00b166743e9afd7caf46f8393f140e2fe9b7714517874a8b",
+    "examples/mechanistic/clock_and_pizza/model.rs": "5fa4a9f3021874d47885b1e6868403596be0f242e7f3128c8dff0a78b2358a4a",
+    "examples/mechanistic/clock_and_pizza/plot.py": "cda312515c13e2289a0a27f285896b04bf07cbbc4c1e139600b90551f532c950",
+    "examples/mechanistic/clock_and_pizza/prepare.py": "dac8f7aeb8e778280aea138d340f8060ea0e6c9d0b4fb55089ce6d066750b2c1",
+    "examples/mechanistic/clock_and_pizza/reference.py": "e65e2bcf092e4cacebc4dc4df6d444662bc4f5298be51501ae807060ea087d06",
+    "examples/mechanistic/clock_and_pizza/manifest.json": "85548c8e46cd0fa58ffb84cc7dd4b2b3eb82ed02bfedcb2d5e0491395de1986c",
+    "src/attention.rs": "4da8ab771ced5b32e85ca6cea0e1862ce9c1cb57315437620744218739c12667",
+    "src/intervention.rs": "920b9f77d7f565cd7194f45765638db65e731cbd0f93ab577e4d5c705ea95d05",
+    "Cargo.lock": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d"
+  },
+  "rust_corrupt_artifact_rejected": true,
+  "exit_code": 0,
+  "stdout": "\npizza: attention rate alpha=0, all 3481 input pairs\nembedding intervention          accuracy    distance q\nbaseline                       100.0000%      0.171736\nfirst2                          34.8176%      0.071987\ncircle2                         32.8354%      0.073088\ncircle3                         25.9983%      0.065203\nfirst6                          99.6553%      0.024734\nrandom2 (matched energy)         2.1546%      0.904018\nremove first circle             49.0664%      0.055831\nrestore clean embeddings       100.0000%      0.171736\nnormalize J (control)          100.0000%      0.210257\nTable 2 circle 1: Clock FVE 75.4079%, Pizza FVE 99.1789%\nTable 2 circle 2: Clock FVE 75.6161%, Pizza FVE 99.1772%\nTable 2 circle 3: Clock FVE 75.3767%, Pizza FVE 99.2780%\nreference max error 3.81e-5; observation 0.00e0; restoration 0.00e0\n\nclock: attention rate alpha=1, all 3481 input pairs\nembedding intervention          accuracy    distance q\nbaseline                       100.0000%      0.848260\nfirst2                          13.5019%      0.994689\ncircle2                         14.5361%      0.999426\ncircle3                          4.3953%      0.990119\nfirst6                         100.0000%      0.581971\nrandom2 (matched energy)         1.6949%      0.999689\nremove first circle             19.4197%      0.999326\nrestore clean embeddings       100.0000%      0.848260\nreference max error 3.81e-5; observation 0.00e0; restoration 0.00e0\n\nAccuracy caveat: the public Pizza checkpoint's first six PCs reproduce the paper's later 99.7%, not section 3.3's 91.4%; see the protocol note.\n",
+  "stderr": "",
+  "initial_measurement": {
+    "recorded_at_utc": "2026-09-10T16:31:14Z",
+    "runtime_seconds_excluding_build": 1.922962374985218,
+    "peak_rss_bytes": 236650496,
+    "stdout_matches_final_replay": true
+  },
+  "repository_revision": "cc56333b4bd35083013f85406defb483d9a737aa",
+  "repository_has_uncommitted_changes": true,
+  "figure_sha256": {
+    "embedding_circles.png": "5f1ad15cdf6e65f5332cffdea99f2e3a96dc7f94a02f419f156451b907870cfa",
+    "embedding_circles.svg": "a8934828295f5bf4f5b0afc0a1cd622c443b41c3a4f9feb4c5514a51a8a39251"
+  },
+  "plotting_library": "Matplotlib3.11.1",
+  "validation": {
+    "commands_passed": [
+      "python3 examples/mechanistic/clock_and_pizza/prepare.py",
+      "python3 examples/mechanistic/clock_and_pizza/prepare.py --offline",
+      "cargo build --release --locked --offline --example clock_and_pizza",
+      "cargo clippy --release --locked --offline --example clock_and_pizza -- -D warnings",
+      "rustfmt --edition 2024 --check examples/clock_and_pizza.rs examples/mechanistic/clock_and_pizza/model.rs examples/mechanistic/clock_and_pizza/measure.rs",
+      "python3 -m py_compile examples/mechanistic/clock_and_pizza/prepare.py examples/mechanistic/clock_and_pizza/reference.py examples/mechanistic/clock_and_pizza/plot.py"
+    ],
+    "manual_preparation_checks_passed": [
+      "missing offline source rejected",
+      "corrupt pinned-source SHA rejected",
+      "corrupt derived artifact SHA rejected",
+      "incomplete output publication rejected",
+      "interrupted atomic replace cleans temporary file",
+      "wrong parameter dtype rejected",
+      "wrong parameter shape rejected",
+      "NaN parameters rejected",
+      "unexpected tensor name rejected",
+      "original cache remains valid after isolated checks"
+    ],
+    "literal_author_einsum_reference_max_error": {
+      "pizza": 0.0,
+      "clock": 0.0
+    },
+    "rust_corrupt_artifact_rejected": true,
+    "figure_visually_reviewed": true
+  }
+}

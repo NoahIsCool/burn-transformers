@@ -1,0 +1,33 @@
+{
+  "task": "Synthetic T5 adjective sentiment",
+  "seed": 73,
+  "learning_rate": 0.01,
+  "optimizer": "Adam",
+  "weight_decay": 0.0,
+  "steps": 100,
+  "train_examples": 24,
+  "held_out_examples": 8,
+  "initial": {
+    "loss": 0.8370721340179443,
+    "accuracy": 0.25
+  },
+  "final_scores": {
+    "loss": 0.0002889753086492419,
+    "accuracy": 1.0
+  },
+  "final_train_scores": {
+    "loss": 0.00024260598002001643,
+    "accuracy": 1.0
+  },
+  "parameter_changes": {
+    "embedding": 0.16391277313232422,
+    "inserted adapter": 0.18203505873680115,
+    "layer 0 attention": 0.18287093937397003,
+    "layer 1 MLP": 0.1795833259820938,
+    "layer 1 attention": 0.17237300425767899,
+    "layer 2 attention": 0.1533769592642784,
+    "task head": 0.2444663643836975
+  },
+  "reload_logit_error": 0.0,
+  "seconds": 0.134066833
+}

@@ -1,0 +1,14 @@
+{
+  "command": [
+    "/Users/nover/repos/transformers/target/release/examples/train_qwen_adapter",
+    "--model-dir",
+    "models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "--steps",
+    "40"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "exit_code": 0,
+  "wall_seconds": 15.474910041957628,
+  "stdout": "Loaded two frozen blocks from 594783424 source bytes.\nTask loss: 2.306121 -> -0.000000; synthetic training accuracy: 100.0%\nFrozen backbone unchanged; adapter/head updated; restored Adam step matched exactly.\nRecords and report: /var/folders/hh/541wrb613833x7hpvqymn_rc0000gn/T/qwen-adapter-training-LUYBlk\n",
+  "stderr": ""
+}

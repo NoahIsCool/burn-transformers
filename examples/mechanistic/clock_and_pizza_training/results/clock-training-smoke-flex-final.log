@@ -1,0 +1,2 @@
+step     0: train=0.0187 test=0.0172 CE=4.150685 q=0.9922 elapsed=0.1s
+step     5: train=0.0208 test=0.0158 CE=4.155172 q=0.9914 elapsed=0.1s

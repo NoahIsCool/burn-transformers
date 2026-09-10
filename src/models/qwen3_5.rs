@@ -6,6 +6,11 @@
 //! causal attention. Unlike classic multi-head attention, `hidden_size` need not
 //! equal `num_attention_heads * head_dim`: projections map between the residual
 //! stream and an independently sized attention space.
+//!
+//! The runtime applies no stochastic attention dropout, including with an
+//! autodiff backend. `attention_dropout` is checkpoint metadata rather than an
+//! execution-mode switch. Compose stochastic regularization explicitly when
+//! optimizing floating parameters or inserted modules.
 
 pub mod model;
 
@@ -24,11 +29,15 @@ use super::config::{
 
 mod checkpoint;
 mod load;
+mod recipe;
 
 pub use checkpoint::{
     Qwen3_5CheckpointContract, Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource,
 };
 pub use load::Qwen3_5LoadError;
+pub use recipe::{
+    LoadedQwen3_5Backbone, Qwen3_5BackboneRecipe, Qwen3_5LayerRecipe, Qwen3_5RecipeLoadOptions,
+};
 
 /// Per-layer mixer selected by the serialized Qwen schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

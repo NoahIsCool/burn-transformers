@@ -1,0 +1,32 @@
+{
+  "task": "Bidirectional MLA category counting",
+  "seed": 101,
+  "learning_rate": 0.003,
+  "optimizer": "AdamW",
+  "weight_decay": 0.1,
+  "steps": 600,
+  "train_examples": 51,
+  "held_out_examples": 13,
+  "initial": {
+    "loss": 1.1151565313339233,
+    "accuracy": 0.46153846153846156
+  },
+  "final_scores": {
+    "loss": 0.001542095560580492,
+    "accuracy": 1.0
+  },
+  "final_train_scores": {
+    "loss": 0.0014593751402571797,
+    "accuracy": 1.0
+  },
+  "parameter_changes": {
+    "cross MLA": 0.23322457075119019,
+    "decoder MLA": 0.25095991790294647,
+    "embedding": 0.5175385475158691,
+    "encoder MLA": 0.3300978038460016,
+    "latent adapter": 0.2877647653222084,
+    "task head": 0.5669387578964233
+  },
+  "reload_logit_error": 0.0,
+  "seconds": 0.725000334
+}

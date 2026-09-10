@@ -1,0 +1,30 @@
+
+pizza: attention rate alpha=0, all 3481 input pairs
+embedding intervention          accuracy    distance q
+baseline                       100.0000%      0.171736
+first2                          34.8176%      0.071987
+circle2                         32.8354%      0.073088
+circle3                         25.9983%      0.065203
+first6                          99.6553%      0.024734
+random2 (matched energy)         2.1546%      0.904018
+remove first circle             49.0664%      0.055831
+restore clean embeddings       100.0000%      0.171736
+normalize J (control)          100.0000%      0.210257
+Table 2 circle 1: Clock FVE 75.4079%, Pizza FVE 99.1789%
+Table 2 circle 2: Clock FVE 75.6161%, Pizza FVE 99.1772%
+Table 2 circle 3: Clock FVE 75.3767%, Pizza FVE 99.2780%
+reference max error 3.81e-5; observation 0.00e0; restoration 0.00e0
+
+clock: attention rate alpha=1, all 3481 input pairs
+embedding intervention          accuracy    distance q
+baseline                       100.0000%      0.848260
+first2                          13.5019%      0.994689
+circle2                         14.5361%      0.999426
+circle3                          4.3953%      0.990119
+first6                         100.0000%      0.581971
+random2 (matched energy)         1.6949%      0.999689
+remove first circle             19.4197%      0.999326
+restore clean embeddings       100.0000%      0.848260
+reference max error 3.81e-5; observation 0.00e0; restoration 0.00e0
+
+Accuracy caveat: the public Pizza checkpoint's first six PCs reproduce the paper's later 99.7%, not section 3.3's 91.4%; see the protocol note.

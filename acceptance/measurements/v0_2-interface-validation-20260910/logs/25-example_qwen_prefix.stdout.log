@@ -1,0 +1,3 @@
+Initializing 2 random Qwen blocks; no checkpoint is read.
+Captured last-block neurons: [1, 1, 12]
+Untrained two-class logits: [0.15602939, 0.20307882]

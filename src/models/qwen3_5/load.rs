@@ -19,7 +19,7 @@ use crate::{
     normalization::RmsNorm,
 };
 
-use super::{Qwen3_5DecoderLayer, Qwen3_5ForCausalLm, Qwen3_5Mtp};
+use super::{Qwen3_5DecoderLayer, Qwen3_5ForCausalLm, Qwen3_5Mtp, Qwen3_5TextModel};
 
 /// Architecture-specific failure while applying a validated Qwen load plan.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -66,6 +66,34 @@ pub enum Qwen3_5LoadError {
         /// Human-readable contract violation.
         reason: String,
     },
+}
+
+impl<B: Backend> TensorSink for Qwen3_5TextModel<B> {
+    type Error = Qwen3_5LoadError;
+
+    fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
+        match target {
+            "model.embed_tokens.weight" => install(target, &mut self.embed_tokens.weight, data),
+            "model.norm.weight" => install_norm(target, &mut self.norm, data),
+            _ => {
+                let (index, suffix) = parse_layer_target(target)?;
+                let count = self.layers.len();
+                let layer =
+                    self.layers
+                        .get_mut(index)
+                        .ok_or_else(|| Qwen3_5LoadError::InvalidLayer {
+                            target: target.into(),
+                            reason: format!("index {index} is outside 0..{count}"),
+                        })?;
+                install_layer_tensor(layer, target, suffix, data)
+            }
+        }
+    }
+
+    fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error> {
+        Err(Qwen3_5LoadError::InvalidAlias { target: target.into(), source_target: source_target.into(),
+            reason: "the headless backbone stores only the embedding owner; vocabulary views are explicit execution operations".into() })
+    }
 }
 
 impl<B: Backend> TensorSink for Qwen3_5ForCausalLm<B> {

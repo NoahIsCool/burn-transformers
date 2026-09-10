@@ -943,6 +943,11 @@ fn cache_layout<B: Backend>(
     model: &Qwen3_5ForCausalLm<B>,
     staging_capacity: usize,
 ) -> Result<Qwen3_5CacheLayout> {
+    if !model.model.supports_family_cache {
+        return Err(Error::BackendCapability(
+            "editable Qwen recipe backbones use stateless execution; cached family decoding requires Qwen3_5ForCausalLm::init with an unchanged family configuration".into(),
+        ));
+    }
     let mut full_layers = 0usize;
     let mut delta_layers = 0usize;
     let schedule = model

@@ -1,0 +1,222 @@
+{
+  "artifacts": {
+    "author_circuit_sha256": "0d83b82ac8f40a5770757b3364ee99ad5cc3d32474a38366646ed746f9c83d23",
+    "author_repository": "https://github.com/hannamw/gpt2-greater-than",
+    "author_revision": "0e6dc8c2da87f7d2befeb2a4dd432fae404ea35a",
+    "author_tensor_archive": {
+      "bytes": 779065832,
+      "sha256": "d66c9efcf7c3edcd1a4344d3e21374309d21bc8a2b617d36bc71bab6d42590eb",
+      "url": "https://rrserve.s3.us-west-2.amazonaws.com/remix/remix_tensors.zip?versionId=3llqs2FIJ7iAYSmEON.TR62nOCOODM4U"
+    },
+    "checkpoint": {
+      "bytes": 548105171,
+      "sha256": "248dfc3911869ec493c76e65bf2fcf7f615828b0254c12b473182f0f81d3a707"
+    },
+    "config_sha256": "0daed7749b4f02b8f76240d5444551d7b08712dab4d0adb8239c56ba823bb7b4",
+    "exact_reference_json_sha256": "d15f03f36d52b3a495010ad194c5bec9abca46f27c2c3047a50c55d95a2b8999",
+    "hf_repository": "openai-community/gpt2",
+    "hf_revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e",
+    "standard_reference_json_sha256": "ef0c90030a942bab0cf4378c466dc2edbcb9201bcc8a4004b29d0ecbd5b77141",
+    "tokenizer_sha256": "8414cab924d8b9b33013f0d221c5862f365ee9be39c5c2bfae8a5a9e970478a6"
+  },
+  "author_weights_equivalence": {
+    "bitwise_equal_entries": 197,
+    "full_report_sha256": "beb21a5cc0f41440e1ea941fa1bacdf772323ac067045ea4b80ec073ea58c003",
+    "maximum_absolute_error": 0.0,
+    "original_array_entries": 197,
+    "original_rust_circuit_execution_compared": false,
+    "transforms": "Explicit native Conv1D transposes and per-head views; tied output aliases token embedding"
+  },
+  "checks": [
+    {
+      "command": "GPT2_CHECKPOINT=/local/gpt2 GPT2_REFERENCE=/tmp/gpt2-reference-exact.json cargo test --release --offline --locked --features autodiff models::gpt2 --lib -- --include-ignored --nocapture",
+      "failed": 0,
+      "ignored": 0,
+      "passed": 13
+    },
+    {
+      "command": "GPT2_CHECKPOINT=/local/gpt2 GPT2_REFERENCE=/tmp/gpt2-reference.json <same test binary> models::gpt2::model::tests::pretrained_gpt2_matches_pytorch_last_logits_and_late_mlp_outputs --ignored --nocapture",
+      "failed": 0,
+      "passed": 1
+    },
+    {
+      "command": "cargo test --release --offline --locked --doc models::gpt2",
+      "failed": 0,
+      "passed": 1
+    },
+    {
+      "command": "python3 -m py_compile src/models/gpt2/prepare_reference.py src/models/gpt2/compare_author_weights.py",
+      "passed": true
+    }
+  ],
+  "environment": {
+    "platform": "macOS-15.7.9-arm64-arm-64bit",
+    "reference": {
+      "torch": "2.10.0",
+      "transformers": "5.2.0"
+    },
+    "reference_settings": {
+      "attention_implementation": "eager",
+      "cache": false,
+      "dropout": false,
+      "dtype": "float32",
+      "evaluation": true,
+      "torch_cpu_threads": 1
+    },
+    "rust_backend": "Burn 0.21 Flex F32 CPU",
+    "rust_test_profile": "release, offline, locked, autodiff"
+  },
+  "gelu_graph_difference_on_these_inputs": {
+    "comparison": "PyTorch exact versus tanh GELU with identical weights; F64 softmax of recorded F32 logits",
+    "maximum_logit_absolute_difference": 0.0499725341796875,
+    "maximum_probability_absolute_difference": 0.00011498188259446984
+  },
+  "input_ids": [
+    [
+      50256,
+      383,
+      1175,
+      15436,
+      422,
+      262,
+      614,
+      1596,
+      2624,
+      284,
+      262,
+      614,
+      1596
+    ],
+    [
+      50256,
+      383,
+      1175,
+      15436,
+      422,
+      262,
+      614,
+      1596,
+      486,
+      284,
+      262,
+      614,
+      1596
+    ]
+  ],
+  "limitations": [
+    "Only Flex/F32 CPU execution is measured.",
+    "No training, quantized GPT-2 import, decode cache, or Greater-Than paper aggregate has been validated.",
+    "These two numerical development prompts are separate from the proposed held-out Greater-Than fixture.",
+    "Source hashes identify this GPT-2 prerequisite snapshot; repository-wide release evidence must account for concurrent shared-module changes."
+  ],
+  "measured_elements": {
+    "logits": 100514,
+    "mlp_outputs": {
+      "layers": [
+        8,
+        9,
+        10,
+        11
+      ],
+      "per_layer": 19968
+    }
+  },
+  "measurements": {
+    "gelu": {
+      "late_mlp_errors": [
+        {
+          "layer": 8,
+          "max_absolute_error": 3.719329833984375e-05
+        },
+        {
+          "layer": 9,
+          "max_absolute_error": 8.249282836914062e-05
+        },
+        {
+          "layer": 10,
+          "max_absolute_error": 0.0001277923583984375
+        },
+        {
+          "layer": 11,
+          "max_absolute_error": 0.000457763671875
+        }
+      ],
+      "late_mlps_match": true,
+      "logits_and_mlp_absolute_tolerance": 0.0001,
+      "logits_and_mlp_relative_tolerance": 1e-05,
+      "logits_match": true,
+      "maximum_logit_absolute_error": 0.0003509521484375,
+      "maximum_probability_absolute_error": 1.0831468302559266e-05,
+      "probabilities_match": true,
+      "probability_absolute_tolerance": 1e-05,
+      "probability_relative_tolerance": 0.0001
+    },
+    "gelu_new": {
+      "late_mlp_errors": [
+        {
+          "layer": 8,
+          "max_absolute_error": 5.054473876953125e-05
+        },
+        {
+          "layer": 9,
+          "max_absolute_error": 5.91278076171875e-05
+        },
+        {
+          "layer": 10,
+          "max_absolute_error": 0.0001316070556640625
+        },
+        {
+          "layer": 11,
+          "max_absolute_error": 0.000335693359375
+        }
+      ],
+      "late_mlps_match": true,
+      "logits_and_mlp_absolute_tolerance": 0.0001,
+      "logits_and_mlp_relative_tolerance": 1e-05,
+      "logits_match": true,
+      "maximum_logit_absolute_error": 0.0004425048828125,
+      "maximum_probability_absolute_error": 6.4330804459694635e-06,
+      "probabilities_match": true,
+      "probability_absolute_tolerance": 1e-05,
+      "probability_relative_tolerance": 0.0001
+    }
+  },
+  "recorded_at_utc": "2026-09-10T17:04:02.607776+00:00",
+  "repository_base_commit": "cc56333b4bd35083013f85406defb483d9a737aa",
+  "rust_test_binary_sha256": "240d41d6babc39b8312fca6c5ab3309ccdbd90e670ce6e11a16def237b1f1e98",
+  "schema_version": 1,
+  "scope": "GPT-2 public graph numerical prerequisite; two development prompts; not Greater-Than held-out study or original rust-circuit execution parity",
+  "source_file_sha256": {
+    "src/models/gpt2.rs": "d3d03c7e94e2789da266ef604b79814d03aa447b3fed05f7e10635cda26c8518",
+    "src/models/gpt2/checkpoint.rs": "521eeb88e7dd0a0d141f416f742c584f63fe2c65d2eaf279df545e2d35098322",
+    "src/models/gpt2/compare_author_weights.py": "40cb3bd9132aeb7e646a1a18871fdc60dc9e659386193d7e302ade8ed61550ea",
+    "src/models/gpt2/fixtures/tiny_reference.json": "9a7c097c5e06c4855d53aa30de49fe0f8938296afc254644e71f909a787e48de",
+    "src/models/gpt2/model.rs": "19f08845511a621d85a38874c048be12c783abc3ea06dd25711107cd4f3e0116",
+    "src/models/gpt2/model_tests.rs": "00229334426ed3cb8dc3e13dd3f7b4944eb02ba9ca70311ebbe731f4373ddccf",
+    "src/models/gpt2/prepare_reference.py": "58492b879c711857e41e7e694b80bb0c1752946e515b2fa5e3667b6b98cf39cd"
+  },
+  "tolerance_provenance": {
+    "development_history": [
+      {
+        "check": "all final logits absolute error <= 3e-4",
+        "graph": "gelu_new",
+        "observed_maximum_absolute_error": 0.0004425048828125,
+        "status": "failed"
+      },
+      {
+        "investigation": "The reference logits have a large common offset, approximately -269 to -186. Added full-vocabulary probability comparisons alongside mixed absolute/relative raw-tensor comparisons."
+      },
+      {
+        "check": "probability absolute error <= 5e-6",
+        "gelu_maximum_error": 1.0831468302559266e-05,
+        "gelu_new_maximum_error": 6.4330804459694635e-06,
+        "status": "failed"
+      },
+      {
+        "revision": "Final mixed tolerances in the measurement objects were chosen after these development failures; retain raw measurements and independently predeclare later study thresholds."
+      }
+    ],
+    "predeclared_scientific_acceptance": false
+  },
+  "working_tree_changes_present": true
+}

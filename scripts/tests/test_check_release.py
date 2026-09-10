@@ -460,6 +460,46 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual(command.count("--ignore"), 2)
         self.assertIn("--deny", command)
 
+    def test_source_experiments_run_without_checkpoint_or_network_preparation(self):
+        """Compilation alone cannot validate the public experiments' assertions."""
+
+        commands = GATES.command_plan("source", Path("/tmp/output"), "stable", "1.92.0", True)
+        crate_tests = [command for command in commands
+                       if command[:3] == ["cargo", "+stable", "test"]
+                       and str(GATES.CRATE / "Cargo.toml") in command]
+        self.assertTrue(any("--all-targets" in command for command in crate_tests))
+        self.assertTrue(any("--doc" in command for command in crate_tests))
+        runs = [command for command in commands if command[:3] == ["cargo", "+stable", "run"]]
+        names = {command[command.index("--example") + 1] for command in runs}
+        self.assertEqual(names, {
+            "activation_workbench", "attention_head_attribution", "custom_composition",
+            "t5_classifier", "mla_encoder_decoder", "qwen_prefix", "burn_training",
+        })
+        for command in runs:
+            self.assertIn("--release", command)
+            self.assertIn("--offline", command)
+            self.assertIn("--locked", command)
+            self.assertIn("flex", command[command.index("--features") + 1].split(","))
+            self.assertIn("train", command[command.index("--features") + 1].split(","))
+            if command[command.index("--example") + 1] == "qwen_prefix":
+                self.assertEqual(command[-2:], ["--", "--random"])
+            if command[command.index("--example") + 1] == "burn_training":
+                self.assertEqual(command[-2:], ["--", "/tmp/output/burn_training"])
+        self.assertFalse(any("prepare.py" in argument for command in commands for argument in command))
+
+    def test_source_checks_compile_native_training_without_changing_coverage_profile(self):
+        """The gated Learner example must not disappear behind an inactive cfg."""
+
+        commands = GATES.command_plan("source", Path("/tmp/output"), "stable", "1.92.0", True)
+        selected = [command for command in commands
+                    if command[0] == "cargo" and str(GATES.CRATE / "Cargo.toml") in command
+                    and command[2] in {"clippy", "test", "doc"}]
+        self.assertEqual({command[2] for command in selected}, {"clippy", "test", "doc"})
+        for command in selected:
+            self.assertIn("train", command[command.index("--features") + 1].split(","))
+        coverage = GATES.command_plan("coverage", Path("/tmp/output"), "stable", "1.92.0", True)[0]
+        self.assertEqual(coverage[coverage.index("--features") + 1], GATES.FEATURES)
+
     def test_standalone_classifier_has_separate_source_and_msrv_checks(self):
         """The dev-only parser has its own lockfile, tests and warning-denied lint."""
 

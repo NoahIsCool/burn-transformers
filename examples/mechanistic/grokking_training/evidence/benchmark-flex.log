@@ -1,0 +1,14 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 12.27s
+     Running `target/release/examples/grokking_train --steps 10 --benchmark --output target/mechanistic/grokking-benchmark-flex`
+step 1: elapsed 0.147s
+step 2: elapsed 0.291s
+step 3: elapsed 0.433s
+step 4: elapsed 0.578s
+step 5: elapsed 0.723s
+step 6: elapsed 0.868s
+step 7: elapsed 1.007s
+step 8: elapsed 1.151s
+step 9: elapsed 1.302s
+step 10: elapsed 1.458s
+10 updates in 1.459s (0.1459s/update); records: target/mechanistic/grokking-benchmark-flex

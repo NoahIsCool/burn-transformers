@@ -93,6 +93,8 @@ pub enum ParameterInstallError {
         /// Human-readable Burn dtype name.
         dtype: String,
     },
+    /// Burn 0.21 cannot construct or differentiate packed tensors on autodiff.
+    QuantizedAutodiff,
     /// Reloading existing QFloat storage cannot inspect its saved shape cheaply.
     ///
     /// The save mapper may dequantize the complete weight, and Burn exposes no
@@ -132,6 +134,10 @@ impl fmt::Display for ParameterInstallError {
             Self::UnsupportedStorage { dtype } => {
                 write!(formatter, "backend cannot store checkpoint dtype {dtype}")
             }
+            Self::QuantizedAutodiff => write!(
+                formatter,
+                "Burn 0.21 autodiff cannot load or differentiate packed Q4/Q8 weights, including frozen weights; explicitly dequantize on the inner backend before loading floating data"
+            ),
             Self::InitializedQuantized => write!(
                 formatter,
                 "reloading an initialized QFloat parameter is unsupported without saved-shape metadata; load checkpoint data into a fresh lazy parameter"
@@ -175,6 +181,10 @@ impl Error for ParameterInstallError {}
 /// inverse nor a way to identify unmapped parameters. The guard therefore also
 /// covers unmapped initialized QFloat values. This narrow unsupported reload
 /// boundary does not restrict initial lazy packed loading or quantized inference.
+/// Packed loading into an autodiff backend is rejected separately with
+/// [`ParameterInstallError::QuantizedAutodiff`]. Burn 0.21 does not implement its
+/// quantized tensor constructor or input gradients through frozen packed
+/// weights. Explicitly dequantize before loading floating data for training.
 ///
 /// The helper constructs the tensor at its checkpoint dtype and
 /// delegates to Burn's ordinary record-loading path so device, gradient, and
@@ -201,6 +211,9 @@ pub fn install_float_parameter<B: Backend, const D: usize>(
             expected: D,
             actual: actual.len(),
         });
+    }
+    if matches!(data.dtype, DType::QFloat(_)) && B::ad_enabled(&parameter.lazy_device()) {
+        return Err(ParameterInstallError::QuantizedAutodiff);
     }
     let initialized = parameter.is_initialized();
     if initialized && matches!(parameter.val().dtype(), DType::QFloat(_)) {

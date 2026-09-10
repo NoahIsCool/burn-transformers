@@ -1,0 +1,411 @@
+use burn::{
+    backend::Flex,
+    module::Module,
+    nn::{Linear, LinearConfig, LinearLayout},
+    tensor::{DType, Tensor},
+};
+
+use super::*;
+
+type B = Flex<f32, i32>;
+
+#[derive(Module, Debug)]
+struct Block<B: Backend> {
+    weight: Param<Tensor<B, 2>>,
+    bias: Param<Tensor<B, 1>>,
+}
+
+#[derive(Module, Debug)]
+struct Experiment<B: Backend> {
+    encoder: Vec<Block<B>>,
+    head: Block<B>,
+}
+
+fn block(width: usize, value: f32) -> Block<B> {
+    let device = Default::default();
+    Block {
+        weight: Param::from_tensor(Tensor::full([2, width], value, &device)),
+        bias: Param::from_tensor(Tensor::full([width], value, &device)),
+    }
+}
+
+fn experiment(widths: &[usize], value: f32) -> Experiment<B> {
+    Experiment {
+        encoder: widths.iter().map(|&width| block(width, value)).collect(),
+        head: block(1, value),
+    }
+}
+
+fn values<const D: usize>(tensor: Tensor<B, D>) -> Vec<f32> {
+    tensor.into_data().to_vec().unwrap()
+}
+
+#[test]
+fn prefix_transfer_reports_reused_omitted_and_new_parameters() {
+    let source = experiment(&[3], 7.);
+    let target = experiment(&[3, 4], 2.);
+    let (actual, report) = TransferPlan::new()
+        .copy_prefix("encoder", "encoder")
+        .apply(&source, &target)
+        .unwrap();
+    assert_eq!(values(actual.encoder[0].weight.val()), vec![7.; 6]);
+    assert_eq!(values(actual.encoder[1].weight.val()), vec![2.; 8]);
+    assert_eq!(values(actual.head.weight.val()), vec![2.; 2]);
+    assert_eq!(values(target.encoder[0].weight.val()), vec![2.; 6]);
+    assert_eq!(report.reused.len(), 2);
+    assert_eq!(report.omitted.len(), 2);
+    assert_eq!(report.newly_initialized.len(), 4);
+    assert_eq!(report.reused[1].source, "encoder.0.weight");
+    assert_eq!(report.reused[1].target, "encoder.0.weight");
+    assert_eq!(report.reused[1].shape, [2, 3]);
+    assert!(report.newly_initialized[0].reason.contains("no source"));
+    assert_eq!(parameters(&actual).unwrap()[1].name, "encoder.0.weight");
+}
+
+#[derive(Module, Debug)]
+struct LazySource<B: Backend> {
+    selected: Linear<B>,
+    omitted: Linear<B>,
+}
+
+#[test]
+fn unselected_source_parameters_are_not_initialized_or_read() {
+    let device = Default::default();
+    let source = LazySource {
+        selected: LinearConfig::new(2, 3).init::<B>(&device),
+        omitted: LinearConfig::new(2, 8).init::<B>(&device),
+    };
+    assert!(!source.selected.weight.is_initialized());
+    assert!(!source.omitted.weight.is_initialized());
+    let target = experiment(&[3], 2.);
+    let (_, report) = TransferPlan::new()
+        .copy_prefix("selected", "encoder.0")
+        .apply(&source, &target)
+        .unwrap();
+    assert!(source.selected.weight.is_initialized());
+    assert!(!source.omitted.weight.is_initialized());
+    assert!(!source.omitted.bias.as_ref().unwrap().is_initialized());
+    assert_eq!(
+        report
+            .omitted
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["omitted.bias", "omitted.weight"]
+    );
+}
+
+#[test]
+fn changed_shapes_require_reinitialization_or_an_explicit_transform() {
+    let source = block(3, 7.);
+    let target = block(2, 2.);
+    assert!(
+        TransferPlan::new()
+            .copy_matching()
+            .apply(&source, &target)
+            .is_err()
+    );
+    let (unchanged, report) = TransferPlan::new()
+        .copy_matching()
+        .on_shape_change(ShapeChangePolicy::Reinitialize)
+        .apply(&source, &target)
+        .unwrap();
+    assert_eq!(values(unchanged.weight.val()), vec![2.; 4]);
+    assert_eq!(report.newly_initialized.len(), 2);
+    assert!(report.newly_initialized[0].reason.contains("differs"));
+    assert_eq!(report.omitted.len(), 2);
+
+    let (cropped, report) = TransferPlan::new()
+        .transform(
+            "weight",
+            "weight",
+            "select first two output channels",
+            |x: Tensor<B, 2>| Ok(x.slice([0..2, 0..2])),
+        )
+        .apply(&source, &target)
+        .unwrap();
+    assert_eq!(values(cropped.weight.val()), vec![7.; 4]);
+    assert_eq!(values(cropped.bias.val()), vec![2.; 2]);
+    assert_eq!(report.transformed[0].sources, ["weight"]);
+    assert_eq!(report.transformed[0].shape, [2, 2]);
+}
+
+#[test]
+fn failed_transforms_and_invalid_rules_leave_the_target_unchanged() {
+    let source = experiment(&[2, 2], 7.);
+    let target = experiment(&[2, 2], 2.);
+    let failed = TransferPlan::new()
+        .copy_prefix("encoder", "encoder")
+        .transform::<2, 2>(
+            "encoder.1.weight",
+            "encoder.1.weight",
+            "failing experiment",
+            |_| Err(Error::configuration("probe", "intentional failure")),
+        )
+        .apply(&source, &target);
+    let error = failed.unwrap_err().to_string();
+    assert!(error.contains("encoder.1.weight"));
+    assert!(error.contains("intentional failure"));
+    assert_eq!(values(target.encoder[0].weight.val()), vec![2.; 4]);
+    assert_eq!(values(target.encoder[1].weight.val()), vec![2.; 4]);
+
+    let called = std::cell::Cell::new(false);
+    let invalid = TransferPlan::new()
+        .transform(
+            "encoder.0.weight",
+            "encoder.0.weight",
+            "must not run",
+            |x: Tensor<B, 2>| {
+                called.set(true);
+                Ok(x)
+            },
+        )
+        .copy("nonexistent.weight", "head.weight")
+        .apply(&source, &target);
+    assert!(invalid.is_err());
+    assert!(!called.get());
+}
+
+#[test]
+fn exact_overrides_and_explicit_initialization_are_unambiguous() {
+    let source = experiment(&[2], 7.);
+    let target = experiment(&[2], 2.);
+    let (actual, report) = TransferPlan::new()
+        .copy_matching()
+        .transform(
+            "encoder.0.weight",
+            "encoder.0.weight",
+            "halve weights",
+            |x: Tensor<B, 2>| Ok(x * 0.5),
+        )
+        .keep_initialized("head")
+        .apply(&source, &target)
+        .unwrap();
+    assert_eq!(values(actual.encoder[0].weight.val()), vec![3.5; 4]);
+    assert_eq!(values(actual.head.weight.val()), vec![2.; 2]);
+    assert_eq!(report.reused.len(), 1);
+    assert_eq!(report.transformed.len(), 1);
+    assert_eq!(report.newly_initialized.len(), 2);
+    assert!(
+        TransferPlan::new()
+            .copy("head.weight", "head.weight")
+            .copy("head.weight", "head.weight")
+            .apply(&source, &target)
+            .is_err()
+    );
+    assert!(
+        TransferPlan::new()
+            .copy_prefix("encoder", "encoder")
+            .copy_matching()
+            .apply(&source, &target)
+            .is_err()
+    );
+    assert!(
+        TransferPlan::new()
+            .copy_prefix("encode", "encoder")
+            .apply(&source, &target)
+            .is_err()
+    );
+}
+
+#[test]
+fn matching_nothing_returns_an_actionable_error() {
+    let error = TransferPlan::new()
+        .copy_matching()
+        .apply(&pair(false, 7.), &block(2, 2.))
+        .unwrap_err();
+    assert!(error.to_string().contains("no matching parameter paths"));
+}
+
+#[derive(Module, Debug)]
+struct Pair<B: Backend> {
+    left: Param<Tensor<B, 2>>,
+    right: Param<Tensor<B, 2>>,
+}
+
+fn pair(tied: bool, value: f32) -> Pair<B> {
+    let left = Param::from_tensor(Tensor::full([2, 2], value, &Default::default()));
+    let right = if tied {
+        left.clone()
+    } else {
+        Param::from_tensor(Tensor::full([2, 2], value, &Default::default()))
+    };
+    Pair { left, right }
+}
+
+#[test]
+fn source_ties_are_preserved_and_can_be_explicitly_removed() {
+    let source = pair(true, 7.);
+    let target = pair(false, 2.);
+    let (tied, report) = TransferPlan::new()
+        .copy_matching()
+        .apply(&source, &target)
+        .unwrap();
+    assert_eq!(tied.left.id, tied.right.id);
+    assert_ne!(tied.left.id, source.left.id);
+    assert_eq!(report.preserved_ties, [vec!["left", "right"]]);
+    assert_eq!(
+        parameters(&tied).unwrap()[1].tied_to.as_deref(),
+        Some("left")
+    );
+
+    let (untied, report) = TransferPlan::new()
+        .copy_matching()
+        .with_ties(TiePolicy::Untie)
+        .apply(&source, &target)
+        .unwrap();
+    assert_ne!(untied.left.id, untied.right.id);
+    assert_eq!(values(untied.left.val()), values(untied.right.val()));
+    assert_eq!(report.untied, [vec!["left", "right"]]);
+}
+
+#[test]
+fn partial_target_alias_updates_require_intentional_untying() {
+    let source = pair(false, 7.);
+    let target = pair(true, 2.);
+    let error = TransferPlan::new()
+        .copy("left", "left")
+        .apply(&source, &target)
+        .unwrap_err();
+    assert!(error.to_string().contains("TiePolicy::Untie"));
+    let (actual, report) = TransferPlan::new()
+        .copy("left", "left")
+        .with_ties(TiePolicy::Untie)
+        .apply(&source, &target)
+        .unwrap();
+    assert_ne!(actual.left.id, actual.right.id);
+    assert_eq!(values(actual.left.val()), vec![7.; 4]);
+    assert_eq!(values(actual.right.val()), vec![2.; 4]);
+    assert_eq!(report.untied, [vec!["left", "right"]]);
+    assert_eq!(target.left.id, target.right.id);
+}
+
+#[test]
+fn transformed_aliases_reject_accidental_untying() {
+    let source = pair(true, 7.);
+    let target = pair(false, 2.);
+    let error = TransferPlan::new()
+        .copy_matching()
+        .transform("left", "left", "halve", |x: Tensor<B, 2>| Ok(x * 0.5))
+        .apply(&source, &target)
+        .unwrap_err();
+    assert!(error.to_string().contains("source aliases"));
+}
+
+#[test]
+fn diverged_source_alias_values_are_never_silently_collapsed() {
+    let mut source = pair(true, 7.);
+    source.right = source.right.map(|x| x * 2.);
+    let target = pair(false, 2.);
+    let error = TransferPlan::new()
+        .copy_matching()
+        .apply(&source, &target)
+        .unwrap_err();
+    assert!(error.to_string().contains("unequal values"));
+    let (actual, _) = TransferPlan::new()
+        .copy_matching()
+        .with_ties(TiePolicy::Untie)
+        .apply(&source, &target)
+        .unwrap();
+    assert_eq!(values(actual.left.val()), vec![7.; 4]);
+    assert_eq!(values(actual.right.val()), vec![14.; 4]);
+}
+
+#[test]
+fn dtype_conversion_must_be_explicit_and_results_are_checked() {
+    let source = block(2, 7.);
+    let mut target = block(2, 2.);
+    target.weight = target.weight.map(|x| x.cast(DType::F64));
+    assert!(
+        TransferPlan::new()
+            .copy("weight", "weight")
+            .apply(&source, &target)
+            .is_err()
+    );
+    let (actual, report) = TransferPlan::new()
+        .transform("weight", "weight", "convert to f64", |x: Tensor<B, 2>| {
+            Ok(x.cast(DType::F64))
+        })
+        .apply(&source, &target)
+        .unwrap();
+    assert_eq!(actual.weight.val().dtype(), DType::F64);
+    assert_eq!(report.transformed.len(), 1);
+    assert!(
+        TransferPlan::new()
+            .transform("weight", "weight", "invalid shape", |x: Tensor<B, 2>| Ok(
+                x.narrow(1, 0, 1)
+            ))
+            .apply(&source, &target)
+            .is_err()
+    );
+    assert!(
+        TransferPlan::new()
+            .transform::<1, 1>("weight", "bias", "invalid callback rank", Ok)
+            .apply(&source, &target)
+            .is_err()
+    );
+}
+
+#[test]
+fn transfer_preserves_burn_parameter_layout_mappers_on_record_roundtrip() {
+    let device = Default::default();
+    let config = LinearConfig::new(2, 3).with_layout(LinearLayout::Col);
+    let source = config.init::<B>(&device);
+    let target = config.init::<B>(&device);
+    let (actual, _) = TransferPlan::new()
+        .copy_matching()
+        .apply(&source, &target)
+        .unwrap();
+    let record = actual.clone().into_record();
+    let expected_record = source.clone().into_record();
+    assert_eq!(
+        values(record.weight.val()),
+        values(expected_record.weight.val())
+    );
+    let restored = config.init::<B>(&device).load_record(record);
+    let input = Tensor::<B, 2>::ones([1, 2], &device);
+    assert_eq!(
+        values(actual.forward(input.clone())),
+        values(restored.forward(input))
+    );
+}
+
+#[cfg(feature = "autodiff")]
+#[test]
+fn transferred_ties_share_gradients_without_linking_to_source_parameters() {
+    use burn::backend::Autodiff;
+    type Ad = Autodiff<B>;
+    let left = Param::from_tensor(Tensor::<Ad, 2>::ones([2, 2], &Default::default()));
+    let source = Pair {
+        left: left.clone(),
+        right: left,
+    };
+    let target = Pair {
+        left: Param::from_tensor(Tensor::<Ad, 2>::zeros([2, 2], &Default::default())),
+        right: Param::from_tensor(Tensor::<Ad, 2>::zeros([2, 2], &Default::default())),
+    };
+    let (actual, _) = TransferPlan::new()
+        .copy_matching()
+        .apply(&source, &target)
+        .unwrap();
+    let gradients = (actual.left.val() + actual.right.val() * 3.)
+        .sum()
+        .backward();
+    assert_eq!(
+        values(actual.left.val().grad(&gradients).unwrap()),
+        vec![4.; 4]
+    );
+    assert_eq!(
+        values(actual.right.val().grad(&gradients).unwrap()),
+        vec![4.; 4]
+    );
+    assert!(source.left.val().grad(&gradients).is_none());
+
+    let frozen = target.no_grad();
+    let (frozen, _) = TransferPlan::new()
+        .copy_matching()
+        .apply(&source, &frozen)
+        .unwrap();
+    assert!(!frozen.left.val().is_require_grad());
+    assert!(!frozen.right.val().is_require_grad());
+}

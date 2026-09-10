@@ -1,0 +1,101 @@
+[package]
+name = "transformers"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+description = "Backend-generic modern transformer architectures for Burn"
+readme = "README.md"
+keywords = ["burn", "transformer", "inference", "llm"]
+categories = ["science", "algorithms"]
+include = [
+    "/src/**",
+    "/examples/**",
+    "/tests/**",
+    "/scripts/**/*.py",
+    "/scripts/COVERAGE_EVIDENCE.md",
+    "/scripts/WHOLE_FILE_COVERAGE.md",
+    "/scripts/tests/fixtures/coverage_lines/**",
+    "/scripts/tests/fixtures/coverage_dependencies/**",
+    "/acceptance/**",
+    "/*.md",
+    "/LICENSE-*",
+    "/deny.toml",
+    "/Cargo.lock",
+]
+
+[features]
+default = ["std", "flex"]
+std = ["burn/std"]
+autodiff = ["burn/autodiff"]
+# Optional access to Burn's own Learner and TrainStep APIs. Ordinary optimizer
+# loops require only `autodiff`; the crate does not provide a separate trainer.
+train = ["std", "autodiff", "burn/train"]
+cpu = ["burn/cpu"]
+flex = ["burn/flex"]
+metal = ["burn/metal"]
+cuda = ["burn/cuda"]
+rocm = ["burn/rocm"]
+tokenizers = ["std", "dep:tokenizers"]
+chat-templates = ["tokenizers", "dep:minijinja"]
+# Enables opt-in tests that observe CubeCL kernel launch identifiers. This is
+# intentionally separate from `metal`: normal inference builds do not compile
+# tracing instrumentation into the backend.
+kernel-tracing = ["metal", "burn/tracing"]
+# Enables the attention autotuner only for the opt-in fused-attention parity
+# gate. Normal Metal builds retain their reviewed non-autotuned policy, while
+# this feature proves the numerics of a flash candidate selected by dispatch.
+attention-kernel-tracing = ["kernel-tracing", "burn/autotune"]
+
+[dependencies]
+burn = { version = "=0.21.0", default-features = false }
+burn-store = { version = "=0.21.0", default-features = false, features = ["burnpack", "memmap"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.149", features = ["raw_value"] }
+safetensors = { version = "=0.7.0", default-features = false, features = ["std"] }
+sha2 = "=0.10.9"
+thiserror = "2.0.18"
+tokenizers = { version = "=0.22.2", default-features = false, features = ["onig"], optional = true }
+minijinja = { version = "=2.19.0", default-features = false, features = ["adjacent_loop_items", "builtins", "fuel", "json", "loop_controls", "macros", "multi_template", "serde", "std_collections"], optional = true }
+
+[dev-dependencies]
+proptest = "1.9.0"
+tempfile = "3.27.0"
+tracing = "=0.1.44"
+
+[[example]]
+name = "burn_training"
+required-features = ["train", "flex"]
+
+[[example]]
+name = "grokking_train"
+required-features = ["std", "flex", "autodiff"]
+
+[[example]]
+name = "clock_and_pizza_train"
+required-features = ["std", "flex", "autodiff"]
+
+[[example]]
+name = "tuned_lens_train"
+required-features = ["std", "flex", "autodiff", "tokenizers"]
+
+[[example]]
+name = "greater_than_train"
+required-features = ["std", "flex", "autodiff"]
+
+[[example]]
+name = "train_qwen_adapter"
+required-features = ["std", "flex", "autodiff"]
+
+# Checkpoint integrity is part of ordinary local loading, and acceptance gates
+# hash tens of gigabytes. Keep SHA-256 optimized even when the surrounding
+# executable uses a debuggable development or test profile.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.test.package.sha2]
+opt-level = 3
+
+[package.metadata.docs.rs]
+no-default-features = true
+features = ["std", "flex", "tokenizers", "chat-templates"]

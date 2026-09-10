@@ -1,0 +1,125 @@
+{
+  "status": "passed",
+  "recorded_utc": "2026-09-10T20:36:05.739557+00:00",
+  "immutable_training_result_sha256": "787833676523b1662ccaa1b9d700ac6cf0c3f544e37cea87e12903c60f325074",
+  "final_source_sha256": {
+    "examples/grokking_train.rs": "170302677774c03eba0fea67a6277473e9afc3d455b6acf55e127711e6c2c000",
+    "examples/mechanistic/grokking_model.rs": "36414277d0ce2c5702488f75163bfd77611ce8c1525daf031896fac15d9951cb",
+    "examples/mechanistic/grokking_training/study.rs": "3fcc87f92d018b03f1786e97bd1174cf34c1a88e3276e2de1454770920cafadb",
+    "examples/mechanistic/grokking_training/analyze.rs": "c3d51cc074bb68f8fe2d5bae5c6aaec4117d0ff7ee5196a7c184c9e0aea011b8"
+  },
+  "final_flex_replay_binary_sha256": "96b7b7ad8d356a522c52abce582978f3bb160fe6ca1ff4ad5eea8556d34b1f75",
+  "rust_tests": {
+    "command": "cargo test --release --locked --offline --features autodiff --example grokking_train",
+    "passed": 6,
+    "failed": 0,
+    "log": "evidence/rust-tests.log"
+  },
+  "python_tests": {
+    "command": "python3 -m unittest discover -s examples/mechanistic/grokking_training -p 'test_*.py' -v",
+    "passed": 8,
+    "failed": 0,
+    "log": "evidence/python-tests.log"
+  },
+  "clippy": {
+    "command": "cargo clippy --release --locked --offline --features autodiff --example grokking_train -- -D warnings",
+    "exit_code": 0,
+    "log": "evidence/clippy.log"
+  },
+  "native_training_cli": {
+    "fresh_command": "target/release/examples/grokking_train --steps 2 --output target/mechanistic/grokking-final-source-smoke",
+    "resume_command": "target/release/examples/grokking_train --resume --steps 3 --output target/mechanistic/grokking-final-source-smoke",
+    "fresh_exit_code": 0,
+    "resume_exit_code": 0,
+    "invalid_resumes": "evidence/cli-guards.json",
+    "record_continuation": "Rust regression saves/loads both native Burn records and compares the next optimizer update exactly"
+  },
+  "trained_model_replay": {
+    "metal_command": "target/release/examples/grokking_train --backend metal --analyze --output target/mechanistic/grokking-training-metal-seed0",
+    "flex_command": "target/release/examples/grokking_train --analyze --output target/mechanistic/grokking-training-metal-seed0",
+    "metal_exit_code": 0,
+    "flex_exit_code": 0,
+    "metal_report": "evidence/replay-metal.json",
+    "flex_report": "evidence/replay-flex.json",
+    "all_accuracies_identical": true,
+    "frequency_selection_identical": true,
+    "metal_original_conditions_and_legacy_diagnostic_exactly_equal": true,
+    "maximum_flex_metal_cross_entropy_difference": 3.208089793815816e-09,
+    "maximum_flex_metal_affine_fve_difference": 3.890440969378517e-09,
+    "identity_max_logit_error": 0.0,
+    "restoration_max_logit_error": 3.0517578125e-05
+  },
+  "post_run_affine_diagnostic": {
+    "preregistered": false,
+    "formula": "(sum(x*y)^2 / sum(x*x)) / sum((y-mean(y))^2), where x has zero mean on the complete modular-addition grid",
+    "independent_fixture": "test_affine_sinusoid_variance_explained_separates_constant_offset",
+    "legacy_result_retained": true,
+    "affine_variance_explained": [
+      0.8078074758437543,
+      0.8791792842795557,
+      0.961486595596129,
+      0.8567420844377207,
+      0.9277720846747673,
+      0.9191584433476798,
+      0.9683154160661741,
+      0.7837017655644634,
+      4.243101407815178e-05,
+      6.8624090690653786e-06
+    ],
+    "dominant_four_frequencies": [
+      10,
+      7,
+      49,
+      13
+    ],
+    "dominant_four_readout_power_fraction": 0.8996484417359054,
+    "weak_fifth_frequency": 42,
+    "weak_fifth_readout_power_fraction": 0.006845022443059182,
+    "claim_limit": "This run learned four dominant frequency pairs; the fixed five-pair selection includes a weak fifth. The paper's ten Table 1 measurements are not claimed for this new initialization."
+  },
+  "source_changes_after_the_training_snapshot": [
+    "Cargo.toml",
+    "examples/grokking_train.rs",
+    "examples/mechanistic/grokking_training/analyze.rs",
+    "examples/mechanistic/grokking_training/study.rs",
+    "src/training.rs",
+    "src/training_tests.rs"
+  ],
+  "drift_scope": "Resume guards, feature gates, analysis reporting and unrelated repository training API/package/test work changed afterward. The immutable full-run binary and archived sources retain the original experiment. Core attention, operations and Grokking model weights/graph remain unchanged.",
+  "environment_attempts": {
+    "benchmark_flex": "evidence/benchmark-flex.log",
+    "benchmark_metal_sandbox_failure": "evidence/benchmark-metal-sandbox-failure.log",
+    "benchmark_metal_enabled": "evidence/benchmark-metal-enabled.log",
+    "flex_timing_wrapper_failure": "/usr/bin/time could not read sandboxed kern.clockrate after the example completed; the plain Flex replay was rerun and exited zero."
+  },
+  "evidence_sha256": {
+    "evidence/archived-checkpoint-replay.log": "b213463745b2782538b8db9a45aa979f8ac88ccd8b9792795ebf5ad22e2f3308",
+    "evidence/benchmark-flex.log": "4ec79b1a83ddb7fb1dc28096055ad059c80296249251f1c91fbea6dc80add50a",
+    "evidence/benchmark-metal-enabled.log": "57023dd2951d6675834af55581b7d77e3966615b52dd411839adbffaa0e00aa7",
+    "evidence/benchmark-metal-sandbox-failure.log": "271dc10378249883e98e57e89b114ea5c90d4560c07379d1fabd202601320ea1",
+    "evidence/cli-guards.json": "02ce7b4ee380c3ccc95d4bdf693165f31660f714f39b2469c84a9914b52be246",
+    "evidence/clippy.log": "3b94e5d651a4344301f47b5202cb02549b3bb612b2e0f8145a37d0b141541b4b",
+    "evidence/executed-source.tar.gz": "0f266f543e50dfb7699d7b74b732c2c56209b907b1b84fc4c9ff07296f08fe00",
+    "evidence/final-source-resume.log": "1c62a9f465e10f7015941ec8eb4b2adf991569237534629e7093fedceef16097",
+    "evidence/final-source-smoke.log": "1ba1f2b839b307fd262724e247a1b4180bac31dc5fb7a417dd1747ac8079d9af",
+    "evidence/learned-circuit.json": "ac6be4a586c1b89c840c57e476d716f1a3fd7042487a7a34a346ff1bb150c8b3",
+    "evidence/outcome.json": "eb69e7409d8c6b00b1972fcba4f45a11746974606b9073ba81c3a64a47983946",
+    "evidence/progress.json": "fbe4b3d298a9a8cbc5202c19358e3abcccb5c364b1bd38cc2b5f28b25c430922",
+    "evidence/python-tests.log": "bfeda9c3e53c606e79993d45642996399437266e13a96e4a5946c90af64b99cf",
+    "evidence/replay-flex-timing-wrapper-failure.log": "8ea5ec9a09354b54676730335a46bc3223981ccc9a97abf8bfbc20ac247726af",
+    "evidence/replay-flex.json": "8f46dc65fe55d9dc71911f89bab37340febcca69cfc27de004032ca4ba5709a8",
+    "evidence/replay-flex.log": "7d4571b6041a54447135f56a7b33026ea3d90a4fe34cffb1c0d05f8c52354090",
+    "evidence/replay-metal-binary.json": "2b4cd70827a6d16de15461b9b715fe390a483f4ccdb604df4278bd63396318f9",
+    "evidence/replay-metal.json": "2a647d5a3f9e5c46711b9d673f407cbb73e7882812812e0a87d348ca480ea008",
+    "evidence/replay-metal.log": "7d4571b6041a54447135f56a7b33026ea3d90a4fe34cffb1c0d05f8c52354090",
+    "evidence/run.json": "8ab0635628897421c79ce5e57dff3c2f7119c73a5b26cff8b60a8ed96ca00f30",
+    "evidence/rust-tests.log": "95eedb0eff9b9af04566f89f87cfc8a50ad4cb7c6d8e1c256ca02b3521951b86",
+    "evidence/source-inventory.json": "cecef6db6d8e086d32b8f2e514f56a0768a2f08354523a33f16213a20dee7de4",
+    "evidence/stdout.log": "ab3ea029c5cf6ffa12ae4a66f87a76d124122200ed0e3d08b1b4268f0f5d030b",
+    "evidence/timing.log": "eece57ba41e6da5b5c6c436396ee3f76657ba4e35685497a980495c9d971ce4e"
+  },
+  "plot_sha256": {
+    "training.png": "fbca5cf100457a256088710be573e5a70a3009b7dd3300df6d02ccb2478c0a5d",
+    "training.svg": "ea6545487737b92384777a95cc3e3b05c60b2916deb11d8fdbf5bf11719fa6f4"
+  }
+}

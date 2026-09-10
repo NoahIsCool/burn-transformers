@@ -1,0 +1,642 @@
+//! Artifact verification, fixed protocol, and numerical/checkpoint controls.
+
+use burn::{
+    backend::{Autodiff, Flex},
+    module::{Initializer, Module, ModuleVisitor, Param},
+    nn::{LayerNorm, Linear, LinearConfig},
+    optim::{
+        GradientsParams, Optimizer, Sgd, SgdConfig, adaptor::OptimizerAdaptor,
+        decay::WeightDecayConfig, momentum::MomentumConfig,
+    },
+    record::{FullPrecisionSettings, NamedMpkFileRecorder, Recorder},
+    tensor::{Tensor, TensorData, backend::Backend},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+};
+use transformers::{
+    CausalLmInput, ForwardOptions, LogitsSelection,
+    checkpoint::LoadOptions,
+    intervention::{Hooks, Layer, Stack},
+    models::gpt_neox::{GptNeoXConfig, GptNeoXModel},
+};
+
+pub type Cpu = Flex<f32, i32>;
+pub type B = Autodiff<Cpu>;
+pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+pub type SgdOptimizer = OptimizerAdaptor<Sgd<Cpu>, Lens<B>, B>;
+
+pub struct Settings {
+    pub base: PathBuf,
+    pub output: PathBuf,
+    pub stages: Vec<usize>,
+    pub train_records: usize,
+    pub steps: usize,
+    protocol: Value,
+}
+
+impl Settings {
+    pub fn read() -> Result<Self> {
+        let protocol: Value = serde_json::from_str(include_str!("manifest.json"))?;
+        let base = std::env::args()
+            .nth(1)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| "target/mechanistic/tuned_lens".into());
+        let output = std::env::args()
+            .nth(2)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| "target/mechanistic/tuned_lens_training".into());
+        if base == output {
+            return Err(
+                "training output must differ from the frozen v0.2 artifact directory".into(),
+            );
+        }
+        fs::create_dir_all(&output)?;
+        Ok(Self {
+            base,
+            output,
+            stages: vec![0, 6, 11],
+            train_records: 12,
+            steps: 100,
+            protocol,
+        })
+    }
+
+    pub fn learning_rate(&self, step: usize) -> f64 {
+        0.02 * (1.0 - step as f64 / self.steps as f64)
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct Lens<B: Backend> {
+    pub translator: Linear<B>,
+    final_norm: LayerNorm<B>,
+    unembedding: Linear<B>,
+}
+
+impl<T: Backend> Lens<T> {
+    pub fn new(backbone: &GptNeoXModel<T>) -> Self {
+        let width = backbone.embed_out.weight.val().dims()[0];
+        Self {
+            translator: LinearConfig::new(width, width)
+                .with_initializer(Initializer::Zeros)
+                .init(&Default::default()),
+            final_norm: backbone.final_layer_norm.clone().no_grad(),
+            unembedding: backbone.embed_out.clone().no_grad(),
+        }
+    }
+}
+
+impl<T: Backend> Lens<T> {
+    pub fn forward(&self, hidden: Tensor<T, 2>) -> Tensor<T, 2> {
+        let translated = hidden.clone() + self.translator.forward(hidden);
+        self.unembedding
+            .forward(self.final_norm.forward(translated))
+    }
+
+    pub fn frozen_fingerprint(&self) -> (String, String) {
+        (
+            fingerprint(&self.final_norm),
+            fingerprint(&self.unembedding),
+        )
+    }
+}
+
+pub fn optimizer() -> SgdOptimizer {
+    SgdConfig::new()
+        .with_momentum(Some(
+            MomentumConfig::new()
+                .with_momentum(0.9)
+                .with_dampening(0.0)
+                .with_nesterov(true),
+        ))
+        .with_weight_decay(Some(WeightDecayConfig::new(0.001)))
+        .init()
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct Record {
+    pub record_index: usize,
+    pub input_ids: Vec<i32>,
+}
+
+pub fn load(settings: &Settings) -> Result<(GptNeoXModel<B>, Vec<Record>, Value)> {
+    let mut artifacts = serde_json::Map::new();
+    for (name, expected) in settings.protocol["base_artifacts"].as_object().unwrap() {
+        let path = settings.base.join(name);
+        let actual = json!({"bytes": fs::metadata(&path)?.len(), "sha256": file_hash(&path)?});
+        if &actual != expected {
+            return Err(
+                format!("{name}: artifact differs from the pinned training protocol").into(),
+            );
+        }
+        artifacts.insert(name.clone(), actual);
+    }
+    let config: GptNeoXConfig =
+        serde_json::from_slice(&fs::read(settings.base.join("model/config.json"))?)?;
+    let mut backbone = GptNeoXModel::<B>::init(config, &Default::default())?;
+    backbone.load_checkpoint(settings.base.join("model"), &LoadOptions::default())?;
+    let backbone = backbone.no_grad();
+    let tokenizer = tokenizers::Tokenizer::from_file(settings.base.join("model/tokenizer.json"))
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let documents = fs::read_to_string(settings.base.join("pile_test_first25.jsonl"))?;
+    let mut records = Vec::new();
+    for (record_index, line) in documents.lines().enumerate().skip(4).take(16) {
+        let document: Value = serde_json::from_str(line)?;
+        let encoding = tokenizer
+            .encode(document["text"].as_str().ok_or("missing text")?, false)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let input_ids = std::iter::once(0)
+            .chain(encoding.get_ids().iter().map(|&id| id as i32))
+            .take(32)
+            .collect::<Vec<_>>();
+        if input_ids.len() != 32 {
+            return Err(
+                format!("record {record_index} has fewer than the pinned 32 tokens").into(),
+            );
+        }
+        records.push(Record {
+            record_index,
+            input_ids,
+        });
+    }
+    if records.len() != 16 {
+        return Err("expected 12 train and 4 validation documents".into());
+    }
+    write_json(&settings.output.join("fixture.json"), &records)?;
+    let provenance = json!({"artifacts": artifacts,
+        "manifest_sha256": hash(include_bytes!("manifest.json")),
+        "fixture_sha256": file_hash(&settings.output.join("fixture.json"))?,
+        "training_source_sha256": hash(include_bytes!("../../tuned_lens_train.rs")),
+        "study_source_sha256": hash(include_bytes!("study.rs")),
+    });
+    Ok((backbone, records, provenance))
+}
+
+pub struct CachedRecord {
+    pub hidden: Vec<Tensor<B, 2>>,
+    pub teacher: Tensor<B, 2>,
+    pub tokens: Vec<i32>,
+}
+
+pub fn capture(
+    backbone: &GptNeoXModel<B>,
+    records: &[Record],
+    stages: &[usize],
+) -> Result<Vec<CachedRecord>> {
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..Default::default()
+    };
+    let mut cache = Vec::new();
+    for record in records {
+        let mut hooks = Hooks::new();
+        let handles = stages
+            .iter()
+            .map(|&stage| {
+                if stage == 0 {
+                    hooks.capture(Stack::Decoder.embedding())
+                } else {
+                    hooks.capture(Layer::decoder(stage - 1).residual_post())
+                }
+            })
+            .collect::<Vec<_>>();
+        let input = CausalLmInput {
+            token_ids: Tensor::from_data(
+                TensorData::new(record.input_ids.clone(), [1, 32]),
+                &Default::default(),
+            ),
+            token_mask: None,
+            position_ids: None,
+        };
+        let output = backbone.forward_with_hooks(input, &options, &mut hooks)?;
+        let hidden = handles
+            .iter()
+            .map(|handle| hooks.get(handle).map(|tensor| tensor.reshape([32, 768])))
+            .collect::<transformers::Result<Vec<_>>>()?;
+        cache.push(CachedRecord {
+            hidden,
+            teacher: output.logits.reshape([32, 50304]).detach(),
+            tokens: record.input_ids.clone(),
+        });
+    }
+    Ok(cache)
+}
+
+/// Global clipping across both affine tensors, before Burn's weight decay and
+/// Nesterov update. Burn's built-in Norm option instead clips each tensor alone.
+pub fn gradients(
+    grads: <B as burn::tensor::backend::AutodiffBackend>::Gradients,
+    lens: &Lens<B>,
+) -> Result<(GradientsParams, f64)> {
+    let mut grads = GradientsParams::from_grads(grads, lens);
+    if grads.len() != 2 {
+        return Err(format!(
+            "expected exactly two translator gradients, found {}",
+            grads.len()
+        )
+        .into());
+    }
+    let bias_id = lens.translator.bias.as_ref().unwrap().id;
+    let weight = grads
+        .remove::<Cpu, 2>(lens.translator.weight.id)
+        .ok_or("missing translator weight gradient")?;
+    let bias = grads
+        .remove::<Cpu, 1>(bias_id)
+        .ok_or("missing translator bias gradient")?;
+    let mut squared = 0.0_f64;
+    for value in weight
+        .to_data()
+        .iter::<f32>()
+        .chain(bias.to_data().iter::<f32>())
+    {
+        squared += f64::from(value).powi(2);
+    }
+    let norm = squared.sqrt();
+    if !norm.is_finite() || norm == 0.0 {
+        return Err("translator gradients must be finite and nonzero".into());
+    }
+    let scale = (1.0 / (norm + 1e-6)).min(1.0);
+    grads.register(lens.translator.weight.id, weight * scale);
+    grads.register(bias_id, bias * scale);
+    Ok((grads, norm))
+}
+
+#[derive(Clone, Copy, Serialize)]
+pub struct Metrics {
+    pub kl: f64,
+    pub ce: f64,
+    pub kl_tokens: usize,
+    pub ce_tokens: usize,
+}
+
+pub fn evaluate(lens: &Lens<B>, data: &[CachedRecord], slot: usize) -> Result<Metrics> {
+    use burn::module::AutodiffModule;
+    let lens = lens.valid();
+    let mut kl = 0.0;
+    let mut ce = 0.0;
+    for batch in data {
+        let logits = lens.forward(batch.hidden[slot].clone().inner());
+        let values = logits.into_data().to_vec::<f32>()?;
+        let teacher = batch.teacher.to_data().to_vec::<f32>()?;
+        for token in 0..32 {
+            let row = &values[token * 50304..(token + 1) * 50304];
+            let target = &teacher[token * 50304..(token + 1) * 50304];
+            let normalizer = logsumexp(row);
+            let teacher_normalizer = logsumexp(target);
+            for (&s, &t) in row.iter().zip(target) {
+                let logp = f64::from(t) - teacher_normalizer;
+                kl += logp.exp() * (logp - (f64::from(s) - normalizer));
+            }
+            if token < 31 {
+                ce += normalizer - f64::from(row[batch.tokens[token + 1] as usize]);
+            }
+        }
+    }
+    Ok(Metrics {
+        kl: kl / (data.len() * 32) as f64,
+        ce: ce / (data.len() * 31) as f64,
+        kl_tokens: data.len() * 32,
+        ce_tokens: data.len() * 31,
+    })
+}
+
+fn logsumexp(row: &[f32]) -> f64 {
+    let maximum = row.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+    maximum
+        + row
+            .iter()
+            .map(|&value| (f64::from(value) - maximum).exp())
+            .sum::<f64>()
+            .ln()
+}
+
+pub fn checkpoint(
+    settings: &Settings,
+    stage: usize,
+    lens: &Lens<B>,
+    optim: &SgdOptimizer,
+) -> Result<(Lens<B>, SgdOptimizer)> {
+    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+    let model_path = settings
+        .output
+        .join(format!("stage_{stage}_half_translator"));
+    let optimizer_path = settings
+        .output
+        .join(format!("stage_{stage}_half_optimizer"));
+    recorder.record(lens.translator.clone().into_record(), model_path.clone())?;
+    recorder.record(optim.to_record(), optimizer_path.clone())?;
+    let mut restored = lens.clone();
+    let [input, output] = lens.translator.weight.val().dims();
+    restored.translator = LinearConfig::new(input, output)
+        .with_initializer(Initializer::Zeros)
+        .init::<B>(&Default::default())
+        .load_record(recorder.load(model_path, &Default::default())?);
+    let resumed = optimizer().load_record(recorder.load(optimizer_path, &Default::default())?);
+    Ok((restored, resumed))
+}
+
+pub fn compare_next_step(
+    mut original: Lens<B>,
+    mut original_optim: SgdOptimizer,
+    mut restored: Lens<B>,
+    mut restored_optim: SgdOptimizer,
+    batch: &CachedRecord,
+    slot: usize,
+    lr: f64,
+) -> Result<f32> {
+    for (lens, optim) in [
+        (&mut original, &mut original_optim),
+        (&mut restored, &mut restored_optim),
+    ] {
+        let loss = transformers::training::kl_divergence(
+            lens.forward(batch.hidden[slot].clone()),
+            batch.teacher.clone(),
+        )?;
+        let (grads, _) = gradients(loss.backward(), lens)?;
+        *lens = optim.step(lr, lens.clone(), grads);
+    }
+    let weight = max_difference(
+        original.translator.weight.val(),
+        restored.translator.weight.val(),
+    )?;
+    let bias = max_difference(
+        original.translator.bias.unwrap().val(),
+        restored.translator.bias.unwrap().val(),
+    )?;
+    Ok(weight.max(bias))
+}
+
+pub fn save_final(
+    settings: &Settings,
+    stage: usize,
+    lens: &Lens<B>,
+    optim: &SgdOptimizer,
+) -> Result<()> {
+    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+    recorder.record(
+        lens.translator.clone().into_record(),
+        settings.output.join(format!("stage_{stage}_translator")),
+    )?;
+    recorder.record(
+        optim.to_record(),
+        settings.output.join(format!("stage_{stage}_optimizer")),
+    )?;
+    Ok(())
+}
+
+pub fn scalar(tensor: Tensor<B, 1>) -> Result<f64> {
+    Ok(f64::from(tensor.into_data().to_vec::<f32>()?[0]))
+}
+
+fn max_difference<const D: usize>(left: Tensor<B, D>, right: Tensor<B, D>) -> Result<f32> {
+    Ok((left - right).abs().max().into_data().to_vec::<f32>()?[0])
+}
+
+pub fn identity_error(
+    lens: &Lens<B>,
+    backbone: &GptNeoXModel<B>,
+    batch: &CachedRecord,
+    slot: usize,
+) -> Result<f32> {
+    max_difference(
+        lens.forward(batch.hidden[slot].clone()),
+        backbone
+            .project_hidden(batch.hidden[slot].clone().reshape([1, 32, 768]))?
+            .reshape([32, 50304]),
+    )
+}
+
+pub fn fingerprint<T: Backend, M: Module<T>>(model: &M) -> String {
+    struct HashParameters(Sha256);
+    impl<T: Backend> ModuleVisitor<T> for HashParameters {
+        fn visit_float<const D: usize>(&mut self, parameter: &Param<Tensor<T, D>>) {
+            let data = parameter.val().into_data();
+            self.0
+                .update(format!("{:?}:{:?}", data.shape, data.dtype).as_bytes());
+            self.0.update(data.as_bytes());
+        }
+    }
+    let mut visitor = HashParameters(Sha256::new());
+    model.visit(&mut visitor);
+    format!("{:x}", visitor.0.finalize())
+}
+
+fn hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn file_hash(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    fs::write(path, format!("{}\n", serde_json::to_string_pretty(value)?))?;
+    Ok(())
+}
+
+pub fn export_gradient_oracle(
+    settings: &Settings,
+    stage: usize,
+    lens: &Lens<B>,
+    batch: &CachedRecord,
+    slot: usize,
+    grads: &GradientsParams,
+    loss: f64,
+) -> Result<()> {
+    // A small independent Python reference can verify this exact initial batch
+    // and gradient without running or training the whole transformer again.
+    let prefix = settings.output.join(format!("stage_{stage}_first_step"));
+    fs::create_dir_all(&prefix)?;
+    for (name, data) in [
+        ("hidden", batch.hidden[slot].to_data()),
+        ("teacher", batch.teacher.to_data()),
+        ("unembedding", lens.unembedding.weight.val().into_data()),
+        ("norm_weight", lens.final_norm.gamma.val().into_data()),
+        (
+            "norm_bias",
+            lens.final_norm.beta.as_ref().unwrap().val().into_data(),
+        ),
+        (
+            "gradient_weight",
+            grads
+                .get::<Cpu, 2>(lens.translator.weight.id)
+                .unwrap()
+                .into_data(),
+        ),
+        (
+            "gradient_bias",
+            grads
+                .get::<Cpu, 1>(lens.translator.bias.as_ref().unwrap().id)
+                .unwrap()
+                .into_data(),
+        ),
+    ] {
+        fs::write(prefix.join(format!("{name}.f32")), data.as_bytes())?;
+    }
+    write_json(
+        &prefix.join("metrics.json"),
+        &json!({"loss":loss,"shape":[32,768,50304],"gradients":"after global norm clip1; before weight decay and optimizer"}),
+    )
+}
+
+pub fn export_first_update(settings: &Settings, stage: usize, lens: &Lens<B>) -> Result<()> {
+    let prefix = settings.output.join(format!("stage_{stage}_first_step"));
+    fs::write(
+        prefix.join("updated_weight.f32"),
+        lens.translator.weight.val().into_data().as_bytes(),
+    )?;
+    fs::write(
+        prefix.join("updated_bias.f32"),
+        lens.translator
+            .bias
+            .as_ref()
+            .unwrap()
+            .val()
+            .into_data()
+            .as_bytes(),
+    )?;
+    Ok(())
+}
+
+pub fn report(
+    settings: &Settings,
+    provenance: Value,
+    layers: Vec<Value>,
+    backbone_unchanged: bool,
+    seconds: f64,
+) -> Result<()> {
+    let passed = backbone_unchanged
+        && layers.iter().all(|item| {
+            item["frozen_decoder_unchanged"] == true
+                && item["initial_identity_max_abs"].as_f64().unwrap() <= 1e-6
+                && item["resume_next_step_max_abs"].as_f64().unwrap() <= 1e-6
+                && item["final"]["kl"].as_f64().unwrap() < item["initial"]["kl"].as_f64().unwrap()
+        });
+    let report = json!({"status":if passed {"passed"} else {"failed"}, "provenance":provenance,
+        "protocol":settings.protocol, "backbone_unchanged":backbone_unchanged,
+        "layers":layers, "wall_seconds":seconds});
+    write_json(&settings.output.join("result.json"), &report)?;
+    if !passed {
+        return Err("training result failed a frozen-backbone, resume, or held-out KL check; result retained".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tiny_lens() -> Lens<B> {
+        let device = Default::default();
+        let backbone = GptNeoXModel::init(
+            GptNeoXConfig {
+                vocab_size: 7,
+                hidden_size: 4,
+                intermediate_size: 8,
+                num_attention_heads: 1,
+                num_hidden_layers: 1,
+                rotary_pct: 1.0,
+                ..Default::default()
+            },
+            &device,
+        )
+        .unwrap();
+        Lens::new(&backbone)
+    }
+
+    fn batch() -> CachedRecord {
+        CachedRecord {
+            hidden: vec![Tensor::from_floats(
+                [[1.0, 2.0, 3.0, 4.0], [-1.0, 0.5, 2.0, 3.0]],
+                &Default::default(),
+            )],
+            teacher: Tensor::from_floats(
+                [
+                    [1.0, 2.0, 0.0, -1.0, 3.0, 1.0, 0.0],
+                    [0.0, 1.0, 3.0, 2.0, 0.0, 1.0, -1.0],
+                ],
+                &Default::default(),
+            ),
+            tokens: vec![1, 2],
+        }
+    }
+
+    #[test]
+    fn frozen_decoder_propagates_translator_gradients_without_updating_its_weights() {
+        let mut lens = tiny_lens();
+        let batch = batch();
+        let before = lens.frozen_fingerprint();
+        let raw = lens
+            .unembedding
+            .forward(lens.final_norm.forward(batch.hidden[0].clone()));
+        assert_eq!(
+            max_difference(raw, lens.forward(batch.hidden[0].clone())).unwrap(),
+            0.0
+        );
+        let loss = transformers::training::kl_divergence(
+            lens.forward(batch.hidden[0].clone()),
+            batch.teacher,
+        )
+        .unwrap();
+        let (gradients, norm) = gradients(loss.backward(), &lens).unwrap();
+        assert!(norm > 0.0);
+        assert_eq!(gradients.len(), 2);
+        lens = optimizer().step(0.02, lens, gradients);
+        assert_eq!(before, lens.frozen_fingerprint());
+        assert!(
+            lens.translator
+                .weight
+                .val()
+                .abs()
+                .max()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()[0]
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn saved_affine_and_momentum_records_reproduce_the_next_optimizer_step() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            base: PathBuf::new(),
+            output: directory.path().into(),
+            stages: vec![0],
+            train_records: 1,
+            steps: 2,
+            protocol: Value::Null,
+        };
+        let mut lens = tiny_lens();
+        let batch = batch();
+        let mut optim = optimizer();
+        let loss = transformers::training::kl_divergence(
+            lens.forward(batch.hidden[0].clone()),
+            batch.teacher.clone(),
+        )
+        .unwrap();
+        let (gradients, _) = gradients(loss.backward(), &lens).unwrap();
+        lens = optim.step(0.02, lens, gradients);
+        let (restored, restored_optim) = checkpoint(&settings, 0, &lens, &optim).unwrap();
+        assert_eq!(
+            compare_next_step(lens, optim, restored, restored_optim, &batch, 0, 0.01).unwrap(),
+            0.0
+        );
+    }
+}

@@ -1,0 +1,273 @@
+{
+  "development/clean": {
+    "clean_gap_recovery": {
+      "count": 97,
+      "mean": 1.0,
+      "sample_sd": 0.0
+    },
+    "cutoff_sharpness": {
+      "count": 97,
+      "mean": 0.0666239512539116,
+      "sample_sd": 0.08719940781410526
+    },
+    "numeric_mass": {
+      "count": 97,
+      "mean": 0.9989202134120491,
+      "sample_sd": 0.0006926732698806487
+    },
+    "probability_difference": {
+      "count": 97,
+      "mean": 0.8223158006211719,
+      "sample_sd": 0.15755086659987935
+    },
+    "teacher_kl": {
+      "count": 97,
+      "mean": 0.9844057094390871,
+      "sample_sd": 0.6022662570440465
+    }
+  },
+  "development/corrupt": {
+    "clean_gap_recovery": {
+      "count": 97,
+      "mean": 0.0,
+      "sample_sd": 0.0
+    },
+    "cutoff_sharpness": {
+      "count": 97,
+      "mean": -0.000743508051670736,
+      "sample_sd": 0.008302504481215804
+    },
+    "numeric_mass": {
+      "count": 97,
+      "mean": 0.9990603929213356,
+      "sample_sd": 0.00017088434483492036
+    },
+    "probability_difference": {
+      "count": 97,
+      "mean": -0.4350264418359166,
+      "sample_sd": 0.5319076650440271
+    },
+    "teacher_kl": {
+      "count": 97,
+      "mean": 0.5428932756921702,
+      "sample_sd": 0.3752606842782608
+    }
+  },
+  "development/initial_student": {
+    "clean_gap_recovery": {
+      "count": 97,
+      "mean": -0.05435643111437185,
+      "sample_sd": 0.20431923459423432
+    },
+    "cutoff_sharpness": {
+      "count": 97,
+      "mean": -0.0012863808833009423,
+      "sample_sd": 0.008771325412815379
+    },
+    "numeric_mass": {
+      "count": 97,
+      "mean": 0.9950397540997781,
+      "sample_sd": 0.0009718670427453406
+    },
+    "probability_difference": {
+      "count": 97,
+      "mean": -0.44414823700341727,
+      "sample_sd": 0.4947979470073246
+    },
+    "teacher_kl": {
+      "count": 97,
+      "mean": 0.5340616771771249,
+      "sample_sd": 0.3218093863517065
+    }
+  },
+  "development/oracle": {
+    "clean_gap_recovery": {
+      "count": 97,
+      "mean": 0.548331694687228,
+      "sample_sd": 0.15756603793775367
+    },
+    "cutoff_sharpness": {
+      "count": 97,
+      "mean": 0.0034399733315750606,
+      "sample_sd": 0.010615125205175945
+    },
+    "numeric_mass": {
+      "count": 97,
+      "mean": 0.9976044680621137,
+      "sample_sd": 0.0008972136420010337
+    },
+    "probability_difference": {
+      "count": 97,
+      "mean": 0.2369789769025459,
+      "sample_sd": 0.44438657216892613
+    },
+    "teacher_kl": {
+      "count": 97,
+      "mean": 0.0,
+      "sample_sd": 0.0
+    }
+  },
+  "development/trained_student": {
+    "clean_gap_recovery": {
+      "count": 97,
+      "mean": 0.5609549063176756,
+      "sample_sd": 0.15200332035434572
+    },
+    "cutoff_sharpness": {
+      "count": 97,
+      "mean": 0.0013306618572061853,
+      "sample_sd": 0.012524519428191588
+    },
+    "numeric_mass": {
+      "count": 97,
+      "mean": 0.997142680409512,
+      "sample_sd": 0.0007719452267369525
+    },
+    "probability_difference": {
+      "count": 97,
+      "mean": 0.2606714910747305,
+      "sample_sd": 0.4347206384204632
+    },
+    "teacher_kl": {
+      "count": 97,
+      "mean": 0.04668272799024719,
+      "sample_sd": 0.016737025318924754
+    }
+  },
+  "held_out/clean": {
+    "clean_gap_recovery": {
+      "count": 97,
+      "mean": 1.0,
+      "sample_sd": 0.0
+    },
+    "cutoff_sharpness": {
+      "count": 97,
+      "mean": 0.05631390344918284,
+      "sample_sd": 0.058421223974394546
+    },
+    "numeric_mass": {
+      "count": 97,
+      "mean": 0.9989281974622984,
+      "sample_sd": 0.0008877234354388781
+    },
+    "probability_difference": {
+      "count": 97,
+      "mean": 0.8205723023420203,
+      "sample_sd": 0.20262944317842096
+    },
+    "teacher_kl": {
+      "count": 97,
+      "mean": 0.9293448825152377,
+      "sample_sd": 0.5696882854730198
+    }
+  },
+  "held_out/corrupt": {
+    "clean_gap_recovery": {
+      "count": 97,
+      "mean": 0.0,
+      "sample_sd": 0.0
+    },
+    "cutoff_sharpness": {
+      "count": 97,
+      "mean": -0.0011915599578471968,
+      "sample_sd": 0.010877519839652688
+    },
+    "numeric_mass": {
+      "count": 97,
+      "mean": 0.9990399093251873,
+      "sample_sd": 0.00018690274056291296
+    },
+    "probability_difference": {
+      "count": 97,
+      "mean": -0.43952360419348036,
+      "sample_sd": 0.5055284229968074
+    },
+    "teacher_kl": {
+      "count": 97,
+      "mean": 0.5810052963594144,
+      "sample_sd": 0.402161006355198
+    }
+  },
+  "held_out/initial_student": {
+    "clean_gap_recovery": {
+      "count": 97,
+      "mean": -0.033942205657552973,
+      "sample_sd": 0.14435993057886257
+    },
+    "cutoff_sharpness": {
+      "count": 97,
+      "mean": -0.0018782102639553452,
+      "sample_sd": 0.01364594345309881
+    },
+    "numeric_mass": {
+      "count": 97,
+      "mean": 0.9951031781033214,
+      "sample_sd": 0.0010231570048843187
+    },
+    "probability_difference": {
+      "count": 97,
+      "mean": -0.44608494358206263,
+      "sample_sd": 0.4718408956289019
+    },
+    "teacher_kl": {
+      "count": 97,
+      "mean": 0.5621927793652071,
+      "sample_sd": 0.32412535107604223
+    }
+  },
+  "held_out/oracle": {
+    "clean_gap_recovery": {
+      "count": 97,
+      "mean": 0.5711980316440376,
+      "sample_sd": 0.15244336720329887
+    },
+    "cutoff_sharpness": {
+      "count": 97,
+      "mean": 0.0036868484030664873,
+      "sample_sd": 0.009819146336908433
+    },
+    "numeric_mass": {
+      "count": 97,
+      "mean": 0.997680696749505,
+      "sample_sd": 0.0008121336320366911
+    },
+    "probability_difference": {
+      "count": 97,
+      "mean": 0.27187594188086683,
+      "sample_sd": 0.42089754256993606
+    },
+    "teacher_kl": {
+      "count": 97,
+      "mean": 0.0,
+      "sample_sd": 0.0
+    }
+  },
+  "held_out/trained_student": {
+    "clean_gap_recovery": {
+      "count": 97,
+      "mean": 0.5739242813781721,
+      "sample_sd": 0.13960476434883706
+    },
+    "cutoff_sharpness": {
+      "count": 97,
+      "mean": 0.0012828838106608842,
+      "sample_sd": 0.011951099571314872
+    },
+    "numeric_mass": {
+      "count": 97,
+      "mean": 0.9972207268863761,
+      "sample_sd": 0.0008240304369150005
+    },
+    "probability_difference": {
+      "count": 97,
+      "mean": 0.27959143272099535,
+      "sample_sd": 0.4095434294985274
+    },
+    "teacher_kl": {
+      "count": 97,
+      "mean": 0.05004546895170398,
+      "sample_sd": 0.020585054673386297
+    }
+  }
+}
+Results: target/mechanistic/greater_than_training/full/result.json
