@@ -401,6 +401,10 @@ struct ModularMla<B: Backend> {
 }
 
 impl<B: Backend> ModularMla<B> {
+    /// Builds shared latent attention with optional RoPE or learned T5 relative bias.
+    ///
+    /// Compressed KV width, query rank, and content/rotary/value head widths
+    /// remain independent of the residual width; normalization supplies its epsilon.
     fn init(
         spec: &MlaSpec,
         hidden_size: usize,
@@ -456,6 +460,11 @@ impl<B: Backend> ModularMla<B> {
         })
     }
 
+    /// Computes latent self-attention on `[batch, token, hidden]` residuals.
+    ///
+    /// Projected content and rotary channels receive explicit positions; the
+    /// selected connectivity, padding, and relative score bias combine before
+    /// attention. Padded query outputs are zeroed after the output projection.
     #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
@@ -1009,10 +1018,16 @@ impl<B: Backend> ModularLayer<B> {
 }
 
 impl<B: Backend> HiddenTransform<B> for ModularLayer<B> {
+    /// Lists the actual mixer, optional cross-attention, and MLP points for this block.
     fn activation_points(&self, layer: Layer) -> Vec<PointInfo> {
         ModularLayer::activation_points(self, layer)
     }
 
+    /// Applies this residual block using explicit positions, padding, and attention policies.
+    ///
+    /// Encoder blocks default to bidirectional attention and decoder blocks to
+    /// causal attention. Cross-attention consumes the supplied encoder context;
+    /// the returned tensor preserves the residual axes and autodiff graph.
     fn forward(
         &self,
         hidden: Tensor<B, 3>,

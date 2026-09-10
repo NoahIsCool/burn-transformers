@@ -71,6 +71,10 @@ pub enum Qwen3_5LoadError {
 impl<B: Backend> TensorSink for Qwen3_5TextModel<B> {
     type Error = Qwen3_5LoadError;
 
+    /// Installs a headless-backbone tensor after resolving its exact layer and mixer field.
+    ///
+    /// The shared installer validates rank, shape, and dtype before replacing
+    /// the parameter and preserves Burn record transformations.
     fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
         match target {
             "model.embed_tokens.weight" => install(target, &mut self.embed_tokens.weight, data),
@@ -90,6 +94,10 @@ impl<B: Backend> TensorSink for Qwen3_5TextModel<B> {
         }
     }
 
+    /// Rejects aliases because a headless backbone owns only its embedding parameter.
+    ///
+    /// A tied vocabulary projection is an explicit reuse of that owner in the
+    /// forward graph, not a second registered parameter field.
     fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error> {
         Err(Qwen3_5LoadError::InvalidAlias { target: target.into(), source_target: source_target.into(),
             reason: "the headless backbone stores only the embedding owner; vocabulary views are explicit execution operations".into() })

@@ -210,6 +210,10 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
         self.embed_stack(input, Stack::Decoder, Some(encoder), hooks)
     }
 
+    /// Validates tokens and creates `[batch, token, hidden]` state for one selected stack.
+    ///
+    /// Decoder state retains the supplied encoder representation separately
+    /// from its own positions and padding; hooks see only that embedding point.
     fn embed_stack(
         &self,
         input: CausalLmInput<B>,
@@ -273,6 +277,10 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
         self.run_stack_layers(state, range, Stack::Decoder, hooks)
     }
 
+    /// Runs a contiguous unnormalized block range and advances the continuation cursor.
+    ///
+    /// All selected contexts are validated before the first block or callback,
+    /// and only points belonging to the selected stack/range enter the hook scope.
     fn run_stack_layers(
         &self,
         mut state: HiddenState<B>,
@@ -319,6 +327,10 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
         })
     }
 
+    /// Checks stack width, dtype/device, cursor, and self/cross-attention addresses.
+    ///
+    /// Encoder and decoder states have distinct topology contracts even when
+    /// their residual widths happen to match.
     fn validate_execution_state(&self, state: &HiddenState<B>, stack: Stack) -> Result<()> {
         let (spec, embeddings, total) = match stack {
             Stack::Encoder => (
@@ -403,6 +415,10 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
         self.normalize_stack(state, Stack::Decoder, hooks)
     }
 
+    /// Applies one stack-specific final norm exactly once without running omitted blocks.
+    ///
+    /// Normalization preserves `[batch, token, hidden]`, dtype, and the graph
+    /// needed by an external trainable task head.
     fn normalize_stack(
         &self,
         mut state: HiddenState<B>,
@@ -672,6 +688,7 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
 impl ArchitectureConfig for Seq2SeqSpec {
     const MODEL_TYPES: &'static [&'static str] = &["modular_seq2seq"];
 
+    /// Validates cross-stack topology and the supported encoder/decoder mixer roles.
     fn validate(&self) -> Result<()> {
         validate_seq2seq_execution(self)
     }
@@ -681,6 +698,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ModularSeq2SeqLm<B> {
     type Config = Seq2SeqSpec;
     type State = ModularDecodeState<B>;
 
+    /// Runs the stateless bidirectional encoder through the common seq2seq interface.
     fn encode(
         &self,
         source: CausalLmInput<B>,
@@ -689,6 +707,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ModularSeq2SeqLm<B> {
         ModularSeq2SeqLm::encode(self, source, options)
     }
 
+    /// Runs the encoder and conditioned decoder through the common seq2seq interface.
     fn forward(
         &self,
         input: Seq2SeqInput<B>,
@@ -697,6 +716,10 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ModularSeq2SeqLm<B> {
         ModularSeq2SeqLm::forward(self, input, options)
     }
 
+    /// Allocates external decoder token history within the target position capacity.
+    ///
+    /// Encoder representations are supplied by the caller; model parameters
+    /// never own mutable generation history.
     fn new_decode_state(
         &self,
         config: CacheConfig,
@@ -722,6 +745,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ModularSeq2SeqLm<B> {
         )
     }
 
+    /// Evaluates and commits an initial decoder prompt conditioned on encoder states.
     fn prefill_decoder(
         &self,
         encoder: &EncoderOutput<B>,
@@ -732,6 +756,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ModularSeq2SeqLm<B> {
         state.run_seq2seq(self, encoder, decoder, options, true)
     }
 
+    /// Appends target tokens against encoder states and commits the evaluated history.
     fn decode(
         &self,
         encoder: &EncoderOutput<B>,

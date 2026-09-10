@@ -314,26 +314,35 @@ impl<B: Backend> Qwen3_5DecodeState<B> {
 }
 
 impl<B: Backend> ArchitectureDecodeState<B> for Qwen3_5DecodeState<B> {
+    /// Returns the number of logical sequence rows represented by this state.
     fn batch_size(&self) -> usize {
         self.tensors.batch_size()
     }
 
+    /// Returns the maximum logical token count per row, excluding padding.
     fn capacity(&self) -> usize {
         self.tensors.capacity()
     }
 
+    /// Borrows committed semantic token counts in the current batch order.
     fn lengths(&self) -> &[usize] {
         self.tensors.lengths()
     }
 
+    /// Resets logical lengths and all cache groups through the shared state contract.
     fn reset(&mut self) -> Result<()> {
         self.tensors.reset().map_err(Into::into)
     }
 
+    /// Reorders or duplicates sequence rows across metadata and every cache group atomically.
     fn reorder(&mut self, indices: &[usize]) -> Result<()> {
         self.tensors.reorder(indices).map_err(Into::into)
     }
 
+    /// Truncates target history and bounds shifted MTP history by `target_length - 1`.
+    ///
+    /// Shared cache validation rejects unavailable recurrent snapshots or an
+    /// invalid row count before any prefix is committed.
     fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
         let Some(current_mtp) = self.tensors.mtp_lengths() else {
             return self.tensors.truncate(lengths).map_err(Into::into);
@@ -357,6 +366,7 @@ impl<B: Backend> ArchitectureDecodeState<B> for Qwen3_5DecodeState<B> {
             .map_err(Into::into)
     }
 
+    /// Returns the device holding this state, independent of model parameter ownership.
     fn device(&self) -> &B::Device {
         self.tensors.device()
     }
@@ -366,6 +376,7 @@ impl<B: Backend> CausalLanguageModel<B> for Qwen3_5ForCausalLm<B> {
     type Config = Qwen3_5TextConfig;
     type State = Qwen3_5DecodeState<B>;
 
+    /// Delegates to the stateless family graph without allocating or mutating decode history.
     fn forward(
         &self,
         input: CausalLmInput<B>,
@@ -374,6 +385,7 @@ impl<B: Backend> CausalLanguageModel<B> for Qwen3_5ForCausalLm<B> {
         Qwen3_5ForCausalLm::forward(self, input, options)
     }
 
+    /// Allocates external Qwen hybrid cache groups after validating model/device geometry.
     fn new_decode_state(
         &self,
         config: CacheConfig,
@@ -383,6 +395,7 @@ impl<B: Backend> CausalLanguageModel<B> for Qwen3_5ForCausalLm<B> {
         Qwen3_5DecodeState::new(self, config, batch_size, device)
     }
 
+    /// Evaluates prompt rows with at least one valid token and commits all cache writes together.
     fn prefill(
         &self,
         input: CausalLmInput<B>,
@@ -392,6 +405,7 @@ impl<B: Backend> CausalLanguageModel<B> for Qwen3_5ForCausalLm<B> {
         self.forward_with_decode_state(input, state, options, StatefulPhase::Prefill)
     }
 
+    /// Appends valid tokens while fully masked rows retain their state and return zero outputs.
     fn decode(
         &self,
         input: DecodeInput<B>,

@@ -203,6 +203,10 @@ impl<B: Backend> ModularCausalLm<B> {
         })
     }
 
+    /// Checks `[batch, token, hidden]` state compatibility before staged execution.
+    ///
+    /// Dtype/device must match embeddings, the cursor must fit the block list,
+    /// and attention overrides must address this decoder without cross-attention.
     fn validate_execution_state(&self, state: &HiddenState<B>) -> Result<()> {
         state.validate(self.spec.hidden_size)?;
         let embedding = self.embed_tokens.weight.val();
@@ -434,6 +438,10 @@ impl<B: Backend> ModularCausalLm<B> {
         self.forward_hidden_direction_with_hooks(input, AttentionDirection::Bidirectional, hooks)
     }
 
+    /// Runs the selected connectivity policy and returns normalized token representations.
+    ///
+    /// The hook scope exposes this backbone only; causal recurrent mixers reject
+    /// bidirectional execution before processing tokens.
     fn forward_hidden_direction_with_hooks(
         &self,
         input: CausalLmInput<B>,
@@ -448,6 +456,7 @@ impl<B: Backend> ModularCausalLm<B> {
         })
     }
 
+    /// Rejects bidirectional execution when any block contains causal DeltaNet state.
     fn validate_direction(&self, direction: AttentionDirection) -> Result<()> {
         if direction == AttentionDirection::Bidirectional
             && self
@@ -507,6 +516,7 @@ impl<B: Backend> ModularCausalLm<B> {
 impl ArchitectureConfig for DecoderSpec {
     const MODEL_TYPES: &'static [&'static str] = &["modular_causal"];
 
+    /// Validates the decoder topology and its executable causal mixer capabilities.
     fn validate(&self) -> Result<()> {
         validate_decoder_execution(self, AttentionDirection::Causal, "custom.causal")
     }
@@ -516,6 +526,7 @@ impl<B: Backend> CausalLanguageModel<B> for ModularCausalLm<B> {
     type Config = DecoderSpec;
     type State = ModularDecodeState<B>;
 
+    /// Evaluates the ordinary stateless causal graph through the common model interface.
     fn forward(
         &self,
         input: CausalLmInput<B>,
@@ -524,6 +535,10 @@ impl<B: Backend> CausalLanguageModel<B> for ModularCausalLm<B> {
         ModularCausalLm::forward(self, input, options)
     }
 
+    /// Allocates external token-history state bounded by the configured position capacity.
+    ///
+    /// The generic modular path recomputes the retained prefix, allowing mixed
+    /// architectures without embedding architecture-specific KV caches in parameters.
     fn new_decode_state(
         &self,
         config: CacheConfig,
@@ -549,6 +564,7 @@ impl<B: Backend> CausalLanguageModel<B> for ModularCausalLm<B> {
         )
     }
 
+    /// Evaluates and commits a prompt requiring at least one valid token in each row.
     fn prefill(
         &self,
         input: CausalLmInput<B>,
@@ -558,6 +574,7 @@ impl<B: Backend> CausalLanguageModel<B> for ModularCausalLm<B> {
         state.run_causal(self, input, options, true)
     }
 
+    /// Appends valid tokens, recomputes their retained prefix, and commits only on success.
     fn decode(
         &self,
         input: DecodeInput<B>,

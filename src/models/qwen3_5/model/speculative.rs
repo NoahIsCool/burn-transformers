@@ -34,6 +34,7 @@ pub struct Qwen3_5SpeculativeConfig {
 }
 
 impl Default for Qwen3_5SpeculativeConfig {
+    /// Uses two draft tokens per cycle and the ordinary generation defaults.
     fn default() -> Self {
         Self {
             max_draft_tokens: 2,
@@ -723,10 +724,15 @@ struct SplitMix64 {
 }
 
 impl SplitMix64 {
+    /// Initializes the independent deterministic stream used for verification decisions.
     const fn new(seed: u64) -> Self {
         Self { state: seed }
     }
 
+    /// Returns a deterministic uniform variate in `[0, 1)` from the upper 53 mixed bits.
+    ///
+    /// The conversion fits the F64 mantissa exactly and excludes one, preventing
+    /// out-of-range inverse-CDF selections at the top of the sampling interval.
     fn next_unit(&mut self) -> f64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut value = self.state;

@@ -209,30 +209,40 @@ impl<B: Backend> MuseGlimmerDecodeState<B> {
 }
 
 impl<B: Backend> ArchitectureDecodeState<B> for MuseGlimmerDecodeState<B> {
+    /// Returns the number of logical sequence rows represented by this state.
     fn batch_size(&self) -> usize {
         self.tensors.batch_size()
     }
 
+    /// Returns the maximum logical token count per row, excluding padding.
     fn capacity(&self) -> usize {
         self.tensors.capacity()
     }
 
+    /// Borrows committed semantic token counts in the current batch order.
     fn lengths(&self) -> &[usize] {
         self.tensors.lengths()
     }
 
+    /// Resets logical lengths and all cache groups through the shared state contract.
     fn reset(&mut self) -> Result<()> {
         self.tensors.reset().map_err(Into::into)
     }
 
+    /// Reorders or duplicates sequence rows across metadata and every cache group atomically.
     fn reorder(&mut self, indices: &[usize]) -> Result<()> {
         self.tensors.reorder(indices).map_err(Into::into)
     }
 
+    /// Truncates full and sliding histories together when all requested prefixes remain retained.
+    ///
+    /// Ring-buffer eviction can make an older prefix unavailable; the shared
+    /// cache rejects such rollback instead of reconstructing missing KV values.
     fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
         self.tensors.truncate(lengths).map_err(Into::into)
     }
 
+    /// Returns the device holding this state, independent of model parameter ownership.
     fn device(&self) -> &B::Device {
         self.tensors.device()
     }
@@ -242,6 +252,7 @@ impl<B: Backend> CausalLanguageModel<B> for MuseGlimmerForCausalLm<B> {
     type Config = MuseGlimmerTextConfig;
     type State = MuseGlimmerDecodeState<B>;
 
+    /// Delegates to the stateless family graph without allocating or mutating decode history.
     fn forward(
         &self,
         input: CausalLmInput<B>,
@@ -250,6 +261,7 @@ impl<B: Backend> CausalLanguageModel<B> for MuseGlimmerForCausalLm<B> {
         MuseGlimmerForCausalLm::forward(self, input, options)
     }
 
+    /// Allocates external Muse-Glimmer cache groups after validating model/device geometry.
     fn new_decode_state(
         &self,
         config: CacheConfig,
@@ -259,6 +271,7 @@ impl<B: Backend> CausalLanguageModel<B> for MuseGlimmerForCausalLm<B> {
         MuseGlimmerDecodeState::new(self, config, batch_size, device)
     }
 
+    /// Evaluates prompt rows with at least one valid token and commits all cache writes together.
     fn prefill(
         &self,
         input: CausalLmInput<B>,
@@ -268,6 +281,7 @@ impl<B: Backend> CausalLanguageModel<B> for MuseGlimmerForCausalLm<B> {
         self.forward_with_decode_state(input, state, options, StatefulPhase::Prefill)
     }
 
+    /// Appends valid tokens while fully masked rows retain their state and return zero outputs.
     fn decode(
         &self,
         input: DecodeInput<B>,

@@ -1,4 +1,16 @@
 //! Editable Qwen backbones with explicit random or selective pretrained initialization.
+//!
+//! Recipes separate checkpoint layer identity from execution order. Each block can
+//! change its mixer, head geometry, and SwiGLU width while retaining the stack's
+//! residual axis `hidden_size`. Full attention has score axes
+//! `[batch, query_heads, query, key]`; DeltaNet remains a causal recurrence and
+//! cannot implement arbitrary softmax connectivity policies.
+//!
+//! Random initialization is artifact-free. Selective loading resolves the exact
+//! source namespace and reports reused, converted, newly initialized, and omitted
+//! parameters. Shape changes require explicit policy; new parameters adopt the
+//! resolved checkpoint dtype and remain autodiff leaves. The result owns parameters
+//! only, with no vocabulary head or mutable decode cache.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,6 +45,8 @@ use super::{
 };
 use crate::models::config::ModelConfig;
 
+// Consumer-editable topology, independent of checkpoint parameter ownership.
+
 /// Editable dimensions and sequence mixer for one Qwen block.
 ///
 /// Residual width and family numerical conventions come from the recipe's
@@ -65,6 +79,7 @@ pub struct Qwen3_5LayerRecipe {
 }
 
 impl Qwen3_5LayerRecipe {
+    /// Copies one source layer into an editable recipe while preserving its original index.
     fn from_config(config: &Qwen3_5TextConfig, index: usize, layer_type: Qwen3_5LayerType) -> Self {
         Self {
             source_layer: Some(index),
@@ -81,6 +96,10 @@ impl Qwen3_5LayerRecipe {
         }
     }
 
+    /// Translates edited dimensions into a validated-later single-block family configuration.
+    ///
+    /// Residual width, rotary conventions, and dtype-independent numerical
+    /// settings remain inherited; MTP is excluded from the headless block.
     fn config(&self, base: &Qwen3_5TextConfig) -> Qwen3_5TextConfig {
         let mut config = base.clone();
         config.num_hidden_layers = 1;
@@ -407,6 +426,10 @@ impl Qwen3_5BackboneRecipe {
         })
     }
 
+    /// Validates each edited block and resolves its executable family configuration.
+    ///
+    /// Pretrained reuse additionally requires unique, in-range source indices;
+    /// random initialization does not read or require those source parameters.
     fn validate(&self, pretrained: bool) -> Result<Vec<Qwen3_5TextConfig>> {
         ArchitectureConfig::validate(&self.source_config)?;
         if self.layers.is_empty() {
@@ -435,6 +458,10 @@ impl Qwen3_5BackboneRecipe {
         Ok(configurations)
     }
 
+    /// Pairs each target parameter and checkpoint shape with an optional source owner.
+    ///
+    /// Block indices are rewritten independently of the checkpoint ordering.
+    /// A missing source selects new initialization rather than implicit reuse.
     fn parameter_selection(
         &self,
         configurations: &[Qwen3_5TextConfig],
@@ -478,6 +505,8 @@ impl Qwen3_5BackboneRecipe {
     }
 }
 
+// Selective installation: preserve lazy pretrained data and explicit dtype policy.
+
 /// Cast only new parameters, leaving overwritten pretrained parameters lazy.
 struct InitializeDtype {
     path: Vec<String>,
@@ -486,14 +515,20 @@ struct InitializeDtype {
 }
 
 impl<B: Backend> ModuleMapper<B> for InitializeDtype {
+    /// Pushes a module name so parameter callbacks resolve fully qualified target paths.
     fn enter_module(&mut self, name: &str, _: &str) {
         self.path.push(name.into());
     }
 
+    /// Removes the completed module from the parameter-path stack.
     fn exit_module(&mut self, _: &str, _: &str) {
         self.path.pop();
     }
 
+    /// Casts only newly initialized parameters to the resolved checkpoint dtype.
+    ///
+    /// Detaching the cast restores a leaf while retaining its trainability flag;
+    /// pretrained parameters remain lazy until the loader installs their data.
     fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
         let name = format!("model.{}", self.path.join("."));
         if !self.new_parameters.contains(&name) {
@@ -506,6 +541,9 @@ impl<B: Backend> ModuleMapper<B> for InitializeDtype {
     }
 }
 
+/// Uses an explicit namespace or requires exactly one recognized embedding key.
+///
+/// Ambiguous or absent namespaces fail rather than guessing a model layout.
 fn source_namespace(
     manifest: &CheckpointManifest,
     explicit: Option<Qwen3_5CheckpointSource>,
@@ -528,6 +566,10 @@ fn source_namespace(
     }
 }
 
+/// Reads and parses local `config.json` under a 16 MiB bound.
+///
+/// Both metadata and the actual read are bounded so a growing file cannot
+/// bypass the configuration-size limit.
 fn read_config(root: &Path) -> Result<Qwen3_5TextConfig> {
     let path = root.join("config.json");
     let metadata = fs::metadata(&path).map_err(|source| Error::Io {

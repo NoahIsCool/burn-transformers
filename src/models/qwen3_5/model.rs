@@ -399,6 +399,11 @@ impl<B: Backend> Qwen3_5TextModel<B> {
         })
     }
 
+    /// Validates and executes a contiguous Qwen block range on `[batch, token, hidden]`.
+    ///
+    /// All policies and model dtype/device/position contracts are checked before
+    /// execution. Full attention accepts custom connectivity; DeltaNet requires
+    /// its causal recurrence. The returned cursor names the first unexecuted block.
     fn run_layers_inner(
         &self,
         mut state: HiddenState<B>,

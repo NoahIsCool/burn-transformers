@@ -29,6 +29,7 @@ pub enum Qwen3_5CheckpointSource {
 }
 
 impl Qwen3_5CheckpointSource {
+    /// Returns the exact source namespace for the selected text checkpoint layout.
     fn language_prefix(self) -> &'static str {
         match self {
             Self::Multimodal => "model.language_model",
@@ -170,6 +171,8 @@ impl Qwen3_5TextConfig {
     }
 }
 
+// Checked checkpoint geometry: no tensor data is allocated below.
+
 #[derive(Debug, Clone, Copy)]
 struct Dimensions {
     vocab: u64,
@@ -190,6 +193,10 @@ struct Dimensions {
 impl TryFrom<&Qwen3_5TextConfig> for Dimensions {
     type Error = ConfigError;
 
+    /// Computes portable tensor dimensions with checked products and sums.
+    ///
+    /// Projection widths are head counts times head widths; DeltaNet convolution
+    /// channels concatenate Q, K, and V. Overflow is rejected before allocation.
     fn try_from(config: &Qwen3_5TextConfig) -> Result<Self, Self::Error> {
         let hidden = dimension("hidden_size", config.hidden_size)?;
         let query = product(
@@ -232,6 +239,8 @@ impl TryFrom<&Qwen3_5TextConfig> for Dimensions {
     }
 }
 
+// Topology-to-inventory translation and explicit source namespaces.
+
 struct ContractBuilder {
     source: Qwen3_5CheckpointSource,
     expected: Vec<ExpectedTensor>,
@@ -240,6 +249,7 @@ struct ContractBuilder {
 }
 
 impl ContractBuilder {
+    /// Starts an empty contract and explicitly exempts the multimodal vision tower.
     fn new(source: Qwen3_5CheckpointSource) -> Self {
         let allow_unexpected = match source {
             Qwen3_5CheckpointSource::Multimodal => {
@@ -255,6 +265,7 @@ impl ContractBuilder {
         }
     }
 
+    /// Publishes the completed inventory, mappings, and intentional key exceptions.
     fn finish(self) -> Qwen3_5CheckpointContract {
         Qwen3_5CheckpointContract {
             expected: self.expected,
@@ -263,12 +274,17 @@ impl ContractBuilder {
         }
     }
 
+    /// Maps one source text tensor to its canonical `model.*` target without reshaping.
     fn language(&mut self, suffix: &str, shape: Vec<u64>) {
         let source = format!("{}.{suffix}", self.source.language_prefix());
         let target = format!("model.{suffix}");
         self.tensor(source, target, shape, TensorTransform::Identity);
     }
 
+    /// Registers an expected target shape and its explicit source transformation.
+    ///
+    /// Shapes describe checkpoint axes; the runtime parameter mapper handles
+    /// Burn linear storage layout separately.
     fn tensor(
         &mut self,
         source: String,
@@ -284,6 +300,7 @@ impl ContractBuilder {
         });
     }
 
+    /// Adds pre-attention norm, the configured mixer, post-attention norm, and SwiGLU.
     fn decoder_layer(
         &mut self,
         index: usize,
@@ -307,6 +324,10 @@ impl ContractBuilder {
         self.mlp(&format!("{layer}.mlp"), dimensions, true);
     }
 
+    /// Declares DeltaNet projection, convolution, decay, and gated-normalization tensors.
+    ///
+    /// Linear weights use `[output, input]`; the depthwise convolution uses
+    /// `[2 * key_width + value_width, 1, kernel]`. Recurrent state is not a parameter.
     fn delta_layer(&mut self, layer: &str, dimensions: &Dimensions) {
         let prefix = format!("{layer}.linear_attn");
         self.language(
@@ -345,6 +366,10 @@ impl ContractBuilder {
         );
     }
 
+    /// Declares native GQA projections and per-head Q/K normalization weights.
+    ///
+    /// Gated Q rows retain `[head, Q_or_gate, head_dim]` order; K/V stay at
+    /// their native head count rather than being expanded to query heads.
     fn attention_layer(
         &mut self,
         layer: &str,
@@ -389,6 +414,9 @@ impl ContractBuilder {
         );
     }
 
+    /// Declares `down(SiLU(gate(x)) * up(x))` weights in text or MTP namespace.
+    ///
+    /// Gate and up weights are `[intermediate, hidden]`; down reverses those axes.
     fn mlp(&mut self, prefix: &str, dimensions: &Dimensions, language: bool) {
         for (projection, shape) in [
             (
@@ -415,6 +443,10 @@ impl ContractBuilder {
         }
     }
 
+    /// Adds the shared embedding/hidden fusion and configured MTP decoder blocks.
+    ///
+    /// The fusion projection maps concatenated width `2 * hidden` back to
+    /// `hidden`; zero MTP depth contributes no parameters.
     fn mtp(&mut self, config: &Qwen3_5TextConfig, dimensions: &Dimensions) {
         if config.mtp_num_hidden_layers == 0 {
             return;
@@ -442,6 +474,9 @@ impl ContractBuilder {
         }
     }
 
+    /// Declares MTP full-attention weights with the same gated-query layout as the base.
+    ///
+    /// MTP uses its own namespace and independent KV state during execution.
     fn mtp_attention_layer(
         &mut self,
         layer: &str,
@@ -486,6 +521,7 @@ impl ContractBuilder {
         );
     }
 
+    /// Registers one unchanged `mtp.*` tensor in both source and target inventories.
     fn mtp_tensor(&mut self, suffix: &str, shape: Vec<u64>) {
         self.tensor(
             format!("mtp.{suffix}"),
@@ -496,6 +532,9 @@ impl ContractBuilder {
     }
 }
 
+// Portable shape arithmetic: reject overflow before producing a load plan.
+
+/// Converts a host dimension to the portable checkpoint `u64` representation.
 fn dimension(field: &'static str, value: usize) -> Result<u64, ConfigError> {
     u64::try_from(value).map_err(|_| {
         ConfigError::new(
@@ -506,6 +545,7 @@ fn dimension(field: &'static str, value: usize) -> Result<u64, ConfigError> {
     })
 }
 
+/// Multiplies shape factors with overflow checks and a configuration-field diagnostic.
 fn product(field: &'static str, values: &[usize]) -> Result<u64, ConfigError> {
     values.iter().try_fold(1_u64, |accumulator, value| {
         let value = dimension(field, *value)?;
@@ -515,6 +555,7 @@ fn product(field: &'static str, values: &[usize]) -> Result<u64, ConfigError> {
     })
 }
 
+/// Sums packed projection widths without permitting checkpoint-dimension overflow.
 fn checked_sum(field: &'static str, values: &[u64]) -> Result<u64, ConfigError> {
     values.iter().try_fold(0_u64, |accumulator, value| {
         accumulator.checked_add(*value).ok_or_else(|| {

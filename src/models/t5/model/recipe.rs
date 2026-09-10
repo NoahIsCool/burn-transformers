@@ -1,8 +1,22 @@
 //! Editable, headless T5 encoder recipes for representation experiments.
+//!
+//! A block computes pre-normalized residual attention followed by its dense or
+//! gated feed-forward branch. Attention is `softmax(Q K^T + relative_bias + mask) V`
+//! with T5's scale of one: head count and width may change independently of
+//! residual width `d_model`. Scores have `[batch, heads, query, key]` axes.
+//!
+//! Layers with equal head counts share one registered learned relative-bias owner.
+//! Explicit token positions determine bucket lookups; padding constrains attention
+//! even when a user supplies custom connectivity. Eager FP32 softmax exposes score
+//! and pattern hooks, while the backend-default path retains its own arithmetic.
+//! Staged execution preserves dtype, device, gradients, and a continuation cursor;
+//! final normalization can be applied once to any retained encoder prefix.
 
 use std::collections::BTreeMap;
 
 use super::*;
+
+// Per-block geometry and shared learned relative-position bias.
 
 /// Per-layer choices in a T5 encoder recipe.
 ///
@@ -24,6 +38,7 @@ pub struct T5EncoderLayerSpec {
 }
 
 impl T5EncoderLayerSpec {
+    /// Copies the attention and feed-forward dimensions of one unmodified T5 encoder block.
     fn from_config(config: &T5Config) -> Self {
         Self {
             attention_heads: config.num_heads,
@@ -34,6 +49,10 @@ impl T5EncoderLayerSpec {
         }
     }
 
+    /// Translates one edited block into a family configuration while retaining stack conventions.
+    ///
+    /// Clearing derived activation fields lets the explicit projection choice
+    /// define dense versus gated topology without stale checkpoint aliases.
     fn config(&self, base: &T5Config) -> T5Config {
         let mut config = base.clone();
         config.num_layers = 1;
@@ -352,6 +371,7 @@ impl<B: Backend> T5Encoder<B> {
         })
     }
 
+    /// Checks `[batch, token, d_model]` residuals, dtype/device, cursor, and encoder-only policies.
     fn validate_state(&self, state: &crate::experiment::HiddenState<B>) -> Result<()> {
         state.validate(self.recipe.config.d_model)?;
         ensure_model_device(
@@ -391,6 +411,11 @@ impl<B: Backend> T5Encoder<B> {
         Ok(())
     }
 
+    /// Executes a contiguous raw-residual range with a compatible learned bias owner per block.
+    ///
+    /// Each score bias has axes `[batch, heads, query, key]` and derives from
+    /// explicit positions. All attention policies are checked before execution;
+    /// relative-bias lookups retain gradients to their single registered owner.
     fn run_layers_impl(
         &self,
         mut state: crate::experiment::HiddenState<B>,
@@ -469,6 +494,7 @@ impl<B: Backend> T5Encoder<B> {
         Ok(state)
     }
 
+    /// Applies final T5 RMS normalization once and preserves the result for an external task head.
     fn normalize_impl(
         &self,
         mut state: crate::experiment::HiddenState<B>,
@@ -489,6 +515,8 @@ impl<B: Backend> T5Encoder<B> {
         Ok(state)
     }
 }
+
+// Position-to-bucket lookup keeps the learned bias table inside the gradient graph.
 
 /// Builds T5's learned bias from explicit per-token positions, retaining gradients.
 pub(super) fn relative_bias_for_positions<B: Backend>(

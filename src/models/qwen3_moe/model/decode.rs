@@ -120,30 +120,37 @@ impl<B: Backend> Qwen3MoeDecodeState<B> {
 }
 
 impl<B: Backend> ArchitectureDecodeState<B> for Qwen3MoeDecodeState<B> {
+    /// Returns the number of logical sequence rows represented by this state.
     fn batch_size(&self) -> usize {
         self.tensors.batch_size()
     }
 
+    /// Returns the maximum logical token count per row, excluding padding.
     fn capacity(&self) -> usize {
         self.tensors.capacity()
     }
 
+    /// Borrows committed semantic token counts in the current batch order.
     fn lengths(&self) -> &[usize] {
         self.tensors.lengths()
     }
 
+    /// Resets logical lengths and all cache groups through the shared state contract.
     fn reset(&mut self) -> Result<()> {
         self.tensors.reset().map_err(Into::into)
     }
 
+    /// Reorders or duplicates sequence rows across metadata and every cache group atomically.
     fn reorder(&mut self, indices: &[usize]) -> Result<()> {
         self.tensors.reorder(indices).map_err(Into::into)
     }
 
+    /// Shortens committed KV prefixes after validating every requested sequence length.
     fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
         self.tensors.truncate(lengths).map_err(Into::into)
     }
 
+    /// Returns the device holding this state, independent of model parameter ownership.
     fn device(&self) -> &B::Device {
         self.tensors.device()
     }
@@ -153,6 +160,7 @@ impl<B: Backend> CausalLanguageModel<B> for Qwen3MoeForCausalLm<B> {
     type Config = super::super::Qwen3MoeConfig;
     type State = Qwen3MoeDecodeState<B>;
 
+    /// Delegates to the stateless family graph without allocating or mutating decode history.
     fn forward(
         &self,
         input: CausalLmInput<B>,
@@ -161,6 +169,7 @@ impl<B: Backend> CausalLanguageModel<B> for Qwen3MoeForCausalLm<B> {
         Qwen3MoeForCausalLm::forward(self, input, options)
     }
 
+    /// Allocates external Qwen MoE cache groups after validating model/device geometry.
     fn new_decode_state(
         &self,
         config: CacheConfig,
@@ -170,6 +179,7 @@ impl<B: Backend> CausalLanguageModel<B> for Qwen3MoeForCausalLm<B> {
         Qwen3MoeDecodeState::new(self, config, batch_size, device)
     }
 
+    /// Evaluates prompt rows with at least one valid token and commits all cache writes together.
     fn prefill(
         &self,
         input: CausalLmInput<B>,
@@ -179,6 +189,7 @@ impl<B: Backend> CausalLanguageModel<B> for Qwen3MoeForCausalLm<B> {
         self.forward_with_decode_state(input, state, options, StatefulPhase::Prefill)
     }
 
+    /// Appends valid tokens while fully masked rows retain their state and return zero outputs.
     fn decode(
         &self,
         input: DecodeInput<B>,

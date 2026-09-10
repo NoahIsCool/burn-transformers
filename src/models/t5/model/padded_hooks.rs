@@ -1,4 +1,14 @@
 //! Original-token-coordinate hook execution for padded T5 decoder batches.
+//!
+//! Hook selections retain the caller's rectangular token coordinates. Validity
+//! masks broadcast over channel and head axes, preventing edits from restoring
+//! padded Q/K/V, head-context, or score-plane entries. They express semantic token
+//! validity (`true` means present), independently of causal connectivity.
+//!
+//! Only eager FP32 softmax exposes score/pattern points; this module performs
+//! boolean/integer bookkeeping and never changes attention arithmetic. Logical
+//! decoder positions advance on valid tokens alone, so holes and left padding do
+//! not alter T5's relative-position distances.
 
 use burn::tensor::Bool;
 
@@ -93,6 +103,13 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
     }
 }
 
+// Axis-aware padding validity for attention projections and score planes.
+
+/// Adds broadcast validity masks for native Q/K/V, head outputs, and visible score planes.
+///
+/// Query/head masks use `[batch, 1, query, 1]`; key/value masks replace
+/// query with key length. Eager score/pattern masks use the outer conjunction
+/// `query_valid AND key_valid`, so interventions cannot revive padded entries.
 fn attention_validity<B: Backend>(
     validity: &mut Vec<PointValidity<B>>,
     points: AttentionPoints,
@@ -119,6 +136,8 @@ fn attention_validity<B: Backend>(
     }
     Ok(())
 }
+
+// Semantic positions ignore padding while preserving rectangular hook coordinates.
 
 /// Valid target tokens advance relative positions; padding never consumes one.
 pub(super) fn logical_decoder_positions<B: Backend>(

@@ -283,18 +283,22 @@ impl<B: Backend> ModularDecodeState<B> {
 }
 
 impl<B: Backend> ArchitectureDecodeState<B> for ModularDecodeState<B> {
+    /// Returns the number of logical sequence rows represented by this state.
     fn batch_size(&self) -> usize {
         self.metadata.config().sequence_count()
     }
 
+    /// Returns the maximum logical token count per row, excluding padding.
     fn capacity(&self) -> usize {
         self.metadata.config().capacity()
     }
 
+    /// Borrows committed semantic token counts in the current batch order.
     fn lengths(&self) -> &[usize] {
         self.metadata.lengths()
     }
 
+    /// Clears committed lengths and replaces token/position history with device-side zeros.
     fn reset(&mut self) -> Result<()> {
         self.metadata
             .reset()
@@ -304,6 +308,10 @@ impl<B: Backend> ArchitectureDecodeState<B> for ModularDecodeState<B> {
         Ok(())
     }
 
+    /// Selects history rows and logical metadata together for beam expansion or reordering.
+    ///
+    /// Indices are validated before selection; repeated indices duplicate the
+    /// same history without changing token or position semantics.
     fn reorder(&mut self, indices: &[usize]) -> Result<()> {
         let selection = indices
             .iter()
@@ -322,6 +330,10 @@ impl<B: Backend> ArchitectureDecodeState<B> for ModularDecodeState<B> {
         Ok(())
     }
 
+    /// Shortens logical histories after validating every requested prefix length.
+    ///
+    /// Stored tail bytes remain allocated but are invisible to subsequent
+    /// prefix evaluation and may be overwritten by the next append.
     fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
         self.metadata
             .truncate_all(lengths)
@@ -329,6 +341,7 @@ impl<B: Backend> ArchitectureDecodeState<B> for ModularDecodeState<B> {
         Ok(())
     }
 
+    /// Returns the device holding this state, independent of model parameter ownership.
     fn device(&self) -> &B::Device {
         &self.device
     }
