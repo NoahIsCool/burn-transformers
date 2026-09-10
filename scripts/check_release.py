@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -25,6 +26,7 @@ from coverage_binding import prepare_capture, validate_capture, read_json, requi
 CRATE = Path(__file__).resolve().parents[1]
 FEATURES = "std,flex,tokenizers,chat-templates,autodiff"
 GATES = ("source", "msrv", "coverage", "dependencies", "accelerator-compile", "package")
+MINIMUM_BUILD_FREE_BYTES = 20 * 1024**3
 # Public experiments with fixed/random fixtures and numerical assertions. Paper
 # checkpoints have separate explicit preparation/replay protocols; never fetch
 # artifacts as a side effect of checking source code.
@@ -273,6 +275,52 @@ def command_plan(gate: str, output: Path, toolchain: str, msrv: str, offline: bo
     raise ValueError(f"unknown gate: {gate}")
 
 
+def command_compiles(command: list[str]) -> bool:
+    """Identify compile-capable invocations in the explicit release command plan.
+
+    Rustdoc, examples, coverage, and package verification can compile even when
+    an ordinary build is not requested. Formatting and package listing cannot.
+    """
+
+    if not command or command[0] != "cargo" or len(command) < 2:
+        return False
+    index = 2 if command[1].startswith("+") else 1
+    if index >= len(command):
+        return False
+    operation = command[index]
+    return operation in {"build", "check", "clippy", "doc", "test", "run", "llvm-cov", "package"} and not (
+        operation == "package" and "--list" in command
+    )
+
+
+def observe_build_storage(crate: Path, environment: dict) -> dict:
+    """Measure local free bytes without cleaning artifacts or selecting a fallback.
+
+    This checks the checkout's local filesystem immediately before compilation.
+    Explicit Cargo target overrides are retained as provenance, not silently
+    changed or treated as evidence that the local-space requirement was met.
+    An unreadable measurement fails closed with its diagnostic in the record.
+    """
+
+    observation = {
+        "checked_path": str(crate.resolve()),
+        "checked_utc": datetime.now(timezone.utc).isoformat(),
+        "minimum_free_bytes": MINIMUM_BUILD_FREE_BYTES,
+        "free_bytes": None,
+        "passed": False,
+        "target_environment": {name: environment[name] for name in (
+            "CARGO_TARGET_DIR", "CARGO_LLVM_COV_TARGET_DIR",
+        ) if name in environment},
+    }
+    try:
+        observation["free_bytes"] = shutil.disk_usage(crate).free
+    except OSError as error:
+        observation["measurement_error"] = str(error)
+    else:
+        observation["passed"] = observation["free_bytes"] >= MINIMUM_BUILD_FREE_BYTES
+    return observation
+
+
 def require_msrv(toolchain: str) -> None:
     """Reject an alias that no longer resolves to the declared Rust 1.92 MSRV."""
 
@@ -360,6 +408,14 @@ def main() -> int:
                "process_exit_code": None, "log": log.name}
         results["gates"].append(row)
         try:
+            if command_compiles(command):
+                storage = row["storage_preflight"] = observe_build_storage(CRATE, command_environment)
+                if not storage["passed"]:
+                    reason = storage.get("measurement_error") or (
+                        f"{storage['free_bytes']} bytes free; at least "
+                        f"{storage['minimum_free_bytes']} bytes (20 GiB) required"
+                    )
+                    raise ValueError(f"compile storage preflight failed at {storage['checked_path']}: {reason}")
             if gate == "coverage":
                 if args.coverage_compiler_evidence:
                     command_environment, compiler_setup = prepare_capture(CRATE.resolve(), output.resolve(), args.toolchain, FEATURES, command_environment)

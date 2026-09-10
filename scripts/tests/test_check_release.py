@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import tomllib
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -37,6 +38,148 @@ def minimal_crate(crate: Path) -> None:
 
 class ReleaseGateTests(unittest.TestCase):
     """Pin denominator policy, exact threshold comparisons, and safe command plans."""
+
+    def setUp(self):
+        """Keep pure runner tests independent of the host's current free space."""
+
+        patcher = mock.patch.object(GATES.shutil, "disk_usage", return_value=SimpleNamespace(
+            free=GATES.MINIMUM_BUILD_FREE_BYTES + 1,
+        ))
+        self.disk_usage = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_compile_detection_includes_coverage_documentation_and_package_verification(self):
+        """Every compile-capable operation gets a preflight, even with a warm cache."""
+
+        for operation in ("build", "check", "clippy", "doc", "test", "run", "llvm-cov", "package"):
+            for toolchain in ([], ["+stable"]):
+                with self.subTest(operation=operation, toolchain=toolchain):
+                    self.assertTrue(GATES.command_compiles(["cargo", *toolchain, operation]))
+        for command in ([], ["cargo"], ["cargo", "+stable"], ["rustc", "--version"],
+                        ["cargo", "+stable", "fmt", "--check"], ["cargo", "metadata"],
+                        ["cargo", "audit"], ["cargo", "deny", "check"],
+                        ["cargo", "+stable", "package", "--list"]):
+            with self.subTest(command=command):
+                self.assertFalse(GATES.command_compiles(command))
+
+    def test_storage_preflight_uses_exact_gib_boundary_and_retains_override(self):
+        """Exactly 20 GiB passes; a target override never changes the measured path."""
+
+        threshold = 20 * 1024**3
+        environment = {"CARGO_TARGET_DIR": "/external/explicit-target", "SECRET": "not recorded"}
+        for free, passed in ((threshold - 1, False), (threshold, True), (threshold + 1, True)):
+            with self.subTest(free=free):
+                self.disk_usage.return_value = SimpleNamespace(free=free)
+                observed = GATES.observe_build_storage(GATES.CRATE, environment)
+                self.assertEqual(observed["minimum_free_bytes"], threshold)
+                self.assertEqual(observed["free_bytes"], free)
+                self.assertEqual(observed["passed"], passed)
+                self.assertEqual(observed["checked_path"], str(GATES.CRATE.resolve()))
+                self.assertTrue(observed["checked_utc"])
+                self.assertEqual(observed["target_environment"], {"CARGO_TARGET_DIR": environment["CARGO_TARGET_DIR"]})
+                self.disk_usage.assert_called_with(GATES.CRATE)
+        self.assertEqual(environment, {"CARGO_TARGET_DIR": "/external/explicit-target", "SECRET": "not recorded"})
+
+    def test_low_storage_stops_before_coverage_setup_or_native_execution(self):
+        """A failed storage observation cannot acquire native or compiler-binding claims."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            minimal_crate(crate)
+            self.disk_usage.return_value = SimpleNamespace(free=GATES.MINIMUM_BUILD_FREE_BYTES - 1)
+            with (
+                mock.patch.object(GATES, "CRATE", crate),
+                mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "coverage", "--gate", "source", "--coverage-compiler-evidence"]),
+                mock.patch.object(GATES, "prepare_capture") as prepare,
+                mock.patch.object(GATES, "capture_coverage_context") as capture,
+                mock.patch.object(GATES.subprocess, "run") as process,
+                mock.patch("builtins.print"),
+            ):
+                self.assertEqual(GATES.main(), 1)
+            prepare.assert_not_called()
+            capture.assert_not_called()
+            process.assert_not_called()
+            result = json.loads(next((crate / "target/release-gates").glob("*/results.json")).read_text())
+            row, = result["gates"]
+            self.assertFalse(result["passed"])
+            self.assertFalse(row["storage_preflight"]["passed"])
+            self.assertEqual(row["storage_preflight"]["free_bytes"], GATES.MINIMUM_BUILD_FREE_BYTES - 1)
+            self.assertIsNone(row["process_exit_code"])
+            self.assertEqual(row["exit_code"], 1)
+            self.assertIn("20 GiB", row["validation_error"])
+            self.assertNotIn("compiler_evidence", row)
+            self.assertNotIn("coverage", row)
+
+    def test_storage_is_rechecked_before_each_compile_but_not_formatting(self):
+        """One passing observation cannot authorize a later compile after space falls."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            commands = [["cargo", "+stable", "fmt", "--check"],
+                        ["cargo", "+stable", "test"], ["cargo", "+stable", "doc"]]
+            self.disk_usage.side_effect = [SimpleNamespace(free=GATES.MINIMUM_BUILD_FREE_BYTES),
+                                          SimpleNamespace(free=GATES.MINIMUM_BUILD_FREE_BYTES - 1)]
+            environment = {"CARGO_TARGET_DIR": "/explicit/target"}
+            with (
+                mock.patch.object(GATES, "CRATE", crate),
+                mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "source"]),
+                mock.patch.object(GATES, "command_plan", return_value=commands),
+                mock.patch.object(GATES.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as process,
+                mock.patch.dict(GATES.os.environ, environment, clear=True),
+                mock.patch("builtins.print"),
+            ):
+                self.assertEqual(GATES.main(), 1)
+            self.assertEqual(self.disk_usage.call_count, 2)
+            self.assertEqual([call.args[0] for call in process.call_args_list], commands[:2])
+            self.assertTrue(all(call.kwargs["env"]["CARGO_TARGET_DIR"] == environment["CARGO_TARGET_DIR"]
+                                for call in process.call_args_list))
+            result = json.loads(next((crate / "target/release-gates").glob("*/results.json")).read_text())
+            formatted, compiled, blocked = result["gates"]
+            self.assertNotIn("storage_preflight", formatted)
+            self.assertTrue(compiled["storage_preflight"]["passed"])
+            self.assertEqual(compiled["process_exit_code"], 0)
+            self.assertFalse(blocked["storage_preflight"]["passed"])
+            self.assertIsNone(blocked["process_exit_code"])
+            self.assertFalse(result["passed"])
+
+    def test_unreadable_free_space_is_recorded_without_spawning(self):
+        """Failure to measure is distinct from an observed low-space count."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            self.disk_usage.side_effect = OSError("storage query unavailable")
+            with (
+                mock.patch.object(GATES, "CRATE", crate),
+                mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "accelerator-compile"]),
+                mock.patch.object(GATES.subprocess, "run") as process,
+                mock.patch("builtins.print"),
+            ):
+                self.assertEqual(GATES.main(), 1)
+            process.assert_not_called()
+            result = json.loads(next((crate / "target/release-gates").glob("*/results.json")).read_text())
+            row, = result["gates"]
+            self.assertIsNone(row["storage_preflight"]["free_bytes"])
+            self.assertEqual(row["storage_preflight"]["minimum_free_bytes"], GATES.MINIMUM_BUILD_FREE_BYTES)
+            self.assertFalse(row["storage_preflight"]["passed"])
+            self.assertIn("storage query unavailable", row["validation_error"])
+            self.assertIsNone(row["process_exit_code"])
+
+    def test_dry_run_does_not_measure_storage_or_create_evidence(self):
+        """Command previews remain read-only even when the host cannot report storage."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory)
+            self.disk_usage.side_effect = OSError("not available")
+            with (
+                mock.patch.object(GATES, "CRATE", crate),
+                mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "source", "--dry-run"]),
+                mock.patch.object(GATES.subprocess, "run") as process,
+                mock.patch("builtins.print"),
+            ):
+                self.assertEqual(GATES.main(), 0)
+            process.assert_not_called()
+            self.disk_usage.assert_not_called()
+            self.assertFalse((crate / "target").exists())
 
     def test_exact_thresholds_and_exclusions(self):
         """Keep experimental source but exclude integration harnesses/dependencies."""
@@ -131,6 +274,7 @@ class ReleaseGateTests(unittest.TestCase):
             self.assertTrue(result["passed"])
             row = result["gates"][0]
             self.assertTrue(row["compiler_evidence"]["artifact_binding_verified"])
+            self.assertTrue(row["storage_preflight"]["passed"])
             self.assertFalse(row["compiler_evidence"]["production_only_exclusions_qualified"])
             self.assertEqual(observed[0][1], "run-local")
             self.assertTrue(all(wrapper is None for _, wrapper in observed[1:]))
@@ -269,6 +413,7 @@ class ReleaseGateTests(unittest.TestCase):
             self.assertEqual((status, calls), (0, 1))
             self.assertTrue(result["passed"])
             row, = result["gates"]
+            self.assertTrue(row["storage_preflight"]["passed"])
             evidence = row["input_evidence"]
             self.assertTrue(evidence["sources_unchanged"])
             self.assertFalse(evidence["production_only_exclusions_qualified"])
