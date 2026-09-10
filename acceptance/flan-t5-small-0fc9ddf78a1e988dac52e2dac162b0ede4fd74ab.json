@@ -1,4 +1,5 @@
 {
+  "sampled_phase_memory_record": "measurements/small-model-metal-memory-20260909.json",
   "schema_version": 1,
   "advertised_supported": false,
   "phase": "f32_reference_parity_and_repeated_metal_timings_verified_pending_release_coverage_phase_memory_and_final_replay",

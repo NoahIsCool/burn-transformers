@@ -1,4 +1,5 @@
 {
+  "sampled_phase_memory_record": "measurements/small-model-metal-memory-20260909.json",
   "schema_version": 1,
   "advertised_supported": false,
   "phase": "reference_public_api_repeated_metal_timings_and_q4_32k_execution_verified_pending_coverage_phase_memory_long_timings_and_quantized_quality",

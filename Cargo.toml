@@ -13,6 +13,7 @@ include = [
     "/examples/**",
     "/tests/**",
     "/scripts/**/*.py",
+    "/scripts/tests/fixtures/coverage_lines/**",
     "/acceptance/**",
     "/*.md",
     "/LICENSE-*",

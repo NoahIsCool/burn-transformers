@@ -105,6 +105,13 @@ the source-classification and line-count tooling still needs independent tests,
 source/report identity checks, and differential validation against LLVM.
 Neither this diagnostic nor a future legacy-counter pass waives that work.
 
+The supplementary physical-line counter now matches every native LCOV line and
+count in a [pinned isolated LLVM 21 fixture](scripts/tests/fixtures/coverage_lines/provenance.json):
+30 mapped lines / 26 covered, versus the deliberately different function-summary
+33 / 27. Compiler, profile merge, and both native exports produced no warnings.
+This qualifies that fixture's counter comparison, not source exclusions or a
+historical full-crate export against subsequently edited source.
+
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is
 `819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d`.
@@ -169,7 +176,12 @@ it is useful locally but is not a substitute for that final connected audit.
   FLAN now has a [repeated Metal/F32 timing series](acceptance/measurements/flan-t5-small-metal-benchmark-20260909-run.json)
   with three warmups and ten samples at 32/128/512 source tokens, 128 forced
   decode steps, canonical hashes, and separate whole-process high-water
-  memory. Phase-specific peaks and final integrated replay are still open.
+  memory. A [separate instrumented memory series](acceptance/measurements/small-model-metal-memory-20260909.json)
+  now records all 93 phases for each small model, with per-phase idle baselines,
+  actual sampling gaps, and distinct warmup/measured partitions; both completed
+  with zero sampling errors. These are sampled OS-accounted process maxima, not
+  exact unsampled peaks or separately attributable host/device allocations.
+  Instrumented timings cannot be compared to the original timing baseline.
   The matching [Qwen Metal/F16 baseline](acceptance/measurements/qwen3.5-0.8b-metal-benchmark-20260909-run.json)
   now passes the same repeated protocol and records actual hybrid cache bytes.
   Its optional 2K/8K/32K prefill-only timing series has not yet run.

@@ -1350,10 +1350,17 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   The later [integrated replay](acceptance/measurements/small-model-functional-replay-6226170-20260909.json)
   reconfirms both families' official vectors, exact decisions, public APIs and
   examples after the latest storage, attention, and beam-score validation fixes.
+- **Strict artifact identity includes JSON key uniqueness.** Burnpack tensor
+  inventories and checkpoint-shard provenance now reuse the same duplicate-key
+  Serde visitor as SafeTensors metadata/index maps. Identical, conflicting, and
+  escape-equivalent duplicate names fail instead of silently selecting the last
+  value. Payload hashes do not replace this structural validation.
 - **Memory measurements distinguish storage from observed process footprint.**
   The test-only Darwin supervisor brackets synchronized phases, samples a real
-  idle baseline, and retains raw timestamps, gaps, and errors. Sampled maxima
-  are not exact transient peaks; kernel lifetime high-water and analytical
+  idle baseline, and retains raw timestamps, gaps, and errors. The [executed Qwen/FLAN series](acceptance/measurements/small-model-metal-memory-20260909.json)
+  passed 93 phases per model without sampling errors, with warmups kept separate
+  from measured repetitions. Sampled maxima are not exact transient peaks;
+  kernel lifetime high-water and analytical
   cache bytes remain distinct. Instrumentation is excluded from comparable
   timing series and adds no runtime networking or dependencies.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
