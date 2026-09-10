@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "scope": "Passing v0.1 source/coverage gates and final public-example replay; performance resolution and release promotion remain pending",
+  "source_commit": "b4d64109cc990b5a01b0251cf23f67e7a87075bf",
+  "src_tree_git_oid_including_test_sources": "aa4868b5f294700593d3f2a37a6cccde5ea1a3cc",
+  "previous_measurement": "shared-coverage-gate-20260910.json",
+  "advertised_supported": false,
+  "release_gate_promotion": false,
+  "changes": {
+    "new_unit_tests": 3,
+    "production_sources_changed": false,
+    "contracts": [
+      "Strict mixed dense/routed Qwen3-MoE loading with attention biases",
+      "Linear and YaRN configuration translation against independent scalar phases",
+      "Cached/full parity and single-router diagnostic/loss semantics"
+    ]
+  },
+  "validation": {
+    "unit_passed": 1082,
+    "unit_ignored": 3,
+    "integration_passed": 102,
+    "integration_ignored": 27,
+    "total_passed": 1184,
+    "total_ignored": 30,
+    "failed": 0,
+    "source_msrv_accelerator_package_directory": "target/release-gates/20260910T082309.755107Z",
+    "release_check_commands_passed": 17,
+    "all_target_all_feature_clippy": "Separate isolated direct-driver replay passed with warnings denied",
+    "msrv": "1.92.0",
+    "python_tests": 372,
+    "python_native_opt_ins_skipped": 14,
+    "classifier_tests_per_toolchain": 29,
+    "package_files": 386,
+    "package_verified": true,
+    "package_warning": "Existing informational missing documentation/homepage/repository URLs",
+    "accelerators": "Metal, CUDA and ROCm compiled separately; these compile checks execute no kernels"
+  },
+  "coverage": {
+    "directory": "target/release-gates/20260910T082305.848132Z",
+    "features": ["std", "flex", "tokenizers", "chat-templates", "autodiff"],
+    "source_inventory_sha256": "a9585e522ae8d6b6d7a0db848b14274f32f4e877b2e4019f507a120ddfbbd42b",
+    "production_inputs": 101,
+    "unit_inputs": 188,
+    "reported_files": 168,
+    "whole_test_files_excluded": 79,
+    "retained_production_files": 89,
+    "crate": {"covered": 32879, "lines": 36530, "percent": 90.00547495209418, "minimum_percent": 90, "meets_threshold": true},
+    "shared": {"covered": 15560, "lines": 16377, "percent": 95.01129633021921, "minimum_percent": 95, "meets_threshold": true},
+    "denominator_change": 0,
+    "newly_covered_lines": {"crate": 62, "shared": 0},
+    "native_export": {"file": "llvm-export/native-coverage.json", "bytes": 83749129, "sha256": "07b4044727e59a04c8ef9fd416eb2ec8225e6d17eded71a45a6a86685c46e71a"},
+    "native_log": {"file": "00-coverage.log", "bytes": 119519, "sha256": "1638af9a373be6fa950c2fb758d0e88fc87cc1535c4bc0e7c9fe74180a0f33cb"},
+    "diagnostic": {"file": "whole-test-file-diagnostic.json", "bytes": 139773, "sha256": "f83a991b86c23c1476e5ba975cee8fd7a2d9db0e9b0dd2d5f4cec7da320551d9"},
+    "authored_production_interpretation": {
+      "qualified": true,
+      "scope": "Exact captured source/configuration only, under the existing trusted compiler/tool boundary",
+      "native_regions": 159675,
+      "native_function_instantiations": 9021,
+      "unmatched_regions_or_mapped_lines": 0,
+      "generated_code_exclusions": 0,
+      "generic_gate_flags_changed": false,
+      "branch_coverage_claim": false,
+      "arbitrary_procedural_macro_io_attestation": false,
+      "independent_reauthentication": {"path": "/private/tmp/tfm-coverage-reauth-20260910-passing.Zk5GRk/proof.json", "bytes": 80316, "sha256": "e69070f8ab155032d6e9f9e0a7f727d6baabb34c17b2f32cae33befb9c8a131e"}
+    }
+  },
+  "public_examples": {
+    "scope": "Functional executions only, not new reference-logit parity, throughput, memory or quality measurements",
+    "source_before_after_identical": true,
+    "full_pinned_checkpoint_hashes_verified_before_and_after": true,
+    "example_sources_unchanged_from_previous_replay": true,
+    "executed_binary_hashes_unchanged_during_each_run": true,
+    "raw_record": {"path": "/private/tmp/tfm-public-examples-final.gi9f2q/summary.json", "bytes": 9474, "sha256": "d97db1cbba8cabff19dd877238a7fee48d10515b0a031505f6c2402e1a364fc5"},
+    "runs": [
+      {
+        "example": "qwen35_chat",
+        "backend": "Metal/F16",
+        "repository": "Qwen/Qwen3.5-0.8B",
+        "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+        "features": ["std", "metal", "tokenizers", "chat-templates"],
+        "prompt": "Explain why the seasons change in four complete sentences.",
+        "max_new_tokens": 32,
+        "exit_code": 0,
+        "binary_sha256": "d3cf4554618e7ee1147bade59716ff63f1d8f604b7615353fff690cb34845cd4",
+        "stdout_sha256": "44ffd45f2751a5a5a5fa8bb99c5dd973dad64a96c2e70211f2de438f7964757f",
+        "stdout_matches_previous_replay": true,
+        "stderr_empty": true
+      },
+      {
+        "example": "flan_t5_small",
+        "backend": "Flex/F32",
+        "repository": "google/flan-t5-small",
+        "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
+        "features": ["std", "flex", "tokenizers"],
+        "prompt": "translate English to German: The house is wonderful.",
+        "exit_code": 0,
+        "binary_sha256": "17bde15c761cf437f7da832101b2073abc465eff7683afd5c34d4ed03365c17c",
+        "stdout": "Das Haus ist schön.\n",
+        "stdout_sha256": "973bf9cbbec86b22b1be507d3ce8f79953d2a8bb4389c9d1b79cf0dc3ffcdc73",
+        "stdout_matches_previous_replay": true,
+        "generation_metadata": "finish=EndOfSequence { token_id: 1 } score=-0.601039 tokens=6"
+      }
+    ]
+  },
+  "remaining": [
+    "Resolve or explicitly replace the historical Qwen timing gate; controlled rebuilt-old/current agreement is not automatic authorization to rebaseline",
+    "After applicable gates are resolved, finalize coordinated v0.1 support records, dated changelog and release packaging; no publishing or tagging is implied"
+  ]
+}

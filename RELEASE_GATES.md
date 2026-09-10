@@ -5,6 +5,28 @@ implemented families remain experimental. This checklist supplements
 [RELEASING.md](RELEASING.md); a green source check does not promote a checkpoint,
 publish an archive, or waive any real-weight gate.
 
+## Current candidate
+
+The [`b4d6410` source-gate record](acceptance/measurements/v0_1-source-gates-20260910.json)
+passes **1,184 Rust tests / 30 opt-in ignores**, all 17 source/Rust 1.92/backend/
+package commands, and separate all-feature warning-denied Clippy. Independently
+reauthenticated authored-function line coverage is **32,879 / 36,530 (90.0055%)**
+crate-wide and **15,560 / 16,377 (95.0113%)** shared/core, passing both unchanged
+thresholds with the same 79 whole-test-file exclusions and zero Burn exclusions.
+The exact-source manual interpretation is not a general macro-closure or branch
+coverage claim. Later sections retain historical failures at their own snapshots.
+
+Both unchanged public examples were replayed from this source after the tokenizer
+fix: Qwen/Metal reproduces the previous 32-token text exactly, and FLAN/Flex
+reproduces the previous translation and six-token EOS metadata. Full pinned
+artifact, binary and source hashes remain identical before/after each run.
+These functional checks do not supply new performance measurements.
+
+The unresolved historical Qwen timing gate is still open; controlled same-host
+old/current agreement does not authorize replacing it. Support flags remain
+false, and the changelog date/final release metadata stay unpromoted until that
+decision or a demonstrated resolution. No publication or tag has been created.
+
 ## Reproducible source checks
 
 The standard-library-only [runner](scripts/check_release.py) executes explicit
