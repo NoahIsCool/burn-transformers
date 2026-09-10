@@ -192,6 +192,9 @@ struct ScriptedModel<B: Backend> {
     trace: Arc<Mutex<ScriptTrace>>,
     #[module(skip)]
     fault: Option<ScriptFault>,
+    /// Optional hard vocabulary restriction, represented by valid negative-infinity logits.
+    #[module(skip)]
+    vocabulary_mask: Option<Vec<bool>>,
 }
 
 impl<B: Backend> ScriptedModel<B> {
@@ -202,17 +205,28 @@ impl<B: Backend> ScriptedModel<B> {
             config,
             trace: Arc::new(Mutex::new(ScriptTrace::default())),
             fault: None,
+            vocabulary_mask: None,
         }
     }
 
     /// Creates a model output from one flat row-major logits buffer.
     fn output(
         &self,
-        logits: Vec<f32>,
+        mut logits: Vec<f32>,
         batch: usize,
         encoder: EncoderOutput<B>,
         device: &B::Device,
     ) -> Seq2SeqOutput<B> {
+        if let Some(mask) = &self.vocabulary_mask {
+            assert_eq!(mask.len(), self.config.vocabulary_size);
+            for row in logits.chunks_exact_mut(mask.len()) {
+                for (score, &allowed) in row.iter_mut().zip(mask) {
+                    if !allowed {
+                        *score = f32::NEG_INFINITY;
+                    }
+                }
+            }
+        }
         Seq2SeqOutput {
             decoder: CausalLmOutput {
                 logits: Tensor::from_data(
@@ -1482,4 +1496,67 @@ fn one_beam_returns_one_length_limited_sequence() {
     assert_eq!(output.sequences[0].len(), 1);
     assert_eq!(output.sequences[0][0].token_ids.len(), 2);
     assert_eq!(output.sequences[0][0].finish_reason, FinishReason::Length);
+}
+
+/// A finite frontier narrower than the beam width leaves unused cache rows as PAD no-ops.
+#[test]
+fn release_v2_restricted_vocabulary_keeps_unused_beam_slots_inert() {
+    let device = Default::default();
+    let mut model = ScriptedModel::<TestBackend>::new(
+        ScriptedConfig {
+            vocabulary_size: 5,
+            emit_nonfinite: false,
+        },
+        &device,
+    );
+    model.vocabulary_mask = Some(vec![false, false, false, true, false]);
+    let mut config = search(3, 3);
+    config.num_return_sequences = 1;
+    let output = generate_seq2seq_beam_search(&model, request(&device, config)).unwrap();
+    assert_eq!(output.sequences.len(), 1);
+    assert_eq!(output.sequences[0].len(), 1);
+    let sequence = &output.sequences[0][0];
+    assert_eq!(sequence.token_ids, [3, 3, 3]);
+    assert_eq!(sequence.log_probabilities, [0.0; 3]);
+    assert_eq!(sequence.cumulative_log_probability, 0.0);
+    assert_eq!(sequence.score, 0.0);
+    assert_eq!(sequence.decoder_prompt_length, 1);
+    assert_eq!(sequence.finish_reason, FinishReason::Length);
+    let trace = model.trace.lock().unwrap();
+    assert_eq!(trace.encode_calls, 1);
+    assert_eq!(trace.state_allocations, 1);
+    assert_eq!(trace.prefill_calls, 1);
+    assert_eq!(trace.reorders, [vec![0, 1, 2], vec![0, 1, 2]]);
+    assert_eq!(trace.decode_tokens, [vec![3, 0, 0], vec![3, 0, 0]]);
+    assert_eq!(
+        trace.decode_valid,
+        [vec![true, false, false], vec![true, false, false]]
+    );
+    assert_eq!(trace.decode_lengths, [vec![2, 1, 1], vec![3, 1, 1]]);
+}
+
+/// Too few reachable terminal hypotheses produce an error instead of cloned or fabricated outputs.
+#[test]
+fn release_v2_restricted_vocabulary_reports_insufficient_return_hypotheses() {
+    let device = Default::default();
+    let mut model = ScriptedModel::<TestBackend>::new(
+        ScriptedConfig {
+            vocabulary_size: 5,
+            emit_nonfinite: false,
+        },
+        &device,
+    );
+    model.vocabulary_mask = Some(vec![false, false, false, true, false]);
+    let error = generate_seq2seq_beam_search(&model, request(&device, search(2, 3)))
+        .expect_err("one reachable sequence cannot supply three distinct hypotheses");
+    assert!(matches!(error, Error::Generation(ref message)
+        if message == "beam-search source row 0 produced 1 finished hypotheses, fewer than requested 3"));
+    let trace = model.trace.lock().unwrap();
+    assert_eq!(
+        trace.boundaries,
+        ["encode", "cache", "prefill", "reorder", "decode"]
+    );
+    assert_eq!(trace.decode_tokens, [vec![3, 0, 0]]);
+    assert_eq!(trace.decode_valid, [vec![true, false, false]]);
+    assert_eq!(trace.decode_lengths, [vec![2, 1, 1]]);
 }

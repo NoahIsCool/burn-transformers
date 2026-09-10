@@ -1476,3 +1476,104 @@ fn coordinator_contract_decode_logits_fail_after_exactly_one_valid_batch() {
         assert_eq!(model.drops.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
+
+/// Empty physical prompt axes fail before a model session or callback can become observable.
+#[test]
+fn release_v2_empty_prompt_axes_reject_before_session_allocation() {
+    for shape in [[0, 2], [2, 0]] {
+        for chunk_size in [None, Some(1)] {
+            let (mut model, mut request) =
+                coordinator_contract_fixture(false, CoordinatorFault::ModelError);
+            model.fault = None;
+            let device = request.prompt.token_ids.device();
+            request.prompt.token_ids = Tensor::zeros(shape, &device);
+            request.prefill_chunk_size = chunk_size;
+            let mut callbacks = 0;
+            let error = generate_causal_streaming(&model, request, |_| {
+                callbacks += 1;
+                Ok(())
+            })
+            .expect_err("an empty prompt cannot start a generation session");
+            assert!(matches!(error, Error::Shape { ref tensor, ref actual, .. }
+                if tensor == "generation.prompt.token_ids" && actual == &format!("{shape:?}")));
+            assert_eq!(callbacks, 0);
+            assert!(model.calls.lock().unwrap().is_empty());
+            assert_eq!(model.drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+    }
+}
+
+/// Streaming preserves longest-stop precedence, generated-only matching, and terminal probabilities.
+#[test]
+fn release_v2_overlapping_stops_stream_at_the_exact_cache_boundary() {
+    let (model, mut request) = finished_row_fixture(SamplingStrategy::Sample, None);
+    request.cache = CacheConfig::new(2, 3).unwrap();
+    request.generation.max_new_tokens = 2;
+    request.generation.eos_token_ids.clear();
+    // Row one's prompt ends in 8: [8, 4] must not terminate its first generated
+    // token. At token 5 the longest generated suffix wins over [5] and Length.
+    request.generation.stop_sequences = vec![vec![8, 4], vec![5], vec![4, 5], vec![2]];
+    let mut events = Vec::new();
+    let output = generate_causal_streaming(&model, request, |event| {
+        events.push(event);
+        Ok(())
+    })
+    .expect("the last emitted token needs no extra feedback cache slot");
+    let first_reason = FinishReason::StopSequence {
+        index: 3,
+        length: 1,
+    };
+    let second_reason = FinishReason::StopSequence {
+        index: 2,
+        length: 2,
+    };
+    assert_eq!(output.sequences[0].token_ids, [2]);
+    assert_eq!(output.sequences[1].token_ids, [4, 5]);
+    assert_eq!(output.sequences[0].finish_reason, first_reason);
+    assert_eq!(output.sequences[1].finish_reason, second_reason);
+    for sequence in &output.sequences {
+        assert_eq!(sequence.prompt_length, 2);
+        // The fixture's top-k=1 distribution has exactly one possible token,
+        // so its processed probability is one, even with repetition penalties.
+        assert_eq!(
+            sequence.log_probabilities,
+            vec![0.0; sequence.token_ids.len()]
+        );
+    }
+    assert_eq!(
+        events,
+        [
+            GenerationToken {
+                sequence: 0,
+                step: 0,
+                token_id: 2,
+                log_probability: 0.0,
+                finish_reason: Some(first_reason)
+            },
+            GenerationToken {
+                sequence: 1,
+                step: 0,
+                token_id: 4,
+                log_probability: 0.0,
+                finish_reason: None
+            },
+            GenerationToken {
+                sequence: 1,
+                step: 1,
+                token_id: 5,
+                log_probability: 0.0,
+                finish_reason: Some(second_reason)
+            },
+        ]
+    );
+    assert_eq!(*model.calls.lock().unwrap(), ["cache", "prefill", "decode"]);
+    assert_eq!(
+        *model.feedback.lock().unwrap(),
+        [FinishedRowFeedback {
+            ids: vec![0, 4],
+            valid: vec![false, true],
+            positions: vec![7, 12],
+            lengths: vec![2, 3],
+        }]
+    );
+}
