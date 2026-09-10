@@ -17,6 +17,13 @@ type TestBackend = Flex<f32, i32>;
 /// Device selected by the deterministic test backend.
 type TestDevice = <TestBackend as BackendTypes>::Device;
 
+/// Complete tiny encoder/decoder binding used by input-contract regressions.
+type ContractFixture = (
+    T5ForConditionalGeneration<TestBackend>,
+    EncoderOutput<TestBackend>,
+    T5DecodeState<TestBackend>,
+);
+
 /// Builds a small topology with configurable FFN and vocabulary-head layouts.
 fn tiny_config(projection: T5FeedForwardProjection, tied: bool, layers: usize) -> T5Config {
     T5Config {
@@ -88,6 +95,444 @@ fn self_cache_snapshot(state: &T5DecodeState<TestBackend>) -> Vec<Vec<f32>> {
         }
     }
     snapshot
+}
+
+/// Includes source tensors and diagnostics because a rejected operation must retain its binding.
+#[derive(Debug, PartialEq)]
+struct ContractSnapshot {
+    self_kv: Vec<Vec<f32>>,
+    cross: Option<Vec<TensorData>>,
+    lengths: Vec<usize>,
+}
+
+/// Captures the entire self cache and the immutable projected encoder bank.
+fn contract_snapshot(state: &T5DecodeState<TestBackend>) -> ContractSnapshot {
+    ContractSnapshot {
+        self_kv: self_cache_snapshot(state),
+        cross: state.cross.as_ref().map(|cross| {
+            let mut data = vec![cross.encoder.hidden_state.clone().into_data()];
+            if let Some(mask) = &cross.encoder.token_mask {
+                data.push(mask.as_tensor().clone().into_data());
+            }
+            data.extend(
+                cross
+                    .keys
+                    .iter()
+                    .chain(&cross.values)
+                    .map(|tensor| tensor.clone().into_data()),
+            );
+            data.extend(
+                cross
+                    .encoder
+                    .hidden_states
+                    .iter()
+                    .map(|tensor| tensor.clone().into_data()),
+            );
+            data.extend(
+                cross
+                    .encoder
+                    .attentions
+                    .iter()
+                    .map(|tensor| tensor.clone().into_data()),
+            );
+            data
+        }),
+        lengths: state.lengths().to_vec(),
+    }
+}
+
+/// Prefills nonzero history so rejected appends cannot silently erase a valid prefix.
+fn contract_fixture(device: &TestDevice, masked: bool) -> ContractFixture {
+    let model = T5ForConditionalGeneration::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 2),
+        device,
+    )
+    .unwrap();
+    let mut encoder = encoded_source(&model, device);
+    if masked {
+        encoder.token_mask = Some(TokenMask::new(Tensor::from_bool(
+            [[true, false, true]].into(),
+            device,
+        )));
+    }
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 6).unwrap(), 1, device)
+        .unwrap();
+    model
+        .prefill_decoder(
+            &encoder,
+            target(&[0, 3], device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    (model, encoder, state)
+}
+
+/// Builds one nonzero append per active row and layer at the current committed cursor.
+fn contract_pending(
+    state: &T5DecodeState<TestBackend>,
+    counts: &[usize],
+) -> PendingT5SelfWrites<TestBackend> {
+    let cache = state.tensors.main().native_kv(SELF_KV_GROUP).unwrap();
+    let mut pending = PendingT5SelfWrites::new();
+    for (row, &count) in counts.iter().enumerate().filter(|(_, count)| **count > 0) {
+        for layer in 0..state.self_spec.layers() {
+            let keys = cache
+                .keys(layer)
+                .unwrap()
+                .clone()
+                .narrow(0, row, 1)
+                .narrow(2, 0, count)
+                + 1.0;
+            pending.writes.push(PendingT5SelfWrite {
+                layer,
+                sequence: row,
+                start: state.lengths()[row],
+                values: keys.clone() + 1.0,
+                keys,
+            });
+        }
+    }
+    pending
+}
+
+/// Bad target rectangles fail before modifying an already bound encoder or self-KV prefix.
+#[test]
+fn cache_contract_invalid_rectangles_are_atomic() {
+    let device = Default::default();
+    let (model, encoder, mut state) = contract_fixture(&device, false);
+    let before = contract_snapshot(&state);
+    for (case, context) in [
+        (0, "t5.decoder.input_ids"),
+        (1, "batch"),
+        (2, "t5.decoder.token_mask"),
+        (3, "t5.decoder.position_ids"),
+    ] {
+        let mut input = DecodeInput {
+            token_ids: target(&[4], &device).token_ids,
+            token_mask: None,
+            position_ids: None,
+        };
+        match case {
+            0 => input.token_ids = Tensor::zeros([1, 0], &device),
+            1 => input.token_ids = Tensor::zeros([2, 1], &device),
+            2 => {
+                input.token_mask = Some(TokenMask::new(Tensor::from_bool(
+                    [[true, true]].into(),
+                    &device,
+                )))
+            }
+            3 => input.position_ids = Some(Tensor::zeros([1, 2], &device)),
+            _ => unreachable!(),
+        }
+        let error = model
+            .decode(&encoder, input, &mut state, &ForwardOptions::default())
+            .unwrap_err();
+        assert!(error.to_string().contains(context), "case {case}: {error}");
+        assert_eq!(contract_snapshot(&state), before, "case {case}");
+    }
+}
+
+/// Encoder batch, source length, and width are immutable after cross-attention binding.
+#[test]
+fn cache_contract_encoder_geometry_binding_is_atomic() {
+    let device = Default::default();
+    let (model, encoder, mut state) = contract_fixture(&device, false);
+    let before = contract_snapshot(&state);
+    for shape in [[2, 3, 8], [1, 2, 8], [1, 3, 7]] {
+        let mut changed = encoder.clone();
+        changed.hidden_state = Tensor::zeros(shape, &device);
+        let error = model
+            .decode(
+                &changed,
+                DecodeInput {
+                    token_ids: target(&[4], &device).token_ids,
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("t5.encoder_output.hidden_state"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("bound to decoder state"),
+            "{error}"
+        );
+        assert_eq!(contract_snapshot(&state), before);
+    }
+}
+
+/// Neither adding/removing a source mask nor changing its rectangle can alter an existing binding.
+#[test]
+fn cache_contract_encoder_mask_binding_is_atomic() {
+    let device = Default::default();
+    for masked in [false, true] {
+        let (model, encoder, mut state) = contract_fixture(&device, masked);
+        let before = contract_snapshot(&state);
+        for wrong_shape in [false, true] {
+            let mut changed = encoder.clone();
+            changed.token_mask = if masked && !wrong_shape {
+                None
+            } else if wrong_shape {
+                Some(TokenMask::new(Tensor::from_bool(
+                    [[true, true]].into(),
+                    &device,
+                )))
+            } else {
+                Some(TokenMask::new(Tensor::from_bool(
+                    [[true, true, true]].into(),
+                    &device,
+                )))
+            };
+            let error = model
+                .decode(
+                    &changed,
+                    DecodeInput {
+                        token_ids: target(&[4], &device).token_ids,
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                    &mut state,
+                    &ForwardOptions::default(),
+                )
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("t5.encoder_output.token_mask"),
+                "{error}"
+            );
+            assert_eq!(contract_snapshot(&state), before);
+        }
+    }
+}
+
+/// Same-shaped encoder arguments do not replace the documented retained source of truth.
+#[test]
+fn cache_contract_same_shape_encoder_values_do_not_rebind() {
+    let device = Default::default();
+    let (model, encoder, mut state) = contract_fixture(&device, true);
+    let expected = model
+        .decode_stateless(
+            &encoder,
+            target(&[0, 3, 4], &device),
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let bound = contract_snapshot(&state).cross;
+    let mut changed = encoder.clone();
+    changed.hidden_state = Tensor::zeros([1, 3, 8], &device);
+    changed.token_mask = Some(TokenMask::new(Tensor::from_bool(
+        [[false, true, false]].into(),
+        &device,
+    )));
+    let actual = model
+        .decode(
+            &changed,
+            DecodeInput {
+                token_ids: target(&[4], &device).token_ids,
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    assert_close(actual.decoder.logits, expected.logits);
+    assert_eq!(contract_snapshot(&state).cross, bound);
+    assert_eq!(state.lengths(), &[3]);
+}
+
+/// Coverage validation rejects absent rows and missing/extra layers before length publication.
+#[test]
+fn cache_contract_pending_cardinality_is_atomic() {
+    let device = Default::default();
+    let (_, _, mut state) = contract_fixture(&device, false);
+    let before = contract_snapshot(&state);
+    for case in 0..3 {
+        let mut pending = contract_pending(&state, &[1]);
+        let counts: &[usize] = if case == 0 { &[] } else { &[1] };
+        if case == 1 {
+            pending.writes.pop();
+        }
+        if case == 2 {
+            pending.writes.extend(contract_pending(&state, &[1]).writes);
+        }
+        let error = pending
+            .commit(&mut state.tensors, state.self_spec.layers(), counts)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(if case == 0 {
+                "describe 0 rows"
+            } else {
+                "pending self-cache coverage"
+            }),
+            "{error}"
+        );
+        assert_eq!(contract_snapshot(&state), before);
+    }
+}
+
+/// Appends require active unique row/layer pairs, the old cursor, and both matching time axes.
+#[test]
+fn cache_contract_pending_coordinates_are_atomic() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 2),
+        &device,
+    )
+    .unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
+        .unwrap();
+    let before = contract_snapshot(&state);
+    for case in 0..7 {
+        let counts = if case == 6 { [1, 0] } else { [1, 1] };
+        let mut pending = contract_pending(&state, &counts);
+        let write = pending.writes.last_mut().unwrap();
+        match case {
+            0 => write.sequence = 2,
+            1 => write.layer = 2,
+            2 => write.start = 1,
+            3 => write.keys = Tensor::zeros([1, 2, 2, 4], &device),
+            4 => write.values = Tensor::zeros([1, 2, 2, 4], &device),
+            5 => write.layer = 0,
+            6 => write.sequence = 1,
+            _ => unreachable!(),
+        }
+        let error = pending
+            .commit(&mut state.tensors, state.self_spec.layers(), &counts)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(if case == 0 {
+                "outside batch 2"
+            } else {
+                "invalid or duplicate T5 self-cache write"
+            }),
+            "case {case}: {error}"
+        );
+        assert_eq!(contract_snapshot(&state), before, "case {case}");
+    }
+}
+
+/// A late malformed head axis leaves earlier prepared writes and the retained encoder unpublished.
+#[test]
+fn cache_contract_pending_tensor_geometry_is_atomic() {
+    let device = Default::default();
+    let (_, _, mut state) = contract_fixture(&device, false);
+    let before = contract_snapshot(&state);
+    let mut pending = contract_pending(&state, &[1]);
+    pending.writes.last_mut().unwrap().values = Tensor::zeros([1, 1, 1, 4], &device);
+    let error = pending
+        .commit(&mut state.tensors, state.self_spec.layers(), &[1])
+        .unwrap_err();
+    assert!(error.to_string().contains("shape"), "{error}");
+    assert_eq!(contract_snapshot(&state), before);
+    contract_pending(&state, &[1])
+        .commit(&mut state.tensors, state.self_spec.layers(), &[1])
+        .unwrap();
+    assert_eq!(state.lengths(), &[3]);
+    assert_eq!(contract_snapshot(&state).cross, before.cross);
+}
+
+/// Cross-cache lookup bounds remain contextual even when the value vector is incomplete.
+#[test]
+fn cache_contract_cross_lookup_rejects_missing_layers_and_rows() {
+    let device = Default::default();
+    let (_, _, mut state) = contract_fixture(&device, false);
+    let before = contract_snapshot(&state);
+    let cross = state.cross.as_mut().unwrap();
+    let error = cross.layer_row(2, 0).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("layer 2 is outside 2 cached layers")
+    );
+    let error = cross.layer_row(0, 1).unwrap_err();
+    assert!(error.to_string().contains("row 1 is outside batch 1"));
+    let last = cross.values.pop().unwrap();
+    let error = cross.layer_row(1, 0).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("value layer 1 is outside 2 cached layers")
+    );
+    cross.values.push(last);
+    assert_eq!(contract_snapshot(&state), before);
+}
+
+/// A corrupted cross-layer count fails public decode before the valid self cache is changed.
+#[test]
+fn cache_contract_cross_geometry_rejection_is_atomic() {
+    let device = Default::default();
+    let (model, encoder, mut state) = contract_fixture(&device, false);
+    state.cross.as_mut().unwrap().keys.pop();
+    let before = contract_snapshot(&state);
+    let error = model
+        .decode(
+            &encoder,
+            DecodeInput {
+                token_ids: target(&[4], &device).token_ids,
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cross cache has 1 layers for a 2-layer decoder")
+    );
+    assert_eq!(contract_snapshot(&state), before);
+}
+
+/// Active-only write sets advance exactly those rows without requiring padding-layer appends.
+#[test]
+fn cache_contract_pending_active_rows_commit_without_touching_peers() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 2),
+        &device,
+    )
+    .unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
+        .unwrap();
+    contract_pending(&state, &[0, 2])
+        .commit(&mut state.tensors, state.self_spec.layers(), &[0, 2])
+        .unwrap();
+    assert_eq!(state.lengths(), &[0, 2]);
+    let cache = state.tensors.main().native_kv(SELF_KV_GROUP).unwrap();
+    for layer in 0..state.self_spec.layers() {
+        for tensor in [cache.keys(layer).unwrap(), cache.values(layer).unwrap()] {
+            assert!(
+                tensor
+                    .clone()
+                    .narrow(0, 0, 1)
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap()
+                    .iter()
+                    .all(|&value| value == 0.0)
+            );
+            assert!(
+                tensor
+                    .clone()
+                    .narrow(0, 1, 1)
+                    .narrow(2, 0, 2)
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap()
+                    .iter()
+                    .all(|&value| value > 0.0)
+            );
+        }
+    }
 }
 
 /// Cached prefill exactly reproduces stateless logits and diagnostics.
