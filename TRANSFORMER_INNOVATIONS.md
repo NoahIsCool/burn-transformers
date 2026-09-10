@@ -1375,7 +1375,9 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   reference scripts embedded by Rust tests. The runner retains raw report/log
   hashes and selected tool versions, but does not treat these as compiler
   dependency closure or permission to exclude test-only syntax candidates.
-  The production-only measurement work and unchanged 90%/95% gates remain open.
+  A fresh `9ff597f` run passes the unchanged legacy 90%/95% thresholds
+  (90.1704% crate-wide, 95.0594% shared/core). Those counts still include inline
+  tests and expansions; production-only qualification remains open.
 - **Memory measurements distinguish storage from observed process footprint.**
   The test-only Darwin supervisor brackets synchronized phases, samples a real
   idle baseline, and retains raw timestamps, gaps, and errors. The [executed Qwen/FLAN series](acceptance/measurements/small-model-metal-memory-20260909.json)
