@@ -192,6 +192,58 @@ fn policy_is_applied_before_dtype_conversion() {
     ));
 }
 
+/// Only an exact, case-insensitive weight suffix may enter numerical conversion.
+#[test]
+fn non_weight_matrix_names_preserve_source_before_numerical_conversion() {
+    let mut values = vec![1.0_f64; 32];
+    values[0] = f64::from_bits(0x7ff8_0000_0000_0042);
+    values[1] = -0.0;
+    let source = TensorData::new(values, [2, 16]);
+    let original_bytes = source.as_bytes().to_vec();
+    for name in [
+        "adapter.running_mean",
+        "projection.kernel",
+        "Projection.KeRnEl",
+        "projection.weights",
+        "projection.WeIgHtS",
+        "projection.weight_extra",
+        "projection.preweight",
+        "projection.weight.child",
+    ] {
+        assert_eq!(
+            quantize_weight(name, &source, WeightQuantizationConfig::default()).unwrap(),
+            WeightQuantizationOutcome::Excluded(QuantizationExclusion::NotWeight),
+            "{name}"
+        );
+        assert_eq!(source.dtype, DType::F64, "{name}");
+        assert_eq!(source.shape.as_slice(), [2, 16], "{name}");
+        assert_eq!(source.as_bytes(), original_bytes, "{name}");
+    }
+
+    // The same nonfinite payload must fail if the numerical converter is reached.
+    assert!(matches!(
+        quantize_weight(
+            "projection.weight",
+            &source,
+            WeightQuantizationConfig::default()
+        ),
+        Err(QuantizationError::NonFiniteValue { index: 0 })
+    ));
+    assert_eq!(source.as_bytes(), original_bytes);
+
+    let finite = TensorData::new(vec![1.0_f64; 32], [2, 16]);
+    for name in ["projection.weight", "Projection.WeIgHt"] {
+        let WeightQuantizationOutcome::Quantized(weight) =
+            quantize_weight(name, &finite, WeightQuantizationConfig::default()).unwrap()
+        else {
+            panic!("a conventional weight suffix must be eligible: {name}");
+        };
+        assert_eq!(weight.metadata().source_dtype, SourceFloatDType::F64);
+        assert_eq!(weight.metadata().shape, [2, 16]);
+        assert_eq!(f32_values(&weight.dequantize_f32().unwrap()), vec![1.0; 32]);
+    }
+}
+
 #[test]
 fn q8_fixture_has_exact_codes_scale_and_metadata() {
     let mut values = vec![0.0_f32; 32];
