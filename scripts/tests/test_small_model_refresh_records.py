@@ -251,3 +251,53 @@ class WholeFileCoverageRecords(unittest.TestCase):
         self.assertEqual(failed["fix_validation"]["focused_parallel_runs"], 100)
         self.assertEqual(failed["fix_validation"]["full_parallel_runs"], 10)
         self.assertEqual(failed["fix_validation"]["full_serial_runs"], 1)
+
+    def test_checkpoint_contract_refresh_keeps_scope_and_parent_identities(self):
+        """The compact follow-up links exact test changes without a scope waiver."""
+        record = json.loads((MEASUREMENTS / "checkpoint-contract-coverage-20260910.json").read_text())
+        parent = json.loads((MEASUREMENTS / record["parent_record"]).read_text())
+        self.assertEqual(record["policy"], parent["policy"])
+        self.assertEqual(record["compiler_inputs"], parent["compiler_inputs"])
+        for flag in ("advertised_supported", "release_gate_promotion", "production_only_measurement",
+                     "production_only_exclusions_qualified", "compiler_dependency_closure_verified",
+                     "exclusion_policy_changed", "production_sources_changed"):
+            self.assertFalse(record[flag])
+        paths = sorted(row["path"] for row in parent["excluded_files"])
+        digest = hashlib.sha256(json.dumps(paths, separators=(",", ":")).encode()).hexdigest()
+        self.assertEqual(record["files"]["excluded_paths_sha256"], digest)
+        self.assertEqual(record["files"]["excluded_count"], 78)
+        self.assertEqual(record["files"]["retained_count"], 89)
+        self.assertEqual(record["files"]["reported_count"], 167)
+        old_hashes = {row["path"]: row["source_sha256"] for row in parent["excluded_files"]}
+        self.assertEqual({row["path"] for row in record["test_source_changes"]}, {
+            "src/checkpoint/tests.rs", "src/checkpoint/runtime/tests.rs",
+            "src/checkpoint/quantization/tests.rs", "src/checkpoint/quantization/burnpack_tests.rs",
+            "src/loaded_tests.rs",
+        })
+        for change in record["test_source_changes"]:
+            self.assertEqual(change["parent_sha256"], old_hashes[change["path"]])
+            self.assertNotEqual(change["source_sha256"], change["parent_sha256"])
+        added = sum(row["tests_added"] for row in record["test_milestones"])
+        self.assertEqual(added, 24)
+        self.assertEqual(record["tests"]["unit_identities"], parent["tests"]["unit_identities"] + added)
+        self.assertEqual(record["tests"]["passed"], 1099)
+        self.assertEqual(record["tests"]["failed"], 0)
+        self.assertEqual(record["tests"]["ignored"], 29)
+        for kind in ("legacy_native_aggregate", "physical_before_exclusions", "physical_whole_file_diagnostic"):
+            for group in ("crate", "shared"):
+                count = record[kind][group]
+                self.assertAlmostEqual(count["percent"], 100 * count["covered"] / count["lines"], places=12)
+                self.assertEqual(count["meets_threshold"], 100 * count["covered"] >= count["minimum_percent"] * count["lines"])
+        for group in ("crate", "shared"):
+            current = record["physical_whole_file_diagnostic"][group]
+            old = parent["physical_whole_file_diagnostic"][group]
+            self.assertFalse(current["meets_threshold"])
+            self.assertEqual(current["lines"], old["lines"])
+            self.assertEqual(current["covered"] - old["covered"], 86)
+            self.assertEqual(record["coverage_change_since_parent"][group], {"mapped_lines": 0, "covered_lines": 86})
+        audit = record["structural_test_audit"]
+        self.assertTrue(audit["structural_eligibility"])
+        self.assertEqual(audit["inspected_production_file_count"], 101)
+        self.assertEqual(audit["blockers"], [])
+        self.assertFalse(audit["macro_expansion_resolved"])
+        self.assertFalse(audit["production_measurement_qualified"])

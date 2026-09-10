@@ -1,0 +1,234 @@
+{
+  "schema_version": 1,
+  "policy": "whole_test_files_v2_exact_test_macro_spans_no_inline_or_generated_exclusions",
+  "scope": "captured configuration; whole test files only; inline tests and generated or ambiguous ownership retained",
+  "whole_test_file_exclusions_qualified": true,
+  "production_only_exclusions_qualified": false,
+  "production_only_measurement": false,
+  "compiler_dependency_closure_verified": false,
+  "release_gate_promotion": false,
+  "legacy_native_aggregate": {
+    "crate": {
+      "lines": 71406,
+      "covered": 65404,
+      "percent": 91.59454387586477,
+      "minimum_percent": 90,
+      "meets_threshold": true
+    },
+    "shared": {
+      "lines": 34963,
+      "covered": 33464,
+      "percent": 95.71261047392959,
+      "minimum_percent": 95,
+      "meets_threshold": true
+    }
+  },
+  "physical_before_exclusions": {
+    "crate": {
+      "lines": 69407,
+      "covered": 64505,
+      "percent": 92.93731179852176,
+      "minimum_percent": 90,
+      "meets_threshold": true
+    },
+    "shared": {
+      "lines": 34133,
+      "covered": 33046,
+      "percent": 96.81539858787683,
+      "minimum_percent": 95,
+      "meets_threshold": true
+    }
+  },
+  "physical_whole_file_diagnostic": {
+    "crate": {
+      "lines": 36479,
+      "covered": 32046,
+      "percent": 87.84780284547274,
+      "minimum_percent": 90,
+      "meets_threshold": false
+    },
+    "shared": {
+      "lines": 16364,
+      "covered": 15447,
+      "percent": 94.39623563920802,
+      "minimum_percent": 95,
+      "meets_threshold": false
+    }
+  },
+  "source_inventory_sha256": "006fdf2580b8c5882fea36defe5c7a3c7cf56387bd90c96bfbc9d0b244ff571d",
+  "native_report": {
+    "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T053138.635172Z/llvm-export/native-coverage.json",
+    "identity": {
+      "sha256": "efa95db41f093b27aaf602b01cec3c610401a1e03f84dce8de933fbf065741c3",
+      "bytes": 82692437,
+      "lines": 1
+    }
+  },
+  "coverage_log": {
+    "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T053138.635172Z/00-coverage.log",
+    "identity": {
+      "sha256": "a57f4f55334c04fd910f19adc6e1961363d466c8e6329654a8b244433b4a6787",
+      "bytes": 110148,
+      "lines": 1224
+    }
+  },
+  "classifier_capture": {
+    "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T053138.635172Z/whole-test-file-classifier/invocation.json",
+    "identity": {
+      "sha256": "aa627875f9f6205da16e3bd0b684cd4e90aecea8d844d83bc7bfaea30d7d80a8",
+      "bytes": 2314,
+      "lines": 65
+    }
+  },
+  "retained_run_evidence": {
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T053138.635172Z/results.json": {
+      "sha256": "a2872198e48262a1429243f23b64b68db3b66ab046f8df4fa24323781bb449b6",
+      "bytes": 2366,
+      "lines": 76
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T053138.635172Z/00-coverage.log": {
+      "sha256": "a57f4f55334c04fd910f19adc6e1961363d466c8e6329654a8b244433b4a6787",
+      "bytes": 110148,
+      "lines": 1224
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T053138.635172Z/compiler-capture-setup.json": {
+      "sha256": "7515afaf98988549f43d6f3f6d07d8563e976cdbe3e0e79cad0fafe469c5bdbe",
+      "bytes": 5312,
+      "lines": 137
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T053138.635172Z/compiler-binding.json": {
+      "sha256": "ef583fc05d214ffdb75aa260f1110a08a3cfc3d32d2290e202e8c8410928c8ed",
+      "bytes": 23153,
+      "lines": 577
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T053138.635172Z/coverage-inputs-before.json": {
+      "sha256": "cdfcd33eaada6663a63504dc0239d5e14cc284f8197b5948a7dd96fa5cbd6079",
+      "bytes": 75804,
+      "lines": 1970
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T053138.635172Z/coverage-inputs-after.json": {
+      "sha256": "cdfcd33eaada6663a63504dc0239d5e14cc284f8197b5948a7dd96fa5cbd6079",
+      "bytes": 75804,
+      "lines": 1970
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T053138.635172Z/coverage.json": {
+      "sha256": "d3b8397ce7981ac7dfdf78e67ff1961c74f2e572853ce54b7891a0986dbb3983",
+      "bytes": 82709588,
+      "lines": 1
+    }
+  },
+  "kind": "checkpoint_contract_coverage_refresh",
+  "source_commit": "09a3d491d6c151e58a496ba737aa7c42df01e2e4",
+  "parent_record": "whole-test-file-coverage-v3-20260910.json",
+  "advertised_supported": false,
+  "exclusion_policy_changed": false,
+  "production_sources_changed": false,
+  "files": {
+    "reported_count": 167,
+    "excluded_count": 78,
+    "retained_count": 89,
+    "excluded_paths_sha256": "e87f4160b86a95ac896fbaa2bb1f9665ac4466a75f9adb32355d8133e3cdb655",
+    "path_digest_encoding": "UTF-8 compact JSON sorted string array; no trailing newline"
+  },
+  "tests": {
+    "passed": 1099,
+    "failed": 0,
+    "ignored": 29,
+    "unit_identities": 1000,
+    "unit_passed": 997,
+    "unit_ignored": 3
+  },
+  "compiler_inputs": {
+    "production": 101,
+    "unit": 187,
+    "unit_rust": 179,
+    "integration_targets": 14,
+    "selected_llvm_objects": 15,
+    "fresh_compiler_captures": 16
+  },
+  "structural_test_audit": {
+    "schema_version": 1,
+    "policy": "parsed_test_layout_v1_no_production_measurement_claim",
+    "structural_eligibility": true,
+    "blockers": [],
+    "macro_expansion_resolved": false,
+    "production_measurement_qualified": false,
+    "scope": "parsed source layout only; opaque/generated runtime or test mappings retained; not production-only coverage",
+    "inspected_production_file_count": 101,
+    "inspected_production_paths_sha256": "22c1c44375f6aa1f533cb59a89e1be4e7ee586fa2efacea13b51ca54b6aa1a6a"
+  },
+  "coverage_change_since_parent": {
+    "crate": {
+      "mapped_lines": 0,
+      "covered_lines": 86
+    },
+    "shared": {
+      "mapped_lines": 0,
+      "covered_lines": 86
+    }
+  },
+  "independent_reauthentication": {
+    "path": "/private/tmp/tfm-coverage-reauth-09a3d49.8CeJi2/reauthentication.json",
+    "identity": {
+      "sha256": "1f5c98007a9d6b33ac85185dc257c22ea56a6671eb279ac34b5acc43b4b4aacb",
+      "bytes": 11570,
+      "lines": 322
+    },
+    "exact_diagnostic_reproduced": true
+  },
+  "test_milestones": [
+    {
+      "commit": "5499f03",
+      "tests_added": 8,
+      "scope": "Public LoadedModel counters, provenance and ownership contracts"
+    },
+    {
+      "commit": "a014214",
+      "tests_added": 3,
+      "scope": "Late concatenation failures, exact equivalence budgets, and create-only sidecar retry"
+    },
+    {
+      "commit": "59000d5",
+      "tests_added": 0,
+      "scope": "Use realizable Q8/G64 audit sizes after independent review"
+    },
+    {
+      "commit": "09a3d49",
+      "tests_added": 13,
+      "scope": "Mapping source/target validation and transactional quantization manifest contracts"
+    }
+  ],
+  "test_source_changes": [
+    {
+      "path": "src/checkpoint/quantization/burnpack_tests.rs",
+      "parent_sha256": "174263378981cd70aac01a7792c45fade3735e50de56555d1d1084a9b56e10d3",
+      "source_sha256": "4b987faed33aebd0a6ce86d376ec1df4eede847674bd8660610b8e9ac33953fc"
+    },
+    {
+      "path": "src/checkpoint/quantization/tests.rs",
+      "parent_sha256": "031672304233faf7ef64884a51d43a9ecc83afbe414a0b9af382df2368d283e7",
+      "source_sha256": "412806941a3c913d432603a44e66d93ca9ca9f3a5848d7b009406f5dbedf2429"
+    },
+    {
+      "path": "src/checkpoint/runtime/tests.rs",
+      "parent_sha256": "8885d025b9adcc4c3b884a21563eaf6580e3134410a164b5b37faf1b55d941fd",
+      "source_sha256": "2cc1063bf92098c31abec20a9c740e1c8af2071f96eaa530786d77f86445e56f"
+    },
+    {
+      "path": "src/checkpoint/tests.rs",
+      "parent_sha256": "aee00a50a2be0f54da425de6b8be199bd1fc82fbbe577044a5a659150e0c4292",
+      "source_sha256": "07fd78e923d459ad41e753978d57632f655a5db9ed9cfc4ff6b1f81697d73adb"
+    },
+    {
+      "path": "src/loaded_tests.rs",
+      "parent_sha256": "a8c340a63e9d2fd26e97247012d695a0b4f2e51e006d14de7efe9b871e2ae57b",
+      "source_sha256": "2e2b141548b0508cbf43349083fab9c62c8de163e136f011fcd2c8ec56875fa2"
+    }
+  ],
+  "limitations": [
+    "This diagnostic excludes the same 78 verified whole test files; it is not qualified production-only or branch coverage.",
+    "Opaque/generated mappings and experimental model source remain included. Neither numerical coverage target is met.",
+    "These tests do not add real-checkpoint, performance, packed-kernel, memory or hardware acceptance evidence.",
+    "This binds 09a3d49 before later source or evidence edits; subsequent changes need a fresh native run."
+  ]
+}

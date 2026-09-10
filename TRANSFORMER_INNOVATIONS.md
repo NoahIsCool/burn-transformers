@@ -1479,6 +1479,15 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   shared/core; both still fail their targets. The structural audit finds no
   parsed inline-test blockers in the 101 production files. Opaque/generated
   mappings remain included, and production-only qualification stays false.
+- **Loader failure contracts extend beyond tensor mathematics.** A further
+  [24 checkpoint-contract tests](acceptance/measurements/checkpoint-contract-coverage-20260910.json)
+  cover interrupted concatenation without partial target publication, exact
+  physical-equivalence memory limits, non-destructive sidecar publication and
+  retry, mixed-precision split/alias plans, transactional provenance binding,
+  and contradictory retained load counters. The clean combined run passes
+  1,099 tests and raises shared/core coverage to 94.3962% (87.8478% crate-wide)
+  with unchanged denominators. Runtime code, support claims, coverage targets,
+  and qualification requirements are unchanged.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

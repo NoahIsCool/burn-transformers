@@ -349,6 +349,18 @@ not resolved, so production-only qualification remains false. Raw evidence is
 retained under `target/release-gates/20260910T051536.131067Z/`. The compact record
 also identifies the rejected run and fixture-fix validation separately.
 
+The next [checkpoint-contract replay at `09a3d49`](acceptance/measurements/checkpoint-contract-coverage-20260910.json)
+adds 24 tests across five existing test-only files: eight bundle-audit checks,
+three failure/retry checks, and thirteen mapping/manifest checks. It passes
+**1,099 tests, zero failures, 29 existing ignores**, including 997 unit passes.
+The independently reproduced whole-file diagnostic reaches **32,046 / 36,479 =
+87.8478%** crate-wide and **15,447 / 16,364 = 94.3962%** shared/core: 86 additional
+covered shared lines, no denominator or runtime changes. Both targets and
+production-only qualification remain open. The normal Cargo target and external
+cache were used; the exact capture remains at
+`target/release-gates/20260910T053138.635172Z/`. The separately replayed development
+suite also passes all 354 Python/native tests without skips.
+
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is
 `819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d`.
