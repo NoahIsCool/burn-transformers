@@ -198,6 +198,8 @@ enum Rule<'a, B: Backend> {
     },
 }
 
+// Selection precedence and transactional transfer planning.
+
 /// Select parameters by discoverable module paths, then apply the plan transactionally.
 /// Exact copy/transform rules override prefix rules; duplicate exact targets and
 /// overlapping prefixes are rejected. Unselected target parameters remain initialized.
@@ -209,6 +211,7 @@ pub struct TransferPlan<'a, B: Backend> {
 }
 
 impl<B: Backend> Default for TransferPlan<'_, B> {
+    /// Creates an empty transfer plan with strict shape checks and alias preservation.
     fn default() -> Self {
         Self::new()
     }
@@ -449,6 +452,7 @@ impl<'a, B: Backend> TransferPlan<'a, B> {
         Ok((model, report))
     }
 
+    /// Validates source/target paths, explicit mappings, and transformation descriptions before staging.
     fn validate_rules(
         &self,
         sources: &BTreeSet<String>,
@@ -529,6 +533,10 @@ impl<'a, B: Backend> TransferPlan<'a, B> {
         Ok(())
     }
 
+    /// Resolves one target using keep-initialized, exact, then prefix/matching precedence.
+    ///
+    /// Multiple fallback matches are rejected, so rule order cannot silently choose
+    /// between overlapping module prefixes.
     fn select(&self, target: &str, sources: &BTreeSet<String>) -> Result<Option<(usize, String)>> {
         if self
             .keep
@@ -579,10 +587,13 @@ impl<'a, B: Backend> TransferPlan<'a, B> {
     }
 }
 
+/// Returns the suffix only for an exact module path or a dot-delimited descendant.
 fn under<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
     name.strip_prefix(prefix)
         .filter(|suffix| suffix.is_empty() || suffix.starts_with('.'))
 }
+
+// Lazy discovery, value staging, and alias-aware installation.
 
 struct Parameter<B: Backend> {
     info: ParameterInfo,
@@ -599,12 +610,15 @@ struct Names {
 }
 
 impl<B: Backend> ModuleVisitor<B> for Names {
+    /// Pushes the module segment used to discover checkpoint-independent parameter names.
     fn enter_module(&mut self, name: &str, _: &str) {
         self.path.push(name.into());
     }
+    /// Restores the parent path before visiting a sibling module.
     fn exit_module(&mut self, _: &str, _: &str) {
         self.path.pop();
     }
+    /// Collects a parameter path without forcing lazy tensor initialization, rejecting duplicate paths.
     fn visit_float<const D: usize>(&mut self, _: &Param<Tensor<B, D>>) {
         let name = path_name(&self.path);
         if !self.names.insert(name.clone()) {
@@ -616,6 +630,7 @@ impl<B: Backend> ModuleVisitor<B> for Names {
     }
 }
 
+/// Discovers unique float-parameter paths using Burn traversal and propagates path collisions.
 fn parameter_names<B: Backend, M: Module<B>>(module: &M) -> Result<BTreeSet<String>> {
     let mut visitor = Names::default();
     module.visit(&mut visitor);
@@ -632,6 +647,7 @@ struct Collect<'a, B: Backend> {
     selected: Option<&'a BTreeSet<String>>,
 }
 
+/// Formats a dot-delimited module path, using `$` for a parameter at the root.
 fn path_name(path: &[String]) -> String {
     if path.is_empty() {
         "$".into()
@@ -641,12 +657,18 @@ fn path_name(path: &[String]) -> String {
 }
 
 impl<B: Backend> ModuleVisitor<B> for Collect<'_, B> {
+    /// Pushes the module segment used to collect selected parameter metadata and values.
     fn enter_module(&mut self, name: &str, _: &str) {
         self.path.push(name.into());
     }
+    /// Restores the parent path after collecting a nested module.
     fn exit_module(&mut self, _: &str, _: &str) {
         self.path.pop();
     }
+    /// Collects selected dense float parameters with their runtime shape, dtype, and trainability.
+    ///
+    /// Positive-rank tensors are flattened on device for rank-independent staging;
+    /// packed quantized tensors are rejected rather than implicitly dequantized.
     fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
         if self.error.is_some() {
             return;
@@ -683,10 +705,15 @@ impl<B: Backend> ModuleVisitor<B> for Collect<'_, B> {
     }
 }
 
+/// Collects every dense float parameter and identifies shared parameter identities.
 fn collect<B: Backend, M: Module<B>>(module: &M) -> Result<BTreeMap<String, Parameter<B>>> {
     collect_filtered(module, None)
 }
 
+/// Collects an optional path subset and labels aliases by their first sorted owner.
+///
+/// Unselected tensors remain lazy; identity tracking never infers ties merely from
+/// equal numerical values.
 fn collect_filtered<B: Backend, M: Module<B>>(
     module: &M,
     selected: Option<&BTreeSet<String>>,
@@ -720,6 +747,11 @@ struct Staged<B: Backend> {
     trainable: bool,
 }
 
+/// Validates alias groups and assigns a common staged identity when preserving ties.
+///
+/// Aliased targets must receive the same source and transformation; aliased sources
+/// must agree in shape, dtype, device, values, and trainability. Equality checking
+/// synchronizes a scalar, while explicit untying retains independently staged owners.
 fn resolve_ties<B: Backend>(
     targets: &BTreeMap<String, Parameter<B>>,
     staged: &mut BTreeMap<String, Staged<B>>,
@@ -825,12 +857,19 @@ struct Install<B: Backend> {
 }
 
 impl<B: Backend> ModuleMapper<B> for Install<B> {
+    /// Pushes the target path for transactional installation of prepared values.
     fn enter_module(&mut self, name: &str, _: &str) {
         self.path.push(name.into());
     }
+    /// Restores the parent target path after mapping a nested module.
     fn exit_module(&mut self, _: &str, _: &str) {
         self.path.pop();
     }
+    /// Installs one validated tensor while retaining the target parameter's record mapper.
+    ///
+    /// Values begin a fresh gradient graph with the target freezing policy. Shared
+    /// identities reuse one tensor handle; a rank mismatch records an error and leaves
+    /// that parameter unchanged so the caller can discard the staged clone.
     fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
         let name = path_name(&self.path);
         let Some(staged) = self.staged.remove(&name) else {

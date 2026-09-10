@@ -1,4 +1,10 @@
 //! Public architecture contracts and reusable model specifications.
+//!
+//! Contracts separate stateless parameterized computation from mutable decode
+//! sessions. Shared specifications describe mixer, normalization, and residual
+//! choices without selecting a checkpoint family. Input/output types make tensor
+//! axes and token-validity semantics explicit; family implementations validate the
+//! requested capabilities before applying their numerical graph.
 
 mod spec;
 mod traits;

@@ -1,4 +1,11 @@
 //! Typed model inputs, outputs, masks, and diagnostic requests.
+//!
+//! Inputs carry integer token/position IDs with `[batch, token]` axes; hidden
+//! states use `[batch, token, channel]`, and logits append a vocabulary axis.
+//! Token masks always mean `true == valid`, including padded decode no-ops.
+//! Boolean adapters reconstruct the backend's logical storage through integer
+//! indicators instead of assuming a specific byte encoding. These wrappers define
+//! shape and semantic contracts; execution validates concrete geometry and devices.
 
 use burn::tensor::{Bool, ElementConversion, Int, Tensor, TensorData, backend::Backend};
 

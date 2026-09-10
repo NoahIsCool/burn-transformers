@@ -40,6 +40,8 @@ use crate::{Error, Result};
 mod validity;
 pub use validity::PointValidity;
 
+// Semantic tensor coordinates and rank-preserving selections.
+
 /// Meaning of an activation dimension; rank alone does not identify its axes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Axis {
@@ -136,6 +138,7 @@ pub struct Selection<const D: usize> {
 }
 
 impl<const D: usize> From<Point<D>> for Selection<D> {
+    /// Selects the complete typed point without changing its rank or axis order.
     fn from(point: Point<D>) -> Self {
         Self {
             point,
@@ -145,12 +148,14 @@ impl<const D: usize> From<Point<D>> for Selection<D> {
 }
 
 impl<const D: usize> From<&Point<D>> for Selection<D> {
+    /// Clones a borrowed point into a complete, unsliced selection.
     fn from(point: &Point<D>) -> Self {
         Self::from(point.clone())
     }
 }
 
 impl<const D: usize> From<&Selection<D>> for Selection<D> {
+    /// Clones a borrowed selection with its existing semantic-axis ranges.
     fn from(selection: &Selection<D>) -> Self {
         selection.clone()
     }
@@ -186,6 +191,10 @@ impl<const D: usize> Selection<D> {
     pub fn key_token(self, index: usize) -> Self {
         self.one(Axis::Key, index)
     }
+    /// Selects a length-one semantic axis without overflowing the upper bound.
+    ///
+    /// A saturated endpoint becomes an invalid empty range and is rejected during
+    /// scope validation rather than panicking during registration.
     fn one(self, axis: Axis, index: usize) -> Self {
         self.slice(axis, index..index.saturating_add(1))
     }
@@ -201,6 +210,7 @@ pub enum Stack {
 }
 
 impl Stack {
+    /// Returns the stable stack prefix used by discoverable activation names.
     fn name(self) -> &'static str {
         match self {
             Self::Encoder => "encoder",
@@ -217,6 +227,8 @@ impl Stack {
     }
 }
 
+// Built-in layer and attention point catalogs.
+
 /// Address a zero-based layer without knowing its checkpoint parameter names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layer {
@@ -226,6 +238,7 @@ pub struct Layer {
 
 macro_rules! hidden_points {
     ($($method:ident => ($suffix:literal, $doc:literal)),* $(,)?) => {$ (
+        /// The returned axes are `[batch, token, channel]`; token and channel selections preserve rank.
         #[doc = $doc]
         pub fn $method(self) -> Point<3> { hidden_point(format!("{}.layers.{}.{}", self.stack.name(), self.index, $suffix)) }
     )*};
@@ -284,6 +297,7 @@ impl Layer {
     }
 }
 
+/// Constructs a hidden-state point with `[batch, token, channel]` axis semantics.
 fn hidden_point(name: String) -> Point<3> {
     Point::custom(name, [Axis::Batch, Axis::Token, Axis::Channel])
 }
@@ -312,6 +326,7 @@ impl AttentionPoints {
         ))
     }
 
+    /// Builds a self/cross-attention point with explicit rank-four axis semantics.
     fn point(self, suffix: &str, axes: [Axis; 4]) -> Point<4> {
         Point::custom(
             format!(
@@ -403,6 +418,8 @@ struct Entry<'a, B: Backend> {
 }
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
+// Run-scoped action registration, capture ownership, and execution.
+
 /// Scoped, ordered activation actions. Create one collection per experiment run policy.
 /// No `Send` or `'static` bound is imposed on callbacks, so local modules can be borrowed.
 pub struct Hooks<'a, B: Backend> {
@@ -414,6 +431,7 @@ pub struct Hooks<'a, B: Backend> {
 }
 
 impl<B: Backend> Default for Hooks<'_, B> {
+    /// Creates an empty hook collection with its own capture-handle identity.
     fn default() -> Self {
         Self::new()
     }
@@ -470,6 +488,7 @@ impl<'a, B: Backend> Hooks<'a, B> {
         self.capture_impl(selection.into(), false)
     }
 
+    /// Registers a capture with an explicit graph-retention policy and a collection-bound handle.
     fn capture_impl<const D: usize>(
         &mut self,
         selection: Selection<D>,
@@ -664,6 +683,7 @@ impl<'a, B: Backend> Hooks<'a, B> {
         result
     }
 
+    /// Rejects registrations added during execution because the validated scope must remain fixed.
     fn check_registration_count(&self) -> Result<()> {
         if self.entries.len() != self.run_entry_count {
             Err(Error::configuration(
@@ -675,6 +695,7 @@ impl<'a, B: Backend> Hooks<'a, B> {
         }
     }
 
+    /// Releases captured tensors and resets visit counts before a run or after failure.
     fn clear_captures(&mut self) {
         for entry in &mut self.entries {
             entry.visits = 0;
@@ -819,6 +840,7 @@ impl<'a, B: Backend> Hooks<'a, B> {
     }
 }
 
+/// Checks that selected axes exist exactly once and have unique, nonempty ranges.
 fn validate_slices(point: &PointInfo, slices: &[(Axis, Range<usize>)]) -> Result<()> {
     for (index, (axis, range)) in slices.iter().enumerate() {
         if point

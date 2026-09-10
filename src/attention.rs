@@ -16,6 +16,12 @@
 //! score-like plane by evaluating complete attention rows in synchronized query
 //! chunks. This is a storage bound, not a linear-time attention approximation:
 //! full-attention chunks still visit every key.
+//!
+//! Queries use `[batch, query_head, query_token, head_dim]`; keys and values
+//! retain native KV heads until dispatch. Score masks use `true == excluded`,
+//! whereas incoming token-validity masks use `true == valid`. Causal alignment is
+//! bottom-right for cached prefixes. Exclusions are restored after interventions,
+//! and eager softmax defines fully excluded rows as zero probabilities.
 
 use burn::{
     module::Module,
@@ -724,6 +730,12 @@ impl<B: Backend> GroupedQueryAttention<B> {
         )
     }
 
+    /// Dispatches projected attention while preserving hook order and exclusion masks.
+    ///
+    /// Native kernels retain Q/K/V and head-context access without allocating scores.
+    /// Score hooks or a structural pattern transform require eager F32 softmax and
+    /// materialize `[batch, query_head, query_token, key_token]` planes. Edits cannot
+    /// restore excluded links; excluded pattern entries remain zero.
     #[allow(clippy::too_many_arguments)]
     fn attend_with_transform(
         &self,

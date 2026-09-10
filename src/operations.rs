@@ -12,6 +12,12 @@
 //! [`linear`] evaluates `reshape(x, [-1, I]) @ W + b` and restores
 //! `[..., O]`. Flattening only the activation's leading axes leaves packed
 //! weight block boundaries and packing dimensions unchanged.
+//!
+//! Dense floating projections remain differentiable through both inputs and
+//! parameters. Packed quantized projections retain their inference representation,
+//! but Burn 0.21 cannot differentiate those operations, including a frozen packed
+//! suffix. The autodiff path rejects packed values contextually; callers needing
+//! input gradients must explicitly dequantize before constructing the float graph.
 
 use burn::{
     module::Param,

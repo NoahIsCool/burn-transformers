@@ -15,6 +15,12 @@
 //! never materializes historical per-head keys or values. Both paths share the
 //! same parameters and are numerically equivalent up to floating-point
 //! reassociation.
+//!
+//! Latents use `[batch, token, rank]`; content queries use
+//! `[batch, head, query_token, content_channel]`, and the shared rotary key has one
+//! head. Expanded score/pattern hooks require the reference path; absorbed decode
+//! prioritizes compact cached storage. Projection components share dtype/device,
+//! with F32 softmax normalization and explicit exclusion masks for padded rows.
 
 use burn::{
     module::Module,
@@ -543,6 +549,11 @@ impl<B: Backend> MultiLatentAttention<B> {
         operations::linear(context, &self.o_proj)
     }
 
+    /// Checks latent/query geometry and shared device/dtype before MLA tensor operations.
+    ///
+    /// The score plane is `[batch, head, query_token, key_token]`; masks and biases must
+    /// match it under the supported broadcast rules. Content and rotary widths remain
+    /// separate so absorbed and expanded paths share the same validated contract.
     fn validate_projection(
         &self,
         projection: &MlaProjection<B>,

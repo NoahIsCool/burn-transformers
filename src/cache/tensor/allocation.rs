@@ -1,4 +1,10 @@
 //! Backend-portable validation for tensor-cache allocation geometry.
+//!
+//! For dimensions `d_i`, allocation size is `product(d_i) * dtype.size()`.
+//! Both products are checked before constructing backend shapes, with a
+//! conservative `i32::MAX` per-tensor element limit for portable indexing. These
+//! checks prevent arithmetic overflow; they cannot guarantee available device
+//! memory or account for a backend's temporary allocations.
 
 use burn::tensor::DType;
 

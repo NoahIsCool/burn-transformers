@@ -1,3 +1,10 @@
+//! Validated logical capacity and physical retention dimensions.
+//!
+//! A session tracks `batch > 0` sequences and permits absolute lengths in
+//! `0..=capacity`. A sliding layer retains at most `window <= capacity` tokens;
+//! eviction changes physical storage, never absolute position numbering. These
+//! integer-only checks precede tensor allocation and are independent of dtype.
+
 use core::fmt;
 use core::num::NonZeroUsize;
 
@@ -102,6 +109,7 @@ pub enum CacheConfigError {
 }
 
 impl fmt::Display for CacheConfigError {
+    /// Formats the invalid cache dimensions or retention window with their actual values.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroSequences => formatter.write_str("cache must track at least one sequence"),

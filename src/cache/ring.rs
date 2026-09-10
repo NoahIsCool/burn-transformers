@@ -1,3 +1,15 @@
+//! Pure plans for standard, mirrored, and speculative sliding-window storage.
+//!
+//! Absolute token position `p` maps to physical slot `p % capacity`. A retained
+//! suffix no wider than capacity crosses that boundary at most once, so reads
+//! and writes need at most two contiguous segments. Plans use checked integer
+//! arithmetic and do not allocate backend tensors or depend on floating dtype.
+//!
+//! Mirrored storage doubles physical slots to make chronological reads contiguous.
+//! Speculative proposals instead remain in separate linear storage until acceptance:
+//! rolling back a logical length cannot recover baseline values overwritten in a
+//! full ring. This trades temporary proposal memory for reversible execution.
+
 use core::fmt;
 use core::num::NonZeroUsize;
 use core::ops::Range;
@@ -378,6 +390,10 @@ pub fn plan_mirrored_ring_read(
     })
 }
 
+/// Splits at most one ring wrap into ordered contiguous input/destination ranges.
+///
+/// The caller ensures `count <= capacity` and nonzero capacity; the first range
+/// starts at `absolute_start % capacity`, and any remainder starts at slot zero.
 fn write_segments(
     input_start: usize,
     absolute_start: usize,
@@ -403,6 +419,7 @@ fn write_segments(
     segments
 }
 
+/// Rejects a retained window wider than the nonzero physical ring capacity.
 fn validate_window(window: NonZeroUsize, capacity: NonZeroUsize) -> Result<(), RingPlanError> {
     if window <= capacity {
         Ok(())
@@ -446,6 +463,7 @@ pub enum RingPlanError {
 }
 
 impl fmt::Display for RingPlanError {
+    /// Formats the failed ring arithmetic or proposal boundary with the offending counts.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PositionOverflow {

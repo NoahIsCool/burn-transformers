@@ -1,4 +1,15 @@
 //! Open residual blocks and explicit width changes built from ordinary Burn modules.
+//!
+//! Residual branches compute `x + F(norm(x))` for pre-normalization, with
+//! post/sandwich variants delegated to the registered normalization layout. Hidden
+//! tensors use `[batch, token, channel]`; residual additions preserve all axes,
+//! device, and dtype. Width adapters change only the final channel axis through
+//! explicit bias-free projections, so heterogeneous stages remain ordinary Burn
+//! modules with visible parameters and connected full-precision gradients.
+//!
+//! Attention policy, positions, and padding come from the execution context.
+//! Callbacks expose intermediate computation without owning optimizer parameters;
+//! any trainable inserted module belongs to the surrounding module tree.
 
 use burn::{
     module::{Module, ModuleDisplay},
@@ -116,6 +127,7 @@ impl<B: Backend, M: HiddenTransform<B> + ModuleDisplay, F: HiddenTransform<B> + 
 impl<B: Backend, M: HiddenTransform<B> + ModuleDisplay, F: HiddenTransform<B> + ModuleDisplay>
     HiddenTransform<B> for ResidualBlock<B, M, F>
 {
+    /// Lists residual and branch boundaries together with points exposed by the composed modules.
     fn activation_points(&self, layer: Layer) -> Vec<crate::intervention::PointInfo> {
         let mut points = vec![layer.residual_pre().info(), layer.attention_input().info()];
         points.extend(self.mixer.activation_points(layer));
@@ -125,6 +137,10 @@ impl<B: Backend, M: HiddenTransform<B> + ModuleDisplay, F: HiddenTransform<B> + 
         points
     }
 
+    /// Evaluates both normalized residual branches and emits their ordered hook points.
+    ///
+    /// Each branch must preserve `[batch, token, channel]`, dtype, and device before
+    /// addition; the execution context supplies attention and padding semantics.
     fn forward(
         &self,
         hidden: Tensor<B, 3>,
@@ -235,10 +251,15 @@ impl<B: Backend, T: HiddenTransform<B> + ModuleDisplay> WidthAdapter<B, T> {
 }
 
 impl<B: Backend, T: HiddenTransform<B> + ModuleDisplay> HiddenTransform<B> for WidthAdapter<B, T> {
+    /// Delegates point discovery to the wrapped transform; width projections add no hidden hooks.
     fn activation_points(&self, layer: Layer) -> Vec<crate::intervention::PointInfo> {
         self.transform.activation_points(layer)
     }
 
+    /// Projects input channels, runs the inner transform, then projects output channels.
+    ///
+    /// Batch/token dimensions, dtype, and device remain invariant; the inner channel
+    /// width is checked before the optional output projection.
     fn forward(
         &self,
         hidden: Tensor<B, 3>,
@@ -276,6 +297,7 @@ impl<B: Backend, T: HiddenTransform<B> + ModuleDisplay> HiddenTransform<B> for W
     }
 }
 
+/// Requires nonempty batch/token axes and the advertised residual channel width.
 fn validate_width<B: Backend>(hidden: &Tensor<B, 3>, width: usize, field: &str) -> Result<()> {
     let [batch, tokens, actual] = hidden.dims();
     if batch == 0 || tokens == 0 || actual != width {
@@ -288,6 +310,7 @@ fn validate_width<B: Backend>(hidden: &Tensor<B, 3>, width: usize, field: &str) 
     Ok(())
 }
 
+/// Checks shape, device, and dtype equality before adding a residual branch.
 fn validate_same_shape<B: Backend>(
     actual: &Tensor<B, 3>,
     expected: &Tensor<B, 3>,
@@ -306,6 +329,7 @@ fn validate_same_shape<B: Backend>(
 }
 
 impl<B: Backend> HiddenTransform<B> for Linear<B> {
+    /// Applies a tokenwise affine projection while leaving sequence-context semantics to its caller.
     fn forward(
         &self,
         hidden: Tensor<B, 3>,
@@ -318,6 +342,7 @@ impl<B: Backend> HiddenTransform<B> for Linear<B> {
 }
 
 impl<B: Backend> HiddenTransform<B> for crate::feed_forward::DenseFeedForward<B> {
+    /// Exposes dense MLP values immediately before and after its configured nonlinearity.
     fn activation_points(&self, layer: Layer) -> Vec<crate::intervention::PointInfo> {
         vec![
             layer.mlp_pre_activation().info(),
@@ -325,6 +350,7 @@ impl<B: Backend> HiddenTransform<B> for crate::feed_forward::DenseFeedForward<B>
         ]
     }
 
+    /// Evaluates `down(phi(up(x)))`, allowing edits before and after `phi`.
     fn forward(
         &self,
         hidden: Tensor<B, 3>,
@@ -343,6 +369,7 @@ impl<B: Backend> HiddenTransform<B> for crate::feed_forward::DenseFeedForward<B>
 }
 
 impl<B: Backend> HiddenTransform<B> for crate::feed_forward::GatedFeedForward<B> {
+    /// Exposes the gate branch before and after activation, prior to multiplying its content branch.
     fn activation_points(&self, layer: Layer) -> Vec<crate::intervention::PointInfo> {
         vec![
             layer.mlp_pre_activation().info(),
@@ -350,6 +377,7 @@ impl<B: Backend> HiddenTransform<B> for crate::feed_forward::GatedFeedForward<B>
         ]
     }
 
+    /// Evaluates `down(phi(gate(x)) * up(x))` with ordered gate-activation hooks.
     fn forward(
         &self,
         hidden: Tensor<B, 3>,
@@ -369,6 +397,7 @@ impl<B: Backend> HiddenTransform<B> for crate::feed_forward::GatedFeedForward<B>
 }
 
 impl<B: Backend> HiddenTransform<B> for crate::attention::GroupedQueryAttention<B> {
+    /// Advertises score/pattern points only when eager attention can materialize their tensor graph.
     fn activation_points(&self, layer: Layer) -> Vec<crate::intervention::PointInfo> {
         let points = layer.self_attention();
         if self.precision_mode == crate::attention::AttentionPrecisionMode::EagerFp32Softmax {
@@ -383,6 +412,10 @@ impl<B: Backend> HiddenTransform<B> for crate::attention::GroupedQueryAttention<
         }
     }
 
+    /// Projects self-attention under the selected layer policy and token-validity mask.
+    ///
+    /// Decoder stacks default to causal attention; an explicit policy may override it.
+    /// Padding exclusions remain in force, and additive bias must match the input dtype.
     fn forward(
         &self,
         hidden: Tensor<B, 3>,

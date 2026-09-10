@@ -1,3 +1,14 @@
+//! Checked logical lengths for independent decoder sequences.
+//!
+//! Each row retains an absolute processed-token count `0 <= length <= capacity`.
+//! An append proposes `next = length + valid_tokens` using checked arithmetic;
+//! all rows are validated before publishing a batched transition. Sliding eviction
+//! does not reduce these counts because attention and RoPE need absolute offsets.
+//!
+//! This module owns integer metadata only. Reset/reorder/truncate are forbidden
+//! during speculation, and tensor-owning callers must coordinate the corresponding
+//! physical changes before treating a metadata transition as committed.
+
 use core::fmt;
 
 use super::{CacheConfig, TransactionError};
@@ -340,6 +351,7 @@ impl DecodeState {
         self.active_transaction.is_some()
     }
 
+    /// Rejects reset/reorder/truncate operations while an append-only transaction is active.
     fn ensure_topology_mutation_allowed(
         &self,
         operation: &'static str,
@@ -406,6 +418,7 @@ pub enum DecodeStateError {
 }
 
 impl fmt::Display for DecodeStateError {
+    /// Formats lifecycle failures with sequence indices, lengths, and capacity where available.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SequenceCountMismatch { expected, actual } => write!(
@@ -453,6 +466,7 @@ impl fmt::Display for DecodeStateError {
 }
 
 impl std::error::Error for DecodeStateError {
+    /// Exposes an underlying transaction error while leaving direct validation failures unchained.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Transaction(error) => Some(error),
@@ -462,11 +476,13 @@ impl std::error::Error for DecodeStateError {
 }
 
 impl From<TransactionError> for DecodeStateError {
+    /// Wraps a transaction failure without discarding its typed cause.
     fn from(value: TransactionError) -> Self {
         Self::Transaction(value)
     }
 }
 
+/// Requires exactly one logical length or increment per tracked sequence.
 fn validate_length_count(expected: usize, actual: usize) -> Result<(), DecodeStateError> {
     if expected == actual {
         Ok(())
@@ -475,6 +491,7 @@ fn validate_length_count(expected: usize, actual: usize) -> Result<(), DecodeSta
     }
 }
 
+/// Rejects a requested logical length beyond capacity while accepting the exact endpoint.
 fn validate_capacity(
     sequence: usize,
     requested: usize,

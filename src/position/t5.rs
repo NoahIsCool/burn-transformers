@@ -1,3 +1,15 @@
+//! Exact and logarithmic relative-position buckets for T5 attention.
+//!
+//! The displacement is `key_position - query_position`. Within each direction,
+//! distances below `E = buckets_per_direction / 2` receive exact buckets; larger
+//! distances use `E + floor(log(distance/E) / log(max_distance/E) * (B-E))`,
+//! clipped to `B-1`, where `B` is the number of buckets in that direction.
+//!
+//! Unsigned distance arithmetic handles extreme absolute or signed positions;
+//! logarithms use host F64. Bidirectional tables separate past and future halves.
+//! Causal tables map future displacements to zero, but the attention mask remains
+//! responsible for excluding those future keys.
+
 use core::fmt;
 
 /// Validated T5 relative-position bucketing parameters.
@@ -106,6 +118,10 @@ impl T5RelativePositionBuckets {
         }
     }
 
+    /// Maps a direction and unsigned distance to exact or logarithmic T5 buckets.
+    ///
+    /// Unsigned distances avoid signed-minimum overflow. Causal future keys map to
+    /// zero; distant keys saturate at the last bucket after host F64 logarithms.
     fn bucket_parts(self, key_is_future: bool, distance: u64) -> usize {
         let buckets_per_direction = if self.bidirectional {
             self.num_buckets / 2
@@ -167,6 +183,7 @@ pub enum T5BucketError {
 }
 
 impl fmt::Display for T5BucketError {
+    /// Formats invalid bucket counts or logarithmic-distance bounds with their values.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooFewBuckets {

@@ -1,3 +1,15 @@
+//! Validated host configuration for rotary embeddings and context extension.
+//!
+//! A rotary prefix of even width `d <= head_dim` defines `d/2` complex coordinate
+//! pairs with base frequencies `omega_i = theta^(-2i/d)`. Linear scaling divides
+//! positions by an extension factor; dynamic NTK adjusts the base beyond the
+//! trained context; YaRN blends frequency regimes and scales cosine/sine amplitude.
+//!
+//! Configuration uses host F64 scalars with finite-domain checks; tensor dtype and
+//! device conversion occur separately in the rotary tensor module. Dynamic NTK
+//! needs `d > 2` because its exponent contains `d/(d-2)`. Pair layout and partial
+//! rotation must be chosen explicitly to preserve checkpoint tensor semantics.
+
 use core::fmt;
 
 const DEFAULT_YARN_BETA_FAST: f64 = 32.0;
@@ -221,18 +233,21 @@ pub enum RopeScaling {
 }
 
 impl From<LinearRopeScaling> for RopeScaling {
+    /// Wraps already validated linear position scaling in the shared RoPE policy.
     fn from(value: LinearRopeScaling) -> Self {
         Self::Linear(value)
     }
 }
 
 impl From<DynamicNtkScaling> for RopeScaling {
+    /// Wraps already validated dynamic-NTK scaling in the shared RoPE policy.
     fn from(value: DynamicNtkScaling) -> Self {
         Self::DynamicNtk(value)
     }
 }
 
 impl From<YarnConfig> for RopeScaling {
+    /// Wraps already validated YaRN interpolation settings in the shared RoPE policy.
     fn from(value: YarnConfig) -> Self {
         Self::Yarn(value)
     }
@@ -378,6 +393,7 @@ pub fn rotary_dimension_from_partial_factor(
     Ok(rotary_dimension)
 }
 
+/// Requires a positive, even rotary prefix that fits inside a nonempty attention head.
 fn validate_dimensions(
     head_dimension: usize,
     rotary_dimension: usize,
@@ -400,6 +416,7 @@ fn validate_dimensions(
     Ok(())
 }
 
+/// Requires a finite context-extension factor of at least one; one preserves the original scale.
 fn validate_scaling_factor(kind: &'static str, factor: f64) -> Result<(), RopeConfigError> {
     if factor.is_finite() && factor >= 1.0 {
         Ok(())
@@ -408,6 +425,7 @@ fn validate_scaling_factor(kind: &'static str, factor: f64) -> Result<(), RopeCo
     }
 }
 
+/// Requires a nonzero trained context length before evaluating an extension formula.
 fn validate_original_context(
     kind: &'static str,
     original_max_position_embeddings: usize,
@@ -419,6 +437,7 @@ fn validate_original_context(
     }
 }
 
+/// Requires a finite positive YaRN cosine/sine amplitude multiplier.
 fn validate_positive_finite_attention_factor(attention_factor: f64) -> Result<(), RopeConfigError> {
     if attention_factor.is_finite() && attention_factor > 0.0 {
         Ok(())
@@ -427,6 +446,7 @@ fn validate_positive_finite_attention_factor(attention_factor: f64) -> Result<()
     }
 }
 
+/// Requires a finite positive YaRN rotation-count bound before logarithmic interpolation.
 fn validate_yarn_beta(name: &'static str, value: f64) -> Result<(), RopeConfigError> {
     if value.is_finite() && value > 0.0 {
         Ok(())
@@ -517,6 +537,7 @@ pub enum RopeConfigError {
 }
 
 impl fmt::Display for RopeConfigError {
+    /// Formats invalid rotary geometry or scaling parameters with the offending values.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroHeadDimension => formatter.write_str("RoPE head dimension must be non-zero"),

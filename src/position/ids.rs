@@ -1,3 +1,11 @@
+//! Overflow-safe absolute positions from padded token-validity masks.
+//!
+//! For valid token `i` in row `b`, `position[b, i] = start[b] + valid_before[b, i]`.
+//! Invalid tokens receive a caller-selected sentinel and do not advance the count.
+//! The row-major mask has axes `[batch, token]`; each row has its own cache offset.
+//! All arithmetic is integral and checked before conversion to backend tensor IDs,
+//! so left padding and ragged cached prefixes do not change valid-token phases.
+
 use core::fmt;
 
 /// Derives numeric positions for one token-validity row.
@@ -137,6 +145,7 @@ pub enum PositionIdError {
 }
 
 impl fmt::Display for PositionIdError {
+    /// Formats invalid position geometry or absolute-index overflow with row/token context.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ShapeOverflow {

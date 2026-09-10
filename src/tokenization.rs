@@ -87,6 +87,7 @@ pub struct EncodeOptions {
 }
 
 impl Default for EncodeOptions {
+    /// Enables checkpoint special tokens with no added padding or truncation limit.
     fn default() -> Self {
         Self {
             add_special_tokens: true,

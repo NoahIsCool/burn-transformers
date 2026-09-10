@@ -36,6 +36,12 @@
 //! precision logits to F32 before computing loss. Logits remain on their device;
 //! cross-entropy label validation synchronizes minimum/maximum scalars. No
 //! implicit dtype promotion, gradient detachment, padding policy, or trainer is applied.
+//!
+//! For class logits `z`, `log_softmax(z)_i = z_i - m - log(sum_j exp(z_j-m))`,
+//! where `m = max(z)` is detached only as a stabilization constant. Cross entropy
+//! is `-mean_n log p_n[label_n]`; distillation is
+//! `mean_n sum_i p_teacher(n,i) * (log p_teacher(n,i) - log p_student(n,i))`.
+//! Both use `[example, class]` axes and return one scalar tensor in nats.
 
 use std::collections::HashMap;
 
@@ -48,6 +54,8 @@ use burn::{
 };
 
 use crate::{Error, Result};
+
+// Parameter ownership and native optimizer compatibility.
 
 /// Checks that each trainable parameter identifier has one registered owner.
 ///
@@ -104,14 +112,17 @@ struct ParameterGroup {
 }
 
 impl<B: Backend> ModuleVisitor<B> for ParameterOwners {
+    /// Pushes one module-path segment while collecting parameter ownership.
     fn enter_module(&mut self, name: &str, _: &str) {
         self.path.push(name.into());
     }
 
+    /// Removes the completed module segment so sibling parameter paths stay distinct.
     fn exit_module(&mut self, _: &str, _: &str) {
         self.path.pop();
     }
 
+    /// Records the current parameter path by identifier without initializing its tensor.
     fn visit_float<const D: usize>(&mut self, parameter: &Param<Tensor<B, D>>) {
         let path = if self.path.is_empty() {
             "$".into()
@@ -131,6 +142,7 @@ struct DuplicateTrainability<'a> {
 }
 
 impl<B: AutodiffBackend> ModuleVisitor<B> for DuplicateTrainability<'_> {
+    /// Initializes only duplicated parameter owners and records whether any requires gradients.
     fn visit_float<const D: usize>(&mut self, parameter: &Param<Tensor<B, D>>) {
         if let Some(group) = self.groups.get_mut(&parameter.id)
             && !group.trainable
@@ -139,6 +151,8 @@ impl<B: AutodiffBackend> ModuleVisitor<B> for DuplicateTrainability<'_> {
         }
     }
 }
+
+// Differentiable losses and stable reductions.
 
 /// Computes log probabilities along `dim`, preserving shape, dtype, and gradients.
 ///
@@ -237,6 +251,7 @@ pub fn kl_divergence<B: Backend>(
     Ok(sum_dim(per_example, 0) / examples as f64)
 }
 
+/// Checks nonempty tensor geometry and F32/F64 storage without reading logit values.
 fn validate_logits<B: Backend, const D: usize>(logits: &Tensor<B, D>, field: &str) -> Result<()> {
     if D == 0 || logits.dims().contains(&0) {
         return Err(Error::configuration(
@@ -256,8 +271,11 @@ fn validate_logits<B: Backend, const D: usize>(logits: &Tensor<B, D>, field: &st
     Ok(())
 }
 
-// Adjacent pairs keep every reduction to two terms on every backend. Flattening
-// the other dimensions permits the same implementation at arbitrary input rank.
+/// Reduces one axis with a balanced tree while retaining its length-one dimension.
+///
+/// Every backend sum sees two adjacent terms, limiting F32 accumulation error to
+/// logarithmic depth. Odd widths receive one zero; flattening other axes preserves
+/// independent rows and differentiability. The caller supplies a nonempty valid axis.
 fn sum_dim<B: Backend, const D: usize>(input: Tensor<B, D>, dim: usize) -> Tensor<B, D> {
     let mut shape = input.dims();
     shape.swap(dim, D - 1);

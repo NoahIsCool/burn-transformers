@@ -1,4 +1,11 @@
 //! Typed validation and lifecycle errors for tensor-backed caches.
+//!
+//! Errors retain the layer, tensor, axis, or lifecycle boundary that failed.
+//! Shape and byte-count failures are checked before backend allocation; stale
+//! marks and invalid accepted prefixes are checked before cache publication. The
+//! error hierarchy distinguishes these recoverable input failures from backend
+//! resource limits rather than treating successful metadata validation as a
+//! promise that device allocation or arithmetic will succeed.
 
 use burn::tensor::DType;
 

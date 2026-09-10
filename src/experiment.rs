@@ -4,6 +4,13 @@
 //! `embed`, `run_layers`, and `normalize` make the boundaries visible: running
 //! blocks never silently reapplies embeddings or final normalization. Parameters
 //! belong to ordinary Burn modules; these execution values are not checkpointed.
+//!
+//! Hidden tensors have axes `[batch, token, channel]`; positions and token
+//! validity have `[batch, token]` axes. Attention policies operate on broadcastable
+//! `[batch, head, query, key]` planes. User-supplied allowed links use `true`, while
+//! kernel exclusions invert that convention and combine it with padding. Layer
+//! policies may choose causal, bidirectional, or custom attention without changing
+//! parameter ownership or silently converting tensor dtype/device.
 
 use std::ops::Range;
 
@@ -144,6 +151,7 @@ impl<B: Backend> AttentionPolicy<B> {
     }
 }
 
+/// Checks broadcasting into `[batch, head, query_token, key_token]` one axis at a time.
 fn validate_plane(field: &str, actual: [usize; 4], expected: [usize; 4]) -> Result<()> {
     if actual
         .iter()

@@ -1,4 +1,10 @@
 //! Per-execution activation validity, independent of hook registrations.
+//!
+//! A point's Boolean indicator is broadcast over its declared tensor axes.
+//! Applying it computes `where(valid, activation, 0)` while preserving shape,
+//! dtype, and device. A hidden-state mask `[batch, token, 1]` can therefore suppress
+//! all channels of a padded token before observation and after each edit. This
+//! execution invariant is independent of whether any user callback is registered.
 
 use burn::tensor::{Bool, Tensor, backend::Backend};
 
@@ -38,6 +44,10 @@ impl<B: Backend> PointValidity<B> {
         })
     }
 
+    /// Zeros invalid elements after checking rank, broadcast extents, and device.
+    ///
+    /// The mask uses `true == valid`; inversion is confined to Burn's `mask_fill`
+    /// boundary. Shape, floating dtype, and gradients of valid elements are preserved.
     pub(super) fn apply<const D: usize>(&self, tensor: Tensor<B, D>) -> Result<Tensor<B, D>> {
         let shape: [usize; D] = self.shape.clone().try_into().map_err(|_| {
             Error::configuration(

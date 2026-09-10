@@ -1,3 +1,13 @@
+//! Single-use transactions for speculative logical cache lengths.
+//!
+//! A mark captures baseline lengths `L_b`; after proposing `P_b` tokens, accepting
+//! `A_b` requires `0 <= A_b <= P_b` and commits `L_b + A_b`. Validation finishes
+//! for every row before metadata changes. Rollback restores every `L_b`.
+//!
+//! Allocation identity distinguishes active, stale, and foreign marks, including
+//! cloned handles. These integer transactions do not journal tensor values: ring
+//! and recurrent caches must stage their proposed data outside committed storage.
+
 use core::fmt;
 use std::sync::Arc;
 
@@ -26,18 +36,21 @@ impl CacheMark {
 struct TransactionToken(Arc<()>);
 
 impl TransactionToken {
+    /// Allocates a unique transaction identity whose cloned handles still identify the same mark.
     fn new() -> Self {
         Self(Arc::new(()))
     }
 }
 
 impl fmt::Debug for TransactionToken {
+    /// Formats the token without exposing its process-specific allocation address.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("TransactionToken(..)")
     }
 }
 
 impl PartialEq for TransactionToken {
+    /// Compares allocation identity so unrelated transactions cannot share a valid mark.
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
@@ -139,6 +152,7 @@ impl DecodeState {
         Ok(())
     }
 
+    /// Checks that a mark names the active transaction and its original logical lengths.
     fn validate_mark(&self, mark: &CacheMark) -> Result<&ActiveTransaction, DecodeStateError> {
         let active = self
             .active_transaction
@@ -159,6 +173,7 @@ impl TransactionalCache for DecodeState {
     type Mark = CacheMark;
     type Error = DecodeStateError;
 
+    /// Begins one append-only transaction, rejecting nesting and retaining every baseline length.
     fn mark(&mut self) -> Result<Self::Mark, Self::Error> {
         if self.active_transaction.is_some() {
             return Err(DecodeStateError::Transaction(
@@ -179,6 +194,7 @@ impl TransactionalCache for DecodeState {
         })
     }
 
+    /// Commits the same accepted prefix count for each sequence through atomic ragged validation.
     fn commit_prefix(
         &mut self,
         mark: Self::Mark,
@@ -188,6 +204,7 @@ impl TransactionalCache for DecodeState {
         self.commit_prefix_per_sequence(mark, &counts)
     }
 
+    /// Restores all baseline logical lengths and consumes the active transaction identity.
     fn rollback(&mut self, mark: Self::Mark) -> Result<(), Self::Error> {
         let active = self.validate_mark(&mark)?;
         let baseline_lengths = active.baseline_lengths.clone();
@@ -225,6 +242,7 @@ pub enum TransactionError {
 }
 
 impl fmt::Display for TransactionError {
+    /// Formats the rejected transaction transition with sequence/count context when available.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlreadyActive => formatter.write_str("a cache transaction is already active"),

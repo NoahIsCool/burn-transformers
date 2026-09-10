@@ -4,6 +4,11 @@
 //! `down(phi(gate(x)) * up(x))`. The second gated input projection acts as a
 //! multiplicative content path. SwiGLU chooses `phi = SiLU`; T5 checkpoints use
 //! either a dense ReLU path or gated GELU/SiLU variants.
+//!
+//! Hidden axes are `[batch, token, channel]`; input and output projections
+//! operate independently at every batch/token location. Intermediate width is an
+//! explicit architecture choice. Tensor dtype follows the projections and chosen
+//! activation; no implicit masking, cache state, or training-mode dropout is added.
 
 use burn::{
     module::Module,

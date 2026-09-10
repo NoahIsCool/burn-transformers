@@ -1,4 +1,15 @@
 //! Composable model-level decode state and lifecycle coordination.
+//!
+//! The coordinator keeps absolute lengths alongside independent native-KV and
+//! recurrent banks. KV tensors use `[batch, kv_head, time, channel]`; recurrent
+//! geometry is declared per group. Main and optional auxiliary banks share a
+//! device and fixed batch/capacity while retaining their own accepted progress.
+//!
+//! Ordinary writes are prepared before publication. Speculation stages KV values
+//! and recurrent terminal snapshots, validates every accepted prefix, then commits
+//! tensor storage and metadata together. Reset/reorder/truncate cannot cross an
+//! active transaction. These mutable execution tensors remain outside trainable
+//! model parameters, and storage dtype is explicit in each group's specification.
 
 use std::sync::Arc;
 
@@ -15,6 +26,8 @@ use super::{
     NativeKvCache, NativeKvCacheSpec, RecurrentStateCache, RecurrentStateSpec, TensorCacheError,
     TensorCacheResult,
 };
+
+// Bank allocation and coordinated tensor writes.
 
 /// A composable collection of attention and recurrent cache allocations.
 ///
@@ -393,18 +406,22 @@ impl TensorTransactionToken {
 }
 
 impl core::fmt::Debug for TensorTransactionToken {
+    /// Formats the tensor transaction token without exposing its allocation address.
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter.write_str("TensorTransactionToken(..)")
     }
 }
 
 impl PartialEq for TensorTransactionToken {
+    /// Compares allocation identity so marks cannot authorize a different tensor-cache transaction.
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
 impl Eq for TensorTransactionToken {}
+
+// Session transactions and lifecycle operations.
 
 /// Single-use identity returned for a tensor-cache speculative transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1038,10 +1055,12 @@ impl<B: Backend> TransactionalCache for TensorDecodeState<B> {
     type Mark = TensorCacheMark;
     type Error = TensorCacheError;
 
+    /// Begins a coordinated tensor transaction with external staging for speculative writes.
     fn mark(&mut self) -> Result<Self::Mark, Self::Error> {
         self.begin_transaction()
     }
 
+    /// Publishes a uniform accepted prefix across cache banks after all commit checks succeed.
     fn commit_prefix(
         &mut self,
         mark: Self::Mark,
@@ -1050,36 +1069,44 @@ impl<B: Backend> TransactionalCache for TensorDecodeState<B> {
         self.commit_uniform_prefix(mark, accepted_tokens)
     }
 
+    /// Discards staged proposals and restores the tensor-state transaction baseline.
     fn rollback(&mut self, mark: Self::Mark) -> Result<(), Self::Error> {
         TensorDecodeState::rollback(self, mark)
     }
 }
 
 impl<B: Backend> ArchitectureDecodeState<B> for TensorDecodeState<B> {
+    /// Returns the fixed number of independently tracked cache rows.
     fn batch_size(&self) -> usize {
         TensorDecodeState::batch_size(self)
     }
 
+    /// Returns logical context capacity, independent of a layer's physical retention window.
     fn capacity(&self) -> usize {
         TensorDecodeState::capacity(self)
     }
 
+    /// Borrows absolute processed-token counts used by positions and causal offsets.
     fn lengths(&self) -> &[usize] {
         TensorDecodeState::lengths(self)
     }
 
+    /// Resets logical progress and recurrent state through the checked tensor lifecycle operation.
     fn reset(&mut self) -> crate::Result<()> {
         TensorDecodeState::reset(self).map_err(Into::into)
     }
 
+    /// Gathers or duplicates cache rows according to validated beam-parent indices.
     fn reorder(&mut self, indices: &[usize]) -> crate::Result<()> {
         TensorDecodeState::reorder(self, indices).map_err(Into::into)
     }
 
+    /// Truncates every row to a supported earlier state, propagating typed lifecycle errors.
     fn truncate(&mut self, lengths: &[usize]) -> crate::Result<()> {
         TensorDecodeState::truncate(self, lengths).map_err(Into::into)
     }
 
+    /// Returns the backend device shared by the session's cache allocations.
     fn device(&self) -> &B::Device {
         TensorDecodeState::device(self)
     }
