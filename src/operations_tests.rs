@@ -152,6 +152,110 @@ fn invalid_projection_shape_is_rejected() {
     assert!(linear(input, &projection).is_err());
 }
 
+/// Empty activation axes report their shape before matmul dispatch.
+#[test]
+fn projection_contract_empty_inputs_are_contextual_errors() {
+    let device = Default::default();
+    let projection = Linear {
+        weight: Param::from_tensor(Tensor::<Flex, 2>::from_floats([[2.0]], &device)),
+        bias: None,
+    };
+    for shape in [[0, 1], [2, 0]] {
+        let input =
+            Tensor::<Flex, 2>::from_data(TensorData::new(Vec::<f32>::new(), shape), &device);
+        assert!(
+            matches!(linear(input, &projection), Err(crate::Error::Shape {
+            tensor, expected, actual
+        }) if tensor == "linear.input" && expected == "non-zero dimensions ending in the projection input width" && actual == format!("{shape:?}"))
+        );
+    }
+    let output = linear(Tensor::<Flex, 1>::from_floats([3.0], &device), &projection).unwrap();
+    assert_eq!(output.dims(), [1]);
+    assert_eq!(output.to_data().to_vec::<f32>().unwrap(), [6.0]);
+}
+
+/// Packed activations are rejected without materializing or altering parameters.
+#[test]
+fn projection_contract_packed_activations_require_explicit_dequantization() {
+    let device = Default::default();
+    for scheme in [SymmetricQuantization::Q4, SymmetricQuantization::Q8] {
+        let input = Tensor::<Flex, 2>::from_data(
+            quantize_tensor_data(
+                &TensorData::new(vec![1.0_f32; 32], [1, 32]),
+                WeightQuantizationConfig {
+                    scheme,
+                    group_size: QuantizationGroupSize::new(32).unwrap(),
+                },
+            )
+            .unwrap()
+            .into_burn_qfloat_data()
+            .unwrap(),
+            &device,
+        );
+        let projection = Linear {
+            weight: Param::from_tensor(Tensor::<Flex, 2>::ones([32, 1], &device)),
+            bias: None,
+        };
+        let dtype = input.dtype();
+        assert!(matches!(dtype, DType::QFloat(_)));
+        assert!(
+            matches!(linear(input.clone(), &projection), Err(crate::Error::BackendCapability(reason))
+            if reason.contains("not quantized activations"))
+        );
+        assert_eq!(input.dtype(), dtype);
+        assert_eq!(projection.weight.val().dtype(), DType::F32);
+        assert_eq!(
+            projection.weight.to_data().to_vec::<f32>().unwrap(),
+            vec![1.0; 32]
+        );
+        let output = linear(input.dequantize(), &projection).unwrap();
+        assert_eq!(output.dims(), [1, 1]);
+        let values = output.to_data().to_vec::<f32>().unwrap();
+        assert!(values[0].is_finite());
+        assert!((values[0] - 32.0).abs() < 1e-4);
+    }
+}
+
+/// A malformed bias returns its own context and a corrected bias works exactly.
+#[test]
+fn projection_contract_bias_width_rejection_preserves_weight_values() {
+    let device = Default::default();
+    let mut projection = Linear {
+        weight: Param::from_tensor(Tensor::<Flex, 2>::from_floats(
+            [[1.0, 2.0], [3.0, 4.0]],
+            &device,
+        )),
+        bias: Some(Param::from_tensor(Tensor::<Flex, 1>::from_floats(
+            [9.0],
+            &device,
+        ))),
+    };
+    let input = Tensor::<Flex, 3>::from_floats([[[2.0, 3.0], [4.0, 5.0]]], &device);
+    assert!(
+        matches!(linear(input.clone(), &projection), Err(crate::Error::Shape {
+        tensor, expected, actual
+    }) if tensor == "linear.bias" && expected == "[2]" && actual == "[1]")
+    );
+    assert_eq!(
+        projection.weight.to_data(),
+        TensorData::from([[1.0_f32, 2.0], [3.0, 4.0]])
+    );
+    assert_eq!(
+        projection.bias.as_ref().unwrap().to_data(),
+        TensorData::from([9.0_f32])
+    );
+    projection.bias = Some(Param::from_tensor(Tensor::<Flex, 1>::from_floats(
+        [1.0, -1.0],
+        &device,
+    )));
+    let output = linear(input, &projection).unwrap();
+    assert_eq!(output.dims(), [1, 2, 2]);
+    assert_eq!(
+        output.to_data(),
+        TensorData::from([[[12.0_f32, 15.0], [20.0, 27.0]]])
+    );
+}
+
 /// The feature-unification guard distinguishes Q4 Metal from safe paths.
 #[cfg(all(feature = "metal", feature = "rocm"))]
 #[test]

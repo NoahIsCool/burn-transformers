@@ -1993,3 +1993,236 @@ fn tensor_transaction_edge_contracts_remain_recoverable() {
         ))
     ));
 }
+
+/// Invalid snapshots cannot overwrite either an earlier proposal or committed state.
+fn assert_snapshot_contract_rejections_are_atomic(whole_batch: bool) {
+    let config = CacheConfig::new(2, 5).expect("small two-row cache");
+    let spec = RecurrentStateSpec::new_with_dtypes(1, 1, 1, 1, 1, 2, DType::F32, DType::F16)
+        .expect("FP32 accumulation and FP16 convolution")
+        .with_staging_capacity(2);
+    let mut state = TensorDecodeState::<TestBackend>::new(config, 2, &device()).unwrap();
+    state.main_mut().add_recurrent(spec).unwrap();
+    state
+        .main_mut()
+        .recurrent_mut(0)
+        .unwrap()
+        .set_batch_state(
+            0,
+            tensor4(vec![1.0, 2.0], [2, 1, 1, 1]),
+            tensor3(vec![3.0, 4.0, 5.0, 6.0], [2, 1, 2]).cast(DType::F16),
+        )
+        .unwrap();
+    state.advance(&[1, 1]).unwrap();
+    let mark = state.begin_transaction().unwrap();
+    state
+        .main_mut()
+        .recurrent_mut(0)
+        .unwrap()
+        .stage_batch_snapshots(
+            0,
+            tensor5(vec![11.0, 12.0], [2, 1, 1, 1, 1]),
+            tensor4(vec![13.0, 14.0, 15.0, 16.0], [2, 1, 1, 2]).cast(DType::F16),
+        )
+        .unwrap();
+    state.advance(&[1, 1]).unwrap();
+    let rows = if whole_batch { 2 } else { 1 };
+    let names = if whole_batch {
+        [
+            "recurrent matrix snapshot batch",
+            "convolution snapshot batch",
+        ]
+    } else {
+        ["recurrent matrix snapshots", "convolution snapshots"]
+    };
+
+    // Each invalid call has a nonempty destination proposal. Checking both
+    // snapshots and committed tensors catches partial publication, while the
+    // next successful append proves that an error did not advance its cursor.
+    for invalid in 0..4 {
+        let matrix_shape = [rows, 1, if invalid == 0 { 2 } else { 1 }, 1, 1];
+        let convolution_shape = [rows, if invalid == 1 { 2 } else { 1 }, 1, 2];
+        let matrices = tensor5(vec![90.0; matrix_shape.iter().product()], matrix_shape)
+            .cast(if invalid == 2 { DType::F64 } else { DType::F32 });
+        let convolutions = tensor4(
+            vec![99.0; convolution_shape.iter().product()],
+            convolution_shape,
+        )
+        .cast(if invalid == 3 { DType::F32 } else { DType::F16 });
+        let cache = state.main_mut().recurrent_mut(0).unwrap();
+        let error = if whole_batch {
+            cache.stage_batch_snapshots(0, matrices, convolutions)
+        } else {
+            cache.stage_sequence_snapshots(0, 1, matrices, convolutions)
+        }
+        .expect_err("incompatible snapshot must be rejected before publication");
+        match (invalid, error) {
+            (
+                0 | 1,
+                TensorCacheError::ShapeMismatch {
+                    tensor,
+                    expected,
+                    actual,
+                },
+            ) => {
+                assert_eq!(tensor, names[invalid]);
+                let (expected_shape, actual_shape) = if invalid == 0 {
+                    (vec![rows, 1, 1, 1, 1], matrix_shape.to_vec())
+                } else {
+                    (vec![rows, 1, 1, 2], convolution_shape.to_vec())
+                };
+                assert_eq!(expected, expected_shape);
+                assert_eq!(actual, actual_shape);
+            }
+            (
+                2 | 3,
+                TensorCacheError::DTypeMismatch {
+                    tensor,
+                    expected,
+                    actual,
+                },
+            ) => {
+                assert_eq!(tensor, names[invalid - 2]);
+                assert_eq!(expected, if invalid == 2 { DType::F32 } else { DType::F16 });
+                assert_eq!(actual, if invalid == 2 { DType::F64 } else { DType::F32 });
+            }
+            (_, error) => panic!("unexpected validation error: {error}"),
+        }
+        assert_eq!(state.lengths(), &[1, 1]);
+        assert_eq!(state.working_lengths(), &[2, 2]);
+        let cache = state.main().recurrent(0).unwrap();
+        assert_eq!(cache.staged_length(0, 0).unwrap(), 1);
+        assert_eq!(cache.staged_length(0, 1).unwrap(), 1);
+        let working = cache.read_working_batch(0).unwrap();
+        assert_eq!(working.staged_rows(), &[true, true]);
+        assert_eq!(working.matrix().dims(), [2, 1, 1, 1]);
+        assert_eq!(working.matrix().dtype(), DType::F32);
+        assert_eq!(
+            working.matrix().to_data().to_vec::<f32>().unwrap(),
+            [11.0, 12.0]
+        );
+        assert_eq!(working.convolution().dims(), [2, 1, 2]);
+        assert_eq!(working.convolution().dtype(), DType::F16);
+        assert_eq!(
+            working
+                .convolution()
+                .clone()
+                .cast(DType::F32)
+                .to_data()
+                .to_vec::<f32>()
+                .unwrap(),
+            [13.0, 14.0, 15.0, 16.0]
+        );
+        assert_eq!(
+            cache.matrix(0).unwrap().to_data().to_vec::<f32>().unwrap(),
+            [1.0, 2.0]
+        );
+        assert_eq!(
+            cache
+                .convolution(0)
+                .unwrap()
+                .clone()
+                .cast(DType::F32)
+                .to_data()
+                .to_vec::<f32>()
+                .unwrap(),
+            [3.0, 4.0, 5.0, 6.0]
+        );
+    }
+
+    let cache = state.main_mut().recurrent_mut(0).unwrap();
+    if whole_batch {
+        cache
+            .stage_batch_snapshots(
+                0,
+                tensor5(vec![21.0, 22.0], [2, 1, 1, 1, 1]),
+                tensor4(vec![23.0, 24.0, 25.0, 26.0], [2, 1, 1, 2]).cast(DType::F16),
+            )
+            .unwrap();
+    } else {
+        cache
+            .stage_sequence_snapshots(
+                0,
+                1,
+                tensor5(vec![22.0], [1, 1, 1, 1, 1]),
+                tensor4(vec![25.0, 26.0], [1, 1, 1, 2]).cast(DType::F16),
+            )
+            .unwrap();
+    }
+    state.advance(&[usize::from(whole_batch), 1]).unwrap();
+    state
+        .commit_prefix(mark, &[usize::from(whole_batch), 2])
+        .unwrap();
+    assert_eq!(state.lengths(), &[1 + usize::from(whole_batch), 3]);
+    let cache = state.main().recurrent(0).unwrap();
+    let expected_matrix = [if whole_batch { 11.0 } else { 1.0 }, 22.0];
+    let expected_convolution = if whole_batch {
+        [13.0, 14.0, 25.0, 26.0]
+    } else {
+        [3.0, 4.0, 25.0, 26.0]
+    };
+    assert_eq!(
+        cache.matrix(0).unwrap().to_data().to_vec::<f32>().unwrap(),
+        expected_matrix
+    );
+    assert_eq!(
+        cache
+            .convolution(0)
+            .unwrap()
+            .clone()
+            .cast(DType::F32)
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap(),
+        expected_convolution
+    );
+
+    // A fresh transaction after the repaired commit has independent storage.
+    let mark = state.begin_transaction().unwrap();
+    state
+        .main_mut()
+        .recurrent_mut(0)
+        .unwrap()
+        .stage_batch_snapshots(
+            0,
+            tensor5(vec![91.0, 92.0], [2, 1, 1, 1, 1]),
+            tensor4(vec![93.0, 94.0, 95.0, 96.0], [2, 1, 1, 2]).cast(DType::F16),
+        )
+        .unwrap();
+    state.advance(&[1, 1]).unwrap();
+    state.rollback(mark).unwrap();
+    assert_eq!(state.lengths(), &[1 + usize::from(whole_batch), 3]);
+    assert_eq!(state.working_lengths(), state.lengths());
+    let restored = state
+        .main()
+        .recurrent(0)
+        .unwrap()
+        .read_working_batch(0)
+        .unwrap();
+    assert_eq!(restored.staged_rows(), &[false, false]);
+    assert_eq!(
+        restored.matrix().to_data().to_vec::<f32>().unwrap(),
+        expected_matrix
+    );
+    assert_eq!(
+        restored
+            .convolution()
+            .clone()
+            .cast(DType::F32)
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap(),
+        expected_convolution
+    );
+}
+
+/// Per-row shape/dtype failures preserve every row and permit an exact retry.
+#[test]
+fn snapshot_contract_sequence_rejection_preserves_pending_and_committed_state() {
+    assert_snapshot_contract_rejections_are_atomic(false);
+}
+
+/// Whole-batch shape/dtype failures cannot partly publish a matrix or convolution.
+#[test]
+fn snapshot_contract_batch_rejection_preserves_pending_and_committed_state() {
+    assert_snapshot_contract_rejections_are_atomic(true);
+}
