@@ -1388,6 +1388,12 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   reusing another worktree's test binary in a shared target directory; distinct
   workspace wrappers and explicit test/dep-info identities protect ordinary
   test runs. Clippy overrides that wrapper setting and needs separate validation.
+  The first [full-crate native-bound run](acceptance/measurements/native-coverage-binding-20260910.json)
+  at `57d0560` passes unchanged 90%/95% aggregate thresholds (90.2564% crate-wide,
+  95.1797% shared/core), with all 16 compiler captures and the exact 15 LLVM test
+  objects authenticated. No test or generated-code exclusions are applied; this
+  does not establish production-only coverage. Isolated direct-driver Clippy and
+  source/MSRV/accelerator-compile/package checks also pass at that snapshot.
 - **Public generation overhead has its own benchmark protocol.** Qwen's
   existing model-API loop remains unchanged; a separate ignored benchmark now
   times actual `generate_causal` calls through automatic model dispatch, including

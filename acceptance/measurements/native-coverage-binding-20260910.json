@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "kind": "native_compiler_bound_coverage",
+  "source": {
+    "git_revision": "57d056076477fc8fb46c16d552bec9ed0c516da0",
+    "runtime_source_tree": "f02d5569b774b83d096fd542b2ed99be3a3608c5",
+    "cargo_manifest_sha256": "3abf23c7c71af25689aef71f124ba06e61ec276cdfa119638f76d7fcfd5e5139",
+    "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d"
+  },
+  "claims": {
+    "coverage_gate_passed": true,
+    "artifact_binding_verified": true,
+    "compiler_reported_inputs_verified": true,
+    "no_export_filter_verified": true,
+    "compiler_dependency_closure_verified": false,
+    "production_only_exclusions_qualified": false,
+    "branch_coverage_measured": false,
+    "checkpoint_acceptance_refreshed": false,
+    "release_promoted": false,
+    "scope": "All compiled src Rust source, including inline unit tests and generated expansions; no exclusions. Local trusted-tool reproducibility, not hostile-local attestation."
+  },
+  "run": {
+    "directory": "target/release-gates/20260910T025358.640412Z",
+    "command": [
+      "cargo",
+      "+nightly",
+      "llvm-cov",
+      "--manifest-path",
+      "/Users/nover/repos/hmm_compression/crates/transformers/Cargo.toml",
+      "--locked",
+      "--offline",
+      "--no-default-features",
+      "--features",
+      "std,flex,tokenizers,chat-templates,autodiff",
+      "--lib",
+      "--tests",
+      "--json",
+      "--output-path",
+      "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T025358.640412Z/coverage.json",
+      "--disable-default-ignore-filename-regex"
+    ],
+    "process_exit_code": 0,
+    "validation_exit_code": 0,
+    "compiler_version": "rustc 1.94.0-nightly (4f14395c3 2025-12-22)\nbinary: rustc\ncommit-hash: 4f14395c37db4c1be874e6b0ace6721674223c22\ncommit-date: 2025-12-22\nhost: aarch64-apple-darwin\nrelease: 1.94.0-nightly\nLLVM version: 21.1.8\n",
+    "cargo_llvm_cov_version": "cargo-llvm-cov 0.6.21\n",
+    "llvm_version": "LLVM (http://llvm.org/):\n  LLVM version 21.1.8-rust-1.94.0-nightly\n  Optimized build.\n",
+    "reviewed_tool_option_notice": {
+      "text": "warning: --disable-default-ignore-filename-regex option is unstable",
+      "count": 1
+    },
+    "other_compiler_or_llvm_warnings": 0,
+    "unit_tests": {
+      "passed": 911,
+      "failed": 0,
+      "ignored": 3
+    },
+    "all_test_targets": {
+      "passed": 1013,
+      "failed": 0,
+      "ignored": 29
+    },
+    "captured_workspace_targets": 16,
+    "llvm_objects": 15,
+    "production_compiler_inputs": 101,
+    "unit_compiler_inputs": 125
+  },
+  "aggregate": {
+    "crate": {
+      "lines": 68219,
+      "covered": 61572,
+      "percent": 90.25638018733784,
+      "minimum_percent": 90,
+      "passed": true
+    },
+    "shared": {
+      "lines": 33608,
+      "covered": 31988,
+      "percent": 95.17971911449655,
+      "minimum_percent": 95,
+      "passed": true
+    },
+    "scope": "unfiltered native export restricted to src/**/*.rs, including inline unit tests and generated expansions",
+    "branch_coverage_measured": false,
+    "passed": true
+  },
+  "evidence": {
+    "native_export": {
+      "path": "llvm-export/native-coverage.json",
+      "sha256": "ebfe94b7be103e647c62d38fceaa3a7a3ed06c895267498e95e235d3308b2e90",
+      "bytes": 82075701,
+      "lines": 1
+    },
+    "cargo_serde_rewrite": {
+      "path": "coverage.json",
+      "sha256": "528d9c792bc6a1bd323e406864d36a06b034bd36db6ff7e58e604d6e2ba20fb5",
+      "bytes": 82092400,
+      "lines": 1,
+      "byte_identical_to_native": false
+    },
+    "log": {
+      "path": "00-coverage.log",
+      "sha256": "76c66af43c619834ae82765c34b43af382adfcb71fc163484cad3859be4aefd7",
+      "bytes": 101624,
+      "lines": 1138
+    },
+    "before_after_source_snapshots": {
+      "paths": [
+        "coverage-inputs-before.json",
+        "coverage-inputs-after.json"
+      ],
+      "both_sha256": "81a92121cbbdcda81a8e12e9a7dc431c9195f50640c8f79e33d6187274b89299"
+    },
+    "compiler_binding": {
+      "path": "compiler-binding.json",
+      "sha256": "ac6c60cb67c868fa597a4dd3b34199509b284931cc52f19ed6ae04135ad8e5a4"
+    },
+    "retention": "Captures, copied dep-info and 82 MB exports are retained in the run directory, not packaged. Native profiles and binaries remain in shared target/llvm-cov-target and can be replaced by later coverage cleanup. Their hashes were reauthenticated at this historical snapshot; immutable binary retention is not claimed."
+  },
+  "unsuccessful_attempt": {
+    "directory": "target/release-gates/20260910T025310.607758Z",
+    "runner_exit_code": 1,
+    "native_cargo_test_exit_code": 101,
+    "coverage_adopted": false,
+    "cause": "Sandbox denied the local Unix-socket bind in benchmark_metrics::tests::memory_channel_failure_boundaries_are_bounded (EPERM). The unchanged gate was rerun with host execution permissions."
+  },
+  "source_validation": {
+    "directory": "target/release-gates/20260910T025559.369412Z",
+    "groups": [
+      "source",
+      "msrv",
+      "accelerator-compile",
+      "package"
+    ],
+    "commands": 17,
+    "all_native_exit_codes_zero": true,
+    "python_ordinary": {
+      "run": 317,
+      "passed": 311,
+      "optional_native_skipped": 6
+    },
+    "python_separate_native_enabled": {
+      "run": 317,
+      "passed": 317,
+      "skipped": 0,
+      "evidence": "Observed terminal output from the earlier integrated native-enabled suite; no separate raw log is linked here. Subsequent package-assertion edits passed the focused 25-test runner suite."
+    },
+    "rust_msrv": "1.92.0",
+    "accelerators_compile_only": [
+      "metal",
+      "cuda",
+      "rocm"
+    ],
+    "package": {
+      "files": 289,
+      "verified": true,
+      "sha256": "b4c3454377b7ab55a2f68b3d23646643f50fc4b19d940408f74b2f5b335a714d",
+      "warning": "manifest has no documentation, homepage or repository",
+      "scope": "Historical archive at source revision above; adding this record changes the next archive."
+    },
+    "separate_isolated_clippy": {
+      "native_exit_code": 0,
+      "elapsed_seconds": 10.12,
+      "wrapper": "/private/tmp/tfm-worktree-wrappers.w7drfj/integration-clippy",
+      "wrapper_sha256": "f0beba4975549651a6c7c5c7e6c46598b246115aabb78f5bd2589172f3f3c2b6",
+      "invocation": "Direct cargo +stable check --release --all-targets with the actual clippy-driver and -D warnings; cargo-clippy itself overrides workspace wrappers.",
+      "features": "std,flex,tokenizers,chat-templates,autodiff",
+      "evidence": "Observed native terminal completion and root dep-info; no separate raw execution log is linked here. The standard source gate's Clippy log is retained separately."
+    }
+  }
+}

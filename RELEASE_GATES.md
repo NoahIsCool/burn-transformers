@@ -206,9 +206,24 @@ target, unchanged compiler-reported inputs, and exact identities for the product
 library and test binaries consumed by LLVM. It removes upstream filename filters;
 exactly one pinned cargo-llvm-cov option notice is retained, while every compiler
 or LLVM warning still fails. Tiny native fixtures exercise the complete runner,
-including production code under a directory named `tests`. A full-crate run of
-this mode remains pending. Neither this integration nor `capture_valid` qualifies
+including production code under a directory named `tests`. The first
+[full-crate run](acceptance/measurements/native-coverage-binding-20260910.json)
+at `57d0560` now passes: 61,572 / 68,219 crate lines (90.2564%) and
+31,988 / 33,608 shared/core lines (95.1797%). All 16 workspace targets have fresh
+captures, and the export contains exactly their 15 test binaries. The native
+82,075,701-byte export and Cargo's distinct serde rewrite agree on these counters.
+Pre/post source inventories match; one exact upstream option notice is retained.
+The initial sandbox attempt failed on a local Unix-socket permission check and
+adopted no coverage; the unchanged host-permission replay passed 1,013 tests with
+29 explicit ignores. Neither `capture_valid` nor this aggregate qualifies
 production-only exclusions or arbitrary procedural-macro input closure.
+
+The same snapshot passes all 17 source/MSRV/accelerator-compile/package commands
+at `target/release-gates/20260910T025559.369412Z/`, including Rust 1.92, all-target
+Clippy, documentation, and 317 Python checks (six optional native skips in
+ordinary discovery; a separate native-enabled run passes all 317). Cargo verifies
+the 289-file archive. Its expected missing-URL metadata warning is retained; no
+repository URL is invented. These are snapshot results, not release promotion.
 
 Shared-target worktree validation needs special care. During parallel test-only
 edits, ordinary Cargo reused another worktree's test executable and omitted a new
@@ -216,7 +231,12 @@ test while reporting `Fresh`. Distinct `RUSTC_WORKSPACE_WRAPPER` paths partition
 workspace artifacts while retaining dependency caches; verify the actual test
 inventory and dep-info checkout identity. Do not treat a fast cache hit as proof
 of the intended source. `cargo clippy` replaces that environment variable with
-its own driver, so setting it alone does **not** isolate Clippy. The opt-in coverage
+its own driver, so setting it alone does **not** isolate Clippy. A separate direct
+`cargo check` replay uses a unique wrapper that invokes the installed Clippy driver
+with its observed `CLIPPY_ARGS` warning-denial protocol. Tiny native differentials
+prove both artifact separation and an intentional Clippy-lint failure; the
+integrated all-target release replay passes. This protocol is pinned to the
+installed Rust 1.92 tools, not a portable Cargo interface. The opt-in coverage
 runner creates its own unique wrapper and rejects inherited compiler overrides.
 
 The first restricted structural extraction (`ab47117`) moves only terminal
