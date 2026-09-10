@@ -196,7 +196,7 @@ class ReleaseGateTests(unittest.TestCase):
         base = "Cargo.toml\nCargo.lock\nREADME.md\nsrc/lib.rs\n"
         self.assertEqual(GATES.validate_package_listing(base + "src/models/t5.rs\n"), 5)
         self.assertEqual(GATES.validate_package_listing("warning: manifest has no homepage\n  |\n  = note: docs\n" + base), 4)
-        for entry in ("models/model/README.md", "target/package.md", "fuzz/README.md", "nested/Cargo.lock", "tests/weights.safetensors", "tests/weights.bpk", "scripts/__pycache__/x.pyc", "scripts/coverage-layout/target/debug/build.rs", "scripts/.git/config", "/tmp/README.md", "src/../secret.md", "Cargo.lock"):
+        for entry in ("models/model/README.md", "target/package.md", "fuzz/README.md", "nested/Cargo.lock", "tests/weights.safetensors", "tests/weights.bpk", "scripts/__pycache__/x.pyc", "scripts/coverage-layout/target/debug/build.rs", "scripts/coverage-layout/Cargo.toml", "scripts/coverage-layout/src/lib.rs", "scripts/.git/config", "/tmp/README.md", "src/../secret.md", "Cargo.lock"):
             with self.subTest(entry=entry), self.assertRaises(ValueError):
                 GATES.validate_package_listing(base + entry + "\n")
         with self.assertRaisesRegex(ValueError, "incomplete"):

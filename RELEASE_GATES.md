@@ -26,6 +26,10 @@ Run from this crate or use its full script path from the repository root. Instal
 tools separately; the runner does not install or update them. The reviewed tool
 versions are `cargo-llvm-cov 0.6.21`, `cargo-audit 0.22.2`, `cargo-deny 0.20.2`,
 and `cargo-fuzz 0.13.2`. LLVM tools must match the selected Rust toolchain.
+Source/MSRV audit groups require the full repository checkout: Cargo excludes
+nested standalone packages from source archives, including the development-only
+Rust classifier. Ordinary library tests and package checks remain usable from
+the archive; archive verification does not claim to run repository-only tooling.
 The MSRV gate checks `rustc --version` exactly: `--msrv-toolchain stable` is
 permitted only while that local alias actually resolves to Rust **1.92.0**.
 Coverage export warnings (including mismatched profile data) fail validation
@@ -54,8 +58,11 @@ At `c2cc2b3`, source and Rust 1.92 gates pass 884 unit tests plus ordinary
 integrations, 231 Python tests, and warning-denied Clippy/docs. Cargo also verified
 the clean 236-file source archive; no weights or build directories are included.
 The exact local logs remain at `target/release-gates/20260910T003025.158291Z/`.
-The subsequent supplementary classifier integration adds its own source/MSRV
-checks and must pass the package gate again; runtime dependencies are unchanged.
+The subsequent `28cafe5` snapshot passes the expanded source/MSRV checks (including
+24 standalone-classifier tests and 233 Python tests) and verifies a 237-file
+runtime archive. Its logs are at `target/release-gates/20260910T004203.127243Z/`.
+Cargo's actual inventory excludes the nested standalone classifier; explicit
+include entries did not override that behavior and have therefore been removed.
 
 Cargo's usual target location is retained. Check at least 20 GiB free before
 building a new profile; external model artifacts are never a cleanup target.
@@ -121,7 +128,8 @@ historical full-crate export against subsequently edited source.
 
 The separate [Rust syntax classifier](scripts/coverage-layout/README.md) has an
 independent pinned development lockfile and adversarial source fixtures. It is
-packaged as tooling, never linked into the runtime. Both source and MSRV groups
+repository-only tooling, never packaged with or linked into the runtime. Its
+linked README is available in a checkout, not the runtime archive. Both source and MSRV groups
 test it explicitly. Its JSON always sets `qualified_for_coverage_exclusions` to
 false: macro-generated references and exact source/export binding remain to be
 verified before any candidates can affect a release denominator.

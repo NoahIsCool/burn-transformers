@@ -3,6 +3,9 @@
 This standalone development tool parses Rust source with pinned Syn and emits
 versioned JSON. It adds no dependencies to the transformer runtime. It does not
 read coverage profiles, change a denominator, or decide whether a release passes.
+It is repository-only, like the independent fuzz package: Cargo omits nested
+standalone packages from the transformer runtime archive. Full source/MSRV audit
+groups require a repository checkout; runtime archive verification is separate.
 
 ```sh
 cargo +stable run --manifest-path scripts/coverage-layout/Cargo.toml --locked --offline -- . src/lib.rs

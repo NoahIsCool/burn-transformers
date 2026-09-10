@@ -170,6 +170,8 @@ def validate_package_listing(listing: str) -> int:
         path = Path(raw)
         if path.is_absolute() or any(part in {"..", "__pycache__", "target", ".git"} for part in path.parts):
             raise ValueError(f"unsafe package entry: {raw}")
+        if path.parts[:2] == ("scripts", "coverage-layout"):
+            raise ValueError(f"repository-only standalone audit tool in runtime package: {raw}")
         if path.suffix.lower() in {".safetensors", ".bin", ".pt", ".pth", ".bpk", ".gguf", ".pyc", ".pyo"}:
             raise ValueError(f"runtime artifact in source package: {raw}")
         root_doc = len(path.parts) == 1 and path.suffix == ".md"
