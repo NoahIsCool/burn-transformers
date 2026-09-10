@@ -134,6 +134,22 @@ test it explicitly. Its JSON always sets `qualified_for_coverage_exclusions` to
 false: macro-generated references and exact source/export binding remain to be
 verified before any candidates can affect a release denominator.
 
+New coverage runs retain `coverage-inputs-before.json` and
+`coverage-inputs-after.json`: bounded SHA-256 inventories of source, fixtures,
+embedded Python scripts, Cargo inputs and the runner itself. Declared generated
+directories under `scripts/` are excluded; the external `models` symlink is
+never traversed. The runner records the selected compiler/Cargo/exporter version
+outputs, command, compiler-control environment, and raw export/log hashes.
+Input edits, a changed tool identity, warnings, or edits during report parsing
+fail validation even when the native process exits successfully. Native failures
+retain terminal input snapshots when those inputs remain readable; a failed
+preflight or spawn leaves a failed manifest with no fabricated process status.
+
+These checks detect ordinary local edits, not adversarial edit-and-restore
+behavior. They do not prove compiler dependency closure, authenticate preexisting
+test binaries, or qualify test-only exclusions. Both qualification flags remain
+false, and neither coverage threshold nor denominator policy changes here.
+
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is
 `819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d`.

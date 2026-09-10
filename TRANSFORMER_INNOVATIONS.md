@@ -1358,6 +1358,20 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   The [post-fix real-artifact replay](acceptance/measurements/small-model-post-json-validation-replay-20260910.json)
   passes Qwen F16/Q4 and FLAN F32; all seven FLAN full-vector hashes remain
   unchanged. This is loader/correctness evidence, not quantized corpus quality.
+- **Checkpoint layout survives parameter initialization.** Burn's lazy shape
+  becomes the runtime shape after initialization. Repeated full-precision
+  installation now validates in saved/checkpoint layout, preserving column
+  transposes, autodiff leaf policy, and the original value on failure. Reloading
+  an initialized QFloat parameter fails before its save mapper can allocate a
+  whole-weight dequantization temporary; initial lazy packed loading and
+  quantized inference are unaffected. Burnpack tests also verify retryable
+  staging after conversion, provenance, and late publication failures.
+- **Coverage evidence is bound to observed inputs.** Pre/post source and fixture
+  hashes now detect ordinary concurrent edits, including changes to Python
+  reference scripts embedded by Rust tests. The runner retains raw report/log
+  hashes and selected tool versions, but does not treat these as compiler
+  dependency closure or permission to exclude test-only syntax candidates.
+  The production-only measurement work and unchanged 90%/95% gates remain open.
 - **Memory measurements distinguish storage from observed process footprint.**
   The test-only Darwin supervisor brackets synchronized phases, samples a real
   idle baseline, and retains raw timestamps, gaps, and errors. The [executed Qwen/FLAN series](acceptance/measurements/small-model-metal-memory-20260909.json)

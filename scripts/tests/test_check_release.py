@@ -1,9 +1,11 @@
 """Pure release-runner tests: no Cargo commands, network, or GPU required."""
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 import tomllib
@@ -14,13 +16,23 @@ SCRIPT = Path(__file__).resolve().parents[1] / "check_release.py"
 SPEC = importlib.util.spec_from_file_location("check_release", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 GATES = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(GATES)
+with mock.patch.object(sys, "path", [str(SCRIPT.parent), *sys.path]):
+    SPEC.loader.exec_module(GATES)
 
 
 def file_entry(path: str, count: int, covered: int) -> dict:
     """Build only the documented LLVM JSON fields consumed by the runner."""
 
     return {"filename": str(GATES.CRATE / path), "summary": {"lines": {"count": count, "covered": covered}}}
+
+
+def minimal_crate(crate: Path) -> None:
+    """Provide actual fingerprintable inputs without invoking a compiler."""
+
+    (crate / "src").mkdir()
+    (crate / "src/lib.rs").write_text("pub fn value() -> u32 { 7 }\n")
+    (crate / "Cargo.toml").write_text("[package]\nname = 'fixture'\n")
+    (crate / "Cargo.lock").write_text("version = 4\n")
 
 
 class ReleaseGateTests(unittest.TestCase):
@@ -99,6 +111,7 @@ class ReleaseGateTests(unittest.TestCase):
         for log, report, expected in cases:
             with self.subTest(expected=expected), tempfile.TemporaryDirectory() as temporary:
                 crate = Path(temporary)
+                minimal_crate(crate)
 
                 def run(command, **kwargs):
                     """Emit a synthetic native result without running Cargo or LLVM."""
@@ -112,6 +125,7 @@ class ReleaseGateTests(unittest.TestCase):
                     mock.patch.object(GATES, "CRATE", crate),
                     mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "coverage", "--gate", "source"]),
                     mock.patch.object(GATES.subprocess, "run", side_effect=run) as process,
+                    mock.patch.object(GATES, "coverage_tool_versions", return_value=[]),
                     mock.patch("builtins.print"),
                 ):
                     self.assertEqual(GATES.main(), 1)
@@ -123,6 +137,201 @@ class ReleaseGateTests(unittest.TestCase):
                 self.assertEqual(result["gates"][0]["exit_code"], 1)
                 self.assertIn(expected, result["gates"][0]["validation_error"])
                 self.assertNotIn("coverage", result["gates"][0])
+
+    def run_coverage_fixture(self, crate, callback):
+        """Run the real runner around one fake native coverage subprocess."""
+
+        with (
+            mock.patch.object(GATES, "CRATE", crate),
+            mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "coverage"]),
+            mock.patch.object(GATES.subprocess, "run", side_effect=callback) as process,
+            mock.patch.object(GATES, "coverage_tool_versions", return_value=[]),
+            mock.patch("builtins.print"),
+        ):
+            status = GATES.main()
+        manifest, = (crate / "target/release-gates").glob("*/results.json")
+        return status, json.loads(manifest.read_text()), manifest.parent, process.call_count
+
+    def passing_export(self, command, **kwargs):
+        """Emit a well-formed perfect-coverage fixture and a clean native log."""
+
+        kwargs["stdout"].write("finished\n")
+        path = Path(kwargs["stdout"].name).parent / "coverage.json"
+        path.write_text(json.dumps({"data": [{"files": [file_entry("src/lib.rs", 100, 100)]}]}))
+        return subprocess.CompletedProcess(command, 0)
+
+    def test_stable_coverage_records_both_snapshots_and_raw_identities(self):
+        """A green native run is byte-bound but still not production-qualified."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            crate = Path(temporary)
+            minimal_crate(crate)
+            status, result, output, calls = self.run_coverage_fixture(crate, self.passing_export)
+            self.assertEqual((status, calls), (0, 1))
+            self.assertTrue(result["passed"])
+            row, = result["gates"]
+            evidence = row["input_evidence"]
+            self.assertTrue(evidence["sources_unchanged"])
+            self.assertFalse(evidence["production_only_exclusions_qualified"])
+            before = json.loads((output / evidence["before"]).read_text())
+            after = json.loads((output / evidence["after"]).read_text())
+            self.assertEqual(before, after)
+            self.assertFalse(before["compiler_dependency_closure_verified"])
+            for name, key in (("coverage.json", "report_identity"), (row["log"], "log_identity")):
+                self.assertEqual(row[key]["sha256"], hashlib.sha256((output / name).read_bytes()).hexdigest())
+
+    def test_source_mutation_fails_before_any_counter_is_adopted(self):
+        """Even same-size input edits invalidate otherwise passing native output."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            crate = Path(temporary)
+            minimal_crate(crate)
+
+            def mutate(command, **kwargs):
+                """Change the source while the synthetic native command runs."""
+
+                (crate / "src/lib.rs").write_text("pub fn value() -> u32 { 8 }\n")
+                return self.passing_export(command, **kwargs)
+
+            with mock.patch.object(GATES, "coverage_summary") as summary:
+                status, result, output, _ = self.run_coverage_fixture(crate, mutate)
+            summary.assert_not_called()
+            self.assertEqual(status, 1)
+            row, = result["gates"]
+            self.assertEqual(row["process_exit_code"], 0)
+            self.assertIn("src/lib.rs", row["validation_error"])
+            self.assertFalse(row["input_evidence"]["sources_unchanged"])
+            self.assertTrue((output / "coverage-inputs-after.json").is_file())
+
+    def test_uncaptured_or_non_rust_coverage_entries_fail_before_adopting_counters(self):
+        """Stable source files do not make a stale deleted-file export acceptable."""
+
+        for filename in ("src/deleted.rs", "src/fixture.txt"):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:
+                crate = Path(temporary)
+                minimal_crate(crate)
+                (crate / "src/fixture.txt").write_text("fixture\n")
+
+                def stale(command, **kwargs):
+                    """Emit passing counters for one file outside the Rust inventory."""
+
+                    kwargs["stdout"].write("finished\n")
+                    path = Path(kwargs["stdout"].name).parent / "coverage.json"
+                    path.write_text(json.dumps({"data": [{"files": [file_entry(filename, 100, 100)]}]}))
+                    return subprocess.CompletedProcess(command, 0)
+
+                with mock.patch.object(GATES, "coverage_summary") as summary:
+                    status, result, _, _ = self.run_coverage_fixture(crate, stale)
+                summary.assert_not_called()
+                self.assertEqual(status, 1)
+                self.assertIn("not a captured Rust input", result["gates"][0]["validation_error"])
+
+    def test_relative_llvm_source_paths_use_the_compiler_working_directory(self):
+        """Invoking the runner from a parent checkout must not silently drop files."""
+
+        report = {"data": [{"files": [{"filename": "src/lib.rs", "summary": {"lines": {"count": 100, "covered": 100}}}]}]}
+        with tempfile.TemporaryDirectory() as temporary:
+            crate = Path(temporary)
+            minimal_crate(crate)
+            GATES.require_bound_coverage_sources(report, GATES.capture_sources(crate), crate)
+            self.assertTrue(GATES.coverage_summary(report, crate)["passed"])
+            for invalid in (None, "", "src/\0.rs"):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    GATES.coverage_source_relative(invalid, crate)
+
+    def test_native_failure_still_records_terminal_inputs_without_using_counters(self):
+        """Preserve native failure separately from any validation outcome."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            crate = Path(temporary)
+            minimal_crate(crate)
+
+            def fail(command, **kwargs):
+                """Write a report, then report a failing native command."""
+
+                self.passing_export(command, **kwargs)
+                return subprocess.CompletedProcess(command, 7)
+
+            status, result, output, _ = self.run_coverage_fixture(crate, fail)
+            self.assertEqual(status, 1)
+            row, = result["gates"]
+            self.assertEqual((row["process_exit_code"], row["exit_code"]), (7, 7))
+            self.assertNotIn("coverage", row)
+            self.assertTrue((output / "coverage-inputs-after.json").is_file())
+
+    def test_failed_preflight_or_spawn_leaves_a_failed_manifest(self):
+        """Missing inputs and tools must not leave an unrecorded successful prefix."""
+
+        for inputs in (False, True):
+            with self.subTest(inputs=inputs), tempfile.TemporaryDirectory() as temporary:
+                crate = Path(temporary)
+                if inputs:
+                    minimal_crate(crate)
+
+                def missing(*args, **kwargs):
+                    """Model a missing Cargo executable after a valid snapshot."""
+
+                    raise FileNotFoundError("cargo missing")
+
+                status, result, _, calls = self.run_coverage_fixture(crate, missing)
+                row, = result["gates"]
+                self.assertEqual((status, calls), (1, int(inputs)))
+                self.assertFalse(result["passed"])
+                self.assertIsNone(row["process_exit_code"])
+                self.assertIn("cargo missing" if inputs else "mandatory", row["validation_error"])
+
+    def test_report_or_log_edit_during_validation_discards_the_summary(self):
+        """Hashing raw evidence once does not excuse a later parse-time change."""
+
+        original = GATES.coverage_summary
+        for filename in ("coverage.json", "00-coverage.log"):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:
+                crate = Path(temporary)
+                minimal_crate(crate)
+
+                def edit(report, root):
+                    """Change the retained artifact after counters are parsed."""
+
+                    result = original(report, root)
+                    path, = (crate / "target/release-gates").glob(f"*/{filename}")
+                    path.write_text(path.read_text() + "\n")
+                    return result
+
+                with mock.patch.object(GATES, "coverage_summary", side_effect=edit):
+                    status, result, _, _ = self.run_coverage_fixture(crate, self.passing_export)
+                self.assertEqual(status, 1)
+                row, = result["gates"]
+                self.assertIn("changed during validation", row["validation_error"])
+                self.assertNotIn("coverage", row)
+
+    def test_context_changes_are_rejected_and_tool_versions_are_explicit(self):
+        """Environment, runner and selected tools are evidence, not hidden defaults."""
+
+        command = ["cargo", "+stable", "llvm-cov"]
+        with mock.patch.object(GATES.subprocess, "check_output", return_value="tool version\n") as run:
+            versions = GATES.coverage_tool_versions(command, GATES.CRATE, {})
+        self.assertEqual(len(versions), 3)
+        self.assertTrue(all(call.args[0][1] == "+stable" for call in run.call_args_list))
+        for output in ("", "warning: stale executable\n"):
+            with mock.patch.object(GATES.subprocess, "check_output", return_value=output), self.assertRaises(ValueError):
+                GATES.coverage_tool_versions(command, GATES.CRATE, {})
+        with self.assertRaises(ValueError):
+            GATES.coverage_tool_versions(["cargo", "llvm-cov"], GATES.CRATE, {})
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(GATES, "coverage_tool_versions", return_value=[]):
+            crate = Path(temporary)
+            minimal_crate(crate)
+            before = GATES.capture_coverage_context(crate, command, {"CARGO_INCREMENTAL": "0", "SECRET_TOKEN": "not recorded"})
+            self.assertNotIn("SECRET_TOKEN", before["compiler_environment"])
+            for key in ("runner_inputs", "tool_versions", "command", "working_directory", "compiler_environment"):
+                after = {**before, key: None}
+                with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
+                    GATES.require_same_coverage_context(before, after)
+
+    def test_duplicate_gate_names_fail_before_creating_artifacts(self):
+        """Repeated coverage groups must not overwrite earlier raw evidence."""
+
+        with mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "coverage", "--gate", "coverage"]), self.assertRaisesRegex(ValueError, "duplicate gate"):
+            GATES.main()
 
     def test_all_command_groups_are_scoped(self):
         """Build every group without shell interpolation or mutable lockfiles."""

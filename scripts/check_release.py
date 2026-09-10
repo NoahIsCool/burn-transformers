@@ -18,12 +18,74 @@ import shlex
 import subprocess
 import sys
 
+from coverage_provenance import capture_sources, fingerprint_file, require_same_sources
+
 
 CRATE = Path(__file__).resolve().parents[1]
 FEATURES = "std,flex,tokenizers,chat-templates,autodiff"
 GATES = ("source", "msrv", "coverage", "dependencies", "accelerator-compile", "package")
 # These are maintenance notices, not vulnerability waivers. New IDs fail.
 MAINTENANCE_NOTICES = ("RUSTSEC-2025-0141", "RUSTSEC-2024-0436")
+RUNNER_INPUTS = (Path(__file__).resolve(), Path(__file__).resolve().with_name("coverage_provenance.py"))
+
+
+def coverage_tool_versions(command: list[str], crate: Path, environment: dict) -> list[dict]:
+    """Record the selected compiler/Cargo/exporter versions, not binary attestation."""
+
+    if len(command) < 3 or command[0] != "cargo" or not command[1].startswith("+") or command[2] != "llvm-cov":
+        raise ValueError("coverage command has no explicit Cargo toolchain")
+    toolchain = command[1]
+    commands = (["rustc", toolchain, "--version", "--verbose"],
+                ["cargo", toolchain, "--version"], ["cargo", toolchain, "llvm-cov", "--version"])
+    versions = []
+    for invocation in commands:
+        output = subprocess.check_output(invocation, cwd=crate, env=environment,
+                                         stderr=subprocess.STDOUT, text=True, timeout=30)
+        require_clean_coverage_log(output)
+        if not output.strip():
+            raise ValueError(f"empty coverage tool identity: {invocation[0]}")
+        versions.append({"command": invocation, "output": output})
+    return versions
+
+
+def capture_coverage_context(crate: Path, command: list[str], environment: dict) -> dict:
+    """Bind declared source and runner bytes, without claiming compiler closure.
+
+    Only explicit compiler-control environment variables are retained. This is
+    an ordinary local reproducibility record, not an attestation that wrappers,
+    build scripts, procedural macros or inherited Cargo settings are hermetic.
+    """
+
+    return {
+        "schema_version": 1,
+        "sources": capture_sources(crate),
+        "runner_inputs": {path.name: fingerprint_file(path) for path in RUNNER_INPUTS},
+        "tool_versions": coverage_tool_versions(command, crate, environment),
+        "command": command,
+        "working_directory": str(crate.resolve()),
+        "compiler_environment": {name: environment[name] for name in (
+            "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTDOCFLAGS", "CARGO_INCREMENTAL",
+            "CARGO_BUILD_TARGET", "CARGO_TARGET_DIR", "RUSTC", "RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
+        ) if name in environment},
+        "compiler_dependency_closure_verified": False,
+        "production_only_exclusions_qualified": False,
+    }
+
+
+def require_same_coverage_context(before: dict, after: dict) -> None:
+    """Reject input edits before consulting any native coverage counters."""
+
+    require_same_sources(before["sources"], after["sources"])
+    for key in ("runner_inputs", "tool_versions", "command", "working_directory", "compiler_environment"):
+        if before[key] != after[key]:
+            raise ValueError(f"coverage context changed: {key}")
+
+
+def write_evidence(path: Path, value: dict) -> None:
+    """Retain one human-readable JSON observation inside a fresh run directory."""
+
+    path.write_text(json.dumps(value, indent=2) + "\n")
 
 
 def require_clean_coverage_log(log: str) -> None:
@@ -42,6 +104,27 @@ def require_clean_coverage_log(log: str) -> None:
             raise ValueError(f"unqualified coverage diagnostic: {line.strip()}")
 
 
+def coverage_source_relative(filename: str, crate: Path) -> str | None:
+    """Resolve LLVM filenames against the command cwd, retaining only src inputs."""
+
+    if not isinstance(filename, str) or not filename or "\0" in filename:
+        raise ValueError("invalid coverage filename")
+    root = crate.resolve()
+    path = Path(filename)
+    path = (path if path.is_absolute() else root / path).resolve()
+    return path.relative_to(root).as_posix() if path.is_relative_to(root / "src") else None
+
+
+def require_bound_coverage_sources(report: dict, snapshot: dict, crate: Path) -> None:
+    """Reject demonstrably stale src entries without claiming complete closure."""
+
+    for data in report["data"]:
+        for entry in data["files"]:
+            relative = coverage_source_relative(entry["filename"], crate)
+            if relative is not None and (not relative.endswith(".rs") or relative not in snapshot["files"]):
+                raise ValueError(f"coverage source is not a captured Rust input: {relative}")
+
+
 def coverage_summary(report: dict, crate: Path) -> dict:
     """Aggregate LLVM's line counters, retaining all compiled production files.
 
@@ -55,10 +138,9 @@ def coverage_summary(report: dict, crate: Path) -> dict:
     seen = set()
     for data in report["data"]:
         for entry in data["files"]:
-            path = Path(entry["filename"]).resolve()
-            if not path.is_relative_to(crate.resolve() / "src"):
+            relative = coverage_source_relative(entry["filename"], crate)
+            if relative is None:
                 continue
-            relative = path.relative_to(crate.resolve()).as_posix()
             if relative in seen:
                 raise ValueError(f"duplicate coverage file: {relative}")
             seen.add(relative)
@@ -195,6 +277,8 @@ def main() -> int:
     parser.add_argument("--offline", action="store_true", help="requires pre-fetched dependencies/advisories")
     parser.add_argument("--dry-run", action="store_true", help="print commands without creating files")
     args = parser.parse_args()
+    if len(args.gate) != len(set(args.gate)):
+        raise ValueError("duplicate gate groups would overwrite their evidence")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     output = CRATE / "target/release-gates" / stamp
     plan = [(gate, command) for gate in args.gate for command in command_plan(
@@ -216,30 +300,60 @@ def main() -> int:
         log = output / f"{index:02d}-{gate}.log"
         print(f"[{gate}] {shlex.join(command)}\nlog: {log}", flush=True)
         started = datetime.now(timezone.utc)
-        with log.open("x") as stream:
-            completed = subprocess.run(command, cwd=CRATE, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=False)
-        row = {"gate": gate, "command": command, "exit_code": completed.returncode,
-               "process_exit_code": completed.returncode,
-               "seconds": (datetime.now(timezone.utc) - started).total_seconds(), "log": log.name}
+        row = {"gate": gate, "command": command, "exit_code": 1,
+               "process_exit_code": None, "log": log.name}
         results["gates"].append(row)
         try:
+            if gate == "coverage":
+                before = capture_coverage_context(CRATE, command, environment)
+                before_path = output / "coverage-inputs-before.json"
+                write_evidence(before_path, before)
+                row["input_evidence"] = {"before": before_path.name,
+                                         "sources_unchanged": False,
+                                         "production_only_exclusions_qualified": False}
+            with log.open("x") as stream:
+                completed = subprocess.run(command, cwd=CRATE, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=False)
+            row["process_exit_code"] = row["exit_code"] = completed.returncode
+            if gate == "coverage":
+                # Capture terminal observations even when the native process
+                # fails. Failure never adopts counters or a passing manifest.
+                after = capture_coverage_context(CRATE, command, environment)
+                after_path = output / "coverage-inputs-after.json"
+                write_evidence(after_path, after)
+                row["input_evidence"]["after"] = after_path.name
+                row["log_identity"] = fingerprint_file(log, maximum_bytes=512 * 1024 * 1024)
+                report_path = output / "coverage.json"
+                if report_path.exists() or report_path.is_symlink():
+                    row["report_identity"] = fingerprint_file(report_path, maximum_bytes=2 * 1024 * 1024 * 1024)
+                require_same_coverage_context(before, after)
+                row["input_evidence"]["sources_unchanged"] = True
             if completed.returncode == 0 and gate == "coverage":
                 require_clean_coverage_log(log.read_text())
-                row["coverage"] = coverage_summary(json.loads((output / "coverage.json").read_text()), CRATE)
+                report = json.loads((output / "coverage.json").read_text())
+                require_bound_coverage_sources(report, before["sources"], CRATE)
+                row["coverage"] = coverage_summary(report, CRATE)
+                # Detect ordinary edits during parsing as well as during the
+                # native command. The hashes do not authenticate old binaries.
+                if row["report_identity"] != fingerprint_file(report_path, maximum_bytes=2 * 1024 * 1024 * 1024):
+                    raise ValueError("coverage export changed during validation")
+                if row["log_identity"] != fingerprint_file(log, maximum_bytes=512 * 1024 * 1024):
+                    raise ValueError("coverage log changed during validation")
                 if not row["coverage"]["passed"]:
                     row["exit_code"] = 1
             if completed.returncode == 0 and gate == "package" and "--list" in command:
                 row["package_files"] = validate_package_listing(log.read_text())
-        except (OSError, ValueError, KeyError, TypeError) as error:
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
             # Preserve the distinction between a successful native process and
             # invalid evidence, including a malformed/missing export or unsafe
             # package inventory. Never leave an interrupted validation green.
             row["validation_error"] = str(error)
             row["exit_code"] = 1
+            row.pop("coverage", None)
+        row["seconds"] = (datetime.now(timezone.utc) - started).total_seconds()
         # A successfully executed prefix is not completion: an interruption or
         # missing tool at the next step must never leave a passing manifest.
         results["passed"] = index + 1 == len(plan) and all(item["exit_code"] == 0 for item in results["gates"])
-        (output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+        write_evidence(output / "results.json", results)
         if row["exit_code"] != 0:
             print(f"FAILED: {gate}; see {log} and {output / 'results.json'}", flush=True)
             return 1
