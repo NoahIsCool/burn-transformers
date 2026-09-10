@@ -626,6 +626,102 @@ fn manifest_rejects_unknown_fields_and_invalid_derived_counts() {
     ));
 }
 
+/// Duplicate decoded tensor keys are ambiguous even when their payloads agree.
+#[test]
+fn manifest_duplicate_json_tensor_keys_are_rejected_before_map_collapse() {
+    let metadata = QuantizedTensorMetadata::new(
+        &[1, 64],
+        SourceFloatDType::F32,
+        WeightQuantizationConfig::default(),
+    )
+    .unwrap();
+    let metadata = serde_json::to_string(&metadata).unwrap();
+    for second_key in [r#""x.weight""#, r#""\u0078.weight""#] {
+        let json = format!(
+            r#"{{"format_version":1,"byte_order":"little_endian","packed_execution":"unavailable","tensors":{{"x.weight":{metadata},{second_key}:{metadata}}}}}"#
+        );
+        let error = BurnpackQuantizationManifest::from_json(&json).unwrap_err();
+        assert!(matches!(error, QuantizationError::ManifestJson(_)));
+        assert!(error.to_string().contains("duplicate map key `x.weight`"));
+        let error = serde_json::from_str::<BurnpackQuantizationManifest>(&json).unwrap_err();
+        assert!(error.to_string().contains("duplicate map key `x.weight`"));
+    }
+}
+
+/// Checkpoint provenance cannot silently keep only the last duplicate shard.
+#[test]
+fn manifest_duplicate_json_provenance_keys_are_rejected_before_map_collapse() {
+    let shard = serde_json::to_string(&BurnpackShardProvenance {
+        file_bytes: 4096,
+        sha256: "2".repeat(64),
+    })
+    .unwrap();
+    for second_key in [r#""model.safetensors""#, r#""\u006dodel.safetensors""#] {
+        let json = format!(
+            r#"{{"load_plan_sha256":"{}","checkpoint_shards":{{"model.safetensors":{shard},{second_key}:{shard}}}}}"#,
+            "1".repeat(64)
+        );
+        let error = serde_json::from_str::<BurnpackProvenance>(&json).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate map key `model.safetensors`")
+        );
+    }
+}
+
+/// Conflicting duplicates fail in either order, not only when values are equal.
+#[test]
+fn manifest_duplicate_conflicting_tensor_values_cannot_select_a_winner() {
+    let q8 = serde_json::to_string(
+        &QuantizedTensorMetadata::new(
+            &[1, 64],
+            SourceFloatDType::F32,
+            config(SymmetricQuantization::Q8, 64),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let q4 = serde_json::to_string(
+        &QuantizedTensorMetadata::new(
+            &[2, 64],
+            SourceFloatDType::F16,
+            config(SymmetricQuantization::Q4, 64),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    for (first, second) in [(&q8, &q4), (&q4, &q8)] {
+        let json = format!(
+            r#"{{"format_version":1,"byte_order":"little_endian","packed_execution":"unavailable","tensors":{{"x.weight":{first},"x.weight":{second}}}}}"#
+        );
+        assert!(
+            BurnpackQuantizationManifest::from_json(&json)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate map key `x.weight`")
+        );
+    }
+    // Distinct decoded keys still produce a complete, deterministically sorted map.
+    let json = format!(
+        r#"{{"format_version":1,"byte_order":"little_endian","packed_execution":"unavailable","tensors":{{"z.weight":{q8},"a.weight":{q4}}}}}"#
+    );
+    let manifest = BurnpackQuantizationManifest::from_json(&json).unwrap();
+    assert_eq!(manifest.tensors.len(), 2);
+    assert_eq!(
+        manifest.tensors["z.weight"].scheme,
+        SymmetricQuantization::Q8
+    );
+    assert_eq!(
+        manifest.tensors["a.weight"].scheme,
+        SymmetricQuantization::Q4
+    );
+    assert!(
+        manifest.to_json_pretty().unwrap().find("a.weight").unwrap()
+            < manifest.to_json_pretty().unwrap().find("z.weight").unwrap()
+    );
+}
+
 #[test]
 fn manifest_v2_requires_provenance_while_v1_remains_compatible() {
     let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();

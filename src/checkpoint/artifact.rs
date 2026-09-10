@@ -958,35 +958,64 @@ impl<'de> Deserialize<'de> for RawHeader {
 struct UniqueStringMap(BTreeMap<String, String>);
 
 impl<'de> Deserialize<'de> for UniqueStringMap {
+    /// Uses the shared duplicate-rejecting map parser for SafeTensors metadata.
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        struct StringMapVisitor;
+        deserialize_unique_map(deserializer).map(Self)
+    }
+}
 
-        impl<'de> de::Visitor<'de> for StringMapVisitor {
-            type Value = UniqueStringMap;
+/// Deserializes string-keyed artifact maps without last-entry-wins ambiguity.
+///
+/// Serde's ordinary `BTreeMap` implementation replaces duplicate keys. Artifact
+/// identities instead require an injective mapping from decoded names to values:
+/// even identical repeated entries, including JSON escape-equivalent names, are
+/// rejected before decoding the second value. The same parser covers checkpoint
+/// weight maps, SafeTensors metadata, and Burnpack tensor/provenance inventories.
+pub(super) fn deserialize_unique_map<'de, D, V>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    /// Carries only the value type; the visitor never allocates from a size hint.
+    struct UniqueMapVisitor<V>(std::marker::PhantomData<fn() -> V>);
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("an object with unique string keys and string values")
-            }
+    impl<'de, V: Deserialize<'de>> de::Visitor<'de> for UniqueMapVisitor<V> {
+        type Value = BTreeMap<String, V>;
 
-            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
-            where
-                A: de::MapAccess<'de>,
-            {
-                let mut values = BTreeMap::new();
-                while let Some((key, value)) = map.next_entry::<String, String>()? {
-                    if values.insert(key.clone(), value).is_some() {
-                        return Err(de::Error::custom(format!("duplicate map key `{key}`")));
-                    }
-                }
-                Ok(UniqueStringMap(values))
-            }
+        /// Describes the uniqueness requirement in contextual Serde errors.
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an object with unique string keys")
         }
 
-        deserializer.deserialize_map(StringMapVisitor)
+        /// Rejects repeated decoded keys before they can replace an earlier value.
+        fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: de::MapAccess<'de>,
+        {
+            let mut values = BTreeMap::new();
+            while let Some(key) = map.next_key::<String>()? {
+                match values.entry(key) {
+                    std::collections::btree_map::Entry::Occupied(entry) => {
+                        return Err(de::Error::custom(format!(
+                            "duplicate map key `{}`",
+                            entry.key()
+                        )));
+                    }
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(map.next_value()?);
+                    }
+                }
+            }
+            Ok(values)
+        }
     }
+
+    deserializer.deserialize_map(UniqueMapVisitor(std::marker::PhantomData))
 }
 
 #[derive(Debug, Deserialize)]

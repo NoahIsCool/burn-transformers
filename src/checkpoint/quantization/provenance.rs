@@ -37,6 +37,7 @@ use sha2::{Digest, Sha256};
 use super::{QuantizationError, Result};
 use crate::checkpoint::{
     CheckpointManifest, LoadPlan, PlannedSource, PlannedTensor, PlannedTransform,
+    artifact::deserialize_unique_map,
 };
 
 /// Domain separator for the canonical v2 load-plan digest.
@@ -68,6 +69,7 @@ pub struct BurnpackProvenance {
     /// Lowercase SHA-256 of the canonical, domain-separated [`LoadPlan`].
     pub load_plan_sha256: String,
     /// Complete shard identities keyed by validated root-relative path.
+    #[serde(deserialize_with = "deserialize_unique_map")]
     pub checkpoint_shards: BTreeMap<String, BurnpackShardProvenance>,
 }
 

@@ -1,9 +1,16 @@
 //! Serializable metadata for versioned Burnpack quantization formats.
+//!
+//! Redundant counts are checked against the logical row-major shape: `N` values
+//! occupy `N` Q8 bytes or `ceil(N / 2)` Q4 bytes, followed by `4 * ceil(N / G)`
+//! bytes of F32 scales. JSON maps must have unique decoded names, because silently
+//! replacing one tensor would make its payload and checkpoint identity ambiguous.
 
 use std::collections::BTreeMap;
 
 use burn::tensor::DType;
 use serde::{Deserialize, Serialize};
+
+use crate::checkpoint::artifact::deserialize_unique_map;
 
 use super::{
     BurnpackProvenance, PackedValueLayout, QuantizationError, QuantizationGroupSize,
@@ -117,6 +124,7 @@ impl SourceFloatDType {
 impl TryFrom<DType> for SourceFloatDType {
     type Error = QuantizationError;
 
+    /// Rejects non-floating storage before a quantizer interprets source bytes.
     fn try_from(dtype: DType) -> Result<Self> {
         match dtype {
             DType::F16 => Ok(Self::F16),
@@ -359,6 +367,7 @@ impl QuantizedTensorMetadata {
         Ok(())
     }
 
+    /// Converts validated element, group, and packed-byte counts without truncation.
     pub(crate) fn host_counts(&self) -> Result<(usize, usize, usize)> {
         self.validate()?;
         let elements = usize::try_from(self.num_elements).map_err(|_| {
@@ -397,6 +406,7 @@ pub struct BurnpackQuantizationManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<BurnpackProvenance>,
     /// Tensor metadata keyed by architecture-owned parameter name.
+    #[serde(deserialize_with = "deserialize_unique_map")]
     pub tensors: BTreeMap<String, QuantizedTensorMetadata>,
 }
 
@@ -527,11 +537,13 @@ impl BurnpackQuantizationManifest {
 /// only after a [`BurnpackProvenance`] binding validates their checkpoint, plan,
 /// and payload digests.
 impl Default for BurnpackQuantizationManifest {
+    /// Retains the original constructor's explicit provenance-free v1 semantics.
     fn default() -> Self {
         Self::new_legacy_v1()
     }
 }
 
+/// Maps a precision to its sole canonical two's-complement byte layout.
 fn packed_layout(scheme: SymmetricQuantization) -> PackedValueLayout {
     match scheme {
         SymmetricQuantization::Q8 => PackedValueLayout::SignedI8TwosComplement,
@@ -539,6 +551,7 @@ fn packed_layout(scheme: SymmetricQuantization) -> PackedValueLayout {
     }
 }
 
+/// Computes the logical element product, allowing reference scalars and empty axes.
 fn checked_num_elements_u64(shape: &[u64]) -> Result<u64> {
     shape.iter().try_fold(1_u64, |elements, &dimension| {
         elements
@@ -547,10 +560,12 @@ fn checked_num_elements_u64(shape: &[u64]) -> Result<u64> {
     })
 }
 
+/// Divides by a nonzero validated group/packing width without addition overflow.
 const fn ceil_div_u64(value: u64, divisor: u64) -> u64 {
     value / divisor + if value.is_multiple_of(divisor) { 0 } else { 1 }
 }
 
+/// Preserves a violated wire-format invariant as a contextual, non-panicking error.
 fn invalid_metadata<T>(reason: impl Into<String>) -> Result<T> {
     Err(QuantizationError::InvalidMetadata {
         reason: reason.into(),
