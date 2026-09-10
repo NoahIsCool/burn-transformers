@@ -5,6 +5,19 @@ implemented families remain experimental. This checklist supplements
 [RELEASING.md](RELEASING.md); a green source check does not promote a checkpoint,
 publish an archive, or waive any real-weight gate.
 
+## Required development checks
+
+The source gate also runs the [authored Rust documentation check](scripts/coverage-layout/README.md#authored-documentation-check).
+It checks literal `///` function and `//!` module documentation, including
+private helpers, and rejects inline test bodies in production files. Its
+source-bound report states the limits of macro inspection; generated methods
+are not represented as audited authored functions. The check supplements
+compiler-enforced public documentation and review of mathematical explanations.
+
+Every compile-capable release command records a fresh local storage preflight
+and stops below 20 GiB. Explicit target overrides remain visible in the report;
+the runner does not delete files or silently relocate build storage.
+
 ## v0.1 release qualification
 
 The [release record](acceptance/measurements/v0_1-release-20260910.json) promotes

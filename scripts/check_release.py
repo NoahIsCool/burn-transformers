@@ -231,6 +231,10 @@ def command_plan(gate: str, output: Path, toolchain: str, msrv: str, offline: bo
             cargo + ["fmt"] + layout_manifest + ["--check"],
             cargo + ["clippy"] + layout_manifest + locked + layout_target + ["--all-targets", "--", "-D", "warnings"],
             cargo + ["test"] + layout_manifest + locked + layout_target,
+            cargo + ["build"] + layout_manifest + locked + layout_target,
+            [sys.executable, str(CRATE / "scripts/check_documentation.py"),
+             "--classifier", str(CRATE / "target/debug/transformers-coverage-layout"),
+             "--output", str(output / "documentation.json")],
             *[
                 cargo + ["run", "--release"] + manifest + locked + feature_args
                 + ["--example", name] + (["--", *arguments] if arguments else [])

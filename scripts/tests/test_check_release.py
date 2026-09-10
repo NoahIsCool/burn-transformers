@@ -648,7 +648,7 @@ class ReleaseGateTests(unittest.TestCase):
     def test_standalone_classifier_has_separate_source_and_msrv_checks(self):
         """The dev-only parser has its own lockfile, tests and warning-denied lint."""
 
-        for gate, expected_count in (("source", 3), ("msrv", 1)):
+        for gate, expected_count in (("source", 4), ("msrv", 1)):
             commands = GATES.command_plan(gate, Path("/tmp/output"), "stable", "1.92.0", True)
             selected = [command for command in commands if str(GATES.CRATE / "scripts/coverage-layout/Cargo.toml") in command]
             self.assertEqual(len(selected), expected_count)
@@ -660,7 +660,12 @@ class ReleaseGateTests(unittest.TestCase):
                 if gate == "msrv":
                     self.assertEqual(command[1], "+1.92.0")
             if gate == "source":
-                self.assertEqual([command[2] for command in selected], ["fmt", "clippy", "test"])
+                self.assertEqual([command[2] for command in selected], ["fmt", "clippy", "test", "build"])
+                audit, = [command for command in commands if str(GATES.CRATE / "scripts/check_documentation.py") in command]
+                self.assertGreater(commands.index(audit), commands.index(selected[-1]))
+                self.assertEqual(audit[audit.index("--classifier") + 1], str(GATES.CRATE / "target/debug/transformers-coverage-layout"))
+                self.assertEqual(audit[audit.index("--output") + 1], "/tmp/output/documentation.json")
+                self.assertNotIn("--inventory-only", audit)
 
     def test_msrv_alias_is_checked_exactly(self):
         """A rolling stable alias must never silently substitute a newer MSRV."""
