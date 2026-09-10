@@ -23,12 +23,13 @@ checkpoint is documented separately in
 
 The v0.1 candidate is limited to **Qwen3.5-0.8B and FLAN-T5-small**; other
 families remain experimental. Both have refreshed local correctness evidence.
-The latest [tokenizer/cache-contract coverage review](acceptance/measurements/tokenizer-contract-coverage-20260910.json)
-exposes a gap: 89.48% crate-wide and 94.90% shared/core after excluding 79 verified
-test-only files, measured at `820d460` with 1,173 passing tests. Manual review
+The latest [shared/core coverage milestone](acceptance/measurements/shared-coverage-gate-20260910.json)
+passes the shared/core threshold at 95.01%; crate-wide coverage remains below
+its target at 89.84%. This excludes 79 verified test-only files and was measured
+at `796933f` with 1,181 passing tests. Manual review
 binds every retained native region to authored production function items for
 that exact source/configuration; it adds no generated-code exclusions. This is
-not a general macro-closure proof, and both numerical coverage gates still fail.
+not a general macro-closure proof; the crate-wide numerical gate still fails.
 The [refreshed timing and sampled-memory records](acceptance/measurements/small-model-performance-20260910/manifest.json)
 are now available, including FLAN's first Flex CPU baseline. Qwen's unexplained
 historical timing regression, coverage, and final integrated release checks remain

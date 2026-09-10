@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "scope": "Shared/core line threshold reached by ordinary CPU contract tests; crate-wide threshold and performance still open",
+  "source_commit": "796933f0a861786b9c93b59eb37fc623ddf6edcf",
+  "src_tree_git_oid_including_test_sources": "1f67bd043b2073c90e30085d27743889d9a68c8c",
+  "previous_measurement": "tokenizer-contract-coverage-20260910.json",
+  "advertised_supported": false,
+  "release_gate_promotion": false,
+  "changes": {
+    "new_unit_tests": 8,
+    "executable_production_changes": false,
+    "production_documentation_change": "Nemotron's pinned Mamba execution uses use_bias; mamba_proj_bias is retained compatibility metadata",
+    "contracts": [
+      "Empty rotary geometry, section partitions and independent three-axis complex-phase oracle",
+      "Signed T5 bucket-index bounds before allocation",
+      "Biased rectangular dense FFNs against independent affine/ReLU-squared equations",
+      "Non-weight quantization exclusions preserve exact dtype and bytes",
+      "Strict optional Nemotron projection loading, latent expert scalar oracle and cached parity"
+    ]
+  },
+  "validation": {
+    "unit_passed": 1079,
+    "unit_ignored": 3,
+    "integration_passed": 102,
+    "integration_ignored": 27,
+    "total_passed": 1181,
+    "total_ignored": 30,
+    "failed": 0,
+    "source_msrv_accelerator_package_directory": "target/release-gates/20260910T081227.056975Z",
+    "release_check_commands_passed": 17,
+    "msrv": "1.92.0",
+    "python_tests": 372,
+    "python_native_opt_ins_skipped": 14,
+    "classifier_tests_per_toolchain": 29,
+    "package_files": 385,
+    "package_verified": true,
+    "package_warning": "Existing informational missing documentation/homepage/repository URLs",
+    "accelerators": "Metal, CUDA and ROCm compiled separately; no kernels executed",
+    "new_real_checkpoint_or_performance_evidence": false
+  },
+  "coverage": {
+    "directory": "target/release-gates/20260910T081223.009218Z",
+    "features": ["std", "flex", "tokenizers", "chat-templates", "autodiff"],
+    "source_inventory_sha256": "3798e21d45dd7458d3aa06d03ac45b362da955275ab554eff38bb158b02a8496",
+    "production_inputs": 101,
+    "unit_inputs": 188,
+    "reported_files": 168,
+    "whole_test_files_excluded": 79,
+    "retained_production_files": 89,
+    "crate": {"covered": 32817, "lines": 36530, "percent": 89.83575143717492, "minimum_percent": 90, "meets_threshold": false},
+    "shared": {"covered": 15560, "lines": 16377, "percent": 95.01129633021921, "minimum_percent": 95, "meets_threshold": true},
+    "denominator_change": 0,
+    "newly_covered_lines": {"crate": 130, "shared": 18},
+    "native_export": {"file": "llvm-export/native-coverage.json", "bytes": 83693989, "sha256": "a90b59eec73b647f109b67d086ccb787ebb44425e5bfad14f30e3092e2e7fa21"},
+    "native_log": {"file": "00-coverage.log", "bytes": 119208, "sha256": "f4d400c565596023b5bc910c96a50093096ade44d5d20df1f0e15815e01b9c0c"},
+    "diagnostic": {"file": "whole-test-file-diagnostic.json", "bytes": 139773, "sha256": "df304518987c066fec6ef83aa48e03ef2f9288103086e34c242112250469482f"},
+    "authored_production_interpretation": {
+      "qualified": true,
+      "scope": "Exact captured source/configuration only, under the existing trusted compiler/tool boundary",
+      "native_regions": 159675,
+      "native_function_instantiations": 9021,
+      "unmatched_regions_or_mapped_lines": 0,
+      "generated_code_exclusions": 0,
+      "generic_gate_flags_changed": false,
+      "branch_coverage_claim": false,
+      "arbitrary_procedural_macro_io_attestation": false,
+      "independent_reauthentication": {"path": "/private/tmp/tfm-coverage-reauth-20260910-final-cpu.2XtQNp/proof.json", "bytes": 81395, "sha256": "f947354c72ed36dade070de5de80f3941dd34ac3e4b6be8dc908bc2784671e5e"}
+    }
+  }
+}
