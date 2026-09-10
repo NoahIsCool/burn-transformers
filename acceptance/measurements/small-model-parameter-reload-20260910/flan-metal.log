@@ -1,0 +1,17 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/hmm_compression/crates/transformers)
+    Finished `release` profile [optimized] target(s) in 31.35s
+     Running tests/flan_t5_small.rs (crates/transformers/target/release/deps/flan_t5_small-2f4181cb08abf0db)
+
+running 1 test
+test flan_t5_small_metal_matches_official_reference ... FLAN-T5-small Metal/F32: load=0.155s stateless=0.225s cached32=0.689s teacher32=0.381s boundary512=0.062s beam=1.001s
+FLAN-T5-small Metal/F32 encoder: cosine=1.000000000000 max_abs=0.000000432 failures_1e-4=0 actual_f32le_sha256=0338e69c5259299636d22597d8bf667cf326ceda8a35b78119698ddcadc27f26
+FLAN-T5-small Metal/F32 decoder: cosine=0.999999999999 max_abs=0.000010252 failures_1e-4=0 actual_f32le_sha256=c120253f75b47286be35d4dbff9dc0177d533d197315700773dbcb62d265ce83
+FLAN-T5-small Metal/F32 first: cosine=1.000000000000 max_abs=0.000045776 failures_1e-4=0 actual_f32le_sha256=fe8c24615690911bb5b9e7bf11dc5a8524367742fe9292e568d2993367c1108d
+FLAN-T5-small Metal/F32 cached: cosine=1.000000000000 max_abs=0.000045776 failures_1e-4=0 actual_f32le_sha256=6c065beeb7e405185fa7633d8d958a7ffc79ef0c3c914c65eab409d7f5b8aacc
+FLAN-T5-small Metal/F32 teacher: cosine=1.000000000000 max_abs=0.000022888 failures_1e-4=0 actual_f32le_sha256=38ed24cd1bbf31acfb8fe7d167525562b9e6642f871abbf855815ca0a8fbb07b
+FLAN-T5-small Metal/F32 padded: cosine=1.000000000000 max_abs=0.000030518 failures_1e-4=0 actual_f32le_sha256=cfaa7d8309d7c46ef919218736c59dbdb39a1f87bda47fe6fec9411ec4321ff1
+FLAN-T5-small Metal/F32 boundary: cosine=1.000000000000 max_abs=0.000076294 failures_1e-4=0 actual_f32le_sha256=5a4cb95431905b37b85d7fade4d21f5e21532a9fac95dda2414992818f645cd6
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 3.58s
+

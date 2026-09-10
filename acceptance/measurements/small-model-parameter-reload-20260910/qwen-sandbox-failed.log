@@ -1,0 +1,30 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/hmm_compression/crates/transformers)
+    Finished `release` profile [optimized] target(s) in 47.40s
+     Running tests/local_artifacts.rs (crates/transformers/target/release/deps/local_artifacts-1a1f2f190955cf81)
+
+running 2 tests
+test loads_pinned_qwen35_q4_burnpack_and_runs_metal ... 
+thread 'DSD-4-0' (8203635) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubecl-wgpu-0.10.0/src/runtime.rs:510:10:
+No possible adapter available for backend. Falling back to first available.: NotFound { active_backends: Backends(METAL), requested_backends: Backends(METAL), supported_backends: Backends(VULKAN | METAL), no_fallback_backends: Backends(0x0), no_adapter_backends: Backends(METAL), incompatible_surface_backends: Backends(0x0) }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'loads_pinned_qwen35_q4_burnpack_and_runs_metal' (8203634) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubecl-common-0.10.0/src/device/handle/channel.rs:327:35:
+called `Result::unwrap()` on an `Err` value: RecvError
+FAILED
+test loads_pinned_qwen35_weights_and_runs_metal_inference ... 
+thread 'DSD-4-0' (8203635) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubecl-wgpu-0.10.0/src/runtime.rs:510:10:
+No possible adapter available for backend. Falling back to first available.: NotFound { active_backends: Backends(METAL), requested_backends: Backends(METAL), supported_backends: Backends(VULKAN | METAL), no_fallback_backends: Backends(0x0), no_adapter_backends: Backends(METAL), incompatible_surface_backends: Backends(0x0) }
+
+thread 'loads_pinned_qwen35_weights_and_runs_metal_inference' (8203639) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubecl-common-0.10.0/src/device/handle/channel.rs:327:35:
+called `Result::unwrap()` on an `Err` value: RecvError
+FAILED
+
+failures:
+
+failures:
+    loads_pinned_qwen35_q4_burnpack_and_runs_metal
+    loads_pinned_qwen35_weights_and_runs_metal_inference
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 24 filtered out; finished in 5.84s
+
+error: test failed, to rerun pass `--test local_artifacts`

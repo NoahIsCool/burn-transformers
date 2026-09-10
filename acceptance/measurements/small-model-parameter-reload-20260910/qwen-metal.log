@@ -1,0 +1,13 @@
+    Finished `release` profile [optimized] target(s) in 0.17s
+     Running tests/local_artifacts.rs (crates/transformers/target/release/deps/local_artifacts-1a1f2f190955cf81)
+
+running 2 tests
+test loads_pinned_qwen35_q4_burnpack_and_runs_metal ... q4: tensors=186, top1=13, cached_cosine=1.000000000
+ok
+test loads_pinned_qwen35_weights_and_runs_metal_inference ... official full-vocabulary prompt-logit cosine similarity: 0.999998613
+minimum cached/official full-vocabulary cosine similarity: 0.999997815
+minimum teacher-forced/official full-vocabulary cosine similarity: 0.999996242
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 21.78s
+

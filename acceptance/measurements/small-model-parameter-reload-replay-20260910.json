@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "scope": "functional_post_parameter_reload_fix_not_benchmark",
+  "date_utc": "2026-09-10",
+  "advertised_supported": false,
+  "passed": true,
+  "source_commit": "f5482eaa9ff3e65f575bedb47e12e1bb1d455436",
+  "runtime_source_tree_git_oid": "ff1966773e6c141e73dfec052e93a0f3f8453d47",
+  "crate_sources_clean_during_runs": true,
+  "unrelated_hmm_change_preserved": true,
+  "toolchain": {
+    "rustc": "1.92.0",
+    "rustc_commit": "ded5c06cf21d2b93bffd5d884aa6e96934ee4234",
+    "burn": "0.21.0",
+    "profile": "release",
+    "target": "aarch64-apple-darwin"
+  },
+  "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+  "runtime_files_sha256": {
+    "src/checkpoint/runtime/mod.rs": "2e4712031178c489b7bbb13bc25f1fbef7685feb42e30f981a18ccefce3fe969"
+  },
+  "evidence_capture": "Concatenated terminal tool output chunks retained as compact raw logs; failed sandbox attempt retained separately.",
+  "common_arguments": [
+    "cargo",
+    "+stable",
+    "test",
+    "--manifest-path",
+    "crates/transformers/Cargo.toml",
+    "--locked",
+    "--offline",
+    "--release",
+    "--no-default-features",
+    "--features",
+    "std,metal,tokenizers,chat-templates"
+  ],
+  "runs": [
+    {
+      "name": "qwen_f16_and_q4_v2",
+      "repository": "Qwen/Qwen3.5-0.8B",
+      "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+      "argument_suffix": [
+        "--test",
+        "local_artifacts",
+        "loads_pinned_qwen35",
+        "--",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "CARGO_INCREMENTAL": "0",
+        "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+        "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+        "TRANSFORMERS_QWEN35_BURNPACK": "/Volumes/bag of holding/models/transformers-acceptance/qwen3.5-0.8b-q4-2fc06364-v2/qwen3.5-0.8b-q4.bpk"
+      },
+      "exit_code": 0,
+      "passed_test_cases": 2,
+      "log": "small-model-parameter-reload-20260910/qwen-metal.log",
+      "log_sha256": "45679bc1521f27e16435536a9011aa1d13ecb6b9c7fe4cca33636fa7c498fd29",
+      "executable_sha256": "7ec1b132db40a67c1b169073dd14ddbb2da96fd1b401b3bd8ecac1f2d0b717fd",
+      "q4": {
+        "artifact_bytes": 280044715,
+        "artifact_sha256": "cca925f24ab3b61a76fbbd5aefb8e0f2052da1b4636de9e996b890859cae5fd5",
+        "artifact_pre_run_sha256_verified": true,
+        "quantized_matrices": 186,
+        "stateless_and_cached_top1": 13,
+        "stateless_cached_full_vocabulary_cosine": 1,
+        "logits_finite": true,
+        "quantized_quality_corpus_evaluated": false
+      },
+      "f16": {
+        "prompt_official_cosine": 0.999998613,
+        "minimum_cached_official_cosine": 0.999997815,
+        "minimum_teacher_official_cosine": 0.999996242,
+        "exact_cached_and_stateless_official_greedy_tokens": 32
+      }
+    },
+    {
+      "name": "flan_f32_official_metal",
+      "repository": "google/flan-t5-small",
+      "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
+      "argument_suffix": [
+        "--test",
+        "flan_t5_small",
+        "flan_t5_small_metal_matches_official_reference",
+        "--",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "CARGO_INCREMENTAL": "0",
+        "TRANSFORMERS_FLAN_T5_SMALL_DIR": "/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
+        "TRANSFORMERS_FLAN_T5_SMALL_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle"
+      },
+      "exit_code": 0,
+      "passed_test_cases": 1,
+      "log": "small-model-parameter-reload-20260910/flan-metal.log",
+      "log_sha256": "eb710f4fe9d6ffcd26a65e46c959bc1fe5c52e466b753dc40b87493b9f5bc892",
+      "executable_sha256": "4ac61a9756cd8412317f667d17e08214d91b60d2bf2e9db74b1fb1172b11539e",
+      "minimum_full_vector_cosine": 0.999999999999,
+      "maximum_absolute_error": 0.000076294,
+      "failures_at_1e_4": 0,
+      "exact_greedy_official_tokens": 32,
+      "exact_official_beam_ids": [
+        644,
+        4598,
+        229,
+        9685,
+        5,
+        1
+      ],
+      "full_vector_hashes_match_prior_record": "small-model-post-json-validation-replay-20260910.json"
+    }
+  ],
+  "failed_attempts": [
+    {
+      "name": "qwen_sandbox_gpu_unavailable",
+      "exit_code": 101,
+      "passed_test_cases": 0,
+      "failed_test_cases": 2,
+      "log": "small-model-parameter-reload-20260910/qwen-sandbox-failed.log",
+      "log_sha256": "7db83875f61a7f4be2afdb1867430e4704483d2d41ae261399dfa3a597c81954",
+      "reason": "Sandbox exposed no Metal adapter. Repeated unchanged executable with host GPU access passed; this failed attempt is not model-parity evidence."
+    }
+  ],
+  "limitations": [
+    "This is first-load and inference non-regression evidence; synthetic runtime tests separately exercise repeated initialized parameter installation.",
+    "No performance, phase-memory, public-example, generation-coordinator, 32K stress or quantized corpus-quality rerun is implied.",
+    "Release coverage and coordinated final-candidate qualification remain open."
+  ]
+}

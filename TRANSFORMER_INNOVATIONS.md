@@ -1366,6 +1366,10 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   whole-weight dequantization temporary; initial lazy packed loading and
   quantized inference are unaffected. Burnpack tests also verify retryable
   staging after conversion, provenance, and late publication failures.
+  A [post-fix Metal replay](acceptance/measurements/small-model-parameter-reload-replay-20260910.json)
+  passes Qwen F16/Q4 and FLAN, retaining exact output hashes and the separate
+  failed sandbox attempt. Initialized-reload behavior is exercised by synthetic
+  regression tests, not inferred from these first-load checkpoint runs.
 - **Coverage evidence is bound to observed inputs.** Pre/post source and fixture
   hashes now detect ordinary concurrent edits, including changes to Python
   reference scripts embedded by Rust tests. The runner retains raw report/log

@@ -64,6 +64,16 @@ runtime archive. Its logs are at `target/release-gates/20260910T004203.127243Z/`
 Cargo's actual inventory excludes the nested standalone classifier; explicit
 include entries did not override that behavior and have therefore been removed.
 
+After the initialized-parameter reload fix (`c3f7001`), source/MSRV checks passed
+903 unit tests and ordinary integrations, plus 254 Python and 24 standalone
+classifier tests. Warning-denied Clippy/docs and minimal builds also passed;
+logs are at `target/release-gates/20260910T011423.312808Z/`. The final coverage
+runner review subsequently added two stale-filename regressions. A clean
+`f5482ea` [Metal replay](acceptance/measurements/small-model-parameter-reload-replay-20260910.json)
+passed Qwen F16/Q4 and FLAN against the pinned local artifacts; the unsuccessful
+sandbox/GPU-discovery attempt is retained separately. These functional checks
+are not new performance, Q4 quality, or production-only coverage measurements.
+
 Cargo's usual target location is retained. Check at least 20 GiB free before
 building a new profile; external model artifacts are never a cleanup target.
 The package gate requires clean tracked crate sources and includes verification.
@@ -149,6 +159,14 @@ These checks detect ordinary local edits, not adversarial edit-and-restore
 behavior. They do not prove compiler dependency closure, authenticate preexisting
 test binaries, or qualify test-only exclusions. Both qualification flags remain
 false, and neither coverage threshold nor denominator policy changes here.
+
+The independent [dep-info parser](scripts/coverage_dependencies.py) is tested
+against four tiny Rust 1.92 compiler fixtures. It preserves escaped-space
+dependencies and separates environment comments while rejecting unsupported or
+ambiguous native path spellings. It does not resolve paths, identify output
+executables, or prove exclusions. Enable its exact-compiler differentials with
+`TFM_DEPINFO_NATIVE_TESTS=1`; its producer pin must not be silently generalized
+to another coverage toolchain. No dependency-derived exclusions are adopted yet.
 
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is
