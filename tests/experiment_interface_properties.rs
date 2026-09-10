@@ -249,13 +249,13 @@ proptest! {
                         let expected_after = if allowed { expected_before + 0.25 } else { 0.0 };
                         prop_assert!((f64::from(before[index]) - expected_before).abs() < 2e-6);
                         prop_assert!((f64::from(after[index]) - expected_after).abs() < 2e-6);
-                        for channel in 0..2 {
-                            expected_context[channel] += expected_after * f64::from(native_values[(b * keys + k) * 2 + channel]);
+                        for (channel, expected) in expected_context.iter_mut().enumerate() {
+                            *expected += expected_after * f64::from(native_values[(b * keys + k) * 2 + channel]);
                         }
                     }
-                    for channel in 0..2 {
+                    for (channel, expected) in expected_context.iter().enumerate() {
                         let index = ((b * heads + h) * queries + q) * 2 + channel;
-                        prop_assert!((f64::from(context[index]) - expected_context[channel]).abs() < 1e-5);
+                        prop_assert!((f64::from(context[index]) - *expected).abs() < 1e-5);
                     }
                 }
             }
@@ -283,9 +283,9 @@ proptest! {
                 }
             }
         }
-        for i in 0..count {
+        for (i, &group) in groups.iter().enumerate() {
             prop_assert_eq!(values(target.blocks[i].weight.val()), vec![-10.0 + i as f32; 2 * width]);
-            prop_assert_eq!(values(source.blocks[i].weight.val()), vec![10.0 + groups[i] as f32; 2 * width]);
+            prop_assert_eq!(values(source.blocks[i].weight.val()), vec![10.0 + group as f32; 2 * width]);
         }
     }
 
@@ -336,9 +336,9 @@ proptest! {
         for (row_index, row) in logits.chunks_exact(classes).enumerate() {
             let expected = reference_log_probabilities(row);
             let mut sum = 0.0;
-            for column in 0..classes {
+            for (column, expected_value) in expected.iter().enumerate() {
                 let index = row_index * classes + column;
-                prop_assert!((f64::from(observed[index]) - expected[column]).abs() < 4e-6);
+                prop_assert!((f64::from(observed[index]) - *expected_value).abs() < 4e-6);
                 prop_assert!((shifted[index] - observed[index]).abs() < 4e-6);
                 sum += f64::from(observed[index]).exp();
             }

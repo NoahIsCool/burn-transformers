@@ -635,8 +635,10 @@ fn qwen_recipe_namespace_ambiguity_is_rejected_and_explicit_layout_is_honored() 
     let directory = tempfile::tempdir().unwrap();
     fixture(directory.path(), &tiny_config(), false);
     let recipe = Qwen3_5BackboneRecipe::from_config(tiny_config()).unwrap();
-    let mut explicit = Qwen3_5RecipeLoadOptions::default();
-    explicit.source = Some(Qwen3_5CheckpointSource::TextOnly);
+    let explicit = Qwen3_5RecipeLoadOptions {
+        source: Some(Qwen3_5CheckpointSource::TextOnly),
+        ..Default::default()
+    };
     assert!(
         recipe
             .load_pretrained::<B>(directory.path(), &explicit, &Default::default())
