@@ -937,6 +937,248 @@ fn packed_backend_execution_is_explicitly_unavailable() {
     );
 }
 
+/// Requires both the typed manifest error and its complete contextual fields.
+#[track_caller]
+fn assert_manifest_contract_error(actual: QuantizationError, expected: QuantizationError) {
+    assert_eq!(
+        core::mem::discriminant(&actual),
+        core::mem::discriminant(&expected)
+    );
+    assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+}
+
+/// Supplies valid, compact metadata independently of any packed payload allocation.
+fn manifest_contract_metadata() -> QuantizedTensorMetadata {
+    QuantizedTensorMetadata::new(
+        &[2, 64],
+        SourceFloatDType::F32,
+        config(SymmetricQuantization::Q4, 64),
+    )
+    .unwrap()
+}
+
+/// Supplies syntactically valid provenance for transactional manifest tests.
+fn manifest_contract_provenance() -> BurnpackProvenance {
+    BurnpackProvenance {
+        load_plan_sha256: "1".repeat(64),
+        checkpoint_shards: BTreeMap::from([(
+            "weights.safetensors".into(),
+            BurnpackShardProvenance {
+                file_bytes: 256,
+                sha256: "2".repeat(64),
+            },
+        )]),
+    }
+}
+
+/// V1 cannot advertise per-payload v2 digests, even without top-level provenance.
+#[test]
+fn manifest_contract_legacy_payload_digest_is_rejected_at_every_wire_boundary() {
+    let mut metadata = manifest_contract_metadata();
+    metadata.payload_sha256 = Some("3".repeat(64));
+    let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
+    // Insertion intentionally permits staging a digest before atomic v2 binding.
+    manifest.insert("projection.weight", metadata).unwrap();
+    let wire = serde_json::to_string(&manifest).unwrap();
+    for error in [
+        manifest.validate().unwrap_err(),
+        manifest.to_json_pretty().unwrap_err(),
+        BurnpackQuantizationManifest::from_json(&wire).unwrap_err(),
+    ] {
+        assert_manifest_contract_error(error, QuantizationError::InvalidProvenance {
+            reason: "format version one tensor `projection.weight` must not claim a v2 payload digest".into(),
+        });
+    }
+    assert_eq!(
+        manifest.format_version,
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_V1
+    );
+    assert!(manifest.provenance.is_none());
+}
+
+/// Failed v2 binding preserves every field of the original legacy or v2 manifest.
+#[test]
+fn manifest_contract_provenance_binding_is_transactional_for_partial_digests() {
+    let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
+    let mut complete = manifest_contract_metadata();
+    complete.payload_sha256 = Some("3".repeat(64));
+    manifest.insert("a.weight", complete).unwrap();
+    manifest
+        .insert("z.weight", manifest_contract_metadata())
+        .unwrap();
+    let before = manifest.clone();
+    assert_manifest_contract_error(
+        manifest
+            .bind_provenance(manifest_contract_provenance())
+            .unwrap_err(),
+        QuantizationError::InvalidProvenance {
+            reason: "format version two tensor `z.weight` is missing its payload SHA-256".into(),
+        },
+    );
+    assert_eq!(manifest, before);
+
+    manifest.tensors.get_mut("z.weight").unwrap().payload_sha256 = Some("4".repeat(64));
+    manifest
+        .bind_provenance(manifest_contract_provenance())
+        .unwrap();
+    assert_eq!(
+        manifest.format_version,
+        BURNPACK_QUANTIZATION_FORMAT_VERSION_V2
+    );
+    assert_eq!(manifest.provenance, Some(manifest_contract_provenance()));
+    let bound = manifest.clone();
+    let mut invalid = manifest_contract_provenance();
+    invalid.load_plan_sha256 = "INVALID".into();
+    assert_manifest_contract_error(
+        manifest.bind_provenance(invalid).unwrap_err(),
+        QuantizationError::InvalidProvenance {
+            reason: "load plan SHA-256 must be 64 lowercase hexadecimal characters".into(),
+        },
+    );
+    assert_eq!(manifest, bound);
+    assert_eq!(
+        BurnpackQuantizationManifest::from_json(&manifest.to_json_pretty().unwrap()).unwrap(),
+        bound
+    );
+}
+
+/// Insertion validates names before metadata, then metadata before duplicate keys.
+#[test]
+fn manifest_contract_failed_insertions_preserve_existing_metadata() {
+    let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
+    manifest
+        .insert("weight", manifest_contract_metadata())
+        .unwrap();
+    let before = manifest.clone();
+    let mut invalid = manifest_contract_metadata();
+    invalid.num_elements = 127;
+    assert_manifest_contract_error(
+        manifest.insert("", invalid.clone()).unwrap_err(),
+        QuantizationError::EmptyTensorName,
+    );
+    assert_eq!(manifest, before);
+    assert_manifest_contract_error(
+        manifest.insert("weight", invalid).unwrap_err(),
+        QuantizationError::InvalidMetadata {
+            reason: "num_elements 127 does not match shape product 128".into(),
+        },
+    );
+    assert_eq!(manifest, before);
+    assert_manifest_contract_error(
+        manifest
+            .insert("weight", manifest_contract_metadata())
+            .unwrap_err(),
+        QuantizationError::DuplicateManifestTensor {
+            name: "weight".into(),
+        },
+    );
+    assert_eq!(manifest, before);
+}
+
+/// Wire readers report schema/provenance failures before examining tensor entries.
+#[test]
+fn manifest_contract_wire_validation_order_is_explicit() {
+    let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
+    let mut metadata = manifest_contract_metadata();
+    metadata.num_elements = 127;
+    manifest.tensors.insert(String::new(), metadata);
+    for (version, error) in [
+        (
+            99,
+            QuantizationError::UnsupportedFormatVersion { version: 99 },
+        ),
+        (
+            2,
+            QuantizationError::InvalidProvenance {
+                reason: "format version two requires checkpoint and load-plan provenance".into(),
+            },
+        ),
+        (1, QuantizationError::EmptyTensorName),
+    ] {
+        manifest.format_version = version;
+        let wire = serde_json::to_string(&manifest).unwrap();
+        assert_manifest_contract_error(
+            BurnpackQuantizationManifest::from_json(&wire).unwrap_err(),
+            error,
+        );
+    }
+    let metadata = manifest.tensors.remove("").unwrap();
+    manifest.tensors.insert("weight".into(), metadata);
+    let wire = serde_json::to_string(&manifest).unwrap();
+    assert_manifest_contract_error(
+        BurnpackQuantizationManifest::from_json(&wire).unwrap_err(),
+        QuantizationError::InvalidMetadata {
+            reason: "num_elements 127 does not match shape product 128".into(),
+        },
+    );
+}
+
+/// Packed-layout checks first authenticate redundant counts, then rank and rows.
+#[test]
+fn manifest_contract_packed_layout_checks_metadata_before_backend_geometry() {
+    let mut metadata = QuantizedTensorMetadata::new(
+        &[2, 32],
+        SourceFloatDType::F32,
+        config(SymmetricQuantization::Q4, 64),
+    )
+    .unwrap();
+    metadata.group_count = 0;
+    assert_manifest_contract_error(
+        metadata.validate_burn_qfloat_layout().unwrap_err(),
+        QuantizationError::InvalidMetadata {
+            reason: "group_count 0 does not match expected 1".into(),
+        },
+    );
+    metadata.group_count = 1;
+    assert_manifest_contract_error(
+        metadata.validate_burn_qfloat_layout().unwrap_err(),
+        QuantizationError::BurnQFloatIncompatible {
+            reason: "innermost dimension 32 is not divisible by group size 64".into(),
+        },
+    );
+    metadata.shape = vec![1, 2, 32];
+    assert_manifest_contract_error(
+        metadata.validate_burn_qfloat_layout().unwrap_err(),
+        QuantizationError::BurnQFloatIncompatible {
+            reason: "expected a rank-two matrix, found shape [1, 2, 32]".into(),
+        },
+    );
+    for scheme in [SymmetricQuantization::Q4, SymmetricQuantization::Q8] {
+        for group in [32, 64, 128] {
+            for shape in [[0, group], [2, 0], [3, group * 2]] {
+                let metadata = QuantizedTensorMetadata::new(
+                    &shape,
+                    SourceFloatDType::F32,
+                    config(scheme, group),
+                )
+                .unwrap();
+                metadata.validate_burn_qfloat_layout().unwrap();
+                assert_eq!(metadata.host_shape().unwrap(), shape);
+                let elements = shape[0] * shape[1];
+                assert_eq!(
+                    metadata.host_counts().unwrap(),
+                    (
+                        elements,
+                        elements / group,
+                        if scheme == SymmetricQuantization::Q4 {
+                            elements / 2
+                        } else {
+                            elements
+                        }
+                    )
+                );
+                assert_eq!(
+                    serde_json::from_str::<QuantizedTensorMetadata>(
+                        &serde_json::to_string(&metadata).unwrap()
+                    )
+                    .unwrap(),
+                    metadata
+                );
+            }
+        }
+    }
+}
+
 proptest! {
     #[test]
     fn finite_inputs_round_trip_within_half_a_quantization_step(

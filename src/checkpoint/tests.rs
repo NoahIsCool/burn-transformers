@@ -1877,6 +1877,391 @@ fn explicit_operation_push_and_report_runtime_records_are_available() {
     assert_eq!(plan.report.quantized.len(), 1);
 }
 
+/// Requires the exact planner error variant and complete diagnostic context.
+#[track_caller]
+fn assert_mapping_contract_error(actual: CheckpointError, expected: CheckpointError) {
+    assert_eq!(
+        core::mem::discriminant(&actual),
+        core::mem::discriminant(&expected)
+    );
+    assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+}
+
+/// Discovers a real indexed alias before exercising public-manifest revalidation.
+fn indexed_mapping_contract_fixture() -> (TempDir, CheckpointManifest, LoadOptions) {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "part.safetensors",
+        &[FixtureTensor::new("shared.weight", TensorDType::F16, [1])],
+    );
+    write_index(
+        temp.path(),
+        &[
+            ("shared.weight", "part.safetensors"),
+            ("alias.weight", "part.safetensors"),
+        ],
+        Some(4),
+    );
+    let options = LoadOptions {
+        index_aliases: vec![IndexTensorAlias::new("alias.weight", "shared.weight")],
+        ..LoadOptions::default()
+    };
+    let manifest = discover_checkpoint(temp.path(), &options).unwrap();
+    assert!(plan_mapping_contract_fixture(&manifest, &options).is_ok());
+    (temp, manifest, options)
+}
+
+/// Plans one owner while consuming its authorized index-only alias.
+fn plan_mapping_contract_fixture(
+    manifest: &CheckpointManifest,
+    options: &LoadOptions,
+) -> Result<LoadPlan> {
+    let expected = [ExpectedTensor::new("shared.weight", [1])];
+    build_load_plan(
+        manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        options,
+    )
+}
+
+/// Public manifest edits cannot detach an alias from its proven shard inventory.
+#[test]
+fn mapping_contract_revalidates_alias_shard_provenance() {
+    let (_temp, manifest, options) = indexed_mapping_contract_fixture();
+    let mut empty_shard = manifest.clone();
+    empty_shard.index_aliases[0].shard.clear();
+    let mut absent_shard = manifest.clone();
+    absent_shard.shards.clear();
+    let mut missing_inventory = manifest.clone();
+    missing_inventory.shards[0].tensors.clear();
+    let mut mismatched_inventory = manifest.clone();
+    mismatched_inventory.shards[0]
+        .tensors
+        .get_mut("shared.weight")
+        .unwrap()
+        .shape = vec![2];
+    for (edited, reason) in [
+        (empty_shard, "resolved shard provenance must not be empty"),
+        (
+            absent_shard,
+            "resolved shard `part.safetensors` is absent from the manifest",
+        ),
+        (
+            missing_inventory,
+            "storage key `shared.weight` does not match its resolved shard inventory",
+        ),
+        (
+            mismatched_inventory,
+            "storage key `shared.weight` does not match its resolved shard inventory",
+        ),
+    ] {
+        let before = edited.clone();
+        assert_mapping_contract_error(
+            plan_mapping_contract_fixture(&edited, &options).unwrap_err(),
+            CheckpointError::InvalidIndexAlias {
+                alias: "alias.weight".into(),
+                reason: reason.into(),
+            },
+        );
+        assert_eq!(edited, before);
+    }
+    assert!(
+        plan_mapping_contract_fixture(&manifest, &options)
+            .unwrap()
+            .report
+            .is_strictly_valid()
+    );
+}
+
+/// Index-only metadata cannot survive a public change to single-file selection.
+#[test]
+fn mapping_contract_rejects_index_metadata_on_unsharded_sources() {
+    let (_temp, mut manifest, options) = indexed_mapping_contract_fixture();
+    manifest.source = ArtifactSource::Single {
+        relative_path: "part.safetensors".into(),
+    };
+    assert_mapping_contract_error(
+        plan_mapping_contract_fixture(&manifest, &options).unwrap_err(),
+        CheckpointError::ManifestAccountingMismatch {
+            reason: "an unsharded manifest cannot contain index-only aliases".into(),
+        },
+    );
+    manifest.index_aliases.clear();
+    assert_mapping_contract_error(
+        plan_mapping_contract_fixture(&manifest, &options).unwrap_err(),
+        CheckpointError::ManifestAccountingMismatch {
+            reason: "an unsharded manifest cannot record index alias accounting".into(),
+        },
+    );
+}
+
+/// Accounting provenance is rechecked before malformed architecture expectations.
+#[test]
+fn mapping_contract_revalidates_accounting_before_target_shapes() {
+    let (_temp, manifest, options) = indexed_mapping_contract_fixture();
+    let mut wrong_total = manifest.clone();
+    wrong_total.tensor_bytes = 3;
+    let mut absent_convention = manifest.clone();
+    absent_convention.index_alias_size_accounting = None;
+    for (edited, reason) in [
+        (
+            wrong_total,
+            "manifest records 3 physical tensor bytes, inventory sums to 2",
+        ),
+        (
+            absent_convention,
+            "an indexed manifest is missing its alias-size convention",
+        ),
+    ] {
+        let error = build_load_plan(
+            &edited,
+            &[ExpectedTensor::new("", [u64::MAX, 2])],
+            &MappingPlan::new(),
+            &options,
+        )
+        .unwrap_err();
+        assert_mapping_contract_error(
+            error,
+            CheckpointError::ManifestAccountingMismatch {
+                reason: reason.into(),
+            },
+        );
+    }
+}
+
+/// Mutable physical-alias inventories cannot conceal a changed payload length.
+#[test]
+fn mapping_contract_equivalence_rechecks_physical_alias_lengths() {
+    let (_temp, mut manifest) = fixture_manifest(&[
+        FixtureTensor::new("shared.weight", TensorDType::F16, [1]),
+        FixtureTensor::new("alias.weight", TensorDType::F16, [1]),
+    ]);
+    let options = LoadOptions {
+        index_aliases: vec![IndexTensorAlias::new("alias.weight", "shared.weight")],
+        ..LoadOptions::default()
+    };
+    assert_eq!(
+        plan_mapping_contract_fixture(&manifest, &options)
+            .unwrap()
+            .equivalences
+            .len(),
+        1
+    );
+    manifest.tensors.get_mut("alias.weight").unwrap().byte_len = 1;
+    assert_mapping_contract_error(
+        plan_mapping_contract_fixture(&manifest, &options).unwrap_err(),
+        CheckpointError::TensorEquivalenceMismatch {
+            alias: "alias.weight".into(),
+            owner: "shared.weight".into(),
+            reason: "payload length 1 differs from owner length 2".into(),
+        },
+    );
+}
+
+/// Later split destinations preserve shape, dtype, and name failure context.
+#[test]
+fn mapping_contract_split_validates_each_target_before_publishing_a_plan() {
+    let (_temp, manifest) =
+        fixture_manifest(&[FixtureTensor::new("fused", TensorDType::BF16, [2, 3])]);
+    let mut mapping = MappingPlan::new();
+    mapping.split("fused", 0, [("left".into(), 1), ("right".into(), 1)]);
+    let options = LoadOptions {
+        dtype_policy: DTypePolicy::Preserve,
+        ..LoadOptions::default()
+    };
+    let left = ExpectedTensor::new("left", [1, 3]);
+    for (expected, error) in [
+        (
+            vec![left.clone()],
+            CheckpointError::UnknownMappingTarget {
+                tensor: "right".into(),
+            },
+        ),
+        (
+            vec![left.clone(), ExpectedTensor::new("right", [1, 2])],
+            CheckpointError::ShapeMismatch {
+                tensor: "right".into(),
+                expected: vec![1, 2],
+                observed: vec![1, 3],
+            },
+        ),
+        (
+            vec![
+                left.clone(),
+                ExpectedTensor::new("right", [1, 3]).with_dtype(TensorDType::F16),
+            ],
+            CheckpointError::DTypeMismatch {
+                tensor: "right".into(),
+                observed: TensorDType::BF16,
+                expected: TensorDType::F16,
+            },
+        ),
+    ] {
+        assert_mapping_contract_error(
+            build_load_plan(&manifest, &expected, &mapping, &options).unwrap_err(),
+            error,
+        );
+    }
+    let mut collision = MappingPlan::new();
+    collision.split("fused", 0, [("left".into(), 1), ("left".into(), 1)]);
+    assert_mapping_contract_error(
+        build_load_plan(&manifest, std::slice::from_ref(&left), &collision, &options).unwrap_err(),
+        CheckpointError::MappingTargetCollision {
+            tensor: "left".into(),
+        },
+    );
+    let plan = build_load_plan(
+        &manifest,
+        &[left, ExpectedTensor::new("right", [1, 3])],
+        &mapping,
+        &options,
+    )
+    .unwrap();
+    assert_eq!(
+        plan.tensors[1].transform,
+        PlannedTransform::Slice {
+            axis: 0,
+            start: 1,
+            length: 1
+        }
+    );
+    assert_eq!(plan.memory.target_parameter_bytes, 12);
+}
+
+/// Concatenation checks its produced shape and dtype without losing source order.
+#[test]
+fn mapping_contract_concatenation_validates_destination_and_preserves_order() {
+    let (_temp, manifest) = fixture_manifest(&[
+        FixtureTensor::new("a", TensorDType::F16, [1, 3]),
+        FixtureTensor::new("z", TensorDType::F16, [1, 3]),
+    ]);
+    let mut mapping = MappingPlan::new();
+    mapping.concatenate(["z".into(), "a".into()], "joined", 0);
+    let options = LoadOptions {
+        dtype_policy: DTypePolicy::Preserve,
+        ..LoadOptions::default()
+    };
+    for (expected, error) in [
+        (
+            vec![],
+            CheckpointError::UnknownMappingTarget {
+                tensor: "joined".into(),
+            },
+        ),
+        (
+            vec![ExpectedTensor::new("joined", [3, 2])],
+            CheckpointError::ShapeMismatch {
+                tensor: "joined".into(),
+                expected: vec![3, 2],
+                observed: vec![2, 3],
+            },
+        ),
+        (
+            vec![ExpectedTensor::new("joined", [2, 3]).with_dtype(TensorDType::F32)],
+            CheckpointError::DTypeMismatch {
+                tensor: "joined".into(),
+                observed: TensorDType::F16,
+                expected: TensorDType::F32,
+            },
+        ),
+    ] {
+        assert_mapping_contract_error(
+            build_load_plan(&manifest, &expected, &mapping, &options).unwrap_err(),
+            error,
+        );
+    }
+    let plan = build_load_plan(
+        &manifest,
+        &[ExpectedTensor::new("joined", [2, 3])],
+        &mapping,
+        &options,
+    )
+    .unwrap();
+    assert_eq!(
+        plan.tensors[0]
+            .sources
+            .iter()
+            .map(|source| source.name.as_str())
+            .collect::<Vec<_>>(),
+        ["z", "a"]
+    );
+    assert_eq!(
+        plan.tensors[0].transform,
+        PlannedTransform::Concatenate { axis: 0 }
+    );
+}
+
+/// Empty SafeTensors axes expose dimension-sum overflow without large payloads.
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn mapping_contract_empty_tensor_concatenation_checks_dimension_overflow() {
+    let (_temp, manifest) = fixture_manifest(&[
+        FixtureTensor::new("wide", TensorDType::F16, [0, u64::MAX]),
+        FixtureTensor::new("one", TensorDType::F16, [0, 1]),
+    ]);
+    assert_eq!(manifest.tensor_bytes, 0);
+    let mut mapping = MappingPlan::new();
+    mapping.concatenate(["wide".into(), "one".into()], "joined", 1);
+    assert_mapping_contract_error(
+        build_load_plan(
+            &manifest,
+            &[ExpectedTensor::new("joined", [0, 0])],
+            &mapping,
+            &LoadOptions::default(),
+        )
+        .unwrap_err(),
+        CheckpointError::ArithmeticOverflow {
+            context: "summing concatenated tensor dimensions",
+        },
+    );
+}
+
+/// Per-target precision overrides survive splitting and subsequent tied aliases.
+#[test]
+fn mapping_contract_split_casts_respect_mixed_precision_and_alias_storage() {
+    let (_temp, manifest) =
+        fixture_manifest(&[FixtureTensor::new("fused", TensorDType::BF16, [2, 2])]);
+    let expected = [
+        ExpectedTensor::new("half", [1, 2]).with_dtype(TensorDType::F16),
+        ExpectedTensor::new("precise", [1, 2]).with_dtype(TensorDType::F32),
+        ExpectedTensor::new("tied", [1, 2]).with_dtype(TensorDType::F32),
+    ];
+    let mut mapping = MappingPlan::new();
+    mapping
+        .split("fused", 0, [("half".into(), 1), ("precise".into(), 1)])
+        .alias("precise", "tied");
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &mapping,
+        &LoadOptions {
+            dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+            ..LoadOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        plan.tensors
+            .iter()
+            .map(|tensor| tensor.dtype)
+            .collect::<Vec<_>>(),
+        [TensorDType::F16, TensorDType::F32]
+    );
+    assert_eq!(plan.aliases[0].dtype, TensorDType::F32);
+    assert_eq!(
+        plan.aliases[0].transform,
+        PlannedTransform::Alias {
+            source_target: "precise".into()
+        }
+    );
+    assert_eq!(plan.memory.target_parameter_bytes, 12);
+    assert_eq!(plan.memory.logical_model_bytes, 20);
+    assert_eq!(plan.report.dtype_converted.len(), 2);
+    assert_eq!(plan.report.aliased.len(), 1);
+}
+
 proptest! {
     #[test]
     fn dtype_storage_bytes_scale_linearly(elements in 0_u64..1_000_000) {
