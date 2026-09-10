@@ -1412,8 +1412,10 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   incorrectly declared AC power while the host probe reported battery power.
   A sandboxed probe reported AC; differing probe contexts do not establish a
   physical power transition.
-  A stable-power performance run remains pending; these observations do not
-  replace the older model-loop baseline.
+  A [replacement host-AC-endpoint run](acceptance/measurements/small-model-performance-20260910/manifest.json)
+  now validates all thirteen calls and measures a 1.751402479 s median for 32
+  tokens. Continuous power monitoring was not performed. This is a separate
+  public-coordinator timing boundary, not a replacement for the model-loop baseline.
 - **Small-model release checks distinguish correctness from performance.**
   The same refresh passes both Qwen public-API tests, all seven FLAN Flex/F32
   oracle comparisons, the genuinely populated Q4 32K history (including atomic
@@ -1434,6 +1436,23 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   kernel lifetime high-water and analytical
   cache bytes remain distinct. Instrumentation is excluded from comparable
   timing series and adds no runtime networking or dependencies.
+  The [refreshed source-bound series](acceptance/measurements/small-model-performance-20260910/manifest.json)
+  repeats all 93 phases per model without errors and retains signed above-idle
+  deltas plus raw-trace hashes; kernel lifetime physical-footprint high-water
+  observations are 2,977,486,656 bytes for Qwen and 771,181,504 for FLAN.
+- **Production tests and performance comparisons need explicit denominators.**
+  After the remaining test modules were separated without changing production
+  code, the [native-bound v2 diagnostic](acceptance/measurements/whole-test-file-coverage-v2-20260910.json)
+  removes 78 verified test-only files: coverage is 86.1098% crate-wide and
+  93.6446% shared/core, below the unchanged 90%/95% targets. All 1,013 tests pass,
+  but the higher test-inclusive aggregate does not close the gap; production-only
+  qualification remains false. Targeted dispatch/cache/integrity tests are next.
+  Qwen's repeated timing remains about 25% slower than its historical baseline;
+  the exact historical source rebuilt on the same host now shows the same drop.
+  Paired rebuilt-old/current medians differ by at most 1.247%, with three p95
+  alerts. This narrows attribution but neither explains nor waives the historical
+  regression. FLAN now also has a first Flex CPU timing baseline. These
+  measurements do not promote either checkpoint or the experimental families.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

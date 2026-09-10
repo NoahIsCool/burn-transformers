@@ -1,0 +1,374 @@
+{
+  "schema_version": 1,
+  "advertised_supported": false,
+  "source_commit": "3d5220a3cc2a0ac91ffc70d1b4089b8fe4d0fb58",
+  "scope": "captured configuration; whole test files only; inline tests and generated or ambiguous ownership retained",
+  "policy": "whole_test_files_v1_no_inline_or_generated_exclusions",
+  "whole_test_file_exclusions_qualified": true,
+  "production_only_exclusions_qualified": false,
+  "production_only_measurement": false,
+  "release_gate_promotion": false,
+  "compiler_dependency_closure_verified": false,
+  "native_source_binding": {
+    "artifact_binding_verified": true,
+    "compiler_reported_inputs_verified": true,
+    "no_export_filter_verified": true,
+    "target_count": 16,
+    "llvm_object_count": 15,
+    "source_inventory_sha256": "c1cd56ad456a452cbf0d9dfb7a67612ed8ce4089be16f839d744791a8f8e4306",
+    "library_inputs": [
+      {
+        "test": false,
+        "all_inputs": 101,
+        "rust_inputs": 101
+      },
+      {
+        "test": true,
+        "all_inputs": 153,
+        "rust_inputs": 145
+      }
+    ],
+    "reviewed_tool_option_notice": {
+      "text": "warning: --disable-default-ignore-filename-regex option is unstable",
+      "count": 1
+    }
+  },
+  "legacy_native_aggregate": {
+    "crate": {
+      "lines": 68150,
+      "covered": 61503,
+      "percent": 90.24651504035216,
+      "minimum_percent": 90,
+      "meets_threshold": true
+    },
+    "shared": {
+      "lines": 33573,
+      "covered": 31953,
+      "percent": 95.17469395049594,
+      "minimum_percent": 95,
+      "meets_threshold": true
+    }
+  },
+  "physical_before_exclusions": {
+    "crate": {
+      "lines": 66174,
+      "covered": 60661,
+      "percent": 91.66893341795871,
+      "minimum_percent": 90,
+      "meets_threshold": true
+    },
+    "shared": {
+      "lines": 32753,
+      "covered": 31547,
+      "percent": 96.31789454401124,
+      "minimum_percent": 95,
+      "meets_threshold": true
+    }
+  },
+  "physical_whole_file_diagnostic": {
+    "crate": {
+      "lines": 52882,
+      "covered": 47635,
+      "percent": 90.07790930751484,
+      "minimum_percent": 90,
+      "meets_threshold": true
+    },
+    "shared": {
+      "lines": 23911,
+      "covered": 22780,
+      "percent": 95.269959432897,
+      "minimum_percent": 95,
+      "meets_threshold": true
+    }
+  },
+  "excluded_file_count": 39,
+  "reported_file_count": 133,
+  "excluded_files": [
+    {
+      "path": "src/architecture/types_tests.rs",
+      "source_sha256": "37051afd20bf0cc833bc8023ef73328259620b0e4133fe5cfc130d1258507ac8",
+      "mapped_lines": 48,
+      "covered_lines": 48
+    },
+    {
+      "path": "src/attention_tests.rs",
+      "source_sha256": "166c0c77a477cae4e26a0c60f039696f2e203e4245da54995ba31d36058de538",
+      "mapped_lines": 497,
+      "covered_lines": 496
+    },
+    {
+      "path": "src/cache/config_tests.rs",
+      "source_sha256": "b9d1c14f7e60a1764bee91ab47de3c8cd7dbd339d81ef3a3777301bfccb45d38",
+      "mapped_lines": 36,
+      "covered_lines": 36
+    },
+    {
+      "path": "src/cache/ring_tests.rs",
+      "source_sha256": "7873f00aafb207eb10d38d15011acd1c2e8f39a69800feeb0e263ac7c12c7bfc",
+      "mapped_lines": 183,
+      "covered_lines": 183
+    },
+    {
+      "path": "src/cache/state_tests.rs",
+      "source_sha256": "b97e5462d397e539d165455da4ecf6d468b048a351244bba1a664df2a76958bf",
+      "mapped_lines": 141,
+      "covered_lines": 141
+    },
+    {
+      "path": "src/cache/tensor/tests.rs",
+      "source_sha256": "f906d37b2fe27c01702d9b8ab70a4b241052e62415218131f8bb4da64f65fa53",
+      "mapped_lines": 1457,
+      "covered_lines": 1457
+    },
+    {
+      "path": "src/cache/transaction_tests.rs",
+      "source_sha256": "5aee826b3099b3eacb957438b4ed607c23b2031fcfc42fa7a7c145de70228f8d",
+      "mapped_lines": 115,
+      "covered_lines": 115
+    },
+    {
+      "path": "src/checkpoint/dtype_tests.rs",
+      "source_sha256": "3f9699cae76b9a51508a4ba75be87bd157201bb0f65e0fcec33684ecee5fbb24",
+      "mapped_lines": 40,
+      "covered_lines": 40
+    },
+    {
+      "path": "src/checkpoint/quantization/burnpack_tests.rs",
+      "source_sha256": "2503325cc88b1d79074a24f90929ae9e522434a042fb6ea46f5d3b7198c6c571",
+      "mapped_lines": 831,
+      "covered_lines": 829
+    },
+    {
+      "path": "src/checkpoint/quantization/provenance_tests.rs",
+      "source_sha256": "8bd6c6cb86a4bbed55fb27897b564c32840fd99f525995e2ca1b6230a00c3d2d",
+      "mapped_lines": 454,
+      "covered_lines": 450
+    },
+    {
+      "path": "src/checkpoint/report_tests.rs",
+      "source_sha256": "07ea1b36c8c27780c54241cb621d85c8edcd79b51c9320c7fb68101bf4c2677d",
+      "mapped_lines": 88,
+      "covered_lines": 88
+    },
+    {
+      "path": "src/delta_net_tests.rs",
+      "source_sha256": "f72a15ef4ef194710c9f6d3d6799efff0b6b2bddd17cc37922916b33ff3082ff",
+      "mapped_lines": 325,
+      "covered_lines": 324
+    },
+    {
+      "path": "src/error_tests.rs",
+      "source_sha256": "af2a3739a86544d41457cd9857b1fe4011e02066d3432d6e99d4467f6ed0ace5",
+      "mapped_lines": 10,
+      "covered_lines": 10
+    },
+    {
+      "path": "src/feed_forward_tests.rs",
+      "source_sha256": "79f100cd2d029e6359f848b0f0ed1982327fea188c2b96a27cec18e4d9bee7ad",
+      "mapped_lines": 65,
+      "covered_lines": 65
+    },
+    {
+      "path": "src/generation/causal_tests.rs",
+      "source_sha256": "d22abf67507a4b949ab76e569721291755d9d2f9ab9bf806e450e51deaaebc69",
+      "mapped_lines": 642,
+      "covered_lines": 634
+    },
+    {
+      "path": "src/generation/seq2seq_tests.rs",
+      "source_sha256": "a1967cdb901894b4c3fb1957dc3f974d04bb0f3c4b06cfbfb5bd033d531d331a",
+      "mapped_lines": 996,
+      "covered_lines": 938
+    },
+    {
+      "path": "src/generation_tests.rs",
+      "source_sha256": "a66bdbbe74a0c6a0796ece7ea0bd850b820cc65e6411704483d09bdc0ed58687",
+      "mapped_lines": 434,
+      "covered_lines": 434
+    },
+    {
+      "path": "src/loaded_tests.rs",
+      "source_sha256": "a8c340a63e9d2fd26e97247012d695a0b4f2e51e006d14de7efe9b871e2ae57b",
+      "mapped_lines": 659,
+      "covered_lines": 659
+    },
+    {
+      "path": "src/models/custom/tests.rs",
+      "source_sha256": "70f30927f2dcb85bb9ff32c2a00ce2e677438eedba002e964030b15fe8f9b15e",
+      "mapped_lines": 775,
+      "covered_lines": 774
+    },
+    {
+      "path": "src/models/qwen3_5/checkpoint_tests.rs",
+      "source_sha256": "fbcfa16017958a359195f84a0ad40d6da48ce21681938cf7ca8f195980655187",
+      "mapped_lines": 266,
+      "covered_lines": 266
+    },
+    {
+      "path": "src/models/qwen3_5/load_tests.rs",
+      "source_sha256": "98e36c30267478517c5263fe008d98ecf3e2d25432c0f25d37f01cb93b675e7f",
+      "mapped_lines": 235,
+      "covered_lines": 235
+    },
+    {
+      "path": "src/models/qwen3_5/model/decode_tests.rs",
+      "source_sha256": "818917b17cf7ebb60f711236f8673c5909229ea55763803a1f5afe1e849d0a1c",
+      "mapped_lines": 946,
+      "covered_lines": 946
+    },
+    {
+      "path": "src/models/qwen3_5/model/speculative_tests.rs",
+      "source_sha256": "113615fb62304efe847c393add14ea789e15077d5ae102fae11fa329a5db0f89",
+      "mapped_lines": 496,
+      "covered_lines": 496
+    },
+    {
+      "path": "src/models/qwen3_5/model_tests.rs",
+      "source_sha256": "2230b788b04b1b9dc2dbca07de6904d25c5d179f21d01e6b30aeb5c5dbb23947",
+      "mapped_lines": 269,
+      "covered_lines": 269
+    },
+    {
+      "path": "src/models/qwen3_5_tests.rs",
+      "source_sha256": "f1b80db2109bebc1df2651fd624fffb97a716d5d3197f000073ecd1051f797b7",
+      "mapped_lines": 86,
+      "covered_lines": 86
+    },
+    {
+      "path": "src/models/t5/checkpoint_tests.rs",
+      "source_sha256": "ce195fbd22c6757e47d21856251aba502683808a48c1baf9325a6056c99eb8f5",
+      "mapped_lines": 352,
+      "covered_lines": 352
+    },
+    {
+      "path": "src/models/t5/generation_tests.rs",
+      "source_sha256": "c9ddab1d1ee1d3a383721d94f243793b79531c2b44e085d0d8d9b8efc3ab6f1c",
+      "mapped_lines": 93,
+      "covered_lines": 51
+    },
+    {
+      "path": "src/models/t5/load_tests.rs",
+      "source_sha256": "8cafccceec61cb08d0856ae54d61decdc5f9c972c70903a439b8aaa57218e3a0",
+      "mapped_lines": 451,
+      "covered_lines": 303
+    },
+    {
+      "path": "src/models/t5/model_tests.rs",
+      "source_sha256": "221002d8591929f718cbe9612f597c298e24e76077799f234ce9520216b0743a",
+      "mapped_lines": 422,
+      "covered_lines": 422
+    },
+    {
+      "path": "src/models/t5_tests.rs",
+      "source_sha256": "ba1bc8f13201935160eb967fb7028c3a98d716094190f69644bafa78b27a2714",
+      "mapped_lines": 59,
+      "covered_lines": 59
+    },
+    {
+      "path": "src/moe_tests.rs",
+      "source_sha256": "b0bb62729fde77346b203adc99bae711f2e7fe1ff239d2f9c69333b561f56eba",
+      "mapped_lines": 398,
+      "covered_lines": 397
+    },
+    {
+      "path": "src/normalization_tests.rs",
+      "source_sha256": "84e366ab7c39c2bcd60a0c25917dbcadc11927ccc825c69ceae4b6c9fda923f1",
+      "mapped_lines": 140,
+      "covered_lines": 140
+    },
+    {
+      "path": "src/operations_tests.rs",
+      "source_sha256": "77a8bf4e77ce1bbdb0f768dbe235bbbcd1b7db95fe80bba7606060a84e775fa0",
+      "mapped_lines": 101,
+      "covered_lines": 101
+    },
+    {
+      "path": "src/position/ids_tests.rs",
+      "source_sha256": "1ddbeb572efcd462ff9b242f11a581a2ef797336b4a40589d05f10c2380581b6",
+      "mapped_lines": 88,
+      "covered_lines": 88
+    },
+    {
+      "path": "src/position/rope_tests.rs",
+      "source_sha256": "57b60e5cbef85cbd60aea1cf7ce8b18d655d193814da00baef35020c355f5b8c",
+      "mapped_lines": 172,
+      "covered_lines": 172
+    },
+    {
+      "path": "src/position/t5_bias_tests.rs",
+      "source_sha256": "467649c8c29e4bf910ed8e68bbf0180b9f670b4cd6a794f1859ba0be328185f8",
+      "mapped_lines": 86,
+      "covered_lines": 86
+    },
+    {
+      "path": "src/position/t5_tests.rs",
+      "source_sha256": "140e0837fcc89c54ebb00df1c826cbbbfcb852c082d17a880b00ea9d4b401853",
+      "mapped_lines": 132,
+      "covered_lines": 132
+    },
+    {
+      "path": "src/position/tensor_tests.rs",
+      "source_sha256": "c82e8536a9a28f21ebd7b5527ed0e674cec519c4e20dc432754c929f7eff0eb0",
+      "mapped_lines": 103,
+      "covered_lines": 103
+    },
+    {
+      "path": "src/tokenization_tests.rs",
+      "source_sha256": "825782bc3c7de1d624a921d300faeb1b6263ca7a4ee761a16ff0b2f6fa42a011",
+      "mapped_lines": 601,
+      "covered_lines": 601
+    }
+  ],
+  "native_report": {
+    "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T032338.964466Z/llvm-export/native-coverage.json",
+    "identity": {
+      "sha256": "c088c3f9bcf9d84bf58730d351d3dab2c3dab84832195d1e18a7d5ca3f76787b",
+      "bytes": 82025591,
+      "lines": 1
+    }
+  },
+  "retained_run_evidence": {
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T032338.964466Z/results.json": {
+      "sha256": "3356bb92c48983e6b908745a4fc88af9f964a3c325c310fd953523cc469af5d0",
+      "bytes": 2367,
+      "lines": 76
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T032338.964466Z/00-coverage.log": {
+      "sha256": "4ce1c58cdb41f601f4316af3186bc8827e94b71c16995d194d54d87611cbeac4",
+      "bytes": 101624,
+      "lines": 1138
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T032338.964466Z/compiler-capture-setup.json": {
+      "sha256": "2afc0d96aeacef8e0a1e1957bb95afe77ecd93ed77ad4c4941e8857f5c078e2b",
+      "bytes": 5312,
+      "lines": 137
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T032338.964466Z/compiler-binding.json": {
+      "sha256": "0110a267e31e23d0dde3b13acbafb3bc88944f5b90e58f632a3e2865840c846b",
+      "bytes": 21409,
+      "lines": 543
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T032338.964466Z/coverage-inputs-before.json": {
+      "sha256": "bf201e752cba5c6d127321d26822cbda43aff4db568c0f78a5275239aec303ef",
+      "bytes": 64528,
+      "lines": 1695
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T032338.964466Z/coverage-inputs-after.json": {
+      "sha256": "bf201e752cba5c6d127321d26822cbda43aff4db568c0f78a5275239aec303ef",
+      "bytes": 64528,
+      "lines": 1695
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T032338.964466Z/coverage.json": {
+      "sha256": "a0516634e2ebc4e4b68df5eefe4317698989cc0a5c389d2ba24decfb9b3d2c2c",
+      "bytes": 82042505,
+      "lines": 1
+    }
+  },
+  "local_evidence_directory": "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T032338.964466Z",
+  "limitations": [
+    "This v1 whole-file policy retains inline tests and macro-bearing test files. Its ratio is not a lower bound on production-only coverage.",
+    "The source-bound native run passed 1,013 tests with 29 explicit ignores; no checkpoint inference was included in the coverage gate.",
+    "Raw profiles and executable objects live in the shared llvm-cov target and may be replaced by future runs; source captures, dep-info and native exports are retained in this run directory.",
+    "The diagnostic was independently reauthenticated against the unchanged source and original coverage log before subsequent work. This is local reproducibility evidence, not adversarial process attestation."
+  ]
+}

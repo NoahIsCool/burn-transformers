@@ -1,0 +1,1444 @@
+{
+  "benchmark": {
+    "artifact_authentication_seconds_separate_from_load": 4.051211667,
+    "benchmark": "qwen35_08b_f16_baseline",
+    "cold_first_token": {
+      "includes_cache_allocation": false,
+      "includes_lazy_kernel_compilation": true,
+      "includes_token_selection_and_readback": true,
+      "minimum_cached_reference_cosine": 0.9999978151215553,
+      "minimum_teacher_reference_cosine": 0.999997879365516,
+      "prompt_reference_cosine": 0.9999986125515824,
+      "reference_cached_decisions": 32,
+      "seconds": 0.16752,
+      "source_token_ids": [
+        248045,
+        846,
+        198,
+        814,
+        20139,
+        3069,
+        279,
+        15127,
+        2222,
+        303,
+        2943,
+        4434,
+        22157,
+        13,
+        248046,
+        198,
+        248045,
+        74455,
+        198,
+        248068,
+        271,
+        248069,
+        271
+      ],
+      "token_ids": [
+        760,
+        8964,
+        579,
+        7772,
+        369,
+        82951,
+        506,
+        449,
+        8937,
+        314,
+        12805,
+        220,
+        17,
+        18,
+        13,
+        20,
+        11995,
+        8410,
+        310,
+        1141,
+        62409,
+        10709,
+        11,
+        13969,
+        279,
+        11247,
+        310,
+        381,
+        11784,
+        310,
+        279,
+        7806
+      ],
+      "tokens_u32le_sha256": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
+    },
+    "memory": {
+      "boundary_snapshots": [
+        {
+          "is_peak": false,
+          "measurement": "ps RSS boundary snapshot",
+          "phase": "before_load",
+          "probe": {
+            "error": null,
+            "value": "131520"
+          },
+          "resident_bytes": 134676480
+        },
+        {
+          "is_peak": false,
+          "measurement": "ps RSS boundary snapshot",
+          "phase": "after_load",
+          "probe": {
+            "error": null,
+            "value": "2101280"
+          },
+          "resident_bytes": 2151710720
+        },
+        {
+          "is_peak": false,
+          "measurement": "ps RSS boundary snapshot",
+          "phase": "after_cold_and_reference",
+          "probe": {
+            "error": null,
+            "value": "1929152"
+          },
+          "resident_bytes": 1975451648
+        },
+        {
+          "is_peak": false,
+          "measurement": "ps RSS boundary snapshot",
+          "phase": "after_source_32",
+          "probe": {
+            "error": null,
+            "value": "1957488"
+          },
+          "resident_bytes": 2004467712
+        },
+        {
+          "is_peak": false,
+          "measurement": "ps RSS boundary snapshot",
+          "phase": "after_source_128",
+          "probe": {
+            "error": null,
+            "value": "1965200"
+          },
+          "resident_bytes": 2012364800
+        },
+        {
+          "is_peak": false,
+          "measurement": "ps RSS boundary snapshot",
+          "phase": "after_source_512",
+          "probe": {
+            "error": null,
+            "value": "1982576"
+          },
+          "resident_bytes": 2030157824
+        },
+        {
+          "is_peak": false,
+          "measurement": "ps RSS boundary snapshot",
+          "phase": "after_measured_series",
+          "probe": {
+            "error": null,
+            "value": "1982592"
+          },
+          "resident_bytes": 2030174208
+        }
+      ],
+      "external_high_water_evidence": "supervise the already-built executable; snapshots are not peaks",
+      "phase_peak_device_bytes": null,
+      "phase_peak_host_bytes": null,
+      "phase_peak_unified_bytes": null
+    },
+    "natural_greedy": {
+      "cache_allocation_included": true,
+      "eos_token_ids": [
+        248044
+      ],
+      "finish_reason": "length",
+      "max_new_tokens": 32,
+      "mode": "greedy_model_api_loop",
+      "source_token_ids": [
+        248045,
+        846,
+        198,
+        814,
+        20139,
+        3069,
+        279,
+        15127,
+        2222,
+        303,
+        2943,
+        4434,
+        22157,
+        13,
+        248046,
+        198,
+        248045,
+        74455,
+        198,
+        248068,
+        271,
+        248069,
+        271
+      ],
+      "source_tokens_u32le_sha256": "ef1e3f71284b0c8404493d09e633b957500e2bc0f60dbfeefd7bff7f71c75684",
+      "token_ids": [
+        760,
+        8964,
+        579,
+        7772,
+        369,
+        82951,
+        506,
+        449,
+        8937,
+        314,
+        12805,
+        220,
+        17,
+        18,
+        13,
+        20,
+        11995,
+        8410,
+        310,
+        1141,
+        62409,
+        10709,
+        11,
+        13969,
+        279,
+        11247,
+        310,
+        381,
+        11784,
+        310,
+        279,
+        7806
+      ],
+      "tokens_u32le_sha256": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
+      "total_time": {
+        "maximum_seconds": 1.468549417,
+        "median_seconds": 1.420816125,
+        "minimum_seconds": 1.414339542,
+        "p95_seconds": 1.468549417,
+        "samples_seconds": [
+          1.416228125,
+          1.41635175,
+          1.468081,
+          1.414339542,
+          1.418602917,
+          1.439088458,
+          1.4230293330000001,
+          1.4424109999999999,
+          1.468549417,
+          1.41848475
+        ],
+        "tokens_per_second": null,
+        "valid_tokens_per_sample": null
+      }
+    },
+    "post_run_artifact_authentication_seconds": 3.840784541,
+    "process_memory_instrumentation_enabled": false,
+    "protocol": {
+      "decode_mode": "teacher_forced_with_greedy_predictions",
+      "decode_steps": 128,
+      "forced_decode_token_ids": [
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964,
+        579,
+        760,
+        8964
+      ],
+      "forced_decode_tokens_u32le_sha256": "524b97fdc92ebacbc02fb7fb3f0f7f1fb9f2547fa114d0e9b66b932664c00797",
+      "maximum_total_context": 32768,
+      "measured_repetitions": 10,
+      "prefill_cache_allocation_included": false,
+      "seed": 0,
+      "synchronization": "Backend::sync at timing boundaries and every prefill chunk; readback included only in selection-inclusive intervals",
+      "tokenization_included": false,
+      "warmup_repetitions": 3
+    },
+    "provenance": {
+      "backend_name": "cubecl<wgpu<msl>>",
+      "backend_profile": "Metal/F16",
+      "benchmark_executable_sha256": "80071cbefd9ff20967630726ed94f140efec3defcba0f6b133c5671dbf456ff7",
+      "benchmark_source_sha256": "49b7e6481b50ef11d1b0afa49b21657ff4dbcaedf88fca181c0fd687624b713a",
+      "burn_version": "0.21.0",
+      "cargo_features": [
+        "std",
+        "metal",
+        "tokenizers",
+        "chat-templates"
+      ],
+      "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+      "checkpoint_artifacts": [
+        {
+          "bytes": 7755,
+          "relative_path": "chat_template.jinja",
+          "sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80"
+        },
+        {
+          "bytes": 2907,
+          "relative_path": "config.json",
+          "sha256": "b90b86f35c8e6925ef74ee04d0e758f0a845c83a42089ad82bbaa948de9b4204"
+        },
+        {
+          "bytes": 1746942600,
+          "relative_path": "model.safetensors-00001-of-00001.safetensors",
+          "sha256": "04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696"
+        },
+        {
+          "bytes": 50900,
+          "relative_path": "model.safetensors.index.json",
+          "sha256": "d8a08838a613b025eb7952ed9db11696213e57e76a375661ef5c12f9dd5dcf4e"
+        },
+        {
+          "bytes": 12807982,
+          "relative_path": "tokenizer.json",
+          "sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+        },
+        {
+          "bytes": 16709,
+          "relative_path": "tokenizer_config.json",
+          "sha256": "49e2b6e395f959f077f1e992b338919c0d4a9732fc6e613995e06557f843500c"
+        }
+      ],
+      "compiled_rustup_toolchain": "stable-aarch64-apple-darwin",
+      "crate_commit": {
+        "error": null,
+        "value": "3d5220a3cc2a0ac91ffc70d1b4089b8fe4d0fb58"
+      },
+      "crate_worktree_status": {
+        "error": null,
+        "value": ""
+      },
+      "environment": {
+        "accelerator": "Apple M3 Max, 30 GPU cores",
+        "accelerator_exclusive": true,
+        "command": "env 'TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17' 'TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance' 'TRANSFORMERS_FLAN_T5_SMALL_DIR=/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab' 'TRANSFORMERS_FLAN_T5_SMALL_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle' 'TRANSFORMERS_QWEN35_Q4_32K_BURNPACK=/Volumes/bag of holding/models/transformers-acceptance/qwen3.5-0.8b-q4-2fc06364-v2/qwen3.5-0.8b-q4.bpk' TRANSFORMERS_BENCH_METADATA_JSON=/private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/environment.json TRANSFORMERS_BENCH_OUTPUT_JSON=/private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/benchmark.json /usr/bin/time -l /Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-9ebf360b401eab26 qwen::qwen35_metal_baseline_benchmark --ignored --exact --nocapture --test-threads=1 > /private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/stdout.log 2> /private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/stderr.log",
+        "cpu": "Apple M3 Max",
+        "driver_runtime": "OS-provided Metal 3, macOS build 24G830",
+        "machine_model": "Mac15,11",
+        "operating_system": "macOS 15.7.9, build 24G830",
+        "other_workloads": "Agent compilers and other model-inference jobs paused. Ordinary desktop graphics remain active: Firefox and its GPU helper, ChatGPT/Codex, Discord, WindowServer and video/audio support. Accelerator reservation refers to model-inference jobs, not an otherwise idle physical GPU. Memory-instrumented runs are timing-incomparable to ordinary timing runs.",
+        "physical_memory_bytes": 103079215104,
+        "power_mode": "Observed AC power before run; pmset settings: Battery Power:\n Sleep On Power Button 1\n powermode            0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         2\n womp                 0\n networkoversleep     0\n sleep                1\n lessbright           1\n tcpkeepalive         1\n disksleep            10\nAC Power:\n Sleep On Power Button 1\n powermode            0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         10\n womp                 1\n networkoversleep     0\n sleep                0\n tcpkeepalive         1\n disksleep            10"
+      },
+      "metric_helper_sha256": "c5a7b8860ddea572eae4d10c47edf03e2709a9da02592029eaeee3c4bf74e4e3",
+      "parameter_dtype": "F16",
+      "profile": "release (debug assertions disabled)",
+      "public_generation_helper_sha256": "2a2a72b90a873258f537c9ecfda4f2e4fd1f09de1027f0048b92805a2f3e5abd",
+      "quantization": null,
+      "recurrent_matrix_dtype": "F32",
+      "reference_helper_sha256": "83fd59277d825b9721779a8f827d46fcfd9033641529bcbd6fcdbbc91639d5ba",
+      "reference_manifest_sha256": "1a1fb75e193f82c48ef0494f3d64066d32133f7654e5c485cb193adc54acd20a",
+      "reference_payloads": {
+        "cached": {
+          "bytes": 31784960,
+          "elements": 7946240,
+          "encoding": "ieee754-f32-little-endian",
+          "relative_path": "qwen3.5-0.8b-2fc06364-cached-logits-32x248320.f32le",
+          "sha256": "a100338b3b1c6f755b3ef3c1925c090fe9cf5b2a38b8ca2df42d57bc8b9ae4c9",
+          "shape": [
+            32,
+            248320
+          ]
+        },
+        "prompt": {
+          "bytes": 993280,
+          "elements": 248320,
+          "encoding": "ieee754-f32-little-endian",
+          "relative_path": "qwen3.5-0.8b-2fc06364-prompt-logits.f32le",
+          "sha256": "96c1291aebb1c36c15b42ad684a0a5bed5917c40808ad8cbbe82a03deb646df1",
+          "shape": [
+            248320
+          ]
+        },
+        "teacher": {
+          "bytes": 31784960,
+          "elements": 7946240,
+          "encoding": "ieee754-f32-little-endian",
+          "relative_path": "qwen3.5-0.8b-2fc06364-teacher-logits-32x248320.f32le",
+          "sha256": "ec7786b3f837c97b7ee13c16a9fc742333075a84bf3da126b81191ec4a190f03",
+          "shape": [
+            32,
+            248320
+          ]
+        }
+      },
+      "repository": "Qwen/Qwen3.5-0.8B",
+      "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+      "rustc": {
+        "error": null,
+        "value": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3"
+      }
+    },
+    "publishable_without_external_memory_and_full_acceptance_evidence": false,
+    "schema_version": 1,
+    "strict_load_report": {
+      "aliased": 1,
+      "allowlisted_ignored": 168,
+      "allowlisted_missing": 0,
+      "applied": 321,
+      "checkpoint_aliases": 0,
+      "dtype_converted": 320,
+      "equivalence_planned": 0,
+      "equivalence_verified": 0,
+      "memory": {
+        "artifact_bytes": 1746942600,
+        "checkpoint_tensor_bytes": 1746882752,
+        "largest_equivalence_pair_bytes": 0,
+        "largest_shard_bytes": 1746942600,
+        "largest_source_tensor_bytes": 508559360,
+        "largest_target_tensor_bytes": 508559360,
+        "logical_model_bytes": 2013345408,
+        "peak_host_staging_bytes": 2255501960,
+        "target_parameter_bytes": 1504786048
+      },
+      "missing": 0,
+      "quantized": 0,
+      "transformed": 320,
+      "unexpected": 0
+    },
+    "strict_load_seconds": 1.4129218749999999,
+    "timing_comparable_to_uninstrumented_series": true,
+    "warm_series": [
+      {
+        "batch_size": 1,
+        "cache": {
+          "allocator_overhead_included": false,
+          "analytical": {
+            "convolution_history_bytes": 663552,
+            "full_attention_layers": 6,
+            "kv_allocated_bytes": 1966080,
+            "kv_bytes_per_token": 12288,
+            "recurrent_layers": 18,
+            "recurrent_matrix_bytes": 18874368,
+            "total_tensor_payload_bytes": 21504000
+          },
+          "observed_convolution_history_bytes": 663552,
+          "observed_kv_bytes": 1966080,
+          "observed_recurrent_matrix_bytes": 18874368,
+          "temporary_working_tensors_included": false
+        },
+        "cache_capacity": 160,
+        "cache_window": null,
+        "decode_including_greedy_readback": {
+          "maximum_seconds": 5.882458375,
+          "median_seconds": 5.8152309165,
+          "minimum_seconds": 5.757638291,
+          "p95_seconds": 5.882458375,
+          "samples_seconds": [
+            5.821452666,
+            5.777506,
+            5.826979667,
+            5.809009167,
+            5.869649667,
+            5.838821084,
+            5.757638291,
+            5.763949792,
+            5.882458375,
+            5.766718042
+          ],
+          "tokens_per_second": [
+            21.987639055725683,
+            22.154888285706672,
+            21.966783362039834,
+            22.034738854802704,
+            21.80709365324375,
+            21.922233642465212,
+            22.231337491290837,
+            22.206994269390748,
+            21.75960998619051,
+            22.196334044382606
+          ],
+          "valid_tokens_per_sample": 128
+        },
+        "decode_model_only": {
+          "maximum_seconds": 4.829502669999999,
+          "median_seconds": 4.758459875,
+          "minimum_seconds": 4.722044667999998,
+          "p95_seconds": 4.829502669999999,
+          "samples_seconds": [
+            4.757178339000001,
+            4.736032965999999,
+            4.763589324999998,
+            4.7597414109999985,
+            4.815548994,
+            4.765740252999999,
+            4.722099658999996,
+            4.722044667999998,
+            4.829502669999999,
+            4.726858046999998
+          ],
+          "tokens_per_second": [
+            26.90670621923892,
+            27.026838900597305,
+            26.870494340945324,
+            26.892217233521478,
+            26.580562290921215,
+            26.858366844358528,
+            27.106585892578703,
+            27.106901564786313,
+            26.503764206429153,
+            27.0792984953796
+          ],
+          "valid_tokens_per_sample": 128
+        },
+        "decode_steps": 128,
+        "first_token_latency": {
+          "maximum_seconds": 0.096457916,
+          "median_seconds": 0.08421347900000001,
+          "minimum_seconds": 0.082963417,
+          "p95_seconds": 0.096457916,
+          "samples_seconds": [
+            0.082963417,
+            0.084586416,
+            0.084776833,
+            0.082993708,
+            0.096457916,
+            0.087509292,
+            0.085087542,
+            0.083840542,
+            0.083249875,
+            0.083621708
+          ],
+          "tokens_per_second": null,
+          "valid_tokens_per_sample": null
+        },
+        "padding": "none",
+        "per_repetition_prediction_hashes": [
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
+        ],
+        "predicted_tokens_u32le_sha256": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+        "prefill": {
+          "maximum_seconds": 0.086958875,
+          "median_seconds": 0.07565039600000001,
+          "minimum_seconds": 0.075064334,
+          "p95_seconds": 0.086958875,
+          "samples_seconds": [
+            0.075064334,
+            0.075230833,
+            0.076886375,
+            0.075095083,
+            0.086958875,
+            0.078046958,
+            0.075588959,
+            0.075945792,
+            0.075360917,
+            0.075711833
+          ],
+          "tokens_per_second": [
+            426.30099136029105,
+            425.35751265707773,
+            416.19857874688455,
+            426.1264349358266,
+            367.99004126950814,
+            410.0095739798084,
+            423.3422502881671,
+            421.35316726962304,
+            424.62328318006,
+            422.655201070089
+          ],
+          "valid_tokens_per_sample": 32
+        },
+        "prefill_chunk_size": 32,
+        "prefill_chunks": 1,
+        "source_length": 32,
+        "source_tokens_u32le_sha256": "e5ce64ce59495f45d333c6002c36dbb3cfb91b65b0bf0724668b674303675d15",
+        "valid_source_tokens": 32
+      },
+      {
+        "batch_size": 1,
+        "cache": {
+          "allocator_overhead_included": false,
+          "analytical": {
+            "convolution_history_bytes": 663552,
+            "full_attention_layers": 6,
+            "kv_allocated_bytes": 3145728,
+            "kv_bytes_per_token": 12288,
+            "recurrent_layers": 18,
+            "recurrent_matrix_bytes": 18874368,
+            "total_tensor_payload_bytes": 22683648
+          },
+          "observed_convolution_history_bytes": 663552,
+          "observed_kv_bytes": 3145728,
+          "observed_recurrent_matrix_bytes": 18874368,
+          "temporary_working_tensors_included": false
+        },
+        "cache_capacity": 256,
+        "cache_window": null,
+        "decode_including_greedy_readback": {
+          "maximum_seconds": 5.939980708,
+          "median_seconds": 5.7935767505,
+          "minimum_seconds": 5.742642583,
+          "p95_seconds": 5.939980708,
+          "samples_seconds": [
+            5.750397917,
+            5.742642583,
+            5.90299775,
+            5.770724792,
+            5.821660125,
+            5.939980708,
+            5.816428709,
+            5.751263959,
+            5.748886917,
+            5.856895959
+          ],
+          "tokens_per_second": [
+            22.259329153829757,
+            22.28938997159942,
+            21.683897812768098,
+            22.180922607407545,
+            21.98685551056624,
+            21.548891535558166,
+            22.006630942100315,
+            22.255977279515438,
+            22.26517965094981,
+            21.85457978014938
+          ],
+          "valid_tokens_per_sample": 128
+        },
+        "decode_model_only": {
+          "maximum_seconds": 4.890502290000001,
+          "median_seconds": 4.747253018999999,
+          "minimum_seconds": 4.710000079000001,
+          "p95_seconds": 4.890502290000001,
+          "samples_seconds": [
+            4.716787206999999,
+            4.710000079000001,
+            4.860194420999996,
+            4.734672951999999,
+            4.765139335000003,
+            4.890502290000001,
+            4.7598330859999995,
+            4.727739498999996,
+            4.719511041999998,
+            4.797555454999998
+          ],
+          "tokens_per_second": [
+            27.137115664247098,
+            27.176220350972095,
+            26.336394990071966,
+            27.0346022413081,
+            26.861753875660785,
+            26.173180669341836,
+            26.89169928594425,
+            27.074249760815793,
+            27.12145365502888,
+            26.680254392181915
+          ],
+          "valid_tokens_per_sample": 128
+        },
+        "decode_steps": 128,
+        "first_token_latency": {
+          "maximum_seconds": 0.2049875,
+          "median_seconds": 0.18756125,
+          "minimum_seconds": 0.183170417,
+          "p95_seconds": 0.2049875,
+          "samples_seconds": [
+            0.187100083,
+            0.186827708,
+            0.191302458,
+            0.183170417,
+            0.184612583,
+            0.183655,
+            0.189971791,
+            0.196465959,
+            0.188022417,
+            0.2049875
+          ],
+          "tokens_per_second": null,
+          "valid_tokens_per_sample": null
+        },
+        "padding": "none",
+        "per_repetition_prediction_hashes": [
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
+        ],
+        "predicted_tokens_u32le_sha256": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+        "prefill": {
+          "maximum_seconds": 0.19491225,
+          "median_seconds": 0.1781127915,
+          "minimum_seconds": 0.173816542,
+          "p95_seconds": 0.19491225,
+          "samples_seconds": [
+            0.177729208,
+            0.177401958,
+            0.181567416,
+            0.173816542,
+            0.175222958,
+            0.174301625,
+            0.1791135,
+            0.187101417,
+            0.178496375,
+            0.19491225
+          ],
+          "tokens_per_second": [
+            720.1967613561864,
+            721.5252945517095,
+            704.9723062644676,
+            736.4086209930468,
+            730.4978837305098,
+            734.3591891355001,
+            714.6306671468091,
+            684.1209545729951,
+            717.1013977174606,
+            656.7057740085602
+          ],
+          "valid_tokens_per_sample": 128
+        },
+        "prefill_chunk_size": 128,
+        "prefill_chunks": 1,
+        "source_length": 128,
+        "source_tokens_u32le_sha256": "524b97fdc92ebacbc02fb7fb3f0f7f1fb9f2547fa114d0e9b66b932664c00797",
+        "valid_source_tokens": 128
+      },
+      {
+        "batch_size": 1,
+        "cache": {
+          "allocator_overhead_included": false,
+          "analytical": {
+            "convolution_history_bytes": 663552,
+            "full_attention_layers": 6,
+            "kv_allocated_bytes": 7864320,
+            "kv_bytes_per_token": 12288,
+            "recurrent_layers": 18,
+            "recurrent_matrix_bytes": 18874368,
+            "total_tensor_payload_bytes": 27402240
+          },
+          "observed_convolution_history_bytes": 663552,
+          "observed_kv_bytes": 7864320,
+          "observed_recurrent_matrix_bytes": 18874368,
+          "temporary_working_tensors_included": false
+        },
+        "cache_capacity": 640,
+        "cache_window": null,
+        "decode_including_greedy_readback": {
+          "maximum_seconds": 5.8438571249999995,
+          "median_seconds": 5.799062667,
+          "minimum_seconds": 5.748235334,
+          "p95_seconds": 5.8438571249999995,
+          "samples_seconds": [
+            5.783625917,
+            5.753047208,
+            5.814499417,
+            5.8438571249999995,
+            5.763224667,
+            5.83034975,
+            5.748235334,
+            5.82584025,
+            5.78202525,
+            5.827599333
+          ],
+          "tokens_per_second": [
+            22.131445193190213,
+            22.249078683381455,
+            22.013932897776744,
+            21.903341793285204,
+            22.209788338275793,
+            21.954086030602195,
+            22.267703488564234,
+            21.971079622377218,
+            22.137571951973054,
+            21.96444756851646
+          ],
+          "valid_tokens_per_sample": 128
+        },
+        "decode_model_only": {
+          "maximum_seconds": 4.819062703999997,
+          "median_seconds": 4.773885999999999,
+          "minimum_seconds": 4.7330715009999995,
+          "p95_seconds": 4.819062703999997,
+          "samples_seconds": [
+            4.766832372999999,
+            4.738675540000002,
+            4.780939626999999,
+            4.819062703999997,
+            4.7389222969999985,
+            4.804987834000001,
+            4.7330715009999995,
+            4.793670548999999,
+            4.756456417000003,
+            4.803562250999998
+          ],
+          "tokens_per_second": [
+            26.85221337444333,
+            27.011767089670787,
+            26.772979787724065,
+            26.561181678286808,
+            27.010360579457302,
+            26.638985242433805,
+            27.04374949183765,
+            26.701876712554206,
+            26.91079004582413,
+            26.646891059515916
+          ],
+          "valid_tokens_per_sample": 128
+        },
+        "decode_steps": 128,
+        "first_token_latency": {
+          "maximum_seconds": 0.642585917,
+          "median_seconds": 0.6236139795,
+          "minimum_seconds": 0.614937875,
+          "p95_seconds": 0.642585917,
+          "samples_seconds": [
+            0.619402416,
+            0.631455083,
+            0.62197325,
+            0.642585917,
+            0.631283959,
+            0.6211795,
+            0.636315458,
+            0.614937875,
+            0.623154125,
+            0.624073834
+          ],
+          "tokens_per_second": null,
+          "valid_tokens_per_sample": null
+        },
+        "padding": "none",
+        "per_repetition_prediction_hashes": [
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+          "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
+        ],
+        "predicted_tokens_u32le_sha256": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
+        "prefill": {
+          "maximum_seconds": 0.634807709,
+          "median_seconds": 0.6158041045,
+          "minimum_seconds": 0.606984792,
+          "p95_seconds": 0.634807709,
+          "samples_seconds": [
+            0.611537708,
+            0.623649375,
+            0.614151917,
+            0.634807709,
+            0.622517,
+            0.613365917,
+            0.627740083,
+            0.606984792,
+            0.61513325,
+            0.616474959
+          ],
+          "tokens_per_second": [
+            837.2337360429784,
+            820.9741250843073,
+            833.6699533578106,
+            806.5434504671398,
+            822.4674988795487,
+            834.7382627717803,
+            815.6241952132918,
+            843.5137201921857,
+            832.3399848731963,
+            830.5284627140873
+          ],
+          "valid_tokens_per_sample": 512
+        },
+        "prefill_chunk_size": 512,
+        "prefill_chunks": 1,
+        "source_length": 512,
+        "source_tokens_u32le_sha256": "3d861516708719659ba998b6e806db6d45cc0acc26bebe9279e52bdeaccf6e17",
+        "valid_source_tokens": 512
+      }
+    ]
+  },
+  "execution": {
+    "schema_version": 1,
+    "name": "qwen-controlled-current",
+    "mode": "benchmark",
+    "source_before": {
+      "commit": "3d5220a3cc2a0ac91ffc70d1b4089b8fe4d0fb58",
+      "runtime_src_tree": "097e0f0178414f6bdcdfeb5b965bea080f73fa5b",
+      "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+      "cargo_manifest_sha256": "0554a3d881a20dfbe8412fae717507684d395f7570283308f1ad8ca11f3b04bd",
+      "transformer_worktree_status": ""
+    },
+    "source_after": {
+      "commit": "3d5220a3cc2a0ac91ffc70d1b4089b8fe4d0fb58",
+      "runtime_src_tree": "097e0f0178414f6bdcdfeb5b965bea080f73fa5b",
+      "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+      "cargo_manifest_sha256": "0554a3d881a20dfbe8412fae717507684d395f7570283308f1ad8ca11f3b04bd",
+      "transformer_worktree_status": ""
+    },
+    "command": "env 'TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17' 'TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance' 'TRANSFORMERS_FLAN_T5_SMALL_DIR=/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab' 'TRANSFORMERS_FLAN_T5_SMALL_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle' 'TRANSFORMERS_QWEN35_Q4_32K_BURNPACK=/Volumes/bag of holding/models/transformers-acceptance/qwen3.5-0.8b-q4-2fc06364-v2/qwen3.5-0.8b-q4.bpk' TRANSFORMERS_BENCH_METADATA_JSON=/private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/environment.json TRANSFORMERS_BENCH_OUTPUT_JSON=/private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/benchmark.json /usr/bin/time -l /Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-9ebf360b401eab26 qwen::qwen35_metal_baseline_benchmark --ignored --exact --nocapture --test-threads=1 > /private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/stdout.log 2> /private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/stderr.log",
+    "argv": [
+      "/usr/bin/time",
+      "-l",
+      "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-9ebf360b401eab26",
+      "qwen::qwen35_metal_baseline_benchmark",
+      "--ignored",
+      "--exact",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "started_utc": "2026-09-10T04:13:01.757454+00:00",
+    "completed_utc": "2026-09-10T04:17:30.422445+00:00",
+    "wall_seconds": 268.65267158305505,
+    "process_exit_code": 0,
+    "executable": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-9ebf360b401eab26",
+    "executable_sha256_before": "80071cbefd9ff20967630726ed94f140efec3defcba0f6b133c5671dbf456ff7",
+    "executable_sha256_after": "80071cbefd9ff20967630726ed94f140efec3defcba0f6b133c5671dbf456ff7",
+    "power": {
+      "before": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=35389539)\t98%; charging; 0:15 remaining present: true",
+      "after": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=35389539)\t99%; finishing charge; 0:11 remaining present: true",
+      "settings": "Battery Power:\n Sleep On Power Button 1\n powermode            0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         2\n womp                 0\n networkoversleep     0\n sleep                1\n lessbright           1\n tcpkeepalive         1\n disksleep            10\nAC Power:\n Sleep On Power Button 1\n powermode            0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         10\n womp                 1\n networkoversleep     0\n sleep                0\n tcpkeepalive         1\n disksleep            10",
+      "continuous_monitoring": false
+    },
+    "timing_power_endpoints_valid": true,
+    "logs": {
+      "stdout.log": {
+        "sha256": "1c9ba15599bd19bc6203cd42aa4ae52b1d9ecb763f3954d17234f44d3406669f",
+        "bytes": 165
+      },
+      "stderr.log": {
+        "sha256": "c627fca8415ef2b9dabf321bf6c215591bf815873300e216938b22f4ab1df945",
+        "bytes": 777
+      }
+    },
+    "benchmark": {
+      "file": "benchmark.json",
+      "sha256": "3fb37022413ab89eb04c8fe097fef8c588f46bcc22053b496784a64c50088da3"
+    }
+  },
+  "build": {
+    "command": [
+      "cargo",
+      "+stable",
+      "test",
+      "--manifest-path",
+      "/Users/nover/repos/hmm_compression/crates/transformers/Cargo.toml",
+      "--locked",
+      "--offline",
+      "--release",
+      "--no-default-features",
+      "--features",
+      "std,metal,tokenizers,chat-templates",
+      "--no-run",
+      "--test",
+      "qwen35_benchmarks",
+      "--test",
+      "small_model_benchmarks",
+      "--message-format=json"
+    ],
+    "source_before": {
+      "commit": "3d5220a3cc2a0ac91ffc70d1b4089b8fe4d0fb58",
+      "runtime_src_tree": "097e0f0178414f6bdcdfeb5b965bea080f73fa5b",
+      "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+      "cargo_manifest_sha256": "0554a3d881a20dfbe8412fae717507684d395f7570283308f1ad8ca11f3b04bd",
+      "transformer_worktree_status": ""
+    },
+    "source_after": {
+      "commit": "3d5220a3cc2a0ac91ffc70d1b4089b8fe4d0fb58",
+      "runtime_src_tree": "097e0f0178414f6bdcdfeb5b965bea080f73fa5b",
+      "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+      "cargo_manifest_sha256": "0554a3d881a20dfbe8412fae717507684d395f7570283308f1ad8ca11f3b04bd",
+      "transformer_worktree_status": ""
+    },
+    "process_exit_code": 0,
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3",
+    "wrapper": {
+      "path": "/private/tmp/tfm-worktree-wrappers.w7drfj/integration",
+      "sha256": "9e470c14f0b8a393d5ad5724cffc99faa6d44689b80768d9f951022efb4435e5"
+    },
+    "logs": {
+      "stdout.jsonl": {
+        "sha256": "f4f1fc05ef8d428ce5183e9dd884deb51a320183da1a897a12e17abcf81e60db",
+        "bytes": 320671
+      },
+      "stderr.log": {
+        "sha256": "185bc65d16dab15fde556695ddcce604fa3afa180c524884ff09a51ae1e4276d",
+        "bytes": 153
+      }
+    },
+    "record": {
+      "path": "/private/tmp/tfm-small-model-final.GlGmEt/build/build.json",
+      "sha256": "124c041cab359ca224e2de7804d79ec82c09902f6b1c9cfbdf6147c593ae07e5",
+      "bytes": 6000
+    },
+    "artifacts": [
+      {
+        "target": "transformers",
+        "features": [
+          "chat-templates",
+          "metal",
+          "std",
+          "tokenizers"
+        ],
+        "fresh": false,
+        "filenames": [
+          "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libtransformers-46f69e9b760641ae.rlib",
+          "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libtransformers-46f69e9b760641ae.rmeta"
+        ],
+        "executable": null
+      },
+      {
+        "target": "small_model_benchmarks",
+        "features": [
+          "chat-templates",
+          "metal",
+          "std",
+          "tokenizers"
+        ],
+        "fresh": false,
+        "filenames": [
+          "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/small_model_benchmarks-8e0d96d9bf384242"
+        ],
+        "executable": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/small_model_benchmarks-8e0d96d9bf384242"
+      },
+      {
+        "target": "qwen35_benchmarks",
+        "features": [
+          "chat-templates",
+          "metal",
+          "std",
+          "tokenizers"
+        ],
+        "fresh": false,
+        "filenames": [
+          "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-9ebf360b401eab26"
+        ],
+        "executable": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-9ebf360b401eab26"
+      }
+    ],
+    "backend_dependency_identity": {
+      "count": 40,
+      "canonical_json_sha256": "b3d845d84cf732bda9788da50eabfe92714ab9b8a81cb0fbf6078b66ac268c21",
+      "normalization": "sort by package_id and filenames; fields package_id/features/filenames; sorted JSON object keys, compact separators",
+      "native_cargo_json": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/build/stdout.jsonl",
+        "sha256": "f4f1fc05ef8d428ce5183e9dd884deb51a320183da1a897a12e17abcf81e60db",
+        "bytes": 320671
+      }
+    }
+  },
+  "runtime_controls": {
+    "schema_version": 1,
+    "runtime_before": {
+      "cwd": "/Users/nover/repos/hmm_compression",
+      "resolved_cwd": "/Users/nover/repos/hmm_compression",
+      "environment": {
+        "CUBECL_DEBUG_LOG": null,
+        "CUBECL_DEBUG_OPTION": null,
+        "CUBECL_AUTOTUNE_LEVEL": null,
+        "CUBECL_WGPU_DEFAULT_DEVICE": null,
+        "CUBECL_WGPU_MAX_TASKS": null,
+        "CUBECL_DEBUG_SPIRV": null,
+        "BURN_FUSION_LOG": null,
+        "WGPU_ADAPTER_NAME": null,
+        "WGPU_BACKEND": null,
+        "WGPU_POWER_PREF": null,
+        "WGPU_DEBUG": null,
+        "WGPU_VALIDATION": null,
+        "WGPU_DISCARD_HAL_LABELS": null,
+        "WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER": null,
+        "WGPU_GPU_BASED_VALIDATION": null,
+        "WGPU_VALIDATION_INDIRECT_CALL": null,
+        "WGPU_CORE_LOCK_OBSERVE_DIR": null
+      },
+      "config_candidates_in_lookup_order": [
+        {
+          "path": "/Users/nover/repos/hmm_compression/cubecl.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/repos/hmm_compression/CubeCL.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/repos/hmm_compression/burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/repos/hmm_compression/Burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/repos/cubecl.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/repos/CubeCL.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/repos/burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/repos/Burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/cubecl.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/CubeCL.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/Burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/cubecl.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/CubeCL.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/Burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/cubecl.toml",
+          "exists": false
+        },
+        {
+          "path": "/CubeCL.toml",
+          "exists": false
+        },
+        {
+          "path": "/burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Burn.toml",
+          "exists": false
+        }
+      ],
+      "selected_cubecl_config": null,
+      "selected_burn_config": null,
+      "nearest_cargo_manifest": "/Users/nover/repos/hmm_compression/Cargo.toml",
+      "default_target_cache_root": "/Users/nover/repos/hmm_compression/target",
+      "note": "Defaults are descriptive only; no runtime configuration or cache is modified."
+    },
+    "runtime_after": {
+      "cwd": "/Users/nover/repos/hmm_compression",
+      "resolved_cwd": "/Users/nover/repos/hmm_compression",
+      "environment": {
+        "CUBECL_DEBUG_LOG": null,
+        "CUBECL_DEBUG_OPTION": null,
+        "CUBECL_AUTOTUNE_LEVEL": null,
+        "CUBECL_WGPU_DEFAULT_DEVICE": null,
+        "CUBECL_WGPU_MAX_TASKS": null,
+        "CUBECL_DEBUG_SPIRV": null,
+        "BURN_FUSION_LOG": null,
+        "WGPU_ADAPTER_NAME": null,
+        "WGPU_BACKEND": null,
+        "WGPU_POWER_PREF": null,
+        "WGPU_DEBUG": null,
+        "WGPU_VALIDATION": null,
+        "WGPU_DISCARD_HAL_LABELS": null,
+        "WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER": null,
+        "WGPU_GPU_BASED_VALIDATION": null,
+        "WGPU_VALIDATION_INDIRECT_CALL": null,
+        "WGPU_CORE_LOCK_OBSERVE_DIR": null
+      },
+      "config_candidates_in_lookup_order": [
+        {
+          "path": "/Users/nover/repos/hmm_compression/cubecl.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/repos/hmm_compression/CubeCL.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/repos/hmm_compression/burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/repos/hmm_compression/Burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/repos/cubecl.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/repos/CubeCL.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/repos/burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/repos/Burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/cubecl.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/CubeCL.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/nover/Burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/cubecl.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/CubeCL.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Users/Burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/cubecl.toml",
+          "exists": false
+        },
+        {
+          "path": "/CubeCL.toml",
+          "exists": false
+        },
+        {
+          "path": "/burn.toml",
+          "exists": false
+        },
+        {
+          "path": "/Burn.toml",
+          "exists": false
+        }
+      ],
+      "selected_cubecl_config": null,
+      "selected_burn_config": null,
+      "nearest_cargo_manifest": "/Users/nover/repos/hmm_compression/Cargo.toml",
+      "default_target_cache_root": "/Users/nover/repos/hmm_compression/target",
+      "note": "Defaults are descriptive only; no runtime configuration or cache is modified."
+    },
+    "runtime_controls_unchanged": true,
+    "runner_script_hashes": {
+      "/private/tmp/tfm-small-model-final.GlGmEt/run_controlled.py": "4d273285dac2f268004efabb00c258d38794d2a58340adb1a4207c87153a14dc",
+      "/private/tmp/tfm-small-model-final.GlGmEt/run.py": "01cd53763b1ad5143f6aaaa558352e3ffd9f874639d55197375e6211e9ef53a5",
+      "/private/tmp/tfm-perf-baseline-capture.tJeVLq/capture.py": "e14f085178b96e15681d4feab03f38fe59b93c5b7a93f60ae18583294ed56cd5"
+    },
+    "execution_cwd": "/Users/nover/repos/hmm_compression",
+    "process_exit_code": 0,
+    "configuration_changed_by_runner": false
+  },
+  "evidence": {
+    "raw_directory": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current",
+    "records": {
+      "benchmark.json": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/benchmark.json",
+        "sha256": "3fb37022413ab89eb04c8fe097fef8c588f46bcc22053b496784a64c50088da3",
+        "bytes": 120911
+      },
+      "execution.json": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/execution.json",
+        "sha256": "53806d76459112aaff8fe55627116985288e3d37c0fc63ed87db7d040570eee2",
+        "bytes": 4369
+      },
+      "runtime-controls.json": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/runtime-controls.json",
+        "sha256": "7d909ced24aea79e6bffe7e041f4ce622b0a57b5fd1d3de81271357c4d341da5",
+        "bytes": 6355
+      },
+      "environment.json": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/environment.json",
+        "sha256": "85eff63ea9133d4f57d2ed04f9c5b5e049cf850c86ee9e2ed012a0a543364dc7",
+        "bytes": 2702
+      }
+    },
+    "independent_executable_rehash": {
+      "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-9ebf360b401eab26",
+      "sha256": "80071cbefd9ff20967630726ed94f140efec3defcba0f6b133c5671dbf456ff7",
+      "bytes": 39197456
+    },
+    "math_audit": {
+      "distributions": 13,
+      "samples": 130,
+      "all_stored_statistics_recomputed": true,
+      "source_prediction_and_natural_token_hashes_verified": true,
+      "throughput_summary_convention": "128 / median decode seconds, matching the committed historical compact summary"
+    }
+  },
+  "notes": [
+    "Historical source-bound snapshot: later integration commits do not retarget this evidence.",
+    "Tensor-name lists are replaced by counts; omitted warm token arrays remain authenticated by their u32le hashes and the raw report hash.",
+    "All ten timing samples, per-sample throughputs, medians, p95 values, cache accounting and repeated prediction hashes are retained.",
+    "AC power is observed only at endpoints; physical GPU exclusivity, continuous thermal/power state and runtime cache contents are not established.",
+    "No checkpoint-weight rehash was performed by this audit; the native benchmark authenticated checkpoint artifacts before and after execution.",
+    "No release waiver, historical-baseline replacement, or performance-policy change is assumed.",
+    "The separately recorded September 9 Qwen greater-than-10-percent confirmed timing regression remains unresolved.",
+    "Use qwen-controlled-historical-comparison.json to distinguish that historical failure from same-environment source-to-source observations."
+  ]
+}

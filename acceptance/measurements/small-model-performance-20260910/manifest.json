@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "advertised_supported": false,
+  "release_gate_promotion": false,
+  "scope": "Local source-bound small-model timing and separate sampled-process-memory refresh; no model support promotion.",
+  "measured_current_source_commit": "3d5220a3cc2a0ac91ffc70d1b4089b8fe4d0fb58",
+  "rebuilt_historical_source_commit": "1e4f836632b46d072bd3ea1ec2200ec1d365a1ff",
+  "qwen_historical_timing_gate": "confirmed_failure_unresolved",
+  "performance_policy_decision": null,
+  "records": {
+    "flan-flex-summary.json": {
+      "sha256": "937da2ee31326dfbef696ce146d4cb75cd6b198da646d390c6e2f7d4568a56cf",
+      "bytes": 45233,
+      "lines": 1254
+    },
+    "flan-memory-phase-summary.json": {
+      "sha256": "cdf1528dd3bf9ddaf57445e6f0972208071e5baadca81f1a74a0918ab93214c6",
+      "bytes": 25123,
+      "lines": 830
+    },
+    "flan-memory-summary.json": {
+      "sha256": "a83f4c10c71bb22a393a2e81db00ea3e07e03d8569ec59918feb35d9a3630ab4",
+      "bytes": 26404,
+      "lines": 797
+    },
+    "flan-short-summary.json": {
+      "sha256": "291528b6ee7df2eb7c39ab218254c9b255b7b86801c06e9ba3fc967cea360054",
+      "bytes": 25916,
+      "lines": 788
+    },
+    "flex-build.json": {
+      "sha256": "210a15a8766e26fb1b9583a557f18df9545c83e44f565fad6f3aaceb3173e281",
+      "bytes": 4533,
+      "lines": 133
+    },
+    "historical-source-build.json": {
+      "sha256": "13611939f7dd9f5545ff578fb10d409c6dff9776aadb614108cae9d3fdceaac1",
+      "bytes": 60008,
+      "lines": 1408
+    },
+    "metal-build.json": {
+      "sha256": "124c041cab359ca224e2de7804d79ec82c09902f6b1c9cfbdf6147c593ae07e5",
+      "bytes": 6000,
+      "lines": 176
+    },
+    "qwen-baseline-summary.json": {
+      "sha256": "97e0e02d23220c5cd644b29755e7ce4d1309843fc8dd5d66b056866064fed1a1",
+      "bytes": 51259,
+      "lines": 1460
+    },
+    "qwen-controlled-current-summary.json": {
+      "sha256": "1a1c989ad9fe1b4d0ee87b8d35e0c41a4005ca61f6677ffc58b711a844cee899",
+      "bytes": 50151,
+      "lines": 1444
+    },
+    "qwen-controlled-historical-comparison.json": {
+      "sha256": "794398e422e7f7c0ef8c4ded122570fc9ea0519078a08360e4f7212bfc03cdda",
+      "bytes": 15526,
+      "lines": 375
+    },
+    "qwen-memory-phase-summary.json": {
+      "sha256": "831e713d13164d7ddf6984402a4343c0b08a89748dcfac968e2fc21ec9ffe8eb",
+      "bytes": 25280,
+      "lines": 830
+    },
+    "qwen-memory-summary.json": {
+      "sha256": "6754db0b8264f5f17ad5a2b18022dffb63a734b711ecbfbf2df42d912794bdc8",
+      "bytes": 27795,
+      "lines": 852
+    },
+    "qwen-public-summary.json": {
+      "sha256": "81555bd8bbe0647f5e3860d93271a3d1b2a5455ffe79e193b2bc2c4ed6dd32af",
+      "bytes": 41207,
+      "lines": 1437
+    },
+    "qwen-short-rerun-summary.json": {
+      "sha256": "0c93936b3ab996b3d669466e849b3336f36b35dab58da89e9d928469e25434a2",
+      "bytes": 27208,
+      "lines": 843
+    },
+    "qwen-short-summary.json": {
+      "sha256": "6da5df5f1d4f65d3bc80ac9ddb87cec012316876af3f4a6bba558958a63bf541",
+      "bytes": 27242,
+      "lines": 843
+    }
+  },
+  "record_format": "Derived compact JSON summaries. Manifest identities authenticate committed summary bytes. execution.benchmark.sha256 and local raw-report identities authenticate the separate original reports, not these summaries.",
+  "builds": {
+    "metal": {
+      "file": "metal-build.json",
+      "raw_record_sha256": "124c041cab359ca224e2de7804d79ec82c09902f6b1c9cfbdf6147c593ae07e5"
+    },
+    "flex": {
+      "file": "flex-build.json",
+      "raw_record_sha256": "210a15a8766e26fb1b9583a557f18df9545c83e44f565fad6f3aaceb3173e281"
+    },
+    "historical_source": {
+      "file": "historical-source-build.json",
+      "raw_record_sha256": "13611939f7dd9f5545ff578fb10d409c6dff9776aadb614108cae9d3fdceaac1"
+    }
+  },
+  "measured_runs": [
+    "qwen-public",
+    "qwen-short",
+    "qwen-short-rerun",
+    "flan-short",
+    "qwen-memory",
+    "flan-memory",
+    "qwen-baseline",
+    "qwen-controlled-current",
+    "flan-flex"
+  ],
+  "results": {
+    "qwen_public": {
+      "measured_repetitions": 10,
+      "warmups": 3,
+      "generated_tokens": 32,
+      "total_call_median_seconds": 1.751402479,
+      "total_call_p95_seconds": 1.76914625,
+      "model_only_decode_measured": false,
+      "ttft_measured": false,
+      "all_13_exact_token_sequences": true
+    },
+    "qwen_controlled": {
+      "comparison": "qwen-controlled-historical-comparison.json",
+      "largest_absolute_warm_median_delta_percent": 1.2464253775571699,
+      "p95_five_percent_alerts": 3,
+      "greater_than_ten_percent_controlled_regression_observed": false,
+      "historical_failure_waived": false
+    },
+    "flan_flex": {
+      "first_cpu_baseline": true,
+      "source_lengths": [
+        32,
+        128,
+        512
+      ],
+      "model_tokens_per_second_using_median_seconds": [
+        233.71264624980807,
+        159.51808996797718,
+        68.3865285741734
+      ],
+      "natural_generated_token_ids": [
+        644,
+        4598,
+        229,
+        9685,
+        5,
+        1
+      ],
+      "natural_total_median_seconds": 0.3523376045
+    },
+    "memory": {
+      "phases_per_model": 93,
+      "errors": 0,
+      "requested_interval_ns": 1000000,
+      "qwen_observed_kernel_lifetime_high_water_bytes": 2977486656,
+      "flan_observed_kernel_lifetime_high_water_bytes": 771181504,
+      "host_device_split_measured": false,
+      "phase_maxima_are_exact_unsampled_peaks": false,
+      "timing_comparable_to_uninstrumented_series": false
+    }
+  },
+  "limitations": [
+    "AC power was verified from the host before and after each run; power was not continuously monitored. No thermal warning was reported; this is not continuous thermal instrumentation.",
+    "No competing model or agent compiler jobs ran during the timed series. Ordinary desktop graphics were active; exclusive physical GPU access is not claimed.",
+    "Qwen still exhibits a repeatable approximately 25% throughput drop from the committed historical timing baseline. Rebuilding that historical source reproduces the drop; its cause remains unknown. The controlled comparison does not erase or waive this failure.",
+    "With ten measured repetitions, nearest-rank p95 is the maximum sample; small tail differences have limited statistical precision.",
+    "Public generate_causal measures a different boundary from the historical model-API loop. Tokenization, request tensor construction and reference validation are outside the public call timer.",
+    "FLAN Flex is a first CPU baseline for this exact single-batch workload, not a general CPU-versus-Metal performance claim or historical regression result.",
+    "Memory traces are separate instrumented replays. Sampled phase maxima are lower bounds on unsampled peaks; kernel lifetime high-water and signed above-idle deltas are distinct.",
+    "Only compact summaries, all repeated timing samples, hashes and provenance are committed. Large native reports, sample JSONL traces and build logs remain at the recorded local paths; weights and executables are not committed.",
+    "These runs bind the pre-refactor 3d5220a source. Later test-only relocations have independent checks; these measurements are not evidence of executing a later binary."
+  ]
+}

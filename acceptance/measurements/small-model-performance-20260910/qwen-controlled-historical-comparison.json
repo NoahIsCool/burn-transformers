@@ -1,0 +1,375 @@
+{
+  "schema_version": 1,
+  "scope": "Qwen3.5-0.8B Metal/F16 historical versus controlled short-context timing evidence",
+  "historical_baseline": {
+    "path": "/Users/nover/repos/hmm_compression/crates/transformers/acceptance/measurements/qwen3.5-0.8b-metal-benchmark-20260909.json",
+    "sha256": "ab57e476a224a329eda2cd303ee3ce2664eb3f7922550c4659dac26eea824946",
+    "bytes": 119168
+  },
+  "historical_compact_record": {
+    "path": "/Users/nover/repos/hmm_compression/crates/transformers/acceptance/measurements/qwen3.5-0.8b-metal-benchmark-20260909-run.json",
+    "sha256": "fcbbbb37411135e8540a1db64207cfdc056a2918cebd832be9547b14167f6704",
+    "bytes": 4315
+  },
+  "controlled_baseline_summary": "qwen-baseline-summary.json",
+  "controlled_current_summary": "qwen-controlled-current-summary.json",
+  "source_commits": {
+    "rebuilt_historical": "1e4f836632b46d072bd3ea1ec2200ec1d365a1ff",
+    "current": "3d5220a3cc2a0ac91ffc70d1b4089b8fe4d0fb58"
+  },
+  "rebuilt_historical_provenance_differences_from_original": [
+    "benchmark_executable_sha256",
+    "environment"
+  ],
+  "measurement_conventions": {
+    "latency_delta": "100 * (current median seconds / baseline median seconds - 1); positive is slower",
+    "throughput_delta": "100 * (baseline median seconds / current median seconds - 1); negative is slower",
+    "throughput_value": "128 / median decode seconds, not the median of reciprocal per-sample throughputs",
+    "p95": "nearest rank on ten measured samples, therefore the sample maximum",
+    "unmeasured_warmups_per_shape": 3,
+    "measured_repetitions_per_shape": 10
+  },
+  "controlled_comparison": {
+    "rows": [
+      {
+        "source_tokens": 32,
+        "median_deltas_percent": {
+          "prefill": -0.5373557910963278,
+          "first_token_latency": -0.8673454640234946,
+          "decode_model_only": -0.3046708889187011,
+          "decode_including_greedy_readback": -0.46578974917649285
+        },
+        "p95_elapsed_deltas_percent": {
+          "prefill": 6.187913275492574,
+          "first_token_latency": 5.556103750519159,
+          "decode_model_only": -1.0519585296959177,
+          "decode_including_greedy_readback": -1.0630783626575213
+        }
+      },
+      {
+        "source_tokens": 128,
+        "median_deltas_percent": {
+          "prefill": 0.7629276375822336,
+          "first_token_latency": 0.9469996342902354,
+          "decode_model_only": 0.4666805078922698,
+          "decode_including_greedy_readback": 0.32046805107739385
+        },
+        "p95_elapsed_deltas_percent": {
+          "prefill": 4.87023229303436,
+          "first_token_latency": 5.026956607178135,
+          "decode_model_only": 0.8602696389411024,
+          "decode_including_greedy_readback": 0.469373056011535
+        }
+      },
+      {
+        "source_tokens": 512,
+        "median_deltas_percent": {
+          "prefill": -1.2464253775571699,
+          "first_token_latency": -1.2393534775091308,
+          "decode_model_only": -0.016419254670096972,
+          "decode_including_greedy_readback": 0.044000283261635964
+        },
+        "p95_elapsed_deltas_percent": {
+          "prefill": -2.626058037364376,
+          "first_token_latency": -2.5951326297060318,
+          "decode_model_only": -0.6223464885219521,
+          "decode_including_greedy_readback": -0.7288330752283301
+        }
+      }
+    ],
+    "largest_absolute_warm_median_change_percent": 1.2464253775571699,
+    "natural_median_elapsed_delta_percent": -0.16726143294341078,
+    "natural_p95_elapsed_delta_percent": 1.8924194368173497,
+    "median_five_percent_alerts": [],
+    "p95_five_percent_alerts": [
+      {
+        "source_tokens": 32,
+        "metric": "prefill",
+        "p95_elapsed_regression_percent": 6.187913275492574
+      },
+      {
+        "source_tokens": 32,
+        "metric": "first_token_latency",
+        "p95_elapsed_regression_percent": 5.556103750519159
+      },
+      {
+        "source_tokens": 128,
+        "metric": "first_token_latency",
+        "p95_elapsed_regression_percent": 5.026956607178135
+      }
+    ],
+    "greater_than_ten_percent_controlled_regression_observed": false,
+    "runtime_contexts_before_after_identical_across_runs": true,
+    "runtime_controls_record_sha256": "7d909ced24aea79e6bffe7e041f4ce622b0a57b5fd1d3de81271357c4d341da5",
+    "all_40_backend_dependency_records_exactly_match": true,
+    "protocol_token_hashes_cache_and_strict_load_fields_identical": true,
+    "no_current_source_specific_median_regression_observed": true
+  },
+  "historical_comparisons": {
+    "qwen-short": {
+      "raw_report": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-short/benchmark.json",
+        "sha256": "39a76e6f5a77ff0e22c55734c53d2fe1073b8328b932341399c80ba504a66b33",
+        "bytes": 120797
+      },
+      "execution_record": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-short/execution.json",
+        "sha256": "becb3d4633b016b8a77d9d9111bd76c4bb97ce9ab331d574c4d171a7c68cc3cd",
+        "bytes": 4295
+      },
+      "source_commit": "3d5220a3cc2a0ac91ffc70d1b4089b8fe4d0fb58",
+      "rows": [
+        {
+          "source_tokens": 32,
+          "median_deltas_percent": {
+            "prefill": 31.195140708475222,
+            "first_token_latency": 29.64248183801841,
+            "decode_model_only": -24.41769041849222,
+            "decode_including_greedy_readback": -20.786239534746898
+          },
+          "p95_elapsed_deltas_percent": {
+            "prefill": 15.847588776982558,
+            "first_token_latency": 17.00404506095927,
+            "decode_model_only": 26.6754241481326,
+            "decode_including_greedy_readback": 21.91889637160742
+          }
+        },
+        {
+          "source_tokens": 128,
+          "median_deltas_percent": {
+            "prefill": 34.70215299695951,
+            "first_token_latency": 33.89712427389877,
+            "decode_model_only": -25.29405030531169,
+            "decode_including_greedy_readback": -21.404460282050753
+          },
+          "p95_elapsed_deltas_percent": {
+            "prefill": 30.54929144516303,
+            "first_token_latency": 29.710726894114448,
+            "decode_model_only": 34.68859741217807,
+            "decode_including_greedy_readback": 28.325193210896416
+          }
+        },
+        {
+          "source_tokens": 512,
+          "median_deltas_percent": {
+            "prefill": 21.691943295636484,
+            "first_token_latency": 21.506258409851696,
+            "decode_model_only": -25.046315633742577,
+            "decode_including_greedy_readback": -21.016794092511624
+          },
+          "p95_elapsed_deltas_percent": {
+            "prefill": 23.335750396383048,
+            "first_token_latency": 23.182040627182253,
+            "decode_model_only": 30.128874395228642,
+            "decode_including_greedy_readback": 24.520988650618914
+          }
+        }
+      ],
+      "natural_median_elapsed_delta_percent": 24.84605015560717
+    },
+    "qwen-short-rerun": {
+      "raw_report": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-short-rerun/benchmark.json",
+        "sha256": "529424f277fad71f61d3006d89eeae25c6e07404c45701c5252884f1c39f1f99",
+        "bytes": 120757
+      },
+      "execution_record": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-short-rerun/execution.json",
+        "sha256": "05363bfac1ec8347c216c9c5b991f2525a1e2bc39c1a07db1a0c93460f5af926",
+        "bytes": 4325
+      },
+      "source_commit": "3d5220a3cc2a0ac91ffc70d1b4089b8fe4d0fb58",
+      "rows": [
+        {
+          "source_tokens": 32,
+          "median_deltas_percent": {
+            "prefill": 30.763507838054128,
+            "first_token_latency": 29.161693299926704,
+            "decode_model_only": -24.53570401168299,
+            "decode_including_greedy_readback": -20.817876855214422
+          },
+          "p95_elapsed_deltas_percent": {
+            "prefill": 19.38596645030075,
+            "first_token_latency": 19.61147351142689,
+            "decode_model_only": 27.324497447065465,
+            "decode_including_greedy_readback": 22.296285571197206
+          }
+        },
+        {
+          "source_tokens": 128,
+          "median_deltas_percent": {
+            "prefill": 37.695964959491725,
+            "first_token_latency": 36.61105865355741,
+            "decode_model_only": -25.301621781970816,
+            "decode_including_greedy_readback": -21.354506172887653
+          },
+          "p95_elapsed_deltas_percent": {
+            "prefill": 32.72238874981317,
+            "first_token_latency": 33.24089470796614,
+            "decode_model_only": 38.06394100155504,
+            "decode_including_greedy_readback": 31.342643774772604
+          }
+        },
+        {
+          "source_tokens": 512,
+          "median_deltas_percent": {
+            "prefill": 19.784560402890563,
+            "first_token_latency": 19.524687117378715,
+            "decode_model_only": -24.601560598753192,
+            "decode_including_greedy_readback": -20.694099290940393
+          },
+          "p95_elapsed_deltas_percent": {
+            "prefill": 21.96440500578507,
+            "first_token_latency": 21.653470863909007,
+            "decode_model_only": 27.717767479055368,
+            "decode_including_greedy_readback": 22.605613184581074
+          }
+        }
+      ],
+      "natural_median_elapsed_delta_percent": 24.843939797106064
+    },
+    "qwen-baseline": {
+      "raw_report": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-baseline/benchmark.json",
+        "sha256": "0cd62f3aa8842f24962fe57d3e8a5d1b28077be99b23456495a9f2974325d23a",
+        "bytes": 120626
+      },
+      "execution_record": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-baseline/execution.json",
+        "sha256": "061ba4ad91c132b9d3522b15dc1703c6d47355862c476bf8be0cca02fc3eebb1",
+        "bytes": 5022
+      },
+      "source_commit": "1e4f836632b46d072bd3ea1ec2200ec1d365a1ff",
+      "rows": [
+        {
+          "source_tokens": 32,
+          "median_deltas_percent": {
+            "prefill": 31.757453359308506,
+            "first_token_latency": 29.617718759170096,
+            "decode_model_only": -24.375578413252484,
+            "decode_including_greedy_readback": -20.772471621472654
+          },
+          "p95_elapsed_deltas_percent": {
+            "prefill": 22.61646250603546,
+            "first_token_latency": 22.49000517193882,
+            "decode_model_only": 29.3193614026392,
+            "decode_including_greedy_readback": 24.425075606062908
+          }
+        },
+        {
+          "source_tokens": 128,
+          "median_deltas_percent": {
+            "prefill": 35.10883267180933,
+            "first_token_latency": 34.05207709366513,
+            "decode_model_only": -25.405820639767796,
+            "decode_including_greedy_readback": -21.61406435368123
+          },
+          "p95_elapsed_deltas_percent": {
+            "prefill": 34.52066091518906,
+            "first_token_latency": 33.67042245995264,
+            "decode_model_only": 35.4169652925558,
+            "decode_including_greedy_readback": 29.133692557667334
+          }
+        },
+        {
+          "source_tokens": 512,
+          "median_deltas_percent": {
+            "prefill": 20.420836131595422,
+            "first_token_latency": 20.168099106695948,
+            "decode_model_only": -24.887793028694084,
+            "decode_including_greedy_readback": -21.028833985023144
+          },
+          "p95_elapsed_deltas_percent": {
+            "prefill": 23.527227841126887,
+            "first_token_latency": 23.05585219939863,
+            "decode_model_only": 28.84548123605011,
+            "decode_including_greedy_readback": 23.55034706193131
+          }
+        }
+      ],
+      "natural_median_elapsed_delta_percent": 25.034553507429912
+    },
+    "qwen-controlled-current": {
+      "raw_report": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/benchmark.json",
+        "sha256": "3fb37022413ab89eb04c8fe097fef8c588f46bcc22053b496784a64c50088da3",
+        "bytes": 120911
+      },
+      "execution_record": {
+        "path": "/private/tmp/tfm-small-model-final.GlGmEt/qwen-controlled-current/execution.json",
+        "sha256": "53806d76459112aaff8fe55627116985288e3d37c0fc63ed87db7d040570eee2",
+        "bytes": 4369
+      },
+      "source_commit": "3d5220a3cc2a0ac91ffc70d1b4089b8fe4d0fb58",
+      "rows": [
+        {
+          "source_tokens": 32,
+          "median_deltas_percent": {
+            "prefill": 31.049447053481227,
+            "first_token_latency": 28.493485354941694,
+            "decode_model_only": -24.605984010740457,
+            "decode_including_greedy_readback": -21.14150532718574
+          },
+          "p95_elapsed_deltas_percent": {
+            "prefill": 30.203862867385787,
+            "first_token_latency": 29.295676943308035,
+            "decode_model_only": 27.958975349815862,
+            "decode_including_greedy_readback": 23.102339549574612
+          }
+        },
+        {
+          "source_tokens": 128,
+          "median_deltas_percent": {
+            "prefill": 36.1396152970773,
+            "first_token_latency": 35.321549773500614,
+            "decode_model_only": -25.05770414467139,
+            "decode_including_greedy_readback": -21.362862473396692
+          },
+          "p95_elapsed_deltas_percent": {
+            "prefill": 41.072129583883864,
+            "first_token_latency": 40.38997659364616,
+            "decode_model_only": 36.58191633094307,
+            "decode_including_greedy_readback": 29.739811316765795
+          }
+        },
+        {
+          "source_tokens": 512,
+          "median_deltas_percent": {
+            "prefill": 18.919880270184674,
+            "first_token_latency": 18.678791591560497,
+            "decode_model_only": -24.90012589324504,
+            "decode_including_greedy_readback": -20.994086448281525
+          },
+          "p95_elapsed_deltas_percent": {
+            "prefill": 20.28333114607157,
+            "first_token_latency": 19.862389626209207,
+            "decode_model_only": 28.04361590795834,
+            "decode_including_greedy_readback": 22.649871267984565
+          }
+        }
+      ],
+      "natural_median_elapsed_delta_percent": 24.825418921558985
+    }
+  },
+  "historical_failure": {
+    "greater_than_ten_percent_confirmed": true,
+    "confirmed_by": [
+      "qwen-short",
+      "qwen-short-rerun"
+    ],
+    "status": "unresolved",
+    "waived": false,
+    "historical_baseline_replaced": false,
+    "cause_established": false,
+    "current_source_attribution_established": false,
+    "explanation": "The same historical source and benchmark helpers rebuilt today also reproduce approximately 25 percent lower decode throughput. Controlled source-to-source medians differ by at most 1.247 percent, but this does not erase the confirmed historical failure or establish its cause."
+  },
+  "performance_policy_decision": null,
+  "limitations": [
+    "No performance-policy change, rebaseline, acceptance waiver or overall release pass is assumed.",
+    "Retain the three greater-than-five-percent p95 alerts even though no controlled median crosses five percent.",
+    "Source-bound snapshots describe their recorded commits, not a later integration HEAD.",
+    "The desktop GPU is not physically exclusive; endpoint controls do not establish continuous thermal/power/runtime-cache state.",
+    "These short-context timing observations do not replace memory, long-context, quantization or full acceptance gates."
+  ]
+}

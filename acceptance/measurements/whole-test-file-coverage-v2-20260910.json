@@ -1,0 +1,742 @@
+{
+  "schema_version": 1,
+  "policy": "whole_test_files_v2_exact_test_macro_spans_no_inline_or_generated_exclusions",
+  "scope": "captured configuration; whole test files only; inline tests and generated or ambiguous ownership retained",
+  "whole_test_file_exclusions_qualified": true,
+  "production_only_exclusions_qualified": false,
+  "production_only_measurement": false,
+  "compiler_dependency_closure_verified": false,
+  "release_gate_promotion": false,
+  "legacy_native_aggregate": {
+    "crate": {
+      "lines": 68083,
+      "covered": 61440,
+      "percent": 90.24279188637398,
+      "minimum_percent": 90,
+      "meets_threshold": true
+    },
+    "shared": {
+      "lines": 33540,
+      "covered": 31924,
+      "percent": 95.18187239117472,
+      "minimum_percent": 95,
+      "meets_threshold": true
+    }
+  },
+  "physical_before_exclusions": {
+    "crate": {
+      "lines": 66106,
+      "covered": 60597,
+      "percent": 91.66641454633468,
+      "minimum_percent": 90,
+      "meets_threshold": true
+    },
+    "shared": {
+      "lines": 32720,
+      "covered": 31518,
+      "percent": 96.32640586797066,
+      "minimum_percent": 95,
+      "meets_threshold": true
+    }
+  },
+  "physical_whole_file_diagnostic": {
+    "crate": {
+      "lines": 36479,
+      "covered": 31412,
+      "percent": 86.10981660681487,
+      "minimum_percent": 90,
+      "meets_threshold": false
+    },
+    "shared": {
+      "lines": 16364,
+      "covered": 15324,
+      "percent": 93.64458567587387,
+      "minimum_percent": 95,
+      "meets_threshold": false
+    }
+  },
+  "source_inventory_sha256": "096bd57de06aba56eca7ad5ad46212c00190f69c9d973d9a0180847f1f19f963",
+  "native_report": {
+    "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T043433.769811Z/llvm-export/native-coverage.json",
+    "identity": {
+      "sha256": "d6c5110214057436df5980c6ca2bfb0af9b9cda0db36441173bb385e16e8999e",
+      "bytes": 82008603,
+      "lines": 1
+    }
+  },
+  "coverage_log": {
+    "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T043433.769811Z/00-coverage.log",
+    "identity": {
+      "sha256": "b6a99eb49043134bd78d7868879b0396c42c4d4f1ebbbf34b13a8a7486b78d2b",
+      "bytes": 101624,
+      "lines": 1138
+    }
+  },
+  "classifier_capture": {
+    "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T043433.769811Z/whole-test-file-classifier/invocation.json",
+    "identity": {
+      "sha256": "361e7e77f10bc82550a89652348bf3f75c9fab5eaf4cf420acba6512ed35a5fc",
+      "bytes": 2314,
+      "lines": 65
+    }
+  },
+  "retained_run_evidence": {
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T043433.769811Z/results.json": {
+      "sha256": "7f7311d68829fed966e69eded637509cba72145db077469460c73856c425e350",
+      "bytes": 2367,
+      "lines": 76
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T043433.769811Z/00-coverage.log": {
+      "sha256": "b6a99eb49043134bd78d7868879b0396c42c4d4f1ebbbf34b13a8a7486b78d2b",
+      "bytes": 101624,
+      "lines": 1138
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T043433.769811Z/compiler-capture-setup.json": {
+      "sha256": "f51a2cb29cc139ffbe67ee74c9d970f1729cdcba35f4144e6586bf6eafe3d1f4",
+      "bytes": 5312,
+      "lines": 137
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T043433.769811Z/compiler-binding.json": {
+      "sha256": "35f8f62f3b3f33c393b80da1434f35edab6133016745247232e430baea087e56",
+      "bytes": 23153,
+      "lines": 577
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T043433.769811Z/coverage-inputs-before.json": {
+      "sha256": "04dd13205827aa1da83a106deff66548eee96e766965026d9adac4ac8e4100a2",
+      "bytes": 71002,
+      "lines": 1865
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T043433.769811Z/coverage-inputs-after.json": {
+      "sha256": "04dd13205827aa1da83a106deff66548eee96e766965026d9adac4ac8e4100a2",
+      "bytes": 71002,
+      "lines": 1865
+    },
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T043433.769811Z/coverage.json": {
+      "sha256": "4a3bcde792b85f7082ef6308b3c501fb72d685480d41d8d93eeaefc3de962689",
+      "bytes": 82025745,
+      "lines": 1
+    }
+  },
+  "reported_file_count": 167,
+  "excluded_file_count": 78,
+  "excluded_files": [
+    {
+      "path": "src/architecture/spec_tests.rs",
+      "source_sha256": "0966687cab0e38639adeefbc4c81a122c5395e2e16514fe5f1635bf6e4bb4a98",
+      "mapped_lines": 447,
+      "covered_lines": 442
+    },
+    {
+      "path": "src/architecture/types_tests.rs",
+      "source_sha256": "37051afd20bf0cc833bc8023ef73328259620b0e4133fe5cfc130d1258507ac8",
+      "mapped_lines": 48,
+      "covered_lines": 48
+    },
+    {
+      "path": "src/attention_tests.rs",
+      "source_sha256": "166c0c77a477cae4e26a0c60f039696f2e203e4245da54995ba31d36058de538",
+      "mapped_lines": 497,
+      "covered_lines": 496
+    },
+    {
+      "path": "src/cache/config_tests.rs",
+      "source_sha256": "b9d1c14f7e60a1764bee91ab47de3c8cd7dbd339d81ef3a3777301bfccb45d38",
+      "mapped_lines": 36,
+      "covered_lines": 36
+    },
+    {
+      "path": "src/cache/ring_tests.rs",
+      "source_sha256": "7873f00aafb207eb10d38d15011acd1c2e8f39a69800feeb0e263ac7c12c7bfc",
+      "mapped_lines": 183,
+      "covered_lines": 183
+    },
+    {
+      "path": "src/cache/state_tests.rs",
+      "source_sha256": "b97e5462d397e539d165455da4ecf6d468b048a351244bba1a664df2a76958bf",
+      "mapped_lines": 141,
+      "covered_lines": 141
+    },
+    {
+      "path": "src/cache/tensor/tests.rs",
+      "source_sha256": "f906d37b2fe27c01702d9b8ab70a4b241052e62415218131f8bb4da64f65fa53",
+      "mapped_lines": 1457,
+      "covered_lines": 1457
+    },
+    {
+      "path": "src/cache/transaction_tests.rs",
+      "source_sha256": "5aee826b3099b3eacb957438b4ed607c23b2031fcfc42fa7a7c145de70228f8d",
+      "mapped_lines": 115,
+      "covered_lines": 115
+    },
+    {
+      "path": "src/checkpoint/dtype_tests.rs",
+      "source_sha256": "3f9699cae76b9a51508a4ba75be87bd157201bb0f65e0fcec33684ecee5fbb24",
+      "mapped_lines": 40,
+      "covered_lines": 40
+    },
+    {
+      "path": "src/checkpoint/quantization/burnpack_test_support.rs",
+      "source_sha256": "937cb3d4f352dbf3d1b3ac4409ceb7c1789e79cdafc5412af1b21e248d298006",
+      "mapped_lines": 28,
+      "covered_lines": 28
+    },
+    {
+      "path": "src/checkpoint/quantization/burnpack_tests.rs",
+      "source_sha256": "2503325cc88b1d79074a24f90929ae9e522434a042fb6ea46f5d3b7198c6c571",
+      "mapped_lines": 831,
+      "covered_lines": 829
+    },
+    {
+      "path": "src/checkpoint/quantization/burnpack_validation_edge_tests.rs",
+      "source_sha256": "82b374b7e447643a70451fb3abb742f9b40dfaf18acbce5563179be9d41517ad",
+      "mapped_lines": 209,
+      "covered_lines": 208
+    },
+    {
+      "path": "src/checkpoint/quantization/checkpoint_tests.rs",
+      "source_sha256": "bf3ebecc59459c6b3dae66e171cf4ddfd9d88abca1a7ef93766a8ecfe301ac4b",
+      "mapped_lines": 440,
+      "covered_lines": 439
+    },
+    {
+      "path": "src/checkpoint/quantization/load_tests.rs",
+      "source_sha256": "9a37f8c24ddd8856fa232f1b8c8282aa419159d42c20806e78b12f2c8b3a1730",
+      "mapped_lines": 1454,
+      "covered_lines": 1443
+    },
+    {
+      "path": "src/checkpoint/quantization/provenance_tests.rs",
+      "source_sha256": "8bd6c6cb86a4bbed55fb27897b564c32840fd99f525995e2ca1b6230a00c3d2d",
+      "mapped_lines": 454,
+      "covered_lines": 450
+    },
+    {
+      "path": "src/checkpoint/quantization/tests.rs",
+      "source_sha256": "031672304233faf7ef64884a51d43a9ecc83afbe414a0b9af382df2368d283e7",
+      "mapped_lines": 634,
+      "covered_lines": 630
+    },
+    {
+      "path": "src/checkpoint/report_tests.rs",
+      "source_sha256": "07ea1b36c8c27780c54241cb621d85c8edcd79b51c9320c7fb68101bf4c2677d",
+      "mapped_lines": 88,
+      "covered_lines": 88
+    },
+    {
+      "path": "src/checkpoint/runtime/boundary_tests.rs",
+      "source_sha256": "b18a6e3e752ab49d01f5ea8a1e05de86f419ade6b97727751f417bc77c7a3001",
+      "mapped_lines": 296,
+      "covered_lines": 293
+    },
+    {
+      "path": "src/checkpoint/runtime/source_boundary_tests.rs",
+      "source_sha256": "fc01a16f16f2c39ca3203a6ac9ca43c79e40aa36bd4a6a748552fdea1bfe9ff1",
+      "mapped_lines": 215,
+      "covered_lines": 212
+    },
+    {
+      "path": "src/checkpoint/runtime/tests.rs",
+      "source_sha256": "8885d025b9adcc4c3b884a21563eaf6580e3134410a164b5b37faf1b55d941fd",
+      "mapped_lines": 2048,
+      "covered_lines": 2003
+    },
+    {
+      "path": "src/checkpoint/runtime/transform_boundary_tests.rs",
+      "source_sha256": "ec10a75fc856ed03e9b62cdd61440b947b3603321ac9909fd73084e15cbf7e81",
+      "mapped_lines": 464,
+      "covered_lines": 454
+    },
+    {
+      "path": "src/checkpoint/tests.rs",
+      "source_sha256": "4eaffad346161e20f126703c0e7fb6e4ee6fd37d3e7b6c8ae736a9c435c78095",
+      "mapped_lines": 1279,
+      "covered_lines": 1275
+    },
+    {
+      "path": "src/delta_net_tests.rs",
+      "source_sha256": "f72a15ef4ef194710c9f6d3d6799efff0b6b2bddd17cc37922916b33ff3082ff",
+      "mapped_lines": 325,
+      "covered_lines": 324
+    },
+    {
+      "path": "src/error_tests.rs",
+      "source_sha256": "af2a3739a86544d41457cd9857b1fe4011e02066d3432d6e99d4467f6ed0ace5",
+      "mapped_lines": 10,
+      "covered_lines": 10
+    },
+    {
+      "path": "src/feed_forward_tests.rs",
+      "source_sha256": "79f100cd2d029e6359f848b0f0ed1982327fea188c2b96a27cec18e4d9bee7ad",
+      "mapped_lines": 65,
+      "covered_lines": 65
+    },
+    {
+      "path": "src/generation/causal_tests.rs",
+      "source_sha256": "d22abf67507a4b949ab76e569721291755d9d2f9ab9bf806e450e51deaaebc69",
+      "mapped_lines": 642,
+      "covered_lines": 634
+    },
+    {
+      "path": "src/generation/seq2seq_tests.rs",
+      "source_sha256": "a1967cdb901894b4c3fb1957dc3f974d04bb0f3c4b06cfbfb5bd033d531d331a",
+      "mapped_lines": 996,
+      "covered_lines": 938
+    },
+    {
+      "path": "src/generation_tests.rs",
+      "source_sha256": "a66bdbbe74a0c6a0796ece7ea0bd850b820cc65e6411704483d09bdc0ed58687",
+      "mapped_lines": 434,
+      "covered_lines": 434
+    },
+    {
+      "path": "src/loaded_tests.rs",
+      "source_sha256": "a8c340a63e9d2fd26e97247012d695a0b4f2e51e006d14de7efe9b871e2ae57b",
+      "mapped_lines": 659,
+      "covered_lines": 659
+    },
+    {
+      "path": "src/models/auto/load_tests.rs",
+      "source_sha256": "329e8513156eef2e8a72e9377edb8095bc8845f5bd3245611f67a148115f4702",
+      "mapped_lines": 1036,
+      "covered_lines": 980
+    },
+    {
+      "path": "src/models/auto_tests.rs",
+      "source_sha256": "7d148df6c4fb747709aeb827ddf30cfe449f4bd675709796927f642be318ea79",
+      "mapped_lines": 417,
+      "covered_lines": 417
+    },
+    {
+      "path": "src/models/config_tests.rs",
+      "source_sha256": "038c84f259051b8223866c93fcba6f21a4f4d4bc577b4cf8305ee1cb96ea0100",
+      "mapped_lines": 94,
+      "covered_lines": 94
+    },
+    {
+      "path": "src/models/custom/tests.rs",
+      "source_sha256": "70f30927f2dcb85bb9ff32c2a00ce2e677438eedba002e964030b15fe8f9b15e",
+      "mapped_lines": 775,
+      "covered_lines": 774
+    },
+    {
+      "path": "src/models/deepseek_v2/checkpoint_tests.rs",
+      "source_sha256": "50f17c60b20987cd811af16c7a3fc87fefc0795fe924ae7b62c348d3e46e8a8d",
+      "mapped_lines": 46,
+      "covered_lines": 46
+    },
+    {
+      "path": "src/models/deepseek_v2/load_tests.rs",
+      "source_sha256": "d05cb843282977fb293ee1c3684a2b6882a3ba90a4f102b0a1867882bcaddb13",
+      "mapped_lines": 184,
+      "covered_lines": 184
+    },
+    {
+      "path": "src/models/deepseek_v2/mla_tests.rs",
+      "source_sha256": "7d56f4f71f2820a3ea497bec517174c663f307a9aee4577976d21a743c22ca0e",
+      "mapped_lines": 138,
+      "covered_lines": 137
+    },
+    {
+      "path": "src/models/deepseek_v2/model/decode_tests.rs",
+      "source_sha256": "5f22f4e825a3e477f5e261ca857062cbe2d892db92e4bb57ba38ffdad8ca59cb",
+      "mapped_lines": 364,
+      "covered_lines": 364
+    },
+    {
+      "path": "src/models/deepseek_v2/model_tests.rs",
+      "source_sha256": "67de3ba1206dd8d4ec090d390b3c4e7a5e9838c10056091584790a82f82ff945",
+      "mapped_lines": 333,
+      "covered_lines": 330
+    },
+    {
+      "path": "src/models/deepseek_v2/model_tests_support.rs",
+      "source_sha256": "25b310288d4881765ee6de75451b23dce4509af7a5ef790e37e8ea7739c63784",
+      "mapped_lines": 71,
+      "covered_lines": 71
+    },
+    {
+      "path": "src/models/deepseek_v2_tests.rs",
+      "source_sha256": "ba3b84be738a7aec61372389ff2dc807e117a40aaee0b49468253f06854da4ab",
+      "mapped_lines": 56,
+      "covered_lines": 56
+    },
+    {
+      "path": "src/models/muse_glimmer/checkpoint_tests.rs",
+      "source_sha256": "65e06a8c9b7b54d91d91d6ce2c41dde18672e6f736f7da0fd65214f47b8f0e98",
+      "mapped_lines": 188,
+      "covered_lines": 188
+    },
+    {
+      "path": "src/models/muse_glimmer/load_tests.rs",
+      "source_sha256": "578e0b402ec9c0ebe86bf6b6641c4dd12c21cc9e178b41864b95a9400a8d4a0e",
+      "mapped_lines": 188,
+      "covered_lines": 188
+    },
+    {
+      "path": "src/models/muse_glimmer/model/decode_tests.rs",
+      "source_sha256": "0355bb37b953fb3341d0b798112a99c258612fb0993e650db929f0fdfee1f7b9",
+      "mapped_lines": 586,
+      "covered_lines": 574
+    },
+    {
+      "path": "src/models/muse_glimmer/model_tests.rs",
+      "source_sha256": "82f1b6fb458bf181684f17aa15dc8257317d949cd87d623df9590b10ec0f76cf",
+      "mapped_lines": 602,
+      "covered_lines": 594
+    },
+    {
+      "path": "src/models/muse_glimmer_tests.rs",
+      "source_sha256": "eea4ed07703e198c73883a9df24654958ae46f47d82d07ab60c830bcfb47845b",
+      "mapped_lines": 57,
+      "covered_lines": 57
+    },
+    {
+      "path": "src/models/nemotron_h/checkpoint_tests.rs",
+      "source_sha256": "0f146ca5c754d2f3b1839143f0b006033529afb78d698e3d35aa4b5e4a2ad60b",
+      "mapped_lines": 380,
+      "covered_lines": 375
+    },
+    {
+      "path": "src/models/nemotron_h/load_tests.rs",
+      "source_sha256": "a79a9988e1f54fca466635db15e34df878d5e0217f98951af631cf1aacfb8859",
+      "mapped_lines": 195,
+      "covered_lines": 195
+    },
+    {
+      "path": "src/models/nemotron_h/model/decode_tests.rs",
+      "source_sha256": "df3b0f3f3bc07506790105a770b7bd5bb51b78a3ea2b1bd3815f281a4785f110",
+      "mapped_lines": 289,
+      "covered_lines": 289
+    },
+    {
+      "path": "src/models/nemotron_h/model/mamba2_tests.rs",
+      "source_sha256": "b448f6436924ef4268251f03103856eabf44aefc1e4e3a6767354bc9fdd1a778",
+      "mapped_lines": 526,
+      "covered_lines": 526
+    },
+    {
+      "path": "src/models/nemotron_h/model/mtp_tests.rs",
+      "source_sha256": "4442ea310c855d8f4da84d78e91de247a01f0608fc5c8ceff7a2f98d3f1cea70",
+      "mapped_lines": 392,
+      "covered_lines": 392
+    },
+    {
+      "path": "src/models/nemotron_h/model/speculative_tests.rs",
+      "source_sha256": "9f8813775108ad38ab8e0eb7268245466fe97606059a1c1ad2771ea1ce448b40",
+      "mapped_lines": 472,
+      "covered_lines": 472
+    },
+    {
+      "path": "src/models/nemotron_h/model_tests.rs",
+      "source_sha256": "d9c980d909695c8d8701c4981a8bcf3cc69d0834d399e3d786ac7a47c50e4ddd",
+      "mapped_lines": 256,
+      "covered_lines": 253
+    },
+    {
+      "path": "src/models/nemotron_h_tests.rs",
+      "source_sha256": "25e850892a4fd28b381e283081f091fb828cfbb46d3d72a798ab9324f336399f",
+      "mapped_lines": 99,
+      "covered_lines": 98
+    },
+    {
+      "path": "src/models/qwen3_5/checkpoint_tests.rs",
+      "source_sha256": "fbcfa16017958a359195f84a0ad40d6da48ce21681938cf7ca8f195980655187",
+      "mapped_lines": 266,
+      "covered_lines": 266
+    },
+    {
+      "path": "src/models/qwen3_5/load_tests.rs",
+      "source_sha256": "98e36c30267478517c5263fe008d98ecf3e2d25432c0f25d37f01cb93b675e7f",
+      "mapped_lines": 235,
+      "covered_lines": 235
+    },
+    {
+      "path": "src/models/qwen3_5/model/decode_tests.rs",
+      "source_sha256": "818917b17cf7ebb60f711236f8673c5909229ea55763803a1f5afe1e849d0a1c",
+      "mapped_lines": 946,
+      "covered_lines": 946
+    },
+    {
+      "path": "src/models/qwen3_5/model/speculative_tests.rs",
+      "source_sha256": "113615fb62304efe847c393add14ea789e15077d5ae102fae11fa329a5db0f89",
+      "mapped_lines": 496,
+      "covered_lines": 496
+    },
+    {
+      "path": "src/models/qwen3_5/model_tests.rs",
+      "source_sha256": "2230b788b04b1b9dc2dbca07de6904d25c5d179f21d01e6b30aeb5c5dbb23947",
+      "mapped_lines": 269,
+      "covered_lines": 269
+    },
+    {
+      "path": "src/models/qwen3_5_tests.rs",
+      "source_sha256": "f1b80db2109bebc1df2651fd624fffb97a716d5d3197f000073ecd1051f797b7",
+      "mapped_lines": 86,
+      "covered_lines": 86
+    },
+    {
+      "path": "src/models/qwen3_moe/checkpoint_tests.rs",
+      "source_sha256": "4c96f7a439e19a2beff861b24b7bc16831d7588606ada70ce2d5fcf1a4a42ffb",
+      "mapped_lines": 166,
+      "covered_lines": 166
+    },
+    {
+      "path": "src/models/qwen3_moe/load_tests.rs",
+      "source_sha256": "5084d109ab96d784e651e53666e10d6476380ebc0d8ec827d19d919d0246e21b",
+      "mapped_lines": 180,
+      "covered_lines": 180
+    },
+    {
+      "path": "src/models/qwen3_moe/model_tests.rs",
+      "source_sha256": "a4ff7c55a9bdc72a9424058c69a9fd47020b2803113c2fbc512daa71cd56652e",
+      "mapped_lines": 648,
+      "covered_lines": 648
+    },
+    {
+      "path": "src/models/qwen3_moe_tests.rs",
+      "source_sha256": "401feb66edcb0e9322b3302dd49b79ff9d65c3813521d4b183fcf676be3c9fd0",
+      "mapped_lines": 19,
+      "covered_lines": 19
+    },
+    {
+      "path": "src/models/t5/checkpoint_tests.rs",
+      "source_sha256": "ce195fbd22c6757e47d21856251aba502683808a48c1baf9325a6056c99eb8f5",
+      "mapped_lines": 352,
+      "covered_lines": 352
+    },
+    {
+      "path": "src/models/t5/generation_tests.rs",
+      "source_sha256": "c9ddab1d1ee1d3a383721d94f243793b79531c2b44e085d0d8d9b8efc3ab6f1c",
+      "mapped_lines": 93,
+      "covered_lines": 51
+    },
+    {
+      "path": "src/models/t5/load_tests.rs",
+      "source_sha256": "8cafccceec61cb08d0856ae54d61decdc5f9c972c70903a439b8aaa57218e3a0",
+      "mapped_lines": 451,
+      "covered_lines": 303
+    },
+    {
+      "path": "src/models/t5/model/decode_tests.rs",
+      "source_sha256": "3b2edbfe06fe0e291b4c7e90d4d02007fd420b3c3a99afdc958ea69e286aed15",
+      "mapped_lines": 839,
+      "covered_lines": 839
+    },
+    {
+      "path": "src/models/t5/model_tests.rs",
+      "source_sha256": "221002d8591929f718cbe9612f597c298e24e76077799f234ce9520216b0743a",
+      "mapped_lines": 422,
+      "covered_lines": 422
+    },
+    {
+      "path": "src/models/t5_tests.rs",
+      "source_sha256": "ba1bc8f13201935160eb967fb7028c3a98d716094190f69644bafa78b27a2714",
+      "mapped_lines": 59,
+      "covered_lines": 59
+    },
+    {
+      "path": "src/moe_tests.rs",
+      "source_sha256": "b0bb62729fde77346b203adc99bae711f2e7fe1ff239d2f9c69333b561f56eba",
+      "mapped_lines": 398,
+      "covered_lines": 397
+    },
+    {
+      "path": "src/normalization_tests.rs",
+      "source_sha256": "84e366ab7c39c2bcd60a0c25917dbcadc11927ccc825c69ceae4b6c9fda923f1",
+      "mapped_lines": 140,
+      "covered_lines": 140
+    },
+    {
+      "path": "src/operations_tests.rs",
+      "source_sha256": "77a8bf4e77ce1bbdb0f768dbe235bbbcd1b7db95fe80bba7606060a84e775fa0",
+      "mapped_lines": 101,
+      "covered_lines": 101
+    },
+    {
+      "path": "src/position/ids_tests.rs",
+      "source_sha256": "1ddbeb572efcd462ff9b242f11a581a2ef797336b4a40589d05f10c2380581b6",
+      "mapped_lines": 88,
+      "covered_lines": 88
+    },
+    {
+      "path": "src/position/rope_tests.rs",
+      "source_sha256": "57b60e5cbef85cbd60aea1cf7ce8b18d655d193814da00baef35020c355f5b8c",
+      "mapped_lines": 172,
+      "covered_lines": 172
+    },
+    {
+      "path": "src/position/t5_bias_tests.rs",
+      "source_sha256": "467649c8c29e4bf910ed8e68bbf0180b9f670b4cd6a794f1859ba0be328185f8",
+      "mapped_lines": 86,
+      "covered_lines": 86
+    },
+    {
+      "path": "src/position/t5_tests.rs",
+      "source_sha256": "140e0837fcc89c54ebb00df1c826cbbbfcb852c082d17a880b00ea9d4b401853",
+      "mapped_lines": 132,
+      "covered_lines": 132
+    },
+    {
+      "path": "src/position/tensor_tests.rs",
+      "source_sha256": "c82e8536a9a28f21ebd7b5527ed0e674cec519c4e20dc432754c929f7eff0eb0",
+      "mapped_lines": 103,
+      "covered_lines": 103
+    },
+    {
+      "path": "src/tokenization_tests.rs",
+      "source_sha256": "825782bc3c7de1d624a921d300faeb1b6263ca7a4ee761a16ff0b2f6fa42a011",
+      "mapped_lines": 601,
+      "covered_lines": 601
+    }
+  ],
+  "largest_retained_missed_files": [
+    {
+      "path": "src/models/qwen3_5/model/decode.rs",
+      "mapped_lines": 1304,
+      "covered_lines": 1035,
+      "missed_lines": 269
+    },
+    {
+      "path": "src/models/nemotron_h/model/decode.rs",
+      "mapped_lines": 932,
+      "covered_lines": 701,
+      "missed_lines": 231
+    },
+    {
+      "path": "src/models/muse_glimmer/model.rs",
+      "mapped_lines": 1104,
+      "covered_lines": 898,
+      "missed_lines": 206
+    },
+    {
+      "path": "src/models/auto.rs",
+      "mapped_lines": 406,
+      "covered_lines": 218,
+      "missed_lines": 188
+    },
+    {
+      "path": "src/models/t5/model/decode.rs",
+      "mapped_lines": 1049,
+      "covered_lines": 869,
+      "missed_lines": 180
+    },
+    {
+      "path": "src/checkpoint/quantization/burnpack.rs",
+      "mapped_lines": 1229,
+      "covered_lines": 1055,
+      "missed_lines": 174
+    },
+    {
+      "path": "src/models/muse_glimmer/model/decode.rs",
+      "mapped_lines": 761,
+      "covered_lines": 588,
+      "missed_lines": 173
+    },
+    {
+      "path": "src/models/qwen3_moe/model.rs",
+      "mapped_lines": 600,
+      "covered_lines": 429,
+      "missed_lines": 171
+    },
+    {
+      "path": "src/models/nemotron_h/model.rs",
+      "mapped_lines": 827,
+      "covered_lines": 659,
+      "missed_lines": 168
+    },
+    {
+      "path": "src/models/qwen3_moe/model/decode.rs",
+      "mapped_lines": 743,
+      "covered_lines": 577,
+      "missed_lines": 166
+    },
+    {
+      "path": "src/models/deepseek_v2/model/decode.rs",
+      "mapped_lines": 881,
+      "covered_lines": 721,
+      "missed_lines": 160
+    },
+    {
+      "path": "src/models/qwen3_5/model/speculative.rs",
+      "mapped_lines": 570,
+      "covered_lines": 442,
+      "missed_lines": 128
+    },
+    {
+      "path": "src/models/auto/load.rs",
+      "mapped_lines": 557,
+      "covered_lines": 430,
+      "missed_lines": 127
+    },
+    {
+      "path": "src/models/nemotron_h/load.rs",
+      "mapped_lines": 368,
+      "covered_lines": 246,
+      "missed_lines": 122
+    },
+    {
+      "path": "src/models/deepseek_v2/model.rs",
+      "mapped_lines": 702,
+      "covered_lines": 582,
+      "missed_lines": 120
+    },
+    {
+      "path": "src/checkpoint/runtime/mod.rs",
+      "mapped_lines": 632,
+      "covered_lines": 521,
+      "missed_lines": 111
+    },
+    {
+      "path": "src/models/custom/common.rs",
+      "mapped_lines": 777,
+      "covered_lines": 674,
+      "missed_lines": 103
+    },
+    {
+      "path": "src/models/nemotron_h/model/speculative.rs",
+      "mapped_lines": 544,
+      "covered_lines": 451,
+      "missed_lines": 93
+    },
+    {
+      "path": "src/models/t5/model.rs",
+      "mapped_lines": 738,
+      "covered_lines": 646,
+      "missed_lines": 92
+    },
+    {
+      "path": "src/models/nemotron_h/model/mtp.rs",
+      "mapped_lines": 318,
+      "covered_lines": 227,
+      "missed_lines": 91
+    }
+  ],
+  "advertised_supported": false,
+  "source_commit": "c67d9fec238cc213e5591d5837772a05b8779b61",
+  "tests": {
+    "passed": 1013,
+    "failed": 0,
+    "ignored": 29,
+    "unit_identities": 914,
+    "unit_passed": 911,
+    "unit_ignored": 3
+  },
+  "compiler_inputs": {
+    "production": 101,
+    "unit": 187,
+    "unit_rust": 179,
+    "integration_targets": 14,
+    "selected_llvm_objects": 15,
+    "fresh_compiler_captures": 16
+  },
+  "independent_reauthentication": {
+    "path": "/private/tmp/tfm-coverage-reauth.apwxcb/reauthentication.json",
+    "exact_diagnostic_reproduced": true
+  },
+  "limitations": [
+    "This versioned whole-test-file diagnostic is not qualified production-only or branch coverage.",
+    "No inline or individually generated spans are removed. Experimental model source remains in scope.",
+    "Removing 78 fully qualified test-only files exposes a numerical gap; the higher test-inclusive native aggregate does not satisfy the intended production coverage gate.",
+    "This records c67d9fe before later source or evidence edits. Future changes require fresh native capture."
+  ]
+}

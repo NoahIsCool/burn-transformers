@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "command": [
+    "cargo",
+    "+stable",
+    "test",
+    "--manifest-path",
+    "/Users/nover/repos/hmm_compression/crates/transformers/Cargo.toml",
+    "--locked",
+    "--offline",
+    "--release",
+    "--no-default-features",
+    "--features",
+    "std,metal,tokenizers,chat-templates",
+    "--no-run",
+    "--test",
+    "qwen35_benchmarks",
+    "--test",
+    "small_model_benchmarks",
+    "--message-format=json"
+  ],
+  "process_exit_code": 0,
+  "source_before": {
+    "commit": "3d5220a3cc2a0ac91ffc70d1b4089b8fe4d0fb58",
+    "runtime_src_tree": "097e0f0178414f6bdcdfeb5b965bea080f73fa5b",
+    "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+    "cargo_manifest_sha256": "0554a3d881a20dfbe8412fae717507684d395f7570283308f1ad8ca11f3b04bd",
+    "transformer_worktree_status": ""
+  },
+  "source_after": {
+    "commit": "3d5220a3cc2a0ac91ffc70d1b4089b8fe4d0fb58",
+    "runtime_src_tree": "097e0f0178414f6bdcdfeb5b965bea080f73fa5b",
+    "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+    "cargo_manifest_sha256": "0554a3d881a20dfbe8412fae717507684d395f7570283308f1ad8ca11f3b04bd",
+    "transformer_worktree_status": ""
+  },
+  "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3",
+  "wrapper": {
+    "path": "/private/tmp/tfm-worktree-wrappers.w7drfj/integration",
+    "sha256": "9e470c14f0b8a393d5ad5724cffc99faa6d44689b80768d9f951022efb4435e5"
+  },
+  "artifacts": [
+    {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///Users/nover/repos/hmm_compression/crates/transformers#0.1.0",
+      "manifest_path": "/Users/nover/repos/hmm_compression/crates/transformers/Cargo.toml",
+      "target": {
+        "kind": [
+          "lib"
+        ],
+        "crate_types": [
+          "lib"
+        ],
+        "name": "transformers",
+        "src_path": "/Users/nover/repos/hmm_compression/crates/transformers/src/lib.rs",
+        "edition": "2024",
+        "doc": true,
+        "doctest": true,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 0,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": false
+      },
+      "features": [
+        "chat-templates",
+        "metal",
+        "std",
+        "tokenizers"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libtransformers-46f69e9b760641ae.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libtransformers-46f69e9b760641ae.rmeta"
+      ],
+      "executable": null,
+      "fresh": false
+    },
+    {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///Users/nover/repos/hmm_compression/crates/transformers#0.1.0",
+      "manifest_path": "/Users/nover/repos/hmm_compression/crates/transformers/Cargo.toml",
+      "target": {
+        "kind": [
+          "test"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "small_model_benchmarks",
+        "src_path": "/Users/nover/repos/hmm_compression/crates/transformers/tests/small_model_benchmarks.rs",
+        "edition": "2024",
+        "doc": false,
+        "doctest": false,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 0,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": true
+      },
+      "features": [
+        "chat-templates",
+        "metal",
+        "std",
+        "tokenizers"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/small_model_benchmarks-8e0d96d9bf384242"
+      ],
+      "executable": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/small_model_benchmarks-8e0d96d9bf384242",
+      "fresh": false
+    },
+    {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///Users/nover/repos/hmm_compression/crates/transformers#0.1.0",
+      "manifest_path": "/Users/nover/repos/hmm_compression/crates/transformers/Cargo.toml",
+      "target": {
+        "kind": [
+          "test"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "qwen35_benchmarks",
+        "src_path": "/Users/nover/repos/hmm_compression/crates/transformers/tests/qwen35_benchmarks.rs",
+        "edition": "2024",
+        "doc": false,
+        "doctest": false,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 0,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": true
+      },
+      "features": [
+        "chat-templates",
+        "metal",
+        "std",
+        "tokenizers"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-9ebf360b401eab26"
+      ],
+      "executable": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-9ebf360b401eab26",
+      "fresh": false
+    }
+  ],
+  "executables": {
+    "small_model_benchmarks": {
+      "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/small_model_benchmarks-8e0d96d9bf384242",
+      "sha256": "745aa900c21c68fe8d070828bd2ed2e61ecf7fe37d661df4732fcfe74df9d02b"
+    },
+    "qwen35_benchmarks": {
+      "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-9ebf360b401eab26",
+      "sha256": "80071cbefd9ff20967630726ed94f140efec3defcba0f6b133c5671dbf456ff7"
+    }
+  },
+  "logs": {
+    "stdout.jsonl": {
+      "sha256": "f4f1fc05ef8d428ce5183e9dd884deb51a320183da1a897a12e17abcf81e60db",
+      "bytes": 320671
+    },
+    "stderr.log": {
+      "sha256": "185bc65d16dab15fde556695ddcce604fa3afa180c524884ff09a51ae1e4276d",
+      "bytes": 153
+    }
+  }
+}

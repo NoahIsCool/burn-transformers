@@ -23,10 +23,14 @@ checkpoint is documented separately in
 
 The v0.1 candidate is limited to **Qwen3.5-0.8B and FLAN-T5-small**; other
 families remain experimental. Both have refreshed local correctness evidence.
-The latest [source and native-bound aggregate coverage checks](acceptance/measurements/native-coverage-binding-20260910.json)
-pass, but production-only coverage qualification and refreshed performance/memory
-measurements remain open. See [the release gates](RELEASE_GATES.md) for the exact
-scope and historical evidence; a passing aggregate does not promote support.
+The latest [whole-test-file coverage diagnostic](acceptance/measurements/whole-test-file-coverage-v2-20260910.json)
+exposes a gap: 86.11% crate-wide and 93.64% shared/core after excluding 78 verified
+test-only files. This remains a diagnostic, not qualified production-only coverage.
+The [refreshed timing and sampled-memory records](acceptance/measurements/small-model-performance-20260910/manifest.json)
+are now available, including FLAN's first Flex CPU baseline. Qwen's unexplained
+historical timing regression, coverage, and final integrated release checks remain
+open. See [the release gates](RELEASE_GATES.md); passing correctness or a
+test-inclusive aggregate does not promote support.
 
 ## Current status
 

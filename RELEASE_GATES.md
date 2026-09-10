@@ -282,8 +282,27 @@ Native fixtures verify macro/include/alias and conditional-path vetoes. Inline,
 generated, unclassified, and ambiguous ownership remains in the denominator.
 This separately scoped file policy does not qualify production-only coverage:
 remaining inline tests can still inflate its physical-line diagnostic. The
-90%/95% requirements are unchanged, and full-crate execution of this new layer
-remains pending.
+90%/95% requirements are unchanged.
+
+The first [executed v1 diagnostic at `3d5220a`](acceptance/measurements/whole-test-file-coverage-v1-20260910.json)
+removed 39 whole test files and measured 90.0779% crate-wide / 95.2700% shared;
+remaining inline/property tests could still inflate those values. The following
+checkpoint and model extractions (`82da8cb`, `c67d9fe`) preserved 101 production
+inputs and all 914 unit-test identities, adding only 34 test-only sibling files.
+The narrowly reviewed macro-span policy (`41e0038`) also qualifies macros whose
+complete spans inherit independently proven whole-file test ownership; it does
+not classify arbitrary generated code as test-only.
+
+The [fresh v2 execution at `c67d9fe`](acceptance/measurements/whole-test-file-coverage-v2-20260910.json)
+passes 1,013 tests with 29 existing ignores. Sixteen fresh compiler captures and
+15 exact LLVM objects bind 101 production / 187 unit inputs. Independent
+revalidation reproduces the diagnostic exactly: 78 files excluded, **31,412 /
+36,479 = 86.1098% crate-wide** and **15,324 / 16,364 = 93.6446% shared/core**.
+Both intended numerical targets fail. The native test-inclusive aggregate still
+passes (90.2428% / 95.1819%); it must not be substituted for this uncovered gap.
+Production-only, branch-coverage and release-promotion flags remain false.
+The exact native export and command log remain under
+`target/release-gates/20260910T043433.769811Z/`. Later source edits need a new run.
 
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is
@@ -377,10 +396,48 @@ examples. The earlier parameter-reload record remains the corresponding Metal
 full-vector replay. The new public-coordinator hardware run validates thirteen
 exact continuations but is **excluded from performance comparisons** because
 the observed power state contradicted its supplied AC metadata. Repeated timing
-and sampled phase-memory refreshes, production-only coverage qualification,
-and final packaging remain separate release work. The [fresh five-target ASan campaign](fuzz/evidence/refresh-80b51e8.json)
+and sampled phase-memory refreshes are now recorded separately below;
+production-only coverage qualification and final packaging remain open.
+The [fresh five-target ASan campaign](fuzz/evidence/refresh-80b51e8.json)
 now passes all 50,000 configured inputs without sanitizer diagnostics, timeouts,
 or failure artifacts, with unchanged source, seed, and lockfile hashes. It is
 bounded fuzz evidence, not proof of complete coverage.
+
+The [source-bound timing and memory refresh at `3d5220a`](acceptance/measurements/small-model-performance-20260910/manifest.json)
+completed before the test-only refactors. Every run has clean before/after source
+and executable identities, successful correctness checks, and host-observed AC
+power at both endpoints. There was no continuous power/thermal monitoring or
+exclusive desktop GPU access. Compact summaries retain all measured timing
+samples; hashes distinguish them from the original local reports.
+
+- Qwen's public `generate_causal` coordinator reproduces all 32 oracle tokens in
+  each of 13 calls (three warmups, ten measured), with median **1.751402479 s**
+  and p95 **1.76914625 s**. This boundary includes cache allocation/destruction,
+  selection, log-probability readback and stopping. It excludes tokenization,
+  request-tensor construction and reference validation; no public TTFT or
+  model-only timing was measured.
+- Qwen's ordinary model-loop timing and an identical-binary rerun confirm an
+  approximately **25% decode-throughput regression** from the September 9
+  baseline. Rebuilding the exact historical source (`1e4f836`) with the current
+  40 matching backend dependency artifacts also produces about 27 tokens/s,
+  rather than the historical 36. The immediate [controlled comparison](acceptance/measurements/small-model-performance-20260910/qwen-controlled-historical-comparison.json)
+  places all warm median source-to-source differences within **1.247%**. Three
+  p95 latency alerts exceed 5%, none exceeds 10%; with ten repetitions p95 is
+  the maximum sample. **The historical failure is not waived or explained.**
+  No current-source cause or decision to replace the historical gate is assumed.
+- FLAN Metal repeats the 32/128/512-source-token, 128-decode-step protocol with
+  exact prediction hashes, roughly 73–75 model-only decode tokens/s, and no
+  repeated metric regression over 10% versus its historical baseline. Some
+  TTFT/natural-loop latency alerts exceed 5%. The first **Flex/F32 CPU baseline**
+  measures 233.713 / 159.518 / 68.387 model-only tokens/s at those source lengths;
+  its six-token EOS continuation takes median 0.352338 s. This is workload-specific
+  evidence, not a general backend ranking or a historical CPU regression result.
+- Separate Qwen/FLAN memory replays each pass 93 phases with zero sampling or
+  validation errors. Observed kernel lifetime physical-footprint high-water marks
+  are **2,977,486,656 / 771,181,504 bytes**. The 1 ms requested sampling interval
+  achieved roughly 1.25 ms; maximum whole-window gaps were 5.40 / 1.88 ms.
+  Signed above-idle phase deltas are retained. Sampled maxima are not exact
+  unsampled peaks, no host/device split is measured, and instrumented timings
+  cannot enter the uninstrumented performance comparison.
 
 No expensive acceptance runs for larger families belong to this v0.1 phase.

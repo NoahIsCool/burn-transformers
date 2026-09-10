@@ -1,0 +1,1408 @@
+{
+  "artifact_hashes": {
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libtransformers-0beecf7515961436.rlib": "8ac9302e71997662b48ccfe0d1c3cb3464d978c134385067d0dd9a564b3457a8",
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libtransformers-0beecf7515961436.rmeta": "86d968979f22110cd2e12973d60b8d0d065e3d072c0776e2db6950aec4a566ff",
+    "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-f528fcca2d213ee1": "6ff3b08574d73907621d262e37acfc4ef8772702d9d0a73993270ff4456989e2"
+  },
+  "artifacts": [
+    {
+      "executable": null,
+      "features": [
+        "chat-templates",
+        "metal",
+        "std",
+        "tokenizers"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libtransformers-0beecf7515961436.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libtransformers-0beecf7515961436.rmeta"
+      ],
+      "fresh": false,
+      "manifest_path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/Cargo.toml",
+      "package_id": "path+file:///private/tmp/hmm-tfm-perf-baseline/crates/transformers#0.1.0",
+      "profile": {
+        "debug_assertions": false,
+        "debuginfo": 0,
+        "opt_level": "3",
+        "overflow_checks": false,
+        "test": false
+      },
+      "reason": "compiler-artifact",
+      "target": {
+        "crate_types": [
+          "lib"
+        ],
+        "doc": true,
+        "doctest": true,
+        "edition": "2024",
+        "kind": [
+          "lib"
+        ],
+        "name": "transformers",
+        "src_path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/lib.rs",
+        "test": true
+      }
+    },
+    {
+      "executable": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-f528fcca2d213ee1",
+      "features": [
+        "chat-templates",
+        "metal",
+        "std",
+        "tokenizers"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-f528fcca2d213ee1"
+      ],
+      "fresh": false,
+      "manifest_path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/Cargo.toml",
+      "package_id": "path+file:///private/tmp/hmm-tfm-perf-baseline/crates/transformers#0.1.0",
+      "profile": {
+        "debug_assertions": false,
+        "debuginfo": 0,
+        "opt_level": "3",
+        "overflow_checks": false,
+        "test": true
+      },
+      "reason": "compiler-artifact",
+      "target": {
+        "crate_types": [
+          "bin"
+        ],
+        "doc": false,
+        "doctest": false,
+        "edition": "2024",
+        "kind": [
+          "test"
+        ],
+        "name": "qwen35_benchmarks",
+        "src_path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/tests/qwen35_benchmarks.rs",
+        "test": true
+      }
+    }
+  ],
+  "backend_dependencies": [
+    {
+      "features": [
+        "cubecl",
+        "cubecl-wgpu",
+        "std"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_backend-26565f42b61748d8.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_backend-26565f42b61748d8.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#burn-backend@0.21.0"
+    },
+    {
+      "features": [
+        "flate2",
+        "log",
+        "rmp-serde",
+        "std"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_core-0d9404da4688442f.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_core-0d9404da4688442f.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#burn-core@0.21.0"
+    },
+    {
+      "features": [
+        "std"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_cubecl-73353386cc605007.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_cubecl-73353386cc605007.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#burn-cubecl@0.21.0"
+    },
+    {
+      "features": [],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_derive-81f4b22998f8fa4f.dylib"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#burn-derive@0.21.0"
+    },
+    {
+      "features": [],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_ir-d238ae9b3ff5feba.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_ir-d238ae9b3ff5feba.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#burn-ir@0.21.0"
+    },
+    {
+      "features": [
+        "std"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_nn-09839bad5478bab7.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_nn-09839bad5478bab7.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#burn-nn@0.21.0"
+    },
+    {
+      "features": [
+        "log",
+        "std"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_optim-696e0da542caecbd.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_optim-696e0da542caecbd.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#burn-optim@0.21.0"
+    },
+    {
+      "features": [
+        "cubecl",
+        "std"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_std-7a2b1e3e27fc4059.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_std-7a2b1e3e27fc4059.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#burn-std@0.21.0"
+    },
+    {
+      "features": [
+        "burnpack",
+        "ciborium",
+        "memmap",
+        "safetensors",
+        "serde",
+        "std"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_store-68e588ff2d7a76cd.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_store-68e588ff2d7a76cd.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#burn-store@0.21.0"
+    },
+    {
+      "features": [
+        "colored",
+        "std"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_tensor-ee680e3ca98f7d27.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_tensor-ee680e3ca98f7d27.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#burn-tensor@0.21.0"
+    },
+    {
+      "features": [
+        "cubecl-msl",
+        "metal",
+        "std"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_wgpu-6fe89a158486eb18.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn_wgpu-6fe89a158486eb18.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#burn-wgpu@0.21.0"
+    },
+    {
+      "features": [
+        "burn-wgpu",
+        "metal",
+        "std",
+        "wgpu"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn-d9bac2297c1b66ba.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libburn-d9bac2297c1b66ba.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#burn@0.21.0"
+    },
+    {
+      "features": [],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_common-b0880c6036218c9d.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_common-b0880c6036218c9d.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubecl-common@0.10.0"
+    },
+    {
+      "features": [
+        "backtrace",
+        "cache",
+        "default",
+        "dirs",
+        "float4",
+        "float8",
+        "fp4",
+        "fp8",
+        "futures-lite",
+        "hash",
+        "oneshot",
+        "parking_lot",
+        "sanitize-filename",
+        "serde",
+        "serde_bytes",
+        "serde_json",
+        "shared-bytes",
+        "std",
+        "xxhash-rust"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_common-d1894a6e8566c4f9.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_common-d1894a6e8566c4f9.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubecl-common@0.10.0"
+    },
+    {
+      "features": [
+        "default",
+        "std"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_core-860069175a6648f0.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_core-860069175a6648f0.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubecl-core@0.10.0"
+    },
+    {
+      "features": [
+        "default",
+        "metal"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_cpp-ffca898332a20f0b.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_cpp-ffca898332a20f0b.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubecl-cpp@0.10.0"
+    },
+    {
+      "features": [
+        "default",
+        "serde",
+        "std"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_ir-fb2d6ec0486b3506.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_ir-fb2d6ec0486b3506.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubecl-ir@0.10.0"
+    },
+    {
+      "features": [],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_macros_internal-6bb10555e26d59b4.dylib"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubecl-macros-internal@0.10.0"
+    },
+    {
+      "features": [],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_macros-34f1afa8bc44154a.dylib"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubecl-macros@0.10.0"
+    },
+    {
+      "features": [],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_opt-e81b362f50eb44f5.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_opt-e81b362f50eb44f5.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubecl-opt@0.10.0"
+    },
+    {
+      "features": [
+        "channel-cell",
+        "channel-mpsc",
+        "channel-mutex",
+        "default",
+        "dirs",
+        "std",
+        "storage-bytes",
+        "toml"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_runtime-5abd61d53055307d.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_runtime-5abd61d53055307d.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubecl-runtime@0.10.0"
+    },
+    {
+      "features": [
+        "default"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_std-d8afd2933e4e2df6.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_std-d8afd2933e4e2df6.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubecl-std@0.10.0"
+    },
+    {
+      "features": [
+        "cubecl-cpp",
+        "msl",
+        "sanitize-filename",
+        "std"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_wgpu-b59d6297e5f10d69.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_wgpu-b59d6297e5f10d69.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubecl-wgpu@0.10.0"
+    },
+    {
+      "features": [
+        "default"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_zspace-7868f0557154baa6.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl_zspace-7868f0557154baa6.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubecl-zspace@0.10.0"
+    },
+    {
+      "features": [
+        "cubecl-std",
+        "cubecl-wgpu",
+        "std",
+        "stdlib",
+        "wgpu",
+        "wgpu-msl"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl-7b59b445c10a74e6.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubecl-7b59b445c10a74e6.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubecl@0.10.0"
+    },
+    {
+      "features": [],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_attention-60b6aa4af4833cff.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_attention-60b6aa4af4833cff.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubek-attention@0.2.0"
+    },
+    {
+      "features": [],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_convolution-aa255543511f80c8.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_convolution-aa255543511f80c8.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubek-convolution@0.2.0"
+    },
+    {
+      "features": [],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_fft-038a1423cd8f3c61.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_fft-038a1423cd8f3c61.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubek-fft@0.2.0"
+    },
+    {
+      "features": [],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_matmul-84b0bbc1e11c28f6.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_matmul-84b0bbc1e11c28f6.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubek-matmul@0.2.0"
+    },
+    {
+      "features": [
+        "kernels",
+        "std"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_quant-44c7c9cc262958c8.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_quant-44c7c9cc262958c8.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubek-quant@0.2.0"
+    },
+    {
+      "features": [],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_random-3777c3da4d92b011.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_random-3777c3da4d92b011.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubek-random@0.2.0"
+    },
+    {
+      "features": [],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_reduce-3c431171e2675883.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_reduce-3c431171e2675883.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubek-reduce@0.2.0"
+    },
+    {
+      "features": [],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_std-23b9b4aaa395679f.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek_std-23b9b4aaa395679f.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubek-std@0.2.0"
+    },
+    {
+      "features": [
+        "attention",
+        "convolution",
+        "cubek-attention",
+        "cubek-convolution",
+        "cubek-fft",
+        "cubek-matmul",
+        "cubek-quant",
+        "cubek-random",
+        "cubek-reduce",
+        "cubek-std",
+        "fft",
+        "matmul",
+        "quantization",
+        "random",
+        "reduce",
+        "stdlib"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek-731771fbff1e4527.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libcubek-731771fbff1e4527.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#cubek@0.2.0"
+    },
+    {
+      "features": [
+        "metal",
+        "vulkan-portability"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libwgpu_core_deps_apple-8d488b8078c5a472.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libwgpu_core_deps_apple-8d488b8078c5a472.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#wgpu-core-deps-apple@29.0.4"
+    },
+    {
+      "features": [
+        "default",
+        "dx12",
+        "fragile-send-sync-non-atomic-wasm",
+        "gles",
+        "metal",
+        "portable-atomic",
+        "renderdoc",
+        "std",
+        "vulkan",
+        "vulkan-portability",
+        "wgpu-core-deps-apple",
+        "wgsl"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libwgpu_core-d857e51ce9f2c6fc.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libwgpu_core-d857e51ce9f2c6fc.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#wgpu-core@29.0.4"
+    },
+    {
+      "features": [
+        "fragile-send-sync-non-atomic-wasm",
+        "metal",
+        "portable-atomic",
+        "renderdoc",
+        "vulkan"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libwgpu_hal-93cc9caf745afcdc.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libwgpu_hal-93cc9caf745afcdc.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#wgpu-hal@29.0.4"
+    },
+    {
+      "features": [],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libwgpu_naga_bridge-bc9333965e83a6e3.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libwgpu_naga_bridge-bc9333965e83a6e3.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#wgpu-naga-bridge@29.0.4"
+    },
+    {
+      "features": [
+        "fragile-send-sync-non-atomic-wasm",
+        "std",
+        "web"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libwgpu_types-b8add02b2224b4fb.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libwgpu_types-b8add02b2224b4fb.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#wgpu-types@29.0.4"
+    },
+    {
+      "features": [
+        "default",
+        "dx12",
+        "fragile-send-sync-non-atomic-wasm",
+        "gles",
+        "metal",
+        "parking_lot",
+        "std",
+        "vulkan",
+        "vulkan-portability",
+        "web",
+        "webgpu",
+        "wgsl"
+      ],
+      "filenames": [
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libwgpu-0e538f465576bcf8.rlib",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/libwgpu-0e538f465576bcf8.rmeta"
+      ],
+      "package_id": "registry+https://github.com/rust-lang/crates.io-index#wgpu@29.0.4"
+    }
+  ],
+  "backend_dependencies_match_current": true,
+  "capture_script_sha256": "e14f085178b96e15681d4feab03f38fe59b93c5b7a93f60ae18583294ed56cd5",
+  "command": [
+    "cargo",
+    "+stable",
+    "test",
+    "--manifest-path",
+    "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/Cargo.toml",
+    "--locked",
+    "--offline",
+    "--release",
+    "--no-default-features",
+    "--features",
+    "std,metal,tokenizers,chat-templates",
+    "--no-run",
+    "--test",
+    "qwen35_benchmarks",
+    "--message-format=json",
+    "--verbose"
+  ],
+  "completed_utc": "2026-09-10T03:54:03.945314+00:00",
+  "cwd": "/private/tmp/hmm-tfm-perf-baseline",
+  "depinfo": [
+    {
+      "inputs": [
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/lib.rs",
+          "relative": "src/lib.rs",
+          "sha256": "9986fe65b596f487d5741e69640112711ad81ffebad25df9534e1ee28f5b11bd"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/architecture/mod.rs",
+          "relative": "src/architecture/mod.rs",
+          "sha256": "388db50f951d38587111afd0e5a4863a97b18e2f7544b721134d878970ae9130"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/architecture/spec.rs",
+          "relative": "src/architecture/spec.rs",
+          "sha256": "b265369d05965f20ecb55343b52cbc7d75174d3ff69180ea29858325543657e6"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/architecture/traits.rs",
+          "relative": "src/architecture/traits.rs",
+          "sha256": "d6be1dd2a279d6d7aeb23b4117e1346749825ae5cae7ac1e325941ec95cc65a1"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/architecture/types.rs",
+          "relative": "src/architecture/types.rs",
+          "sha256": "8782b152879a453e52ff4118d6db467a46d610ad19d422bb15fbedb9749542d3"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/attention.rs",
+          "relative": "src/attention.rs",
+          "sha256": "b4884872448e25731f431ba865aa077e4ea2508b998093cec68350d501a52e4d"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/cache/mod.rs",
+          "relative": "src/cache/mod.rs",
+          "sha256": "45a5f69bdda2f82644c284c216d4e5b54402aa16a276712acbe8ccee3d1e7bc5"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/cache/config.rs",
+          "relative": "src/cache/config.rs",
+          "sha256": "811ebfbc48b74765a9d4e0fb98b27ab086313fffbf57a2f90d682bdc02f738a3"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/cache/ring.rs",
+          "relative": "src/cache/ring.rs",
+          "sha256": "2d30b9076b83fc0e2e45f10b22dbca53ed66129ea5ff3532ad9c90c1e8a88d51"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/cache/state.rs",
+          "relative": "src/cache/state.rs",
+          "sha256": "ea560b5afd1ba936ee8339270bed51fbc21f6ae569116a967b0cc394207ba513"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/cache/tensor/mod.rs",
+          "relative": "src/cache/tensor/mod.rs",
+          "sha256": "f0df432df1b522e7c5188e1383425a30d46ff04cf5bbea469f1d991f8509ae98"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/cache/tensor/allocation.rs",
+          "relative": "src/cache/tensor/allocation.rs",
+          "sha256": "5da30bb7410881d1c4dddf91a66a61183fc1c3323ecbf9961f601b9b8b259e6d"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/cache/tensor/error.rs",
+          "relative": "src/cache/tensor/error.rs",
+          "sha256": "ffbb89f06d39e437da210ca6205dd11478398233683a50d23cb89c05f3107274"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/cache/tensor/kv.rs",
+          "relative": "src/cache/tensor/kv.rs",
+          "sha256": "79704f982455afeb0935a9737d0f4fd71b8a7f88431ad616eec1385bc4448b46"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/cache/tensor/recurrent.rs",
+          "relative": "src/cache/tensor/recurrent.rs",
+          "sha256": "2ad968e04c1dcf09642a9dfd920d4414045b20211634eafce76654f72f615c5e"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/cache/tensor/state.rs",
+          "relative": "src/cache/tensor/state.rs",
+          "sha256": "27b04704e13de3db3508c88eab36972ce2d15f03be1ea62c0754124201c10e53"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/cache/transaction.rs",
+          "relative": "src/cache/transaction.rs",
+          "sha256": "98081319693b13daf0fed14236df675c40cfcda36fd428816019711c81ddd5a9"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/mod.rs",
+          "relative": "src/checkpoint/mod.rs",
+          "sha256": "e6bb57582cc8aac7462877d9533c10ca0c2542d824d8c9dc6e1b719b1bfa217a"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/accounting.rs",
+          "relative": "src/checkpoint/accounting.rs",
+          "sha256": "d57240d3b2ec053aac55334b4107f571ad6dc4d1a079f963f0b4ca247f49868b"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/artifact.rs",
+          "relative": "src/checkpoint/artifact.rs",
+          "sha256": "1d199148576aa503423dfcd976bd3669aabc053de879928c49fe2fda4b2d7fe0"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/dtype.rs",
+          "relative": "src/checkpoint/dtype.rs",
+          "sha256": "3f0551b4993fc3ddfbedab903b830451bf2f6fb369fa27004f46d15cb0c09f8e"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/error.rs",
+          "relative": "src/checkpoint/error.rs",
+          "sha256": "3575f473cd55f8bf064796f5a664043e5a6e4de892e08b6a91f2ac46bdbd9bd5"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/mapping.rs",
+          "relative": "src/checkpoint/mapping.rs",
+          "sha256": "9e57cfbc22e99fc96342d41069be1d21e5bb49a32f713acebcd8bbe85407bfc8"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/options.rs",
+          "relative": "src/checkpoint/options.rs",
+          "sha256": "aa569ed47f8a530a7fb920fe140165b79b9ac42131fb1543d1a48c532e4d3682"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/quantization/mod.rs",
+          "relative": "src/checkpoint/quantization/mod.rs",
+          "sha256": "12e0fb42c01b155fe22e801aabfd2f3a2b2f3b124ef3525539710c649734525c"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/quantization/burnpack.rs",
+          "relative": "src/checkpoint/quantization/burnpack.rs",
+          "sha256": "8ce451eef1ac18311fe3d8c26c577d25679dfdc70de9d054febf930eabd516e3"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/quantization/checkpoint.rs",
+          "relative": "src/checkpoint/quantization/checkpoint.rs",
+          "sha256": "8090a01a2f914489377b885048595232d733f6c07a46fa019f155bf046047c50"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/quantization/config.rs",
+          "relative": "src/checkpoint/quantization/config.rs",
+          "sha256": "5bbc71e7faa2644dfcbf3e4305fa369361d70d80e2de4a50984595f8a8e82aac"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/quantization/error.rs",
+          "relative": "src/checkpoint/quantization/error.rs",
+          "sha256": "b1a1873770152fcffe7437bb5f6777aa097e723d9672360acb54432719766326"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/quantization/load.rs",
+          "relative": "src/checkpoint/quantization/load.rs",
+          "sha256": "681c2c8f2cb52c954165bc95958407d716dab665aaf2b9eb07aafac95b2bbf5c"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/quantization/manifest.rs",
+          "relative": "src/checkpoint/quantization/manifest.rs",
+          "sha256": "eec97dfa674ad0b628017ffeffc3ea7865a96f6be10143c8acef5f89a6af88e1"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/quantization/policy.rs",
+          "relative": "src/checkpoint/quantization/policy.rs",
+          "sha256": "597b74e202e1d92911f03828df19d93a88808aa86bbfc3b5e712b4f247535fb9"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/quantization/provenance.rs",
+          "relative": "src/checkpoint/quantization/provenance.rs",
+          "sha256": "7d88745dc4ce45cb4239be1fe13f7561536777955dbd421fd23c139a79fa9bc7"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/quantization/reference.rs",
+          "relative": "src/checkpoint/quantization/reference.rs",
+          "sha256": "5c67cff5daff088f02bc8cce34406240f23ea88ac98845c38131df430ff41314"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/report.rs",
+          "relative": "src/checkpoint/report.rs",
+          "sha256": "d6fc35c24f2da48e70d9d66f2195d4de8500e3d4db16729f19a8811ceb2529ad"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/runtime/mod.rs",
+          "relative": "src/checkpoint/runtime/mod.rs",
+          "sha256": "eb388b3d727d8af0eb0c8597843aa92ceb9a53c7110fbfa40bdccc4bc877ec19"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/runtime/source.rs",
+          "relative": "src/checkpoint/runtime/source.rs",
+          "sha256": "017b21c9a84f1dc95dd37b14f29aa1dca351783fb4238e4922ca6ef471d1dc35"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/checkpoint/runtime/transform.rs",
+          "relative": "src/checkpoint/runtime/transform.rs",
+          "sha256": "cb3b251f793f6d4960027ef7f36c26978e3e13a911ec8f832bd03e56602bb063"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/delta_net.rs",
+          "relative": "src/delta_net.rs",
+          "sha256": "e568de9e641323eb925935bceb79c082c4cfe2f554e86701c0711d61a99911ec"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/error.rs",
+          "relative": "src/error.rs",
+          "sha256": "19de1d3f5bb42f88c147a19a6c8d165fb60f8c69b9706cc6329a7682ef8cf446"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/feed_forward.rs",
+          "relative": "src/feed_forward.rs",
+          "sha256": "19ce6692865597555de89edc40b02dac5fe657ac96b29b0bd2f475b04c3fc8a5"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/generation.rs",
+          "relative": "src/generation.rs",
+          "sha256": "a192feb659db66a852c8982389b1fa3eec5e923a66b15261d462e2fde1d1df80"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/generation/causal.rs",
+          "relative": "src/generation/causal.rs",
+          "sha256": "77b97b375a3d606454eb48a6ae6b4a1aff38813dc52a8d31fd9944f8b4c74cae"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/generation/seq2seq.rs",
+          "relative": "src/generation/seq2seq.rs",
+          "sha256": "15813a886517e6eb87a12f11d448eb7b7f70982b9c3dfd1a4a1c01b02a078314"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/loaded.rs",
+          "relative": "src/loaded.rs",
+          "sha256": "e701d835ba6d5ce87f6cf1ed34555d775a418b73f467ba9152b4bbdfc164379f"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/mod.rs",
+          "relative": "src/models/mod.rs",
+          "sha256": "7c64e115f88bc1c1aeac42043f076cbee5bbdf2cb61bc72c9234cb2f8ac63ac3"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/auto.rs",
+          "relative": "src/models/auto.rs",
+          "sha256": "8205f77d31d69c55d4a3eca982712b3a9e8d44562df66d073dbd2efbd4b7cbb4"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/auto/load.rs",
+          "relative": "src/models/auto/load.rs",
+          "sha256": "5206db7614ee9a30b9f15df6328b2c75ad4f08dcc0cff14f8a0757b902c1155b"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/config.rs",
+          "relative": "src/models/config.rs",
+          "sha256": "ed7254e44073f563073a1c43746f7d3e03080a9838dbff3578e6c0cc1bc2ac2c"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/custom.rs",
+          "relative": "src/models/custom.rs",
+          "sha256": "b3c970b0f716a888237e498cb906a34e444822dd253122c1c0713f8a5d39041e"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/custom/causal.rs",
+          "relative": "src/models/custom/causal.rs",
+          "sha256": "c8d624993a16e901587ca80290fbc7c917f1c42fc78bf1566a31a2b0d8f0607f"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/custom/common.rs",
+          "relative": "src/models/custom/common.rs",
+          "sha256": "e933ce32fab6943c7c349d616cc51933bbeb2f8e05a76b36af0dd8f896b02407"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/custom/seq2seq.rs",
+          "relative": "src/models/custom/seq2seq.rs",
+          "sha256": "bec4d42e7961b97fb8befe8d5e3cb7a9b58058fba7a393cdf2089dea02e632bb"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/custom/state.rs",
+          "relative": "src/models/custom/state.rs",
+          "sha256": "8cd79c1821dd9be0736c06991c7a9edaaf88dc2cac30aa8c62ae5c09ad75dad1"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/deepseek_v2.rs",
+          "relative": "src/models/deepseek_v2.rs",
+          "sha256": "58c795884fcba8bfc463720afdf8f9f7a7a14072b014982601d4b79a4c5f0078"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/deepseek_v2/checkpoint.rs",
+          "relative": "src/models/deepseek_v2/checkpoint.rs",
+          "sha256": "2946ac159f9f43bb87184bb6b6d51dc14ab6a4495f52f4a8f784ff2a132964ed"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/deepseek_v2/load.rs",
+          "relative": "src/models/deepseek_v2/load.rs",
+          "sha256": "86432bbdb51402d977736158794a528fc73d7ba05ddcad3388a2e047d1efcef4"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/deepseek_v2/mla.rs",
+          "relative": "src/models/deepseek_v2/mla.rs",
+          "sha256": "69c9a09a314a16543283f13a8bef4f255d4346dbba54648726643a7ef01e75af"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/deepseek_v2/model.rs",
+          "relative": "src/models/deepseek_v2/model.rs",
+          "sha256": "1b895f45d192dbed00b2dce771c48b20a80822bf0b5c46df418db80171c75941"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/deepseek_v2/model/decode.rs",
+          "relative": "src/models/deepseek_v2/model/decode.rs",
+          "sha256": "f233c5e9efc772dc8eed57af079cff5443e96d6491c5cb9a79dfa677e4c26d82"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/muse_glimmer.rs",
+          "relative": "src/models/muse_glimmer.rs",
+          "sha256": "6f5e5e2645ad3100e9ba9f4083d1e2c3f5663b1f76e8579fabb1cff7ab35ae6d"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/muse_glimmer/checkpoint.rs",
+          "relative": "src/models/muse_glimmer/checkpoint.rs",
+          "sha256": "9c310621abac4c56ee57bf7fa5cc0f4fb45e598e9de66c8714c1dddeac603cc7"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/muse_glimmer/load.rs",
+          "relative": "src/models/muse_glimmer/load.rs",
+          "sha256": "6c31e27dcfe5f26a0949163928fcff6b29b5df89c44353712421eb1b34663dba"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/muse_glimmer/model.rs",
+          "relative": "src/models/muse_glimmer/model.rs",
+          "sha256": "87d794492852668e03ee5a66ea9195905e25c15062d586b55e9479c13dc2754e"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/muse_glimmer/model/decode.rs",
+          "relative": "src/models/muse_glimmer/model/decode.rs",
+          "sha256": "78ab18e2d047789f4cddd9f8288a3e78ac909612423be7acf3559b78e7fac2f7"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/nemotron_h.rs",
+          "relative": "src/models/nemotron_h.rs",
+          "sha256": "c2ac949a2f60248aeeaea191bfefef9caf9829a9768f5d47aead03c1d35dc575"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/nemotron_h/checkpoint.rs",
+          "relative": "src/models/nemotron_h/checkpoint.rs",
+          "sha256": "fc9167d9aa475cd255aad7ff218a53b9c2e122a1867c36ba918288b55191b985"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/nemotron_h/load.rs",
+          "relative": "src/models/nemotron_h/load.rs",
+          "sha256": "d44c4a02dad33359617d99205d707ffc9cbdf5476c2e36dda732d8783712de70"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/nemotron_h/model.rs",
+          "relative": "src/models/nemotron_h/model.rs",
+          "sha256": "acd2dfb5c196970e69ab5061eaf9dc809f5a2d23bc047f9e67c8f2c1e15f7ba9"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/nemotron_h/model/decode.rs",
+          "relative": "src/models/nemotron_h/model/decode.rs",
+          "sha256": "e055aa9d1d35e7985db18878b9b94b7fa76aee0c16954cd25cd91a61ae7ec0d3"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/nemotron_h/model/mamba2.rs",
+          "relative": "src/models/nemotron_h/model/mamba2.rs",
+          "sha256": "60b66fa3ddbcd2f2aceaf495a352508d9dc9944def861a09dac9646bf76eaa16"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/nemotron_h/model/mtp.rs",
+          "relative": "src/models/nemotron_h/model/mtp.rs",
+          "sha256": "e5e87e3a4641f259260a90872458886485bbb65c93175693f8ba052ac43d7a04"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/nemotron_h/model/speculative.rs",
+          "relative": "src/models/nemotron_h/model/speculative.rs",
+          "sha256": "a91f6d6030e678b77dbe25ac4d960a81f72a390aff5a06f8ad15760f4e92b425"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/qwen3_5.rs",
+          "relative": "src/models/qwen3_5.rs",
+          "sha256": "99cde6af81d836cef3204cac4b6adf94fbdb5831f6cc2b7bee5b82c69f7a11f1"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/qwen3_5/model.rs",
+          "relative": "src/models/qwen3_5/model.rs",
+          "sha256": "78fe207405df635db54223f52c0a6d43d10c1e1b1288b99b521bfa6856053c10"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/qwen3_5/model/decode.rs",
+          "relative": "src/models/qwen3_5/model/decode.rs",
+          "sha256": "e54b8a3b25e989ef999f2be00714c3bc0fd0b4ad66ebd6ebd64d6958a7ef202f"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/qwen3_5/model/mtp.rs",
+          "relative": "src/models/qwen3_5/model/mtp.rs",
+          "sha256": "0ab459569943393a74d647ab3f28ec2fcb4572a21e16a0a010ee784dfe449b8e"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/qwen3_5/model/speculative.rs",
+          "relative": "src/models/qwen3_5/model/speculative.rs",
+          "sha256": "4b11f8511c96eae7c8d563249d6df20e7b9e6be136a79a527a6d4315936d9806"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/qwen3_5/checkpoint.rs",
+          "relative": "src/models/qwen3_5/checkpoint.rs",
+          "sha256": "b026aced64ceac20c13de817906272813df546fee86df8c3952ecd7ebeb764dd"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/qwen3_5/load.rs",
+          "relative": "src/models/qwen3_5/load.rs",
+          "sha256": "4120b6ac71bdf80d1c07cb161ca65dbe569f48078ba9213593d8295d6481f68b"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/qwen3_moe.rs",
+          "relative": "src/models/qwen3_moe.rs",
+          "sha256": "7db73326397db2efd9756ea89c8825ae2ab764c68eebdf0035994372ce53ea00"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/qwen3_moe/checkpoint.rs",
+          "relative": "src/models/qwen3_moe/checkpoint.rs",
+          "sha256": "888a5bbb810928b6ce72655f2286104436bdd781b05f5ff5f7411047cce61b56"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/qwen3_moe/load.rs",
+          "relative": "src/models/qwen3_moe/load.rs",
+          "sha256": "a1924219e506a5ef71cedfc4e90fe6e41f6112bf29954f29969f9740c5307567"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/qwen3_moe/model.rs",
+          "relative": "src/models/qwen3_moe/model.rs",
+          "sha256": "809b879a38358fcf5a8a8d2e02fe2f8faa7ec8a2a52da7ac20ca92fba068b605"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/qwen3_moe/model/decode.rs",
+          "relative": "src/models/qwen3_moe/model/decode.rs",
+          "sha256": "35e3969e5f36d7862107c72ebdd7a563daff0472f22856740a6390947019e5c8"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/t5.rs",
+          "relative": "src/models/t5.rs",
+          "sha256": "b456b5029446157d2e24d805f30e65f9a66eeac72980ecf1b3fc3261b5b1e00d"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/t5/checkpoint.rs",
+          "relative": "src/models/t5/checkpoint.rs",
+          "sha256": "b333409895c878d8e9561a2b065b099132d2c4c2f0d10b2329850ba6001f3029"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/t5/generation.rs",
+          "relative": "src/models/t5/generation.rs",
+          "sha256": "997f56a9c65b374c121997fbd099e88bbe34b441c85c297824306ce9840c3fa5"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/t5/load.rs",
+          "relative": "src/models/t5/load.rs",
+          "sha256": "3415eb855d56255ea231ff60511a4a99390323416c1503c0af46868c665a460a"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/t5/model.rs",
+          "relative": "src/models/t5/model.rs",
+          "sha256": "b072b4633f776b24ffef7643de7ab5888fed9a0bde5f1861574e210d02bdd4ad"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/models/t5/model/decode.rs",
+          "relative": "src/models/t5/model/decode.rs",
+          "sha256": "36b54a003adfb0355b811062d3900388b98a0757dd3597f48ce05fe75cc9bf6e"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/moe.rs",
+          "relative": "src/moe.rs",
+          "sha256": "f32ad6fdf2e3a93e119c4e7e61d369a4ef8ecfbfad90685818412a15602b8346"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/normalization.rs",
+          "relative": "src/normalization.rs",
+          "sha256": "38b04bfeed141394efc8baf1bf3821f559a8558747aa9a722c391ae02e730fd4"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/operations.rs",
+          "relative": "src/operations.rs",
+          "sha256": "7507a65a8f253ead7716241e9578c39bef802c30ed381c3f42160a9c5b6d94ce"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/position/mod.rs",
+          "relative": "src/position/mod.rs",
+          "sha256": "91e18fe664afeaa5958802b15f594f4f14d86ba983d027b5c83c4983c97744cb"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/position/ids.rs",
+          "relative": "src/position/ids.rs",
+          "sha256": "4965134f66550a1a52008f0b0c8561d53a8b51c85c0ccf5c4e0b893ff4563387"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/position/rope.rs",
+          "relative": "src/position/rope.rs",
+          "sha256": "ac12bfaeb1962b33d8f6a01e10537db3e749d43a46f0838f641f007be89c710f"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/position/t5.rs",
+          "relative": "src/position/t5.rs",
+          "sha256": "f930255c442bfe8324378e9ebb1454c69d4b3c2c48de7872944c238587623014"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/position/t5_bias.rs",
+          "relative": "src/position/t5_bias.rs",
+          "sha256": "f0577455bb35a5ad896dd3eb998d390d736dc828d9925976fbe8480e89dd031c"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/position/tensor.rs",
+          "relative": "src/position/tensor.rs",
+          "sha256": "e8513f46f6d9f285615ef58bf293f669e3005f52f7d480d499b40344b4f1ba63"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/src/tokenization.rs",
+          "relative": "src/tokenization.rs",
+          "sha256": "d6b04ba99ef3bb0812b671130a7d2e8193b6eff2548b958b71d62fc791277b57"
+        }
+      ],
+      "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/transformers-0beecf7515961436.d",
+      "retained": "/private/tmp/tfm-perf-baseline-capture.tJeVLq/build/transformers-0beecf7515961436.d",
+      "sha256": "881ef19c3546dbf082a1d81a6b6b6de101187838fab2c217fdacce3f65bb87e5"
+    },
+    {
+      "inputs": [
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/tests/qwen35_benchmarks.rs",
+          "relative": "tests/qwen35_benchmarks.rs",
+          "sha256": "e997d591b47b482c5ebeab67c2dcadc440530821a9b50095aa899db781e739f1"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/tests/support/benchmark_metrics.rs",
+          "relative": "tests/support/benchmark_metrics.rs",
+          "sha256": "2cdc35be3a48126e439a9a69525aa82b4b8ba3329b00d5d63ac51a9a1c17e8d9"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/tests/support/qwen35_release_reference.rs",
+          "relative": "tests/support/qwen35_release_reference.rs",
+          "sha256": "83fd59277d825b9721779a8f827d46fcfd9033641529bcbd6fcdbbc91639d5ba"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/scripts/generate_qwen35_08b_reference.py",
+          "relative": "scripts/generate_qwen35_08b_reference.py",
+          "sha256": "d4305f8b3c13085899e60144f58bb60bdf2bd7ba992ed1ee82a79f33611efc98"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/scripts/generate_qwen38_reference.py",
+          "relative": "scripts/generate_qwen38_reference.py",
+          "sha256": "e52b3699ae08920ca8f177a7fad0b68d807732d0fae524d6c943347357ed864b"
+        },
+        {
+          "path": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers/tests/fixtures/qwen3_5_0_8b.json",
+          "relative": "tests/fixtures/qwen3_5_0_8b.json",
+          "sha256": "6b9cc734b7b48d5834ef4fb9876f1e2694950edcb190114d03ad180c498c15a8"
+        }
+      ],
+      "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-f528fcca2d213ee1.d",
+      "retained": "/private/tmp/tfm-perf-baseline-capture.tJeVLq/build/qwen35_benchmarks-f528fcca2d213ee1.d",
+      "sha256": "2b1d29d2ad3f7d7c78826679ea651cfceb1c8a53948692ba0fa82b85dfdede2d"
+    }
+  ],
+  "elapsed_seconds": 43.97793891699985,
+  "environment_overrides": {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_TARGET_DIR": "/Users/nover/repos/hmm_compression/crates/transformers/target",
+    "CARGO_TERM_COLOR": "never",
+    "RUSTC_WORKSPACE_WRAPPER": "/private/tmp/tfm-perf-baseline-capture.tJeVLq/baseline-wrapper"
+  },
+  "executables": {
+    "qwen35_benchmarks": {
+      "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/qwen35_benchmarks-f528fcca2d213ee1",
+      "sha256": "6ff3b08574d73907621d262e37acfc4ef8772702d9d0a73993270ff4456989e2"
+    }
+  },
+  "logs": {
+    "stderr.log": {
+      "bytes": 14306,
+      "sha256": "3bb12a05fcfe476ac5f1f5e9171739473bef7738f6b7cc454d50a7988457f0af"
+    },
+    "stdout.jsonl": {
+      "bytes": 319795,
+      "sha256": "29744e375cfacdb1643a1f58a10d542d34100a82c0218dd586d8b9f11ec8a6b2"
+    }
+  },
+  "preflight_free_bytes": 37715009536,
+  "preparation_sha256": "f1378ab049266d758cbe70e0bdabb749ae53b074481ea5b520e093af1d6628fc",
+  "process_exit_code": 0,
+  "runtime_context_after": {
+    "config_candidates_in_lookup_order": [
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/hmm_compression/cubecl.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/hmm_compression/CubeCL.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/hmm_compression/burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/hmm_compression/Burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/cubecl.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/CubeCL.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/Burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/cubecl.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/CubeCL.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/Burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/cubecl.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/CubeCL.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/Burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/cubecl.toml"
+      },
+      {
+        "exists": false,
+        "path": "/CubeCL.toml"
+      },
+      {
+        "exists": false,
+        "path": "/burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Burn.toml"
+      }
+    ],
+    "cwd": "/Users/nover/repos/hmm_compression",
+    "default_target_cache_root": "/Users/nover/repos/hmm_compression/target",
+    "environment": {
+      "BURN_FUSION_LOG": null,
+      "CUBECL_AUTOTUNE_LEVEL": null,
+      "CUBECL_DEBUG_LOG": null,
+      "CUBECL_DEBUG_OPTION": null,
+      "CUBECL_DEBUG_SPIRV": null,
+      "CUBECL_WGPU_DEFAULT_DEVICE": null,
+      "CUBECL_WGPU_MAX_TASKS": null,
+      "WGPU_ADAPTER_NAME": null,
+      "WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER": null,
+      "WGPU_BACKEND": null,
+      "WGPU_CORE_LOCK_OBSERVE_DIR": null,
+      "WGPU_DEBUG": null,
+      "WGPU_DISCARD_HAL_LABELS": null,
+      "WGPU_GPU_BASED_VALIDATION": null,
+      "WGPU_POWER_PREF": null,
+      "WGPU_VALIDATION": null,
+      "WGPU_VALIDATION_INDIRECT_CALL": null
+    },
+    "nearest_cargo_manifest": "/Users/nover/repos/hmm_compression/Cargo.toml",
+    "note": "Defaults are descriptive only; no runtime configuration or cache is modified.",
+    "resolved_cwd": "/Users/nover/repos/hmm_compression",
+    "selected_burn_config": null,
+    "selected_cubecl_config": null
+  },
+  "runtime_context_before": {
+    "config_candidates_in_lookup_order": [
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/hmm_compression/cubecl.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/hmm_compression/CubeCL.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/hmm_compression/burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/hmm_compression/Burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/cubecl.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/CubeCL.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/repos/Burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/cubecl.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/CubeCL.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/nover/Burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/cubecl.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/CubeCL.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Users/Burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/cubecl.toml"
+      },
+      {
+        "exists": false,
+        "path": "/CubeCL.toml"
+      },
+      {
+        "exists": false,
+        "path": "/burn.toml"
+      },
+      {
+        "exists": false,
+        "path": "/Burn.toml"
+      }
+    ],
+    "cwd": "/Users/nover/repos/hmm_compression",
+    "default_target_cache_root": "/Users/nover/repos/hmm_compression/target",
+    "environment": {
+      "BURN_FUSION_LOG": null,
+      "CUBECL_AUTOTUNE_LEVEL": null,
+      "CUBECL_DEBUG_LOG": null,
+      "CUBECL_DEBUG_OPTION": null,
+      "CUBECL_DEBUG_SPIRV": null,
+      "CUBECL_WGPU_DEFAULT_DEVICE": null,
+      "CUBECL_WGPU_MAX_TASKS": null,
+      "WGPU_ADAPTER_NAME": null,
+      "WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER": null,
+      "WGPU_BACKEND": null,
+      "WGPU_CORE_LOCK_OBSERVE_DIR": null,
+      "WGPU_DEBUG": null,
+      "WGPU_DISCARD_HAL_LABELS": null,
+      "WGPU_GPU_BASED_VALIDATION": null,
+      "WGPU_POWER_PREF": null,
+      "WGPU_VALIDATION": null,
+      "WGPU_VALIDATION_INDIRECT_CALL": null
+    },
+    "nearest_cargo_manifest": "/Users/nover/repos/hmm_compression/Cargo.toml",
+    "note": "Defaults are descriptive only; no runtime configuration or cache is modified.",
+    "resolved_cwd": "/Users/nover/repos/hmm_compression",
+    "selected_burn_config": null,
+    "selected_cubecl_config": null
+  },
+  "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3",
+  "schema_version": 1,
+  "source_after": {
+    "branch": "codex/tfm-perf-baseline",
+    "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+    "cargo_manifest_sha256": "611324dc1855ff8ebd37910589ba9ce7b306cd68fdef996c7c9e2831e0d24695",
+    "commit": "1e4f836632b46d072bd3ea1ec2200ec1d365a1ff",
+    "compile_root": "/private/tmp/hmm-tfm-perf-baseline",
+    "crate_tree": "4f79473bfc23d26a30316783a273f669b11ad1b2",
+    "manifest_dir": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers",
+    "repository_tree": "d1a000bfa8e1eb876833df945357489054b8e83a",
+    "runtime_src_tree": "720bd628f18c0b3be08f64ea7f58ea14a41792dd",
+    "tests_tree": "36f3751ae790bab5aed855d7b011aa8b541fd9dc",
+    "worktree_status": ""
+  },
+  "source_before": {
+    "branch": "codex/tfm-perf-baseline",
+    "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+    "cargo_manifest_sha256": "611324dc1855ff8ebd37910589ba9ce7b306cd68fdef996c7c9e2831e0d24695",
+    "commit": "1e4f836632b46d072bd3ea1ec2200ec1d365a1ff",
+    "compile_root": "/private/tmp/hmm-tfm-perf-baseline",
+    "crate_tree": "4f79473bfc23d26a30316783a273f669b11ad1b2",
+    "manifest_dir": "/private/tmp/hmm-tfm-perf-baseline/crates/transformers",
+    "repository_tree": "d1a000bfa8e1eb876833df945357489054b8e83a",
+    "runtime_src_tree": "720bd628f18c0b3be08f64ea7f58ea14a41792dd",
+    "tests_tree": "36f3751ae790bab5aed855d7b011aa8b541fd9dc",
+    "worktree_status": ""
+  },
+  "started_utc": "2026-09-10T03:53:19.966151+00:00",
+  "validation_error": null,
+  "wrapper": {
+    "path": "/private/tmp/tfm-perf-baseline-capture.tJeVLq/baseline-wrapper",
+    "sha256": "7f812349eb1017d2122230d2daf3592fc5952efee881ffc42585d876687a97ee"
+  }
+}
