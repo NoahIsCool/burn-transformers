@@ -1068,6 +1068,114 @@ fn malformed_index_json_and_duplicate_weight_keys_are_rejected() {
     assert!(error.to_string().contains("duplicate"));
 }
 
+/// Checks the exact map-type diagnostic while retaining a bounded parser location.
+fn assert_unique_map_type_error(
+    error: CheckpointError,
+    kind: &'static str,
+    path: &Path,
+    actual_type: &str,
+    json_bytes: usize,
+) {
+    let CheckpointError::InvalidJson {
+        kind: actual_kind,
+        path: actual_path,
+        message,
+    } = error
+    else {
+        panic!("expected contextual JSON type error, found {error}");
+    };
+    assert_eq!(actual_kind, kind);
+    assert_eq!(actual_path, fs::canonicalize(path).unwrap());
+    let (detail, location) = message
+        .split_once(" at line ")
+        .expect("retained parser coordinates");
+    assert_eq!(
+        detail,
+        format!("invalid type: {actual_type}, expected an object with unique string keys")
+    );
+    let column = location
+        .strip_prefix("1 column ")
+        .expect("single-line fixture location")
+        .parse::<usize>()
+        .unwrap();
+    assert!((1..=json_bytes).contains(&column), "{message}");
+}
+
+/// Header metadata must be a string map, never a null/scalar/sequence masquerading as one.
+#[test]
+fn artifact_entrypoint_rejects_non_map_header_metadata_without_writes() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("model.safetensors");
+    write_shard_with_metadata(
+        temp.path(),
+        "model.safetensors",
+        &[FixtureTensor::new("weight", TensorDType::F16, [1])],
+        BTreeMap::from([("format".into(), "pt".into())]),
+    );
+    let valid = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap();
+    assert_eq!(valid.tensor_bytes, 2);
+    assert_eq!(
+        valid.shards[0].metadata.get("format").map(String::as_str),
+        Some("pt")
+    );
+    for (value, actual_type) in [
+        (Value::Null, "null"),
+        (json!([]), "sequence"),
+        (json!(true), "boolean `true`"),
+        (json!(42), "integer `42`"),
+    ] {
+        let header = serde_json::to_vec(&json!({
+            "__metadata__": value,
+            "weight": {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]},
+        }))
+        .unwrap();
+        write_raw_shard(temp.path(), "model.safetensors", &header, 2);
+        let before = fs::read(&path).unwrap();
+        let error = CheckpointManifest::discover(temp.path(), &LoadOptions::default()).unwrap_err();
+        assert_unique_map_type_error(
+            error,
+            "SafeTensors header",
+            &path,
+            actual_type,
+            header.len(),
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+}
+
+/// Index storage ownership must be an object; rejected map types cannot touch shard payloads.
+#[test]
+fn artifact_entrypoint_rejects_non_map_index_inventory_without_writes() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "part.safetensors",
+        &[FixtureTensor::new("weight", TensorDType::F16, [1])],
+    );
+    write_index(temp.path(), &[("weight", "part.safetensors")], Some(2));
+    let path = temp.path().join("model.safetensors.index.json");
+    let shard = temp.path().join("part.safetensors");
+    let before_shard = fs::read(&shard).unwrap();
+    let valid = CheckpointManifest::discover(temp.path(), &LoadOptions::default()).unwrap();
+    assert_eq!(valid.tensor_bytes, 2);
+    assert_eq!(valid.shards[0].relative_path, "part.safetensors");
+    for (value, actual_type) in [
+        (Value::Null, "null"),
+        (json!([]), "sequence"),
+        (json!(true), "boolean `true`"),
+        (json!(42), "integer `42`"),
+    ] {
+        let index =
+            serde_json::to_vec(&json!({"metadata": {"total_size": 2}, "weight_map": value}))
+                .unwrap();
+        fs::write(&path, &index).unwrap();
+        let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
+        assert_unique_map_type_error(error, "checkpoint index", &path, actual_type, index.len());
+        assert_eq!(fs::read(&path).unwrap(), index);
+        assert_eq!(fs::read(&shard).unwrap(), before_shard);
+    }
+}
+
 /// An alias cannot introduce storage that is absent from the authoritative index.
 #[test]
 fn artifact_contract_alias_storage_must_be_indexed() {
@@ -1311,9 +1419,11 @@ fn duplicate_metadata_keys_and_missing_roots_fail_cleanly() {
 
     let absent = temp.path().join("does-not-exist");
     assert!(matches!(
-        discover_checkpoint(absent, &LoadOptions::default()),
-        Err(CheckpointError::Io { .. })
+        discover_checkpoint(&absent, &LoadOptions::default()),
+        Err(CheckpointError::Io { operation: "inspect checkpoint root", path, source })
+            if path == absent && source.kind() == std::io::ErrorKind::NotFound
     ));
+    assert!(!absent.exists());
 }
 
 #[test]
