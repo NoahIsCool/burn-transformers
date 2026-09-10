@@ -97,6 +97,13 @@ impl MultiLatentAttentionConfig {
             .ok_or_else(|| Error::configuration("mla.qk_head_dim", "dimension sum overflows usize"))
     }
 
+    /// Checks the flattened query-head width before constructing a projection shape.
+    fn query_projection_width(&self) -> Result<usize> {
+        self.num_heads
+            .checked_mul(self.qk_head_dim()?)
+            .ok_or_else(|| Error::configuration("mla.query_width", "head product overflows usize"))
+    }
+
     /// Returns the width emitted by the joint KV-A projection.
     pub fn compressed_projection_width(&self) -> Result<usize> {
         self.kv_lora_rank
@@ -122,7 +129,11 @@ impl MultiLatentAttentionConfig {
         })
     }
 
-    /// Validates every projection extent and numerical invariant.
+    /// Validates projection extents, matrix element counts, and numerical invariants.
+    ///
+    /// Checks matrix products before Burn's lazy parameters can defer an overflow
+    /// to their first materialization. Valid geometry does not guarantee sufficient
+    /// backend memory for the requested tensors.
     pub fn validate(&self) -> Result<()> {
         for (field, value) in [
             ("hidden_size", self.hidden_size),
@@ -164,18 +175,46 @@ impl MultiLatentAttentionConfig {
             ));
         }
         self.qk_head_dim()?;
-        self.compressed_projection_width()?;
-        self.expanded_kv_width()?;
+        let compressed_width = self.compressed_projection_width()?;
+        let expanded_width = self.expanded_kv_width()?;
+        let query_width = self.query_projection_width()?;
+        // Burn parameters initialize lazily. Reject impossible matrix element
+        // counts here, rather than overflowing when their tensors are first read.
+        // The checked expanded width also bounds num_heads * value_head_dim.
+        for (projection, input, output) in [
+            self.q_lora_rank
+                .is_none()
+                .then_some(("q_proj", self.hidden_size, query_width)),
+            self.q_lora_rank
+                .map(|rank| ("q_a_proj", self.hidden_size, rank)),
+            self.q_lora_rank.map(|rank| ("q_b_proj", rank, query_width)),
+            Some(("kv_a_proj_with_mqa", self.hidden_size, compressed_width)),
+            Some(("kv_b_proj", self.kv_lora_rank, expanded_width)),
+            Some((
+                "o_proj",
+                self.num_heads * self.value_head_dim,
+                self.hidden_size,
+            )),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if input.checked_mul(output).is_none() {
+                return Err(Error::configuration(
+                    "mla.projection_shape",
+                    format!(
+                        "{projection} matrix element count overflows usize: {input} * {output}"
+                    ),
+                ));
+            }
+        }
         Ok(())
     }
 
     /// Allocates all MLA projections in checkpoint-native column layout.
     pub fn init<B: Backend>(&self, device: &B::Device) -> Result<MultiLatentAttention<B>> {
         self.validate()?;
-        let qk_width = self.qk_head_dim()?;
-        let query_width = self.num_heads.checked_mul(qk_width).ok_or_else(|| {
-            Error::configuration("mla.query_width", "head product overflows usize")
-        })?;
+        let query_width = self.query_projection_width()?;
         let projection = |input, output, bias| {
             operations::init_linear(
                 &LinearConfig::new(input, output)

@@ -428,3 +428,413 @@ fn mla_latent_adapter_receives_gradients_along_with_encoder_states() {
     assert!(source.grad(&gradients).is_some());
     assert!(mla.kv_b_proj.weight.grad(&gradients).is_some());
 }
+
+#[test]
+fn configuration_rejects_each_zero_extent_and_nonfinite_numerical_constant() {
+    for field in [
+        "hidden_size",
+        "num_heads",
+        "qk_nope_head_dim",
+        "qk_rope_head_dim",
+        "value_head_dim",
+        "kv_lora_rank",
+        "q_lora_rank",
+    ] {
+        let mut config = MultiLatentAttentionConfig::new(8, 2, 3, 2, 4, 5, None);
+        match field {
+            "hidden_size" => config.hidden_size = 0,
+            "num_heads" => config.num_heads = 0,
+            "qk_nope_head_dim" => config.qk_nope_head_dim = 0,
+            "qk_rope_head_dim" => config.qk_rope_head_dim = 0,
+            "value_head_dim" => config.value_head_dim = 0,
+            "kv_lora_rank" => config.kv_lora_rank = 0,
+            "q_lora_rank" => config.q_lora_rank = Some(0),
+            _ => unreachable!(),
+        }
+        assert!(
+            matches!(config.validate(), Err(Error::Configuration { field: actual, .. })
+            if actual == format!("mla.{field}"))
+        );
+    }
+    for field in ["rms_norm_epsilon", "softmax_scale"] {
+        for value in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut config = MultiLatentAttentionConfig::new(8, 2, 3, 2, 4, 5, None);
+            if field == "rms_norm_epsilon" {
+                config.rms_norm_epsilon = value;
+            } else {
+                config.softmax_scale = value;
+            }
+            assert!(
+                matches!(config.validate(), Err(Error::Configuration { field: actual, .. })
+                if actual == format!("mla.{field}"))
+            );
+        }
+    }
+}
+
+#[test]
+fn projection_extent_overflow_is_rejected_before_parameter_allocation() {
+    let base = MultiLatentAttentionConfig::new(8, 2, 3, 2, 4, 5, None);
+    let mut config = base.clone();
+    config.qk_nope_head_dim = usize::MAX;
+    assert!(
+        config
+            .qk_head_dim()
+            .unwrap_err()
+            .to_string()
+            .contains("mla.qk_head_dim")
+    );
+    config = base.clone();
+    config.kv_lora_rank = usize::MAX;
+    assert!(
+        config
+            .compressed_projection_width()
+            .unwrap_err()
+            .to_string()
+            .contains("mla.compressed_projection_width")
+    );
+    config = base.clone();
+    config.value_head_dim = usize::MAX;
+    assert!(
+        config
+            .expanded_kv_width()
+            .unwrap_err()
+            .to_string()
+            .contains("per-head sum")
+    );
+    config = base;
+    config.num_heads = usize::MAX;
+    assert!(
+        config
+            .expanded_kv_width()
+            .unwrap_err()
+            .to_string()
+            .contains("head product")
+    );
+
+    // KV expansion fits, while the wider rotary query projection cannot fit.
+    let config = MultiLatentAttentionConfig::new(1, usize::MAX / 2, 1, 4, 1, 1, None);
+    assert!(
+        matches!(config.validate(), Err(Error::Configuration { field, .. }) if field == "mla.query_width")
+    );
+    let error = config.init::<TestBackend>(&Default::default()).unwrap_err();
+    assert!(matches!(error, Error::Configuration { field, .. } if field == "mla.query_width"));
+}
+
+#[test]
+fn projection_checks_query_source_dtype_and_all_input_axes() {
+    let (mla, device) = deterministic_mla(None);
+    for (query, source, expected) in [
+        ([0, 2, 8], [0, 2, 8], "mla.query_input"),
+        ([1, 0, 8], [1, 2, 8], "mla.query_input"),
+        ([1, 2, 7], [1, 2, 8], "mla.query_input"),
+        ([1, 2, 8], [2, 2, 8], "mla.key_value_input"),
+        ([1, 2, 8], [1, 0, 8], "mla.key_value_input"),
+        ([1, 2, 8], [1, 2, 7], "mla.key_value_input"),
+    ] {
+        let error = mla
+            .project(
+                Tensor::zeros(query, &device),
+                Tensor::zeros(source, &device),
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::Shape { tensor, .. } if tensor == expected));
+    }
+    let error = mla
+        .project(
+            Tensor::ones([1, 2, 8], &device),
+            Tensor::<TestBackend, 3>::ones([1, 3, 8], &device).cast(DType::F64),
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Configuration { field, .. } if field == "mla.inputs"));
+}
+
+#[test]
+fn malformed_query_module_topology_fails_both_projection_entry_points() {
+    for rank in [None, Some(4)] {
+        let (mut mla, device) = deterministic_mla(rank);
+        if rank.is_none() {
+            mla.q_proj = None;
+        } else {
+            mla.q_b_proj = None;
+        }
+        let input = Tensor::ones([1, 2, 8], &device);
+        let error = mla.project_self(input.clone()).unwrap_err();
+        assert!(
+            matches!(error, Error::Checkpoint(reason) if reason.contains("query projection topology"))
+        );
+        let error = mla
+            .project_rotary(
+                input,
+                Tensor::from_ints([[0, 1]], &device),
+                RopeConfig::new(2, 2, 10_000.0, RopeScaling::None).unwrap(),
+                2,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Checkpoint(reason) if reason.contains("query projection topology"))
+        );
+    }
+}
+
+#[test]
+fn rotary_projection_rejects_input_and_position_geometry_before_rotation() {
+    let (mla, device) = deterministic_mla(None);
+    let rope = RopeConfig::new(2, 2, 10_000.0, RopeScaling::None).unwrap();
+    for shape in [[0, 2, 8], [1, 0, 8], [1, 2, 7]] {
+        let error = mla
+            .project_rotary(
+                Tensor::zeros(shape, &device),
+                Tensor::zeros([shape[0], shape[1]], &device),
+                rope,
+                2,
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.input"));
+    }
+    for shape in [[2, 2], [1, 1]] {
+        let error = mla
+            .project_rotary(
+                Tensor::ones([1, 2, 8], &device),
+                Tensor::zeros(shape, &device),
+                rope,
+                2,
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.position_ids"));
+    }
+}
+
+#[test]
+fn attention_rejects_each_mixed_projection_dtype_and_bias_dtype() {
+    let (mla, device) = deterministic_mla(None);
+    let projection = mla.project_self(Tensor::ones([1, 2, 8], &device)).unwrap();
+    for component in ["query_rotary", "normalized_latent", "rotated_key"] {
+        let mut changed = projection.clone();
+        match component {
+            "query_rotary" => changed.query_rotary = changed.query_rotary.cast(DType::F64),
+            "normalized_latent" => {
+                changed.normalized_latent = changed.normalized_latent.cast(DType::F64)
+            }
+            "rotated_key" => changed.rotated_key = changed.rotated_key.cast(DType::F64),
+            _ => unreachable!(),
+        }
+        let error = mla.attend(changed, None, None, false).unwrap_err();
+        assert!(matches!(error, Error::Configuration { field, .. } if field == "mla.projection"));
+    }
+    let error = mla
+        .attend(
+            projection,
+            None,
+            Some(Tensor::<TestBackend, 4>::zeros([1, 1, 1, 2], &device).cast(DType::F64)),
+            false,
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Configuration { field, .. } if field == "mla.attention_bias"));
+}
+
+#[test]
+fn absorbed_decode_rejects_history_and_expansion_weight_mismatches() {
+    let (mut mla, device) = deterministic_mla(None);
+    let projection = mla.project_self(Tensor::ones([1, 1, 8], &device)).unwrap();
+    for (latent, rotary) in [
+        ([2, 3, 5], [1, 1, 3, 2]),
+        ([1, 3, 4], [1, 1, 3, 2]),
+        ([1, 3, 5], [1, 2, 3, 2]),
+        ([1, 3, 5], [1, 1, 2, 2]),
+        ([1, 3, 5], [1, 1, 3, 4]),
+    ] {
+        let error = mla
+            .mix_absorbed(
+                &projection,
+                Tensor::zeros(latent, &device),
+                Tensor::zeros(rotary, &device),
+                None,
+                false,
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.absorbed_history"));
+    }
+    for query_shape in [[1, 1, 1, 3], [1, 2, 1, 4]] {
+        let mut changed = projection.clone();
+        changed.query_content = Tensor::ones(query_shape, &device);
+        let error = mla
+            .mix_absorbed(
+                &changed,
+                Tensor::ones([1, 3, 5], &device),
+                Tensor::ones([1, 1, 3, 2], &device),
+                None,
+                false,
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.absorbed_history"));
+    }
+    mla.kv_b_proj.weight = Param::from_tensor(Tensor::zeros([5, 13], &device));
+    let error = mla
+        .mix_absorbed(
+            &projection,
+            Tensor::ones([1, 3, 5], &device),
+            Tensor::ones([1, 1, 3, 2], &device),
+            None,
+            false,
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.kv_b_proj.weight"));
+}
+
+#[test]
+fn latent_and_rotary_helpers_reject_invalid_channel_widths() {
+    let (mla, device) = deterministic_mla(None);
+    let error = mla
+        .expand_latents(Tensor::zeros([1, 2, 4], &device))
+        .unwrap_err();
+    assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.latents"));
+    for width in [0, 1, 3] {
+        let error = interleaved_to_split(
+            Tensor::<TestBackend, 4>::zeros([1, 1, 2, width], &device),
+            "odd_rotary",
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "odd_rotary"));
+    }
+    let error = attention_probabilities(
+        Tensor::<TestBackend, 4>::zeros([1, 2, 1, 3], &device),
+        Some(Tensor::zeros([1, 1, 1, 3], &device)),
+    )
+    .unwrap_err();
+    assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.attention_mask"));
+}
+
+#[test]
+fn public_attention_matches_scalar_oracle_and_allows_unmasked_pattern_interventions() {
+    let device = Default::default();
+    let mut config = MultiLatentAttentionConfig::new(1, 1, 1, 2, 1, 2, None);
+    config.softmax_scale = 1.0;
+    let mut mla = config.init::<TestBackend>(&device).unwrap();
+    // c_0=[1,0], c_1=[0,1] expand to content keys [1,3] and values [2,4].
+    mla.kv_b_proj.weight =
+        Param::from_tensor(Tensor::from_floats([[1.0, 2.0], [3.0, 4.0]], &device));
+    mla.o_proj.weight = Param::from_tensor(Tensor::from_floats([[1.0]], &device));
+    let projection = MlaProjection {
+        query_content: Tensor::from_floats([[[[2.0]]]], &device),
+        query_rotary: Tensor::from_floats([[[[1.0, -1.0]]]], &device),
+        normalized_latent: Tensor::from_floats([[[1.0, 0.0], [0.0, 1.0]]], &device),
+        rotated_key: Tensor::from_floats([[[[0.0, 1.0], [2.0, 0.0]]]], &device),
+    };
+    // Content plus rotary scores are [2*1-1, 2*3+2] = [1,8].
+    let first_probability = 1.0 / (1.0 + 7.0_f64.exp());
+    let expected = 2.0 * first_probability + 4.0 * (1.0 - first_probability);
+    for causal in [false, true] {
+        // A suffix query aligns with the last key, so both keys are causal.
+        let result = mla.attend(projection.clone(), None, None, causal).unwrap();
+        assert!((f64::from(result.into_scalar()) - expected).abs() < 1e-6);
+    }
+    for (mask, expected) in [([[[[true, false]]]], 4.0), ([[[[true, true]]]], 0.0)] {
+        let result = mla
+            .attend(
+                projection.clone(),
+                Some(Tensor::from_bool(mask.into(), &device)),
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(result.into_scalar(), expected);
+    }
+    let points = Layer::encoder(0).self_attention();
+    let mut hooks = Hooks::new();
+    hooks.edit(points.pattern(), |pattern| pattern * 0.0 + 2.0);
+    let output = hooks
+        .run(mla.attention_points(points), |hooks| {
+            mla.attend_with_hooks(projection, None, None, false, points, hooks)
+        })
+        .unwrap();
+    // Explicit interventions need not preserve probability normalization.
+    assert_eq!(output.into_scalar(), 2.0 * (2.0 + 4.0));
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+
+    #[test]
+    fn absorbed_and_expanded_attention_agree_for_batched_masked_histories(
+        batch in 1usize..=2,
+        queries in 1usize..=3,
+        keys in 1usize..=4,
+        mask_phase in 0usize..3,
+        low_rank_query in proptest::bool::ANY,
+    ) {
+        let (mla, device) = deterministic_mla(low_rank_query.then_some(4));
+        let query_values = (0..batch * queries * 8).map(|i| ((i % 13) as f32 - 6.0) * 0.13).collect::<Vec<_>>();
+        let source_values = (0..batch * keys * 8).map(|i| ((i % 17) as f32 - 8.0) * 0.07).collect::<Vec<_>>();
+        let projection = mla.project(
+            Tensor::from_data(TensorData::new(query_values, [batch, queries, 8]), &device),
+            Tensor::from_data(TensorData::new(source_values, [batch, keys, 8]), &device),
+        ).unwrap();
+        let exclusions = (0..batch * 2 * queries * keys).map(|i| i32::from((i + mask_phase).is_multiple_of(3))).collect::<Vec<_>>();
+        let mask = Tensor::<TestBackend, 4, Int>::from_data(TensorData::new(exclusions, [batch, 2, queries, keys]), &device).bool();
+        let reference = mla.mix_unabsorbed(&projection, projection.normalized_latent.clone(), projection.rotated_key.clone(), Some(mask.clone()), true).unwrap();
+        let absorbed = mla.mix_absorbed(&projection, projection.normalized_latent.clone(), projection.rotated_key.clone(), Some(mask), false).unwrap();
+        proptest::prop_assert!(absorbed.probabilities.is_none());
+        absorbed.hidden_state.into_data().assert_approx_eq::<f32>(&reference.hidden_state.into_data(), Tolerance::absolute(1e-5));
+        let probabilities = reference.probabilities.unwrap().into_data().to_vec::<f32>().unwrap();
+        for (row, values) in probabilities.chunks_exact(keys).enumerate() {
+            let valid_count = (0..keys).filter(|&key| !(row * keys + key + mask_phase).is_multiple_of(3)).count();
+            let total = values.iter().sum::<f32>();
+            let expected_total = if valid_count > 0 { 1.0 } else { 0.0 };
+            proptest::prop_assert!((total - expected_total).abs() < 1e-6);
+            for (key, &value) in values.iter().enumerate() {
+                if (row * keys + key + mask_phase).is_multiple_of(3) {
+                    proptest::prop_assert_eq!(value, 0.0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn configuration_rejects_impossible_elements_in_every_registered_projection() {
+    let cases = [
+        (
+            "q_proj",
+            MultiLatentAttentionConfig::new(usize::MAX, 1, 1, 2, 1, 1, None),
+        ),
+        (
+            "q_a_proj",
+            MultiLatentAttentionConfig::new(usize::MAX, 1, 1, 2, 1, 1, Some(2)),
+        ),
+        (
+            "q_b_proj",
+            MultiLatentAttentionConfig::new(1, 1, 1, 2, 1, 1, Some(usize::MAX / 2 + 1)),
+        ),
+        (
+            "kv_a_proj_with_mqa",
+            MultiLatentAttentionConfig::new(usize::MAX / 3, 1, 1, 2, 1, 4, None),
+        ),
+        (
+            "kv_b_proj",
+            MultiLatentAttentionConfig::new(1, 2, 1, 2, 1, usize::MAX / 4 + 1, None),
+        ),
+        (
+            "o_proj",
+            MultiLatentAttentionConfig::new(2, 1, 1, 2, usize::MAX / 2 + 1, 1, None),
+        ),
+    ];
+    let device = Default::default();
+    for (projection, config) in cases {
+        for error in [
+            config.validate().unwrap_err(),
+            config.init::<TestBackend>(&device).unwrap_err(),
+        ] {
+            assert!(matches!(error, Error::Configuration { field, reason }
+                if field == "mla.projection_shape" && reason.starts_with(projection) && reason.contains("element count overflows")));
+        }
+    }
+    // Arithmetic validation accepts large representable matrices; it is not
+    // device-memory admission control and these configurations are never allocated.
+    for config in [
+        MultiLatentAttentionConfig::new(1, 1, 1, 2, 1, usize::MAX / 2, None),
+        MultiLatentAttentionConfig::new(1, 1, 1, 2, 1, 1, Some(usize::MAX / 3)),
+    ] {
+        config.validate().unwrap();
+    }
+}
