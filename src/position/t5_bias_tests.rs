@@ -119,3 +119,39 @@ fn host_index_capacity_overflow_is_contextual_before_iteration() {
             )
     ));
 }
+
+/// Wire-sized bucket counts must fit signed embedding indices before allocation.
+#[test]
+fn bucket_count_signed_index_bound_is_checked_before_initialization() {
+    let Some(too_many_buckets) = usize::try_from(i64::MAX)
+        .ok()
+        .and_then(|maximum| maximum.checked_add(1))
+    else {
+        // A 32-bit usize cannot express an out-of-range i64 bucket count.
+        return;
+    };
+    let device = Default::default();
+    let config = T5RelativePositionBiasConfig::new(1, too_many_buckets, 128, false);
+    for error in [
+        config
+            .validate()
+            .expect_err("validate rejects signed overflow"),
+        config
+            .init::<Flex>(&device)
+            .expect_err("init validates before allocation"),
+    ] {
+        assert!(matches!(error, Error::Configuration { field, reason }
+            if field == "t5_relative_bias.num_buckets"
+                && reason == "must fit in the signed integer index representation"));
+    }
+    let corrected = T5RelativePositionBiasConfig::new(1, 8, 128, false)
+        .with_initializer_std(0.0)
+        .init::<Flex>(&device)
+        .expect("a corrected bucket count initializes");
+    let output = corrected.forward(2, 3, 0, &device).expect("valid lookup");
+    assert_eq!(output.dims(), [1, 1, 2, 3]);
+    assert_eq!(
+        output.into_data().to_vec::<f32>().expect("F32 table"),
+        vec![0.0; 6]
+    );
+}

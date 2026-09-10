@@ -146,3 +146,94 @@ fn rejects_invalid_positions_sections_and_application_shapes() {
         .is_err()
     );
 }
+
+/// Empty axes and inconsistent frequency partitions fail before broadcasting.
+#[test]
+fn empty_rotary_axes_and_inconsistent_mrope_sections_are_contextual() {
+    let device = Default::default();
+    let config = RopeConfig::new(8, 6, 10_000.0, RopeScaling::None).expect("valid rope");
+    for shape in [[0, 1], [1, 0], [0, 0]] {
+        let positions = Tensor::<TestBackend, 2, Int>::from_data(
+            TensorData::new(Vec::<i32>::new(), shape),
+            &device,
+        );
+        let error = rotary_angles(config, positions, 8).expect_err("nonempty axes required");
+        assert!(
+            matches!(error, crate::Error::Shape { tensor, expected, actual }
+            if tensor == "rope.position_ids"
+                && expected == "non-empty [batch, sequence]"
+                && actual == format!("[{}, {}]", shape[0], shape[1]))
+        );
+    }
+    for shape in [[3, 0, 1], [3, 1, 0], [3, 0, 0]] {
+        let positions = Tensor::<TestBackend, 3, Int>::from_data(
+            TensorData::new(Vec::<i32>::new(), shape),
+            &device,
+        );
+        let error = mrope_angles(config, positions, [1, 1, 1], 8)
+            .expect_err("all three axes must describe a nonempty batch");
+        assert!(
+            matches!(error, crate::Error::Shape { tensor, expected, actual }
+            if tensor == "mrope.position_ids"
+                && expected == "[3, batch>0, sequence>0]"
+                && actual == format!("[{}, {}, {}]", shape[0], shape[1], shape[2]))
+        );
+    }
+    let positions =
+        Tensor::<TestBackend, 3, Int>::from_ints([[[1, 2]], [[3, 4]], [[5, 6]]], &device);
+    for sections in [[0, 0, 0], [1, 1, 0], [2, 1, 1]] {
+        let error = mrope_angles(config, positions.clone(), sections, 8)
+            .expect_err("partition must account for every complex frequency");
+        assert!(
+            matches!(error, crate::Error::Configuration { field, reason }
+            if field == "mrope.sections"
+                && reason == format!("must sum to 3, found {}", sections.iter().sum::<usize>()))
+        );
+    }
+    let error = mrope_angles(config, positions.clone(), [usize::MAX, 1, 0], 8)
+        .expect_err("partition sum must not wrap");
+    assert!(
+        matches!(error, crate::Error::Configuration { field, reason }
+        if field == "mrope.sections" && reason == "sum overflows usize")
+    );
+    let valid = mrope_angles(config, positions, [1, 1, 1], 8)
+        .expect("correcting the section partition succeeds");
+    assert_eq!(valid.cosine.dims(), [1, 1, 2, 6]);
+    assert_eq!(valid.sine.dims(), [1, 1, 2, 6]);
+}
+
+/// Distinct temporal/height/width phases occupy interleaved complex frequencies.
+#[test]
+fn distinct_mrope_axes_match_a_scalar_complex_phase_oracle() {
+    let device = Default::default();
+    let config = RopeConfig::new(8, 6, 10_000.0, RopeScaling::None).expect("partial rope");
+    let axes = [[[1, 2]], [[3, 4]], [[5, 6]]];
+    let angles = mrope_angles(
+        config,
+        Tensor::<TestBackend, 3, Int>::from_ints(axes, &device),
+        [1, 1, 1],
+        8,
+    )
+    .expect("one complex frequency per axis");
+    let cosine = angles
+        .cosine
+        .into_data()
+        .to_vec::<f32>()
+        .expect("F32 cosine");
+    let sine = angles.sine.into_data().to_vec::<f32>().expect("F32 sine");
+    for token in 0..2 {
+        for (frequency, axis) in axes.iter().enumerate() {
+            // theta^(-2j/d) multiplies the selected axis; split-half RoPE repeats
+            // each complex phase for its real and imaginary tensor channels.
+            let phase =
+                f64::from(axis[0][token]) * 10_000.0_f64.powf(-2.0 * frequency as f64 / 6.0);
+            for channel in [frequency, frequency + 3] {
+                let index = token * 6 + channel;
+                assert!(cosine[index].is_finite() && sine[index].is_finite());
+                assert!((f64::from(cosine[index]) - phase.cos()).abs() < 1e-6);
+                assert!((f64::from(sine[index]) - phase.sin()).abs() < 1e-6);
+            }
+        }
+    }
+    assert!((cosine[0] - cosine[6]).abs() > 0.5);
+}
