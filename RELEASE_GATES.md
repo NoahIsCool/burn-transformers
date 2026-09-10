@@ -115,6 +115,27 @@ the 380-file, 9.3 MiB source archive, with only the existing informational warni
 about unset documentation/homepage/repository URLs. This refresh does not waive
 coverage or performance gates and does not execute accelerator kernels.
 
+The [dtype-guard refresh at `41f3f73`](acceptance/measurements/t5-encoder-dtype-refresh-20260910.json)
+fixes a reproduced T5 public-prefill dtype panic before cross-attention or cache
+mutation. Nine Qwen/T5, six custom-state, and eight Burnpack regressions bring
+the combined and coverage suites to **1,140 passed / 29 existing ignored**;
+isolated all-target/all-feature warning-denied Clippy also passes. Independent
+reauthentication reproduces **32,209 / 36,517 crate lines (88.2028%)** and
+**15,472 / 16,364 shared lines (94.5490%)**. All 29 newly mapped runtime lines
+are the T5 validation guards and remain counted. The sole additional exclusion
+is the new whole custom-state test file; the policy is unchanged. Both thresholds
+and production-only qualification remain open.
+
+The same clean snapshot passes FLAN-T5-small's authenticated official-reference
+replay on Flex/F32 and Metal/F32, including all seven vector comparisons with
+zero `1e-4` tolerance failures, all 32 cached/teacher-forced greedy decisions,
+and exact four-beam outputs. The first Flex native test passed but its macOS
+timing recorder exited nonzero after a sandbox-denied `kern.clockrate` query;
+that attempt is retained separately from the successful unchanged-binary host
+retry. Vector hashes are recorded per execution, not claimed equal across
+runs. These are functional checks, not new comparable performance or memory
+measurements, and the historical Qwen timing failure is not waived.
+
 Cargo's usual target location is retained. Check at least 20 GiB free before
 building a new profile; external model artifacts are never a cleanup target.
 The current host needed a [documented cache fallback](acceptance/measurements/local-build-cache-relocation-20260910.json)

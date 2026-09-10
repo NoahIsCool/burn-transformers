@@ -1,0 +1,590 @@
+{
+  "schema_version": 1,
+  "scope": "T5 encoder-dtype non-regression replay and whole-test-file coverage refresh; not benchmark or release promotion",
+  "source_commit": "41f3f732e0cfc98762219b67e9e67bc304140c04",
+  "runtime_source_tree_git_oid": "d6d0ed30288fcc7b903db5a093284ac83ff9a37e",
+  "advertised_supported": false,
+  "release_gate_promotion": false,
+  "runtime_fix": {
+    "integration_commit": "736832e",
+    "worker_commit": "b5bf6598799f99baa5776cbc11f612a4286532c3",
+    "proof": {
+      "path": "/private/tmp/tfm-small-decode-contract-proof.TMMq7u/green-validation.json",
+      "bytes": 132430,
+      "sha256": "a24d32c1531e91ba1410f59b3a58961b48d52daaac1e57fd17a993bb2040250c"
+    },
+    "original_public_prefill_panic": {
+      "path": "/private/tmp/tfm-small-decode-contract-proof.TMMq7u/repro-focused.stderr",
+      "bytes": 2814,
+      "sha256": "f466ec6f606059be12eee9ee517cc76ead05e993d70f908f7949dc72d6eb0521"
+    },
+    "files": [
+      {
+        "path": "/Users/nover/repos/hmm_compression/crates/transformers/src/models/t5/model.rs",
+        "bytes": 39169,
+        "sha256": "4aec6b9e08243d1461619b9bde89dbfc71206ff14a0cf33e3ac146c18cb0dc14"
+      },
+      {
+        "path": "/Users/nover/repos/hmm_compression/crates/transformers/src/models/t5/model/decode.rs",
+        "bytes": 49466,
+        "sha256": "e929f61b70b223829de08bfb61683ce3db21a6a10bbd1d94520e6d03c976bfa5"
+      }
+    ],
+    "new_qwen_t5_unit_tests": 9,
+    "new_custom_unit_tests": 6,
+    "new_burnpack_unit_tests": 8,
+    "dtype_positive_controls": "F32/F16/F64 matrix parameters on Flex<f32,i32>, with deterministic matrices and F32 normalization scales",
+    "no_implicit_encoder_cast": true,
+    "valid_path_math_changed": false
+  },
+  "reference_target": {
+    "repository": "google/flan-t5-small",
+    "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
+    "test_source": {
+      "path": "/Users/nover/repos/hmm_compression/crates/transformers/tests/flan_t5_small.rs",
+      "bytes": 36498,
+      "sha256": "74e399ae91a64847b1f2ea9f1f15dafd79185a3ea33cbf3758bc1b3df1ca29c8"
+    },
+    "applied_tensors": 190,
+    "transformed_tensors": 145,
+    "missing": 0,
+    "unexpected": 0,
+    "exact_greedy_decisions": 32,
+    "exact_beam_ids": [
+      644,
+      4598,
+      229,
+      9685,
+      5,
+      1
+    ]
+  },
+  "successful_replays": [
+    {
+      "name": "flan-flex-host",
+      "backend": "flex/F32",
+      "process_exit_code": 0,
+      "native_tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "build_record": {
+        "path": "/private/tmp/tfm-t5-dtype-refresh.UOobrj/build-flex/build.json",
+        "bytes": 4612,
+        "sha256": "bd558c8c09d3250b6ac3d77f8088a825e671288dfa6dfbadae9b93cba3696b73"
+      },
+      "build_command": [
+        "cargo",
+        "+stable",
+        "test",
+        "--manifest-path",
+        "/Users/nover/repos/hmm_compression/crates/transformers/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--release",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates",
+        "--test",
+        "flan_t5_small",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3",
+      "workspace_wrapper": {
+        "path": "/private/tmp/tfm-worktree-wrappers.w7drfj/integration",
+        "sha256": "9e470c14f0b8a393d5ad5724cffc99faa6d44689b80768d9f951022efb4435e5"
+      },
+      "execution_record": {
+        "path": "/private/tmp/tfm-t5-dtype-refresh.UOobrj/flan-flex-host/execution.json",
+        "bytes": 3977,
+        "sha256": "b22b4fe02451e63640e87f551c0ac83769f1659616c18215177e044b3067a244"
+      },
+      "executable_sha256": "30deb531a85c32e413622c811f440460fec0ed7750e29c0c24b07b62d4d50786",
+      "source_before": {
+        "commit": "41f3f732e0cfc98762219b67e9e67bc304140c04",
+        "runtime_src_tree": "d6d0ed30288fcc7b903db5a093284ac83ff9a37e",
+        "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+        "cargo_manifest_sha256": "0554a3d881a20dfbe8412fae717507684d395f7570283308f1ad8ca11f3b04bd",
+        "transformer_worktree_status": ""
+      },
+      "source_after": {
+        "commit": "41f3f732e0cfc98762219b67e9e67bc304140c04",
+        "runtime_src_tree": "d6d0ed30288fcc7b903db5a093284ac83ff9a37e",
+        "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+        "cargo_manifest_sha256": "0554a3d881a20dfbe8412fae717507684d395f7570283308f1ad8ca11f3b04bd",
+        "transformer_worktree_status": ""
+      },
+      "argv": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/flan_t5_small-7c790967d2b4e0ca",
+        "flan_t5_small_flex_matches_official_reference",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "vectors": [
+        {
+          "label": "encoder",
+          "cosine": 1,
+          "maximum_absolute_error": 4.99e-7,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "f3dea396ae668196da38289ac288c4ece231fd206069f99b8487b3511be131b4"
+        },
+        {
+          "label": "decoder",
+          "cosine": 0.999999999999,
+          "maximum_absolute_error": 0.000010967,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "66d6c9f0f95092a80aab97ce06a7e14b48c1978d7932ff24885f432e96244502"
+        },
+        {
+          "label": "first",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000049591,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "7e87aa2d2daeb9242b1e2b8ceb4cff2f91554554f3d4d853a4e52bf204c7d6be"
+        },
+        {
+          "label": "cached",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000072479,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "774d0c77c66705856db30e4697807e86184a6095a01d590007ccb8e293f0a04b"
+        },
+        {
+          "label": "teacher",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000034332,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "a138e7c73565d9b634e20ba621856810df755e6e6649b1ea3941351ce06d4b61"
+        },
+        {
+          "label": "padded",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000034332,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "d493c450080ae8c85c53f88243846dc3a8422574dacbc0c24386921ac4c02435"
+        },
+        {
+          "label": "boundary",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000076294,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "9cac2b6f5432b905da781dea75c0876b058d554e20b56b7f4e18152e6f898dfe"
+        }
+      ],
+      "stdout": {
+        "identity": {
+          "path": "/private/tmp/tfm-t5-dtype-refresh.UOobrj/flan-flex-host/stdout.log",
+          "bytes": 170,
+          "sha256": "551084b8e8533dbd36ef47bdd99623170ec3a526329a01fedc01ad915cfdc3f4"
+        },
+        "text": "\nrunning 1 test\ntest flan_t5_small_flex_matches_official_reference ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.88s\n\n"
+      },
+      "stderr": {
+        "identity": {
+          "path": "/private/tmp/tfm-t5-dtype-refresh.UOobrj/flan-flex-host/stderr.log",
+          "bytes": 2116,
+          "sha256": "4a5dc520b6d417e58554fd3adc573da4990c0c5a26a0150fd458a8f03ffac866"
+        },
+        "text": "FLAN-T5-small Flex/F32: load=0.131s stateless=0.045s cached32=0.149s teacher32=0.083s boundary512=0.384s beam=0.302s\nFLAN-T5-small Flex/F32 encoder: cosine=1.000000000000 max_abs=0.000000499 failures_1e-4=0 actual_f32le_sha256=f3dea396ae668196da38289ac288c4ece231fd206069f99b8487b3511be131b4\nFLAN-T5-small Flex/F32 decoder: cosine=0.999999999999 max_abs=0.000010967 failures_1e-4=0 actual_f32le_sha256=66d6c9f0f95092a80aab97ce06a7e14b48c1978d7932ff24885f432e96244502\nFLAN-T5-small Flex/F32 first: cosine=1.000000000000 max_abs=0.000049591 failures_1e-4=0 actual_f32le_sha256=7e87aa2d2daeb9242b1e2b8ceb4cff2f91554554f3d4d853a4e52bf204c7d6be\nFLAN-T5-small Flex/F32 cached: cosine=1.000000000000 max_abs=0.000072479 failures_1e-4=0 actual_f32le_sha256=774d0c77c66705856db30e4697807e86184a6095a01d590007ccb8e293f0a04b\nFLAN-T5-small Flex/F32 teacher: cosine=1.000000000000 max_abs=0.000034332 failures_1e-4=0 actual_f32le_sha256=a138e7c73565d9b634e20ba621856810df755e6e6649b1ea3941351ce06d4b61\nFLAN-T5-small Flex/F32 padded: cosine=1.000000000000 max_abs=0.000034332 failures_1e-4=0 actual_f32le_sha256=d493c450080ae8c85c53f88243846dc3a8422574dacbc0c24386921ac4c02435\nFLAN-T5-small Flex/F32 boundary: cosine=1.000000000000 max_abs=0.000076294 failures_1e-4=0 actual_f32le_sha256=9cac2b6f5432b905da781dea75c0876b058d554e20b56b7f4e18152e6f898dfe\n        1.88 real         1.77 user         0.10 sys\n           515997696  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               31972  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   0  voluntary context switches\n                  19  involuntary context switches\n         28319962227  instructions retired\n          7135674824  cycles elapsed\n           410666496  peak memory footprint\n"
+      }
+    },
+    {
+      "name": "flan-metal",
+      "backend": "metal/F32",
+      "process_exit_code": 0,
+      "native_tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "build_record": {
+        "path": "/private/tmp/tfm-t5-dtype-refresh.UOobrj/build-metal/build.json",
+        "bytes": 4615,
+        "sha256": "f34c749c3116542a8e3256c415e5434d8745745ed4f5e3c8cef1dd952eb202b8"
+      },
+      "build_command": [
+        "cargo",
+        "+stable",
+        "test",
+        "--manifest-path",
+        "/Users/nover/repos/hmm_compression/crates/transformers/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--release",
+        "--no-default-features",
+        "--features",
+        "std,metal,tokenizers,chat-templates",
+        "--test",
+        "flan_t5_small",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3",
+      "workspace_wrapper": {
+        "path": "/private/tmp/tfm-worktree-wrappers.w7drfj/integration",
+        "sha256": "9e470c14f0b8a393d5ad5724cffc99faa6d44689b80768d9f951022efb4435e5"
+      },
+      "execution_record": {
+        "path": "/private/tmp/tfm-t5-dtype-refresh.UOobrj/flan-metal/execution.json",
+        "bytes": 3967,
+        "sha256": "27f22830de687c0d0a51ccb05e45567b1f6bc2a21e743599bfaf2cc15e8b406b"
+      },
+      "executable_sha256": "e393f2f647565e4dce0b90523a793a9367fc69dac0cd8a5ce483625efa2947da",
+      "source_before": {
+        "commit": "41f3f732e0cfc98762219b67e9e67bc304140c04",
+        "runtime_src_tree": "d6d0ed30288fcc7b903db5a093284ac83ff9a37e",
+        "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+        "cargo_manifest_sha256": "0554a3d881a20dfbe8412fae717507684d395f7570283308f1ad8ca11f3b04bd",
+        "transformer_worktree_status": ""
+      },
+      "source_after": {
+        "commit": "41f3f732e0cfc98762219b67e9e67bc304140c04",
+        "runtime_src_tree": "d6d0ed30288fcc7b903db5a093284ac83ff9a37e",
+        "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+        "cargo_manifest_sha256": "0554a3d881a20dfbe8412fae717507684d395f7570283308f1ad8ca11f3b04bd",
+        "transformer_worktree_status": ""
+      },
+      "argv": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/flan_t5_small-1786cf8053510a08",
+        "flan_t5_small_metal_matches_official_reference",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "vectors": [
+        {
+          "label": "encoder",
+          "cosine": 1,
+          "maximum_absolute_error": 4.32e-7,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "0338e69c5259299636d22597d8bf667cf326ceda8a35b78119698ddcadc27f26"
+        },
+        {
+          "label": "decoder",
+          "cosine": 0.999999999999,
+          "maximum_absolute_error": 0.000010252,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "c120253f75b47286be35d4dbff9dc0177d533d197315700773dbcb62d265ce83"
+        },
+        {
+          "label": "first",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000045776,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "fe8c24615690911bb5b9e7bf11dc5a8524367742fe9292e568d2993367c1108d"
+        },
+        {
+          "label": "cached",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000045776,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "6c065beeb7e405185fa7633d8d958a7ffc79ef0c3c914c65eab409d7f5b8aacc"
+        },
+        {
+          "label": "teacher",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000022888,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "38ed24cd1bbf31acfb8fe7d167525562b9e6642f871abbf855815ca0a8fbb07b"
+        },
+        {
+          "label": "padded",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000030518,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "cfaa7d8309d7c46ef919218736c59dbdb39a1f87bda47fe6fec9411ec4321ff1"
+        },
+        {
+          "label": "boundary",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000076294,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "5a4cb95431905b37b85d7fade4d21f5e21532a9fac95dda2414992818f645cd6"
+        }
+      ],
+      "stdout": {
+        "identity": {
+          "path": "/private/tmp/tfm-t5-dtype-refresh.UOobrj/flan-metal/stdout.log",
+          "bytes": 171,
+          "sha256": "93d9f4454e19be9e89d1ec223635f69da42c8b6403f4b5789712132f08f549d1"
+        },
+        "text": "\nrunning 1 test\ntest flan_t5_small_metal_matches_official_reference ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 3.18s\n\n"
+      },
+      "stderr": {
+        "identity": {
+          "path": "/private/tmp/tfm-t5-dtype-refresh.UOobrj/flan-metal/stderr.log",
+          "bytes": 2124,
+          "sha256": "554ad3c4cc1bba0a33d6791e988474c4070dd584887e7e2beb6144304e14c01c"
+        },
+        "text": "FLAN-T5-small Metal/F32: load=0.208s stateless=0.198s cached32=0.646s teacher32=0.178s boundary512=0.041s beam=1.068s\nFLAN-T5-small Metal/F32 encoder: cosine=1.000000000000 max_abs=0.000000432 failures_1e-4=0 actual_f32le_sha256=0338e69c5259299636d22597d8bf667cf326ceda8a35b78119698ddcadc27f26\nFLAN-T5-small Metal/F32 decoder: cosine=0.999999999999 max_abs=0.000010252 failures_1e-4=0 actual_f32le_sha256=c120253f75b47286be35d4dbff9dc0177d533d197315700773dbcb62d265ce83\nFLAN-T5-small Metal/F32 first: cosine=1.000000000000 max_abs=0.000045776 failures_1e-4=0 actual_f32le_sha256=fe8c24615690911bb5b9e7bf11dc5a8524367742fe9292e568d2993367c1108d\nFLAN-T5-small Metal/F32 cached: cosine=1.000000000000 max_abs=0.000045776 failures_1e-4=0 actual_f32le_sha256=6c065beeb7e405185fa7633d8d958a7ffc79ef0c3c914c65eab409d7f5b8aacc\nFLAN-T5-small Metal/F32 teacher: cosine=1.000000000000 max_abs=0.000022888 failures_1e-4=0 actual_f32le_sha256=38ed24cd1bbf31acfb8fe7d167525562b9e6642f871abbf855815ca0a8fbb07b\nFLAN-T5-small Metal/F32 padded: cosine=1.000000000000 max_abs=0.000030518 failures_1e-4=0 actual_f32le_sha256=cfaa7d8309d7c46ef919218736c59dbdb39a1f87bda47fe6fec9411ec4321ff1\nFLAN-T5-small Metal/F32 boundary: cosine=1.000000000000 max_abs=0.000076294 failures_1e-4=0 actual_f32le_sha256=5a4cb95431905b37b85d7fade4d21f5e21532a9fac95dda2414992818f645cd6\n        3.52 real         2.64 user         0.64 sys\n           638550016  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               56850  page reclaims\n                 227  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  43  voluntary context switches\n               23624  involuntary context switches\n         27576368432  instructions retired\n         11895311848  cycles elapsed\n           734694208  peak memory footprint\n"
+      }
+    }
+  ],
+  "failed_recorder_attempts": [
+    {
+      "name": "flan-flex",
+      "backend": "flex/F32",
+      "process_exit_code": 1,
+      "native_tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "build_record": {
+        "path": "/private/tmp/tfm-t5-dtype-refresh.UOobrj/build-flex/build.json",
+        "bytes": 4612,
+        "sha256": "bd558c8c09d3250b6ac3d77f8088a825e671288dfa6dfbadae9b93cba3696b73"
+      },
+      "build_command": [
+        "cargo",
+        "+stable",
+        "test",
+        "--manifest-path",
+        "/Users/nover/repos/hmm_compression/crates/transformers/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--release",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates",
+        "--test",
+        "flan_t5_small",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3",
+      "workspace_wrapper": {
+        "path": "/private/tmp/tfm-worktree-wrappers.w7drfj/integration",
+        "sha256": "9e470c14f0b8a393d5ad5724cffc99faa6d44689b80768d9f951022efb4435e5"
+      },
+      "execution_record": {
+        "path": "/private/tmp/tfm-t5-dtype-refresh.UOobrj/flan-flex/execution.json",
+        "bytes": 3577,
+        "sha256": "a066c1cec66bfee4907ec58f66a03051959ae46390ecf2dea231381e969248c5"
+      },
+      "executable_sha256": "30deb531a85c32e413622c811f440460fec0ed7750e29c0c24b07b62d4d50786",
+      "source_before": {
+        "commit": "41f3f732e0cfc98762219b67e9e67bc304140c04",
+        "runtime_src_tree": "d6d0ed30288fcc7b903db5a093284ac83ff9a37e",
+        "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+        "cargo_manifest_sha256": "0554a3d881a20dfbe8412fae717507684d395f7570283308f1ad8ca11f3b04bd",
+        "transformer_worktree_status": ""
+      },
+      "source_after": {
+        "commit": "41f3f732e0cfc98762219b67e9e67bc304140c04",
+        "runtime_src_tree": "d6d0ed30288fcc7b903db5a093284ac83ff9a37e",
+        "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+        "cargo_manifest_sha256": "0554a3d881a20dfbe8412fae717507684d395f7570283308f1ad8ca11f3b04bd",
+        "transformer_worktree_status": ""
+      },
+      "argv": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/nover/repos/hmm_compression/crates/transformers/target/release/deps/flan_t5_small-7c790967d2b4e0ca",
+        "flan_t5_small_flex_matches_official_reference",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "vectors": [
+        {
+          "label": "encoder",
+          "cosine": 1,
+          "maximum_absolute_error": 5.66e-7,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "9c22bccd522675cac1e0c769b8d8e7c662de7ad41dc1307018a7df9d73cafcad"
+        },
+        {
+          "label": "decoder",
+          "cosine": 0.999999999999,
+          "maximum_absolute_error": 0.000011921,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "25e79fffc50a4dbc7a9da46a10c42db3e789350603f8ad5bd0d1a98c7d1893cf"
+        },
+        {
+          "label": "first",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000038147,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "0a3af6aa88fff0b78948b214b6c80d649b6b21c65e3f5b2c86cf2a085a049de4"
+        },
+        {
+          "label": "cached",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000068665,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "79379dce8eb8b3fd1f066787df840b0b05bf6ca83242dd8d8bdb1127ee917cca"
+        },
+        {
+          "label": "teacher",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000040054,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "bf62fdd81af5773b982941db8e99af7aeda0837d4f6322896cd09fa76a542f54"
+        },
+        {
+          "label": "padded",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000045776,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "4d0fa7f974a94926ec37a4547e472e78e7b5e84c6eff7986c10a93f32414c5bf"
+        },
+        {
+          "label": "boundary",
+          "cosine": 1,
+          "maximum_absolute_error": 0.000076294,
+          "tolerance_failures": 0,
+          "actual_f32le_sha256": "b48b0cca10f425fd95a6aacd5e11d5bc51be21913609d81032a43b6c511f61ce"
+        }
+      ],
+      "stdout": {
+        "identity": {
+          "path": "/private/tmp/tfm-t5-dtype-refresh.UOobrj/flan-flex/stdout.log",
+          "bytes": 170,
+          "sha256": "3337cfe1dce5228c12c6b7ce370dfeedc0a2afec052d4db2e068d74e007d8545"
+        },
+        "text": "\nrunning 1 test\ntest flan_t5_small_flex_matches_official_reference ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.29s\n\n"
+      },
+      "stderr": {
+        "identity": {
+          "path": "/private/tmp/tfm-t5-dtype-refresh.UOobrj/flan-flex/stderr.log",
+          "bytes": 1445,
+          "sha256": "f9954ec991afa54a310a688a565085f33e387ca3f31eaae16c7da31fed413569"
+        },
+        "text": "FLAN-T5-small Flex/F32: load=0.125s stateless=0.049s cached32=0.154s teacher32=0.083s boundary512=0.397s beam=0.328s\nFLAN-T5-small Flex/F32 encoder: cosine=1.000000000000 max_abs=0.000000566 failures_1e-4=0 actual_f32le_sha256=9c22bccd522675cac1e0c769b8d8e7c662de7ad41dc1307018a7df9d73cafcad\nFLAN-T5-small Flex/F32 decoder: cosine=0.999999999999 max_abs=0.000011921 failures_1e-4=0 actual_f32le_sha256=25e79fffc50a4dbc7a9da46a10c42db3e789350603f8ad5bd0d1a98c7d1893cf\nFLAN-T5-small Flex/F32 first: cosine=1.000000000000 max_abs=0.000038147 failures_1e-4=0 actual_f32le_sha256=0a3af6aa88fff0b78948b214b6c80d649b6b21c65e3f5b2c86cf2a085a049de4\nFLAN-T5-small Flex/F32 cached: cosine=1.000000000000 max_abs=0.000068665 failures_1e-4=0 actual_f32le_sha256=79379dce8eb8b3fd1f066787df840b0b05bf6ca83242dd8d8bdb1127ee917cca\nFLAN-T5-small Flex/F32 teacher: cosine=1.000000000000 max_abs=0.000040054 failures_1e-4=0 actual_f32le_sha256=bf62fdd81af5773b982941db8e99af7aeda0837d4f6322896cd09fa76a542f54\nFLAN-T5-small Flex/F32 padded: cosine=1.000000000000 max_abs=0.000045776 failures_1e-4=0 actual_f32le_sha256=4d0fa7f974a94926ec37a4547e472e78e7b5e84c6eff7986c10a93f32414c5bf\nFLAN-T5-small Flex/F32 boundary: cosine=1.000000000000 max_abs=0.000076294 failures_1e-4=0 actual_f32le_sha256=b48b0cca10f425fd95a6aacd5e11d5bc51be21913609d81032a43b6c511f61ce\n        2.48 real         1.82 user         0.30 sys\ntime: sysctl kern.clockrate: Operation not permitted\n"
+      },
+      "failure_scope": "Native model test passed; sandbox denied macOS process-counter sysctl in /usr/bin/time after child exit. This is not a successful complete recorder run."
+    }
+  ],
+  "coverage": {
+    "parent_record": "custom-mask-coverage-20260910.json",
+    "policy": "whole_test_files_v2_exact_test_macro_spans_no_inline_or_generated_exclusions",
+    "native_report": {
+      "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T065244.301685Z/llvm-export/native-coverage.json",
+      "identity": {
+        "sha256": "3b296a11b9300876c5b2bb45b85c13acf3cd836310feaaf4e0638fe25aa320d8",
+        "bytes": 83187983,
+        "lines": 1
+      }
+    },
+    "diagnostic": {
+      "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T065244.301685Z/whole-test-file-diagnostic.json",
+      "bytes": 139752,
+      "sha256": "48af65cdae684e1bcc4f4409ead3a9e3b4271c1f031808dbed329fe587594452"
+    },
+    "coverage_log": {
+      "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T065244.301685Z/00-coverage.log",
+      "identity": {
+        "sha256": "1919d5182100dc17e7dc471517169018292d3ce8fc234b7776c7cec0dfd613d9",
+        "bytes": 114731,
+        "lines": 1265
+      }
+    },
+    "classifier": {
+      "path": "/Users/nover/repos/hmm_compression/crates/transformers/target/release-gates/20260910T065244.301685Z/whole-test-file-classifier/invocation.json",
+      "identity": {
+        "sha256": "ba70abdb6226f649211185ff57f5ae5dfbf1889a728685e1d62968479cde5eb7",
+        "bytes": 2314,
+        "lines": 65
+      }
+    },
+    "source_inventory_sha256": "198a999f06acac10be9bf158984bb0ea48ee752fe5e46d5b0f2b40448ca298ba",
+    "tests": {
+      "passed": 1140,
+      "failed": 0,
+      "ignored": 29
+    },
+    "unit_tests": {
+      "passed": 1038,
+      "failed": 0,
+      "ignored": 3,
+      "identities": 1041
+    },
+    "compiler_inputs": {
+      "production": 101,
+      "unit": 188,
+      "fresh_compiler_captures": 16,
+      "selected_llvm_objects": 15
+    },
+    "reported_files": 168,
+    "excluded_files": 79,
+    "physical_whole_file_diagnostic": {
+      "crate": {
+        "lines": 36517,
+        "covered": 32209,
+        "percent": 88.20275488128817,
+        "minimum_percent": 90,
+        "meets_threshold": false
+      },
+      "shared": {
+        "lines": 16364,
+        "covered": 15472,
+        "percent": 94.5490100219995,
+        "minimum_percent": 95,
+        "meets_threshold": false
+      }
+    },
+    "change_since_parent": {
+      "crate": {
+        "lines": 29,
+        "covered": 125
+      },
+      "shared": {
+        "lines": 0,
+        "covered": 11
+      }
+    },
+    "whole_test_file_exclusions_qualified": true,
+    "exclusion_policy_changed": false,
+    "production_only_measurement": false,
+    "production_only_exclusions_qualified": false,
+    "compiler_dependency_closure_verified": false,
+    "independent_reauthentication": {
+      "proof": {
+        "path": "/private/tmp/tfm-coverage-reauth-20260910.8TLz1E/proof.json",
+        "bytes": 21495,
+        "sha256": "9d428327351db189794865635776733cf92f49e3b267041fa7571a230bdb00a4"
+      },
+      "source_unchanged": true,
+      "exact_binding_reproduced": true,
+      "exact_diagnostic_reproduced": true,
+      "new_excluded_file": "src/models/custom/state_contracts_tests.rs",
+      "mapped_runtime_line_changes": {
+        "src/models/t5/model.rs": 12,
+        "src/models/t5/model/decode.rs": 17
+      }
+    },
+    "features": [
+      "std",
+      "flex",
+      "tokenizers",
+      "chat-templates",
+      "autodiff"
+    ]
+  },
+  "limitations": [
+    "Floating-point output hashes identify each replay, not bit-identical results across runs or backends; every comparison must independently satisfy atol=rtol=1e-4.",
+    "Both coverage thresholds and production-only qualification remain open. Whole-test-file diagnostics are not branch coverage.",
+    "No new Qwen real-weight run, quantized-quality gate, comparable performance series or sampled-memory campaign is implied.",
+    "The historical Qwen performance regression is not waived.",
+    "Stored raw process timings are functional replay context, not comparable benchmark evidence."
+  ],
+  "independent_replay_review": {
+    "method": "Read-only build/Cargo-artifact/log/binary/dep-info authentication against the frozen source; no separate review artifact produced.",
+    "build_and_binary_identities_verified": true,
+    "all_101_runtime_inputs_verified": true,
+    "exact_reference_test_source_verified": true,
+    "failed_recorder_attempt_preserved": true,
+    "bit_identical_logits_claimed": false
+  }
+}

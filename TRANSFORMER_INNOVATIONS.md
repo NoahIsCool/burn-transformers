@@ -1025,6 +1025,11 @@ mutating cache state; the runtime does not silently convert it. After prefill,
 the retained encoder and cross-KV remain authoritative, including after beam
 reordering. Later encoder arguments are checked for structural compatibility
 (including dtype), not full tensor-value identity.
+The [dtype-guard replay](acceptance/measurements/t5-encoder-dtype-refresh-20260910.json)
+strictly loads the pinned FLAN-T5-small checkpoint on Flex/F32 and Metal/F32;
+both pass all seven official vector comparisons at `atol=rtol=1e-4` plus the
+exact cached/teacher-forced 32-token and four-beam decisions. This is numerical
+correctness evidence, not bit-identical-logit or performance evidence.
 
 <a id="innovation-recurrent-cache"></a>
 ### External recurrent-state cache
