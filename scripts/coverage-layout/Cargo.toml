@@ -1,0 +1,18 @@
+[package]
+name = "transformers-coverage-layout"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Development-only Rust source classification for transformer coverage audits"
+
+# Keep coverage analysis out of the inference dependency graph and runtime ABI.
+[workspace]
+
+[dependencies]
+proc-macro2 = { version = "=1.0.107", features = ["span-locations"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+syn = { version = "=2.0.119", features = ["full", "visit"] }
