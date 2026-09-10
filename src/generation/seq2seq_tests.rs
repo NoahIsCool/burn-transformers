@@ -69,6 +69,7 @@ impl ArchitectureConfig for ScriptedConfig {
 /// Observable lifecycle events emitted by the scripted cache and model.
 #[derive(Debug, Default)]
 struct ScriptTrace {
+    boundaries: Vec<&'static str>,
     encode_calls: usize,
     state_allocations: usize,
     prefill_calls: usize,
@@ -79,12 +80,19 @@ struct ScriptTrace {
     decode_lengths: Vec<Vec<usize>>,
 }
 
-/// Deliberate malformed outputs used to audit coordinator validation boundaries.
+/// Public model/cache failures and malformed outputs at coordinator boundaries.
 #[derive(Clone, Copy, Debug)]
 enum ScriptFault {
     EncodeBatch,
     PrefillLogits,
     DecodeLogits,
+    EncodeError,
+    StateError,
+    PrefillError,
+    ReorderError,
+    DecodeError,
+    PrefillEncoderMask,
+    DecodeEncoderHiddenState,
 }
 
 /// Fixed-batch logical state used to prove coordinator reorder behavior.
@@ -95,6 +103,7 @@ struct ScriptedState<B: Backend> {
     lengths: Vec<usize>,
     device: B::Device,
     trace: Arc<Mutex<ScriptTrace>>,
+    fault: Option<ScriptFault>,
 }
 
 impl<B: Backend> DecodeState<B> for ScriptedState<B> {
@@ -121,6 +130,14 @@ impl<B: Backend> DecodeState<B> for ScriptedState<B> {
 
     /// Reorders or duplicates lengths and records exact parent indices.
     fn reorder(&mut self, indices: &[usize]) -> Result<()> {
+        self.trace
+            .lock()
+            .expect("script trace")
+            .boundaries
+            .push("reorder");
+        if matches!(self.fault, Some(ScriptFault::ReorderError)) {
+            return Err(Error::Cache("scripted cache reorder failed".into()));
+        }
         if indices.len() != self.batch {
             return Err(Error::Cache(format!(
                 "scripted reorder expected {} indices, found {}",
@@ -267,7 +284,14 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ScriptedModel<B> {
         source: CausalLmInput<B>,
         _options: &ForwardOptions,
     ) -> Result<EncoderOutput<B>> {
-        self.trace.lock().expect("script trace").encode_calls += 1;
+        {
+            let mut trace = self.trace.lock().expect("script trace");
+            trace.boundaries.push("encode");
+            trace.encode_calls += 1;
+        }
+        if matches!(self.fault, Some(ScriptFault::EncodeError)) {
+            return Err(Error::BackendCapability("scripted encoder failed".into()));
+        }
         let hidden_state = source.token_ids.float().unsqueeze_dim(2);
         Ok(EncoderOutput {
             hidden_state: if matches!(self.fault, Some(ScriptFault::EncodeBatch)) {
@@ -301,7 +325,14 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ScriptedModel<B> {
         batch_size: usize,
         device: &B::Device,
     ) -> Result<Self::State> {
-        self.trace.lock().expect("script trace").state_allocations += 1;
+        {
+            let mut trace = self.trace.lock().expect("script trace");
+            trace.boundaries.push("cache");
+            trace.state_allocations += 1;
+        }
+        if matches!(self.fault, Some(ScriptFault::StateError)) {
+            return Err(Error::Cache("scripted cache allocation failed".into()));
+        }
         if config.sequence_count() != batch_size {
             return Err(Error::Cache("scripted cache batch mismatch".into()));
         }
@@ -311,6 +342,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ScriptedModel<B> {
             lengths: vec![0; batch_size],
             device: device.clone(),
             trace: Arc::clone(&self.trace),
+            fault: self.fault,
         })
     }
 
@@ -322,7 +354,14 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ScriptedModel<B> {
         state: &mut Self::State,
         _options: &ForwardOptions,
     ) -> Result<Seq2SeqOutput<B>> {
-        self.trace.lock().expect("script trace").prefill_calls += 1;
+        {
+            let mut trace = self.trace.lock().expect("script trace");
+            trace.boundaries.push("prefill");
+            trace.prefill_calls += 1;
+        }
+        if matches!(self.fault, Some(ScriptFault::PrefillError)) {
+            return Err(Error::Checkpoint("scripted decoder prefill failed".into()));
+        }
         let [batch, sequence] = decoder.token_ids.dims();
         let valid = super::mask_values(
             decoder.token_mask.as_ref(),
@@ -337,6 +376,13 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ScriptedModel<B> {
         if matches!(self.fault, Some(ScriptFault::PrefillLogits)) {
             output.decoder.logits = output.decoder.logits.repeat_dim(1, 2);
         }
+        if matches!(self.fault, Some(ScriptFault::PrefillEncoderMask)) {
+            let source = encoder.hidden_state.dims()[1];
+            output.encoder.token_mask = Some(TokenMask::new(Tensor::from_data(
+                TensorData::new(vec![true; batch * (source + 1)], [batch, source + 1]),
+                &device,
+            )));
+        }
         Ok(output)
     }
 
@@ -348,6 +394,14 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ScriptedModel<B> {
         state: &mut Self::State,
         _options: &ForwardOptions,
     ) -> Result<Seq2SeqOutput<B>> {
+        self.trace
+            .lock()
+            .expect("script trace")
+            .boundaries
+            .push("decode");
+        if matches!(self.fault, Some(ScriptFault::DecodeError)) {
+            return Err(Error::Checkpoint("scripted decoder step failed".into()));
+        }
         let [batch, sequence] = input.token_ids.dims();
         if sequence != 1 || batch != state.batch {
             return Err(Error::Cache("scripted decode shape mismatch".into()));
@@ -380,6 +434,13 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ScriptedModel<B> {
         let mut output = self.output(logits, batch, encoder.clone(), &device);
         if matches!(self.fault, Some(ScriptFault::DecodeLogits)) {
             output.decoder.logits = output.decoder.logits.repeat_dim(1, 2);
+        }
+        if matches!(self.fault, Some(ScriptFault::DecodeEncoderHiddenState)) {
+            let [batch, source, hidden] = encoder.hidden_state.dims();
+            output
+                .encoder
+                .hidden_states
+                .push(Tensor::zeros([batch, source, hidden + 1], &device));
         }
         Ok(output)
     }
@@ -875,6 +936,113 @@ fn malformed_model_outputs_stop_at_their_validation_boundary() {
         assert_eq!(trace.decode_tokens.len(), expected_decodes);
         assert_eq!(trace.reorders.len(), expected_decodes);
     }
+}
+
+/// Model and cache errors retain their category and stop before the next boundary.
+#[test]
+fn beam_contract_public_model_and_cache_failures_preserve_exact_errors() {
+    let device = Default::default();
+    for (fault, expected, expected_boundaries) in [
+        (
+            ScriptFault::EncodeError,
+            Error::BackendCapability("scripted encoder failed".into()),
+            vec!["encode"],
+        ),
+        (
+            ScriptFault::StateError,
+            Error::Cache("scripted cache allocation failed".into()),
+            vec!["encode", "cache"],
+        ),
+        (
+            ScriptFault::PrefillError,
+            Error::Checkpoint("scripted decoder prefill failed".into()),
+            vec!["encode", "cache", "prefill"],
+        ),
+        (
+            ScriptFault::ReorderError,
+            Error::Cache("scripted cache reorder failed".into()),
+            vec!["encode", "cache", "prefill", "reorder"],
+        ),
+        (
+            ScriptFault::DecodeError,
+            Error::Checkpoint("scripted decoder step failed".into()),
+            vec!["encode", "cache", "prefill", "reorder", "decode"],
+        ),
+    ] {
+        let mut model = ScriptedModel::<TestBackend>::new(
+            ScriptedConfig {
+                vocabulary_size: 5,
+                emit_nonfinite: false,
+            },
+            &device,
+        );
+        model.fault = Some(fault);
+        let error = generate_seq2seq_beam_search(&model, request(&device, search(3, 2)))
+            .expect_err("a failed public model boundary aborts the search");
+        assert_eq!(format!("{error:?}"), format!("{expected:?}"));
+        let trace = model.trace.lock().expect("trace");
+        assert_eq!(trace.boundaries, expected_boundaries);
+        assert!(
+            trace.decode_tokens.is_empty(),
+            "failed steps must not advance the script"
+        );
+        assert_eq!(
+            trace.reorders.len(),
+            usize::from(matches!(fault, ScriptFault::DecodeError))
+        );
+    }
+}
+
+/// Returned encoder masks are checked before a beam cache can be reordered.
+#[test]
+fn beam_contract_prefill_encoder_mask_failure_stops_before_reordering() {
+    let device = Default::default();
+    let mut model = ScriptedModel::<TestBackend>::new(
+        ScriptedConfig {
+            vocabulary_size: 5,
+            emit_nonfinite: false,
+        },
+        &device,
+    );
+    model.fault = Some(ScriptFault::PrefillEncoderMask);
+    let error = generate_seq2seq_beam_search(&model, request(&device, search(3, 2)))
+        .expect_err("a model-returned source mask must match its hidden state");
+    let expected = Error::shape("beam_search.encoder_output.token_mask", "[2, 2]", "[2, 3]");
+    assert_eq!(format!("{error:?}"), format!("{expected:?}"));
+    let trace = model.trace.lock().expect("trace");
+    assert_eq!(trace.boundaries, ["encode", "cache", "prefill"]);
+    assert!(trace.reorders.is_empty() && trace.decode_tokens.is_empty());
+}
+
+/// Invalid decode-time encoder diagnostics never become the next beam's inputs.
+#[test]
+fn beam_contract_decode_encoder_diagnostic_failure_stops_after_one_step() {
+    let device = Default::default();
+    let mut model = ScriptedModel::<TestBackend>::new(
+        ScriptedConfig {
+            vocabulary_size: 5,
+            emit_nonfinite: false,
+        },
+        &device,
+    );
+    model.fault = Some(ScriptFault::DecodeEncoderHiddenState);
+    let error = generate_seq2seq_beam_search(&model, request(&device, search(3, 2)))
+        .expect_err("a model-returned encoder diagnostic must match its hidden state");
+    let expected = Error::shape(
+        "beam_search.encoder_output.hidden_states[0]",
+        "[2, 2, 1]",
+        "[2, 2, 2]",
+    );
+    assert_eq!(format!("{error:?}"), format!("{expected:?}"));
+    let trace = model.trace.lock().expect("trace");
+    assert_eq!(
+        trace.boundaries,
+        ["encode", "cache", "prefill", "reorder", "decode"]
+    );
+    assert_eq!(trace.reorders, [vec![0, 0]]);
+    assert_eq!(trace.decode_tokens, [vec![1, 2]]);
+    assert_eq!(trace.decode_valid, [vec![true, true]]);
+    assert_eq!(trace.decode_lengths, [vec![2, 2]]);
 }
 
 /// An all-EOS vocabulary terminates without live successors even in non-eager mode.

@@ -8,7 +8,7 @@ use burn::{
 
 use super::{CausalGenerationRequest, GenerationToken, generate_causal, generate_causal_streaming};
 use crate::{
-    CausalLmInput, Error, FinishReason, GenerationConfig, SamplingStrategy, TokenMask,
+    CausalLmInput, DecodeState, Error, FinishReason, GenerationConfig, SamplingStrategy, TokenMask,
     cache::CacheConfig,
     models::qwen3_5::{Qwen3_5ForCausalLm, Qwen3_5LayerType, Qwen3_5TextConfig},
 };
@@ -1157,4 +1157,322 @@ fn callback_failure_mid_batch_suppresses_later_rows_and_feedback() {
     assert_eq!((events[0].sequence, events[0].token_id), (0, 2));
     assert_eq!(*model.calls.lock().unwrap(), ["cache", "prefill"]);
     assert!(model.feedback.lock().unwrap().is_empty());
+}
+
+/// A public model implementation may return an error or malformed output tensor.
+#[derive(Clone, Copy, Debug)]
+enum CoordinatorFault {
+    /// A model error after a real cache update must still discard the session.
+    ModelError,
+    /// A wrong output axis must fail before selecting another token.
+    LogitShape([usize; 3]),
+}
+
+/// Records real cached calls and the committed prefix just before a model fault.
+#[derive(Debug, PartialEq, Eq)]
+struct CoordinatorCall {
+    /// The public entry point selected for this prompt chunk or generated token.
+    stage: &'static str,
+    /// Number of physical input columns processed by this call.
+    width: usize,
+    /// Real per-row logical lengths after applying the input's validity mask.
+    lengths: Vec<usize>,
+}
+
+/// Real Qwen state wrapped only to observe the coordinator-owned session lifetime.
+#[derive(Debug)]
+struct CoordinatorState<B: Backend> {
+    /// The architecture's real external KV cache.
+    inner: <Qwen3_5ForCausalLm<B> as crate::CausalLanguageModel<B>>::State,
+    /// Session destruction is observable even when generation returns an error.
+    drops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl<B: Backend> DecodeState<B> for CoordinatorState<B> {
+    /// Delegates batch geometry without fabricating tracker state.
+    fn batch_size(&self) -> usize {
+        self.inner.batch_size()
+    }
+    /// Delegates the real cache's logical capacity.
+    fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+    /// Exposes lengths committed by the real architecture.
+    fn lengths(&self) -> &[usize] {
+        self.inner.lengths()
+    }
+    /// Delegates reset without altering the lifetime probe.
+    fn reset(&mut self) -> crate::Result<()> {
+        self.inner.reset()
+    }
+    /// Delegates real tensor and metadata reordering.
+    fn reorder(&mut self, indices: &[usize]) -> crate::Result<()> {
+        self.inner.reorder(indices)
+    }
+    /// Delegates the architecture's supported rewind behavior.
+    fn truncate(&mut self, lengths: &[usize]) -> crate::Result<()> {
+        self.inner.truncate(lengths)
+    }
+    /// Returns the cache's actual allocation device.
+    fn device(&self) -> &B::Device {
+        self.inner.device()
+    }
+}
+
+impl<B: Backend> Drop for CoordinatorState<B> {
+    /// Records destruction of the session after either success or failure.
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Fault-injecting public model adapter; numerical execution and caches stay real.
+#[derive(burn::module::Module, Debug)]
+struct CoordinatorModel<B: Backend> {
+    inner: Qwen3_5ForCausalLm<B>,
+    #[module(skip)]
+    calls: std::sync::Arc<std::sync::Mutex<Vec<CoordinatorCall>>>,
+    #[module(skip)]
+    drops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[module(skip)]
+    fault: Option<(usize, CoordinatorFault)>,
+}
+
+impl CoordinatorModel<TestBackend> {
+    /// Records committed real-cache work before optionally replacing the return value.
+    fn returned(
+        &self,
+        stage: &'static str,
+        width: usize,
+        state: &CoordinatorState<TestBackend>,
+        mut output: crate::CausalLmOutput<TestBackend>,
+    ) -> crate::Result<crate::CausalLmOutput<TestBackend>> {
+        let mut calls = self.calls.lock().unwrap();
+        calls.push(CoordinatorCall {
+            stage,
+            width,
+            lengths: state.lengths().to_vec(),
+        });
+        if let Some((ordinal, fault)) = self.fault
+            && calls.len() == ordinal
+        {
+            match fault {
+                CoordinatorFault::ModelError => {
+                    return Err(Error::Checkpoint(format!(
+                        "model failed after {stage} call {ordinal}"
+                    )));
+                }
+                CoordinatorFault::LogitShape(shape) => {
+                    output.logits = Tensor::zeros(shape, &output.logits.device())
+                }
+            }
+        }
+        Ok(output)
+    }
+}
+
+impl crate::CausalLanguageModel<TestBackend> for CoordinatorModel<TestBackend> {
+    type Config = Qwen3_5TextConfig;
+    type State = CoordinatorState<TestBackend>;
+
+    /// Leaves stateless inference unchanged.
+    fn forward(
+        &self,
+        input: CausalLmInput<TestBackend>,
+        options: &crate::ForwardOptions,
+    ) -> crate::Result<crate::CausalLmOutput<TestBackend>> {
+        self.inner.forward(input, options)
+    }
+    /// Allocates a real cache and attaches only a destruction probe.
+    fn new_decode_state(
+        &self,
+        config: CacheConfig,
+        batch_size: usize,
+        device: &<TestBackend as BackendTypes>::Device,
+    ) -> crate::Result<Self::State> {
+        Ok(CoordinatorState {
+            inner: self.inner.new_decode_state(config, batch_size, device)?,
+            drops: self.drops.clone(),
+        })
+    }
+    /// Executes dense prompt chunks before fault-injecting the public return boundary.
+    fn prefill(
+        &self,
+        input: CausalLmInput<TestBackend>,
+        state: &mut Self::State,
+        options: &crate::ForwardOptions,
+    ) -> crate::Result<crate::CausalLmOutput<TestBackend>> {
+        let width = input.token_ids.dims()[1];
+        let output = self.inner.prefill(input, &mut state.inner, options)?;
+        self.returned("prefill", width, state, output)
+    }
+    /// Executes ragged chunks or feedback before fault-injecting the return boundary.
+    fn decode(
+        &self,
+        input: crate::DecodeInput<TestBackend>,
+        state: &mut Self::State,
+        options: &crate::ForwardOptions,
+    ) -> crate::Result<crate::CausalLmOutput<TestBackend>> {
+        let width = input.token_ids.dims()[1];
+        let output = self.inner.decode(input, &mut state.inner, options)?;
+        self.returned("decode", width, state, output)
+    }
+}
+
+/// Builds a dense or ragged two-row request with four physical prompt columns.
+fn coordinator_contract_fixture(
+    ragged: bool,
+    fault: CoordinatorFault,
+) -> (
+    CoordinatorModel<TestBackend>,
+    CausalGenerationRequest<TestBackend>,
+) {
+    let (inner, device) = tiny_model();
+    let model = CoordinatorModel {
+        inner,
+        calls: Default::default(),
+        drops: Default::default(),
+        fault: Some((2, fault)),
+    };
+    let request = CausalGenerationRequest {
+        prompt: CausalLmInput {
+            token_ids: Tensor::from_ints([[1, 2, 3, 4], [5, 6, 7, 8]], &device),
+            token_mask: ragged.then(|| {
+                TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [[true, true, false, false], [false, false, true, true]].into(),
+                    &device,
+                ))
+            }),
+            position_ids: None,
+        },
+        cache: CacheConfig::new(2, 8).unwrap(),
+        generation: GenerationConfig {
+            max_new_tokens: 3,
+            ..Default::default()
+        },
+        prefill_chunk_size: Some(1),
+        vocabulary_size: 32,
+    };
+    (model, request)
+}
+
+/// Failed later prompt chunks propagate exactly and discard partially filled sessions.
+#[test]
+fn coordinator_contract_later_chunk_model_errors_drop_state_before_any_emission() {
+    for ragged in [false, true] {
+        let (mut model, request) =
+            coordinator_contract_fixture(ragged, CoordinatorFault::ModelError);
+        let mut events = Vec::new();
+        let error = generate_causal_streaming(&model, request.clone(), |event| {
+            events.push(event);
+            Ok(())
+        })
+        .unwrap_err();
+        let stage = if ragged { "decode" } else { "prefill" };
+        assert!(
+            matches!(error, Error::Checkpoint(message) if message == format!("model failed after {stage} call 2"))
+        );
+        assert!(events.is_empty());
+        let calls = model.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0],
+            CoordinatorCall {
+                stage,
+                width: 1,
+                lengths: if ragged { vec![1, 0] } else { vec![1, 1] }
+            }
+        );
+        assert_eq!(
+            calls[1],
+            CoordinatorCall {
+                stage,
+                width: 1,
+                lengths: if ragged { vec![2, 0] } else { vec![2, 2] }
+            }
+        );
+        drop(calls);
+        assert_eq!(model.drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Reusing the same model starts a fresh cache, not the abandoned prefix.
+        model.fault = None;
+        model.calls.lock().unwrap().clear();
+        let output = generate_causal(&model, request).unwrap();
+        assert!(output.sequences.iter().all(|row| row.token_ids.len() == 3));
+        assert_eq!(
+            model.calls.lock().unwrap()[0].lengths,
+            if ragged { vec![1, 0] } else { vec![1, 1] }
+        );
+        assert_eq!(model.drops.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+}
+
+/// A malformed later chunk must not publish tokens even after an earlier valid chunk.
+#[test]
+fn coordinator_contract_later_chunk_logits_validate_every_output_axis() {
+    for ragged in [false, true] {
+        for shape in [[1, 1, 32], [2, 2, 32], [2, 1, 31]] {
+            let (model, request) =
+                coordinator_contract_fixture(ragged, CoordinatorFault::LogitShape(shape));
+            let mut events = Vec::new();
+            let error = generate_causal_streaming(&model, request, |event| {
+                events.push(event);
+                Ok(())
+            })
+            .unwrap_err();
+            let expected = Error::shape(
+                "generation.model_logits",
+                "[2, 1, 32] for prefill chunk 1..2",
+                format!("{shape:?}"),
+            );
+            assert_eq!(format!("{error:?}"), format!("{expected:?}"));
+            assert!(events.is_empty());
+            assert_eq!(model.calls.lock().unwrap().len(), 2);
+            assert_eq!(model.drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+}
+
+/// Invalid generated-step logits cannot emit a second token or retain cache state.
+#[test]
+fn coordinator_contract_decode_logits_fail_after_exactly_one_valid_batch() {
+    for shape in [[1, 1, 32], [2, 2, 32], [2, 1, 31]] {
+        let (model, mut request) =
+            coordinator_contract_fixture(false, CoordinatorFault::LogitShape(shape));
+        request.prefill_chunk_size = None;
+        let mut events = Vec::new();
+        let error = generate_causal_streaming(&model, request, |event| {
+            events.push(event);
+            Ok(())
+        })
+        .unwrap_err();
+        let expected = Error::shape(
+            "generation.model_logits",
+            "[2, 1, 32]",
+            format!("{shape:?}"),
+        );
+        assert_eq!(format!("{error:?}"), format!("{expected:?}"));
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.sequence, event.step))
+                .collect::<Vec<_>>(),
+            [(0, 0), (1, 0)]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.log_probability.is_finite() && event.finish_reason.is_none())
+        );
+        assert_eq!(
+            model
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|call| call.stage)
+                .collect::<Vec<_>>(),
+            ["prefill", "decode"]
+        );
+        assert_eq!(model.drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 }
