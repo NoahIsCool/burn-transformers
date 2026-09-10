@@ -11,6 +11,281 @@ use crate::{
 
 type TestBackend = Flex<f32, i32>;
 
+/// Materializes every public KV buffer so failures are compared against host bytes.
+fn contract_cache_snapshot(state: &MuseGlimmerDecodeState<TestBackend>) -> Vec<TensorData> {
+    let bank = state.tensor_state().main();
+    let mut data = Vec::new();
+    for group in 0..bank.native_kv_count() {
+        let cache = bank.native_kv(group).unwrap();
+        for layer in 0..cache.spec().layers() {
+            data.push(cache.keys(layer).unwrap().to_data());
+            data.push(cache.values(layer).unwrap().to_data());
+        }
+    }
+    data
+}
+
+/// Compares finite public outputs with an absolute F32 tolerance of `1e-4`.
+fn contract_close(actual: Tensor<TestBackend, 3>, expected: Tensor<TestBackend, 3>) {
+    assert_eq!(actual.dims(), expected.dims());
+    let actual = actual.to_data().to_vec::<f32>().unwrap();
+    let expected = expected.to_data().to_vec::<f32>().unwrap();
+    for (actual, expected) in actual.into_iter().zip(expected) {
+        assert!(actual.is_finite() && expected.is_finite());
+        assert!((actual - expected).abs() <= 1e-4, "{actual} != {expected}");
+    }
+}
+
+/// Public mask, position and output failures preserve both sliding and full caches.
+#[test]
+fn experimental_contract_public_rejections_preserve_muse_history() {
+    let (model, device) = tiny_model();
+    let error = model
+        .new_decode_state(CacheConfig::new(1, 33).unwrap(), 1, &device)
+        .unwrap_err();
+    assert!(matches!(error, Error::Configuration { field, reason }
+        if field == "muse_glimmer.decode_state.capacity"
+        && reason == "33 exceeds max_position_embeddings 32"));
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let baseline = contract_cache_snapshot(&state);
+    assert!(baseline.iter().all(|tensor| {
+        tensor
+            .to_vec::<f32>()
+            .unwrap()
+            .into_iter()
+            .any(|value| value != 0.0)
+    }));
+    for case in 0..7 {
+        let mut input = CausalLmInput {
+            token_ids: Tensor::from_ints([[3]], &device),
+            token_mask: None,
+            position_ids: None,
+        };
+        let mut options = ForwardOptions::default();
+        let (tensor, expected, actual) = match case {
+            0 => {
+                input.token_mask = Some(TokenMask::new(Tensor::from_bool(
+                    [[true, true]].into(),
+                    &device,
+                )));
+                ("muse_glimmer.token_mask", "[1, 1]", "[1, 2]")
+            }
+            1 => {
+                input.position_ids = Some(Tensor::from_ints([[2, 3]], &device));
+                ("muse_glimmer.position_ids", "[1, 1]", "[1, 2]")
+            }
+            2 | 3 => {
+                input.position_ids = Some(Tensor::from_ints(
+                    [[if case == 2 { -1 } else { 32 }]],
+                    &device,
+                ));
+                (
+                    "muse_glimmer.position_ids",
+                    "values in 0..32",
+                    if case == 2 {
+                        "observed range -1..=-1"
+                    } else {
+                        "observed range 32..=32"
+                    },
+                )
+            }
+            4 | 5 => {
+                options.logits =
+                    crate::LogitsSelection::Positions(if case == 4 { vec![] } else { vec![1] });
+                (
+                    "forward_options.logits.positions",
+                    "a non-empty list of indices below 1",
+                    if case == 4 { "[]" } else { "[1]" },
+                )
+            }
+            _ => {
+                input.token_mask =
+                    Some(TokenMask::new(Tensor::from_bool([[false]].into(), &device)));
+                (
+                    "muse_glimmer.token_mask",
+                    "at least one valid token in every prefill row",
+                    "a fully masked prompt row",
+                )
+            }
+        };
+        let error = if case == 6 {
+            model.prefill(input, &mut state, &options)
+        } else {
+            model.decode(
+                DecodeInput {
+                    token_ids: input.token_ids,
+                    token_mask: input.token_mask,
+                    position_ids: input.position_ids,
+                },
+                &mut state,
+                &options,
+            )
+        }
+        .unwrap_err();
+        assert!(
+            matches!(error, Error::Shape { tensor: found, expected: expected_found, actual: actual_found }
+            if found == tensor && expected_found == expected && actual_found == actual)
+        );
+        assert_eq!(state.lengths(), &[2]);
+        assert_eq!(contract_cache_snapshot(&state), baseline);
+    }
+    let error = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions {
+                attentions: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::BackendCapability(reason)
+        if reason == "Muse-Glimmer cached attention-probability capture is unavailable"));
+    assert_eq!(state.lengths(), &[2]);
+    assert_eq!(contract_cache_snapshot(&state), baseline);
+    let actual = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let expected = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    contract_close(actual.logits, expected.logits);
+    assert_eq!(state.lengths(), &[3]);
+}
+
+/// Explicit positions are compacted with tokens; hidden diagnostics scatter only valid columns.
+#[test]
+fn experimental_contract_muse_hidden_positions_and_inactive_rows() {
+    let (model, device) = tiny_model();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1], [2]], &device),
+                token_mask: None,
+                position_ids: Some(Tensor::from_ints([[2], [4]], &device)),
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let options = ForwardOptions {
+        logits: crate::LogitsSelection::All,
+        hidden_states: true,
+        ..Default::default()
+    };
+    let actual = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[31, 3, 31], [31, 31, 31]], &device),
+                token_mask: Some(TokenMask::new(Tensor::from_bool(
+                    [[false, true, false], [false, false, false]].into(),
+                    &device,
+                ))),
+                position_ids: Some(Tensor::from_ints([[-1, 8, 99], [-1, 99, 100]], &device)),
+            },
+            &mut state,
+            &options,
+        )
+        .unwrap();
+    let expected = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 3]], &device),
+                token_mask: None,
+                position_ids: Some(Tensor::from_ints([[2, 8]], &device)),
+            },
+            &options,
+        )
+        .unwrap();
+    assert_eq!(state.lengths(), &[2, 1]);
+    assert_eq!(actual.hidden_states.len(), 6);
+    for (actual, expected) in actual.hidden_states.into_iter().zip(expected.hidden_states) {
+        assert_eq!(actual.dims(), [2, 3, 8]);
+        contract_close(
+            actual.clone().slice([0..1, 1..2, 0..8]),
+            expected.narrow(1, 1, 1),
+        );
+        let values = actual.to_data().to_vec::<f32>().unwrap();
+        for (index, value) in values.into_iter().enumerate() {
+            if !(8..16).contains(&index) {
+                assert_eq!(value, 0.0);
+            }
+        }
+    }
+    contract_close(
+        actual.logits.slice([0..1, 1..2, 0..32]),
+        expected.logits.narrow(1, 1, 1),
+    );
+    state.reorder(&[1, 0]).unwrap();
+    let actual = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[4], [5]], &device),
+                token_mask: None,
+                position_ids: Some(Tensor::from_ints([[9], [10]], &device)),
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    for (row, tokens, positions) in [
+        (0, vec![2, 4], vec![4, 9]),
+        (1, vec![1, 3, 5], vec![2, 8, 10]),
+    ] {
+        let length = tokens.len();
+        let expected = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_data(TensorData::new(tokens, [1, length]), &device),
+                    token_mask: None,
+                    position_ids: Some(Tensor::from_data(
+                        TensorData::new(positions, [1, length]),
+                        &device,
+                    )),
+                },
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        contract_close(actual.logits.clone().narrow(0, row, 1), expected.logits);
+    }
+    assert_eq!(state.lengths(), &[2, 3]);
+}
+
 /// Four-layer miniature preserving local/local/local/global scheduling.
 fn tiny_config() -> MuseGlimmerTextConfig {
     MuseGlimmerTextConfig {
