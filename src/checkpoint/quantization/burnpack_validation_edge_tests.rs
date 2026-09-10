@@ -278,3 +278,103 @@ fn staged_snapshot_bounds_and_allocation_errors_are_lazy_and_contextual() {
         matches!(impossible.to_data(), Err(TensorSnapshotError::DataError(message)) if message.contains("failed to reserve"))
     );
 }
+
+/// Read-only staging reports failed rollback and never commits metadata or publishes output.
+#[test]
+fn checkpoint_standards_read_only_staging_preserves_uncommitted_state() {
+    for append_weight in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("failed-write.bpk");
+        let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+        let read_only = tempfile::NamedTempFile::new().unwrap();
+        session.staging_file = Some(File::open(read_only.path()).unwrap());
+        let before = session.stats();
+        let result = if append_weight {
+            let (metadata, bytes) = packed_fixture();
+            let (weight, _) = decode_payload("q.weight", metadata, &bytes)
+                .unwrap_or_else(|failure| panic!("{}", failure.error));
+            session.append_quantized("q.weight", weight).map(|_| ())
+        } else {
+            session.finalize().map(|_| ())
+        };
+        assert!(matches!(
+            result,
+            Err(QuantizationError::ArtifactIo {
+                operation: "roll back quantization staging file",
+                ..
+            })
+        ));
+        assert_eq!(session.stats(), before);
+        assert!(session.entries.is_empty());
+        assert!(session.manifest.tensors.is_empty());
+        assert!(!session.finalized);
+        assert_eq!(read_only.as_file().metadata().unwrap().len(), 0);
+        assert!(!output.exists());
+
+        // A repaired descriptor can finalize the still-empty session normally.
+        session.staging_file = Some(tempfile::tempfile().unwrap());
+        let summary = session.finalize().unwrap();
+        assert_eq!(summary.tensor_count, 0);
+        assert!(output.is_file());
+    }
+}
+
+/// Parent path failures stay contextual and cannot overwrite an unrelated ordinary file.
+#[test]
+fn checkpoint_standards_temporary_creation_rejects_non_directory_parent() {
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("occupied-parent");
+    fs::write(&parent, b"preserve me").unwrap();
+    let output = parent.join("weights.bpk");
+    for (error, operation) in [
+        (
+            create_unique_file(&output, "test-stage").unwrap_err(),
+            "create private Burnpack temporary file",
+        ),
+        (
+            create_unique_directory(&output, "test-output").unwrap_err(),
+            "create private Burnpack temporary directory",
+        ),
+    ] {
+        assert!(matches!(error, QuantizationError::ArtifactIo {
+            operation: actual, ref path, ..
+        } if actual == operation && path.parent() == Some(parent.as_path())));
+    }
+    assert_eq!(fs::read(&parent).unwrap(), b"preserve me");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+/// A digest-valid payload with invalid numerical semantics is still rejected after copying.
+#[test]
+fn checkpoint_standards_decoder_rejects_authenticated_invalid_scales_and_codes() {
+    let (base_metadata, base_bytes) = packed_fixture();
+    for corrupt_scale in [false, true] {
+        let mut metadata = base_metadata.clone();
+        let mut bytes = base_bytes.clone();
+        if corrupt_scale {
+            let offset = metadata.packed_value_bytes as usize;
+            bytes[offset..offset + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+        } else {
+            bytes[0] = (bytes[0] & 0xf0) | 0x08; // Reserved Q4 code -8.
+        }
+        metadata.payload_sha256 = Some(packed_payload_sha256(&bytes));
+        let failure = decode_payload("q.weight", metadata, &bytes).unwrap_err();
+        if corrupt_scale {
+            assert!(
+                matches!(failure.error, QuantizationError::InvalidScale { group: 0, scale }
+                if scale.is_nan())
+            );
+        } else {
+            assert!(matches!(
+                failure.error,
+                QuantizationError::InvalidQuantizedValue {
+                    index: 0,
+                    value: -8
+                }
+            ));
+        }
+        assert_eq!(failure.stats.tensor_reads, 1);
+        assert_eq!(failure.stats.payload_bytes, bytes.len() as u64);
+        assert!(failure.stats.peak_owned_payload_bytes >= bytes.len() as u64 + 8);
+    }
+}

@@ -3165,3 +3165,38 @@ fn accounting_contract_override_provider_failures_close_without_publication() {
         assert!(sink.events.is_empty());
     }
 }
+
+/// A packed-style override still preserves successful aliases when a later alias is rejected.
+#[test]
+fn checkpoint_standards_override_alias_failure_keeps_successful_owner_and_alias() {
+    let (mut plan, mut source) = aliased_memory_fixture();
+    plan.aliases[0].target = "a_alias".into();
+    plan.aliases.push(PlannedTensor {
+        target: "z_alias".into(),
+        ..plan.aliases[0].clone()
+    });
+    let mut sink = CollectingSink {
+        fail_alias: Some("z_alias".into()),
+        ..Default::default()
+    };
+    let failure = execute_load_plan_with_overrides(
+        &plan,
+        &mut source,
+        &mut sink,
+        |_, _| true,
+        |_, _| Ok(Some(TensorData::from([9.0_f32]))),
+    )
+    .unwrap_err();
+    assert_eq!(failure.failed_target.as_deref(), Some("z_alias"));
+    assert!(
+        matches!(&failure.cause, ExecutionFailureCause::Sink(SinkError(target))
+        if target == "z_alias")
+    );
+    assert_eq!(failure.report.applied, ["a_alias", "weight"]);
+    assert_eq!(failure.stats.tensors_applied, 1);
+    assert_eq!(failure.stats.aliases_applied, 1);
+    assert_eq!(source.close_calls, 1);
+    assert_eq!(tensor_f32(&sink.tensors["weight"]), [9.0]);
+    assert_eq!(sink.aliases["a_alias"], "weight");
+    assert!(!sink.aliases.contains_key("z_alias"));
+}

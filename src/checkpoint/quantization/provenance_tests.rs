@@ -574,3 +574,35 @@ fn packed_scale_hashing_and_two_pass_statistics_preserve_exact_boundaries() {
     assert_eq!(ProvenanceExecutionStats::default().bytes_hashed(), 0);
     assert_eq!(ProvenanceExecutionStats::default().peak_buffer_bytes(), 0);
 }
+
+/// Counter overflow cannot falsely certify a completed shard or wrap accumulated bytes.
+#[test]
+fn checkpoint_standards_provenance_counter_overflow_retains_precise_progress() {
+    let (_root, manifest, _plan) = local_fixture(4);
+    let shard = &manifest.shards[0];
+    for byte_overflow in [true, false] {
+        let mut stats = ProvenanceHashStats {
+            bytes_hashed: if byte_overflow { u64::MAX } else { 0 },
+            shards_hashed: if byte_overflow { 0 } else { usize::MAX },
+            ..Default::default()
+        };
+        let error = hash_shard(&manifest, shard, &mut stats).unwrap_err();
+        assert!(
+            matches!(error, QuantizationError::ByteLengthOverflow { context }
+            if context == if byte_overflow {
+                "provenance checkpoint byte count"
+            } else {
+                "provenance shard count"
+            })
+        );
+        assert_eq!(stats.passes_completed, 0);
+        assert_eq!(stats.peak_buffer_bytes, PROVENANCE_HASH_BUFFER_BYTES);
+        if byte_overflow {
+            assert_eq!(stats.bytes_hashed, u64::MAX);
+            assert_eq!(stats.shards_hashed, 0);
+        } else {
+            assert_eq!(stats.bytes_hashed, shard.file_bytes);
+            assert_eq!(stats.shards_hashed, usize::MAX);
+        }
+    }
+}

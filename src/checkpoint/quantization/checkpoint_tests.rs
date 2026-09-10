@@ -565,3 +565,55 @@ fn changed_shard_diagnostic_identifies_membership_digest_and_plan_changes() {
         );
     }
 }
+
+/// A publication-stage limit preserves both completed hash passes and every staged target.
+#[test]
+fn checkpoint_standards_finalize_limit_keeps_complete_audit_without_output() {
+    let root = tempfile::tempdir().unwrap();
+    let (manifest, plan) = identity_fixture(root.path(), &["a.weight", "b.embed_tokens.weight"]);
+    let output = root.path().join("manifest-does-not-fit.bpk");
+    // The 32 Q8 values and one F32 scale fit exactly; the final JSON cannot fit.
+    let payload_bytes = 32 + 4;
+    let failure = quantize_local_checkpoint_to_burnpack(
+        &manifest,
+        &plan,
+        &output,
+        QuantizedCheckpointOptions {
+            limits: BurnpackSessionLimits {
+                max_staged_bytes: payload_bytes,
+                ..BurnpackSessionLimits::default()
+            },
+            ..QuantizedCheckpointOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        failure.cause,
+        CheckpointQuantizationFailureCause::Quantization(QuantizationError::SessionLimitExceeded {
+            kind: "staged payload", attempted, limit
+        }) if attempted > payload_bytes && limit == payload_bytes
+    ));
+    assert!(failure.failed_target.is_none());
+    assert_eq!(
+        failure.report.applied,
+        ["a.weight", "b.embed_tokens.weight"]
+    );
+    assert_eq!(failure.report.quantized.len(), 1);
+    assert_eq!(failure.report.quantized[0].target, "a.weight");
+    assert_eq!(failure.report.quantized[0].bytes, payload_bytes);
+    assert_eq!(failure.excluded.len(), 1);
+    assert_eq!(failure.excluded[0].reason, QuantizationExclusion::Embedding);
+    assert_eq!(failure.execution.tensors_applied, 2);
+    assert_eq!(failure.staging.tensor_count, 1);
+    assert_eq!(failure.staging.staged_payload_bytes, payload_bytes);
+    for stats in [
+        failure.provenance.pre_execution.unwrap(),
+        failure.provenance.post_execution.unwrap(),
+    ] {
+        assert_eq!(stats.passes_completed, 1);
+        assert_eq!(stats.shards_hashed, 1);
+        assert_eq!(stats.bytes_hashed, manifest.artifact_bytes);
+    }
+    assert!(!output.exists());
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+}
