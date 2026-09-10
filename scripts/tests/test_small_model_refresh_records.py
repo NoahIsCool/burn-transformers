@@ -441,6 +441,52 @@ class WholeFileCoverageRecords(unittest.TestCase):
         self.assertEqual(failed["fix_validation"]["full_parallel_runs"], 10)
         self.assertEqual(failed["fix_validation"]["full_serial_runs"], 1)
 
+    def test_custom_mask_refresh_retains_added_runtime_lines_and_open_gates(self):
+        """Runtime fixes cannot hide their new lines or promote diagnostic coverage."""
+        record = json.loads((MEASUREMENTS / "custom-mask-coverage-20260910.json").read_text())
+        parent = json.loads((MEASUREMENTS / record["parent_record"]).read_text())
+        self.assertEqual(record["policy"], parent["policy"])
+        self.assertEqual(record["files"], parent["files"])
+        self.assertEqual(record["compiler_inputs"], parent["compiler_inputs"])
+        self.assertTrue(record["production_sources_changed"])
+        self.assertTrue(record["whole_test_file_exclusions_qualified"])
+        for flag in ("advertised_supported", "release_gate_promotion", "production_only_measurement",
+                     "production_only_exclusions_qualified", "compiler_dependency_closure_verified",
+                     "exclusion_policy_changed"):
+            self.assertFalse(record[flag])
+        self.assertEqual(record["native_exit_code"], 0)
+        self.assertEqual(record["tests"], {
+            "passed": 1117, "failed": 0, "ignored": 29,
+            "unit_identities": 1018, "unit_passed": 1015, "unit_ignored": 3,
+        })
+        for group, added_lines, added_covered in (("crate", 9, 38), ("shared", 0, 14)):
+            current = record["physical_whole_file_diagnostic"][group]
+            old = parent["physical_whole_file_diagnostic"][group]
+            self.assertEqual(current["lines"] - old["lines"], added_lines)
+            self.assertEqual(current["covered"] - old["covered"], added_covered)
+            self.assertEqual(record["coverage_change_since_parent"][group], {
+                "mapped_lines": added_lines, "covered_lines": added_covered,
+            })
+            self.assertAlmostEqual(current["percent"], 100 * current["covered"] / current["lines"], places=12)
+            self.assertLess(current["percent"], current["minimum_percent"])
+            self.assertFalse(current["meets_threshold"])
+        audit = record["structural_test_audit"]
+        self.assertEqual(audit["inspected_production_file_count"], 101)
+        self.assertEqual(audit["blockers"], [])
+        self.assertFalse(audit["macro_expansion_resolved"])
+        self.assertFalse(audit["production_measurement_qualified"])
+        proof = record["independent_reauthentication"]
+        self.assertTrue(proof["source_unchanged"])
+        self.assertTrue(proof["exact_binding_reproduced"])
+        self.assertTrue(proof["exact_diagnostic_reproduced"])
+        self.assertEqual(proof["retained_diagnostic_sha256"], record["diagnostic"]["sha256"])
+        fix = record["runtime_fix"]
+        self.assertEqual(fix["source_path"], "src/models/custom/common.rs")
+        self.assertEqual(fix["regressions_added"], 5)
+        self.assertEqual(fix["regression_absolute_tolerance"], 1e-4)
+        self.assertTrue(fix["finite_and_shape_checks"])
+        self.assertFalse(fix["family_kernels_changed"])
+
     def test_checkpoint_contract_refresh_keeps_scope_and_parent_identities(self):
         """The compact follow-up links exact test changes without a scope waiver."""
         record = json.loads((MEASUREMENTS / "checkpoint-contract-coverage-20260910.json").read_text())

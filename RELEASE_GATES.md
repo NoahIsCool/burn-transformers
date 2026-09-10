@@ -96,6 +96,15 @@ checks clean. Five new custom regressions enforce finite F32 parity at absolute
 Qwen/T5 family kernels are unchanged. This is ordinary synthetic validation,
 not a new real-checkpoint replay, package verification, or coverage measurement.
 
+The [subsequent coverage refresh at `b7d2d62`](acceptance/measurements/custom-mask-coverage-20260910.json)
+passes the same 1,117 Rust tests and independently reproduces the source-bound
+whole-file diagnostic: **87.9303% crate-wide / 94.4818% shared/core**. The custom
+mask fix adds nine mapped production lines; they remain in the denominator.
+The same 78 whole test files are excluded and both targets still fail. All
+368 Python tests, including all fourteen native opt-ins, also pass at this
+snapshot. Tiny native coverage-separation fixtures demonstrate compiler
+behavior only; production-only qualification and release promotion remain false.
+
 Cargo's usual target location is retained. Check at least 20 GiB free before
 building a new profile; external model artifacts are never a cleanup target.
 The current host needed a [documented cache fallback](acceptance/measurements/local-build-cache-relocation-20260910.json)
