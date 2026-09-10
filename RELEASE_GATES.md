@@ -105,6 +105,16 @@ The same 78 whole test files are excluded and both targets still fail. All
 snapshot. Tiny native coverage-separation fixtures demonstrate compiler
 behavior only; production-only qualification and release promotion remain false.
 
+At `c7d4c8d`, all 17 source, exact Rust 1.92, accelerator compile-only, and
+package commands pass at `target/release-gates/20260910T062918.975092Z/`.
+Both Rust suites pass 1,117 tests with 29 existing opt-in tests ignored; each
+standalone-classifier suite passes 29 tests. Python discovery runs 369 tests
+with fourteen native opt-ins skipped (the prior 368-test snapshot ran all of
+them; the additional measurement-consistency test also passes). Cargo verifies
+the 380-file, 9.3 MiB source archive, with only the existing informational warning
+about unset documentation/homepage/repository URLs. This refresh does not waive
+coverage or performance gates and does not execute accelerator kernels.
+
 Cargo's usual target location is retained. Check at least 20 GiB free before
 building a new profile; external model artifacts are never a cleanup target.
 The current host needed a [documented cache fallback](acceptance/measurements/local-build-cache-relocation-20260910.json)
