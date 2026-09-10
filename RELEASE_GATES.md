@@ -136,6 +136,15 @@ retry. Vector hashes are recorded per execution, not claimed equal across
 runs. These are functional checks, not new comparable performance or memory
 measurements, and the historical Qwen timing failure is not waived.
 
+At `69e4d87`, all 17 source, exact Rust 1.92, accelerator compile-only, and
+package commands pass at `target/release-gates/20260910T070622.030574Z/`.
+Both Rust suites pass 1,140 tests with 29 existing ignores. Python discovery
+passes 372 tests with fourteen native opt-ins skipped; a separate native-enabled
+run passes all 372 without skips. Cargo verifies the 383-file, 9.4 MiB source
+archive, retaining only its existing informational missing-URL metadata warning.
+Metal, CUDA, and ROCm checks compile without executing kernels. This packaging
+refresh does not change the preceding coverage, parity, or performance scope.
+
 Cargo's usual target location is retained. Check at least 20 GiB free before
 building a new profile; external model artifacts are never a cleanup target.
 The current host needed a [documented cache fallback](acceptance/measurements/local-build-cache-relocation-20260910.json)
