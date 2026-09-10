@@ -1473,6 +1473,12 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   every parameter before cloning. A counter-valued lazy initializer proves the
   skipped-expert failure deterministically, without relying on random seeds.
   Runtime expert dispatch and parity tolerances are unchanged.
+  The [fresh integrated v3 diagnostic](acceptance/measurements/whole-test-file-coverage-v3-20260910.json)
+  passes all 1,075 executed tests. With the same 78 test-only files excluded and
+  unchanged denominators, coverage rises to 87.6121% crate-wide and 93.8707%
+  shared/core; both still fail their targets. The structural audit finds no
+  parsed inline-test blockers in the 101 production files. Opaque/generated
+  mappings remain included, and production-only qualification stays false.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

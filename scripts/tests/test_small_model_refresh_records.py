@@ -196,7 +196,7 @@ class WholeFileCoverageRecords(unittest.TestCase):
 
     def test_whole_file_scope_and_exact_thresholds(self):
         """Both versioned records retain their actual denominator and false flags."""
-        for version, excluded in ((1, 39), (2, 78)):
+        for version, excluded in ((1, 39), (2, 78), (3, 78)):
             record = json.loads((MEASUREMENTS / f"whole-test-file-coverage-v{version}-20260910.json").read_text())
             self.assertTrue(record["whole_test_file_exclusions_qualified"])
             for name in ("advertised_supported", "production_only_exclusions_qualified",
@@ -218,5 +218,36 @@ class WholeFileCoverageRecords(unittest.TestCase):
                          if group == "crate" or not row["path"].startswith("src/models/")]
                 self.assertEqual(before["lines"] - after["lines"], sum(row["mapped_lines"] for row in files))
                 self.assertEqual(before["covered"] - after["covered"], sum(row["covered_lines"] for row in files))
-                if version == 2:
+                if version >= 2:
                     self.assertFalse(after["meets_threshold"])
+
+    def test_contract_tests_improve_the_unchanged_diagnostic_denominator(self):
+        """A passing replay retains the rejected attempt and narrow audit scope."""
+        before = json.loads((MEASUREMENTS / "whole-test-file-coverage-v2-20260910.json").read_text())
+        after = json.loads((MEASUREMENTS / "whole-test-file-coverage-v3-20260910.json").read_text())
+        for group, increase in (("crate", 548), ("shared", 37)):
+            old = before["physical_whole_file_diagnostic"][group]
+            new = after["physical_whole_file_diagnostic"][group]
+            self.assertEqual(new["lines"], old["lines"])
+            self.assertEqual(new["covered"] - old["covered"], increase)
+        self.assertEqual(after["tests"], {
+            "passed": 1075, "failed": 0, "ignored": 29,
+            "unit_identities": 976, "unit_passed": 973, "unit_ignored": 3,
+        })
+        self.assertEqual(after["compiler_inputs"], before["compiler_inputs"])
+        self.assertEqual({row["path"] for row in after["excluded_files"]},
+                         {row["path"] for row in before["excluded_files"]})
+        audit = after["structural_test_audit"]
+        self.assertTrue(audit["structural_eligibility"])
+        self.assertEqual(len(set(audit["inspected_production_scope_files"])), 101)
+        self.assertEqual(audit["blockers"], [])
+        self.assertFalse(audit["macro_expansion_resolved"])
+        self.assertFalse(audit["production_measurement_qualified"])
+        failed = after["preceding_failed_attempt"]
+        self.assertEqual(failed["native_exit_code"], 1)
+        self.assertEqual(failed["unit_tests"], {"passed": 971, "failed": 1, "ignored": 3})
+        for flag in ("coverage_adopted", "runtime_changed", "tolerances_changed"):
+            self.assertFalse(failed[flag])
+        self.assertEqual(failed["fix_validation"]["focused_parallel_runs"], 100)
+        self.assertEqual(failed["fix_validation"]["full_parallel_runs"], 10)
+        self.assertEqual(failed["fix_validation"]["full_serial_runs"], 1)

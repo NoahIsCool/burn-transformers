@@ -330,6 +330,25 @@ with the three generation regressions, this adds 61 tests without changing any
 runtime inference code. The combined snapshot requires a fresh coverage run;
 the previously recorded diagnostic must not be reused against these new tests.
 
+The first combined run (`b5ca317`) failed a new sparse-MoE fixture: the initial
+prompt had left unused experts lazy, and cloning their independent initializer
+cells allowed later decode weights to diverge. That failed run contributes no
+coverage. The test-only fix explicitly materializes every parameter before
+cloning and adds a deterministic dormant-expert regression; tolerances and
+runtime dispatch are unchanged. It passes 100 focused parallel replays and
+eleven full worktree suites, plus warning-denied Clippy and formatting.
+
+The subsequent [v3 native replay at `bd68375`](acceptance/measurements/whole-test-file-coverage-v3-20260910.json)
+passes **1,075 tests, zero failures, 29 existing ignores**. Independent
+requalification reproduces the exact diagnostic: **31,960 / 36,479 = 87.6121%**
+crate-wide and **15,361 / 16,364 = 93.8707%** shared/core. These are increases of
+548 and 37 covered lines with unchanged denominators and the same 78 excluded
+test-only files. Both targets still fail. The parsed structural audit reports
+101 inspected production files and no blockers; macro-generated ownership is
+not resolved, so production-only qualification remains false. Raw evidence is
+retained under `target/release-gates/20260910T051536.131067Z/`. The compact record
+also identifies the rejected run and fixture-fix validation separately.
+
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is
 `819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d`.
