@@ -1,0 +1,19 @@
+{
+  "command": [
+    "/Users/nover/.cargo/bin/cargo-fuzz",
+    "--version"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "elapsed_seconds": 0.005261584010440856,
+  "ended_utc": "2026-09-10T23:33:56.692263+00:00",
+  "label": "cargo-fuzz",
+  "log": {
+    "bytes": 18,
+    "sha256": "3e2aa5c2baaf44e5a4968cc3fedb864f4717f85b713deacf3fc4294162358ca1"
+  },
+  "log_path": "/Users/nover/repos/transformers/acceptance/measurements/coding-standards-fuzz-20260910/cargo-fuzz.log",
+  "native_returncode": 0,
+  "started_utc": "2026-09-10T23:33:56.687016+00:00",
+  "timed_out": false,
+  "wall_timeout_seconds": 30
+}

@@ -1,0 +1,198 @@
+{
+  "Cargo.lock": {
+    "bytes": 165947,
+    "sha256": "7c57f9830fb5b93195fb8ac765106dd9db91234f9130e9f66494fbec0d808b9d"
+  },
+  "Cargo.toml": {
+    "bytes": 3437,
+    "sha256": "ae741cefb94773d81d6fcd7833d865ddc33f002ecd7c274e1419de0ac748942a"
+  },
+  "fuzz/Cargo.lock": {
+    "bytes": 150951,
+    "sha256": "252d0ed980a8452f7c7da1aa54c3da00b256fe9804624270a7c1fb19ba12fea0"
+  },
+  "fuzz/Cargo.toml": {
+    "bytes": 1367,
+    "sha256": "b28fec3784a1ff5e8337a796da5e2671ffbae3f41dea0c058cf1a62aeb0c2590"
+  },
+  "fuzz/fuzz_targets/cache_transactions.rs": {
+    "bytes": 337,
+    "sha256": "e7203fdea41759219e5d59f706cfbea1923bd99d4375d2a70ec699e1f03d5e9a"
+  },
+  "fuzz/fuzz_targets/configuration.rs": {
+    "bytes": 357,
+    "sha256": "8969a2d09cd906bd308454e315dbf65a849c30a15127cf0ed3e7ad4c45a88d99"
+  },
+  "fuzz/fuzz_targets/experiment_interfaces.rs": {
+    "bytes": 192,
+    "sha256": "5d83db66b07d21a5fed5511c682aea4a7b5c7925d9e423fcbda4d74733ab9d96"
+  },
+  "fuzz/fuzz_targets/generation.rs": {
+    "bytes": 355,
+    "sha256": "67914dfbb3e0656ff5f6bb08bc31443ccd4ded4a58b05e64c76ea44fb8238204"
+  },
+  "fuzz/fuzz_targets/index_artifacts.rs": {
+    "bytes": 350,
+    "sha256": "06ed7bdbce2e04d806331dd95dba862db421e484741aa0c9a47d89c7b7a3027d"
+  },
+  "fuzz/fuzz_targets/masks_positions.rs": {
+    "bytes": 352,
+    "sha256": "762d31cfbf4f445b81286a8af7b95b2be1a5e5701d56bf11b7a0aeb22cc7e1a6"
+  },
+  "fuzz/seeds/cache_transactions/mixed": {
+    "bytes": 52,
+    "sha256": "81618cbca665aee0afbc62861283d1752ccd294f86642d7d47011d3b370b3a11"
+  },
+  "fuzz/seeds/configuration/defaults.json": {
+    "bytes": 3,
+    "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+  },
+  "fuzz/seeds/configuration/legacy-infinity.json": {
+    "bytes": 61,
+    "sha256": "f1b778d72542835f78b153bc9ffa306d6f35fa92ebd4fc5e4a92a644506c9705"
+  },
+  "fuzz/seeds/configuration/qwen.json": {
+    "bytes": 96,
+    "sha256": "ec9582ba66507b57ab9fcc78fae0fff53f3e750e97468c6b13bb7ffa2d46f67f"
+  },
+  "fuzz/seeds/configuration/seq2seq.json": {
+    "bytes": 1277,
+    "sha256": "b022a8a1d09ed80ad0e1b7faebecbe637d04ed4ec25cd3fa061400f5971cb201"
+  },
+  "fuzz/seeds/configuration/t5.json": {
+    "bytes": 104,
+    "sha256": "b55e9745f129424bbcdccd02ec3ad41917dd1db89479888791ddba073b11d851"
+  },
+  "fuzz/seeds/experiment_interfaces/duplicate-axis": {
+    "bytes": 8,
+    "sha256": "b0f50fd7676cef9960cd9193930ac3ce63f318561d3f0b9ab4716aecb57e80f2"
+  },
+  "fuzz/seeds/experiment_interfaces/failed-transform-callback": {
+    "bytes": 9,
+    "sha256": "da4f9e11cfd22b24795624e88ea4f5cec4a329ceb39a972abd888b668e239de9"
+  },
+  "fuzz/seeds/experiment_interfaces/failed-transform-shape": {
+    "bytes": 9,
+    "sha256": "06f8c6e93c3639d21114693dda7674b900faf3d63e596487b6b8b3bcdd2dba06"
+  },
+  "fuzz/seeds/experiment_interfaces/finite-loss": {
+    "bytes": 12,
+    "sha256": "17b4d91d6a029795d36015fc92cdfed8a4fda8a7ca56688f425271d85a382ad8"
+  },
+  "fuzz/seeds/experiment_interfaces/fully-masked": {
+    "bytes": 7,
+    "sha256": "b858418abf60f85a87e1119c1a9dfc5e2f932b02f79bffe371ec056f9ef07405"
+  },
+  "fuzz/seeds/experiment_interfaces/invalid-broadcast": {
+    "bytes": 7,
+    "sha256": "d6daf695589ea5deac5e21fb0e668331c19170087f848c46beac4aba33f722ae"
+  },
+  "fuzz/seeds/experiment_interfaces/invalid-loss-axis-label": {
+    "bytes": 12,
+    "sha256": "1d67cb376c5f5860b013270c009783ce6cd81606b766aeeddfafff2f5d7b4c4d"
+  },
+  "fuzz/seeds/experiment_interfaces/invalid-transfer-path": {
+    "bytes": 9,
+    "sha256": "0d4f24a4caf13acc7a80b236565a1ac8390808be1268ba32cbe147bb74389d55"
+  },
+  "fuzz/seeds/experiment_interfaces/overflow-selection": {
+    "bytes": 8,
+    "sha256": "6b9c194ebb57af686cc6b64decc992d9d038f0f3aa31a32229c8ebdeaaa4ae9f"
+  },
+  "fuzz/seeds/experiment_interfaces/permuted-selection": {
+    "bytes": 8,
+    "sha256": "8c3554e45c9fcc3bcc9308d22932d825e631b6d9cfb3f28f592c3a7e649c7428"
+  },
+  "fuzz/seeds/experiment_interfaces/preserved-ties": {
+    "bytes": 9,
+    "sha256": "1c89be4b2d3e86988aeb645dc682035c119ca387de30fa9c55e21858978c35c6"
+  },
+  "fuzz/seeds/experiment_interfaces/untied-parameters": {
+    "bytes": 9,
+    "sha256": "100755b896e9065c549cd779644ae3ee91c51e025a775b12e992853ef65927e5"
+  },
+  "fuzz/seeds/experiment_interfaces/valid-selection": {
+    "bytes": 8,
+    "sha256": "0d16380748e3a558c16a29958e450696da070ea378986fdbd92a6700696fb9ab"
+  },
+  "fuzz/seeds/generation/config.json": {
+    "bytes": 111,
+    "sha256": "5e5af4eefbc1b50fbd2a7aa91e80d903bef7a5ffd2cd177efa1d6855beb12cd0"
+  },
+  "fuzz/seeds/index_artifacts/duplicate-key": {
+    "bytes": 68,
+    "sha256": "81f9995adc19c3ba1f33d717cf1c4fac84dc5e63620d1d56b44ef0a61e50c3d7"
+  },
+  "fuzz/seeds/index_artifacts/header": {
+    "bytes": 61,
+    "sha256": "b79831d5482664a8c6a1e9b910cffb94a8aa3dfdbb908e9e9a8fc655297732dd"
+  },
+  "fuzz/seeds/index_artifacts/traversal": {
+    "bytes": 18,
+    "sha256": "78e307b3def3873312b69eb7116d20337f11084a57675bbf05acd7a38bda8a9f"
+  },
+  "fuzz/seeds/index_artifacts/valid-index": {
+    "bytes": 71,
+    "sha256": "683d35a5a68e36846ac813ab7f9da280e80fcd195defe6bad7a4141bf2137fbb"
+  },
+  "fuzz/seeds/masks_positions/mixed": {
+    "bytes": 41,
+    "sha256": "aaae46db6f2dd481c8a17336c09329f4bb1bd33fc456e33bbbf3e0c534567c16"
+  },
+  "fuzz/src/artifacts.rs": {
+    "bytes": 3662,
+    "sha256": "bfc745ebe4563c72e43643617618eb699ccaaf8cc47113ca153f03c27a5eed84"
+  },
+  "fuzz/src/artifacts_tests.rs": {
+    "bytes": 625,
+    "sha256": "e14f95afe421f7dff438ec7b744ebbcbad1faeed9a6503125b17122a43c32985"
+  },
+  "fuzz/src/cache.rs": {
+    "bytes": 7039,
+    "sha256": "526276001312e34a61a27793b10442a8f180731a8b0ba30580729fe7275b0d80"
+  },
+  "fuzz/src/cache_tests.rs": {
+    "bytes": 521,
+    "sha256": "6325595187608904ebb41bffbafa89aab71e55d8508d975dc2051ac93d9f8523"
+  },
+  "fuzz/src/configuration.rs": {
+    "bytes": 3066,
+    "sha256": "d5a480e2fd4e12a1bf308ea04670345212e27083faafe0604bc7f6f0bec1a330"
+  },
+  "fuzz/src/configuration_tests.rs": {
+    "bytes": 622,
+    "sha256": "088d4bc4ae482c9b9d800709ebaab420d90e97cd3a2d6f21516a073dcbfd45fa"
+  },
+  "fuzz/src/experiment_interfaces.rs": {
+    "bytes": 13605,
+    "sha256": "93dff5bce0530eb3092905b0c57b9a35878ef0b4fb9479f9087ace1f8fc46bbd"
+  },
+  "fuzz/src/experiment_interfaces_tests.rs": {
+    "bytes": 1448,
+    "sha256": "15bc9310a2907195a6126f9a7f24133705ea64cc6a3f6c0ea9f6487ef8a289db"
+  },
+  "fuzz/src/generation.rs": {
+    "bytes": 4258,
+    "sha256": "007ac402671c90b2dc38b3c42ee28efc3957ad8fca31c3904787cbe82bd4c4ca"
+  },
+  "fuzz/src/generation_tests.rs": {
+    "bytes": 810,
+    "sha256": "39c0a2f1b6c62eda4121350bd7013df9fba409d01f086f7efcf338ebfe7dc104"
+  },
+  "fuzz/src/lib.rs": {
+    "bytes": 1958,
+    "sha256": "5eaa6badaf8e8e5285ecb6b64b7dea3dabebfca69b73906f99eab43a44e1f84d"
+  },
+  "fuzz/src/masks.rs": {
+    "bytes": 4065,
+    "sha256": "923e724af4f895d90a1c612fc5eb74ef4b32e023d5e57a1cbdffa7a94709e2c3"
+  },
+  "fuzz/src/masks_tests.rs": {
+    "bytes": 320,
+    "sha256": "d26c04b68f03c235c0b1886c3745b420ee97e5a773da74770bf853ff8ab3f2dd"
+  },
+  "tests/experiment_interface_properties.rs": {
+    "bytes": 20327,
+    "sha256": "c623c04f7858fa428a94c274ca13dd814bbca1c365c6f4ef02ad95c602c899a2"
+  }
+}

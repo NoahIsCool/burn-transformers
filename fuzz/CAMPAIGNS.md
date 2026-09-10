@@ -82,3 +82,13 @@ inventory digests are retained in the compact record. Bulk logs, generated
 corpora and the complete source/corpus inventories remain at
 `/private/tmp/transformers-fuzz-refresh.EXC7pm`; their raw report is hashed in
 the committed JSON. No GPU work or runtime source changes were involved.
+
+## 2026-09-10: experiment interface invariants
+
+The [new interface campaign](../acceptance/measurements/coding-standards-fuzz-20260910/README.md)
+ran `experiment_interfaces` for exactly 10,000 inputs under AddressSanitizer
+with seed `20260910`. It passed without crashes, timeouts, or sanitizer
+diagnostics. Six ordinary fuzz-oracle tests and all-target warning-denied fuzz
+Clippy also passed. The record retains source, binary, seed, command, and storage
+identities. This new-target campaign does not refresh the five historical
+campaigns above or establish exhaustive branch coverage.

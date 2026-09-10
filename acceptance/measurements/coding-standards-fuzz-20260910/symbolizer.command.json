@@ -1,0 +1,19 @@
+{
+  "command": [
+    "/opt/homebrew/opt/llvm/bin/llvm-symbolizer",
+    "--version"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "elapsed_seconds": 0.019954207993578166,
+  "ended_utc": "2026-09-10T23:33:56.712566+00:00",
+  "label": "symbolizer",
+  "log": {
+    "bytes": 64,
+    "sha256": "3e4fce473e434b2756e7a0e4fc57e32ef4bab7c20db55caf4474ea486860d796"
+  },
+  "log_path": "/Users/nover/repos/transformers/acceptance/measurements/coding-standards-fuzz-20260910/symbolizer.log",
+  "native_returncode": 0,
+  "started_utc": "2026-09-10T23:33:56.692627+00:00",
+  "timed_out": false,
+  "wall_timeout_seconds": 30
+}

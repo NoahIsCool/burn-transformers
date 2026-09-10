@@ -1,0 +1,25 @@
+{
+  "command": [
+    "cargo",
+    "+nightly",
+    "clippy",
+    "--release",
+    "--locked",
+    "--offline",
+    "--manifest-path",
+    "fuzz/Cargo.toml",
+    "--target",
+    "aarch64-apple-darwin",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "free_bytes_before": 21925994496,
+  "minimum_free_bytes": 21474836480,
+  "started": 1789083766.9571042,
+  "exit_code": 0,
+  "elapsed_seconds": 275.15182280540466,
+  "free_bytes_after": 21921009664
+}

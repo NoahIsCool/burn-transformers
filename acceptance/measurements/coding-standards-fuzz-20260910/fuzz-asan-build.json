@@ -1,0 +1,24 @@
+{
+  "command": [
+    "env",
+    "CARGO_NET_OFFLINE=true",
+    "ASAN_SYMBOLIZER_PATH=/opt/homebrew/opt/llvm/bin/llvm-symbolizer",
+    "cargo",
+    "+nightly",
+    "fuzz",
+    "build",
+    "experiment_interfaces",
+    "--sanitizer",
+    "address",
+    "--target",
+    "aarch64-apple-darwin",
+    "--verbose"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "free_bytes_before": 21974671360,
+  "minimum_free_bytes": 21474836480,
+  "started": 1789082962.073401,
+  "exit_code": 0,
+  "elapsed_seconds": 129.38100409507751,
+  "free_bytes_after": 21963608064
+}

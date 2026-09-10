@@ -1,0 +1,27 @@
+{
+  "command": [
+    "/Users/nover/repos/transformers/fuzz/target/aarch64-apple-darwin/release/experiment_interfaces",
+    "/Users/nover/repos/transformers/target/standards-fuzz-experiment-interfaces-20260910/corpus",
+    "/Users/nover/repos/transformers/target/standards-fuzz-experiment-interfaces-20260910/seeds",
+    "-artifact_prefix=/Users/nover/repos/transformers/target/standards-fuzz-experiment-interfaces-20260910/artifacts/",
+    "-runs=10000",
+    "-max_len=4096",
+    "-timeout=10",
+    "-rss_limit_mb=2048",
+    "-seed=20260910",
+    "-print_final_stats=1"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "elapsed_seconds": 2.078715000010561,
+  "ended_utc": "2026-09-10T23:33:58.791660+00:00",
+  "label": "experiment_interfaces",
+  "log": {
+    "bytes": 41072,
+    "sha256": "2bfdac9acff6eabcfee72596045f5466a97494c4cdb5586f7d291ee3a1e74c1f"
+  },
+  "log_path": "/Users/nover/repos/transformers/acceptance/measurements/coding-standards-fuzz-20260910/experiment_interfaces.log",
+  "native_returncode": 0,
+  "started_utc": "2026-09-10T23:33:56.712963+00:00",
+  "timed_out": false,
+  "wall_timeout_seconds": 900
+}

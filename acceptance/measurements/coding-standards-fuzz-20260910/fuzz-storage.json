@@ -1,0 +1,7 @@
+{
+  "target": "fuzz/target",
+  "resolved": "/Volumes/bag of holding/models/transformers-build-cache.Kri4ck/fuzz-target-80b51e8",
+  "reason": "Reuse the existing authenticated ASan dependency cache; avoid a second sanitizer graph on the constrained local volume. No downloaded artifacts.",
+  "local_free_bytes": 21974671360,
+  "cache_free_bytes": 847357173760
+}

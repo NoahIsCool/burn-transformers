@@ -2,7 +2,7 @@
 
 This standalone development package follows the
 [Rust Fuzz Book cargo-fuzz workflow](https://rust-fuzz.github.io/book/cargo-fuzz/tutorial.html).
-It adds no dependencies or networking to the inference library. Five libFuzzer
+It adds no dependencies or networking to the transformer library. Six libFuzzer
 entry points reuse the same harnesses as ordinary deterministic unit tests:
 
 | Target | Exercised code and oracle | Per-input limits |
@@ -13,6 +13,8 @@ entry points reuse the same harnesses as ordinary deterministic unit tests:
 | `cache_transactions` | Advance, reset, reorder, truncate, mark, commit, rollback and stale marks against an independent length state machine; ring writes and staged commits against modulo indexing | Batch ≤4, capacity ≤32, at most 128 operations; no physical model cache |
 | `generation` | Raw JSON and arbitrary IEEE-754 parameter validation; EOS/stop/length precedence, idempotence and rejection atomicity against a scalar token tracker | Vocabulary ≤32, batch ≤4, output length ≤32, four stops of length ≤4, 128 pushes |
 
+| `experiment_interfaces` | Semantic-axis selection, activation-mask broadcasting, parameter-transfer ties and failure atomicity, stable categorical losses against scalar oracles | 4 KiB input; tensor extents ≤4, at most four parameter owners, five classes; no model initialization |
+
 Accepted invalid input is not automatically a bug: the harness asserts the
 documented invariants and allows contextual validation errors. It never catches
 panics from production code. Optimized campaigns retain overflow checks, and the
@@ -20,7 +22,7 @@ default cargo-fuzz AddressSanitizer instruments the exercised dependency graph.
 The independent fuzz-package lockfile is committed to reproduce this graph.
 No GPU work, checkpoint downloads or random giant model allocations occur.
 
-From `crates/transformers`, install the development tool and run the deterministic
+From the repository root, install the development tool and run the deterministic
 oracles first:
 
 ```sh
@@ -43,7 +45,7 @@ cargo +nightly fuzz run configuration \
 ```
 
 Repeat with `index_artifacts`, `masks_positions`, `cache_transactions`, and
-`generation`. Keep campaigns bounded by `-runs` or `-max_total_time`; omitted
+`generation`, and `experiment_interfaces`. Keep campaigns bounded by `-runs` or `-max_total_time`; omitted
 limits run indefinitely. Seeds remain committed; generated corpora, sanitizer
 builds, crash artifacts and coverage profiles are ignored. Reproduce a crash with
 `cargo +nightly fuzz run TARGET fuzz/artifacts/TARGET/crash-HASH`, minimize it with

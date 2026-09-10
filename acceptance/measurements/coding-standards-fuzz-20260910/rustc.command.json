@@ -1,0 +1,23 @@
+{
+  "command": [
+    "rustup",
+    "run",
+    "nightly",
+    "rustc",
+    "--version",
+    "--verbose"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "elapsed_seconds": 0.020041125011630356,
+  "ended_utc": "2026-09-10T23:33:56.686660+00:00",
+  "label": "rustc",
+  "log": {
+    "bytes": 208,
+    "sha256": "48d15fae5bc3c29981b8f3b43e075ea2c3f8213f8811699acb867de1d1fb2e16"
+  },
+  "log_path": "/Users/nover/repos/transformers/acceptance/measurements/coding-standards-fuzz-20260910/rustc.log",
+  "native_returncode": 0,
+  "started_utc": "2026-09-10T23:33:56.666628+00:00",
+  "timed_out": false,
+  "wall_timeout_seconds": 30
+}
