@@ -777,6 +777,148 @@ mod tests {
 
     type TestBackend = Flex<f32, i32>;
 
+    /// Replaces one real model output with an exact nonfinite score fixture.
+    ///
+    /// A constant NaN or infinite row makes normalized log probabilities
+    /// undefined even if argmax returns an in-range token. Retaining the real
+    /// Qwen cache makes this a coordinator boundary test, not a tracker-only test.
+    #[derive(burn::module::Module, Debug)]
+    struct NonfiniteModel<B: Backend> {
+        inner: Qwen3_5ForCausalLm<B>,
+        #[module(skip)]
+        fail_on_decode: bool,
+        #[module(skip)]
+        corrupt_value: f32,
+        #[module(skip)]
+        prefill_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        #[module(skip)]
+        decode_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl<B: Backend> crate::CausalLanguageModel<B> for NonfiniteModel<B> {
+        type Config = Qwen3_5TextConfig;
+        type State = <Qwen3_5ForCausalLm<B> as crate::CausalLanguageModel<B>>::State;
+
+        /// Leaves stateless evaluation untouched; only cached outputs inject faults.
+        fn forward(
+            &self,
+            input: CausalLmInput<B>,
+            options: &crate::ForwardOptions,
+        ) -> crate::Result<crate::CausalLmOutput<B>> {
+            self.inner.forward(input, options)
+        }
+
+        /// Allocates the real architecture's external cache without changing policy.
+        fn new_decode_state(
+            &self,
+            config: CacheConfig,
+            batch_size: usize,
+            device: &B::Device,
+        ) -> crate::Result<Self::State> {
+            self.inner.new_decode_state(config, batch_size, device)
+        }
+
+        /// Counts prompt calls and optionally corrupts the first selectable distribution.
+        fn prefill(
+            &self,
+            input: CausalLmInput<B>,
+            state: &mut Self::State,
+            options: &crate::ForwardOptions,
+        ) -> crate::Result<crate::CausalLmOutput<B>> {
+            self.prefill_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut output = self.inner.prefill(input, state, options)?;
+            if !self.fail_on_decode {
+                output.logits = Tensor::full(
+                    output.logits.dims(),
+                    self.corrupt_value,
+                    &output.logits.device(),
+                );
+            }
+            Ok(output)
+        }
+
+        /// Counts feedback calls and injects the fault only after one valid token.
+        fn decode(
+            &self,
+            input: crate::DecodeInput<B>,
+            state: &mut Self::State,
+            options: &crate::ForwardOptions,
+        ) -> crate::Result<crate::CausalLmOutput<B>> {
+            self.decode_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut output = self.inner.decode(input, state, options)?;
+            output.logits = Tensor::full(
+                output.logits.dims(),
+                self.corrupt_value,
+                &output.logits.device(),
+            );
+            Ok(output)
+        }
+    }
+
+    /// Active nonfinite probabilities abort before emission or any later model call.
+    #[test]
+    fn active_nonfinite_probabilities_cancel_before_the_invalid_token() {
+        use std::sync::{Arc, atomic::AtomicUsize};
+
+        for corrupt_value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for fail_on_decode in [false, true] {
+                let (inner, device) = tiny_model();
+                let model = NonfiniteModel {
+                    inner,
+                    fail_on_decode,
+                    corrupt_value,
+                    prefill_calls: Arc::new(AtomicUsize::new(0)),
+                    decode_calls: Arc::new(AtomicUsize::new(0)),
+                };
+                let mut events = Vec::new();
+                let error = generate_causal_streaming(
+                    &model,
+                    request(
+                        &device,
+                        GenerationConfig {
+                            max_new_tokens: 3,
+                            ..Default::default()
+                        },
+                    ),
+                    |event| {
+                        events.push(event);
+                        Ok(())
+                    },
+                )
+                .expect_err("an undefined active probability cannot be emitted");
+                assert!(matches!(error, Error::Generation(_)));
+                assert!(
+                    error
+                        .to_string()
+                        .contains("sequence 0 produced non-finite selected log probability"),
+                    "{error}"
+                );
+                let valid_tokens = usize::from(fail_on_decode);
+                assert_eq!(events.len(), valid_tokens);
+                for event in events {
+                    assert_eq!((event.sequence, event.step), (0, 0));
+                    assert!(event.log_probability.is_finite());
+                    assert_eq!(event.finish_reason, None);
+                }
+                assert_eq!(
+                    model
+                        .prefill_calls
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    1
+                );
+                assert_eq!(
+                    model
+                        .decode_calls
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    valid_tokens,
+                    "the coordinator must not decode after rejecting a probability"
+                );
+            }
+        }
+    }
+
     /// Runtime half-precision selected values cannot be decoded as the backend's default F32.
     #[test]
     fn selected_log_probabilities_respect_runtime_float_dtype() {
