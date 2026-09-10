@@ -771,7 +771,11 @@ fn loaded_model_rejects_unverified_equivalence_without_execution_stats() {
     assert!(error.to_string().contains("0 of 1"));
 }
 
-/// Creates a consistent two-matrix audit with independently checkable byte sums.
+/// Creates Q8/G64 audit sizes for one-row and two-row 64-column matrices.
+///
+/// Each group stores 64 signed codes and one four-byte scale, hence the two
+/// realizable payload sizes are 68 and 136 bytes. No tensor allocation is needed
+/// to test the public bundle's redundant accounting invariants.
 fn two_matrix_audit() -> AuditedQuantizedExecutionOutcome {
     AuditedQuantizedExecutionOutcome {
         format_version: BURNPACK_QUANTIZATION_FORMAT_VERSION_V1,
@@ -779,14 +783,14 @@ fn two_matrix_audit() -> AuditedQuantizedExecutionOutcome {
             passes_started: 1,
             passes_completed: 1,
             tensor_reads: 2,
-            payload_bytes: 72,
-            largest_payload_bytes: 40,
-            peak_owned_payload_bytes: 80,
+            payload_bytes: 204,
+            largest_payload_bytes: 136,
+            peak_owned_payload_bytes: 272,
         },
         execution: QuantizedExecutionOutcome {
             report: LoadReport {
                 applied: vec!["a.weight".into(), "b.weight".into()],
-                quantized: [("a.weight", 32), ("b.weight", 40)]
+                quantized: [("a.weight", 68), ("b.weight", 136)]
                     .map(|(target, bytes)| QuantizationRecord {
                         target: target.into(),
                         scheme: "burn-qfloat-symmetric-q8-g64-block-1xg".into(),
@@ -801,8 +805,8 @@ fn two_matrix_audit() -> AuditedQuantizedExecutionOutcome {
             },
             packed: PackedLoadStats {
                 tensor_reads: 2,
-                payload_bytes: 72,
-                largest_payload_bytes: 40,
+                payload_bytes: 204,
+                largest_payload_bytes: 136,
                 tensors_applied: 2,
             },
             provenance: ProvenanceExecutionStats::default(),
@@ -884,12 +888,12 @@ fn quantized_bundle_rejects_report_payload_total_mismatch() {
     let directory = tempfile::tempdir().unwrap();
     let source = ModelSourceMetadata::local(directory.path(), "t5").unwrap();
     let mut outcome = two_matrix_audit();
-    outcome.execution.report.quantized[1].bytes = 39;
+    outcome.execution.report.quantized[1].bytes = 135;
     let error = bundle_audit(&source, outcome).unwrap_err();
     assert!(matches!(&error, crate::Error::Checkpoint(_)));
     assert_eq!(
         error.to_string(),
-        "checkpoint error: Burnpack decoded 72 payload bytes but the load report accounts for 71"
+        "checkpoint error: Burnpack decoded 204 payload bytes but the load report accounts for 203"
     );
 }
 
@@ -900,13 +904,13 @@ fn quantized_bundle_rejects_report_largest_payload_mismatch() {
     let source = ModelSourceMetadata::local(directory.path(), "t5").unwrap();
     let mut outcome = two_matrix_audit();
     for record in &mut outcome.execution.report.quantized {
-        record.bytes = 36;
+        record.bytes = 102;
     }
     let error = bundle_audit(&source, outcome).unwrap_err();
     assert!(matches!(&error, crate::Error::Checkpoint(_)));
     assert_eq!(
         error.to_string(),
-        "checkpoint error: largest Burnpack payload is 40, but the load report records 36"
+        "checkpoint error: largest Burnpack payload is 136, but the load report records 102"
     );
 }
 
