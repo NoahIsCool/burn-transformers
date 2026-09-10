@@ -2,8 +2,8 @@
 
 use burn::{
     backend::Flex,
-    module::Param,
-    tensor::{Bool, Int, Tensor, Tolerance, backend::BackendTypes},
+    module::{Module, ModuleMapper, Param},
+    tensor::{Bool, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 
 use crate::{
@@ -113,6 +113,605 @@ fn mask<const B: usize, const S: usize>(
         values.into(),
         device,
     ))
+}
+
+/// Replaces every lazy float parameter with reproducible, non-degenerate fixture values.
+///
+/// The mapping consumes the graph and initializes every parameter before any model clone can
+/// occur. Matrix entries vary by their ordinal and parameter traversal order, while norm scales
+/// remain one. This avoids random global seeds and independently initialized lazy clones.
+#[derive(Default)]
+struct DeterministicParameters {
+    /// Stable traversal ordinal used to distinguish equally shaped projection matrices.
+    ordinal: usize,
+}
+
+impl ModuleMapper<TestBackend> for DeterministicParameters {
+    /// Materializes deterministic weights without changing the original parameter identities.
+    fn map_float<const D: usize>(
+        &mut self,
+        param: Param<Tensor<TestBackend, D>>,
+    ) -> Param<Tensor<TestBackend, D>> {
+        self.ordinal += 1;
+        let ordinal = self.ordinal;
+        param.map(|tensor| {
+            let shape = tensor.dims();
+            let values = (0..shape.iter().product())
+                .map(|index| {
+                    if D == 1 {
+                        1.0
+                    } else {
+                        (((index + 1) * (ordinal + 3)) as f32 * 0.17).sin() * 0.2
+                    }
+                })
+                .collect::<Vec<_>>();
+            Tensor::from_data(TensorData::new(values, shape), &tensor.device())
+        })
+    }
+}
+
+/// Builds a fully initialized single-layer full/sliding attention graph for parity tests.
+fn deterministic_attention_model(
+    window: Option<usize>,
+    position: PositionEncodingSpec,
+    device: &<TestBackend as BackendTypes>::Device,
+) -> ModularCausalLm<TestBackend> {
+    let attention = AttentionSpec {
+        query_heads: 2,
+        key_value_heads: 1,
+        head_dim: 4,
+        query_key_norm: true,
+        output_gate: false,
+        position,
+    };
+    let mixer = match window {
+        Some(window) => MixerSpec::SlidingAttention(SlidingWindowSpec { attention, window }),
+        None => MixerSpec::Attention(attention),
+    };
+    ModularCausalLm::init(decoder(vec![layer(mixer)]), device)
+        .unwrap()
+        .map(&mut DeterministicParameters::default())
+}
+
+/// Constructs one unbatched token row with optional semantic mask and exact RoPE positions.
+fn parity_input(
+    ids: &[i32],
+    validity: Option<&[bool]>,
+    positions: Option<&[i32]>,
+    device: &<TestBackend as BackendTypes>::Device,
+) -> CausalLmInput<TestBackend> {
+    let shape = [1, ids.len()];
+    CausalLmInput {
+        token_ids: Tensor::from_data(TensorData::new(ids.to_vec(), shape), device),
+        token_mask: validity.map(|values| {
+            assert_eq!(values.len(), ids.len());
+            TokenMask::new(Tensor::from_bool(
+                TensorData::new(values.to_vec(), shape),
+                device,
+            ))
+        }),
+        position_ids: positions.map(|values| {
+            assert_eq!(values.len(), ids.len());
+            Tensor::from_data(TensorData::new(values.to_vec(), shape), device)
+        }),
+    }
+}
+
+/// Requires shape-preserving, finite F32 parity at the component acceptance tolerance.
+fn assert_finite_attention_parity(actual: &TensorData, expected: &TensorData) {
+    assert_eq!(actual.shape, expected.shape);
+    assert!(
+        actual
+            .as_slice::<f32>()
+            .unwrap()
+            .iter()
+            .all(|value| value.is_finite())
+    );
+    assert!(
+        expected
+            .as_slice::<f32>()
+            .unwrap()
+            .iter()
+            .all(|value| value.is_finite())
+    );
+    actual.assert_approx_eq::<f32>(expected, Tolerance::absolute(1e-4));
+}
+
+/// Compares one token's vocabulary vector while keeping batch/sequence axes explicit.
+fn assert_token_logits_match(
+    actual: &Tensor<TestBackend, 3>,
+    actual_row: usize,
+    actual_column: usize,
+    expected: &Tensor<TestBackend, 3>,
+    expected_column: usize,
+) {
+    let actual = actual
+        .clone()
+        .slice([
+            actual_row..actual_row + 1,
+            actual_column..actual_column + 1,
+            0..32,
+        ])
+        .into_data();
+    let expected = expected
+        .clone()
+        .slice([0..1, expected_column..expected_column + 1, 0..32])
+        .into_data();
+    assert_finite_attention_parity(&actual, &expected);
+}
+
+/// Masked columns must not consume a trailing window when cached history compacts them.
+#[test]
+fn sliding_reference_parity_with_interior_padding() {
+    let device = Default::default();
+    for sliding in [false, true] {
+        let model = deterministic_attention_model(
+            sliding.then_some(2),
+            PositionEncodingSpec::None,
+            &device,
+        );
+        let options = ForwardOptions::default();
+        let stateless = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 0, 2]], &device),
+                    token_mask: Some(mask([[true, false, true]], &device)),
+                    position_ids: None,
+                },
+                &options,
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        let compact = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 2]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &options,
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        let mut prefill_state = model
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        let prefill = model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 0, 2]], &device),
+                    token_mask: Some(mask([[true, false, true]], &device)),
+                    position_ids: None,
+                },
+                &mut prefill_state,
+                &options,
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        let mut decode_state = model
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 0]], &device),
+                    token_mask: Some(mask([[true, false]], &device)),
+                    position_ids: None,
+                },
+                &mut decode_state,
+                &options,
+            )
+            .unwrap();
+        assert_eq!(decode_state.lengths(), &[1]);
+        let decoded = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[2]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut decode_state,
+                &options,
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        assert_eq!(prefill_state.lengths(), &[2]);
+        assert_eq!(decode_state.lengths(), &[2]);
+        assert_finite_attention_parity(&compact, &prefill);
+        assert_finite_attention_parity(&compact, &decoded);
+        assert_finite_attention_parity(&stateless, &prefill);
+    }
+}
+
+/// Left, right, interior, and explicitly all-valid padding preserve every valid token's logits.
+#[test]
+fn full_and_sliding_attention_ignore_padding_columns() {
+    let device = Default::default();
+    let layouts = [
+        (vec![1, 2, 3], vec![true, true, true]),
+        (vec![0, 0, 1, 2, 3], vec![false, false, true, true, true]),
+        (vec![1, 2, 3, 0, 0], vec![true, true, true, false, false]),
+        (
+            vec![0, 1, 0, 2, 0, 3, 0],
+            vec![false, true, false, true, false, true, false],
+        ),
+    ];
+    for window in [None, Some(1), Some(2), Some(8), Some(usize::MAX)] {
+        let model = deterministic_attention_model(
+            window,
+            PositionEncodingSpec::Rope {
+                theta: 10_000.0,
+                rotary_dim: 4,
+                scaling: RopeScaling::None,
+            },
+            &device,
+        );
+        let options = ForwardOptions {
+            logits: LogitsSelection::All,
+            ..Default::default()
+        };
+        let compact = model
+            .forward(parity_input(&[1, 2, 3], None, None, &device), &options)
+            .unwrap()
+            .logits;
+        for (ids, validity) in &layouts {
+            let padded = model
+                .forward(parity_input(ids, Some(validity), None, &device), &options)
+                .unwrap()
+                .logits;
+            for (compact_column, padded_column) in validity
+                .iter()
+                .enumerate()
+                .filter_map(|(column, &valid)| valid.then_some(column))
+                .enumerate()
+            {
+                assert_token_logits_match(&padded, 0, padded_column, &compact, compact_column);
+            }
+        }
+    }
+}
+
+/// A window counts recent tokens, not gaps or offsets in explicit positional-encoding IDs.
+#[test]
+fn sliding_window_cardinality_is_independent_of_explicit_positions() {
+    let device = Default::default();
+    let ids = [1, 2, 3, 4];
+    let positions = [2, 7, 15, 24];
+    for window in [1, 2, 4, 8] {
+        let model = deterministic_attention_model(
+            Some(window),
+            PositionEncodingSpec::Rope {
+                theta: 10_000.0,
+                rotary_dim: 4,
+                scaling: RopeScaling::None,
+            },
+            &device,
+        );
+        let options = ForwardOptions::default();
+        let start = ids.len().saturating_sub(window);
+        // A one-layer graph's last query depends only on its visible raw token embeddings.
+        // Evaluating exactly that suffix is an independent control for the window boundary.
+        let suffix = model
+            .forward(
+                parity_input(&ids[start..], None, Some(&positions[start..]), &device),
+                &options,
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        let full = model
+            .forward(
+                parity_input(&ids, None, Some(&positions), &device),
+                &options,
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        assert_finite_attention_parity(&full, &suffix);
+        let padded_input = || {
+            parity_input(
+                &[0, 1, 0, 2, 3, 0, 4, 0],
+                Some(&[false, true, false, true, true, false, true, false]),
+                Some(&[0, 2, 0, 7, 15, 0, 24, 0]),
+                &device,
+            )
+        };
+        let padded = model
+            .forward(padded_input(), &options)
+            .unwrap()
+            .logits
+            .into_data();
+        assert_finite_attention_parity(&padded, &suffix);
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+            .unwrap();
+        let cached = model
+            .prefill(padded_input(), &mut state, &options)
+            .unwrap()
+            .logits
+            .into_data();
+        assert_finite_attention_parity(&cached, &suffix);
+        assert_eq!(state.lengths(), &[4]);
+    }
+}
+
+/// Ragged chunking, reorder, duplicate beams, and truncation preserve compact history semantics.
+#[test]
+fn masked_attention_continuations_survive_chunking_reorder_and_truncate() {
+    let device = Default::default();
+    for window in [None, Some(2)] {
+        let model = deterministic_attention_model(
+            window,
+            PositionEncodingSpec::Rope {
+                theta: 10_000.0,
+                rotary_dim: 4,
+                scaling: RopeScaling::None,
+            },
+            &device,
+        );
+        let all = ForwardOptions {
+            logits: LogitsSelection::All,
+            ..Default::default()
+        };
+        let mut state = model
+            .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+            .unwrap();
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 0, 2], [0, 3, 0]], &device),
+                    token_mask: Some(mask([[true, false, true], [false, true, false]], &device)),
+                    position_ids: Some(Tensor::from_ints([[2, 0, 5], [0, 7, 0]], &device)),
+                },
+                &mut state,
+                &all,
+            )
+            .unwrap();
+        assert_eq!(state.lengths(), &[2, 1]);
+        let chunk = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[0, 4, 5], [6, 0, 7]], &device),
+                    token_mask: Some(mask([[false, true, true], [true, false, true]], &device)),
+                    position_ids: Some(Tensor::from_ints([[0, 10, 13], [11, 0, 15]], &device)),
+                },
+                &mut state,
+                &all,
+            )
+            .unwrap()
+            .logits;
+        assert_eq!(state.lengths(), &[4, 3]);
+        let first = model
+            .forward(
+                parity_input(&[1, 2, 4, 5], None, Some(&[2, 5, 10, 13]), &device),
+                &all,
+            )
+            .unwrap()
+            .logits;
+        let second = model
+            .forward(
+                parity_input(&[3, 6, 7], None, Some(&[7, 11, 15]), &device),
+                &all,
+            )
+            .unwrap()
+            .logits;
+        let batched = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[1, 0, 2, 0, 4, 5], [0, 3, 0, 6, 0, 7]], &device),
+                    token_mask: Some(mask(
+                        [
+                            [true, false, true, false, true, true],
+                            [false, true, false, true, false, true],
+                        ],
+                        &device,
+                    )),
+                    position_ids: Some(Tensor::from_ints(
+                        [[2, 0, 5, 0, 10, 13], [0, 7, 0, 11, 0, 15]],
+                        &device,
+                    )),
+                },
+                &all,
+            )
+            .unwrap()
+            .logits;
+        assert_token_logits_match(&batched, 0, 4, &first, 2);
+        assert_token_logits_match(&batched, 0, 5, &first, 3);
+        assert_token_logits_match(&batched, 1, 3, &second, 1);
+        assert_token_logits_match(&batched, 1, 5, &second, 2);
+        assert_token_logits_match(&chunk, 0, 1, &first, 2);
+        assert_token_logits_match(&chunk, 0, 2, &first, 3);
+        assert_token_logits_match(&chunk, 1, 0, &second, 1);
+        assert_token_logits_match(&chunk, 1, 2, &second, 2);
+        for (row, column) in [(0, 0), (1, 1)] {
+            assert!(
+                chunk
+                    .clone()
+                    .slice([row..row + 1, column..column + 1, 0..32])
+                    .into_data()
+                    .as_slice::<f32>()
+                    .unwrap()
+                    .iter()
+                    .all(|&value| value == 0.0)
+            );
+        }
+
+        state.reorder(&[1, 0]).unwrap();
+        assert_eq!(state.lengths(), &[3, 4]);
+        state.truncate(&[1, 2]).unwrap();
+        assert_eq!(state.lengths(), &[1, 2]);
+        let last = ForwardOptions::default();
+        let after_truncate = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[8, 0], [0, 9]], &device),
+                    token_mask: Some(mask([[true, false], [false, true]], &device)),
+                    position_ids: Some(Tensor::from_ints([[20, 0], [0, 21]], &device)),
+                },
+                &mut state,
+                &last,
+            )
+            .unwrap()
+            .logits;
+        assert_eq!(state.lengths(), &[2, 3]);
+        for (row, ids, positions) in [
+            (0, vec![3, 8], vec![7, 20]),
+            (1, vec![1, 2, 9], vec![2, 5, 21]),
+        ] {
+            let fresh = model
+                .forward(parity_input(&ids, None, Some(&positions), &device), &last)
+                .unwrap()
+                .logits;
+            assert_token_logits_match(&after_truncate, row, 0, &fresh, 0);
+        }
+
+        state.reorder(&[0, 0]).unwrap();
+        assert_eq!(state.lengths(), &[2, 2]);
+        let after_duplicate = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[10], [11]], &device),
+                    token_mask: None,
+                    position_ids: Some(Tensor::from_ints([[25], [26]], &device)),
+                },
+                &mut state,
+                &last,
+            )
+            .unwrap()
+            .logits;
+        assert_eq!(state.lengths(), &[3, 3]);
+        for (row, token, position) in [(0, 10, 25), (1, 11, 26)] {
+            let fresh = model
+                .forward(
+                    parity_input(&[3, 8, token], None, Some(&[7, 20, position]), &device),
+                    &last,
+                )
+                .unwrap()
+                .logits;
+            assert_token_logits_match(&after_duplicate, row, 0, &fresh, 0);
+        }
+    }
+}
+
+/// Full attention preserves encoder and decoder valid-token outputs under independent padding.
+#[test]
+fn seq2seq_full_attention_padding_preserves_encoded_and_decoded_outputs() {
+    let device = Default::default();
+    let model = ModularSeq2SeqLm::<TestBackend>::init(seq2seq_spec(), &device)
+        .unwrap()
+        .map(&mut DeterministicParameters::default());
+    let options = ForwardOptions::default();
+    let source_ids = [4, 5, 6];
+    let target_ids = [1, 2, 3];
+    let compact_encoder = model
+        .encode(parity_input(&source_ids, None, None, &device), &options)
+        .unwrap();
+    let compact_logits = model
+        .forward(
+            Seq2SeqInput {
+                encoder: parity_input(&source_ids, None, None, &device),
+                decoder: parity_input(&target_ids, None, None, &device),
+            },
+            &options,
+        )
+        .unwrap()
+        .decoder
+        .logits
+        .into_data();
+    let source_layouts = [
+        (vec![0, 4, 5, 6], vec![false, true, true, true]),
+        (vec![4, 5, 6, 0], vec![true, true, true, false]),
+        (vec![4, 0, 5, 0, 6], vec![true, false, true, false, true]),
+    ];
+    let target_layouts = [
+        (vec![0, 1, 2, 3], vec![false, true, true, true]),
+        (vec![1, 2, 3, 0], vec![true, true, true, false]),
+        (vec![1, 0, 2, 0, 3], vec![true, false, true, false, true]),
+    ];
+    for (source_ids, source_validity) in &source_layouts {
+        let padded_encoder = model
+            .encode(
+                parity_input(source_ids, Some(source_validity), None, &device),
+                &options,
+            )
+            .unwrap();
+        for (compact_column, padded_column) in source_validity
+            .iter()
+            .enumerate()
+            .filter_map(|(column, &valid)| valid.then_some(column))
+            .enumerate()
+        {
+            let padded = padded_encoder
+                .hidden_state
+                .clone()
+                .slice([0..1, padded_column..padded_column + 1, 0..8])
+                .into_data();
+            let compact = compact_encoder
+                .hidden_state
+                .clone()
+                .slice([0..1, compact_column..compact_column + 1, 0..8])
+                .into_data();
+            assert_finite_attention_parity(&padded, &compact);
+        }
+        for (target_ids, target_validity) in &target_layouts {
+            let decoder = || parity_input(target_ids, Some(target_validity), None, &device);
+            let padded = model
+                .forward(
+                    Seq2SeqInput {
+                        encoder: parity_input(source_ids, Some(source_validity), None, &device),
+                        decoder: decoder(),
+                    },
+                    &options,
+                )
+                .unwrap()
+                .decoder
+                .logits
+                .into_data();
+            assert_finite_attention_parity(&padded, &compact_logits);
+            let mut state = model
+                .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+                .unwrap();
+            let cached = model
+                .prefill_decoder(&padded_encoder, decoder(), &mut state, &options)
+                .unwrap()
+                .decoder
+                .logits
+                .into_data();
+            assert_finite_attention_parity(&cached, &compact_logits);
+            assert_eq!(state.lengths(), &[3]);
+            let decoded = model
+                .decode(
+                    &padded_encoder,
+                    DecodeInput {
+                        token_ids: Tensor::from_ints([[0, 7]], &device),
+                        token_mask: Some(mask([[false, true]], &device)),
+                        position_ids: None,
+                    },
+                    &mut state,
+                    &options,
+                )
+                .unwrap()
+                .decoder
+                .logits;
+            assert_eq!(state.lengths(), &[4]);
+            let fresh = model
+                .forward(
+                    Seq2SeqInput {
+                        encoder: parity_input(&[4, 5, 6], None, None, &device),
+                        decoder: parity_input(&[1, 2, 3, 7], None, None, &device),
+                    },
+                    &options,
+                )
+                .unwrap()
+                .decoder
+                .logits;
+            assert_finite_attention_parity(&decoded.into_data(), &fresh.into_data());
+        }
+    }
 }
 
 /// Heterogeneous attention and recurrent layers execute as one decoder graph.

@@ -11,6 +11,9 @@
 //! mathematically different operation. Stateful inference uses a preallocated token-history
 //! state and recomputes the stateless graph. That reference path is exact and useful for parity
 //! experiments, while family runtimes retain the optimized native-KV and recurrent caches.
+//! Semantic masks exclude invalid keys for both full and sliding attention. Sliding windows
+//! count valid tokens, matching compact cached history; explicit positional-encoding IDs can
+//! have gaps without changing which recent keys remain visible.
 //!
 //! The serializable flags retain one unambiguous runtime meaning here: an attention
 //! `output_gate` is sigmoid-multiplicative, Q/K normalization is per-head RMS normalization

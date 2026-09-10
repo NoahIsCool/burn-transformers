@@ -264,6 +264,7 @@ impl<B: Backend> ModularAttention<B> {
         )?;
         let mask = add_sliding_mask(
             padding,
+            token_mask,
             batch,
             self.attention.query_heads,
             sequence,
@@ -790,23 +791,38 @@ pub(super) fn tied_projection<B: Backend>(
     burn::tensor::module::linear(hidden, embedding_weight.transpose(), None)
 }
 
-/// Adds the exclusion mask for a causal trailing attention window.
+/// Adds a trailing window measured in valid-token ordinals, preserving key padding.
+///
+/// Let `r_i = sum_{j <= i} valid_j`. A valid causal key `k` is too old for query `q`
+/// exactly when `r_q - r_k >= window`. Padding columns therefore consume no history, matching
+/// the decode state's compact token storage. Caller-supplied position IDs affect positional
+/// encodings only: gaps or offsets in those IDs do not discard otherwise recent keys.
 fn add_sliding_mask<B: Backend>(
     padding: Option<Tensor<B, 4, Bool>>,
+    token_mask: Option<&TokenMask<B>>,
     batch: usize,
     heads: usize,
     sequence: usize,
     window: Option<usize>,
     device: &B::Device,
 ) -> Option<Tensor<B, 4, Bool>> {
-    let window = window?;
-    let query = Tensor::<B, 1, Int>::arange(0..sequence as i64, device)
-        .reshape([1, 1, sequence, 1])
+    let Some(window) = window.filter(|&window| window < sequence) else {
+        return padding;
+    };
+    let ordinals = match token_mask {
+        Some(mask) => mask.as_tensor().clone().int().cumsum(1),
+        None => Tensor::<B, 1, Int>::arange(0..sequence as i64, device)
+            .reshape([1, sequence])
+            .expand([batch, sequence]),
+    };
+    let query = ordinals
+        .clone()
+        .reshape([batch, 1, sequence, 1])
         .expand([batch, heads, sequence, sequence]);
-    let key = Tensor::<B, 1, Int>::arange(0..sequence as i64, device)
-        .reshape([1, 1, 1, sequence])
+    let key = ordinals
+        .reshape([batch, 1, 1, sequence])
         .expand([batch, heads, sequence, sequence]);
-    let too_old = (key + window as i64).lower_equal(query);
+    let too_old = (query - key).greater_equal_elem(window as i64);
     Some(match padding {
         Some(padding) => padding.bool_or(too_old),
         None => too_old,

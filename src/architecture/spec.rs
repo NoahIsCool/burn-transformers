@@ -233,7 +233,10 @@ impl AttentionSpec {
 pub struct SlidingWindowSpec {
     /// Attention topology evaluated inside the window.
     pub attention: AttentionSpec,
-    /// Maximum number of key positions visible to a query.
+    /// Maximum number of valid keys visible to a query, including the query's own key.
+    ///
+    /// Masked padding columns do not consume the window. Its age is measured in valid-token
+    /// order, independently of offsets or gaps in explicit positional-encoding IDs.
     pub window: usize,
 }
 
