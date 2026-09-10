@@ -29,7 +29,8 @@ class PublicExampleRecordTests(unittest.TestCase):
                 self.assertEqual(run["repository"], primary["repository"])
                 self.assertEqual(run["revision"], primary["revision"])
                 self.assertEqual(run["exit_code"], 0)
-                self.assertEqual(run["example_sha256"], hashlib.sha256((CRATE / run["example"]).read_bytes()).hexdigest())
+                historical_example = historical_lock.parent / run["example"]
+                self.assertEqual(run["example_sha256"], hashlib.sha256(historical_example.read_bytes()).hexdigest())
                 self.assertEqual(run["stdout_sha256"], hashlib.sha256(run["stdout"].encode()).hexdigest())
                 self.assertIn("--offline", run["command"])
                 self.assertIn("--locked", run["command"])
