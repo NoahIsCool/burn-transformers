@@ -300,15 +300,19 @@ sliding layers retain only their ring-backed history. Ragged chunks preserve
 each row's latest valid logits even when a later chunk is padding-only. Muse
 uses window 2,048 in 39 of 52 text blocks, interleaved with 13 global blocks
 that restore long-range connectivity. When a valid-token mask contains padding
-or an interior hole, Muse measures $i$ and $j$ in cumulative valid-token
-ordinals. Invalid source columns therefore consume no window distance, matching
-the cache path's semantic row compaction for left padding, right padding, and
-interior holes.
+or an interior hole, Muse and custom modular attention measure $i$ and $j$ in
+cumulative valid-token ordinals. Invalid source columns consume no window
+distance, matching the cache path's semantic row compaction for left padding,
+right padding, and interior holes. Explicit positional-encoding IDs may contain
+offsets or gaps; they do not change this valid-token window distance. Custom full attention also
+preserves key padding when no sliding window is requested.
 
 **Implementation:** masking and layer selection in
 [`muse_glimmer/model.rs`](src/models/muse_glimmer/model.rs), cached execution in
 [`muse_glimmer/model/decode.rs`](src/models/muse_glimmer/model/decode.rs), and
-ring planning in [`cache/ring.rs`](src/cache/ring.rs). Bounded orchestration is
+ring planning in [`cache/ring.rs`](src/cache/ring.rs). The custom reference path
+uses [`custom/common.rs`](src/models/custom/common.rs), with compact token-history
+recomputation rather than a projected-KV ring. Bounded orchestration is
 implemented by `CausalGenerationRequest::prefill_chunk_size` in
 [`generation/causal.rs`](src/generation/causal.rs).
 **Reference:** the [pinned Muse configuration](https://huggingface.co/meta-models/Muse-Glimmer-30B/blob/a4e59da52a7bc87ae7251dd5545c0dd437c44b68/config.json).

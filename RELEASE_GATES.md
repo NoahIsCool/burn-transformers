@@ -87,6 +87,15 @@ offline and the dependency lockfile is unchanged. This is an intermediate
 snapshot: later test edits need replay and no coverage or performance gate is
 waived by successful packaging.
 
+The custom-attention fix at `1ded688` restores padding masks in full attention
+and valid-token window distances in sliding attention. Its independent review
+and combined release-profile suite pass: **1,117 tests passed, 29 existing tests
+ignored**, with all-target/all-feature warning-denied Clippy and formatting
+checks clean. Five new custom regressions enforce finite F32 parity at absolute
+`1e-4`; five additional loader tests cover accounting and override failures.
+Qwen/T5 family kernels are unchanged. This is ordinary synthetic validation,
+not a new real-checkpoint replay, package verification, or coverage measurement.
+
 Cargo's usual target location is retained. Check at least 20 GiB free before
 building a new profile; external model artifacts are never a cleanup target.
 The current host needed a [documented cache fallback](acceptance/measurements/local-build-cache-relocation-20260910.json)
@@ -505,6 +514,13 @@ samples; hashes distinguish them from the original local reports.
   p95 latency alerts exceed 5%, none exceeds 10%; with ten repetitions p95 is
   the maximum sample. **The historical failure is not waived or explained.**
   No current-source cause or decision to replace the historical gate is assumed.
+  A [read-only timing attribution audit](acceptance/measurements/qwen-historical-warm-inference-audit-20260910.json)
+  confirms matched native-process boundaries: warm model-only decode accounts
+  for 35.709 seconds of the 53.71-second original/rebuilt wall-time difference.
+  Whole-process retired instructions also increase, but cannot distinguish CPU
+  submission work from GPU waiting or execution. Neither a hardware cause nor a
+  software cause is established. A future CPU-stack/GPU-telemetry replay would
+  be diagnostic-only; no such profiling run has been performed.
 - FLAN Metal repeats the 32/128/512-source-token, 128-decode-step protocol with
   exact prediction hashes, roughly 73–75 model-only decode tokens/s, and no
   repeated metric regression over 10% versus its historical baseline. Some
