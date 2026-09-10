@@ -6,6 +6,13 @@ because its configuration parses: support requires strict weight loading,
 reference-logit parity, cache parity, generation parity, and a recorded hardware
 acceptance run.
 
+The research targets below are broader than the completed v0.1 release scope.
+Only the exact Qwen3.5-0.8B Metal/F16 base-text and FLAN-T5-small Flex/F32 /
+Metal/F32 profiles are promoted; see [the release record](acceptance/measurements/v0_1-release-20260910.json).
+All other families and quantized-quality or real-weight MTP claims remain
+experimental. Historical checkpoint bring-up descriptions below are not current
+release-status declarations.
+
 The checkpoint revisions below are immutable. Muse and the current shared
 architecture fixtures pin Hugging Face Transformers revision
 `cfa309cfa34b5497a32fd50af49aa97aac94c054`; Qwen3-MoE's executable oracle

@@ -19,6 +19,13 @@ raw-report hash identifies the separate original local JSON, not the compact fil
 All repeated timing samples are retained. The Qwen historical timing failure
 remains unresolved despite close controlled rebuilt-old/current medians.
 
+The later [v0.1 release decision](v0_1-release-20260910.json) records explicit
+user authorization to adopt the controlled timing baseline while retaining
+that historical slowdown as an unexplained limitation. It names the three
+promoted execution profiles; the primary checkpoint records remain the
+authoritative support declarations. Earlier measurement flags and results are
+not rewritten by this policy decision.
+
 The [v1](whole-test-file-coverage-v1-20260910.json) and
 [v2](whole-test-file-coverage-v2-20260910.json) coverage records retain distinct
 source snapshots and exclusion policies. Neither is qualified production-only

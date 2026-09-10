@@ -5,7 +5,16 @@ implemented families remain experimental. This checklist supplements
 [RELEASING.md](RELEASING.md); a green source check does not promote a checkpoint,
 publish an archive, or waive any real-weight gate.
 
-## Current candidate
+## v0.1 release qualification
+
+The [release record](acceptance/measurements/v0_1-release-20260910.json) promotes
+the bounded Qwen3.5-0.8B Metal/F16 base-text and FLAN-T5-small Flex/F32 /
+Metal/F32 profiles. On September 10 the user explicitly approved the controlled
+Qwen measurements as the v0.1 baseline, while retaining the unexplained
+historical slowdown. This changes the baseline policy, not the measured results
+or the future 5% alert / confirmed 10% failure thresholds. No new benchmark is
+claimed by that approval. Larger families, quantized quality and real-weight
+MTP remain experimental.
 
 The [`b4d6410` source-gate record](acceptance/measurements/v0_1-source-gates-20260910.json)
 passes **1,184 Rust tests / 30 opt-in ignores**, all 17 source/Rust 1.92/backend/
@@ -22,10 +31,14 @@ reproduces the previous translation and six-token EOS metadata. Full pinned
 artifact, binary and source hashes remain identical before/after each run.
 These functional checks do not supply new performance measurements.
 
-The unresolved historical Qwen timing gate is still open; controlled same-host
-old/current agreement does not authorize replacing it. Support flags remain
-false, and the changelog date/final release metadata stay unpromoted until that
-decision or a demonstrated resolution. No publication or tag has been created.
+The original historical Qwen timing gate failed and its cause remains unknown.
+The explicit user decision, not old/current agreement alone, permits the new
+baseline and the bounded support promotion. The changelog is dated September 10.
+Package verification is repeated on the final committed source, with commit and
+archive SHA-256 retained beside the local artifact. No publication or tag has
+been created. All older sections below retain their snapshot-specific outcomes,
+including pre-promotion false flags and then-open gates; they do not override
+the current release record.
 
 ## Reproducible source checks
 

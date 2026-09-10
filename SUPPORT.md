@@ -28,6 +28,21 @@ Revisions, repacks, quantization formats, and third-party conversions not named
 by such a record are experimental even when their tensor names happen to load.
 Quantized support is tracked independently from full-precision support.
 
+Version 0.1 promotes exactly three profiles on the validated Apple M3 Max host:
+
+- Qwen3.5-0.8B, revision `2fc06364715b967f1860aea9cf38778875588b17`,
+  Metal/F16 parameters with FP32 recurrent state, base text graph only.
+- FLAN-T5-small, revision `0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab`,
+  Flex/F32 and Metal/F32, including cached greedy and beam generation.
+
+The [release record](acceptance/measurements/v0_1-release-20260910.json) and
+each checkpoint's `supported_profiles` describe the tested boundaries and
+known limits. Hardware, dtype, quantization, MTP or long-context quality claims
+must not be inferred from a family-wide implementation. Qwen's historical
+approximately 25% throughput slowdown is accepted as an unresolved limitation;
+the user approved the controlled September 10 baseline for future comparisons,
+not a claim that the historical regression was explained or repaired.
+
 ## Artifact and provenance boundary
 
 The runtime reads local files only. It does not download models, resolve moving

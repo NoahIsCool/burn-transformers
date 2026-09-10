@@ -9,6 +9,13 @@ gates have passed. See [the runtime status table](README.md) and
 [the compatibility evidence matrix](ARCHITECTURE_COMPATIBILITY.md) for that
 separate question.
 
+For v0.1, only the pinned Q3.5-0.8 Metal/F16 base-text and FLAN-S Flex/F32 /
+Metal/F32 profiles are promoted. This does not promote every checked mechanism
+in their columns: quantized quality, real-weight MTP and multimodal paths remain
+experimental. The [release record](acceptance/measurements/v0_1-release-20260910.json)
+retains Qwen's user-accepted historical performance limitation. No architectural
+feature was changed to adopt the new timing baseline.
+
 Only the executable text graph is counted. Vision towers, tokenizer behavior,
 quantization formats, serving systems, and broad training recipes such as FLAN
 instruction tuning and UL2's Mixture-of-Denoisers are deliberately outside the
@@ -1440,6 +1447,13 @@ tests cover both outcomes and the exact reorder/token/mask history.
   verified shared and Qwen/FLAN test-module extraction makes this distinction
   possible without changing model execution. Remaining inline tests are retained;
   this partial diagnostic is not yet a production-only gate.
+  The later [b4d6410 capture](acceptance/measurements/v0_1-source-gates-20260910.json)
+  independently binds every retained native region to authored production
+  function items and passes 90.005% crate-wide / 95.011% shared/core coverage.
+  It excludes 79 verified whole test files and no Burn-generated spans. This
+  exact-source qualification supersedes the earlier numerical gaps, not the
+  conservative generic-tool flags; it is not a general macro-closure or branch
+  coverage claim.
 - **Public generation overhead has its own benchmark protocol.** Qwen's
   existing model-API loop remains unchanged; a separate ignored benchmark now
   times actual `generate_causal` calls through automatic model dispatch, including

@@ -1,17 +1,20 @@
 # Qwen3.5-0.8B v0.1 profile
 
-This pre-advertisement profile defines the intended bounded Qwen support claim
+This profile defines the bounded Qwen support claim
 for the first crate release. It applies to `Qwen/Qwen3.5-0.8B` at immutable revision
 `2fc06364715b967f1860aea9cf38778875588b17` and to text inference only. The
 repository contains a vision tower and a one-layer multi-token-prediction (MTP)
 head; neither is part of the default v0.1 execution graph.
 
-The machine-readable record intentionally remains `advertised_supported=false`.
-The retained, independently reviewed official-reference bundle now passes its
-Metal replay. The separate populated Q4 32K execution stress also passes.
-Promotion still requires the crate-wide [release gates](RELEASE_GATES.md);
-numerical parity and stress execution alone are
-not a complete release qualification.
+The machine-readable record is `advertised_supported=true` for its named
+Metal/F16 base-text profile on the validated Apple M3 Max host. The independently
+reviewed official-reference bundle, source gates and public examples pass.
+The [v0.1 release decision](acceptance/measurements/v0_1-release-20260910.json)
+records the user's approval of the controlled performance baseline: the
+historical slowdown from roughly 36 to 27 tokens/s remains unexplained and is
+an accepted limitation, not a claimed fix. The separate populated Q4 32K stress
+is execution/storage evidence only; it does not promote quantized support or
+establish F16 official-reference parity at 32K.
 
 The detailed tensor map is recorded in
 [QWEN3_5_CHECKPOINT_MAPPING.md](QWEN3_5_CHECKPOINT_MAPPING.md), and machine-readable
@@ -210,5 +213,7 @@ It matches all 32 greedy decisions on cached and teacher-forced paths; minimum
 full-vocabulary reference cosine is **0.999996242** (gate **0.999**). The acceptance
 record pins every payload and its producer provenance. Both target checkpoint
 and reference sources are authenticated. Separate [warm timing measurements](acceptance/measurements/qwen3.5-0.8b-metal-benchmark-20260909-run.json)
-now cover 32/128/512-token prompts. Neither those measurements nor the separate
-32K stress waive the remaining crate-wide release gates.
+cover 32/128/512-token prompts. The explicitly approved
+[controlled September 10 baseline](acceptance/measurements/small-model-performance-20260910/qwen-controlled-current-summary.json)
+is used for future matching-workload comparisons. Earlier timing and stress
+records remain historical evidence; support is limited to the profile above.

@@ -5,8 +5,27 @@
   "post_json_validation_replay_record": "measurements/small-model-post-json-validation-replay-20260910.json",
   "sampled_phase_memory_record": "measurements/small-model-metal-memory-20260909.json",
   "schema_version": 1,
-  "advertised_supported": false,
-  "phase": "v0_1_source_and_correctness_gates_passed_pending_historical_performance_resolution",
+  "advertised_supported": true,
+  "phase": "v0_1_supported_bounded_profile",
+  "release_record": "measurements/v0_1-release-20260910.json",
+  "supported_profiles": [
+    {
+      "id": "qwen3.5-0.8b-metal-f16",
+      "backend": "Metal",
+      "dtype": "F16",
+      "recurrent_state_dtype": "F32",
+      "features": ["std", "metal", "tokenizers", "chat-templates"],
+      "scope": "Text-only base-model inference from the exact BF16 checkpoint with tensor-at-a-time F16 conversion; strict local loading, stateless/cached execution, padded batches, local chat tokenization and ordinary generation on the validated Apple M3 Max host",
+      "known_limits": [
+        "No vision, multimodal positions, real-weight MTP or quantized-quality support is implied",
+        "Official-reference acceptance covers the fixed stable prompt and 32 greedy decisions; warm timing covers 32/128/512-token prompts, not arbitrary long-context numerical quality or throughput",
+        "The separate Q4 32K execution stress is storage/execution evidence only and does not promote Q4 or Q8 support",
+        "An unexplained historical throughput drop from approximately 36 to 27 tokens/s remains; the user authorized the controlled September 10 measurements as the v0.1 baseline",
+        "Memory evidence consists of OS-accounted process high-water and sampled phase maxima, not exact transient peaks or separately attributable host/device allocations",
+        "Other hardware, checkpoint revisions, backend/dtype combinations and training remain experimental"
+      ]
+    }
+  ],
   "repository": "Qwen/Qwen3.5-0.8B",
   "revision": "2fc06364715b967f1860aea9cf38778875588b17",
   "artifact_layout": {

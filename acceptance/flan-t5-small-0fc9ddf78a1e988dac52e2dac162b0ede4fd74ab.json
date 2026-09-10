@@ -5,8 +5,36 @@
   "post_json_validation_replay_record": "measurements/small-model-post-json-validation-replay-20260910.json",
   "sampled_phase_memory_record": "measurements/small-model-metal-memory-20260909.json",
   "schema_version": 1,
-  "advertised_supported": false,
-  "phase": "v0_1_source_and_correctness_gates_passed_pending_coordinated_release_promotion",
+  "advertised_supported": true,
+  "phase": "v0_1_supported_bounded_profile",
+  "release_record": "measurements/v0_1-release-20260910.json",
+  "supported_profiles": [
+    {
+      "id": "flan-t5-small-flex-f32",
+      "backend": "Flex",
+      "dtype": "F32",
+      "features": ["std", "flex", "tokenizers"],
+      "scope": "Exact-checkpoint F32 text encoder-decoder inference with local tokenization, strict loading, cached/stateless generation, right padding and cached beam search on the validated Apple M3 Max host",
+      "known_limits": [
+        "Official reference evidence covers the fixed 32-decision continuation, four-beam continuation and source contexts through 512 tokens; this is not an arbitrary-context quality guarantee",
+        "CPU timing is a first baseline for the committed single-batch workload, not a general CPU-versus-GPU performance claim",
+        "Per-phase memory refreshes use Metal; no separately instrumented Flex phase-memory series or exact host/device allocation split is claimed",
+        "Quantization, training, other revisions and unvalidated hardware or dtype combinations remain experimental"
+      ]
+    },
+    {
+      "id": "flan-t5-small-metal-f32",
+      "backend": "Metal",
+      "dtype": "F32",
+      "features": ["std", "metal", "tokenizers"],
+      "scope": "Exact-checkpoint F32 text encoder-decoder inference with local tokenization, strict loading, cached/stateless generation, right padding and cached beam search on the validated Apple M3 Max host",
+      "known_limits": [
+        "Official reference evidence covers the fixed 32-decision continuation, four-beam continuation and source contexts through 512 tokens; this is not an arbitrary-context quality guarantee",
+        "Memory evidence consists of OS-accounted process high-water and sampled phase maxima, not exact transient peaks or separately attributable host/device allocations",
+        "Quantization, training, other revisions and unvalidated hardware or dtype combinations remain experimental"
+      ]
+    }
+  ],
   "repository": "google/flan-t5-small",
   "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
   "artifact_layout": {

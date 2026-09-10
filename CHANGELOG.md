@@ -7,10 +7,14 @@ versioning, with the additional pre-1.0 compatibility policy documented in
 
 ## [Unreleased]
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-09-10
 
 ### Added
 
+- Bounded support for the pinned Qwen3.5-0.8B Metal/F16 base-text profile and
+  FLAN-T5-small Flex/F32 and Metal/F32 profiles. Larger models, quantized
+  quality and real-weight MTP remain experimental. This records a local source
+  release, not a registry publication or Git tag.
 - Backend-generic causal and encoder-decoder inference contracts for Burn.
 - Strict, local-only sharded SafeTensors discovery and streaming installation
   with deterministic tensor-level load reports.
@@ -37,6 +41,16 @@ versioning, with the additional pre-1.0 compatibility policy documented in
   authenticated source inputs and binary identities, unfiltered exports, and
   strict diagnostics. Passing aggregate coverage is not production-only
   qualification or checkpoint promotion.
+
+### Known limitations
+
+- Qwen's historical decode throughput fell from approximately 36 to 27 tokens/s.
+  Rebuilt historical and current sources agree within 1.247% on controlled warm
+  medians, but the historical cause remains unknown. The user explicitly approved
+  the controlled September 10 measurements as the v0.1 baseline; old evidence
+  is retained and future 5% alert / confirmed 10% failure thresholds are unchanged.
+- Memory evidence reports OS-accounted process high-water and sampled phase
+  maxima, not exact transient peaks or separately attributable host/device usage.
 
 ### Fixed
 

@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "version": "0.1.0",
+  "date": "2026-09-10",
+  "scope": "Local v0.1 source-release qualification of exactly two pinned checkpoints and three bounded execution profiles; no registry publication, Git tag or larger-family promotion",
+  "release_gate_promotion": true,
+  "published_or_tagged": false,
+  "runtime_source_commit": "b4d64109cc990b5a01b0251cf23f67e7a87075bf",
+  "src_tree_git_oid_including_unit_tests": "aa4868b5f294700593d3f2a37a6cccde5ea1a3cc",
+  "pre_promotion_committed_candidate": "cf34fba185f6ce3c865a73d2e2addd3b6e8fadcf",
+  "promoted_profiles": [
+    "qwen3.5-0.8b-metal-f16",
+    "flan-t5-small-flex-f32",
+    "flan-t5-small-metal-f32"
+  ],
+  "checkpoint_records": [
+    "../qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17.json",
+    "../flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab.json"
+  ],
+  "source_evidence": {
+    "source_coverage_and_examples": "v0_1-source-gates-20260910.json",
+    "coverage_scope": "The exact b4d6410 runtime src tree is retained unchanged. Its independently qualified authored-function coverage passes 90% crate-wide and 95% shared/core. Later release-record tests and documentation are outside that production denominator; no new coverage measurement is claimed here.",
+    "connected_dependency_audit": "connected-dependency-audit-20260910/manifest.json",
+    "dependency_scope": "The audited lockfile, dependency/feature graph and deny policy are unchanged; later Cargo.toml edits affect packaging include patterns/comments only, so the old manifest byte hash is not claimed equal.",
+    "fuzz_campaign": "../../fuzz/evidence/refresh-80b51e8.json",
+    "public_examples": "v0_1-source-gates-20260910.json",
+    "final_archive_policy": "Verify the clean committed release source with Cargo package --locked --offline; retain the exact Git commit, inventory, native terminal statuses and archive SHA-256 beside the local archive. This record does not assert a self-referential archive hash."
+  },
+  "performance_policy": {
+    "user_authorized_rebaseline": true,
+    "authorization_date": "2026-09-10",
+    "authorization_context": "The user answered 'Yes, continue.' to the explicit request to adopt the controlled baseline while documenting Qwen's unexplained approximately 36-to-27 tokens/s historical slowdown.",
+    "decision": "Use the controlled September 10 Qwen current-source measurements for future v0.1 comparisons. Retain the September 9 regression as an accepted release limitation, not a corrected measurement or an explained cause.",
+    "historical_slowdown_explained": false,
+    "historical_measurements_modified": false,
+    "new_performance_run_claimed": false,
+    "historical_comparison": "small-model-performance-20260910/qwen-controlled-historical-comparison.json",
+    "qwen_model_loop_baseline": "small-model-performance-20260910/qwen-controlled-current-summary.json",
+    "qwen_model_loop_baseline_sha256": "1a1c989ad9fe1b4d0ee87b8d35e0c41a4005ca61f6677ffc58b711a844cee899",
+    "qwen_public_coordinator_baseline": "small-model-performance-20260910/qwen-public-summary.json",
+    "flan_metal_baseline": "small-model-performance-20260910/flan-short-summary.json",
+    "flan_flex_baseline": "small-model-performance-20260910/flan-flex-summary.json",
+    "measurement_manifest": "small-model-performance-20260910/manifest.json",
+    "controlled_old_current_maximum_absolute_warm_median_delta_percent": 1.2464253775571699,
+    "future_alert_percent": 5,
+    "future_failure_percent_after_controlled_rerun": 10,
+    "comparison_constraints": [
+      "Keep model-loop and public-coordinator timing boundaries separate",
+      "Compare matching checkpoint, dtype, backend, source-token lengths, decode counts, warmups and repetitions with observed power/environment provenance",
+      "Do not compare instrumented memory timings to uninstrumented performance",
+      "Ten-sample nearest-rank p95 is the maximum sample; retained tail alerts are not erased",
+      "No exclusive desktop GPU access or continuous thermal/power monitoring is claimed"
+    ]
+  },
+  "retained_limitations": [
+    "Qwen's historical approximately 25% throughput drop remains unexplained and is explicitly accepted for this release",
+    "Only profiles named in the two promoted checkpoint records are supported; architecture presence, synthetic coverage and artifact smokes do not promote other models",
+    "Quantized corpus-quality guarantees, real-weight MTP support, multimodal towers, long-context quality/performance, training and larger-family completion remain outside this v0.1 scope",
+    "Memory traces report process high-water and sampled phase maxima, not exact unsampled peaks or separately attributable host/device allocations",
+    "Burn's existing bincode and paste maintenance notices remain documented; no new dependency advisory or license waiver is introduced"
+  ]
+}
