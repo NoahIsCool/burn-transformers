@@ -168,13 +168,5 @@ fn batch<B: Backend>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn noncausal_mla_and_hooked_latent_adapter_learn_and_reload() {
-        let (train_rows, held) = dataset();
-        assert_eq!(train_rows.len() + held.len(), 64);
-        assert!(held.iter().all(|r| !train_rows.contains(r)));
-        train(tempfile::tempdir().unwrap().path(), STEPS).unwrap();
-    }
-}
+#[path = "mla_encoder_decoder_tests.rs"]
+mod tests;
