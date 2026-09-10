@@ -180,3 +180,423 @@ fn source_positions_are_independent_of_target_extent_but_never_negative() {
             .contains("execution.encoder.positions")
     );
 }
+
+/// Fixed logical [input, output] matrices make composition expectations independent of initialization.
+fn matrix(input: usize, output: usize, values: &[f32]) -> burn::nn::Linear<B> {
+    let device = Default::default();
+    let mut linear = burn::nn::LinearConfig::new(input, output)
+        .with_bias(false)
+        .init(&device);
+    linear.weight = burn::module::Param::from_tensor(Tensor::from_data(
+        TensorData::new(values.to_vec(), [input, output]),
+        &device,
+    ));
+    linear
+}
+
+/// Compare an actual public execution result with a scalar mathematical oracle.
+fn composition_close(tensor: Tensor<B, 3>, expected: &[f32]) {
+    let actual = tensor.into_data().to_vec::<f32>().unwrap();
+    assert_eq!(actual.len(), expected.len());
+    for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (actual - expected).abs() < 3e-6,
+            "element {index}: {actual} != {expected}"
+        );
+    }
+}
+
+#[test]
+fn composition_normalization_placements_follow_scalar_residual_equations() {
+    use crate::architecture::{NormPlacement, NormalizationSpec};
+    let device = Default::default();
+    let input = Tensor::<B, 3>::from_floats([[[1.0, 3.0], [-2.0, 1.0], [4.0, -3.0]]], &device);
+    for placement in [
+        NormPlacement::Pre,
+        NormPlacement::Post,
+        NormPlacement::Sandwich,
+    ] {
+        let block = ResidualBlock::new(
+            2,
+            matrix(2, 2, &[0.25, 0.0, 0.0, 0.25]),
+            matrix(2, 2, &[0.5, 0.0, 0.0, 0.5]),
+            NormalizationSpec::Rms {
+                epsilon: 0.25,
+                zero_centered: false,
+            },
+            placement,
+            &device,
+        )
+        .unwrap();
+        let normalize = |x: [f64; 2]| {
+            let scale = ((x[0] * x[0] + x[1] * x[1]) / 2.0 + 0.25).sqrt();
+            [x[0] / scale, x[1] / scale]
+        };
+        let mut expected = Vec::new();
+        for mut x in [[1.0, 3.0], [-2.0, 1.0], [4.0, -3.0]] {
+            for factor in [0.25, 0.5] {
+                x = match placement {
+                    NormPlacement::Pre => {
+                        let n = normalize(x);
+                        [x[0] + factor * n[0], x[1] + factor * n[1]]
+                    }
+                    NormPlacement::Post => {
+                        normalize([x[0] * (1.0 + factor), x[1] * (1.0 + factor)])
+                    }
+                    NormPlacement::Sandwich => {
+                        let n = normalize(x);
+                        let n = normalize([factor * n[0], factor * n[1]]);
+                        [x[0] + n[0], x[1] + n[1]]
+                    }
+                };
+            }
+            expected.extend(x.map(|v| v as f32));
+        }
+        composition_close(
+            block
+                .run(input.clone(), &context(), Layer::decoder(0))
+                .unwrap(),
+            &expected,
+        );
+        let mut hooks = Hooks::new();
+        let output = hooks.capture(Layer::decoder(0).residual_post());
+        block
+            .run_with_hooks(input.clone(), &context(), Layer::decoder(0), &mut hooks)
+            .unwrap();
+        composition_close(hooks.get(&output).unwrap(), &expected);
+    }
+    let norm = NormalizationSpec::Rms {
+        epsilon: 0.25,
+        zero_centered: false,
+    };
+    assert!(
+        ResidualBlock::new(
+            0,
+            matrix(2, 2, &[1.0; 4]),
+            matrix(2, 2, &[1.0; 4]),
+            norm,
+            NormPlacement::Pre,
+            &device
+        )
+        .is_err()
+    );
+    let invalid = NormalizationSpec::Rms {
+        epsilon: f64::NAN,
+        zero_centered: false,
+    };
+    assert!(
+        ResidualBlock::new(
+            2,
+            matrix(2, 2, &[1.0; 4]),
+            matrix(2, 2, &[1.0; 4]),
+            invalid,
+            NormPlacement::Pre,
+            &device
+        )
+        .is_err()
+    );
+    assert!(
+        ResidualBlock::without_normalization(0, matrix(2, 2, &[1.0; 4]), matrix(2, 2, &[1.0; 4]))
+            .is_err()
+    );
+}
+
+#[test]
+fn composition_dense_and_gated_branches_expose_the_actual_nonlinearity() {
+    use crate::{
+        architecture::Activation,
+        feed_forward::{DenseFeedForward, GatedFeedForward},
+    };
+    let device = Default::default();
+    let input = Tensor::<B, 3>::from_floats([[[-2.0, 3.0], [4.0, -1.0], [0.0, 2.0]]], &device);
+    let identity = || matrix(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+    let dense = DenseFeedForward {
+        up_proj: identity(),
+        down_proj: identity(),
+        activation: Activation::Relu,
+    };
+    let block = ResidualBlock::without_normalization(2, matrix(2, 2, &[0.0; 4]), dense).unwrap();
+    composition_close(
+        block
+            .run(input.clone(), &context(), Layer::decoder(0))
+            .unwrap(),
+        &[-2.0, 6.0, 8.0, -1.0, 0.0, 4.0],
+    );
+    let gated = GatedFeedForward {
+        gate_proj: identity(),
+        up_proj: identity(),
+        down_proj: identity(),
+        activation: Activation::Relu,
+    };
+    let block = ResidualBlock::without_normalization(2, matrix(2, 2, &[0.0; 4]), gated).unwrap();
+    composition_close(
+        block
+            .run(input.clone(), &context(), Layer::decoder(0))
+            .unwrap(),
+        &[-2.0, 12.0, 20.0, -1.0, 0.0, 6.0],
+    );
+    let mut hooks = Hooks::new();
+    let before = hooks.capture(Layer::decoder(0).mlp_activation());
+    hooks.edit(Layer::decoder(0).mlp_activation(), |activation| {
+        activation.zeros_like()
+    });
+    let output = block
+        .run_with_hooks(input.clone(), &context(), Layer::decoder(0), &mut hooks)
+        .unwrap();
+    composition_close(hooks.get(&before).unwrap(), &[0.0, 3.0, 4.0, 0.0, 0.0, 2.0]);
+    assert_eq!(output.into_data(), input.into_data());
+}
+
+#[test]
+fn composition_gqa_obeys_causality_bias_padding_and_fully_masked_rows() {
+    use crate::attention::{AttentionPrecisionMode, GroupedQueryAttentionConfig};
+    let device = Default::default();
+    let input = Tensor::<B, 3>::from_floats([[[2.0, 1.0], [6.0, 3.0], [10.0, 5.0]]], &device);
+    for mode in [
+        AttentionPrecisionMode::BackendDefault,
+        AttentionPrecisionMode::EagerFp32Softmax,
+    ] {
+        let mut attention = GroupedQueryAttentionConfig::new(2, 2, 1, 1)
+            .with_precision_mode(mode)
+            .init::<B>(&device)
+            .unwrap();
+        attention.q_proj = matrix(2, 2, &[0.0; 4]);
+        attention.k_proj = matrix(2, 1, &[0.0; 2]);
+        attention.v_proj = matrix(2, 1, &[1.0, 0.0]);
+        attention.o_proj = matrix(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+        let adapter = WidthAdapter::new(attention, 2, 2, 2, &device).unwrap();
+        // Equal zero scores give prefix means; both query heads share the same values.
+        composition_close(
+            adapter
+                .run(input.clone(), &context(), Layer::decoder(0))
+                .unwrap(),
+            &[2.0, 2.0, 4.0, 4.0, 6.0, 6.0],
+        );
+        composition_close(
+            adapter
+                .run(input.clone(), &context(), Layer::encoder(0))
+                .unwrap(),
+            &[6.0; 6],
+        );
+        let allowed =
+            Tensor::<B, 4, Int>::from_data([[[[1, 1, 1], [0, 0, 0], [1, 1, 1]]]], &device).bool();
+        let mut masked = context().with_attention(
+            AttentionPolicy::custom(allowed).with_bias(Tensor::zeros([1, 1, 1, 1], &device)),
+        );
+        masked.token_mask = Some(TokenMask::new(
+            Tensor::<B, 2, Int>::from_data([[1, 1, 0]], &device).bool(),
+        ));
+        let mut hooks = Hooks::new();
+        let pattern = (mode == AttentionPrecisionMode::EagerFp32Softmax)
+            .then(|| hooks.capture(Layer::decoder(0).self_attention().pattern()));
+        composition_close(
+            adapter
+                .run_with_hooks(input.clone(), &masked, Layer::decoder(0), &mut hooks)
+                .unwrap(),
+            &[4.0, 4.0, 0.0, 0.0, 0.0, 0.0],
+        );
+        if let Some(pattern) = pattern {
+            let values = hooks
+                .get(&pattern)
+                .unwrap()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap();
+            assert_eq!(
+                values,
+                vec![
+                    0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0
+                ]
+            );
+        }
+        // Bias log(3) triples the first key's weight: (3*2 + 6 + 10) / 5 = 4.4.
+        let biased = context().with_attention(
+            AttentionPolicy::bidirectional()
+                .with_bias(Tensor::from_data([[[[3.0_f32.ln(), 0.0, 0.0]]]], &device)),
+        );
+        composition_close(
+            adapter
+                .run(input.clone(), &biased, Layer::decoder(0))
+                .unwrap(),
+            &[4.4; 6],
+        );
+        let invalid = context().with_attention(
+            AttentionPolicy::bidirectional().with_bias(Tensor::zeros([1, 3, 1, 1], &device)),
+        );
+        assert!(
+            adapter
+                .run(input.clone(), &invalid, Layer::decoder(0))
+                .unwrap_err()
+                .to_string()
+                .contains("attention.bias")
+        );
+        let mismatched = context().with_attention(AttentionPolicy::bidirectional().with_bias(
+            Tensor::<B, 4>::zeros([1, 1, 1, 1], &device).cast(burn::tensor::DType::F64),
+        ));
+        assert!(
+            adapter
+                .run(input.clone(), &mismatched, Layer::decoder(0))
+                .unwrap_err()
+                .to_string()
+                .contains("residual_block.attention.bias")
+        );
+    }
+}
+
+/// A registered consumer module intentionally violating one output contract.
+#[derive(burn::module::Module, Debug)]
+struct BadComposition<B: burn::tensor::backend::Backend> {
+    parameter: burn::nn::Linear<B>,
+    #[module(skip)]
+    wrong_dtype: bool,
+}
+
+impl<B: burn::tensor::backend::Backend> HiddenTransform<B> for BadComposition<B> {
+    fn forward(
+        &self,
+        hidden: Tensor<B, 3>,
+        _: &ExecutionContext<B>,
+        _: Layer,
+        _: &mut Hooks<'_, B>,
+    ) -> Result<Tensor<B, 3>> {
+        Ok(if self.wrong_dtype {
+            hidden.cast(burn::tensor::DType::F64)
+        } else {
+            hidden.narrow(1, 0, 1)
+        })
+    }
+}
+
+#[test]
+fn composition_width_adapters_have_explicit_matrix_products_and_reject_bad_modules() {
+    let device = Default::default();
+    let input = Tensor::<B, 3>::from_floats([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]], &device);
+    // [a,b] -> [a,b,a+b] -> [2a,3b,4(a+b)] -> [6a+4b,4a+7b].
+    let mut adapter = WidthAdapter::new(
+        matrix(3, 3, &[2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0]),
+        2,
+        3,
+        2,
+        &device,
+    )
+    .unwrap();
+    adapter.input_projection = Some(matrix(2, 3, &[1.0, 0.0, 1.0, 0.0, 1.0, 1.0]));
+    adapter.output_projection = Some(matrix(3, 2, &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0]));
+    composition_close(
+        adapter
+            .run(input.clone(), &context(), Layer::decoder(0))
+            .unwrap(),
+        &[14.0, 18.0, 34.0, 40.0, 54.0, 62.0],
+    );
+    for dimensions in [[0, 2, 2], [2, 0, 2], [2, 2, 0]] {
+        assert!(
+            WidthAdapter::new(
+                matrix(2, 2, &[1.0; 4]),
+                dimensions[0],
+                dimensions[1],
+                dimensions[2],
+                &device
+            )
+            .is_err()
+        );
+    }
+    for wrong_dtype in [false, true] {
+        let bad = || BadComposition {
+            parameter: matrix(2, 2, &[1.0; 4]),
+            wrong_dtype,
+        };
+        let adapter = WidthAdapter::new(bad(), 2, 2, 2, &device).unwrap();
+        assert!(
+            adapter
+                .run(input.clone(), &context(), Layer::decoder(0))
+                .unwrap_err()
+                .to_string()
+                .contains("width_adapter.transform")
+        );
+        let block =
+            ResidualBlock::without_normalization(2, bad(), matrix(2, 2, &[0.0; 4])).unwrap();
+        assert!(
+            block
+                .run(input.clone(), &context(), Layer::decoder(0))
+                .unwrap_err()
+                .to_string()
+                .contains("residual_block.mixer")
+        );
+        let block =
+            ResidualBlock::without_normalization(2, matrix(2, 2, &[0.0; 4]), bad()).unwrap();
+        assert!(
+            block
+                .run(input.clone(), &context(), Layer::decoder(0))
+                .unwrap_err()
+                .to_string()
+                .contains("residual_block.feed_forward")
+        );
+    }
+    let block =
+        ResidualBlock::without_normalization(3, matrix(2, 2, &[0.0; 4]), matrix(2, 2, &[0.0; 4]))
+            .unwrap();
+    assert!(
+        block
+            .run(input, &context(), Layer::decoder(0))
+            .unwrap_err()
+            .to_string()
+            .contains("residual_block.input")
+    );
+}
+
+#[test]
+fn composition_context_rejects_invalid_extent_source_batch_positions_and_padding() {
+    let device = Default::default();
+    let mut changed = context();
+    changed.evaluated_context = 0;
+    assert!(
+        changed
+            .validate([1, 3], &device)
+            .unwrap_err()
+            .to_string()
+            .contains("evaluated_context")
+    );
+    assert!(context().validate([2, 3], &device).is_err());
+    assert!(context().validate([1, 0], &device).is_err());
+    let source = || EncoderContext {
+        hidden: Tensor::<B, 3>::ones([1, 2, 4], &device),
+        positions: Tensor::from_ints([[0, 1]], &device),
+        token_mask: None,
+    };
+    let mut changed = context();
+    changed.encoder = Some(source());
+    changed.encoder.as_mut().unwrap().hidden = Tensor::ones([2, 2, 4], &device);
+    assert!(
+        changed
+            .validate([1, 3], &device)
+            .unwrap_err()
+            .to_string()
+            .contains("execution.encoder")
+    );
+    changed.encoder = Some(source());
+    changed.encoder.as_mut().unwrap().positions = Tensor::from_ints([[0, 1, 2]], &device);
+    assert!(
+        changed
+            .validate([1, 3], &device)
+            .unwrap_err()
+            .to_string()
+            .contains("execution.encoder")
+    );
+    changed.encoder = Some(source());
+    changed.encoder.as_mut().unwrap().token_mask = Some(TokenMask::new(
+        Tensor::<B, 2, Int>::ones([1, 3], &device).bool(),
+    ));
+    assert!(
+        changed
+            .validate([1, 3], &device)
+            .unwrap_err()
+            .to_string()
+            .contains("execution.encoder.token_mask")
+    );
+    changed.encoder = Some(source());
+    changed.encoder.as_mut().unwrap().token_mask = Some(TokenMask::new(
+        Tensor::<B, 2, Int>::from_ints([[1, 0]], &device).bool(),
+    ));
+    assert!(changed.validate([1, 3], &device).is_ok());
+}
