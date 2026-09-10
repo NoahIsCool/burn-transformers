@@ -115,15 +115,5 @@ pub fn exercise(input: &[u8]) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Zero-length fuzz input still tests fully masked rows; all-one bytes cover valid tokens.
-    #[test]
-    fn covers_padding_and_position_overflow() {
-        exercise(&[]);
-        exercise(&[1; 96]);
-        exercise(&[255; 96]);
-        exercise(&[254; 96]);
-    }
-}
+#[path = "masks_tests.rs"]
+mod tests;
