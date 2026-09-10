@@ -1,13 +1,14 @@
-"""Strict dep-info grammar tests and opt-in tiny, pinned Rust 1.92 differentials.
+"""Strict dep-info grammar and opt-in exact stable/coverage-nightly differentials.
 
 Run ordinary tests without a compiler using unittest discovery. Enable the
-isolated native fixtures with ``TFM_DEPINFO_NATIVE_TESTS=1``. They use only
-``rustc +stable`` metadata/dep-info emission into temporary directories and
-require its exact pinned commit plus zero compiler warnings or other stderr.
+isolated native matrix with ``TFM_DEPINFO_NATIVE_TESTS=1``. It runs the same tiny
+metadata/dep-info fixtures with ``rustc +stable`` and ``rustc +nightly``, requiring
+each exact release/commit/LLVM identity plus zero warnings or other stderr.
 No Cargo builds, GPUs, live profiles, coverage exclusions or network are used.
 """
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -20,6 +21,10 @@ SPEC = importlib.util.spec_from_file_location("coverage_dependencies", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 DEPENDENCIES = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DEPENDENCIES)
+NATIVE_PRODUCERS = (
+    ("+stable", DEPENDENCIES.STABLE_PRODUCER),
+    ("+nightly", DEPENDENCIES.COVERAGE_PRODUCER),
+)
 
 
 def document(paths=("src/lib.rs",), *, targets="out.d out.rmeta", environment=""):
@@ -33,6 +38,43 @@ def document(paths=("src/lib.rs",), *, targets="out.d out.rmeta", environment=""
 
 class DependencyGrammarTests(unittest.TestCase):
     """Exercise supported syntax, ambiguity rejection and inventory consistency."""
+
+    def test_only_exact_reviewed_producers_are_supported(self):
+        """Neither matching semver, a commit prefix nor another LLVM version is enough."""
+
+        self.assertEqual(len(DEPENDENCIES.SUPPORTED_PRODUCERS), 2)
+        for producer in DEPENDENCIES.SUPPORTED_PRODUCERS:
+            self.assertEqual(DEPENDENCIES.require_supported_producer(**producer._asdict()), producer)
+            for field, value in (("release", "1.94.0-nightly-other"),
+                                 ("commit_hash", producer.commit_hash[:10]),
+                                 ("commit_hash", "0" * 40), ("llvm_version", "21.1.9")):
+                with self.subTest(producer=producer.release, field=field, value=value):
+                    identity = producer._asdict()
+                    identity[field] = value
+                    with self.assertRaises(DEPENDENCIES.DependencyInfoError):
+                        DEPENDENCIES.require_supported_producer(**identity)
+
+    def test_syntax_does_not_imply_compiler_identity(self):
+        """Successfully parsing unversioned text makes no source or producer assertion."""
+
+        result = DEPENDENCIES.parse_dep_info(document())
+        self.assertEqual(result.dependencies, ("src/lib.rs",))
+        self.assertNotIn("producer", result._fields)
+
+    def test_review_provenance_matches_the_explicit_producer_matrix(self):
+        """Recorded source review pins remain aligned without pretending to prove exclusions."""
+
+        fixture = Path(__file__).parent / "fixtures/coverage_dependencies/provenance.json"
+        evidence = json.loads(fixture.read_text(encoding="utf-8"))
+        self.assertEqual(evidence["schema_version"], 1)
+        self.assertIs(evidence["qualified_for_coverage_exclusions"], False)
+        identities = tuple(DEPENDENCIES.RustcProducer(
+            producer["release"], producer["commit_hash"], producer["llvm_version"]
+        ) for producer in evidence["producers"])
+        self.assertEqual(identities, DEPENDENCIES.SUPPORTED_PRODUCERS)
+        for producer in evidence["producers"]:
+            self.assertIn(f'/{producer["commit_hash"]}/', producer["source_url"])
+        self.assertEqual(len(evidence["reviewed_byte_identical_sections"]), 3)
 
     def test_multiple_targets_and_outputs_are_not_dependencies(self):
         """Spaced/raw output targets do not contaminate compiler input paths."""
@@ -209,23 +251,27 @@ class DependencyGrammarTests(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get("TFM_DEPINFO_NATIVE_TESTS") == "1",
-                     "set TFM_DEPINFO_NATIVE_TESTS=1 for isolated Rust 1.92 fixtures")
+                     "set TFM_DEPINFO_NATIVE_TESTS=1 for the pinned native compiler matrix")
 class NativeRustcDependencyTests(unittest.TestCase):
-    """Compare actual compiler-emitted paths/comments with the pinned dialect."""
+    """Compare identical fixtures under the exact stable and coverage producers."""
 
     @classmethod
     def setUpClass(cls):
         """Require the exact installed producer instead of silently testing another version."""
 
-        result = subprocess.run(["rustc", "+stable", "-Vv"], capture_output=True,
-                                text=True, check=False, timeout=20)
-        if result.returncode != 0 or result.stderr:
-            raise AssertionError("pinned compiler version command failed or emitted diagnostics")
-        if (f"release: {DEPENDENCIES.RUSTC_RELEASE}\n" not in result.stdout
-                or f"commit-hash: {DEPENDENCIES.RUSTC_COMMIT}\n" not in result.stdout):
-            raise AssertionError("rustc +stable is not the pinned Rust 1.92 compiler")
+        for toolchain, producer in NATIVE_PRODUCERS:
+            result = subprocess.run(["rustc", toolchain, "-Vv"], capture_output=True,
+                                    text=True, check=False, timeout=20)
+            if result.returncode != 0 or result.stderr:
+                raise AssertionError(f"{toolchain}: version command failed or emitted diagnostics")
+            for field, value in (("release", producer.release),
+                                 ("commit-hash", producer.commit_hash),
+                                 ("LLVM version", producer.llvm_version)):
+                if result.stdout.splitlines().count(f"{field}: {value}") != 1:
+                    raise AssertionError(f"{toolchain}: compiler does not match the pinned {field}")
+            DEPENDENCIES.require_supported_producer(**producer._asdict())
 
-    def compile_fixture(self, root, files, environment=None):
+    def compile_fixture(self, toolchain, root, files, environment=None):
         """Emit only tiny metadata/dep-info in an isolated temporary directory."""
 
         for name, contents in files.items():
@@ -238,7 +284,7 @@ class NativeRustcDependencyTests(unittest.TestCase):
         env.pop("TFM_DEPINFO_NATIVE_ABSENT_79137", None)
         env.update(environment or {})
         result = subprocess.run([
-            "rustc", "+stable", "--edition=2024", "--crate-type=lib", "--crate-name=dep_fixture",
+            "rustc", toolchain, "--edition=2024", "--crate-type=lib", "--crate-name=dep_fixture",
             "entry point.rs", "--emit=metadata=compiler outputs/fixture.rmeta,"
             "dep-info=compiler outputs/fixture.d",
         ], cwd=root, env=env, capture_output=True, text=True, check=False, timeout=30)
@@ -250,42 +296,50 @@ class NativeRustcDependencyTests(unittest.TestCase):
     def test_native_spaces_in_sources_includes_outputs_and_environment(self):
         """Actual raw spaced targets and escaped inputs preserve all source identities."""
 
-        with tempfile.TemporaryDirectory(prefix="tfm dep native ") as directory:
-            root = Path(directory)
-            files = {
-                "entry point.rs": '#[path = "nested module.rs"]\nmod nested;\n'
-                    'pub const VALUE: usize = nested::VALUE;\n'
-                    'pub const DATA: &str = include_str!("fixture data.txt");\n'
-                    'pub const ABSENT: Option<&str> = option_env!("TFM_DEPINFO_NATIVE_ABSENT_79137");\n'
-                    'pub const PRESENT: &str = env!("TFM_DEPINFO_NATIVE_PRESENT_79137");\n',
-                "nested module.rs": "pub const VALUE: usize = 7;\n",
-                "fixture data.txt": "test fixture\n",
-            }
-            value = "a b#c$d=e\\f\nnext\rlast"
-            emitted = self.compile_fixture(root, files, {"TFM_DEPINFO_NATIVE_PRESENT_79137": value})
-            self.assertIn("compiler outputs/fixture.d: entry\\ point.rs", emitted)
-            result = DEPENDENCIES.parse_dep_info(emitted)
-            self.assertEqual(set(result.dependencies), set(files))
-            self.assertEqual(result.output_rule_count, 2)
-            self.assertEqual(dict(result.environment), {
-                "TFM_DEPINFO_NATIVE_ABSENT_79137": None,
-                "TFM_DEPINFO_NATIVE_PRESENT_79137": value,
-            })
+        files = {
+            "entry point.rs": '#[path = "nested module.rs"]\nmod nested;\n'
+                'pub const VALUE: usize = nested::VALUE;\n'
+                'pub const DATA: &str = include_str!("fixture data.txt");\n'
+                'pub const ABSENT: Option<&str> = option_env!("TFM_DEPINFO_NATIVE_ABSENT_79137");\n'
+                'pub const PRESENT: &str = env!("TFM_DEPINFO_NATIVE_PRESENT_79137");\n',
+            "nested module.rs": "pub const VALUE: usize = 7;\n",
+            "fixture data.txt": "test fixture\n",
+        }
+        value = "a b#c$d=e\\f\nnext\rlast"
+        emissions = []
+        for toolchain, _ in NATIVE_PRODUCERS:
+            with self.subTest(toolchain=toolchain), tempfile.TemporaryDirectory(prefix="tfm dep native ") as directory:
+                emitted = self.compile_fixture(toolchain, Path(directory), files,
+                                               {"TFM_DEPINFO_NATIVE_PRESENT_79137": value})
+                self.assertIn("compiler outputs/fixture.d: entry\\ point.rs", emitted)
+                result = DEPENDENCIES.parse_dep_info(emitted)
+                self.assertEqual(set(result.dependencies), set(files))
+                self.assertEqual(result.output_rule_count, 2)
+                self.assertEqual(dict(result.environment), {
+                    "TFM_DEPINFO_NATIVE_ABSENT_79137": None,
+                    "TFM_DEPINFO_NATIVE_PRESENT_79137": value,
+                })
+                emissions.append(emitted)
+        self.assertEqual(emissions[0], emissions[1], "pinned producer outputs differ")
 
     def test_native_unescaped_special_paths_are_rejected_not_misdecoded(self):
         """The real producer writes raw #/$/backslash paths; do not invent Make escapes."""
 
         for name in ("hash#file.txt", "money$file.txt", "slash\\file.txt"):
-            with self.subTest(name=name), tempfile.TemporaryDirectory(prefix="tfm-dep-special-") as directory:
-                files = {
-                    "entry point.rs": f'pub const DATA: &str = include_str!(r"{name}");\n',
-                    name: "test fixture\n",
-                }
-                emitted = self.compile_fixture(Path(directory), files)
-                self.assertIn(f" {name}\n", emitted)
-                self.assertIn(f"\n{name}:\n", emitted)
-                with self.assertRaises(DEPENDENCIES.DependencyInfoError):
-                    DEPENDENCIES.parse_dep_info(emitted)
+            files = {
+                "entry point.rs": f'pub const DATA: &str = include_str!(r"{name}");\n',
+                name: "test fixture\n",
+            }
+            emissions = []
+            for toolchain, _ in NATIVE_PRODUCERS:
+                with self.subTest(toolchain=toolchain, name=name), tempfile.TemporaryDirectory(prefix="tfm-dep-special-") as directory:
+                    emitted = self.compile_fixture(toolchain, Path(directory), files)
+                    self.assertIn(f" {name}\n", emitted)
+                    self.assertIn(f"\n{name}:\n", emitted)
+                    with self.assertRaises(DEPENDENCIES.DependencyInfoError):
+                        DEPENDENCIES.parse_dep_info(emitted)
+                    emissions.append(emitted)
+            self.assertEqual(emissions[0], emissions[1], "pinned producer outputs differ")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Parse a deliberately strict subset of Rust 1.92 compiler dep-info.
+"""Parse a strict dep-info subset from two explicitly pinned Rust compilers.
 
 This is compiler-input evidence, not a Make interpreter, source classifier or
 coverage exclusion proof. It performs no filesystem access, path normalization,
@@ -6,12 +6,24 @@ environment expansion or shell evaluation. A caller must bind the bytes to the
 actual compiler invocation, working directory, source inventory and toolchain.
 Dep-info does not record arbitrary untracked filesystem I/O by procedural macros.
 
-The producer is pinned to rustc 1.92.0, commit
-ded5c06cf21d2b93bffd5d884aa6e96934ee4234, functions ``escape_dep_filename``,
-``escape_dep_env`` and ``write_out_deps`` in:
+The audited producers are rustc 1.92.0 / LLVM 21.1.3, commit
+ded5c06cf21d2b93bffd5d884aa6e96934ee4234, and the coverage compiler
+rustc 1.94.0-nightly / LLVM 21.1.8, commit
+4f14395c37db4c1be874e6b0ace6721674223c22. The ``escape_dep_filename``,
+``escape_dep_env`` functions and ``write_deps_to_file`` closure within
+``write_out_deps`` are byte-identical in the pinned primary sources:
 https://github.com/rust-lang/rust/blob/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/compiler/rustc_interface/src/passes.rs
+https://github.com/rust-lang/rust/blob/4f14395c37db4c1be874e6b0ace6721674223c22/compiler/rustc_interface/src/passes.rs
 
-Crucially, this producer escapes ONLY ASCII spaces in prerequisite filenames.
+This does NOT assert all compiler input collection is identical: the nightly
+uses unconditional local source paths, unnormalized source lengths for optional
+checksums, and direct local-path conversion for explicitly tracked inputs.
+Paths remain opaque here; checksum comments still fail closed. The supported
+identities do not extend to another stable/nightly commit or LLVM version.
+Use ``require_supported_producer`` on the invocation's recorded identity before
+associating parsed bytes with it; dep-info alone contains no compiler identity.
+
+Crucially, both producers escape ONLY ASCII spaces in prerequisite filenames.
 For real files ``with space.rs``, ``hash#file.rs``, ``money$file.rs`` and
 ``slash\\file.rs``, it emits ``with\\ space.rs``, ``hash#file.rs``,
 ``money$file.rs`` and ``slash\\file.rs`` respectively. Generic Make parsing would
@@ -31,8 +43,8 @@ from silently becoming a partial input inventory. Duplicate paths are retained
 once, in first-seen order. Multiple output rules must agree exactly.
 
 As a narrowly specified extension, a continuation is accepted only after an
-ASCII-space separator and before a nonempty, space-indented next line. Rustc
-1.92 does not itself wrap rules. Mid-token continuations and ambiguous raw
+ASCII-space separator and before a nonempty, space-indented next line. Neither
+pinned producer wraps rules. Mid-token continuations and ambiguous raw
 backslashes fail closed; no general Make whitespace folding is attempted.
 
 Only ``# env-dep:KEY[=VALUE]`` comments are accepted. Their independent rustc
@@ -45,14 +57,46 @@ from collections.abc import Iterator
 from typing import NamedTuple
 
 
-RUSTC_RELEASE = "1.92.0"
-RUSTC_COMMIT = "ded5c06cf21d2b93bffd5d884aa6e96934ee4234"
 _ENV_PREFIX = "# env-dep:"
 _UNSUPPORTED_PATH_CHARACTERS = frozenset("#$:;|=*?[]%~&()")
 
 
 class DependencyInfoError(ValueError):
     """Malformed or unsupported dep-info cannot establish an input inventory."""
+
+
+class RustcProducer(NamedTuple):
+    """Exact recorded compiler identity; aliases such as ``nightly`` are not pins."""
+
+    release: str
+    commit_hash: str
+    llvm_version: str
+
+
+STABLE_PRODUCER = RustcProducer(
+    "1.92.0", "ded5c06cf21d2b93bffd5d884aa6e96934ee4234", "21.1.3"
+)
+COVERAGE_PRODUCER = RustcProducer(
+    "1.94.0-nightly", "4f14395c37db4c1be874e6b0ace6721674223c22", "21.1.8"
+)
+SUPPORTED_PRODUCERS = (STABLE_PRODUCER, COVERAGE_PRODUCER)
+
+
+def require_supported_producer(
+    *, release: str, commit_hash: str, llvm_version: str
+) -> RustcProducer:
+    """Reject an unreviewed producer identity without inferring it from dep-info.
+
+    The caller supplies fields captured from the exact invoked ``rustc -Vv``.
+    Matching these strings is a necessary compatibility check, not evidence of
+    compiler-binary authenticity or of which compiler emitted particular bytes.
+    Neither semantic-version ranges nor abbreviated commit hashes are accepted.
+    """
+
+    identity = RustcProducer(release, commit_hash, llvm_version)
+    if identity not in SUPPORTED_PRODUCERS:
+        raise DependencyInfoError("unsupported rustc producer identity")
+    return identity
 
 
 class EnvironmentDependency(NamedTuple):
@@ -154,14 +198,16 @@ def _decode_environment(text: str, location: str) -> str:
 
 
 def parse_dep_info(text: str, *, context: str = "<dep-info>") -> DependencyInfo:
-    """Validate one Rust 1.92 dep-info document and return its input inventory.
+    """Validate one pinned-dialect dep-info document and return its input inventory.
 
     Empty documents, input-free documents, missing/extra phony input rules,
     conflicting output inventories and conflicting environment observations are
     errors. Relative paths remain relative to the compiler's working directory;
     no existence, symlink, source-language or provenance claims are made here.
     Unknown comments (including optional nightly checksum comments) are errors.
-    Callers must decode bytes as strict UTF-8, not with replacement or loss.
+    Callers must decode bytes as strict UTF-8, not with replacement or loss,
+    and validate the separately captured compiler identity. The text format has
+    no version header from which this parser could infer its producer.
     """
 
     if not isinstance(text, str):

@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "qualified_for_coverage_exclusions": false,
+  "scope": "Pinned producer source review and isolated dep-info grammar differential only; not source inventory, compiler binary authenticity, or coverage qualification.",
+  "source_path": "compiler/rustc_interface/src/passes.rs",
+  "source_hash_encoding": "SHA-256 of raw UTF-8 source bytes from each immutable official URL, without normalization",
+  "producers": [
+    {
+      "release": "1.92.0",
+      "commit_hash": "ded5c06cf21d2b93bffd5d884aa6e96934ee4234",
+      "llvm_version": "21.1.3",
+      "tested_host": "aarch64-apple-darwin",
+      "source_url": "https://raw.githubusercontent.com/rust-lang/rust/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/compiler/rustc_interface/src/passes.rs",
+      "source_bytes": 51033,
+      "source_sha256": "ba66ea46b957a7e4e54ea0665e283d81b3e5fe0009384de59ee2837941628161"
+    },
+    {
+      "release": "1.94.0-nightly",
+      "commit_hash": "4f14395c37db4c1be874e6b0ace6721674223c22",
+      "llvm_version": "21.1.8",
+      "tested_host": "aarch64-apple-darwin",
+      "source_url": "https://raw.githubusercontent.com/rust-lang/rust/4f14395c37db4c1be874e6b0ace6721674223c22/compiler/rustc_interface/src/passes.rs",
+      "source_bytes": 52275,
+      "source_sha256": "7c6c81287d5c347186ba796aa6943eba3b82a3cf89b4c340f9a781916fcf89bb"
+    }
+  ],
+  "identical_section_hash_encoding": "SHA-256 of UTF-8 substring beginning at start marker and ending before end marker, with surrounding whitespace stripped",
+  "reviewed_byte_identical_sections": [
+    {
+      "start": "fn escape_dep_filename",
+      "end": "// Makefile comments",
+      "bytes": 223,
+      "sha256": "59c5dc2cb9d438e351259e32c3c6f401732a9b2baaff6362f1584dd9948ed86a"
+    },
+    {
+      "start": "fn escape_dep_env",
+      "end": "fn write_out_deps",
+      "bytes": 370,
+      "sha256": "ebf6f8f1bb9427c845dd0f76c8ef0e47474845d1d4a96611865851ce571d787a"
+    },
+    {
+      "start": "let write_deps_to_file =",
+      "end": "match deps_output",
+      "bytes": 2410,
+      "sha256": "178b98b82071f40972d56aa807d4e0f16ce682bcdd8b4841c0c9a7a4debf2821"
+    }
+  ],
+  "nightly_collection_differences": [
+    "Source-map filename collection now calls prefer_local_unconditionally instead of prefer_local.",
+    "Optional source checksums use unnormalized_source_len rather than normalized source_len.",
+    "Explicit tracked paths use direct to_string_lossy conversion rather than FileName::prefer_local."
+  ],
+  "native_validation": {
+    "command": "TFM_DEPINFO_NATIVE_TESTS=1 PYTHONDONTWRITEBYTECODE=1 python3 -W error -m unittest discover -s crates/transformers/scripts/tests -p test_coverage_dependencies.py -v",
+    "toolchain_aliases_resolved_and_checked": ["+stable", "+nightly"],
+    "fixture_count_per_producer": 4,
+    "emission": "metadata and dep-info only, in isolated temporary directories",
+    "all_compiler_exit_codes": 0,
+    "all_compiler_stdout_and_stderr_empty": true,
+    "paired_dep_info_outputs_byte_identical": true,
+    "cases": [
+      "Spaces in source/module/include/output paths; present/absent environment values containing spaces, hash, dollar, equals, backslash, newline and carriage return.",
+      "A literal hash in an included filename is emitted raw and rejected.",
+      "A literal dollar in an included filename is emitted raw and rejected.",
+      "A literal backslash in an included filename is emitted raw and rejected."
+    ]
+  },
+  "unchanged_limitations": [
+    "Only the two exact release/commit/LLVM triples are supported; an alias alone is not a pin.",
+    "Continuations are a synthetic-tested restricted extension, not observed native line wrapping.",
+    "Non-UTF-8, Windows/colon paths, ambiguous filename punctuation, unsupported Make syntax and nightly checksum comments fail closed.",
+    "No arbitrary untracked macro filesystem I/O, path resolution, source exclusion or gate behavior is qualified."
+  ]
+}
