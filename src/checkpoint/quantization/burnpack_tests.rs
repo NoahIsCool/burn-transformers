@@ -479,6 +479,8 @@ fn v2_same_size_staging_corruption_is_rejected_before_publication() {
         .append("q.weight", &source, WeightQuantizationConfig::default())
         .unwrap();
     session.bind_provenance(fixture_provenance()).unwrap();
+    let before_stats = session.stats();
+    let before_manifest = session.manifest().clone();
     session.xor_staging_byte_for_test(0, 1);
 
     assert!(matches!(
@@ -486,6 +488,27 @@ fn v2_same_size_staging_corruption_is_rejected_before_publication() {
         Err(QuantizationError::PackedPayloadDigestMismatch { .. })
     ));
     assert!(!output.exists());
+    assert_eq!(session.stats(), before_stats);
+    assert_eq!(session.manifest(), &before_manifest);
+    assert_eq!(
+        session.staging_len_for_test(),
+        before_stats.staged_payload_bytes
+    );
+    #[cfg(unix)]
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+
+    // Restoring the deliberately flipped byte makes the same transaction retryable;
+    // a stale appended manifest or partial Burnpack must not survive the failure.
+    session.xor_staging_byte_for_test(0, 1);
+    session.finalize().unwrap();
+    assert_eq!(
+        QuantizedBurnpackArtifact::open(output)
+            .unwrap()
+            .validate_all()
+            .unwrap()
+            .tensor_count,
+        1
+    );
 }
 
 #[test]
@@ -765,4 +788,347 @@ fn path_and_open_manifest_limits_are_enforced_before_payload_use() {
             ..
         })
     ));
+}
+
+/// Failed source conversion cannot reserve a name, grow staging, or alter accounting.
+#[test]
+fn rejected_source_conversions_leave_staging_retryable() {
+    let directory = tempdir().unwrap();
+    let output = directory.path().join("conversion-retry.bpk");
+    let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+    assert_eq!(
+        session.output_path(),
+        fs::canonicalize(directory.path())
+            .unwrap()
+            .join("conversion-retry.bpk")
+    );
+    let before_stats = session.stats();
+    let before_manifest = session.manifest().clone();
+    let mut short = TensorData::new(vec![1.0_f32; 31], [1, 31]);
+    short.shape = burn::tensor::Shape::new([1, 32]);
+    for (source, expected) in [
+        (TensorData::new(vec![1_i32; 32], [1, 32]), "dtype"),
+        (short, "bytes"),
+        (TensorData::new(vec![f32::NAN; 32], [1, 32]), "nonfinite"),
+    ] {
+        let error = session
+            .append("q.weight", &source, config(SymmetricQuantization::Q4))
+            .unwrap_err();
+        assert!(matches!(
+            (expected, error),
+            ("dtype", QuantizationError::UnsupportedInputDType { .. })
+                | (
+                    "bytes",
+                    QuantizationError::SourceByteLengthMismatch {
+                        expected: 128,
+                        actual: 124
+                    }
+                )
+                | ("nonfinite", QuantizationError::NonFiniteValue { index: 0 })
+        ));
+        assert_eq!(session.stats(), before_stats);
+        assert_eq!(session.manifest(), &before_manifest);
+        assert_eq!(session.staging_len_for_test(), 0);
+        assert!(!output.exists());
+    }
+    let valid = TensorData::new(vec![1.0_f32; 32], [1, 32]);
+    session
+        .append("q.weight", &valid, config(SymmetricQuantization::Q4))
+        .unwrap();
+    session.finalize().unwrap();
+    assert_eq!(
+        QuantizedBurnpackArtifact::open(output)
+            .unwrap()
+            .validate_all()
+            .unwrap()
+            .tensor_count,
+        1
+    );
+}
+
+/// Invalid or oversized late provenance leaves the original v1 manifest publishable.
+#[test]
+fn provenance_validation_and_both_size_limits_are_transactional() {
+    let directory = tempdir().unwrap();
+    let source = TensorData::new(vec![1.0_f32; 32], [1, 32]);
+    let weight = quantize_tensor_data(&source, config(SymmetricQuantization::Q4)).unwrap();
+    let mut legacy = BurnpackQuantizationManifest::new_legacy_v1();
+    legacy
+        .insert("q.weight", weight.metadata().clone())
+        .unwrap();
+    legacy.packed_execution = PackedExecutionSupport::BurnQFloatMatmul;
+    let exact_v1_staging =
+        payload(&weight).len() as u64 + legacy.to_json_pretty().unwrap().len() as u64;
+    for (case, limits) in [
+        ("invalid", BurnpackSessionLimits::default()),
+        (
+            "estimated manifest",
+            BurnpackSessionLimits {
+                max_manifest_bytes: 5_000,
+                ..BurnpackSessionLimits::default()
+            },
+        ),
+        (
+            "staged payload",
+            BurnpackSessionLimits {
+                max_staged_bytes: exact_v1_staging,
+                ..BurnpackSessionLimits::default()
+            },
+        ),
+    ] {
+        let output = directory.path().join(format!("{case}.bpk"));
+        let mut session = QuantizedBurnpackSession::with_limits(&output, limits).unwrap();
+        session
+            .append_quantized("q.weight", weight.clone())
+            .unwrap();
+        let before_stats = session.stats();
+        let before_manifest = session.manifest().clone();
+        let before_length = session.staging_len_for_test();
+        let mut provenance = fixture_provenance();
+        if case == "invalid" {
+            provenance.load_plan_sha256 = "not-a-digest".into();
+        }
+        let error = session.bind_provenance(provenance).unwrap_err();
+        match error {
+            QuantizationError::InvalidProvenance { .. } => assert_eq!(case, "invalid"),
+            QuantizationError::SessionLimitExceeded {
+                kind,
+                attempted,
+                limit,
+            } => {
+                assert_eq!(kind, case);
+                assert!(attempted > limit);
+            }
+            other => panic!("unexpected provenance failure: {other}"),
+        }
+        assert_eq!(session.stats(), before_stats);
+        assert_eq!(session.manifest(), &before_manifest);
+        assert_eq!(session.staging_len_for_test(), before_length);
+        assert!(!output.exists());
+        session.finalize().unwrap();
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        assert_eq!(artifact.manifest().format_version, 1);
+        assert!(artifact.manifest().provenance.is_none());
+        assert_eq!(artifact.read_weight("q.weight").unwrap(), weight);
+    }
+}
+
+/// A directory disappearing after staging fails publication but permits a clean retry.
+#[test]
+fn missing_output_parent_rolls_back_finalization_manifest_for_retry() {
+    let directory = tempdir().unwrap();
+    let parent = directory.path().join("destination");
+    fs::create_dir(&parent).unwrap();
+    let output = parent.join("retry.bpk");
+    let source = TensorData::new(vec![1.0_f32; 32], [1, 32]);
+    let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+    session
+        .append("q.weight", &source, config(SymmetricQuantization::Q4))
+        .unwrap();
+    session.bind_provenance(fixture_provenance()).unwrap();
+    let before_stats = session.stats();
+    let before_manifest = session.manifest().clone();
+    // Unix sessions unlink their private staging name immediately, so moving the
+    // empty directory invalidates the destination without invalidating its handle.
+    let moved = directory.path().join("moved-destination");
+    fs::rename(&parent, &moved).unwrap();
+    assert!(matches!(
+        session.finalize(),
+        Err(QuantizationError::ArtifactIo { .. })
+    ));
+    assert_eq!(session.stats(), before_stats);
+    assert_eq!(session.manifest(), &before_manifest);
+    assert_eq!(
+        session.staging_len_for_test(),
+        before_stats.staged_payload_bytes
+    );
+    assert!(!output.exists());
+    fs::rename(&moved, &parent).unwrap();
+    let summary = session.finalize().unwrap();
+    assert_eq!(summary.tensor_count, 1);
+    assert_eq!(
+        QuantizedBurnpackArtifact::open(output)
+            .unwrap()
+            .validate_all()
+            .unwrap()
+            .tensor_count,
+        1
+    );
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
+}
+
+/// Empty v2 artifacts have no packed execution or validation reads, even at the exact manifest limit.
+#[test]
+fn empty_bound_artifact_has_zero_audit_and_exact_manifest_boundary() {
+    let directory = tempdir().unwrap();
+    let output = directory.path().join("empty-v2.bpk");
+    let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+    let before = session.stats();
+    let excluded = TensorData::new(vec![1_i8; 8], [8]);
+    for _ in 0..2 {
+        assert!(matches!(
+            session
+                .append("layer.bias", &excluded, WeightQuantizationConfig::default())
+                .unwrap(),
+            BurnpackAppendOutcome::Excluded(_)
+        ));
+        assert_eq!(session.stats(), before);
+        assert_eq!(session.staging_len_for_test(), 0);
+    }
+    session.bind_provenance(fixture_provenance()).unwrap();
+    let summary = session.finalize().unwrap();
+    let mut artifact =
+        QuantizedBurnpackArtifact::open_with_manifest_limit(&output, summary.manifest_bytes)
+            .unwrap();
+    assert_eq!(artifact.manifest().format_version, 2);
+    assert_eq!(
+        artifact.manifest().packed_execution,
+        PackedExecutionSupport::Unavailable
+    );
+    assert_eq!(
+        artifact.validate_all_audited().unwrap(),
+        burnpack::BurnpackValidationAudit::default()
+    );
+    assert!(
+        matches!(artifact.tensor_payload("missing.weight"), Err(QuantizationError::QuantizedTensorNotFound { ref name }) if name == "missing.weight")
+    );
+    let failure = artifact
+        .read_weight_audited("missing.weight")
+        .err()
+        .unwrap();
+    assert_eq!(failure.stats, burnpack::BurnpackPayloadReadStats::default());
+    assert!(matches!(
+        failure.error,
+        QuantizationError::QuantizedTensorNotFound { .. }
+    ));
+    assert!(
+        matches!(QuantizedBurnpackArtifact::open_with_manifest_limit(&output, summary.manifest_bytes - 1), Err(QuantizationError::SessionLimitExceeded { kind: "manifest", attempted, limit }) if attempted == summary.manifest_bytes as u64 && limit + 1 == attempted)
+    );
+}
+
+/// Reserved logical names, matrix-shaped manifests, and non-U8 model storage are distinct errors.
+#[test]
+fn reserved_manifest_and_wrong_rank_or_model_dtype_are_rejected() {
+    let directory = tempdir().unwrap();
+    let weight = quantize_tensor_data(
+        &TensorData::new(vec![1.0_f32; 32], [1, 32]),
+        config(SymmetricQuantization::Q8),
+    )
+    .unwrap();
+    let mut reserved = BurnpackQuantizationManifest::new_legacy_v1();
+    reserved
+        .insert(BURNPACK_MANIFEST_TENSOR, weight.metadata().clone())
+        .unwrap();
+    let output = directory.path().join("reserved.bpk");
+    write_official(
+        &output,
+        vec![(BURNPACK_MANIFEST_TENSOR, manifest_tensor(&reserved))],
+    );
+    assert!(
+        matches!(QuantizedBurnpackArtifact::open(output), Err(QuantizationError::ReservedTensorCollision { ref name }) if name == BURNPACK_MANIFEST_TENSOR)
+    );
+
+    let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
+    manifest
+        .insert("q.weight", weight.metadata().clone())
+        .unwrap();
+    let mut wrong_rank = manifest_tensor(&manifest);
+    wrong_rank.shape = burn::tensor::Shape::new([1, wrong_rank.as_bytes().len()]);
+    let output = directory.path().join("manifest-rank.bpk");
+    write_official(&output, vec![(BURNPACK_MANIFEST_TENSOR, wrong_rank)]);
+    assert!(
+        matches!(QuantizedBurnpackArtifact::open(output), Err(QuantizationError::InvalidArtifactTensor { ref name, ref reason }) if name == BURNPACK_MANIFEST_TENSOR && reason.contains("expected one dimension"))
+    );
+
+    let output = directory.path().join("model-dtype.bpk");
+    write_official(
+        &output,
+        vec![
+            (BURNPACK_MANIFEST_TENSOR, manifest_tensor(&manifest)),
+            ("q.weight", TensorData::new(vec![0_i8; 36], [36])),
+        ],
+    );
+    assert!(
+        matches!(QuantizedBurnpackArtifact::open(output), Err(QuantizationError::InvalidArtifactTensor { ref name, ref reason }) if name == "q.weight" && reason.contains("physical dtype"))
+    );
+}
+
+/// Validation stops at the first bad payload and counts only its completely copied prefix.
+#[test]
+fn sequential_failure_audit_preserves_prior_success_and_skips_later_tensors() {
+    let directory = tempdir().unwrap();
+    let weight = quantize_tensor_data(
+        &TensorData::new(vec![127.0_f32; 32], [1, 32]),
+        config(SymmetricQuantization::Q8),
+    )
+    .unwrap();
+    for failure_kind in ["code", "scale", "digest"] {
+        let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
+        let mut tensors = Vec::new();
+        for name in ["a.weight", "b.weight", "c.weight"] {
+            let mut metadata = weight.metadata().clone();
+            let mut bytes = payload(&weight);
+            if failure_kind == "digest" {
+                metadata.payload_sha256 = Some(provenance::packed_payload_sha256(&bytes));
+            }
+            if name == "b.weight" {
+                match failure_kind {
+                    "code" => bytes[0] = 0x80,
+                    "scale" => bytes[32..36].copy_from_slice(&0.0_f32.to_le_bytes()),
+                    "digest" => bytes[0] ^= 1,
+                    _ => unreachable!(),
+                }
+            }
+            manifest.insert(name, metadata).unwrap();
+            let length = bytes.len();
+            tensors.push((name, TensorData::new(bytes, [length])));
+        }
+        if failure_kind == "digest" {
+            manifest.packed_execution = PackedExecutionSupport::BurnQFloatMatmul;
+            manifest.bind_provenance(fixture_provenance()).unwrap();
+        }
+        tensors.push((BURNPACK_MANIFEST_TENSOR, manifest_tensor(&manifest)));
+        let output = directory.path().join(format!("prefix-{failure_kind}.bpk"));
+        write_official(&output, tensors);
+        let mut artifact = QuantizedBurnpackArtifact::open(output).unwrap();
+        let failure = artifact.validate_all_audited().unwrap_err();
+        assert_eq!(failure.audit.tensor_reads, 2);
+        assert_eq!(failure.audit.tensors_validated, 1);
+        assert_eq!(failure.audit.payload_bytes, 72);
+        assert_eq!(failure.audit.largest_payload_bytes, 36);
+        assert!(failure.audit.peak_owned_payload_bytes >= 40);
+        assert!(matches!(
+            (failure_kind, failure.error),
+            (
+                "code",
+                QuantizationError::InvalidQuantizedValue {
+                    index: 0,
+                    value: -128
+                }
+            ) | (
+                "scale",
+                QuantizationError::InvalidScale {
+                    group: 0,
+                    scale: 0.0
+                }
+            ) | (
+                "digest",
+                QuantizationError::PackedPayloadDigestMismatch { .. }
+            )
+        ));
+        if failure_kind == "digest" {
+            assert!(
+                matches!(artifact.tensor_payload("b.weight"), Err(QuantizationError::PackedPayloadDigestMismatch { ref name, .. }) if name == "b.weight")
+            );
+            assert_eq!(
+                artifact.tensor_payload("a.weight").unwrap().as_bytes(),
+                payload(&weight)
+            );
+        }
+        // A sequential failure does not poison unrelated later lazy reads.
+        assert_eq!(
+            artifact.read_weight("c.weight").unwrap().packed_values(),
+            weight.packed_values()
+        );
+    }
 }

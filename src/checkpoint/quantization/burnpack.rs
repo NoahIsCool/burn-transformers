@@ -1990,4 +1990,64 @@ mod validation_edge_tests {
         .unwrap();
         assert_eq!(snapshot(&audit), [2, 0, 48, 40, 48]);
     }
+
+    /// Even an empty session budgets its manifest before extending the staging file.
+    #[test]
+    fn empty_finalize_staging_budget_failure_does_not_close_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("too-small.bpk");
+        let mut session = QuantizedBurnpackSession::with_limits(
+            &output,
+            BurnpackSessionLimits {
+                max_staged_bytes: 1,
+                ..BurnpackSessionLimits::default()
+            },
+        )
+        .unwrap();
+        let before = session.stats();
+        for _ in 0..2 {
+            assert!(
+                matches!(session.finalize(), Err(QuantizationError::SessionLimitExceeded { kind: "staged payload", attempted, limit: 1 }) if attempted > 1)
+            );
+            assert_eq!(session.stats(), before);
+            assert_eq!(session.staging_len_for_test(), 0);
+            assert!(!session.finalized);
+            assert!(!output.exists());
+        }
+    }
+
+    /// Lazy range snapshots re-seek their shared handle and surface truncation at materialization.
+    #[test]
+    fn staged_snapshot_bounds_and_allocation_errors_are_lazy_and_contextual() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&[1_u8, 2, 3]).unwrap();
+        let file = Rc::new(file);
+        let path = Path::new("private-test-stage");
+        let snapshot =
+            staged_snapshot(Rc::clone(&file), path, "q.weight", 1, 2, ParamId::from(1)).unwrap();
+        assert_eq!(snapshot.to_data().unwrap().as_bytes(), &[2, 3]);
+        assert_eq!(snapshot.to_data().unwrap().as_bytes(), &[2, 3]);
+
+        file.set_len(2).unwrap();
+        assert!(
+            matches!(snapshot.to_data(), Err(TensorSnapshotError::IoError(message)) if message.contains("failed to read 2 bytes") && message.contains("private-test-stage"))
+        );
+        let empty =
+            staged_snapshot(Rc::clone(&file), path, "empty", 2, 0, ParamId::from(2)).unwrap();
+        assert!(empty.to_data().unwrap().as_bytes().is_empty());
+
+        // Vec rejects a capacity above isize::MAX before attempting allocation.
+        let impossible = staged_snapshot(
+            file,
+            path,
+            "overflow",
+            0,
+            usize::MAX as u64,
+            ParamId::from(3),
+        )
+        .unwrap();
+        assert!(
+            matches!(impossible.to_data(), Err(TensorSnapshotError::DataError(message)) if message.contains("failed to reserve"))
+        );
+    }
 }
