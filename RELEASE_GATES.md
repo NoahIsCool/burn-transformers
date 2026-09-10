@@ -304,6 +304,21 @@ Production-only, branch-coverage and release-promotion flags remain false.
 The exact native export and command log remain under
 `target/release-gates/20260910T043433.769811Z/`. Later source edits need a new run.
 
+The subsequent parsed structural audit is deliberately diagnostic: it checks
+test-dependent attributes across items, associated items, expressions and
+statements, including module-only production parents absent from LLVM rows.
+Opaque macro-generated tests/helpers still prevent a production-only claim even
+when the parsed blocker list is empty. Native counterexamples demonstrate why
+normalized expanded-AST equality alone loses physical source ownership. The
+integrated development checks pass all 353 Python/native tests without skips;
+this does not substitute for runtime coverage.
+
+Three new real-cache generation regressions cover early-EOS mixed batches,
+inactive nonfinite logits, unchanged finished-row positions/lengths, model
+failure propagation, and mid-batch callback cancellation. The CPU unit suite
+passes 914 tests with three existing ignores, and isolated all-target Clippy
+passes with warnings denied. No runtime inference code changed in this batch.
+
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is
 `819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d`.

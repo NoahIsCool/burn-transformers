@@ -1453,6 +1453,13 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   alerts. This narrows attribution but neither explains nor waives the historical
   regression. FLAN now also has a first Flex CPU timing baseline. These
   measurements do not promote either checkpoint or the experimental families.
+- **Batched stopping is part of cache correctness.** New coordinator regressions
+  keep a real tiny Qwen cache while one row emits EOS before its peer. Greedy
+  and seeded top-1 sampling both preserve the finished row's length and explicit
+  position, supply false-valid padding on feedback, and ignore deliberately
+  nonfinite logits only for that inactive row. Model-boundary errors and a
+  callback failure midway through a batch stop subsequent emissions and decode
+  calls. These are deterministic API/state tests, not a new hardware benchmark.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.

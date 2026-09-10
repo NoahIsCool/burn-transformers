@@ -896,3 +896,265 @@ fn output_assembly_never_fabricates_terminal_metadata() {
     assert_eq!(output.sequences[0].log_probabilities, [-0.5]);
     assert_eq!(output.sequences[0].finish_reason, FinishReason::Length);
 }
+
+/// Feedback observed by a real batched cache after the first row has finished.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FinishedRowFeedback {
+    /// Padded token IDs, in row order.
+    ids: Vec<i64>,
+    /// True-valid activity bits supplied to decode.
+    valid: Vec<bool>,
+    /// Explicit positions; an inactive sequence must not advance.
+    positions: Vec<i64>,
+    /// Real cache lengths after the successful feedback call.
+    lengths: Vec<usize>,
+}
+
+/// Deterministic output fixture retaining Qwen's actual cache and forward graph.
+///
+/// Row zero emits EOS immediately. Row one emits two ordinary tokens and then
+/// EOS. Subsequent row-zero logits are deliberately NaN: only the inactive row
+/// may be neutralized, and it must never receive a second token or cache write.
+#[derive(burn::module::Module, Debug)]
+struct FinishedRowModel<B: Backend> {
+    inner: Qwen3_5ForCausalLm<B>,
+    #[module(skip)]
+    calls: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+    #[module(skip)]
+    feedback: std::sync::Arc<std::sync::Mutex<Vec<FinishedRowFeedback>>>,
+    #[module(skip)]
+    fail_at: Option<&'static str>,
+}
+
+impl FinishedRowModel<TestBackend> {
+    /// Records entry before injecting a contextual, recoverable model error.
+    fn enter(&self, stage: &'static str) -> crate::Result<()> {
+        self.calls.lock().unwrap().push(stage);
+        if self.fail_at == Some(stage) {
+            return Err(Error::Cache(format!("synthetic {stage} failure")));
+        }
+        Ok(())
+    }
+
+    /// Creates exact, well-separated active logits and toxic inactive logits.
+    fn scores(
+        step: usize,
+        device: &<TestBackend as BackendTypes>::Device,
+    ) -> Tensor<TestBackend, 3> {
+        let mut values = vec![-20.0_f32; 64];
+        if step == 0 {
+            values[2] = 20.0;
+        } else {
+            values[..32].fill(f32::NAN);
+        }
+        values[32 + [4, 5, 2][step]] = 20.0;
+        Tensor::from_data(burn::tensor::TensorData::new(values, [2, 1, 32]), device)
+    }
+}
+
+impl crate::CausalLanguageModel<TestBackend> for FinishedRowModel<TestBackend> {
+    type Config = Qwen3_5TextConfig;
+    type State =
+        <Qwen3_5ForCausalLm<TestBackend> as crate::CausalLanguageModel<TestBackend>>::State;
+
+    /// Keeps stateless evaluation identical to the underlying Qwen model.
+    fn forward(
+        &self,
+        input: CausalLmInput<TestBackend>,
+        options: &crate::ForwardOptions,
+    ) -> crate::Result<crate::CausalLmOutput<TestBackend>> {
+        self.inner.forward(input, options)
+    }
+
+    /// Allocates the real external state, unless this boundary is fault-injected.
+    fn new_decode_state(
+        &self,
+        config: CacheConfig,
+        batch_size: usize,
+        device: &<TestBackend as BackendTypes>::Device,
+    ) -> crate::Result<Self::State> {
+        self.enter("cache")?;
+        self.inner.new_decode_state(config, batch_size, device)
+    }
+
+    /// Runs real prompt inference before replacing only the selected logits.
+    fn prefill(
+        &self,
+        input: CausalLmInput<TestBackend>,
+        state: &mut Self::State,
+        options: &crate::ForwardOptions,
+    ) -> crate::Result<crate::CausalLmOutput<TestBackend>> {
+        self.enter("prefill")?;
+        let mut output = self.inner.prefill(input, state, options)?;
+        output.logits = Self::scores(0, &output.logits.device());
+        Ok(output)
+    }
+
+    /// Observes active-only feedback, then tests nonfinite finished-row handling.
+    fn decode(
+        &self,
+        input: crate::DecodeInput<TestBackend>,
+        state: &mut Self::State,
+        options: &crate::ForwardOptions,
+    ) -> crate::Result<crate::CausalLmOutput<TestBackend>> {
+        use crate::DecodeState;
+
+        self.enter("decode")?;
+        let ids = super::tensor_i64_values(input.token_ids.clone(), "feedback IDs").unwrap();
+        let valid = input
+            .token_mask
+            .as_ref()
+            .unwrap()
+            .as_tensor()
+            .clone()
+            .into_data()
+            .to_vec::<bool>()
+            .unwrap();
+        let positions =
+            super::tensor_i64_values(input.position_ids.clone().unwrap(), "feedback positions")
+                .unwrap();
+        let mut output = self.inner.decode(input, state, options)?;
+        let mut feedback = self.feedback.lock().unwrap();
+        feedback.push(FinishedRowFeedback {
+            ids,
+            valid,
+            positions,
+            lengths: state.lengths().to_vec(),
+        });
+        output.logits = Self::scores(feedback.len(), &output.logits.device());
+        Ok(output)
+    }
+}
+
+/// Constructs a two-row real-cache request with distinct explicit position offsets.
+fn finished_row_fixture(
+    strategy: SamplingStrategy,
+    fail_at: Option<&'static str>,
+) -> (
+    FinishedRowModel<TestBackend>,
+    CausalGenerationRequest<TestBackend>,
+) {
+    let (inner, device) = tiny_model();
+    let model = FinishedRowModel {
+        inner,
+        calls: Default::default(),
+        feedback: Default::default(),
+        fail_at,
+    };
+    let request = CausalGenerationRequest {
+        prompt: CausalLmInput {
+            token_ids: Tensor::from_ints([[1, 3], [7, 8]], &device),
+            token_mask: None,
+            position_ids: Some(Tensor::from_ints([[5, 6], [10, 11]], &device)),
+        },
+        cache: CacheConfig::new(2, 8).unwrap(),
+        generation: GenerationConfig {
+            max_new_tokens: 5,
+            eos_token_ids: vec![2],
+            pad_token_id: Some(0),
+            strategy,
+            top_k: Some(1),
+            presence_penalty: 0.5,
+            repetition_penalty: 1.2,
+            ..Default::default()
+        },
+        prefill_chunk_size: None,
+        vocabulary_size: 32,
+    };
+    (model, request)
+}
+
+/// Early-finished rows remain inactive while their batch peers continue generating.
+#[test]
+fn mixed_eos_batches_do_not_emit_or_cache_finished_row_tokens() {
+    for strategy in [SamplingStrategy::Greedy, SamplingStrategy::Sample] {
+        let (model, request) = finished_row_fixture(strategy, None);
+        let mut events = Vec::new();
+        let output = generate_causal_streaming(&model, request, |event| {
+            events.push(event);
+            Ok(())
+        })
+        .expect("inactive NaN logits cannot poison the remaining row");
+        assert_eq!(output.sequences[0].token_ids, [2]);
+        assert_eq!(output.sequences[1].token_ids, [4, 5, 2]);
+        for row in &output.sequences {
+            assert_eq!(
+                row.finish_reason,
+                FinishReason::EndOfSequence { token_id: 2 }
+            );
+            assert_eq!(row.prompt_length, 2);
+            assert_eq!(row.log_probabilities.len(), row.token_ids.len());
+            assert!(row.log_probabilities.iter().all(|value| value.is_finite()));
+        }
+        assert_eq!(
+            events
+                .iter()
+                .map(|e| (e.sequence, e.step, e.token_id))
+                .collect::<Vec<_>>(),
+            [(0, 0, 2), (1, 0, 4), (1, 1, 5), (1, 2, 2)]
+        );
+        assert_eq!(
+            *model.calls.lock().unwrap(),
+            ["cache", "prefill", "decode", "decode"]
+        );
+        assert_eq!(
+            *model.feedback.lock().unwrap(),
+            [
+                FinishedRowFeedback {
+                    ids: vec![0, 4],
+                    valid: vec![false, true],
+                    positions: vec![7, 12],
+                    lengths: vec![2, 3]
+                },
+                FinishedRowFeedback {
+                    ids: vec![0, 5],
+                    valid: vec![false, true],
+                    positions: vec![7, 13],
+                    lengths: vec![2, 4]
+                },
+            ]
+        );
+    }
+}
+
+/// Errors at each model boundary propagate unchanged and stop future emissions.
+#[test]
+fn model_boundary_failures_cancel_generation_at_the_exact_call() {
+    for stage in ["cache", "prefill", "decode"] {
+        let (model, request) = finished_row_fixture(SamplingStrategy::Greedy, Some(stage));
+        let mut events = Vec::new();
+        let error = generate_causal_streaming(&model, request, |event| {
+            events.push(event);
+            Ok(())
+        })
+        .expect_err("model failure must stop generation");
+        assert!(
+            matches!(&error, Error::Cache(message) if message == &format!("synthetic {stage} failure"))
+        );
+        let expected_calls: &[&str] = match stage {
+            "cache" => &["cache"],
+            "prefill" => &["cache", "prefill"],
+            _ => &["cache", "prefill", "decode"],
+        };
+        assert_eq!(*model.calls.lock().unwrap(), expected_calls);
+        assert_eq!(events.len(), if stage == "decode" { 2 } else { 0 });
+        assert!(model.feedback.lock().unwrap().is_empty());
+    }
+}
+
+/// Cancelling the first callback stops the same batch before emitting a peer row.
+#[test]
+fn callback_failure_mid_batch_suppresses_later_rows_and_feedback() {
+    let (model, request) = finished_row_fixture(SamplingStrategy::Greedy, None);
+    let mut events = Vec::new();
+    let error = generate_causal_streaming(&model, request, |event| {
+        events.push(event);
+        Err(Error::Generation("subscriber disconnected".into()))
+    })
+    .expect_err("callback cancellation must not process another row");
+    assert!(matches!(error, Error::Generation(message) if message == "subscriber disconnected"));
+    assert_eq!(events.len(), 1);
+    assert_eq!((events[0].sequence, events[0].token_id), (0, 2));
+    assert_eq!(*model.calls.lock().unwrap(), ["cache", "prefill"]);
+    assert!(model.feedback.lock().unwrap().is_empty());
+}
