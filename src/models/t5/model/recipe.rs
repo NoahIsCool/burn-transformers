@@ -162,9 +162,10 @@ impl T5EncoderRecipe {
 ///
 /// Parameter paths intentionally match the source portions of
 /// [`T5ForConditionalGeneration`]: `shared` and `encoder`. A classifier can pool
-/// its hidden states and apply an ordinary Burn linear layer. Training mode and
-/// dropout integration are planned for v0.3; this interface builds and inspects
-/// the differentiable deterministic graph.
+/// its hidden states and apply an ordinary Burn linear layer. This deterministic,
+/// differentiable graph works with native Burn training. Add caller-owned
+/// `Dropout` modules when needed; the complete upstream dropout topology is not
+/// implemented here.
 #[derive(Module, Debug)]
 pub struct T5Encoder<B: Backend> {
     /// Token embeddings, preserving the full model's `shared` parameter path.

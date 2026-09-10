@@ -20,9 +20,37 @@ Only the executable text graph is counted. Vision towers, tokenizer behavior,
 quantization formats, serving systems, and broad training recipes such as FLAN
 instruction tuning and UL2's Mixture-of-Denoisers are deliberately outside the
 matrix. Those recipes change how weights are learned, but not the transformer
-operations executed by this inference crate. Architecture-coupled router
+operations executed by this transformer crate. Architecture-coupled router
 objectives are included as optional forward diagnostics; the runtime computes
 them only when requested and never adds them to inference logits.
+
+## Experiment composition and training
+
+The pinned-family matrix below describes reference graphs. The experiment API
+also supports intentionally different graphs; their correctness is evaluated
+with explicit mathematical and task-level tests, independently of checkpoint
+support. See [EXPERIMENTS.md](EXPERIMENTS.md) and [TRAINING.md](TRAINING.md) for
+complete consumer workflows.
+
+| Implemented capability | Composition and validation boundary |
+|---|---|
+| Typed activation selection, observation, and edits | Select layers, tokens, heads, and channels; preserve gradients for intermediate losses; borrow registered Burn modules in ordered callbacks. Captures document axes and precision, and padding remains enforced after edits. |
+| Staged execution and attention policies | Embed, run selected blocks, and normalize explicitly. Causal, bidirectional, custom connectivity, and additive biases are selectable where supported; cached interventions require a separate state contract. |
+| Editable T5/Qwen recipes and parameter transfer | Change block geometry, extract prefixes, and transfer compatible tensors with explicit transformations and tie reports. Tiny synthetic tests and bounded real-prefix comparisons do not promote arbitrary modified graphs to checkpoint support. |
+| Reusable mixers and residual blocks | Compose shared MLA, GQA, feed-forward modules, optional norms, and width adapters. The MLA encoder-decoder example trains a custom graph without DeepSeek family wiring. |
+| Native Burn training compatibility | Full-precision graphs use Burn autodiff, optimizers, records, and optional Learner integration. Single parameter ownership, freezing, differentiable captures, dropout in inserted modules, and optimizer resume have explicit tests. Packed quantized inference remains separate from training support. |
+
+The [v0.3 training record](acceptance/measurements/v0_3-training-validation-20260910/README.md)
+retains exact source identities and executed experiments. Grokking actually
+trains modular addition and demonstrates delayed held-out generalization and
+frequency interventions. Newly trained Tuned Lens translators improve held-out
+KL, and a Greater-Than activation adapter improves its bounded transfer task.
+Clock and Pizza training reaches task accuracy but does **not** reproduce the
+specified representative circular mechanism. These results are scoped to their
+recorded protocols; documentation edits do not turn archived measurements into
+current-source validation. Experimental GPT-2 and GPT-NeoX/Pythia implementations
+support the pinned interpretability workflows without expanding the advertised
+release-support matrix.
 
 ## Models and source basis
 
@@ -231,7 +259,7 @@ $\bigl(1/\sqrt{192}\bigr)\operatorname{mscale}(40,0.707)^2$.
 
 **Implementation:** shared attention and its opt-in eager-FP32-softmax precision
 mode in [`attention.rs`](src/attention.rs), MLA in
-[`deepseek_v2/mla.rs`](src/models/deepseek_v2/mla.rs), and Muse's specialized
+[`mla.rs`](src/mla.rs), and Muse's specialized
 selection in [`muse_glimmer/model.rs`](src/models/muse_glimmer/model.rs).
 **Reference:** [Attention Is All You Need](https://arxiv.org/abs/1706.03762).
 
@@ -272,7 +300,7 @@ rotary channels. DeepSeek-V2-Lite uses $r=512$, 16 heads, 128 NoPE content
 channels, 64 rotary channels, and 128 value channels. Its query path is direct
 because the pinned `q_lora_rank` is null.
 
-**Implementation:** [`deepseek_v2/mla.rs`](src/models/deepseek_v2/mla.rs).
+**Implementation:** [`mla.rs`](src/mla.rs).
 **Reference:** [DeepSeek-V2](https://arxiv.org/abs/2405.04434) and the
 [pinned reference code](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/604d5664dddd88a0433dbae533b7fe9472482de0/modeling_deepseek.py).
 
@@ -288,7 +316,7 @@ pinned Lite model. This is an optimized realization: DeepSeek's pinned Python
 reference expands K/V into its generic dynamic cache.
 
 **Implementation:** absorbed math in
-[`deepseek_v2/mla.rs`](src/models/deepseek_v2/mla.rs) and external state in
+[`mla.rs`](src/mla.rs) and external state in
 [`deepseek_v2/model/decode.rs`](src/models/deepseek_v2/model/decode.rs).
 **Reference:** [DeepSeek-V2](https://arxiv.org/abs/2405.04434).
 
@@ -504,7 +532,7 @@ content term plus a 64-channel positional term in Lite. Unlike generic partial
 RoPE, this split is part of MLA's factorization and permits the rotary key to be
 shared and cached separately from the compressed content latent.
 
-**Implementation:** [`deepseek_v2/mla.rs`](src/models/deepseek_v2/mla.rs).
+**Implementation:** [`mla.rs`](src/mla.rs).
 **Reference:** [DeepSeek-V2](https://arxiv.org/abs/2405.04434).
 
 <a id="innovation-mrope"></a>
@@ -1352,7 +1380,10 @@ tests cover both outcomes and the exact reorder/token/mask history.
   until after mapping. No forward computation is detached. Tests check row/column
   values, frozen parameters, checkpoint loading, and finite nonzero gradients
   through all projections, norms, recurrent scalars, and convolutions in tied
-  and untied tiny 3:1 Qwen hybrid graphs. Training loops remain out of scope.
+  and untied tiny 3:1 Qwen hybrid graphs. This established the initialization
+  prerequisite; the subsequent [v0.3 training workflows](TRAINING.md) use native
+  Burn optimizers and Learner integration. A separate trainer framework remains
+  outside this crate's scope.
 - **Release coverage is measured separately from feature presence.** The first
   Flex/tokenizer/template/autodiff unit-suite baseline passes 764 tests but
   reaches only 87.7084% LLVM line coverage crate-wide and 90.5207% shared/core,
