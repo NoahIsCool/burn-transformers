@@ -506,9 +506,248 @@ class ClassifierCaptureTests(unittest.TestCase):
         with self.assertRaises(ValueError): E.validated_classifier(path, self.snapshot, self.classification["entries"])
 
 
+class StructuralAuditTests(unittest.TestCase):
+    """Pure structural eligibility never substitutes for authenticated capture."""
+
+    def setUp(self):
+        """Reuse synthetic inputs with explicitly versioned empty structural audits."""
+
+        WholeFileTests.setUp(self)
+        for entry in self.classification["files"]:
+            entry["test_audit"] = {"schema_version": 1, "complete": True, "macro_expansion_resolved": False, "sites": []}
+
+    def result(self):
+        """Return both unchanged counters and the independent structural predicate."""
+
+        return E.whole_file_diagnostic(self.snapshot, self.classification, self.targets, self.native)
+
+    def production(self):
+        """Select an ordinary retained production source in the synthetic graph."""
+
+        return next(entry for entry in self.classification["files"] if entry["path"] == "src/lib.rs")
+
+    def site(self, kind="item", disposition="test_body"):
+        """Attach an exact synthetic structural owner without source heuristics."""
+
+        span = copy.deepcopy(self.production()["contexts"][0]["regions"][0]["span"])
+        site = {"span": span, "attribute_span": copy.deepcopy(span), "owner_kind": kind, "disposition": disposition}
+        self.production()["test_audit"]["sites"].append(site)
+        return site
+
+    def test_structural_eligibility_is_independent_of_thresholds_and_artifact_proof(self):
+        """A valid layout does not imply sufficient exercised production code."""
+
+        result = self.result()
+        self.assertTrue(result["structural_test_audit"]["structural_eligibility"])
+        self.assertFalse(result["physical_whole_file_diagnostic"]["crate"]["meets_threshold"])
+        self.assertFalse(result["production_only_measurement"])
+        self.assertFalse(result["production_only_exclusions_qualified"])
+        self.assertFalse(result["compiler_dependency_closure_verified"])
+        self.assertFalse(result["release_gate_promotion"])
+
+    def test_each_residual_test_owner_or_unknown_test_dependency_blocks_without_exclusion(self):
+        """Every explicit residual body stays counted and records an actionable blocker."""
+
+        for kind in ("file", "item", "inline_mod", "impl_item", "trait_item", "expr", "stmt"):
+            for disposition in ("test_body", "unresolved_test_dependent"):
+                with self.subTest(kind=kind, disposition=disposition):
+                    self.production()["test_audit"]["sites"] = []
+                    self.site(kind, disposition)
+                    result = self.result()
+                    self.assertFalse(result["structural_test_audit"]["structural_eligibility"])
+                    self.assertEqual(result["structural_test_audit"]["blockers"][0]["code"], disposition)
+                    self.assertEqual(result["physical_whole_file_diagnostic"]["crate"]["lines"], 3)
+
+    def test_resolved_external_declaration_can_share_a_counted_production_line(self):
+        """The entire physical line remains; only the bodyless declaration is harmless."""
+
+        site = self.site("external_mod", "external_declaration")
+        region = copy.deepcopy(self.production()["contexts"][0]["regions"][0])
+        region.update(kind="mod", depth=1, test_only=True)
+        self.production()["contexts"][0]["regions"].append(region)
+        self.production()["lines"][0]["classification"] = "mixed"
+        self.classification["diagnostics"].append({"file": "src/lib.rs", "code": "mixed_production_test_lines"})
+        self.assertEqual(region["span"], site["span"])
+        result = self.result()
+        self.assertTrue(result["structural_test_audit"]["structural_eligibility"])
+        self.assertEqual(result["physical_whole_file_diagnostic"]["crate"]["lines"], 3)
+        self.classification["diagnostics"].append({"file": "src/lib.rs", "code": "ambiguous_module_path"})
+        self.assertFalse(self.result()["structural_test_audit"]["structural_eligibility"])
+
+    def test_old_incomplete_unit_only_unclassified_and_test_context_only_inputs_block(self):
+        """Compiler input membership alone cannot turn included text into runtime code."""
+
+        baseline, targets = copy.deepcopy(self.classification), copy.deepcopy(self.targets)
+        for case in ("old", "incomplete", "version", "unit_only", "unclassified", "test_context"):
+            with self.subTest(case=case):
+                self.classification, self.targets = copy.deepcopy(baseline), copy.deepcopy(targets)
+                if case == "old": self.production().pop("test_audit")
+                elif case == "incomplete": self.production()["test_audit"]["complete"] = False
+                elif case == "version": self.production()["test_audit"]["schema_version"] = 99
+                elif case == "unit_only": self.targets[0]["inputs"].remove("src/models/experimental.rs")
+                elif case == "unclassified": self.classification["files"].remove(self.production())
+                else: self.production()["contexts"][0]["regions"][0]["test_only"] = True
+                result = self.result()
+                self.assertFalse(result["structural_test_audit"]["structural_eligibility"])
+                self.assertTrue(result["structural_test_audit"]["blockers"])
+                self.assertEqual(result["physical_whole_file_diagnostic"]["crate"]["lines"], 3)
+
+    def test_unknown_runtime_macros_remain_counted_without_a_global_closure_claim(self):
+        """An opaque runtime diagnostic is not an exclusion or expansion attestation."""
+
+        self.classification["diagnostics"].append({"file": "src/lib.rs", "code": "opaque_macro_or_verbatim"})
+        result = self.result()
+        self.assertTrue(result["structural_test_audit"]["structural_eligibility"])
+        self.assertFalse(result["structural_test_audit"]["macro_expansion_resolved"])
+        self.assertEqual(result["physical_whole_file_diagnostic"]["crate"]["lines"], 3)
+
+    def test_unmapped_module_parent_is_audited_without_adding_a_coverage_line(self):
+        """An unreported parent can still make a measured child's cfg/path ambiguous."""
+
+        self.native["data"][0]["files"] = [item for item in self.native["data"][0]["files"]
+                                           if item["filename"] != str(self.crate / "src/lib.rs")]
+        before = self.result()
+        self.assertTrue(before["structural_test_audit"]["structural_eligibility"])
+        self.assertIn("src/lib.rs", before["structural_test_audit"]["inspected_production_scope_files"])
+        self.classification["diagnostics"].append({"file": "src/lib.rs", "code": "ambiguous_module_path"})
+        after = self.result()
+        self.assertFalse(after["structural_test_audit"]["structural_eligibility"])
+        self.assertEqual(before["physical_whole_file_diagnostic"], after["physical_whole_file_diagnostic"])
+
+    def test_unreported_parent_contexts_and_regions_fail_closed_in_the_direct_helper(self):
+        """No-row parents receive the same context/region/line validation as rows."""
+
+        baseline = copy.deepcopy(self.classification)
+        production = set(self.targets[0]["inputs"])
+        for case in ("missing_contexts", "not_contexts", "empty_contexts", "context_type", "missing_regions",
+                     "empty_regions", "region_type", "root_kind", "root_span", "test_bool", "line_gap"):
+            with self.subTest(case=case):
+                self.classification = copy.deepcopy(baseline)
+                entry = self.production()
+                if case == "missing_contexts": del entry["contexts"]
+                elif case == "not_contexts": entry["contexts"] = {}
+                elif case == "empty_contexts": entry["contexts"] = []
+                elif case == "context_type": entry["contexts"] = [None]
+                elif case == "missing_regions": del entry["contexts"][0]["regions"]
+                elif case == "empty_regions": entry["contexts"][0]["regions"] = []
+                elif case == "region_type": entry["contexts"][0]["regions"] = [None]
+                elif case == "root_kind": entry["contexts"][0]["regions"][0]["kind"] = "item"
+                elif case == "root_span": entry["contexts"][0]["regions"][0]["span"]["start"]["byte"] = 1
+                elif case == "test_bool": entry["contexts"][0]["regions"][0]["test_only"] = 1
+                else: entry["lines"] = []
+                with self.assertRaises(ValueError):
+                    E._structural_test_audit([], self.classification, {}, production, self.snapshot)
+
+    def test_malformed_audit_sites_and_false_external_declarations_fail_closed(self):
+        """A malformed record cannot promote a body by spelling it a declaration."""
+
+        self.site()
+        baseline = copy.deepcopy(self.classification)
+        for case in ("version_bool", "complete_bool", "expanded", "missing_sites", "unknown_owner", "unknown_disposition",
+                     "outside_owner", "empty_attribute", "false_external", "unbound_external"):
+            with self.subTest(case=case):
+                self.classification = copy.deepcopy(baseline)
+                audit = self.production()["test_audit"]
+                site = audit["sites"][0]
+                if case == "version_bool": audit["schema_version"] = True
+                elif case == "complete_bool": audit["complete"] = 1
+                elif case == "expanded": audit["macro_expansion_resolved"] = True
+                elif case == "missing_sites": del audit["sites"]
+                elif case == "unknown_owner": site["owner_kind"] = "unknown"
+                elif case == "unknown_disposition": site["disposition"] = "ignore"
+                elif case == "outside_owner": site["span"]["start"]["byte"] = 1
+                elif case == "empty_attribute": site["attribute_span"]["end"] = copy.deepcopy(site["attribute_span"]["start"])
+                elif case == "false_external": site["disposition"] = "external_declaration"
+                else: site.update(owner_kind="external_mod", disposition="external_declaration")
+                with self.assertRaises(ValueError): self.result()
+
+
 @unittest.skipUnless(os.environ.get("TFM_WHOLE_FILE_COVERAGE_NATIVE_TESTS") == "1", "opt-in tiny pinned compiler/classifier fixture")
 class NativeWholeFileTests(unittest.TestCase):
     """Native inputs veto candidates; exact test-only macro ownership can qualify."""
+
+    def test_native_structural_diagnostic_cannot_promote_macro_generated_tests(self):
+        """Parsed eligibility distinguishes visible bodies but cannot prove macro origins."""
+
+        with tempfile.TemporaryDirectory(prefix="tfm-structural-native-") as directory:
+            root = Path(directory).resolve()
+            environment = {key: value for key, value in os.environ.items() if key not in (
+                "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
+                "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET", "LLVM_COV", "LLVM_PROFDATA", "LLVM_PROFILE_FILE")}
+            environment.update(CARGO_INCREMENTAL="0", CARGO_TERM_COLOR="never")
+            B.producer_from_version(subprocess.check_output(["rustc", "+nightly", "-Vv"], env=environment, text=True, timeout=30))
+            manifest = SCRIPT.parent / "coverage-layout/Cargo.toml"
+            classifier_sources = {str(path): fingerprint_file(path) for path in [manifest, manifest.with_name("Cargo.lock"),
+                *sorted(manifest.parent.joinpath("src").glob("*.rs"))]}
+            build = subprocess.run(["cargo", "+nightly", "build", "--manifest-path", str(manifest), "--locked", "--offline",
+                                    "--target-dir", str(root / "classifier")], env=environment, capture_output=True, text=True, timeout=120)
+            self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+            self.assertNotIn("warning:", build.stderr)
+            for path, identity in classifier_sources.items(): self.assertEqual(fingerprint_file(Path(path)), identity)
+            executable = root / "classifier/debug/transformers-coverage-layout"
+            unit = '#[test] fn check() { assert_eq!(super::value(), 1); }\n'
+            runtime = 'pub fn value() -> u32 { 1 }\n'
+            declaration = '#[cfg(test)] mod unit;\n'
+            variants = {
+                "inline": (runtime + '#[cfg(test)] mod unit { ' + unit + '}\n', unit, {}, False),
+                "extracted": (runtime + declaration, unit, {}, True),
+                "shared_line": (runtime.rstrip() + ' ' + declaration, unit, {}, True),
+                "runtime_macro_cfg": ('macro_rules! scalar { () => { 1 }; }\n#[cfg(feature="fixture")] pub fn value() -> u32 { scalar!() }\n' + declaration, unit, {}, True),
+                "generated_test": (runtime + declaration + 'macro_rules! hidden { () => { #[test] fn generated_test() { assert_eq!(value(), 1); } }; } hidden!();\n', unit, {}, True),
+                "generated_helper": (runtime + declaration + 'macro_rules! hidden { () => { #[cfg(test)] fn generated_helper() -> u32 { 1 } }; } hidden!();\n',
+                                     unit + '#[test] fn helper() { assert_eq!(super::generated_helper(), 1); }\n', {}, True),
+                "bare_test": (runtime + declaration + '#[test] fn residual() { assert_eq!(value(), 1); }\n', unit, {}, False),
+                "inherent": (runtime + declaration + 'struct S; impl S { #[cfg(test)] fn helper() -> u32 { 1 } }\n',
+                             unit + '#[test] fn helper() { assert_eq!(super::S::helper(), 1); }\n', {}, False),
+                "expression_statement": ('pub fn value() -> u32 { #[cfg(test)] let _x = 1; #[cfg(test)] { assert_eq!(1, 1); } 1 }\n' + declaration, unit, {}, False),
+                "conditional_attribute": ('#[cfg_attr(test, inline)] ' + runtime + declaration, unit, {}, False),
+                "uncertain_cfg": ('#[cfg(any(test, feature="fixture"))] ' + runtime + declaration, unit, {}, False),
+                "conditional_path": (runtime + '#[cfg(test)] #[cfg_attr(test, path="unit.rs")] mod unit;\n', unit, {}, False),
+                "runtime_include": ('include!("runtime.rs");\n' + declaration, unit, {"src/runtime.rs": runtime}, False),
+                "test_include": (runtime + declaration, unit + 'include!("child.rs");\n#[test] fn child() { assert_eq!(child_value(), 1); }\n',
+                                 {"src/child.rs": 'fn child_value() -> u32 { 1 }\n'}, False),
+                "raw_production_input": (runtime + declaration + '#[cfg(test)] mod support; const RAW: &str = include_str!("support.rs");\n',
+                                         unit + '#[test] fn helper() { assert_eq!(super::support::helper(), 1); }\n',
+                                         {"src/support.rs": 'pub fn helper() -> u32 { 1 }\n'}, False),
+            }
+            for name, (source, tests, extra, expected) in variants.items():
+                with self.subTest(name=name):
+                    crate = root / name
+                    put(crate / "Cargo.toml", '[package]\nname="structural_fixture"\nversion="0.1.0"\nedition="2024"\n[workspace]\n[features]\nfixture=[]\n')
+                    put(crate / "Cargo.lock", 'version=4\n[[package]]\nname="structural_fixture"\nversion="0.1.0"\n')
+                    put(crate / "src/lib.rs", '#![allow(dead_code)]\n' + source)
+                    put(crate / "src/unit.rs", tests)
+                    for path, content in extra.items(): put(crate / path, content)
+                    put(crate / "tests/integration.rs", '#[test] fn check() { assert_eq!(structural_fixture::value(), 1); }\n')
+                    with mock.patch.object(check_release, "CRATE", crate), mock.patch.object(check_release, "FEATURES", "fixture"), \
+                            mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(sys, "argv", [
+                                "check_release", "--gate", "coverage", "--toolchain", "nightly", "--offline", "--coverage-compiler-evidence",
+                            ]), mock.patch("builtins.print"):
+                        code = check_release.main()
+                    results_path = next((crate / "target/release-gates").glob("*/results.json"))
+                    output, results = results_path.parent, E.read_json(results_path)
+                    self.assertEqual(code, 0, json.dumps(results))
+                    log = output / results["gates"][0]["log"]
+                    self.assertIn("test unit::check ... ok", log.read_text())
+                    setup = E.read_json(output / "compiler-capture-setup.json")
+                    before = E.read_json(output / "coverage-inputs-before.json")["sources"]
+                    binding = B.validate_capture(setup, before, crate)
+                    E.capture_classifier(crate, before, executable, output / "classifier", E.target_entries(binding["targets"], crate))
+                    result = E.qualify_capture(setup, before, output / "classifier/invocation.json", crate,
+                                               coverage_log=log, run_results=results_path)
+                    self.assertEqual(result["structural_test_audit"]["structural_eligibility"], expected, json.dumps(result["structural_test_audit"]))
+                    self.assertFalse(result["structural_test_audit"]["production_measurement_qualified"])
+                    self.assertFalse(result["production_only_measurement"])
+                    self.assertFalse(result["production_only_exclusions_qualified"])
+                    self.assertNotIn("physical_scoped_production", result)
+                    self.assertFalse(result["compiler_dependency_closure_verified"])
+                    self.assertFalse(result["release_gate_promotion"])
+                    self.assertTrue(all(item["meets_threshold"] for item in result["physical_whole_file_diagnostic"].values()))
+                    if not expected: self.assertTrue(result["structural_test_audit"]["blockers"])
+                    if name == "raw_production_input":
+                        self.assertIn("retained_only_test_module_contexts", [item["code"] for item in result["structural_test_audit"]["blockers"]])
+                    if name == "generated_test": self.assertIn("test generated_test ... ok", log.read_text())
+                    if name == "generated_helper": self.assertIn("test unit::helper ... ok", log.read_text())
 
     def test_native_compiler_edges_override_the_classifier_without_inline_exclusions(self):
         """Build only a tiny offline fixture and the independent development classifier."""

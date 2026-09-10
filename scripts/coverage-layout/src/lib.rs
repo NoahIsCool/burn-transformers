@@ -16,8 +16,10 @@
 mod cfg;
 mod scanner;
 mod source;
+mod test_audit;
 
 pub use scanner::classify;
 pub use source::{
     Classification, Context, Diagnostic, FileReport, LineRun, Position, Region, Report, SourceSpan,
 };
+pub use test_audit::{TestAudit, TestSite};

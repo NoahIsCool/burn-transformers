@@ -37,6 +37,7 @@ MAX_CONTEXTS = 4096
 MAX_ITEMS = 65_536
 CAPTURE_PURPOSE = "fresh_whole_test_file_classifier_invocation"
 POLICY = "whole_test_files_v2_exact_test_macro_spans_no_inline_or_generated_exclusions"
+STRUCTURAL_POLICY = "parsed_test_layout_v1_no_production_measurement_claim"
 
 
 def relative_name(value: object) -> str:
@@ -281,6 +282,89 @@ def _thresholds(rows: list[dict], count_key: str, covered_key: str) -> dict:
     return result
 
 
+def _structural_test_audit(rows: list[dict], classification: dict, diagnostics: dict[str, list[dict]],
+                           production: set[str], snapshot: dict) -> dict:
+    """Determine eligibility without excluding any extra file, span or line.
+
+    This is a pure parsed-layout diagnostic, not artifact or production-code
+    attestation. A retained unit-only/unclassified file, parsed test body or
+    unresolved test dependence is a blocker even if currently unmapped. A
+    resolved bodyless module declaration is harmless. An empty blocker list
+    does NOT prove production-only coverage: opaque macros may generate test
+    bodies or helpers mapped to retained source. Those mappings stay counted.
+    """
+
+    entries = {entry["path"]: entry for entry in classification["files"]}
+    scope = {row["path"]: row for row in rows if not row["excluded"]}
+    # A module-only parent may have no LLVM counters while its cfg/path decides
+    # ownership of a measured child. Audit all captured production Rust sources,
+    # not only reported rows; this changes no numerator or denominator.
+    for name in sorted(production):
+        if name.startswith("src/") and name.endswith(".rs"):
+            scope.setdefault(name, {"path": name, "identity": snapshot["files"][name],
+                                    "reason": "retained_production_compiler_input"})
+    blockers, inspected = [], []
+    for name in sorted(scope):
+        row = scope[name]
+        name, identity = row["path"], row["identity"]
+        entry = entries.get(name)
+        if row["reason"] != "retained_production_compiler_input":
+            blockers.append({"path": name, "code": "retained_non_production_input"})
+        if entry is None:
+            blockers.append({"path": name, "code": "retained_unclassified_source"})
+            continue
+        # Validate every audited parent, including files with no native row and
+        # direct pure-helper callers. Never index unvalidated contexts/regions.
+        _candidate(entry, identity, diagnostics.get(name, []))
+        if all(context["regions"][0]["test_only"] for context in entry["contexts"]):
+            # include_str! can make a test module a production compiler input
+            # without making its Rust functions production code. Do not infer
+            # executable ownership from that input observation alone.
+            blockers.append({"path": name, "code": "retained_only_test_module_contexts"})
+        audit = entry.get("test_audit")
+        if audit is None:
+            blockers.append({"path": name, "code": "missing_structural_test_audit"})
+            continue
+        if (not isinstance(audit, dict) or type(audit.get("schema_version")) is not int
+                or type(audit.get("complete")) is not bool
+                or audit.get("macro_expansion_resolved") is not False
+                or not isinstance(audit.get("sites"), list) or len(audit["sites"]) > MAX_ITEMS):
+            raise ValueError("malformed structural test audit")
+        if audit["schema_version"] != 1 or not audit["complete"]:
+            blockers.append({"path": name, "code": "unsupported_or_incomplete_structural_test_audit"})
+            continue
+        inspected.append(name)
+        for issue in diagnostics.get(name, []):
+            if issue["code"] not in {"duplicate_context", "opaque_macro_or_verbatim", "mixed_production_test_lines"}:
+                blockers.append({"path": name, "code": "unresolved_source_diagnostic", "diagnostic": issue["code"]})
+        for site in audit["sites"]:
+            if (not isinstance(site, dict)
+                    or site.get("owner_kind") not in {"file", "item", "inline_mod", "external_mod", "impl_item", "trait_item", "expr", "stmt"}
+                    or site.get("disposition") not in {"test_body", "external_declaration", "unresolved_test_dependent"}):
+                raise ValueError("malformed structural test site")
+            owner, attribute = _span(site.get("span"), identity), _span(site.get("attribute_span"), identity)
+            if not owner[0] <= attribute[0] < attribute[1] <= owner[1]:
+                raise ValueError("structural test attribute is outside its nonempty owner")
+            if site["disposition"] == "external_declaration":
+                if site["owner_kind"] != "external_mod":
+                    raise ValueError("only a bodyless external module can be a harmless test declaration")
+                # The independent structural audit distinguishes bodyless from
+                # inline `mod`; the original context graph must identify that
+                # exact full module item in every observed reference context.
+                if not all(any(region["kind"] == "mod" and _span_coordinates(region["span"]) == _span_coordinates(site["span"])
+                               for region in context["regions"]) for context in entry["contexts"]):
+                    raise ValueError("external test declaration is not bound to every parsed module context")
+            else:
+                blockers.append({"path": name, "code": site["disposition"],
+                                 "owner_kind": site["owner_kind"], "span": site["span"],
+                                 "attribute_span": site["attribute_span"]})
+    return {"schema_version": 1, "policy": STRUCTURAL_POLICY,
+            "structural_eligibility": not blockers, "inspected_production_scope_files": inspected,
+            "blockers": blockers, "macro_expansion_resolved": False,
+            "production_measurement_qualified": False,
+            "scope": "parsed source layout only; opaque/generated runtime or test mappings retained; not production-only coverage"}
+
+
 def whole_file_diagnostic(snapshot: dict, classification: dict, targets: list[dict], native: dict) -> dict:
     """Join already-authenticated inputs and retain a per-file exclusion ledger.
 
@@ -364,6 +448,7 @@ def whole_file_diagnostic(snapshot: dict, classification: dict, targets: list[di
                      "removed_covered_lines": physical.covered_lines if excluded else 0,
                      "legacy_count": count, "legacy_covered": covered})
     rows.sort(key=lambda row: row["path"])
+    structural = _structural_test_audit(rows, classification, by_file, production, snapshot)
     return {"schema_version": 1, "policy": POLICY, "whole_test_file_policy_validated": True,
             "production_only_exclusions_qualified": False, "production_only_measurement": False,
             "compiler_dependency_closure_verified": False, "release_gate_promotion": False,
@@ -371,6 +456,7 @@ def whole_file_diagnostic(snapshot: dict, classification: dict, targets: list[di
             "legacy_native_aggregate": _thresholds(rows, "legacy_count", "legacy_covered"),
             "physical_before_exclusions": _thresholds(rows, "mapped_lines", "covered_lines"),
             "physical_whole_file_diagnostic": _thresholds([row for row in rows if not row["excluded"]], "mapped_lines", "covered_lines"),
+            "structural_test_audit": structural,
             "files": rows}
 
 
@@ -462,7 +548,9 @@ def qualify_capture(setup: dict, snapshot: dict, capture_path: Path, crate: Path
     No caller-provided boolean can substitute for actual artifact revalidation.
     The source snapshot, classifier record/output, and native report are checked
     again around measurement. This detects ordinary edits, not malicious tools
-    or edit-and-restore races. Full production-only qualification stays false.
+    or edit-and-restore races. The structural test audit is diagnostic only:
+    even an empty blocker list cannot establish origin-aware ownership of macro
+    generated test bodies/helpers. Production-only qualification remains false.
     """
 
     # Import lazily so the existing runner can later consume this module without

@@ -74,11 +74,47 @@ ledger identifying exactly which mapped/covered lines were removed and why.
 The thresholds use integer comparisons, never rounded displayed percentages.
 
 `whole_test_file_exclusions_qualified=true` refers only to this bounded file
-policy. `production_only_exclusions_qualified`, `production_only_measurement`,
-`compiler_dependency_closure_verified`, and `release_gate_promotion` remain
-**false**. Retained highly covered inline tests can inflate the ratio: this is
-not a lower bound on production coverage. Arbitrary untracked procedural-macro
-I/O and adversarial edit-and-restore behavior are not proven or claimed.
+policy. Retained highly covered inline tests can inflate its ratio: without the
+additional audit below, it is not a lower bound on production coverage.
+Arbitrary untracked procedural-macro I/O and adversarial edit-and-restore
+behavior are not proven or claimed.
+
+## Parsed structural test diagnostic
+
+The versioned `structural_test_audit` records parsed-layout eligibility and exact
+blockers; it does not remove any additional file, generated span, or inline line.
+Even after full artifact reauthentication, **all production-only qualification
+flags remain false**. An empty blocker list means only that:
+
+- Every retained reported file is a production compiler input, has a parsed
+  production-capable module context, and has a complete version-1 structural
+  test audit. Unit-only/unclassified files block the claim. A mere production
+  `include_str!` input does not make a test-context-only Rust helper runtime code.
+  All production compiler Rust inputs under `src/` are also audited, including
+  module-only parents without LLVM counters whose cfg/path controls a child.
+  Auditing those parents does not add any coverage lines.
+- No retained file has a bare test/bench, inline test module, test-only helper,
+  or unresolved test-dependent item, associated item, expression, or statement.
+- Only resolved bodyless external test-module declarations are harmless; their
+  exact spans must match the original module contexts. They may share physical
+  lines with production code because those whole lines remain counted.
+- No unresolved source/path/traversal diagnostic prevents the structural proof.
+
+Ordinary feature-dependent and opaque/generated runtime mappings stay counted.
+This is an audit of **parsed source layout**, not production-only coverage. An
+opaque macro can emit `#[test] fn hidden() { ... }` or a `#[cfg(test)]` helper
+whose mapped lines remain in a production compiler input. Its parsed audit can
+have zero sites even when that generated test executes. Native regressions
+explicitly demonstrate both cases; neither can promote production-only flags.
+`compiler_dependency_closure_verified` and macro-expansion attestation also
+remain false. Pure helper eligibility never substitutes for compiler evidence
+or original-source ownership of expanded code.
+
+No production-only counter is emitted. Exact 90%/95% threshold results remain
+independent of structural eligibility, and all original legacy/physical
+diagnostics remain.
+`release_gate_promotion` stays false: this helper does not change the existing
+release runner's policy or advertise a release by itself.
 
 ## Tests
 

@@ -117,6 +117,8 @@ pub struct FileReport {
     pub contexts: Vec<Context>,
     /// Complete physical-line classification; no lines are silently dropped.
     pub lines: Vec<LineRun>,
+    /// Versioned structural test audit; opaque macro expansion is not inspected.
+    pub test_audit: crate::TestAudit,
 }
 
 /// A source issue that must remain visible to a human coverage auditor.

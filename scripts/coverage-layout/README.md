@@ -57,3 +57,22 @@ features, toolchain, profile, and LLVM export; verify source bytes before and
 after execution. Reports from older source revisions cannot qualify edited
 files. Canonical-path containment and one-read snapshots assume ordinary local
 filesystem concurrency, not an adversary replacing files between checks.
+
+## Versioned structural test audit
+
+Each file additionally records `test_audit.schema_version = 1`. This independent
+parsed-attribute visitor distinguishes bodyless external module declarations
+from inline modules and records bare `#[test]`/`#[bench]`, test-sensitive cfg, and
+conditional attributes on files, items, associated items, expressions, and
+statements. It does **not** expand macro tokens or change any exclusion candidate.
+Pure production-only cfg and ordinary feature cfg introduce no test-body claim;
+test-dependent uncertainty remains an explicit blocker. Conditional/expanding
+external declarations are not treated as harmless.
+
+`complete` means non-opaque parsed syntax was visited within span/depth bounds.
+It is false on parse, verbatim, depth, or coordinate failure; it never attests
+macro expansion, generated syntax, compiler reachability, or tool build origin.
+The consumer joins this audit with the independently authenticated compiler
+capture. Missing/old audits are blockers. Even a complete empty audit remains a
+diagnostic: opaque macros can emit tests/helpers from original source locations
+that cannot be distinguished from runtime code by this parsed audit alone.

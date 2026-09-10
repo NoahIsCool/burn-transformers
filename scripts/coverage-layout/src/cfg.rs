@@ -187,6 +187,59 @@ pub(crate) fn attributes(attrs: &[Attribute]) -> (Reach, Vec<String>) {
     (reach, issues)
 }
 
+/// Recognizes structural test dependence without changing exclusion candidates.
+///
+/// Bare harness attributes identify test bodies. Pure cfg is evaluated in both
+/// modes, retaining uncertainty over other atoms. Conditional attributes that
+/// mention test/bench remain unresolved: an attribute can change expansion or
+/// module identity even when it does not change ordinary cfg reachability.
+pub(crate) fn test_audit_attribute(attr: &Attribute) -> Option<&'static str> {
+    let meta = &attr.meta;
+    if meta.path().is_ident("test") || meta.path().is_ident("bench") {
+        return Some("test_body");
+    }
+    if !meta.path().is_ident("cfg") && !meta.path().is_ident("cfg_attr") {
+        return None;
+    }
+    let Ok(args) = arguments(meta) else {
+        return Some("unresolved_test_dependent");
+    };
+    if args.is_empty() || (meta.path().is_ident("cfg_attr") && args.len() < 2) {
+        return Some("unresolved_test_dependent");
+    }
+    if !args.iter().any(mentions_test) {
+        return None;
+    }
+    if meta.path().is_ident("cfg_attr") {
+        return Some("unresolved_test_dependent");
+    }
+    match (attribute(meta, false), attribute(meta, true)) {
+        (Ok(Truth::True), _) | (_, Ok(Truth::False)) => None,
+        (Ok(Truth::False), Ok(_)) => Some("test_body"),
+        _ => Some("unresolved_test_dependent"),
+    }
+}
+
+/// Searches parsed attribute meta, never strings/comments or opaque macro text.
+fn mentions_test(meta: &Meta) -> bool {
+    if meta.path().is_ident("test") || meta.path().is_ident("bench") {
+        return true;
+    }
+    matches!(meta, Meta::List(_))
+        && arguments(meta).map_or(true, |args| args.iter().any(mentions_test))
+}
+
+/// Allows only known non-expanding attributes on a bodyless module declaration.
+pub(crate) fn plain_external_attributes(attrs: &[Attribute]) -> bool {
+    attrs.iter().all(|attr| {
+        [
+            "cfg", "path", "doc", "allow", "warn", "deny", "forbid", "expect",
+        ]
+        .iter()
+        .any(|name| attr.path().is_ident(name))
+    })
+}
+
 /// Collects literal module paths and identifies conditional path ambiguity.
 pub(crate) fn paths(attrs: &[Attribute]) -> (Vec<String>, bool) {
     let mut result = Vec::new();

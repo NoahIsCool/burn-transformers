@@ -127,6 +127,7 @@ pub fn classify(root: &Path, entries: &[PathBuf]) -> Result<Report, String> {
                 line_count: snapshot.source.line_count(),
                 contexts: snapshot.contexts,
                 lines,
+                test_audit: snapshot.test_audit,
             }
         })
         .collect();
@@ -148,6 +149,8 @@ struct Snapshot {
     source: Source,
     /// Every visited context, including repeated aliases.
     contexts: Vec<Context>,
+    /// Independent parsed-attribute audit of these exact physical source bytes.
+    test_audit: crate::TestAudit,
 }
 
 /// Bounded traversal state shared across independently supplied entry roots.
@@ -261,6 +264,7 @@ impl Scan {
                 Snapshot {
                     source: Source::new(text),
                     contexts: Vec::new(),
+                    test_audit: crate::test_audit::unparsed(),
                 },
             );
         }
@@ -278,6 +282,12 @@ impl Scan {
         } else {
             reach.unresolved = true;
         }
+        let test_audit =
+            crate::test_audit::audit(&self.snapshots[&path].source, parsed.as_ref().ok(), offset);
+        self.snapshots
+            .get_mut(&path)
+            .ok_or("source snapshot disappeared")?
+            .test_audit = test_audit;
         let key = format!("{}|{}|{reach:?}", path.display(), directory.display());
         let duplicate_context = !self.seen.insert(key);
         if duplicate_context {

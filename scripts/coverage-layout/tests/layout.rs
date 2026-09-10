@@ -553,3 +553,118 @@ fn opaque_production_edges_keep_candidate_reports_explicitly_unqualified() {
             .any(|issue| issue.code == "opaque_macro_or_verbatim")
     );
 }
+
+/// Bodies and declarations remain distinct even on shared physical lines.
+#[test]
+fn structural_test_audit_distinguishes_external_inline_and_harness_owners() {
+    let fixture = Fixture::new();
+    fixture.put("lib.rs", "fn live() {} #[cfg(test)] mod external;\n#[cfg(test)] mod inline { fn helper() {} }\n#[test] fn bare_test() {}\n#[bench] fn bare_bench() {}\n");
+    fixture.put("external.rs", "#[test] fn external_test() {}\n");
+    let report = fixture.report();
+    let audit = &file(&report, "lib.rs").test_audit;
+    assert_eq!(audit.schema_version, 1);
+    assert!(audit.complete);
+    assert!(!audit.macro_expansion_resolved);
+    assert_eq!(
+        audit
+            .sites
+            .iter()
+            .map(|site| (site.owner_kind.as_str(), site.disposition.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("external_mod", "external_declaration"),
+            ("inline_mod", "test_body"),
+            ("item", "test_body"),
+            ("item", "test_body")
+        ]
+    );
+    assert_eq!(line(file(&report, "lib.rs"), 1), Classification::Mixed);
+    assert_eq!(
+        file(&report, "external.rs").test_audit.sites[0].disposition,
+        "test_body"
+    );
+}
+
+/// Associated methods and inner expression/statement attributes cannot hide.
+#[test]
+fn structural_test_audit_covers_associated_items_expressions_and_statements() {
+    let fixture = Fixture::new();
+    fixture.put("lib.rs", "struct S;\nimpl S { #[cfg(test)] fn helper() {} }\ntrait T { #[cfg(test)] fn helper() {} }\nfn live() { #[cfg(test)] let value = 1; #[cfg(test)] { let _ = 2; } }\n");
+    let report = fixture.report();
+    let audit = &file(&report, "lib.rs").test_audit;
+    assert!(audit.complete);
+    for kind in ["impl_item", "trait_item", "stmt", "expr"] {
+        assert!(
+            audit
+                .sites
+                .iter()
+                .any(|site| site.owner_kind == kind && site.disposition == "test_body"),
+            "missing {kind}"
+        );
+    }
+    for site in &audit.sites {
+        assert!(site.span.start.byte <= site.attribute_span.start.byte);
+        assert!(site.attribute_span.end.byte <= site.span.end.byte);
+    }
+}
+
+/// Conditional attributes and expanding external declarations remain blockers.
+#[test]
+fn structural_test_audit_does_not_resolve_test_sensitive_uncertainty() {
+    let fixture = Fixture::new();
+    fixture.put("lib.rs", "#[cfg_attr(feature = \"x\", test)] fn conditional_harness() {}\n#[cfg(any(test, feature = \"x\"))] fn conditional_body() {}\n#[cfg(test)] #[cfg_attr(test, path = \"external.rs\")] mod external;\n#[cfg(test)] #[custom_attribute] mod plain;\n");
+    fixture.put("external.rs", "fn a() {}\n");
+    fixture.put("plain.rs", "fn a() {}\n");
+    let report = fixture.report();
+    let audit = &file(&report, "lib.rs").test_audit;
+    assert!(audit.complete);
+    assert!(
+        audit
+            .sites
+            .iter()
+            .all(|site| site.disposition == "unresolved_test_dependent")
+    );
+    assert_eq!(audit.sites.len(), 5);
+}
+
+/// Ordinary feature cfg and opaque runtime macros are retained without guessing.
+#[test]
+fn structural_test_audit_ignores_runtime_cfg_macro_tokens_strings_and_comments() {
+    let fixture = Fixture::new();
+    fixture.put("lib.rs", "#[cfg(feature = \"x\")] fn runtime() {}\n#[cfg(not(test))] fn production_only() {}\n#[cfg(any(test, not(test)))] fn always() {}\nmacro_rules! opaque { () => { #[test] fn generated() {} }; }\nconst TEXT: &str = \"#[test] #[cfg(test)]\";\n// #[cfg(test)] fn fake() {}\n");
+    let report = fixture.report();
+    let audit = &file(&report, "lib.rs").test_audit;
+    assert!(audit.complete);
+    assert!(audit.sites.is_empty());
+    assert!(!audit.macro_expansion_resolved);
+}
+
+/// Parse/depth failures cannot masquerade as successful empty structural audits.
+#[test]
+fn structural_test_audit_records_file_cfg_and_fails_incomplete_syntax() {
+    let fixture = Fixture::new();
+    fixture.put("lib.rs", "\u{feff}#![cfg(test)]\r\nfn helper() {}\r\n");
+    let report = fixture.report();
+    let audit = &file(&report, "lib.rs").test_audit;
+    assert!(audit.complete);
+    assert_eq!(audit.sites[0].owner_kind, "file");
+    assert_eq!(audit.sites[0].span.start.byte, 0);
+    assert_eq!(audit.sites[0].attribute_span.start.byte, 3);
+    fixture.put("lib.rs", "fn broken(\n");
+    assert!(!file(&fixture.report(), "lib.rs").test_audit.complete);
+    // Give Syn enough parser stack to reach this visitor's independent bound;
+    // this fixture tests audit truncation, not the test harness's stack size.
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let deep = Fixture::new();
+            deep.put(
+                "lib.rs",
+                format!("fn deep() {{ {}0{}; }}\n", "{".repeat(150), "}".repeat(150)),
+            );
+            assert!(!file(&deep.report(), "lib.rs").test_audit.complete);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
