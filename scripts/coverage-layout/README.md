@@ -76,3 +76,59 @@ The consumer joins this audit with the independently authenticated compiler
 capture. Missing/old audits are blockers. Even a complete empty audit remains a
 diagnostic: opaque macros can emit tests/helpers from original source locations
 that cannot be distinguished from runtime code by this parsed audit alone.
+
+## Authored documentation check
+
+The separate `--documentation` mode checks contributor source style. It does not
+change coverage classification or require compiler coverage evidence. Build the
+helper once, then run the Python wrapper from the repository root:
+
+```sh
+cargo +stable build --release --locked --manifest-path scripts/coverage-layout/Cargo.toml --target-dir target
+python3 scripts/check_documentation.py --classifier target/release/transformers-coverage-layout --output target/documentation.json
+```
+
+Use `--offline` on Cargo only when dependencies are already cached. The wrapper
+never builds or executes transformer code. It inventories tracked and untracked
+nonignored Rust sources under `src/`, `examples/`, `scripts/`, and `fuzz/`, selects
+crate roots, and conservatively audits unreferenced authored sources as additional
+entries. Retained evidence, integration-test roots, and fixture directories are
+excluded from discovery; a production module reference still brings their source
+into the audit. A `*_tests.rs` filename alone never proves test ownership.
+
+Every authored function needs a nonempty literal `///` comment, including private
+helpers, trait declarations/default methods, trait implementation methods, and
+foreign declarations. Every physical or inline production module needs a
+nonempty inner `//!` comment. Bodyless `mod name;` declarations are checked through
+their destination files. Equivalent block comments and `#[doc = "..."]` are
+reported as existing rustdoc but do not satisfy these exact spelling rules.
+Computed documentation is reported separately. Actual `#[test]`/`#[bench]` and
+test-only cfg bodies are exempt; uncertain feature/cfg ownership remains included.
+Inline test modules containing functions are separately reported for relocation
+to sibling test files. Duplicate module references preserve all contexts and
+produce informational diagnostics, rather than an incomplete audit.
+
+Macro boundaries remain visible. The checker visits parseable authored item
+fragments and checks real attribute spans on simple `fn $name` templates. A
+template's `#[doc = $description]` cannot substitute for literal `///`; an
+accompanying literal comment can satisfy the style. Unresolvable authored function
+prefixes block completion. Macro expansion, generated derive methods (including
+Burn, Serde, and thiserror), and externally generated source are outside this
+authored-source claim: `macro_expansion_resolved` always remains false. This is
+not a universal expansion or compiler-reachability proof.
+
+JSON includes exact source and helper hashes, source spans, test exclusions,
+alternative doc forms, unresolved macro functions, and stable component counts.
+The wrapper verifies source inventory and bytes before/after parsing. Exit codes
+are **0** for success, **1** for missing style or misplaced inline tests, and
+**2** for incomplete inspection or invalid input. `--inventory-only` tolerates
+style findings, but still fails on incomplete inspection. The raw Rust CLI only
+reports JSON; use the wrapper for enforcement. Neither form judges whether prose
+is accurate or useful; that remains a review responsibility.
+
+Focused regression checks:
+
+```sh
+cargo +stable test --locked --manifest-path scripts/coverage-layout/Cargo.toml --test documentation
+python3 -m unittest discover -s scripts/tests -p test_check_documentation.py -v
+```

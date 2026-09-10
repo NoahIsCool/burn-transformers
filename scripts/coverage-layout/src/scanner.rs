@@ -588,7 +588,7 @@ impl<'ast> Visit<'ast> for Walker<'_> {
 }
 
 /// Retrieves attributes from each known Syn item without textual heuristics.
-fn item_attributes(item: &Item) -> (&[Attribute], &'static str) {
+pub(crate) fn item_attributes(item: &Item) -> (&[Attribute], &'static str) {
     match item {
         Item::Const(value) => (&value.attrs, "const"),
         Item::Enum(value) => (&value.attrs, "enum"),

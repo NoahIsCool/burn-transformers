@@ -14,10 +14,14 @@
 #![deny(missing_docs)]
 
 mod cfg;
+mod documentation;
 mod scanner;
 mod source;
 mod test_audit;
 
+pub use documentation::{
+    DocumentationFile, DocumentationReport, DocumentationSite, MacroBoundary, audit_documentation,
+};
 pub use scanner::classify;
 pub use source::{
     Classification, Context, Diagnostic, FileReport, LineRun, Position, Region, Report, SourceSpan,
