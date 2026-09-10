@@ -579,6 +579,10 @@ counts: 16 key/query heads and 48 value/decay heads.
 [`cache/tensor/recurrent.rs`](src/cache/tensor/recurrent.rs).
 **Reference:** [Gated Delta Networks](https://arxiv.org/abs/2412.06464) and the
 pinned Qwen3.5 implementation.
+Both public rule paths reject empty query axes, misaligned value axes, and
+incorrect decay shapes before tensor math while preserving supplied state.
+Their tests include an independent host-scalar evaluation of the update above;
+a width-one convolution is also checked as a valid zero-history state.
 
 <a id="innovation-mamba2"></a>
 ### Mamba2 selective state-space mixer

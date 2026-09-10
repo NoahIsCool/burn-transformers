@@ -185,6 +185,13 @@ The snapshot-specific helper is not a general parser: source/configuration
 changes require a new audit. Generic classifier flags remain conservative and
 unchanged. **The 90%/95% numerical gates still fail; release promotion is false.**
 
+The subsequent test-only `a9f5678` milestone adds four public DeltaNet contracts,
+including an independent scalar recurrence oracle. The integrated release-profile
+CPU suite passes **1,153 tests / 29 existing ignores**, with all-target/all-feature
+warning-denied Clippy and formatting clean. No runtime or dependency changed.
+Coverage above remains explicitly measured at `311fe3a`; no numerical improvement
+is inferred for these later tests without another capture.
+
 The runner measures all compiled `src/**/*.rs` at **90%** line coverage and
 shared/core source (everything outside `src/models/`) at **95%**, with exact
 integer threshold comparisons. Experimental model source is retained in the
@@ -193,9 +200,9 @@ external acceptance payloads are not part of those denominators.
 
 LLVM's unfiltered summaries can also count inline unit-test bodies and generated
 expansions. Those legacy aggregate numbers are **not production-only coverage**
-and are not branch coverage. Do not represent the historical baseline below as satisfying the intended
-reachable-branch policy; a refined production-only measurement and targeted
-uncovered-path tests remain release work. Hardware-only paths receive separate
+and are not branch coverage. Do not represent the historical baseline below as
+satisfying the intended reachable-branch policy; a final-candidate coverage run
+and targeted uncovered-path tests remain release work. Hardware-only paths receive separate
 opt-in runs, not invented coverage percentages.
 
 The first baseline at integration commit `050f18d`, with
