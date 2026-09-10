@@ -2948,3 +2948,220 @@ fn runtime_coverage_save_mapper_shape_inspection_preserves_original_on_error() {
     install_float_parameter(&mut parameter, TensorData::from([[2.0_f32, 4.0, 6.0, 8.0]])).unwrap();
     assert_eq!(parameter.val().to_data(), source.to_data());
 }
+
+/// Structured install failures retain useful shape, rank, and dtype context in text.
+#[test]
+fn accounting_contract_parameter_error_messages_preserve_metadata() {
+    let cases = [
+        (
+            ParameterInstallError::Rank {
+                expected: 2,
+                actual: 1,
+            },
+            "expected rank 2, received rank 1",
+        ),
+        (
+            ParameterInstallError::Shape {
+                expected: vec![3, 2],
+                actual: vec![2, 3],
+            },
+            "expected shape [3, 2], received [2, 3]",
+        ),
+        (
+            ParameterInstallError::NonFloat {
+                dtype: "I32".into(),
+            },
+            "expected floating-point data, received I32",
+        ),
+        (
+            ParameterInstallError::UnsupportedStorage {
+                dtype: "BF16".into(),
+            },
+            "backend cannot store checkpoint dtype BF16",
+        ),
+        (
+            ParameterInstallError::PayloadLength {
+                expected: 24,
+                actual: 20,
+            },
+            "expected 24 checkpoint float bytes, received 20",
+        ),
+        (
+            ParameterInstallError::PayloadSizeOverflow,
+            "checkpoint float payload size overflows usize",
+        ),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(error.to_string(), expected);
+        assert!(std::error::Error::source(&error).is_none());
+    }
+    assert!(
+        ParameterInstallError::InitializedQuantized
+            .to_string()
+            .contains("fresh lazy parameter")
+    );
+}
+
+/// Accounting overflow must be detected before handing ownership to a nontransactional sink.
+#[test]
+fn accounting_contract_install_overflow_precedes_sink_mutation() {
+    let (plan, _) = aliased_memory_fixture();
+    for (tensors_applied, delivered_tensor_bytes, expected_context) in [
+        (usize::MAX, 8, "counting applied target tensors"),
+        (
+            2,
+            u64::MAX - 3,
+            "summing target bytes delivered to the sink",
+        ),
+    ] {
+        let mut stats = ExecutionStats {
+            tensors_applied,
+            delivered_tensor_bytes,
+            ..Default::default()
+        };
+        let mut report = LoadReport::default();
+        report.record_applied("previous");
+        let mut sink = CollectingSink::default();
+        let result = install_tensor(
+            &plan.tensors[0],
+            TensorData::from([9.0_f32]),
+            &mut sink,
+            &mut report,
+            &mut stats,
+        );
+        assert!(matches!(result, Err(InstallError::Checkpoint(
+            CheckpointError::ArithmeticOverflow { context }
+        )) if context == expected_context));
+        assert!(sink.events.is_empty());
+        assert!(sink.tensors.is_empty());
+        assert_eq!(report.applied, ["previous"]);
+        assert_eq!(stats.tensors_applied, tensors_applied);
+        assert_eq!(stats.delivered_tensor_bytes, delivered_tensor_bytes);
+        assert_eq!(stats.largest_output_tensor_bytes, 0);
+    }
+}
+
+/// A destination rejection leaves audit counters reusable for a later successful write.
+#[test]
+fn accounting_contract_sink_failure_does_not_publish_install_counters() {
+    let (plan, _) = aliased_memory_fixture();
+    let tensor = &plan.tensors[0];
+    let mut stats = ExecutionStats {
+        tensors_applied: 2,
+        delivered_tensor_bytes: 8,
+        ..Default::default()
+    };
+    let mut report = LoadReport::default();
+    report.record_applied("previous");
+    let mut sink = CollectingSink {
+        fail_write: Some(tensor.target.clone()),
+        ..Default::default()
+    };
+    assert!(matches!(
+        install_tensor(tensor, TensorData::from([9.0_f32]), &mut sink, &mut report, &mut stats),
+        Err(InstallError::Sink(SinkError(target))) if target == tensor.target
+    ));
+    assert_eq!(stats.tensors_applied, 2);
+    assert_eq!(stats.delivered_tensor_bytes, 8);
+    assert_eq!(stats.largest_output_tensor_bytes, 0);
+    assert_eq!(report.applied, ["previous"]);
+    assert!(sink.events.is_empty());
+    sink.fail_write = None;
+    assert!(
+        install_tensor(
+            tensor,
+            TensorData::from([9.0_f32]),
+            &mut sink,
+            &mut report,
+            &mut stats
+        )
+        .is_ok()
+    );
+    assert_eq!(stats.tensors_applied, 3);
+    assert_eq!(stats.delivered_tensor_bytes, 12);
+    assert_eq!(stats.largest_output_tensor_bytes, 4);
+    assert_eq!(report.applied, ["previous", "weight"]);
+    assert_eq!(tensor_f32(&sink.tensors["weight"]), [9.0]);
+}
+
+/// Override memory includes the simultaneously live fused payload, not just the replacement.
+#[test]
+fn accounting_contract_override_peak_checks_shape_and_exact_combined_budget() {
+    let (plan, _) = aliased_memory_fixture();
+    let tensor = &plan.tensors[0];
+    let data = TensorData::from([9.0_f32]);
+    let source = SourceTensor::new("fused", [2], TensorDType::F32, f32_bytes(&[1.0, 2.0])).unwrap();
+    for (shared, bound, required) in [(None, 4, 4), (Some(&source), 12, 12)] {
+        let mut stats = ExecutionStats::default();
+        observe_override_peak(tensor, &data, shared, bound, &mut stats).unwrap();
+        assert_eq!(stats.peak_host_staging_bytes, required);
+        assert_eq!(stats.largest_output_tensor_bytes, 4);
+        let mut rejected = ExecutionStats::default();
+        assert!(matches!(
+            observe_override_peak(tensor, &data, shared, bound - 1, &mut rejected),
+            Err(CheckpointError::MemoryEstimateExceeded { tensor, required: actual, planned })
+            if tensor == "weight" && actual == required && planned == bound - 1
+        ));
+        // These buffers already exist: a failure report must retain the observed high-water.
+        assert_eq!(rejected.peak_host_staging_bytes, required);
+        assert_eq!(rejected.largest_output_tensor_bytes, 4);
+        assert_eq!(rejected.tensors_applied, 0);
+    }
+    let mut stats = ExecutionStats::default();
+    let wrong_shape = TensorData::from([[9.0_f32]]);
+    assert_eq!(wrong_shape.shape.as_slice(), [1, 1]);
+    let expected_reason = format!(
+        "override shape {:?} differs from planned shape [1]",
+        wrong_shape.shape
+    );
+    assert!(matches!(
+        observe_override_peak(tensor, &wrong_shape, Some(&source), 12, &mut stats),
+        Err(CheckpointError::InvalidTensorPayload { tensor, reason })
+        if tensor == "weight" && reason == expected_reason
+    ));
+    assert_eq!(stats.peak_host_staging_bytes, 0);
+}
+
+/// Override failures cannot claim installation or execute aliases after source cleanup.
+#[test]
+fn accounting_contract_override_provider_failures_close_without_publication() {
+    for case in 0..3 {
+        let (plan, mut source) = aliased_memory_fixture();
+        let mut sink = CollectingSink::default();
+        let failure = execute_load_plan_with_overrides(
+            &plan,
+            &mut source,
+            &mut sink,
+            |_, _| true,
+            |_, _| match case {
+                0 => Ok(None),
+                1 => Err(SinkError("override provider".into())),
+                _ => Ok(Some(TensorData::from([[9.0_f32]]))),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.failed_target.as_deref(), Some("weight"));
+        match (&failure.cause, case) {
+            (ExecutionFailureCause::Checkpoint(CheckpointError::InvalidMapping { message }), 0) => {
+                assert!(message.contains("materializer returned no tensor"))
+            }
+            (ExecutionFailureCause::Sink(SinkError(message)), 1) => {
+                assert_eq!(message, "override provider")
+            }
+            (
+                ExecutionFailureCause::Checkpoint(CheckpointError::InvalidTensorPayload {
+                    reason,
+                    ..
+                }),
+                2,
+            ) => assert!(reason.contains("override shape")),
+            _ => panic!("wrong override failure: {}", failure.cause),
+        }
+        assert_eq!(source.close_calls, 1);
+        assert_eq!(failure.stats.source_reads, 1);
+        assert_eq!(failure.stats.tensors_applied, 0);
+        assert_eq!(failure.stats.aliases_applied, 0);
+        assert!(failure.report.applied.is_empty());
+        assert!(sink.events.is_empty());
+    }
+}
