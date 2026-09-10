@@ -75,6 +75,6 @@ authorized operation.
 ## 5. Complete executable and hardware release gates
 
 [RELEASE_GATES.md](RELEASE_GATES.md) defines the command runner, exact MSRV
-verification, failing coverage thresholds, dependency policy, separate backend
+verification, coverage thresholds and qualification, dependency policy, separate backend
 compile checks, and the remaining fuzz/hardware/performance requirements.
 Passing the source/package commands above does not waive those gates.

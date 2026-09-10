@@ -21,6 +21,13 @@ acceptance. The bounded first-release usage contract for the smallest Qwen
 checkpoint is documented separately in
 [Qwen3.5-0.8B v0.1 profile](QWEN3_5_0_8B_RELEASE.md).
 
+The v0.1 candidate is limited to **Qwen3.5-0.8B and FLAN-T5-small**; other
+families remain experimental. Both have refreshed local correctness evidence.
+The latest [source and native-bound aggregate coverage checks](acceptance/measurements/native-coverage-binding-20260910.json)
+pass, but production-only coverage qualification and refreshed performance/memory
+measurements remain open. See [the release gates](RELEASE_GATES.md) for the exact
+scope and historical evidence; a passing aggregate does not promote support.
+
 ## Current status
 
 | Runtime | Implemented surface | Real-checkpoint status |

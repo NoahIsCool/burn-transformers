@@ -33,6 +33,10 @@ versioning, with the additional pre-1.0 compatibility policy documented in
 - Separate sampled phase-memory evidence for both small models, retaining idle
   baselines, sampling gaps, and warmup/measured partitions without claiming exact
   transient peaks or a host/device allocation split.
+- Opt-in native compiler/export binding for development coverage gates, with
+  authenticated source inputs and binary identities, unfiltered exports, and
+  strict diagnostics. Passing aggregate coverage is not production-only
+  qualification or checkpoint promotion.
 
 ### Fixed
 
@@ -46,3 +50,6 @@ versioning, with the additional pre-1.0 compatibility policy documented in
   before backend execution or parameter mutation.
 - Reject duplicate decoded Burnpack tensor and checkpoint-provenance JSON keys,
   including escape-equivalent names, before a map can silently replace an entry.
+- Validate repeated full-precision parameter installation in checkpoint layout
+  after lazy parameters initialize. Reject already initialized quantized
+  parameters before a save mapper could allocate whole-weight dequantization.

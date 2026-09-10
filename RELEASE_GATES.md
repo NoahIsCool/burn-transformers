@@ -76,6 +76,11 @@ are not new performance, Q4 quality, or production-only coverage measurements.
 
 Cargo's usual target location is retained. Check at least 20 GiB free before
 building a new profile; external model artifacts are never a cleanup target.
+The current host needed a [documented cache fallback](acceptance/measurements/local-build-cache-relocation-20260910.json)
+after dropping below that preflight: inactive incremental data was archived,
+and `target/debug/deps` now links to a content-verified cache on the model volume.
+The target path remains unchanged; release and coverage artifacts stay local.
+This host-local symlink requires the external drive and is never packaged.
 The package gate requires clean tracked crate sources and includes verification.
 An unrelated change outside this standalone crate is not permission to stage it.
 Every include pattern is root-anchored: Cargo otherwise matches slash-free
@@ -249,6 +254,16 @@ commands and hashes remain locally in `/private/tmp/tfm-extract-comparison.json`
 and `/private/tmp/tfm-extract-validation.json`. That comparison records a Cargo
 cache-bookkeeping warning and is structural evidence, not a warning-free coverage
 run. No inline spans or new files are excluded by the gate yet.
+
+The third extraction (`e6460f2`) separates five more position/cache modules.
+Independent worktree checks preserve all five production prefixes, all 101
+production inputs, and all 914 test identities; unit inputs change only from
+125 to 130. All 911 unit tests pass with three existing ignores, and isolated
+all-target Clippy checks 18 fresh targets without diagnostics. The comparison
+record is retained at `/private/tmp/tfm-extract3-proof.O5At5m/comparison.json`
+(SHA-256 `9269c8fcebdeed7635ed5dfbfb68a752092cc6b221d6badfad97e9daf57cb37f`).
+The earlier `57d0560` coverage numbers remain historical, not a measurement of
+these newly arranged sources; no new exclusion is inferred from this refactor.
 
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is

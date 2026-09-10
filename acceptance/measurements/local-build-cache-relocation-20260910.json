@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-09-10",
+  "kind": "recoverable_build_cache_relocation",
+  "reason": "Internal free space fell below the required 20 GiB compiler preflight. Archiving inactive incremental data alone left only 19,035,848 KiB available, so the external-storage fallback was also needed for debug dependencies.",
+  "preflight": {
+    "compiler_launches_paused": true,
+    "reported_open_handles_in_debug_dependencies": 0,
+    "lsof_exit_code": 1,
+    "incremental_last_modified_local": "2026-09-09 20:52:51",
+    "all_task_cargo_commands_use_incremental_zero": true,
+    "artifact_volume": "/Volumes/bag of holding/models"
+  },
+  "steps": [
+    {
+      "source": "/Users/nover/repos/hmm_compression/crates/transformers/target/debug/incremental",
+      "destination": "/Volumes/bag of holding/models/transformers-build-cache.dBtcTN/transformers-incremental-20260910",
+      "original_path_after": "Empty local directory; future ordinary incremental output remains local.",
+      "files": 1927,
+      "bytes": 3342063673,
+      "tree_sha256": "d9152ebead3fdf53fa61f4d132d52efb292c3bb8f154ac27323d61bf229b1a58",
+      "before_after_tree_sha256_equal": true
+    },
+    {
+      "source": "/Users/nover/repos/hmm_compression/crates/transformers/target/debug/deps",
+      "destination": "/Volumes/bag of holding/models/transformers-build-cache.dBtcTN/transformers-debug-deps-20260910",
+      "original_path_after": "Directory symlink to destination, preserving the normal Cargo path and existing dependency reuse.",
+      "files": 16251,
+      "bytes": 20261631157,
+      "tree_sha256": "42067e8cd219fa4d529fcd9e93a34c57b7ba5541da22255096c62f69807735f7",
+      "before_after_tree_sha256_equal": true
+    }
+  ],
+  "verification": {
+    "hash_algorithm": "Sort regular files by full path. For each, append relative filename, NUL, decimal byte length, NUL, lowercase SHA256 of file bytes, and LF to a SHA256 digest. Reject symlinks inside the moved tree. Both destination trees exactly matched their pre-move inventory.",
+    "after_incremental_move_internal_available_kib": 19035848,
+    "after_both_moves_internal_available_kib": 37867832,
+    "minimum_required_available_kib": 20971520,
+    "preflight_passed": true
+  },
+  "preserved": {
+    "model_weights": true,
+    "source_files": true,
+    "release_profile_artifacts": true,
+    "native_coverage_artifacts_and_evidence": true,
+    "cargo_target_directory": "/Users/nover/repos/hmm_compression/crates/transformers/target",
+    "global_cargo_target_override": false,
+    "files_deleted": false
+  },
+  "recovery": "Both complete cache trees remain on the external drive. The debug dependency symlink requires that drive; restoring the directory locally needs sufficient free space. Replacing only that symlink with an empty local directory is also possible, but requires Cargo to rebuild dependencies. Do not remove either external cache archive or any model artifacts as part of that operation."
+}
