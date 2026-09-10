@@ -4,6 +4,13 @@
 //! generic loader. Each architecture declares how its external checkpoint tensors
 //! produce internal parameters. This makes fused projections, transposes, aliases,
 //! and ignored multimodal towers visible in validation reports and unit tests.
+//!
+//! Tensor axes are explicit: a matrix transpose exchanges its two dimensions;
+//! split ranges partition a named axis; concatenation sums that axis while all
+//! others match. Shape products and byte totals use checked integer arithmetic.
+//! These operations are planned before materialization, so a malformed mapping
+//! cannot allocate or mutate model parameters. Tied aliases resolve to one owner,
+//! while dtype conversion follows each architecture's precision contract.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,6 +21,8 @@ use super::{
     DTypeConversion, DTypePolicy, IndexAliasSizeAccounting, IndexTensorAlias, LoadOptions,
     LoadReport, MemoryEstimate, Result, TensorDType, TensorInventory, TransformRecord,
 };
+
+// Declarative architecture mapping: names, axes, dtypes, and alias topology.
 
 /// Exact or prefix-based exception for a checkpoint key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +56,7 @@ impl KeyMatcher {
         }
     }
 
+    /// Rejects empty matchers so an accidental empty prefix cannot exempt every key.
     fn validate(&self) -> Result<()> {
         let value = match self {
             Self::Exact(value) | Self::Prefix(value) => value,
@@ -262,6 +272,7 @@ pub struct PlannedSource {
 }
 
 impl From<&TensorInventory> for PlannedSource {
+    /// Copies a discovered tensor descriptor without changing its axes or byte range.
     fn from(tensor: &TensorInventory) -> Self {
         Self {
             name: tensor.name.clone(),
@@ -927,6 +938,9 @@ fn manifest_accounting_mismatch(reason: String) -> CheckpointError {
     CheckpointError::ManifestAccountingMismatch { reason }
 }
 
+// Validation helpers operate on temporary plans before parameter allocation.
+
+/// Indexes expected targets after checking nonempty unique names and shape products.
 fn expected_inventory(expected: &[ExpectedTensor]) -> Result<BTreeMap<String, &ExpectedTensor>> {
     let mut inventory = BTreeMap::new();
     for tensor in expected {
@@ -945,6 +959,10 @@ fn expected_inventory(expected: &[ExpectedTensor]) -> Result<BTreeMap<String, &E
     Ok(inventory)
 }
 
+/// Adds one uniquely owned target only after its shape and dtype contract match.
+///
+/// This mutates temporary planning state, not model parameters. A rejected plan is
+/// discarded before execution, so partial planning cannot install invalid tensors.
 #[allow(clippy::too_many_arguments)]
 fn insert_primary(
     expected: &BTreeMap<String, &ExpectedTensor>,
@@ -980,6 +998,7 @@ fn insert_primary(
     Ok(())
 }
 
+/// Marks a physical source consumed once; explicit split operations own their reuse.
 fn consume(consumed: &mut BTreeSet<String>, source: &str) -> Result<()> {
     if !consumed.insert(source.to_owned()) {
         return Err(CheckpointError::MappingSourceCollision {
@@ -989,6 +1008,7 @@ fn consume(consumed: &mut BTreeSet<String>, source: &str) -> Result<()> {
     Ok(())
 }
 
+/// Looks up a required physical source and reports its missing checkpoint key.
 fn source_tensor<'a>(
     manifest: &'a CheckpointManifest,
     source: &str,
@@ -1000,6 +1020,7 @@ fn source_tensor<'a>(
         })
 }
 
+/// Requires exact axis-by-axis equality rather than equal flattened element counts.
 fn ensure_shape(target: &str, expected: &[u64], observed: &[u64]) -> Result<()> {
     if expected != observed {
         return Err(CheckpointError::ShapeMismatch {
@@ -1011,6 +1032,10 @@ fn ensure_shape(target: &str, expected: &[u64], observed: &[u64]) -> Result<()> 
     Ok(())
 }
 
+/// Resolves conversion policy while preserving concrete architecture dtype contracts.
+///
+/// Automatic conversion changes only real floating-point types. Blanket casts
+/// cannot override a concrete target dtype or reinterpret integer parameters.
 fn resolve_dtype(
     target: &str,
     source: TensorDType,
@@ -1043,6 +1068,7 @@ fn resolve_dtype(
     Ok(resolved)
 }
 
+/// Follows alias chains to a storage owner and rejects cycles or dangling targets.
 fn resolve_alias<'a>(
     target: &'a str,
     aliases: &'a BTreeMap<String, String>,
@@ -1074,6 +1100,9 @@ fn resolve_alias<'a>(
     }
 }
 
+// Auditable transformations and conservative host/parameter storage accounting.
+
+/// Builds deterministic provenance records for renames, layout changes, casts, and ties.
 fn create_report(primary: &[PlannedTensor], aliases: &[PlannedTensor]) -> LoadReport {
     let mut report = LoadReport::new();
     for tensor in primary {
@@ -1122,6 +1151,11 @@ fn create_report(primary: &[PlannedTensor], aliases: &[PlannedTensor]) -> LoadRe
     report
 }
 
+/// Estimates logical, uniquely owned, and conservative temporary storage separately.
+///
+/// Aliases add logical bytes without new parameter storage. The temporary bound is
+/// the maximum of largest-shard-plus-output and the largest physical equivalence
+/// pair; it does not include backend queues, activations, or allocator overhead.
 fn estimate_memory(
     manifest: &CheckpointManifest,
     primary: &[PlannedTensor],
@@ -1211,10 +1245,12 @@ fn estimate_memory(
     })
 }
 
+/// Computes exact tensor storage after validating the dimension product and bit alignment.
 fn tensor_bytes(shape: &[u64], dtype: TensorDType) -> Result<u64> {
     dtype.storage_bytes(checked_elements(shape)?)
 }
 
+/// Multiplies target dimensions without overflow, treating rank zero as one scalar.
 fn checked_elements(shape: &[u64]) -> Result<u64> {
     shape.iter().try_fold(1_u64, |count, dimension| {
         count
@@ -1225,10 +1261,12 @@ fn checked_elements(shape: &[u64]) -> Result<u64> {
     })
 }
 
+/// Tests whether any explicit exact-name or prefix exception selects a key.
 fn matches_any(matchers: &[KeyMatcher], key: &str) -> bool {
     matchers.iter().any(|matcher| matcher.matches(key))
 }
 
+/// Validates every exception before it can relax strict missing/unexpected-key checks.
 fn validate_matchers(matchers: &[KeyMatcher]) -> Result<()> {
     for matcher in matchers {
         matcher.validate()?;

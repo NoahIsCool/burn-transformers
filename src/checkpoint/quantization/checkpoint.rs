@@ -89,6 +89,7 @@ pub enum CheckpointQuantizationFailureCause {
 }
 
 impl fmt::Display for CheckpointQuantizationFailureCause {
+    /// Formats the original checkpoint or quantization failure without hiding its detail.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Checkpoint(error) => error.fmt(formatter),
@@ -98,6 +99,7 @@ impl fmt::Display for CheckpointQuantizationFailureCause {
 }
 
 impl StdError for CheckpointQuantizationFailureCause {
+    /// Exposes the underlying failure for standard chained error reporting.
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             Self::Checkpoint(error) => Some(error),
@@ -137,6 +139,7 @@ struct CheckpointQuantizationProgress {
 }
 
 impl fmt::Display for CheckpointQuantizationFailure {
+    /// Formats the requested output and, when available, the target where conversion stopped.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(target) = &self.failed_target {
             write!(
@@ -157,6 +160,7 @@ impl fmt::Display for CheckpointQuantizationFailure {
 }
 
 impl StdError for CheckpointQuantizationFailure {
+    /// Exposes the categorized conversion cause while keeping progress in the outer error.
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         Some(&self.cause)
     }

@@ -128,6 +128,7 @@ pub fn classify_weight_for_quantization(name: &str, shape: &[usize]) -> Quantiza
     QuantizationEligibility::Eligible
 }
 
+/// Recognizes embedding path components conservatively, ignoring ASCII case.
 fn is_embedding(component: &str) -> bool {
     let component = component.to_ascii_lowercase();
     matches!(
@@ -146,6 +147,7 @@ fn is_embedding(component: &str) -> bool {
         || component.ends_with("_embeddings")
 }
 
+/// Recognizes normalization components whose scales should retain source precision.
 fn is_normalization(component: &str) -> bool {
     let component = component.to_ascii_lowercase();
     component.contains("norm")
@@ -154,16 +156,19 @@ fn is_normalization(component: &str) -> bool {
         || component.starts_with("ln_")
 }
 
+/// Recognizes convolution components excluded from matrix-only quantization.
 fn is_convolution(component: &str) -> bool {
     let component = component.to_ascii_lowercase();
     component == "conv" || component.starts_with("conv1d") || component.starts_with("conv_")
 }
 
+/// Recognizes bias-table suffixes before generic matrix eligibility is considered.
 fn is_bias_table(component: &str) -> bool {
     let component = component.to_ascii_lowercase();
     component.ends_with("_bias") || component.ends_with("_biases")
 }
 
+/// Recognizes recurrent decay, step, and scaling parameters requiring source precision.
 fn is_recurrent_scalar(components: &[&str]) -> bool {
     components.iter().any(|component| {
         matches!(

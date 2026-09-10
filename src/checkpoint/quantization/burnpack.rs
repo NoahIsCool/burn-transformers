@@ -144,6 +144,7 @@ impl BurnpackSessionLimits {
 }
 
 impl Default for BurnpackSessionLimits {
+    /// Sets finite staging and manifest bounds suitable for incremental weight conversion.
     fn default() -> Self {
         Self {
             max_tensors: UPSTREAM_MAX_TENSORS - 1,
@@ -520,6 +521,13 @@ impl QuantizedBurnpackSession {
         }
     }
 
+    // Staging transactions: validate, append, then commit metadata and counters.
+
+    /// Stages one validated packed payload and commits its metadata only after exact writes.
+    ///
+    /// The payload digest covers packed codes followed by little-endian F32 scales.
+    /// A write or validation failure truncates back to the previous committed offset;
+    /// manifest entries and counters advance only after staging succeeds.
     fn append_quantized_inner(
         &mut self,
         name: &str,
@@ -594,6 +602,10 @@ impl QuantizedBurnpackSession {
         })
     }
 
+    /// Checks prospective count, payload, staging, and manifest bounds before writing.
+    ///
+    /// The manifest estimate includes worst-case JSON name escaping and dimension
+    /// text overhead; final serialization is checked against the actual byte limit.
     fn preflight_append(
         &self,
         name: &str,
@@ -669,6 +681,7 @@ impl QuantizedBurnpackSession {
         Ok((next_staged, next_estimate))
     }
 
+    /// Rejects empty, reserved, overlong, or already staged tensor names.
     fn validate_name(&self, name: &str) -> Result<()> {
         if name.is_empty() {
             return Err(QuantizationError::EmptyTensorName);
@@ -693,6 +706,7 @@ impl QuantizedBurnpackSession {
         Ok(())
     }
 
+    /// Checks actual serialized manifest bytes against the configured hard bound.
     fn check_manifest_size(&self, actual: usize) -> Result<()> {
         if actual > self.limits.max_manifest_bytes {
             return Err(QuantizationError::SessionLimitExceeded {
@@ -704,6 +718,7 @@ impl QuantizedBurnpackSession {
         Ok(())
     }
 
+    /// Rejects changes after an output has been successfully published.
     fn ensure_mutable(&self) -> Result<()> {
         if self.finalized {
             Err(QuantizationError::SessionFinalized)
@@ -721,6 +736,7 @@ impl QuantizedBurnpackSession {
         }
     }
 
+    /// Borrows the live staging handle or reports its absence as staging corruption.
     fn staging_file_mut(&mut self) -> Result<&mut File> {
         self.staging_file
             .as_mut()
@@ -730,6 +746,7 @@ impl QuantizedBurnpackSession {
             })
     }
 
+    /// Requires the staging file length to match the last committed payload boundary.
     fn checked_staging_end(&mut self) -> Result<u64> {
         let expected = self.stats.staged_payload_bytes;
         let actual = self.staging_end()?;
@@ -739,6 +756,7 @@ impl QuantizedBurnpackSession {
         Ok(actual)
     }
 
+    /// Seeks to the physical end of staging and returns its checked I/O result.
     fn staging_end(&mut self) -> Result<u64> {
         let path = self.staging_path.clone();
         self.staging_file_mut()?
@@ -750,6 +768,7 @@ impl QuantizedBurnpackSession {
             })
     }
 
+    /// Writes all supplied bytes to staging; the caller owns rollback on failure.
     fn write_raw_staging(&mut self, bytes: &[u8]) -> Result<()> {
         let path = self.staging_path.clone();
         self.staging_file_mut()?
@@ -761,6 +780,7 @@ impl QuantizedBurnpackSession {
             })
     }
 
+    /// Flushes staged bytes and requests data durability before final materialization.
     fn sync_staging(&mut self) -> Result<()> {
         let path = self.staging_path.clone();
         let file = self.staging_file_mut()?;
@@ -773,6 +793,10 @@ impl QuantizedBurnpackSession {
             })
     }
 
+    /// Truncates and rewinds to the last safe boundary after a failed append.
+    ///
+    /// If rollback itself fails, that failure takes precedence because the staging
+    /// state can no longer be assumed reusable.
     fn rollback_after<T>(&mut self, offset: u64, error: QuantizationError) -> Result<T> {
         let path = self.staging_path.clone();
         let rollback = self.staging_file_mut().and_then(|file| {
@@ -790,6 +814,13 @@ impl QuantizedBurnpackSession {
         }
     }
 
+    // Publication separates atomic visibility from best-effort directory durability.
+
+    /// Writes, reopens, and validates a temporary Burnpack before create-only publication.
+    ///
+    /// The hard link is the atomic visibility boundary and cannot replace existing
+    /// output. Directory synchronization is reported separately after publication,
+    /// because a durability failure cannot undo an already visible successful link.
     fn write_and_publish(
         &self,
         manifest_offset: u64,
@@ -873,6 +904,10 @@ impl QuantizedBurnpackSession {
         })
     }
 
+    /// Builds lazy U8 snapshots over staging offsets, reserving parameter zero for metadata.
+    ///
+    /// Snapshot closures share a private file handle and materialize one payload at a
+    /// time; collecting descriptors therefore does not collect all model weights.
     fn snapshots(
         &self,
         manifest_offset: u64,
@@ -933,6 +968,7 @@ impl QuantizedBurnpackSession {
         Ok(snapshots)
     }
 
+    /// Drops the staging handle and attempts to remove its private file without panicking.
     fn close_staging(&mut self) {
         if let Some(file) = self.staging_file.take() {
             drop(file);
@@ -942,6 +978,7 @@ impl QuantizedBurnpackSession {
 }
 
 impl Drop for QuantizedBurnpackSession {
+    /// Performs best-effort staging cleanup when the session leaves scope.
     fn drop(&mut self) {
         self.close_staging();
     }
@@ -1505,6 +1542,13 @@ fn payload_len_usize(metadata: &QuantizedTensorMetadata) -> Result<usize> {
     })
 }
 
+// Lazy payload snapshots and private adjacent temporary-file lifecycles.
+
+/// Creates a lazy one-dimensional U8 view of an exact staged byte interval.
+///
+/// The closure uses the retained file handle rather than reopening its pathname,
+/// so replacing the path cannot redirect its payload read. Host length conversion
+/// and allocation are checked when creating and materializing the snapshot.
 fn staged_snapshot(
     staging_file: Rc<File>,
     staging_path: &Path,
@@ -1562,6 +1606,7 @@ fn staged_snapshot(
     ))
 }
 
+/// Validates the `.bpk` filename and canonicalizes its existing parent directory.
 fn validate_bpk_path(path: &Path) -> Result<PathBuf> {
     if path.as_os_str().is_empty() || path.file_name().is_none() {
         return Err(QuantizationError::InvalidArtifactPath {
@@ -1594,12 +1639,17 @@ fn validate_bpk_path(path: &Path) -> Result<PathBuf> {
     ))
 }
 
+/// Returns an explicit parent or the current directory for a bare artifact filename.
 fn artifact_parent(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
 }
 
+/// Creates an exclusive adjacent staging file with bounded collision retries.
+///
+/// Unix permissions are owner-only; atomic `create_new` prevents overwriting an
+/// existing file even if another process chooses the same candidate name.
 fn create_unique_file(output: &Path, role: &'static str) -> Result<(PathBuf, File)> {
     let parent = artifact_parent(output);
     let filename = output
@@ -1640,6 +1690,10 @@ fn create_unique_file(output: &Path, role: &'static str) -> Result<(PathBuf, Fil
     })
 }
 
+/// Creates an exclusive adjacent output directory with bounded collision retries.
+///
+/// Unix directories are owner-only so the temporary artifact remains private until
+/// the validated file is published.
 fn create_unique_directory(output: &Path, role: &'static str) -> Result<PathBuf> {
     let parent = artifact_parent(output);
     let filename = output
@@ -1679,6 +1733,7 @@ fn create_unique_directory(output: &Path, role: &'static str) -> Result<PathBuf>
     })
 }
 
+/// Requests durability of the published directory entry on Unix filesystems.
 #[cfg(unix)]
 fn sync_parent_directory(output: &Path) -> Result<()> {
     let parent = artifact_parent(output);
@@ -1691,6 +1746,7 @@ fn sync_parent_directory(output: &Path) -> Result<()> {
         })
 }
 
+/// Reports that directory-entry synchronization is unavailable on this platform.
 #[cfg(not(unix))]
 fn sync_parent_directory(output: &Path) -> Result<()> {
     Err(QuantizationError::ArtifactIo {
@@ -1703,6 +1759,7 @@ fn sync_parent_directory(output: &Path) -> Result<()> {
     })
 }
 
+/// Rejects a zero resource bound before a session or artifact reader is created.
 fn validate_nonzero_limit(field: &'static str, value: u64) -> Result<()> {
     if value == 0 {
         Err(QuantizationError::InvalidSessionLimit {
@@ -1721,12 +1778,14 @@ struct TemporaryOutput {
 }
 
 impl TemporaryOutput {
+    /// Registers a temporary artifact and its directory for cleanup on every return path.
     fn new(directory: PathBuf, path: PathBuf) -> Self {
         Self { directory, path }
     }
 }
 
 impl Drop for TemporaryOutput {
+    /// Removes the private temporary file and directory without touching published output.
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
         let _ = fs::remove_dir(&self.directory);

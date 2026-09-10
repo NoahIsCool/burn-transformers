@@ -1,4 +1,12 @@
 //! Auditable checkpoint load reports and memory estimates.
+//!
+//! Reports distinguish planned transformations from successful parameter writes
+//! and verified physical equivalences. A partial failure retains the exact
+//! successful write set; sorting the report does not imply execution order.
+//! Storage estimates distinguish logical aliases from unique parameter owners,
+//! and loader staging bounds exclude activations and backend transfer queues.
+//! A strictly valid report establishes loading consistency, not reference parity
+//! or advertised checkpoint support.
 
 use serde::{Deserialize, Serialize};
 

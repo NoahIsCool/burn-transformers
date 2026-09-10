@@ -1,4 +1,14 @@
 //! First-pass discovery of local SafeTensors artifacts.
+//!
+//! Discovery reads JSON metadata, never model payloads. A tensor with dimensions
+//! `d[0..rank]` must own exactly `product(d) * dtype_bits / 8` bytes in a
+//! little-endian, row-major data section. Checked arithmetic, duplicate-key
+//! rejection, and contiguous non-overlapping ranges make the inventory safe to
+//! consume before expensive backend allocation.
+//!
+//! Index paths remain inside the canonical local root. Index aliases and defective
+//! byte-total exceptions require explicit architecture policy; matching names or
+//! total element counts alone never establish compatible tensor wiring.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -222,6 +232,12 @@ fn discover_checkpoint_with_policy(
     }
 }
 
+// Artifact selection and index/shard reconciliation.
+
+/// Prefers standard artifact names, then accepts only an unambiguous fallback.
+///
+/// The selected artifact still passes the same containment and metadata checks as
+/// an explicitly named file; directory enumeration does not authorize its paths.
 fn discover_auto(
     root: PathBuf,
     options: &LoadOptions,
@@ -274,6 +290,7 @@ fn discover_auto(
     }
 }
 
+/// Inventories one contained SafeTensors file and derives totals from its header.
 fn discover_single(
     root: PathBuf,
     relative_path: &str,
@@ -305,6 +322,11 @@ fn discover_single(
     })
 }
 
+/// Cross-checks every index entry against all shard inventories before returning.
+///
+/// Physical tensor names must be unique and assigned to their declared shards.
+/// Missing aliases and byte-total exceptions require the caller's explicit policy;
+/// no tensor payload is materialized during this pass.
 fn discover_index(
     root: PathBuf,
     relative_path: &str,
@@ -631,6 +653,12 @@ pub(super) fn validated_index_alias_policy(
     Ok(validated)
 }
 
+// Portable paths and bounded SafeTensors metadata validation.
+
+/// Resolves an untrusted relative filename to a regular file inside the root.
+///
+/// Canonical containment rejects symlink escapes after the portable path check.
+/// The runtime source repeats containment checks when opening payloads.
 fn resolve_local_file(root: &Path, untrusted: &str, kind: &'static str) -> Result<PathBuf> {
     validate_relative_path(untrusted)?;
     let joined = root.join(untrusted);
@@ -657,6 +685,7 @@ fn resolve_local_file(root: &Path, untrusted: &str, kind: &'static str) -> Resul
     Ok(canonical)
 }
 
+/// Rejects absolute, parent, drive-prefixed, NUL, and nonportable artifact paths.
 fn validate_relative_path(path: &str) -> Result<()> {
     if path.is_empty() {
         return Err(unsafe_path(path, "path is empty"));
@@ -690,6 +719,7 @@ fn validate_relative_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Attaches the original untrusted path to a precise path-validation failure.
 fn unsafe_path(path: &str, reason: &'static str) -> CheckpointError {
     CheckpointError::UnsafeRelativePath {
         path: path.to_owned(),
@@ -697,6 +727,12 @@ fn unsafe_path(path: &str, reason: &'static str) -> CheckpointError {
     }
 }
 
+/// Reads a bounded shard header and proves exact contiguous coverage of its data.
+///
+/// For each tensor, the byte interval must equal `product(shape) * dtype_bits / 8`
+/// without overflow or partial bytes. Sorted intervals must neither overlap nor
+/// leave gaps, including trailing bytes. The official SafeTensors metadata parser
+/// then independently validates the same header without reading weight payloads.
 fn inspect_shard(
     relative_path: &str,
     path: PathBuf,
@@ -883,6 +919,7 @@ fn inspect_shard(
     })
 }
 
+/// Multiplies dimensions with checked arithmetic; a rank-zero tensor has one scalar.
 fn checked_elements(shape: &[u64]) -> Result<u64> {
     shape.iter().try_fold(1_u64, |elements, dimension| {
         elements
@@ -893,6 +930,7 @@ fn checked_elements(shape: &[u64]) -> Result<u64> {
     })
 }
 
+/// Reports an exceeded metadata count bound in the common unsigned-byte/count form.
 fn limit(kind: &'static str, actual: usize, configured: usize) -> CheckpointError {
     CheckpointError::LimitExceeded {
         kind,
@@ -900,6 +938,8 @@ fn limit(kind: &'static str, actual: usize, configured: usize) -> CheckpointErro
         limit: configured as u64,
     }
 }
+
+// Serde visitors preserve exact key and integer semantics at the trust boundary.
 
 #[derive(Debug, Deserialize)]
 struct RawTensor {
@@ -915,6 +955,7 @@ struct RawHeader {
 }
 
 impl<'de> Deserialize<'de> for RawHeader {
+    /// Deserializes a SafeTensors header with duplicate decoded keys rejected.
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -924,10 +965,12 @@ impl<'de> Deserialize<'de> for RawHeader {
         impl<'de> de::Visitor<'de> for HeaderVisitor {
             type Value = RawHeader;
 
+            /// Describes the expected top-level object for Serde's parse diagnostics.
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str("a SafeTensors header object")
             }
 
+            /// Separates metadata from tensors while rejecting repeated names before insertion.
             fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
             where
                 A: de::MapAccess<'de>,
@@ -1091,6 +1134,10 @@ where
     Ok(UniqueStringMap::deserialize(deserializer)?.0)
 }
 
+/// Reads and hashes a size-bounded index, retaining its exact byte identity.
+///
+/// The reader allows at most one byte beyond the configured bound to detect a file
+/// that grows after its initial metadata check; such growth is rejected.
 fn read_index(path: &Path, options: &LoadOptions) -> Result<RawIndexDocument> {
     let file = File::open(path)
         .map_err(|error| CheckpointError::io("open checkpoint index", path, error))?;
@@ -1128,6 +1175,7 @@ fn read_index(path: &Path, options: &LoadOptions) -> Result<RawIndexDocument> {
     })
 }
 
+/// Preserves duplicate-key diagnostics separately from other malformed JSON errors.
 fn classify_json_error(
     kind: &'static str,
     path: &Path,

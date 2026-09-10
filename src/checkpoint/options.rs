@@ -1,4 +1,10 @@
 //! Loader policy and resource bounds.
+//!
+//! Policy is explicit data shared by discovery and load planning. Resource bounds
+//! constrain untrusted metadata before weight allocation; missing/unexpected key
+//! exceptions and index aliases must be named rather than inferred. Dtype policy
+//! selects float conversion while concrete architecture dtype requirements remain
+//! authoritative for numerically sensitive parameters.
 
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +67,7 @@ pub struct ArtifactLimits {
 }
 
 impl Default for ArtifactLimits {
+    /// Sets finite metadata bounds without allocating buffers or inspecting artifacts.
     fn default() -> Self {
         Self {
             max_header_bytes: 100_000_000,

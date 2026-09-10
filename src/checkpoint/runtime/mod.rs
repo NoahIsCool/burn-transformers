@@ -333,6 +333,7 @@ pub enum ExecutionFailureCause<E> {
 }
 
 impl<E: fmt::Display> fmt::Display for ExecutionFailureCause<E> {
+    /// Formats the checkpoint cause or identifies an architecture-owned sink failure.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Checkpoint(error) => error.fmt(formatter),
@@ -342,6 +343,7 @@ impl<E: fmt::Display> fmt::Display for ExecutionFailureCause<E> {
 }
 
 impl<E: Error + 'static> Error for ExecutionFailureCause<E> {
+    /// Exposes the underlying checkpoint or sink error for chained diagnostics.
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Checkpoint(error) => Some(error),
@@ -375,6 +377,7 @@ pub struct ExecutionFailure<E> {
 pub type ExecutionResult<T, E> = Result<T, Box<ExecutionFailure<E>>>;
 
 impl<E: fmt::Display> fmt::Display for ExecutionFailure<E> {
+    /// Formats the failed target when known while retaining the underlying cause.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(target) = &self.failed_target {
             write!(
@@ -389,6 +392,7 @@ impl<E: fmt::Display> fmt::Display for ExecutionFailure<E> {
 }
 
 impl<E: Error + 'static> Error for ExecutionFailure<E> {
+    /// Exposes the categorized cause without discarding the partial execution report.
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         Some(&self.cause)
     }
@@ -937,6 +941,7 @@ struct SharedSourceKey<'a> {
 }
 
 impl<'a> From<&'a PlannedSource> for SharedSourceKey<'a> {
+    /// Borrows the complete physical descriptor used to group slices of one fused source.
     fn from(source: &'a PlannedSource) -> Self {
         Self {
             name: &source.name,

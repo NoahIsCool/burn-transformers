@@ -1,4 +1,16 @@
 //! Deterministic `f32` reference conversion for packed Burnpack weights.
+//!
+//! For each contiguous row-major group, compute `s = max(abs(x)) / qmax` and
+//! `q = clamp(round(x / s), -qmax, qmax)`, then reconstruct `x_hat = s * q`.
+//! Arithmetic uses F32, including narrowed F64 inputs; half formats widen before
+//! the maximum reduction. Ties round away from zero. Zero groups use `s = 1`,
+//! and a subnormal fallback prevents nonzero groups from acquiring a zero scale.
+//!
+//! Two scans per group avoid a whole-tensor decoded F32 copy. Q4 uses low-nibble
+//! first signed codes, zeroes an unused final nibble, and excludes the asymmetric
+//! minimum code. Persisted scales must be positive and finite. Native packed
+//! execution additionally requires row/group alignment; representable storage
+//! alone does not establish backend or autodiff support.
 
 use std::io::Write;
 
@@ -12,6 +24,8 @@ use super::{
     Result, SourceFloatDType, SymmetricQuantization, WeightQuantizationConfig,
     classify_weight_for_quantization, provenance::quantized_payload_sha256,
 };
+
+// Validated packed ownership and storage/backend conversion boundaries.
 
 /// Bounded-work statistics produced by the reference converter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,6 +353,9 @@ pub fn quantize_tensor_data(
     })
 }
 
+// Scalar reference arithmetic and canonical wire-code validation.
+
+/// Computes the flattened element count without overflowing the host index type.
 fn checked_num_elements(shape: &[usize]) -> Result<usize> {
     shape.iter().try_fold(1_usize, |elements, &dimension| {
         elements
@@ -347,6 +364,7 @@ fn checked_num_elements(shape: &[usize]) -> Result<usize> {
     })
 }
 
+/// Requires exact native-endian source byte length before indexed scalar decoding.
 fn validate_source_bytes(
     source: &TensorData,
     dtype: SourceFloatDType,
@@ -365,6 +383,10 @@ fn validate_source_bytes(
     Ok(())
 }
 
+/// Decodes one prevalidated native-endian source scalar into the F32 quantizer domain.
+///
+/// F16/BF16 values widen exactly; F64 values round to F32. The caller checks
+/// finite values after conversion, including overflow introduced by narrowing.
 fn read_f32(source: &TensorData, dtype: SourceFloatDType, index: usize) -> Result<f32> {
     let width = dtype.byte_width();
     let offset = index
@@ -402,6 +424,10 @@ fn read_f32(source: &TensorData, dtype: SourceFloatDType, index: usize) -> Resul
     Ok(value)
 }
 
+/// Computes `max_abs / qmax`, using one for zero groups and a subnormal fallback.
+///
+/// If division underflows to zero, retaining `max_abs` keeps the scale positive
+/// and representable, at the cost of using fewer integer codes for that group.
 fn canonical_scale(max_abs: f32, scheme: SymmetricQuantization) -> f32 {
     if max_abs == 0.0 {
         return 1.0;
@@ -410,11 +436,16 @@ fn canonical_scale(max_abs: f32, scheme: SymmetricQuantization) -> f32 {
     if divided == 0.0 { max_abs } else { divided }
 }
 
+/// Rounds `value / scale` with ties away from zero and clamps to the symmetric code grid.
 fn quantize_value(value: f32, scale: f32, scheme: SymmetricQuantization) -> i8 {
     let qmax = f32::from(scheme.qmax());
     (value / scale).round().clamp(-qmax, qmax) as i8
 }
 
+/// Appends a Q8 code or packs a Q4 code with even indices in the low nibble.
+///
+/// The caller visits contiguous increasing indices, so every odd index completes
+/// the byte created by its preceding even index.
 fn push_code(scheme: SymmetricQuantization, output: &mut Vec<u8>, index: usize, code: i8) {
     match scheme {
         SymmetricQuantization::Q8 => output.push(code as u8),
@@ -429,6 +460,7 @@ fn push_code(scheme: SymmetricQuantization, output: &mut Vec<u8>, index: usize, 
     }
 }
 
+/// Reads a prevalidated packed code, sign-extending a Q4 two's-complement nibble.
 fn decode_code(scheme: SymmetricQuantization, packed: &[u8], index: usize) -> i8 {
     match scheme {
         SymmetricQuantization::Q8 => packed[index] as i8,
@@ -444,6 +476,7 @@ fn decode_code(scheme: SymmetricQuantization, packed: &[u8], index: usize) -> i8
     }
 }
 
+/// Requires each persisted F32 scale to be finite and strictly positive.
 fn validate_scales(scales: &[f32]) -> Result<()> {
     for (group, &scale) in scales.iter().enumerate() {
         if !scale.is_finite() || scale <= 0.0 {
@@ -453,6 +486,7 @@ fn validate_scales(scales: &[f32]) -> Result<()> {
     Ok(())
 }
 
+/// Rejects asymmetric reserved codes and nonzero unused high-nibble padding.
 fn validate_codes(scheme: SymmetricQuantization, elements: usize, packed: &[u8]) -> Result<()> {
     for index in 0..elements {
         let value = decode_code(scheme, packed, index);
@@ -475,6 +509,7 @@ fn validate_codes(scheme: SymmetricQuantization, elements: usize, packed: &[u8])
     Ok(())
 }
 
+/// Computes a rounded-up quotient without addition overflow for a nonzero divisor.
 const fn ceil_div(value: usize, divisor: usize) -> usize {
     value / divisor + if value.is_multiple_of(divisor) { 0 } else { 1 }
 }

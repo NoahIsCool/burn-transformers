@@ -1,4 +1,10 @@
 //! Quantizer configuration and exact storage-layout vocabulary.
+//!
+//! Contiguous row-major groups share one F32 scale, with symmetric integer codes
+//! `[-127, 127]` for Q8 or `[-7, 7]` for Q4. The unused most-negative code is
+//! reserved for corruption detection. Groups of 32, 64, or 128 values trade scale
+//! overhead against quantization error; their precise packing and scale byte order
+//! are persisted so loading cannot guess a backend-dependent layout.
 
 use serde::{Deserialize, Deserializer, Serialize, de};
 
@@ -58,12 +64,14 @@ impl QuantizationGroupSize {
 }
 
 impl Default for QuantizationGroupSize {
+    /// Selects 64 contiguous values per scale as the default storage group.
     fn default() -> Self {
         Self(64)
     }
 }
 
 impl<'de> Deserialize<'de> for QuantizationGroupSize {
+    /// Deserializes through the constructor so unsupported group sizes cannot bypass validation.
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -118,6 +126,7 @@ pub struct WeightQuantizationConfig {
 }
 
 impl Default for WeightQuantizationConfig {
+    /// Selects symmetric Q8 with 64-value groups for the default accuracy/storage tradeoff.
     fn default() -> Self {
         Self {
             scheme: SymmetricQuantization::Q8,

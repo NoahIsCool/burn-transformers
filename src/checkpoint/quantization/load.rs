@@ -129,6 +129,7 @@ pub enum QuantizedSinkError<E> {
 }
 
 impl<E: fmt::Display> fmt::Display for QuantizedSinkError<E> {
+    /// Formats either the packed-payload failure or the architecture sink rejection.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Quantization(error) => error.fmt(formatter),
@@ -138,6 +139,7 @@ impl<E: fmt::Display> fmt::Display for QuantizedSinkError<E> {
 }
 
 impl<E: StdError + 'static> StdError for QuantizedSinkError<E> {
+    /// Exposes the quantization or architecture error as the next diagnostic cause.
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             Self::Quantization(error) => Some(error),
@@ -147,6 +149,7 @@ impl<E: StdError + 'static> StdError for QuantizedSinkError<E> {
 }
 
 impl<E> From<QuantizationError> for QuantizedSinkError<E> {
+    /// Wraps a packed-format error without changing its structured information.
     fn from(error: QuantizationError) -> Self {
         Self::Quantization(error)
     }
@@ -170,6 +173,7 @@ pub struct QuantizedExecutionFailure<E> {
 }
 
 impl<E: fmt::Display> fmt::Display for QuantizedExecutionFailure<E> {
+    /// Formats the target-specific packed-load failure when execution reached a target.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(target) = &self.failed_target {
             write!(
@@ -188,6 +192,7 @@ impl<E: fmt::Display> fmt::Display for QuantizedExecutionFailure<E> {
 }
 
 impl<E: StdError + 'static> StdError for QuantizedExecutionFailure<E> {
+    /// Exposes the common executor cause while preserving packed-load audit counters.
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         Some(&self.cause)
     }
@@ -214,12 +219,14 @@ impl<E> AuditedQuantizedExecutionFailure<E> {
 }
 
 impl<E: fmt::Display> fmt::Display for AuditedQuantizedExecutionFailure<E> {
+    /// Delegates display to the execution failure; preflight evidence remains structured.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.execution.fmt(formatter)
     }
 }
 
 impl<E: StdError + 'static> StdError for AuditedQuantizedExecutionFailure<E> {
+    /// Exposes the execution failure, including its own checkpoint or sink cause.
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         Some(&self.execution)
     }
@@ -639,6 +646,8 @@ pub fn validate_sidecar_contract(
     Ok(())
 }
 
+// Source wrappers separate structural validation from content-authenticated bypass.
+
 /// Local source whose positive descriptor result follows a complete SHA-256 gate.
 struct ProvenanceLocalSource<'a> {
     inner: LocalShardSource<'a>,
@@ -652,6 +661,7 @@ struct DescriptorBypassPolicySource<'a, S> {
 }
 
 impl<S: TensorSource> TensorSource for DescriptorBypassPolicySource<'_, S> {
+    /// Permits descriptor-only bypass only when both the source and binding policy authorize it.
     fn validate_tensor_descriptor(
         &self,
         source: &crate::checkpoint::PlannedSource,
@@ -660,6 +670,7 @@ impl<S: TensorSource> TensorSource for DescriptorBypassPolicySource<'_, S> {
         Ok(self.allow_descriptor_bypass && descriptor_matches)
     }
 
+    /// Forwards a normal payload read without changing source ownership or accounting.
     fn read_tensor(
         &mut self,
         source: &crate::checkpoint::PlannedSource,
@@ -667,16 +678,19 @@ impl<S: TensorSource> TensorSource for DescriptorBypassPolicySource<'_, S> {
         self.inner.read_tensor(source)
     }
 
+    /// Closes the wrapped source even when descriptor bypass was disabled.
     fn close(&mut self) -> crate::checkpoint::Result<()> {
         self.inner.close()
     }
 
+    /// Returns the wrapped source's unmodified I/O audit counters.
     fn stats(&self) -> crate::checkpoint::SourceStats {
         self.inner.stats()
     }
 }
 
 impl TensorSource for ProvenanceLocalSource<'_> {
+    /// Revalidates structure and permits bypass only after complete content verification.
     fn validate_tensor_descriptor(
         &self,
         source: &crate::checkpoint::PlannedSource,
@@ -685,6 +699,7 @@ impl TensorSource for ProvenanceLocalSource<'_> {
         Ok(self.content_verified)
     }
 
+    /// Reads an ordinary tensor through the same contained local shard source.
     fn read_tensor(
         &mut self,
         source: &crate::checkpoint::PlannedSource,
@@ -692,10 +707,12 @@ impl TensorSource for ProvenanceLocalSource<'_> {
         self.inner.read_tensor(source)
     }
 
+    /// Releases the verified source's active shard handle.
     fn close(&mut self) -> crate::checkpoint::Result<()> {
         self.inner.close()
     }
 
+    /// Returns local read counters independently of provenance-hashing counters.
     fn stats(&self) -> crate::checkpoint::SourceStats {
         self.inner.stats()
     }
@@ -785,6 +802,8 @@ fn post_audited_execution_failure<E>(
     })
 }
 
+// The overlay records successful installs separately from sidecar payload reads.
+
 /// Sink wrapper that chooses packed or original data at the final target boundary.
 struct QuantizedOverlaySink<'a, K> {
     artifact: &'a mut QuantizedBurnpackArtifact,
@@ -813,6 +832,10 @@ impl<'a, K> QuantizedOverlaySink<'a, K> {
 impl<K: TensorSink> TensorSink for QuantizedOverlaySink<'_, K> {
     type Error = QuantizedSinkError<K::Error>;
 
+    /// Forwards a final tensor and records packed application only after sink success.
+    ///
+    /// Targets absent from the sidecar retain the ordinary source-precision path.
+    /// Packed read statistics are maintained separately from successful installation.
     fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
         let Some(metadata) = self.artifact.manifest().tensors.get(target).cloned() else {
             return self
@@ -845,6 +868,7 @@ impl<K: TensorSink> TensorSink for QuantizedOverlaySink<'_, K> {
         Ok(())
     }
 
+    /// Delegates a model alias after its storage owner has been installed by the executor.
     fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error> {
         self.inner
             .alias_tensor(target, source_target)

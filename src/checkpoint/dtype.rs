@@ -1,4 +1,9 @@
 //! SafeTensors dtype metadata and checked storage-size arithmetic.
+//!
+//! Storage validation is independent of backend execution support. A logical
+//! scalar count `N` requires exactly `N * bits / 8` bytes, with overflow and
+//! partial-byte tails rejected. This layer preserves the source dtype spelling;
+//! numerical conversion and backend capability checks happen during execution.
 
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
@@ -138,6 +143,7 @@ impl TensorDType {
 }
 
 impl fmt::Display for TensorDType {
+    /// Formats the canonical SafeTensors dtype name without backend-specific aliases.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
@@ -146,6 +152,7 @@ impl fmt::Display for TensorDType {
 impl FromStr for TensorDType {
     type Err = CheckpointError;
 
+    /// Parses only recognized SafeTensors scalar spellings; unknown types fail closed.
     fn from_str(value: &str) -> Result<Self> {
         let dtype = match value {
             "BOOL" => Self::BOOL,

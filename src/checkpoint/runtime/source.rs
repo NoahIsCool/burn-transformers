@@ -318,6 +318,10 @@ impl<'a> LocalShardSource<'a> {
 }
 
 impl TensorSource for LocalShardSource<'_> {
+    /// Rechecks a plan descriptor against discovery while withholding content authentication.
+    ///
+    /// A matching header alone cannot authorize skipping a payload read: its shard may
+    /// have been replaced or deleted since discovery.
     fn validate_tensor_descriptor(&self, source: &PlannedSource) -> Result<bool> {
         let observed = self.manifest.tensor(&source.name).ok_or_else(|| {
             CheckpointError::PlanManifestMismatch {
@@ -332,6 +336,10 @@ impl TensorSource for LocalShardSource<'_> {
         Ok(false)
     }
 
+    /// Reads one verified tensor interval into owned bytes and records successful I/O.
+    ///
+    /// The offset is relative to the validated data-section start. Allocation and
+    /// byte counters use checked arithmetic; the source retains only one shard handle.
     fn read_tensor(&mut self, source: &PlannedSource) -> Result<SourceTensor> {
         let _ = self.validate_tensor_descriptor(source)?;
         self.ensure_open(&source.shard)?;
@@ -398,11 +406,13 @@ impl TensorSource for LocalShardSource<'_> {
         Ok(payload)
     }
 
+    /// Releases the current shard handle while retaining accumulated audit counters.
     fn close(&mut self) -> Result<()> {
         self.open = None;
         Ok(())
     }
 
+    /// Returns a snapshot of file and payload counters without resetting them.
     fn stats(&self) -> SourceStats {
         self.stats.clone()
     }
