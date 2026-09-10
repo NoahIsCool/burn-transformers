@@ -27,7 +27,7 @@ use crate::{
     models::{
         deepseek_v2::model::tests_support::tiny_config as tiny_deepseek_config,
         muse_glimmer::MuseGlimmerLayerType, nemotron_h::NemotronHBlockType,
-        t5::T5FeedForwardProjection,
+        qwen3_5::Qwen3_5LayerType, t5::T5FeedForwardProjection,
     },
 };
 
@@ -742,6 +742,592 @@ fn required_config_is_bounded_and_regular() {
     assert!(read_required_config(&file).is_err());
     std::fs::create_dir(root.path().join("config.json")).expect("fixture directory");
     assert!(read_required_config(root.path()).is_err());
+}
+
+/// Fixed local artifacts preserve exact size limits and contextual I/O errors.
+#[test]
+fn contained_artifacts_enforce_boundaries_and_requiredness() {
+    let directory = tempfile::tempdir().expect("temporary artifact root");
+    let root = directory.path().canonicalize().expect("canonical root");
+    assert_eq!(
+        contained_regular_file(&root, "absent.json", 2, false).unwrap(),
+        None
+    );
+    let error = contained_regular_file(&root, "absent.json", 2, true).unwrap_err();
+    assert!(matches!(error, Error::Io { path, source }
+        if path == root.join("absent.json") && source.kind() == std::io::ErrorKind::NotFound));
+
+    let path = root.join("config.json");
+    std::fs::write(&path, b"{}").expect("bounded fixture");
+    assert_eq!(
+        contained_regular_file(&root, "config.json", 2, true).unwrap(),
+        Some(path.clone())
+    );
+    assert_eq!(
+        read_required_config(&root).unwrap(),
+        (root.clone(), "{}".into())
+    );
+    assert!(
+        matches!(contained_regular_file(&root, "config.json", 1, true).unwrap_err(),
+        Error::Artifact { path: actual, reason }
+        if actual == path && reason == "config.json exceeds the 1-byte limit")
+    );
+
+    let generation_path = root.join("generation_config.json");
+    File::create(&generation_path)
+        .unwrap()
+        .set_len(MAX_GENERATION_CONFIG_BYTES + 1)
+        .unwrap();
+    assert!(matches!(read_generation_config(&root).unwrap_err(),
+        Error::Artifact { path: actual, reason }
+        if actual == generation_path && reason == format!("generation_config.json exceeds the {MAX_GENERATION_CONFIG_BYTES}-byte limit")));
+    File::create(&path)
+        .unwrap()
+        .set_len(MAX_CONFIG_BYTES + 1)
+        .unwrap();
+    assert!(matches!(read_required_config(&root).unwrap_err(),
+        Error::Artifact { path: actual, reason }
+        if actual == path && reason == format!("config.json exceeds the {MAX_CONFIG_BYTES}-byte limit")));
+}
+
+/// Artifact type and text decoding errors identify the actual offending path.
+#[test]
+fn required_config_preserves_artifact_type_and_encoding_errors() {
+    let directory = tempfile::tempdir().expect("temporary artifact root");
+    let root = directory.path().canonicalize().expect("canonical root");
+    let missing = root.join("missing-root");
+    assert!(matches!(read_required_config(&missing).unwrap_err(),
+        Error::Io { path, source } if path == missing && source.kind() == std::io::ErrorKind::NotFound));
+    let config_path = root.join("config.json");
+    std::fs::write(&config_path, [0xff]).unwrap();
+    assert!(matches!(read_required_config(&root).unwrap_err(),
+        Error::Io { path, source } if path == config_path && source.kind() == std::io::ErrorKind::InvalidData));
+    assert!(matches!(read_required_config(&config_path).unwrap_err(),
+        Error::Artifact { path, reason } if path == config_path && reason == "model source root must be a directory"));
+    let generation_path = root.join("generation_config.json");
+    std::fs::create_dir(&generation_path).unwrap();
+    assert!(matches!(read_generation_config(&root).unwrap_err(),
+        Error::Artifact { path, reason } if path == generation_path && reason == "generation_config.json must be a regular file"));
+}
+
+/// In-root aliases are valid, but neither required nor optional files may escape.
+#[cfg(unix)]
+#[test]
+fn automatic_metadata_resolves_symlinks_without_escaping_model_root() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().expect("temporary artifact root");
+    let outside = tempfile::tempdir().expect("temporary external root");
+    let root = directory.path().canonicalize().expect("canonical root");
+    let config = root.join("config-data.json");
+    std::fs::write(&config, b"{}").unwrap();
+    symlink("config-data.json", root.join("config.json")).unwrap();
+    assert_eq!(
+        contained_regular_file(&root, "config.json", 2, true).unwrap(),
+        Some(config)
+    );
+    assert_eq!(
+        read_required_config(&root).unwrap(),
+        (root.clone(), "{}".into())
+    );
+
+    let external = outside.path().join("generation.json");
+    std::fs::write(&external, b"{}").unwrap();
+    let external = external.canonicalize().unwrap();
+    symlink(&external, root.join("generation_config.json")).unwrap();
+    assert!(matches!(read_generation_config(&root).unwrap_err(),
+        Error::Artifact { path, reason }
+        if path == external && reason == "generation_config.json resolves outside the model source root"));
+    symlink(&external, root.join("foreign.json")).unwrap();
+    assert!(
+        matches!(contained_regular_file(&root, "foreign.json", 2, true).unwrap_err(),
+        Error::Artifact { path, reason }
+        if path == external && reason == "foreign.json resolves outside the model source root")
+    );
+}
+
+/// Source options remain independently optional and malformed provenance fails early.
+#[test]
+fn automatic_source_metadata_validates_optional_provenance() {
+    let directory = tempfile::tempdir().expect("temporary artifact root");
+    for (repository, revision) in [
+        (None, None),
+        (Some("owner/model"), None),
+        (None, Some("revision")),
+    ] {
+        let options = AutoLoadOptions {
+            repository: repository.map(str::to_owned),
+            revision: revision.map(str::to_owned),
+            ..AutoLoadOptions::default()
+        };
+        let source = source_metadata(directory.path(), "qwen3_5_text", &options).unwrap();
+        assert_eq!(source.root(), directory.path().canonicalize().unwrap());
+        assert_eq!(source.model_type(), "qwen3_5_text");
+        assert_eq!(source.repository(), repository);
+        assert_eq!(source.revision(), revision);
+    }
+    for (options, expected_field, expected_reason) in [
+        (
+            AutoLoadOptions {
+                repository: Some(" owner/model".into()),
+                ..AutoLoadOptions::default()
+            },
+            "model_source.repository",
+            "must be non-empty and contain no surrounding whitespace",
+        ),
+        (
+            AutoLoadOptions {
+                revision: Some("rev\u{0000}ision".into()),
+                ..AutoLoadOptions::default()
+            },
+            "model_source.revision",
+            "must not contain control characters",
+        ),
+    ] {
+        assert!(
+            matches!(source_metadata(directory.path(), "qwen3_5_text", &options).unwrap_err(),
+            Error::Configuration { field, reason } if field == expected_field && reason == expected_reason)
+        );
+    }
+}
+
+/// Explicit generation controls bypass malformed local metadata but remain validated.
+#[test]
+fn explicit_generation_defaults_bypass_artifacts_and_validate_the_override() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    std::fs::write(root.path().join("generation_config.json"), b"not JSON").unwrap();
+    let explicit = GenerationConfig {
+        max_new_tokens: 2,
+        ..GenerationConfig::default()
+    };
+    assert_eq!(
+        normalize_generation_defaults(
+            root.path(),
+            Some(&TokenIds::One(99)),
+            Some(&TokenIds::Many(vec![98, 99])),
+            8,
+            Some(&explicit)
+        )
+        .unwrap(),
+        explicit
+    );
+    let invalid = GenerationConfig {
+        max_new_tokens: 0,
+        ..explicit
+    };
+    assert!(
+        matches!(normalize_generation_defaults(root.path(), None, None, 8, Some(&invalid)).unwrap_err(),
+        Error::Generation(reason) if reason == "max_new_tokens must be greater than zero")
+    );
+    let error = normalize_generation_defaults(root.path(), None, None, 8, None).unwrap_err();
+    assert!(matches!(error, Error::Json { path, source }
+        if path == root.path().canonicalize().unwrap().join("generation_config.json") && source.is_syntax()));
+}
+
+/// Token normalization keeps EOS sets and scalar padding distinct at their boundaries.
+#[test]
+fn generation_special_tokens_preserve_field_context_and_set_semantics() {
+    assert_eq!(
+        normalize_token_list(None, 8, "eos_token_id").unwrap(),
+        Vec::<u32>::new()
+    );
+    assert_eq!(
+        normalize_pad_token(Some(&TokenIds::Many(vec![])), 8).unwrap(),
+        None
+    );
+    assert_eq!(
+        normalize_pad_token(Some(&TokenIds::Many(vec![7, 7])), 8).unwrap(),
+        Some(7)
+    );
+    for (tokens, field, expected) in [
+        (
+            TokenIds::One(8),
+            "eos_token_id",
+            "token 8 is outside vocabulary size 8",
+        ),
+        (
+            TokenIds::One(8),
+            "generation_config.eos_token_id",
+            "token 8 is outside vocabulary size 8",
+        ),
+    ] {
+        assert!(
+            matches!(normalize_token_list(Some(&tokens), 8, field).unwrap_err(),
+            Error::Configuration { field: actual, reason } if actual == field && reason == expected)
+        );
+    }
+    assert!(
+        matches!(normalize_pad_token_named(Some(&TokenIds::Many(vec![1, 2])), 8,
+        "generation_config.pad_token_id").unwrap_err(), Error::Configuration { field, reason }
+        if field == "generation_config.pad_token_id" && reason == "padding requires exactly one token ID")
+    );
+}
+
+/// Wider host vocabularies cannot smuggle unrepresentable IDs into the u32 API.
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn generation_special_tokens_reject_ids_wider_than_runtime() {
+    let oversized = u32::MAX as usize + 1;
+    assert_eq!(
+        normalize_token_list(
+            Some(&TokenIds::One(oversized - 1)),
+            oversized,
+            "eos_token_id"
+        )
+        .unwrap(),
+        [u32::MAX]
+    );
+    assert!(
+        matches!(normalize_token_list(Some(&TokenIds::One(oversized)), oversized + 1,
+        "eos_token_id").unwrap_err(), Error::Configuration { field, reason }
+        if field == "eos_token_id" && reason == format!("token {oversized} does not fit the u32 runtime"))
+    );
+}
+
+/// Local overrides validate active sampling values and retain generation field names.
+#[test]
+fn local_generation_defaults_validate_active_fields() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let path = root.path().join("generation_config.json");
+    for (json, expected_reason) in [
+        (
+            json!({"do_sample": true, "temperature": 0.0}),
+            "temperature must be finite and greater than zero",
+        ),
+        (
+            json!({"do_sample": true, "top_k": 9}),
+            "top_k must be in 1..=8, found 9",
+        ),
+        (
+            json!({"max_new_tokens": 0}),
+            "max_new_tokens must be greater than zero",
+        ),
+    ] {
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(
+            matches!(normalize_generation_defaults(root.path(), None, None, 8, None).unwrap_err(),
+            Error::Generation(reason) if reason == expected_reason)
+        );
+    }
+    for (json, expected_field, expected_reason) in [
+        (
+            json!({"eos_token_id": 8}),
+            "generation_config.eos_token_id",
+            "token 8 is outside vocabulary size 8",
+        ),
+        (
+            json!({"pad_token_id": [1, 2]}),
+            "generation_config.pad_token_id",
+            "padding requires exactly one token ID",
+        ),
+    ] {
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(
+            matches!(normalize_generation_defaults(root.path(), None, None, 8, None).unwrap_err(),
+            Error::Configuration { field, reason } if field == expected_field && reason == expected_reason)
+        );
+    }
+    std::fs::write(
+        &path,
+        br#"{"do_sample":true,"top_k":2,"eos_token_id":[],"pad_token_id":[]}"#,
+    )
+    .unwrap();
+    let normalized = normalize_generation_defaults(
+        root.path(),
+        Some(&TokenIds::One(7)),
+        Some(&TokenIds::One(0)),
+        8,
+        None,
+    )
+    .unwrap();
+    assert_eq!(normalized.strategy, SamplingStrategy::Sample);
+    assert_eq!(normalized.temperature, 1.0);
+    assert_eq!(normalized.top_k, Some(2));
+    assert!(normalized.eos_token_ids.is_empty());
+    assert_eq!(normalized.pad_token_id, None);
+}
+
+/// Absent and explicitly disabled tokenizers do not require decodable artifacts.
+#[test]
+fn optional_tokenizer_respects_absence_and_explicit_disable() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    assert!(
+        load_optional_tokenizer(root.path(), true)
+            .unwrap()
+            .is_none()
+    );
+    std::fs::write(root.path().join("tokenizer.json"), b"not JSON").unwrap();
+    assert!(
+        load_optional_tokenizer(root.path(), false)
+            .unwrap()
+            .is_none()
+    );
+    #[cfg(not(feature = "tokenizers"))]
+    assert!(
+        load_optional_tokenizer(root.path(), true)
+            .unwrap()
+            .is_none()
+    );
+    #[cfg(feature = "tokenizers")]
+    assert!(
+        matches!(load_optional_tokenizer(root.path(), true).unwrap_err(), Error::Tokenizer(reason)
+        if reason.contains("failed to decode") && reason.contains("tokenizer.json"))
+    );
+}
+
+/// Automatic loading must not suppress decoder errors or follow escaping tokenizer files.
+#[cfg(all(feature = "tokenizers", unix))]
+#[test]
+fn enabled_tokenizer_rejects_escaping_artifact() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let outside = tempfile::NamedTempFile::new().expect("external tokenizer fixture");
+    let external = outside.path().canonicalize().unwrap();
+    std::os::unix::fs::symlink(&external, root.path().join("tokenizer.json")).unwrap();
+    assert!(
+        matches!(load_optional_tokenizer(root.path(), true).unwrap_err(),
+        Error::Artifact { path, reason } if path == external && reason == "tokenizer.json resolves outside the model source root")
+    );
+    assert!(
+        load_optional_tokenizer(root.path(), false)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Invalid topologies fail in family parsing before tokenizer or tensor discovery.
+#[test]
+fn automatic_loads_preserve_family_config_error_context() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    for (model_type, family) in [
+        ("deepseek_v2", "deepseek_v2"),
+        ("muse_glimmer_text", "muse_glimmer"),
+        ("nemotron_h", "nemotron_h"),
+        ("qwen3_5_text", "qwen3_5"),
+        ("qwen3_moe", "qwen3_moe"),
+    ] {
+        write_auto_metadata(
+            root.path(),
+            &json!({"model_type": model_type, "vocab_size": 0}),
+        );
+        let error = AutoCausalLm::<TestBackend>::load_local(
+            root.path(),
+            &AutoLoadOptions::default(),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::Configuration { field, reason }
+            if field == "auto_causal.config" && reason == format!("{family}.vocab_size: must be nonzero")));
+    }
+    write_auto_metadata(root.path(), &json!({"model_type": "t5", "vocab_size": 0}));
+    assert!(
+        matches!(AutoSeq2SeqLm::<TestBackend>::load_local(root.path(), &AutoLoadOptions::default(),
+        &Default::default()).unwrap_err(), Error::Configuration { field, reason }
+        if field == "auto_seq2seq.config" && reason == "t5.vocab_size: must be nonzero")
+    );
+}
+
+/// Cross-family options fail before touching otherwise missing model artifacts.
+#[test]
+fn automatic_load_rejects_wrong_family_options_and_registry() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    write_auto_metadata(root.path(), &json!({"model_type": "t5"}));
+    assert!(
+        matches!(AutoCausalLm::<TestBackend>::load_local(root.path(), &AutoLoadOptions::default(),
+        &Default::default()).unwrap_err(), Error::UnsupportedArchitecture(reason)
+        if reason == format!("causal model_type `t5` is not executable; supported values: {}", AutoCausalLm::<TestBackend>::MODEL_TYPES.join(", ")))
+    );
+    let mtp = AutoLoadOptions {
+        qwen_mtp: true,
+        ..AutoLoadOptions::default()
+    };
+    assert!(
+        matches!(AutoCausalLm::<TestBackend>::load_local(root.path(), &mtp,
+        &Default::default()).unwrap_err(), Error::Configuration { field, reason }
+        if field == "auto_causal.qwen_mtp" && reason == "Qwen MTP is defined only for qwen3_5_text checkpoints")
+    );
+    write_auto_metadata(root.path(), &json!({"model_type": "qwen3_moe"}));
+    assert!(
+        matches!(AutoSeq2SeqLm::<TestBackend>::load_local(root.path(), &AutoLoadOptions::default(),
+        &Default::default()).unwrap_err(), Error::UnsupportedArchitecture(reason)
+        if reason == "seq2seq model_type `qwen3_moe` is not executable; supported values: t5")
+    );
+    let packed = AutoLoadOptions {
+        quantized_burnpack: Some("missing.bpk".into()),
+        ..AutoLoadOptions::default()
+    };
+    assert!(
+        matches!(AutoSeq2SeqLm::<TestBackend>::load_local(root.path().join("missing-root"), &packed,
+        &Default::default()).unwrap_err(), Error::BackendCapability(reason)
+        if reason == "packed Burnpack loading is currently certified only for causal model types: muse_glimmer_text, qwen3_5_text, qwen3_moe")
+    );
+}
+
+/// Returns one full-attention Qwen layer with a checkpoint-declared MTP body.
+fn tiny_automatic_qwen_config() -> Qwen3_5TextConfig {
+    Qwen3_5TextConfig {
+        vocab_size: 16,
+        hidden_size: 8,
+        intermediate_size: 16,
+        num_hidden_layers: 1,
+        num_attention_heads: 2,
+        num_key_value_heads: 1,
+        head_dim: 4,
+        max_position_embeddings: 16,
+        layer_types: vec![Qwen3_5LayerType::FullAttention],
+        linear_key_head_dim: 4,
+        linear_value_head_dim: 4,
+        linear_num_key_heads: 1,
+        linear_num_value_heads: 2,
+        linear_conv_kernel_dim: 3,
+        partial_rotary_factor: Some(1.0),
+        rope_theta: Some(10_000.0),
+        mtp_num_hidden_layers: 1,
+        tie_word_embeddings: false,
+        bos_token_id: Some(TokenIds::One(1)),
+        eos_token_id: Some(TokenIds::One(2)),
+        pad_token_id: Some(TokenIds::One(0)),
+        ..Qwen3_5TextConfig::default()
+    }
+}
+
+/// Base-only loading cannot expose an unconsumed MTP graph in either Qwen namespace.
+#[test]
+fn automatic_qwen_namespaces_preserve_explicit_mtp_consumption() {
+    let config = tiny_automatic_qwen_config();
+    for source in [
+        Qwen3_5CheckpointSource::TextOnly,
+        Qwen3_5CheckpointSource::Multimodal,
+    ] {
+        let root = tempfile::tempdir().expect("temporary Qwen checkpoint");
+        let contract = config
+            .checkpoint_contract(Qwen3_5CheckpointOptions {
+                source,
+                include_mtp: true,
+            })
+            .unwrap();
+        write_auto_metadata(root.path(), &config);
+        write_contract_checkpoint(
+            root.path(),
+            contract.expected_tensors(),
+            contract.mappings(),
+        );
+        for include_mtp in [false, true] {
+            let options = AutoLoadOptions {
+                load_tokenizer: false,
+                qwen_mtp: include_mtp,
+                ..AutoLoadOptions::default()
+            };
+            let loaded =
+                AutoCausalLm::<TestBackend>::load_local(root.path(), &options, &Default::default())
+                    .unwrap();
+            let AutoCausalLm::Qwen3_5(model) = loaded.model() else {
+                panic!("Qwen automatic variant")
+            };
+            assert_eq!(model.mtp.is_some(), include_mtp);
+            assert!(loaded.load_report().is_strictly_valid());
+            assert!(loaded.load_report().missing.is_empty());
+            assert!(loaded.load_report().unexpected.is_empty());
+            if include_mtp {
+                assert_strict_report(
+                    loaded.load_report(),
+                    contract.expected_tensors(),
+                    contract.mappings(),
+                );
+            } else {
+                assert_eq!(loaded.load_report().allowlisted_ignored.len(), 15);
+                assert!(
+                    loaded
+                        .load_report()
+                        .allowlisted_ignored
+                        .iter()
+                        .all(|name| name.starts_with("mtp."))
+                );
+            }
+        }
+    }
+}
+
+/// Namespace errors and sidecar paths are preserved by the complete automatic loader.
+#[test]
+fn automatic_causal_load_preserves_namespace_and_sidecar_errors() {
+    for (config, family) in [
+        (
+            serde_json::to_value(tiny_automatic_qwen_config()).unwrap(),
+            "Qwen",
+        ),
+        (serde_json::to_value(packed_muse_config()).unwrap(), "Muse"),
+    ] {
+        let root = tempfile::tempdir().expect("temporary model root");
+        write_auto_metadata(root.path(), &config);
+        for (names, expected) in [
+            (
+                vec!["foreign.weight"],
+                format!(
+                    "{family} checkpoint contains neither official language parameter namespace"
+                ),
+            ),
+            (
+                vec![
+                    "model.embed_tokens.weight",
+                    "model.language_model.embed_tokens.weight",
+                ],
+                format!(
+                    "{family} checkpoint ambiguously contains wrapped and text-only language namespaces"
+                ),
+            ),
+        ] {
+            let expected_tensors = names
+                .iter()
+                .map(|name| ExpectedTensor::new(*name, vec![1]))
+                .collect::<Vec<_>>();
+            let mut mappings = MappingPlan::default();
+            for name in names {
+                mappings.map(name, name);
+            }
+            write_contract_checkpoint(root.path(), &expected_tensors, &mappings);
+            assert!(
+                matches!(AutoCausalLm::<TestBackend>::load_local(root.path(), &AutoLoadOptions::default(),
+                &Default::default()).unwrap_err(), Error::Checkpoint(reason) if reason == expected)
+            );
+        }
+    }
+
+    let root = tempfile::tempdir().expect("temporary Qwen checkpoint");
+    let config = tiny_automatic_qwen_config();
+    let contract = config
+        .checkpoint_contract(Qwen3_5CheckpointOptions {
+            source: Qwen3_5CheckpointSource::TextOnly,
+            include_mtp: false,
+        })
+        .unwrap();
+    write_auto_metadata(root.path(), &config);
+    write_contract_checkpoint(
+        root.path(),
+        contract.expected_tensors(),
+        contract.mappings(),
+    );
+    for supplied in [
+        PathBuf::from("missing.bpk"),
+        root.path()
+            .canonicalize()
+            .unwrap()
+            .join("absolute-missing.bpk"),
+    ] {
+        let resolved = if supplied.is_absolute() {
+            supplied.clone()
+        } else {
+            root.path().canonicalize().unwrap().join(&supplied)
+        };
+        let options = AutoLoadOptions {
+            load_tokenizer: false,
+            quantized_burnpack: Some(supplied),
+            ..AutoLoadOptions::default()
+        };
+        assert!(
+            matches!(AutoCausalLm::<TestBackend>::load_local(root.path(), &options, &Default::default()).unwrap_err(),
+            Error::Artifact { path, reason } if path == resolved && !reason.is_empty())
+        );
+    }
 }
 
 /// The DeepSeek branch performs strict discovery, installation, and execution.

@@ -1,6 +1,6 @@
 use burn::{
     backend::Flex,
-    tensor::{Bool, Int, Tensor, Tolerance},
+    tensor::{Bool, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 
 use super::*;
@@ -533,5 +533,635 @@ fn registry_rejects_unknown_or_malformed_configurations() {
             &device,
         )
         .is_err()
+    );
+}
+
+/// CPU device used to compare enum dispatch with the same concrete parameters.
+type RegistryDevice = <TestBackend as BackendTypes>::Device;
+
+/// Constructs two distinct token rows, preserving batch order explicitly.
+fn registry_tokens<const S: usize>(
+    ids: [[i32; S]; 2],
+    device: &RegistryDevice,
+) -> CausalLmInput<TestBackend> {
+    CausalLmInput {
+        token_ids: Tensor::from_data(
+            TensorData::new(ids.into_iter().flatten().collect::<Vec<_>>(), [2, S]),
+            device,
+        ),
+        token_mask: None,
+        position_ids: None,
+    }
+}
+
+/// Converts a continuation without changing any public input semantics.
+fn registry_decode<const S: usize>(
+    ids: [[i32; S]; 2],
+    device: &RegistryDevice,
+) -> DecodeInput<TestBackend> {
+    let input = registry_tokens(ids, device);
+    DecodeInput {
+        token_ids: input.token_ids,
+        token_mask: input.token_mask,
+        position_ids: input.position_ids,
+    }
+}
+
+/// Requires full-vocabulary parity, not merely agreement of the selected token.
+fn assert_registry_logits(actual: Tensor<TestBackend, 3>, expected: Tensor<TestBackend, 3>) {
+    actual
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::rel_abs(5.0e-4, 5.0e-5));
+}
+
+/// Requires the same typed error and complete contextual diagnostic after dispatch.
+fn assert_registry_error(actual: Error, expected: Error) {
+    assert_eq!(
+        core::mem::discriminant(&actual),
+        core::mem::discriminant(&expected)
+    );
+    assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+}
+
+/// Exercises every causal trait entry point and nonempty cache lifecycle operation.
+///
+/// The concrete graph is initialized before cloning, so enum and direct calls
+/// share parameters. Distinct rows expose swapped-cache bugs; a fresh stateless
+/// computation additionally detects cache damage after rejected operations.
+fn assert_causal_dispatch_contract<M>(
+    concrete: M,
+    family: &str,
+    cache: CacheConfig,
+    can_rewind_nonzero: bool,
+    device: &RegistryDevice,
+) where
+    M: CausalLanguageModel<TestBackend> + Clone,
+    AutoCausalLm<TestBackend>: From<M>,
+{
+    let options = ForwardOptions {
+        logits: LogitsSelection::Last,
+        ..Default::default()
+    };
+    let prompt = registry_tokens([[1, 2], [3, 4]], device);
+    let initial = concrete.forward(prompt.clone(), &options).unwrap().logits;
+    let automatic = AutoCausalLm::from(concrete.clone());
+    assert_eq!(automatic.config().model_type(), family);
+    assert_eq!(automatic.config().vocabulary_size(), 32);
+    assert_registry_logits(
+        CausalLanguageModel::forward(&automatic, prompt.clone(), &options)
+            .unwrap()
+            .logits,
+        initial.clone(),
+    );
+
+    assert_registry_error(
+        CausalLanguageModel::new_decode_state(&automatic, cache, 0, device).unwrap_err(),
+        concrete.new_decode_state(cache, 0, device).unwrap_err(),
+    );
+    let mut state = CausalLanguageModel::new_decode_state(&automatic, cache, 2, device).unwrap();
+    let mut direct = concrete.new_decode_state(cache, 2, device).unwrap();
+    assert_eq!(state.batch_size(), 2);
+    assert_eq!(state.capacity(), 8);
+    assert_eq!(state.lengths(), [0, 0]);
+    assert_eq!(state.device(), device);
+    assert_registry_logits(
+        CausalLanguageModel::prefill(&automatic, prompt.clone(), &mut state, &options)
+            .unwrap()
+            .logits,
+        concrete
+            .prefill(prompt.clone(), &mut direct, &options)
+            .unwrap()
+            .logits,
+    );
+    assert_eq!(state.lengths(), [2, 2]);
+    assert_registry_logits(
+        CausalLanguageModel::decode(
+            &automatic,
+            registry_decode([[5], [6]], device),
+            &mut state,
+            &options,
+        )
+        .unwrap()
+        .logits,
+        concrete
+            .decode(registry_decode([[5], [6]], device), &mut direct, &options)
+            .unwrap()
+            .logits,
+    );
+    assert_eq!(state.lengths(), [3, 3]);
+
+    state.reorder(&[1, 0]).unwrap();
+    direct.reorder(&[1, 0]).unwrap();
+    state.truncate(&[3, 3]).unwrap();
+    direct.truncate(&[3, 3]).unwrap();
+    for indices in [&[][..], &[2, 0][..]] {
+        assert_registry_error(
+            state.reorder(indices).unwrap_err(),
+            direct.reorder(indices).unwrap_err(),
+        );
+        assert_eq!(state.lengths(), [3, 3]);
+    }
+    for lengths in [&[3][..], &[4, 3][..]] {
+        assert_registry_error(
+            state.truncate(lengths).unwrap_err(),
+            direct.truncate(lengths).unwrap_err(),
+        );
+        assert_eq!(state.lengths(), [3, 3]);
+    }
+    let continuation = automatic
+        .decode(registry_decode([[9], [10]], device), &mut state, &options)
+        .unwrap()
+        .logits;
+    assert_registry_logits(
+        continuation.clone(),
+        concrete
+            .decode(registry_decode([[9], [10]], device), &mut direct, &options)
+            .unwrap()
+            .logits,
+    );
+    assert_registry_logits(
+        continuation,
+        concrete
+            .forward(
+                registry_tokens([[3, 4, 6, 9], [1, 2, 5, 10]], device),
+                &options,
+            )
+            .unwrap()
+            .logits,
+    );
+
+    state.reorder(&[1, 1]).unwrap();
+    direct.reorder(&[1, 1]).unwrap();
+    let duplicated = automatic
+        .decode(registry_decode([[11], [12]], device), &mut state, &options)
+        .unwrap()
+        .logits;
+    assert_registry_logits(
+        duplicated.clone(),
+        concrete
+            .decode(registry_decode([[11], [12]], device), &mut direct, &options)
+            .unwrap()
+            .logits,
+    );
+    assert_registry_logits(
+        duplicated,
+        concrete
+            .forward(
+                registry_tokens([[1, 2, 5, 10, 11], [1, 2, 5, 10, 12]], device),
+                &options,
+            )
+            .unwrap()
+            .logits,
+    );
+    assert_eq!(state.lengths(), [5, 5]);
+    if can_rewind_nonzero {
+        state.truncate(&[2, 2]).unwrap();
+        direct.truncate(&[2, 2]).unwrap();
+        assert_eq!(state.lengths(), [2, 2]);
+        assert_registry_logits(
+            automatic
+                .decode(registry_decode([[7], [8]], device), &mut state, &options)
+                .unwrap()
+                .logits,
+            concrete
+                .forward(registry_tokens([[1, 2, 7], [1, 2, 8]], device), &options)
+                .unwrap()
+                .logits,
+        );
+    } else {
+        assert_registry_error(
+            state.truncate(&[2, 2]).unwrap_err(),
+            direct.truncate(&[2, 2]).unwrap_err(),
+        );
+        assert_eq!(state.lengths(), [5, 5]);
+    }
+    state.reset().unwrap();
+    direct.reset().unwrap();
+    assert_eq!(state.batch_size(), 2);
+    assert_eq!(state.capacity(), 8);
+    assert_eq!(state.device(), device);
+    assert_eq!(state.lengths(), [0, 0]);
+    assert_registry_logits(
+        automatic
+            .prefill(prompt, &mut state, &options)
+            .unwrap()
+            .logits,
+        initial,
+    );
+}
+
+/// Hybrid Qwen dispatch preserves recurrent-state restrictions and row identity.
+#[test]
+fn qwen_hybrid_auto_trait_dispatch_and_state_lifecycle() {
+    let device = Default::default();
+    assert_causal_dispatch_contract(
+        Qwen3_5ForCausalLm::init(tiny_qwen(), &device).unwrap(),
+        "qwen3_5_text",
+        CacheConfig::new(2, 8).unwrap(),
+        false,
+        &device,
+    );
+}
+
+/// Sparse Qwen dispatch supports rollback of full-history attention state.
+#[test]
+fn qwen_moe_auto_trait_dispatch_and_state_lifecycle() {
+    let device = Default::default();
+    assert_causal_dispatch_contract(
+        Qwen3MoeForCausalLm::init(tiny_qwen_moe(), &device).unwrap(),
+        "qwen3_moe",
+        CacheConfig::new(2, 8).unwrap(),
+        true,
+        &device,
+    );
+}
+
+/// MLA dispatch keeps compressed-cache metadata and tensor row order coherent.
+#[test]
+fn deepseek_auto_trait_dispatch_and_state_lifecycle() {
+    let device = Default::default();
+    assert_causal_dispatch_contract(
+        crate::models::deepseek_v2::model::tests_support::initialized_model(
+            crate::models::deepseek_v2::model::tests_support::tiny_config(),
+            &device,
+        ),
+        "deepseek_v2",
+        CacheConfig::new(2, 8).unwrap(),
+        true,
+        &device,
+    );
+}
+
+/// Muse dispatch rejects rewinding beyond retained sliding-ring history.
+#[test]
+fn muse_auto_trait_dispatch_and_state_lifecycle() {
+    let device = Default::default();
+    assert_causal_dispatch_contract(
+        MuseGlimmerForCausalLm::init(tiny_muse(), &device).unwrap(),
+        "muse_glimmer_text",
+        CacheConfig::new(2, 8)
+            .unwrap()
+            .with_sliding_window(3)
+            .unwrap(),
+        false,
+        &device,
+    );
+}
+
+/// Nemotron dispatch preserves the Mamba recurrent rewind restriction.
+#[test]
+fn nemotron_auto_trait_dispatch_and_state_lifecycle() {
+    let device = Default::default();
+    assert_causal_dispatch_contract(
+        NemotronHForCausalLm::init(tiny_nemotron(), &device).unwrap(),
+        "nemotron_h",
+        CacheConfig::new(2, 8).unwrap(),
+        false,
+        &device,
+    );
+}
+
+/// Every cross-family pairing fails before touching the owning model's live cache.
+#[test]
+fn all_foreign_causal_state_pairs_reject_prefill_and_decode_atomically() {
+    let device = Default::default();
+    let models: Vec<AutoCausalLm<TestBackend>> = vec![
+        Qwen3_5ForCausalLm::init(tiny_qwen(), &device)
+            .unwrap()
+            .into(),
+        Qwen3MoeForCausalLm::init(tiny_qwen_moe(), &device)
+            .unwrap()
+            .into(),
+        crate::models::deepseek_v2::model::tests_support::initialized_model(
+            crate::models::deepseek_v2::model::tests_support::tiny_config(),
+            &device,
+        )
+        .into(),
+        MuseGlimmerForCausalLm::init(tiny_muse(), &device)
+            .unwrap()
+            .into(),
+        NemotronHForCausalLm::init(tiny_nemotron(), &device)
+            .unwrap()
+            .into(),
+    ];
+    let options = ForwardOptions {
+        logits: LogitsSelection::Last,
+        ..Default::default()
+    };
+    for (owner_index, owner) in models.iter().enumerate() {
+        let cache = if owner.config().model_type() == "muse_glimmer_text" {
+            CacheConfig::new(2, 8)
+                .unwrap()
+                .with_sliding_window(3)
+                .unwrap()
+        } else {
+            CacheConfig::new(2, 8).unwrap()
+        };
+        let mut state = owner.new_decode_state(cache, 2, &device).unwrap();
+        owner
+            .prefill(
+                registry_tokens([[1, 2], [3, 4]], &device),
+                &mut state,
+                &options,
+            )
+            .unwrap();
+        for (foreign_index, foreign) in models.iter().enumerate() {
+            if owner_index == foreign_index {
+                continue;
+            }
+            let expected = || {
+                Error::Cache(
+                    "automatic causal decode state belongs to a different architecture".into(),
+                )
+            };
+            assert_registry_error(
+                foreign
+                    .prefill(registry_tokens([[5], [6]], &device), &mut state, &options)
+                    .unwrap_err(),
+                expected(),
+            );
+            assert_registry_error(
+                foreign
+                    .decode(registry_decode([[5], [6]], &device), &mut state, &options)
+                    .unwrap_err(),
+                expected(),
+            );
+            assert_eq!(state.lengths(), [2, 2]);
+        }
+        assert_registry_logits(
+            owner
+                .decode(registry_decode([[5], [6]], &device), &mut state, &options)
+                .unwrap()
+                .logits,
+            owner
+                .forward(registry_tokens([[1, 2, 5], [3, 4, 6]], &device), &options)
+                .unwrap()
+                .logits,
+        );
+        assert_eq!(state.lengths(), [3, 3]);
+    }
+}
+
+/// T5's enum forwards encoder, decoder, state metadata, and cache lifecycle calls.
+#[test]
+fn seq2seq_auto_trait_dispatch_and_state_lifecycle() {
+    let device = Default::default();
+    let concrete = T5ForConditionalGeneration::<TestBackend>::init(tiny_t5(), &device).unwrap();
+    let options = ForwardOptions {
+        logits: LogitsSelection::Last,
+        ..Default::default()
+    };
+    let source = registry_tokens([[8, 9, 10], [11, 12, 13]], &device);
+    let decoder = registry_tokens([[0, 4], [0, 5]], &device);
+    let inputs = Seq2SeqInput {
+        encoder: source.clone(),
+        decoder: decoder.clone(),
+    };
+    let expected = concrete.forward(inputs.clone(), &options).unwrap();
+    let automatic = AutoSeq2SeqLm::from(concrete.clone());
+    assert_eq!(automatic.config().model_type(), "t5");
+    assert_eq!(automatic.config().vocabulary_size(), 32);
+    let actual = Seq2SeqLanguageModel::forward(&automatic, inputs, &options).unwrap();
+    assert_registry_logits(actual.decoder.logits, expected.decoder.logits);
+    assert_registry_logits(actual.encoder.hidden_state, expected.encoder.hidden_state);
+    let encoder = Seq2SeqLanguageModel::encode(&automatic, source.clone(), &options).unwrap();
+    assert_registry_logits(
+        encoder.hidden_state.clone(),
+        concrete
+            .encode(source.clone(), &options)
+            .unwrap()
+            .hidden_state,
+    );
+
+    let cache = CacheConfig::new(2, 8).unwrap();
+    assert_registry_error(
+        Seq2SeqLanguageModel::new_decode_state(&automatic, cache, 0, &device).unwrap_err(),
+        Seq2SeqLanguageModel::new_decode_state(&concrete, cache, 0, &device).unwrap_err(),
+    );
+    let mut state = Seq2SeqLanguageModel::new_decode_state(&automatic, cache, 2, &device).unwrap();
+    let mut direct = Seq2SeqLanguageModel::new_decode_state(&concrete, cache, 2, &device).unwrap();
+    assert_eq!(state.batch_size(), 2);
+    assert_eq!(state.capacity(), 8);
+    assert_eq!(state.lengths(), [0, 0]);
+    assert_eq!(state.device(), &device);
+    assert_registry_logits(
+        Seq2SeqLanguageModel::prefill_decoder(
+            &automatic,
+            &encoder,
+            decoder.clone(),
+            &mut state,
+            &options,
+        )
+        .unwrap()
+        .decoder
+        .logits,
+        Seq2SeqLanguageModel::prefill_decoder(&concrete, &encoder, decoder, &mut direct, &options)
+            .unwrap()
+            .decoder
+            .logits,
+    );
+    assert_registry_logits(
+        Seq2SeqLanguageModel::decode(
+            &automatic,
+            &encoder,
+            registry_decode([[6], [7]], &device),
+            &mut state,
+            &options,
+        )
+        .unwrap()
+        .decoder
+        .logits,
+        Seq2SeqLanguageModel::decode(
+            &concrete,
+            &encoder,
+            registry_decode([[6], [7]], &device),
+            &mut direct,
+            &options,
+        )
+        .unwrap()
+        .decoder
+        .logits,
+    );
+    assert_eq!(state.lengths(), [3, 3]);
+    for indices in [&[][..], &[2, 0][..]] {
+        assert_registry_error(
+            state.reorder(indices).unwrap_err(),
+            DecodeState::reorder(&mut direct, indices).unwrap_err(),
+        );
+        assert_eq!(state.lengths(), [3, 3]);
+    }
+    for lengths in [&[3][..], &[4, 3][..]] {
+        assert_registry_error(
+            state.truncate(lengths).unwrap_err(),
+            DecodeState::truncate(&mut direct, lengths).unwrap_err(),
+        );
+        assert_eq!(state.lengths(), [3, 3]);
+    }
+    state.reorder(&[1, 0]).unwrap();
+    DecodeState::reorder(&mut direct, &[1, 0]).unwrap();
+    let selector = Tensor::<TestBackend, 1, Int>::from_ints([1, 0], &device);
+    let mut swapped_encoder = encoder.clone();
+    swapped_encoder.hidden_state = swapped_encoder.hidden_state.select(0, selector);
+    assert_registry_logits(
+        automatic
+            .decode(
+                &swapped_encoder,
+                registry_decode([[8], [9]], &device),
+                &mut state,
+                &options,
+            )
+            .unwrap()
+            .decoder
+            .logits,
+        Seq2SeqLanguageModel::decode(
+            &concrete,
+            &swapped_encoder,
+            registry_decode([[8], [9]], &device),
+            &mut direct,
+            &options,
+        )
+        .unwrap()
+        .decoder
+        .logits,
+    );
+    state.truncate(&[1, 1]).unwrap();
+    assert_eq!(state.lengths(), [1, 1]);
+    assert_registry_logits(
+        automatic
+            .decode(
+                &swapped_encoder,
+                registry_decode([[10], [11]], &device),
+                &mut state,
+                &options,
+            )
+            .unwrap()
+            .decoder
+            .logits,
+        concrete
+            .forward(
+                Seq2SeqInput {
+                    encoder: registry_tokens([[11, 12, 13], [8, 9, 10]], &device),
+                    decoder: registry_tokens([[0, 10], [0, 11]], &device),
+                },
+                &options,
+            )
+            .unwrap()
+            .decoder
+            .logits,
+    );
+    state.reset().unwrap();
+    assert_eq!(state.lengths(), [0, 0]);
+    assert_eq!(state.batch_size(), 2);
+    assert_eq!(state.capacity(), 8);
+    assert_eq!(state.device(), &device);
+    assert_registry_logits(
+        automatic
+            .prefill_decoder(
+                &encoder,
+                registry_tokens([[0], [0]], &device),
+                &mut state,
+                &options,
+            )
+            .unwrap()
+            .decoder
+            .logits,
+        concrete
+            .forward(
+                Seq2SeqInput {
+                    encoder: source,
+                    decoder: registry_tokens([[0], [0]], &device),
+                },
+                &options,
+            )
+            .unwrap()
+            .decoder
+            .logits,
+    );
+}
+
+/// Registry configuration traits enumerate every executable discriminator explicitly.
+#[test]
+fn automatic_config_discriminators_validate_and_match_runtime_registries() {
+    for config in [
+        AutoCausalConfig::DeepseekV2,
+        AutoCausalConfig::MuseGlimmer,
+        AutoCausalConfig::NemotronH,
+        AutoCausalConfig::Qwen3_5,
+        AutoCausalConfig::Qwen3Moe,
+    ] {
+        config.validate().unwrap();
+    }
+    AutoSeq2SeqConfig::T5.validate().unwrap();
+    assert_eq!(
+        AutoCausalConfig::MODEL_TYPES,
+        AutoCausalLm::<TestBackend>::MODEL_TYPES
+    );
+    assert_eq!(
+        AutoSeq2SeqConfig::MODEL_TYPES,
+        AutoSeq2SeqLm::<TestBackend>::MODEL_TYPES
+    );
+}
+
+/// Null wrappers fall through, while the first non-null wrapper owns model detection.
+#[test]
+fn model_detection_wrapper_precedence_and_typed_failures_are_stable() {
+    for (json, expected) in [
+        (
+            r#"{"model_type":"direct","text_config":null,"language_config":{"model_type":"language"},"llm_config":{"model_type":"llm"}}"#,
+            "language",
+        ),
+        (
+            r#"{"model_type":"direct","text_config":null,"language_config":null,"llm_config":{"model_type":"llm"}}"#,
+            "llm",
+        ),
+        (
+            r#"{"model_type":"direct","text_config":null,"language_config":null,"llm_config":null}"#,
+            "direct",
+        ),
+        (
+            r#"{"model_type":"direct","text_config":{"model_type":"text"},"language_config":{"model_type":"language"}}"#,
+            "text",
+        ),
+    ] {
+        assert_eq!(detect_model_type(json).unwrap(), expected);
+    }
+    for json in [
+        "null",
+        "[]",
+        "7",
+        r#"{"model_type":false}"#,
+        r#"{"model_type":"direct","text_config":{}}"#,
+        r#"{"model_type":"direct","text_config":7}"#,
+    ] {
+        assert!(
+            matches!(detect_model_type(json).unwrap_err(), Error::Configuration { field, reason }
+            if field == "auto.model_type" && reason == "configuration must contain a string model_type")
+        );
+    }
+    assert!(
+        matches!(detect_model_type("{").unwrap_err(), Error::Configuration { field, reason }
+        if field == "auto.config_json" && reason.starts_with("invalid JSON:"))
+    );
+}
+
+/// Each parser maps schema failures into its automatic-model context without allocating weights.
+#[test]
+fn all_registry_parsers_preserve_configuration_error_context() {
+    let device = Default::default();
+    for family in AutoCausalLm::<TestBackend>::MODEL_TYPES {
+        let json =
+            serde_json::json!({"model_type":family,"vocab_size":"not an integer"}).to_string();
+        assert!(
+            matches!(AutoCausalLm::<TestBackend>::from_config_json(&json, &device).unwrap_err(),
+            Error::Configuration { field, reason } if field == "auto_causal.config" && !reason.is_empty())
+        );
+    }
+    assert!(
+        matches!(AutoSeq2SeqLm::<TestBackend>::from_config_json(r#"{"model_type":"t5","vocab_size":"invalid"}"#, &device).unwrap_err(),
+        Error::Configuration { field, reason } if field == "auto_seq2seq.config" && !reason.is_empty())
+    );
+    assert!(
+        matches!(AutoSeq2SeqLm::<TestBackend>::from_config_json(r#"{"model_type":"qwen3_moe"}"#, &device).unwrap_err(),
+        Error::UnsupportedArchitecture(reason) if reason == "seq2seq model_type `qwen3_moe` is not executable; supported values: t5")
     );
 }
