@@ -51,6 +51,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "experiment_interfaces"
+path = "fuzz_targets/experiment_interfaces.rs"
+test = false
+doc = false
+bench = false
+
 # Keep fuzz-only dependencies and sanitizer artifacts outside the runtime package.
 [workspace]
 members = ["."]

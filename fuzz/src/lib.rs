@@ -11,6 +11,7 @@
 pub mod artifacts;
 pub mod cache;
 pub mod configuration;
+pub mod experiment_interfaces;
 pub mod generation;
 pub mod masks;
 
