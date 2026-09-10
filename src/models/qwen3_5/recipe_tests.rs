@@ -524,3 +524,156 @@ fn recipe_backbones_cannot_silently_enter_homogeneous_family_caches() {
         .unwrap_err();
     assert!(error.to_string().contains("stateless"));
 }
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config {
+        cases: 16,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(0x5157_454e_5245_4349),
+        ..Default::default()
+    })]
+
+    #[test]
+    fn qwen_recipe_source_selections_are_exact_or_rejected_before_loading(
+        selected in proptest::collection::vec(0usize..5, 1..5),
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = tiny_config();
+        config.num_hidden_layers = 3;
+        config.layer_types = vec![Qwen3_5LayerType::FullAttention; 3];
+        fixture(directory.path(), &config, false);
+        let mut recipe = Qwen3_5BackboneRecipe::from_config(config.clone()).unwrap();
+        let template = recipe.layers[0].clone();
+        recipe.layers = selected.iter().map(|&index| {
+            let mut layer = template.clone();
+            layer.source_layer = Some(index);
+            layer
+        }).collect();
+        let result = recipe.load_pretrained::<B>(directory.path(), &Default::default(), &Default::default());
+        let valid = selected.iter().all(|&index| index < 3)
+            && selected.iter().copied().collect::<std::collections::BTreeSet<_>>().len() == selected.len();
+        if !valid {
+            let error = result.unwrap_err();
+            proptest::prop_assert!(error.to_string().contains("source_layer"), "{}", error);
+        } else {
+            let loaded = result.unwrap();
+            let family = original(directory.path(), config);
+            proptest::prop_assert!(loaded.report.newly_initialized.is_empty());
+            for (target, &source) in selected.iter().enumerate() {
+                proptest::prop_assert_eq!(
+                    loaded.model.layers[target].mlp.up_proj.weight.val().to_data(),
+                    family.model.layers[source].mlp.up_proj.weight.val().to_data(),
+                );
+                proptest::prop_assert!(loaded.report.reused.iter().any(|item| {
+                    item.source == format!("model.layers.{source}.mlp.up_proj.weight")
+                        && item.target == format!("model.layers.{target}.mlp.up_proj.weight")
+                }), "transfer report must preserve the selected source identity");
+            }
+            let (hidden, _) = loaded.model.forward(&input(), false).unwrap();
+            proptest::prop_assert!(hidden.to_data().to_vec::<f32>().unwrap().iter().all(|value| value.is_finite()));
+        }
+    }
+}
+
+#[test]
+fn qwen_recipe_empty_topology_prefix_and_source_contract_fail_contextually() {
+    let recipe = Qwen3_5BackboneRecipe::from_config(tiny_config()).unwrap();
+    assert_eq!(recipe.source_config(), &tiny_config());
+    for count in [0, 3, usize::MAX] {
+        let error = recipe.clone().prefix(count).unwrap_err();
+        assert!(error.to_string().contains("qwen.recipe.prefix"));
+    }
+    let mut empty = recipe.clone();
+    empty.layers.clear();
+    let error = empty.init_random::<B>(&Default::default()).unwrap_err();
+    assert!(error.to_string().contains("at least one block"));
+
+    let directory = tempfile::tempdir().unwrap();
+    fixture(directory.path(), &tiny_config(), false);
+    for missing in [true, false] {
+        let mut options = Qwen3_5RecipeLoadOptions::default();
+        if missing {
+            options
+                .checkpoint
+                .allow_missing
+                .push(KeyMatcher::prefix("model."));
+        } else {
+            options
+                .checkpoint
+                .allow_unexpected
+                .push(KeyMatcher::prefix("model."));
+        }
+        let error = recipe
+            .load_pretrained::<B>(directory.path(), &options, &Default::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("allowlists"));
+    }
+}
+
+#[test]
+fn qwen_local_recipe_config_is_bounded_and_does_not_require_weight_files() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(Qwen3_5BackboneRecipe::from_local_config(directory.path()).is_err());
+    let path = directory.path().join("config.json");
+    fs::write(&path, b"{invalid").unwrap();
+    let error = Qwen3_5BackboneRecipe::from_local_config(directory.path()).unwrap_err();
+    assert!(error.to_string().contains("qwen.recipe.config"));
+    fs::File::create(&path)
+        .unwrap()
+        .set_len(16 * 1024 * 1024 + 1)
+        .unwrap();
+    let error = Qwen3_5BackboneRecipe::from_local_config(directory.path()).unwrap_err();
+    assert!(error.to_string().contains("16 MiB"));
+    fs::write(&path, serde_json::to_vec(&tiny_config()).unwrap()).unwrap();
+    let recipe = Qwen3_5BackboneRecipe::from_local_config(directory.path()).unwrap();
+    assert_eq!(recipe.source_config(), &tiny_config());
+    assert!(!directory.path().join("model.safetensors").exists());
+    assert!(recipe.init_random::<B>(&Default::default()).is_ok());
+}
+
+#[test]
+fn qwen_recipe_namespace_ambiguity_is_rejected_and_explicit_layout_is_honored() {
+    let directory = tempfile::tempdir().unwrap();
+    fixture(directory.path(), &tiny_config(), false);
+    let recipe = Qwen3_5BackboneRecipe::from_config(tiny_config()).unwrap();
+    let mut explicit = Qwen3_5RecipeLoadOptions::default();
+    explicit.source = Some(Qwen3_5CheckpointSource::TextOnly);
+    assert!(
+        recipe
+            .load_pretrained::<B>(directory.path(), &explicit, &Default::default())
+            .is_ok()
+    );
+
+    // Add a second, physically distinct embedding to create a valid SafeTensors
+    // container whose model namespace is ambiguous before contract matching.
+    let path = directory.path().join("model.safetensors");
+    let bytes = fs::read(&path).unwrap();
+    let header_length = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+    let mut header: Map<String, serde_json::Value> =
+        serde_json::from_slice(&bytes[8..8 + header_length]).unwrap();
+    let mut payload = bytes[8 + header_length..].to_vec();
+    let mut embedding = header["model.embed_tokens.weight"].clone();
+    let offsets = embedding["data_offsets"].as_array().unwrap();
+    let duplicate = payload
+        [offsets[0].as_u64().unwrap() as usize..offsets[1].as_u64().unwrap() as usize]
+        .to_vec();
+    let start = payload.len();
+    payload.extend(duplicate);
+    embedding["data_offsets"] = json!([start, payload.len()]);
+    header.insert("model.language_model.embed_tokens.weight".into(), embedding);
+    let mut header = serde_json::to_vec(&header).unwrap();
+    while !header.len().is_multiple_of(8) {
+        header.push(b' ');
+    }
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(header);
+    bytes.extend(payload);
+    fs::write(path, bytes).unwrap();
+    let error = recipe
+        .load_pretrained::<B>(directory.path(), &Default::default(), &Default::default())
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("exactly one Qwen embedding namespace")
+    );
+}

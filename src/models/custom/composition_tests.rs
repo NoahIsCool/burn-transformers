@@ -532,3 +532,58 @@ fn explicit_bidirectional_policy_replaces_a_trailing_window_consistently() {
         .unwrap();
     assert_close(observed.hidden, expected);
 }
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config {
+        cases: 16,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(0x4355_5354_4f4d_5354),
+        ..Default::default()
+    })]
+
+    #[test]
+    fn modular_partitions_preserve_both_stacks_and_reject_replayed_blocks(
+        depth in 1usize..4,
+        encoder_cut_seed in 0usize..4,
+        decoder_cut_seed in 0usize..4,
+        placement_index in 0usize..3,
+        first_token in 1i32..16,
+    ) {
+        let placement = [NormPlacement::Pre, NormPlacement::Post, NormPlacement::Sandwich][placement_index];
+        let mut stack = spec(placement);
+        stack.layers = vec![stack.layers[0].clone(); depth];
+        let model = ModularSeq2SeqLm::<B>::init(Seq2SeqSpec {
+            encoder: stack.clone(),
+            decoder: stack,
+            cross_attention_heads: 2,
+            cross_attention_head_dim: 4,
+        }, &Default::default()).unwrap().map(&mut FixedParameters::default());
+        let source_tokens = input([[first_token, 2, 3]]);
+        let target_tokens = input([[4, 5, 6]]);
+        let expected = model.forward(Seq2SeqInput {
+            encoder: source_tokens.clone(),
+            decoder: target_tokens.clone(),
+        }, &ForwardOptions { hidden_states: true, ..Default::default() }).unwrap();
+        let encoder_cut = encoder_cut_seed % (depth + 1);
+        let source = model.run_encoder_layers(model.embed_encoder(source_tokens).unwrap(), 0..encoder_cut).unwrap();
+        proptest::prop_assert_eq!(source.next_layer, encoder_cut);
+        if encoder_cut > 0 {
+            proptest::prop_assert!(model.run_encoder_layers(source.clone(), 0..encoder_cut).is_err());
+        }
+        let source = model.normalize_encoder(model.run_encoder_layers(source, encoder_cut..depth).unwrap()).unwrap();
+        proptest::prop_assert_eq!(source.hidden.to_data(), expected.encoder.hidden_state.to_data());
+        let source = EncoderContext {
+            hidden: source.hidden,
+            positions: source.context.positions,
+            token_mask: source.context.token_mask,
+        };
+        let decoder_cut = decoder_cut_seed % (depth + 1);
+        let target = model.run_decoder_layers(model.embed_decoder(target_tokens, source).unwrap(), 0..decoder_cut).unwrap();
+        proptest::prop_assert_eq!(target.next_layer, decoder_cut);
+        if decoder_cut > 0 {
+            proptest::prop_assert!(model.run_decoder_layers(target.clone(), 0..decoder_cut).is_err());
+        }
+        let completed = model.normalize_decoder(model.run_decoder_layers(target, decoder_cut..depth).unwrap()).unwrap();
+        proptest::prop_assert_eq!(completed.hidden.to_data(), expected.decoder.final_hidden_state.unwrap().to_data());
+        proptest::prop_assert!(model.normalize_decoder(completed).is_err());
+    }
+}

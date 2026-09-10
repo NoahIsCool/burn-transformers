@@ -373,3 +373,182 @@ fn t5_embedding_hooks_capture_and_edit_before_layers_and_clear_on_failure() {
     assert!(encoder.embed_with_hooks(invalid, &mut hooks).is_err());
     assert!(hooks.get(&saved).is_err());
 }
+
+// Properties vary execution partitions and geometry, while comparing one fixed
+// parameter graph against itself. These check semantics rather than RNG values.
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config {
+        cases: 16,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(0x5435_5245_4349_5045),
+        ..Default::default()
+    })]
+
+    #[test]
+    fn t5_recipe_partitions_preserve_heterogeneous_graphs_and_relative_translation(
+        geometry in proptest::collection::vec((1usize..4, 1usize..5, 1usize..16), 1..5),
+        cut_seed in 0usize..5,
+        offset in 0i32..64,
+        causal in proptest::bool::ANY,
+    ) {
+        let device = Default::default();
+        let mut recipe = T5EncoderRecipe::from_config(config()).unwrap();
+        let original = recipe.layers[0].clone();
+        recipe.layers = geometry.iter().map(|&(heads, width, feed_forward)| {
+            let mut layer = original.clone();
+            layer.attention_heads = heads;
+            layer.head_dim = width;
+            layer.feed_forward_width = feed_forward;
+            layer
+        }).collect();
+        let encoder = recipe.init::<TestBackend>(&device).unwrap();
+        let depth = geometry.len();
+        let cut = cut_seed % (depth + 1);
+        let state = |translation| {
+            let mut source = input(&device);
+            source.position_ids = Some(Tensor::<TestBackend, 2, Int>::from_ints(
+                [[translation, translation + 2, translation + 7]], &device,
+            ));
+            let mut state = encoder.embed(source).unwrap();
+            state.context = state.context.with_attention(if causal {
+                AttentionPolicy::causal()
+            } else {
+                AttentionPolicy::bidirectional()
+            });
+            state
+        };
+        let expected = encoder.normalize(encoder.run_layers(state(0), 0..depth).unwrap()).unwrap();
+        let prefix = encoder.run_layers(state(offset), 0..cut).unwrap();
+        proptest::prop_assert_eq!(prefix.next_layer, cut);
+        proptest::prop_assert!(!prefix.normalized);
+        let completed = encoder.run_layers(prefix, cut..depth).unwrap();
+        let mut hooks = Hooks::new();
+        let final_norm = hooks.capture(Stack::Encoder.final_norm());
+        let actual = encoder.normalize_with_hooks(completed, &mut hooks).unwrap();
+        proptest::prop_assert_eq!(actual.next_layer, depth);
+        proptest::prop_assert_eq!(values(actual.hidden.clone()), values(expected.hidden));
+        proptest::prop_assert_eq!(values(hooks.get(&final_norm).unwrap()), values(actual.hidden));
+    }
+}
+
+#[test]
+fn t5_recipe_rejects_incompatible_staged_contexts_before_callbacks() {
+    use burn::tensor::DType;
+
+    let device = Default::default();
+    let encoder = T5EncoderRecipe::from_config(config())
+        .unwrap()
+        .init::<TestBackend>(&device)
+        .unwrap();
+    let base = encoder.embed(input(&device)).unwrap();
+    let mut cases = Vec::new();
+    let mut state = base.clone();
+    state.hidden = state.hidden.cast(DType::F64);
+    cases.push((state, "dtype"));
+    let mut state = base.clone();
+    state.next_layer = 4;
+    cases.push((state, "cursor"));
+    let mut state = base.clone();
+    state.context.cross_attention = Some(AttentionPolicy::bidirectional());
+    cases.push((state, "cross-attention"));
+    for layer in [Layer::decoder(0), Layer::encoder(3)] {
+        let mut state = base.clone();
+        state.context = state
+            .context
+            .with_layer_attention(layer, AttentionPolicy::causal());
+        cases.push((state, "outside this encoder"));
+    }
+    let mut state = base.clone();
+    state.context =
+        state
+            .context
+            .with_attention(AttentionPolicy::bidirectional().with_bias(
+                Tensor::<TestBackend, 4>::zeros([1, 1, 1, 1], &device).cast(DType::F64),
+            ));
+    cases.push((state, "bias dtype"));
+    let mut state = base;
+    state.context = state.context.with_attention(
+        AttentionPolicy::bidirectional().with_bias(Tensor::zeros([2, 1, 1, 1], &device)),
+    );
+    cases.push((state, "bias"));
+
+    for (state, diagnostic) in cases {
+        let called = std::cell::Cell::new(false);
+        let mut hooks = Hooks::new();
+        hooks.edit(Layer::encoder(0).residual_pre(), |hidden| {
+            called.set(true);
+            hidden
+        });
+        let error = encoder
+            .run_layers_with_hooks(state, 0..3, &mut hooks)
+            .unwrap_err();
+        assert!(error.to_string().contains(diagnostic), "{error}");
+        assert!(
+            !called.get(),
+            "invalid state invoked a callback: {diagnostic}"
+        );
+    }
+}
+
+#[test]
+fn t5_recipe_rejects_missing_bias_owners_and_inconsistent_encoder_extraction() {
+    let device = Default::default();
+    let mut encoder = T5EncoderRecipe::from_config(config())
+        .unwrap()
+        .init::<TestBackend>(&device)
+        .unwrap();
+    encoder.encoder.block[0]
+        .self_attention
+        .self_attention
+        .relative_attention_bias = None;
+    let error = encoder
+        .run_layers(encoder.embed(input(&device)).unwrap(), 0..1)
+        .unwrap_err();
+    assert!(error.to_string().contains("learned bias owner"));
+
+    for wrong_role in [false, true] {
+        let mut model = T5ForConditionalGeneration::<TestBackend>::init(config(), &device).unwrap();
+        if wrong_role {
+            model.encoder.is_decoder = true;
+        } else {
+            model.encoder.block.pop();
+        }
+        let error = model.into_encoder().unwrap_err();
+        assert!(error.to_string().contains("topology"));
+    }
+}
+
+#[test]
+fn t5_recipe_rejects_empty_inputs_and_reports_full_hidden_diagnostics() {
+    let device = Default::default();
+    let encoder = T5EncoderRecipe::from_config(config())
+        .unwrap()
+        .init::<TestBackend>(&device)
+        .unwrap();
+    for shape in [[0, 3], [1, 0]] {
+        let mut source = input(&device);
+        source.token_ids = Tensor::<TestBackend, 2, Int>::zeros(shape, &device);
+        assert!(
+            encoder
+                .embed(source)
+                .unwrap_err()
+                .to_string()
+                .contains("non-empty")
+        );
+    }
+    let output = encoder
+        .encode(
+            input(&device),
+            &ForwardOptions {
+                hidden_states: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(output.hidden_states.len(), encoder.encoder.block.len() + 2);
+    assert!(
+        output
+            .hidden_states
+            .iter()
+            .all(|hidden| hidden.dims() == [1, 3, 4])
+    );
+}
