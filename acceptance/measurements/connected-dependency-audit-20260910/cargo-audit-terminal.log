@@ -1,0 +1,4 @@
+    Fetching advisory database from `https://github.com/RustSec/advisory-db.git`
+      Loaded 1243 security advisories (from /private/tmp/tfm-advisory-db)
+    Updating crates.io index
+    Scanning /Users/nover/repos/hmm_compression/crates/transformers/Cargo.lock for vulnerabilities (636 crate dependencies)

@@ -1,0 +1,12 @@
+2026-09-10 01:51:55 [INFO] using config from /Users/nover/repos/hmm_compression/crates/transformers/deny.toml
+2026-09-10 01:51:55 [INFO] fetching crates for /Users/nover/repos/hmm_compression/crates/transformers/Cargo.toml
+2026-09-10 01:51:55 [INFO] fetched crates in 250.209417ms
+2026-09-10 01:51:55 [INFO] gathering crates for /Users/nover/repos/hmm_compression/crates/transformers/Cargo.toml
+2026-09-10 01:51:55 [INFO] gathered 491 crates in 508ms
+2026-09-10 01:51:55 [INFO] no workspace dependencies were declared
+2026-09-10 01:51:55 [INFO] checking licenses...
+2026-09-10 01:51:55 [INFO] checking sources...
+2026-09-10 01:51:55 [INFO] sources checked in 0ms
+2026-09-10 01:51:55 [INFO] licenses checked in 7ms
+ licenses ok: 0 errors, 0 warnings, 491 notes
+  sources ok: 0 errors, 0 warnings, 0 notes

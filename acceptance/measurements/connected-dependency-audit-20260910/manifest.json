@@ -1,0 +1,236 @@
+{
+  "schema_version": 1,
+  "measurement": "connected_dependency_audit",
+  "result": "passed",
+  "scope": "Root transformers Cargo.lock advisory/yanked audit, and locked all-feature manifest dependency-graph license/source checks; no runtime/model or full release acceptance claim.",
+  "observed_integration_heads": {
+    "before": "d5c5b2cde0d6e3b6003264059ea5d6970e367356",
+    "after": "80b51e838033cc479ab7d99a97106e5c2309d5a8",
+    "note": "Integration advanced during this independent task. The three audited input hashes below were captured before and after and did not change. The evidence branch itself is not the audited manifest snapshot."
+  },
+  "working_directory": "/Users/nover/repos/hmm_compression/crates/transformers",
+  "inputs": {
+    "Cargo.lock": {
+      "sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+      "before_equals_after": true
+    },
+    "Cargo.toml": {
+      "sha256": "c3636d2468707ddbf33d7c3278f87bf087204e07dfd3da69f886fd3ee018f4e7",
+      "before_equals_after": true
+    },
+    "deny.toml": {
+      "sha256": "ba350ff4078d26291c0b5a12dd6d7ab26cf5b56d4b62775fb9ae2a12a7f42fac",
+      "before_equals_after": true
+    }
+  },
+  "tools": [
+    {
+      "command": [
+        "/private/tmp/tfm-release-tools/bin/cargo-audit",
+        "--version"
+      ],
+      "exit_code": 0,
+      "output": "cargo-audit 0.22.2\n",
+      "binary_sha256": "9f5ec15e6b7f62551a148d4bcbc63ecffc64b1819bbd9be6a14c7d9b7fbf31ab"
+    },
+    {
+      "command": [
+        "/private/tmp/tfm-release-tools/bin/cargo-deny",
+        "--version"
+      ],
+      "exit_code": 0,
+      "output": "cargo-deny 0.20.2\n",
+      "binary_sha256": "69c354d5b393fd3fbbdb6c589a480f70a322d5bd75758b0809211d412b353e74"
+    },
+    {
+      "command": [
+        "cargo",
+        "+stable",
+        "-Vv"
+      ],
+      "exit_code": 0,
+      "release": "1.92.0",
+      "commit_hash": "344c4567c634a25837e3c3476aac08af84cf9203",
+      "host": "aarch64-apple-darwin",
+      "purpose": "Cargo metadata subprocess selected for cargo-deny by RUSTUP_TOOLCHAIN=stable"
+    }
+  ],
+  "advisory_database": {
+    "path": "/private/tmp/tfm-advisory-db",
+    "origin": "https://github.com/RustSec/advisory-db.git",
+    "revision_before": "b50980aad8b8f14f77e25a97b32dd94bf008b0af",
+    "revision_after": "b50980aad8b8f14f77e25a97b32dd94bf008b0af",
+    "worktree_clean_before_and_after": true,
+    "connected_fetch_performed": true,
+    "advisory_count": 1243,
+    "last_commit_time": "2026-09-09T12:49:52+02:00"
+  },
+  "policy": {
+    "deny_all_audit_warnings": true,
+    "existing_maintenance_notices_only": [
+      {
+        "advisory": "RUSTSEC-2025-0141",
+        "package": "bincode",
+        "version": "2.0.1",
+        "classification": "unmaintained"
+      },
+      {
+        "advisory": "RUSTSEC-2024-0436",
+        "package": "paste",
+        "version": "1.0.15",
+        "classification": "unmaintained"
+      }
+    ],
+    "new_waivers_added": false,
+    "license_exceptions_unchanged": [
+      "colored@=3.1.1: MPL-2.0",
+      "option-ext@=0.2.0: MPL-2.0",
+      "webpki-roots@=1.0.9: CDLA-Permissive-2.0"
+    ],
+    "target_arch_filters": [],
+    "target_os_filters": [],
+    "severity_filter": null,
+    "lockfile_modified": false,
+    "manifest_modified_by_task": false,
+    "policy_modified": false
+  },
+  "checks": [
+    {
+      "name": "cargo-audit-connected-terminal",
+      "command": [
+        "/private/tmp/tfm-release-tools/bin/cargo-audit",
+        "audit",
+        "--file",
+        "/Users/nover/repos/hmm_compression/crates/transformers/Cargo.lock",
+        "--db",
+        "/private/tmp/tfm-advisory-db",
+        "--deny",
+        "warnings",
+        "--ignore",
+        "RUSTSEC-2025-0141",
+        "--ignore",
+        "RUSTSEC-2024-0436",
+        "--color",
+        "never"
+      ],
+      "environment_overrides": {
+        "CARGO_NET_OFFLINE": "false"
+      },
+      "started_at_utc": "2026-09-10 01:51:09 UTC",
+      "completion_observed_at_utc": "2026-09-10 01:51:33 UTC",
+      "process_exit_code": 0,
+      "log": {
+        "path": "cargo-audit-terminal.log",
+        "format": "combined tool-captured stdout/stderr, unchanged UTF-8 text",
+        "sha256": "8510139effe3d20ca0b4c894f2e35ef1272b975e78029f4bc555974322fbfe3a",
+        "bytes": 308
+      }
+    },
+    {
+      "name": "cargo-audit-connected-json",
+      "command": [
+        "/private/tmp/tfm-release-tools/bin/cargo-audit",
+        "audit",
+        "--file",
+        "/Users/nover/repos/hmm_compression/crates/transformers/Cargo.lock",
+        "--db",
+        "/private/tmp/tfm-advisory-db",
+        "--deny",
+        "warnings",
+        "--ignore",
+        "RUSTSEC-2025-0141",
+        "--ignore",
+        "RUSTSEC-2024-0436",
+        "--color",
+        "never",
+        "--json"
+      ],
+      "environment_overrides": {
+        "CARGO_NET_OFFLINE": "false"
+      },
+      "started_at_utc": "2026-09-10 01:52:12 UTC",
+      "completion_observed_at_utc": "2026-09-10 01:52:35 UTC",
+      "process_exit_code": 0,
+      "log": {
+        "path": "cargo-audit-report.json",
+        "format": "native JSON report; no surrounding diagnostics were emitted",
+        "sha256": "1ea03680727cc0b2667ccc7e355efc6bb4ac854a79c1291935c565e63c3e59c7",
+        "bytes": 414
+      },
+      "dependency_count": 636,
+      "vulnerability_count": 0,
+      "new_warning_count": 0
+    },
+    {
+      "name": "cargo-deny-connected-licenses-sources",
+      "command": [
+        "/private/tmp/tfm-release-tools/bin/cargo-deny",
+        "--manifest-path",
+        "/Users/nover/repos/hmm_compression/crates/transformers/Cargo.toml",
+        "--locked",
+        "--all-features",
+        "--config",
+        "/Users/nover/repos/hmm_compression/crates/transformers/deny.toml",
+        "--color",
+        "never",
+        "--log-level",
+        "info",
+        "check",
+        "licenses",
+        "sources",
+        "--show-stats"
+      ],
+      "environment_overrides": {
+        "CARGO_NET_OFFLINE": "false",
+        "RUSTUP_TOOLCHAIN": "stable"
+      },
+      "started_at_utc": "2026-09-10 01:51:52 UTC",
+      "completion_observed_at_utc": "2026-09-10 01:52:12 UTC",
+      "process_exit_code": 0,
+      "log": {
+        "path": "cargo-deny-licenses-sources.log",
+        "format": "combined tool-captured stdout/stderr, unchanged UTF-8 text",
+        "sha256": "e3359bdcf583a3e2b19c8b05fb8b5550f6fd795a7a03b78e41fe81e39b95643c",
+        "bytes": 804
+      },
+      "graph_crate_count": 491,
+      "include_dev": true,
+      "include_build": true,
+      "licenses": {
+        "errors": 0,
+        "warnings": 0,
+        "notes": 491
+      },
+      "sources": {
+        "errors": 0,
+        "warnings": 0,
+        "notes": 0
+      }
+    }
+  ],
+  "yanked_check": {
+    "enabled": true,
+    "skipped": false,
+    "registry_update_requested_and_succeeded": true,
+    "eligible_default_registry_packages": 635,
+    "local_packages_not_subject_to_registry_yank": 1,
+    "yanked_warnings": 0,
+    "basis": [
+      "Neither audit invocation used --no-fetch, --no-yanked, --stale or --quiet.",
+      "The non-quiet terminal log contains Updating crates.io index, which is emitted only in the enabled + update-index + database-fetch branch.",
+      "The complete terminal and JSON logs contain no index update/open failures and no couldn't check if the package is yanked diagnostics.",
+      "Reviewed cargo-audit 0.22.2 Auditor::new and check_for_yanked_crates: failed index initialization or per-package lookup emits diagnostics; successful initialization checks every default-registry lockfile package.",
+      "Native JSON settings confirm exactly the two existing maintenance notices are ignored, with no target or severity filters."
+    ],
+    "reviewed_tool_source": {
+      "path": "cargo-audit-0.22.2/src/auditor.rs",
+      "sha256": "b944aaf3c8457567cb3b5f4afb0d9d2534ef37b9cab796486db7609d834e8282"
+    }
+  },
+  "limitations": [
+    "This is a time-bound connected advisory/index observation, not a guarantee of absence of undisclosed vulnerabilities.",
+    "cargo-audit scans all 636 lockfile packages; cargo-deny checks the selected all-feature dependency graph of 491 crates. The graph count is not represented as whole-lockfile license coverage.",
+    "The existing maintenance notices and version-pinned license exceptions remain documented policy, not newly waived failures.",
+    "No Rust compilation, GPU execution, model artifacts, Cargo.lock changes, or coverage exclusions were involved."
+  ]
+}
