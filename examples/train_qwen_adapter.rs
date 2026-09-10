@@ -3,8 +3,19 @@
 //! Random CPU smoke: `cargo run --release --locked --offline --features autodiff --example train_qwen_adapter`
 //! Local weights: append `-- --model-dir /path/to/Qwen3.5-0.8B --steps 40`.
 //! This learns eight synthetic token-label pairs; it is not sentiment evaluation.
+//!
+//! The two-block F32 backbone keeps causal token order and accepts unpadded
+//! `[batch, 3]` IDs. Its parameters are frozen on the autodiff backend, preserving
+//! derivatives through the later block to an inserted residual bottleneck:
+//! `h + 0.1 up(tanh(down(h)))`. A head reads the last token into `[batch, 2]` logits.
+//! The objective is categorical cross entropy plus `0.01 * mean(z^2)`, where `z`
+//! is a selected, gradient-connected MLP activation after that later frozen block.
+//! No dropout or decode cache is used. Native Burn records store trainable parts
+//! and Adam moments separately from the frozen backbone; restored parameter IDs
+//! reconnect optimizer state for an exact next-step comparison.
 
 #[cfg(not(all(feature = "flex", feature = "autodiff")))]
+/// Report missing Flex/autodiff features before attempting adapter training.
 fn main() {
     eprintln!("train_qwen_adapter requires the flex and autodiff features");
     std::process::exit(1);
@@ -15,12 +26,15 @@ fn main() {
 mod support;
 
 #[cfg(all(feature = "flex", feature = "autodiff"))]
+/// Run the frozen-backbone adapter experiment and native Adam resume checks.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     experiment::run()
 }
 
 #[cfg(all(feature = "flex", feature = "autodiff"))]
 mod experiment {
+    //! Registered adapter/head training through a causally executed frozen Qwen prefix.
+
     use burn::{
         backend::{Autodiff, Flex},
         module::{AutodiffModule, Module},
@@ -50,6 +64,7 @@ mod experiment {
     }
 
     impl<B: Backend> Adapter<B> {
+        /// Map `[batch, token, hidden]` through `up(tanh(down(h)))`, restoring the original hidden width.
         fn forward(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
             self.up.forward(self.down.forward(hidden).tanh())
         }
@@ -63,6 +78,7 @@ mod experiment {
     }
 
     impl<B: Backend> TrainableParts<B> {
+        /// Register a bounded bottleneck adapter and binary head for the supplied backbone width.
         fn init(width: usize, device: &B::Device) -> Self {
             let bottleneck = (width / 2).clamp(1, 16);
             Self {
@@ -82,6 +98,8 @@ mod experiment {
     }
 
     impl<B: Backend> Experiment<B> {
+        /// Insert a residual adapter after block zero and return last-token logits plus selected downstream MLP features.
+        /// The selected capture remains gradient-connected, allowing its auxiliary loss to reach the adapter through a frozen block.
         fn forward(&self, input: &CausalLmInput<B>) -> Result<(Tensor<B, 2>, Tensor<B, 3>)> {
             let mut hooks = Hooks::new();
             hooks.edit(Layer::decoder(0).residual_post(), |hidden| {
@@ -111,6 +129,8 @@ mod experiment {
         }
     }
 
+    /// Train only the adapter/head and verify both task and auxiliary gradient routes through the frozen backbone.
+    /// Save and restore trainable parameters with Adam state, compare the next update exactly, and report the synthetic task metrics.
     pub fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let options = Options::parse()?;
         let device = Default::default();

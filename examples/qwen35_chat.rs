@@ -3,6 +3,14 @@
 //! The model repository is multimodal, but this crate intentionally loads only
 //! its language tower. The example casts the BF16 checkpoint to F16 while each
 //! tensor is streamed because that is the validated M3 Metal execution policy.
+//!
+//! Tokenized chat uses `[batch, token]` IDs with causal visibility. The prepared
+//! BF16 weights are streamed into the explicit F16 Metal execution policy; this
+//! program does not imply quantized-training support. Decode state is external to
+//! parameters: its capacity covers the complete prompt plus the requested token
+//! budget, and prefill is chunked into at most 256 tokens. Generation uses the
+//! checkpoint's defaults after overriding `max_new_tokens`. No optimizer records
+//! or training dropout participate in this inference-only path.
 
 #[cfg(all(target_os = "macos", feature = "metal", feature = "chat-templates"))]
 use std::{env, error::Error as StdError, io, path::PathBuf};

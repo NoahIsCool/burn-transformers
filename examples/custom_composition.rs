@@ -6,8 +6,17 @@
 //! Train a warm-color majority classifier with native Burn Adam:
 //! `cargo run --release --features autodiff --example custom_composition -- --train`
 //! Read training/custom_composition.rs for the differentiable capture and learning loop.
+//!
+//! The first residual block uses bidirectional grouped-query attention. The next
+//! mixer broadcasts `W(mean_tokens(h))`, with no softmax or causal mask. Learned
+//! projections explicitly change residual width `8 -> 12 -> 6`; mean pooling
+//! produces `[batch, 6]` features and a `[batch, 2]` task readout. Every token is
+//! valid, so neither mixer nor pooling applies a padding mask. There is no dropout
+//! or decode cache. Training uses F32 Flex autodiff and registered Burn parameters;
+//! the training module owns loss construction, optimization, and record checks.
 
 #[cfg(not(feature = "flex"))]
+/// Report the missing Flex backend required by the local composition example.
 fn main() {
     eprintln!("enable the `flex` feature to run this example");
     std::process::exit(1);
@@ -18,6 +27,7 @@ fn main() {
 mod training;
 
 #[cfg(feature = "flex")]
+/// Dispatch to the structural demonstration or the explicitly requested training loop.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().nth(1).as_deref() == Some("--train") {
         #[cfg(all(feature = "autodiff", feature = "std"))]
@@ -30,6 +40,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(feature = "flex")]
 mod experiment {
+    //! An open two-mixer graph with explicit residual-width boundaries and shared hook points.
+
     use burn::{
         backend::Flex,
         module::Module,
@@ -56,6 +68,8 @@ mod experiment {
     }
 
     impl<B: Backend> HiddenTransform<B> for MeanMixer<B> {
+        /// Project the mean of `[batch, token, channel]` states and broadcast it to every token.
+        /// All positions participate; this mixer assumes the example's unpadded inputs.
         fn forward(
             &self,
             hidden: Tensor<B, 3>,
@@ -82,6 +96,7 @@ mod experiment {
     }
 
     impl<B: Backend> Classifier<B> {
+        /// Register a width-eight attention block, a width-twelve mean mixer, and a six-channel readout boundary.
         pub(super) fn init(device: &B::Device) -> Result<Self> {
             let attention = GroupedQueryAttentionConfig::new(8, 2, 1, 4).init(device)?;
             let first = ResidualBlock::new(
@@ -113,6 +128,7 @@ mod experiment {
         }
 
         #[cfg(all(feature = "autodiff", feature = "std"))]
+        /// Borrow representative registered matrices used to check gradient flow and optimizer updates.
         pub(super) fn training_weights(
             &self,
         ) -> Vec<(&'static str, &burn::module::Param<Tensor<B, 2>>)> {
@@ -135,6 +151,7 @@ mod experiment {
             ]
         }
 
+        /// List the embedding and both residual blocks' valid semantic hook addresses.
         fn activation_points(&self) -> Vec<PointInfo> {
             let mut points = vec![Stack::Encoder.embedding().info()];
             points.extend(self.first.activation_points(Layer::encoder(0)));
@@ -142,6 +159,8 @@ mod experiment {
             points
         }
 
+        /// Run bidirectional attention and the custom mixer, then mean-pool into `[batch, 2]` logits.
+        /// Token positions accompany the context; all input positions are treated as valid.
         pub(super) fn forward(
             &self,
             tokens: Tensor<B, 2, Int>,
@@ -168,6 +187,7 @@ mod experiment {
         }
     }
 
+    /// Verify that a selected custom-block activation can be ablated and restored without editing weights.
     pub fn run() -> Result<()> {
         type B = Flex<f32, i32>;
         let device = Default::default();

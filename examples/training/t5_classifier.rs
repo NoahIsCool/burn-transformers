@@ -1,5 +1,14 @@
 //! Native Burn optimization of the heterogeneous T5 graph from the parent example.
 //! The synthetic task labels positive/negative adjectives, not real sentiment.
+//!
+//! Each example contains four token slots and one binary adjective label. Boolean
+//! masks mark nonzero IDs as valid; bidirectional attention and masked mean pooling
+//! ignore padding. The fixed split withholds noun/adjective combinations while
+//! retaining every vocabulary item in training. Full-batch F32 categorical cross
+//! entropy trains the encoder, inserted adapter, and readout with native Burn Adam.
+//! The parent recipe sets dropout to zero. The final parameter record is saved
+//! from the training owner to preserve layout metadata; this helper checks model
+//! reload equivalence and does not save Adam state for a resumed training run.
 
 #[path = "support.rs"]
 mod support;
@@ -21,10 +30,13 @@ const STEPS: usize = 100;
 const LEARNING_RATE: f64 = 0.01;
 const SEED: u64 = 73;
 
+/// Train the synthetic adjective classifier with the fixed seed and update budget in local ignored storage.
 pub fn run() -> Result<()> {
     train(Path::new("target/training/t5_classifier"), STEPS)
 }
 
+/// Optimize the staged T5 graph using full-batch Adam, then verify held-out learning and parameter-record reload.
+/// The first update checks representative gradient routes; the final record retains every registered model parameter.
 fn train(root: &Path, steps: usize) -> Result<()> {
     let started = Instant::now();
     std::fs::create_dir_all(root)?;
@@ -94,6 +106,7 @@ struct Example {
     label: i32,
 }
 
+/// Enumerate padded/unpadded adjective sentences and deterministically withhold noun/adjective combinations.
 fn dataset() -> (Vec<Example>, Vec<Example>) {
     // 0=pad, 1=this, 2=film, 3=book, 4=story, 5=game, 6=is,
     // 7=good, 8=great, 9=bad, 10=awful, 11=really.
@@ -117,6 +130,7 @@ fn dataset() -> (Vec<Example>, Vec<Example>) {
     (train, test)
 }
 
+/// Pack four-token rows and binary labels, marking nonzero token IDs as valid in the Boolean padding mask.
 fn batch<B: Backend>(rows: &[Example]) -> (CausalLmInput<B>, Tensor<B, 1, Int>) {
     let device = Default::default();
     let ids: Vec<_> = rows.iter().flat_map(|r| r.tokens).collect();

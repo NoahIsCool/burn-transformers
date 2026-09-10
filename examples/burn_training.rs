@@ -2,20 +2,34 @@
 //!
 //! cargo run --release --locked --features train --example burn_training
 //! This small symbolic classification task needs no downloads.
+//!
+//! Inputs are unpadded I32 `[batch, 3]` token IDs. A bidirectional F32 backbone
+//! produces `[batch, token, 8]` states; an adapter edits token zero and a two-class
+//! head reads that token. Its residual is `h + 0.1 dropout(W(h))`. Burn applies
+//! inverted dropout with probability 0.1 during autodiff execution and disables
+//! it on the `.valid()` backend. Mean categorical cross entropy drives native
+//! `TrainStep`; `InferenceStep` exposes the same outputs without backward.
+//! Burn's Learner owns batching, Adam updates, and checkpointing. The reload check
+//! preserves training-module layout metadata before conversion to evaluation.
+//! This fixed-length experiment needs no padding mask or decode cache.
 
 #[cfg(not(all(feature = "train", feature = "flex")))]
+/// Report the missing native Burn training or Flex feature before starting a Learner.
 fn main() {
     eprintln!("enable `train,flex` to run the native Burn Learner example");
     std::process::exit(1);
 }
 
 #[cfg(all(feature = "train", feature = "flex"))]
+/// Launch the native Burn supervised training example and its evaluation checks.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     experiment::run()
 }
 
 #[cfg(all(feature = "train", feature = "flex"))]
 mod experiment {
+    //! Native Burn batching, training/inference traits, dropout, and checkpoint verification.
+
     use burn::{
         backend::{Autodiff, Flex},
         data::{
@@ -60,6 +74,7 @@ mod experiment {
     }
 
     impl<B: Backend> Experiment<B> {
+        /// Register the fixed backbone, adapter, 0.1 dropout, and binary readout in one Burn module.
         fn init(device: &B::Device) -> Self {
             Self {
                 backbone: ModularCausalLm::init(recipe(), device).expect("valid fixed recipe"),
@@ -71,6 +86,8 @@ mod experiment {
             }
         }
 
+        /// Produce binary logits and mean cross entropy after editing token zero in a bidirectional pass.
+        /// The backend determines dropout behavior; all three input tokens are valid.
         fn classify(&self, batch: Batch<B>) -> ClassificationOutput<B> {
             let mut hooks = Hooks::new();
             hooks.edit(Layer::decoder(0).residual_post().token(0), |hidden| {
@@ -103,6 +120,7 @@ mod experiment {
     impl<B: AutodiffBackend> TrainStep for Experiment<B> {
         type Input = Batch<B>;
         type Output = ClassificationOutput<B>;
+        /// Build native Burn training output by differentiating the classification loss through the owning module.
         fn step(&self, batch: Self::Input) -> TrainOutput<Self::Output> {
             let output = self.classify(batch);
             TrainOutput::new(self, output.loss.clone().backward(), output)
@@ -112,11 +130,14 @@ mod experiment {
     impl<B: Backend> InferenceStep for Experiment<B> {
         type Input = Batch<B>;
         type Output = ClassificationOutput<B>;
+        /// Compute classification metrics without invoking backward; evaluation callers use the `.valid()` model.
         fn step(&self, batch: Self::Input) -> Self::Output {
             self.classify(batch)
         }
     }
 
+    /// Train with Burn data loaders and Adam, then verify deterministic evaluation and native checkpoint reload.
+    /// The held-out split changes nuisance-token combinations without changing the first-token labeling rule.
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let directory = std::env::args()
             .nth(1)
@@ -219,6 +240,7 @@ mod experiment {
     #[derive(Clone)]
     struct SymbolBatcher;
     impl<B: Backend> Batcher<B, Item, Batch<B>> for SymbolBatcher {
+        /// Pack symbolic rows into I32 `[batch, 3]` token IDs and `[batch]` labels on the requested device.
         fn batch(&self, items: Vec<Item>, device: &B::Device) -> Batch<B> {
             let count = items.len();
             Batch {
@@ -242,6 +264,7 @@ mod experiment {
             }
         }
     }
+    /// Enumerate sixteen labeled sequences, choosing seen or held-out nuisance-token combinations.
     fn items(held_out: bool) -> Vec<Item> {
         (0..2)
             .flat_map(|label| {
@@ -260,6 +283,7 @@ mod experiment {
             })
             .collect()
     }
+    /// Return held-out mean cross entropy in nats and argmax accuracy on the non-autodiff Flex model.
     fn evaluate(model: &Experiment<Cpu>) -> (f32, f32) {
         let output = model.classify(SymbolBatcher.batch(items(true), &Default::default()));
         let accuracy = output
@@ -272,6 +296,7 @@ mod experiment {
             .into_scalar();
         (output.loss.into_scalar(), accuracy)
     }
+    /// Define two width-eight pre-norm attention/ReLU blocks for the symbolic Learner fixture.
     fn recipe() -> DecoderSpec {
         let norm = NormalizationSpec::Rms {
             epsilon: 1e-6,

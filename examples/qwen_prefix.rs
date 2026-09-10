@@ -7,21 +7,35 @@
 //! `cargo run --release --locked --example qwen_prefix -- MODEL_DIR 4`
 //!
 //! The adapter/classifier are newly initialized. This demonstrates composition
-//! and activation access, not trained sentiment accuracy. Training is v0.3.
+//! and activation access, not trained sentiment accuracy. See `train_qwen_adapter`
+//! for the native Burn training and optimizer-resume workflow.
+//!
+//! Token IDs have axes `[batch, token]`; staged hidden states retain
+//! `[batch, token, hidden]` with the Qwen layer's causal semantics. Final RMS
+//! normalization precedes an explicit width-changing bottleneck and token mean;
+//! the readout retains a singleton token axis, `[batch, 1, 2]`. Inputs here have
+//! no padding. Pretrained tensors are explicitly cast to F32 on Flex, and loading
+//! a prefix skips later blocks and the original vocabulary head. All components
+//! belong to one Burn module; this stateless demo uses neither dropout nor an
+//! external decode cache.
 
 #[cfg(not(feature = "flex"))]
+/// Report the missing Flex feature required by the prefix demonstration.
 fn main() {
     eprintln!("qwen_prefix requires the flex feature");
     std::process::exit(1);
 }
 
 #[cfg(feature = "flex")]
+/// Run local prefix initialization/loading and the custom readout demonstration.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     experiment::run()
 }
 
 #[cfg(feature = "flex")]
 mod experiment {
+    //! Selective Qwen prefix loading and stateless F32 hidden-state readout.
+
     use std::env;
 
     use burn::{
@@ -51,6 +65,8 @@ mod experiment {
         classifier: Linear<B>,
     }
 
+    /// Construct a selected Qwen prefix, capture its final MLP token, and attach an untrained bottleneck/head.
+    /// Local checkpoint tensors are cast explicitly to F32; no later blocks or vocabulary head are needed.
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let device = Default::default();
         B::seed(&device, 42);
@@ -139,6 +155,7 @@ mod experiment {
         Ok(())
     }
 
+    /// Define the small recurrent-plus-full-attention Qwen recipe used for the no-download demonstration.
     fn tiny_config() -> Qwen3_5TextConfig {
         Qwen3_5TextConfig {
             vocab_size: 16,

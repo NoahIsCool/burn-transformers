@@ -1,4 +1,11 @@
 //! Small measurement helpers; optimization stays in each example's native Burn loop.
+//!
+//! Evaluation takes F32 `[examples, classes]` logits and I32 `[examples]` labels;
+//! cross entropy is averaged over examples and reported in nats. Gradient and
+//! update checks sample named rank-two parameter groups, not every model tensor.
+//! Snapshots retain host F32 values for comparison, while records are written by
+//! the caller's owning Burn module. These helpers introduce no masking, dropout,
+//! optimizer state, or gradient detachment policy into the training graph.
 
 use std::{collections::BTreeMap, path::Path};
 
@@ -10,17 +17,25 @@ use burn::{
 };
 use serde::Serialize;
 
+/// Deterministic F32/I32 Flex backend used by the local training fixtures.
 pub type Cpu = Flex<f32, i32>;
+/// Fallible measurement or artifact operation with a contextual displayable error.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+/// Named borrowed rank-two parameter groups selected for gradient and update checks.
 pub type Weights<'a, B> = Vec<(&'static str, &'a Param<Tensor<B, 2>>)>;
+/// Host F32 parameter values indexed by their experiment-readable group names.
 pub type Snapshot = BTreeMap<String, Vec<f32>>;
 
+/// Mean classification loss and accuracy for one explicit evaluation split.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct Scores {
+    /// Mean categorical cross entropy in nats, promoted to F64 for reporting.
     pub loss: f64,
+    /// Fraction of examples whose argmax class matches the integer label.
     pub accuracy: f64,
 }
 
+/// Measure mean categorical cross entropy and argmax accuracy for aligned F32 logits and I32 labels.
 pub fn evaluate(logits: Tensor<Cpu, 2>, labels: Tensor<Cpu, 1, Int>) -> Result<Scores> {
     let loss =
         transformers::training::cross_entropy(logits.clone(), labels.clone())?.into_scalar() as f64;
@@ -43,6 +58,7 @@ pub fn evaluate(logits: Tensor<Cpu, 2>, labels: Tensor<Cpu, 1, Int>) -> Result<S
 
 // Borrow the original parameters: cloning an uninitialized Burn Param can sample
 // a different random value when that clone is first accessed.
+/// Read the original named parameter tensors into host F32 snapshots without cloning lazy parameter owners.
 pub fn snapshot<B: Backend>(weights: Weights<'_, B>) -> Result<Snapshot> {
     weights
         .into_iter()
@@ -50,6 +66,7 @@ pub fn snapshot<B: Backend>(weights: Weights<'_, B>) -> Result<Snapshot> {
         .collect()
 }
 
+/// Require finite, nonzero rank-two Flex gradients for every sampled parameter group.
 pub fn check_gradients<B: Backend>(
     weights: Weights<'_, B>,
     gradients: &GradientsParams,
@@ -67,6 +84,7 @@ pub fn check_gradients<B: Backend>(
     Ok(())
 }
 
+/// Return each named matrix's maximum absolute update, rejecting missing, nonfinite, or effectively unchanged values.
 pub fn changes(before: &Snapshot, after: Snapshot) -> Result<BTreeMap<String, f64>> {
     after
         .into_iter()
@@ -88,29 +106,47 @@ pub fn changes(before: &Snapshot, after: Snapshot) -> Result<BTreeMap<String, f6
         .collect()
 }
 
+/// Return the maximum absolute F32 tensor difference as an F64 reporting scalar.
 pub fn max_error<const D: usize>(a: Tensor<Cpu, D>, b: Tensor<Cpu, D>) -> f64 {
     (a - b).abs().max().into_scalar() as f64
 }
 
+/// Synthetic-task evidence saved before learning/reload checks are enforced.
 #[derive(Serialize)]
 pub struct Report {
+    /// Human-readable synthetic task description.
     pub task: &'static str,
+    /// Backend seed used before initialization.
     pub seed: u64,
+    /// Constant learning rate supplied to the native Burn optimizer.
     pub learning_rate: f64,
+    /// Native Burn optimizer name used by the example.
     pub optimizer: &'static str,
+    /// Configured weight-decay coefficient; zero when no decay is applied.
     pub weight_decay: f64,
+    /// Number of completed full-batch optimizer updates.
     pub steps: usize,
+    /// Number of training sequences, before flattening any query slots.
     pub train_examples: usize,
+    /// Number of held-out sequences.
     pub held_out_examples: usize,
+    /// Held-out metrics before the first optimizer update.
     pub initial: Scores,
+    /// Held-out metrics after training.
     pub final_scores: Scores,
+    /// Training-split metrics after training.
     pub final_train_scores: Scores,
+    /// Maximum absolute changes for the sampled named parameter groups.
     pub parameter_changes: BTreeMap<String, f64>,
+    /// Maximum absolute held-out logit difference after reloading the model record.
     pub reload_logit_error: f64,
+    /// Elapsed wall time for initialization, training, evaluation, and record checks.
     pub seconds: f64,
 }
 
 impl Report {
+    /// Persist metrics before enforcing held-out learning and model-reload tolerances.
+    /// Failed checks leave `result.json` available for inspection.
     pub fn save(self, root: &Path) -> Result<()> {
         let passed = self.final_scores.loss < self.initial.loss * 0.5
             && self.final_scores.accuracy >= 0.875

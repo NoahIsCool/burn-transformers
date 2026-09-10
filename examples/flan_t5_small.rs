@@ -4,11 +4,18 @@
 //! enable the `flex` and `tokenizers` features, and pass its directory as the first argument:
 //!
 //! ```text
-//! cargo run --release --manifest-path crates/transformers/Cargo.toml \
+//! cargo run --release \
 //!   --no-default-features --features std,flex,tokenizers \
 //!   --example flan_t5_small -- /path/to/flan-t5-small \
 //!   "translate English to German: The house is wonderful."
 //! ```
+//!
+//! Flex executes F32 tensors with I32 IDs. Encoder attention is bidirectional;
+//! decoder self-attention is causal, while cross-attention reads valid source
+//! tokens. Source masks travel with tokenized input and cached decode state stays
+//! external to model parameters. Four beams accumulate log-probability scores
+//! under the generator's configured defaults; at most 64 new tokens are produced.
+//! This inference-only path uses no autodiff optimizer or training dropout.
 
 #[cfg(all(feature = "flex", feature = "tokenizers"))]
 use std::{error::Error as StdError, ffi::OsString, io, path::PathBuf};

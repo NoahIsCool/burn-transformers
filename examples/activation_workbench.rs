@@ -4,20 +4,32 @@
 //!
 //! This tiny randomly initialized model needs no checkpoint or tokenizer. The
 //! checks demonstrate intervention behavior, not a learned circuit or task score.
+//!
+//! Hidden tensors use `[batch, token, channel]`; selecting a token retains a
+//! length-one token axis. Captures detach by default, while edits replace values
+//! consumed by later operations. The residual adapter computes `h + 0.1 W(h)`
+//! without changing shape, dtype, or device. Flex uses F32 activations and I32 IDs.
+//! The ordinary pass is causal; a separate stateless pass enables future-token
+//! attention. No dropout or decode cache is used. The owning Burn module registers
+//! both the backbone and adapter for parameter traversal and records.
 
 #[cfg(not(feature = "flex"))]
+/// Report the missing Flex backend before any model or tensor is constructed.
 fn main() {
     eprintln!("enable the `flex` feature to run this example");
     std::process::exit(1);
 }
 
 #[cfg(feature = "flex")]
+/// Run the seeded activation intervention checks on the Flex backend.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     experiment::run()
 }
 
 #[cfg(feature = "flex")]
 mod experiment {
+    //! Registered random-weight graph and scoped F32 activation interventions.
+
     use burn::{
         backend::Flex,
         module::Module,
@@ -45,6 +57,8 @@ mod experiment {
         adapter: Linear<B>,
     }
 
+    /// Demonstrate selected capture, ablation, ordered restoration, and an inserted adapter.
+    /// The final comparison changes causal visibility while retaining the same weights.
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let device = Default::default();
         B::seed(&device, 42);
@@ -143,6 +157,8 @@ mod experiment {
 
     // The experiment above is independent of this recipe. Change either layer's
     // heads or MLP width here; retain matching dimensions in inserted modules.
+    /// Build two width-eight pre-norm blocks with grouped-query attention and ReLU MLPs.
+    /// The fixed vocabulary and absence of positional encoding keep this a small structural fixture.
     fn tiny_architecture() -> DecoderSpec {
         let norm = NormalizationSpec::Rms {
             epsilon: 1e-6,

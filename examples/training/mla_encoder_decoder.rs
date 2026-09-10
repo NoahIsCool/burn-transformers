@@ -1,4 +1,13 @@
 //! Train MLA encoder/decoder modules and a borrowed latent adapter using native AdamW.
+//!
+//! Source IDs are `[batch, 2]`; decoder queries `[10, 11]` ask for warm and cool
+//! counts. Both decoder slots may see each other because their inputs are known
+//! queries, never target answers. All source/query tokens are valid. Three-class
+//! logits `[batch, query, 3]` flatten to `[batch * 2, 3]` with matching labels for
+//! mean categorical cross entropy. A registered adapter edits compressed cross
+//! KV states before expansion, preserving gradients into encoder and MLA modules.
+//! F32 native Burn AdamW uses weight decay 0.1; dropout and caches are absent.
+//! The final model record checks parameter reload, not optimizer-state resumption.
 
 #[path = "support.rs"]
 mod support;
@@ -20,10 +29,13 @@ const STEPS: usize = 600;
 const LEARNING_RATE: f64 = 0.003;
 const SEED: u64 = 101;
 
+/// Train the bidirectional MLA counting task with its fixed AdamW budget in ignored local storage.
 pub fn run() -> Result<()> {
     train(Path::new("target/training/mla_encoder_decoder"), STEPS)
 }
 
+/// Optimize both query answers through encoder, decoder, cross-MLA, and the borrowed latent adapter.
+/// Check representative gradient/update paths and compare held-out logits after native model-record reload.
 fn train(root: &Path, steps: usize) -> Result<()> {
     let started = Instant::now();
     std::fs::create_dir_all(root)?;
@@ -104,6 +116,7 @@ struct Example {
     labels: [i32; 2],
 }
 
+/// Enumerate all ordered source pairs with warm/cool counts, withholding pairs by a fixed arithmetic rule.
 fn dataset() -> (Vec<Example>, Vec<Example>) {
     // Source symbols 1..4 are cool colors, 5..8 are warm colors. Query 10 asks
     // for the warm count, query 11 for the cool count; each answer is 0, 1, or 2.
@@ -126,6 +139,8 @@ fn dataset() -> (Vec<Example>, Vec<Example>) {
     (train, test)
 }
 
+/// Pack source pairs, repeated known query IDs, and example-major flattened count labels.
+/// The label order matches reshaping `[batch, 2, 3]` logits into `[batch * 2, 3]`.
 fn batch<B: Backend>(
     rows: &[Example],
 ) -> (Tensor<B, 2, Int>, Tensor<B, 2, Int>, Tensor<B, 1, Int>) {

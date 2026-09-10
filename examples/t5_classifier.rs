@@ -6,8 +6,17 @@
 //! Train a small synthetic adjective task with native Burn Adam:
 //! `cargo run --release --features autodiff --example t5_classifier -- --train`
 //! Read training/t5_classifier.rs for the loop, held-out split, and record round-trip.
+//!
+//! T5 encoder states are `[batch, token, 16]`. Layers keep that residual width
+//! while changing head counts to `2, 4, 1` and MLP widths to `32, 48, 24`.
+//! Attention is bidirectional; the Boolean token mask uses `true` for real tokens.
+//! Pooling computes `sum(mask * h) / sum(mask)` and requires at least one real
+//! token per row. A registered `h + W(h)` adapter is inserted between encoder
+//! stages before the two-class readout. This recipe sets dropout to zero, uses no
+//! decoder cache, and trains on F32 Flex with ordinary Burn parameter records.
 
 #[cfg(not(feature = "flex"))]
+/// Report the missing Flex backend required by the classifier example.
 fn main() {
     eprintln!("enable the `flex` feature to run this example");
     std::process::exit(1);
@@ -18,6 +27,7 @@ fn main() {
 mod training;
 
 #[cfg(feature = "flex")]
+/// Run the untrained T5 composition, or train its synthetic task when `--train` is supplied.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().nth(1).as_deref() == Some("--train") {
         #[cfg(all(feature = "autodiff", feature = "std"))]
@@ -30,6 +40,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(feature = "flex")]
 mod experiment {
+    //! A heterogeneous T5 encoder with an inserted registered adapter and masked readout.
+
     use burn::{
         backend::Flex,
         module::Module,
@@ -55,6 +67,8 @@ mod experiment {
     }
 
     impl<B: Backend> SentimentClassifier<B> {
+        /// Initialize a three-layer T5 encoder with heterogeneous head/MLP widths and registered adapter/head modules.
+        /// The residual width remains 16 and dropout is explicitly disabled.
         pub(super) fn init(device: &B::Device) -> transformers::Result<Self> {
             // 1. Begin with T5's actual encoder graph, then edit individual layers.
             //    We keep the residual width at 16 while varying attention and MLP widths.
@@ -84,6 +98,8 @@ mod experiment {
         }
 
         #[cfg(all(feature = "autodiff", feature = "std"))]
+        /// Insert the adapter between encoder stages, normalize, and pool real tokens into two-class logits.
+        /// The supplied mask must contain at least one valid token per batch row.
         pub(super) fn logits(&self, input: CausalLmInput<B>) -> transformers::Result<Tensor<B, 2>> {
             let mut state = self.encoder.embed(input)?;
             state = self.encoder.run_layers(state, 0..1)?;
@@ -106,6 +122,7 @@ mod experiment {
         }
 
         #[cfg(all(feature = "autodiff", feature = "std"))]
+        /// Borrow representative embeddings, attention, MLP, adapter, and head matrices for training checks.
         pub(super) fn training_weights(
             &self,
         ) -> Vec<(&'static str, &burn::module::Param<Tensor<B, 2>>)> {
@@ -154,6 +171,7 @@ mod experiment {
         }
     }
 
+    /// Demonstrate padded T5 stage execution, an inserted adapter, and selected MLP capture with random weights.
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let device = Default::default();
         Cpu::seed(&device, 7);

@@ -1,4 +1,13 @@
 //! Train the open mixer and both registered width adapters with native Burn Adam.
+//!
+//! Three unpadded tokens encode a warm-color majority task. Held-out sequences
+//! are disjoint, but may share multisets because the custom mean mixer is
+//! permutation invariant. The F32 objective is `CE(logits, label) + 1e-4 mean(z^2)`
+//! for captured `[batch, token, 24]` MLP activations. `capture_with_grad` keeps
+//! that auxiliary term connected to the registered mixer and width projections.
+//! Attention is bidirectional and no dropout or cache is used. Native Burn Adam
+//! updates the full module; the saved model record verifies evaluation reload,
+//! rather than restoring Adam moments or resuming the optimization sequence.
 
 #[path = "support.rs"]
 mod support;
@@ -23,10 +32,13 @@ const STEPS: usize = 120;
 const LEARNING_RATE: f64 = 0.01;
 const SEED: u64 = 89;
 
+/// Train the color-majority experiment using the fixed native Adam budget and local output directory.
 pub fn run() -> Result<()> {
     train(Path::new("target/training/custom_composition"), STEPS)
 }
 
+/// Optimize task cross entropy plus captured-feature regularization through the custom mixer and width adapters.
+/// Measure held-out learning, representative parameter changes, and native model-record equivalence.
 fn train(root: &Path, steps: usize) -> Result<()> {
     let started = Instant::now();
     std::fs::create_dir_all(root)?;
@@ -96,6 +108,8 @@ struct Example {
     label: i32,
 }
 
+/// Enumerate all 64 ordered color triples and split disjoint sequences using a fixed arithmetic rule.
+/// Labels indicate at least two warm tokens; identical multisets may occur across the split.
 fn dataset() -> (Vec<Example>, Vec<Example>) {
     // Tokens 1=blue, 2=green, 3=red, 4=orange; classify a warm-color majority.
     // Disjoint sequences may share multisets: this bag-of-tokens task intentionally
@@ -118,6 +132,7 @@ fn dataset() -> (Vec<Example>, Vec<Example>) {
     (train, test)
 }
 
+/// Pack unpadded I32 `[batch, 3]` color IDs and aligned `[batch]` majority labels.
 fn batch<B: Backend>(rows: &[Example]) -> (Tensor<B, 2, Int>, Tensor<B, 1, Int>) {
     let device = Default::default();
     (

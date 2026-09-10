@@ -7,8 +7,19 @@
 //! Train a source-counting task with bidirectional decoder queries and native Burn AdamW:
 //! `cargo run --release --features autodiff --example mla_encoder_decoder -- --train`
 //! Read training/mla_encoder_decoder.rs for the task split, loop, and record round-trip.
+//!
+//! Hidden states have axes `[batch, token, 8]`. MLA compresses each source token
+//! into three KV channels, then expands it into the keys and values consumed by
+//! two attention heads; cross-attention keeps source and query lengths independent.
+//! Encoder and cross-attention are unmasked. Decoder self-attention is causal in
+//! the structural demo and bidirectional for the training task's known queries.
+//! All tokens are valid; this example uses no RoPE, dropout, or decode cache.
+//! Residual blocks apply RMS normalization before attention or gated feed-forward
+//! processing. The owning Burn module includes the latent adapter, so F32 autodiff
+//! and native parameter records include its learned `c + 0.1 W(c)` intervention.
 
 #[cfg(not(feature = "flex"))]
+/// Report the missing Flex backend before constructing MLA modules.
 fn main() {
     eprintln!("enable the `flex` feature to run this example");
     std::process::exit(1);
@@ -19,6 +30,7 @@ fn main() {
 mod training;
 
 #[cfg(feature = "flex")]
+/// Dispatch between the structural MLA intervention demo and the synthetic counting training task.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().nth(1).as_deref() == Some("--train") {
         #[cfg(all(feature = "autodiff", feature = "std"))]
@@ -32,6 +44,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(feature = "flex")]
 mod experiment {
+    //! Registered MLA building blocks and caller-selected decoder visibility.
+
     use burn::{
         backend::Flex,
         module::Module,
@@ -57,6 +71,7 @@ mod experiment {
     }
 
     impl<B: Backend> AttentionBlock<B> {
+        /// Construct width-eight pre-attention RMS normalization and two-head MLA with three KV latent channels.
         fn init(device: &B::Device) -> Result<Self> {
             Ok(Self {
                 norm: RmsNormConfig::new(8).init(device)?,
@@ -64,6 +79,9 @@ mod experiment {
             })
         }
 
+        /// Add MLA output to `[batch, query, 8]` residuals after normalizing the query input.
+        /// An explicit source enables cross-attention; otherwise normalized queries also supply keys and values.
+        /// `causal` controls visibility, with no padding mask or rotary positions in this example.
         fn forward(
             &self,
             hidden: Tensor<B, 3>,
@@ -93,6 +111,7 @@ mod experiment {
     }
 
     impl<B: Backend> FeedForwardBlock<B> {
+        /// Construct width-eight RMS normalization and a sixteen-channel gated feed-forward module.
         fn init(device: &B::Device) -> Result<Self> {
             Ok(Self {
                 norm: RmsNormConfig::new(8).init(device)?,
@@ -100,6 +119,7 @@ mod experiment {
             })
         }
 
+        /// Apply the pre-norm feed-forward residual `h + FFN(RMSNorm(h))` without changing token axes.
         fn forward(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
             Ok(hidden.clone() + self.feed_forward.forward(self.norm.forward(hidden))?)
         }
@@ -123,6 +143,7 @@ mod experiment {
     }
 
     impl<B: Backend> EncoderDecoder<B> {
+        /// Register encoder, decoder, cross-MLA, three-class readout, and a three-channel latent adapter.
         pub(super) fn init(device: &B::Device) -> Result<Self> {
             Ok(Self {
                 embedding: EmbeddingConfig::new(16, 8).init(device),
@@ -139,6 +160,7 @@ mod experiment {
         }
 
         #[cfg(all(feature = "autodiff", feature = "std"))]
+        /// Edit cross-attention KV latents with the registered adapter and expose both known query tokens to each other.
         pub(super) fn training_logits(
             &self,
             source: Tensor<B, 2, Int>,
@@ -153,6 +175,7 @@ mod experiment {
         }
 
         #[cfg(all(feature = "autodiff", feature = "std"))]
+        /// Borrow representative embedding, MLA, adapter, and head matrices for gradient/update checks.
         pub(super) fn training_weights(
             &self,
         ) -> Vec<(&'static str, &burn::module::Param<Tensor<B, 2>>)> {
@@ -181,6 +204,7 @@ mod experiment {
             ]
         }
 
+        /// Run the structural example with causal decoder self-attention and independent source visibility.
         fn forward(
             &self,
             source_ids: Tensor<B, 2, Int>,
@@ -190,6 +214,8 @@ mod experiment {
             self.forward_with_visibility(source_ids, target_ids, true, hooks)
         }
 
+        /// Encode source IDs and decode target IDs into `[batch, target, 3]` task logits.
+        /// Register separate encoder, decoder, and cross-attention points; only decoder self-attention uses `decoder_causal`.
         fn forward_with_visibility(
             &self,
             source_ids: Tensor<B, 2, Int>,
@@ -248,6 +274,7 @@ mod experiment {
         }
     }
 
+    /// Capture compressed source KV states, apply a latent adapter, and verify exact restoration within tolerance.
     pub fn run() -> Result<()> {
         let device = Default::default();
         B::seed(&device, 23);
