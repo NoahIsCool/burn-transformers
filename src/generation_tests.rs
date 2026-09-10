@@ -548,3 +548,40 @@ fn tracker_rejects_invalid_tokens_and_impossible_batch_capacity() {
         "capacity overflow must not reach an infallible allocation"
     );
 }
+
+/// Empty generation batches fail explicitly without changing valid processor controls.
+#[test]
+fn empty_tracker_batches_are_rejected_with_the_callers_exact_controls() {
+    let config = GenerationConfig {
+        max_new_tokens: 3,
+        strategy: SamplingStrategy::Sample,
+        temperature: 0.75,
+        top_k: Some(2),
+        top_p: Some(0.9),
+        repetition_penalty: 1.1,
+        presence_penalty: 0.2,
+        seed: 91,
+        eos_token_ids: vec![3],
+        pad_token_id: Some(0),
+        stop_sequences: vec![vec![1, 2]],
+    };
+    let processor = LogitsProcessor::<TestBackend>::new(config.clone(), 4, &Default::default())
+        .expect("valid reusable generation controls");
+    assert_eq!(processor.config(), &config);
+    assert_eq!(processor.clone().config(), &config);
+    let error = GenerationTracker::new(processor.config().clone(), 4, 0)
+        .expect_err("there is no sequence to track in an empty batch");
+    assert!(matches!(error, crate::Error::Generation(ref reason)
+        if reason == "generation batch_size must be greater than zero"));
+    let mut tracker = GenerationTracker::new(processor.config().clone(), 4, 1).unwrap();
+    assert_eq!(tracker.push(0, 1).unwrap(), None);
+    assert_eq!(
+        tracker.push(0, 2).unwrap(),
+        Some(&FinishReason::StopSequence {
+            index: 0,
+            length: 2
+        })
+    );
+    assert_eq!(tracker.generated(0).unwrap(), &[1, 2]);
+    assert_eq!(processor.config(), &config);
+}
