@@ -14,6 +14,7 @@ include = [
     "/tests/**",
     "/scripts/**/*.py",
     "/scripts/COVERAGE_EVIDENCE.md",
+    "/scripts/WHOLE_FILE_COVERAGE.md",
     "/scripts/tests/fixtures/coverage_lines/**",
     "/scripts/tests/fixtures/coverage_dependencies/**",
     "/acceptance/**",

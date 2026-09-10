@@ -1394,6 +1394,13 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   objects authenticated. No test or generated-code exclusions are applied; this
   does not establish production-only coverage. Isolated direct-driver Clippy and
   source/MSRV/accelerator-compile/package checks also pass at that snapshot.
+  A separate [whole-test-file policy](scripts/WHOLE_FILE_COVERAGE.md) now requires
+  classifier ownership, exact unit/production compiler input sets, source hashes,
+  and the actual successful coverage-command log to agree before removing a file.
+  Macro/include/alias references from production veto removal. Mechanically
+  verified shared and Qwen/FLAN test-module extraction makes this distinction
+  possible without changing model execution. Remaining inline tests are retained;
+  this partial diagnostic is not yet a production-only gate.
 - **Public generation overhead has its own benchmark protocol.** Qwen's
   existing model-API loop remains unchanged; a separate ignored benchmark now
   times actual `generate_causal` calls through automatic model dispatch, including

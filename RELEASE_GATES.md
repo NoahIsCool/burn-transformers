@@ -265,6 +265,26 @@ record is retained at `/private/tmp/tfm-extract3-proof.O5At5m/comparison.json`
 The earlier `57d0560` coverage numbers remain historical, not a measurement of
 these newly arranged sources; no new exclusion is inferred from this refactor.
 
+The following shared and Qwen/FLAN batches (`ccc04b8`, `b11795a`) separate 23
+additional terminal test modules, again preserving production prefixes and all
+914 test identities. Their independent worktree comparisons keep 101 production
+inputs unchanged and add only the corresponding unit-test siblings. All unit
+tests and isolated all-target Clippy pass in both worktrees. These structural
+checks neither execute checkpoints nor reuse an old coverage export.
+
+The [whole-test-file diagnostic](scripts/WHOLE_FILE_COVERAGE.md) now joins a fresh
+classifier invocation with authenticated native compiler inputs. A whole-file
+candidate can be excluded only if every parsed context is test-only, it belongs
+to the unit compilation, and no production compilation reports it as an input.
+The exact successful runner row, log name/hash, and strict diagnostic policy are
+also required; another clean log in the directory cannot replace the real log.
+Native fixtures verify macro/include/alias and conditional-path vetoes. Inline,
+generated, unclassified, and ambiguous ownership remains in the denominator.
+This separately scoped file policy does not qualify production-only coverage:
+remaining inline tests can still inflate its physical-line diagnostic. The
+90%/95% requirements are unchanged, and full-crate execution of this new layer
+remains pending.
+
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is
 `819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d`.
