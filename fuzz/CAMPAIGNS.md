@@ -33,3 +33,52 @@ continued; this is a diagnostic limitation, not disabled sanitization. Install a
 matching LLVM symbolizer before investigating a future crash. These short runs
 are reproducible smoke evidence, not exhaustive branch coverage or a substitute
 for the crate's 90%/95% line gates, GPU numerical tests, or real checkpoint tests.
+
+## 2026-09-09: current-runtime v0.1 refresh
+
+The [compact authenticated record](evidence/refresh-80b51e8.json) refreshes all
+five targets against integration commit
+`80b51e838033cc479ab7d99a97106e5c2309d5a8`, runtime source Git tree
+`b4d4a96ca38fdb709bce07b6fd384d497e523f98`. All 137 tracked runtime, harness,
+seed and lockfile compilation inputs had identical content inventories before
+and after execution. Neither Cargo lockfile changed. The initial campaign
+above remains historical evidence; it is not relabeled as this replay.
+
+| Target | Executed inputs | Seed | Native exit | LibFuzzer peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| configuration | 10,000 | 483013554 | 0 | 157 MiB |
+| index_artifacts | 10,000 | 20260909 | 0 | 205 MiB |
+| masks_positions | 10,000 | 20260909 | 0 | 292 MiB |
+| cache_transactions | 10,000 | 20260909 | 0 | 127 MiB |
+| generation | 10,000 | 20260909 | 0 | 100 MiB |
+
+All five final execution counters were exactly 10,000. There were no native
+failure exits, timeout/crash/OOM artifacts, or warning/error/summary
+diagnostics. Instrumented executable hashes matched before and after each
+campaign. Each target used an initially empty writable corpus plus its
+unchanged committed seeds, `-runs=10000 -max_len=4096 -timeout=10
+-rss_limit_mb=2048 -print_final_stats=1`, and an independent 900-second wall
+deadline. Previous generated corpora and artifacts were preserved, not imported
+or overwritten. The reported RSS/rate counters are libFuzzer diagnostics, not
+controlled comparative benchmark results.
+
+The five deterministic Rust harness tests and warning-denied Clippy passed
+before the optimized cargo-fuzz build. Its verbose log confirms ASan,
+sanitizer coverage, debug assertions and overflow checks in the runtime,
+shared harness and all five entry points. Cargo-fuzz `0.13.2` and nightly
+`1.94.0-nightly (4f14395c3 2025-12-22)` were used. The installed Homebrew
+symbolizer `21.1.1` was selected explicitly; its version probe passed and
+campaigns had no symbolizer warning. It matches compiler LLVM `21.1.8` only at
+the major version. No intentional crash or symbolized stack-trace qualification
+was performed. Prebuilt standard-library/native dependency closure is not
+claimed to be rebuilt or hermetically authenticated.
+
+[The supervisor](evidence/run_refresh.py) builds once, then executes native
+targets directly to preserve their exit codes. Its seven Python tests cover
+failure accounting, native signals/timeouts, create-only records, corpus
+identities and compact/raw-record consistency. Source, executable, tool and
+raw-log hashes, exact argument arrays, timestamps, final counters and corpus
+inventory digests are retained in the compact record. Bulk logs, generated
+corpora and the complete source/corpus inventories remain at
+`/private/tmp/transformers-fuzz-refresh.EXC7pm`; their raw report is hashed in
+the committed JSON. No GPU work or runtime source changes were involved.

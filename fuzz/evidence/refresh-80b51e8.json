@@ -1,0 +1,644 @@
+{
+  "build_std": false,
+  "campaigns": {
+    "cache_transactions": {
+      "artifacts": {
+        "file_count": 0,
+        "files_canonical_json_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "present": true,
+        "total_bytes": 0
+      },
+      "command": {
+        "command": [
+          "/private/tmp/hmm-tfm-small-bench/crates/transformers/fuzz/target/aarch64-apple-darwin/release/cache_transactions",
+          "/private/tmp/transformers-fuzz-refresh.EXC7pm/corpus/cache_transactions",
+          "fuzz/seeds/cache_transactions",
+          "-artifact_prefix=/private/tmp/transformers-fuzz-refresh.EXC7pm/artifacts/cache_transactions/",
+          "-runs=10000",
+          "-max_len=4096",
+          "-timeout=10",
+          "-rss_limit_mb=2048",
+          "-seed=20260909",
+          "-print_final_stats=1"
+        ],
+        "cwd": "/private/tmp/hmm-tfm-small-bench/crates/transformers",
+        "elapsed_seconds": 1.255410625017248,
+        "ended_utc": "2026-09-10T02:13:25.633715+00:00",
+        "label": "cache_transactions",
+        "log": {
+          "bytes": 51188,
+          "sha256": "6adf8d73b801af718cfaf5ba812934c9fe0e56a92552e5b7e853397f40ba265e"
+        },
+        "log_path": "/private/tmp/transformers-fuzz-refresh.EXC7pm/cache_transactions.log",
+        "native_returncode": 0,
+        "started_utc": "2026-09-10T02:13:24.378316+00:00",
+        "timed_out": false,
+        "wall_timeout_seconds": 900
+      },
+      "diagnostics": [],
+      "executable_after": {
+        "bytes": 68962224,
+        "sha256": "58420689aa66002b150f3136edf2ab593a1a4be3cde1bedd7c10c6167e934109"
+      },
+      "executable_before": {
+        "bytes": 68962224,
+        "sha256": "58420689aa66002b150f3136edf2ab593a1a4be3cde1bedd7c10c6167e934109"
+      },
+      "executable_path": "/private/tmp/hmm-tfm-small-bench/crates/transformers/fuzz/target/aarch64-apple-darwin/release/cache_transactions",
+      "executed_units": 10000,
+      "failures": [],
+      "final_corpus": {
+        "file_count": 223,
+        "files_canonical_json_sha256": "c66b3bcfef0b66b68b0ea553fed53988c794e31d0c943fccbecebc1da54c8816",
+        "present": true,
+        "total_bytes": 7517
+      },
+      "final_statistics": {
+        "stat::average_exec_per_sec": "0",
+        "stat::new_units_added": "381",
+        "stat::number_of_executed_units": "10000",
+        "stat::peak_rss_mb": "127",
+        "stat::slowest_unit_time_sec": "0"
+      },
+      "initial_corpus": {
+        "file_count": 0,
+        "files_canonical_json_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "present": true,
+        "total_bytes": 0
+      },
+      "passed": true,
+      "seed": 20260909
+    },
+    "configuration": {
+      "artifacts": {
+        "file_count": 0,
+        "files_canonical_json_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "present": true,
+        "total_bytes": 0
+      },
+      "command": {
+        "command": [
+          "/private/tmp/hmm-tfm-small-bench/crates/transformers/fuzz/target/aarch64-apple-darwin/release/configuration",
+          "/private/tmp/transformers-fuzz-refresh.EXC7pm/corpus/configuration",
+          "fuzz/seeds/configuration",
+          "-artifact_prefix=/private/tmp/transformers-fuzz-refresh.EXC7pm/artifacts/configuration/",
+          "-runs=10000",
+          "-max_len=4096",
+          "-timeout=10",
+          "-rss_limit_mb=2048",
+          "-seed=483013554",
+          "-print_final_stats=1"
+        ],
+        "cwd": "/private/tmp/hmm-tfm-small-bench/crates/transformers",
+        "elapsed_seconds": 1.5400475000496954,
+        "ended_utc": "2026-09-10T02:13:17.177865+00:00",
+        "label": "configuration",
+        "log": {
+          "bytes": 48977,
+          "sha256": "91bc1751dec897a539cc29df4b00372794ffa06cc3acb708a50ad5f3779581ee"
+        },
+        "log_path": "/private/tmp/transformers-fuzz-refresh.EXC7pm/configuration.log",
+        "native_returncode": 0,
+        "started_utc": "2026-09-10T02:13:15.637817+00:00",
+        "timed_out": false,
+        "wall_timeout_seconds": 900
+      },
+      "diagnostics": [],
+      "executable_after": {
+        "bytes": 68962128,
+        "sha256": "221426185f4867092fbbd999c4119c9fb3be99f882a15388237e5ea1d42ec79a"
+      },
+      "executable_before": {
+        "bytes": 68962128,
+        "sha256": "221426185f4867092fbbd999c4119c9fb3be99f882a15388237e5ea1d42ec79a"
+      },
+      "executable_path": "/private/tmp/hmm-tfm-small-bench/crates/transformers/fuzz/target/aarch64-apple-darwin/release/configuration",
+      "executed_units": 10000,
+      "failures": [],
+      "final_corpus": {
+        "file_count": 253,
+        "files_canonical_json_sha256": "5107c4ad7d5c9b23c087faad1dca27f186315f335e5d4ee9d6f1a37c3a0326c7",
+        "present": true,
+        "total_bytes": 57833
+      },
+      "final_statistics": {
+        "stat::average_exec_per_sec": "0",
+        "stat::new_units_added": "363",
+        "stat::number_of_executed_units": "10000",
+        "stat::peak_rss_mb": "157",
+        "stat::slowest_unit_time_sec": "0"
+      },
+      "initial_corpus": {
+        "file_count": 0,
+        "files_canonical_json_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "present": true,
+        "total_bytes": 0
+      },
+      "passed": true,
+      "seed": 483013554
+    },
+    "generation": {
+      "artifacts": {
+        "file_count": 0,
+        "files_canonical_json_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "present": true,
+        "total_bytes": 0
+      },
+      "command": {
+        "command": [
+          "/private/tmp/hmm-tfm-small-bench/crates/transformers/fuzz/target/aarch64-apple-darwin/release/generation",
+          "/private/tmp/transformers-fuzz-refresh.EXC7pm/corpus/generation",
+          "fuzz/seeds/generation",
+          "-artifact_prefix=/private/tmp/transformers-fuzz-refresh.EXC7pm/artifacts/generation/",
+          "-runs=10000",
+          "-max_len=4096",
+          "-timeout=10",
+          "-rss_limit_mb=2048",
+          "-seed=20260909",
+          "-print_final_stats=1"
+        ],
+        "cwd": "/private/tmp/hmm-tfm-small-bench/crates/transformers",
+        "elapsed_seconds": 1.595545374962967,
+        "ended_utc": "2026-09-10T02:13:27.302335+00:00",
+        "label": "generation",
+        "log": {
+          "bytes": 65282,
+          "sha256": "443fbea335957917592b9925bb9396a75ab412ba4871c8653219c1ea5f2f1246"
+        },
+        "log_path": "/private/tmp/transformers-fuzz-refresh.EXC7pm/generation.log",
+        "native_returncode": 0,
+        "started_utc": "2026-09-10T02:13:25.706800+00:00",
+        "timed_out": false,
+        "wall_timeout_seconds": 900
+      },
+      "diagnostics": [],
+      "executable_after": {
+        "bytes": 68962072,
+        "sha256": "bed7b0825cce8a50bf35df7ac38f4c4e9d54bf4c2c5438c1ddec9e34f113237b"
+      },
+      "executable_before": {
+        "bytes": 68962072,
+        "sha256": "bed7b0825cce8a50bf35df7ac38f4c4e9d54bf4c2c5438c1ddec9e34f113237b"
+      },
+      "executable_path": "/private/tmp/hmm-tfm-small-bench/crates/transformers/fuzz/target/aarch64-apple-darwin/release/generation",
+      "executed_units": 10000,
+      "failures": [],
+      "final_corpus": {
+        "file_count": 322,
+        "files_canonical_json_sha256": "2667628881545f0317ca52afbae542c62a31d7bc37fa1c23000826530d99807a",
+        "present": true,
+        "total_bytes": 20973
+      },
+      "final_statistics": {
+        "stat::average_exec_per_sec": "0",
+        "stat::new_units_added": "454",
+        "stat::number_of_executed_units": "10000",
+        "stat::peak_rss_mb": "100",
+        "stat::slowest_unit_time_sec": "0"
+      },
+      "initial_corpus": {
+        "file_count": 0,
+        "files_canonical_json_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "present": true,
+        "total_bytes": 0
+      },
+      "passed": true,
+      "seed": 20260909
+    },
+    "index_artifacts": {
+      "artifacts": {
+        "file_count": 0,
+        "files_canonical_json_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "present": true,
+        "total_bytes": 0
+      },
+      "command": {
+        "command": [
+          "/private/tmp/hmm-tfm-small-bench/crates/transformers/fuzz/target/aarch64-apple-darwin/release/index_artifacts",
+          "/private/tmp/transformers-fuzz-refresh.EXC7pm/corpus/index_artifacts",
+          "fuzz/seeds/index_artifacts",
+          "-artifact_prefix=/private/tmp/transformers-fuzz-refresh.EXC7pm/artifacts/index_artifacts/",
+          "-runs=10000",
+          "-max_len=4096",
+          "-timeout=10",
+          "-rss_limit_mb=2048",
+          "-seed=20260909",
+          "-print_final_stats=1"
+        ],
+        "cwd": "/private/tmp/hmm-tfm-small-bench/crates/transformers",
+        "elapsed_seconds": 4.467918416950852,
+        "ended_utc": "2026-09-10T02:13:21.717567+00:00",
+        "label": "index_artifacts",
+        "log": {
+          "bytes": 63602,
+          "sha256": "22fc278c4403c498d6d3fbec6c34f17c71c6e3b9b58a67babba6baac1847c766"
+        },
+        "log_path": "/private/tmp/transformers-fuzz-refresh.EXC7pm/index_artifacts.log",
+        "native_returncode": 0,
+        "started_utc": "2026-09-10T02:13:17.249665+00:00",
+        "timed_out": false,
+        "wall_timeout_seconds": 900
+      },
+      "diagnostics": [],
+      "executable_after": {
+        "bytes": 68962176,
+        "sha256": "81c0b391745753be615540fa6edc38c76bd10c4ea247a75c87cbb1b4640632a4"
+      },
+      "executable_before": {
+        "bytes": 68962176,
+        "sha256": "81c0b391745753be615540fa6edc38c76bd10c4ea247a75c87cbb1b4640632a4"
+      },
+      "executable_path": "/private/tmp/hmm-tfm-small-bench/crates/transformers/fuzz/target/aarch64-apple-darwin/release/index_artifacts",
+      "executed_units": 10000,
+      "failures": [],
+      "final_corpus": {
+        "file_count": 273,
+        "files_canonical_json_sha256": "f26d8996cf8d89b38702022be5a08c731bf9f8e55e609a2d3c06b8698e52b52b",
+        "present": true,
+        "total_bytes": 11167
+      },
+      "final_statistics": {
+        "stat::average_exec_per_sec": "3333",
+        "stat::new_units_added": "444",
+        "stat::number_of_executed_units": "10000",
+        "stat::peak_rss_mb": "205",
+        "stat::slowest_unit_time_sec": "0"
+      },
+      "initial_corpus": {
+        "file_count": 0,
+        "files_canonical_json_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "present": true,
+        "total_bytes": 0
+      },
+      "passed": true,
+      "seed": 20260909
+    },
+    "masks_positions": {
+      "artifacts": {
+        "file_count": 0,
+        "files_canonical_json_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "present": true,
+        "total_bytes": 0
+      },
+      "command": {
+        "command": [
+          "/private/tmp/hmm-tfm-small-bench/crates/transformers/fuzz/target/aarch64-apple-darwin/release/masks_positions",
+          "/private/tmp/transformers-fuzz-refresh.EXC7pm/corpus/masks_positions",
+          "fuzz/seeds/masks_positions",
+          "-artifact_prefix=/private/tmp/transformers-fuzz-refresh.EXC7pm/artifacts/masks_positions/",
+          "-runs=10000",
+          "-max_len=4096",
+          "-timeout=10",
+          "-rss_limit_mb=2048",
+          "-seed=20260909",
+          "-print_final_stats=1"
+        ],
+        "cwd": "/private/tmp/hmm-tfm-small-bench/crates/transformers",
+        "elapsed_seconds": 2.5154053749865852,
+        "ended_utc": "2026-09-10T02:13:24.309290+00:00",
+        "label": "masks_positions",
+        "log": {
+          "bytes": 55055,
+          "sha256": "13d7ab5eb1c59b9b3a6bc8ee8c0ec8ca8b1458c52e22929612974c78cda2cda7"
+        },
+        "log_path": "/private/tmp/transformers-fuzz-refresh.EXC7pm/masks_positions.log",
+        "native_returncode": 0,
+        "started_utc": "2026-09-10T02:13:21.793897+00:00",
+        "timed_out": false,
+        "wall_timeout_seconds": 900
+      },
+      "diagnostics": [],
+      "executable_after": {
+        "bytes": 68962176,
+        "sha256": "fafe7fbaea1848b8789b2ffc74c0f0f024981f987e72984ffc578675ca98a7d0"
+      },
+      "executable_before": {
+        "bytes": 68962176,
+        "sha256": "fafe7fbaea1848b8789b2ffc74c0f0f024981f987e72984ffc578675ca98a7d0"
+      },
+      "executable_path": "/private/tmp/hmm-tfm-small-bench/crates/transformers/fuzz/target/aarch64-apple-darwin/release/masks_positions",
+      "executed_units": 10000,
+      "failures": [],
+      "final_corpus": {
+        "file_count": 175,
+        "files_canonical_json_sha256": "aedaf30caaea3c3313acff07e86fb467665ad8cdafc3472f2053d74b14ce07a7",
+        "present": true,
+        "total_bytes": 2712
+      },
+      "final_statistics": {
+        "stat::average_exec_per_sec": "10000",
+        "stat::new_units_added": "425",
+        "stat::number_of_executed_units": "10000",
+        "stat::peak_rss_mb": "292",
+        "stat::slowest_unit_time_sec": "0"
+      },
+      "initial_corpus": {
+        "file_count": 0,
+        "files_canonical_json_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "present": true,
+        "total_bytes": 0
+      },
+      "passed": true,
+      "seed": 20260909
+    }
+  },
+  "commands": [
+    {
+      "command": [
+        "rustc",
+        "+nightly",
+        "--version",
+        "--verbose"
+      ],
+      "cwd": "/private/tmp/hmm-tfm-small-bench/crates/transformers",
+      "elapsed_seconds": 0.04086608299985528,
+      "ended_utc": "2026-09-10T02:09:50.210091+00:00",
+      "label": "rustc",
+      "log": {
+        "bytes": 208,
+        "sha256": "48d15fae5bc3c29981b8f3b43e075ea2c3f8213f8811699acb867de1d1fb2e16"
+      },
+      "log_path": "/private/tmp/transformers-fuzz-refresh.EXC7pm/rustc.log",
+      "native_returncode": 0,
+      "started_utc": "2026-09-10T02:09:50.169227+00:00",
+      "timed_out": false,
+      "wall_timeout_seconds": 1800
+    },
+    {
+      "command": [
+        "/Users/nover/.cargo/bin/cargo-fuzz",
+        "--version"
+      ],
+      "cwd": "/private/tmp/hmm-tfm-small-bench/crates/transformers",
+      "elapsed_seconds": 0.010206790990196168,
+      "ended_utc": "2026-09-10T02:09:50.220755+00:00",
+      "label": "cargo-fuzz",
+      "log": {
+        "bytes": 18,
+        "sha256": "3e2aa5c2baaf44e5a4968cc3fedb864f4717f85b713deacf3fc4294162358ca1"
+      },
+      "log_path": "/private/tmp/transformers-fuzz-refresh.EXC7pm/cargo-fuzz.log",
+      "native_returncode": 0,
+      "started_utc": "2026-09-10T02:09:50.210555+00:00",
+      "timed_out": false,
+      "wall_timeout_seconds": 1800
+    },
+    {
+      "command": [
+        "/opt/homebrew/opt/llvm/bin/llvm-symbolizer",
+        "--version"
+      ],
+      "cwd": "/private/tmp/hmm-tfm-small-bench/crates/transformers",
+      "elapsed_seconds": 0.020068541984073818,
+      "ended_utc": "2026-09-10T02:09:50.241161+00:00",
+      "label": "symbolizer",
+      "log": {
+        "bytes": 64,
+        "sha256": "3e4fce473e434b2756e7a0e4fc57e32ef4bab7c20db55caf4474ea486860d796"
+      },
+      "log_path": "/private/tmp/transformers-fuzz-refresh.EXC7pm/symbolizer.log",
+      "native_returncode": 0,
+      "started_utc": "2026-09-10T02:09:50.221106+00:00",
+      "timed_out": false,
+      "wall_timeout_seconds": 1800
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly",
+        "test",
+        "--manifest-path",
+        "fuzz/Cargo.toml",
+        "--locked",
+        "--lib"
+      ],
+      "cwd": "/private/tmp/hmm-tfm-small-bench/crates/transformers",
+      "elapsed_seconds": 28.496320499980357,
+      "ended_utc": "2026-09-10T02:10:18.737839+00:00",
+      "label": "deterministic",
+      "log": {
+        "bytes": 5705,
+        "sha256": "29e5a9f5b9a194f7e75b52d0051e51f4db678d3e1872d6f12dbacab6e3b11e3c"
+      },
+      "log_path": "/private/tmp/transformers-fuzz-refresh.EXC7pm/deterministic.log",
+      "native_returncode": 0,
+      "started_utc": "2026-09-10T02:09:50.241587+00:00",
+      "timed_out": false,
+      "wall_timeout_seconds": 1800
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly",
+        "clippy",
+        "--manifest-path",
+        "fuzz/Cargo.toml",
+        "--locked",
+        "--lib",
+        "--tests",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "/private/tmp/hmm-tfm-small-bench/crates/transformers",
+      "elapsed_seconds": 19.973885917046573,
+      "ended_utc": "2026-09-10T02:10:38.712153+00:00",
+      "label": "clippy",
+      "log": {
+        "bytes": 4094,
+        "sha256": "4d2e57a669fc6d4483ac956cb505071aadaa172d6d5b8f0ab7f6c453f23a8d6f"
+      },
+      "log_path": "/private/tmp/transformers-fuzz-refresh.EXC7pm/clippy.log",
+      "native_returncode": 0,
+      "started_utc": "2026-09-10T02:10:18.738316+00:00",
+      "timed_out": false,
+      "wall_timeout_seconds": 1800
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly",
+        "fuzz",
+        "build",
+        "--sanitizer",
+        "address",
+        "--target",
+        "aarch64-apple-darwin",
+        "--verbose"
+      ],
+      "cwd": "/private/tmp/hmm-tfm-small-bench/crates/transformers",
+      "elapsed_seconds": 156.8740779160289,
+      "ended_utc": "2026-09-10T02:13:15.586376+00:00",
+      "label": "asan-build",
+      "log": {
+        "bytes": 352860,
+        "sha256": "3cec1cb14e6b3f1577dba8df7e29ddcd3b01988309495f30f6e2aa945a51ab7f"
+      },
+      "log_path": "/private/tmp/transformers-fuzz-refresh.EXC7pm/asan-build.log",
+      "native_returncode": 0,
+      "started_utc": "2026-09-10T02:10:38.712612+00:00",
+      "timed_out": false,
+      "wall_timeout_seconds": 1800
+    }
+  ],
+  "dependency_closure_verified": false,
+  "disk_final_free_bytes": 20444356608,
+  "disk_preflight_free_bytes": 23105814528,
+  "ended_utc": "2026-09-10T02:13:27.362604+00:00",
+  "evidence_kind": "bounded_native_asan_fuzz_refresh",
+  "explicit_environment": {
+    "ASAN_SYMBOLIZER_PATH": "/opt/homebrew/opt/llvm/bin/llvm-symbolizer",
+    "CARGO_NET_OFFLINE": "true"
+  },
+  "historical_corpora_imported": false,
+  "inherited_overrides": {
+    "ASAN_OPTIONS": null,
+    "CARGO_ENCODED_RUSTFLAGS": null,
+    "CARGO_TARGET_DIR": null,
+    "LLVM_PROFILE_FILE": null,
+    "RUSTC": null,
+    "RUSTC_WORKSPACE_WRAPPER": null,
+    "RUSTC_WRAPPER": null,
+    "RUSTFLAGS": null
+  },
+  "instrumentation": {
+    "common_observed_rustc_flags": [
+      "-Zsanitizer=address",
+      "-Cdebug-assertions",
+      "-C overflow-checks=on",
+      "-Cpasses=sancov-module",
+      "-Cllvm-args=-sanitizer-coverage-inline-8bit-counters",
+      "-Cllvm-args=-sanitizer-coverage-trace-compares",
+      "--cfg fuzzing",
+      "-C opt-level=3"
+    ],
+    "standard_library_rebuilt": false,
+    "symbolized_crash_replay_performed": false,
+    "symbolizer_llvm_patch_differs_from_compiler": true,
+    "verbose_build_log": {
+      "bytes": 352860,
+      "sha256": "3cec1cb14e6b3f1577dba8df7e29ddcd3b01988309495f30f6e2aa945a51ab7f"
+    },
+    "verified_crate_names": [
+      "transformers",
+      "transformers_fuzz",
+      "configuration",
+      "index_artifacts",
+      "masks_positions",
+      "cache_transactions",
+      "generation"
+    ]
+  },
+  "limitations": [
+    "Finite sanitizer smoke campaigns are not exhaustive coverage or model/backend acceptance.",
+    "LibFuzzer counters, RSS and integer execution-rate diagnostics are retained observations, not comparative performance benchmarks.",
+    "Prebuilt Rust standard library and arbitrary native dependency closure were not rebuilt/authenticated as a hermetic instrumented closure.",
+    "The symbolizer version probe passed and campaign diagnostics had no warning; no intentional crash was introduced to qualify symbolized stack traces.",
+    "Native executables were run directly after cargo-fuzz build to preserve their native exit codes; writable corpus paths differ from the preliminary command sketch."
+  ],
+  "lockfiles": {
+    "Cargo.lock": {
+      "bytes": 162952,
+      "sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d"
+    },
+    "fuzz/Cargo.lock": {
+      "bytes": 150951,
+      "sha256": "252d0ed980a8452f7c7da1aa54c3da00b256fe9804624270a7c1fb19ba12fea0"
+    }
+  },
+  "native_campaign_asan_options": "detect_odr_violation=0",
+  "raw_report": {
+    "bytes": 286421,
+    "path": "/private/tmp/transformers-fuzz-refresh.EXC7pm/report.json",
+    "sha256": "a2bc23e135052e089be3c18cdcd651c8d11f79bd53b476f3f8bc47f0e22c1e1d"
+  },
+  "runner": {
+    "bytes": 11556,
+    "sha256": "bb0b3d34bb8a8d4f5b1c8aeafeba5c245bafacab54134eb6332d7897e577e980"
+  },
+  "runtime_src_git_tree": "b4d4a96ca38fdb709bce07b6fd384d497e523f98",
+  "sanitizer": "address",
+  "schema_version": 1,
+  "seeds_before_and_after": {
+    "fuzz/seeds/cache_transactions/mixed": {
+      "bytes": 52,
+      "sha256": "81618cbca665aee0afbc62861283d1752ccd294f86642d7d47011d3b370b3a11"
+    },
+    "fuzz/seeds/configuration/defaults.json": {
+      "bytes": 3,
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    "fuzz/seeds/configuration/legacy-infinity.json": {
+      "bytes": 61,
+      "sha256": "f1b778d72542835f78b153bc9ffa306d6f35fa92ebd4fc5e4a92a644506c9705"
+    },
+    "fuzz/seeds/configuration/qwen.json": {
+      "bytes": 96,
+      "sha256": "ec9582ba66507b57ab9fcc78fae0fff53f3e750e97468c6b13bb7ffa2d46f67f"
+    },
+    "fuzz/seeds/configuration/seq2seq.json": {
+      "bytes": 1277,
+      "sha256": "b022a8a1d09ed80ad0e1b7faebecbe637d04ed4ec25cd3fa061400f5971cb201"
+    },
+    "fuzz/seeds/configuration/t5.json": {
+      "bytes": 104,
+      "sha256": "b55e9745f129424bbcdccd02ec3ad41917dd1db89479888791ddba073b11d851"
+    },
+    "fuzz/seeds/generation/config.json": {
+      "bytes": 111,
+      "sha256": "5e5af4eefbc1b50fbd2a7aa91e80d903bef7a5ffd2cd177efa1d6855beb12cd0"
+    },
+    "fuzz/seeds/index_artifacts/duplicate-key": {
+      "bytes": 68,
+      "sha256": "81f9995adc19c3ba1f33d717cf1c4fac84dc5e63620d1d56b44ef0a61e50c3d7"
+    },
+    "fuzz/seeds/index_artifacts/header": {
+      "bytes": 61,
+      "sha256": "b79831d5482664a8c6a1e9b910cffb94a8aa3dfdbb908e9e9a8fc655297732dd"
+    },
+    "fuzz/seeds/index_artifacts/traversal": {
+      "bytes": 18,
+      "sha256": "78e307b3def3873312b69eb7116d20337f11084a57675bbf05acd7a38bda8a9f"
+    },
+    "fuzz/seeds/index_artifacts/valid-index": {
+      "bytes": 71,
+      "sha256": "683d35a5a68e36846ac813ab7f9da280e80fcd195defe6bad7a4141bf2137fbb"
+    },
+    "fuzz/seeds/masks_positions/mixed": {
+      "bytes": 41,
+      "sha256": "aaae46db6f2dd481c8a17336c09329f4bb1bd33fc456e33bbbf3e0c534567c16"
+    }
+  },
+  "source_commit": "80b51e838033cc479ab7d99a97106e5c2309d5a8",
+  "source_inventory": {
+    "after_canonical_json_sha256": "32407b79c18f85fb91cfc582b4a56b3eb24570c708871a2c63d2f56106d7f2a1",
+    "before_canonical_json_sha256": "32407b79c18f85fb91cfc582b4a56b3eb24570c708871a2c63d2f56106d7f2a1",
+    "canonical_json_encoding": "UTF-8; json.dumps(sort_keys=True,separators=(comma,colon),ensure_ascii=True)",
+    "file_count": 137,
+    "raw_inventory_retained_in_report": true
+  },
+  "source_unchanged": true,
+  "started_utc": "2026-09-10T02:09:50.161570+00:00",
+  "status": "passed",
+  "target_directory": "/private/tmp/hmm-tfm-small-bench/crates/transformers/fuzz/target",
+  "tool_hashes_observed_after_build": {
+    "cargo_fuzz": {
+      "bytes": 2291504,
+      "sha256": "49dd6e4f489e9051b60c47121c8b671d3cbc6d7288e63a0817b8608eab162452"
+    },
+    "rustc": {
+      "bytes": 414264,
+      "sha256": "79372ab01bee9c7cf29d2ae93d3e9eced66817dc78376f375b8706bc5a685289"
+    },
+    "symbolizer": {
+      "bytes": 96448,
+      "sha256": "b4ff4738560aec120cbbd033e827db47b4286cf286edb7e920971edcc31c76e7"
+    }
+  },
+  "tool_versions": {
+    "cargo-fuzz": "cargo-fuzz 0.13.2",
+    "rustc": "rustc 1.94.0-nightly (4f14395c3 2025-12-22)\nbinary: rustc\ncommit-hash: 4f14395c37db4c1be874e6b0ace6721674223c22\ncommit-date: 2025-12-22\nhost: aarch64-apple-darwin\nrelease: 1.94.0-nightly\nLLVM version: 21.1.8",
+    "symbolizer": "llvm-symbolizer\nHomebrew LLVM version 21.1.1\n  Optimized build."
+  },
+  "total_executed_units": 50000
+}
