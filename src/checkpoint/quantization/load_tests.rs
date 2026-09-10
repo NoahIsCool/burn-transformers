@@ -1977,3 +1977,175 @@ fn corrupt_v1_packed_payload_cannot_create_partial_model_writes() {
         ))
     ));
 }
+
+/// A generic source is closed before any read when a legacy sidecar names a non-owner.
+#[test]
+fn artifact_contract_generic_preflight_rejects_unknown_storage_without_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, plan, _) = executable_sidecar(&directory);
+    let output = directory.path().join("unknown-owner.bpk");
+    write_sidecar(&output, &[("unknown.weight", vec![32, 32])]);
+    let before = fs::read(&output).unwrap();
+    let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+    let mut source = FailingSource::default();
+    let mut sink = RecordingSink::default();
+    let failure =
+        execute_quantized_load_plan(&plan, &mut source, &mut artifact, &mut sink).unwrap_err();
+    assert!(
+        matches!(&failure.cause, ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(QuantizationError::SidecarContract { name, reason }))
+        if name == "unknown.weight" && reason == "name is not a storage-owning target in the strict load plan")
+    );
+    assert!(source.closed);
+    assert_eq!(source.reads, 0);
+    assert_eq!(failure.failed_target, None);
+    assert_eq!(failure.execution, ExecutionStats::default());
+    assert_eq!(failure.packed, PackedLoadStats::default());
+    assert!(failure.report.applied.is_empty());
+    assert!(failure.report.quantized.is_empty());
+    assert!(sink.operations.is_empty());
+    assert_eq!(fs::read(output).unwrap(), before);
+
+    // Diagnostics must retain the typed root error through every public wrapper.
+    let text = failure.to_string();
+    assert_eq!(
+        text,
+        "quantized checkpoint execution failed: tensor sink failed: invalid quantized sidecar tensor `unknown.weight`: name is not a storage-owning target in the strict load plan"
+    );
+    let cause = StdError::source(failure.as_ref()).unwrap();
+    let sink_error = cause.source().unwrap();
+    let root = sink_error.source().unwrap();
+    assert!(root.downcast_ref::<QuantizationError>().is_some());
+    assert_eq!(sink_error.to_string(), root.to_string());
+}
+
+/// Generic v1 execution validates every packed code before reading source storage.
+#[test]
+fn artifact_contract_generic_preflight_rejects_reserved_payload_before_source_io() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, plan, _) = executable_sidecar(&directory);
+    let target = "model.layers.0.self_attn.q_proj.weight";
+    let output = directory.path().join("generic-corrupt.bpk");
+    write_sidecar(&output, &[(target, vec![32, 32])]);
+    let payload = {
+        let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+        artifact.tensor_payload(target).unwrap().as_bytes().to_vec()
+    };
+    // Destroy the fixture's mapping before editing bytes; never mutate a live mmap.
+    let mut bytes = fs::read(&output).unwrap();
+    let offset = unique_subslice(&bytes, &payload);
+    bytes[offset] = 0x80;
+    fs::write(&output, &bytes).unwrap();
+    let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+    let mut source = FailingSource::default();
+    let mut sink = RecordingSink::default();
+    let failure =
+        execute_quantized_load_plan(&plan, &mut source, &mut artifact, &mut sink).unwrap_err();
+    assert!(matches!(
+        failure.cause,
+        ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(
+            QuantizationError::InvalidQuantizedValue {
+                index: 0,
+                value: -128
+            }
+        ))
+    ));
+    assert!(source.closed);
+    assert_eq!(source.reads, 0);
+    assert_eq!(failure.failed_target, None);
+    assert_eq!(failure.execution, ExecutionStats::default());
+    assert_eq!(failure.packed, PackedLoadStats::default());
+    assert_eq!(failure.provenance, ProvenanceExecutionStats::default());
+    assert!(failure.report.applied.is_empty());
+    assert!(failure.report.quantized.is_empty());
+    assert!(sink.operations.is_empty());
+    assert_eq!(fs::read(output).unwrap(), bytes);
+}
+
+/// Closing a rejected source is mandatory, and a close error takes lifecycle precedence.
+#[test]
+fn artifact_contract_generic_preflight_retains_source_close_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let (manifest, plan, _) = executable_sidecar(&directory);
+    let output = directory.path().join("close-failure.bpk");
+    write_sidecar(&output, &[("unknown.weight", vec![32, 32])]);
+    let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+    let closed = Rc::new(Cell::new(false));
+    let mut source = CloseAwareLocalSource {
+        inner: LocalShardSource::new(&manifest),
+        closed: closed.clone(),
+        fail_close: true,
+    };
+    let mut sink = RecordingSink::default();
+    let failure =
+        execute_quantized_load_plan(&plan, &mut source, &mut artifact, &mut sink).unwrap_err();
+    assert!(
+        matches!(&failure.cause, ExecutionFailureCause::Checkpoint(CheckpointError::InvalidMapping { message }) if message == "synthetic close failure")
+    );
+    assert!(closed.get());
+    assert_eq!(failure.failed_target, None);
+    assert_eq!(failure.execution, ExecutionStats::default());
+    assert_eq!(failure.packed, PackedLoadStats::default());
+    assert!(failure.report.applied.is_empty());
+    assert!(failure.report.quantized.is_empty());
+    assert!(sink.operations.is_empty());
+    let cause = StdError::source(failure.as_ref()).unwrap();
+    assert!(
+        cause
+            .source()
+            .unwrap()
+            .downcast_ref::<CheckpointError>()
+            .is_some()
+    );
+}
+
+/// Legacy source-dtype tolerance does not admit unrelated F64 or synthetic Flex32 storage.
+#[test]
+fn artifact_contract_legacy_dtype_must_match_source_or_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, _, _) = executable_sidecar(&directory);
+    let (_, plan) = fixture_plan(directory.path(), Some(TensorDType::F16));
+    let target = "model.layers.0.self_attn.q_proj.weight";
+    let flex_bytes = vec![1.0_f32; 1024]
+        .into_iter()
+        .flat_map(f32::to_ne_bytes)
+        .collect();
+    let sources = [
+        ("F64", TensorData::new(vec![1.0_f64; 1024], [32, 32])),
+        (
+            "Flex32",
+            TensorData::from_bytes_vec(flex_bytes, [32, 32], DType::Flex32),
+        ),
+    ];
+    for (dtype, data) in sources {
+        let output = directory.path().join(format!("wrong-{dtype}.bpk"));
+        let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+        session
+            .append(
+                target,
+                &data,
+                WeightQuantizationConfig {
+                    group_size: QuantizationGroupSize::new(32).unwrap(),
+                    ..WeightQuantizationConfig::default()
+                },
+            )
+            .unwrap();
+        session.finalize().unwrap();
+        let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+        let mut source = FailingSource::default();
+        let mut sink = RecordingSink::default();
+        let failure =
+            execute_quantized_load_plan(&plan, &mut source, &mut artifact, &mut sink).unwrap_err();
+        assert!(
+            matches!(&failure.cause, ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(QuantizationError::SidecarContract { name, reason }))
+            if name == target && reason == &format!("legacy quantizer-input dtype {dtype} matches neither planned target dtype F16 nor its checkpoint source dtypes"))
+        );
+        assert!(source.closed);
+        assert_eq!(source.reads, 0);
+        assert!(sink.operations.is_empty());
+    }
+    // In contrast, the actual F32 checkpoint dtype remains valid for a cast-F16 plan.
+    let valid = directory.path().join("original-source-dtype.bpk");
+    write_sidecar(&valid, &[(target, vec![32, 32])]);
+    let artifact = QuantizedBurnpackArtifact::open(valid).unwrap();
+    validate_sidecar_contract(&plan, &artifact).unwrap();
+}

@@ -1068,6 +1068,131 @@ fn malformed_index_json_and_duplicate_weight_keys_are_rejected() {
     assert!(error.to_string().contains("duplicate"));
 }
 
+/// An alias cannot introduce storage that is absent from the authoritative index.
+#[test]
+fn artifact_contract_alias_storage_must_be_indexed() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "one.safetensors",
+        &[FixtureTensor::new("sentinel", TensorDType::F16, [1])],
+    );
+    write_index(
+        temp.path(),
+        &[
+            ("a.alias", "one.safetensors"),
+            ("sentinel", "one.safetensors"),
+        ],
+        None,
+    );
+    let shard = temp.path().join("one.safetensors");
+    let index = temp.path().join("model.safetensors.index.json");
+    let before = (fs::read(&shard).unwrap(), fs::read(&index).unwrap());
+    let options = LoadOptions {
+        index_aliases: vec![IndexTensorAlias::new("a.alias", "z.storage")],
+        ..LoadOptions::default()
+    };
+    assert!(
+        matches!(discover_checkpoint(temp.path(), &options), Err(CheckpointError::InvalidIndexAlias { alias, reason })
+        if alias == "a.alias" && reason == "storage key `z.storage` is absent from weight_map")
+    );
+    assert_eq!((fs::read(shard).unwrap(), fs::read(index).unwrap()), before);
+}
+
+/// Declaring another alias as storage must not make an absent physical tensor real.
+#[test]
+fn artifact_contract_alias_storage_must_exist_in_the_shard_header() {
+    let temp = TempDir::new().unwrap();
+    write_shard(
+        temp.path(),
+        "one.safetensors",
+        &[FixtureTensor::new("sentinel", TensorDType::F16, [1])],
+    );
+    write_index(
+        temp.path(),
+        &[
+            ("a.alias", "one.safetensors"),
+            ("z.storage", "one.safetensors"),
+            ("sentinel", "one.safetensors"),
+        ],
+        None,
+    );
+    let shard = temp.path().join("one.safetensors");
+    let before = fs::read(&shard).unwrap();
+    // An alias chain is not a substitute for a direct physical-storage binding.
+    for aliases in [
+        vec![IndexTensorAlias::new("a.alias", "z.storage")],
+        vec![
+            IndexTensorAlias::new("a.alias", "z.storage"),
+            IndexTensorAlias::new("z.storage", "sentinel"),
+        ],
+    ] {
+        let options = LoadOptions {
+            index_aliases: aliases,
+            ..LoadOptions::default()
+        };
+        assert!(
+            matches!(discover_checkpoint(temp.path(), &options), Err(CheckpointError::InvalidIndexAlias { alias, reason })
+            if alias == "a.alias" && reason == "storage key `z.storage` is not present in its assigned shard header")
+        );
+        assert_eq!(fs::read(&shard).unwrap(), before);
+    }
+}
+
+/// A forbidden shard extension is rejected before any attempt to open that path.
+#[test]
+fn artifact_contract_index_rejects_non_safetensors_storage() {
+    let temp = TempDir::new().unwrap();
+    write_index(temp.path(), &[("weight", "absent.bin")], None);
+    let index = temp.path().join("model.safetensors.index.json");
+    let before = fs::read(&index).unwrap();
+    assert!(
+        matches!(discover_checkpoint(temp.path(), &LoadOptions::default()), Err(CheckpointError::UnsafeRelativePath { path, reason })
+        if path == "absent.bin" && reason == "tensor shard must end in .safetensors")
+    );
+    assert!(!temp.path().join("absent.bin").exists());
+    assert_eq!(fs::read(index).unwrap(), before);
+}
+
+/// JSON escapes cannot disguise duplicate index-map identities.
+#[test]
+fn artifact_contract_index_rejects_escape_equivalent_tensor_names() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("model.safetensors.index.json");
+    let bytes = br#"{"weight_map":{"weight":"one.safetensors","\u0077eight":"two.safetensors"}}"#;
+    fs::write(&path, bytes).unwrap();
+    assert!(
+        matches!(discover_checkpoint(temp.path(), &LoadOptions::default()), Err(CheckpointError::DuplicateJsonKey { kind, path: actual, key })
+        if kind == "checkpoint index" && actual == fs::canonicalize(&path).unwrap() && key == "weight")
+    );
+    assert_eq!(fs::read(path).unwrap(), bytes);
+}
+
+/// Duplicate metadata identities are rejected after escape decoding in either map.
+#[test]
+fn artifact_contract_header_rejects_escape_equivalent_metadata_names() {
+    let temp = TempDir::new().unwrap();
+    for (header, key) in [
+        (
+            br#"{"__metadata__":{},"\u005f_metadata__":{}}"#.as_slice(),
+            "__metadata__",
+        ),
+        (
+            br#"{"__metadata__":{"format":"pt","\u0066ormat":"other"}}"#.as_slice(),
+            "format",
+        ),
+    ] {
+        write_raw_shard(temp.path(), "model.safetensors", header, 0);
+        let path = temp.path().join("model.safetensors");
+        let before = fs::read(&path).unwrap();
+        assert!(
+            matches!(discover_checkpoint(temp.path(), &LoadOptions::default()), Err(CheckpointError::DuplicateJsonKey { kind, path: actual, key: actual_key })
+            if kind == "SafeTensors header" && actual == fs::canonicalize(&path).unwrap() && actual_key == key)
+        );
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+}
+
 #[test]
 fn all_header_count_rank_name_and_arithmetic_bounds_are_enforced() {
     let temp = TempDir::new().unwrap();

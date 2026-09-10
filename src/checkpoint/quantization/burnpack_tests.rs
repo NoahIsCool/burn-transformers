@@ -7,6 +7,7 @@ use burn::tensor::TensorData;
 use burn_store::{BurnpackStore, BurnpackWriter, ModuleStore, TensorSnapshot};
 use tempfile::tempdir;
 
+use super::provenance::packed_payload_sha256;
 use super::*;
 
 fn config(scheme: SymmetricQuantization) -> WeightQuantizationConfig {
@@ -63,6 +64,105 @@ fn fixture_provenance() -> BurnpackProvenance {
                 sha256: "2".repeat(64),
             },
         )]),
+    }
+}
+
+/// Mapped v2 payload access verifies its digest and reports absent logical names precisely.
+#[test]
+fn artifact_contract_mapped_payload_is_read_only_and_name_checked() {
+    let directory = tempdir().unwrap();
+    let output = directory.path().join("mapped-v2.bpk");
+    let source = TensorData::new(vec![1.0_f32; 32], [1, 32]);
+    let weight = quantize_tensor_data(&source, config(SymmetricQuantization::Q8)).unwrap();
+    let expected = payload(&weight);
+    let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+    session
+        .append("q.weight", &source, config(SymmetricQuantization::Q8))
+        .unwrap();
+    session.bind_provenance(fixture_provenance()).unwrap();
+    session.finalize().unwrap();
+    let before = fs::read(&output).unwrap();
+    let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+    for _ in 0..2 {
+        let data = artifact.tensor_payload("q.weight").unwrap();
+        assert_eq!(data.dtype, burn::tensor::DType::U8);
+        assert_eq!(data.as_bytes(), expected);
+    }
+    assert!(
+        matches!(artifact.tensor_payload("missing.weight"), Err(QuantizationError::QuantizedTensorNotFound { name }) if name == "missing.weight")
+    );
+    assert_eq!(fs::read(output).unwrap(), before);
+}
+
+/// A well-formed but false digest must fail lazy access without modifying the artifact.
+#[test]
+fn artifact_contract_mapped_payload_rejects_false_provenance_digest() {
+    let directory = tempdir().unwrap();
+    let output = directory.path().join("false-digest.bpk");
+    let weight = quantize_tensor_data(
+        &TensorData::new(vec![1.0_f32; 32], [1, 32]),
+        config(SymmetricQuantization::Q8),
+    )
+    .unwrap();
+    let bytes = payload(&weight);
+    let actual_digest = packed_payload_sha256(&bytes);
+    let expected_digest = "0".repeat(64);
+    let mut metadata = weight.metadata().clone();
+    metadata.payload_sha256 = Some(expected_digest.clone());
+    let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
+    manifest.insert("q.weight", metadata).unwrap();
+    manifest.bind_provenance(fixture_provenance()).unwrap();
+    let length = bytes.len();
+    write_official(
+        &output,
+        vec![
+            (BURNPACK_MANIFEST_TENSOR, manifest_tensor(&manifest)),
+            ("q.weight", TensorData::new(bytes, [length])),
+        ],
+    );
+    let before = fs::read(&output).unwrap();
+    let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+    // Opening inspects only descriptors. Both subsequent reads must independently fail.
+    for _ in 0..2 {
+        assert!(
+            matches!(artifact.tensor_payload("q.weight"), Err(QuantizationError::PackedPayloadDigestMismatch { name, expected, actual })
+            if name == "q.weight" && expected == expected_digest && actual == actual_digest)
+        );
+    }
+    assert_eq!(fs::read(output).unwrap(), before);
+}
+
+/// Unsupported or provenance-free version tags fail before model payload lookup.
+#[test]
+fn artifact_contract_open_rejects_invalid_manifest_version_provenance_pairs() {
+    let directory = tempdir().unwrap();
+    for version in [2, 3] {
+        let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
+        manifest.format_version = version;
+        // Serialize deliberately invalid metadata directly, not through its validated writer.
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let length = bytes.len();
+        let output = directory.path().join(format!("invalid-v{version}.bpk"));
+        write_official(
+            &output,
+            vec![(BURNPACK_MANIFEST_TENSOR, TensorData::new(bytes, [length]))],
+        );
+        let before = fs::read(&output).unwrap();
+        let error = QuantizedBurnpackArtifact::open(&output)
+            .err()
+            .expect("invalid manifest version/provenance pair");
+        match version {
+            2 => assert!(
+                matches!(error, QuantizationError::InvalidProvenance { reason }
+                if reason == "format version two requires checkpoint and load-plan provenance")
+            ),
+            3 => assert!(matches!(
+                error,
+                QuantizationError::UnsupportedFormatVersion { version: 3 }
+            )),
+            _ => unreachable!("fixed fixture versions"),
+        }
+        assert_eq!(fs::read(output).unwrap(), before);
     }
 }
 
