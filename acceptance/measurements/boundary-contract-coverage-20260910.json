@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "scope": "Captured Flex configuration, nine public-boundary regressions and manually reviewed authored-production coverage; not release promotion",
+  "source_commit": "311fe3a5769825401e97337b5f48d2f960bd93b4",
+  "src_tree_git_oid_including_test_sources": "50942ceced682b0be1fb9b4ee448fccd636134de",
+  "features": ["std", "flex", "tokenizers", "chat-templates", "autodiff"],
+  "advertised_supported": false,
+  "release_gate_promotion": false,
+  "changes": {
+    "integration_commits": ["7a46971", "311fe3a"],
+    "new_unit_tests": 9,
+    "generation_contracts": [
+      "Empty prompt geometry fails before state allocation or streaming callbacks",
+      "Overlapping generated-only stop sequences preserve terminal events, processed log probabilities and the exact cache boundary",
+      "A restricted vocabulary leaves dormant beam rows inert",
+      "Too few reachable finished hypotheses return an error instead of fabricated duplicates"
+    ],
+    "tensor_contracts": [
+      "Per-sequence and whole-batch recurrent snapshot shape/dtype rejection preserve committed and pending tensors, cursors, retry, prefix commit and rollback",
+      "Empty projection input dimensions return contextual errors",
+      "Packed Q4/Q8 activations require explicit dequantization",
+      "Malformed projection bias returns its own shape context and a corrected retry succeeds"
+    ],
+    "runtime_sources_changed": false,
+    "dependencies_changed": false,
+    "rank_zero_tensor_claim": "Not tested as a transformer API input: Burn rejects construction before the call. The unsuccessful development attempt was not counted as API coverage."
+  },
+  "tests": {
+    "unit_passed": 1047,
+    "unit_ignored": 3,
+    "unit_identities": 1050,
+    "prior_unit_identities_preserved": 1041,
+    "ordinary_integration_passed": 102,
+    "ordinary_integration_ignored": 26,
+    "total_passed": 1149,
+    "total_ignored": 29,
+    "failed": 0,
+    "release_profile_host_retry": "Passed unchanged after the sandbox denied UnixListener::bind in the benchmark-metrics local socket test; the first release-profile attempt exited 101 and is not a passing run.",
+    "all_target_all_feature_clippy": "Passed using the isolated direct-driver wrapper with warnings denied",
+    "format_check": "Passed",
+    "fresh_checkpoint_or_performance_run": false,
+    "fresh_package_verification": false
+  },
+  "capture": {
+    "directory": "target/release-gates/20260910T072427.681680Z",
+    "rustc_commit": "4f14395c37db4c1be874e6b0ace6721674223c22",
+    "rustc_release": "1.94.0-nightly",
+    "llvm_version": "21.1.8",
+    "source_inventory_sha256": "0dcac589ffd0e9c6d599560ab2e0f999e5aae85d94a36019e708d24f6aaa7f10",
+    "production_inputs": 101,
+    "unit_inputs": 188,
+    "integration_targets": 14,
+    "fresh_compiler_captures": 16,
+    "llvm_objects": 15,
+    "reported_files": 168,
+    "excluded_whole_test_files": 79,
+    "retained_production_files": 89,
+    "native_export": {
+      "file": "llvm-export/native-coverage.json",
+      "bytes": 83270151,
+      "sha256": "be06b8e33c41523e40e73e9cb1e3dc6759b346c4f064cf52dcbf8e6518729c04"
+    },
+    "native_log": {
+      "file": "00-coverage.log",
+      "bytes": 115649,
+      "sha256": "41a6e9ea38599add5ca34399c88c6ab58e3e3ea0f0d2aa67631e88bb9ecf05e8"
+    },
+    "diagnostic": {
+      "file": "whole-test-file-diagnostic.json",
+      "bytes": 139757,
+      "sha256": "c83b8cb1579852b5769268cb72d1382cefa15055ce6181e50454835580f76f20"
+    }
+  },
+  "authored_production_ownership": {
+    "qualified": true,
+    "qualification_scope": "Manual review of this exact source/configuration/native capture only, under the existing trusted compiler/tool boundary; not a general-purpose classifier or arbitrary procedural-macro I/O attestation",
+    "generic_gate_flags_changed": false,
+    "compiler_dependency_closure_verified": false,
+    "native_function_instantiations": 8967,
+    "native_regions": 158491,
+    "implementation_function_regions": 74435,
+    "free_or_nested_function_regions": 83935,
+    "trait_default_function_regions": 121,
+    "unmatched_regions": 0,
+    "mapped_lines_outside_function_item_spans": 0,
+    "ownership_includes_signatures": true,
+    "associated_constants_types_and_required_trait_signatures_used_as_body_owners": false,
+    "test_dependent_sites": 78,
+    "all_test_dependent_sites_are_external_module_declarations": true,
+    "opaque_item_macros_in_production_inputs": 0,
+    "reviewed_expression_macros": ["format", "write", "vec", "matches", "debug_assert", "debug_assert_eq"],
+    "source_review": "No local macro definitions, include-family macros, cfg!(test), cfg_attr, function-transforming attributes or macro-shadowing imports were identified. Literal test-cfg attributes were independently rebound to the exact external-module attribute spans, including a raw-token check for test helpers inside macro inputs.",
+    "burn_module_declarations_reviewed": 48,
+    "burn_module_declaration_native_regions": 0,
+    "new_generated_code_exclusions": 0,
+    "source_or_configuration_change_requires_new_audit": true,
+    "independent_reauthentication": {
+      "path": "/private/tmp/tfm-coverage-reauth-20260910-final.haQe8c/proof.json",
+      "bytes": 139486,
+      "sha256": "a3df24df8718213e9257884fb851d085144cbd5823c3322f191f6845c1bc53dd",
+      "binding_exactly_reproduced": true,
+      "diagnostic_exactly_reproduced": true
+    },
+    "snapshot_specific_read_only_helper": {
+      "path": "/private/tmp/tfm-coverage-reauth-20260910-final.haQe8c/production_audit.py",
+      "sha256": "af72a163ab797c02f1e9116753d69017979bf6c568aea3113e65f0ae59f7221b",
+      "limitation": "Member refinement is restricted to the exact reviewed Syn item prefixes in this source. It is not a general Rust function parser or an automatic release gate."
+    }
+  },
+  "physical_coverage": {
+    "crate": {"covered": 32232, "lines": 36517, "percent": 88.26573924473533, "minimum_percent": 90, "meets_threshold": false},
+    "shared": {"covered": 15495, "lines": 16364, "percent": 94.68956245416769, "minimum_percent": 95, "meets_threshold": false},
+    "denominator_change_from_previous_capture": 0,
+    "newly_covered_lines": {
+      "src/cache/tensor/recurrent.rs": 4,
+      "src/generation/causal.rs": 5,
+      "src/operations.rs": 14
+    },
+    "branch_coverage_claim": false
+  }
+}

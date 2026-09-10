@@ -23,11 +23,12 @@ checkpoint is documented separately in
 
 The v0.1 candidate is limited to **Qwen3.5-0.8B and FLAN-T5-small**; other
 families remain experimental. Both have refreshed local correctness evidence.
-The latest [whole-test-file coverage diagnostic](acceptance/measurements/t5-encoder-dtype-refresh-20260910.json)
-exposes a gap: 88.20% crate-wide and 94.55% shared/core after excluding 79 verified
-test-only files, measured at `41f3f73`. It includes the T5 encoder-dtype guard
-and passes 1,140 tests. This remains a diagnostic, not qualified
-production-only coverage.
+The latest [boundary-contract coverage review](acceptance/measurements/boundary-contract-coverage-20260910.json)
+exposes a gap: 88.27% crate-wide and 94.69% shared/core after excluding 79 verified
+test-only files, measured at `311fe3a` with 1,149 passing tests. Manual review
+binds every retained native region to authored production function items for
+that exact source/configuration; it adds no generated-code exclusions. This is
+not a general macro-closure proof, and both numerical coverage gates still fail.
 The [refreshed timing and sampled-memory records](acceptance/measurements/small-model-performance-20260910/manifest.json)
 are now available, including FLAN's first Flex CPU baseline. Qwen's unexplained
 historical timing regression, coverage, and final integrated release checks remain

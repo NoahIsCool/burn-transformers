@@ -1051,6 +1051,11 @@ API sentinel, not because physical batch geometry is unknown.
 **Implementation:** [`cache/tensor/recurrent.rs`](src/cache/tensor/recurrent.rs)
 and [`cache/tensor/state.rs`](src/cache/tensor/state.rs), consumed by Qwen and
 Nemotron decode modules.
+The snapshot API validates matrix and convolution shapes and dtypes before
+publishing either tensor. Regression tests now verify that per-row and batched
+rejections preserve both an existing pending proposal and committed state,
+including their independent F32/F16 storage, and that retry, ragged prefix
+commit, and a subsequent rollback remain usable.
 
 <a id="innovation-transactional-cache"></a>
 ### Transactional speculative cache
@@ -1114,6 +1119,11 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
 **Implementation:** the generic coordinator in
 [`generation/seq2seq.rs`](src/generation/seq2seq.rs) and T5 defaults in
 [`t5/generation.rs`](src/models/t5/generation.rs).
+A valid restricted vocabulary can leave fewer live hypotheses than beam slots.
+Unused rows are PAD-masked no-ops: their cache lengths do not advance. If fewer
+distinct terminal hypotheses are reachable than `num_return_sequences`, the
+coordinator reports an error rather than duplicating a result. Deterministic
+tests cover both outcomes and the exact reorder/token/mask history.
 
 ## Reference/runtime distinctions discovered during review
 
