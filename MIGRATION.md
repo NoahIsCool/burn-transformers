@@ -13,7 +13,13 @@ and moves that subtree to the new repository root. Commit IDs necessarily
 change because trees and parent IDs change. Authors, committers, dates, messages,
 and each retained historical crate tree are preserved. Commits unrelated to
 the crate may be pruned. The original HMM history is not rewritten; removal
-is a normal new commit in that repository.
+is a normal new commit in that repository. All 431 source commits were retained,
+including 16 reflog-only commits protected under
+`refs/archive/transformers/<original-commit>`. The 100 local branches and stash
+were extracted; 17 app-specific tree snapshots stay only in the original
+repository and backup. The complete map verifies parent order as well as trees
+and commit metadata. Old auxiliary HMM worktrees remain untouched; create new
+worktrees from this standalone repository for future transformer development.
 
 The `migration/` directory records the extraction tool/version, source cut,
 verification results, and original-to-extracted commit/ref maps. The local
@@ -22,7 +28,10 @@ unfiltered original branches for reproducing Git-bound historical tools. That
 backup is not tracked, packaged, or published. It contains the original
 monorepo history, so review it before sharing. The extracted repository does
 not depend on the original checkout, this bundle, or shared Git object storage
-for ordinary development.
+for ordinary development. `history-verification.json` describes the extracted
+cut before the subsequent migration-only documentation commit; its paths are
+the locations used during verification. The checked-in verifier can audit a
+fresh extraction against an original source mirror at that cut.
 
 The original working directory is moved intact. Its ignored `models` symlink
 still points to `/Volumes/bag of holding/models`; downloaded weights are not
@@ -78,6 +87,9 @@ previously nonexistent directory and check out the original producer commit:
 ```sh
 git clone /Users/nover/repos/transformers/.git/migration/hmm-compression-original.bundle \
   /private/tmp/transformers-original-layout
+git -C /private/tmp/transformers-original-layout fetch \
+  /Users/nover/repos/transformers/.git/migration/hmm-compression-original.bundle \
+  'refs/archive/transformers/*:refs/archive/transformers/*'
 git -C /private/tmp/transformers-original-layout switch --detach \
   06f39e77758a6eaf94b1583de60c531b94de872c
 ```

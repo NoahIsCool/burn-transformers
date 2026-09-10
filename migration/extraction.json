@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-10",
+  "source": {
+    "repository": "/Users/nover/repos/hmm_compression",
+    "subdirectory": "crates/transformers",
+    "branch": "codex/transformers",
+    "commit": "243cc6ab583bf03a92cde13c6a84508ac5b564c5",
+    "subtree": "d91159174a336098df79834992fb259086ab519e",
+    "release_commit": "1e0f688225de6512475e138b10ef74054e254ba3"
+  },
+  "destination": {
+    "repository": "/Users/nover/repos/transformers",
+    "branch": "codex/transformers",
+    "extracted_commit": "06882efadd2ba37b2c12ba5caa59327a9b0eaba0",
+    "extracted_release_commit": "b5b1c2357974e1bde304093ff2a399ce34ac1c4b",
+    "remote": null
+  },
+  "extraction": {
+    "tool": "git-filter-repo",
+    "version": "2.47.0",
+    "tool_version_output": "a40bce548d2c",
+    "arguments": [
+      "--force",
+      "--subdirectory-filter",
+      "crates/transformers",
+      "--preserve-commit-hashes",
+      "--preserve-commit-encoding"
+    ],
+    "force_reason": "A fresh --mirror --no-local clone contains the source stash, which trips the freshness guard. Filtering ran only on the independently backed-up disposable clone.",
+    "local_branches": 100,
+    "mapped_refs": 117,
+    "archival_refs": 16,
+    "stash_refs": 1,
+    "omitted_operational_tree_refs": 17,
+    "preserved_commits": 431,
+    "pruned_commits": 0,
+    "integration_ancestry_commits": 277,
+    "commit_map": "commit-map.txt",
+    "ref_map": "ref-map.txt",
+    "verification": "history-verification.json"
+  },
+  "original_backup": {
+    "local_git_relative_path": "migration/hmm-compression-original.bundle",
+    "sha256": "fb113d507e2fc9eb755f2e6698c236a49c2924e83275db88b1db088d94d4ac3c",
+    "complete_bundle_verified": true,
+    "includes_original_monorepo": true,
+    "includes_operational_snapshots": true,
+    "includes_all_original_branch_and_reflog_reachable_commits": true,
+    "archival_ref_namespace": "refs/archive/transformers/",
+    "tracked": false
+  },
+  "preserved_content": {
+    "runtime_src_tree": "aa4868b5f294700593d3f2a37a6cccde5ea1a3cc",
+    "unchanged_from_original_release": [
+      "src/",
+      "scripts/",
+      "acceptance/",
+      "examples/",
+      "Cargo.toml",
+      "Cargo.lock"
+    ],
+    "unrelated_hmm_source_sha256": "6d44c98ce1e67bd67438b46a447fba342c69663934daf262978e976abfba30a3",
+    "models_symlink": "/Volumes/bag of holding/models",
+    "build_directory": "target/"
+  },
+  "scope": {
+    "parent_history_rewritten": false,
+    "parent_retains_submodule": false,
+    "parent_retains_compatibility_symlink": false,
+    "large_artifacts_copied": false,
+    "original_worktrees_migrated": false,
+    "hardware_acceptance_rerun": false,
+    "notes": "Original auxiliary HMM worktrees remain untouched as historical checkouts. New worktrees must be created from the standalone repository. This migration does not change model support or qualify new performance measurements."
+  }
+}

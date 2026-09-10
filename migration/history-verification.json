@@ -1,0 +1,117 @@
+{
+  "checked": [
+    "exact_extracted_tree_oid",
+    "raw_author_header",
+    "raw_committer_header",
+    "raw_message_bytes",
+    "original_and_resulting_ref_identities",
+    "all_ref_map_completeness",
+    "exact_ordered_parent_id_mapping"
+  ],
+  "commit_map": {
+    "path": "/Users/nover/repos/hmm_compression/crates/transformers/.git/filter-repo/commit-map",
+    "sha256": "e9642f458acb727f7dbea11178d08a4d61a62a5583ee993ae9dbe3e95392e430"
+  },
+  "distinct_preserved_commits": 431,
+  "failures": [],
+  "filtered_git_dir": "/Users/nover/repos/hmm_compression/crates/transformers/.git",
+  "filtered_head": "06882efadd2ba37b2c12ba5caa59327a9b0eaba0",
+  "mapped_commits": 431,
+  "mapped_refs": 117,
+  "not_checked": [
+    "other_commit_headers_or_signatures",
+    "annotated_tag_object_metadata",
+    "unreachable_unmapped_objects",
+    "working_tree_files"
+  ],
+  "omitted_original_operational_ref_count": 17,
+  "omitted_original_operational_refs": {
+    "path": "/private/tmp/transformers-migration.Jr39sW/omitted-operational-refs.txt",
+    "refs": [
+      {
+        "original_oid": "61fde48f422a5f1c0c6998b7555bc2a9235e8a06",
+        "ref": "refs/codex/turn-diffs/captures/1789040342661/b1397b99-eef3-4909-bc5e-715632fe06df/base"
+      },
+      {
+        "original_oid": "d98aecaa27d0248e71bbeff7b988bdb19639b74f",
+        "ref": "refs/codex/turn-diffs/checkpoints/065ca8de0d7442fc837ca04d7b6b348e672db582f6b872405e4cf6c8967e9f3a/2e659eed508a27e0e76407c9fe4113f5e5ebd55d40c077b24fa9ff605fb462ef/1788555733367/ddd18d38-1454-422a-b96c-3587626e211d"
+      },
+      {
+        "original_oid": "3ee62c16dba455248537b5e8f09c6d554b7deb26",
+        "ref": "refs/codex/turn-diffs/checkpoints/0d418f283301df7e6336cbd9ca3e72bcbf61e440dc01ddd4074d9d46765f2b49/c08f280e17ddfd1a04ebf36f5e35d67b17997308bf121107ffb7f06505ba43c5/1788454149366/fadf6edf-9b45-4da3-b320-89a2573b5624"
+      },
+      {
+        "original_oid": "6ccc9a1c2e1da98ab990fe6236e5652d2a09483e",
+        "ref": "refs/codex/turn-diffs/checkpoints/0dc5610c5506eacff8fd2e6bb9005813db8a8f8bf5f61750142c6c18df19bf00/5e49042cc0ac041649effe7e971b1a54d88a2e9d6c8b59a21396c5592a07112d/1788890497983/c1bbeca9-011e-437b-9d39-37bb8111049d"
+      },
+      {
+        "original_oid": "c982c44a5d9c0e057a134eddd41917c37111673a",
+        "ref": "refs/codex/turn-diffs/checkpoints/2c6b2df05ee9ae4cba7f9a62974ce8bb27622dd587d37d7693b5396f4a76f68a/25422e9dbd887f3d1a18a3d6ed3b8d738ceb6eb7c33a155fcb23ddd04da80a16/1788450700299/dd0f9846-5089-4421-85d2-22d3619a8d39"
+      },
+      {
+        "original_oid": "6ccc9a1c2e1da98ab990fe6236e5652d2a09483e",
+        "ref": "refs/codex/turn-diffs/checkpoints/2e399e4a02dfefe8a3d70ce27c1b76a5247e7239d19bbfbf1822a65e7e209826/1df163ae01b07e988e2226c396d87019f8b91c198065702e1cf431c1b4648f84/1788888668958/2b9b7ebd-c7f9-4786-96f9-c9f41c75c47a"
+      },
+      {
+        "original_oid": "61fde48f422a5f1c0c6998b7555bc2a9235e8a06",
+        "ref": "refs/codex/turn-diffs/checkpoints/4da6f9ac510577945e30eb6f01b7e05df55ea37ad83d1421d04c1ea2aaa89b72/5bc283ed7834720001e3752eb95f7cd47f8c21001d2cb920bff9f739569f7b6a/1789039879156/13e09ba5-9fbb-4679-b8e6-abbc03c88d10"
+      },
+      {
+        "original_oid": "95ea66b69f782d637897df16318fd81a020452ae",
+        "ref": "refs/codex/turn-diffs/checkpoints/71231657284c82d817abf2b765c8086d986dc037e71017f5d5317a1157cb2802/24b6b4e8dcc5c12e508690cdc4e2e65f9e6c56cf4a0713ee5762864ded71cc2c/1788449275271/3b83d29a-65af-4217-a626-f04d45e525e1"
+      },
+      {
+        "original_oid": "451a38e0b73b6968081643690f077f222d058347",
+        "ref": "refs/codex/turn-diffs/checkpoints/74e91ffca2f6b8d1993af8f4364f7e467c789ab381045feb0303fab428f6e33e/ef3084b896b4f2ebca6752da00d69e63765f16753d3a945b0888a5ab3c03a1cd/1788897525184/4dcbd8b1-5e13-4f60-830a-b5965475e714"
+      },
+      {
+        "original_oid": "0cb0462d50fd6ede6eefc8c696cc0061f300c9a7",
+        "ref": "refs/codex/turn-diffs/checkpoints/91cb180f257a2fbdd06f8533e32df65614a20be1e5fd207599c2d5d78c10ffa3/4004cd59378466904bd055d84d08f4ffcc0d19e6c9ff309318cc7df5a7e9fafb/1788877846388/eee34692-d3a4-49c5-8351-3036015d9841"
+      },
+      {
+        "original_oid": "6ddc0bf43d9b7c50b99645b7bbddfb89e78e3669",
+        "ref": "refs/codex/turn-diffs/checkpoints/91fdb3b78e758f16831cf1f1758b346f5b32a75614e4fc37848f7414dd3b1c56/65dd2d09ca707be131e9265dd4ec71b8def397e4574e0acdca26f327dc240651/1788450189656/f4aa1a75-af84-4e14-9768-82ec3c55b77c"
+      },
+      {
+        "original_oid": "3d5bf5ecfe62855fe2ec9e1b684882049cc40469",
+        "ref": "refs/codex/turn-diffs/checkpoints/9e8431f0c431d393d50cdccb5025946b50d230ec175335117195509e41eb6238/ee12422367f7288c293c39f0450da958a88bbbf667e342176489ce4e06f20b1e/1788888259206/11a3338d-511c-4c7a-bac0-1b39f3941748"
+      },
+      {
+        "original_oid": "3166e18099b5d99bf6fb573be831ff54d3584e8e",
+        "ref": "refs/codex/turn-diffs/checkpoints/9fdfe879d79b1cf69ab27277b6b72a23505c00a469b915691d774a5f35eda81a/147096c02584c516de4d7f8fd3ca627859be268584314326f7fb1fa3a44dda43/1788443959041/8f4a37f3-0f68-4570-8cf8-f7eb23996dc6"
+      },
+      {
+        "original_oid": "63c7d46725ef07922bec2cdf06791f021f63514f",
+        "ref": "refs/codex/turn-diffs/checkpoints/d291ab493b8b7e11e3cd6e66c93ebe74589344ab2ecd063aa37dfa52ca42a4c8/5df58158e7befbb2339f0e6fa258592c423f4fb42160b21a79e03ec7254006ab/1788550268886/6d4d97bb-5be5-4635-b8d0-9578ac4d81d1"
+      },
+      {
+        "original_oid": "657abf3bd98556c7cdde11ac4eb708b2dc0de7ee",
+        "ref": "refs/codex/turn-diffs/checkpoints/dcf2681854601b8af1ba55b4d93de6299f46a2b0dc3469ff1e7d0ce5f203d111/9fb4e9e6a104f8dc802587a0dc5d3503f99905b6d147a8432192f8cd81d1aff2/1788881857833/f56cc876-f0be-4cba-88d9-06f9ff208be9"
+      },
+      {
+        "original_oid": "2c7fe6560b937566aee97dc7e4efd985387e0a75",
+        "ref": "refs/codex/turn-diffs/checkpoints/ea30d77e9adfdcfe94132d4c3e1bce5e4d85f493364b80b50527dc847b0e1e93/8b1e9e51a56c96f5b327ecd66c830cdee81513a0ee9ec9a1db04b88cfc4d6d19/1788464403648/ee8a7168-d9d3-4f28-8cbd-b0c2b3212222"
+      },
+      {
+        "original_oid": "2713ab83c9deac97234064bdd71f7140438d6646",
+        "ref": "refs/codex/turn-diffs/checkpoints/fa214a9e4a3509395a78a789b11723c88912f811ab2eb76e4e72e5f36a176624/56b306c3eeea74382d2931836fc0a8af4e02a4840813c45104904b7dd7b11842/1788879624038/84932cda-f814-43f6-b10e-4a6c6b00a579"
+      }
+    ],
+    "sha256": "39734891bc5318d55efd4fad8d26423ad36a7fd796d1fded76a6cd12c62cc612"
+  },
+  "original_git_dir": "/private/tmp/transformers-migration.Jr39sW/source-archive.git",
+  "original_head": "243cc6ab583bf03a92cde13c6a84508ac5b564c5",
+  "original_repository": "/private/tmp/transformers-migration.Jr39sW/source-archive.git",
+  "passed": true,
+  "preserved_commits": 431,
+  "pruned_commits": 0,
+  "pruned_refs": 0,
+  "ref_map": {
+    "path": "/Users/nover/repos/hmm_compression/crates/transformers/.git/filter-repo/ref-map",
+    "sha256": "6ccf0fc1c7c67c4c8e4467d486ee6abf6015d3cda39e5162637c901f4f2451ee"
+  },
+  "schema_version": 1,
+  "script_sha256": "5cbaec950576191a6dec0303225758167a19bacfe8604aa23be66f2d0409c264",
+  "subtree": "crates/transformers",
+  "surviving_refs": 117
+}
