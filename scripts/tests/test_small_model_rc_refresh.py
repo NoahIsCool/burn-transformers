@@ -31,6 +31,7 @@ class SmallModelRcRefreshTests(unittest.TestCase):
         self.assertEqual(record["source_before"], record["source_after"])
         self.assertEqual(record["executable_sha256_before"], record["executable_sha256_after"])
         self.assertRegex(record["executable_sha256_before"], r"^[0-9a-f]{64}$")
+        self.assertEqual(set(record["logs"]), {"stdout.log", "stderr.log"})
         for filename, identity in record["logs"].items():
             self.assertIn(filename, ("stdout.log", "stderr.log"))
             data = (MEASUREMENTS / path.parent / filename).read_bytes()
@@ -67,6 +68,24 @@ class SmallModelRcRefreshTests(unittest.TestCase):
             self.assertEqual(saved, dict(name=row[0], cosine=float(row[1]), maximum_absolute_error=float(row[2]), failures_at_1e_4=int(row[3]), actual_f32le_sha256=row[4]))
             self.assertGreaterEqual(saved["cosine"], 0.999)
             self.assertEqual(saved["failures_at_1e_4"], 0)
+
+    def test_build_metadata_keeps_benchmark_and_correctness_features_distinct(self):
+        """The public timing attempt used Metal alone; correctness also enabled Flex."""
+        self.assertEqual(self.record["compiler"]["rustc_release"], "1.92.0")
+        self.assertEqual(self.record["compiler"]["rustc_commit"], "ded5c06cf21d2b93bffd5d884aa6e96934ee4234")
+        self.assertEqual(self.record["compiler"]["llvm_version"], "21.1.3")
+        self.assertEqual(self.record["compiler"]["burn_version"], "0.21.0")
+        expected = ["std", "metal", "flex", "tokenizers", "chat-templates"]
+        for run in self.record["runs"]:
+            self.assertEqual(run["features"], expected)
+        for index, build in enumerate(self.record["builds"]):
+            features = expected if index < 2 else ["std", "metal", "tokenizers", "chat-templates"]
+            self.assertEqual(build["features"], features)
+            command = build["command"]
+            self.assertEqual(command[command.index("--features") + 1].split(","), features)
+            for flag in ("--locked", "--offline", "--release", "--no-default-features"):
+                self.assertIn(flag, command)
+            self.assertEqual(build["process_exit_code"], 0)
 
     def test_stress_is_populated_and_not_quality_or_timing(self):
         """The record proves 32K real history, not merely an allocated capacity."""
@@ -105,6 +124,8 @@ class SmallModelRcRefreshTests(unittest.TestCase):
         self.assertTrue(public["correctness_passed"])
         self.assertIn("incorrectly declared AC power", public["rejection_reason"])
         self.assertIn("Battery Power", public["observed_power_before"])
+        self.assertFalse(public["physical_power_transition_established"])
+        self.assertEqual(public["power_probe_contexts"], {"before": "host, outside sandbox", "after": "sandboxed"})
         self.assertFalse(public["subsequent_attempt"]["model_inference_started"])
         self.assertEqual(public["subsequent_attempt"]["process_exit_code"], 1)
         natural = report["natural_greedy"]

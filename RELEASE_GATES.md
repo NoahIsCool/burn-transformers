@@ -312,6 +312,9 @@ full-vector replay. The new public-coordinator hardware run validates thirteen
 exact continuations but is **excluded from performance comparisons** because
 the observed power state contradicted its supplied AC metadata. Repeated timing
 and sampled phase-memory refreshes, production-only coverage qualification,
-bounded fuzz refresh and final packaging remain separate release work.
+and final packaging remain separate release work. The [fresh five-target ASan campaign](fuzz/evidence/refresh-80b51e8.json)
+now passes all 50,000 configured inputs without sanitizer diagnostics, timeouts,
+or failure artifacts, with unchanged source, seed, and lockfile hashes. It is
+bounded fuzz evidence, not proof of complete coverage.
 
 No expensive acceptance runs for larger families belong to this v0.1 phase.

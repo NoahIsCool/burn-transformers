@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-10",
+  "scope": "Recoverable relocation of a completed, inactive generated fuzz build cache after the internal 20 GiB compile preflight failed. This is workspace hygiene, not model acceptance.",
+  "original_path": "/private/tmp/hmm-tfm-small-bench/crates/transformers/fuzz/target",
+  "destination_path": "/Volumes/bag of holding/models/transformers-build-cache.Kri4ck/fuzz-target-80b51e8",
+  "old_path_retained_as_directory_symlink": true,
+  "worker_confirmed_no_active_or_pending_target_mutations": true,
+  "cache_file_count_before": 5510,
+  "cache_file_count_after": 5510,
+  "content_and_relative_name_manifest_sha256_before": "7fb4b542854596c8ad578df6dc5ce3a172fdb22984d992905f1ae72ed1bf4a8b",
+  "content_and_relative_name_manifest_sha256_after": "7fb4b542854596c8ad578df6dc5ce3a172fdb22984d992905f1ae72ed1bf4a8b",
+  "digest_method": "From the fuzz directory: rg --files --hidden --no-ignore -0 target | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256. The explicit root target path traverses the preserving symlink after relocation. The digest covers regular-file contents and relative names, not filesystem timestamps or permission metadata.",
+  "allocated_cache_kib_before": 3053952,
+  "internal_available_kib_before": 19979476,
+  "internal_available_kib_after": 22589768,
+  "other_host_work_may_change_free_space": true,
+  "weights_source_corpus_and_evidence_moved": false,
+  "files_deleted_without_recoverable_copy": false,
+  "raw_fuzz_evidence_unchanged_at": "/private/tmp/transformers-fuzz-refresh.EXC7pm",
+  "main_crate_cargo_target_remains_default": true
+}

@@ -399,7 +399,7 @@
     "measured_partition_calls": 10,
     "tokens_u32le_sha256": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "accepted_for_performance": false,
-    "rejection_reason": "The initial operator metadata incorrectly declared AC power. A native pmset observation immediately before launch reported Battery Power; a post-run observation reported AC Power. The subsequent guarded AC rerun failed its power preflight before spawning model inference. Original raw bytes are retained, but their power declaration and timing_comparable_to_uninstrumented_series flag do not qualify these timings for comparisons.",
+    "rejection_reason": "The initial operator metadata incorrectly declared AC power. A native host pmset observation immediately before launch reported Battery Power; the post-run AC Power observation was made inside the sandbox. Repeated sandbox-host-sandbox checks later reproduced the differing reports at the same battery percentage. These observations do not establish a physical power transition. The subsequent guarded host rerun failed its battery-power preflight before spawning model inference. Original raw bytes are retained, but their AC declaration and timing_comparable_to_uninstrumented_series flag do not qualify these timings for comparisons.",
     "observed_power_before": "Now drawing from 'Battery Power'; 44%; discharging",
     "observed_power_after": "Now drawing from 'AC Power'; 44%; discharging",
     "continuous_power_monitoring": false,
@@ -408,6 +408,39 @@
       "process_exit_code": 1,
       "model_inference_started": false,
       "error": "comparable benchmark requires observed AC power"
+    },
+    "power_probe_contexts": {
+      "before": "host, outside sandbox",
+      "after": "sandboxed"
+    },
+    "physical_power_transition_established": false,
+    "context_recheck": {
+      "date": "2026-09-10",
+      "observations": [
+        {
+          "context": "sandboxed",
+          "stdout": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=35389539)\t34%; discharging; 1:21 remaining present: true\n"
+        },
+        {
+          "context": "host, outside sandbox",
+          "stdout": "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=35389539)\t34%; discharging; 1:21 remaining present: true\n"
+        },
+        {
+          "context": "sandboxed",
+          "stdout": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=35389539)\t34%; discharging; 1:29 remaining present: true\n"
+        }
+      ],
+      "command": [
+        "pmset",
+        "-g",
+        "batt"
+      ],
+      "process_exit_codes": [
+        0,
+        0,
+        0
+      ],
+      "scope": "Retained native tool outputs observed in sequence; not a general explanation of macOS power APIs."
     }
   },
   "limitations": [

@@ -198,8 +198,9 @@ The [latest correctness refresh](acceptance/measurements/small-model-rc-refresh-
 also executes the separate public `generate_causal` benchmark: all three warmups
 and ten measured-partition calls produce the same 32 oracle tokens. This does
 **not** establish a new timing baseline. The initially supplied metadata said
-AC power, but native observations found battery power before the run and AC
-afterward; the guarded follow-up attempt refused to start on battery. The
+AC power, but the host probe found battery power. A sandboxed probe reported AC;
+this context-dependent disagreement was reproduced and does not establish a
+physical power transition. The guarded host follow-up refused to start on battery. The
 unchanged raw report is retained with an explicit rejection that overrides its
 incorrect power/comparability labels. A stable-power run remains required.
 Public-API, FLAN CPU oracle, populated Q4 32K, and unchanged example replays in

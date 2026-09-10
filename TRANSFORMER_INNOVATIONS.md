@@ -1389,7 +1389,9 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   The [hardware correctness run](acceptance/measurements/small-model-rc-refresh-20260910.json)
   now passes all thirteen complete calls with exact oracle tokens and finite
   log probabilities. Its timings are explicitly rejected: the operator metadata
-  incorrectly declared AC power while observed power changed around the run.
+  incorrectly declared AC power while the host probe reported battery power.
+  A sandboxed probe reported AC; differing probe contexts do not establish a
+  physical power transition.
   A stable-power performance run remains pending; these observations do not
   replace the older model-loop baseline.
 - **Small-model release checks distinguish correctness from performance.**
@@ -1401,6 +1403,9 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   also passes advisory, yanked-version, license and source checks without new
   waivers. None of these results promotes experimental families or substitutes
   for production-only coverage and refreshed performance/memory gates.
+  The [refreshed sanitizer campaigns](fuzz/evidence/refresh-80b51e8.json) also pass
+  10,000 inputs for each of five targets, with no sanitizer diagnostics or
+  failure artifacts. This finite campaign is not exhaustive branch coverage.
 - **Memory measurements distinguish storage from observed process footprint.**
   The test-only Darwin supervisor brackets synchronized phases, samples a real
   idle baseline, and retains raw timestamps, gaps, and errors. The [executed Qwen/FLAN series](acceptance/measurements/small-model-metal-memory-20260909.json)
