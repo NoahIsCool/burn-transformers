@@ -1,5 +1,6 @@
 use burn::{
     backend::Flex,
+    module::{ModuleVisitor, Param, ParamId},
     tensor::{Bool, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 
@@ -568,6 +569,7 @@ fn registry_decode<const S: usize>(
 }
 
 /// Requires full-vocabulary parity, not merely agreement of the selected token.
+#[track_caller]
 fn assert_registry_logits(actual: Tensor<TestBackend, 3>, expected: Tensor<TestBackend, 3>) {
     actual
         .into_data()
@@ -583,11 +585,57 @@ fn assert_registry_error(actual: Error, expected: Error) {
     assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
 }
 
+/// Materializes every parameter, including experts never selected by a prompt.
+///
+/// Burn deliberately clones an uninitialized parameter's initializer into an
+/// independent cell. Such clones may later draw different random weights. A
+/// sparse forward does not initialize skipped experts, so comparing two cloned
+/// graphs requires traversing the entire parameter bank before cloning.
+#[derive(Default)]
+struct RegistryParameterMaterializer {
+    /// Number of visited parameters, including those already initialized.
+    visited: usize,
+}
+
+impl ModuleVisitor<TestBackend> for RegistryParameterMaterializer {
+    /// Freezes every floating-point weight before graphs can diverge lazily.
+    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<TestBackend, D>>) {
+        let _ = param.val();
+        assert!(param.is_initialized());
+        self.visited += 1;
+    }
+
+    /// Preserves the same materialization invariant for integer parameters.
+    fn visit_int<const D: usize>(&mut self, param: &Param<Tensor<TestBackend, D, Int>>) {
+        let _ = param.val();
+        assert!(param.is_initialized());
+        self.visited += 1;
+    }
+
+    /// Preserves the same materialization invariant for Boolean parameters.
+    fn visit_bool<const D: usize>(&mut self, param: &Param<Tensor<TestBackend, D, Bool>>) {
+        let _ = param.val();
+        assert!(param.is_initialized());
+        self.visited += 1;
+    }
+}
+
+/// Makes fixture clones share concrete parameter values, not lazy initializers.
+fn materialize_registry_parameters<M: Module<TestBackend>>(model: &M) {
+    let mut visitor = RegistryParameterMaterializer::default();
+    model.visit(&mut visitor);
+    assert!(
+        visitor.visited > 0,
+        "registry fixture must contain parameters"
+    );
+}
+
 /// Exercises every causal trait entry point and nonempty cache lifecycle operation.
 ///
-/// The concrete graph is initialized before cloning, so enum and direct calls
-/// share parameters. Distinct rows expose swapped-cache bugs; a fresh stateless
-/// computation additionally detects cache damage after rejected operations.
+/// Every concrete parameter is materialized before cloning, including skipped
+/// experts, so enum and direct calls share weights. Distinct rows expose
+/// swapped-cache bugs; a fresh stateless computation additionally detects cache
+/// damage after rejected operations.
 fn assert_causal_dispatch_contract<M>(
     concrete: M,
     family: &str,
@@ -598,6 +646,7 @@ fn assert_causal_dispatch_contract<M>(
     M: CausalLanguageModel<TestBackend> + Clone,
     AutoCausalLm<TestBackend>: From<M>,
 {
+    materialize_registry_parameters(&concrete);
     let options = ForwardOptions {
         logits: LogitsSelection::Last,
         ..Default::default()
@@ -776,6 +825,86 @@ fn qwen_moe_auto_trait_dispatch_and_state_lifecycle() {
     );
 }
 
+/// A deliberately skipped expert proves cloning safety without relying on RNG.
+#[test]
+fn registry_materialization_includes_experts_skipped_by_the_initial_prompt() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let device = Default::default();
+    let mut concrete = Qwen3MoeForCausalLm::<TestBackend>::init(tiny_qwen_moe(), &device).unwrap();
+    let initializations = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&initializations);
+    let moe = concrete.model.layers[0].sparse_mlp.as_mut().unwrap();
+    // Equal router logits deterministically select experts 0 and 1, leaving
+    // expert 3 untouched regardless of process-wide random initialization.
+    moe.router.weight = Param::from_tensor(Tensor::zeros([8, 4], &device));
+    moe.routed[3].gate_proj.weight = Param::uninitialized(
+        ParamId::new(),
+        move |device, _| {
+            let value = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            Tensor::full([8, 12], value as f32, device)
+        },
+        device,
+        false,
+        [8, 12].into(),
+    );
+    concrete
+        .forward(
+            registry_tokens([[1, 2], [3, 4]], &device),
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(initializations.load(Ordering::SeqCst), 0);
+    let skipped = &concrete.model.layers[0].sparse_mlp.as_ref().unwrap().routed[3];
+    assert!(!skipped.gate_proj.weight.is_initialized());
+    assert!(!skipped.up_proj.weight.is_initialized());
+    assert!(!skipped.down_proj.weight.is_initialized());
+    let lazy_clone = concrete.clone();
+
+    materialize_registry_parameters(&concrete);
+    let prepared_clone = AutoCausalLm::from(concrete.clone());
+    let AutoCausalLm::Qwen3Moe(prepared) = prepared_clone else {
+        unreachable!("the fixture converts into the Qwen3-MoE variant")
+    };
+    let copied = &prepared.model.layers[0].sparse_mlp.as_ref().unwrap().routed[3];
+    for expert in [skipped, copied] {
+        assert!(expert.gate_proj.weight.is_initialized());
+        assert!(expert.up_proj.weight.is_initialized());
+        assert!(expert.down_proj.weight.is_initialized());
+    }
+    assert_eq!(initializations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        skipped.gate_proj.weight.val().into_data(),
+        copied.gate_proj.weight.val().into_data(),
+    );
+    assert_registry_logits(
+        copied.forward(Tensor::ones([2, 1, 8], &device)).unwrap(),
+        skipped.forward(Tensor::ones([2, 1, 8], &device)).unwrap(),
+    );
+
+    // The pre-materialization clone still owns a separate lazy cell. Its
+    // controlled initializer returns 2 instead of 1, demonstrating the old
+    // fixture's failure mode even if random weights happen to match by chance.
+    let uncopied = &lazy_clone.model.layers[0]
+        .sparse_mlp
+        .as_ref()
+        .unwrap()
+        .routed[3];
+    assert!(!uncopied.gate_proj.weight.is_initialized());
+    assert_eq!(
+        skipped.gate_proj.weight.val().into_data(),
+        TensorData::new(vec![1.0_f32; 96], [8, 12]),
+    );
+    assert_eq!(
+        uncopied.gate_proj.weight.val().into_data(),
+        TensorData::new(vec![2.0_f32; 96], [8, 12]),
+    );
+    assert_eq!(initializations.load(Ordering::SeqCst), 2);
+}
+
 /// MLA dispatch keeps compressed-cache metadata and tensor row order coherent.
 #[test]
 fn deepseek_auto_trait_dispatch_and_state_lifecycle() {
@@ -907,6 +1036,7 @@ fn all_foreign_causal_state_pairs_reject_prefill_and_decode_atomically() {
 fn seq2seq_auto_trait_dispatch_and_state_lifecycle() {
     let device = Default::default();
     let concrete = T5ForConditionalGeneration::<TestBackend>::init(tiny_t5(), &device).unwrap();
+    materialize_registry_parameters(&concrete);
     let options = ForwardOptions {
         logits: LogitsSelection::Last,
         ..Default::default()
