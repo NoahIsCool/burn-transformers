@@ -5,6 +5,12 @@
 //! complete warmups and ten measured repetitions. An independent ignored test,
 //! `qwen::qwen35_metal_long_prefill_benchmark`, measures only 2K/8K/32K prefill in
 //! 256-token chunks. It never decodes beyond a 32K source or allocates above 32K.
+//! `qwen::qwen35_metal_public_causal_greedy_benchmark` is a third, separate series:
+//! it measures the complete public `generate_causal` coordinator on the pinned
+//! natural prompt, with three warmups and ten measured 32-token continuations.
+//! Those end-to-end intervals include cache allocation, host selection, probability
+//! readback and stopping, but exclude tokenization and reference validation. They
+//! are not replacements for the baseline's historical greedy model-API loop.
 //!
 //! Set `TRANSFORMERS_QWEN35_DIR`, `TRANSFORMERS_QWEN35_REFERENCE_DIR` (the bundle's
 //! parent), `TRANSFORMERS_BENCH_METADATA_JSON` and `TRANSFORMERS_BENCH_OUTPUT_JSON`.
@@ -27,6 +33,10 @@
 )]
 #[path = "support/benchmark_metrics.rs"]
 mod benchmark_metrics;
+
+#[allow(dead_code, reason = "the public coordinator runner is Metal-only")]
+#[path = "support/public_generation_benchmark.rs"]
+mod public_generation_benchmark;
 
 use serde::Serialize;
 use transformers::models::qwen3_5::{Qwen3_5LayerType, Qwen3_5TextConfig};
@@ -223,7 +233,7 @@ mod qwen {
     };
     use super::{
         MAX_CONTEXT, PREFILL_CHUNK, cache_accounting, capacity_for, cosine, product,
-        qwen35_release_reference, sha256_regular_file,
+        public_generation_benchmark, qwen35_release_reference, sha256_regular_file,
     };
     use burn::tensor::{
         DType, Int, Tensor, TensorData,
@@ -239,10 +249,11 @@ mod qwen {
         time::Instant,
     };
     use transformers::{
-        AutoCausalLm, AutoLoadOptions, CausalLanguageModel, CausalLmInput, DecodeInput,
-        DecodeState, EncodeOptions, ForwardOptions, LogitsSelection,
+        AutoCausalLm, AutoLoadOptions, CausalGenerationRequest, CausalLanguageModel, CausalLmInput,
+        DecodeInput, DecodeState, EncodeOptions, ForwardOptions, GenerationConfig, LogitsSelection,
         cache::CacheConfig,
         checkpoint::{DTypePolicy, LoadOptions, TensorDType},
+        generate_causal,
         models::qwen3_5::{Qwen3_5DecodeState, Qwen3_5ForCausalLm},
     };
 
@@ -255,6 +266,17 @@ mod qwen {
     const REPOSITORY: &str = "Qwen/Qwen3.5-0.8B";
     /// Real generated EOS ID; forced-work loops deliberately do not stop here.
     const EOS: u32 = 248_044;
+
+    /// Disjoint timing protocols; selecting one never executes either other warm series.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum BenchmarkSeries {
+        /// Historical fixed-source prefill/decode plus natural model-API loop.
+        Baseline,
+        /// Optional bounded long-context prefill, with no decode suffix.
+        LongPrefill,
+        /// Actual public generation coordinator on the authenticated natural prompt.
+        PublicCausalGreedy,
+    }
 
     /// Requires an explicit local argument rather than discovering network artifacts.
     fn required_path(name: &str) -> PathBuf {
@@ -613,6 +635,84 @@ mod qwen {
         json!({"source_token_ids":source_ids,"source_tokens_u32le_sha256":token_hash(source_ids),"max_new_tokens":32,"eos_token_ids":[EOS],"mode":"greedy_model_api_loop","cache_allocation_included":true,"token_ids":ids,"tokens_u32le_sha256":token_hash(&ids),"finish_reason":finish,"total_time":summarize(&times,None,MEASURED_REPETITIONS).unwrap()})
     }
 
+    /// Times complete public coordinator calls, validating every warmup and measured result.
+    ///
+    /// Request/tensor preparation is outside each timer. `generate_causal` owns its
+    /// cache lifetime, token processing, readback and EOS/stop tracking; all of those
+    /// costs are inside. The final sync completes queued work before elapsed time is
+    /// observed. We report no invented model-only or first-token sub-intervals here.
+    fn public_causal_greedy(
+        model: &AutoCausalLm<Metal>,
+        defaults: &GenerationConfig,
+        reference: &qwen35_release_reference::ReferenceBundle,
+        device: &<Metal as BackendTypes>::Device,
+    ) -> Value {
+        let source_ids = reference
+            .input_ids()
+            .iter()
+            .map(|&id| u32::try_from(id).unwrap())
+            .collect::<Vec<_>>();
+        let expected_ids = reference
+            .greedy_token_ids()
+            .iter()
+            .map(|&id| u32::try_from(id).unwrap())
+            .collect::<Vec<_>>();
+        let generation = public_generation_benchmark::generation_config(
+            defaults,
+            model.config().vocabulary_size(),
+        )
+        .unwrap();
+        assert_eq!(generation.eos_token_ids, [EOS]);
+        let capacity = public_generation_benchmark::cache_capacity(source_ids.len()).unwrap();
+        let source = input(&source_ids, device);
+        let mut times = Vec::with_capacity(MEASURED_REPETITIONS);
+        let mut outputs = Vec::with_capacity(WARMUP_REPETITIONS + MEASURED_REPETITIONS);
+        for repetition in 0..WARMUP_REPETITIONS + MEASURED_REPETITIONS {
+            let request = CausalGenerationRequest {
+                prompt: source.clone(),
+                cache: CacheConfig::new(1, capacity).unwrap(),
+                generation: generation.clone(),
+                prefill_chunk_size: None,
+                vocabulary_size: model.config().vocabulary_size(),
+            };
+            synchronize(device);
+            let phase = MemoryPhase::begin("public_causal_greedy");
+            let start = Instant::now();
+            let output = generate_causal(model, request).unwrap();
+            synchronize(device);
+            let seconds = start.elapsed().as_secs_f64();
+            phase.finish();
+            let canonical = public_generation_benchmark::validate_output(
+                &output,
+                source_ids.len(),
+                &expected_ids,
+            )
+            .unwrap();
+            let measured = repetition >= WARMUP_REPETITIONS;
+            if measured {
+                times.push(seconds);
+            }
+            outputs.push(json!({
+                "repetition": repetition,
+                "partition": if measured { "measured" } else { "warmup" },
+                "output": canonical,
+            }));
+        }
+        json!({
+            "mode": public_generation_benchmark::MODE,
+            "source_token_ids": source_ids,
+            "source_tokens_u32le_sha256": token_hash(&source_ids),
+            "expected_token_ids": expected_ids,
+            "expected_tokens_u32le_sha256": token_hash(&expected_ids),
+            "protocol": public_generation_benchmark::protocol(&generation, source_ids.len()).unwrap(),
+            "per_repetition_outputs": outputs,
+            "total_time": summarize(&times, None, MEASURED_REPETITIONS).unwrap(),
+            "model_only_time": null,
+            "first_token_latency": null,
+            "sub_timing_limitation": "the public non-streaming coordinator returns only the complete continuation; this series measures one synchronized end-to-end interval"
+        })
+    }
+
     /// Rejects accidentally executing a debug benchmark while allowing compile-only CI.
     #[allow(
         clippy::assertions_on_constants,
@@ -623,7 +723,9 @@ mod qwen {
     }
 
     /// Authenticates, validates and measures one explicitly selected Qwen benchmark series.
-    fn run(prefill_only: bool) {
+    fn run(kind: BenchmarkSeries) {
+        let prefill_only = kind == BenchmarkSeries::LongPrefill;
+        let public_causal = kind == BenchmarkSeries::PublicCausalGreedy;
         require_release();
         let environment: RunEnvironment = serde_json::from_slice(
             &fs::read(required_path("TRANSFORMERS_BENCH_METADATA_JSON")).unwrap(),
@@ -658,6 +760,14 @@ mod qwen {
         assert_eq!(
             file_hash(&manifest_dir.join("tests/support/qwen35_release_reference.rs")),
             reference_helper_hash
+        );
+        let public_helper_hash = format!(
+            "{:x}",
+            Sha256::digest(include_bytes!("support/public_generation_benchmark.rs"))
+        );
+        assert_eq!(
+            file_hash(&manifest_dir.join("tests/support/public_generation_benchmark.rs")),
+            public_helper_hash
         );
         let authentication = Instant::now();
         let reference_parent = required_path("TRANSFORMERS_QWEN35_REFERENCE_DIR");
@@ -722,7 +832,7 @@ mod qwen {
         memory.push(rss_snapshot("after_load"));
         let cold = cold_and_reference(model, &reference, &device);
         memory.push(rss_snapshot("after_cold_and_reference"));
-        let forced_ids = if prefill_only {
+        let forced_ids = if prefill_only || public_causal {
             Vec::new()
         } else {
             (0..DECODE_STEPS)
@@ -733,10 +843,12 @@ mod qwen {
             .iter()
             .map(|&id| input(&[id], &device))
             .collect::<Vec<_>>();
-        let lengths = if prefill_only {
-            [2048, 8192, MAX_CONTEXT]
+        let lengths = if public_causal {
+            Vec::new()
+        } else if prefill_only {
+            vec![2048, 8192, MAX_CONTEXT]
         } else {
-            [32, 128, 512]
+            vec![32, 128, 512]
         };
         let mut series = Vec::new();
         for length in lengths {
@@ -787,7 +899,16 @@ mod qwen {
                 "predicted_token_ids":samples[0].predictions,"predicted_tokens_u32le_sha256":token_hash(&samples[0].predictions),"per_repetition_prediction_hashes":samples.iter().map(|sample|token_hash(&sample.predictions)).collect::<Vec<_>>() }));
             memory.push(rss_snapshot(&format!("after_source_{length}")));
         }
-        let natural = (!prefill_only).then(|| natural_greedy(model, &expected_ids, &device));
+        let natural = if public_causal {
+            Some(public_causal_greedy(
+                loaded.model(),
+                loaded.generation_defaults(),
+                &reference,
+                &device,
+            ))
+        } else {
+            (!prefill_only).then(|| natural_greedy(model, &expected_ids, &device))
+        };
         memory.push(rss_snapshot("after_measured_series"));
         let final_authentication = Instant::now();
         reference.validate_checkpoint(&root);
@@ -802,12 +923,26 @@ mod qwen {
                 )
             },
         );
-        let result = json!({"schema_version":1,"benchmark":if prefill_only {"qwen35_08b_f16_long_prefill_only"} else {"qwen35_08b_f16_baseline"},
+        let benchmark_name = match kind {
+            BenchmarkSeries::Baseline => "qwen35_08b_f16_baseline",
+            BenchmarkSeries::LongPrefill => "qwen35_08b_f16_long_prefill_only",
+            BenchmarkSeries::PublicCausalGreedy => "qwen35_08b_f16_public_causal_greedy",
+        };
+        let mut result = json!({"schema_version":1,"benchmark":benchmark_name,
             "process_memory_instrumentation_enabled":memory_profiling_enabled(),"timing_comparable_to_uninstrumented_series":!memory_profiling_enabled(),
             "provenance":{"repository":REPOSITORY,"revision":REVISION,"checkpoint_artifacts":reference_record["provenance"]["artifacts"],"reference_manifest_sha256":file_hash(&reference_json),"reference_payloads":reference_record["payloads"],"crate_commit":command_text("git",&["rev-parse","HEAD"]),"crate_worktree_status":command_text("git",&["status","--porcelain","--untracked-files=all","--","."]),"rustc":compiler,"compiled_rustup_toolchain":toolchain,"cargo_lock_sha256":file_hash(&manifest_dir.join("Cargo.lock")),"benchmark_source_sha256":source_hash,"metric_helper_sha256":helper_hash,"reference_helper_sha256":reference_helper_hash,"benchmark_executable_sha256":file_hash(&std::env::current_exe().unwrap()),"burn_version":"0.21.0","profile":"release (debug assertions disabled)","backend_profile":"Metal/F16","backend_name":Metal::name(&device),"parameter_dtype":"F16","recurrent_matrix_dtype":"F32","quantization":null,"cargo_features":features(),"environment":environment},
             "protocol":{"warmup_repetitions":WARMUP_REPETITIONS,"measured_repetitions":MEASURED_REPETITIONS,"decode_mode":if prefill_only {"none: prefill-only"} else {"teacher_forced_with_greedy_predictions"},"decode_steps":forced.len(),"forced_decode_token_ids":forced_ids,"forced_decode_tokens_u32le_sha256":token_hash(&forced_ids),"maximum_total_context":MAX_CONTEXT,"seed":0,"tokenization_included":false,"prefill_cache_allocation_included":false,"synchronization":"Backend::sync at timing boundaries and every prefill chunk; readback included only in selection-inclusive intervals"},
             "artifact_authentication_seconds_separate_from_load":authentication_seconds,"post_run_artifact_authentication_seconds":final_authentication_seconds,"strict_load_seconds":load_seconds,"strict_load_report":report,"cold_first_token":cold,"warm_series":series,"natural_greedy":natural,
             "memory":{"boundary_snapshots":memory,"phase_peak_host_bytes":null,"phase_peak_device_bytes":null,"phase_peak_unified_bytes":null,"external_high_water_evidence":"supervise the already-built executable; snapshots are not peaks"},"publishable_without_external_memory_and_full_acceptance_evidence":false});
+        result["provenance"]["public_generation_helper_sha256"] = json!(public_helper_hash);
+        if public_causal {
+            result["protocol"] = result["natural_greedy"]["protocol"].clone();
+            result["public_causal_cache"] = observe_cache(
+                model,
+                public_generation_benchmark::cache_capacity(expected_ids.len()).unwrap(),
+                &device,
+            );
+        }
         let mut output = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -847,14 +982,21 @@ mod qwen {
     #[test]
     #[ignore = "requires authenticated Qwen artifacts, exclusive Metal, environment metadata and release profile"]
     fn qwen35_metal_baseline_benchmark() {
-        run(false);
+        run(BenchmarkSeries::Baseline);
     }
 
     /// Runs an independent, potentially expensive 2K/8K/32K chunked-prefill-only series.
     #[test]
     #[ignore = "long prefill only: requires explicit selection, authenticated Qwen artifacts, exclusive Metal and release profile"]
     fn qwen35_metal_long_prefill_benchmark() {
-        run(true);
+        run(BenchmarkSeries::LongPrefill);
+    }
+
+    /// Runs natural greedy feedback through the public API, independent of model-loop baselines.
+    #[test]
+    #[ignore = "public coordinator: requires authenticated Qwen artifacts, exclusive Metal, environment metadata and release profile"]
+    fn qwen35_metal_public_causal_greedy_benchmark() {
+        run(BenchmarkSeries::PublicCausalGreedy);
     }
 }
 
