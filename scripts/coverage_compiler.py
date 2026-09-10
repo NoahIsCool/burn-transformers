@@ -144,6 +144,10 @@ def compiler_probe(arguments: list[str]) -> bool:
         return False
     if arguments in (["-V"], ["-vV"], ["-Vv"], ["--version"], ["--version", "--verbose"]):
         return True
+    # cargo-llvm-cov 0.6.21 probes coverage codegen support with this exact
+    # non-emitting query. Do not generalize it to arbitrary -C invocations.
+    if arguments == ["-C", "help"]:
+        return True
     queries = []
     for index, value in enumerate(arguments):
         if value == "--print":
@@ -174,7 +178,7 @@ def compiler_identity(executable: str, cwd: Path, environment: dict[str, str]) -
 
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
         result = subprocess.run([executable, "-Vv"], cwd=cwd, env=environment,
-                                stdout=output, stderr=errors, check=False, timeout=30)
+                                stdout=output, stderr=errors, check=False, timeout=30, close_fds=False)
         output.seek(0)
         errors.seek(0)
         version = output.read(MAX_VERSION_BYTES + 1)
@@ -203,7 +207,7 @@ def capture(arguments: list[str], environment: dict[str, str], cwd: Path) -> int
     if any(value.startswith("@") for value in arguments[1:]):
         raise CompilerCaptureError("compiler response files are unsupported for artifact capture")
     if compiler_probe(arguments[1:]):
-        return subprocess.run(arguments, cwd=cwd, env=environment, check=False).returncode
+        return subprocess.run(arguments, cwd=cwd, env=environment, check=False, close_fds=False).returncode
     if not emission_requested(arguments[1:]):
         raise CompilerCaptureError("non-probe compiler invocation must request explicit artifact emission")
     capture_root = checked_directory(Path(environment["TFM_COVERAGE_CAPTURE_ROOT"]))
@@ -216,7 +220,12 @@ def capture(arguments: list[str], environment: dict[str, str], cwd: Path) -> int
               "production_only_exclusions_qualified": False}
     messages = []
     capture_error = None
-    with subprocess.Popen(arguments, cwd=cwd, env=environment, stderr=subprocess.PIPE) as child:
+    # A transparent trusted-compiler wrapper must retain Cargo's inheritable
+    # jobserver descriptors. Python's default close_fds=True closes them and
+    # makes rustc warn about a broken CARGO_MAKEFLAGS jobserver. Preserve normal
+    # exec inheritance; do not guess descriptors by parsing Make's syntax.
+    # Python-created capture pipes/tempfiles remain non-inheritable (PEP 446).
+    with subprocess.Popen(arguments, cwd=cwd, env=environment, stderr=subprocess.PIPE, close_fds=False) as child:
         assert child.stderr is not None
         while line := child.stderr.readline(MAX_MESSAGE_BYTES + 1):
             sys.stderr.buffer.write(line)

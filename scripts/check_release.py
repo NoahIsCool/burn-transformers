@@ -19,6 +19,7 @@ import subprocess
 import sys
 
 from coverage_provenance import capture_sources, fingerprint_file, require_same_sources
+from coverage_binding import prepare_capture, validate_capture, read_json, require_identity
 
 
 CRATE = Path(__file__).resolve().parents[1]
@@ -26,7 +27,10 @@ FEATURES = "std,flex,tokenizers,chat-templates,autodiff"
 GATES = ("source", "msrv", "coverage", "dependencies", "accelerator-compile", "package")
 # These are maintenance notices, not vulnerability waivers. New IDs fail.
 MAINTENANCE_NOTICES = ("RUSTSEC-2025-0141", "RUSTSEC-2024-0436")
-RUNNER_INPUTS = (Path(__file__).resolve(), Path(__file__).resolve().with_name("coverage_provenance.py"))
+UNFILTERED_OPTION_NOTICE = "warning: --disable-default-ignore-filename-regex option is unstable"
+RUNNER_INPUTS = tuple(Path(__file__).resolve().with_name(name) for name in (
+    "check_release.py", "coverage_provenance.py", "coverage_binding.py", "coverage_compiler.py", "coverage_dependencies.py",
+))
 
 
 def coverage_tool_versions(command: list[str], crate: Path, environment: dict) -> list[dict]:
@@ -67,6 +71,7 @@ def capture_coverage_context(crate: Path, command: list[str], environment: dict)
             "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTDOCFLAGS", "CARGO_INCREMENTAL",
             "CARGO_BUILD_TARGET", "CARGO_TARGET_DIR", "RUSTC", "RUSTC_WRAPPER",
             "RUSTC_WORKSPACE_WRAPPER",
+            "LLVM_COV", "LLVM_PROFDATA", "TFM_COVERAGE_CAPTURE_ROOT", "TFM_COVERAGE_ARTIFACT_ROOT",
         ) if name in environment},
         "compiler_dependency_closure_verified": False,
         "production_only_exclusions_qualified": False,
@@ -88,20 +93,40 @@ def write_evidence(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n")
 
 
-def require_clean_coverage_log(log: str) -> None:
+def read_coverage_log(path: Path) -> str:
+    """Read bounded literal log bytes, preserving CRLF and exact notice spelling."""
+
+    maximum = 512 * 1024 * 1024
+    with path.open("rb") as stream:
+        payload = stream.read(maximum + 1)
+    if len(payload) > maximum:
+        raise ValueError("coverage log exceeds its byte bound")
+    return payload.decode("utf-8")
+
+
+def require_clean_coverage_log(log: str, *, allow_unfiltered_option_notice: bool = False) -> int:
     """Reject compiler/exporter warnings even when the native process exits zero.
 
     LLVM may export partial coverage after reporting mismatched function data.
-    Such counters must not enter a gate. No warning is allowlisted here: a new
-    diagnostic requires review instead of silently accepting weaker evidence.
-    ANSI terminal styling is ignored so it cannot hide a diagnostic prefix.
+    Such counters must not enter a gate. The explicit unfiltered binding mode
+    may retain exactly one byte-exact pinned cargo-llvm-cov option notice, only
+    after proving the export contains no filter. It is not a numerical or
+    compiler-warning waiver. Legacy mode still rejects every diagnostic.
+    ANSI styling cannot hide diagnostics or qualify a variant notice.
     """
 
-    plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log)
     diagnostic = re.compile(r"^\s*(?:.*?:\s+)?(?:warning|error)(?:\[[^]\n]+\])?:(?:\s|$)", re.IGNORECASE)
-    for line in plain.splitlines():
-        if diagnostic.match(line):
-            raise ValueError(f"unqualified coverage diagnostic: {line.strip()}")
+    notices = 0
+    for line in log.split("\n"):
+        if allow_unfiltered_option_notice and line == UNFILTERED_OPTION_NOTICE and notices == 0:
+            notices += 1
+            continue
+        plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line)
+        if diagnostic.match(plain):
+            raise ValueError(f"unqualified coverage diagnostic: {plain.strip()}")
+    if allow_unfiltered_option_notice and notices != 1:
+        raise ValueError("unfiltered coverage did not emit its expected pinned option notice")
+    return notices
 
 
 def coverage_source_relative(filename: str, crate: Path) -> str | None:
@@ -126,7 +151,7 @@ def require_bound_coverage_sources(report: dict, snapshot: dict, crate: Path) ->
 
 
 def coverage_summary(report: dict, crate: Path) -> dict:
-    """Aggregate LLVM's line counters, retaining all compiled production files.
+    """Aggregate reported LLVM line counters without additional src exclusions.
 
     Inline unit-test bodies and macro expansions are included by LLVM. This
     deliberately makes no production-only or branch-coverage claim. Integration
@@ -160,7 +185,7 @@ def coverage_summary(report: dict, crate: Path) -> dict:
             "lines": count, "covered": covered, "percent": 100 * covered / count,
             "minimum_percent": threshold, "passed": 100 * covered >= threshold * count,
         }
-    result["scope"] = "compiled src/**/*.rs, including inline unit tests and generated expansions"
+    result["scope"] = "reported src/**/*.rs after exporter directory filters, including inline unit tests and generated expansions"
     result["branch_coverage_measured"] = False
     result["passed"] = all(result[label]["passed"] for label in ("crate", "shared"))
     return result
@@ -276,14 +301,22 @@ def main() -> int:
     parser.add_argument("--msrv-toolchain", default="1.92.0")
     parser.add_argument("--offline", action="store_true", help="requires pre-fetched dependencies/advisories")
     parser.add_argument("--dry-run", action="store_true", help="print commands without creating files")
+    parser.add_argument("--coverage-compiler-evidence", action="store_true",
+                        help="require fresh pinned native compiler/export bindings; does not enable exclusions")
     args = parser.parse_args()
     if len(args.gate) != len(set(args.gate)):
         raise ValueError("duplicate gate groups would overwrite their evidence")
+    if args.coverage_compiler_evidence and "coverage" not in args.gate:
+        raise ValueError("--coverage-compiler-evidence requires the coverage gate")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     output = CRATE / "target/release-gates" / stamp
     plan = [(gate, command) for gate in args.gate for command in command_plan(
         gate, output, args.toolchain, args.msrv_toolchain, args.offline,
     )]
+    if args.coverage_compiler_evidence:
+        for gate, command in plan:
+            if gate == "coverage":
+                command.append("--disable-default-ignore-filename-regex")
     if args.dry_run:
         for gate, command in plan:
             print(f"[{gate}] {shlex.join(command)}")
@@ -297,6 +330,7 @@ def main() -> int:
     environment["RUSTDOCFLAGS"] = environment.get("RUSTDOCFLAGS", "") + " -D warnings"
     results = {"schema_version": 1, "created_utc": stamp, "gates": [], "passed": False}
     for index, (gate, command) in enumerate(plan):
+        command_environment = dict(environment)
         log = output / f"{index:02d}-{gate}.log"
         print(f"[{gate}] {shlex.join(command)}\nlog: {log}", flush=True)
         started = datetime.now(timezone.utc)
@@ -305,19 +339,26 @@ def main() -> int:
         results["gates"].append(row)
         try:
             if gate == "coverage":
-                before = capture_coverage_context(CRATE, command, environment)
+                if args.coverage_compiler_evidence:
+                    command_environment, compiler_setup = prepare_capture(CRATE.resolve(), output.resolve(), args.toolchain, FEATURES, command_environment)
+                    write_evidence(output / "compiler-capture-setup.json", compiler_setup)
+                    row["compiler_evidence"] = {"setup": "compiler-capture-setup.json", "artifact_binding_verified": False,
+                                                "compiler_reported_inputs_verified": False,
+                                                "compiler_dependency_closure_verified": False,
+                                                "production_only_exclusions_qualified": False}
+                before = capture_coverage_context(CRATE, command, command_environment)
                 before_path = output / "coverage-inputs-before.json"
                 write_evidence(before_path, before)
                 row["input_evidence"] = {"before": before_path.name,
                                          "sources_unchanged": False,
                                          "production_only_exclusions_qualified": False}
             with log.open("x") as stream:
-                completed = subprocess.run(command, cwd=CRATE, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=False)
+                completed = subprocess.run(command, cwd=CRATE, env=command_environment, stdout=stream, stderr=subprocess.STDOUT, check=False)
             row["process_exit_code"] = row["exit_code"] = completed.returncode
             if gate == "coverage":
                 # Capture terminal observations even when the native process
                 # fails. Failure never adopts counters or a passing manifest.
-                after = capture_coverage_context(CRATE, command, environment)
+                after = capture_coverage_context(CRATE, command, command_environment)
                 after_path = output / "coverage-inputs-after.json"
                 write_evidence(after_path, after)
                 row["input_evidence"]["after"] = after_path.name
@@ -328,7 +369,27 @@ def main() -> int:
                 require_same_coverage_context(before, after)
                 row["input_evidence"]["sources_unchanged"] = True
             if completed.returncode == 0 and gate == "coverage":
-                require_clean_coverage_log(log.read_text())
+                if args.coverage_compiler_evidence:
+                    binding = validate_capture(compiler_setup, before["sources"], CRATE.resolve())
+                    notice_count = require_clean_coverage_log(read_coverage_log(log), allow_unfiltered_option_notice=(
+                        binding["no_export_filter_verified"] is True and "--disable-default-ignore-filename-regex" in command))
+                    binding["reviewed_tool_option_notice"] = {"text": UNFILTERED_OPTION_NOTICE, "count": notice_count}
+                    native_report = read_json(Path(binding["native_report"]["path"]), 2 * 1024 * 1024 * 1024)
+                    require_identity(Path(binding["native_report"]["path"]), binding["native_report"]["identity"])
+                    require_bound_coverage_sources(native_report, before["sources"], CRATE)
+                    # Bind raw native counters separately: cargo-llvm-cov's serde
+                    # rewrite is not a byte-identical native export. Neither
+                    # aggregate enables production-only source exclusions.
+                    binding["native_aggregate"] = coverage_summary(native_report, CRATE)
+                    binding["native_aggregate"]["scope"] = "unfiltered native export restricted to src/**/*.rs, including inline unit tests and generated expansions"
+                    require_identity(Path(binding["native_report"]["path"]), binding["native_report"]["identity"])
+                    write_evidence(output / "compiler-binding.json", binding)
+                    row["compiler_evidence"].update({key: binding[key] for key in (
+                        "artifact_binding_verified", "compiler_reported_inputs_verified", "no_export_filter_verified",
+                    )})
+                    row["compiler_evidence"]["binding"] = "compiler-binding.json"
+                else:
+                    require_clean_coverage_log(read_coverage_log(log))
                 report = json.loads((output / "coverage.json").read_text())
                 require_bound_coverage_sources(report, before["sources"], CRATE)
                 row["coverage"] = coverage_summary(report, CRATE)
@@ -339,6 +400,8 @@ def main() -> int:
                 if row["log_identity"] != fingerprint_file(log, maximum_bytes=512 * 1024 * 1024):
                     raise ValueError("coverage log changed during validation")
                 if not row["coverage"]["passed"]:
+                    row["exit_code"] = 1
+                if args.coverage_compiler_evidence and not binding["native_aggregate"]["passed"]:
                     row["exit_code"] = 1
             if completed.returncode == 0 and gate == "package" and "--list" in command:
                 row["package_files"] = validate_package_listing(log.read_text())

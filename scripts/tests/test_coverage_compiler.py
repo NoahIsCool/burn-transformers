@@ -107,9 +107,9 @@ class ArtifactMessageTests(unittest.TestCase):
         """Unsupported compiler forms fail explicitly instead of losing evidence."""
 
         for arguments in (["input.rs"], ["@args"], ["--print=link-args", "input.rs"],
-                          ["--print"], ["--print=cfg,unknown"], ["--emit=link", "--print=cfg"]):
+                          ["--print"], ["--print=cfg,unknown"], ["--emit=link", "--print=cfg"], ["-C", "help", "input.rs"]):
             self.assertFalse(COMPILER.compiler_probe(arguments))
-        for arguments in (["-Vv"], ["--version"], ["--print", "cfg"],
+        for arguments in (["-Vv"], ["--version"], ["--print", "cfg"], ["-C", "help"],
                           ["-", "--crate-name", "___", "--print=file-names", "--crate-type", "rlib", "--print=cfg", "--print=split-debuginfo"]):
             self.assertTrue(COMPILER.compiler_probe(arguments))
         for arguments in (["rustc", "input.rs"], ["rustc", "@args"], ["rustc", "--emit=link", "@args"]):

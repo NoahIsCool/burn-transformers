@@ -54,6 +54,105 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual(result["shared"]["percent"], 95)
         self.assertFalse(result["branch_coverage_measured"])
 
+    def test_opt_in_compiler_binding_failure_cannot_adopt_native_success(self):
+        """Cache-hit/incomplete evidence fails even when the legacy aggregate passes."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory).resolve()
+            minimal_crate(crate)
+
+            def run(command, **kwargs):
+                """Emit a passing legacy report while the binding validator rejects it."""
+
+                kwargs["stdout"].write("finished\n")
+                output = Path(kwargs["stdout"].name).parent
+                (output / "coverage.json").write_text(json.dumps({"data": [{"files": [
+                    {"filename": str(crate / "src/lib.rs"), "summary": {"lines": {"count": 1, "covered": 1}}}]}]}))
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                mock.patch.object(GATES, "CRATE", crate),
+                mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "coverage", "--coverage-compiler-evidence"]),
+                mock.patch.object(GATES, "prepare_capture", side_effect=lambda crate, output, toolchain, features, env: (env, {})),
+                mock.patch.object(GATES, "validate_capture", side_effect=ValueError("no fresh compiler captures")),
+                mock.patch.object(GATES, "coverage_tool_versions", return_value=[]),
+                mock.patch.object(GATES.subprocess, "run", side_effect=run), mock.patch("builtins.print"),
+            ):
+                self.assertEqual(GATES.main(), 1)
+            row = json.loads(next((crate / "target/release-gates").glob("*/results.json")).read_text())["gates"][0]
+            self.assertEqual(row["process_exit_code"], 0)
+            self.assertEqual(row["exit_code"], 1)
+            self.assertNotIn("coverage", row)
+            self.assertFalse(row["compiler_evidence"]["artifact_binding_verified"])
+            self.assertIn("no fresh", row["validation_error"])
+
+    def test_opt_in_compiler_binding_is_separate_and_does_not_leak_wrappers(self):
+        """Successful bindings retain raw counters, while later gates use normal env."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory).resolve()
+            minimal_crate(crate)
+            observed = []
+
+            def run(command, **kwargs):
+                """Emit both representations without invoking native tooling."""
+
+                observed.append((command, kwargs["env"].get("RUSTC_WORKSPACE_WRAPPER")))
+                kwargs["stdout"].write("finished\n")
+                if "llvm-cov" in command:
+                    kwargs["stdout"].write(GATES.UNFILTERED_OPTION_NOTICE + "\n")
+                    output = Path(kwargs["stdout"].name).parent
+                    report = json.dumps({"data": [{"files": [
+                        {"filename": str(crate / "src/lib.rs"), "summary": {"lines": {"count": 1, "covered": 1}}}]}]})
+                    (output / "coverage.json").write_text(report)
+                    (output / "native.json").write_text(report)
+                return subprocess.CompletedProcess(command, 0)
+
+            def validate(setup, snapshot, root):
+                """Return only narrow artifact/input claims, never exclusion permission."""
+
+                path = next((crate / "target/release-gates").glob("*/native.json"))
+                return {"artifact_binding_verified": True, "compiler_reported_inputs_verified": True,
+                        "no_export_filter_verified": True,
+                        "compiler_dependency_closure_verified": False, "production_only_exclusions_qualified": False,
+                        "native_report": {"path": str(path), "identity": GATES.fingerprint_file(path)}}
+
+            with (
+                mock.patch.object(GATES, "CRATE", crate),
+                mock.patch.object(GATES.sys, "argv", ["check_release", "--gate", "coverage", "--gate", "source", "--coverage-compiler-evidence"]),
+                mock.patch.object(GATES, "prepare_capture", side_effect=lambda crate, output, toolchain, features, env: ({**env, "RUSTC_WORKSPACE_WRAPPER": "run-local"}, {})),
+                mock.patch.object(GATES, "validate_capture", side_effect=validate),
+                mock.patch.object(GATES, "coverage_tool_versions", return_value=[]),
+                mock.patch.object(GATES.subprocess, "run", side_effect=run), mock.patch("builtins.print"),
+                mock.patch.dict(GATES.os.environ, {}, clear=True),
+            ):
+                self.assertEqual(GATES.main(), 0)
+            result = json.loads(next((crate / "target/release-gates").glob("*/results.json")).read_text())
+            self.assertTrue(result["passed"])
+            row = result["gates"][0]
+            self.assertTrue(row["compiler_evidence"]["artifact_binding_verified"])
+            self.assertFalse(row["compiler_evidence"]["production_only_exclusions_qualified"])
+            self.assertEqual(observed[0][1], "run-local")
+            self.assertTrue(all(wrapper is None for _, wrapper in observed[1:]))
+
+    def test_only_one_exact_reviewed_option_notice_is_permitted_when_opted_in(self):
+        """The non-numerical upstream option notice never hides a compiler/LLVM warning."""
+
+        notice = GATES.UNFILTERED_OPTION_NOTICE
+        self.assertEqual(GATES.require_clean_coverage_log(notice + "\n", allow_unfiltered_option_notice=True), 1)
+        with self.assertRaises(ValueError):
+            GATES.require_clean_coverage_log(notice + "\n")
+        for log in ("", notice + "\n" + notice, notice + "\nwarning: mismatched data", notice + "\nwarning[unused]: test",
+                    " " + notice, notice + " ", notice + "\r\n", "\x1b[33m" + notice + "\x1b[0m"):
+            with self.subTest(log=log), self.assertRaises(ValueError):
+                GATES.require_clean_coverage_log(log, allow_unfiltered_option_notice=True)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "native.log"
+            path.write_bytes((notice + "\r\n").encode())
+            self.assertEqual(GATES.read_coverage_log(path), notice + "\r\n")
+            with self.assertRaises(ValueError):
+                GATES.require_clean_coverage_log(GATES.read_coverage_log(path), allow_unfiltered_option_notice=True)
+
     def test_each_threshold_can_fail_independently(self):
         """A passing crate aggregate does not waive the shared-module gate."""
 
