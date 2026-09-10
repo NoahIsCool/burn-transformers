@@ -3,3 +3,7 @@
 !/Cargo.lock
 **/__pycache__/
 *.py[cod]
+**/.DS_Store
+.idea/
+**/*.rs.bk
+*.pdb

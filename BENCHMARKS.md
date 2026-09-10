@@ -135,7 +135,7 @@ behavior, not efficient packed inference.
 For Metal, packed acceptance must use an exact single-backend build:
 
 ```sh
-cargo build --manifest-path crates/transformers/Cargo.toml \
+cargo build --manifest-path Cargo.toml \
   --release --no-default-features --features std,metal,tokenizers
 ```
 

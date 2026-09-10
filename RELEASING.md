@@ -36,14 +36,14 @@ an unsupported checkpoint claim.
 Run commands from the repository root with the standalone manifest:
 
 ```text
-cargo fmt --manifest-path crates/transformers/Cargo.toml --check
-cargo clippy --manifest-path crates/transformers/Cargo.toml \
+cargo fmt --manifest-path Cargo.toml --check
+cargo clippy --manifest-path Cargo.toml \
   --all-targets --all-features -- -D warnings
-cargo test --manifest-path crates/transformers/Cargo.toml
-cargo check --manifest-path crates/transformers/Cargo.toml --no-default-features
-cargo check --manifest-path crates/transformers/Cargo.toml \
+cargo test --manifest-path Cargo.toml
+cargo check --manifest-path Cargo.toml --no-default-features
+cargo check --manifest-path Cargo.toml \
   --no-default-features --features std
-cargo doc --manifest-path crates/transformers/Cargo.toml \
+cargo doc --manifest-path Cargo.toml \
   --no-default-features --features std,flex,tokenizers,chat-templates --no-deps
 ```
 
@@ -57,8 +57,8 @@ First inspect the exact allow-listed file set, then build and verify the source
 archive:
 
 ```text
-cargo +stable package --manifest-path crates/transformers/Cargo.toml --locked --list
-cargo +stable package --manifest-path crates/transformers/Cargo.toml --locked
+cargo +stable package --manifest-path Cargo.toml --locked --list
+cargo +stable package --manifest-path Cargo.toml --locked
 ```
 
 The list may contain source, examples, compact test fixtures, reference scripts,

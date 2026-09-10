@@ -324,7 +324,7 @@ The metadata, mapping, accounting-defect, MTP-inventory, and fail-closed oracle
 tests require no weight payloads:
 
 ```sh
-cargo test --manifest-path crates/transformers/Cargo.toml \
+cargo test --manifest-path Cargo.toml \
   --no-default-features --features std \
   --test nemotron_h_artifacts
 ```
@@ -335,7 +335,7 @@ atomic create-only publication without importing PyTorch or loading weights:
 
 ```sh
 python3 -m unittest \
-  crates/transformers/scripts/tests/test_generate_nemotron_h_base_reference.py
+  scripts/tests/test_generate_nemotron_h_base_reference.py
 ```
 
 After an external pinned download, authenticate all seven controls and every
@@ -343,7 +343,7 @@ byte of all fourteen weight shards without allocating tensors:
 
 ```sh
 TRANSFORMERS_NEMOTRON_H_DIR=/absolute/path/to/pinned-checkpoint \
-cargo test --release --manifest-path crates/transformers/Cargo.toml \
+cargo test --release --manifest-path Cargo.toml \
   --no-default-features --features std,tokenizers \
   --test nemotron_h_artifacts \
   validates_pinned_nemotron_control_and_weight_payloads \
@@ -354,7 +354,7 @@ Strictly apply the complete F16 graph and run the bounded base Metal smoke with:
 
 ```sh
 TRANSFORMERS_NEMOTRON_H_DIR=/absolute/path/to/pinned-checkpoint \
-cargo test --release --manifest-path crates/transformers/Cargo.toml \
+cargo test --release --manifest-path Cargo.toml \
   --no-default-features --features std,metal,tokenizers \
   --test nemotron_h_artifacts \
   loads_pinned_nemotron_f16_and_smokes_base_inference \
@@ -367,7 +367,7 @@ authenticated local inputs and serialized Metal execution:
 ```sh
 TRANSFORMERS_NEMOTRON_H_DIR=/absolute/path/to/pinned-checkpoint \
 TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR=/absolute/path/to/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle \
-cargo test --release --manifest-path crates/transformers/Cargo.toml \
+cargo test --release --manifest-path Cargo.toml \
   --no-default-features --features std,metal,tokenizers \
   --test nemotron_h_artifacts \
   compares_pinned_nemotron_f16_with_official_base_reference \
@@ -384,7 +384,7 @@ output directory in which the fixed bundle name does not already exist:
 
 ```sh
 /absolute/path/to/pinned/python3.11 \
-  crates/transformers/scripts/generate_nemotron_h_base_reference.py \
+  scripts/generate_nemotron_h_base_reference.py \
   --model-dir /absolute/path/to/pinned-checkpoint \
   --transformers-dir /absolute/path/to/transformers-cfa309c \
   --output-dir /absolute/path/on/external-volume
@@ -394,7 +394,7 @@ Authenticate the independently pinned base-only bundle without loading a model:
 
 ```sh
 TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR=/absolute/path/to/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle \
-cargo test --manifest-path crates/transformers/Cargo.toml \
+cargo test --manifest-path Cargo.toml \
   --no-default-features --features std \
   --test nemotron_h_artifacts \
   validates_pinned_nemotron_official_base_reference_bundle \

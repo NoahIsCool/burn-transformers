@@ -52,7 +52,7 @@ delimiters, prefills an external cache, and decodes a continuation:
 
 ```sh
 cargo run --release \
-  --manifest-path crates/transformers/Cargo.toml \
+  --manifest-path Cargo.toml \
   --no-default-features \
   --features std,metal,chat-templates \
   --example qwen35_chat -- \
@@ -124,7 +124,10 @@ fixture remains useful sampled-logit regression evidence but is not a replacemen
 for the full-vector gate.
 
 Generate the bundle into an existing external parent only after installing the
-package versions authenticated by the producer:
+package versions authenticated by the producer. This frozen producer must run
+from an original-layout checkout at its recorded original commit, not from the
+standalone repository; see [historical reproduction](MIGRATION.md#historical-reproduction).
+The following command intentionally retains that historical layout:
 
 ```sh
 python3 crates/transformers/scripts/generate_qwen35_08b_reference.py \
@@ -137,14 +140,14 @@ can be authenticated without loading weights and then replayed against Burn:
 
 ```sh
 TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/models/transformers-acceptance \
-cargo test --release --manifest-path crates/transformers/Cargo.toml \
+cargo test --release --manifest-path Cargo.toml \
   --no-default-features --features std,metal,chat-templates \
   --test local_artifacts validates_pinned_qwen35_official_reference_bundle \
   -- --ignored --exact
 
 TRANSFORMERS_QWEN35_DIR=/Volumes/models/qwen3.5-0.8b \
 TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/models/transformers-acceptance \
-cargo test --release --manifest-path crates/transformers/Cargo.toml \
+cargo test --release --manifest-path Cargo.toml \
   --no-default-features --features std,metal,chat-templates \
   --test local_artifacts loads_pinned_qwen35_weights_and_runs_metal_inference \
   -- --ignored --exact

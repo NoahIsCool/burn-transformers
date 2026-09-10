@@ -6,6 +6,10 @@ mathematics from checkpoint-family wiring so attention, recurrent mixers,
 mixture-of-experts layers, position encodings, caches, loading, and generation
 can be tested independently and recombined in experimental models.
 
+This is a standalone repository. Run the commands below from its root, where
+`Cargo.toml` lives. [Migration and historical reproduction](MIGRATION.md)
+documents the extraction from `hmm_compression` and the original commit mappings.
+
 Version 0.1 supports the exact pinned **Qwen3.5-0.8B Metal/F16** base-text
 profile and **FLAN-T5-small Flex/F32 and Metal/F32** profiles on the validated
 Apple M3 Max host. Their acceptance records define the supported features and
@@ -111,12 +115,13 @@ The crate declares Rust 1.92 as its minimum supported Rust version and pins Burn
 | `tokenizers` | Adds local `tokenizer.json` loading through the `tokenizers` crate. |
 | `chat-templates` | Adds bounded local chat-template rendering with MiniJinja and implies `tokenizers`. |
 
-For example, a consumer selecting only Metal and local tokenization can use:
+For example, a consumer in a sibling directory selecting only Metal and local
+tokenization can use (adjust the local path for your checkout):
 
 ```toml
 [dependencies]
 burn = { version = "=0.21.0", default-features = false, features = ["metal"] }
-transformers = { path = "crates/transformers", default-features = false, features = ["std", "metal", "tokenizers"] }
+transformers = { path = "../transformers", default-features = false, features = ["std", "metal", "tokenizers"] }
 ```
 
 Packed Metal Q4/Q8 has a stricter feature boundary; see
@@ -164,7 +169,7 @@ instruction locally, encodes its source once, and runs cache-aware four-beam
 decoding. No Python environment or network access is used at inference time:
 
 ```sh
-cargo run --release --manifest-path crates/transformers/Cargo.toml \
+cargo run --release --manifest-path Cargo.toml \
   --no-default-features --features std,flex,tokenizers \
   --example flan_t5_small -- /Volumes/models/flan-t5-small \
   "translate English to German: The house is wonderful."
@@ -354,7 +359,7 @@ matmul. The only certified packed-Metal build shape is an exact single-backend
 build such as:
 
 ```sh
-cargo build --manifest-path crates/transformers/Cargo.toml \
+cargo build --manifest-path Cargo.toml \
   --release --no-default-features --features std,metal,tokenizers
 ```
 
