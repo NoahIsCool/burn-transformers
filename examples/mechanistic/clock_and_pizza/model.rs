@@ -1,4 +1,15 @@
 //! The authors' one-block recipe, using shared attention and public interventions.
+//!
+//! Two tokens `[a,b]` modulo 59 enter a width-128 residual stream with four
+//! width-32 attention heads and a biased 512-neuron ReLU MLP. Attention is
+//! unmasked: `A = alpha * softmax(Q K^T / sqrt(32)) + (1-alpha) J`. Every
+//! entry of J is one, so alpha=0 sums values rather than averaging them.
+//! The final token predicts `[batch,59]` logits without normalization or dropout.
+//!
+//! The reference path uses F32 tensors and eager F32 softmax. Token-embedding
+//! interventions run before position addition, preserving the paper’s PCA
+//! interpretation. Registered parameters are shared by inference and training;
+//! this fixed two-token graph has no decode cache.
 use std::{collections::BTreeMap, path::Path};
 
 use burn::{
@@ -13,9 +24,13 @@ use transformers::{
     intervention::{Axis, Hooks, Layer, Point, PointInfo},
 };
 
+/// Deterministic F32 CPU backend used to replay prepared reference fixtures.
 pub type B = Flex<f32, i32>;
+/// Prime modulus and number of token/output classes.
 pub const P: usize = 59;
+/// Residual-stream width of the paper’s single transformer block.
 pub const HIDDEN: usize = 128;
+/// Width of the biased ReLU MLP’s intermediate activation.
 pub const NEURONS: usize = 512;
 
 /// Token lookup output BEFORE position embeddings, `[batch, token, channel]`.
@@ -27,15 +42,23 @@ pub fn token_embedding() -> Point<3> {
     )
 }
 
+/// Prepared pinned model, embedding PCA basis, and independent reference logits.
 pub struct Fixture {
+    /// Transformer assembled from the named released checkpoint.
     pub model: Transformer,
+    /// Embedding mean `[1,128]`, restored after each centered PCA projection.
     pub mean: Tensor<B, 2>,
     /// Principal directions as columns, in descending explained-variance order.
     pub components: Tensor<B, 2>,
+    /// Flattened `[59*59,59]` F32 reference logits for each fixed intervention.
     pub references: BTreeMap<String, Vec<f32>>,
 }
 
 impl Fixture {
+    /// Load a prepared Clock or Pizza fixture after checking its manifest SHA-256.
+    /// Reject wrong tensor shapes, non-F32 storage, and nonfinite values. Q/K/V
+    /// weights are flattened from `[head, head_channel, input]` and transposed
+    /// to Burn’s `[input, output]`; embedding and MLP matrices are mapped likewise.
     pub fn load(directory: &Path, name: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let path = directory.join(format!("{name}.safetensors"));
         let bytes = std::fs::read(&path).map_err(|error| {
@@ -145,10 +168,13 @@ impl Fixture {
 }
 
 #[derive(Module, Debug)]
+/// Registered one-block module exposing embedding, attention, MLP, and residual hooks.
 pub struct Transformer<B: Backend = burn::backend::Flex<f32, i32>> {
+    /// Token lookup table `[59,128]`, also exported for learned-geometry analysis.
     pub embedding: Param<Tensor<B, 2>>,
     position: Param<Tensor<B, 2>>,
     attention: GroupedQueryAttention<B>,
+    /// Attention mixture coefficient in `[0,1]`; zero selects unnormalized summation.
     pub alpha: f64,
     mlp_in: Param<Tensor<B, 2>>,
     mlp_in_bias: Param<Tensor<B, 2>>,
@@ -158,7 +184,9 @@ pub struct Transformer<B: Backend = burn::backend::Flex<f32, i32>> {
 }
 
 impl<B: Backend> Transformer<B> {
-    /// The authors' Gaussian initialization scales; the backend controls the RNG.
+    /// Initialize the authors' Gaussian weight scales with backend-controlled RNG.
+    /// Standard deviations are reciprocal square roots of the documented width
+    /// for each matrix; biases start at zero. Alpha must lie in `[0,1]`.
     #[allow(dead_code)]
     pub fn init_random(alpha: f64, device: &B::Device) -> transformers::Result<Self> {
         use burn::tensor::Distribution;
@@ -190,6 +218,8 @@ impl<B: Backend> Transformer<B> {
         })
     }
 
+    /// Declare selectable token-embedding and single-block intervention boundaries.
+    /// Shared attention points retain their batch/head/query/key axis contracts.
     pub fn activation_points(&self) -> Vec<PointInfo> {
         let layer = Layer::decoder(0);
         let mut points = vec![token_embedding().info(), layer.residual_pre().info()];
@@ -206,6 +236,7 @@ impl<B: Backend> Transformer<B> {
     }
 
     /// Evaluate consecutive `(a,b)` pairs, returning final-token `[batch,59]` logits.
+    /// Flattened grid indices use `pair = a*59+b` and must stay within the grid.
     pub fn forward_with_hooks(
         &self,
         start: usize,
@@ -222,7 +253,10 @@ impl<B: Backend> Transformer<B> {
         self.forward_ids_with_hooks(ids, hooks)
     }
 
-    /// Train or evaluate arbitrary minibatches through the same hooked graph.
+    /// Train or evaluate `[batch,2]` integer pairs through the same hooked graph.
+    /// Tokens have full bidirectional visibility, with no padding or cache. Hooks
+    /// may edit the unnormalized attention mixture or `[batch,2,512]` MLP neurons;
+    /// the second token’s final residual supplies `[batch,59]` output logits.
     pub fn forward_ids_with_hooks(
         &self,
         ids: Tensor<B, 2, Int>,

@@ -3,8 +3,15 @@
 //! First: `python3 examples/mechanistic/grokking_prepare.py`
 //! Then: `cargo run --release --locked --example grokking_fourier`
 //! See `examples/mechanistic/grokking.md` for provenance and precise claim limits.
+//!
+//! The archived checkpoint defines five Fourier frequencies and ten directions
+//! in the 512-channel MLP activation. F64 orthonormalization produces U; F32
+//! hooks apply `x U U^T` to retain the circuit or subtract it to ablate it. The
+//! original residual and biases remain intact. This complete-grid checkpoint
+//! analysis complements from-scratch optimization in `grokking_train`.
 
 #[cfg(not(feature = "flex"))]
+/// Explain the CPU backend feature required for the pinned-checkpoint replay.
 fn main() {
     eprintln!("enable the `flex` feature to run this example");
     std::process::exit(1);
@@ -15,6 +22,9 @@ fn main() {
 mod model;
 
 #[cfg(feature = "flex")]
+/// Reproduce the archived Fourier fits and test keep/remove/restore interventions.
+/// Evaluate every modular pair and compare independent reference logits before
+/// claiming that the ten-dimensional neuron subspace preserves the solution.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use burn::tensor::{Tensor, TensorData};
     use model::{B, GrokkingTransformer, HIDDEN, NEURONS, P};
@@ -188,6 +198,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Modified Gram-Schmidt produces an orthonormal basis for the same span.
+/// Input columns have 512 F64 entries; reject near-dependent directions before
+/// casting the row-major `[512, directions]` basis to F32 for projection.
 #[cfg(feature = "flex")]
 fn orthonormalize(mut columns: Vec<Vec<f64>>) -> Vec<f32> {
     for column in 0..columns.len() {
@@ -213,6 +225,8 @@ fn orthonormalize(mut columns: Vec<Vec<f64>>) -> Vec<f32> {
 }
 
 #[cfg(feature = "flex")]
+/// Transfer a rank-two F32 activation to the host and reject nonfinite values.
+/// Assert its flattened length matches both tensor axes before statistical use.
 fn values(tensor: burn::tensor::Tensor<model::B, 2>) -> Vec<f32> {
     let shape = tensor.dims();
     let values = tensor.into_data().to_vec::<f32>().expect("F32 activations");
@@ -233,6 +247,9 @@ struct Metrics {
 
 #[cfg(feature = "flex")]
 impl Metrics {
+    /// Accumulate complete 113-class rows beginning at grid index `start`.
+    /// Use F64 `log1p(sum exp(other-target))` so near-zero checkpoint losses
+    /// remain measurable even when logits themselves were computed in F32.
     fn add(&mut self, start: usize, logits: &[f32]) {
         assert_eq!(logits.len() % model::P, 0, "complete logit rows");
         for (offset, row) in logits.chunks_exact(model::P).enumerate() {
@@ -256,6 +273,7 @@ impl Metrics {
             self.loss += others.ln_1p();
         }
     }
+    /// Normalize the accumulated correct predictions by the complete 113² grid.
     fn accuracy(&self) -> f64 {
         self.correct as f64 / (model::P * model::P) as f64
     }
@@ -273,12 +291,15 @@ struct FourierFit {
 
 #[cfg(feature = "flex")]
 impl FourierFit {
+    /// Accumulate F64 moments for the theoretical sinusoid x and activation projection y.
     fn add(&mut self, x: f64, y: f64) {
         self.x2 += x * x;
         self.xy += x * y;
         self.y += y;
         self.y2 += y * y;
     }
+    /// Return `1-SSE/SST` for the paper’s zero-intercept least-squares sinusoid fit.
+    /// Each nonzero sinusoid has zero mean on the complete grid; SST centers y.
     fn fve(&self) -> f64 {
         // Every selected sinusoid has exactly zero mean over all 113² pairs.
         let residual_sum_squares = self.y2 - self.xy * self.xy / self.x2;

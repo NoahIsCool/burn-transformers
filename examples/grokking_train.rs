@@ -10,6 +10,7 @@ mod model;
 mod study;
 
 #[cfg(all(feature = "std", feature = "flex", feature = "autodiff"))]
+/// Select the requested autodiff backend and run the frozen modular-addition protocol.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = study::Settings::from_args()?;
     match config.backend.as_str() {
@@ -22,6 +23,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// This is the entire training step. Burn owns autodiff, optimizer state, and
 /// parameter traversal; the transformer is an ordinary registered Burn module.
+/// Inputs are `[batch, 3]` integer IDs `[a, b, =]`; targets are `[batch]` sums
+/// modulo 113. Mean F32 cross entropy includes all 114 output classes, including
+/// the never-targeted equals token, before one native optimizer update.
 #[cfg(all(feature = "std", feature = "flex", feature = "autodiff"))]
 fn training_step<B, O>(
     model: model::GrokkingTransformer<B>,
@@ -43,6 +47,7 @@ where
 }
 
 #[cfg(not(all(feature = "std", feature = "flex", feature = "autodiff")))]
+/// Explain the backend and autodiff features needed to execute the training graph.
 fn main() {
     eprintln!("grokking_train requires --features std,flex,autodiff");
     std::process::exit(1);

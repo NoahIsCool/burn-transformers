@@ -1,5 +1,15 @@
 //! The paper's one-block transformer, assembled from the crate's public attention.
 //! Keeping this small recipe local makes the intervention boundaries easy to read.
+//!
+//! Integer inputs `[batch, 3]` encode `[a, b, =]` modulo 113. A width-128 residual
+//! stream feeds four width-32 attention heads and a biased 512-neuron ReLU MLP,
+//! with no normalization or dropout. Computing only the final query preserves
+//! this one-block causal graph because that query can see all three keys.
+//!
+//! The training readout has 114 classes; archived checkpoint analysis removes
+//! the equals class and reports 113. Forward tensors use the backend’s precision
+//! (the examples select F32), while Fourier sums accumulate on the host in F64.
+//! Parameters have one registered owner each; no decode cache is needed.
 #![allow(dead_code)] // Shared by separate training and checkpoint-analysis examples.
 use burn::{
     backend::Flex,
@@ -13,9 +23,13 @@ use transformers::{
     intervention::{Axis, Hooks, Point},
 };
 
+/// Deterministic CPU backend for the released-checkpoint analysis.
 pub type B = Flex<f32, i32>;
+/// Prime modulus; token ID 113 denotes the equals sign.
 pub const P: usize = 113;
+/// Residual-stream width shared by embeddings, attention, and MLP output.
 pub const HIDDEN: usize = 128;
+/// Number of post-ReLU MLP channels exposed to interventions.
 pub const NEURONS: usize = 512;
 
 /// The final token's post-ReLU neurons, before the MLP output projection.
@@ -28,6 +42,7 @@ pub fn mlp_activation() -> Point<2> {
 }
 
 #[derive(Module, Debug)]
+/// One registered transformer block with independently editable final-token neurons.
 pub struct GrokkingTransformer<B: Backend = self::B> {
     embedding: Param<Tensor<B, 2>>,
     position: Param<Tensor<B, 2>>,
@@ -40,6 +55,10 @@ pub struct GrokkingTransformer<B: Backend = self::B> {
 }
 
 impl GrokkingTransformer<B> {
+    /// Load only the SHA-256-pinned epoch-40,000 F32 checkpoint.
+    /// Attention matrices stored as `[head, head_channel, input]` are flattened
+    /// and transposed to Burn’s `[input, output]` layout. The analysis readout
+    /// omits the equals class; random initialization retains it for training.
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let bytes = std::fs::read(path).map_err(|error| {
             std::io::Error::other(format!(
@@ -124,6 +143,8 @@ impl<B: Backend> GrokkingTransformer<B> {
         self.forward_with_hooks(ids, &mut Hooks::new())
     }
 
+    /// Encode `[batch, 3]` token IDs, intervene on `[batch, 512]` MLP neurons,
+    /// and return `[batch, classes]` logits through the unchanged residual/readout.
     pub fn forward_with_hooks(
         &self,
         ids: Tensor<B, 2, Int>,
@@ -133,7 +154,8 @@ impl<B: Backend> GrokkingTransformer<B> {
         self.continue_with_hooks(residual, activation, hooks)
     }
 
-    /// Capture the final-token residual and post-ReLU neurons, before readout.
+    /// Capture final-token residual `[count, 128]` and ReLU neurons `[count, 512]`.
+    /// Consecutive grid indices use `pair = a * 113 + b`.
     pub fn encode(
         &self,
         start: usize,
@@ -145,6 +167,7 @@ impl<B: Backend> GrokkingTransformer<B> {
 
     /// Encode arbitrary dataset rows. The same differentiable graph serves
     /// training, validation, and the released-checkpoint interpretation.
+    /// Each row index is `a * 113 + b`; all rows must lie in the complete grid.
     pub fn encode_pairs(
         &self,
         pairs: &[usize],
@@ -159,6 +182,9 @@ impl<B: Backend> GrokkingTransformer<B> {
         self.encode_ids(ids)
     }
 
+    /// Compute final-token residual `[batch, 128]` and ReLU neurons `[batch, 512]`.
+    /// Exactly three tokens are required. Only the equals query is evaluated:
+    /// its causal row sees every key, so no future-token mask or cache is needed.
     pub fn encode_ids(
         &self,
         ids: Tensor<B, 2, Int>,
@@ -185,6 +211,8 @@ impl<B: Backend> GrokkingTransformer<B> {
     /// Resume the ordinary readout, exposing the neurons through public hooks.
     /// Custom recipes declare their available points and apply them at the
     /// corresponding computation boundary; selection and validation are shared.
+    /// The residual `[batch, 128]` bypasses the edit to `[batch, 512]` neurons;
+    /// logits are `(residual + activation W_out + b_out) W_U`.
     pub fn continue_with_hooks(
         &self,
         residual: Tensor<B, 2>,
@@ -200,7 +228,8 @@ impl<B: Backend> GrokkingTransformer<B> {
         })
     }
 
-    /// Embedding [113,128] and neuron-to-logit [512,113] for Fourier progress.
+    /// Export F32 embedding `[113, 128]` and neuron-to-logit `[512, 113]` arrays.
+    /// The latter is `W_out W_U`; both omit the equals-token axis for analysis.
     pub fn fourier_weights(&self) -> (Vec<f32>, Vec<f32>) {
         (
             self.embedding
@@ -219,6 +248,9 @@ impl<B: Backend> GrokkingTransformer<B> {
     }
 
     /// Return cosine/sine readout directions as columns in the 512D latent space.
+    /// For each requested k, accumulate `sum_c (W_out W_U)[neuron,c] *
+    /// {cos,sin}(2*pi*k*c/113)` in F64, ordered cosine then sine. Directions
+    /// are deliberately unnormalized; the analysis orthonormalizes their span.
     pub fn fourier_directions(&self, frequencies: &[usize]) -> Vec<Vec<f64>> {
         let neuron_to_logit = self
             .mlp_out

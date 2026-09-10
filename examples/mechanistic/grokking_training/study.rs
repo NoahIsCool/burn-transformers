@@ -1,4 +1,11 @@
 //! A plain Burn training loop: model -> loss -> backward -> AdamW -> model.
+//!
+//! The checked-in split fixes 3,830 training and 8,939 held-out modular-addition
+//! pairs. Full-batch F32 optimization follows the pinned AdamW protocol; F64
+//! host-side loss and Fourier measurements avoid adding a diagnostic gradient.
+//! Model and optimizer records preserve native Burn parameter ownership. Source,
+//! protocol, and split hashes bind resumable training to its original experiment;
+//! read-only analysis records both historical and current source identities.
 use crate::model::{GrokkingTransformer, HIDDEN, NEURONS, P};
 use burn::{
     module::{AutodiffModule, Module},
@@ -19,17 +26,27 @@ mod analyze;
 type AnyResult<T> = Result<T, Box<dyn Error>>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Serializable command-line settings recorded with each training checkpoint.
 pub struct Settings {
+    /// Execution backend name; feature availability is checked by the entry point.
     pub backend: String,
+    /// Total target updates, including any updates already saved in a resumed run.
     pub steps: usize,
+    /// Backend initialization seed; the checked-in data split is independent.
     pub seed: u64,
+    /// Directory for source provenance, learning curves, and native Burn records.
     pub output: PathBuf,
+    /// Load the latest model and optimizer instead of overwriting an existing run.
     pub resume: bool,
+    /// Time disposable updates with explicit device synchronization.
     pub benchmark: bool,
     #[serde(default)]
+    /// Load a checkpoint for circuit analysis without optimizer updates.
     pub analyze_only: bool,
 }
 impl Settings {
+    /// Parse explicit run options and reject zero steps or resumable benchmarks.
+    /// `--analyze` implies loading a checkpoint but permits a different analysis backend.
     pub fn from_args() -> AnyResult<Self> {
         let mut config = Self {
             backend: "flex".into(),
@@ -86,6 +103,11 @@ struct Checkpoint {
     train_split_sha256: String,
 }
 
+/// Train, resume, benchmark, or analyze the registered one-block transformer.
+/// Normal runs use full-batch AdamW and a ten-update linear warmup from zero;
+/// periodic native records include optimizer moments and the exact split.
+/// At 40,000 updates, test the preregistered delayed-generalization criterion
+/// and analyze frequencies selected from this run’s final readout spectrum.
 pub fn train<B: AutodiffBackend>(config: Settings) -> AnyResult<()> {
     let device = B::Device::default();
     B::seed(&device, config.seed);
@@ -270,6 +292,9 @@ pub fn train<B: AutodiffBackend>(config: Settings) -> AnyResult<()> {
     Ok(())
 }
 
+/// Reject backward step targets, disposable benchmarks, and changed protocol/source.
+/// Seed, backend, and split compatibility are checked by the caller before this
+/// guard; read-only analysis deliberately bypasses optimizer-resume restrictions.
 fn validate_resume(
     config: &Settings,
     checkpoint: &Checkpoint,
@@ -295,6 +320,9 @@ fn validate_resume(
     Ok(())
 }
 
+/// Hash compile-time source bytes that define the training and analysis graph.
+/// Documentation edits also change these exact identities; historical evidence
+/// is preserved, and resuming requires the original source snapshot.
 fn source_fingerprints() -> serde_json::Value {
     let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
     serde_json::json!({
@@ -309,6 +337,8 @@ fn source_fingerprints() -> serde_json::Value {
     })
 }
 
+/// Select five nonzero Fourier pairs by descending power, breaking ties by k.
+/// Input powers correspond to frequencies 1 through floor(113/2).
 fn strongest_frequencies(powers: &[f64]) -> Vec<usize> {
     let mut frequencies: Vec<usize> = (1..=P / 2).collect();
     frequencies.sort_by(|&a, &b| powers[b - 1].total_cmp(&powers[a - 1]).then(a.cmp(&b)));
@@ -316,6 +346,8 @@ fn strongest_frequencies(powers: &[f64]) -> Vec<usize> {
     frequencies
 }
 
+/// Convert grid indices `a*113+b` to `[batch,3]` integer `[a,b,=]` inputs
+/// and `[batch]` targets `(a+b) mod 113` on the requested device.
 fn batch<B: Backend>(
     pairs: &[usize],
     device: &B::Device,
@@ -334,6 +366,9 @@ fn batch<B: Backend>(
     )
 }
 
+/// Return mean cross entropy and accuracy for the supplied nonempty split.
+/// Use 512-row inference chunks and F64 log-sum-exp of finite F32 logits;
+/// all 114 training classes, including equals, contribute to normalization.
 fn evaluate<B: Backend>(model: &GrokkingTransformer<B>, pairs: &[usize]) -> AnyResult<(f64, f64)> {
     let mut loss = 0.0;
     let mut correct = 0;
@@ -374,6 +409,8 @@ fn evaluate<B: Backend>(model: &GrokkingTransformer<B>, pairs: &[usize]) -> AnyR
     ))
 }
 
+/// Snapshot train/test metrics and normalized embedding/readout Fourier energy.
+/// Diagnostics consume inference tensors and do not contribute training gradients.
 fn observe<B: Backend>(
     model: &GrokkingTransformer<B>,
     train: &[usize],
@@ -397,6 +434,9 @@ fn observe<B: Backend>(
 }
 
 /// Nonzero sine/cosine energy by frequency, normalized to sum to one.
+/// Read F32 weights as `[113, channels]`, or `[channels, 113]` when transposed.
+/// Sum squared sine and cosine coefficients over channels in F64, excluding
+/// the DC component; an all-zero spectrum stays zero without division by zero.
 fn fourier_power(weights: &[f32], channels: usize, transposed: bool) -> Vec<f64> {
     let mut powers: Vec<f64> = (1..=P / 2)
         .map(|frequency| {
@@ -426,6 +466,8 @@ fn fourier_power(weights: &[f32], channels: usize, transposed: bool) -> Vec<f64>
     powers
 }
 
+/// Write readable JSON through a sibling temporary file, then rename it into place.
+/// Readers therefore see a complete checkpoint pointer or progress snapshot.
 fn write_json(path: PathBuf, value: &impl Serialize) -> AnyResult<()> {
     let temp = path.with_extension("json.tmp");
     fs::write(&temp, serde_json::to_vec_pretty(value)?)?;
@@ -634,6 +676,7 @@ mod tests {
     }
 }
 
+/// Identify an emitted checkpoint by SHA-256 of its exact stored bytes.
 fn file_hash(path: PathBuf) -> AnyResult<String> {
     Ok(format!("{:x}", Sha256::digest(fs::read(path)?)))
 }

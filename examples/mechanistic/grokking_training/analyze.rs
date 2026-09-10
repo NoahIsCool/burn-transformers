@@ -1,10 +1,20 @@
 //! Interpret this run's learned frequencies through the same public hooks as v0.2.
+//!
+//! F64 modified Gram-Schmidt creates an orthonormal neuron-space basis U, cast
+//! to F32 for on-device projection `x U U^T`. Keeping, removing, and restoring
+//! that component changes only final-token MLP activations `[batch, 512]`.
+//! The complete 113² grid is evaluated in chunks; the equals output is excluded
+//! from diagnostic loss and accuracy. Learned frequencies are supplied by this
+//! run’s readout spectrum, rather than copied from the archived checkpoint.
 use crate::model::{GrokkingTransformer, NEURONS, P, mlp_activation};
 use burn::module::Module;
 use burn::tensor::{Tensor, TensorData, backend::Backend};
 use serde_json::{Value, json};
 use transformers::intervention::Hooks;
 
+/// Measure learned sinusoidal directions and their causal intervention controls.
+/// Reject rank-deficient directions and failed capture/restoration controls;
+/// report both historical zero-intercept and affine variance-explained fits.
 pub fn learned_circuit<B: Backend>(
     model: &GrokkingTransformer<B>,
     frequencies: &[usize],
@@ -129,11 +139,14 @@ pub fn learned_circuit<B: Backend>(
 }
 
 #[derive(Clone, Copy, Default)]
+/// Host-side sums for full-grid accuracy and mean negative log likelihood.
 struct Metrics {
     correct: usize,
     loss: f64,
 }
 impl Metrics {
+    /// Accumulate accuracy and stable F64 cross entropy for consecutive grid rows.
+    /// Input rows have 114 F32 logits; only their first 113 classes are analyzed.
     fn add(&mut self, start: usize, logits: &[f32]) {
         // Training includes '=', while the author's Fourier analysis drops it.
         for (offset, row) in logits.chunks_exact(P + 1).enumerate() {
@@ -160,6 +173,7 @@ impl Metrics {
     }
 }
 #[derive(Clone, Copy, Default)]
+/// F64 sufficient statistics; each instance receives exactly 113² grid pairs.
 struct Fit {
     x2: f64,
     xy: f64,
@@ -167,15 +181,20 @@ struct Fit {
     y2: f64,
 }
 impl Fit {
+    /// Accumulate sufficient statistics for sinusoid x and measured activation y.
     fn add(&mut self, x: f64, y: f64) {
         self.x2 += x * x;
         self.xy += x * y;
         self.y += y;
         self.y2 += y * y;
     }
+    /// Return the historical `1 - SSE / centered_SST` for the fit `y = A*x`.
+    /// A nonzero activation mean contributes to SSE and can make this negative.
     fn fve(&self) -> f64 {
         1.0 - (self.y2 - self.xy * self.xy / self.x2) / (self.y2 - self.y * self.y / (P * P) as f64)
     }
+    /// Return explained centered variance for `y = mean(y) + A*x`.
+    /// The complete modular grid makes each nonzero sinusoid x have zero mean.
     fn affine_fve(&self) -> f64 {
         (self.xy * self.xy / self.x2) / (self.y2 - self.y * self.y / (P * P) as f64)
     }

@@ -1,6 +1,13 @@
 //! Small, explicit statistics for the paper's complete modular-addition grid.
+//!
+//! Flattened F32 logits have axes `[a,b,c]`, each of length 59, and class
+//! `(a+b) mod 59` is correct. Statistical sums use F64 population moments.
+//! These diagnostics describe full-grid behavior; they are not training losses
+//! or a held-out evaluation. Formula fits compare both standardized tensors,
+//! preserving the paper’s `2*correlation-1` convention.
 use super::model::P;
 
+/// Return argmax accuracy over all 59² rows of a complete `[a,b,class]` grid.
 pub fn accuracy(logits: &[f32]) -> f64 {
     let correct = logits
         .chunks_exact(P)
@@ -18,6 +25,8 @@ pub fn accuracy(logits: &[f32]) -> f64 {
     correct as f64 / (P * P) as f64
 }
 
+/// Compute the F64 population standard deviation of a nonempty sample.
+/// The denominator is N rather than N-1, matching the paper’s grid statistics.
 fn std(values: &[f64]) -> f64 {
     let mean = values.iter().sum::<f64>() / values.len() as f64;
     (values
@@ -48,6 +57,8 @@ pub fn distance_irrelevance(logits: &[f32]) -> f64 {
 
 /// Table 2: standardize BOTH complete tensors, then 1 - variance(error).
 /// Algebraically this is `2*correlation-1`; it is not squared correlation.
+/// Clock predicts `cos(omega*(a+b-c))`; Pizza multiplies that by
+/// `abs(cos(omega*(a-b)/2))`, where `omega = 2*pi*frequency/59`.
 pub fn formula_fve(logits: &[f32], frequency: usize, pizza: bool) -> f64 {
     let (mut x, mut y, mut xx, mut yy, mut xy) = (0., 0., 0., 0., 0.);
     for (index, &actual) in logits.iter().enumerate() {
@@ -73,6 +84,7 @@ pub fn formula_fve(logits: &[f32], frequency: usize, pizza: bool) -> f64 {
     2. * correlation - 1.
 }
 
+/// Return the largest absolute F32 difference, requiring equal flattened lengths.
 pub fn max_error(actual: &[f32], expected: &[f32]) -> f32 {
     assert_eq!(actual.len(), expected.len());
     actual
@@ -83,6 +95,8 @@ pub fn max_error(actual: &[f32], expected: &[f32]) -> f32 {
 }
 
 /// Check numerical parity with an independently evaluated PyTorch graph.
+/// Require finite complete grids and per-logit error `<= 2e-3 + 2e-5*abs(ref)`,
+/// identical accuracy, and distance-irrelevance agreement within `2e-5`.
 pub fn assert_reference(actual: &[f32], expected: &[f32]) -> f32 {
     assert_eq!(actual.len(), P * P * P);
     assert_eq!(actual.len(), expected.len());

@@ -3,8 +3,15 @@
 //! Prepare: python3 examples/mechanistic/clock_and_pizza/prepare.py
 //! Run: cargo run --release --locked --offline --example clock_and_pizza
 //! See examples/mechanistic/clock_and_pizza/README.md for the exact paper protocol.
+//!
+//! This checkpoint analysis projects centered F32 token embeddings into PCA
+//! subspaces before adding positions. Full-grid logits `[59,59,59]` are checked
+//! against independently prepared reference tensors. Energy-matched random
+//! subspaces, ordered removal/restoration, and attention normalization provide
+//! controls; training new weights is a separate `clock_and_pizza_train` example.
 
 #[cfg(not(feature = "flex"))]
+/// Explain the CPU backend feature required to replay these reference fixtures.
 fn main() {
     eprintln!("enable the `flex` feature to run this example");
     std::process::exit(1);
@@ -18,6 +25,9 @@ mod measure;
 mod model;
 
 #[cfg(feature = "flex")]
+/// Replay both pinned models and compare PCA interventions with paper/reference metrics.
+/// Save current replay measurements beside the prepared fixtures; keep published
+/// results and the documented checkpoint/paper accuracy discrepancy distinct.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use burn::tensor::{Distribution, Tensor, backend::Backend};
     use model::{B, Fixture, HIDDEN, P, token_embedding};
@@ -218,6 +228,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(feature = "flex")]
+/// Evaluate all 59² input pairs using the supplied hooks and return flat F32 logits.
+/// A single complete-grid call keeps capture and restoration row alignment explicit.
 fn run(
     model: &model::Transformer,
     hooks: &mut transformers::intervention::Hooks<'_, model::B>,
@@ -229,6 +241,7 @@ fn run(
 }
 
 #[cfg(feature = "flex")]
+/// Print and serialize complete-grid accuracy and distance irrelevance for one condition.
 fn row(label: &str, logits: &[f32]) -> serde_json::Value {
     let accuracy = measure::accuracy(logits);
     let q = measure::distance_irrelevance(logits);

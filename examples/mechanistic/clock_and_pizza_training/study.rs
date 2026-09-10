@@ -1,4 +1,12 @@
 //! Reproducible data, measurements, and artifacts; the training loop is in the example.
+//!
+//! A deterministic 80/20 split partitions the complete 59² modular-addition
+//! grid. The F32 model is evaluated with host F64 log-sum-exp and population
+//! statistics. Captures expose attention `[batch,4,2,2]` and final-token MLP
+//! neurons `[batch,1,512]` without altering logits. A separate diagnostic
+//! differentiates selected logits with respect to fresh token-embedding leaves
+//! to compare the two operands’ gradient directions. Source and artifact hashes
+//! bind each measurement to its actual run; learned geometry is not presumed.
 use crate::model::{P, Transformer};
 use burn::{
     module::Module,
@@ -13,16 +21,26 @@ use transformers::intervention::{Hooks, Layer};
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 #[derive(Clone, Serialize)]
+/// Serializable settings for one seeded attention-mixture training run.
 pub struct Options {
+    /// Requested native Burn backend, checked by the example entry point.
     pub backend: String,
+    /// Coefficient of softmax attention in the unmasked mixture with all-ones J.
     pub alpha: f64,
+    /// Fixed backend initialization and deterministic dataset-split seed.
     pub seed: u64,
+    /// Number of full-batch AdamW updates; `--paper` selects 20,000.
     pub steps: usize,
+    /// Positive interval between complete-grid measurements.
     pub evaluate_every: usize,
+    /// Use only 32 training pairs for a short compatibility check.
     pub smoke: bool,
+    /// New directory for the protocol, curves, model, and activation artifacts.
     pub output: PathBuf,
 }
 impl Options {
+    /// Parse the training CLI and validate positive intervals and alpha in `[0,1]`.
+    /// Options apply in command-line order, including smoke/paper presets.
     pub fn parse() -> Result<Self> {
         let mut result = Self {
             backend: "flex".into(),
@@ -62,11 +80,17 @@ impl Options {
     }
 }
 
+/// Disjoint training and held-out subsets encoded as grid indices `a*59+b`.
 pub struct Dataset {
+    /// First floor(80% of 59²) pairs in the seeded permutation.
     pub train: Vec<usize>,
+    /// Remaining pairs, excluded from optimizer updates.
     pub test: Vec<usize>,
 }
 impl Dataset {
+    /// Shuffle all grid pairs using a fixed SplitMix64-driven Fisher-Yates pass.
+    /// Modulo reduction fixes this study’s deterministic permutation; no match
+    /// to an unpublished original split or another library’s RNG is claimed.
     pub fn new(seed: u64) -> Self {
         let mut pairs: Vec<usize> = (0..P * P).collect();
         let mut rng = seed;
@@ -81,6 +105,8 @@ impl Dataset {
         let test = pairs.split_off(P * P * 4 / 5);
         Self { train: pairs, test }
     }
+    /// Build integer inputs `[batch,2]` and modular-sum labels `[batch]`.
+    /// Smoke mode selects the first 32 training rows; normal mode uses them all.
     pub fn training_batch<B: Backend>(
         &self,
         device: &B::Device,
@@ -114,12 +140,15 @@ struct Measurement {
     distance_irrelevance: f64,
 }
 
+/// Protocol provenance, elapsed wall time, and measurements for one experiment.
 pub struct Run {
     options: Options,
     started: Instant,
     measurements: Vec<Measurement>,
 }
 impl Run {
+    /// Create a new evidence directory and record sources, settings, split, and model identity.
+    /// Reject an existing protocol file to preserve previous measurements.
     pub fn begin<B: Backend>(
         options: &Options,
         data: &Dataset,
@@ -209,6 +238,8 @@ impl Run {
             measurements: Vec::new(),
         })
     }
+    /// Evaluate both splits and distance irrelevance, then save the learning curve.
+    /// Predictions come from the complete grid; held-out rows remain outside training.
     pub fn measure<B: Backend>(
         &mut self,
         step: usize,
@@ -238,6 +269,9 @@ impl Run {
         )?;
         Ok(())
     }
+    /// Export final F32 activations and a native Burn record with exact round-trip controls.
+    /// Verify capture leaves logits unchanged and reloading the same model template
+    /// reproduces them; hash each exported array before writing the result manifest.
     pub fn finish<B: Backend>(&self, model: &Transformer<B>, _data: &Dataset) -> Result<()> {
         let mut hooks = Hooks::new();
         let pattern = hooks.capture(Layer::decoder(0).self_attention().pattern());
@@ -307,6 +341,8 @@ impl Run {
     }
 }
 
+/// Evaluate the complete grid in 128-row chunks, flattened as `[a,b,class]`.
+/// Chunking bounds temporary activation memory without changing attention context.
 fn all_logits<B: Backend>(model: &Transformer<B>) -> Result<Vec<f32>> {
     let mut values = Vec::with_capacity(P * P * P);
     for start in (0..P * P).step_by(128) {
@@ -319,6 +355,8 @@ fn all_logits<B: Backend>(model: &Transformer<B>) -> Result<Vec<f32>> {
     }
     Ok(values)
 }
+/// Return accuracy and mean cross entropy for a nonempty subset of full-grid logits.
+/// Use a maximum-subtracted F64 log-sum-exp over all 59 output classes.
 fn metrics(logits: &[f32], pairs: &[usize]) -> (f64, f64) {
     let mut correct = 0;
     let mut loss = 0.;
@@ -346,10 +384,14 @@ fn metrics(logits: &[f32], pairs: &[usize]) -> (f64, f64) {
         loss / pairs.len() as f64,
     )
 }
+/// Compute F64 population standard deviation with denominator N on a nonempty sample.
 fn std(values: &[f64]) -> f64 {
     let mean = values.iter().sum::<f64>() / values.len() as f64;
     (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64).sqrt()
 }
+/// Compute Definition 4.2: average fixed-difference variation divided by global variation.
+/// Use only correct-class logits and population standard deviations over the
+/// complete `[a,b]` grid; a constant logit field has undefined normalized variation.
 fn distance_irrelevance(logits: &[f32]) -> f64 {
     let correct: Vec<_> = (0..P * P)
         .map(|pair| logits[pair * P + (pair / P + pair % P) % P] as f64)
@@ -454,6 +496,9 @@ mod tests {
 
 /// Paper Definition 4.1 on 100 fixed triples. The diagnostic deliberately makes
 /// token activations new leaves; it does not change the training graph or weights.
+/// For each sampled `(a,b,c)`, differentiate raw class-c logit with respect to
+/// the two pre-position embeddings `[2,128]`. Their gradient cosine similarity
+/// is accumulated in F64; zero or nonfinite gradient norms are rejected.
 pub fn gradient_symmetry<B: burn::tensor::backend::AutodiffBackend>(
     model: &Transformer<B>,
 ) -> Result<serde_json::Value> {

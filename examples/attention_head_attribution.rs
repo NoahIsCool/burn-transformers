@@ -9,18 +9,27 @@
 //! See examples/README.md for the paper, assumptions, and experimental scope.
 
 #[cfg(not(feature = "flex"))]
+/// Explain the deterministic CPU backend feature needed for this exact decomposition.
 fn main() {
     eprintln!("enable the `flex` feature to run this example");
     std::process::exit(1);
 }
 
 #[cfg(feature = "flex")]
+/// Run the fixed-weight head-attribution and intervention controls.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     experiment::run()
 }
 
 #[cfg(feature = "flex")]
 mod experiment {
+    //! A width-four F32 attention layer with two width-two heads and linear readout.
+    //! Scores use `[batch,head,query,key]` axes and `Q K^T / sqrt(head_width)`.
+    //! Causal exclusion masks only future keys, so each row keeps its own token;
+    //! the bidirectional variant keeps every key. Projected head outputs occupy
+    //! residual channels `[batch,token,4]`, making their logit contributions
+    //! additive until readout. No nonlinear suffix, padding, or cache is present.
+
     use burn::{
         backend::Flex,
         module::Param,
@@ -35,8 +44,8 @@ mod experiment {
     type Hidden = Tensor<B, 3>; // [batch, token, residual channel]
     const TOLERANCE: f32 = 2e-5;
 
-    // These custom points expose each head AFTER its output projection, unlike
-    // the shared attention head_context point. Channels are residual channels.
+    /// Expose one head after its output projection, with residual-channel axes.
+    /// The tensor is `[batch,token,4]`, unlike unprojected shared head context.
     fn head_output(head: usize) -> Point<3> {
         Point::custom(
             format!("attribution.heads.{head}.projected_output"),
@@ -56,6 +65,8 @@ mod experiment {
     }
 
     impl TinyTransformer {
+        /// Construct fixed Q/K/V, output-projection, and readout matrices in F32.
+        /// All initializer values are replaced, so results have no RNG dependence.
         fn new() -> transformers::Result<Self> {
             let device = Default::default();
             let mut attention = GroupedQueryAttentionConfig::new(4, 2, 2, 2).init(&device)?;
@@ -92,10 +103,13 @@ mod experiment {
             })
         }
 
+        /// Map `[batch,token,4]` residuals to `[batch,token,3]` logits linearly.
+        /// Linearity is what makes summed head attributions exact in this model.
         fn readout(&self, hidden: Hidden) -> Hidden {
             hidden.matmul(self.unembedding.clone().unsqueeze())
         }
 
+        /// Declare each projected head output and the post-attention residual point.
         fn activation_points(&self) -> Vec<PointInfo> {
             let mut points: Vec<_> = (0..self.attention.query_heads)
                 .map(|head| head_output(head).info())
@@ -104,8 +118,10 @@ mod experiment {
             points
         }
 
-        // Keep the mechanism visible: project Q/K/V, choose visibility, apply
-        // softmax, then expose each head's contribution before adding the residual.
+        /// Project Q/K/V, apply the selected visibility, and expose each OV contribution.
+        /// Softmax normalizes the key axis; causal masks exclude `key > query`.
+        /// Head-output edits occur before summation into the residual, so their
+        /// effects pass through only the fixed linear readout.
         fn forward_with_hooks(
             &self,
             input: Hidden,
@@ -151,12 +167,16 @@ mod experiment {
         }
     }
 
+    /// Return the maximum absolute F32 difference, rejecting nonfinite comparisons.
     fn max_error(left: Hidden, right: Hidden) -> f32 {
         let errors = (left - right).abs().to_data().to_vec::<f32>().unwrap();
         assert!(errors.iter().all(|error| error.is_finite()));
         errors.into_iter().fold(0., f32::max)
     }
 
+    /// Check exact additive attribution, head ablation, restoration, and wrong-head control.
+    /// Also compare ordinary attention parity and the first token’s sensitivity
+    /// to a future-token edit under causal versus bidirectional visibility.
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let model = TinyTransformer::new()?;
         let input = Tensor::from_floats(

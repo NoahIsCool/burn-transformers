@@ -1,5 +1,11 @@
 //! Train the Clock/Pizza architecture from random weights, then inspect its learned activations.
 //! Run: cargo run --release --features autodiff --example clock_and_pizza_train -- --smoke
+//!
+//! The unmasked attention rule is `alpha * softmax(Q K^T / sqrt(32)) + (1-alpha) J`,
+//! where every entry of J is one. Inputs are `[batch, 2]`; final-token logits are
+//! `[batch, 59]`. Training uses F32 cross entropy and full-batch AdamW with ten
+//! warmup updates; the first update has zero learning rate. Held-out accuracy and
+//! activation geometry are separate outcomes, as described in the study manifest.
 #[cfg(feature = "autodiff")]
 #[allow(dead_code)]
 #[path = "mechanistic/clock_and_pizza/model.rs"]
@@ -9,6 +15,7 @@ mod model;
 mod study;
 
 #[cfg(feature = "autodiff")]
+/// Parse the run settings and choose a supported native Burn autodiff backend.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use burn::{
         backend::{Autodiff, Flex},
@@ -19,6 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     use transformers::intervention::Hooks;
 
+    /// Optimize the registered transformer with the fixed AdamW schedule.
+    /// The same hooks remain in the training graph; evaluation uses the inner
+    /// backend, and the final artifacts include detached activation diagnostics.
     fn train<B: AutodiffBackend>(
         options: study::Options,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -69,6 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(not(feature = "autodiff"))]
+/// Print the feature flag required to enable this example’s differentiable graph.
 fn main() {
     eprintln!(
         "Enable autodiff: cargo run --release --features autodiff --example clock_and_pizza_train -- --smoke"
