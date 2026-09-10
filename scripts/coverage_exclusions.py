@@ -36,7 +36,7 @@ MAX_CLASSIFIER_LOG_BYTES = 8 * 1024 * 1024
 MAX_CONTEXTS = 4096
 MAX_ITEMS = 65_536
 CAPTURE_PURPOSE = "fresh_whole_test_file_classifier_invocation"
-POLICY = "whole_test_files_v1_no_inline_or_generated_exclusions"
+POLICY = "whole_test_files_v2_exact_test_macro_spans_no_inline_or_generated_exclusions"
 
 
 def relative_name(value: object) -> str:
@@ -192,6 +192,17 @@ def _span(span: object, identity: dict) -> tuple[int, int]:
     return tuple(points)
 
 
+def _span_coordinates(span: dict) -> tuple[int, ...]:
+    """Compare every already-validated coordinate, not just overlapping bytes.
+
+    Macro diagnostics and parsed macro regions must identify the same complete
+    item. Byte equality alone must not hide mismatched line or Unicode columns.
+    """
+
+    return tuple(span[point][coordinate] for point in ("start", "end")
+                 for coordinate in ("byte", "line", "column", "unicode_column"))
+
+
 def _candidate(entry: dict, identity: dict, diagnostics: list[dict]) -> bool:
     """Require complete file-wide test ownership in every parsed context.
 
@@ -216,6 +227,7 @@ def _candidate(entry: dict, identity: dict, diagnostics: list[dict]) -> bool:
         candidate &= run["classification"] in {"test_only", "blank"}
     if next_line != identity["lines"] + 1:
         raise ValueError("classifier line runs do not cover the physical source")
+    common_test_macros = None
     for context in contexts:
         if (not isinstance(context, dict) or not isinstance(context.get("module"), str)
                 or not context["module"] or type(context.get("duplicate_context")) is not bool):
@@ -223,6 +235,7 @@ def _candidate(entry: dict, identity: dict, diagnostics: list[dict]) -> bool:
         regions = context.get("regions")
         if not isinstance(regions, list) or not 1 <= len(regions) <= MAX_ITEMS:
             raise ValueError("classifier ownership regions are missing or excessive")
+        test_macros = set()
         for index, region in enumerate(regions):
             if (not isinstance(region, dict) or type(region.get("test_only")) is not bool
                     or not isinstance(region.get("kind"), str)
@@ -235,9 +248,23 @@ def _candidate(entry: dict, identity: dict, diagnostics: list[dict]) -> bool:
             elif region["depth"] == 0 or region["kind"] == "file":
                 raise ValueError("classifier has ambiguous whole-file fallback")
             candidate &= region["test_only"]
-    # Even a diagnostic over blank bytes is a retention reason. Only a repeated
-    # identical reference is benign: all its contexts were independently read.
-    return candidate and all(issue["code"] == "duplicate_context" for issue in diagnostics)
+            if region["test_only"] and region["kind"] == "macro" and span[0] < span[1]:
+                test_macros.add(_span_coordinates(region["span"]))
+        common_test_macros = test_macros if common_test_macros is None else common_test_macros & test_macros
+    # Opacity does not undo independently proven ownership of a whole test file.
+    # It does prevent attributing other expansion filenames to this file, and it
+    # never supplies the missing whole-file proof for inline tests. The grouped
+    # diagnostic also represents verbatim/unresolved syntax: only exact parsed
+    # macro spans shared by EVERY context qualify, never the diagnostic alone.
+    for issue in diagnostics:
+        if issue["code"] == "duplicate_context":
+            continue
+        if issue["code"] != "opaque_macro_or_verbatim" or issue.get("span") is None:
+            return False
+        _span(issue["span"], identity)
+        if _span_coordinates(issue["span"]) not in common_test_macros:
+            return False
+    return candidate
 
 
 def _thresholds(rows: list[dict], count_key: str, covered_key: str) -> dict:

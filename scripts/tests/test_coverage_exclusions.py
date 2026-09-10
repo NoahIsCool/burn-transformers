@@ -101,6 +101,16 @@ class WholeFileTests(unittest.TestCase):
         self.assertFalse(row["excluded"])
         self.assertEqual(row["removed_mapped_lines"], 0)
 
+    def add_unit_macro(self):
+        """Attach one exact synthetic macro span without claiming expanded syntax."""
+
+        region = copy.deepcopy(self.unit()["contexts"][0]["regions"][0])
+        region.update(depth=1, kind="macro")
+        self.unit()["contexts"][0]["regions"].append(region)
+        self.classification["diagnostics"].append({"file": "src/unit.rs", "code": "opaque_macro_or_verbatim",
+                                                  "span": copy.deepcopy(region["span"])})
+        return region
+
     def test_only_whole_test_candidate_is_removed_and_counters_stay_distinct(self):
         """Neither test directory names nor experimental-family status is a waiver."""
 
@@ -162,6 +172,86 @@ class WholeFileTests(unittest.TestCase):
         self.unit()["contexts"].append(context)
         self.classification["diagnostics"].append({"file": "src/unit.rs", "code": "duplicate_context"})
         self.assertTrue(next(row for row in self.diagnostic()["files"] if row["path"] == "src/unit.rs")["excluded"])
+
+    def test_exact_macros_in_every_whole_test_context_do_not_infer_expansion_ownership(self):
+        """Whole-file proof, not a property-library name or macro expansion, qualifies."""
+
+        self.add_unit_macro()
+        context = copy.deepcopy(self.unit()["contexts"][0])
+        context.update(module="entry[0]::second_test_alias", duplicate_context=True)
+        self.unit()["contexts"].append(context)
+        self.classification["diagnostics"].append({"file": "src/unit.rs", "code": "duplicate_context"})
+        result = self.diagnostic()
+        self.assertEqual([row["path"] for row in result["files"] if row["excluded"]], ["src/unit.rs"])
+        self.assertFalse(result["compiler_dependency_closure_verified"])
+        self.assertFalse(result["production_only_measurement"])
+        self.assertEqual(result["policy"], "whole_test_files_v2_exact_test_macro_spans_no_inline_or_generated_exclusions")
+
+    def test_macro_diagnostics_cannot_waive_production_cfg_path_or_context_vetoes(self):
+        """Matching an opaque span never overrides any independent retention reason."""
+
+        self.add_unit_macro()
+        baseline, targets = copy.deepcopy(self.classification), copy.deepcopy(self.targets)
+        for case in ("production_input", "production_context", "inline_root", "mixed_line", "unknown_cfg",
+                     "ambiguous_path", "missing_in_second_context", "different_kind_in_second_context"):
+            with self.subTest(case=case):
+                self.classification, self.targets = copy.deepcopy(baseline), copy.deepcopy(targets)
+                contexts = self.unit()["contexts"]
+                if case == "production_input":
+                    self.targets[0]["inputs"] = sorted([*self.targets[0]["inputs"], "src/unit.rs"])
+                elif case == "production_context":
+                    context = copy.deepcopy(contexts[0]); context["regions"][0]["test_only"] = False
+                    contexts.append(context)
+                elif case == "inline_root": contexts[0]["regions"][0]["test_only"] = False
+                elif case == "mixed_line": self.unit()["lines"][0]["classification"] = "mixed"
+                elif case in ("unknown_cfg", "ambiguous_path"):
+                    self.classification["diagnostics"].append({"file": "src/unit.rs", "code": case})
+                else:
+                    context = copy.deepcopy(contexts[0])
+                    if case == "missing_in_second_context": context["regions"].pop()
+                    else: context["regions"][-1]["kind"] = "verbatim"
+                    contexts.append(context)
+                self.assert_retained_unit()
+
+    def test_macro_diagnostic_requires_exact_nonempty_parsed_macro_span(self):
+        """Verbatim, nearby regions, missing positions and partial matches stay counted."""
+
+        self.add_unit_macro()
+        baseline = copy.deepcopy(self.classification)
+        for case in ("missing", "null", "byte", "line", "column", "unicode_column", "verbatim",
+                     "unresolved_item", "impl_item", "not_test_only", "empty", "extra_unmatched"):
+            with self.subTest(case=case):
+                self.classification = copy.deepcopy(baseline)
+                region = self.unit()["contexts"][0]["regions"][-1]
+                issue = self.classification["diagnostics"][0]
+                if case == "missing": issue.pop("span")
+                elif case == "null": issue["span"] = None
+                elif case in ("byte", "line", "column", "unicode_column"): issue["span"]["start"][case] += 1
+                elif case in ("verbatim", "unresolved_item", "impl_item"): region["kind"] = case
+                elif case == "not_test_only": region["test_only"] = False
+                elif case == "empty":
+                    region["span"]["end"] = copy.deepcopy(region["span"]["start"])
+                    issue["span"] = copy.deepcopy(region["span"])
+                else:
+                    issue = copy.deepcopy(issue); issue["span"]["start"]["byte"] += 1
+                    self.classification["diagnostics"].append(issue)
+                self.assert_retained_unit()
+
+    def test_malformed_macro_coordinates_fail_instead_of_authorizing_exclusion(self):
+        """Malformed opaque-diagnostic evidence must not become a benign exception."""
+
+        self.add_unit_macro()
+        baseline = copy.deepcopy(self.classification)
+        for case in ("not_object", "missing_coordinate", "boolean", "out_of_bounds", "reversed"):
+            with self.subTest(case=case):
+                self.classification = copy.deepcopy(baseline)
+                issue = self.classification["diagnostics"][0]
+                if case == "not_object": issue["span"] = []
+                elif case == "missing_coordinate": del issue["span"]["start"]["unicode_column"]
+                elif case == "boolean": issue["span"]["start"]["byte"] = False
+                elif case == "out_of_bounds": issue["span"]["end"]["line"] = 500
+                else: issue["span"]["start"]["byte"], issue["span"]["end"]["byte"] = 5, 1
+                with self.assertRaises(ValueError): self.diagnostic()
 
     def test_malformed_line_and_context_contracts_fail_instead_of_becoming_empty(self):
         """Missing, overlapping, truncated, nonintegral and contradictory structures fail."""
@@ -418,7 +508,7 @@ class ClassifierCaptureTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("TFM_WHOLE_FILE_COVERAGE_NATIVE_TESTS") == "1", "opt-in tiny pinned compiler/classifier fixture")
 class NativeWholeFileTests(unittest.TestCase):
-    """Native macro/include/configuration inputs must veto syntactic candidates."""
+    """Native inputs veto candidates; exact test-only macro ownership can qualify."""
 
     def test_native_compiler_edges_override_the_classifier_without_inline_exclusions(self):
         """Build only a tiny offline fixture and the independent development classifier."""
@@ -442,8 +532,7 @@ class NativeWholeFileTests(unittest.TestCase):
             for path, identity in classifier_sources.items(): self.assertEqual(fingerprint_file(Path(path)), identity)
             executable = classifier_target / "debug/transformers-coverage-layout"
             crate = root / "fixture with spaces"
-            put(crate / "Cargo.toml", '[package]\nname="whole_file_fixture"\nversion="0.1.0"\nedition="2024"\n[workspace]\n[features]\nfixture=[]\nunselected=[]\n')
-            put(crate / "Cargo.lock", 'version=4\n[[package]]\nname="whole_file_fixture"\nversion="0.1.0"\n')
+            put(crate / "Cargo.toml", '[package]\nname="whole_file_fixture"\nversion="0.1.0"\nedition="2024"\n[workspace]\n[features]\nfixture=[]\nunselected=[]\n[dev-dependencies]\nproptest={version="=1.11.0",default-features=false,features=["std"]}\n')
             put(crate / "src/lib.rs", '''#![allow(dead_code)]
 #[path = "tests/production.rs"] mod production;
 #[cfg(test)] #[path = "unit only.rs"] mod unit_only;
@@ -459,13 +548,48 @@ const RAW: &str = include_str!("raw_input.rs");
 #[cfg(all(test, feature = "fixture"))] #[path = "feature_test.rs"] mod feature_test;
 #[cfg(any(test, feature = "unselected"))] mod uncertain;
 #[cfg(test)] #[cfg_attr(feature = "fixture", path = "conditional.rs")] mod conditional;
+#[cfg(test)] mod whole_macro;
+#[cfg(test)] #[path = "whole_macro.rs"] mod whole_macro_alias;
+#[cfg(test)] mod property_tests;
+#[cfg(test)] mod independent_child;
 pub fn value() -> u32 { production::value() + production_alias::value() + macro_live::value() + included::value() }
 ''')
             for name in ("tests/production.rs", "aliased.rs", "macro_module.rs", "included.rs", "raw_input.rs", "uncertain.rs", "conditional.rs"):
                 put(crate / "src" / name, 'pub fn value() -> u32 { 1 }\n#[test] fn own_test() { assert_eq!(value(), 1); }\n')
+            with (crate / "src/macro_module.rs").open("a") as stream:
+                stream.write('macro_rules! live { () => { pub fn live_value() -> u32 { 2 } }; }\nlive!();\n#[test] fn live_test() { assert_eq!(live_value(), 2); }\n')
             for name in ("unit only.rs", "feature_test.rs"):
                 put(crate / "src" / name, '#[test] fn check() { assert_eq!(super::value(), 4); }\n')
+            put(crate / "src/whole_macro.rs", '''macro_rules! generated_test {
+    () => { #[test] fn generated() { assert_eq!(super::value(), 4); } };
+}
+generated_test!();
+include!("opaque_child.rs");
+mod independently_owned { include!("independent_child.rs"); }
+#[test] fn children() {
+    assert_eq!(child_value(), 3);
+    assert_eq!(independently_owned::independent_value(), 5);
+}
+''')
+            put(crate / "src/opaque_child.rs", 'pub fn child_value() -> u32 { 3 }\n')
+            put(crate / "src/independent_child.rs", 'pub fn independent_value() -> u32 { 5 }\n#[test] fn own_test() { assert_eq!(independent_value(), 5); }\n')
+            put(crate / "src/property_tests.rs", '''fn round_trip(value: u8) -> u8 { u16::from(value) as u8 }
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(16))]
+    #[test]
+    fn property_round_trip(value in 0_u8..=255) {
+        proptest::prop_assert_eq!(round_trip(value), value);
+    }
+}
+''')
+            # An exact macro span cannot heal unknown cfg or conditional paths.
+            for name in ("uncertain.rs", "conditional.rs"):
+                with (crate / "src" / name).open("a") as stream:
+                    stream.write('macro_rules! generated { () => { #[test] fn macro_check() { assert_eq!(value(), 1); } }; }\ngenerated!();\n')
             put(crate / "tests/integration.rs", '#[test] fn check() { assert_eq!(whole_file_fixture::value(), 4); }\n')
+            lock = subprocess.run(["cargo", "+nightly", "generate-lockfile", "--manifest-path", str(crate / "Cargo.toml"),
+                                   "--offline"], env=environment, capture_output=True, text=True, timeout=60)
+            self.assertEqual(lock.returncode, 0, lock.stdout + lock.stderr)
             # Use the real runner, not a synthesized success manifest. Its exact
             # indexed command log and retained native status are part of proof.
             with mock.patch.object(check_release, "CRATE", crate), mock.patch.object(check_release, "FEATURES", "fixture"), \
@@ -478,6 +602,7 @@ pub fn value() -> u32 { production::value() + production_alias::value() + macro_
             results = E.read_json(results_path)
             self.assertEqual(code, 0, json.dumps(results))
             log = output / results["gates"][0]["log"]
+            self.assertIn("test property_tests::property_round_trip ... ok", log.read_text())
             setup = E.read_json(output / "compiler-capture-setup.json")
             before = E.read_json(output / "coverage-inputs-before.json")["sources"]
             require_same_sources(before, capture_sources(crate))
@@ -487,11 +612,28 @@ pub fn value() -> u32 { production::value() + production_alias::value() + macro_
             result = E.qualify_capture(setup, before, capture_dir / "invocation.json", crate,
                                        coverage_log=log, run_results=results_path)
             rows = {row["path"]: row for row in result["files"]}
-            self.assertEqual({name for name, row in rows.items() if row["excluded"]}, {"src/unit only.rs", "src/feature_test.rs"})
+            classification = E.read_json(capture_dir / "classification.json")
+            self.assertEqual({name for name, row in rows.items() if row["excluded"]}, {
+                "src/unit only.rs", "src/feature_test.rs", "src/whole_macro.rs", "src/property_tests.rs", "src/independent_child.rs"},
+                json.dumps({"rows": {name: row["reason"] for name, row in rows.items()},
+                            "diagnostics": classification["diagnostics"]}))
+            self.assertEqual(rows["src/opaque_child.rs"]["reason"], "retained_unclassified_source")
+            self.assertGreater(rows["src/opaque_child.rs"]["mapped_lines"], 0)
             for name in ("tests/production.rs", "aliased.rs", "macro_module.rs", "included.rs", "raw_input.rs"):
                 self.assertEqual(rows["src/" + name]["reason"], "retained_production_compiler_input")
             for name in ("uncertain.rs", "conditional.rs"):
                 self.assertEqual(rows["src/" + name]["reason"], "retained_unknown_mixed_or_non_test_file_ownership")
+            for name in ("whole_macro.rs", "property_tests.rs"):
+                file = next(item for item in classification["files"] if item["path"] == "src/" + name)
+                issues = [issue for issue in classification["diagnostics"]
+                          if issue["file"] == file["path"] and issue["code"] == "opaque_macro_or_verbatim"]
+                self.assertTrue(issues)
+                for context in file["contexts"]:
+                    self.assertTrue(context["regions"][0]["test_only"])
+                    for issue in issues:
+                        self.assertTrue(any(region["kind"] == "macro" and region["test_only"] and region["span"] == issue["span"]
+                                            for region in context["regions"]))
+                if name == "whole_macro.rs": self.assertGreaterEqual(len(file["contexts"]), 2)
             self.assertTrue(result["whole_test_file_exclusions_qualified"])
             self.assertFalse(result["production_only_exclusions_qualified"])
             self.assertFalse(result["release_gate_promotion"])

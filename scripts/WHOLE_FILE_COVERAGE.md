@@ -12,12 +12,21 @@ A file can be removed only when all of these facts agree:
 - No captured non-test production compilation reports it as an input.
 - The classifier and compiler observed the exact snapshotted source bytes.
 
-Repeated equivalent contexts are retained as evidence; every other classifier
-diagnostic vetoes that file's exclusion. Production compiler inputs override
+Repeated equivalent contexts are retained as evidence. The only other permitted
+diagnostic is `opaque_macro_or_verbatim` whose complete byte/line/column span
+exactly matches a nonempty, parsed, test-only **macro** region in **every** file
+context. Verbatim/unresolved syntax, absent spans, unknown cfg/path diagnostics,
+and any production context remain vetoes. This exception uses inherited
+whole-file ownership, never a macro-name whitelist or expansion assumptions.
+The versioned policy records this distinction from the earlier all-macro veto.
+Production compiler inputs override
 syntax candidates, including macro-generated modules, `include!`, and tracked
 `include_str!` inputs. A directory named `tests` never implies exclusion.
-Unclassified files, inline tests, generated code, and uncertain cfg/path contexts
-stay in the denominator. Experimental model source also stays in scope.
+Unclassified files, inline tests, and uncertain cfg/path contexts stay in the
+denominator. A macro expansion's **other mapped filename** also stays unless that
+file independently satisfies the same full proof; qualifying a macro's source
+does not propagate its ownership into included/generated files. No individual
+generated spans are removed. Experimental model source also stays in scope.
 
 ## Invocation and evidence
 
@@ -83,7 +92,14 @@ TFM_WHOLE_FILE_COVERAGE_NATIVE_TESTS=1 python3 -m unittest discover -s scripts/t
 ```
 
 It verifies real compiler-discovered macro/include/alias inputs veto candidate
-exclusions, whole test files qualify, unknown cfg and conditional paths remain,
-and an added coverage warning invalidates previously acceptable evidence.
+exclusions; whole test files with `macro_rules!`, invocation, `include!`, and the
+crate lockfile's exact Proptest 1.11.0 version qualify; and unknown cfg and
+conditional paths remain even when their files contain macros. A macro-included
+file with no independently parsed module context remains, while a separately
+proven test-only module can qualify. Property tests execute unchanged as tests:
+they are neither erased nor replaced to improve the denominator.
+The offline fixture resolves and captures its own lockfile before the native
+run, with Proptest pinned exactly and no Burn dependency. It also verifies that
+an added coverage warning invalidates previously acceptable evidence.
 It also exercises the actual release runner's retained result records: another
 clean log in the same directory cannot substitute for its real coverage log.
