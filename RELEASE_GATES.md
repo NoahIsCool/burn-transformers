@@ -50,6 +50,13 @@ warning-denied Clippy/docs, minimal builds, and 183 Python tests at
 also passed on Rust 1.92 at `9f37b33`, including accelerator feature compilation.
 These are intermediate source snapshots, not final release promotion.
 
+At `c2cc2b3`, source and Rust 1.92 gates pass 884 unit tests plus ordinary
+integrations, 231 Python tests, and warning-denied Clippy/docs. Cargo also verified
+the clean 236-file source archive; no weights or build directories are included.
+The exact local logs remain at `target/release-gates/20260910T003025.158291Z/`.
+The subsequent supplementary classifier integration adds its own source/MSRV
+checks and must pass the package gate again; runtime dependencies are unchanged.
+
 Cargo's usual target location is retained. Check at least 20 GiB free before
 building a new profile; external model artifacts are never a cleanup target.
 The package gate requires clean tracked crate sources and includes verification.
@@ -112,6 +119,13 @@ count in a [pinned isolated LLVM 21 fixture](scripts/tests/fixtures/coverage_lin
 This qualifies that fixture's counter comparison, not source exclusions or a
 historical full-crate export against subsequently edited source.
 
+The separate [Rust syntax classifier](scripts/coverage-layout/README.md) has an
+independent pinned development lockfile and adversarial source fixtures. It is
+packaged as tooling, never linked into the runtime. Both source and MSRV groups
+test it explicitly. Its JSON always sets `qualified_for_coverage_exclusions` to
+false: macro-generated references and exact source/export binding remain to be
+verified before any candidates can affect a release denominator.
+
 The standalone runtime lockfile is now tracked explicitly (overriding only the
 crate-local parent ignore rule). Its reviewed initial SHA-256 is
 `819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d`.
@@ -159,6 +173,10 @@ it is useful locally but is not a substitute for that final connected audit.
   after the parameter-storage, attention-shape, and beam-score fixes. Exact
   commands, source/executable/log hashes, and numerical results are retained;
   subsequent runtime changes still require replay.
+  The [post-strict-JSON-fix replay at `27ada1d`](acceptance/measurements/small-model-post-json-validation-replay-20260910.json)
+  also passes Qwen F16, its authenticated 186-matrix Q4/v2 cached/stateless smoke,
+  and FLAN's seven official vectors with unchanged hashes. It does not imply
+  new public-example, performance, 32K stress, or quantized-quality runs.
 - Run the real Qwen quantized 32K populated-history stress test. Allocating
   32K capacity or evaluating a single token at position 32767 is insufficient.
   The [2026-09-09 Q4/v2 run](acceptance/measurements/qwen3.5-0.8b-q4-32k-stress-20260909.json)

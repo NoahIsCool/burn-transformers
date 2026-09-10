@@ -1,4 +1,5 @@
 {
+  "post_json_validation_replay_record": "measurements/small-model-post-json-validation-replay-20260910.json",
   "sampled_phase_memory_record": "measurements/small-model-metal-memory-20260909.json",
   "schema_version": 1,
   "advertised_supported": false,

@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "scope": "functional_post_strict_json_validation_replay_not_benchmark",
+  "date_utc": "2026-09-10",
+  "advertised_supported": false,
+  "passed": true,
+  "source_commit": "27ada1d12e1c4c6c6f337144e56ef02064c0351d",
+  "runtime_source_tree_git_oid": "4015f62a7393281843e2867198271b90509b889a",
+  "crate_sources_clean_during_runs": true,
+  "unrelated_hmm_change_preserved": true,
+  "toolchain": {
+    "rustc": "1.92.0",
+    "burn": "0.21.0",
+    "profile": "release",
+    "target": "aarch64-apple-darwin"
+  },
+  "cargo_lock_sha256": "819b26befc5ff5040f5ca42b5088826652bd0e713935e56bf8ab30e0b1cc381d",
+  "runtime_files_sha256": {
+    "src/checkpoint/artifact.rs": "596d9aead5b4020e038e3da219d0887ad5b1fe3fca1bf31447074be1e2b9ab53",
+    "src/checkpoint/quantization/manifest.rs": "0586a10b11d85311fbbc9bbdb8838677bf30d42dae80d6a0a4aed8173c6266a3",
+    "src/checkpoint/quantization/provenance.rs": "b5a8420bf1d6064c9eeb894aa208acbb5fc94debc7c3c95118b24d2c01ddf083"
+  },
+  "evidence_capture": "Terminal tool receipts; no separately retained raw log file. These are observed replay results, not a replacement for earlier authenticated full-vector bundles.",
+  "common_arguments": [
+    "cargo",
+    "+stable",
+    "test",
+    "--manifest-path",
+    "crates/transformers/Cargo.toml",
+    "--locked",
+    "--offline",
+    "--release",
+    "--no-default-features",
+    "--features",
+    "std,metal,tokenizers,chat-templates"
+  ],
+  "runs": [
+    {
+      "name": "qwen_f16_and_q4_v2",
+      "repository": "Qwen/Qwen3.5-0.8B",
+      "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+      "argument_suffix": [
+        "--test",
+        "local_artifacts",
+        "loads_pinned_qwen35",
+        "--",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "CARGO_INCREMENTAL": "0",
+        "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+        "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance",
+        "TRANSFORMERS_QWEN35_BURNPACK": "/Volumes/bag of holding/models/transformers-acceptance/qwen3.5-0.8b-q4-2fc06364-v2/qwen3.5-0.8b-q4.bpk"
+      },
+      "exit_code": 0,
+      "passed_test_cases": 2,
+      "executable_sha256": "47d82067b1091648f9c13a9b074e39835c4ce8dda6d3d06c755e7fc19bbc7774",
+      "q4": {
+        "artifact_bytes": 280044715,
+        "artifact_sha256": "cca925f24ab3b61a76fbbd5aefb8e0f2052da1b4636de9e996b890859cae5fd5",
+        "artifact_pre_run_sha256_verified": true,
+        "quantized_matrices": 186,
+        "stateless_and_cached_top1": 13,
+        "stateless_cached_full_vocabulary_cosine": 1,
+        "logits_finite": true,
+        "quantized_quality_corpus_evaluated": false
+      },
+      "f16": {
+        "prompt_official_cosine": 0.999998613,
+        "minimum_cached_official_cosine": 0.999997815,
+        "minimum_teacher_official_cosine": 0.999996242,
+        "exact_cached_and_stateless_official_greedy_tokens": 32
+      }
+    },
+    {
+      "name": "flan_f32_official_metal",
+      "repository": "google/flan-t5-small",
+      "revision": "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
+      "argument_suffix": [
+        "--test",
+        "flan_t5_small",
+        "flan_t5_small_metal_matches_official_reference",
+        "--",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "CARGO_INCREMENTAL": "0",
+        "TRANSFORMERS_FLAN_T5_SMALL_DIR": "/Volumes/bag of holding/models/google/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab",
+        "TRANSFORMERS_FLAN_T5_SMALL_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance/flan-t5-small-0fc9ddf7-reference.bundle"
+      },
+      "exit_code": 0,
+      "passed_test_cases": 1,
+      "executable_sha256": "eb32342793b06e3faf08b3dc741962c01dd9c3230c621be6cef9449c6f90a48f",
+      "minimum_full_vector_cosine": 0.999999999999,
+      "maximum_absolute_error": 0.000076294,
+      "failures_at_1e_4": 0,
+      "exact_greedy_official_tokens": 32,
+      "exact_official_beam_ids": [
+        644,
+        4598,
+        229,
+        9685,
+        5,
+        1
+      ],
+      "vectors_f32le_sha256": {
+        "encoder": "0338e69c5259299636d22597d8bf667cf326ceda8a35b78119698ddcadc27f26",
+        "decoder": "c120253f75b47286be35d4dbff9dc0177d533d197315700773dbcb62d265ce83",
+        "first": "fe8c24615690911bb5b9e7bf11dc5a8524367742fe9292e568d2993367c1108d",
+        "cached": "6c065beeb7e405185fa7633d8d958a7ffc79ef0c3c914c65eab409d7f5b8aacc",
+        "teacher": "38ed24cd1bbf31acfb8fe7d167525562b9e6642f871abbf855815ca0a8fbb07b",
+        "padded": "cfaa7d8309d7c46ef919218736c59dbdb39a1f87bda47fe6fec9411ec4321ff1",
+        "boundary": "5a4cb95431905b37b85d7fade4d21f5e21532a9fac95dda2414992818f645cd6"
+      }
+    }
+  ],
+  "limitations": [
+    "No performance or phase-memory comparisons are derived from these functional replay timings.",
+    "The public example and generation-coordinator suites were not repeated in this post-parser-fix run; their earlier authenticated replay remains a separate source snapshot.",
+    "This Q4 run is a stateless/cached smoke, not a new 32K stress test or a quantized corpus quality evaluation.",
+    "Release coverage and coordinated final-candidate qualification remain open."
+  ]
+}

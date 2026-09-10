@@ -1355,6 +1355,9 @@ parent-beam indices, otherwise scores and hidden histories silently diverge.
   Serde visitor as SafeTensors metadata/index maps. Identical, conflicting, and
   escape-equivalent duplicate names fail instead of silently selecting the last
   value. Payload hashes do not replace this structural validation.
+  The [post-fix real-artifact replay](acceptance/measurements/small-model-post-json-validation-replay-20260910.json)
+  passes Qwen F16/Q4 and FLAN F32; all seven FLAN full-vector hashes remain
+  unchanged. This is loader/correctness evidence, not quantized corpus quality.
 - **Memory measurements distinguish storage from observed process footprint.**
   The test-only Darwin supervisor brackets synchronized phases, samples a real
   idle baseline, and retains raw timestamps, gaps, and errors. The [executed Qwen/FLAN series](acceptance/measurements/small-model-metal-memory-20260909.json)

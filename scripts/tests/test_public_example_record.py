@@ -80,6 +80,38 @@ class PublicExampleRecordTests(unittest.TestCase):
                 output["output_utf8_line_sha256"],
             )
 
+    def test_post_parser_fix_replay_preserves_observed_scope_and_vector_hashes(self):
+        """Three real tests do not imply new example, timing, 32K or quality runs."""
+        relative = "measurements/small-model-post-json-validation-replay-20260910.json"
+        raw = (CRATE / "acceptance" / relative).read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), "bcc2c0d0fb4cdb8259ca9062e33a7071d944ec441713a20c9b1d52026c1cc2e6")
+        record = json.loads(raw)
+        self.assertTrue(record["passed"])
+        self.assertFalse(record["advertised_supported"])
+        self.assertEqual(record["source_commit"], "27ada1d12e1c4c6c6f337144e56ef02064c0351d")
+        self.assertEqual(sum(run["passed_test_cases"] for run in record["runs"]), 3)
+        self.assertTrue(all(run["exit_code"] == 0 for run in record["runs"]))
+        qwen, flan = record["runs"]
+        self.assertTrue(qwen["q4"]["artifact_pre_run_sha256_verified"])
+        self.assertEqual(qwen["q4"]["quantized_matrices"], 186)
+        self.assertEqual(qwen["q4"]["stateless_cached_full_vocabulary_cosine"], 1)
+        self.assertFalse(qwen["q4"]["quantized_quality_corpus_evaluated"])
+        self.assertEqual(qwen["f16"]["exact_cached_and_stateless_official_greedy_tokens"], 32)
+        self.assertGreaterEqual(qwen["f16"]["minimum_teacher_official_cosine"], 0.999)
+        self.assertEqual(flan["failures_at_1e_4"], 0)
+        self.assertEqual(flan["exact_greedy_official_tokens"], 32)
+        prior = json.loads((CRATE / "acceptance/measurements/small-model-functional-replay-6226170-20260909.json").read_text())
+        oracle = next(run for run in prior["runs"] if run["name"] == "flan_official_metal_oracle")
+        self.assertEqual(len(flan["vectors_f32le_sha256"]), len(oracle["results"]["vector_details"]))
+        for vector in oracle["results"]["vector_details"]:
+            self.assertEqual(flan["vectors_f32le_sha256"][vector["name"]], vector["actual_f32le_sha256"])
+        for filename in (
+            "qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17.json",
+            "flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab.json",
+        ):
+            primary = json.loads((CRATE / "acceptance" / filename).read_text())
+            self.assertEqual(primary["post_json_validation_replay_record"], relative)
+
 
 if __name__ == "__main__":
     unittest.main()
