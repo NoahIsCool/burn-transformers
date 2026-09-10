@@ -194,7 +194,10 @@ pub struct NemotronHConfig {
     /// Scan chunk width used by the Mamba-2 recurrence.
     #[serde(alias = "mamba_chunk_size")]
     pub chunk_size: usize,
-    /// Whether Mamba input/output projections contain bias.
+    /// Compatibility metadata retained from the upstream configuration.
+    ///
+    /// The pinned Nemotron-H reference executes Mamba projection biases using
+    /// `use_bias`, not this field; the local graph follows that same convention.
     pub mamba_proj_bias: bool,
     /// Accumulator/cache dtype for recurrent SSM state.
     pub mamba_ssm_cache_dtype: String,
@@ -229,7 +232,7 @@ pub struct NemotronHConfig {
         deserialize_with = "deserialize_block_schedule"
     )]
     pub mtp_layers_block_type: Vec<NemotronHBlockType>,
-    /// Global projection-bias compatibility switch.
+    /// Bias switch used by the pinned Mamba input/output projection graph.
     pub use_bias: bool,
     /// New-weight initialization standard deviation.
     pub initializer_range: f64,

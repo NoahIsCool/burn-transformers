@@ -91,3 +91,81 @@ fn dense_relu_matches_two_projection_definition() {
         burn::tensor::Tolerance::absolute(1e-6),
     );
 }
+
+/// The bias builder controls both projections, including rectangular broadcasts.
+#[test]
+fn dense_bias_builder_matches_independent_affine_relu_squared_equations() {
+    let device = Default::default();
+    let inputs = [[1.0_f32, -2.0], [-3.0, 0.5]];
+    let up = [[1.0_f32, -1.0], [0.5, 2.0], [-1.0, 0.25]];
+    let down = [[1.0_f32, 2.0, -1.0], [-0.5, 0.25, 1.5]];
+    let up_bias = [0.75_f32, -0.5, 1.25];
+    let down_bias = [-0.75_f32, 0.125];
+    for enabled in [false, true] {
+        // Explicitly undo a previous true setting as well as enabling biases.
+        let config = DenseFeedForwardConfig::new(2, 3)
+            .with_activation(Activation::ReluSquared)
+            .with_bias(true)
+            .with_bias(enabled);
+        let mut block = config
+            .init::<Flex>(&device)
+            .expect("rectangular dense block");
+        assert_eq!(block.up_proj.bias.is_some(), enabled);
+        assert_eq!(block.down_proj.bias.is_some(), enabled);
+        // Direct parameter assignment uses Burn's runtime [input, output]
+        // layout, whereas the scalar equations below keep [output, input].
+        block.up_proj.weight = Param::from_tensor(Tensor::from_floats(up, &device).transpose());
+        block.down_proj.weight = Param::from_tensor(Tensor::from_floats(down, &device).transpose());
+        if enabled {
+            assert_eq!(block.up_proj.bias.as_ref().unwrap().val().dims(), [3]);
+            assert_eq!(block.down_proj.bias.as_ref().unwrap().val().dims(), [2]);
+            block.up_proj.bias = Some(Param::from_tensor(Tensor::from_floats(up_bias, &device)));
+            block.down_proj.bias =
+                Some(Param::from_tensor(Tensor::from_floats(down_bias, &device)));
+        }
+        let expected = inputs
+            .iter()
+            .flat_map(|input| {
+                let hidden: Vec<f64> = up
+                    .iter()
+                    .zip(up_bias)
+                    .map(|(row, bias)| {
+                        let affine = row
+                            .iter()
+                            .zip(input)
+                            .map(|(&weight, &value)| f64::from(weight) * f64::from(value))
+                            .sum::<f64>()
+                            + if enabled { f64::from(bias) } else { 0.0 };
+                        affine.max(0.0).powi(2)
+                    })
+                    .collect();
+                down.iter().zip(down_bias).map(move |(row, bias)| {
+                    row.iter()
+                        .zip(&hidden)
+                        .map(|(&weight, &value)| f64::from(weight) * value)
+                        .sum::<f64>()
+                        + if enabled { f64::from(bias) } else { 0.0 }
+                })
+            })
+            .collect::<Vec<_>>();
+        let input = Tensor::<Flex, 2>::from_floats(inputs, &device);
+        let flat = block
+            .forward(input.clone())
+            .expect("matrix forward")
+            .into_data();
+        let batched = block
+            .forward(input.reshape([1, 2, 2]))
+            .expect("batched forward")
+            .into_data();
+        assert_eq!(flat.shape, burn::tensor::Shape::from([2, 2]));
+        assert_eq!(batched.shape, burn::tensor::Shape::from([1, 2, 2]));
+        for actual in [flat, batched] {
+            for (actual, expected) in actual.to_vec::<f32>().unwrap().into_iter().zip(&expected) {
+                assert!(actual.is_finite());
+                assert!((f64::from(actual) - expected).abs() < 1e-6);
+            }
+        }
+        assert!(expected.iter().any(|value| *value < 0.0));
+        assert!((expected[0] - expected[2]).abs() > 1.0);
+    }
+}
