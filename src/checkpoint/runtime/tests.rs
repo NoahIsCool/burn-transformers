@@ -1139,6 +1139,162 @@ fn concatenation_covers_every_axis_and_switches_one_shard_at_a_time() {
     assert!(outcome.stats.peak_host_staging_bytes <= plan.memory.peak_host_staging_bytes);
 }
 
+/// A concatenation owns one complete output: a late input failure cannot publish its prefix.
+#[test]
+fn atomicity_concat_late_failures_preserve_only_prior_complete_targets() {
+    for malformed_bool in [false, true] {
+        let tensors = [
+            FixtureTensor::new("prior", TensorDType::BOOL, [1], vec![1]),
+            FixtureTensor::new("first", TensorDType::BOOL, [1], vec![0]),
+            FixtureTensor::new(
+                "last",
+                TensorDType::BOOL,
+                [2],
+                vec![1, if malformed_bool { 2 } else { 0 }],
+            ),
+            FixtureTensor::new("later", TensorDType::BOOL, [1], vec![1]),
+        ];
+        let (_temp, manifest) = single_manifest(&tensors);
+        let expected = [
+            ExpectedTensor::new("prior", [1]).with_dtype(TensorDType::BOOL),
+            ExpectedTensor::new("joined", [3]).with_dtype(TensorDType::BOOL),
+            ExpectedTensor::new("later", [1]).with_dtype(TensorDType::BOOL),
+            ExpectedTensor::new("tied", [1]).with_dtype(TensorDType::BOOL),
+        ];
+        let mut mapping = MappingPlan::new();
+        mapping
+            .map("prior", "prior")
+            .concatenate(["first".into(), "last".into()], "joined", 0)
+            .map("later", "later")
+            .alias("prior", "tied");
+        let plan =
+            build_load_plan(&manifest, &expected, &mapping, &LoadOptions::default()).unwrap();
+        let mut source = MemorySource {
+            tensors: tensors
+                .iter()
+                .map(|tensor| {
+                    (
+                        tensor.name.clone(),
+                        SourceTensor::new(
+                            &tensor.name,
+                            tensor.shape.clone(),
+                            tensor.dtype,
+                            tensor.bytes.clone(),
+                        )
+                        .unwrap(),
+                    )
+                })
+                .collect(),
+            fail_at: (!malformed_bool).then(|| "last".into()),
+            ..MemorySource::default()
+        };
+        let mut sink = CollectingSink::default();
+        let failure = execute_load_plan(&plan, &mut source, &mut sink).unwrap_err();
+        assert_eq!(failure.failed_target.as_deref(), Some("joined"));
+        assert!(matches!(&failure.cause,
+            ExecutionFailureCause::Checkpoint(CheckpointError::InvalidTensorPayload { tensor, reason })
+            if tensor == if malformed_bool { "joined" } else { "last" }
+                && reason == if malformed_bool { "boolean element 2 has invalid byte value 2" } else { "synthetic read failure" }));
+        assert_eq!(failure.report.applied, ["prior"]);
+        assert_eq!(failure.stats.tensors_applied, 1);
+        assert_eq!(failure.stats.aliases_applied, 0);
+        assert_eq!(
+            failure.stats.source_reads,
+            if malformed_bool { 3 } else { 2 }
+        );
+        assert_eq!(
+            failure.stats.source_payload_bytes,
+            if malformed_bool { 4 } else { 2 }
+        );
+        assert_eq!(failure.stats.delivered_tensor_bytes, 1);
+        // The output's three bytes overlap only the current one- or two-byte input.
+        assert_eq!(
+            failure.stats.peak_host_staging_bytes,
+            if malformed_bool { 5 } else { 4 }
+        );
+        assert_eq!(failure.stats.largest_output_tensor_bytes, 3);
+        assert_eq!(source.close_calls, 1);
+        assert_eq!(sink.events, ["write:prior"]);
+        assert_eq!(sink.tensors.len(), 1);
+        assert_eq!(sink.tensors["prior"].to_vec::<bool>().unwrap(), [true]);
+        assert!(sink.aliases.is_empty());
+    }
+}
+
+/// Physical-equivalence validation needs both raw payloads concurrently, including at the exact bound.
+#[test]
+fn atomicity_equivalence_pair_budget_rejects_before_reads_and_accepts_exactly() {
+    let tensors = [
+        FixtureTensor::new("owner", TensorDType::F32, [2], f32_bytes(&[1.0, -2.0])),
+        FixtureTensor::new("copy", TensorDType::F32, [2], f32_bytes(&[1.0, -2.0])),
+    ];
+    let (_temp, manifest) = single_manifest(&tensors);
+    let expected = [ExpectedTensor::new("owner", [2])];
+    let options = LoadOptions {
+        index_aliases: vec![IndexTensorAlias::new("copy", "owner")],
+        ..LoadOptions::default()
+    };
+    let original = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &options,
+    )
+    .unwrap();
+    assert_eq!(original.memory.largest_equivalence_pair_bytes, 16);
+    for bound in [15, 16] {
+        let mut plan = original.clone();
+        plan.memory.peak_host_staging_bytes = bound;
+        let mut source = MemorySource {
+            tensors: tensors
+                .iter()
+                .map(|tensor| {
+                    (
+                        tensor.name.clone(),
+                        SourceTensor::new(
+                            &tensor.name,
+                            tensor.shape.clone(),
+                            tensor.dtype,
+                            tensor.bytes.clone(),
+                        )
+                        .unwrap(),
+                    )
+                })
+                .collect(),
+            ..MemorySource::default()
+        };
+        let mut sink = CollectingSink::default();
+        let result = execute_load_plan(&plan, &mut source, &mut sink);
+        assert_eq!(source.close_calls, 1);
+        if bound == 15 {
+            let failure = result.unwrap_err();
+            assert!(matches!(failure.cause,
+                ExecutionFailureCause::Checkpoint(CheckpointError::MemoryEstimateExceeded { ref tensor, required: 16, planned: 15 }) if tensor == "copy"));
+            assert_eq!(failure.failed_target, None);
+            assert_eq!(failure.stats, ExecutionStats::default());
+            assert!(failure.report.applied.is_empty());
+            assert!(failure.report.equivalence_verified.is_empty());
+            assert!(sink.events.is_empty());
+        } else {
+            let outcome = result.unwrap();
+            assert_eq!(outcome.stats.equivalences_verified, 1);
+            assert_eq!(outcome.stats.equivalence_source_reads, 2);
+            assert_eq!(outcome.stats.equivalence_source_payload_bytes, 16);
+            assert_eq!(outcome.stats.source_reads, 3);
+            assert_eq!(outcome.stats.source_payload_bytes, 24);
+            assert_eq!(outcome.stats.largest_equivalence_pair_bytes, 16);
+            assert_eq!(outcome.stats.peak_host_staging_bytes, 16);
+            assert_eq!(
+                outcome.report.equivalence_verified,
+                [CheckpointEquivalenceRecord::new("copy", "owner")]
+            );
+            assert_eq!(outcome.report.applied, ["owner"]);
+            assert_eq!(sink.events, ["write:owner"]);
+            assert_eq!(tensor_f32(&sink.tensors["owner"]), [1.0, -2.0]);
+        }
+    }
+}
+
 #[test]
 fn every_bf16_bit_pattern_casts_to_f16_with_half_semantics() {
     let bits: Vec<u16> = (0..=u16::MAX).collect();

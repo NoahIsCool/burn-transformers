@@ -506,6 +506,76 @@ fn output_collision_is_non_destructive_and_session_can_retry() {
     assert!(QuantizedBurnpackArtifact::open(output).is_ok());
 }
 
+/// Create-only publication preserves a dangling destination link and rolls back for a retry.
+#[cfg(unix)]
+#[test]
+fn atomicity_dangling_output_symlink_survives_publication_and_retry() {
+    use std::os::unix::fs::symlink;
+    let directory = tempdir().unwrap();
+    let output = directory.path().join("create-only.bpk");
+    let missing_target = directory.path().join("absent-owner.bpk");
+    let source = TensorData::new(vec![1.0_f32; 32], [1, 32]);
+    let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+    session
+        .append("q.weight", &source, config(SymmetricQuantization::Q8))
+        .unwrap();
+    session.bind_provenance(fixture_provenance()).unwrap();
+    let before_stats = session.stats();
+    let before_manifest = session.manifest().clone();
+    symlink(&missing_target, &output).unwrap();
+    assert!(!output.exists());
+    assert!(
+        fs::symlink_metadata(&output)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    // The fast exists() guard cannot see this link. The create-only hard link is authoritative.
+    for _ in 0..2 {
+        assert!(
+            matches!(session.finalize(), Err(QuantizationError::OutputAlreadyExists { path }) if path == session.output_path())
+        );
+        assert_eq!(fs::read_link(&output).unwrap(), missing_target);
+        assert!(!missing_target.exists());
+        assert_eq!(session.stats(), before_stats);
+        assert_eq!(session.manifest(), &before_manifest);
+        assert_eq!(
+            session.staging_len_for_test(),
+            before_stats.staged_payload_bytes
+        );
+        // On Unix the private staging inode is unlinked; no .partial directory may survive.
+        let entries: Vec<_> = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(entries, std::slice::from_ref(&output));
+    }
+
+    // Only the fixture's symlink is removed; its nonexistent target is never touched.
+    fs::remove_file(&output).unwrap();
+    let summary = session.finalize().unwrap();
+    assert_eq!(summary.tensor_count, 1);
+    assert!(
+        !fs::symlink_metadata(&output)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!missing_target.exists());
+    let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+    assert_eq!(artifact.manifest(), &before_manifest);
+    assert_eq!(artifact.validate_all().unwrap().tensor_count, 1);
+    assert_eq!(
+        artifact
+            .read_weight("q.weight")
+            .unwrap()
+            .dequantize_f32()
+            .unwrap(),
+        source
+    );
+}
+
 #[test]
 fn successful_finalization_closes_mutation_and_leaves_no_partial_file() {
     let directory = tempdir().unwrap();
