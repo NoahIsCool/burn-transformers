@@ -1,7 +1,7 @@
 use burn::{
     backend::Flex,
-    module::Initializer,
-    tensor::{Bool, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
+    module::{Initializer, Module, ModuleMapper, Param},
+    tensor::{Bool, DType, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 use proptest::prelude::*;
 
@@ -41,6 +41,537 @@ fn tiny_config(projection: T5FeedForwardProjection, tied: bool, layers: usize) -
         tie_word_embeddings: tied,
         ..T5Config::default()
     }
+}
+
+/// Public encoder tensors with a different dtype must fail before backend matrix multiplication.
+#[test]
+fn release_contract_encoder_dtype_rejection_preserves_unbound_state() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let encoder = encoded_source(&model, &device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    let before = contract_snapshot(&state);
+    for dtype in [DType::F16, DType::F64] {
+        let mut invalid = encoder.clone();
+        invalid.hidden_state = invalid.hidden_state.cast(dtype);
+        for masked in [false, true] {
+            let mut input = target(&[0], &device);
+            if masked {
+                input.token_mask =
+                    Some(TokenMask::new(Tensor::from_bool([[true]].into(), &device)));
+            }
+            let error = model
+                .decode_stateless(&invalid, input, &ForwardOptions::default())
+                .unwrap_err();
+            assert!(matches!(error, Error::BackendCapability(_)));
+            assert!(
+                error
+                    .to_string()
+                    .contains("t5.encoder_output.hidden_state dtype"),
+                "{error}"
+            );
+        }
+        let error = model
+            .prefill_decoder(
+                &invalid,
+                target(&[0], &device),
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .expect_err("different encoder dtype must return a contextual error");
+        assert!(matches!(error, Error::BackendCapability(_)));
+        assert!(
+            error.to_string().contains("decoder parameters F32"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains(&format!("found {dtype:?}")),
+            "{error}"
+        );
+        assert_eq!(contract_snapshot(&state), before);
+    }
+    let actual = model
+        .prefill_decoder(
+            &encoder,
+            target(&[0], &device),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let expected = model
+        .decode_stateless(&encoder, target(&[0], &device), &ForwardOptions::default())
+        .unwrap();
+    assert_release_close(actual.decoder.logits, expected.logits);
+    assert_eq!(state.lengths(), &[1]);
+}
+
+/// A bound source rejects dtype changes atomically even though same-dtype caller values are ignored.
+#[test]
+fn release_contract_encoder_dtype_rejection_preserves_populated_state() {
+    let device = Default::default();
+    let (model, encoder, mut state) = contract_fixture(&device, true);
+    let before = contract_snapshot(&state);
+    for dtype in [DType::F16, DType::F64] {
+        let mut invalid = encoder.clone();
+        invalid.hidden_state = invalid.hidden_state.cast(dtype);
+        for prefill in [true, false] {
+            let result = if prefill {
+                model.prefill_decoder(
+                    &invalid,
+                    target(&[4], &device),
+                    &mut state,
+                    &ForwardOptions::default(),
+                )
+            } else {
+                model.decode(
+                    &invalid,
+                    DecodeInput {
+                        token_ids: target(&[4], &device).token_ids,
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                    &mut state,
+                    &ForwardOptions::default(),
+                )
+            };
+            let error = result.expect_err("bound encoder dtype cannot change");
+            assert!(matches!(error, Error::BackendCapability(_)));
+            assert!(error.to_string().contains("bound encoder F32"), "{error}");
+            assert!(
+                error.to_string().contains(&format!("found {dtype:?}")),
+                "{error}"
+            );
+            assert_eq!(contract_snapshot(&state), before);
+        }
+    }
+    let actual = model
+        .decode(
+            &encoder,
+            DecodeInput {
+                token_ids: target(&[4], &device).token_ids,
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let expected = model
+        .decode_stateless(
+            &encoder,
+            target(&[0, 3, 4], &device),
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    assert_release_close(actual.decoder.logits, expected.logits);
+    assert_eq!(state.lengths(), &[3]);
+}
+
+/// Selects a real parameter dtype while retaining T5 normalization scales in F32.
+struct RuntimeDtypeParameters(DType);
+
+impl ModuleMapper<TestBackend> for RuntimeDtypeParameters {
+    /// Replaces lazy weights with deterministic small matrices and unit F32 normalization scales.
+    fn map_float<const D: usize>(
+        &mut self,
+        param: Param<Tensor<TestBackend, D>>,
+    ) -> Param<Tensor<TestBackend, D>> {
+        param.map(|tensor| {
+            let shape = tensor.dims();
+            let values = (0..shape.iter().product())
+                .map(|index| {
+                    if D == 1 {
+                        1.0
+                    } else {
+                        (index % 19) as f32 * 0.01 - 0.09
+                    }
+                })
+                .collect::<Vec<_>>();
+            Tensor::<TestBackend, D>::from_data(TensorData::new(values, shape), &tensor.device())
+                .cast(if D == 1 { DType::F32 } else { self.0 })
+        })
+    }
+}
+
+/// Actual parameter/cache dtype takes precedence over the Flex backend's default F32 element type.
+#[test]
+fn release_contract_matching_runtime_dtypes_accept_mixed_precision_norms() {
+    let device = Default::default();
+    for dtype in [DType::F32, DType::F16, DType::F64] {
+        let model = T5ForConditionalGeneration::<TestBackend>::init(
+            tiny_config(T5FeedForwardProjection::Relu, true, 1),
+            &device,
+        )
+        .unwrap()
+        .map(&mut RuntimeDtypeParameters(dtype));
+        assert_eq!(model.shared.weight.val().dtype(), dtype);
+        assert_eq!(
+            model.decoder.final_layer_norm.weight.val().dtype(),
+            DType::F32
+        );
+        let encoder = encoded_source(&model, &device);
+        assert_eq!(encoder.hidden_state.dtype(), dtype);
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 3).unwrap(), 1, &device)
+            .unwrap();
+        let prefill = model
+            .prefill_decoder(
+                &encoder,
+                target(&[0], &device),
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        let decoded = model
+            .decode(
+                &encoder,
+                DecodeInput {
+                    token_ids: target(&[3], &device).token_ids,
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        let stateless = model
+            .decode_stateless(
+                &encoder,
+                target(&[0, 3], &device),
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        for logits in [
+            prefill.decoder.logits,
+            decoded.decoder.logits,
+            stateless.logits,
+        ] {
+            assert_eq!(logits.dims(), [1, 1, 24]);
+            assert_eq!(logits.dtype(), dtype);
+            assert!(
+                logits
+                    .cast(DType::F32)
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap()
+                    .into_iter()
+                    .all(f32::is_finite)
+            );
+        }
+        assert_eq!(state.lengths(), &[2]);
+        assert_eq!(
+            state
+                .tensor_state()
+                .main()
+                .native_kv(0)
+                .unwrap()
+                .keys(0)
+                .unwrap()
+                .dtype(),
+            dtype
+        );
+    }
+}
+
+/// Compares equally shaped finite F32 outputs independently of tensor assertion shortcuts.
+fn assert_release_close<const D: usize>(
+    left: Tensor<TestBackend, D>,
+    right: Tensor<TestBackend, D>,
+) {
+    assert_eq!(left.dims(), right.dims());
+    let left = left.into_data().to_vec::<f32>().unwrap();
+    let right = right.into_data().to_vec::<f32>().unwrap();
+    for (index, (left, right)) in left.into_iter().zip(right).enumerate() {
+        assert!(left.is_finite() && right.is_finite(), "element {index}");
+        assert!(
+            (left - right).abs() <= 1e-4,
+            "element {index}: {left} != {right}"
+        );
+    }
+}
+
+/// Checks the public encoder binding, including diagnostics and logical mask values.
+fn assert_release_encoder(
+    actual: &EncoderOutput<TestBackend>,
+    expected: &EncoderOutput<TestBackend>,
+) {
+    assert_release_close(actual.hidden_state.clone(), expected.hidden_state.clone());
+    assert_eq!(actual.hidden_states.len(), expected.hidden_states.len());
+    for (actual, expected) in actual.hidden_states.iter().zip(&expected.hidden_states) {
+        assert_release_close(actual.clone(), expected.clone());
+    }
+    assert_eq!(actual.attentions.len(), expected.attentions.len());
+    for (actual, expected) in actual.attentions.iter().zip(&expected.attentions) {
+        assert_release_close(actual.clone(), expected.clone());
+    }
+    assert_eq!(
+        actual
+            .token_mask
+            .as_ref()
+            .map(|mask| mask.as_tensor().clone().int().into_data()),
+        expected
+            .token_mask
+            .as_ref()
+            .map(|mask| mask.as_tensor().clone().int().into_data()),
+    );
+}
+
+/// Beam changes must move gapped source masks and diagnostics together with immutable cross-KV.
+#[test]
+fn release_contract_masked_encoder_reorder_and_duplicate_preserve_continuation() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::GatedGelu, false, 2),
+        &device,
+    )
+    .unwrap();
+    let options = ForwardOptions {
+        hidden_states: true,
+        ..ForwardOptions::default()
+    };
+    let encoder = model
+        .encode(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[8, 0, 9, 0], [0, 10, 0, 11]], &device),
+                token_mask: Some(TokenMask::new(Tensor::from_bool(
+                    [[true, false, true, false], [false, true, false, true]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &options,
+        )
+        .unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 6).unwrap(), 2, &device)
+        .unwrap();
+    model
+        .prefill_decoder(
+            &encoder,
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[0, 3], [0, 4]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &options,
+        )
+        .unwrap();
+    state.reorder(&[1, 0]).unwrap();
+    let selector = Tensor::<TestBackend, 1, Int>::from_ints([1, 0], &device);
+    let reordered = EncoderOutput {
+        hidden_state: encoder.hidden_state.clone().select(0, selector.clone()),
+        token_mask: Some(TokenMask::new(Tensor::from_bool(
+            [[false, true, false, true], [true, false, true, false]].into(),
+            &device,
+        ))),
+        hidden_states: encoder
+            .hidden_states
+            .iter()
+            .map(|hidden| hidden.clone().select(0, selector.clone()))
+            .collect(),
+        attentions: Vec::new(),
+    };
+    // The public contract consumes the state's retained encoder after a beam
+    // reorder, not same-shaped stale caller values or the caller's old mask.
+    let actual = model
+        .decode(
+            &encoder,
+            DecodeInput {
+                token_ids: Tensor::from_ints([[5], [6]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &options,
+        )
+        .unwrap();
+    let expected = model
+        .decode_stateless(
+            &reordered,
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[0, 4, 5], [0, 3, 6]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &options,
+        )
+        .unwrap();
+    assert_release_close(actual.decoder.logits, expected.logits);
+    assert_release_encoder(&actual.encoder, &reordered);
+    assert_eq!(state.tensor_state().lengths(), &[3, 3]);
+
+    state.reorder(&[0, 0]).unwrap();
+    let selector = Tensor::<TestBackend, 1, Int>::from_ints([0, 0], &device);
+    let duplicated = EncoderOutput {
+        hidden_state: reordered.hidden_state.select(0, selector.clone()),
+        token_mask: Some(TokenMask::new(Tensor::from_bool(
+            [[false, true, false, true], [false, true, false, true]].into(),
+            &device,
+        ))),
+        hidden_states: reordered
+            .hidden_states
+            .into_iter()
+            .map(|hidden| hidden.select(0, selector.clone()))
+            .collect(),
+        attentions: Vec::new(),
+    };
+    let actual = model
+        .decode(
+            &encoder,
+            DecodeInput {
+                token_ids: Tensor::from_ints([[7], [8]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &options,
+        )
+        .unwrap();
+    let expected = model
+        .decode_stateless(
+            &duplicated,
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[0, 4, 5, 7], [0, 4, 5, 8]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &options,
+        )
+        .unwrap();
+    assert_release_close(actual.decoder.logits, expected.logits);
+    assert_release_encoder(&actual.encoder, &duplicated);
+    assert_eq!(state.lengths(), &[4, 4]);
+
+    state.reset().unwrap();
+    assert!(!state.has_encoder_cache());
+    let rebound = model
+        .prefill_decoder(
+            &encoder,
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[0], [0]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &options,
+        )
+        .unwrap();
+    assert_release_encoder(&rebound.encoder, &encoder);
+    let expected = model
+        .decode_stateless(
+            &encoder,
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[0], [0]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &options,
+        )
+        .unwrap();
+    assert_release_close(rebound.decoder.logits, expected.logits);
+    assert_eq!(state.lengths(), &[1, 1]);
+}
+
+/// Invalid output selections leave both cache banks intact and permit an ordered duplicate retry.
+#[test]
+fn release_contract_selective_logits_rejections_preserve_bound_history() {
+    let device = Default::default();
+    let (model, encoder, mut state) = contract_fixture(&device, true);
+    let before = contract_snapshot(&state);
+    for positions in [vec![], vec![2], vec![0, usize::MAX]] {
+        let options = ForwardOptions {
+            logits: LogitsSelection::Positions(positions),
+            ..ForwardOptions::default()
+        };
+        for prefill in [true, false] {
+            let input = target(&[4, 5], &device);
+            let result = if prefill {
+                model.prefill_decoder(&encoder, input, &mut state, &options)
+            } else {
+                model.decode(
+                    &encoder,
+                    DecodeInput {
+                        token_ids: input.token_ids,
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                    &mut state,
+                    &options,
+                )
+            };
+            let error = result.unwrap_err();
+            assert!(
+                matches!(error, Error::Shape { ref tensor, .. } if tensor == "forward_options.logits.positions")
+            );
+            assert_eq!(contract_snapshot(&state), before);
+        }
+    }
+    let actual = model
+        .decode(
+            &encoder,
+            DecodeInput {
+                token_ids: target(&[4, 5], &device).token_ids,
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions {
+                logits: LogitsSelection::Positions(vec![1, 0, 1]),
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap();
+    let expected = model
+        .decode_stateless(
+            &encoder,
+            target(&[0, 3, 4, 5], &device),
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap();
+    assert_release_close(
+        actual.decoder.logits,
+        expected.logits.select(
+            1,
+            Tensor::<TestBackend, 1, Int>::from_ints([3, 2, 3], &device),
+        ),
+    );
+    assert_eq!(state.lengths(), &[4]);
+}
+
+/// An impossible portable index capacity is rejected before allocating a multi-billion-token cache.
+#[test]
+fn release_contract_capacity_rejects_unrepresentable_indices_before_allocation() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let error = model
+        .new_decode_state(
+            CacheConfig::new(1, i32::MAX as usize + 1).unwrap(),
+            1,
+            &device,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::Configuration { ref field, .. } if field == "t5.decode_state.capacity")
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("portable signed position-index range")
+    );
 }
 
 /// Encodes a fixed source prompt for one decoder row.

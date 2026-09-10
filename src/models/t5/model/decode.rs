@@ -90,7 +90,12 @@ impl<B: Backend> T5CrossAttentionCache<B> {
     /// Builds all decoder-layer cross projections without mutating decode state.
     fn project(model: &T5ForConditionalGeneration<B>, encoder: &EncoderOutput<B>) -> Result<Self> {
         let [batch, source_sequence, _] = encoder.hidden_state.dims();
-        validate_encoder_output(encoder, batch, model.config.d_model)?;
+        validate_encoder_output(
+            encoder,
+            batch,
+            model.config.d_model,
+            model.shared.weight.val().dtype(),
+        )?;
         let mut keys = Vec::with_capacity(model.decoder.block.len());
         let mut values = Vec::with_capacity(model.decoder.block.len());
         for block in &model.decoder.block {
@@ -337,7 +342,7 @@ impl<B: Backend> T5DecodeState<B> {
     /// Burn's backend-generic tensor interface exposes no stable allocation ID.
     /// Once bound, cached K/V and the retained encoder output are therefore the
     /// source of truth; this check rejects device, batch, source-length, width,
-    /// and mask-shape changes without synchronizing all encoder values to the CPU.
+    /// dtype, and mask-shape changes without synchronizing all encoder values to the CPU.
     fn validate_encoder_binding(&self, encoder: &EncoderOutput<B>) -> Result<()> {
         let cross = self.cross.as_ref().ok_or_else(|| {
             Error::Cache("T5 decode requires a successful decoder prefill".into())
@@ -349,6 +354,13 @@ impl<B: Backend> T5DecodeState<B> {
                 format!("{expected:?} bound to decoder state"),
                 format!("{:?}", encoder.hidden_state.dims()),
             ));
+        }
+        if encoder.hidden_state.dtype() != cross.encoder.hidden_state.dtype() {
+            return Err(Error::BackendCapability(format!(
+                "t5.encoder_output.hidden_state dtype must match the bound encoder {:?}, found {:?}",
+                cross.encoder.hidden_state.dtype(),
+                encoder.hidden_state.dtype(),
+            )));
         }
         ensure_device(
             "t5.encoder_output.hidden_state",
@@ -1020,7 +1032,12 @@ fn prepare_stateful_input<B: Backend>(
     if state.cross.is_some() {
         state.validate_encoder_binding(encoder)?;
     } else {
-        validate_encoder_output(encoder, batch, model.config.d_model)?;
+        validate_encoder_output(
+            encoder,
+            batch,
+            model.config.d_model,
+            model.shared.weight.val().dtype(),
+        )?;
         ensure_device(
             "t5.encoder_output.hidden_state",
             &encoder.hidden_state.device(),

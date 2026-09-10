@@ -17,7 +17,7 @@
 use burn::{
     module::{Initializer, Module},
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
-    tensor::{ElementConversion, Int, Tensor, TensorData, backend::Backend, module::linear},
+    tensor::{DType, ElementConversion, Int, Tensor, TensorData, backend::Backend, module::linear},
 };
 
 use crate::{CausalLmInput, CausalLmOutput, Error, ForwardOptions, LogitsSelection, Result};
@@ -688,7 +688,12 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
         validate_input_devices(&decoder, "decoder", &model_device)?;
         validate_encoder_devices(encoder, &model_device)?;
         let [batch, sequence] = validate_token_input(&decoder, self.config.vocab_size, "decoder")?;
-        validate_encoder_output(encoder, batch, self.config.d_model)?;
+        validate_encoder_output(
+            encoder,
+            batch,
+            self.config.d_model,
+            self.shared.weight.val().dtype(),
+        )?;
         if decoder.token_mask.is_some() {
             return self.decode_stateless_masked(encoder, decoder, options);
         }
@@ -969,6 +974,7 @@ fn validate_encoder_output<B: Backend>(
     encoder: &EncoderOutput<B>,
     decoder_batch: usize,
     hidden_size: usize,
+    decoder_dtype: DType,
 ) -> Result<()> {
     let [batch, sequence, width] = encoder.hidden_state.dims();
     if batch != decoder_batch || sequence == 0 || width != hidden_size {
@@ -977,6 +983,16 @@ fn validate_encoder_output<B: Backend>(
             format!("[{decoder_batch}, source>0, {hidden_size}]"),
             format!("[{batch}, {sequence}, {width}]"),
         ));
+    }
+    // Cross projections multiply the supplied source by decoder parameters.
+    // Read the actual parameter dtype: a checkpoint may select F16 even when
+    // the backend's default floating element type is F32. Do not silently cast
+    // external encoder states or constrain higher-precision normalization weights.
+    if encoder.hidden_state.dtype() != decoder_dtype {
+        return Err(Error::BackendCapability(format!(
+            "t5.encoder_output.hidden_state dtype must match decoder parameters {decoder_dtype:?}, found {:?}",
+            encoder.hidden_state.dtype(),
+        )));
     }
     validate_nonempty_mask(
         encoder.token_mask.as_ref(),

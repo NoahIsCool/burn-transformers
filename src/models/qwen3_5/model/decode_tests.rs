@@ -1719,3 +1719,213 @@ fn cache_contract_mtp_truncate_preserves_shifted_continuation_parity() {
     assert_eq!(state.lengths(), &[3]);
     assert_eq!(state.tensors.mtp_lengths(), Some([2].as_slice()));
 }
+
+/// Compares finite, equally shaped release-contract tensors at absolute F32 tolerance.
+fn assert_release_close<const D: usize>(
+    actual: Tensor<TestBackend, D>,
+    expected: Tensor<TestBackend, D>,
+) {
+    assert_eq!(actual.dims(), expected.dims());
+    let actual = actual.into_data().to_vec::<f32>().unwrap();
+    let expected = expected.into_data().to_vec::<f32>().unwrap();
+    for (index, (actual, expected)) in actual.into_iter().zip(expected).enumerate() {
+        assert!(
+            actual.is_finite() && expected.is_finite(),
+            "element {index}"
+        );
+        assert!(
+            (actual - expected).abs() <= 1e-4,
+            "element {index}: {actual} != {expected}"
+        );
+    }
+}
+
+/// Explicit RoPE coordinates and valid-token cache age stay independent across ragged chunks.
+#[test]
+fn release_contract_ragged_explicit_positions_match_chunk_and_recurrent_decode() {
+    let device = Default::default();
+    let model = tiny_model(&device);
+    let options = diagnostic_options();
+    let config = CacheConfig::new(2, 4).unwrap();
+    let mut chunked = model.new_decode_state(config, 2, &device).unwrap();
+    let mut recurrent = model.new_decode_state(config, 2, &device).unwrap();
+    let mut whole = model.new_decode_state(config, 2, &device).unwrap();
+    let prompt = CausalLmInput {
+        token_ids: Tensor::from_ints([[99, 1, 99, 2], [3, 99, 4, 99]], &device),
+        token_mask: Some(TokenMask::new(Tensor::from_bool(
+            [[false, true, false, true], [true, false, true, false]].into(),
+            &device,
+        ))),
+        position_ids: Some(Tensor::from_ints([[-1, 5, -1, 8], [2, -1, 9, -1]], &device)),
+    };
+    model
+        .prefill(prompt.clone(), &mut chunked, &options)
+        .unwrap();
+    model
+        .prefill(prompt.clone(), &mut recurrent, &options)
+        .unwrap();
+    let tokens = Tensor::<TestBackend, 2, Int>::from_ints([[99, 5, 6], [7, 99, 8]], &device);
+    let mask = Tensor::<TestBackend, 2, Bool>::from_bool(
+        [[false, true, true], [true, false, true]].into(),
+        &device,
+    );
+    let positions = Tensor::<TestBackend, 2, Int>::from_ints([[-1, 10, 12], [11, -1, 15]], &device);
+    let expected = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::cat(vec![prompt.token_ids, tokens.clone()], 1),
+                token_mask: Some(TokenMask::new(Tensor::cat(
+                    vec![prompt.token_mask.unwrap().into_tensor(), mask.clone()],
+                    1,
+                ))),
+                position_ids: Some(Tensor::cat(
+                    vec![prompt.position_ids.unwrap(), positions.clone()],
+                    1,
+                )),
+            },
+            &mut whole,
+            &options,
+        )
+        .unwrap();
+    let actual = model
+        .decode(
+            DecodeInput {
+                token_ids: tokens.clone(),
+                token_mask: Some(TokenMask::new(mask.clone())),
+                position_ids: Some(positions.clone()),
+            },
+            &mut chunked,
+            &options,
+        )
+        .unwrap();
+    let mut logits = Vec::new();
+    let mut hidden = Vec::new();
+    for column in 0..3 {
+        let output = model
+            .decode(
+                DecodeInput {
+                    token_ids: tokens.clone().narrow(1, column, 1),
+                    token_mask: Some(TokenMask::new(mask.clone().narrow(1, column, 1))),
+                    position_ids: Some(positions.clone().narrow(1, column, 1)),
+                },
+                &mut recurrent,
+                &options,
+            )
+            .unwrap();
+        logits.push(output.logits);
+        hidden.push(output.final_hidden_state.unwrap());
+    }
+    assert_release_close(actual.logits.clone(), expected.logits.narrow(1, 4, 3));
+    assert_release_close(actual.logits, Tensor::cat(logits, 1));
+    let actual_hidden = actual.final_hidden_state.unwrap();
+    assert_release_close(
+        actual_hidden.clone(),
+        expected.final_hidden_state.unwrap().narrow(1, 4, 3),
+    );
+    assert_release_close(actual_hidden, Tensor::cat(hidden, 1));
+    assert_eq!(actual.hidden_states.len(), expected.hidden_states.len());
+    for (actual, expected) in actual.hidden_states.into_iter().zip(expected.hidden_states) {
+        assert_release_close(actual, expected.narrow(1, 4, 3));
+    }
+    for state in [&chunked, &recurrent, &whole] {
+        assert_eq!(state.lengths(), &[4, 4]);
+    }
+}
+
+/// Unsupported attention diagnostics return an error without consuming a valid continuation.
+#[test]
+fn release_contract_attention_capture_failure_preserves_hybrid_history() {
+    let device = Default::default();
+    let model = tiny_model(&device);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let before = contract_snapshot(&state);
+    let rejected = ForwardOptions {
+        attentions: true,
+        ..diagnostic_options()
+    };
+    for prefill in [true, false] {
+        let token_ids = Tensor::from_ints([[3, 4]], &device);
+        let result = if prefill {
+            model.prefill(
+                CausalLmInput {
+                    token_ids,
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &rejected,
+            )
+        } else {
+            model.decode(
+                DecodeInput {
+                    token_ids,
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &rejected,
+            )
+        };
+        let error = result.unwrap_err();
+        assert!(matches!(error, Error::BackendCapability(_)));
+        assert!(error.to_string().contains("attention probability capture"));
+        assert_eq!(contract_snapshot(&state), before);
+    }
+    let actual = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[3, 4]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &diagnostic_options(),
+        )
+        .unwrap();
+    let expected = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2, 3, 4]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &diagnostic_options(),
+        )
+        .unwrap();
+    assert_release_close(actual.logits, expected.logits.narrow(1, 2, 2));
+    assert_eq!(state.lengths(), &[4]);
+}
+
+/// An advertised large model context cannot bypass the portable cache-index limit.
+#[test]
+fn release_contract_capacity_rejects_unrepresentable_indices_before_allocation() {
+    let device = Default::default();
+    let capacity = i32::MAX as usize + 1;
+    let mut config = tiny_config();
+    config.max_position_embeddings = capacity;
+    let model = Qwen3_5ForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let error = model
+        .new_decode_state(CacheConfig::new(1, capacity).unwrap(), 1, &device)
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::Configuration { ref field, .. } if field == "qwen3_5.decode_state.capacity")
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("portable signed position-index range")
+    );
+}
