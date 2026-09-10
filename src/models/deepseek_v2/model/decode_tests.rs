@@ -1,6 +1,6 @@
 use burn::{
     backend::Flex,
-    tensor::{Bool, Int, Tensor, Tolerance, backend::BackendTypes},
+    tensor::{Bool, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 
 use super::*;
@@ -408,6 +408,337 @@ fn cache_configuration_and_lifecycle_errors_are_contextual() {
     assert!(state.truncate(&[0]).is_err());
     assert!(state.truncate(&[1, 0]).is_err());
     assert!(state.layer_storage(2).is_err());
+}
+
+/// Builds malformed external inputs without bypassing Burn's tensor constructors.
+fn sparse_contract_bad_inputs(
+    device: &<TestBackend as BackendTypes>::Device,
+) -> Vec<(CausalLmInput<TestBackend>, ForwardOptions, &'static str)> {
+    let plain = CausalLmInput {
+        token_ids: Tensor::from_ints([[3, 4]], device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let mut cases = Vec::new();
+    for shape in [[0, 2], [1, 0]] {
+        let mut input = plain.clone();
+        input.token_ids = Tensor::from_data(TensorData::new(Vec::<i32>::new(), shape), device);
+        cases.push((input, ForwardOptions::default(), "deepseek_v2.input_ids"));
+    }
+    for shape in [[1, 1], [2, 2]] {
+        let mut input = plain.clone();
+        input.token_mask = Some(TokenMask::new(
+            Tensor::<TestBackend, 2, Int>::ones(shape, device).bool(),
+        ));
+        cases.push((input, ForwardOptions::default(), "deepseek_v2.token_mask"));
+        let mut input = plain.clone();
+        input.position_ids = Some(Tensor::<TestBackend, 2, Int>::zeros(shape, device));
+        cases.push((input, ForwardOptions::default(), "deepseek_v2.position_ids"));
+    }
+    for positions in [Vec::new(), vec![2]] {
+        cases.push((
+            plain.clone(),
+            ForwardOptions {
+                logits: LogitsSelection::Positions(positions),
+                ..Default::default()
+            },
+            "forward_options.logits.positions",
+        ));
+    }
+    cases
+}
+
+/// Requires the public shape-error taxonomy rather than an arbitrary failure.
+fn assert_sparse_contract_shape(error: Error, context: &str) {
+    let Error::Shape {
+        tensor,
+        expected,
+        actual,
+    } = error
+    else {
+        panic!("expected a shape error at {context}, got {error}");
+    };
+    assert_eq!(tensor, context);
+    assert!(!expected.is_empty());
+    assert!(!actual.is_empty());
+}
+
+/// Stateful validation cannot publish any layer's tensors before reporting an error.
+fn sparse_contract_snapshot(state: &DeepseekV2DecodeState<TestBackend>) -> Vec<TensorData> {
+    (0..tiny_config().num_hidden_layers)
+        .map(|layer| state.layer_storage(layer).unwrap().to_data())
+        .collect()
+}
+
+/// Stateless geometry and selective-logit errors retain the correct public context.
+#[test]
+fn sparse_public_contract_stateless_shape_errors_are_contextual() {
+    let (model, device) = tiny_model();
+    for (input, options, context) in sparse_contract_bad_inputs(&device) {
+        assert_sparse_contract_shape(model.forward(input, &options).unwrap_err(), context);
+    }
+    let fully_masked = CausalLmInput {
+        token_ids: Tensor::from_ints([[1, 2]], &device),
+        token_mask: Some(TokenMask::new(
+            Tensor::<TestBackend, 2, Int>::zeros([1, 2], &device).bool(),
+        )),
+        position_ids: None,
+    };
+    assert_sparse_contract_shape(
+        model
+            .forward(fully_masked, &ForwardOptions::default())
+            .unwrap_err(),
+        "deepseek_v2.token_mask",
+    );
+}
+
+/// Populated cache bytes and metadata survive prefill/decode errors and a valid retry.
+#[test]
+fn sparse_public_contract_cached_preflight_errors_are_atomic() {
+    let (model, device) = tiny_model();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let before = sparse_contract_snapshot(&state);
+    let path_before = state.last_execution_path();
+    for (input, options, context) in sparse_contract_bad_inputs(&device) {
+        for prefill in [true, false] {
+            let error = if prefill {
+                model.prefill(input.clone(), &mut state, &options)
+            } else {
+                model.decode(
+                    DecodeInput {
+                        token_ids: input.token_ids.clone(),
+                        token_mask: input.token_mask.clone(),
+                        position_ids: input.position_ids.clone(),
+                    },
+                    &mut state,
+                    &options,
+                )
+            }
+            .unwrap_err();
+            assert_sparse_contract_shape(error, context);
+            assert_eq!(state.lengths(), &[2]);
+            assert_eq!(state.last_execution_path(), path_before);
+            assert_eq!(sparse_contract_snapshot(&state), before);
+        }
+    }
+    let batch_error = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[3], [4]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(batch_error.to_string().contains("batch"));
+    let masked_error = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[3]], &device),
+                token_mask: Some(TokenMask::new(
+                    Tensor::<TestBackend, 2, Int>::zeros([1, 1], &device).bool(),
+                )),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert_sparse_contract_shape(masked_error, "deepseek_v2.token_mask");
+    let attention_error = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions {
+                attentions: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(attention_error, Error::BackendCapability(reason) if reason.contains("attention"))
+    );
+    assert_eq!(state.lengths(), &[2]);
+    assert_eq!(state.last_execution_path(), path_before);
+    assert_eq!(sparse_contract_snapshot(&state), before);
+
+    let actual = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap()
+        .logits;
+    let expected = model
+        .forward(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .unwrap()
+        .logits;
+    assert_eq!(actual.dims(), [1, 1, 32]);
+    assert!(
+        actual
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .all(|value| value.is_finite())
+    );
+    actual
+        .to_data()
+        .assert_approx_eq::<f32>(&expected.to_data(), Tolerance::absolute(1e-6));
+    assert_eq!(state.lengths(), &[3]);
+}
+
+/// Mask holes do not consume cache slots; explicit positions and repeated selections retain order.
+#[test]
+fn sparse_public_contract_gapped_positions_and_diagnostics_match_compact_tokens() {
+    let (model, device) = tiny_model();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let options = ForwardOptions {
+        logits: LogitsSelection::Positions(vec![3, 1, 3]),
+        hidden_states: true,
+        router_logits: true,
+        ..Default::default()
+    };
+    for (step, tokens, positions) in [
+        (0, [0, 1, 0, 2, 0], [0, 4, 0, 7, 0]),
+        (1, [0, 3, 0, 4, 0], [0, 10, 0, 12, 0]),
+    ] {
+        let segment = CausalLmInput {
+            token_ids: Tensor::from_ints([tokens], &device),
+            token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                [[false, true, false, true, false]].into(),
+                &device,
+            ))),
+            position_ids: Some(Tensor::from_ints([positions], &device)),
+        };
+        let actual = if step == 0 {
+            model.prefill(segment, &mut state, &options)
+        } else {
+            model.decode(
+                DecodeInput {
+                    token_ids: segment.token_ids,
+                    token_mask: segment.token_mask,
+                    position_ids: segment.position_ids,
+                },
+                &mut state,
+                &options,
+            )
+        }
+        .unwrap();
+        let (tokens, positions, selected) = if step == 0 {
+            (vec![1_i32, 2], vec![4_i32, 7], vec![1_i32, 0, 1])
+        } else {
+            (
+                vec![1_i32, 2, 3, 4],
+                vec![4_i32, 7, 10, 12],
+                vec![3_i32, 2, 3],
+            )
+        };
+        let width = tokens.len();
+        let expected = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_data(TensorData::new(tokens, [1, width]), &device),
+                    token_mask: None,
+                    position_ids: Some(Tensor::from_data(
+                        TensorData::new(positions, [1, width]),
+                        &device,
+                    )),
+                },
+                &ForwardOptions {
+                    logits: LogitsSelection::All,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .logits
+            .select(
+                1,
+                Tensor::<TestBackend, 1, Int>::from_data(TensorData::new(selected, [3]), &device),
+            );
+        assert_eq!(actual.logits.dims(), [1, 3, 32]);
+        let oracle = expected.to_data().to_vec::<f32>().unwrap();
+        assert!(oracle.iter().all(|value| value.is_finite()));
+        assert_eq!(&oracle[0..32], &oracle[64..96]);
+        assert!(
+            oracle[0..32]
+                .iter()
+                .zip(&oracle[32..64])
+                .any(|(left, right)| (left - right).abs() > 2e-6),
+            "distinct selected tokens must be distinguishable at the parity tolerance"
+        );
+        assert!(
+            actual
+                .logits
+                .to_data()
+                .to_vec::<f32>()
+                .unwrap()
+                .iter()
+                .all(|value| value.is_finite())
+        );
+        actual
+            .logits
+            .to_data()
+            .assert_approx_eq::<f32>(&expected.to_data(), Tolerance::absolute(1e-6));
+        assert_eq!(state.lengths(), &[2 * (step + 1)]);
+        assert_eq!(actual.hidden_states.len(), 4);
+        assert_eq!(actual.routers.len(), 1);
+        let mut diagnostics = actual.hidden_states;
+        diagnostics.push(actual.final_hidden_state.unwrap());
+        diagnostics.extend(
+            actual
+                .routers
+                .into_iter()
+                .map(|router| router.logits.unwrap()),
+        );
+        for tensor in diagnostics {
+            let [batch, sequence, width] = tensor.dims();
+            assert_eq!([batch, sequence], [1, 5]);
+            assert!(width == 8 || width == 4);
+            let values = tensor.to_data().to_vec::<f32>().unwrap();
+            assert!(values.iter().all(|value| value.is_finite()));
+            for column in [0, 2, 4] {
+                assert!(
+                    values[column * width..(column + 1) * width]
+                        .iter()
+                        .all(|&value| value == 0.0)
+                );
+            }
+        }
+    }
 }
 
 /// A state created for different MLA geometry is rejected without mutation.
