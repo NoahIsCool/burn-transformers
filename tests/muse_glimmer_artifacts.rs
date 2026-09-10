@@ -113,7 +113,6 @@ use std::{
     time::Instant,
 };
 
-#[cfg(all(feature = "metal", feature = "tokenizers"))]
 use std::process::Command;
 
 #[cfg(all(feature = "metal", feature = "tokenizers", target_os = "macos"))]
@@ -3050,7 +3049,6 @@ struct MuseRustAcceptanceProvenance {
 }
 
 /// Runs one bounded source-control or toolchain query and returns trimmed UTF-8.
-#[cfg(all(feature = "metal", feature = "tokenizers"))]
 fn checked_command_output(program: &str, arguments: &[&str], directory: &Path) -> String {
     let output = Command::new(program)
         .args(arguments)
@@ -3068,29 +3066,150 @@ fn checked_command_output(program: &str, arguments: &[&str], directory: &Path) -
         .to_owned()
 }
 
-/// Requires a clean transformer subtree and builds the reproducibility record.
-#[cfg(all(feature = "metal", feature = "tokenizers"))]
-fn rust_acceptance_provenance() -> MuseRustAcceptanceProvenance {
-    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repository = crate_root
-        .parent()
-        .and_then(Path::parent)
-        .expect("transformer crate must live at repository/crates/transformers");
+/// Resolves the committed crate tree in either a standalone or nested Git checkout.
+///
+/// Canonical paths identify the actual worktree rather than assuming a fixed
+/// number of parent directories. A literal crate-relative pathspec excludes
+/// unrelated parent-repository changes without letting pathspec metacharacters
+/// broaden or suppress the clean-source check. The root crate uses the commit's
+/// root tree; a nested crate uses its exact subtree, preserving the historical
+/// meaning of `transformers_tree` without rewriting old evidence.
+fn clean_git_crate_tree(crate_root: &Path) -> (PathBuf, String) {
+    let crate_root = fs::canonicalize(crate_root).expect("resolve acceptance crate directory");
+    let repository = checked_command_output("git", &["rev-parse", "--show-toplevel"], &crate_root);
+    let repository = fs::canonicalize(repository).expect("resolve acceptance Git worktree");
+    let relative = crate_root
+        .strip_prefix(&repository)
+        .expect("acceptance crate must be inside its Git worktree");
+    let relative = relative
+        .components()
+        .map(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .expect("acceptance crate path must be UTF-8")
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    let pathspec = if relative.is_empty() { "." } else { &relative };
     let status = checked_command_output(
         "git",
         &[
+            "--literal-pathspecs",
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
             "--",
-            "crates/transformers",
+            pathspec,
         ],
-        repository,
+        &repository,
     );
     assert!(
         status.is_empty(),
-        "Muse acceptance requires a committed, clean crates/transformers subtree: {status}"
+        "Muse acceptance requires a committed, clean crate subtree {pathspec}: {status}"
     );
+    let tree_revision = if relative.is_empty() {
+        "HEAD^{tree}".to_owned()
+    } else {
+        format!("HEAD:{relative}")
+    };
+    let tree = checked_command_output("git", &["rev-parse", &tree_revision], &repository);
+    (repository, tree)
+}
+
+/// Creates a tiny committed checkout without reading or modifying the caller's Git index.
+fn git_crate_fixture(relative: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let temporary = tempfile::tempdir().unwrap();
+    let repository = temporary.path().join("repository with spaces");
+    let crate_root = repository.join(relative);
+    fs::create_dir_all(&crate_root).unwrap();
+    fs::write(crate_root.join("Cargo.toml"), "fixture\n").unwrap();
+    if !relative.is_empty() {
+        fs::write(repository.join("unrelated.txt"), "outside crate\n").unwrap();
+    }
+    checked_command_output("git", &["init", "--quiet", "--template="], &repository);
+    checked_command_output("git", &["add", "--", "."], &repository);
+    checked_command_output(
+        "git",
+        &[
+            "-c",
+            "user.name=Transformer fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+        &repository,
+    );
+    (temporary, repository, crate_root)
+}
+
+/// Requires the source-dirtiness diagnostic rather than accepting an unrelated Git failure.
+fn assert_dirty_git_crate_rejected(crate_root: &Path) {
+    let error = std::panic::catch_unwind(|| clean_git_crate_tree(crate_root)).unwrap_err();
+    let message = error
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| error.downcast_ref::<&str>().copied())
+        .expect("source rejection must have a textual diagnostic");
+    assert!(message.contains("requires a committed, clean crate subtree"));
+}
+
+/// Root, former nested and literal-metacharacter layouts bind the exact tree and reject source edits.
+#[test]
+fn git_crate_provenance_supports_standalone_and_nested_layouts() {
+    for relative in ["", "crates/transformers", "nested [fixture]/transformers"] {
+        let (_temporary, repository, crate_root) = git_crate_fixture(relative);
+        let revision = if relative.is_empty() {
+            "HEAD^{tree}".to_owned()
+        } else {
+            format!("HEAD:{relative}")
+        };
+        let expected_tree = checked_command_output("git", &["rev-parse", &revision], &repository);
+        let (actual_repository, actual_tree) = clean_git_crate_tree(&crate_root);
+        assert_eq!(actual_repository, fs::canonicalize(&repository).unwrap());
+        assert_eq!(actual_tree, expected_tree);
+        if !relative.is_empty() {
+            assert_ne!(
+                actual_tree,
+                checked_command_output("git", &["rev-parse", "HEAD^{tree}"], &repository)
+            );
+            fs::write(repository.join("unrelated.txt"), "unrelated user edit\n").unwrap();
+            assert_eq!(clean_git_crate_tree(&crate_root).1, expected_tree);
+        }
+        fs::write(crate_root.join("Cargo.toml"), "modified\n").unwrap();
+        assert_dirty_git_crate_rejected(&crate_root);
+        checked_command_output("git", &["add", "--", "."], &crate_root);
+        assert_dirty_git_crate_rejected(&crate_root);
+        fs::write(crate_root.join("Cargo.toml"), "fixture\n").unwrap();
+        checked_command_output("git", &["add", "--", "."], &crate_root);
+        assert_eq!(clean_git_crate_tree(&crate_root).1, expected_tree);
+        fs::write(crate_root.join("untracked.rs"), "untracked source\n").unwrap();
+        assert_dirty_git_crate_rejected(&crate_root);
+        fs::remove_file(crate_root.join("untracked.rs")).unwrap();
+        assert_eq!(clean_git_crate_tree(&crate_root).1, expected_tree);
+    }
+}
+
+/// A directory outside Git or an unborn repository cannot supply committed source provenance.
+#[test]
+fn git_crate_provenance_requires_a_committed_repository() {
+    let temporary = tempfile::tempdir().unwrap();
+    assert!(std::panic::catch_unwind(|| clean_git_crate_tree(temporary.path())).is_err());
+    checked_command_output("git", &["init", "--quiet", "--template="], temporary.path());
+    assert!(std::panic::catch_unwind(|| clean_git_crate_tree(temporary.path())).is_err());
+}
+
+/// Requires a clean transformer subtree and builds the reproducibility record.
+#[cfg(all(feature = "metal", feature = "tokenizers"))]
+fn rust_acceptance_provenance() -> MuseRustAcceptanceProvenance {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let (repository, transformers_tree) = clean_git_crate_tree(crate_root);
+    let repository = repository.as_path();
     let features = [
         ("std", cfg!(feature = "std")),
         ("metal", cfg!(feature = "metal")),
@@ -3155,11 +3274,7 @@ fn rust_acceptance_provenance() -> MuseRustAcceptanceProvenance {
     MuseRustAcceptanceProvenance {
         git_head: checked_command_output("git", &["rev-parse", "HEAD"], repository),
         git_tree: checked_command_output("git", &["rev-parse", "HEAD^{tree}"], repository),
-        transformers_tree: checked_command_output(
-            "git",
-            &["rev-parse", "HEAD:crates/transformers"],
-            repository,
-        ),
+        transformers_tree,
         transformers_tree_dirty: false,
         test_source_sha256: sha256_hex(compiled_test_source),
         quantized_quality_source_sha256: sha256_hex(compiled_quantized_quality_source),
