@@ -409,3 +409,155 @@ fn transferred_ties_share_gradients_without_linking_to_source_parameters() {
     assert!(!frozen.left.val().is_require_grad());
     assert!(!frozen.right.val().is_require_grad());
 }
+
+#[test]
+fn rule_preflight_rejects_empty_descriptions_and_unknown_keep_paths_before_callbacks() {
+    let source = experiment(&[2], 7.0);
+    let target = experiment(&[2], 2.0);
+    let original_id = target.encoder[0].weight.id;
+    for description in ["", " \n\t"] {
+        let called = std::cell::Cell::new(false);
+        let error = TransferPlan::new()
+            .transform(
+                "encoder.0.weight",
+                "encoder.0.weight",
+                description,
+                |x: Tensor<B, 2>| {
+                    called.set(true);
+                    Ok(x * 3.0)
+                },
+            )
+            .apply(&source, &target)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("describe the explicit transformation")
+        );
+        assert!(!called.get());
+    }
+    for path in ["", "missing", "encoder.10"] {
+        let called = std::cell::Cell::new(false);
+        let error = TransferPlan::new()
+            .transform(
+                "encoder.0.weight",
+                "encoder.0.weight",
+                "triple",
+                |x: Tensor<B, 2>| {
+                    called.set(true);
+                    Ok(x * 3.0)
+                },
+            )
+            .keep_initialized(path)
+            .apply(&source, &target)
+            .unwrap_err();
+        assert!(error.to_string().contains("transfer.keep_initialized"));
+        assert!(!called.get());
+    }
+    assert_eq!(target.encoder[0].weight.id, original_id);
+    assert_eq!(values(target.encoder[0].weight.val()), vec![2.0; 4]);
+}
+
+#[derive(Module, Debug)]
+struct WeightBranch<B: Backend> {
+    branch: Block<B>,
+}
+
+#[derive(Module, Debug)]
+struct PairBranch<B: Backend> {
+    branch: Pair<B>,
+}
+
+#[test]
+fn existing_module_prefixes_without_matching_parameter_suffixes_are_rejected() {
+    // Both modules exist, but weight/bias cannot match left/right by relative path.
+    let source = WeightBranch {
+        branch: block(2, 7.0),
+    };
+    let target = PairBranch {
+        branch: pair(true, 2.0),
+    };
+    let original_id = target.branch.left.id;
+    let error = TransferPlan::new()
+        .copy_prefix("branch", "branch")
+        .apply(&source, &target)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("no matching relative parameter paths")
+    );
+    assert_eq!(target.branch.left.id, original_id);
+    assert_eq!(target.branch.right.id, original_id);
+    assert_eq!(values(target.branch.left.val()), vec![2.0; 4]);
+}
+
+#[test]
+fn an_empty_plan_preserves_initialized_aliases_and_reports_all_dispositions() {
+    let source = pair(false, 7.0);
+    let target = pair(true, 2.0);
+    let original_id = target.left.id;
+    let (actual, report) = TransferPlan::<B>::default()
+        .apply(&source, &target)
+        .unwrap();
+    assert_eq!(actual.left.id, original_id);
+    assert_eq!(actual.right.id, original_id);
+    assert_eq!(values(actual.left.val()), vec![2.0; 4]);
+    assert!(report.reused.is_empty());
+    assert!(report.transformed.is_empty());
+    assert_eq!(report.omitted.len(), 2);
+    assert_eq!(report.newly_initialized.len(), 2);
+    assert_eq!(report.preserved_ties, [vec!["left", "right"]]);
+}
+
+#[test]
+fn packed_parameters_require_explicit_conversion_but_unselected_sources_stay_packed() {
+    use crate::checkpoint::quantization::{
+        QuantizationGroupSize, SymmetricQuantization, WeightQuantizationConfig,
+        quantize_tensor_data,
+    };
+    let device = Default::default();
+    let packed_data = quantize_tensor_data(
+        &burn::tensor::TensorData::new(
+            (0..64).map(|i| i as f32 / 8.0 - 4.0).collect::<Vec<_>>(),
+            [2, 32],
+        ),
+        WeightQuantizationConfig {
+            scheme: SymmetricQuantization::Q4,
+            group_size: QuantizationGroupSize::new(32).unwrap(),
+        },
+    )
+    .unwrap()
+    .into_burn_qfloat_data()
+    .unwrap();
+    let mut source = block(32, 7.0);
+    source.weight = Param::from_tensor(Tensor::<B, 2>::from_data(packed_data, &device));
+    let original_packed = source.weight.val().into_data();
+    let target = block(32, 2.0);
+    let original_target_id = target.weight.id;
+    assert!(
+        parameters(&source)
+            .unwrap_err()
+            .to_string()
+            .contains("dense floating parameters")
+    );
+    let error = TransferPlan::new()
+        .copy("weight", "weight")
+        .apply(&source, &target)
+        .unwrap_err();
+    assert!(error.to_string().contains("dense floating parameters"));
+    assert_eq!(target.weight.id, original_target_id);
+    assert_eq!(values(target.weight.val()), vec![2.0; 64]);
+
+    // Choosing only the dense bias never implicitly dequantizes the unused weight.
+    let (actual, report) = TransferPlan::new()
+        .copy("bias", "bias")
+        .apply(&source, &target)
+        .unwrap();
+    assert_eq!(values(actual.bias.val()), vec![7.0; 32]);
+    assert_eq!(values(actual.weight.val()), vec![2.0; 64]);
+    assert_eq!(report.reused[0].source, "bias");
+    assert_eq!(report.omitted[0].name, "weight");
+    assert!(matches!(source.weight.val().dtype(), DType::QFloat(_)));
+    assert_eq!(source.weight.val().into_data(), original_packed);
+}
