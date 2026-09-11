@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "created_utc": "20260910T231020.252069Z",
+  "gates": [
+    {
+      "gate": "coverage",
+      "command": [
+        "cargo",
+        "+nightly",
+        "llvm-cov",
+        "--manifest-path",
+        "/Users/nover/repos/transformers/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--lib",
+        "--tests",
+        "--json",
+        "--output-path",
+        "/Users/nover/repos/transformers/target/release-gates/20260910T231020.252069Z/coverage.json",
+        "--disable-default-ignore-filename-regex"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "00-coverage.log",
+      "compiler_evidence": {
+        "setup": "compiler-capture-setup.json",
+        "artifact_binding_verified": true,
+        "compiler_reported_inputs_verified": true,
+        "compiler_dependency_closure_verified": false,
+        "production_only_exclusions_qualified": false,
+        "no_export_filter_verified": true,
+        "binding": "compiler-binding.json"
+      },
+      "input_evidence": {
+        "before": "coverage-inputs-before.json",
+        "sources_unchanged": true,
+        "production_only_exclusions_qualified": false,
+        "after": "coverage-inputs-after.json"
+      },
+      "log_identity": {
+        "sha256": "4fa825e0aa31e358aea1fb34845f0b990ee8054ddd65de3b7d7bcf7f4bf0ee65",
+        "bytes": 140774,
+        "lines": 1510
+      },
+      "report_identity": {
+        "sha256": "46e7d17ab99bc25eda8ecbc84ac159c442c14d550c1e1bd278a89b2d829f8299",
+        "bytes": 88734670,
+        "lines": 1
+      },
+      "coverage": {
+        "crate": {
+          "lines": 91385,
+          "covered": 84847,
+          "percent": 92.84565300651091,
+          "minimum_percent": 90,
+          "passed": true
+        },
+        "shared": {
+          "lines": 42554,
+          "covered": 40557,
+          "percent": 95.30713916435587,
+          "minimum_percent": 95,
+          "passed": true
+        },
+        "scope": "reported src/**/*.rs after exporter directory filters, including inline unit tests and generated expansions",
+        "branch_coverage_measured": false,
+        "passed": true
+      },
+      "seconds": 239.459371
+    }
+  ],
+  "passed": true
+}

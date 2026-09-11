@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "purpose": "fresh_whole_test_file_classifier_invocation",
+  "capture_valid": true,
+  "process_exit_code": 0,
+  "command": [
+    "/private/tmp/tfm-standards-coverage-layout",
+    "/Users/nover/repos/transformers",
+    "src/lib.rs",
+    "tests/acceptance_records.rs",
+    "tests/deepseek_v2_artifacts.rs",
+    "tests/experiment_interface_properties.rs",
+    "tests/flan_t5_small.rs",
+    "tests/local_artifacts.rs",
+    "tests/model_configs.rs",
+    "tests/muse_glimmer_artifacts.rs",
+    "tests/nemotron_h_artifacts.rs",
+    "tests/packed_metal_kernels.rs",
+    "tests/qwen35_benchmarks.rs",
+    "tests/qwen35_release_api.rs",
+    "tests/qwen3_moe_artifacts.rs",
+    "tests/small_model_benchmarks.rs",
+    "tests/t5_xxl_artifacts.rs",
+    "tests/t5_xxl_metal.rs"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "entries": [
+    "src/lib.rs",
+    "tests/acceptance_records.rs",
+    "tests/deepseek_v2_artifacts.rs",
+    "tests/experiment_interface_properties.rs",
+    "tests/flan_t5_small.rs",
+    "tests/local_artifacts.rs",
+    "tests/model_configs.rs",
+    "tests/muse_glimmer_artifacts.rs",
+    "tests/nemotron_h_artifacts.rs",
+    "tests/packed_metal_kernels.rs",
+    "tests/qwen35_benchmarks.rs",
+    "tests/qwen35_release_api.rs",
+    "tests/qwen3_moe_artifacts.rs",
+    "tests/small_model_benchmarks.rs",
+    "tests/t5_xxl_artifacts.rs",
+    "tests/t5_xxl_metal.rs"
+  ],
+  "executable_identity": {
+    "sha256": "4d572a93c3177d84350ad941a3f505de13188ce6b87bd843431a6cad9b88b734",
+    "bytes": 4236560,
+    "lines": 13280
+  },
+  "source_inventory_sha256": "d28f1762b01ab77971ab596ac13d7a738ae5390cea55f831e5ac8f6d0c45a707",
+  "stdout": {
+    "path": "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/whole-test-file-classifier/classification.json",
+    "identity": {
+      "sha256": "39e9c06bf4cb09bbf9edb8d0bf0f68e4cc0a5b9191ee282df80d10d57bea6150",
+      "bytes": 8229104,
+      "lines": 303091
+    }
+  },
+  "stderr": {
+    "path": "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/whole-test-file-classifier/stderr.log",
+    "identity": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "lines": 0
+    }
+  }
+}

@@ -1,0 +1,947 @@
+{
+  "schema_version": 1,
+  "kind": "coding_standards_line_coverage",
+  "baseline": {
+    "git_revision": "530b8ea918af310b74cf11de89d6de798167fbc3",
+    "runtime_source_tree": "ca52c552c9044e8c271ccc429bfa655aaa87cf8e",
+    "source_inventory_sha256": "2c32d80e1f5823203bb983aefef565a7b5c0e4d2e957e3b87586f197e7334eba",
+    "source_snapshots_unchanged": true,
+    "original_run_directory": "target/release-gates/20260910T231020.252069Z",
+    "native_export_retention": {
+      "tracked_compressed": false,
+      "ignored_local_path": "target/release-gates/20260910T231020.252069Z/llvm-export/native-coverage.json",
+      "bytes": 88717721,
+      "sha256": "877e3962c7edf9c2dbff6e77f02e9725be3f2c7caca576d99a5fdf03024b89b1"
+    },
+    "command": [
+      "cargo",
+      "+nightly",
+      "llvm-cov",
+      "--manifest-path",
+      "/Users/nover/repos/transformers/Cargo.toml",
+      "--locked",
+      "--offline",
+      "--no-default-features",
+      "--features",
+      "std,flex,tokenizers,chat-templates,autodiff",
+      "--lib",
+      "--tests",
+      "--json",
+      "--output-path",
+      "/Users/nover/repos/transformers/target/release-gates/20260910T231020.252069Z/coverage.json",
+      "--disable-default-ignore-filename-regex"
+    ],
+    "elapsed_seconds": 239.459371,
+    "storage_preflight": {
+      "created_utc": "2026-09-10T23:10:20.050924+00:00",
+      "source_commit": "530b8ea918af310b74cf11de89d6de798167fbc3",
+      "free_bytes": 22389723136,
+      "minimum_free_bytes": 21474836480,
+      "target": "/Users/nover/repos/transformers/target/llvm-cov-target",
+      "command": [
+        "python3",
+        "scripts/check_release.py",
+        "--gate",
+        "coverage",
+        "--toolchain",
+        "nightly",
+        "--offline",
+        "--coverage-compiler-evidence"
+      ]
+    },
+    "tests": {
+      "passed": 1382,
+      "failed": 0,
+      "ignored": 32
+    },
+    "captured_workspace_targets": 16,
+    "native_objects": 15,
+    "legacy_aggregate": {
+      "crate": {
+        "lines": 91385,
+        "covered": 84847,
+        "percent": 92.84565300651091,
+        "minimum_percent": 90,
+        "meets_threshold": true
+      },
+      "shared": {
+        "lines": 42554,
+        "covered": 40557,
+        "percent": 95.30713916435587,
+        "minimum_percent": 95,
+        "meets_threshold": true
+      }
+    },
+    "physical_before_exclusions": {
+      "crate": {
+        "lines": 88763,
+        "covered": 83491,
+        "percent": 94.06058830819147,
+        "minimum_percent": 90,
+        "meets_threshold": true
+      },
+      "shared": {
+        "lines": 41468,
+        "covered": 39974,
+        "percent": 96.397221954278,
+        "minimum_percent": 95,
+        "meets_threshold": true
+      }
+    },
+    "qualified_whole_file_diagnostic": {
+      "crate": {
+        "lines": 43751,
+        "covered": 39145,
+        "percent": 89.47224063449978,
+        "minimum_percent": 90,
+        "meets_threshold": false
+      },
+      "shared": {
+        "lines": 19228,
+        "covered": 17969,
+        "percent": 93.45225712502601,
+        "minimum_percent": 95,
+        "meets_threshold": false
+      }
+    },
+    "excluded_whole_test_files": 97,
+    "structural_test_audit": {
+      "structural_eligibility": true,
+      "blockers": [],
+      "macro_expansion_resolved": false
+    },
+    "claims": {
+      "native_compiler_binding_verified": true,
+      "whole_test_file_exclusions_qualified": true,
+      "production_only_measurement": false,
+      "compiler_dependency_closure_verified": false,
+      "branch_coverage_measured": false,
+      "release_promoted": false
+    },
+    "reviewed_tool_option_notice": {
+      "text": "warning: --disable-default-ignore-filename-regex option is unstable",
+      "count": 1
+    },
+    "retained_files": {
+      "results.json": {
+        "bytes": 2322,
+        "sha256": "0e3048c10baaa934cb9fcee3add19dd15aa264f8137edba48a83bb669061a922"
+      },
+      "compiler-binding.json": {
+        "bytes": 24454,
+        "sha256": "879a49a1c9e520633f933395b65aeeb62be2a25eccbaa4a9cd55311c53679336"
+      },
+      "compiler-capture-setup.json": {
+        "bytes": 4806,
+        "sha256": "2b8607b77d4d71caf9bf0c6ca4175e5fbedc46f16567c65b95f2b7921b12877c"
+      },
+      "coverage-inputs-before.json": {
+        "bytes": 221422,
+        "sha256": "8d19fc4f084c04de3ee80a38be309963bc6e6096610ea6dfedac3cefa9115fbc"
+      },
+      "coverage-inputs-after.json": {
+        "bytes": 221422,
+        "sha256": "8d19fc4f084c04de3ee80a38be309963bc6e6096610ea6dfedac3cefa9115fbc"
+      },
+      "whole-test-file-diagnostic.json": {
+        "bytes": 158362,
+        "sha256": "44d7d4708a9a45afa51c9be42a8a5a5d5b7479fd718b17c8f8e7e0146e197906"
+      },
+      "00-coverage.log": {
+        "bytes": 140774,
+        "sha256": "4fa825e0aa31e358aea1fb34845f0b990ee8054ddd65de3b7d7bcf7f4bf0ee65"
+      },
+      "llvm-export/export.json": {
+        "bytes": 6914,
+        "sha256": "61d08a02d5908a35700a9f6364d133073c9c27c4ef427f9e195763319dd41146"
+      },
+      "whole-test-file-classifier/invocation.json": {
+        "bytes": 2199,
+        "sha256": "c962e79466c2ecf17c5eb3bf6b69d56c463a92cf46747df0bc575be93661c218"
+      },
+      "whole-test-file-classifier/stderr.log": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "compiler/rustc-38536.d": {
+        "bytes": 13106,
+        "sha256": "46440129009887783326c9007bb194c206e97236598f4942750d66dce30ee681"
+      },
+      "compiler/rustc-38536.json": {
+        "bytes": 4614,
+        "sha256": "3005bd3f3df2100efd9d4a87a77ff757e3088e483ec2a6cb1915072718b5fcff"
+      },
+      "compiler/rustc-38537.d": {
+        "bytes": 21802,
+        "sha256": "45fcb8ecf0e695912b450c05f8ccd05558b7b8d766791c3bb861baf98cfef7c0"
+      },
+      "compiler/rustc-38537.json": {
+        "bytes": 4502,
+        "sha256": "f502bcbeb3de3f3fbb6594bc6a49225b73bf918c32a02d4cab1e2909cd264076"
+      },
+      "compiler/rustc-38729.d": {
+        "bytes": 780,
+        "sha256": "9d03358899b203a415eca63d61881db78d74024c6f6c845ed47ac6ac286071d7"
+      },
+      "compiler/rustc-38729.json": {
+        "bytes": 4709,
+        "sha256": "1b2ae28a501e15dcc58ba2ba638ae93656efcd9d90a16ca66201cbeb583796b9"
+      },
+      "compiler/rustc-38730.d": {
+        "bytes": 632,
+        "sha256": "705ca227cb3da13148baec7cf70aa664b20e39bcb43fd7b6fba976f29a845f09"
+      },
+      "compiler/rustc-38730.json": {
+        "bytes": 4677,
+        "sha256": "9f686f6859a2ac4a30341ac5b6d9e4102970abaa67279899054242ccf0a34699"
+      },
+      "compiler/rustc-38731.d": {
+        "bytes": 305,
+        "sha256": "5951a8528073df6f72af45f2bb603c9d4b4f19bf7975e84a3c364da7c5aca9ad"
+      },
+      "compiler/rustc-38731.json": {
+        "bytes": 4693,
+        "sha256": "24eda4f6f1607b2fd269fceedc6e7dfa90b060ee3a54f5ee30499bcd7fbe163d"
+      },
+      "compiler/rustc-38732.d": {
+        "bytes": 295,
+        "sha256": "ea8db6542d11f202296fc108d9bbbcd350783f89cd8450094e7ab7ee8d1b0d38"
+      },
+      "compiler/rustc-38732.json": {
+        "bytes": 4681,
+        "sha256": "b288229e0117492e64af11a3168377f19bc809021f4aff5afda06265ab9a32e3"
+      },
+      "compiler/rustc-38733.d": {
+        "bytes": 265,
+        "sha256": "0af99fa0f3e64ee8c723dcb19d3bd54d4401120935f48a77728ea2c2e5b66d63"
+      },
+      "compiler/rustc-38733.json": {
+        "bytes": 4646,
+        "sha256": "f26c57d3558b60452ccb197b4b341a09fd40b5f2d4204cf32a49e49b65ea26e4"
+      },
+      "compiler/rustc-38734.d": {
+        "bytes": 270,
+        "sha256": "196a568ed01d10d3ef23f67e830fecdc19f7ea2192171554c7672b41f73ca0c7"
+      },
+      "compiler/rustc-38734.json": {
+        "bytes": 4654,
+        "sha256": "40419a5269a78bfdd78c8943eac19b7192fb20e10e3c8803955e1538e2d98a09"
+      },
+      "compiler/rustc-38735.d": {
+        "bytes": 868,
+        "sha256": "702cfcaf4a7d6b63b32ec51978d70388b035620f38c3a0452ebb8461fd78915f"
+      },
+      "compiler/rustc-38735.json": {
+        "bytes": 4690,
+        "sha256": "3c920f2ea2347f36e9f11f54fd4229399e3fe734819882e7b650b14ae88336c6"
+      },
+      "compiler/rustc-38736.d": {
+        "bytes": 561,
+        "sha256": "77f86ca8abc39504e443536b02732e03530c45f249d07eac236349354d5ed6e2"
+      },
+      "compiler/rustc-38736.json": {
+        "bytes": 4666,
+        "sha256": "01eeaa000f2b6fe3808b3c93a015399c9494be0942539aef0e75eafcbf4dc2a0"
+      },
+      "compiler/rustc-38737.d": {
+        "bytes": 937,
+        "sha256": "757628b66e73e7ba69468a52d352585bc8cb2c79671d97d9adf39690433d4300"
+      },
+      "compiler/rustc-38737.json": {
+        "bytes": 4654,
+        "sha256": "d38ea7ca9fb5d64912da990b702e9dc03ef9c3449d5033f522497a159e9fa336"
+      },
+      "compiler/rustc-38738.d": {
+        "bytes": 1085,
+        "sha256": "8d5cb2e4d84f65d1981d28d334584ade47d594203cfb7c8852cd062170ce7a57"
+      },
+      "compiler/rustc-38738.json": {
+        "bytes": 4710,
+        "sha256": "e5b1202847b73c5dadbaf0dc8055c5726eeefd1644d4eb9105b5b921667c5ff1"
+      },
+      "compiler/rustc-38739.d": {
+        "bytes": 422,
+        "sha256": "6ec4c80834558e895bca7b8eb4e89bb767f6780a1ef6a0c3e1ca21485eefeeb5"
+      },
+      "compiler/rustc-38739.json": {
+        "bytes": 4701,
+        "sha256": "4e72c690b1e6b5df528a817983c3ed37794dc2a1a9c25404b6e8145fd96b29bf"
+      },
+      "compiler/rustc-38740.d": {
+        "bytes": 382,
+        "sha256": "33108ae61e0d97ccc40ba773956afc380bb5efc78bcb9cadec5ed82c11bab845"
+      },
+      "compiler/rustc-38740.json": {
+        "bytes": 4671,
+        "sha256": "3d90e25b996d978c966c814ea552adacb7336529415755df8f476fb4cab33122"
+      },
+      "compiler/rustc-38741.d": {
+        "bytes": 5296,
+        "sha256": "04019973e9a35b9e38a41e15058ae017eed702bbf8366cacdd79adda1138b44a"
+      },
+      "compiler/rustc-38741.json": {
+        "bytes": 4697,
+        "sha256": "691b881057e9e8e5745404e7c27f28bcd921b95a9a4437d00090ea56c2c9409e"
+      },
+      "compiler/rustc-38794.d": {
+        "bytes": 357,
+        "sha256": "b53921db7f02d4f4fb045fc94b7c069209bf5fecf5350eeec91335277b91bee7"
+      },
+      "compiler/rustc-38794.json": {
+        "bytes": 4682,
+        "sha256": "6f0835a0aee4203a0223ab69a1d6e42037e6bc2ed43012b0e3c5160af1bca93d"
+      },
+      "whole-test-file-classifier/classification.json.xz": {
+        "bytes": 288512,
+        "sha256": "a6d75aa8d37481895c99139dab21f747f56b3798282684853eb17d849557215e",
+        "decompressed_identity": {
+          "bytes": 8138062,
+          "sha256": "9bf7be1689339431a6dfb42dc831e244e9ff6f5f014d8c8c7cfdc222083aa3d8"
+        }
+      }
+    },
+    "uncompressed_cargo_rewrite": {
+      "ignored_local_path": "target/release-gates/20260910T231020.252069Z/coverage.json",
+      "bytes": 88734670,
+      "sha256": "46e7d17ab99bc25eda8ecbc84ac159c442c14d550c1e1bd278a89b2d829f8299",
+      "byte_identical_to_native": false
+    }
+  },
+  "intermediate_attempts": [
+    {
+      "git_revision": "575073fee2941ecaa89fadfbdf60a48f336a3893",
+      "runtime_source_tree": "8bfc6011d64039d7599d1a0047bb2a0dce5ffb22",
+      "source_inventory_sha256": "d28f1762b01ab77971ab596ac13d7a738ae5390cea55f831e5ac8f6d0c45a707",
+      "source_snapshots_unchanged": true,
+      "original_run_directory": "target/release-gates/20260910T235432.065529Z",
+      "native_export_retention": {
+        "tracked_compressed": false,
+        "ignored_local_path": "target/release-gates/20260910T235432.065529Z/llvm-export/native-coverage.json",
+        "bytes": 90823730,
+        "sha256": "22e7fe24c110093b6df2b850d848109c41ba84fb8a7ae851d2834ea9d58701e3"
+      },
+      "command": [
+        "cargo",
+        "+nightly",
+        "llvm-cov",
+        "--manifest-path",
+        "/Users/nover/repos/transformers/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--lib",
+        "--tests",
+        "--json",
+        "--output-path",
+        "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/coverage.json",
+        "--disable-default-ignore-filename-regex"
+      ],
+      "elapsed_seconds": 60.585365,
+      "storage_preflight": {
+        "checked_path": "/Users/nover/repos/transformers",
+        "checked_utc": "2026-09-10T23:54:32.065842+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 21898858496,
+        "passed": true,
+        "target_environment": {}
+      },
+      "tests": {
+        "passed": 1424,
+        "failed": 0,
+        "ignored": 32
+      },
+      "captured_workspace_targets": 17,
+      "native_objects": 16,
+      "legacy_aggregate": {
+        "crate": {
+          "lines": 92454,
+          "covered": 86259,
+          "percent": 93.29937049776105,
+          "minimum_percent": 90,
+          "meets_threshold": true
+        },
+        "shared": {
+          "lines": 43397,
+          "covered": 41660,
+          "percent": 95.99741917644077,
+          "minimum_percent": 95,
+          "meets_threshold": true
+        }
+      },
+      "physical_before_exclusions": {
+        "crate": {
+          "lines": 89820,
+          "covered": 84881,
+          "percent": 94.50122467156535,
+          "minimum_percent": 90,
+          "meets_threshold": true
+        },
+        "shared": {
+          "lines": 42301,
+          "covered": 41063,
+          "percent": 97.07335523982884,
+          "minimum_percent": 95,
+          "meets_threshold": true
+        }
+      },
+      "qualified_whole_file_diagnostic": {
+        "crate": {
+          "lines": 43778,
+          "covered": 39510,
+          "percent": 90.25081090958929,
+          "minimum_percent": 90,
+          "meets_threshold": true
+        },
+        "shared": {
+          "lines": 19255,
+          "covered": 18254,
+          "percent": 94.80135029862373,
+          "minimum_percent": 95,
+          "meets_threshold": false
+        }
+      },
+      "excluded_whole_test_files": 97,
+      "structural_test_audit": {
+        "structural_eligibility": true,
+        "blockers": [],
+        "macro_expansion_resolved": false
+      },
+      "claims": {
+        "native_compiler_binding_verified": true,
+        "whole_test_file_exclusions_qualified": true,
+        "production_only_measurement": false,
+        "compiler_dependency_closure_verified": false,
+        "branch_coverage_measured": false,
+        "release_promoted": false
+      },
+      "reviewed_tool_option_notice": {
+        "text": "warning: --disable-default-ignore-filename-regex option is unstable",
+        "count": 1
+      },
+      "retained_files": {
+        "results.json": {
+          "bytes": 2612,
+          "sha256": "4c392a225d0fbcde47f2cf820639411988f4b279b505b0dcc2123bb9d1764896"
+        },
+        "compiler-binding.json": {
+          "bytes": 24890,
+          "sha256": "d2b0c6b774b0732fed26993cef0048ea4cf09d5d86937b11b8b76272168991b0"
+        },
+        "compiler-capture-setup.json": {
+          "bytes": 4979,
+          "sha256": "c76656ffbf6a8af935c7ad0d4968f6d7c97a8bb9c482f93bf74146cc8bb0c90c"
+        },
+        "coverage-inputs-before.json": {
+          "bytes": 246204,
+          "sha256": "b7657151e5839534627d5819290df92ed022b73d545ddb1618b2c030c1f93402"
+        },
+        "coverage-inputs-after.json": {
+          "bytes": 246204,
+          "sha256": "b7657151e5839534627d5819290df92ed022b73d545ddb1618b2c030c1f93402"
+        },
+        "whole-test-file-diagnostic.json": {
+          "bytes": 158364,
+          "sha256": "6d45786dd613ae5bfacdd2170996193061a6e020de04195d858aecdef010c092"
+        },
+        "00-coverage.log": {
+          "bytes": 145248,
+          "sha256": "9559e9957aa14198087ef011127b06a132cb99efba6a1f2ba2375c811e880a3d"
+        },
+        "llvm-export/export.json": {
+          "bytes": 7329,
+          "sha256": "75a4d08cd9b4c8c755428050a4a4ff89b52c282c1e8cce0c45596c735649e952"
+        },
+        "whole-test-file-classifier/invocation.json": {
+          "bytes": 2264,
+          "sha256": "250c70611cc2362dcbecc679c090983b1e511f50957ea66af5e373afb8e66e8c"
+        },
+        "whole-test-file-classifier/stderr.log": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "compiler/rustc-45389.d": {
+          "bytes": 13106,
+          "sha256": "c6d1d2c3709b3f6beed6dd43ac0f77634ed309aa4a804cc7392b6b920bb9f408"
+        },
+        "compiler/rustc-45389.json": {
+          "bytes": 4614,
+          "sha256": "215219fa401af7084f506c116fe1ebefdf84f133042ca4fd1395629df36c7671"
+        },
+        "compiler/rustc-45390.d": {
+          "bytes": 21802,
+          "sha256": "6a960ebb13a7f54087a3c8bd13db48e3684212defb88b34ac4704eb47ba77669"
+        },
+        "compiler/rustc-45390.json": {
+          "bytes": 4502,
+          "sha256": "9c753f5094ffcdeebc1cc3ec8a8cd8aff994fa8ff5ba43e2c9c5b1b0291e61c7"
+        },
+        "compiler/rustc-45399.d": {
+          "bytes": 780,
+          "sha256": "3a08a3dda059ae968cdbba239772f24f252bffb71f0ef868377ad259e5bc9e90"
+        },
+        "compiler/rustc-45399.json": {
+          "bytes": 4709,
+          "sha256": "f8f8099cfc107ca87ff7b706c121108eee91796d38e8ff0e8e01f6c1a680a141"
+        },
+        "compiler/rustc-45400.d": {
+          "bytes": 561,
+          "sha256": "76c1257b5a3633abbc8bde726b382caf91a0df8fe8382da9fd57ad344d546c02"
+        },
+        "compiler/rustc-45400.json": {
+          "bytes": 4666,
+          "sha256": "97afc9996954393882197253bdb3076fca01c1a541697467e4008ab97b69267b"
+        },
+        "compiler/rustc-45401.d": {
+          "bytes": 295,
+          "sha256": "f3e5b0e215dae355f93e7d931694b496e5c638e5dc6c40ffc8a3335c1159981d"
+        },
+        "compiler/rustc-45401.json": {
+          "bytes": 4681,
+          "sha256": "48c6a1f0f65378ad7425415586d1bb74a5bb8f5c106d46978f57464ff7afe500"
+        },
+        "compiler/rustc-45402.d": {
+          "bytes": 265,
+          "sha256": "315de1c8ac0ca1227066d53c6140241c55d19efcaa2835dcda1836e34e189b60"
+        },
+        "compiler/rustc-45402.json": {
+          "bytes": 4646,
+          "sha256": "f57c4ee0679b49150a13842e73a422849d20e66500fe07d0daca8375c35dff4e"
+        },
+        "compiler/rustc-45403.d": {
+          "bytes": 382,
+          "sha256": "e61b0b336345af8091b244d955a70d53b9ee8ac5d3ca8afb42a3ff9ab3dfca0a"
+        },
+        "compiler/rustc-45403.json": {
+          "bytes": 4671,
+          "sha256": "2be76682be46968ef61eb2326a5d1f7f001f960e670957f4f0db6c3e0b00d9ee"
+        },
+        "compiler/rustc-45404.d": {
+          "bytes": 632,
+          "sha256": "f7995d7e571fe6a361c09f226ad0c70152f88ab65ae89103567acce9dad6a397"
+        },
+        "compiler/rustc-45404.json": {
+          "bytes": 4677,
+          "sha256": "cce5691e5ff86df85b34111fb27c8e84feaff3cb842d74dbb7a6e32df20397d0"
+        },
+        "compiler/rustc-45405.d": {
+          "bytes": 5296,
+          "sha256": "c84c5730ebd506f1640c5e2e0c71128cb11f087a7d3808d70a3c652599b69b6f"
+        },
+        "compiler/rustc-45405.json": {
+          "bytes": 4697,
+          "sha256": "e170247b95d5f0daa821ce998eeae4f8fc4315095e0b9463786717d69ebcfd27"
+        },
+        "compiler/rustc-45406.d": {
+          "bytes": 305,
+          "sha256": "02cc55e088ad8e36bada0b825b72327d52a3db7ad02e53baeaf9e8688eae3e12"
+        },
+        "compiler/rustc-45406.json": {
+          "bytes": 4693,
+          "sha256": "6f22e18878fef53f9e5dd52855cbfda56af9ecf91c15cce26ee5d357a6c35fc9"
+        },
+        "compiler/rustc-45407.d": {
+          "bytes": 422,
+          "sha256": "798c80e1380bd7e10f8dfddb3e296a16ceeb4c73c2ec35312c85b1c6305c8158"
+        },
+        "compiler/rustc-45407.json": {
+          "bytes": 4701,
+          "sha256": "de92d6ab769417a74af9f3f9a40314d38e2b967b77f076b71905e65126f73374"
+        },
+        "compiler/rustc-45408.d": {
+          "bytes": 270,
+          "sha256": "cef05ced1d4c5c7660df1974071c6e5b3268cb7fa0a33561a1f9c442983968c0"
+        },
+        "compiler/rustc-45408.json": {
+          "bytes": 4654,
+          "sha256": "12c8220609b4377e0c10915742dd8091da8047886b2a48e0e01fb21bf425fd2d"
+        },
+        "compiler/rustc-45409.d": {
+          "bytes": 937,
+          "sha256": "d57491f314dd0affd8b9fe8a44fb41f55efbe5cd24ff285d57692220c3505463"
+        },
+        "compiler/rustc-45409.json": {
+          "bytes": 4654,
+          "sha256": "c475a7fd225a4de0083dd2501bff566604c1fd6e9a94d3434899e23a34f2e968"
+        },
+        "compiler/rustc-45410.d": {
+          "bytes": 1085,
+          "sha256": "76049c1f39cb7abd50fb8749afd7f544977c258c2ad405c0e4cce623abf72b3c"
+        },
+        "compiler/rustc-45410.json": {
+          "bytes": 4710,
+          "sha256": "e2f70f4506cdba89f5450744ad9511227c0c383cefa678294b5b67eed143e41b"
+        },
+        "compiler/rustc-45412.d": {
+          "bytes": 868,
+          "sha256": "93e6e5e9ed0cbfb29b23903c17934c334d749429cd5386ed856abdaff189ebbe"
+        },
+        "compiler/rustc-45412.json": {
+          "bytes": 4690,
+          "sha256": "c2fdbaa6c62d6e46b2845f67328ab67f46a9d8bfb899f3352627251c5acb1b52"
+        },
+        "compiler/rustc-45465.d": {
+          "bytes": 360,
+          "sha256": "856d11a222607a2382f63cf67719be2fea197fc29093764af7beeb6051a3134b"
+        },
+        "compiler/rustc-45465.json": {
+          "bytes": 4762,
+          "sha256": "6e27bb0714e0cefea4d1d1fc0ebf7cef82acfad634d6fdd75f234eb0b3464c38"
+        },
+        "compiler/rustc-45466.d": {
+          "bytes": 357,
+          "sha256": "091ecde76f7b11a90358056b5796dd6062e7daac784a9540d30e494f3f0a694e"
+        },
+        "compiler/rustc-45466.json": {
+          "bytes": 4682,
+          "sha256": "292d88a44d07360d1b63d79b1186d53dbf954b5277a986e56e729c6efbfcfe32"
+        },
+        "whole-test-file-classifier/classification.json.xz": {
+          "bytes": 291348,
+          "sha256": "e8022abcc65684242c6a576e8b163e85a84813d7f23a81b3461a76b62bef6720",
+          "decompressed_identity": {
+            "bytes": 8229104,
+            "sha256": "39e9c06bf4cb09bbf9edb8d0bf0f68e4cc0a5b9191ee282df80d10d57bea6150"
+          }
+        }
+      },
+      "uncompressed_cargo_rewrite": {
+        "ignored_local_path": "target/release-gates/20260910T235432.065529Z/coverage.json",
+        "bytes": 90840642,
+        "sha256": "87e48236ea93f3bedcdc6968c8b052044d67829aba67583bad1438ed212c2761",
+        "byte_identical_to_native": false
+      }
+    }
+  ],
+  "final": {
+    "git_revision": "af95066a4b8c388a8adee8a4c3ddaf29ce577f21",
+    "runtime_source_tree": "2a9005044784a67bdd1b7fb052ce85244a52c602",
+    "source_inventory_sha256": "a7a8b6d72b56dd2249028c06b6e521effbdf2c2878e41d772c6431a58bc0970f",
+    "source_snapshots_unchanged": true,
+    "original_run_directory": "target/release-gates/20260911T000510.776465Z",
+    "native_export_retention": {
+      "tracked_compressed": true,
+      "ignored_local_path": "target/release-gates/20260911T000510.776465Z/llvm-export/native-coverage.json",
+      "bytes": 90916775,
+      "sha256": "e0edb9a19a6018bf8a27a2d5c0b695c282a55111bf2b9f8cf548d3c82cb0cc2b"
+    },
+    "command": [
+      "cargo",
+      "+nightly",
+      "llvm-cov",
+      "--manifest-path",
+      "/Users/nover/repos/transformers/Cargo.toml",
+      "--locked",
+      "--offline",
+      "--no-default-features",
+      "--features",
+      "std,flex,tokenizers,chat-templates,autodiff",
+      "--lib",
+      "--tests",
+      "--json",
+      "--output-path",
+      "/Users/nover/repos/transformers/target/release-gates/20260911T000510.776465Z/coverage.json",
+      "--disable-default-ignore-filename-regex"
+    ],
+    "elapsed_seconds": 53.732164,
+    "storage_preflight": {
+      "checked_path": "/Users/nover/repos/transformers",
+      "checked_utc": "2026-09-11T00:05:10.777201+00:00",
+      "minimum_free_bytes": 21474836480,
+      "free_bytes": 21823225856,
+      "passed": true,
+      "target_environment": {}
+    },
+    "tests": {
+      "passed": 1434,
+      "failed": 0,
+      "ignored": 32
+    },
+    "captured_workspace_targets": 17,
+    "native_objects": 16,
+    "legacy_aggregate": {
+      "crate": {
+        "lines": 92778,
+        "covered": 86635,
+        "percent": 93.37881825432754,
+        "minimum_percent": 90,
+        "meets_threshold": true
+      },
+      "shared": {
+        "lines": 43721,
+        "covered": 42036,
+        "percent": 96.14601678827108,
+        "minimum_percent": 95,
+        "meets_threshold": true
+      }
+    },
+    "physical_before_exclusions": {
+      "crate": {
+        "lines": 90139,
+        "covered": 85256,
+        "percent": 94.5828109919125,
+        "minimum_percent": 90,
+        "meets_threshold": true
+      },
+      "shared": {
+        "lines": 42620,
+        "covered": 41438,
+        "percent": 97.22665415297982,
+        "minimum_percent": 95,
+        "meets_threshold": true
+      }
+    },
+    "qualified_whole_file_diagnostic": {
+      "crate": {
+        "lines": 43778,
+        "covered": 39578,
+        "percent": 90.40614007035498,
+        "minimum_percent": 90,
+        "meets_threshold": true
+      },
+      "shared": {
+        "lines": 19255,
+        "covered": 18322,
+        "percent": 95.15450532329265,
+        "minimum_percent": 95,
+        "meets_threshold": true
+      }
+    },
+    "excluded_whole_test_files": 97,
+    "structural_test_audit": {
+      "structural_eligibility": true,
+      "blockers": [],
+      "macro_expansion_resolved": false
+    },
+    "claims": {
+      "native_compiler_binding_verified": true,
+      "whole_test_file_exclusions_qualified": true,
+      "production_only_measurement": false,
+      "compiler_dependency_closure_verified": false,
+      "branch_coverage_measured": false,
+      "release_promoted": false
+    },
+    "reviewed_tool_option_notice": {
+      "text": "warning: --disable-default-ignore-filename-regex option is unstable",
+      "count": 1
+    },
+    "retained_files": {
+      "results.json": {
+        "bytes": 2612,
+        "sha256": "4bbf8f68cd95588c2e4919e3dd20a67e547c8a5fe99568df81b94e31b6788020"
+      },
+      "compiler-binding.json": {
+        "bytes": 24890,
+        "sha256": "3c255bb49d9ccd3b86dcb79dff7456fda3b7544ff74cd27aaad28dfc351dd360"
+      },
+      "compiler-capture-setup.json": {
+        "bytes": 4979,
+        "sha256": "ef98ced94b73de93c71fb4444226a4a2b29643c5b298ceda0621eebeb0fd32b5"
+      },
+      "coverage-inputs-before.json": {
+        "bytes": 246205,
+        "sha256": "e9f1a6ab037f6c5cbd81e0e24501ad81636860d5e8800056dc78c5e9c56d57a5"
+      },
+      "coverage-inputs-after.json": {
+        "bytes": 246205,
+        "sha256": "e9f1a6ab037f6c5cbd81e0e24501ad81636860d5e8800056dc78c5e9c56d57a5"
+      },
+      "whole-test-file-diagnostic.json": {
+        "bytes": 158363,
+        "sha256": "472a9f4ab9bb4f598b31a5d79fb9b767490b4b7bdb122d98a4d3708925ffe043"
+      },
+      "00-coverage.log": {
+        "bytes": 146290,
+        "sha256": "8f93c8c4f2ae3576af47abc478902d9d70ee1907ef240881b4c4bdfe2cff03f5"
+      },
+      "llvm-export/export.json": {
+        "bytes": 7329,
+        "sha256": "a4cab00f5e9491d54000941c49bf19568a4bf8355f3de29d6b380893adf46851"
+      },
+      "whole-test-file-classifier/invocation.json": {
+        "bytes": 2264,
+        "sha256": "a99eeef7721b5b05f2c8c4301103e2a264176b8907c70fbba5d5df669c6a4da1"
+      },
+      "whole-test-file-classifier/stderr.log": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "compiler/rustc-48852.d": {
+        "bytes": 13106,
+        "sha256": "4cc4779f7881b75194f82ff79492fe68cc8bb90785917940c844633bed86c565"
+      },
+      "compiler/rustc-48852.json": {
+        "bytes": 4614,
+        "sha256": "6288e6b43c371f8ea18db9e438d461d11c9483a1e8d3c7a1ea869366ccef3298"
+      },
+      "compiler/rustc-48853.d": {
+        "bytes": 21802,
+        "sha256": "b68bf792eeaaad4ac1be0556957bd772525236c7918c08e69a514877948bd964"
+      },
+      "compiler/rustc-48853.json": {
+        "bytes": 4502,
+        "sha256": "9a58993ddf0b67df9ec9077afdf7561147bf7287172fc14d6f0b59de8dcaa807"
+      },
+      "compiler/rustc-48938.d": {
+        "bytes": 561,
+        "sha256": "7d071aeb46068809269e6b7cd62a1a481fea8af90d38f2fc8d928c6600005434"
+      },
+      "compiler/rustc-48938.json": {
+        "bytes": 4666,
+        "sha256": "706326eafb156dfa78ee387d31bc2b663ad3fb609b3610ffc67fd0f5df8f4688"
+      },
+      "compiler/rustc-48939.d": {
+        "bytes": 360,
+        "sha256": "ed3ebe03bb7b973d2b1f00c8ea983af4726656679e117e338eb948817a789a72"
+      },
+      "compiler/rustc-48939.json": {
+        "bytes": 4762,
+        "sha256": "3d789bffc6e19a6c26d74efc16137d2b2794479c501d9ca266cc3bc033a8412b"
+      },
+      "compiler/rustc-48940.d": {
+        "bytes": 422,
+        "sha256": "6ff027cfbba069b582414eb981e36249a3215082b01969385b7957a70821cd38"
+      },
+      "compiler/rustc-48940.json": {
+        "bytes": 4701,
+        "sha256": "39e34c3a8b6b32c145c1097b9077682935f5abeb6beadf4a0b4fddbbf14f56de"
+      },
+      "compiler/rustc-48941.d": {
+        "bytes": 305,
+        "sha256": "3d59c1ad5fae39d5fc7f4d68b755bd27d8c495ef48845a69d3daea1069939ea3"
+      },
+      "compiler/rustc-48941.json": {
+        "bytes": 4693,
+        "sha256": "30e3f97d0be7eb26cc1a4719fbe04b1f4c9cec792b14db8cdb86be6d2838682e"
+      },
+      "compiler/rustc-48942.d": {
+        "bytes": 357,
+        "sha256": "2183f8617f2c662857fb859c5a9c1e801c2cba40125a186f56c49d7d37a87c10"
+      },
+      "compiler/rustc-48942.json": {
+        "bytes": 4682,
+        "sha256": "fba1a04fad18bf7d76c4d60a7535198540ed44e5a4f4d3d48c7b4708acd0171d"
+      },
+      "compiler/rustc-48943.d": {
+        "bytes": 265,
+        "sha256": "a429b7dfa2256313a7deabda6c06f486d2e8ab36b3d06286f8a33329f73987d5"
+      },
+      "compiler/rustc-48943.json": {
+        "bytes": 4646,
+        "sha256": "58c5003c5623fced94370f9df6d621942e508e209a089b7e9b56d326fa33a074"
+      },
+      "compiler/rustc-48944.d": {
+        "bytes": 937,
+        "sha256": "01fd6505c1b6533045eefa0c54d9ff44011428d32aae1b572d8996f2b56ce966"
+      },
+      "compiler/rustc-48944.json": {
+        "bytes": 4654,
+        "sha256": "7205a77e07bf370dd348be74e28e9a4a2e95f4d864e7c5ad4fe09315e964b48e"
+      },
+      "compiler/rustc-48945.d": {
+        "bytes": 270,
+        "sha256": "980c564a97c447934229d997b59ad73ed5539ce4628e742125c1c62828d9020c"
+      },
+      "compiler/rustc-48945.json": {
+        "bytes": 4654,
+        "sha256": "b600036c21ce70a6c83391c702632fdde92debfd6851c88858991d445ff0f11c"
+      },
+      "compiler/rustc-48946.d": {
+        "bytes": 632,
+        "sha256": "ee05f7573f1f51d05ee40fbedf7d21755d02026dd7b7e507f3531670214aca1a"
+      },
+      "compiler/rustc-48946.json": {
+        "bytes": 4677,
+        "sha256": "619aaa319a37a3af37d8fc38d205922f94dbd7f5400a579bfc5d25839d102ae2"
+      },
+      "compiler/rustc-48947.d": {
+        "bytes": 868,
+        "sha256": "22bf12fff5735804d1e61310e85a64b5e0f3a7b84bb669f82283933e152b2d6a"
+      },
+      "compiler/rustc-48947.json": {
+        "bytes": 4690,
+        "sha256": "a7d49a8b6f6cce3242a919cea220dabc878a7bc8bb78c30c574f012f54471dad"
+      },
+      "compiler/rustc-48948.d": {
+        "bytes": 295,
+        "sha256": "849f24dd2ee62ba72f2cf2fdf54c4b3a7e1680430092dc78090c3d95f7f98bf7"
+      },
+      "compiler/rustc-48948.json": {
+        "bytes": 4681,
+        "sha256": "970bfe266a022aefd8819f29c4d1434935d355364d9157fbf8861946ab894b1e"
+      },
+      "compiler/rustc-48949.d": {
+        "bytes": 780,
+        "sha256": "8efb873a322233ecc230f50d274cea657f31c111c87f4ac46fdbe8c809cb2bb1"
+      },
+      "compiler/rustc-48949.json": {
+        "bytes": 4709,
+        "sha256": "105b11d991edfc326cf73b56630ffe76e6f610bdff2057c494a39c0eca2526ba"
+      },
+      "compiler/rustc-48950.d": {
+        "bytes": 1085,
+        "sha256": "ed1128c5131ea1e2c95b9caa96f8083e075746a77784b271138edf1c0b1e3c98"
+      },
+      "compiler/rustc-48950.json": {
+        "bytes": 4710,
+        "sha256": "3c7e0ea6db2ac7829d875002315287b460697be4ae4a96cf0d4088b1c7f55dd9"
+      },
+      "compiler/rustc-49011.d": {
+        "bytes": 5296,
+        "sha256": "b07855098c77b7f90a4d0d730b1091e093b0a138dec7959cafca88c3aaf952e2"
+      },
+      "compiler/rustc-49011.json": {
+        "bytes": 4697,
+        "sha256": "8282c5fce87cadacda9b18c2eef34b427975e3f29219896e52d0fbf3a8f50a9d"
+      },
+      "compiler/rustc-49012.d": {
+        "bytes": 382,
+        "sha256": "30f27eddd49f1c1f62eb0d5224a8c3abe58593082ef2fffb9c170bae89329d30"
+      },
+      "compiler/rustc-49012.json": {
+        "bytes": 4671,
+        "sha256": "2e14ea4d97fa3cb0b819f7350ebc6bb50480e635eb577970543269bacce48497"
+      },
+      "llvm-export/native-coverage.json.xz": {
+        "bytes": 7476456,
+        "sha256": "d15151bdbf66e944d5e773cd39a34b1bee9f1bf40508c0d7e6701d20296a71c7",
+        "decompressed_identity": {
+          "bytes": 90916775,
+          "sha256": "e0edb9a19a6018bf8a27a2d5c0b695c282a55111bf2b9f8cf548d3c82cb0cc2b"
+        }
+      },
+      "whole-test-file-classifier/classification.json.xz": {
+        "bytes": 291852,
+        "sha256": "a7adde02d5ad2d20e10a2a49c543b55388e389884eb742eee1b91da8f16c22f4",
+        "decompressed_identity": {
+          "bytes": 8249189,
+          "sha256": "0a4728260f59627fcd792897cc3155fb7748152a0d909a910f4d7bd2bcfd0e68"
+        }
+      }
+    },
+    "uncompressed_cargo_rewrite": {
+      "ignored_local_path": "target/release-gates/20260911T000510.776465Z/coverage.json",
+      "bytes": 90933696,
+      "sha256": "57112a99d83cb12e66754376c9fcb7c7b8eb2ca756f8bf2f03a032b765d8f222",
+      "byte_identical_to_native": false
+    }
+  },
+  "thresholds": {
+    "crate_percent": 90,
+    "shared_core_percent": 95
+  },
+  "scope": "Pinned std,flex,tokenizers,chat-templates,autodiff profile; library and ordinary integration tests. Only independently qualified whole test files are excluded from the separate physical-line diagnostic. Generated and ambiguous mappings remain. This is not production-only or branch coverage.",
+  "retention": "The final compressed native export and all classifier reports preserve exact decompressed bytes for portable recounting against the recorded Git source. Earlier failed native exports remain in their explicitly listed ignored local paths with exact hashes to keep tracked/package size bounded. Compiler records, dep-info, source inventories, logs and bound identities are retained. Compiled binaries, profiles and trusted tool executables remain ignored local artifacts; independent replay of their byte authentication needs those original artifacts or a fresh capture. Prior measurements are historical; no stale source report is adopted.",
+  "storage_context": {
+    "path": "storage-recovery.json",
+    "sha256": "8c4fcc6abaefcf7d3cc19f40b20ead1d5fd6d2c5663026e64a61dee75ee7a80b",
+    "note": "A separate source validation storage preflight between the intermediate and final coverage runs fell below20GiB. Removing eight clean completed worktrees restored headroom while retaining their commits. No historical coverage evidence was removed. Each coverage launch independently passed its recorded20GiB preflight."
+  },
+  "retention_verification": {
+    "all_retained_file_hashes_verified": true,
+    "compressed_payloads_match_original_byte_identities": true,
+    "final_recount_from_archived_native_and_classifier_matches_entire_diagnostic": true,
+    "compiler_binaries_or_profiles_tracked": false
+  }
+}

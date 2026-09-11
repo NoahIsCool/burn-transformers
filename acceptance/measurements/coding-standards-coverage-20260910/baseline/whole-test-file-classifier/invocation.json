@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "purpose": "fresh_whole_test_file_classifier_invocation",
+  "capture_valid": true,
+  "process_exit_code": 0,
+  "command": [
+    "/Users/nover/repos/transformers/target/debug/transformers-coverage-layout",
+    "/Users/nover/repos/transformers",
+    "src/lib.rs",
+    "tests/acceptance_records.rs",
+    "tests/deepseek_v2_artifacts.rs",
+    "tests/flan_t5_small.rs",
+    "tests/local_artifacts.rs",
+    "tests/model_configs.rs",
+    "tests/muse_glimmer_artifacts.rs",
+    "tests/nemotron_h_artifacts.rs",
+    "tests/packed_metal_kernels.rs",
+    "tests/qwen35_benchmarks.rs",
+    "tests/qwen35_release_api.rs",
+    "tests/qwen3_moe_artifacts.rs",
+    "tests/small_model_benchmarks.rs",
+    "tests/t5_xxl_artifacts.rs",
+    "tests/t5_xxl_metal.rs"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "entries": [
+    "src/lib.rs",
+    "tests/acceptance_records.rs",
+    "tests/deepseek_v2_artifacts.rs",
+    "tests/flan_t5_small.rs",
+    "tests/local_artifacts.rs",
+    "tests/model_configs.rs",
+    "tests/muse_glimmer_artifacts.rs",
+    "tests/nemotron_h_artifacts.rs",
+    "tests/packed_metal_kernels.rs",
+    "tests/qwen35_benchmarks.rs",
+    "tests/qwen35_release_api.rs",
+    "tests/qwen3_moe_artifacts.rs",
+    "tests/small_model_benchmarks.rs",
+    "tests/t5_xxl_artifacts.rs",
+    "tests/t5_xxl_metal.rs"
+  ],
+  "executable_identity": {
+    "sha256": "4d572a93c3177d84350ad941a3f505de13188ce6b87bd843431a6cad9b88b734",
+    "bytes": 4236560,
+    "lines": 13280
+  },
+  "source_inventory_sha256": "2c32d80e1f5823203bb983aefef565a7b5c0e4d2e957e3b87586f197e7334eba",
+  "stdout": {
+    "path": "/Users/nover/repos/transformers/target/release-gates/20260910T231020.252069Z/whole-test-file-classifier/classification.json",
+    "identity": {
+      "sha256": "9bf7be1689339431a6dfb42dc831e244e9ff6f5f014d8c8c7cfdc222083aa3d8",
+      "bytes": 8138062,
+      "lines": 299663
+    }
+  },
+  "stderr": {
+    "path": "/Users/nover/repos/transformers/target/release-gates/20260910T231020.252069Z/whole-test-file-classifier/stderr.log",
+    "identity": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "lines": 0
+    }
+  }
+}

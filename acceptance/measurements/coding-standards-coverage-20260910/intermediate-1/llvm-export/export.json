@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "command": [
+    "/Users/nover/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-cov",
+    "export",
+    "-format=text",
+    "-instr-profile=/Users/nover/repos/transformers/target/llvm-cov-target/transformers.profdata",
+    "-object",
+    "target/llvm-cov-target/debug/deps/acceptance_records-34bdee7e6f4c1640",
+    "-object",
+    "target/llvm-cov-target/debug/deps/deepseek_v2_artifacts-9cc13dec8c54d640",
+    "-object",
+    "target/llvm-cov-target/debug/deps/experiment_interface_properties-88e73638b652883f",
+    "-object",
+    "target/llvm-cov-target/debug/deps/flan_t5_small-c1776bdfc868054d",
+    "-object",
+    "target/llvm-cov-target/debug/deps/local_artifacts-194bb38278c4a596",
+    "-object",
+    "target/llvm-cov-target/debug/deps/model_configs-f32453d64159e8e6",
+    "-object",
+    "target/llvm-cov-target/debug/deps/muse_glimmer_artifacts-ae0e17f9e2bf5cd1",
+    "-object",
+    "target/llvm-cov-target/debug/deps/nemotron_h_artifacts-586512733f7375d1",
+    "-object",
+    "target/llvm-cov-target/debug/deps/packed_metal_kernels-e1337592274bdeb2",
+    "-object",
+    "target/llvm-cov-target/debug/deps/qwen35_benchmarks-e3b0d7a7d844bf73",
+    "-object",
+    "target/llvm-cov-target/debug/deps/qwen35_release_api-61b423e4532d63ab",
+    "-object",
+    "target/llvm-cov-target/debug/deps/qwen3_moe_artifacts-75dc27fa20807dcf",
+    "-object",
+    "target/llvm-cov-target/debug/deps/small_model_benchmarks-8ead6a06a394ef06",
+    "-object",
+    "target/llvm-cov-target/debug/deps/t5_xxl_artifacts-a27f4dbb2d9aa019",
+    "-object",
+    "target/llvm-cov-target/debug/deps/t5_xxl_metal-e178f73b2827e15a",
+    "-object",
+    "target/llvm-cov-target/debug/deps/transformers-f3fc71c5641ed631"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "capture_valid": true,
+  "process_exit_code": 0,
+  "tool_identity": {
+    "sha256": "95e89a9cf1bb0618c81fa622ca8fc09c6342dd22414643a6be444212443ebdde",
+    "bytes": 5597752,
+    "lines": 31978
+  },
+  "inputs": [
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/transformers.profdata",
+      "identity": {
+        "sha256": "31d5f012ec31dff64e987f0d942006d4b78428d448419ffb50f95be0a4c07d43",
+        "bytes": 7430928,
+        "lines": 3137
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/acceptance_records-34bdee7e6f4c1640",
+      "identity": {
+        "sha256": "9dab51f76b2296def611fbe0ff0453a6b178cc91ed953a0665ecf02df5c15971",
+        "bytes": 2982000,
+        "lines": 12242
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/deepseek_v2_artifacts-9cc13dec8c54d640",
+      "identity": {
+        "sha256": "dd7834d004dee1c8ae2b92ff645ccd24b37bc78b2877c5dde5ab74251ea268cb",
+        "bytes": 34832088,
+        "lines": 95870
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/experiment_interface_properties-88e73638b652883f",
+      "identity": {
+        "sha256": "598839a04dbe4c7eded6f78de20758e3c6815c64839c0b303f4aa8af28e41296",
+        "bytes": 41370416,
+        "lines": 117129
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/flan_t5_small-c1776bdfc868054d",
+      "identity": {
+        "sha256": "efc1d7fb6b0fd5f5c54ed0893d69d98eacd1928e4aa91b380bafb99b36783e08",
+        "bytes": 55282080,
+        "lines": 151194
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/local_artifacts-194bb38278c4a596",
+      "identity": {
+        "sha256": "b1bff3c45bd6181e5b3d6adb70a2cfda8ffebf70da97b2e472f354f9a64b46ed",
+        "bytes": 47862304,
+        "lines": 115471
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/model_configs-f32453d64159e8e6",
+      "identity": {
+        "sha256": "004983121a278ef5c3222a587dac72852ba69dac62c569833005e371d0209fb8",
+        "bytes": 14833248,
+        "lines": 58301
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/muse_glimmer_artifacts-ae0e17f9e2bf5cd1",
+      "identity": {
+        "sha256": "441ddc02444ae926395af27c48f4bbafaf25c766143ccca1f52f703b2005d7f6",
+        "bytes": 50912456,
+        "lines": 124250
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/nemotron_h_artifacts-586512733f7375d1",
+      "identity": {
+        "sha256": "bf0ae32a5265ad939c4dcf68ffbdb595cfca7f9e512c0bcf90c6d39e1cb0639e",
+        "bytes": 21353992,
+        "lines": 75311
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/packed_metal_kernels-e1337592274bdeb2",
+      "identity": {
+        "sha256": "f4e5435b33c0dc05bfe87a83630365b99fa02c0253a4daab1326546b3d015f41",
+        "bytes": 1055944,
+        "lines": 4757
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/qwen35_benchmarks-e3b0d7a7d844bf73",
+      "identity": {
+        "sha256": "ee4f01d27a57c2f72189ffb96fe7a9f9d68576e4fbd73e969f6c0842024d731b",
+        "bytes": 15442544,
+        "lines": 59672
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/qwen35_release_api-61b423e4532d63ab",
+      "identity": {
+        "sha256": "81f2bb376953ae8dbddcf43bb22b9976b8382160ca045c0f9e5e90e77eef8de5",
+        "bytes": 1055904,
+        "lines": 4751
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/qwen3_moe_artifacts-75dc27fa20807dcf",
+      "identity": {
+        "sha256": "4049317f1e8b7f80b3d4cd0a353149a0d078e440e83c6a3e87f18ae2cfc826c1",
+        "bytes": 37152056,
+        "lines": 103735
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/small_model_benchmarks-8ead6a06a394ef06",
+      "identity": {
+        "sha256": "5d706aefa5039f11d2f995b5734161b9c55d22ca3b73d64bfdfd7bdddbfb3064",
+        "bytes": 56715448,
+        "lines": 153866
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/t5_xxl_artifacts-a27f4dbb2d9aa019",
+      "identity": {
+        "sha256": "88cd892c006292e5bd9d98dbda688ab4b4ef0c74ad24823f38243e01c323f697",
+        "bytes": 34627680,
+        "lines": 93771
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/t5_xxl_metal-e178f73b2827e15a",
+      "identity": {
+        "sha256": "4b1de6b4f37999e07905cbcc868cf3eb6c2606eff2ad41fdaa8de40789a75343",
+        "bytes": 2977520,
+        "lines": 11553
+      }
+    },
+    {
+      "path": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/transformers-f3fc71c5641ed631",
+      "identity": {
+        "sha256": "72866303cf0551016b6de0b456f87b9bf93893f90fec70d7b7bd6d35f456419d",
+        "bytes": 132692080,
+        "lines": 334914
+      }
+    }
+  ],
+  "report": {
+    "path": "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/llvm-export/native-coverage.json",
+    "identity": {
+      "sha256": "22e7fe24c110093b6df2b850d848109c41ba84fb8a7ae851d2834ea9d58701e3",
+      "bytes": 90823730,
+      "lines": 1
+    }
+  }
+}

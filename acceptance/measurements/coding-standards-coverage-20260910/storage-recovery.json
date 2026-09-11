@@ -1,0 +1,38 @@
+{
+  "free_bytes_before": 21455568896,
+  "removed_clean_worktrees": [
+    {
+      "path": "/private/tmp/tfm-standards-examples_lenses",
+      "retained_commit": "06b73cff9b7df40b16fe5522d57ed158223082a6"
+    },
+    {
+      "path": "/private/tmp/tfm-standards-examples_training",
+      "retained_commit": "e5e9346c2bce70137294fde729ab79160276d9d2"
+    },
+    {
+      "path": "/private/tmp/tfm-standards-examples_grokking",
+      "retained_commit": "e11d31fa588c16250ad453279c1c92f2da2a76da"
+    },
+    {
+      "path": "/private/tmp/tfm-standards-model_execution",
+      "retained_commit": "d264696cdd8479d9bbbaaef0d5d9d27af9600497"
+    },
+    {
+      "path": "/private/tmp/tfm-standards-model_imports",
+      "retained_commit": "17b9970de703a1b2f4d26fe2b2f5261f10700e0a"
+    },
+    {
+      "path": "/private/tmp/tfm-standards-doc_audit",
+      "retained_commit": "e358985d1bb009420713df01cd3172bef709976b"
+    },
+    {
+      "path": "/private/tmp/tfm-standards-properties",
+      "retained_commit": "268e191044abd667041624a234802a052fca148d"
+    },
+    {
+      "path": "/private/tmp/tfm-standards-shared",
+      "retained_commit": "bd24759221f6b2ec7d975e6eb44c4213bb77f557"
+    }
+  ],
+  "free_bytes_after": 21859778560
+}

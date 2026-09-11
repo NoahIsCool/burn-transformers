@@ -1,0 +1,5394 @@
+{
+  "schema_version": 1,
+  "policy": "whole_test_files_v2_exact_test_macro_spans_no_inline_or_generated_exclusions",
+  "whole_test_file_policy_validated": true,
+  "production_only_exclusions_qualified": false,
+  "production_only_measurement": false,
+  "compiler_dependency_closure_verified": false,
+  "release_gate_promotion": false,
+  "scope": "captured configuration; whole test files only; inline tests and generated or ambiguous ownership retained",
+  "legacy_native_aggregate": {
+    "crate": {
+      "lines": 92454,
+      "covered": 86259,
+      "percent": 93.29937049776105,
+      "minimum_percent": 90,
+      "meets_threshold": true
+    },
+    "shared": {
+      "lines": 43397,
+      "covered": 41660,
+      "percent": 95.99741917644077,
+      "minimum_percent": 95,
+      "meets_threshold": true
+    }
+  },
+  "physical_before_exclusions": {
+    "crate": {
+      "lines": 89820,
+      "covered": 84881,
+      "percent": 94.50122467156535,
+      "minimum_percent": 90,
+      "meets_threshold": true
+    },
+    "shared": {
+      "lines": 42301,
+      "covered": 41063,
+      "percent": 97.07335523982884,
+      "minimum_percent": 95,
+      "meets_threshold": true
+    }
+  },
+  "physical_whole_file_diagnostic": {
+    "crate": {
+      "lines": 43778,
+      "covered": 39510,
+      "percent": 90.25081090958929,
+      "minimum_percent": 90,
+      "meets_threshold": true
+    },
+    "shared": {
+      "lines": 19255,
+      "covered": 18254,
+      "percent": 94.80135029862373,
+      "minimum_percent": 95,
+      "meets_threshold": false
+    }
+  },
+  "structural_test_audit": {
+    "schema_version": 1,
+    "policy": "parsed_test_layout_v1_no_production_measurement_claim",
+    "structural_eligibility": true,
+    "inspected_production_scope_files": [
+      "src/architecture/mod.rs",
+      "src/architecture/spec.rs",
+      "src/architecture/traits.rs",
+      "src/architecture/types.rs",
+      "src/attention.rs",
+      "src/cache/config.rs",
+      "src/cache/mod.rs",
+      "src/cache/ring.rs",
+      "src/cache/state.rs",
+      "src/cache/tensor/allocation.rs",
+      "src/cache/tensor/error.rs",
+      "src/cache/tensor/kv.rs",
+      "src/cache/tensor/mod.rs",
+      "src/cache/tensor/recurrent.rs",
+      "src/cache/tensor/state.rs",
+      "src/cache/transaction.rs",
+      "src/checkpoint/accounting.rs",
+      "src/checkpoint/artifact.rs",
+      "src/checkpoint/dtype.rs",
+      "src/checkpoint/error.rs",
+      "src/checkpoint/mapping.rs",
+      "src/checkpoint/mod.rs",
+      "src/checkpoint/options.rs",
+      "src/checkpoint/quantization/burnpack.rs",
+      "src/checkpoint/quantization/checkpoint.rs",
+      "src/checkpoint/quantization/config.rs",
+      "src/checkpoint/quantization/error.rs",
+      "src/checkpoint/quantization/load.rs",
+      "src/checkpoint/quantization/manifest.rs",
+      "src/checkpoint/quantization/mod.rs",
+      "src/checkpoint/quantization/policy.rs",
+      "src/checkpoint/quantization/provenance.rs",
+      "src/checkpoint/quantization/reference.rs",
+      "src/checkpoint/report.rs",
+      "src/checkpoint/runtime/mod.rs",
+      "src/checkpoint/runtime/source.rs",
+      "src/checkpoint/runtime/transform.rs",
+      "src/delta_net.rs",
+      "src/error.rs",
+      "src/experiment.rs",
+      "src/experiment/block.rs",
+      "src/feed_forward.rs",
+      "src/generation.rs",
+      "src/generation/causal.rs",
+      "src/generation/seq2seq.rs",
+      "src/intervention.rs",
+      "src/intervention/validity.rs",
+      "src/lib.rs",
+      "src/loaded.rs",
+      "src/mla.rs",
+      "src/models/auto.rs",
+      "src/models/auto/load.rs",
+      "src/models/config.rs",
+      "src/models/custom.rs",
+      "src/models/custom/causal.rs",
+      "src/models/custom/common.rs",
+      "src/models/custom/seq2seq.rs",
+      "src/models/custom/state.rs",
+      "src/models/deepseek_v2.rs",
+      "src/models/deepseek_v2/checkpoint.rs",
+      "src/models/deepseek_v2/load.rs",
+      "src/models/deepseek_v2/mla.rs",
+      "src/models/deepseek_v2/model.rs",
+      "src/models/deepseek_v2/model/decode.rs",
+      "src/models/gpt2.rs",
+      "src/models/gpt2/checkpoint.rs",
+      "src/models/gpt2/model.rs",
+      "src/models/gpt_neox.rs",
+      "src/models/gpt_neox/load.rs",
+      "src/models/gpt_neox/model.rs",
+      "src/models/mod.rs",
+      "src/models/muse_glimmer.rs",
+      "src/models/muse_glimmer/checkpoint.rs",
+      "src/models/muse_glimmer/load.rs",
+      "src/models/muse_glimmer/model.rs",
+      "src/models/muse_glimmer/model/decode.rs",
+      "src/models/nemotron_h.rs",
+      "src/models/nemotron_h/checkpoint.rs",
+      "src/models/nemotron_h/load.rs",
+      "src/models/nemotron_h/model.rs",
+      "src/models/nemotron_h/model/decode.rs",
+      "src/models/nemotron_h/model/mamba2.rs",
+      "src/models/nemotron_h/model/mtp.rs",
+      "src/models/nemotron_h/model/speculative.rs",
+      "src/models/qwen3_5.rs",
+      "src/models/qwen3_5/checkpoint.rs",
+      "src/models/qwen3_5/load.rs",
+      "src/models/qwen3_5/model.rs",
+      "src/models/qwen3_5/model/decode.rs",
+      "src/models/qwen3_5/model/mtp.rs",
+      "src/models/qwen3_5/model/speculative.rs",
+      "src/models/qwen3_5/recipe.rs",
+      "src/models/qwen3_moe.rs",
+      "src/models/qwen3_moe/checkpoint.rs",
+      "src/models/qwen3_moe/load.rs",
+      "src/models/qwen3_moe/model.rs",
+      "src/models/qwen3_moe/model/decode.rs",
+      "src/models/t5.rs",
+      "src/models/t5/checkpoint.rs",
+      "src/models/t5/generation.rs",
+      "src/models/t5/load.rs",
+      "src/models/t5/model.rs",
+      "src/models/t5/model/decode.rs",
+      "src/models/t5/model/padded_hooks.rs",
+      "src/models/t5/model/recipe.rs",
+      "src/moe.rs",
+      "src/normalization.rs",
+      "src/operations.rs",
+      "src/position/ids.rs",
+      "src/position/mod.rs",
+      "src/position/rope.rs",
+      "src/position/t5.rs",
+      "src/position/t5_bias.rs",
+      "src/position/tensor.rs",
+      "src/tokenization.rs",
+      "src/training.rs",
+      "src/transfer.rs"
+    ],
+    "blockers": [],
+    "macro_expansion_resolved": false,
+    "production_measurement_qualified": false,
+    "scope": "parsed source layout only; opaque/generated runtime or test mappings retained; not production-only coverage"
+  },
+  "files": [
+    {
+      "path": "src/architecture/spec.rs",
+      "identity": {
+        "sha256": "ce3c92c5cf0b802cfda587e73c7d9431ea17b349568ed59021cdfc15f442ad14",
+        "bytes": 22816,
+        "lines": 599
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 245,
+      "covered_lines": 245,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 248,
+      "legacy_covered": 248
+    },
+    {
+      "path": "src/architecture/spec_tests.rs",
+      "identity": {
+        "sha256": "0966687cab0e38639adeefbc4c81a122c5395e2e16514fe5f1635bf6e4bb4a98",
+        "bytes": 17377,
+        "lines": 549
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 447,
+      "covered_lines": 442,
+      "removed_mapped_lines": 447,
+      "removed_covered_lines": 442,
+      "legacy_count": 448,
+      "legacy_covered": 443
+    },
+    {
+      "path": "src/architecture/types.rs",
+      "identity": {
+        "sha256": "7afc1fee311278e46aa3c3097e6b944e55dfb2329321109195f9643b030bbe9d",
+        "bytes": 9664,
+        "lines": 235
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 58,
+      "covered_lines": 54,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 64,
+      "legacy_covered": 57
+    },
+    {
+      "path": "src/architecture/types_tests.rs",
+      "identity": {
+        "sha256": "37051afd20bf0cc833bc8023ef73328259620b0e4133fe5cfc130d1258507ac8",
+        "bytes": 3678,
+        "lines": 106
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 48,
+      "covered_lines": 48,
+      "removed_mapped_lines": 48,
+      "removed_covered_lines": 48,
+      "legacy_count": 48,
+      "legacy_covered": 48
+    },
+    {
+      "path": "src/attention.rs",
+      "identity": {
+        "sha256": "a710b0829e5b4060ae9a87a48b9dc9d82bf3ef24a997e47cda91b43c122f082e",
+        "bytes": 50535,
+        "lines": 1301
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 868,
+      "covered_lines": 840,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 898,
+      "legacy_covered": 863
+    },
+    {
+      "path": "src/attention_intervention_tests.rs",
+      "identity": {
+        "sha256": "d9daea82497ee856a1fbf406989bdfdc74ad233ac637920004e1a1f176d9f3ef",
+        "bytes": 22862,
+        "lines": 619
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 520,
+      "covered_lines": 514,
+      "removed_mapped_lines": 520,
+      "removed_covered_lines": 514,
+      "legacy_count": 556,
+      "legacy_covered": 547
+    },
+    {
+      "path": "src/attention_tests.rs",
+      "identity": {
+        "sha256": "166c0c77a477cae4e26a0c60f039696f2e203e4245da54995ba31d36058de538",
+        "bytes": 25031,
+        "lines": 669
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 497,
+      "covered_lines": 496,
+      "removed_mapped_lines": 497,
+      "removed_covered_lines": 496,
+      "legacy_count": 501,
+      "legacy_covered": 500
+    },
+    {
+      "path": "src/cache/config.rs",
+      "identity": {
+        "sha256": "a780e1b740d0f7b0e8a2ee91c3fcb68c0dbfc3e1e1d612d36707a38dd68f725f",
+        "bytes": 4722,
+        "lines": 130
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 43,
+      "covered_lines": 43,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 43,
+      "legacy_covered": 43
+    },
+    {
+      "path": "src/cache/config_tests.rs",
+      "identity": {
+        "sha256": "b9d1c14f7e60a1764bee91ab47de3c8cd7dbd339d81ef3a3777301bfccb45d38",
+        "bytes": 1794,
+        "lines": 61
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 36,
+      "covered_lines": 36,
+      "removed_mapped_lines": 36,
+      "removed_covered_lines": 36,
+      "legacy_count": 36,
+      "legacy_covered": 36
+    },
+    {
+      "path": "src/cache/ring.rs",
+      "identity": {
+        "sha256": "953608c5912ada76ddd3b6bfd1c7cf9c697a7524a4dd4b9ca5fa9d98fe3fd0aa",
+        "bytes": 16779,
+        "lines": 496
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 222,
+      "covered_lines": 222,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 222,
+      "legacy_covered": 222
+    },
+    {
+      "path": "src/cache/ring_tests.rs",
+      "identity": {
+        "sha256": "7873f00aafb207eb10d38d15011acd1c2e8f39a69800feeb0e263ac7c12c7bfc",
+        "bytes": 9933,
+        "lines": 275
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 183,
+      "covered_lines": 183,
+      "removed_mapped_lines": 183,
+      "removed_covered_lines": 183,
+      "legacy_count": 187,
+      "legacy_covered": 187
+    },
+    {
+      "path": "src/cache/state.rs",
+      "identity": {
+        "sha256": "9e2226e242dabc0374e527a19f8997f9df699ec1464605a7724c0079a5e5168f",
+        "bytes": 17146,
+        "lines": 513
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 251,
+      "covered_lines": 251,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 251,
+      "legacy_covered": 251
+    },
+    {
+      "path": "src/cache/state_tests.rs",
+      "identity": {
+        "sha256": "b97e5462d397e539d165455da4ecf6d468b048a351244bba1a664df2a76958bf",
+        "bytes": 6920,
+        "lines": 236
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 141,
+      "covered_lines": 141,
+      "removed_mapped_lines": 141,
+      "removed_covered_lines": 141,
+      "legacy_count": 142,
+      "legacy_covered": 142
+    },
+    {
+      "path": "src/cache/tensor/allocation.rs",
+      "identity": {
+        "sha256": "0862f415a236a2917d333d021ec8e88ae40de4482706de33a3229779e08f0f5f",
+        "bytes": 2615,
+        "lines": 71
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 44,
+      "covered_lines": 44,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 46,
+      "legacy_covered": 46
+    },
+    {
+      "path": "src/cache/tensor/kv.rs",
+      "identity": {
+        "sha256": "79704f982455afeb0935a9737d0f4fd71b8a7f88431ad616eec1385bc4448b46",
+        "bytes": 50055,
+        "lines": 1426
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 974,
+      "covered_lines": 963,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 987,
+      "legacy_covered": 976
+    },
+    {
+      "path": "src/cache/tensor/recurrent.rs",
+      "identity": {
+        "sha256": "2ad968e04c1dcf09642a9dfd920d4414045b20211634eafce76654f72f615c5e",
+        "bytes": 49415,
+        "lines": 1454
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 1016,
+      "covered_lines": 991,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 1038,
+      "legacy_covered": 1009
+    },
+    {
+      "path": "src/cache/tensor/state.rs",
+      "identity": {
+        "sha256": "898a235ab600194d3af7ab642eab5140d00e033635e0b0b4a1769125158dd253",
+        "bytes": 43869,
+        "lines": 1209
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 695,
+      "covered_lines": 678,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 709,
+      "legacy_covered": 691
+    },
+    {
+      "path": "src/cache/tensor/tests.rs",
+      "identity": {
+        "sha256": "2fa2a34c24a01f901f370b3c6c7fb26d5528fecec9e53273f957291b1481e357",
+        "bytes": 73935,
+        "lines": 2228
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 1630,
+      "covered_lines": 1629,
+      "removed_mapped_lines": 1630,
+      "removed_covered_lines": 1629,
+      "legacy_count": 1635,
+      "legacy_covered": 1634
+    },
+    {
+      "path": "src/cache/transaction.rs",
+      "identity": {
+        "sha256": "b834ffe2912f29a7b9470201a5f68368edf03e5bb21654480377be3a53cd96b5",
+        "bytes": 9825,
+        "lines": 273
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 107,
+      "covered_lines": 107,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 107,
+      "legacy_covered": 107
+    },
+    {
+      "path": "src/cache/transaction_tests.rs",
+      "identity": {
+        "sha256": "5aee826b3099b3eacb957438b4ed607c23b2031fcfc42fa7a7c145de70228f8d",
+        "bytes": 5776,
+        "lines": 185
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 115,
+      "covered_lines": 115,
+      "removed_mapped_lines": 115,
+      "removed_covered_lines": 115,
+      "legacy_count": 115,
+      "legacy_covered": 115
+    },
+    {
+      "path": "src/checkpoint/accounting.rs",
+      "identity": {
+        "sha256": "d57240d3b2ec053aac55334b4107f571ad6dc4d1a079f963f0b4ca247f49868b",
+        "bytes": 14217,
+        "lines": 357
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 172,
+      "covered_lines": 164,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 181,
+      "legacy_covered": 170
+    },
+    {
+      "path": "src/checkpoint/artifact.rs",
+      "identity": {
+        "sha256": "e4b0e29763ecfbaa1d457ff797ad5112533fe4f229214c0707db4e6b2f5348f1",
+        "bytes": 45292,
+        "lines": 1199
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 805,
+      "covered_lines": 747,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 844,
+      "legacy_covered": 759
+    },
+    {
+      "path": "src/checkpoint/dtype.rs",
+      "identity": {
+        "sha256": "e9125e4d3481ca53f425206fd002692517b30533412aa3df83e44e6bcc8effc2",
+        "bytes": 6000,
+        "lines": 190
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 82,
+      "covered_lines": 82,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 82,
+      "legacy_covered": 82
+    },
+    {
+      "path": "src/checkpoint/dtype_tests.rs",
+      "identity": {
+        "sha256": "3f9699cae76b9a51508a4ba75be87bd157201bb0f65e0fcec33684ecee5fbb24",
+        "bytes": 1427,
+        "lines": 56
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 40,
+      "covered_lines": 40,
+      "removed_mapped_lines": 40,
+      "removed_covered_lines": 40,
+      "legacy_count": 40,
+      "legacy_covered": 40
+    },
+    {
+      "path": "src/checkpoint/error.rs",
+      "identity": {
+        "sha256": "3575f473cd55f8bf064796f5a664043e5a6e4de892e08b6a91f2ac46bdbd9bd5",
+        "bytes": 12496,
+        "lines": 336
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 7,
+      "covered_lines": 7,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 7,
+      "legacy_covered": 7
+    },
+    {
+      "path": "src/checkpoint/mapping.rs",
+      "identity": {
+        "sha256": "f5b01aa8ce046e92e86d8da8c6767cf5ec74744eb04aca199a311a3d5f98b688",
+        "bytes": 47780,
+        "lines": 1275
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 872,
+      "covered_lines": 858,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 909,
+      "legacy_covered": 886
+    },
+    {
+      "path": "src/checkpoint/options.rs",
+      "identity": {
+        "sha256": "e00bb4dcc4c55b48b5e42f4e8a9eda6ac47bc748bf5e84809b3f6ded8f78f754",
+        "bytes": 5586,
+        "lines": 138
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 16,
+      "covered_lines": 16,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 16,
+      "legacy_covered": 16
+    },
+    {
+      "path": "src/checkpoint/quantization/burnpack.rs",
+      "identity": {
+        "sha256": "f51272d21ed8d7fb9eefac2f1c432e61b009cce5d53ac7e74baebb0cd15597f4",
+        "bytes": 71383,
+        "lines": 1801
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 1229,
+      "covered_lines": 1080,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 1296,
+      "legacy_covered": 1102
+    },
+    {
+      "path": "src/checkpoint/quantization/burnpack_test_support.rs",
+      "identity": {
+        "sha256": "937cb3d4f352dbf3d1b3ac4409ceb7c1789e79cdafc5412af1b21e248d298006",
+        "bytes": 1701,
+        "lines": 45
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 28,
+      "covered_lines": 28,
+      "removed_mapped_lines": 28,
+      "removed_covered_lines": 28,
+      "legacy_count": 28,
+      "legacy_covered": 28
+    },
+    {
+      "path": "src/checkpoint/quantization/burnpack_tests.rs",
+      "identity": {
+        "sha256": "01865e5476128f7bb05039147f47807e12543191863a9ba8f1e30a055b014829",
+        "bytes": 66429,
+        "lines": 1710
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 1263,
+      "covered_lines": 1251,
+      "removed_mapped_lines": 1263,
+      "removed_covered_lines": 1251,
+      "legacy_count": 1276,
+      "legacy_covered": 1263
+    },
+    {
+      "path": "src/checkpoint/quantization/burnpack_validation_edge_tests.rs",
+      "identity": {
+        "sha256": "ad5378ddb60d1692cfd6bff14608e6bc8e5252b5f9440ef656c902d05bf2efb4",
+        "bytes": 14468,
+        "lines": 380
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 281,
+      "covered_lines": 280,
+      "removed_mapped_lines": 281,
+      "removed_covered_lines": 280,
+      "legacy_count": 284,
+      "legacy_covered": 282
+    },
+    {
+      "path": "src/checkpoint/quantization/checkpoint.rs",
+      "identity": {
+        "sha256": "3461e5b74a8a62a1e991ff422df23a58a82c0e8441024ce6baa94087d19e72c3",
+        "bytes": 18735,
+        "lines": 479
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 257,
+      "covered_lines": 216,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 266,
+      "legacy_covered": 223
+    },
+    {
+      "path": "src/checkpoint/quantization/checkpoint_tests.rs",
+      "identity": {
+        "sha256": "d788777b5706beb7c378cf062fb6a4183f075265151437676b50b5e15de9aec2",
+        "bytes": 22047,
+        "lines": 619
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 481,
+      "covered_lines": 480,
+      "removed_mapped_lines": 481,
+      "removed_covered_lines": 480,
+      "legacy_count": 485,
+      "legacy_covered": 484
+    },
+    {
+      "path": "src/checkpoint/quantization/config.rs",
+      "identity": {
+        "sha256": "a069755e49bc2d36b0bd7fe1de5dedaad665245504ef294b24f63a30fc985cdb",
+        "bytes": 4807,
+        "lines": 136
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 33,
+      "covered_lines": 33,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 33,
+      "legacy_covered": 33
+    },
+    {
+      "path": "src/checkpoint/quantization/load.rs",
+      "identity": {
+        "sha256": "d9693bc1241902c0923615ca69ea90dea9ced5cade796b793463921089c2fadd",
+        "bytes": 37632,
+        "lines": 967
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 562,
+      "covered_lines": 521,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 568,
+      "legacy_covered": 512
+    },
+    {
+      "path": "src/checkpoint/quantization/load_tests.rs",
+      "identity": {
+        "sha256": "48f56584fcc3f81f5c6f8cdf0867efbb700c236a0ce7f5ae452e99514f3ca94d",
+        "bytes": 86993,
+        "lines": 2151
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 1593,
+      "covered_lines": 1582,
+      "removed_mapped_lines": 1593,
+      "removed_covered_lines": 1582,
+      "legacy_count": 1610,
+      "legacy_covered": 1590
+    },
+    {
+      "path": "src/checkpoint/quantization/manifest.rs",
+      "identity": {
+        "sha256": "0586a10b11d85311fbbc9bbdb8838677bf30d42dae80d6a0a4aed8173c6266a3",
+        "bytes": 22934,
+        "lines": 573
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 303,
+      "covered_lines": 257,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 322,
+      "legacy_covered": 258
+    },
+    {
+      "path": "src/checkpoint/quantization/policy.rs",
+      "identity": {
+        "sha256": "27442226b2f6ab04a05a5dc771259d02dbaee4ff11b432ab1d0b242816cdf719",
+        "bytes": 7141,
+        "lines": 186
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 100,
+      "covered_lines": 100,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 108,
+      "legacy_covered": 108
+    },
+    {
+      "path": "src/checkpoint/quantization/provenance.rs",
+      "identity": {
+        "sha256": "3997cff0321dd387528a6ed773735295320c5b35127ecc50050ea00a0fd705c1",
+        "bytes": 23524,
+        "lines": 617
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 413,
+      "covered_lines": 389,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 428,
+      "legacy_covered": 399
+    },
+    {
+      "path": "src/checkpoint/quantization/provenance_tests.rs",
+      "identity": {
+        "sha256": "3df0eba059367fc620e57d5d0cd172641af1718f9f7a98239d006dc1a7128c7f",
+        "bytes": 23010,
+        "lines": 608
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 477,
+      "covered_lines": 473,
+      "removed_mapped_lines": 477,
+      "removed_covered_lines": 473,
+      "legacy_count": 478,
+      "legacy_covered": 474
+    },
+    {
+      "path": "src/checkpoint/quantization/reference.rs",
+      "identity": {
+        "sha256": "fa362ce754d56f6f1db724db9f4ac41c013c7978c0179951c9765de35f5e8eec",
+        "bytes": 20419,
+        "lines": 515
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 317,
+      "covered_lines": 293,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 327,
+      "legacy_covered": 296
+    },
+    {
+      "path": "src/checkpoint/quantization/tests.rs",
+      "identity": {
+        "sha256": "9368ac5174ec2a7d61c1a36d118174a1bb973630eacd3778a263745311060d48",
+        "bytes": 43522,
+        "lines": 1267
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 856,
+      "covered_lines": 851,
+      "removed_mapped_lines": 856,
+      "removed_covered_lines": 851,
+      "legacy_count": 858,
+      "legacy_covered": 853
+    },
+    {
+      "path": "src/checkpoint/report.rs",
+      "identity": {
+        "sha256": "d8fdfcc3c22754d7a146a99ebfad085f5436e5a628ac3b63e8e1c0837c6beb3a",
+        "bytes": 8064,
+        "lines": 205
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 47,
+      "covered_lines": 47,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 51,
+      "legacy_covered": 51
+    },
+    {
+      "path": "src/checkpoint/report_tests.rs",
+      "identity": {
+        "sha256": "07ea1b36c8c27780c54241cb621d85c8edcd79b51c9320c7fb68101bf4c2677d",
+        "bytes": 3341,
+        "lines": 104
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 88,
+      "covered_lines": 88,
+      "removed_mapped_lines": 88,
+      "removed_covered_lines": 88,
+      "legacy_count": 88,
+      "legacy_covered": 88
+    },
+    {
+      "path": "src/checkpoint/runtime/boundary_tests.rs",
+      "identity": {
+        "sha256": "f234da60995b969125c92b0951a5fef6eabc818955b6cff7b3575b6dacdcd206",
+        "bytes": 20183,
+        "lines": 544
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 407,
+      "covered_lines": 404,
+      "removed_mapped_lines": 407,
+      "removed_covered_lines": 404,
+      "legacy_count": 409,
+      "legacy_covered": 406
+    },
+    {
+      "path": "src/checkpoint/runtime/mod.rs",
+      "identity": {
+        "sha256": "114c8218c7f05437b171f4f47405aa1488ab1796178daacf6a23c74f0c392364",
+        "bytes": 45844,
+        "lines": 1120
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 637,
+      "covered_lines": 533,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 671,
+      "legacy_covered": 482
+    },
+    {
+      "path": "src/checkpoint/runtime/source.rs",
+      "identity": {
+        "sha256": "ec29295bb3a3cab54165df1c597f91da39b7013d124718c494ef3dad14737653",
+        "bytes": 17846,
+        "lines": 466
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 284,
+      "covered_lines": 261,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 304,
+      "legacy_covered": 273
+    },
+    {
+      "path": "src/checkpoint/runtime/source_boundary_tests.rs",
+      "identity": {
+        "sha256": "fc01a16f16f2c39ca3203a6ac9ca43c79e40aa36bd4a6a748552fdea1bfe9ff1",
+        "bytes": 12164,
+        "lines": 294
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 215,
+      "covered_lines": 212,
+      "removed_mapped_lines": 215,
+      "removed_covered_lines": 212,
+      "legacy_count": 215,
+      "legacy_covered": 212
+    },
+    {
+      "path": "src/checkpoint/runtime/tests.rs",
+      "identity": {
+        "sha256": "56abf667c4163e337d315b357010755bda0ffba46e872b77c5202ee725c6c2bb",
+        "bytes": 115342,
+        "lines": 3202
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 2386,
+      "covered_lines": 2340,
+      "removed_mapped_lines": 2386,
+      "removed_covered_lines": 2340,
+      "legacy_count": 2417,
+      "legacy_covered": 2369
+    },
+    {
+      "path": "src/checkpoint/runtime/transform.rs",
+      "identity": {
+        "sha256": "320d77fa004cb1bdfdba59cb3209ab5f83245a8d333e6fb1cb05e1fa8cc8d07c",
+        "bytes": 43961,
+        "lines": 1172
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 875,
+      "covered_lines": 838,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 914,
+      "legacy_covered": 864
+    },
+    {
+      "path": "src/checkpoint/runtime/transform_boundary_tests.rs",
+      "identity": {
+        "sha256": "ec10a75fc856ed03e9b62cdd61440b947b3603321ac9909fd73084e15cbf7e81",
+        "bytes": 24032,
+        "lines": 616
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 464,
+      "covered_lines": 454,
+      "removed_mapped_lines": 464,
+      "removed_covered_lines": 454,
+      "legacy_count": 466,
+      "legacy_covered": 456
+    },
+    {
+      "path": "src/checkpoint/tests.rs",
+      "identity": {
+        "sha256": "789bc54144796ecbc660ffeac18d79dd25fefd29363ee568c87e5cacb58299c3",
+        "bytes": 88269,
+        "lines": 2627
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 1930,
+      "covered_lines": 1925,
+      "removed_mapped_lines": 1930,
+      "removed_covered_lines": 1925,
+      "legacy_count": 1939,
+      "legacy_covered": 1933
+    },
+    {
+      "path": "src/delta_net.rs",
+      "identity": {
+        "sha256": "c09f457fe48fc3c808b8bb1c71b8fbfa22b82a40acd90cae14b6cab4273101fd",
+        "bytes": 32920,
+        "lines": 855
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 577,
+      "covered_lines": 575,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 588,
+      "legacy_covered": 584
+    },
+    {
+      "path": "src/delta_net_tests.rs",
+      "identity": {
+        "sha256": "96492962a8700000d42be9698d8734705bb21c5672409de21f3953fb843f922c",
+        "bytes": 20869,
+        "lines": 570
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 456,
+      "covered_lines": 454,
+      "removed_mapped_lines": 456,
+      "removed_covered_lines": 454,
+      "legacy_count": 457,
+      "legacy_covered": 455
+    },
+    {
+      "path": "src/error.rs",
+      "identity": {
+        "sha256": "b4303feef993e3ebbdf9447529e7db66c70df054550d02ce5741e08a1721a7b2",
+        "bytes": 4078,
+        "lines": 135
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 29,
+      "covered_lines": 29,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 29,
+      "legacy_covered": 29
+    },
+    {
+      "path": "src/error_tests.rs",
+      "identity": {
+        "sha256": "af2a3739a86544d41457cd9857b1fe4011e02066d3432d6e99d4467f6ed0ace5",
+        "bytes": 661,
+        "lines": 21
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 10,
+      "covered_lines": 10,
+      "removed_mapped_lines": 10,
+      "removed_covered_lines": 10,
+      "legacy_count": 10,
+      "legacy_covered": 10
+    },
+    {
+      "path": "src/experiment.rs",
+      "identity": {
+        "sha256": "67d30bf2062c73595f4439a8519569021326973acde037752927e151e7d8ceba",
+        "bytes": 19991,
+        "lines": 539
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 370,
+      "covered_lines": 324,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 397,
+      "legacy_covered": 338
+    },
+    {
+      "path": "src/experiment/block.rs",
+      "identity": {
+        "sha256": "987fcf8facdb4499b70db32a7eac844d9ba2ae5fe474b46b05ea72e9b28add20",
+        "bytes": 18201,
+        "lines": 463
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 299,
+      "covered_lines": 296,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 306,
+      "legacy_covered": 298
+    },
+    {
+      "path": "src/experiment_tests.rs",
+      "identity": {
+        "sha256": "d4b8a15bb5194125a4543ed3c2c0598fde28140d3459f8f9eb793a64e01ce091",
+        "bytes": 20911,
+        "lines": 602
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 476,
+      "covered_lines": 476,
+      "removed_mapped_lines": 476,
+      "removed_covered_lines": 476,
+      "legacy_count": 482,
+      "legacy_covered": 482
+    },
+    {
+      "path": "src/feed_forward.rs",
+      "identity": {
+        "sha256": "82c8716e3dc8f387f20e2f58bd356ce6c47fb55772aacb5f092f5a767392ef0c",
+        "bytes": 8368,
+        "lines": 223
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 110,
+      "covered_lines": 110,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 110,
+      "legacy_covered": 110
+    },
+    {
+      "path": "src/feed_forward_tests.rs",
+      "identity": {
+        "sha256": "953a106f0aa1910eadbd62ba48e7bfe6a6a55abbd4c0f7c11c1159cb7d205759",
+        "bytes": 6757,
+        "lines": 171
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 134,
+      "covered_lines": 134,
+      "removed_mapped_lines": 134,
+      "removed_covered_lines": 134,
+      "legacy_count": 141,
+      "legacy_covered": 141
+    },
+    {
+      "path": "src/generation.rs",
+      "identity": {
+        "sha256": "7bf11aeeb3cc27262920a8abc51499e34be1f976abd7a21cfce36255849d05c0",
+        "bytes": 29243,
+        "lines": 755
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 481,
+      "covered_lines": 452,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 509,
+      "legacy_covered": 466
+    },
+    {
+      "path": "src/generation/causal.rs",
+      "identity": {
+        "sha256": "b11f62995cb8949d5b74f9ff64fdb5ceef9f28ab065e8d81cfb37e77fa76e88c",
+        "bytes": 30222,
+        "lines": 761
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 559,
+      "covered_lines": 506,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 621,
+      "legacy_covered": 520
+    },
+    {
+      "path": "src/generation/causal_tests.rs",
+      "identity": {
+        "sha256": "68a47be513835b85a3aea8539c628f17fd9540bc1964411871a9ef5cff997f67",
+        "bytes": 57284,
+        "lines": 1579
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 1112,
+      "covered_lines": 1063,
+      "removed_mapped_lines": 1112,
+      "removed_covered_lines": 1063,
+      "legacy_count": 1131,
+      "legacy_covered": 1078
+    },
+    {
+      "path": "src/generation/seq2seq.rs",
+      "identity": {
+        "sha256": "2cf4a363c0dba0563333e4963966e3a98339a42efe4efffe2910b615b7dc1605",
+        "bytes": 43341,
+        "lines": 1087
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 831,
+      "covered_lines": 801,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 922,
+      "legacy_covered": 854
+    },
+    {
+      "path": "src/generation/seq2seq_tests.rs",
+      "identity": {
+        "sha256": "3c4be8b1bf63fcd6d450d436c1d2e3e94add7c075d18f60482b675fabea65314",
+        "bytes": 57587,
+        "lines": 1562
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 1194,
+      "covered_lines": 1136,
+      "removed_mapped_lines": 1194,
+      "removed_covered_lines": 1136,
+      "legacy_count": 1206,
+      "legacy_covered": 1145
+    },
+    {
+      "path": "src/generation_tests.rs",
+      "identity": {
+        "sha256": "f64e00332f00d28bb41444cd9e8ccd2ffb9c91010626a27e735255efe9cc2eb3",
+        "bytes": 20826,
+        "lines": 587
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 463,
+      "covered_lines": 463,
+      "removed_mapped_lines": 463,
+      "removed_covered_lines": 463,
+      "legacy_count": 467,
+      "legacy_covered": 467
+    },
+    {
+      "path": "src/intervention.rs",
+      "identity": {
+        "sha256": "175acc3f7a96d24988b518dcb292927a1f0f84791297427c196e5335a223b059",
+        "bytes": 32675,
+        "lines": 878
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 503,
+      "covered_lines": 474,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 528,
+      "legacy_covered": 473
+    },
+    {
+      "path": "src/intervention/validity.rs",
+      "identity": {
+        "sha256": "ab348a0f09721c4b42ae174c269cc5aee0590a8cd9284b2c9b7d08fc1164c792",
+        "bytes": 3323,
+        "lines": 81
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 40,
+      "covered_lines": 29,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 43,
+      "legacy_covered": 30
+    },
+    {
+      "path": "src/intervention/validity_tests.rs",
+      "identity": {
+        "sha256": "c6befa78d3ee27ea6a924d81b3a12cada8127521a011cfd476e90312cc5d08bb",
+        "bytes": 5671,
+        "lines": 176
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 135,
+      "covered_lines": 134,
+      "removed_mapped_lines": 135,
+      "removed_covered_lines": 134,
+      "legacy_count": 146,
+      "legacy_covered": 143
+    },
+    {
+      "path": "src/intervention_tests.rs",
+      "identity": {
+        "sha256": "b8c161939e31f04d5f3005d93b6091c602f95e3d3771834c49b667409472e8f3",
+        "bytes": 9723,
+        "lines": 292
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 236,
+      "covered_lines": 233,
+      "removed_mapped_lines": 236,
+      "removed_covered_lines": 233,
+      "legacy_count": 263,
+      "legacy_covered": 257
+    },
+    {
+      "path": "src/loaded.rs",
+      "identity": {
+        "sha256": "b30b2fc9e4bffbace556553bbe7d6c8231015650cb6fc8c6cfb979ce58bc7c0b",
+        "bytes": 26077,
+        "lines": 687
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 479,
+      "covered_lines": 474,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 487,
+      "legacy_covered": 475
+    },
+    {
+      "path": "src/loaded_tests.rs",
+      "identity": {
+        "sha256": "2e2b141548b0508cbf43349083fab9c62c8de163e136f011fcd2c8ec56875fa2",
+        "bytes": 35366,
+        "lines": 1074
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 882,
+      "covered_lines": 882,
+      "removed_mapped_lines": 882,
+      "removed_covered_lines": 882,
+      "legacy_count": 884,
+      "legacy_covered": 884
+    },
+    {
+      "path": "src/mla.rs",
+      "identity": {
+        "sha256": "0f765496a029324886d78af6ddc3bf1ab34b94481468738f605de6ee63809932",
+        "bytes": 39049,
+        "lines": 971
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 693,
+      "covered_lines": 682,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 705,
+      "legacy_covered": 693
+    },
+    {
+      "path": "src/mla_tests.rs",
+      "identity": {
+        "sha256": "22dc9ecde3e855ff8a8e41a7e6bde430b2477d3d0c1d32c35ec48bb78c481533",
+        "bytes": 31100,
+        "lines": 840
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 649,
+      "covered_lines": 646,
+      "removed_mapped_lines": 649,
+      "removed_covered_lines": 646,
+      "legacy_count": 664,
+      "legacy_covered": 661
+    },
+    {
+      "path": "src/models/auto.rs",
+      "identity": {
+        "sha256": "26e254e32bec887ec9e45b37272a3da10ee6dfcc91a0aa139dd473af907f9d42",
+        "bytes": 32549,
+        "lines": 845
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 442,
+      "covered_lines": 442,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 461,
+      "legacy_covered": 461
+    },
+    {
+      "path": "src/models/auto/intervention_tests.rs",
+      "identity": {
+        "sha256": "21e28953b21cbade39a73ffd9fd2b46d8a6d979be0b7a8f5dfdb902acb609978",
+        "bytes": 4219,
+        "lines": 102
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 83,
+      "covered_lines": 82,
+      "removed_mapped_lines": 83,
+      "removed_covered_lines": 82,
+      "legacy_count": 85,
+      "legacy_covered": 83
+    },
+    {
+      "path": "src/models/auto/load.rs",
+      "identity": {
+        "sha256": "0f2df91e3e5ba9bb85e00ea851e0e59fa16d5dbff9ca3fddd468d7bbf593a3b6",
+        "bytes": 31035,
+        "lines": 761
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 557,
+      "covered_lines": 513,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 603,
+      "legacy_covered": 525
+    },
+    {
+      "path": "src/models/auto/load_tests.rs",
+      "identity": {
+        "sha256": "3a8d5b345063a9b6c6a55d46fcb5df5ebc10b7aff97247dcc1cf806f0bb4bcdf",
+        "bytes": 71346,
+        "lines": 1906
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 1499,
+      "covered_lines": 1442,
+      "removed_mapped_lines": 1499,
+      "removed_covered_lines": 1442,
+      "legacy_count": 1520,
+      "legacy_covered": 1455
+    },
+    {
+      "path": "src/models/auto_tests.rs",
+      "identity": {
+        "sha256": "09be64beedfac9454bb96cc5c4ba8f9b366dfeddb40455e2b5bf09ddb91feb57",
+        "bytes": 45308,
+        "lines": 1300
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 1010,
+      "covered_lines": 999,
+      "removed_mapped_lines": 1010,
+      "removed_covered_lines": 999,
+      "legacy_count": 1021,
+      "legacy_covered": 997
+    },
+    {
+      "path": "src/models/config.rs",
+      "identity": {
+        "sha256": "5305ec9f98f8fcfaeea5bab7869fcc76a7e500bf29a28e09f54f392a17201e18",
+        "bytes": 20971,
+        "lines": 599
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 323,
+      "covered_lines": 265,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 340,
+      "legacy_covered": 274
+    },
+    {
+      "path": "src/models/config_tests.rs",
+      "identity": {
+        "sha256": "038c84f259051b8223866c93fcba6f21a4f4d4bc577b4cf8305ee1cb96ea0100",
+        "bytes": 4071,
+        "lines": 128
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 94,
+      "covered_lines": 94,
+      "removed_mapped_lines": 94,
+      "removed_covered_lines": 94,
+      "legacy_count": 94,
+      "legacy_covered": 94
+    },
+    {
+      "path": "src/models/custom/causal.rs",
+      "identity": {
+        "sha256": "e11b05d5dd4186a47203f7269c8876ab947974dc3472e43becbd46cce4f82670",
+        "bytes": 22963,
+        "lines": 599
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 400,
+      "covered_lines": 371,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 411,
+      "legacy_covered": 382
+    },
+    {
+      "path": "src/models/custom/common.rs",
+      "identity": {
+        "sha256": "ba93d5102f7c99e500a18d98a99b80f8e477c96b861d675c0546e0201690c60c",
+        "bytes": 60898,
+        "lines": 1662
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 1215,
+      "covered_lines": 1064,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 1269,
+      "legacy_covered": 1084
+    },
+    {
+      "path": "src/models/custom/composition_tests.rs",
+      "identity": {
+        "sha256": "a409406885c61b53aafe028bfcd374f8d3240c2135a934656ad8ec68ae963378",
+        "bytes": 21396,
+        "lines": 589
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 441,
+      "covered_lines": 431,
+      "removed_mapped_lines": 441,
+      "removed_covered_lines": 431,
+      "legacy_count": 446,
+      "legacy_covered": 433
+    },
+    {
+      "path": "src/models/custom/intervention_tests.rs",
+      "identity": {
+        "sha256": "979f0aa4cc3114aa0cc8885bb506a474851d325baf81d29cc2f07c813d298776",
+        "bytes": 17854,
+        "lines": 504
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 408,
+      "covered_lines": 408,
+      "removed_mapped_lines": 408,
+      "removed_covered_lines": 408,
+      "legacy_count": 420,
+      "legacy_covered": 419
+    },
+    {
+      "path": "src/models/custom/seq2seq.rs",
+      "identity": {
+        "sha256": "9de5e9a7868a99d5cdd9c567972b662defc701c62baa0215377ede09c479d72f",
+        "bytes": 31176,
+        "lines": 851
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 639,
+      "covered_lines": 564,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 653,
+      "legacy_covered": 576
+    },
+    {
+      "path": "src/models/custom/state.rs",
+      "identity": {
+        "sha256": "7558c88544a8898a2bd6c858086574fce978e2774e54ec15c69c8f02da4e7765",
+        "bytes": 21763,
+        "lines": 569
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 433,
+      "covered_lines": 390,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 457,
+      "legacy_covered": 399
+    },
+    {
+      "path": "src/models/custom/state_contracts_tests.rs",
+      "identity": {
+        "sha256": "d711c65f89651c33cb4dcf70dcc44650da614c4ffb77ba98972f73c22c86d418",
+        "bytes": 22780,
+        "lines": 627
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 540,
+      "covered_lines": 539,
+      "removed_mapped_lines": 540,
+      "removed_covered_lines": 539,
+      "legacy_count": 545,
+      "legacy_covered": 544
+    },
+    {
+      "path": "src/models/custom/tests.rs",
+      "identity": {
+        "sha256": "a36b1ce0778d8f20142dacddb029a2139754527d504531368358eefd32687f8b",
+        "bytes": 52765,
+        "lines": 1541
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 1307,
+      "covered_lines": 1306,
+      "removed_mapped_lines": 1307,
+      "removed_covered_lines": 1306,
+      "legacy_count": 1320,
+      "legacy_covered": 1318
+    },
+    {
+      "path": "src/models/deepseek_v2.rs",
+      "identity": {
+        "sha256": "334377d11b19e53c737038ab15763a8f1ff2101d5cc4f17c9fac86f1d4dc22ff",
+        "bytes": 14695,
+        "lines": 388
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 192,
+      "covered_lines": 159,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 197,
+      "legacy_covered": 157
+    },
+    {
+      "path": "src/models/deepseek_v2/checkpoint.rs",
+      "identity": {
+        "sha256": "82c6d365f54c6e74b88057a206ce0bf5dc90f133b9a3670df2c0565438abae53",
+        "bytes": 12720,
+        "lines": 373
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 250,
+      "covered_lines": 221,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 255,
+      "legacy_covered": 223
+    },
+    {
+      "path": "src/models/deepseek_v2/checkpoint_tests.rs",
+      "identity": {
+        "sha256": "50f17c60b20987cd811af16c7a3fc87fefc0795fe924ae7b62c348d3e46e8a8d",
+        "bytes": 1908,
+        "lines": 57
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 46,
+      "covered_lines": 46,
+      "removed_mapped_lines": 46,
+      "removed_covered_lines": 46,
+      "legacy_count": 48,
+      "legacy_covered": 48
+    },
+    {
+      "path": "src/models/deepseek_v2/load.rs",
+      "identity": {
+        "sha256": "2b7fda94f9db1d785c42e3e15a83084f92dca97b4e2fbf4fe27f2a842198e250",
+        "bytes": 16394,
+        "lines": 446
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 279,
+      "covered_lines": 193,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 295,
+      "legacy_covered": 198
+    },
+    {
+      "path": "src/models/deepseek_v2/load_tests.rs",
+      "identity": {
+        "sha256": "d05cb843282977fb293ee1c3684a2b6882a3ba90a4f102b0a1867882bcaddb13",
+        "bytes": 8826,
+        "lines": 252
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 184,
+      "covered_lines": 184,
+      "removed_mapped_lines": 184,
+      "removed_covered_lines": 184,
+      "legacy_count": 197,
+      "legacy_covered": 195
+    },
+    {
+      "path": "src/models/deepseek_v2/model.rs",
+      "identity": {
+        "sha256": "3bc9ff66e8395ca21de567337373737955ea52e19a0607159bdb7b890b9c1b9f",
+        "bytes": 37277,
+        "lines": 991
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 702,
+      "covered_lines": 616,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 735,
+      "legacy_covered": 625
+    },
+    {
+      "path": "src/models/deepseek_v2/model/decode.rs",
+      "identity": {
+        "sha256": "5665c2428ea58a715e6b696472598d97e1a275aae6d28232d0f75e50964c8600",
+        "bytes": 42512,
+        "lines": 1156
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 881,
+      "covered_lines": 780,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 932,
+      "legacy_covered": 800
+    },
+    {
+      "path": "src/models/deepseek_v2/model/decode_tests.rs",
+      "identity": {
+        "sha256": "7282dd646f949be5e0eddb3761b4b304138091d4ded7ad88f6568d8ebd9529c9",
+        "bytes": 25319,
+        "lines": 766
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 649,
+      "covered_lines": 648,
+      "removed_mapped_lines": 649,
+      "removed_covered_lines": 648,
+      "legacy_count": 660,
+      "legacy_covered": 659
+    },
+    {
+      "path": "src/models/deepseek_v2/model_tests.rs",
+      "identity": {
+        "sha256": "67de3ba1206dd8d4ec090d390b3c4e7a5e9838c10056091584790a82f82ff945",
+        "bytes": 15112,
+        "lines": 418
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 333,
+      "covered_lines": 330,
+      "removed_mapped_lines": 333,
+      "removed_covered_lines": 330,
+      "legacy_count": 334,
+      "legacy_covered": 331
+    },
+    {
+      "path": "src/models/deepseek_v2/model_tests_support.rs",
+      "identity": {
+        "sha256": "25b310288d4881765ee6de75451b23dce4509af7a5ef790e37e8ea7739c63784",
+        "bytes": 2778,
+        "lines": 82
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 71,
+      "covered_lines": 71,
+      "removed_mapped_lines": 71,
+      "removed_covered_lines": 71,
+      "legacy_count": 74,
+      "legacy_covered": 73
+    },
+    {
+      "path": "src/models/deepseek_v2_tests.rs",
+      "identity": {
+        "sha256": "ba3b84be738a7aec61372389ff2dc807e117a40aaee0b49468253f06854da4ab",
+        "bytes": 1990,
+        "lines": 71
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 56,
+      "covered_lines": 56,
+      "removed_mapped_lines": 56,
+      "removed_covered_lines": 56,
+      "legacy_count": 56,
+      "legacy_covered": 56
+    },
+    {
+      "path": "src/models/gpt2.rs",
+      "identity": {
+        "sha256": "dfd994e540854019968ba4c298e15ff27133a2c6dd53b8026dccab94dc757dad",
+        "bytes": 8464,
+        "lines": 203
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 71,
+      "covered_lines": 62,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 78,
+      "legacy_covered": 64
+    },
+    {
+      "path": "src/models/gpt2/checkpoint.rs",
+      "identity": {
+        "sha256": "c457c325ffcbb8b6f8c39a1aab757b9bd088d64c19d103dc815ce2310e060d68",
+        "bytes": 17012,
+        "lines": 428
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 268,
+      "covered_lines": 244,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 278,
+      "legacy_covered": 248
+    },
+    {
+      "path": "src/models/gpt2/model.rs",
+      "identity": {
+        "sha256": "022ca14c37ada4c683be426dbb40c5f1b16ec42d55ac149e79cff2042a9c6548",
+        "bytes": 26045,
+        "lines": 674
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 470,
+      "covered_lines": 415,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 482,
+      "legacy_covered": 420
+    },
+    {
+      "path": "src/models/gpt2/model_tests.rs",
+      "identity": {
+        "sha256": "00229334426ed3cb8dc3e13dd3f7b4944eb02ba9ca70311ebbe731f4373ddccf",
+        "bytes": 28463,
+        "lines": 820
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 665,
+      "covered_lines": 565,
+      "removed_mapped_lines": 665,
+      "removed_covered_lines": 565,
+      "legacy_count": 698,
+      "legacy_covered": 586
+    },
+    {
+      "path": "src/models/gpt_neox.rs",
+      "identity": {
+        "sha256": "6c5e8718935093ef11233fa0fce19d7eb17e870e34249e69291285cdd1128cca",
+        "bytes": 7006,
+        "lines": 183
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 96,
+      "covered_lines": 80,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 98,
+      "legacy_covered": 82
+    },
+    {
+      "path": "src/models/gpt_neox/load.rs",
+      "identity": {
+        "sha256": "d8c3bfeddd752546a4d2ac48894857d028fc9a1de6faeac6c5ae9e4ff4100976",
+        "bytes": 25571,
+        "lines": 656
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 419,
+      "covered_lines": 393,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 440,
+      "legacy_covered": 407
+    },
+    {
+      "path": "src/models/gpt_neox/load_tests.rs",
+      "identity": {
+        "sha256": "d6da264ad6ca0eb8935d29ffdc38f7e02d810c024fdc324f8e44faf1c2c03cd7",
+        "bytes": 11279,
+        "lines": 345
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 267,
+      "covered_lines": 266,
+      "removed_mapped_lines": 267,
+      "removed_covered_lines": 266,
+      "legacy_count": 283,
+      "legacy_covered": 282
+    },
+    {
+      "path": "src/models/gpt_neox/model.rs",
+      "identity": {
+        "sha256": "c7fd3c4342cfa0dd416fb8230b6d902ae9fba740b906f1b47f191009ede8b26b",
+        "bytes": 30074,
+        "lines": 820
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 641,
+      "covered_lines": 528,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 654,
+      "legacy_covered": 531
+    },
+    {
+      "path": "src/models/gpt_neox/tests.rs",
+      "identity": {
+        "sha256": "ba50fbf667bdd98cc1930b5a033d5ab39bf6da722b3d7642b2196a49b020dfff",
+        "bytes": 11074,
+        "lines": 345
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 284,
+      "covered_lines": 284,
+      "removed_mapped_lines": 284,
+      "removed_covered_lines": 284,
+      "legacy_count": 288,
+      "legacy_covered": 288
+    },
+    {
+      "path": "src/models/muse_glimmer.rs",
+      "identity": {
+        "sha256": "fbd989c7f75eb7674a843721acb23f99757c1525a1efff2d17893c4e1cb4adce",
+        "bytes": 12758,
+        "lines": 334
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 160,
+      "covered_lines": 139,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 164,
+      "legacy_covered": 138
+    },
+    {
+      "path": "src/models/muse_glimmer/checkpoint.rs",
+      "identity": {
+        "sha256": "70b0fc0d3a581efd5e23c688a117e797329a23d2bc5d6a7b512d2ed1a6e43fa5",
+        "bytes": 11543,
+        "lines": 324
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 188,
+      "covered_lines": 180,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 192,
+      "legacy_covered": 182
+    },
+    {
+      "path": "src/models/muse_glimmer/checkpoint_tests.rs",
+      "identity": {
+        "sha256": "65e06a8c9b7b54d91d91d6ce2c41dde18672e6f736f7da0fd65214f47b8f0e98",
+        "bytes": 7656,
+        "lines": 238
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 188,
+      "covered_lines": 188,
+      "removed_mapped_lines": 188,
+      "removed_covered_lines": 188,
+      "legacy_count": 192,
+      "legacy_covered": 192
+    },
+    {
+      "path": "src/models/muse_glimmer/load.rs",
+      "identity": {
+        "sha256": "b2354c9b628ae37c365dcb59cdba14667d089917d213ca25d5b7942abc8e8615",
+        "bytes": 12900,
+        "lines": 336
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 186,
+      "covered_lines": 137,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 195,
+      "legacy_covered": 140
+    },
+    {
+      "path": "src/models/muse_glimmer/load_tests.rs",
+      "identity": {
+        "sha256": "578e0b402ec9c0ebe86bf6b6641c4dd12c21cc9e178b41864b95a9400a8d4a0e",
+        "bytes": 8746,
+        "lines": 254
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 188,
+      "covered_lines": 188,
+      "removed_mapped_lines": 188,
+      "removed_covered_lines": 188,
+      "legacy_count": 199,
+      "legacy_covered": 198
+    },
+    {
+      "path": "src/models/muse_glimmer/model.rs",
+      "identity": {
+        "sha256": "cfe84019bbb1cb4dd1f41fae8d18b9438ae0aaba2bbfb2636efbec65d9c37ee6",
+        "bytes": 59608,
+        "lines": 1519
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 1104,
+      "covered_lines": 916,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 1167,
+      "legacy_covered": 931
+    },
+    {
+      "path": "src/models/muse_glimmer/model/decode.rs",
+      "identity": {
+        "sha256": "61c485b374116d9a683f545fc121301d45acba03456b78f28480bb4bc9199a9c",
+        "bytes": 37001,
+        "lines": 1030
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 761,
+      "covered_lines": 654,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 791,
+      "legacy_covered": 668
+    },
+    {
+      "path": "src/models/muse_glimmer/model/decode_tests.rs",
+      "identity": {
+        "sha256": "2f53498f914ab25242636d9a73e8d072057fb83e56ae91ff3b6d697f7f5457b6",
+        "bytes": 31080,
+        "lines": 969
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 810,
+      "covered_lines": 798,
+      "removed_mapped_lines": 810,
+      "removed_covered_lines": 798,
+      "legacy_count": 821,
+      "legacy_covered": 803
+    },
+    {
+      "path": "src/models/muse_glimmer/model_tests.rs",
+      "identity": {
+        "sha256": "82f1b6fb458bf181684f17aa15dc8257317d949cd87d623df9590b10ec0f76cf",
+        "bytes": 67051,
+        "lines": 1848
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 602,
+      "covered_lines": 594,
+      "removed_mapped_lines": 602,
+      "removed_covered_lines": 594,
+      "legacy_count": 613,
+      "legacy_covered": 602
+    },
+    {
+      "path": "src/models/muse_glimmer_tests.rs",
+      "identity": {
+        "sha256": "eea4ed07703e198c73883a9df24654958ae46f47d82d07ab60c830bcfb47845b",
+        "bytes": 2396,
+        "lines": 73
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 57,
+      "covered_lines": 57,
+      "removed_mapped_lines": 57,
+      "removed_covered_lines": 57,
+      "legacy_count": 57,
+      "legacy_covered": 57
+    },
+    {
+      "path": "src/models/nemotron_h.rs",
+      "identity": {
+        "sha256": "97f33538389230817ce57125a9f3f31f3040ea4291fcd08f2dd24d170eccdb32",
+        "bytes": 25241,
+        "lines": 642
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 364,
+      "covered_lines": 285,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 373,
+      "legacy_covered": 287
+    },
+    {
+      "path": "src/models/nemotron_h/checkpoint.rs",
+      "identity": {
+        "sha256": "b3d758cabd9953f75c21d346c0636960eb48973f77fc5e49e0b50cd4e89b92ee",
+        "bytes": 24220,
+        "lines": 708
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 486,
+      "covered_lines": 465,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 497,
+      "legacy_covered": 467
+    },
+    {
+      "path": "src/models/nemotron_h/checkpoint_tests.rs",
+      "identity": {
+        "sha256": "0f146ca5c754d2f3b1839143f0b006033529afb78d698e3d35aa4b5e4a2ad60b",
+        "bytes": 17168,
+        "lines": 480
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 380,
+      "covered_lines": 375,
+      "removed_mapped_lines": 380,
+      "removed_covered_lines": 375,
+      "legacy_count": 389,
+      "legacy_covered": 384
+    },
+    {
+      "path": "src/models/nemotron_h/load.rs",
+      "identity": {
+        "sha256": "8e8448a93a24811965be4146d5f8029ee2c41cf827e2bbf003816ffe5816c65d",
+        "bytes": 21815,
+        "lines": 556
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 368,
+      "covered_lines": 280,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 391,
+      "legacy_covered": 284
+    },
+    {
+      "path": "src/models/nemotron_h/load_tests.rs",
+      "identity": {
+        "sha256": "9649e4c081aecb300bb264f0c82f1ba47a71187bb9aae9efb41e30e447dd915c",
+        "bytes": 25441,
+        "lines": 705
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 559,
+      "covered_lines": 558,
+      "removed_mapped_lines": 559,
+      "removed_covered_lines": 558,
+      "legacy_count": 584,
+      "legacy_covered": 582
+    },
+    {
+      "path": "src/models/nemotron_h/model.rs",
+      "identity": {
+        "sha256": "a0ec47eaa523ea6064a65f3bdd2bb5e70623b88ee30828b87a39e83fc6f8740f",
+        "bytes": 46212,
+        "lines": 1189
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 827,
+      "covered_lines": 675,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 860,
+      "legacy_covered": 687
+    },
+    {
+      "path": "src/models/nemotron_h/model/decode.rs",
+      "identity": {
+        "sha256": "760da0266808f6456de9742c40e1c27a3075e56e28fb10427d7c5b0af63e5494",
+        "bytes": 45173,
+        "lines": 1219
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 932,
+      "covered_lines": 824,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 982,
+      "legacy_covered": 859
+    },
+    {
+      "path": "src/models/nemotron_h/model/decode_tests.rs",
+      "identity": {
+        "sha256": "6102690d60434961778c4d1d43dcfbf188b2f00e2c89adeb5aacd0c10e70814a",
+        "bytes": 25730,
+        "lines": 766
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 642,
+      "covered_lines": 642,
+      "removed_mapped_lines": 642,
+      "removed_covered_lines": 642,
+      "legacy_count": 651,
+      "legacy_covered": 651
+    },
+    {
+      "path": "src/models/nemotron_h/model/mamba2.rs",
+      "identity": {
+        "sha256": "b124b745af7369f76b7289ae5a43cfa94633225d12c3f467bc4b108d18002ffa",
+        "bytes": 33378,
+        "lines": 836
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 568,
+      "covered_lines": 497,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 580,
+      "legacy_covered": 503
+    },
+    {
+      "path": "src/models/nemotron_h/model/mamba2_tests.rs",
+      "identity": {
+        "sha256": "b448f6436924ef4268251f03103856eabf44aefc1e4e3a6767354bc9fdd1a778",
+        "bytes": 23598,
+        "lines": 661
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 526,
+      "covered_lines": 526,
+      "removed_mapped_lines": 526,
+      "removed_covered_lines": 526,
+      "legacy_count": 528,
+      "legacy_covered": 528
+    },
+    {
+      "path": "src/models/nemotron_h/model/mtp.rs",
+      "identity": {
+        "sha256": "573f45e2a701c4fada4bd6a12148ee8f7d23ea8a37e82b1668e83eb3b2b58ac7",
+        "bytes": 15653,
+        "lines": 398
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 318,
+      "covered_lines": 227,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 340,
+      "legacy_covered": 230
+    },
+    {
+      "path": "src/models/nemotron_h/model/mtp_tests.rs",
+      "identity": {
+        "sha256": "4442ea310c855d8f4da84d78e91de247a01f0608fc5c8ceff7a2f98d3f1cea70",
+        "bytes": 15088,
+        "lines": 466
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 392,
+      "covered_lines": 392,
+      "removed_mapped_lines": 392,
+      "removed_covered_lines": 392,
+      "legacy_count": 392,
+      "legacy_covered": 392
+    },
+    {
+      "path": "src/models/nemotron_h/model/speculative.rs",
+      "identity": {
+        "sha256": "5655b47d089a7eaba482d9a15c1cd68fffba8b594dd1f84221c707eac5792383",
+        "bytes": 28310,
+        "lines": 725
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 544,
+      "covered_lines": 451,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 586,
+      "legacy_covered": 461
+    },
+    {
+      "path": "src/models/nemotron_h/model/speculative_tests.rs",
+      "identity": {
+        "sha256": "9f8813775108ad38ab8e0eb7268245466fe97606059a1c1ad2771ea1ce448b40",
+        "bytes": 20896,
+        "lines": 609
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 472,
+      "covered_lines": 472,
+      "removed_mapped_lines": 472,
+      "removed_covered_lines": 472,
+      "legacy_count": 474,
+      "legacy_covered": 474
+    },
+    {
+      "path": "src/models/nemotron_h/model_tests.rs",
+      "identity": {
+        "sha256": "d9c980d909695c8d8701c4981a8bcf3cc69d0834d399e3d786ac7a47c50e4ddd",
+        "bytes": 10876,
+        "lines": 324
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 256,
+      "covered_lines": 253,
+      "removed_mapped_lines": 256,
+      "removed_covered_lines": 253,
+      "legacy_count": 257,
+      "legacy_covered": 254
+    },
+    {
+      "path": "src/models/nemotron_h_tests.rs",
+      "identity": {
+        "sha256": "25e850892a4fd28b381e283081f091fb828cfbb46d3d72a798ab9324f336399f",
+        "bytes": 4849,
+        "lines": 154
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 99,
+      "covered_lines": 98,
+      "removed_mapped_lines": 99,
+      "removed_covered_lines": 98,
+      "legacy_count": 102,
+      "legacy_covered": 101
+    },
+    {
+      "path": "src/models/qwen3_5.rs",
+      "identity": {
+        "sha256": "f51d5d174b2de04248489b851cb6964c1d6e1772d8baa2a976efb3217c50aa5e",
+        "bytes": 14283,
+        "lines": 366
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 174,
+      "covered_lines": 148,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 175,
+      "legacy_covered": 148
+    },
+    {
+      "path": "src/models/qwen3_5/checkpoint.rs",
+      "identity": {
+        "sha256": "50fbe4468f39f43d7b70c59840420515a03cd4990ca4f08a3239180921baf334",
+        "bytes": 21054,
+        "lines": 569
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 339,
+      "covered_lines": 322,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 344,
+      "legacy_covered": 325
+    },
+    {
+      "path": "src/models/qwen3_5/checkpoint_tests.rs",
+      "identity": {
+        "sha256": "fbcfa16017958a359195f84a0ad40d6da48ce21681938cf7ca8f195980655187",
+        "bytes": 12175,
+        "lines": 369
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 266,
+      "covered_lines": 266,
+      "removed_mapped_lines": 266,
+      "removed_covered_lines": 266,
+      "legacy_count": 274,
+      "legacy_covered": 274
+    },
+    {
+      "path": "src/models/qwen3_5/execution_tests.rs",
+      "identity": {
+        "sha256": "05b346b15d1995611020e1dcefe9fa310274607091762266ec0285d7c46cf684",
+        "bytes": 10907,
+        "lines": 324
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 263,
+      "covered_lines": 257,
+      "removed_mapped_lines": 263,
+      "removed_covered_lines": 257,
+      "legacy_count": 270,
+      "legacy_covered": 262
+    },
+    {
+      "path": "src/models/qwen3_5/intervention_tests.rs",
+      "identity": {
+        "sha256": "051eca01b3141eabb41506543661a37782d09099d966f473dd0a242216bbc8aa",
+        "bytes": 15463,
+        "lines": 445
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 348,
+      "covered_lines": 345,
+      "removed_mapped_lines": 348,
+      "removed_covered_lines": 345,
+      "legacy_count": 356,
+      "legacy_covered": 351
+    },
+    {
+      "path": "src/models/qwen3_5/load.rs",
+      "identity": {
+        "sha256": "c68e804a49fe012e58cb76c1496bea7fac5639fb8433b38de7e02e993577b513",
+        "bytes": 17680,
+        "lines": 433
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 282,
+      "covered_lines": 195,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 302,
+      "legacy_covered": 198
+    },
+    {
+      "path": "src/models/qwen3_5/load_tests.rs",
+      "identity": {
+        "sha256": "8e9db50bbea5f005cd8dd543b46ee2ce526fdc6c14cec36f6c23df5c69fc205e",
+        "bytes": 11328,
+        "lines": 323
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 256,
+      "covered_lines": 256,
+      "removed_mapped_lines": 256,
+      "removed_covered_lines": 256,
+      "legacy_count": 273,
+      "legacy_covered": 267
+    },
+    {
+      "path": "src/models/qwen3_5/model.rs",
+      "identity": {
+        "sha256": "88240afbef543a5505dc2383ee72cb5ea2e079c17b759424066a61c81fce554f",
+        "bytes": 47014,
+        "lines": 1165
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 843,
+      "covered_lines": 710,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 882,
+      "legacy_covered": 725
+    },
+    {
+      "path": "src/models/qwen3_5/model/decode.rs",
+      "identity": {
+        "sha256": "b0939e934e3d8674cd40fe8aa9480ebaddc2da59d0469f05faffa5f8d96d6cbf",
+        "bytes": 65680,
+        "lines": 1710
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 1309,
+      "covered_lines": 1168,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 1380,
+      "legacy_covered": 1201
+    },
+    {
+      "path": "src/models/qwen3_5/model/decode_tests.rs",
+      "identity": {
+        "sha256": "fd13cb86ac7ea1f6fec2ec5577f56bff559cd21763bd67b6d5a25c3f2c0f3338",
+        "bytes": 67544,
+        "lines": 1931
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 1611,
+      "covered_lines": 1606,
+      "removed_mapped_lines": 1611,
+      "removed_covered_lines": 1606,
+      "legacy_count": 1614,
+      "legacy_covered": 1609
+    },
+    {
+      "path": "src/models/qwen3_5/model/mtp.rs",
+      "identity": {
+        "sha256": "0ab459569943393a74d647ab3f28ec2fcb4572a21e16a0a010ee784dfe449b8e",
+        "bytes": 7518,
+        "lines": 189
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 106,
+      "covered_lines": 74,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 112,
+      "legacy_covered": 76
+    },
+    {
+      "path": "src/models/qwen3_5/model/speculative.rs",
+      "identity": {
+        "sha256": "e4e29880d7a7c24af10caeb3e036d822118037b6105974c8edca7577bb8957e4",
+        "bytes": 29233,
+        "lines": 749
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 570,
+      "covered_lines": 442,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 620,
+      "legacy_covered": 449
+    },
+    {
+      "path": "src/models/qwen3_5/model/speculative_tests.rs",
+      "identity": {
+        "sha256": "113615fb62304efe847c393add14ea789e15077d5ae102fae11fa329a5db0f89",
+        "bytes": 20395,
+        "lines": 604
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 496,
+      "covered_lines": 496,
+      "removed_mapped_lines": 496,
+      "removed_covered_lines": 496,
+      "legacy_count": 499,
+      "legacy_covered": 499
+    },
+    {
+      "path": "src/models/qwen3_5/model_tests.rs",
+      "identity": {
+        "sha256": "2230b788b04b1b9dc2dbca07de6904d25c5d179f21d01e6b30aeb5c5dbb23947",
+        "bytes": 12967,
+        "lines": 346
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 269,
+      "covered_lines": 269,
+      "removed_mapped_lines": 269,
+      "removed_covered_lines": 269,
+      "legacy_count": 272,
+      "legacy_covered": 271
+    },
+    {
+      "path": "src/models/qwen3_5/recipe.rs",
+      "identity": {
+        "sha256": "2562f88809cb12f55ac3f7e290e622daca7cbef056e40716cc6b14ae42217228",
+        "bytes": 25219,
+        "lines": 606
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 395,
+      "covered_lines": 372,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 420,
+      "legacy_covered": 388
+    },
+    {
+      "path": "src/models/qwen3_5/recipe_tests.rs",
+      "identity": {
+        "sha256": "edd9752108a0681395acd23a87c92d77ab41040bf5988783071943f33d3a9d7e",
+        "bytes": 24931,
+        "lines": 681
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 534,
+      "covered_lines": 533,
+      "removed_mapped_lines": 534,
+      "removed_covered_lines": 533,
+      "legacy_count": 544,
+      "legacy_covered": 543
+    },
+    {
+      "path": "src/models/qwen3_5_tests.rs",
+      "identity": {
+        "sha256": "f1b80db2109bebc1df2651fd624fffb97a716d5d3197f000073ecd1051f797b7",
+        "bytes": 3179,
+        "lines": 106
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 86,
+      "covered_lines": 86,
+      "removed_mapped_lines": 86,
+      "removed_covered_lines": 86,
+      "legacy_count": 86,
+      "legacy_covered": 86
+    },
+    {
+      "path": "src/models/qwen3_moe.rs",
+      "identity": {
+        "sha256": "5d19d6e68156e9d682eeb4e15e537164c59b3da6b4de8015d12aef6b5c830151",
+        "bytes": 11028,
+        "lines": 294
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 143,
+      "covered_lines": 106,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 146,
+      "legacy_covered": 107
+    },
+    {
+      "path": "src/models/qwen3_moe/checkpoint.rs",
+      "identity": {
+        "sha256": "24a6f300ca83fd15cf00de7fc8b94309f5976f8e64bb4ae6c047e98af3c111e3",
+        "bytes": 9825,
+        "lines": 286
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 187,
+      "covered_lines": 182,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 190,
+      "legacy_covered": 183
+    },
+    {
+      "path": "src/models/qwen3_moe/checkpoint_tests.rs",
+      "identity": {
+        "sha256": "4c96f7a439e19a2beff861b24b7bc16831d7588606ada70ce2d5fcf1a4a42ffb",
+        "bytes": 7166,
+        "lines": 218
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 166,
+      "covered_lines": 166,
+      "removed_mapped_lines": 166,
+      "removed_covered_lines": 166,
+      "legacy_count": 171,
+      "legacy_covered": 171
+    },
+    {
+      "path": "src/models/qwen3_moe/load.rs",
+      "identity": {
+        "sha256": "ac06f5599ef6325f34908f4f8b8dc43916758a87b62d58a343fe7ac808619847",
+        "bytes": 15050,
+        "lines": 399
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 245,
+      "covered_lines": 177,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 264,
+      "legacy_covered": 180
+    },
+    {
+      "path": "src/models/qwen3_moe/load_tests.rs",
+      "identity": {
+        "sha256": "a2037d2b7f0434dd4a4279354193e335115d5c63c3b75811afaeabb9adfac44a",
+        "bytes": 24511,
+        "lines": 667
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 523,
+      "covered_lines": 521,
+      "removed_mapped_lines": 523,
+      "removed_covered_lines": 521,
+      "legacy_count": 544,
+      "legacy_covered": 541
+    },
+    {
+      "path": "src/models/qwen3_moe/model.rs",
+      "identity": {
+        "sha256": "d77bbc2ff86c88cdc7ace5717bcb668661f6ea264982c41eac95f03e8125828b",
+        "bytes": 32615,
+        "lines": 855
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 600,
+      "covered_lines": 506,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 630,
+      "legacy_covered": 515
+    },
+    {
+      "path": "src/models/qwen3_moe/model/decode.rs",
+      "identity": {
+        "sha256": "511c8011ed594685a143f36643e3468243d4e24debf0c95b2268a8dcd073a588",
+        "bytes": 34784,
+        "lines": 965
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 743,
+      "covered_lines": 656,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 773,
+      "legacy_covered": 670
+    },
+    {
+      "path": "src/models/qwen3_moe/model_tests.rs",
+      "identity": {
+        "sha256": "cb525f989fe9021105072d230b7e5d3ed20186a3cd0491243771276a1b84201c",
+        "bytes": 37592,
+        "lines": 1134
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 936,
+      "covered_lines": 935,
+      "removed_mapped_lines": 936,
+      "removed_covered_lines": 935,
+      "legacy_count": 952,
+      "legacy_covered": 950
+    },
+    {
+      "path": "src/models/qwen3_moe_tests.rs",
+      "identity": {
+        "sha256": "401feb66edcb0e9322b3302dd49b79ff9d65c3813521d4b183fcf676be3c9fd0",
+        "bytes": 601,
+        "lines": 24
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 19,
+      "covered_lines": 19,
+      "removed_mapped_lines": 19,
+      "removed_covered_lines": 19,
+      "legacy_count": 19,
+      "legacy_covered": 19
+    },
+    {
+      "path": "src/models/t5.rs",
+      "identity": {
+        "sha256": "7f3fe0e1cbd98acd7f1c8ef74c917a573ba9886ed4aaa8a0b50f08631006fcc5",
+        "bytes": 12449,
+        "lines": 332
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 163,
+      "covered_lines": 131,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 164,
+      "legacy_covered": 127
+    },
+    {
+      "path": "src/models/t5/checkpoint.rs",
+      "identity": {
+        "sha256": "e37c5da3854794a019225fbe9887fc6c3387395d6b8963b341a785b18fde2f09",
+        "bytes": 15044,
+        "lines": 411
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 229,
+      "covered_lines": 217,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 233,
+      "legacy_covered": 219
+    },
+    {
+      "path": "src/models/t5/checkpoint_tests.rs",
+      "identity": {
+        "sha256": "ce195fbd22c6757e47d21856251aba502683808a48c1baf9325a6056c99eb8f5",
+        "bytes": 16014,
+        "lines": 469
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 352,
+      "covered_lines": 352,
+      "removed_mapped_lines": 352,
+      "removed_covered_lines": 352,
+      "legacy_count": 362,
+      "legacy_covered": 362
+    },
+    {
+      "path": "src/models/t5/generation.rs",
+      "identity": {
+        "sha256": "b0e934e28f06e35daa3e010ab1ae55017032779593880acb05d741cad41bdd88",
+        "bytes": 5512,
+        "lines": 150
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 92,
+      "covered_lines": 85,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 101,
+      "legacy_covered": 88
+    },
+    {
+      "path": "src/models/t5/generation_tests.rs",
+      "identity": {
+        "sha256": "c9ddab1d1ee1d3a383721d94f243793b79531c2b44e085d0d8d9b8efc3ab6f1c",
+        "bytes": 4532,
+        "lines": 135
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 93,
+      "covered_lines": 51,
+      "removed_mapped_lines": 93,
+      "removed_covered_lines": 51,
+      "legacy_count": 95,
+      "legacy_covered": 52
+    },
+    {
+      "path": "src/models/t5/load.rs",
+      "identity": {
+        "sha256": "62e23928cf0534dba20fb8e95ce75e8268ef66e82d0d74d8bcc5c59e66bae005",
+        "bytes": 16300,
+        "lines": 422
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 245,
+      "covered_lines": 214,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 256,
+      "legacy_covered": 220
+    },
+    {
+      "path": "src/models/t5/load_tests.rs",
+      "identity": {
+        "sha256": "8cafccceec61cb08d0856ae54d61decdc5f9c972c70903a439b8aaa57218e3a0",
+        "bytes": 21283,
+        "lines": 610
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 451,
+      "covered_lines": 303,
+      "removed_mapped_lines": 451,
+      "removed_covered_lines": 303,
+      "legacy_count": 468,
+      "legacy_covered": 315
+    },
+    {
+      "path": "src/models/t5/model.rs",
+      "identity": {
+        "sha256": "99e76092a1b9658d5f1df32570d065e3e7012a990c8463721d9e66afc96d51ca",
+        "bytes": 60397,
+        "lines": 1634
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 1188,
+      "covered_lines": 1061,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 1221,
+      "legacy_covered": 1072
+    },
+    {
+      "path": "src/models/t5/model/decode.rs",
+      "identity": {
+        "sha256": "e929f61b70b223829de08bfb61683ce3db21a6a10bbd1d94520e6d03c976bfa5",
+        "bytes": 49466,
+        "lines": 1378
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 1066,
+      "covered_lines": 979,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 1120,
+      "legacy_covered": 1013
+    },
+    {
+      "path": "src/models/t5/model/decode_tests.rs",
+      "identity": {
+        "sha256": "5ecbd4f60415bffeecad808303ecb9dbb395f2a73865600113cddb311d452ae8",
+        "bytes": 67794,
+        "lines": 2004
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 1618,
+      "covered_lines": 1614,
+      "removed_mapped_lines": 1618,
+      "removed_covered_lines": 1614,
+      "legacy_count": 1640,
+      "legacy_covered": 1633
+    },
+    {
+      "path": "src/models/t5/model/intervention_tests.rs",
+      "identity": {
+        "sha256": "a803d06e2930e306c8d3464855b312f4c8f065384ed4e2939bcaa26e40466181",
+        "bytes": 25887,
+        "lines": 807
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 688,
+      "covered_lines": 685,
+      "removed_mapped_lines": 688,
+      "removed_covered_lines": 685,
+      "legacy_count": 703,
+      "legacy_covered": 699
+    },
+    {
+      "path": "src/models/t5/model/padded_hooks.rs",
+      "identity": {
+        "sha256": "628ab2ab10e1069abd360a137345268589fa78858114f3ccf69c5766d0b7308e",
+        "bytes": 6981,
+        "lines": 177
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 134,
+      "covered_lines": 121,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 142,
+      "legacy_covered": 125
+    },
+    {
+      "path": "src/models/t5/model/recipe.rs",
+      "identity": {
+        "sha256": "c1b734b73fc4634c62057fa3dd0f24411ca421f7db9893355735c108c24a323d",
+        "bytes": 23841,
+        "lines": 586
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 386,
+      "covered_lines": 360,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 414,
+      "legacy_covered": 376
+    },
+    {
+      "path": "src/models/t5/model/recipe_tests.rs",
+      "identity": {
+        "sha256": "b6b7fbcee174f1d073c5a488c6a9e43105267adff0cb21ccb38ecbfc11135d0b",
+        "bytes": 19354,
+        "lines": 554
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 432,
+      "covered_lines": 429,
+      "removed_mapped_lines": 432,
+      "removed_covered_lines": 429,
+      "legacy_count": 440,
+      "legacy_covered": 436
+    },
+    {
+      "path": "src/models/t5/model_tests.rs",
+      "identity": {
+        "sha256": "221002d8591929f718cbe9612f597c298e24e76077799f234ce9520216b0743a",
+        "bytes": 18267,
+        "lines": 524
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 422,
+      "covered_lines": 422,
+      "removed_mapped_lines": 422,
+      "removed_covered_lines": 422,
+      "legacy_count": 423,
+      "legacy_covered": 423
+    },
+    {
+      "path": "src/models/t5_tests.rs",
+      "identity": {
+        "sha256": "ba1bc8f13201935160eb967fb7028c3a98d716094190f69644bafa78b27a2714",
+        "bytes": 1787,
+        "lines": 71
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 59,
+      "covered_lines": 59,
+      "removed_mapped_lines": 59,
+      "removed_covered_lines": 59,
+      "legacy_count": 59,
+      "legacy_covered": 59
+    },
+    {
+      "path": "src/moe.rs",
+      "identity": {
+        "sha256": "d2263a5b6acfe1cda40275dc2bfbd729f420adb425a8d0b7ecd51e5c63c1135f",
+        "bytes": 30706,
+        "lines": 748
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 464,
+      "covered_lines": 425,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 487,
+      "legacy_covered": 428
+    },
+    {
+      "path": "src/moe_tests.rs",
+      "identity": {
+        "sha256": "c09b32ee378b82ccfef86c98d09318bf85217b68d6c57d597f9a560f3a01f752",
+        "bytes": 24580,
+        "lines": 593
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 410,
+      "covered_lines": 409,
+      "removed_mapped_lines": 410,
+      "removed_covered_lines": 409,
+      "legacy_count": 413,
+      "legacy_covered": 412
+    },
+    {
+      "path": "src/normalization.rs",
+      "identity": {
+        "sha256": "7a71d86287e2ce0f814f1a16423be6b991033e1135786dc9424aaf68f36b5366",
+        "bytes": 7137,
+        "lines": 178
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 65,
+      "covered_lines": 65,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 65,
+      "legacy_covered": 65
+    },
+    {
+      "path": "src/normalization_tests.rs",
+      "identity": {
+        "sha256": "84e366ab7c39c2bcd60a0c25917dbcadc11927ccc825c69ceae4b6c9fda923f1",
+        "bytes": 6262,
+        "lines": 176
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 140,
+      "covered_lines": 140,
+      "removed_mapped_lines": 140,
+      "removed_covered_lines": 140,
+      "legacy_count": 140,
+      "legacy_covered": 140
+    },
+    {
+      "path": "src/operations.rs",
+      "identity": {
+        "sha256": "836c18ca168b7aa46a904e84f8f6eafd94ca1a515c13d7d5d7269ec9b42f0241",
+        "bytes": 9263,
+        "lines": 200
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 110,
+      "covered_lines": 97,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 114,
+      "legacy_covered": 91
+    },
+    {
+      "path": "src/operations_tests.rs",
+      "identity": {
+        "sha256": "acae3ace4a1d9a5ba7cce16c1d5f0747e4476d102404563d506e86c025ece00b",
+        "bytes": 19476,
+        "lines": 520
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 262,
+      "covered_lines": 262,
+      "removed_mapped_lines": 262,
+      "removed_covered_lines": 262,
+      "legacy_count": 265,
+      "legacy_covered": 265
+    },
+    {
+      "path": "src/position/ids.rs",
+      "identity": {
+        "sha256": "94d18ecbb8cc7b3392c3831203a8d76ba18efb3b2b42b4a7eab7efe70eb0f72b",
+        "bytes": 6553,
+        "lines": 183
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 78,
+      "covered_lines": 78,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 78,
+      "legacy_covered": 78
+    },
+    {
+      "path": "src/position/ids_tests.rs",
+      "identity": {
+        "sha256": "1ddbeb572efcd462ff9b242f11a581a2ef797336b4a40589d05f10c2380581b6",
+        "bytes": 3876,
+        "lines": 138
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 88,
+      "covered_lines": 88,
+      "removed_mapped_lines": 88,
+      "removed_covered_lines": 88,
+      "legacy_count": 89,
+      "legacy_covered": 89
+    },
+    {
+      "path": "src/position/rope.rs",
+      "identity": {
+        "sha256": "a7e6589eef13148f0ef3734c6ffd21e46b2f6234045663f2450c22cfeaa92244",
+        "bytes": 21463,
+        "lines": 613
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 246,
+      "covered_lines": 246,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 246,
+      "legacy_covered": 246
+    },
+    {
+      "path": "src/position/rope_tests.rs",
+      "identity": {
+        "sha256": "57b60e5cbef85cbd60aea1cf7ce8b18d655d193814da00baef35020c355f5b8c",
+        "bytes": 8769,
+        "lines": 272
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 172,
+      "covered_lines": 172,
+      "removed_mapped_lines": 172,
+      "removed_covered_lines": 172,
+      "legacy_count": 172,
+      "legacy_covered": 172
+    },
+    {
+      "path": "src/position/t5.rs",
+      "identity": {
+        "sha256": "1061c3173b15f307263a84b1c4b961642de130128c9dda90d8cfcf6722e2fa67",
+        "bytes": 8143,
+        "lines": 221
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 91,
+      "covered_lines": 91,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 91,
+      "legacy_covered": 91
+    },
+    {
+      "path": "src/position/t5_bias.rs",
+      "identity": {
+        "sha256": "edc21e186bc8462f4e136f09a689cba94f3254930de56b352208ad4f7fb96463",
+        "bytes": 7354,
+        "lines": 193
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 108,
+      "covered_lines": 104,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 119,
+      "legacy_covered": 111
+    },
+    {
+      "path": "src/position/t5_bias_tests.rs",
+      "identity": {
+        "sha256": "267eee0719742d2faf142edadaeca4ece1b82b216d82b5e5aaa57704afacf0bc",
+        "bytes": 5623,
+        "lines": 157
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 114,
+      "covered_lines": 113,
+      "removed_mapped_lines": 114,
+      "removed_covered_lines": 113,
+      "legacy_count": 115,
+      "legacy_covered": 114
+    },
+    {
+      "path": "src/position/t5_tests.rs",
+      "identity": {
+        "sha256": "140e0837fcc89c54ebb00df1c826cbbbfcb852c082d17a880b00ea9d4b401853",
+        "bytes": 5702,
+        "lines": 194
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 132,
+      "covered_lines": 132,
+      "removed_mapped_lines": 132,
+      "removed_covered_lines": 132,
+      "legacy_count": 132,
+      "legacy_covered": 132
+    },
+    {
+      "path": "src/position/tensor.rs",
+      "identity": {
+        "sha256": "f5f371017cad66ef491d7f10c852dfb1097b8b7bda2f44ac27382eb4addeed01",
+        "bytes": 11011,
+        "lines": 284
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 207,
+      "covered_lines": 207,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 213,
+      "legacy_covered": 213
+    },
+    {
+      "path": "src/position/tensor_tests.rs",
+      "identity": {
+        "sha256": "d25d226ed581e66d2c4ac0c0453e79ac25484770536fa5637a3a044ace6329e4",
+        "bytes": 9741,
+        "lines": 239
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 172,
+      "covered_lines": 172,
+      "removed_mapped_lines": 172,
+      "removed_covered_lines": 172,
+      "legacy_count": 172,
+      "legacy_covered": 172
+    },
+    {
+      "path": "src/tokenization.rs",
+      "identity": {
+        "sha256": "47d8050b4be467e4edcbb863af64d004253ce1772bb8a994255b4694e5b9ce2d",
+        "bytes": 37747,
+        "lines": 988
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 658,
+      "covered_lines": 652,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 725,
+      "legacy_covered": 705
+    },
+    {
+      "path": "src/tokenization_tests.rs",
+      "identity": {
+        "sha256": "b828990122f5cb8b57ba59af11777531da0e0a09853ab97493674a3740d4b82c",
+        "bytes": 32425,
+        "lines": 896
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 718,
+      "covered_lines": 718,
+      "removed_mapped_lines": 718,
+      "removed_covered_lines": 718,
+      "legacy_count": 718,
+      "legacy_covered": 718
+    },
+    {
+      "path": "src/training.rs",
+      "identity": {
+        "sha256": "4a0c857cf74f64724b12e5d6a49c48f5f14ce54029a746bd73855ad55e3ea3a5",
+        "bytes": 12790,
+        "lines": 303
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 163,
+      "covered_lines": 154,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 164,
+      "legacy_covered": 154
+    },
+    {
+      "path": "src/training_capability_tests.rs",
+      "identity": {
+        "sha256": "555719463c43ed0f719b875ff736e6785d8559903ae4efe911035cbb6ef6c7f6",
+        "bytes": 8863,
+        "lines": 214
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 142,
+      "covered_lines": 141,
+      "removed_mapped_lines": 142,
+      "removed_covered_lines": 141,
+      "legacy_count": 146,
+      "legacy_covered": 145
+    },
+    {
+      "path": "src/training_tests.rs",
+      "identity": {
+        "sha256": "da199f6f74893cb79f53fba72445a26665539dd2dedb26239ec9261ed00705d1",
+        "bytes": 28068,
+        "lines": 683
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 519,
+      "covered_lines": 519,
+      "removed_mapped_lines": 519,
+      "removed_covered_lines": 519,
+      "legacy_count": 535,
+      "legacy_covered": 534
+    },
+    {
+      "path": "src/transfer.rs",
+      "identity": {
+        "sha256": "f10aafbbd1d5daf477f008142d3809532c79927bffbeaa980d9469ce3134eeaf",
+        "bytes": 34123,
+        "lines": 909
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": false
+        },
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "retained_production_compiler_input",
+      "excluded": false,
+      "mapped_lines": 560,
+      "covered_lines": 503,
+      "removed_mapped_lines": 0,
+      "removed_covered_lines": 0,
+      "legacy_count": 591,
+      "legacy_covered": 522
+    },
+    {
+      "path": "src/transfer_tests.rs",
+      "identity": {
+        "sha256": "e16008febec03c494220837f7ef827a905b822d888089ad4715112425f645264",
+        "bytes": 13301,
+        "lines": 411
+      },
+      "compiler_contexts": [
+        {
+          "name": "transformers",
+          "source": "/Users/nover/repos/transformers/src/lib.rs",
+          "test": true
+        }
+      ],
+      "reason": "excluded_whole_test_file_absent_from_production_inputs",
+      "excluded": true,
+      "mapped_lines": 304,
+      "covered_lines": 300,
+      "removed_mapped_lines": 304,
+      "removed_covered_lines": 300,
+      "legacy_count": 310,
+      "legacy_covered": 306
+    }
+  ],
+  "whole_test_file_exclusions_qualified": true,
+  "classifier_capture": {
+    "path": "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/whole-test-file-classifier/invocation.json",
+    "identity": {
+      "sha256": "250c70611cc2362dcbecc679c090983b1e511f50957ea66af5e373afb8e66e8c",
+      "bytes": 2264,
+      "lines": 67
+    }
+  },
+  "native_report": {
+    "path": "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/llvm-export/native-coverage.json",
+    "identity": {
+      "sha256": "22e7fe24c110093b6df2b850d848109c41ba84fb8a7ae851d2834ea9d58701e3",
+      "bytes": 90823730,
+      "lines": 1
+    }
+  },
+  "coverage_log": {
+    "path": "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/00-coverage.log",
+    "identity": {
+      "sha256": "9559e9957aa14198087ef011127b06a132cb99efba6a1f2ba2375c811e880a3d",
+      "bytes": 145248,
+      "lines": 1558
+    }
+  },
+  "retained_run_evidence": {
+    "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/results.json": {
+      "sha256": "4c392a225d0fbcde47f2cf820639411988f4b279b505b0dcc2123bb9d1764896",
+      "bytes": 2612,
+      "lines": 84
+    },
+    "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/00-coverage.log": {
+      "sha256": "9559e9957aa14198087ef011127b06a132cb99efba6a1f2ba2375c811e880a3d",
+      "bytes": 145248,
+      "lines": 1558
+    },
+    "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/compiler-capture-setup.json": {
+      "sha256": "c76656ffbf6a8af935c7ad0d4968f6d7c97a8bb9c482f93bf74146cc8bb0c90c",
+      "bytes": 4979,
+      "lines": 142
+    },
+    "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/compiler-binding.json": {
+      "sha256": "d2b0c6b774b0732fed26993cef0048ea4cf09d5d86937b11b8b76272168991b0",
+      "bytes": 24890,
+      "lines": 642
+    },
+    "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/coverage-inputs-before.json": {
+      "sha256": "b7657151e5839534627d5819290df92ed022b73d545ddb1618b2c030c1f93402",
+      "bytes": 246204,
+      "lines": 5630
+    },
+    "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/coverage-inputs-after.json": {
+      "sha256": "b7657151e5839534627d5819290df92ed022b73d545ddb1618b2c030c1f93402",
+      "bytes": 246204,
+      "lines": 5630
+    },
+    "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/coverage.json": {
+      "sha256": "87e48236ea93f3bedcdc6968c8b052044d67829aba67583bad1438ed212c2761",
+      "bytes": 90840642,
+      "lines": 1
+    }
+  },
+  "source_inventory_sha256": "d28f1762b01ab77971ab596ac13d7a738ae5390cea55f831e5ac8f6d0c45a707"
+}

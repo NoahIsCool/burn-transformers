@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "created_utc": "20260911T000510.776465Z",
+  "gates": [
+    {
+      "gate": "coverage",
+      "command": [
+        "cargo",
+        "+nightly",
+        "llvm-cov",
+        "--manifest-path",
+        "/Users/nover/repos/transformers/Cargo.toml",
+        "--locked",
+        "--offline",
+        "--no-default-features",
+        "--features",
+        "std,flex,tokenizers,chat-templates,autodiff",
+        "--lib",
+        "--tests",
+        "--json",
+        "--output-path",
+        "/Users/nover/repos/transformers/target/release-gates/20260911T000510.776465Z/coverage.json",
+        "--disable-default-ignore-filename-regex"
+      ],
+      "exit_code": 0,
+      "process_exit_code": 0,
+      "log": "00-coverage.log",
+      "storage_preflight": {
+        "checked_path": "/Users/nover/repos/transformers",
+        "checked_utc": "2026-09-11T00:05:10.777201+00:00",
+        "minimum_free_bytes": 21474836480,
+        "free_bytes": 21823225856,
+        "passed": true,
+        "target_environment": {}
+      },
+      "compiler_evidence": {
+        "setup": "compiler-capture-setup.json",
+        "artifact_binding_verified": true,
+        "compiler_reported_inputs_verified": true,
+        "compiler_dependency_closure_verified": false,
+        "production_only_exclusions_qualified": false,
+        "no_export_filter_verified": true,
+        "binding": "compiler-binding.json"
+      },
+      "input_evidence": {
+        "before": "coverage-inputs-before.json",
+        "sources_unchanged": true,
+        "production_only_exclusions_qualified": false,
+        "after": "coverage-inputs-after.json"
+      },
+      "log_identity": {
+        "sha256": "8f93c8c4f2ae3576af47abc478902d9d70ee1907ef240881b4c4bdfe2cff03f5",
+        "bytes": 146290,
+        "lines": 1568
+      },
+      "report_identity": {
+        "sha256": "57112a99d83cb12e66754376c9fcb7c7b8eb2ca756f8bf2f03a032b765d8f222",
+        "bytes": 90933696,
+        "lines": 1
+      },
+      "coverage": {
+        "crate": {
+          "lines": 92778,
+          "covered": 86635,
+          "percent": 93.37881825432754,
+          "minimum_percent": 90,
+          "passed": true
+        },
+        "shared": {
+          "lines": 43721,
+          "covered": 42036,
+          "percent": 96.14601678827108,
+          "minimum_percent": 95,
+          "passed": true
+        },
+        "scope": "reported src/**/*.rs after exporter directory filters, including inline unit tests and generated expansions",
+        "branch_coverage_measured": false,
+        "passed": true
+      },
+      "seconds": 53.732164
+    }
+  ],
+  "passed": true
+}

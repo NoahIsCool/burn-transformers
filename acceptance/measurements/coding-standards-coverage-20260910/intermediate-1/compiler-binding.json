@@ -1,0 +1,642 @@
+{
+  "schema_version": 1,
+  "artifact_binding_verified": true,
+  "compiler_reported_inputs_verified": true,
+  "no_export_filter_verified": true,
+  "compiler_dependency_closure_verified": false,
+  "production_only_exclusions_qualified": false,
+  "scope": "compiler-reported workspace inputs for the captured targets and cfg; no arbitrary macro I/O proof",
+  "native_report": {
+    "path": "/Users/nover/repos/transformers/target/release-gates/20260910T235432.065529Z/llvm-export/native-coverage.json",
+    "identity": {
+      "sha256": "22e7fe24c110093b6df2b850d848109c41ba84fb8a7ae851d2834ea9d58701e3",
+      "bytes": 90823730,
+      "lines": 1
+    }
+  },
+  "targets": [
+    {
+      "target": {
+        "name": "transformers",
+        "source": "/Users/nover/repos/transformers/src/lib.rs",
+        "test": false
+      },
+      "inputs": [
+        "src/architecture/mod.rs",
+        "src/architecture/spec.rs",
+        "src/architecture/traits.rs",
+        "src/architecture/types.rs",
+        "src/attention.rs",
+        "src/cache/config.rs",
+        "src/cache/mod.rs",
+        "src/cache/ring.rs",
+        "src/cache/state.rs",
+        "src/cache/tensor/allocation.rs",
+        "src/cache/tensor/error.rs",
+        "src/cache/tensor/kv.rs",
+        "src/cache/tensor/mod.rs",
+        "src/cache/tensor/recurrent.rs",
+        "src/cache/tensor/state.rs",
+        "src/cache/transaction.rs",
+        "src/checkpoint/accounting.rs",
+        "src/checkpoint/artifact.rs",
+        "src/checkpoint/dtype.rs",
+        "src/checkpoint/error.rs",
+        "src/checkpoint/mapping.rs",
+        "src/checkpoint/mod.rs",
+        "src/checkpoint/options.rs",
+        "src/checkpoint/quantization/burnpack.rs",
+        "src/checkpoint/quantization/checkpoint.rs",
+        "src/checkpoint/quantization/config.rs",
+        "src/checkpoint/quantization/error.rs",
+        "src/checkpoint/quantization/load.rs",
+        "src/checkpoint/quantization/manifest.rs",
+        "src/checkpoint/quantization/mod.rs",
+        "src/checkpoint/quantization/policy.rs",
+        "src/checkpoint/quantization/provenance.rs",
+        "src/checkpoint/quantization/reference.rs",
+        "src/checkpoint/report.rs",
+        "src/checkpoint/runtime/mod.rs",
+        "src/checkpoint/runtime/source.rs",
+        "src/checkpoint/runtime/transform.rs",
+        "src/delta_net.rs",
+        "src/error.rs",
+        "src/experiment.rs",
+        "src/experiment/block.rs",
+        "src/feed_forward.rs",
+        "src/generation.rs",
+        "src/generation/causal.rs",
+        "src/generation/seq2seq.rs",
+        "src/intervention.rs",
+        "src/intervention/validity.rs",
+        "src/lib.rs",
+        "src/loaded.rs",
+        "src/mla.rs",
+        "src/models/auto.rs",
+        "src/models/auto/load.rs",
+        "src/models/config.rs",
+        "src/models/custom.rs",
+        "src/models/custom/causal.rs",
+        "src/models/custom/common.rs",
+        "src/models/custom/seq2seq.rs",
+        "src/models/custom/state.rs",
+        "src/models/deepseek_v2.rs",
+        "src/models/deepseek_v2/checkpoint.rs",
+        "src/models/deepseek_v2/load.rs",
+        "src/models/deepseek_v2/mla.rs",
+        "src/models/deepseek_v2/model.rs",
+        "src/models/deepseek_v2/model/decode.rs",
+        "src/models/gpt2.rs",
+        "src/models/gpt2/checkpoint.rs",
+        "src/models/gpt2/model.rs",
+        "src/models/gpt_neox.rs",
+        "src/models/gpt_neox/load.rs",
+        "src/models/gpt_neox/model.rs",
+        "src/models/mod.rs",
+        "src/models/muse_glimmer.rs",
+        "src/models/muse_glimmer/checkpoint.rs",
+        "src/models/muse_glimmer/load.rs",
+        "src/models/muse_glimmer/model.rs",
+        "src/models/muse_glimmer/model/decode.rs",
+        "src/models/nemotron_h.rs",
+        "src/models/nemotron_h/checkpoint.rs",
+        "src/models/nemotron_h/load.rs",
+        "src/models/nemotron_h/model.rs",
+        "src/models/nemotron_h/model/decode.rs",
+        "src/models/nemotron_h/model/mamba2.rs",
+        "src/models/nemotron_h/model/mtp.rs",
+        "src/models/nemotron_h/model/speculative.rs",
+        "src/models/qwen3_5.rs",
+        "src/models/qwen3_5/checkpoint.rs",
+        "src/models/qwen3_5/load.rs",
+        "src/models/qwen3_5/model.rs",
+        "src/models/qwen3_5/model/decode.rs",
+        "src/models/qwen3_5/model/mtp.rs",
+        "src/models/qwen3_5/model/speculative.rs",
+        "src/models/qwen3_5/recipe.rs",
+        "src/models/qwen3_moe.rs",
+        "src/models/qwen3_moe/checkpoint.rs",
+        "src/models/qwen3_moe/load.rs",
+        "src/models/qwen3_moe/model.rs",
+        "src/models/qwen3_moe/model/decode.rs",
+        "src/models/t5.rs",
+        "src/models/t5/checkpoint.rs",
+        "src/models/t5/generation.rs",
+        "src/models/t5/load.rs",
+        "src/models/t5/model.rs",
+        "src/models/t5/model/decode.rs",
+        "src/models/t5/model/padded_hooks.rs",
+        "src/models/t5/model/recipe.rs",
+        "src/moe.rs",
+        "src/normalization.rs",
+        "src/operations.rs",
+        "src/position/ids.rs",
+        "src/position/mod.rs",
+        "src/position/rope.rs",
+        "src/position/t5.rs",
+        "src/position/t5_bias.rs",
+        "src/position/tensor.rs",
+        "src/tokenization.rs",
+        "src/training.rs",
+        "src/transfer.rs"
+      ],
+      "environment_names": []
+    },
+    {
+      "target": {
+        "name": "transformers",
+        "source": "/Users/nover/repos/transformers/src/lib.rs",
+        "test": true
+      },
+      "inputs": [
+        "src/architecture/mod.rs",
+        "src/architecture/spec.rs",
+        "src/architecture/spec_tests.rs",
+        "src/architecture/traits.rs",
+        "src/architecture/types.rs",
+        "src/architecture/types_tests.rs",
+        "src/attention.rs",
+        "src/attention_intervention_tests.rs",
+        "src/attention_tests.rs",
+        "src/cache/config.rs",
+        "src/cache/config_tests.rs",
+        "src/cache/mod.rs",
+        "src/cache/ring.rs",
+        "src/cache/ring_tests.rs",
+        "src/cache/state.rs",
+        "src/cache/state_tests.rs",
+        "src/cache/tensor/allocation.rs",
+        "src/cache/tensor/error.rs",
+        "src/cache/tensor/kv.rs",
+        "src/cache/tensor/mod.rs",
+        "src/cache/tensor/recurrent.rs",
+        "src/cache/tensor/state.rs",
+        "src/cache/tensor/tests.rs",
+        "src/cache/transaction.rs",
+        "src/cache/transaction_tests.rs",
+        "src/checkpoint/accounting.rs",
+        "src/checkpoint/artifact.rs",
+        "src/checkpoint/dtype.rs",
+        "src/checkpoint/dtype_tests.rs",
+        "src/checkpoint/error.rs",
+        "src/checkpoint/mapping.rs",
+        "src/checkpoint/mod.rs",
+        "src/checkpoint/options.rs",
+        "src/checkpoint/quantization/burnpack.rs",
+        "src/checkpoint/quantization/burnpack_test_support.rs",
+        "src/checkpoint/quantization/burnpack_tests.rs",
+        "src/checkpoint/quantization/burnpack_validation_edge_tests.rs",
+        "src/checkpoint/quantization/checkpoint.rs",
+        "src/checkpoint/quantization/checkpoint_tests.rs",
+        "src/checkpoint/quantization/config.rs",
+        "src/checkpoint/quantization/error.rs",
+        "src/checkpoint/quantization/load.rs",
+        "src/checkpoint/quantization/load_tests.rs",
+        "src/checkpoint/quantization/manifest.rs",
+        "src/checkpoint/quantization/mod.rs",
+        "src/checkpoint/quantization/policy.rs",
+        "src/checkpoint/quantization/provenance.rs",
+        "src/checkpoint/quantization/provenance_tests.rs",
+        "src/checkpoint/quantization/reference.rs",
+        "src/checkpoint/quantization/tests.rs",
+        "src/checkpoint/report.rs",
+        "src/checkpoint/report_tests.rs",
+        "src/checkpoint/runtime/boundary_tests.rs",
+        "src/checkpoint/runtime/mod.rs",
+        "src/checkpoint/runtime/source.rs",
+        "src/checkpoint/runtime/source_boundary_tests.rs",
+        "src/checkpoint/runtime/tests.rs",
+        "src/checkpoint/runtime/transform.rs",
+        "src/checkpoint/runtime/transform_boundary_tests.rs",
+        "src/checkpoint/tests.rs",
+        "src/delta_net.rs",
+        "src/delta_net_tests.rs",
+        "src/error.rs",
+        "src/error_tests.rs",
+        "src/experiment.rs",
+        "src/experiment/block.rs",
+        "src/experiment_tests.rs",
+        "src/feed_forward.rs",
+        "src/feed_forward_tests.rs",
+        "src/generation.rs",
+        "src/generation/causal.rs",
+        "src/generation/causal_tests.rs",
+        "src/generation/seq2seq.rs",
+        "src/generation/seq2seq_tests.rs",
+        "src/generation_tests.rs",
+        "src/intervention.rs",
+        "src/intervention/validity.rs",
+        "src/intervention/validity_tests.rs",
+        "src/intervention_tests.rs",
+        "src/lib.rs",
+        "src/loaded.rs",
+        "src/loaded_tests.rs",
+        "src/mla.rs",
+        "src/mla_tests.rs",
+        "src/models/auto.rs",
+        "src/models/auto/intervention_tests.rs",
+        "src/models/auto/load.rs",
+        "src/models/auto/load_tests.rs",
+        "src/models/auto_tests.rs",
+        "src/models/config.rs",
+        "src/models/config_tests.rs",
+        "src/models/custom.rs",
+        "src/models/custom/causal.rs",
+        "src/models/custom/common.rs",
+        "src/models/custom/composition_tests.rs",
+        "src/models/custom/intervention_tests.rs",
+        "src/models/custom/seq2seq.rs",
+        "src/models/custom/state.rs",
+        "src/models/custom/state_contracts_tests.rs",
+        "src/models/custom/tests.rs",
+        "src/models/deepseek_v2.rs",
+        "src/models/deepseek_v2/checkpoint.rs",
+        "src/models/deepseek_v2/checkpoint_tests.rs",
+        "src/models/deepseek_v2/load.rs",
+        "src/models/deepseek_v2/load_tests.rs",
+        "src/models/deepseek_v2/mla.rs",
+        "src/models/deepseek_v2/model.rs",
+        "src/models/deepseek_v2/model/decode.rs",
+        "src/models/deepseek_v2/model/decode_tests.rs",
+        "src/models/deepseek_v2/model_tests.rs",
+        "src/models/deepseek_v2/model_tests_support.rs",
+        "src/models/deepseek_v2_tests.rs",
+        "src/models/gpt2.rs",
+        "src/models/gpt2/checkpoint.rs",
+        "src/models/gpt2/fixtures/tiny_reference.json",
+        "src/models/gpt2/model.rs",
+        "src/models/gpt2/model_tests.rs",
+        "src/models/gpt_neox.rs",
+        "src/models/gpt_neox/fixtures/oracle.json",
+        "src/models/gpt_neox/load.rs",
+        "src/models/gpt_neox/load_tests.rs",
+        "src/models/gpt_neox/model.rs",
+        "src/models/gpt_neox/tests.rs",
+        "src/models/mod.rs",
+        "src/models/muse_glimmer.rs",
+        "src/models/muse_glimmer/checkpoint.rs",
+        "src/models/muse_glimmer/checkpoint_tests.rs",
+        "src/models/muse_glimmer/load.rs",
+        "src/models/muse_glimmer/load_tests.rs",
+        "src/models/muse_glimmer/model.rs",
+        "src/models/muse_glimmer/model/decode.rs",
+        "src/models/muse_glimmer/model/decode_tests.rs",
+        "src/models/muse_glimmer/model_tests.rs",
+        "src/models/muse_glimmer_tests.rs",
+        "src/models/nemotron_h.rs",
+        "src/models/nemotron_h/checkpoint.rs",
+        "src/models/nemotron_h/checkpoint_tests.rs",
+        "src/models/nemotron_h/load.rs",
+        "src/models/nemotron_h/load_tests.rs",
+        "src/models/nemotron_h/model.rs",
+        "src/models/nemotron_h/model/decode.rs",
+        "src/models/nemotron_h/model/decode_tests.rs",
+        "src/models/nemotron_h/model/mamba2.rs",
+        "src/models/nemotron_h/model/mamba2_tests.rs",
+        "src/models/nemotron_h/model/mtp.rs",
+        "src/models/nemotron_h/model/mtp_tests.rs",
+        "src/models/nemotron_h/model/speculative.rs",
+        "src/models/nemotron_h/model/speculative_tests.rs",
+        "src/models/nemotron_h/model_tests.rs",
+        "src/models/nemotron_h_tests.rs",
+        "src/models/qwen3_5.rs",
+        "src/models/qwen3_5/checkpoint.rs",
+        "src/models/qwen3_5/checkpoint_tests.rs",
+        "src/models/qwen3_5/execution_tests.rs",
+        "src/models/qwen3_5/intervention_tests.rs",
+        "src/models/qwen3_5/load.rs",
+        "src/models/qwen3_5/load_tests.rs",
+        "src/models/qwen3_5/model.rs",
+        "src/models/qwen3_5/model/decode.rs",
+        "src/models/qwen3_5/model/decode_tests.rs",
+        "src/models/qwen3_5/model/mtp.rs",
+        "src/models/qwen3_5/model/speculative.rs",
+        "src/models/qwen3_5/model/speculative_tests.rs",
+        "src/models/qwen3_5/model_tests.rs",
+        "src/models/qwen3_5/recipe.rs",
+        "src/models/qwen3_5/recipe_tests.rs",
+        "src/models/qwen3_5_tests.rs",
+        "src/models/qwen3_moe.rs",
+        "src/models/qwen3_moe/checkpoint.rs",
+        "src/models/qwen3_moe/checkpoint_tests.rs",
+        "src/models/qwen3_moe/load.rs",
+        "src/models/qwen3_moe/load_tests.rs",
+        "src/models/qwen3_moe/model.rs",
+        "src/models/qwen3_moe/model/decode.rs",
+        "src/models/qwen3_moe/model_tests.rs",
+        "src/models/qwen3_moe_tests.rs",
+        "src/models/t5.rs",
+        "src/models/t5/checkpoint.rs",
+        "src/models/t5/checkpoint_tests.rs",
+        "src/models/t5/generation.rs",
+        "src/models/t5/generation_tests.rs",
+        "src/models/t5/load.rs",
+        "src/models/t5/load_tests.rs",
+        "src/models/t5/model.rs",
+        "src/models/t5/model/decode.rs",
+        "src/models/t5/model/decode_tests.rs",
+        "src/models/t5/model/intervention_tests.rs",
+        "src/models/t5/model/padded_hooks.rs",
+        "src/models/t5/model/recipe.rs",
+        "src/models/t5/model/recipe_tests.rs",
+        "src/models/t5/model_tests.rs",
+        "src/models/t5_tests.rs",
+        "src/moe.rs",
+        "src/moe_tests.rs",
+        "src/normalization.rs",
+        "src/normalization_tests.rs",
+        "src/operations.rs",
+        "src/operations_tests.rs",
+        "src/position/ids.rs",
+        "src/position/ids_tests.rs",
+        "src/position/mod.rs",
+        "src/position/rope.rs",
+        "src/position/rope_tests.rs",
+        "src/position/t5.rs",
+        "src/position/t5_bias.rs",
+        "src/position/t5_bias_tests.rs",
+        "src/position/t5_tests.rs",
+        "src/position/tensor.rs",
+        "src/position/tensor_tests.rs",
+        "src/tokenization.rs",
+        "src/tokenization_tests.rs",
+        "src/training.rs",
+        "src/training_capability_tests.rs",
+        "src/training_tests.rs",
+        "src/transfer.rs",
+        "src/transfer_tests.rs",
+        "tests/fixtures/flan_t5_xl.json",
+        "tests/fixtures/qwen3_30b_a3b.json",
+        "tests/fixtures/qwen3_5_0_8b.json",
+        "tests/fixtures/qwen3_5_checkpoint/qwen3_5_0_8b_inventory.json",
+        "tests/fixtures/qwen3_5_checkpoint/qwen3_8_27b_inventory.json",
+        "tests/fixtures/qwen3_5_checkpoint/tiny_text_inventory.json",
+        "tests/fixtures/qwen3_8_27b.json",
+        "tests/fixtures/ul2.json"
+      ],
+      "environment_names": [
+        "CARGO_MANIFEST_DIR"
+      ]
+    },
+    {
+      "target": {
+        "name": "small_model_benchmarks",
+        "source": "/Users/nover/repos/transformers/tests/small_model_benchmarks.rs",
+        "test": true
+      },
+      "inputs": [
+        "acceptance/flan-t5-small-0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab.json",
+        "tests/small_model_benchmarks.rs",
+        "tests/support/benchmark_metrics.rs"
+      ],
+      "environment_names": [
+        "CARGO_MANIFEST_DIR",
+        "RUSTUP_TOOLCHAIN"
+      ]
+    },
+    {
+      "target": {
+        "name": "local_artifacts",
+        "source": "/Users/nover/repos/transformers/tests/local_artifacts.rs",
+        "test": true
+      },
+      "inputs": [
+        "tests/fixtures/qwen3_5_checkpoint/qwen3_8_27b_inventory.json",
+        "tests/fixtures/qwen3_8_27b.json",
+        "tests/local_artifacts.rs"
+      ],
+      "environment_names": []
+    },
+    {
+      "target": {
+        "name": "qwen35_release_api",
+        "source": "/Users/nover/repos/transformers/tests/qwen35_release_api.rs",
+        "test": true
+      },
+      "inputs": [
+        "tests/qwen35_release_api.rs"
+      ],
+      "environment_names": []
+    },
+    {
+      "target": {
+        "name": "t5_xxl_metal",
+        "source": "/Users/nover/repos/transformers/tests/t5_xxl_metal.rs",
+        "test": true
+      },
+      "inputs": [
+        "tests/t5_xxl_metal.rs"
+      ],
+      "environment_names": []
+    },
+    {
+      "target": {
+        "name": "t5_xxl_artifacts",
+        "source": "/Users/nover/repos/transformers/tests/t5_xxl_artifacts.rs",
+        "test": true
+      },
+      "inputs": [
+        "tests/fixtures/flan_t5_xxl.json",
+        "tests/t5_xxl_artifacts.rs"
+      ],
+      "environment_names": []
+    },
+    {
+      "target": {
+        "name": "qwen35_benchmarks",
+        "source": "/Users/nover/repos/transformers/tests/qwen35_benchmarks.rs",
+        "test": true
+      },
+      "inputs": [
+        "tests/fixtures/qwen3_5_0_8b.json",
+        "tests/qwen35_benchmarks.rs",
+        "tests/support/benchmark_metrics.rs",
+        "tests/support/public_generation_benchmark.rs"
+      ],
+      "environment_names": []
+    },
+    {
+      "target": {
+        "name": "nemotron_h_artifacts",
+        "source": "/Users/nover/repos/transformers/tests/nemotron_h_artifacts.rs",
+        "test": true
+      },
+      "inputs": [
+        "acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json",
+        "tests/fixtures/nemotron_h_checkpoint/headers/model-00001-of-00014.safetensors.header",
+        "tests/fixtures/nemotron_h_checkpoint/headers/model-00002-of-00014.safetensors.header",
+        "tests/fixtures/nemotron_h_checkpoint/headers/model-00003-of-00014.safetensors.header",
+        "tests/fixtures/nemotron_h_checkpoint/headers/model-00004-of-00014.safetensors.header",
+        "tests/fixtures/nemotron_h_checkpoint/headers/model-00005-of-00014.safetensors.header",
+        "tests/fixtures/nemotron_h_checkpoint/headers/model-00006-of-00014.safetensors.header",
+        "tests/fixtures/nemotron_h_checkpoint/headers/model-00007-of-00014.safetensors.header",
+        "tests/fixtures/nemotron_h_checkpoint/headers/model-00008-of-00014.safetensors.header",
+        "tests/fixtures/nemotron_h_checkpoint/headers/model-00009-of-00014.safetensors.header",
+        "tests/fixtures/nemotron_h_checkpoint/headers/model-00010-of-00014.safetensors.header",
+        "tests/fixtures/nemotron_h_checkpoint/headers/model-00011-of-00014.safetensors.header",
+        "tests/fixtures/nemotron_h_checkpoint/headers/model-00012-of-00014.safetensors.header",
+        "tests/fixtures/nemotron_h_checkpoint/headers/model-00013-of-00014.safetensors.header",
+        "tests/fixtures/nemotron_h_checkpoint/headers/model-00014-of-00014.safetensors.header",
+        "tests/fixtures/nemotron_h_checkpoint/nemotron_3_5_lightning_30b_a3b_config.json",
+        "tests/fixtures/nemotron_h_checkpoint/nemotron_3_5_lightning_30b_a3b_index.json",
+        "tests/fixtures/nemotron_h_checkpoint/synthetic_oracles_v1.json",
+        "tests/nemotron_h_artifacts.rs",
+        "tests/support/nemotron_h_base_reference.rs",
+        "tests/support/nemotron_h_parity.rs",
+        "tests/support/nemotron_h_reference.rs"
+      ],
+      "environment_names": [
+        "CARGO_MANIFEST_DIR"
+      ]
+    },
+    {
+      "target": {
+        "name": "packed_metal_kernels",
+        "source": "/Users/nover/repos/transformers/tests/packed_metal_kernels.rs",
+        "test": true
+      },
+      "inputs": [
+        "tests/packed_metal_kernels.rs"
+      ],
+      "environment_names": []
+    },
+    {
+      "target": {
+        "name": "deepseek_v2_artifacts",
+        "source": "/Users/nover/repos/transformers/tests/deepseek_v2_artifacts.rs",
+        "test": true
+      },
+      "inputs": [
+        "tests/deepseek_v2_artifacts.rs",
+        "tests/fixtures/deepseek_v2_lite.json"
+      ],
+      "environment_names": []
+    },
+    {
+      "target": {
+        "name": "flan_t5_small",
+        "source": "/Users/nover/repos/transformers/tests/flan_t5_small.rs",
+        "test": true
+      },
+      "inputs": [
+        "tests/flan_t5_small.rs"
+      ],
+      "environment_names": []
+    },
+    {
+      "target": {
+        "name": "model_configs",
+        "source": "/Users/nover/repos/transformers/tests/model_configs.rs",
+        "test": true
+      },
+      "inputs": [
+        "tests/fixtures/deepseek_v2.json",
+        "tests/fixtures/flan_t5_xl.json",
+        "tests/fixtures/muse_glimmer.json",
+        "tests/fixtures/nemotron_h_8b.json",
+        "tests/fixtures/qwen3_30b_a3b.json",
+        "tests/fixtures/qwen3_8_27b.json",
+        "tests/fixtures/ul2.json",
+        "tests/model_configs.rs"
+      ],
+      "environment_names": []
+    },
+    {
+      "target": {
+        "name": "muse_glimmer_artifacts",
+        "source": "/Users/nover/repos/transformers/tests/muse_glimmer_artifacts.rs",
+        "test": true
+      },
+      "inputs": [
+        "acceptance/muse-glimmer-30b-a4e59da52a7bc87ae7251dd5545c0dd437c44b68.json",
+        "scripts/generate_muse_glimmer_reference.py",
+        "tests/fixtures/muse_glimmer_30b.json",
+        "tests/fixtures/muse_glimmer_30b_generation.json",
+        "tests/muse_glimmer_artifacts.rs",
+        "tests/support/quantized_quality.rs"
+      ],
+      "environment_names": []
+    },
+    {
+      "target": {
+        "name": "qwen3_moe_artifacts",
+        "source": "/Users/nover/repos/transformers/tests/qwen3_moe_artifacts.rs",
+        "test": true
+      },
+      "inputs": [
+        "scripts/generate_qwen38_reference.py",
+        "scripts/generate_qwen3_moe_reference.py",
+        "tests/fixtures/qwen3_30b_a3b.json",
+        "tests/qwen3_moe_artifacts.rs",
+        "tests/support/qwen3_moe_reference.rs"
+      ],
+      "environment_names": []
+    },
+    {
+      "target": {
+        "name": "experiment_interface_properties",
+        "source": "/Users/nover/repos/transformers/tests/experiment_interface_properties.rs",
+        "test": true
+      },
+      "inputs": [
+        "tests/experiment_interface_properties.rs"
+      ],
+      "environment_names": []
+    },
+    {
+      "target": {
+        "name": "acceptance_records",
+        "source": "/Users/nover/repos/transformers/tests/acceptance_records.rs",
+        "test": true
+      },
+      "inputs": [
+        "tests/acceptance_records.rs"
+      ],
+      "environment_names": [
+        "CARGO_MANIFEST_DIR"
+      ]
+    }
+  ],
+  "production_link": "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/libtransformers-cbd661ad392ea96e.rlib",
+  "llvm_objects": [
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/acceptance_records-34bdee7e6f4c1640",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/deepseek_v2_artifacts-9cc13dec8c54d640",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/experiment_interface_properties-88e73638b652883f",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/flan_t5_small-c1776bdfc868054d",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/local_artifacts-194bb38278c4a596",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/model_configs-f32453d64159e8e6",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/muse_glimmer_artifacts-ae0e17f9e2bf5cd1",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/nemotron_h_artifacts-586512733f7375d1",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/packed_metal_kernels-e1337592274bdeb2",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/qwen35_benchmarks-e3b0d7a7d844bf73",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/qwen35_release_api-61b423e4532d63ab",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/qwen3_moe_artifacts-75dc27fa20807dcf",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/small_model_benchmarks-8ead6a06a394ef06",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/t5_xxl_artifacts-a27f4dbb2d9aa019",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/t5_xxl_metal-e178f73b2827e15a",
+    "/Users/nover/repos/transformers/target/llvm-cov-target/debug/deps/transformers-f3fc71c5641ed631"
+  ],
+  "reviewed_tool_option_notice": {
+    "text": "warning: --disable-default-ignore-filename-regex option is unstable",
+    "count": 1
+  },
+  "native_aggregate": {
+    "crate": {
+      "lines": 92454,
+      "covered": 86259,
+      "percent": 93.29937049776105,
+      "minimum_percent": 90,
+      "passed": true
+    },
+    "shared": {
+      "lines": 43397,
+      "covered": 41660,
+      "percent": 95.99741917644077,
+      "minimum_percent": 95,
+      "passed": true
+    },
+    "scope": "unfiltered native export restricted to src/**/*.rs, including inline unit tests and generated expansions",
+    "branch_coverage_measured": false,
+    "passed": true
+  }
+}
