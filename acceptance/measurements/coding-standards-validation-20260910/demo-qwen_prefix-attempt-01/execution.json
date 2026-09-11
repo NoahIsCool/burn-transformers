@@ -1,0 +1,32 @@
+{
+  "id": "demo-qwen_prefix",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "run",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,flex,autodiff,train,tokenizers,chat-templates",
+    "--example",
+    "qwen_prefix",
+    "--",
+    "--random"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "runner_sha256": "d428bb39cc2ec00985bbd0d46c9740b3f79916c157207d33a638ddbc418c38a0",
+  "started_utc": "2026-09-10T23:57:48.738405+00:00",
+  "finished_utc": "2026-09-10T23:57:50.352398+00:00",
+  "seconds": 1.6139845830039121,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "demo-qwen_prefix-attempt-01/inputs-before.json",
+  "inputs_after": "demo-qwen_prefix-attempt-01/inputs-after.json",
+  "output": "demo-qwen_prefix-attempt-01/output.log",
+  "output_sha256": "e45763707760ce0d2edb5729f893b51233af0765cc5ef7422040357ef31ce7f1",
+  "passed": true
+}

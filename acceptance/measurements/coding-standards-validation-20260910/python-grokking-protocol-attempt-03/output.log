@@ -1,0 +1,13 @@
+test_affine_sinusoid_variance_explained_separates_constant_offset (test_protocol.FrozenProtocolTests.test_affine_sinusoid_variance_explained_separates_constant_offset) ... ok
+test_criterion_is_strict_and_requires_later_generalization (test_protocol.FrozenProtocolTests.test_criterion_is_strict_and_requires_later_generalization) ... ok
+test_exact_author_split_and_pinned_bytes (test_protocol.FrozenProtocolTests.test_exact_author_split_and_pinned_bytes) ... ok
+test_fourier_pair_selection_matches_an_independent_complex_dft (test_protocol.FrozenProtocolTests.test_fourier_pair_selection_matches_an_independent_complex_dft) ... ok
+test_frequency_indices_are_one_based_with_explicit_tie_order (test_protocol.FrozenProtocolTests.test_frequency_indices_are_one_based_with_explicit_tie_order) ... ok
+test_mainline_configuration_preserves_training_output_class (test_protocol.FrozenProtocolTests.test_mainline_configuration_preserves_training_output_class) ... ok
+test_measurement_schedule_includes_baseline_and_full_run (test_protocol.FrozenProtocolTests.test_measurement_schedule_includes_baseline_and_full_run) ... ok
+test_plot_input_rejects_misordered_steps_nonfinite_and_bad_power (test_protocol.FrozenProtocolTests.test_plot_input_rejects_misordered_steps_nonfinite_and_bad_power) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.031s
+
+OK

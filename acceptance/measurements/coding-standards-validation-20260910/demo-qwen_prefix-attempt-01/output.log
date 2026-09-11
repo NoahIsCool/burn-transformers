@@ -1,0 +1,6 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 1.33s
+     Running `target/release/examples/qwen_prefix --random`
+Initializing 2 random Qwen blocks; no checkpoint is read.
+Captured last-block neurons: [1, 1, 12]
+Untrained two-class logits: [0.15602936, 0.20307882]

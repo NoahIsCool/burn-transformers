@@ -1,0 +1,29 @@
+{
+  "id": "layout-tests",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "test",
+    "--release",
+    "--locked",
+    "--offline",
+    "--manifest-path",
+    "/Users/nover/repos/transformers/scripts/coverage-layout/Cargo.toml",
+    "--target-dir",
+    "/Users/nover/repos/transformers/target"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "layout",
+  "runner_sha256": "d428bb39cc2ec00985bbd0d46c9740b3f79916c157207d33a638ddbc418c38a0",
+  "started_utc": "2026-09-10T23:57:29.610198+00:00",
+  "finished_utc": "2026-09-10T23:57:32.664127+00:00",
+  "seconds": 3.0539265829720534,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "layout-tests-attempt-01/inputs-before.json",
+  "inputs_after": "layout-tests-attempt-01/inputs-after.json",
+  "output": "layout-tests-attempt-01/output.log",
+  "output_sha256": "e06737ca72e38a64354726a8c9ed8093d51c42cac4761faad4099f9f6e9d5e84",
+  "passed": true
+}

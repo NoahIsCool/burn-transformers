@@ -1,0 +1,17 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 14.51s
+     Running tests/experiment_interface_properties.rs (target/release/deps/experiment_interface_properties-47f4dbb3a3246d0d)
+
+running 9 tests
+test malformed_selections_never_invoke_an_edit_or_publish_partial_captures ... ok
+test broadcast_validity_erases_poison_and_survives_ordered_edits ... ok
+test a_failed_transfer_leaves_every_original_parameter_and_alias_untouched ... ok
+test semantic_selection_edits_only_the_named_cartesian_slice ... ok
+test kl_matches_teacher_to_student_expectation_and_batch_replication ... ok
+test transfer_preserves_exact_alias_partitions_or_explicitly_unties ... ok
+test stable_losses_match_scalar_probabilities_and_ignore_row_offsets ... ok
+test attention_constraints_preserve_exact_exclusions_after_both_edit_layers ... ok
+test stable_loss_gradients_match_softmax_with_maximum_ties ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

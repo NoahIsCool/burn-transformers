@@ -1,0 +1,23 @@
+{
+  "command": [
+    "cargo",
+    "+stable",
+    "test",
+    "--release",
+    "--locked",
+    "--offline",
+    "--features",
+    "autodiff",
+    "--test",
+    "experiment_interface_properties",
+    "--target-dir",
+    "/Users/nover/repos/transformers/target"
+  ],
+  "cwd": "/private/tmp/tfm-standards-properties",
+  "free_bytes_before": 22053036032,
+  "minimum_free_bytes": 21474836480,
+  "started": 1789082413.237341,
+  "exit_code": 101,
+  "elapsed_seconds": 85.24398303031921,
+  "free_bytes_after": 21987442688
+}

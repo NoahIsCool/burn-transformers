@@ -1,0 +1,71 @@
+test_all_command_groups_are_scoped (test_check_release.ReleaseGateTests.test_all_command_groups_are_scoped)
+Build every group without shell interpolation or mutable lockfiles. ... ok
+test_compile_detection_includes_coverage_documentation_and_package_verification (test_check_release.ReleaseGateTests.test_compile_detection_includes_coverage_documentation_and_package_verification)
+Every compile-capable operation gets a preflight, even with a warm cache. ... ok
+test_context_changes_are_rejected_and_tool_versions_are_explicit (test_check_release.ReleaseGateTests.test_context_changes_are_rejected_and_tool_versions_are_explicit)
+Environment, runner and selected tools are evidence, not hidden defaults. ... ok
+test_coverage_validation_failure_records_native_success_separately (test_check_release.ReleaseGateTests.test_coverage_validation_failure_records_native_success_separately)
+An invalid export must leave a failed manifest and skip later gates. ... ok
+test_dry_run_does_not_measure_storage_or_create_evidence (test_check_release.ReleaseGateTests.test_dry_run_does_not_measure_storage_or_create_evidence)
+Command previews remain read-only even when the host cannot report storage. ... ok
+test_duplicate_files_cannot_inflate_denominator (test_check_release.ReleaseGateTests.test_duplicate_files_cannot_inflate_denominator)
+Require the exporter to merge profiles before reporting counters. ... ok
+test_duplicate_gate_names_fail_before_creating_artifacts (test_check_release.ReleaseGateTests.test_duplicate_gate_names_fail_before_creating_artifacts)
+Repeated coverage groups must not overwrite earlier raw evidence. ... ok
+test_each_threshold_can_fail_independently (test_check_release.ReleaseGateTests.test_each_threshold_can_fail_independently)
+A passing crate aggregate does not waive the shared-module gate. ... ok
+test_empty_and_malformed_reports_fail_closed (test_check_release.ReleaseGateTests.test_empty_and_malformed_reports_fail_closed)
+Do not treat zero lines or invalid counts as perfect coverage. ... ok
+test_exact_thresholds_and_exclusions (test_check_release.ReleaseGateTests.test_exact_thresholds_and_exclusions)
+Keep experimental source but exclude integration harnesses/dependencies. ... ok
+test_failed_preflight_or_spawn_leaves_a_failed_manifest (test_check_release.ReleaseGateTests.test_failed_preflight_or_spawn_leaves_a_failed_manifest)
+Missing inputs and tools must not leave an unrecorded successful prefix. ... ok
+test_low_storage_stops_before_coverage_setup_or_native_execution (test_check_release.ReleaseGateTests.test_low_storage_stops_before_coverage_setup_or_native_execution)
+A failed storage observation cannot acquire native or compiler-binding claims. ... ok
+test_msrv_alias_is_checked_exactly (test_check_release.ReleaseGateTests.test_msrv_alias_is_checked_exactly)
+A rolling stable alias must never silently substitute a newer MSRV. ... ok
+test_native_failure_still_records_terminal_inputs_without_using_counters (test_check_release.ReleaseGateTests.test_native_failure_still_records_terminal_inputs_without_using_counters)
+Preserve native failure separately from any validation outcome. ... ok
+test_offline_advisory_limits_are_explicit (test_check_release.ReleaseGateTests.test_offline_advisory_limits_are_explicit)
+Only two reviewed maintenance IDs are waived; stale DBs still fail. ... ok
+test_only_one_exact_reviewed_option_notice_is_permitted_when_opted_in (test_check_release.ReleaseGateTests.test_only_one_exact_reviewed_option_notice_is_permitted_when_opted_in)
+The non-numerical upstream option notice never hides a compiler/LLVM warning. ... ok
+test_opt_in_compiler_binding_failure_cannot_adopt_native_success (test_check_release.ReleaseGateTests.test_opt_in_compiler_binding_failure_cannot_adopt_native_success)
+Cache-hit/incomplete evidence fails even when the legacy aggregate passes. ... ok
+test_opt_in_compiler_binding_is_separate_and_does_not_leak_wrappers (test_check_release.ReleaseGateTests.test_opt_in_compiler_binding_is_separate_and_does_not_leak_wrappers)
+Successful bindings retain raw counters, while later gates use normal env. ... ok
+test_package_listing_checks_the_actual_cargo_inventory (test_check_release.ReleaseGateTests.test_package_listing_checks_the_actual_cargo_inventory)
+Allow model source but reject artifact trees, weights, and bytecode. ... ok
+test_package_patterns_are_root_anchored (test_check_release.ReleaseGateTests.test_package_patterns_are_root_anchored)
+Unanchored filename globs also select artifacts through model symlinks. ... ok
+test_relative_llvm_source_paths_use_the_compiler_working_directory (test_check_release.ReleaseGateTests.test_relative_llvm_source_paths_use_the_compiler_working_directory)
+Invoking the runner from a parent checkout must not silently drop files. ... ok
+test_report_or_log_edit_during_validation_discards_the_summary (test_check_release.ReleaseGateTests.test_report_or_log_edit_during_validation_discards_the_summary)
+Hashing raw evidence once does not excuse a later parse-time change. ... ok
+test_source_checks_compile_native_training_without_changing_coverage_profile (test_check_release.ReleaseGateTests.test_source_checks_compile_native_training_without_changing_coverage_profile)
+The gated Learner example must not disappear behind an inactive cfg. ... ok
+test_source_experiments_run_without_checkpoint_or_network_preparation (test_check_release.ReleaseGateTests.test_source_experiments_run_without_checkpoint_or_network_preparation)
+Compilation alone cannot validate the public experiments' assertions. ... ok
+test_source_mutation_fails_before_any_counter_is_adopted (test_check_release.ReleaseGateTests.test_source_mutation_fails_before_any_counter_is_adopted)
+Even same-size input edits invalidate otherwise passing native output. ... ok
+test_stable_coverage_records_both_snapshots_and_raw_identities (test_check_release.ReleaseGateTests.test_stable_coverage_records_both_snapshots_and_raw_identities)
+A green native run is byte-bound but still not production-qualified. ... ok
+test_standalone_classifier_has_separate_source_and_msrv_checks (test_check_release.ReleaseGateTests.test_standalone_classifier_has_separate_source_and_msrv_checks)
+The dev-only parser has its own lockfile, tests and warning-denied lint. ... ok
+test_storage_is_rechecked_before_each_compile_but_not_formatting (test_check_release.ReleaseGateTests.test_storage_is_rechecked_before_each_compile_but_not_formatting)
+One passing observation cannot authorize a later compile after space falls. ... ok
+test_storage_preflight_uses_exact_gib_boundary_and_retains_override (test_check_release.ReleaseGateTests.test_storage_preflight_uses_exact_gib_boundary_and_retains_override)
+Exactly 20 GiB passes; a target override never changes the measured path. ... ok
+test_successful_export_with_warnings_is_not_qualified (test_check_release.ReleaseGateTests.test_successful_export_with_warnings_is_not_qualified)
+LLVM's zero status does not excuse stale, mismatched, or partial data. ... ok
+test_uncaptured_or_non_rust_coverage_entries_fail_before_adopting_counters (test_check_release.ReleaseGateTests.test_uncaptured_or_non_rust_coverage_entries_fail_before_adopting_counters)
+Stable source files do not make a stale deleted-file export acceptable. ... ok
+test_unknown_group_is_rejected (test_check_release.ReleaseGateTests.test_unknown_group_is_rejected)
+Reject programming errors instead of silently running no gates. ... ok
+test_unreadable_free_space_is_recorded_without_spawning (test_check_release.ReleaseGateTests.test_unreadable_free_space_is_recorded_without_spawning)
+Failure to measure is distinct from an observed low-space count. ... ok
+
+----------------------------------------------------------------------
+Ran 33 tests in 2.949s
+
+OK

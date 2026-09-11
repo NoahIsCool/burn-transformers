@@ -1,0 +1,7 @@
+test_pure_circles_and_difference_dependent_logits (analyze_tests.Diagnostics.test_pure_circles_and_difference_dependent_logits) ... ok
+test_sum_dependent_logits_have_unit_distance_irrelevance (analyze_tests.Diagnostics.test_sum_dependent_logits_have_unit_distance_irrelevance) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.002s
+
+OK

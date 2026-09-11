@@ -1,0 +1,29 @@
+{
+  "id": "rust-autodiff-no-backend",
+  "attempt": 2,
+  "command": [
+    "cargo",
+    "+nightly",
+    "check",
+    "--release",
+    "--locked",
+    "--offline",
+    "--lib",
+    "--no-default-features",
+    "--features",
+    "std,autodiff"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "runner_sha256": "01ef9cb4d2f2dce23e169b7c6353d61cdefca88611f9cd05239ee083bd797437",
+  "started_utc": "2026-09-11T00:05:14.899072+00:00",
+  "finished_utc": "2026-09-11T00:05:15.153355+00:00",
+  "seconds": 0.25427516602212563,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "rust-autodiff-no-backend-attempt-02/inputs-before.json",
+  "inputs_after": "rust-autodiff-no-backend-attempt-02/inputs-after.json",
+  "output": "rust-autodiff-no-backend-attempt-02/output.log",
+  "output_sha256": "a70da5408e7a6da7efe97b23011504833b16a7875bda14543f2504b5b8c7d97a",
+  "passed": true
+}

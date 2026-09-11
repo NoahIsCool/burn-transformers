@@ -1,0 +1,22 @@
+{
+  "command": [
+    "cargo",
+    "+nightly",
+    "test",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,flex,autodiff,train,tokenizers,chat-templates",
+    "--lib",
+    "experiment::tests"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "free_bytes_before": 21932449792,
+  "minimum_free_bytes": 21474836480,
+  "started": 1789083296.4018612,
+  "exit_code": 101,
+  "elapsed_seconds": 237.64440989494324,
+  "free_bytes_after": 21925584896
+}

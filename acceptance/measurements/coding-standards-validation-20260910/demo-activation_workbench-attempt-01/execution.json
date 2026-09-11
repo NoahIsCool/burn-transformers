@@ -1,0 +1,30 @@
+{
+  "id": "demo-activation_workbench",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "run",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,flex,autodiff,train,tokenizers,chat-templates",
+    "--example",
+    "activation_workbench"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "runner_sha256": "d428bb39cc2ec00985bbd0d46c9740b3f79916c157207d33a638ddbc418c38a0",
+  "started_utc": "2026-09-10T23:57:37.994867+00:00",
+  "finished_utc": "2026-09-10T23:57:39.730624+00:00",
+  "seconds": 1.7357647499884479,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "demo-activation_workbench-attempt-01/inputs-before.json",
+  "inputs_after": "demo-activation_workbench-attempt-01/inputs-after.json",
+  "output": "demo-activation_workbench-attempt-01/output.log",
+  "output_sha256": "fda8080422f9eda5fe94e6e9931a61c3ebb5f1150387c6b5caf8b66cde598de2",
+  "passed": true
+}

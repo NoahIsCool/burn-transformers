@@ -1,0 +1,11 @@
+    Finished `release` profile [optimized] target(s) in 0.20s
+   Doc-tests transformers
+
+running 3 tests
+test src/intervention.rs - intervention (line 4) ... ok
+test src/transfer.rs - transfer (line 5) ... ok
+test src/models/gpt2.rs - models::gpt2 (line 14) ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.99s; merged doctests compilation took 0.83s

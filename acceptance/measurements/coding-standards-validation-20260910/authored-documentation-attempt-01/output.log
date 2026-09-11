@@ -1,0 +1,6 @@
+checkpoint: 0/368 functions and 0/21 modules missing required line docs; 0 inline test bodies; 0 opaque authored functions
+examples: 0/256 functions and 0/42 modules missing required line docs; 0 inline test bodies; 0 opaque authored functions
+fuzz: 0/25 functions and 0/13 modules missing required line docs; 0 inline test bodies; 0 opaque authored functions
+models: 0/1091 functions and 0/55 modules missing required line docs; 0 inline test bodies; 0 opaque authored functions
+shared: 0/763 functions and 0/41 modules missing required line docs; 0 inline test bodies; 0 opaque authored functions
+tooling: 0/73 functions and 0/7 modules missing required line docs; 0 inline test bodies; 0 opaque authored functions

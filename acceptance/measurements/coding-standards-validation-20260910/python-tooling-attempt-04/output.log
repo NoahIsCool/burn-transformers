@@ -1,0 +1,653 @@
+test_cli_distinguishes_style_failure_from_incomplete_inspection (test_check_documentation.DocumentationWrapperTests.test_cli_distinguishes_style_failure_from_incomplete_inspection)
+Inventory mode relaxes style enforcement, never unresolved source inspection. ... ok
+test_discovery_does_not_trust_test_filenames_or_audit_retained_evidence (test_check_documentation.DocumentationWrapperTests.test_discovery_does_not_trust_test_filenames_or_audit_retained_evidence)
+Only explicit discovery roots are skipped; a *_tests name proves nothing. ... ok
+test_helper_failure_preserves_its_actionable_diagnostic (test_check_documentation.DocumentationWrapperTests.test_helper_failure_preserves_its_actionable_diagnostic)
+Expose the parser's source-change error instead of only its invocation. ... ok
+test_helper_schema_and_root_are_verified (test_check_documentation.DocumentationWrapperTests.test_helper_schema_and_root_are_verified)
+An incompatible helper or report from another checkout is rejected. ... ok
+test_production_reference_into_fixture_directory_is_still_audited (test_check_documentation.DocumentationWrapperTests.test_production_reference_into_fixture_directory_is_still_audited)
+Discovery exclusions cannot override the parser's actual module graph. ... ok
+test_source_edit_during_parsing_invalidates_the_inventory (test_check_documentation.DocumentationWrapperTests.test_source_edit_during_parsing_invalidates_the_inventory)
+Read-only checks fail if another process edits a source during inspection. ... ok
+test_stale_parser_snapshot_and_outside_paths_fail_closed (test_check_documentation.DocumentationWrapperTests.test_stale_parser_snapshot_and_outside_paths_fail_closed)
+A plausible report cannot bind mismatched bytes or an escaping path. ... ok
+test_unreferenced_source_is_added_as_a_conservative_production_entry (test_check_documentation.DocumentationWrapperTests.test_unreferenced_source_is_added_as_a_conservative_production_entry)
+A newly authored source cannot disappear merely because its module is unwired. ... ok
+test_all_command_groups_are_scoped (test_check_release.ReleaseGateTests.test_all_command_groups_are_scoped)
+Build every group without shell interpolation or mutable lockfiles. ... ok
+test_compile_detection_includes_coverage_documentation_and_package_verification (test_check_release.ReleaseGateTests.test_compile_detection_includes_coverage_documentation_and_package_verification)
+Every compile-capable operation gets a preflight, even with a warm cache. ... ok
+test_context_changes_are_rejected_and_tool_versions_are_explicit (test_check_release.ReleaseGateTests.test_context_changes_are_rejected_and_tool_versions_are_explicit)
+Environment, runner and selected tools are evidence, not hidden defaults. ... ok
+test_coverage_validation_failure_records_native_success_separately (test_check_release.ReleaseGateTests.test_coverage_validation_failure_records_native_success_separately)
+An invalid export must leave a failed manifest and skip later gates. ... ok
+test_dry_run_does_not_measure_storage_or_create_evidence (test_check_release.ReleaseGateTests.test_dry_run_does_not_measure_storage_or_create_evidence)
+Command previews remain read-only even when the host cannot report storage. ... ok
+test_duplicate_files_cannot_inflate_denominator (test_check_release.ReleaseGateTests.test_duplicate_files_cannot_inflate_denominator)
+Require the exporter to merge profiles before reporting counters. ... ok
+test_duplicate_gate_names_fail_before_creating_artifacts (test_check_release.ReleaseGateTests.test_duplicate_gate_names_fail_before_creating_artifacts)
+Repeated coverage groups must not overwrite earlier raw evidence. ... ok
+test_each_threshold_can_fail_independently (test_check_release.ReleaseGateTests.test_each_threshold_can_fail_independently)
+A passing crate aggregate does not waive the shared-module gate. ... ok
+test_empty_and_malformed_reports_fail_closed (test_check_release.ReleaseGateTests.test_empty_and_malformed_reports_fail_closed)
+Do not treat zero lines or invalid counts as perfect coverage. ... ok
+test_exact_thresholds_and_exclusions (test_check_release.ReleaseGateTests.test_exact_thresholds_and_exclusions)
+Keep experimental source but exclude integration harnesses/dependencies. ... ok
+test_failed_preflight_or_spawn_leaves_a_failed_manifest (test_check_release.ReleaseGateTests.test_failed_preflight_or_spawn_leaves_a_failed_manifest)
+Missing inputs and tools must not leave an unrecorded successful prefix. ... ok
+test_low_storage_stops_before_coverage_setup_or_native_execution (test_check_release.ReleaseGateTests.test_low_storage_stops_before_coverage_setup_or_native_execution)
+A failed storage observation cannot acquire native or compiler-binding claims. ... ok
+test_msrv_alias_is_checked_exactly (test_check_release.ReleaseGateTests.test_msrv_alias_is_checked_exactly)
+A rolling stable alias must never silently substitute a newer MSRV. ... ok
+test_native_failure_still_records_terminal_inputs_without_using_counters (test_check_release.ReleaseGateTests.test_native_failure_still_records_terminal_inputs_without_using_counters)
+Preserve native failure separately from any validation outcome. ... ok
+test_offline_advisory_limits_are_explicit (test_check_release.ReleaseGateTests.test_offline_advisory_limits_are_explicit)
+Only two reviewed maintenance IDs are waived; stale DBs still fail. ... ok
+test_only_one_exact_reviewed_option_notice_is_permitted_when_opted_in (test_check_release.ReleaseGateTests.test_only_one_exact_reviewed_option_notice_is_permitted_when_opted_in)
+The non-numerical upstream option notice never hides a compiler/LLVM warning. ... ok
+test_opt_in_compiler_binding_failure_cannot_adopt_native_success (test_check_release.ReleaseGateTests.test_opt_in_compiler_binding_failure_cannot_adopt_native_success)
+Cache-hit/incomplete evidence fails even when the legacy aggregate passes. ... ok
+test_opt_in_compiler_binding_is_separate_and_does_not_leak_wrappers (test_check_release.ReleaseGateTests.test_opt_in_compiler_binding_is_separate_and_does_not_leak_wrappers)
+Successful bindings retain raw counters, while later gates use normal env. ... ok
+test_package_listing_checks_the_actual_cargo_inventory (test_check_release.ReleaseGateTests.test_package_listing_checks_the_actual_cargo_inventory)
+Allow model source but reject artifact trees, weights, and bytecode. ... ok
+test_package_patterns_are_root_anchored (test_check_release.ReleaseGateTests.test_package_patterns_are_root_anchored)
+Unanchored filename globs also select artifacts through model symlinks. ... ok
+test_relative_llvm_source_paths_use_the_compiler_working_directory (test_check_release.ReleaseGateTests.test_relative_llvm_source_paths_use_the_compiler_working_directory)
+Invoking the runner from a parent checkout must not silently drop files. ... ok
+test_report_or_log_edit_during_validation_discards_the_summary (test_check_release.ReleaseGateTests.test_report_or_log_edit_during_validation_discards_the_summary)
+Hashing raw evidence once does not excuse a later parse-time change. ... ok
+test_source_checks_compile_native_training_without_changing_coverage_profile (test_check_release.ReleaseGateTests.test_source_checks_compile_native_training_without_changing_coverage_profile)
+The gated Learner example must not disappear behind an inactive cfg. ... ok
+test_source_experiments_run_without_checkpoint_or_network_preparation (test_check_release.ReleaseGateTests.test_source_experiments_run_without_checkpoint_or_network_preparation)
+Compilation alone cannot validate the public experiments' assertions. ... ok
+test_source_mutation_fails_before_any_counter_is_adopted (test_check_release.ReleaseGateTests.test_source_mutation_fails_before_any_counter_is_adopted)
+Even same-size input edits invalidate otherwise passing native output. ... ok
+test_stable_coverage_records_both_snapshots_and_raw_identities (test_check_release.ReleaseGateTests.test_stable_coverage_records_both_snapshots_and_raw_identities)
+A green native run is byte-bound but still not production-qualified. ... ok
+test_standalone_classifier_has_separate_source_and_msrv_checks (test_check_release.ReleaseGateTests.test_standalone_classifier_has_separate_source_and_msrv_checks)
+The dev-only parser has its own lockfile, tests and warning-denied lint. ... ok
+test_storage_is_rechecked_before_each_compile_but_not_formatting (test_check_release.ReleaseGateTests.test_storage_is_rechecked_before_each_compile_but_not_formatting)
+One passing observation cannot authorize a later compile after space falls. ... ok
+test_storage_preflight_uses_exact_gib_boundary_and_retains_override (test_check_release.ReleaseGateTests.test_storage_preflight_uses_exact_gib_boundary_and_retains_override)
+Exactly 20 GiB passes; a target override never changes the measured path. ... ok
+test_successful_export_with_warnings_is_not_qualified (test_check_release.ReleaseGateTests.test_successful_export_with_warnings_is_not_qualified)
+LLVM's zero status does not excuse stale, mismatched, or partial data. ... ok
+test_uncaptured_or_non_rust_coverage_entries_fail_before_adopting_counters (test_check_release.ReleaseGateTests.test_uncaptured_or_non_rust_coverage_entries_fail_before_adopting_counters)
+Stable source files do not make a stale deleted-file export acceptable. ... ok
+test_unknown_group_is_rejected (test_check_release.ReleaseGateTests.test_unknown_group_is_rejected)
+Reject programming errors instead of silently running no gates. ... ok
+test_unreadable_free_space_is_recorded_without_spawning (test_check_release.ReleaseGateTests.test_unreadable_free_space_is_recorded_without_spawning)
+Failure to measure is distinct from an observed low-space count. ... ok
+test_changed_inputs_and_incomplete_captures_fail_closed (test_coverage_binding.BindingTests.test_changed_inputs_and_incomplete_captures_fail_closed)
+Exercise stale binary/source/profile, producer, target and link accounting. ... ok
+test_expected_targets_respect_feature_requirements_and_standalone_scope (test_coverage_binding.BindingTests.test_expected_targets_respect_feature_requirements_and_standalone_scope)
+Missing production/integration contexts and workspace build scripts fail. ... ok
+test_export_capture_retains_failures_and_terminates_oversized_output (test_coverage_binding.BindingTests.test_export_capture_retains_failures_and_terminates_oversized_output)
+Zero status cannot excuse changed inputs; failed child/output stays failed. ... ok
+test_export_grammar_rejects_implicit_or_duplicate_inputs (test_coverage_binding.BindingTests.test_export_grammar_rejects_implicit_or_duplicate_inputs)
+Response files, summary-only output and path aliases cannot hide objects. ... ok
+test_inherited_overrides_fail_before_queries_or_files (test_coverage_binding.BindingTests.test_inherited_overrides_fail_before_queries_or_files)
+An explicit capture run cannot silently replace an existing build wrapper. ... ok
+test_json_and_path_bounds (test_coverage_binding.BindingTests.test_json_and_path_bounds)
+Malformed records and symlink substitutions are not authentic observations. ... ok
+test_literal_compiler_arguments_are_unambiguous (test_coverage_binding.BindingTests.test_literal_compiler_arguments_are_unambiguous)
+Reject response/remapping and disabled coverage instead of guessing flags. ... ok
+test_metadata_queries_reject_diagnostics_and_excess_output (test_coverage_binding.BindingTests.test_metadata_queries_reject_diagnostics_and_excess_output)
+Preflight cannot bypass warning policy or buffer unbounded query text. ... ok
+test_producer_requires_exact_nightly_and_unique_fields (test_coverage_binding.BindingTests.test_producer_requires_exact_nightly_and_unique_fields)
+A mutable nightly alias or stable LLVM identity does not imply compatibility. ... ok
+test_valid_capture_has_narrow_claims (test_coverage_binding.BindingTests.test_valid_capture_has_narrow_claims)
+Bind production+unit+integration inputs without authorizing exclusions. ... ok
+test_cache_reuse_then_unique_wrapper_and_exact_export (test_coverage_binding.NativeBindingTests.test_cache_reuse_then_unique_wrapper_and_exact_export)
+Same wrapper reuses artifacts; a new path recompiles all selected targets. ... skipped 'opt-in tiny offline native Cargo/LLVM fixture'
+test_real_runner_requires_the_bound_native_report (test_coverage_binding.NativeBindingTests.test_real_runner_requires_the_bound_native_report)
+Exercise the actual opt-in runner end to end without the Burn dependency graph. ... skipped 'opt-in tiny offline native Cargo/LLVM fixture'
+test_default_emission_response_files_and_linking_prints_are_not_probes (test_coverage_compiler.ArtifactMessageTests.test_default_emission_response_files_and_linking_prints_are_not_probes)
+Unsupported compiler forms fail explicitly instead of losing evidence. ... ok
+test_identities_require_dep_info_and_real_compiled_artifacts (test_coverage_compiler.ArtifactMessageTests.test_identities_require_dep_info_and_real_compiled_artifacts)
+Files are byte-bound only inside the designated output directory. ... ok
+test_malformed_or_unsupported_messages_fail_closed (test_coverage_compiler.ArtifactMessageTests.test_malformed_or_unsupported_messages_fail_closed)
+Ambiguous keys, lossy JSON and unknown emission kinds cannot be records. ... ok
+test_native_paths_are_not_split_or_make_unescaped (test_coverage_compiler.ArtifactMessageTests.test_native_paths_are_not_split_or_make_unescaped)
+Artifact JSON makes spaces, hashes and dollar signs unambiguous. ... ok
+test_outside_paths_symlinks_missing_and_nonregular_outputs_fail (test_coverage_compiler.ArtifactMessageTests.test_outside_paths_symlinks_missing_and_nonregular_outputs_fail)
+Native-looking paths cannot make the wrapper read unrelated files. ... ok
+test_records_never_overwrite_and_probes_do_not_need_capture_roots (test_coverage_compiler.ArtifactMessageTests.test_records_never_overwrite_and_probes_do_not_need_capture_roots)
+A repeated invocation identity is an error; Cargo probes remain transparent. ... ok
+test_version_probe_bounds_diagnostics_encoding_and_native_failure (test_coverage_compiler.ArtifactMessageTests.test_version_probe_bounds_diagnostics_encoding_and_native_failure)
+Spooling version text avoids unlimited memory buffering of probe output. ... ok
+test_artifact_changes_before_copy_and_before_terminal_validation_fail (test_coverage_compiler.CaptureLifecycleTests.test_artifact_changes_before_copy_and_before_terminal_validation_fail)
+Rechecking only the copied dep-info would miss changed compiled binaries. ... ok
+test_malformed_deep_and_oversized_messages_are_drained_before_failure (test_coverage_compiler.CaptureLifecycleTests.test_malformed_deep_and_oversized_messages_are_drained_before_failure)
+A parse failure never strands the child behind a full stderr pipe. ... ok
+test_native_failure_never_adopts_plausible_artifact_messages (test_coverage_compiler.CaptureLifecycleTests.test_native_failure_never_adopts_plausible_artifact_messages)
+Native status wins even if an earlier compilation stage emitted files. ... ok
+test_stable_success_is_byte_bound_and_missing_artifacts_are_failed (test_coverage_compiler.CaptureLifecycleTests.test_stable_success_is_byte_bound_and_missing_artifacts_are_failed)
+A zero exit needs both validated dependency and compiled outputs. ... ok
+test_cargo_workspace_wrapper_captures_real_library_and_unit_artifacts (test_coverage_compiler.NativeCompilerCaptureTests.test_cargo_workspace_wrapper_captures_real_library_and_unit_artifacts)
+Native Cargo probes and compiler-artifact messages work without Burn builds. ... skipped 'set TFM_COMPILER_CAPTURE_NATIVE_TESTS=1 for isolated rustc captures'
+test_success_failure_and_probe_capture_contract (test_coverage_compiler.NativeCompilerCaptureTests.test_success_failure_and_probe_capture_contract)
+Capture both native producers with exact argv and separately retained dep-info. ... skipped 'set TFM_COMPILER_CAPTURE_NATIVE_TESTS=1 for isolated rustc captures'
+test_between_token_continuations_and_crlf (test_coverage_dependencies.DependencyGrammarTests.test_between_token_continuations_and_crlf)
+Only explicitly separated, indented rule wrapping is supported. ... ok
+test_continuation_ambiguities_fail_closed (test_coverage_dependencies.DependencyGrammarTests.test_continuation_ambiguities_fail_closed)
+Mid-token splits, missing indentation, comments and dangling slashes fail. ... ok
+test_duplicate_dependencies_are_returned_once (test_coverage_dependencies.DependencyGrammarTests.test_duplicate_dependencies_are_returned_once)
+Repeated tracked inputs and phony rules preserve first-seen identity. ... ok
+test_environment_backslash_does_not_continue_comment (test_coverage_dependencies.DependencyGrammarTests.test_environment_backslash_does_not_continue_comment)
+A doubled terminal slash belongs to the environment, not the next line. ... ok
+test_environment_uses_separate_escape_rules (test_coverage_dependencies.DependencyGrammarTests.test_environment_uses_separate_escape_rules)
+Spaces, Make punctuation, equals, CR/LF and backslashes remain environment data. ... ok
+test_environment_values_are_not_leaked_by_errors (test_coverage_dependencies.DependencyGrammarTests.test_environment_values_are_not_leaked_by_errors)
+Malformed escapes/conflicts provide context without reflecting secret values. ... ok
+test_escaped_space_is_not_a_continuation_separator (test_coverage_dependencies.DependencyGrammarTests.test_escaped_space_is_not_a_continuation_separator)
+A quoted terminal space cannot merge the next physical line into a path. ... ok
+test_escaped_spaces_and_unicode_are_preserved (test_coverage_dependencies.DependencyGrammarTests.test_escaped_spaces_and_unicode_are_preserved)
+Leading/trailing/repeated spaces and Unicode never undergo split or normalization. ... ok
+test_final_newline_is_optional (test_coverage_dependencies.DependencyGrammarTests.test_final_newline_is_optional)
+A complete terminal phony rule needs no trailing physical newline. ... ok
+test_identical_environment_duplicates_do_not_conflict (test_coverage_dependencies.DependencyGrammarTests.test_identical_environment_duplicates_do_not_conflict)
+Exact duplicate observations are harmless, unlike changed values. ... ok
+test_invalid_input_encoding_and_control_characters_fail (test_coverage_dependencies.DependencyGrammarTests.test_invalid_input_encoding_and_control_characters_fail)
+Lossy decoding and forbidden physical line encodings cannot change identity. ... ok
+test_literal_terminal_backslash_cannot_swallow_an_input (test_coverage_dependencies.DependencyGrammarTests.test_literal_terminal_backslash_cannot_swallow_an_input)
+The corresponding phony rule vetoes a misleading escaped-space parse. ... ok
+test_make_constructs_fail_closed (test_coverage_dependencies.DependencyGrammarTests.test_make_constructs_fail_closed)
+Variables, comments, recipes, assignments, patterns and order-only rules fail. ... ok
+test_missing_targets_rules_and_phase_inversions_fail (test_coverage_dependencies.DependencyGrammarTests.test_missing_targets_rules_and_phase_inversions_fail)
+Empty or reordered fragments are not accepted as a complete rustc inventory. ... ok
+test_multiple_targets_and_outputs_are_not_dependencies (test_coverage_dependencies.DependencyGrammarTests.test_multiple_targets_and_outputs_are_not_dependencies)
+Spaced/raw output targets do not contaminate compiler input paths. ... ok
+test_native_special_filenames_and_generic_make_escapes_are_rejected (test_coverage_dependencies.DependencyGrammarTests.test_native_special_filenames_and_generic_make_escapes_are_rejected)
+Never reinterpret rustc's raw #/$/backslash as conventional Make escaping. ... ok
+test_only_exact_reviewed_producers_are_supported (test_coverage_dependencies.DependencyGrammarTests.test_only_exact_reviewed_producers_are_supported)
+Neither matching semver, a commit prefix nor another LLVM version is enough. ... ok
+test_output_and_phony_inventories_must_agree (test_coverage_dependencies.DependencyGrammarTests.test_output_and_phony_inventories_must_agree)
+Truncation, hidden extra inputs, and cross-output disagreement are rejected. ... ok
+test_paths_remain_opaque_not_resolved_or_classified (test_coverage_dependencies.DependencyGrammarTests.test_paths_remain_opaque_not_resolved_or_classified)
+Absolute/traversing/test-named inputs are returned, not trusted or excluded. ... ok
+test_review_provenance_matches_the_explicit_producer_matrix (test_coverage_dependencies.DependencyGrammarTests.test_review_provenance_matches_the_explicit_producer_matrix)
+Recorded source review pins remain aligned without pretending to prove exclusions. ... ok
+test_syntax_does_not_imply_compiler_identity (test_coverage_dependencies.DependencyGrammarTests.test_syntax_does_not_imply_compiler_identity)
+Successfully parsing unversioned text makes no source or producer assertion. ... ok
+test_unexplained_comments_fail_closed (test_coverage_dependencies.DependencyGrammarTests.test_unexplained_comments_fail_closed)
+Unsupported comments cannot hide filenames or unparsed checksum metadata. ... ok
+test_native_spaces_in_sources_includes_outputs_and_environment (test_coverage_dependencies.NativeRustcDependencyTests.test_native_spaces_in_sources_includes_outputs_and_environment)
+Actual raw spaced targets and escaped inputs preserve all source identities. ... skipped 'set TFM_DEPINFO_NATIVE_TESTS=1 for the pinned native compiler matrix'
+test_native_unescaped_special_paths_are_rejected_not_misdecoded (test_coverage_dependencies.NativeRustcDependencyTests.test_native_unescaped_special_paths_are_rejected_not_misdecoded)
+The real producer writes raw #/$/backslash paths; do not invent Make escapes. ... skipped 'set TFM_DEPINFO_NATIVE_TESTS=1 for the pinned native compiler matrix'
+test_clean_sibling_cannot_replace_the_actual_coverage_log (test_coverage_exclusions.ClassifierCaptureTests.test_clean_sibling_cannot_replace_the_actual_coverage_log)
+A warning-bearing original is never rescued by a different clean sibling. ... ok
+test_failed_native_validation_and_changed_retained_scope_are_rejected (test_coverage_exclusions.ClassifierCaptureTests.test_failed_native_validation_and_changed_retained_scope_are_rejected)
+Native nonzero, bool statuses, invented success and stale records all fail. ... ok
+test_fresh_capture_binds_invocation_output_tool_and_scope (test_coverage_exclusions.ClassifierCaptureTests.test_fresh_capture_binds_invocation_output_tool_and_scope)
+Original stdout bytes and each explicit root remain attached to the call. ... ok
+test_nonzero_diagnostics_mutations_and_timeouts_retain_failed_record (test_coverage_exclusions.ClassifierCaptureTests.test_nonzero_diagnostics_mutations_and_timeouts_retain_failed_record)
+A failed invocation never turns into an empty or qualified classification. ... ok
+test_retained_invocation_mutations_are_rejected (test_coverage_exclusions.ClassifierCaptureTests.test_retained_invocation_mutations_are_rejected)
+No stale log/report, changed executable or forged target list is adopted. ... ok
+test_run_row_binds_exact_log_identity_and_all_retained_scope_records (test_coverage_exclusions.ClassifierCaptureTests.test_run_row_binds_exact_log_identity_and_all_retained_scope_records)
+Success identifies the row's log plus command/setup/input/binding evidence. ... ok
+test_native_compiler_edges_override_the_classifier_without_inline_exclusions (test_coverage_exclusions.NativeWholeFileTests.test_native_compiler_edges_override_the_classifier_without_inline_exclusions)
+Build only a tiny offline fixture and the independent development classifier. ... skipped 'opt-in tiny pinned compiler/classifier fixture'
+test_native_structural_diagnostic_cannot_promote_macro_generated_tests (test_coverage_exclusions.NativeWholeFileTests.test_native_structural_diagnostic_cannot_promote_macro_generated_tests)
+Parsed eligibility distinguishes visible bodies but cannot prove macro origins. ... skipped 'opt-in tiny pinned compiler/classifier fixture'
+test_each_residual_test_owner_or_unknown_test_dependency_blocks_without_exclusion (test_coverage_exclusions.StructuralAuditTests.test_each_residual_test_owner_or_unknown_test_dependency_blocks_without_exclusion)
+Every explicit residual body stays counted and records an actionable blocker. ... ok
+test_malformed_audit_sites_and_false_external_declarations_fail_closed (test_coverage_exclusions.StructuralAuditTests.test_malformed_audit_sites_and_false_external_declarations_fail_closed)
+A malformed record cannot promote a body by spelling it a declaration. ... ok
+test_old_incomplete_unit_only_unclassified_and_test_context_only_inputs_block (test_coverage_exclusions.StructuralAuditTests.test_old_incomplete_unit_only_unclassified_and_test_context_only_inputs_block)
+Compiler input membership alone cannot turn included text into runtime code. ... ok
+test_resolved_external_declaration_can_share_a_counted_production_line (test_coverage_exclusions.StructuralAuditTests.test_resolved_external_declaration_can_share_a_counted_production_line)
+The entire physical line remains; only the bodyless declaration is harmless. ... ok
+test_structural_eligibility_is_independent_of_thresholds_and_artifact_proof (test_coverage_exclusions.StructuralAuditTests.test_structural_eligibility_is_independent_of_thresholds_and_artifact_proof)
+A valid layout does not imply sufficient exercised production code. ... ok
+test_unknown_runtime_macros_remain_counted_without_a_global_closure_claim (test_coverage_exclusions.StructuralAuditTests.test_unknown_runtime_macros_remain_counted_without_a_global_closure_claim)
+An opaque runtime diagnostic is not an exclusion or expansion attestation. ... ok
+test_unmapped_module_parent_is_audited_without_adding_a_coverage_line (test_coverage_exclusions.StructuralAuditTests.test_unmapped_module_parent_is_audited_without_adding_a_coverage_line)
+An unreported parent can still make a measured child's cfg/path ambiguous. ... ok
+test_unreported_parent_contexts_and_regions_fail_closed_in_the_direct_helper (test_coverage_exclusions.StructuralAuditTests.test_unreported_parent_contexts_and_regions_fail_closed_in_the_direct_helper)
+No-row parents receive the same context/region/line validation as rows. ... ok
+test_equivalent_duplicate_context_is_not_confused_with_ambiguity (test_coverage_exclusions.WholeFileTests.test_equivalent_duplicate_context_is_not_confused_with_ambiguity)
+Repeated positive observations remain represented but do not forbid exclusion. ... ok
+test_exact_macros_in_every_whole_test_context_do_not_infer_expansion_ownership (test_coverage_exclusions.WholeFileTests.test_exact_macros_in_every_whole_test_context_do_not_infer_expansion_ownership)
+Whole-file proof, not a property-library name or macro expansion, qualifies. ... ok
+test_identity_entries_target_and_input_mismatches_fail_closed (test_coverage_exclusions.WholeFileTests.test_identity_entries_target_and_input_mismatches_fail_closed)
+A same-named source or false qualification bit cannot replace evidence. ... ok
+test_integer_threshold_boundaries_remain_90_and_95 (test_coverage_exclusions.WholeFileTests.test_integer_threshold_boundaries_remain_90_and_95)
+No rounding or coverage-exclusion policy changes either required threshold. ... ok
+test_macro_diagnostic_requires_exact_nonempty_parsed_macro_span (test_coverage_exclusions.WholeFileTests.test_macro_diagnostic_requires_exact_nonempty_parsed_macro_span)
+Verbatim, nearby regions, missing positions and partial matches stay counted. ... ok
+test_macro_diagnostics_cannot_waive_production_cfg_path_or_context_vetoes (test_coverage_exclusions.WholeFileTests.test_macro_diagnostics_cannot_waive_production_cfg_path_or_context_vetoes)
+Matching an opaque span never overrides any independent retention reason. ... ok
+test_malformed_line_and_context_contracts_fail_instead_of_becoming_empty (test_coverage_exclusions.WholeFileTests.test_malformed_line_and_context_contracts_fail_instead_of_becoming_empty)
+Missing, overlapping, truncated, nonintegral and contradictory structures fail. ... ok
+test_malformed_macro_coordinates_fail_instead_of_authorizing_exclusion (test_coverage_exclusions.WholeFileTests.test_malformed_macro_coordinates_fail_instead_of_authorizing_exclusion)
+Malformed opaque-diagnostic evidence must not become a benign exception. ... ok
+test_missing_unit_observation_and_classifier_file_are_retained (test_coverage_exclusions.WholeFileTests.test_missing_unit_observation_and_classifier_file_are_retained)
+Absence from production alone is insufficient evidence for removing source. ... ok
+test_native_aliases_bounds_unbound_files_and_invalid_counters_fail (test_coverage_exclusions.WholeFileTests.test_native_aliases_bounds_unbound_files_and_invalid_counters_fail)
+A denominator cannot double-count aliases or trust out-of-source line mappings. ... ok
+test_only_whole_test_candidate_is_removed_and_counters_stay_distinct (test_coverage_exclusions.WholeFileTests.test_only_whole_test_candidate_is_removed_and_counters_stay_distinct)
+Neither test directory names nor experimental-family status is a waiver. ... ok
+test_production_alias_mixed_line_and_unknown_diagnostics_are_retained (test_coverage_exclusions.WholeFileTests.test_production_alias_mixed_line_and_unknown_diagnostics_are_retained)
+Any unknown context, even on blank bytes, vetoes a whole-file exclusion. ... ok
+test_production_input_vetoes_even_a_syntactic_test_candidate (test_coverage_exclusions.WholeFileTests.test_production_input_vetoes_even_a_syntactic_test_candidate)
+Compiler-discovered macro/include edges override the parsed module graph. ... ok
+test_fixture_bytes_and_tool_provenance_are_pinned (test_coverage_lines.NativeFixtureTests.test_fixture_bytes_and_tool_provenance_are_pinned)
+Changes to source or native exports require explicit evidence updates. ... ok
+test_native_lcov_line_records_match_json_reconstruction (test_coverage_lines.NativeFixtureTests.test_native_lcov_line_records_match_json_reconstruction)
+Compare every physical line/count without trusting LLVM LF/LH totals. ... ok
+test_empty_and_unmapped_files (test_coverage_lines.PhysicalLineTests.test_empty_and_unmapped_files)
+No regions means no mapped lines, not a 100 percent coverage claim. ... ok
+test_gap_counts_do_not_dominate_entry_line (test_coverage_lines.PhysicalLineTests.test_gap_counts_do_not_dominate_entry_line)
+Gap segments carry counts forward but are not non-gap region starts. ... ok
+test_gap_entry_restores_skipped_mapping_without_its_own_count (test_coverage_lines.PhysicalLineTests.test_gap_entry_restores_skipped_mapping_without_its_own_count)
+The any-counted-entry rule includes gaps, unlike the count maximum. ... ok
+test_huge_coordinates_are_measured_without_dense_allocation (test_coverage_lines.PhysicalLineTests.test_huge_coordinates_are_measured_without_dense_allocation)
+A valid uint32 source extent occupies one run, not billions of entries. ... ok
+test_later_counted_entry_restores_skipped_line (test_coverage_lines.PhysicalLineTests.test_later_counted_entry_restores_skipped_line)
+A later entry restores mapping and keeps LLVM's wrapped maximum. ... ok
+test_leading_gap_and_gap_entry_match_distinct_llvm_rules (test_coverage_lines.PhysicalLineTests.test_leading_gap_and_gap_entry_match_distinct_llvm_rules)
+Gap starts without entry map only later lines; counted entries map now. ... ok
+test_nonentry_count_changes_apply_on_the_next_line (test_coverage_lines.PhysicalLineTests.test_nonentry_count_changes_apply_on_the_next_line)
+A resumed enclosing region is not independently a region entry. ... ok
+test_same_line_regions_use_maximum_not_sum (test_coverage_lines.PhysicalLineTests.test_same_line_regions_use_maximum_not_sum)
+Overlapping closure/function regions contribute one physical line. ... ok
+test_same_position_skipped_marker_can_resume_enclosing_count (test_coverage_lines.PhysicalLineTests.test_same_position_skipped_marker_can_resume_enclosing_count)
+LLVM permits a duplicate location when the earlier segment has no count. ... ok
+test_separated_functions_leave_unmapped_gaps (test_coverage_lines.PhysicalLineTests.test_separated_functions_leave_unmapped_gaps)
+Ending one function never fills empty source lines before another. ... ok
+test_skipped_end_column_one_does_not_map_end_line (test_coverage_lines.PhysicalLineTests.test_skipped_end_column_one_does_not_map_end_line)
+Region-entry status, not column alone, distinguishes skipped endpoints. ... ok
+test_skipped_start_suppresses_wrapped_mapping (test_coverage_lines.PhysicalLineTests.test_skipped_start_suppresses_wrapped_mapping)
+An explicit skipped-region entry overrides a positive wrapped count. ... ok
+test_wrapped_count_can_dominate_new_region (test_coverage_lines.PhysicalLineTests.test_wrapped_count_can_dominate_new_region)
+The preceding line's active count participates in this line's max. ... ok
+test_wrapped_segments_include_final_line (test_coverage_lines.PhysicalLineTests.test_wrapped_segments_include_final_line)
+Counts carry across lines without entries, including LLVM's end line. ... ok
+test_zero_count_is_mapped_but_uncovered (test_coverage_lines.PhysicalLineTests.test_zero_count_is_mapped_but_uncovered)
+Unexecuted functions keep their physical lines in the denominator. ... ok
+test_all_files_are_retained_without_trusting_summary_counts (test_coverage_lines.ValidationTests.test_all_files_are_retained_without_trusting_summary_counts)
+This primitive cannot waive tests, generated code, models or dependencies. ... ok
+test_coordinates_reject_nonintegers_and_out_of_range_values (test_coverage_lines.ValidationTests.test_coordinates_reject_nonintegers_and_out_of_range_values)
+Do not accept bool-as-int, zero coordinates, or uint32 overflow. ... ok
+test_duplicate_files_across_blocks_are_not_merged (test_coverage_lines.ValidationTests.test_duplicate_files_across_blocks_are_not_merged)
+Merging uncorrelated coverage maps could silently double denominators. ... ok
+test_execution_count_is_a_clamped_nonnegative_json_integer (test_coverage_lines.ValidationTests.test_execution_count_is_a_clamped_nonnegative_json_integer)
+Reject counter overflow, negative values, floats, strings and booleans. ... ok
+test_file_metadata_requires_names_and_full_segment_exports (test_coverage_lines.ValidationTests.test_file_metadata_requires_names_and_full_segment_exports)
+Missing segments are not interchangeable with a genuinely empty file. ... ok
+test_flags_are_boolean_and_uncounted_segments_are_zero (test_coverage_lines.ValidationTests.test_flags_are_boolean_and_uncounted_segments_are_zero)
+No-count markers cannot smuggle positive counters or gap semantics. ... ok
+test_only_supported_export_envelopes_are_accepted (test_coverage_lines.ValidationTests.test_only_supported_export_envelopes_are_accepted)
+Require exact type/version and nonempty data blocks, not tool guesses. ... ok
+test_positions_cannot_reverse_or_overlap_counted_segments (test_coverage_lines.ValidationTests.test_positions_cannot_reverse_or_overlap_counted_segments)
+Preserve LLVM's ordered boundary interpretation, including columns. ... ok
+test_segment_array_and_arity_are_strict (test_coverage_lines.ValidationTests.test_segment_array_and_arity_are_strict)
+Reject missing arrays, tuples, dictionaries and extra segment fields. ... ok
+test_unterminated_counted_segment_is_not_silently_clipped (test_coverage_lines.ValidationTests.test_unterminated_counted_segment_is_not_silently_clipped)
+Without its endpoint, the extent of an active count is unknowable. ... ok
+test_classifier_binding_requires_exact_source_bytes_and_root (test_coverage_provenance.SourceSnapshotTests.test_classifier_binding_requires_exact_source_bytes_and_root)
+Matching hashes bind observations without making syntax a coverage gate. ... ok
+test_directory_listing_is_bounded_before_sorting_or_hashing (test_coverage_provenance.SourceSnapshotTests.test_directory_listing_is_bounded_before_sorting_or_hashing)
+Reject oversized inventories without materializing the full iterator. ... ok
+test_each_resource_bound_and_invalid_bound_fail_closed (test_coverage_provenance.SourceSnapshotTests.test_each_resource_bound_and_invalid_bound_fail_closed)
+No unbounded input walk or file read can be mistaken for a snapshot. ... ok
+test_exact_hash_line_conventions_and_empty_files (test_coverage_provenance.SourceSnapshotTests.test_exact_hash_line_conventions_and_empty_files)
+Hash original bytes, including BOM/CRLF and a non-LF final line. ... ok
+test_ignored_source_is_included_but_external_models_are_not_read (test_coverage_provenance.SourceSnapshotTests.test_ignored_source_is_included_but_external_models_are_not_read)
+A Git-ignored module may compile; an artifact root is not source input. ... ok
+test_inventory_digest_is_portable_sorted_and_byte_bound (test_coverage_provenance.SourceSnapshotTests.test_inventory_digest_is_portable_sorted_and_byte_bound)
+Equivalent inputs in another checkout have the same content digest. ... ok
+test_mutation_during_read_is_detected_on_the_open_descriptor (test_coverage_provenance.SourceSnapshotTests.test_mutation_during_read_is_detected_on_the_open_descriptor)
+A same-size edit during hashing must not produce accepted mixed bytes. ... ok
+test_relative_path_policy_rejects_ambiguous_spellings (test_coverage_provenance.SourceSnapshotTests.test_relative_path_policy_rejects_ambiguous_spellings)
+Do not give traversal, Windows prefixes or separators alternate names. ... ok
+test_root_inputs_and_test_fixture_bytes_are_fingerprinted (test_coverage_provenance.SourceSnapshotTests.test_root_inputs_and_test_fixture_bytes_are_fingerprinted)
+Build configuration and acceptance fixtures can alter a test execution. ... ok
+test_same_length_edit_added_removed_and_renamed_files_are_rejected (test_coverage_provenance.SourceSnapshotTests.test_same_length_edit_added_removed_and_renamed_files_are_rejected)
+Content hashes and membership, not size or timestamps alone, bind inputs. ... ok
+test_script_inputs_are_bound_but_generated_outputs_are_scoped_out (test_coverage_provenance.SourceSnapshotTests.test_script_inputs_are_bound_but_generated_outputs_are_scoped_out)
+Rust include_bytes fixtures include scripts, but Python creates bytecode. ... ok
+test_stream_boundaries_preserve_hashes_and_lf_counts (test_coverage_provenance.SourceSnapshotTests.test_stream_boundaries_preserve_hashes_and_lf_counts)
+Chunking cannot normalize or lose bytes at a buffer boundary. ... ok
+test_symlinked_and_nonregular_inputs_are_rejected (test_coverage_provenance.SourceSnapshotTests.test_symlinked_and_nonregular_inputs_are_rejected)
+Reject aliases rather than reading outside or omitting dangling inputs. ... ok
+test_touch_without_byte_changes_preserves_content_identity (test_coverage_provenance.SourceSnapshotTests.test_touch_without_byte_changes_preserves_content_identity)
+Post-run content comparison does not fail merely because mtimes differ. ... ok
+test_boundary_input_is_exact_and_hashable (test_generate_flan_t5_small_reference.FlanSmallReferenceTests.test_boundary_input_is_exact_and_hashable)
+Pin the maximum declared input construction without a 512-item literal. ... ok
+test_canonical_record_digest_is_order_independent (test_generate_flan_t5_small_reference.FlanSmallReferenceTests.test_canonical_record_digest_is_order_independent)
+Ensure provenance identities do not depend on directory iteration. ... ok
+test_closed_artifact_inventory_and_hashes (test_generate_flan_t5_small_reference.FlanSmallReferenceTests.test_closed_artifact_inventory_and_hashes)
+Fail on missing, unexpected, substituted, and non-directory entries. ... ok
+test_exact_package_versions_are_available (test_generate_flan_t5_small_reference.FlanSmallReferenceTests.test_exact_package_versions_are_available)
+Guard the inexpensive environment half of maintainer preflight. ... ok
+test_hash_and_strict_json_helpers (test_generate_flan_t5_small_reference.FlanSmallReferenceTests.test_hash_and_strict_json_helpers)
+Pin standard SHA-256 and deterministic finite JSON behavior. ... ok
+test_header_parser_bounds_and_rejects_ambiguity (test_generate_flan_t5_small_reference.FlanSmallReferenceTests.test_header_parser_bounds_and_rejects_ambiguity)
+Reject truncated, oversized, and duplicate-key tensor headers. ... ok
+test_json_parsers_reject_duplicate_keys (test_generate_flan_t5_small_reference.FlanSmallReferenceTests.test_json_parsers_reject_duplicate_keys)
+Reject ambiguity in both control files and tensor headers. ... ok
+test_output_paths_and_atomic_publication_are_create_only (test_generate_flan_t5_small_reference.FlanSmallReferenceTests.test_output_paths_and_atomic_publication_are_create_only)
+Reject nested destinations and never replace a visible bundle. ... ok
+test_post_rename_failure_reports_visible_bundle (test_generate_flan_t5_small_reference.FlanSmallReferenceTests.test_post_rename_failure_reports_visible_bundle)
+Do not mislabel an already-published directory as recoverable staging. ... ok
+test_regular_file_rejects_traversal_and_symlinks (test_generate_flan_t5_small_reference.FlanSmallReferenceTests.test_regular_file_rejects_traversal_and_symlinks)
+Keep checkpoint reads under the authenticated model directory. ... ok
+test_safetensors_structure_requires_gap_free_f32_payload (test_generate_flan_t5_small_reference.FlanSmallReferenceTests.test_safetensors_structure_requires_gap_free_f32_payload)
+Validate tensor count, dtype, range length, and physical contiguity. ... ok
+test_tensor_wire_format_and_parity_are_strict (test_generate_flan_t5_small_reference.FlanSmallReferenceTests.test_tensor_wire_format_and_parity_are_strict)
+Use little-endian F32 and detect localized high-cosine corruption. ... ok
+test_top_k_is_finite_and_stably_tied (test_generate_flan_t5_small_reference.FlanSmallReferenceTests.test_top_k_is_finite_and_stably_tied)
+Order equal logits by lower token ID and reject non-finite vectors. ... ok
+test_allocator_override_is_exact_scoped_and_recorded (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_allocator_override_is_exact_scoped_and_recorded)
+Intercept one all-MPS unquantized call and restore the original. ... ok
+test_allocator_override_restores_after_loader_failure (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_allocator_override_restores_after_loader_failure)
+Never leave a process-wide monkey patch installed after an exception. ... ok
+test_artifact_and_source_digests_are_order_independent (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_artifact_and_source_digests_are_order_independent)
+Make manifest identities independent of dictionary insertion order. ... ok
+test_atomic_bundle_is_create_only_and_complete (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_atomic_bundle_is_create_only_and_complete)
+Publish all six outputs together and refuse replacement. ... ok
+test_authenticated_import_prefix_is_private_empty_and_restored (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_authenticated_import_prefix_is_private_empty_and_restored)
+Resolve a package first, suppress adjacent pyc, then restore interpreter state. ... ok
+test_checked_integer_accepts_only_exact_interoperable_values (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_checked_integer_accepts_only_exact_interoperable_values)
+Canonicalize integral floats but reject booleans and ambiguity. ... ok
+test_checked_product_rejects_bad_dimensions_and_overflow (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_checked_product_rejects_bad_dimensions_and_overflow)
+Protect tensor byte arithmetic from invalid shapes and overflow. ... ok
+test_cli_help_exits_without_checkpoint_or_ml_imports (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_cli_help_exits_without_checkpoint_or_ml_imports)
+Keep help usable without allocating or validating a large artifact. ... ok
+test_closed_root_inventory_rejects_loading_overlays (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_closed_root_inventory_rejects_loading_overlays)
+Accept only pinned consumed/inert names and reject loader precedence attacks. ... ok
+test_distribution_payload_verification_detects_record_tampering (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_distribution_payload_verification_detects_record_tampering)
+Authenticate actual wheel bytes, not only the RECORD manifest itself. ... ok
+test_external_paths_reject_nested_outputs_and_dangling_bundle_links (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_external_paths_reject_nested_outputs_and_dangling_bundle_links)
+Resolve roots strictly and treat dangling final symlinks as occupied. ... ok
+test_f32_stability_uses_both_candidates_error_bounds (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_f32_stability_uses_both_candidates_error_bounds)
+Prove top-1 invariance with the stated absolute-relative tolerance. ... ok
+test_generation_config_records_defaults_and_explicit_overrides (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_generation_config_records_defaults_and_explicit_overrides)
+Serialize the complete effective beam policy, including implicit defaults. ... ok
+test_header_inventory_digest_sorts_tensor_names (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_header_inventory_digest_sorts_tensor_names)
+Pin the Rust-compatible field separators and canonical sort. ... ok
+test_json_parser_rejects_duplicate_keys (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_json_parser_rejects_duplicate_keys)
+Ensure control files and SafeTensors headers cannot be ambiguous. ... ok
+test_loading_diagnostics_reject_any_unexplained_key (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_loading_diagnostics_reject_any_unexplained_key)
+Keep official loader classifications strict and canonically hashed. ... ok
+test_long_form_fixture_is_distinct_and_exactly_pinned (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_long_form_fixture_is_distinct_and_exactly_pinned)
+Keep the 32-token gate independent from the short beam fixture. ... ok
+test_main_preflight_returns_before_heavy_imports (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_main_preflight_returns_before_heavy_imports)
+Prove preflight cannot accidentally enter the Torch execution section. ... ok
+test_memory_tracker_records_mps_samples_and_process_peak (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_memory_tracker_records_mps_samples_and_process_peak)
+Expose Metal's sampled peak honestly alongside the kernel RSS peak. ... ok
+test_mps_module_and_cache_inventory_reject_device_escape (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_mps_module_and_cache_inventory_reject_device_escape)
+Validate every recurrent tensor rather than trusting the device map. ... ok
+test_package_and_reference_sources_match_prepared_environment (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_package_and_reference_sources_match_prepared_environment)
+Bind helper execution to the exact installed Transformers wheel. ... ok
+test_pinned_artifact_manifest_constant_matches_literal_inventory (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_pinned_artifact_manifest_constant_matches_literal_inventory)
+Catch transcription errors without rereading the 45 GB checkpoint. ... ok
+test_ranking_is_finite_and_breaks_ties_by_token_id (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_ranking_is_finite_and_breaks_ties_by_token_id)
+Make vocabulary ranking deterministic even when scores are equal. ... ok
+test_regular_file_identity_rejects_paths_and_symlinks (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_regular_file_identity_rejects_paths_and_symlinks)
+Prevent traversal and symlink substitution during checkpoint reads. ... ok
+test_safetensors_header_parser_bounds_the_envelope (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_safetensors_header_parser_bounds_the_envelope)
+Parse a valid header and reject truncated or oversized declarations. ... ok
+test_sha256_helpers_match_standard_vectors (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_sha256_helpers_match_standard_vectors)
+Require both memory and ranged-file hashing to use exact bytes. ... ok
+test_strict_json_rejects_non_finite_values (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_strict_json_rejects_non_finite_values)
+Prevent implementation-specific NaN tokens in provenance output. ... ok
+test_tensor_parity_is_elementwise_not_only_cosine (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_tensor_parity_is_elementwise_not_only_cosine)
+Reject localized corruption even when a high-dimensional cosine is high. ... ok
+test_tensor_payload_is_finite_shaped_little_endian_f32 (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_tensor_payload_is_finite_shaped_little_endian_f32)
+Pin the raw matrix wire format consumed by Rust. ... ok
+test_vector_summary_requires_finite_unique_probes (test_generate_flan_t5_xxl_reference.ReferenceHelperTests.test_vector_summary_requires_finite_unique_probes)
+Reject summaries which could hide corrupt values or duplicate evidence. ... ok
+test_allocator_override_is_scoped_exactly_once_to_mps (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_allocator_override_is_scoped_exactly_once_to_mps) ... ok
+test_artifact_manifest_digest_is_pinned_and_order_independent (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_artifact_manifest_digest_is_pinned_and_order_independent) ... ok
+test_binary16_stability_requires_a_strict_two_sided_budget (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_binary16_stability_requires_a_strict_two_sided_budget) ... ok
+test_binary_descriptor_binds_shape_length_and_digest (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_binary_descriptor_binds_shape_length_and_digest) ... ok
+test_bundle_publication_is_atomic_and_create_only (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_bundle_publication_is_atomic_and_create_only) ... ok
+test_checked_duration_rejects_negative_and_non_finite_values (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_checked_duration_rejects_negative_and_non_finite_values) ... ok
+test_checkpoint_root_inventory_is_closed_over_loader_inputs (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_checkpoint_root_inventory_is_closed_over_loader_inputs) ... ok
+test_cli_is_mps_only_and_has_no_device_or_network_switch (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_cli_is_mps_only_and_has_no_device_or_network_switch) ... ok
+test_committed_generation_and_cache_schedule_are_exact (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_committed_generation_and_cache_schedule_are_exact) ... ok
+test_distribution_manifest_digest_is_pinned_and_order_independent (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_distribution_manifest_digest_is_pinned_and_order_independent) ... ok
+test_duplicate_json_keys_are_rejected (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_duplicate_json_keys_are_rejected) ... ok
+test_external_paths_are_disjoint_and_bundle_is_absent (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_external_paths_are_disjoint_and_bundle_is_absent) ... ok
+test_failed_publication_keeps_forensic_staging (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_failed_publication_keeps_forensic_staging) ... ok
+test_hidden_trace_starts_after_parameter_free_embedding_norm (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_hidden_trace_starts_after_parameter_free_embedding_norm) ... ok
+test_import_installs_all_offline_and_kernel_guards (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_import_installs_all_offline_and_kernel_guards) ... ok
+test_json_integer_accepts_exact_values_only (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_json_integer_accepts_exact_values_only) ... ok
+test_loading_diagnostics_require_all_empty_classes (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_loading_diagnostics_require_all_empty_classes) ... ok
+test_official_cache_validator_checks_every_layer_geometry (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_official_cache_validator_checks_every_layer_geometry) ... ok
+test_position_capture_requires_the_exact_implicit_row (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_position_capture_requires_the_exact_implicit_row) ... ok
+test_runtime_and_dependency_contract_matches_the_audited_environment (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_runtime_and_dependency_contract_matches_the_audited_environment) ... ok
+test_sha_and_f32_encoding_match_standard_vectors (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_sha_and_f32_encoding_match_standard_vectors) ... ok
+test_strict_json_is_sorted_and_rejects_non_finite_numbers (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_strict_json_is_sorted_and_rejects_non_finite_numbers) ... ok
+test_top_k_is_stable_and_rejects_non_finite_values (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_top_k_is_stable_and_rejects_non_finite_values) ... ok
+test_write_create_only_never_overwrites (test_generate_muse_glimmer_reference.ReferenceHelperTests.test_write_create_only_never_overwrites) ... ok
+test_allocator_override_is_scoped_exactly_once_to_mps (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_allocator_override_is_scoped_exactly_once_to_mps) ... ok
+test_artifact_manifest_digest_is_pinned_and_order_independent (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_artifact_manifest_digest_is_pinned_and_order_independent) ... ok
+test_binary16_stability_requires_a_strict_two_sided_budget (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_binary16_stability_requires_a_strict_two_sided_budget) ... ok
+test_binary_descriptor_binds_shape_length_and_digest (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_binary_descriptor_binds_shape_length_and_digest) ... ok
+test_bundle_publication_is_atomic_and_create_only (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_bundle_publication_is_atomic_and_create_only) ... ok
+test_checked_duration_rejects_negative_and_non_finite_values (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_checked_duration_rejects_negative_and_non_finite_values) ... ok
+test_checkpoint_root_inventory_is_closed_over_loader_inputs (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_checkpoint_root_inventory_is_closed_over_loader_inputs) ... ok
+test_cli_is_mps_only_and_has_no_device_or_network_switch (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_cli_is_mps_only_and_has_no_device_or_network_switch) ... ok
+test_committed_generation_and_cache_schedule_are_exact (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_committed_generation_and_cache_schedule_are_exact) ... ok
+test_disk_reserves_include_empirical_mps_headroom (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_disk_reserves_include_empirical_mps_headroom) ... ok
+test_distribution_manifest_digest_is_pinned_and_order_independent (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_distribution_manifest_digest_is_pinned_and_order_independent) ... ok
+test_duplicate_json_keys_are_rejected (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_duplicate_json_keys_are_rejected) ... ok
+test_external_paths_are_disjoint_and_bundle_is_absent (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_external_paths_are_disjoint_and_bundle_is_absent) ... ok
+test_failed_publication_keeps_forensic_staging (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_failed_publication_keeps_forensic_staging) ... ok
+test_free_space_guard_records_capacity_and_fails_closed (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_free_space_guard_records_capacity_and_fails_closed) ... ok
+test_header_inventory_digest_is_order_independent_and_range_sensitive (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_header_inventory_digest_is_order_independent_and_range_sensitive) ... ok
+test_hidden_path_summary_localizes_worst_decision_and_layer (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_hidden_path_summary_localizes_worst_decision_and_layer) ... ok
+test_hidden_trace_covers_embedding_blocks_and_final_norm (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_hidden_trace_covers_embedding_blocks_and_final_norm) ... ok
+test_import_installs_all_offline_and_kernel_guards (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_import_installs_all_offline_and_kernel_guards) ... ok
+test_json_integer_accepts_exact_values_only (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_json_integer_accepts_exact_values_only) ... ok
+test_loading_diagnostics_require_all_empty_classes (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_loading_diagnostics_require_all_empty_classes) ... ok
+test_official_cache_validator_checks_every_layer_geometry (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_official_cache_validator_checks_every_layer_geometry) ... ok
+test_pinned_base_mtp_accounting_contract_is_explicit (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_pinned_base_mtp_accounting_contract_is_explicit) ... ok
+test_position_capture_requires_the_exact_implicit_row (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_position_capture_requires_the_exact_implicit_row) ... ok
+test_runtime_and_dependency_contract_matches_the_audited_environment (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_runtime_and_dependency_contract_matches_the_audited_environment) ... ok
+test_safetensors_header_parser_binds_schema_ranges_and_file_size (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_safetensors_header_parser_binds_schema_ranges_and_file_size) ... ok
+test_selected_hidden_trace_captures_requested_axes_once (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_selected_hidden_trace_captures_requested_axes_once) ... ok
+test_selected_hidden_trace_positions_fail_closed_before_hooks (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_selected_hidden_trace_positions_fail_closed_before_hooks) ... ok
+test_sha_and_f32_encoding_match_standard_vectors (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_sha_and_f32_encoding_match_standard_vectors) ... ok
+test_strict_json_is_sorted_and_rejects_non_finite_numbers (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_strict_json_is_sorted_and_rejects_non_finite_numbers) ... ok
+test_top_k_is_stable_and_rejects_non_finite_values (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_top_k_is_stable_and_rejects_non_finite_values) ... ok
+test_trace_architecture_maps_every_boundary_and_rejects_unknowns (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_trace_architecture_maps_every_boundary_and_rejects_unknowns) ... ok
+test_vector_comparison_diagnostic_exposes_error_and_ranking (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_vector_comparison_diagnostic_exposes_error_and_ranking) ... ok
+test_write_create_only_never_overwrites (test_generate_nemotron_h_base_reference.ReferenceHelperTests.test_write_create_only_never_overwrites) ... ok
+test_artifact_digest_is_order_independent_and_sensitive (test_generate_qwen35_08b_reference.Qwen35ReferenceGeneratorTests.test_artifact_digest_is_order_independent_and_sensitive) ... ok
+test_bundle_publication_is_complete_and_create_only (test_generate_qwen35_08b_reference.Qwen35ReferenceGeneratorTests.test_bundle_publication_is_complete_and_create_only) ... ok
+test_bundle_publication_rejects_incomplete_file_set (test_generate_qwen35_08b_reference.Qwen35ReferenceGeneratorTests.test_bundle_publication_rejects_incomplete_file_set) ... ok
+test_diagnostics_require_complete_rows (test_generate_qwen35_08b_reference.Qwen35ReferenceGeneratorTests.test_diagnostics_require_complete_rows) ... ok
+test_diagnostics_separate_historic_drift_from_self_parity (test_generate_qwen35_08b_reference.Qwen35ReferenceGeneratorTests.test_diagnostics_separate_historic_drift_from_self_parity) ... ok
+test_json_parser_rejects_duplicate_keys (test_generate_qwen35_08b_reference.Qwen35ReferenceGeneratorTests.test_json_parser_rejects_duplicate_keys) ... ok
+test_payload_record_validates_shape_and_digest (test_generate_qwen35_08b_reference.Qwen35ReferenceGeneratorTests.test_payload_record_validates_shape_and_digest) ... ok
+test_pinned_profile_and_continuation_are_complete (test_generate_qwen35_08b_reference.Qwen35ReferenceGeneratorTests.test_pinned_profile_and_continuation_are_complete) ... ok
+test_artifact_digest_is_order_independent (test_generate_qwen38_reference.ReferenceHelperTests.test_artifact_digest_is_order_independent) ... ok
+test_atomic_directory_rename_never_replaces_empty_destination (test_generate_qwen38_reference.ReferenceHelperTests.test_atomic_directory_rename_never_replaces_empty_destination) ... ok
+test_binary16_ulp_is_scale_aware_and_requires_exact_f16 (test_generate_qwen38_reference.ReferenceHelperTests.test_binary16_ulp_is_scale_aware_and_requires_exact_f16) ... ok
+test_bundle_publication_is_atomic_create_only (test_generate_qwen38_reference.ReferenceHelperTests.test_bundle_publication_is_atomic_create_only) ... ok
+test_checked_duration_rejects_negative_or_non_finite_values (test_generate_qwen38_reference.ReferenceHelperTests.test_checked_duration_rejects_negative_or_non_finite_values) ... ok
+test_checked_json_integer_canonicalizes_int_and_integral_float (test_generate_qwen38_reference.ReferenceHelperTests.test_checked_json_integer_canonicalizes_int_and_integral_float) ... ok
+test_checked_json_integer_rejects_ambiguous_or_invalid_values (test_generate_qwen38_reference.ReferenceHelperTests.test_checked_json_integer_rejects_ambiguous_or_invalid_values) ... ok
+test_cli_is_mps_only_and_has_no_device_switch (test_generate_qwen38_reference.ReferenceHelperTests.test_cli_is_mps_only_and_has_no_device_switch) ... ok
+test_distribution_manifest_is_order_independent (test_generate_qwen38_reference.ReferenceHelperTests.test_distribution_manifest_is_order_independent) ... ok
+test_external_path_preflight_rejects_existing_bundle (test_generate_qwen38_reference.ReferenceHelperTests.test_external_path_preflight_rejects_existing_bundle) ... ok
+test_f32_encoding_is_little_endian (test_generate_qwen38_reference.ReferenceHelperTests.test_f32_encoding_is_little_endian) ... ok
+test_failed_bundle_write_leaves_recoverable_hidden_staging (test_generate_qwen38_reference.ReferenceHelperTests.test_failed_bundle_write_leaves_recoverable_hidden_staging) ... ok
+test_generation_eos_ids_are_exact_ordered_integers (test_generate_qwen38_reference.ReferenceHelperTests.test_generation_eos_ids_are_exact_ordered_integers) ... ok
+test_greedy_stability_rejects_non_finite_or_eos_decisions (test_generate_qwen38_reference.ReferenceHelperTests.test_greedy_stability_rejects_non_finite_or_eos_decisions) ... ok
+test_greedy_stability_reports_all_unstable_steps_after_collection (test_generate_qwen38_reference.ReferenceHelperTests.test_greedy_stability_reports_all_unstable_steps_after_collection) ... ok
+test_greedy_stability_uses_binary16_perturbation_proof (test_generate_qwen38_reference.ReferenceHelperTests.test_greedy_stability_uses_binary16_perturbation_proof) ... ok
+test_installed_distribution_provenance_matches_prepared_environment (test_generate_qwen38_reference.ReferenceHelperTests.test_installed_distribution_provenance_matches_prepared_environment) ... ok
+test_mps_allocator_warmup_override_is_exact_and_recorded (test_generate_qwen38_reference.ReferenceHelperTests.test_mps_allocator_warmup_override_is_exact_and_recorded) ... ok
+test_mps_allocator_warmup_override_rejects_non_mps_maps (test_generate_qwen38_reference.ReferenceHelperTests.test_mps_allocator_warmup_override_rejects_non_mps_maps) ... ok
+test_mps_allocator_warmup_override_rejects_quantized_or_wrong_model (test_generate_qwen38_reference.ReferenceHelperTests.test_mps_allocator_warmup_override_rejects_quantized_or_wrong_model) ... ok
+test_mps_allocator_warmup_override_requires_exactly_one_call (test_generate_qwen38_reference.ReferenceHelperTests.test_mps_allocator_warmup_override_requires_exactly_one_call) ... ok
+test_mps_allocator_warmup_override_restores_after_loader_failure (test_generate_qwen38_reference.ReferenceHelperTests.test_mps_allocator_warmup_override_restores_after_loader_failure) ... ok
+test_path_lexists_detects_dangling_symlink (test_generate_qwen38_reference.ReferenceHelperTests.test_path_lexists_detects_dangling_symlink) ... ok
+test_pinned_prompt_is_a_varied_stable_three_word_cycle (test_generate_qwen38_reference.ReferenceHelperTests.test_pinned_prompt_is_a_varied_stable_three_word_cycle)
+Pin the diagnostic-proven 113x-ULP fixture without using a trivial token loop. ... ok
+test_sha256_bytes_matches_standard_vector (test_generate_qwen38_reference.ReferenceHelperTests.test_sha256_bytes_matches_standard_vector) ... ok
+test_strict_json_rejects_non_finite_numbers (test_generate_qwen38_reference.ReferenceHelperTests.test_strict_json_rejects_non_finite_numbers) ... ok
+test_top_k_breaks_ties_by_token_id (test_generate_qwen38_reference.ReferenceHelperTests.test_top_k_breaks_ties_by_token_id) ... ok
+test_top_k_rejects_non_finite_values (test_generate_qwen38_reference.ReferenceHelperTests.test_top_k_rejects_non_finite_values) ... ok
+test_transformers_reference_sources_match_pinned_wheel (test_generate_qwen38_reference.ReferenceHelperTests.test_transformers_reference_sources_match_pinned_wheel) ... ok
+test_vector_summary_rejects_non_finite_values (test_generate_qwen38_reference.ReferenceHelperTests.test_vector_summary_rejects_non_finite_values) ... ok
+test_write_create_only_never_overwrites (test_generate_qwen38_reference.ReferenceHelperTests.test_write_create_only_never_overwrites) ... ok
+test_allocator_override_accepts_only_exact_unquantized_mps_call (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_allocator_override_accepts_only_exact_unquantized_mps_call) ... ok
+test_allocator_override_restores_after_loader_failure (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_allocator_override_restores_after_loader_failure) ... ok
+test_argument_parser_requires_both_local_paths (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_argument_parser_requires_both_local_paths) ... usage: v0_3_python_validation.py [-h] --model-dir MODEL_DIR --output-dir
+                                 OUTPUT_DIR
+v0_3_python_validation.py: error: the following arguments are required: --model-dir, --output-dir
+ok
+test_authenticated_file_rejects_links_and_detects_identity_changes (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_authenticated_file_rejects_links_and_detects_identity_changes) ... ok
+test_authenticated_import_prefix_is_empty_and_restored (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_authenticated_import_prefix_is_empty_and_restored) ... ok
+test_bundle_publication_is_atomic_complete_and_create_only (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_bundle_publication_is_atomic_complete_and_create_only) ... ok
+test_checkpoint_preflight_validates_config_index_hashes_and_digest (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_checkpoint_preflight_validates_config_index_hashes_and_digest) ... ok
+test_every_hashed_wheel_record_payload_is_authenticated (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_every_hashed_wheel_record_payload_is_authenticated) ... ok
+test_generation_eos_ids_require_exact_ordered_integers (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_generation_eos_ids_require_exact_ordered_integers) ... ok
+test_greedy_stability_rejects_eos_ties_order_and_nonfinite (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_greedy_stability_rejects_eos_ties_order_and_nonfinite) ... ok
+test_greedy_stability_uses_both_candidates_f16_spacing (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_greedy_stability_uses_both_candidates_f16_spacing) ... ok
+test_import_is_lightweight_and_installs_offline_controls (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_import_is_lightweight_and_installs_offline_controls) ... ok
+test_loading_diagnostics_are_empty_and_content_bound (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_loading_diagnostics_are_empty_and_content_bound) ... ok
+test_official_source_manifest_matches_installed_pinned_wheel (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_official_source_manifest_matches_installed_pinned_wheel) ... ok
+test_optional_kernel_distributions_must_be_absent (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_optional_kernel_distributions_must_be_absent) ... ok
+test_output_path_must_be_external_absent_and_outside_checkpoint (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_output_path_must_be_external_absent_and_outside_checkpoint) ... ok
+test_pinned_identity_and_prompt_are_exact (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_pinned_identity_and_prompt_are_exact) ... ok
+test_shared_helper_is_bound_before_execution (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_shared_helper_is_bound_before_execution) ... ok
+test_source_verification_rejects_changed_bytes_and_traversal (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_source_verification_rejects_changed_bytes_and_traversal) ... ok
+test_stability_sequence_requires_32_stable_decisions (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_stability_sequence_requires_32_stable_decisions) ... ok
+test_teacher_top1_summary_survives_tensor_cleanup (test_generate_qwen3_moe_reference.ReferenceHelperTests.test_teacher_top1_summary_survives_tensor_cleanup) ... ok
+test_disabling_instrumentation_loses_executed_generic_counters (test_native_coverage_separation.NativeSeparationTests.test_disabling_instrumentation_loses_executed_generic_counters)
+The same successful driver calls the generic, but only its zero map stays. ... skipped 'opt-in tiny pinned native Rust/LLVM separation fixture'
+test_equal_macro_bodies_have_distinct_native_source_origins (test_native_coverage_separation.NativeSeparationTests.test_equal_macro_bodies_have_distinct_native_source_origins)
+Identical expanded bodies do not authorize moving counts between lines. ... skipped 'opt-in tiny pinned native Rust/LLVM separation fixture'
+test_generated_test_outside_annotated_module_remains_instrumented (test_native_coverage_separation.NativeSeparationTests.test_generated_test_outside_annotated_module_remains_instrumented)
+Annotating known test modules is not a proof about every generated item. ... skipped 'opt-in tiny pinned native Rust/LLVM separation fixture'
+test_module_off_inherits_into_tests_helpers_closures_and_macros (test_native_coverage_separation.NativeSeparationTests.test_module_off_inherits_into_tests_helpers_closures_and_macros)
+Both tests execute but the sole mapped function is production runtime. ... skipped 'opt-in tiny pinned native Rust/LLVM separation fixture'
+test_nested_on_override_escapes_module_off (test_native_coverage_separation.NativeSeparationTests.test_nested_on_override_escapes_module_off)
+An opaque macro can explicitly re-enable a helper under an off module. ... skipped 'opt-in tiny pinned native Rust/LLVM separation fixture'
+test_root_injected_off_keeps_imported_generic_and_unused_runtime (test_native_coverage_separation.NativeSeparationTests.test_root_injected_off_keeps_imported_generic_and_unused_runtime)
+Definition-site exclusion removes the driver, not library instantiations. ... skipped 'opt-in tiny pinned native Rust/LLVM separation fixture'
+test_identical_bodies_do_not_identify_physical_source (test_native_coverage_separation.SeparationFixtureTests.test_identical_bodies_do_not_identify_physical_source)
+Equal expanded bodies can still originate from distinct cfg branches. ... ok
+test_version_is_exact_and_unambiguous (test_native_coverage_separation.SeparationFixtureTests.test_version_is_exact_and_unambiguous)
+Truncation, duplicates, vendor labels and suffixes cannot prove a pin. ... ok
+test_raw_outputs_are_authenticated_and_failure_is_not_counted_as_pass (test_parameter_reload_replay_record.ParameterReloadReplayRecordTests.test_raw_outputs_are_authenticated_and_failure_is_not_counted_as_pass)
+A denied GPU adapter remains a failed attempt, not omitted parity data. ... ok
+test_reported_parity_agrees_with_retained_outputs_and_prior_vectors (test_parameter_reload_replay_record.ParameterReloadReplayRecordTests.test_reported_parity_agrees_with_retained_outputs_and_prior_vectors)
+Recompute vector/hash comparisons instead of trusting a summary label. ... ok
+test_source_scope_and_serialized_commands (test_parameter_reload_replay_record.ParameterReloadReplayRecordTests.test_source_scope_and_serialized_commands)
+A non-regression replay is not a release or benchmark promotion. ... ok
+test_hash_stages_only_fixed_blocks (test_profile_process_memory.MemoryMathTests.test_hash_stages_only_fixed_blocks) ... ok
+test_invalid_phase_schema_order_and_missing_samples (test_profile_process_memory.MemoryMathTests.test_invalid_phase_schema_order_and_missing_samples) ... ok
+test_limits_and_abi_layout_are_exact (test_profile_process_memory.MemoryMathTests.test_limits_and_abi_layout_are_exact) ... ok
+test_phase_handshake_requires_time_and_samples (test_profile_process_memory.MemoryMathTests.test_phase_handshake_requires_time_and_samples) ... ok
+test_sampled_baseline_and_edge_gaps (test_profile_process_memory.MemoryMathTests.test_sampled_baseline_and_edge_gaps) ... ok
+test_unreviewed_sdk_header_fails_closed (test_profile_process_memory.MemoryMathTests.test_unreviewed_sdk_header_fails_closed) ... ok
+test_child_exit_unfinished_phase_is_not_success (test_profile_process_memory.SupervisorLifecycleTests.test_child_exit_unfinished_phase_is_not_success) ... ok
+test_complete_phase_records_identity_and_distinct_lifetime_counter (test_profile_process_memory.SupervisorLifecycleTests.test_complete_phase_records_identity_and_distinct_lifetime_counter) ... ok
+test_existing_output_and_oversized_event_are_rejected (test_profile_process_memory.SupervisorLifecycleTests.test_existing_output_and_oversized_event_are_rejected) ... ok
+test_no_markers_and_timeout_fail_closed (test_profile_process_memory.SupervisorLifecycleTests.test_no_markers_and_timeout_fail_closed) ... ok
+test_pid_reuse_or_probe_failure_cannot_be_hidden (test_profile_process_memory.SupervisorLifecycleTests.test_pid_reuse_or_probe_failure_cannot_be_hidden) ... ok
+test_real_darwin_child_allocation_has_observable_footprint_delta (test_profile_process_memory.SupervisorLifecycleTests.test_real_darwin_child_allocation_has_observable_footprint_delta) ... ok
+test_identities_commands_and_output_hashes (test_public_example_record.PublicExampleRecordTests.test_identities_commands_and_output_hashes)
+Each example belongs to the pinned local checkpoint and retained source. ... ok
+test_integrated_functional_replay_is_authenticated_and_scoped (test_public_example_record.PublicExampleRecordTests.test_integrated_functional_replay_is_authenticated_and_scoped)
+Four numerical/API tests and two examples cannot imply a release promotion. ... ok
+test_post_parser_fix_replay_preserves_observed_scope_and_vector_hashes (test_public_example_record.PublicExampleRecordTests.test_post_parser_fix_replay_preserves_observed_scope_and_vector_hashes)
+Three real tests do not imply new example, timing, 32K or quality runs. ... ok
+test_cache_geometry_and_memory_scope (test_qwen35_stress_record.QwenStressRecordTests.test_cache_geometry_and_memory_scope)
+Validate physical tensor bytes without inventing measured device peaks. ... ok
+test_input_hash_and_actual_populated_length (test_qwen35_stress_record.QwenStressRecordTests.test_input_hash_and_actual_populated_length)
+Reconstruct every stress token and check the complete canonical hash. ... ok
+test_provenance_links_and_non_quality_scope (test_qwen35_stress_record.QwenStressRecordTests.test_provenance_links_and_non_quality_scope)
+Require a linked execution pass, keeping unmeasured quality gates open. ... ok
+test_each_independent_gate_rejects_a_candidate (test_select_qwen35_08b_reference_prompt.SelectionTests.test_each_independent_gate_rejects_a_candidate) ... ok
+test_fixed_candidate_set_is_bounded_and_distinct (test_select_qwen35_08b_reference_prompt.SelectionTests.test_fixed_candidate_set_is_bounded_and_distinct) ... ok
+test_canonical_ids_and_cache_accounting (test_small_model_benchmark_records.FlanBenchmarkRecordTests.test_canonical_ids_and_cache_accounting)
+Reconstruct token hashes and the physical T5 cache payload factors. ... ok
+test_primary_checkpoint_identity_and_scope (test_small_model_benchmark_records.FlanBenchmarkRecordTests.test_primary_checkpoint_identity_and_scope)
+A measured run cannot silently become a supported checkpoint or per-phase peak. ... ok
+test_raw_samples_order_statistics_and_rates (test_small_model_benchmark_records.FlanBenchmarkRecordTests.test_raw_samples_order_statistics_and_rates)
+Recompute all warm summaries without copying the Rust implementation. ... ok
+test_canonical_ids_and_cache_accounting (test_small_model_benchmark_records.QwenBenchmarkRecordTests.test_canonical_ids_and_cache_accounting)
+Reconstruct prediction hashes and F16 KV/F32 recurrent physical bytes. ... ok
+test_primary_checkpoint_identity_and_scope (test_small_model_benchmark_records.QwenBenchmarkRecordTests.test_primary_checkpoint_identity_and_scope)
+Retain all source identities and distinguish optional MTP from vision. ... ok
+test_raw_samples_order_statistics_and_rates (test_small_model_benchmark_records.QwenBenchmarkRecordTests.test_raw_samples_order_statistics_and_rates)
+Recompute all warm summaries without copying the Rust implementation. ... ok
+test_deterministic_outputs_and_analytical_cache_bytes (test_small_model_memory_records.SmallModelMemoryRecordTests.test_deterministic_outputs_and_analytical_cache_bytes)
+Retain canonical complete token hashes and distinct physical cache factors. ... ok
+test_exact_retained_bytes_are_authenticated (test_small_model_memory_records.SmallModelMemoryRecordTests.test_exact_retained_bytes_are_authenticated)
+Preserve the supervisor and benchmark output bytes from the real runs. ... ok
+test_exact_source_and_execution_protocol (test_small_model_memory_records.SmallModelMemoryRecordTests.test_exact_source_and_execution_protocol)
+Both instrumented binaries came from the same clean integration revision. ... ok
+test_phase_brackets_baselines_and_signed_deltas (test_small_model_memory_records.SmallModelMemoryRecordTests.test_phase_brackets_baselines_and_signed_deltas)
+Each phase owns its measured idle baseline and conservative IPC bracket. ... ok
+test_sampling_claims_and_lifetime_identity_are_honest (test_small_model_memory_records.SmallModelMemoryRecordTests.test_sampling_claims_and_lifetime_identity_are_honest)
+A requested cadence is not an exact cadence, peak, or host/device split. ... ok
+test_warmup_partition_and_summary_use_same_phase_baselines (test_small_model_memory_records.SmallModelMemoryRecordTests.test_warmup_partition_and_summary_use_same_phase_baselines)
+No warmup maximum or independent baseline can leak into measured maxima. ... ok
+test_build_metadata_keeps_benchmark_and_correctness_features_distinct (test_small_model_rc_refresh.SmallModelRcRefreshTests.test_build_metadata_keeps_benchmark_and_correctness_features_distinct)
+The public timing attempt used Metal alone; correctness also enabled Flex. ... ok
+test_flex_full_vectors_match_native_rows (test_small_model_rc_refresh.SmallModelRcRefreshTests.test_flex_full_vectors_match_native_rows)
+Every native F32 comparison, including padding and boundary, meets tolerance. ... ok
+test_native_success_does_not_promote_release_or_timings (test_small_model_rc_refresh.SmallModelRcRefreshTests.test_native_success_does_not_promote_release_or_timings)
+All four real tests and both examples succeeded at the exact candidate tree. ... ok
+test_public_coordinator_correctness_survives_rejected_power_metadata (test_small_model_rc_refresh.SmallModelRcRefreshTests.test_public_coordinator_correctness_survives_rejected_power_metadata)
+Keep thirteen exact continuations but never accept the misleading AC label. ... ok
+test_public_examples_keep_prior_exact_text (test_small_model_rc_refresh.SmallModelRcRefreshTests.test_public_examples_keep_prior_exact_text)
+Both unchanged public entry points retain their previously recorded stdout. ... ok
+test_stress_is_populated_and_not_quality_or_timing (test_small_model_rc_refresh.SmallModelRcRefreshTests.test_stress_is_populated_and_not_quality_or_timing)
+The record proves 32K real history, not merely an allocated capacity. ... ok
+test_committed_and_raw_record_identities_are_cross_bound (test_small_model_refresh_records.HistoricalWarmInferenceAudit.test_committed_and_raw_record_identities_are_cross_bound)
+Derived observations stay bound to exact committed sources and raw hashes. ... ok
+test_disjoint_phase_sums_and_contributions_recompute_from_native_samples (test_small_model_refresh_records.HistoricalWarmInferenceAudit.test_disjoint_phase_sums_and_contributions_recompute_from_native_samples)
+Nested prefill/decode intervals are never counted twice as wall time. ... ok
+test_embedded_native_logs_authenticate_and_reproduce_process_counters (test_small_model_refresh_records.HistoricalWarmInferenceAudit.test_embedded_native_logs_authenticate_and_reproduce_process_counters)
+Retired instructions and CPU totals come from exact whole-process logs. ... ok
+test_native_boundaries_protocol_and_work_are_matched (test_small_model_refresh_records.HistoricalWarmInferenceAudit.test_native_boundaries_protocol_and_work_are_matched)
+A native-only process counter comparison cannot silently become Cargo timing. ... ok
+test_observations_and_follow_up_do_not_establish_cause_or_waive_failure (test_small_model_refresh_records.HistoricalWarmInferenceAudit.test_observations_and_follow_up_do_not_establish_cause_or_waive_failure)
+Host discovery and a proposed diagnostic are not new benchmark evidence. ... ok
+test_all_native_timing_summaries_recompute (test_small_model_refresh_records.SmallModelRefreshRecords.test_all_native_timing_summaries_recompute)
+Retained samples reproduce medians, nearest-rank p95 and per-sample rates. ... ok
+test_build_run_and_correctness_identities_agree (test_small_model_refresh_records.SmallModelRefreshRecords.test_build_run_and_correctness_identities_agree)
+Each run is source-stable, binary-stable, successful and strictly loaded. ... ok
+test_controlled_comparison_does_not_waive_historical_failure (test_small_model_refresh_records.SmallModelRefreshRecords.test_controlled_comparison_does_not_waive_historical_failure)
+Recompute direction-sensitive latency/throughput deltas from both runs. ... ok
+test_manifest_binds_every_compact_record (test_small_model_refresh_records.SmallModelRefreshRecords.test_manifest_binds_every_compact_record)
+An omitted or edited summary cannot silently retain the old manifest. ... ok
+test_phase_memory_keeps_signed_deltas_and_non_exact_scope (test_small_model_refresh_records.SmallModelRefreshRecords.test_phase_memory_keeps_signed_deltas_and_non_exact_scope)
+Sampling above idle is distinguished from lifetime and unsampled peaks. ... ok
+test_public_coordinator_retains_all_thirteen_outputs (test_small_model_refresh_records.SmallModelRefreshRecords.test_public_coordinator_retains_all_thirteen_outputs)
+The public boundary has no separate TTFT or model-only timing claim. ... ok
+test_checkpoint_contract_refresh_keeps_scope_and_parent_identities (test_small_model_refresh_records.WholeFileCoverageRecords.test_checkpoint_contract_refresh_keeps_scope_and_parent_identities)
+The compact follow-up links exact test changes without a scope waiver. ... ok
+test_contract_tests_improve_the_unchanged_diagnostic_denominator (test_small_model_refresh_records.WholeFileCoverageRecords.test_contract_tests_improve_the_unchanged_diagnostic_denominator)
+A passing replay retains the rejected attempt and narrow audit scope. ... ok
+test_custom_mask_refresh_retains_added_runtime_lines_and_open_gates (test_small_model_refresh_records.WholeFileCoverageRecords.test_custom_mask_refresh_retains_added_runtime_lines_and_open_gates)
+Runtime fixes cannot hide their new lines or promote diagnostic coverage. ... ok
+test_whole_file_scope_and_exact_thresholds (test_small_model_refresh_records.WholeFileCoverageRecords.test_whole_file_scope_and_exact_thresholds)
+Both versioned records retain their actual denominator and false flags. ... ok
+test_coverage_arithmetic_retains_both_failed_thresholds (test_t5_encoder_dtype_refresh_record.T5EncoderDtypeRefreshTests.test_coverage_arithmetic_retains_both_failed_thresholds)
+New runtime guards stay in the denominator; the exclusion policy is unchanged. ... ok
+test_failed_recorder_is_not_promoted_to_a_successful_run (test_t5_encoder_dtype_refresh_record.T5EncoderDtypeRefreshTests.test_failed_recorder_is_not_promoted_to_a_successful_run)
+The host retry preserves the binary and does not rewrite the sandbox failure. ... ok
+test_replay_identities_and_numerical_results (test_t5_encoder_dtype_refresh_record.T5EncoderDtypeRefreshTests.test_replay_identities_and_numerical_results)
+Embedded native logs authenticate every independently passing vector. ... ok
+
+----------------------------------------------------------------------
+Ran 388 tests in 3.406s
+
+OK (skipped=14)

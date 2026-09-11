@@ -1,0 +1,6 @@
+    Finished `release` profile [optimized] target(s) in 0.18s
+     Running `target/release/examples/t5_classifier`
+Captured MLP features: [2, 1, 48]
+"this film delights": untrained negative=0.798, positive=-0.328
+"this story is awful": untrained negative=0.098, positive=0.643
+Graph ready: heterogeneous T5 encoder → inserted module → pooling → task head.

@@ -1,0 +1,7 @@
+    Finished `release` profile [optimized] target(s) in 0.22s
+     Running `target/release/examples/activation_workbench`
+Captured activation shape: [1, 1, 12]
+Ablation: maximum logit change = 0.044202
+Restoration: maximum logit error = 0.000000
+Inserted module: maximum logit change = 0.036027
+Bidirectional attention: first-token logit change = 0.148692

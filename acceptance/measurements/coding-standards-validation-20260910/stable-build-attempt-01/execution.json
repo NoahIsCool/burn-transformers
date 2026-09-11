@@ -1,0 +1,29 @@
+{
+  "id": "stable-build",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+stable",
+    "check",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,flex,autodiff,train,tokenizers,chat-templates",
+    "--lib"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "runner_sha256": "d428bb39cc2ec00985bbd0d46c9740b3f79916c157207d33a638ddbc418c38a0",
+  "started_utc": "2026-09-10T23:57:04.634978+00:00",
+  "finished_utc": "2026-09-10T23:57:22.149290+00:00",
+  "seconds": 17.51427650003461,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "stable-build-attempt-01/inputs-before.json",
+  "inputs_after": "stable-build-attempt-01/inputs-after.json",
+  "output": "stable-build-attempt-01/output.log",
+  "output_sha256": "a8a396ca782e22b9af34ea900b22e1e463a0874ea112db6ddcdc60e6b370dd11",
+  "passed": true
+}

@@ -1,0 +1,28 @@
+{
+  "id": "compile-cuda",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "check",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,cuda,tokenizers,chat-templates"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "runner_sha256": "d428bb39cc2ec00985bbd0d46c9740b3f79916c157207d33a638ddbc418c38a0",
+  "started_utc": "2026-09-10T23:58:21.369030+00:00",
+  "finished_utc": "2026-09-10T23:58:37.987040+00:00",
+  "seconds": 16.617983041971456,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "compile-cuda-attempt-01/inputs-before.json",
+  "inputs_after": "compile-cuda-attempt-01/inputs-after.json",
+  "output": "compile-cuda-attempt-01/output.log",
+  "output_sha256": "b34df639426c6a2c28192f02101b98299bbbc7bd39ded21a0d386716959c2c73",
+  "passed": true
+}

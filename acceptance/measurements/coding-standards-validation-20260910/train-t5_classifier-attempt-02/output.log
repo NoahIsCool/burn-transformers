@@ -1,0 +1,5 @@
+    Finished `release` profile [optimized] target(s) in 0.18s
+     Running `target/release/examples/t5_classifier --train`
+Synthetic T5 adjective sentiment: held-out loss 0.8371 → 0.0003; accuracy 25.0% → 100.0%; 100 Adam steps in 0.17s
+Training loss 0.0002, accuracy 100.0%; learning rate 0.01
+7 parameter groups changed; reload error 0.00e0; records: target/training/t5_classifier

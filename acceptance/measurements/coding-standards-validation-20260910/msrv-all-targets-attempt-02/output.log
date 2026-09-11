@@ -1,0 +1,1690 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 41.37s
+     Running unittests src/lib.rs (target/release/deps/transformers-c2611bdbada790b4)
+
+running 1323 tests
+test architecture::spec::tests::feed_forward_validation_covers_empty_experts_and_invalid_scales ... ok
+test architecture::spec::tests::decoder_validation_accepts_valid_spec ... ok
+test architecture::spec::tests::mla_validation_rejects_zero_ranks_and_overflowing_head_width ... ok
+test architecture::spec::tests::normalization_validates_each_epsilon_boundary ... ok
+test architecture::spec::tests::mixers_validate_zero_dimensions_and_grouping ... ok
+test architecture::spec::tests::decoder_reports_global_and_nested_normalization_fields ... ok
+test architecture::spec::tests::attention_rejects_non_divisible_grouping ... ok
+test architecture::spec::tests::position_encoding_rejects_invalid_base_width_and_bucket_distance ... ok
+test architecture::spec::tests::moe_rejects_impossible_top_k ... ok
+test architecture::spec::tests::rope_rejects_unpaired_channel ... ok
+test architecture::spec::tests::seq2seq_checks_cross_attention_width ... ok
+test architecture::spec::tests::seq2seq_rejects_overflowing_cross_attention_width ... ok
+test architecture::spec::tests::seq2seq_requires_matching_residual_widths ... ok
+test architecture::spec::tests::yarn_validation_reports_expansion_temperature_and_transition_errors ... ok
+test architecture::spec::tests::gqa_accepts_exact_divisors ... ok
+test architecture::types::tests::forward_options_default_to_last_logits_only ... ok
+test architecture::types::tests::logits_only_output_drops_no_uninitialized_diagnostics ... ok
+test architecture::types::tests::logits_selection_round_trips_through_json ... ok
+test attention::intervention_tests::native_score_requests_fail_before_any_callback ... ok
+test architecture::types::tests::boolean_metadata_uses_backend_portable_integer_conversion ... ok
+test architecture::types::tests::boolean_selection_normalizes_backend_storage ... ok
+test attention::intervention_tests::incompatible_projection_inputs_fail_before_observers_or_pattern_transforms ... ok
+test attention::intervention_tests::projection_preflight_preserves_quantized_output_weights ... ok
+test attention::intervention_tests::query_edits_feed_native_attention_without_requiring_materialized_scores ... ok
+test attention::tests::attention_accepts_non_square_query_projection ... ok
+test attention::intervention_tests::selected_head_edit_matches_manual_context_ablation ... ok
+test attention::tests::attention_precision_mode_is_explicitly_opt_in ... ok
+test attention::tests::attention_rejects_malformed_projection ... ok
+test attention::tests::attention_rejects_malformed_projection_input ... ok
+test attention::tests::attention_rejects_projection_dimension_overflow ... ok
+test attention::tests::biased_cross_projection_applies_zero_centered_qk_norms_only_to_queries_and_keys ... ok
+test attention::tests::causal_mask_rejects_lengths_beyond_i64 ... ok
+test attention::tests::config_validates_zero_axes_head_ratios_and_each_numerical_option ... ok
+test attention::intervention_tests::pattern_edits_cannot_restore_causal_or_padding_exclusions ... ok
+test attention::tests::eager_causal_mask_is_bottom_right_aligned ... ok
+test attention::intervention_tests::point_validity_runs_without_observers_and_keeps_precision_explicit ... ok
+test attention::intervention_tests::attention_captures_preserve_native_and_eager_outputs ... ok
+test attention::intervention_tests::scores_are_after_scale_and_softcap_before_additive_bias ... ok
+test attention::tests::eager_fp32_softmax_zeroes_fully_excluded_rows ... ok
+test attention::intervention_tests::entirely_negative_infinity_scores_have_finite_zero_pattern ... ok
+test attention::intervention_tests::eager_score_and_pattern_captures_preserve_reduced_precision_boundaries ... ok
+test attention::tests::execution_policy_covers_overflow_remaining_zero_axes_and_remainders ... ok
+test attention::tests::execution_policy_plans_official_width_32k_attention ... ok
+test attention::intervention_tests::structural_pattern_runs_without_hooks_and_is_visible_to_observers ... ok
+test attention::tests::eager_softcap_bias_and_causal_mask_match_scalar_softmax_oracle ... ok
+test attention::tests::execution_policy_rejects_zero_and_oversized_rows ... ok
+test attention::tests::key_value_repetition_preserves_group_order ... ok
+test attention::tests::gated_attention_preserves_residual_shape ... ok
+test attention::tests::key_value_repetition_rejects_invalid_grouping ... ok
+test attention::intervention_tests::structural_pattern_preserves_masks_and_checks_shape ... ok
+test attention::intervention_tests::materialized_pattern_edits_preserve_value_gradients ... ok
+test attention::tests::padding_mask_marks_invalid_queries_and_keys ... ok
+test attention::tests::padding_mask_rejects_wrong_shape ... ok
+test attention::tests::output_gates_and_broadcast_bias_produce_exact_projected_contexts ... ok
+test attention::tests::padding_masks_cover_one_sided_masks_and_invalid_key_extents ... ok
+test attention::tests::projected_attention_rejects_empty_batch_query_and_key_axes ... ok
+test attention::tests::projected_attention_checks_each_external_topology_boundary ... ok
+test attention::tests::projection_checks_empty_query_and_independent_key_value_extents ... ok
+test attention::tests::unbounded_execution_plan_is_transparent ... ok
+test cache::config::tests::reports_logical_and_physical_capacity ... ok
+test cache::config::tests::error_messages_include_invalid_values ... ok
+test cache::config::tests::validates_required_dimensions ... ok
+test cache::config::tests::validates_sliding_window ... ok
+test cache::ring::tests::arithmetic_errors_are_reported ... ok
+test cache::ring::tests::error_messages_include_planning_context ... ok
+test cache::ring::tests::exhaustive_mirrored_reads_are_contiguous ... ok
+test cache::ring::tests::mirrored_ring_writes_both_halves_and_reads_one_slice ... ok
+test cache::ring::tests::read_plan_rejects_impossible_window ... ok
+test cache::ring::tests::read_plan_returns_chronological_slices ... ok
+test cache::ring::tests::sliding_window_is_absolute_and_saturating ... ok
+test cache::ring::tests::exhaustive_read_plans_reconstruct_absolute_order ... ok
+test cache::ring::tests::staged_transaction_commits_only_an_accepted_prefix ... ok
+test cache::ring::tests::write_plan_handles_empty_contiguous_wrapped_and_oversized_chunks ... ok
+test cache::state::tests::advance_all_is_atomic_on_every_error ... ok
+test cache::state::tests::advances_and_reports_absolute_ranges ... ok
+test cache::state::tests::constructs_empty_and_initialized_states ... ok
+test cache::state::tests::display_messages_are_actionable ... ok
+test cache::state::tests::rejects_invalid_initial_lengths ... ok
+test cache::state::tests::reorder_validation_is_atomic ... ok
+test cache::state::tests::reports_index_and_arithmetic_failures ... ok
+test cache::state::tests::resets_and_reorders_with_duplicates ... ok
+test cache::state::tests::truncates_atomically_and_never_extends ... ok
+test cache::tensor::tests::allocation_shapes_match_full_ring_and_mirrored_layouts ... ok
+test cache::tensor::tests::allocation_arithmetic_is_rejected_before_backend_tensor_creation ... ok
+test cache::tensor::tests::active_transactions_block_topology_and_lifecycle_changes ... ok
+test cache::tensor::tests::bank_attachment_accessors_and_errors_are_contextual ... ok
+test cache::ring::tests::exhaustive_staged_commits_preserve_rollback_and_visible_values ... ok
+test cache::tensor::tests::cross_bank_commit_validation_is_atomic_before_any_tensor_write ... ok
+test cache::tensor::tests::empty_banks_are_topology_locked_for_the_entire_transaction ... ok
+test cache::ring::tests::exhaustive_write_plans_match_ring_simulation ... ok
+test cache::tensor::tests::committed_lengths_stay_stable_while_working_kv_grows_iteratively ... ok
+test cache::tensor::tests::full_cache_writes_reads_and_checks_every_tensor_boundary ... ok
+test cache::tensor::tests::incomplete_or_oversized_staging_is_atomic_and_recoverable ... ok
+test cache::tensor::tests::lifecycle_validates_batch_capacity_transactions_and_bank_topology ... ok
+test cache::tensor::tests::main_and_mtp_proposals_have_independent_cursors_and_prefixes ... ok
+test cache::tensor::tests::low_level_commit_validation_covers_full_mirrored_and_zero_prefixes ... ok
+test cache::tensor::tests::mtp_truncate_and_trait_lifecycle_apply_to_auxiliary_storage ... ok
+test cache::tensor::tests::mtp_transactions_commit_and_rollback_without_aliasing_main_state ... ok
+test cache::tensor::tests::paired_main_mtp_truncate_validates_both_banks_before_mutation ... ok
+test cache::tensor::tests::public_transaction_trait_drives_tensor_state_without_downcasting ... ok
+test cache::tensor::tests::ragged_batch_transactions_commit_independent_prefix_lengths ... ok
+test cache::tensor::tests::recurrent_transactions_select_the_accepted_terminal_snapshot ... ok
+test cache::tensor::tests::recurrent_cache_validates_shapes_indices_and_staging_lifecycle ... ok
+test cache::tensor::tests::recurrent_zero_prefix_and_empty_snapshots_keep_terminal_state_exact ... ok
+test cache::tensor::tests::reset_clears_every_tensor_and_satisfies_architecture_contract ... ok
+test cache::tensor::tests::recurrent_working_reads_and_whole_batch_io_preserve_split_dtypes ... ok
+test cache::tensor::tests::ring_and_mirrored_cache_reads_preserve_chronology ... ok
+test cache::tensor::tests::reorder_duplicates_main_recurrent_and_separate_mtp_rows ... ok
+test cache::tensor::tests::specs_validate_dimensions_dtype_and_accessors ... ok
+test cache::tensor::tests::snapshot_contract_batch_rejection_preserves_pending_and_committed_state ... ok
+test cache::tensor::tests::tensor_transaction_edge_contracts_remain_recoverable ... ok
+test cache::tensor::tests::speculative_ring_rollback_never_overwrites_committed_slots ... ok
+test cache::tensor::tests::snapshot_contract_sequence_rejection_preserves_pending_and_committed_state ... ok
+test cache::tensor::tests::transaction_marks_and_accepted_counts_are_state_local_and_recoverable ... ok
+test cache::tensor::tests::truncate_accepts_safe_prefixes_and_rejects_irreversible_rewinds ... ok
+test cache::tensor::tests::zero_length_and_arithmetic_edges_never_reach_invalid_backend_slices ... ok
+test cache::transaction::tests::blocks_topology_changes_during_transaction ... ok
+test cache::tensor::tests::working_reads_trim_wrapped_history_and_support_proposals_larger_than_window ... ok
+test cache::transaction::tests::commits_ragged_prefixes ... ok
+test cache::transaction::tests::commits_uniform_prefix_and_drops_suffix ... ok
+test cache::transaction::tests::invalid_commit_is_atomic_and_can_be_rolled_back ... ok
+test cache::transaction::tests::rejects_nested_stale_and_foreign_marks ... ok
+test cache::transaction::tests::rejects_wrong_ragged_prefix_count ... ok
+test cache::transaction::tests::rollback_restores_exact_baseline ... ok
+test cache::transaction::tests::transaction_errors_have_actionable_messages ... ok
+test cache::transaction::tests::uniform_commit_rejects_a_prefix_too_long_for_any_row ... ok
+test checkpoint::dtype::tests::every_dtype_round_trips_through_its_wire_name ... ok
+test checkpoint::dtype::tests::storage_size_overflow_is_reported ... ok
+test checkpoint::dtype::tests::sub_byte_tensors_must_end_on_a_byte_boundary ... ok
+test checkpoint::dtype::tests::unknown_dtype_is_not_guessed ... ok
+test checkpoint::quantization::burnpack::validation_edge_tests::checkpoint_standards_decoder_rejects_authenticated_invalid_scales_and_codes ... ok
+test checkpoint::quantization::burnpack::validation_edge_tests::decoder_audit_distinguishes_copied_digest_and_scale_failures ... ok
+test checkpoint::quantization::burnpack::validation_edge_tests::decoder_rejects_length_and_arithmetic_errors_before_copying ... ok
+test checkpoint::quantization::burnpack::validation_edge_tests::independent_session_maxima_and_open_limit_are_enforced ... ok
+test checkpoint::quantization::burnpack::validation_edge_tests::owned_memory_accounting_is_checked ... ok
+test checkpoint::quantization::burnpack::validation_edge_tests::payload_descriptor_rejects_each_physical_inconsistency ... ok
+test checkpoint::quantization::burnpack::validation_edge_tests::validation_read_accumulation_is_atomic_and_keeps_high_water ... ok
+test checkpoint::quantization::burnpack::validation_edge_tests::staged_snapshot_bounds_and_allocation_errors_are_lazy_and_contextual ... ok
+test checkpoint::quantization::burnpack::validation_edge_tests::checkpoint_standards_temporary_creation_rejects_non_directory_parent ... ok
+test checkpoint::quantization::burnpack::validation_edge_tests::empty_finalize_staging_budget_failure_does_not_close_session ... ok
+test checkpoint::quantization::burnpack_tests::burnpack_boundary_invalid_paths_and_long_name_errors_are_contextual ... ok
+test checkpoint::quantization::burnpack_tests::artifact_contract_mapped_payload_rejects_false_provenance_digest ... ok
+test checkpoint::quantization::burnpack_tests::duplicate_empty_reserved_and_long_names_are_rejected_before_writing ... ok
+test checkpoint::quantization::burnpack_tests::artifact_contract_open_rejects_invalid_manifest_version_provenance_pairs ... ok
+test checkpoint::quantization::burnpack_tests::exclusions_never_reach_staging_or_require_a_float_dtype ... ok
+test checkpoint::quantization::burnpack_tests::artifact_contract_mapped_payload_is_read_only_and_name_checked ... ok
+test checkpoint::quantization::burnpack_tests::burnpack_boundary_valid_digest_does_not_approve_bad_codes_or_q4_padding ... ok
+test checkpoint::quantization::burnpack_tests::empty_session_is_still_a_valid_official_burnpack ... ok
+test checkpoint::quantization::burnpack_tests::empty_bound_artifact_has_zero_audit_and_exact_manifest_boundary ... ok
+test checkpoint::quantization::burnpack_tests::burnpack_boundary_parent_alias_retargeting_cannot_redirect_publication ... ok
+test checkpoint::quantization::burnpack_tests::limits_bound_counts_payloads_manifests_and_configuration ... ok
+test checkpoint::quantization::burnpack_tests::burnpack_boundary_mapped_payload_outlives_reader_and_path_replacement ... ok
+test checkpoint::quantization::burnpack_tests::invalid_packed_codes_are_found_by_sequential_validation ... ok
+test checkpoint::quantization::burnpack_tests::invalid_scales_are_found_by_sequential_validation ... ok
+test checkpoint::quantization::burnpack_tests::burnpack_boundary_valid_digest_does_not_approve_invalid_group_scales ... ok
+test checkpoint::quantization::burnpack_tests::atomicity_dangling_output_symlink_survives_publication_and_retry ... ok
+test checkpoint::quantization::burnpack_tests::missing_manifest_and_unexpected_or_missing_payloads_are_rejected ... ok
+test checkpoint::quantization::burnpack::validation_edge_tests::checkpoint_standards_read_only_staging_preserves_uncommitted_state ... ok
+test checkpoint::quantization::burnpack_tests::burnpack_boundary_legacy_semantic_publication_failure_is_retryable ... ok
+test checkpoint::quantization::burnpack_tests::path_and_open_manifest_limits_are_enforced_before_payload_use ... ok
+test checkpoint::quantization::burnpack_tests::staging_retains_only_ranges_and_is_removed_with_the_session ... ok
+test checkpoint::quantization::burnpack_tests::official_burnpack_round_trip_preserves_exact_payloads_and_metadata ... ok
+test checkpoint::quantization::burnpack_tests::physical_dtype_and_shape_must_match_the_reserved_u8_contract ... ok
+test checkpoint::quantization::burnpack_tests::missing_output_parent_rolls_back_finalization_manifest_for_retry ... ok
+test checkpoint::quantization::burnpack_tests::rejected_source_conversions_leave_staging_retryable ... ok
+test checkpoint::quantization::burnpack_tests::unexpected_staging_mutation_is_detected_before_another_append ... ok
+test checkpoint::quantization::burnpack_tests::output_collision_is_non_destructive_and_session_can_retry ... ok
+test checkpoint::quantization::burnpack_tests::provenance_binding_adds_payload_digests_updates_size_and_freezes_staging ... ok
+test checkpoint::quantization::burnpack_tests::reserved_manifest_and_wrong_rank_or_model_dtype_are_rejected ... ok
+test checkpoint::quantization::burnpack_tests::sequential_failure_audit_preserves_prior_success_and_skips_later_tensors ... ok
+test checkpoint::quantization::burnpack_tests::successful_finalization_closes_mutation_and_leaves_no_partial_file ... ok
+test checkpoint::quantization::checkpoint::tests::changed_shard_diagnostic_identifies_membership_digest_and_plan_changes ... ok
+test checkpoint::quantization::checkpoint::tests::invalid_conversion_limits_reset_stale_progress_before_checkpoint_access ... ok
+test checkpoint::quantization::checkpoint::tests::initial_provenance_failure_records_partial_hashing_without_publication ... ok
+test checkpoint::quantization::burnpack_tests::v2_same_size_staging_corruption_is_rejected_before_publication ... ok
+test checkpoint::quantization::checkpoint::tests::provenance_binding_limit_preserves_complete_conversion_progress ... ok
+test checkpoint::quantization::checkpoint::tests::malformed_conversion_plan_never_reaches_the_quantization_sink ... ok
+test checkpoint::quantization::burnpack_tests::provenance_validation_and_both_size_limits_are_transactional ... ok
+test checkpoint::quantization::checkpoint::tests::checkpoint_standards_finalize_limit_keeps_complete_audit_without_output ... ok
+test checkpoint::quantization::load::tests::checkpoint_standards_quantization_error_conversion_retains_source ... ok
+test checkpoint::quantization::checkpoint::tests::conversion_failure_is_structured_and_non_publishing ... ok
+test checkpoint::quantization::checkpoint::tests::existing_output_is_preserved_before_checkpoint_io ... ok
+test checkpoint::quantization::checkpoint::tests::checkpoint_failure_keeps_exact_partial_quantized_and_exclusion_reports ... ok
+test checkpoint::quantization::burnpack_tests::burnpack_boundary_row_axes_and_partial_groups_keep_their_wire_layout ... ok
+test checkpoint::quantization::checkpoint::tests::local_plan_streams_quantized_targets_and_reports_exclusions ... ok
+test checkpoint::quantization::burnpack_tests::truncation_header_corruption_and_manifest_corruption_are_contextual ... ok
+test checkpoint::quantization::load::tests::corrupt_v1_packed_payload_cannot_create_partial_model_writes ... ok
+test checkpoint::quantization::load::tests::fully_packed_owner_closes_source_before_alias_installation ... ok
+test checkpoint::quantization::load::tests::incompatible_artifact_is_marked_and_rejected_before_loading ... ok
+test checkpoint::quantization::load::tests::artifact_contract_generic_preflight_retains_source_close_failure ... ok
+test checkpoint::quantization::load::tests::artifact_contract_generic_preflight_rejects_unknown_storage_without_writes ... ok
+test checkpoint::quantization::load::tests::corrupt_v2_packed_payload_cannot_create_partial_model_writes ... ok
+test checkpoint::quantization::load::tests::generic_source_certificate_is_never_treated_as_v2_artifact_binding ... ok
+test checkpoint::quantization::load::tests::generic_source_rejects_same_plan_different_checkpoint_bytes ... ok
+test checkpoint::quantization::load::tests::artifact_contract_generic_preflight_rejects_reserved_payload_before_source_io ... ok
+test checkpoint::quantization::load::tests::fused_source_failure_precedes_packed_first_target_installation ... ok
+test checkpoint::quantization::load::tests::complete_fused_split_sidecar_reads_the_shared_local_source_once ... ok
+test checkpoint::quantization::load::tests::artifact_contract_legacy_dtype_must_match_source_or_target ... ok
+test checkpoint::quantization::load::tests::asymmetric_partial_fused_split_accounts_for_concurrent_packed_output ... ok
+test checkpoint::quantization::load::tests::checkpoint_standards_half_precision_sidecars_match_target_dtype_contracts ... ok
+test checkpoint::quantization::load::tests::local_overlay_fails_closed_when_an_overridden_source_disappears ... ok
+test checkpoint::quantization::load::tests::local_overlay_installs_mixed_precision_and_reports_exact_io ... ok
+test checkpoint::quantization::load::tests::local_overlay_rejects_checkpoint_payload_digest_mismatch ... ok
+test checkpoint::quantization::load::tests::local_overlay_posthash_rejects_sink_driven_source_mutation ... ok
+test checkpoint::quantization::load::tests::non_certifying_override_source_failure_precedes_packed_read ... ok
+test checkpoint::quantization::load::tests::local_overlay_verifies_redundant_physical_payloads_before_installation ... ok
+test checkpoint::quantization::load::tests::packed_payload_exceeding_the_plan_bound_fails_in_preflight ... ok
+test checkpoint::quantization::burnpack_tests::burnpack_boundary_source_dtypes_and_groups_survive_v2_reopen ... ok
+test checkpoint::quantization::load::tests::packed_sink_failure_preserves_partial_read_accounting ... ok
+test checkpoint::quantization::load::tests::non_certifying_source_falls_back_to_full_materialization ... ok
+test checkpoint::quantization::load::tests::packed_transpose_and_concatenation_targets_validate_every_local_input ... ok
+test checkpoint::quantization::load::tests::local_overlay_preflights_shard_inventory_before_hashing ... ok
+test checkpoint::quantization::provenance::tests::audited_hash_failure_preserves_prefix_and_rejects_duplicate_shards ... ok
+test checkpoint::quantization::provenance::tests::canonical_digest_binds_every_executable_field_but_not_memory_estimates ... ok
+test checkpoint::quantization::provenance::tests::canonical_plan_digest_is_stable_and_semantically_sensitive ... ok
+test checkpoint::quantization::provenance::tests::checkpoint_standards_provenance_counter_overflow_retains_precise_progress ... ok
+test checkpoint::quantization::provenance::tests::packed_scale_hashing_and_two_pass_statistics_preserve_exact_boundaries ... ok
+test checkpoint::quantization::load::tests::provenance_rejects_a_different_cast_plan_before_checkpoint_io ... ok
+test checkpoint::quantization::provenance::tests::provenance_metadata_rejects_noncanonical_digests_and_empty_shards ... ok
+test checkpoint::quantization::load::tests::sidecar_empty_contract_is_rejected_before_payload_io ... ok
+test checkpoint::quantization::provenance::tests::provenance_requires_lexically_normalized_paths_nonzero_lengths_and_shard_hashes ... ok
+test checkpoint::quantization::provenance::tests::provenance_inventory_comparisons_validate_counts_keys_and_lengths ... ok
+test checkpoint::quantization::load::tests::preserved_sidecar_composes_with_a_cast_inference_plan ... ok
+test checkpoint::quantization::tests::burn_qfloat_adapter_rejects_rank_and_cross_row_groups ... ok
+test checkpoint::quantization::tests::compatibility_manifest_api_remains_v1_compatible_without_changing_current_v2 ... ok
+test checkpoint::quantization::tests::compatible_q4_and_q8_matrices_map_exactly_to_burn_qfloat ... ok
+test checkpoint::quantization::tests::digest_verified_constructor_skips_only_the_completed_integrity_check ... ok
+test checkpoint::quantization::tests::each_group_has_an_independent_scale_and_partial_final_group ... ok
+test checkpoint::quantization::load::tests::sidecar_policy_excluded_storage_owner_is_rejected_before_payload_io ... ok
+test checkpoint::quantization::tests::eligibility_policy_explains_every_exclusion_class ... ok
+test checkpoint::quantization::tests::group_size_deserialization_cannot_bypass_validation ... ok
+test checkpoint::quantization::provenance::tests::provenance_rejects_symlink_replacement_before_hashing ... ok
+test checkpoint::quantization::tests::group_sizes_are_closed_and_default_to_sixty_four ... ok
+test checkpoint::quantization::tests::manifest_contract_failed_insertions_preserve_existing_metadata ... ok
+test checkpoint::quantization::tests::malformed_sources_fail_without_panicking ... ok
+test checkpoint::quantization::tests::finite_inputs_round_trip_within_half_a_quantization_step ... ok
+test checkpoint::quantization::tests::manifest_contract_legacy_payload_digest_is_rejected_at_every_wire_boundary ... ok
+test checkpoint::quantization::tests::manifest_contract_provenance_binding_is_transactional_for_partial_digests ... ok
+test checkpoint::quantization::tests::manifest_contract_packed_layout_checks_metadata_before_backend_geometry ... ok
+test checkpoint::quantization::tests::manifest_contract_wire_validation_order_is_explicit ... ok
+test checkpoint::quantization::tests::manifest_duplicate_conflicting_tensor_values_cannot_select_a_winner ... ok
+test checkpoint::quantization::tests::manifest_duplicate_json_provenance_keys_are_rejected_before_map_collapse ... ok
+test checkpoint::quantization::tests::manifest_duplicate_json_tensor_keys_are_rejected_before_map_collapse ... ok
+test checkpoint::quantization::tests::manifest_json_is_deterministic_validated_and_sorted ... ok
+test checkpoint::quantization::tests::manifest_rejects_unknown_fields_and_invalid_derived_counts ... ok
+test checkpoint::quantization::tests::manifest_v2_requires_provenance_while_v1_remains_compatible ... ok
+test checkpoint::quantization::tests::metadata_redundancy_detects_tampering ... ok
+test checkpoint::quantization::tests::non_finite_values_and_f64_to_f32_overflow_are_rejected ... ok
+test checkpoint::quantization::tests::non_weight_matrix_names_preserve_source_before_numerical_conversion ... ok
+test checkpoint::quantization::tests::packed_backend_execution_is_explicitly_unavailable ... ok
+test checkpoint::quantization::tests::payload_writer_preserves_context_for_io_failures ... ok
+test checkpoint::quantization::tests::payload_writer_uses_packed_then_little_endian_scales ... ok
+test checkpoint::quantization::tests::persisted_parts_validate_lengths_scales_and_reserved_codes ... ok
+test checkpoint::quantization::tests::policy_is_applied_before_dtype_conversion ... ok
+test checkpoint::quantization::tests::q4_fixture_defines_nibble_order_and_twos_complement ... ok
+test checkpoint::quantization::tests::q4_odd_tail_uses_low_nibble_and_zeroes_unused_high_nibble ... ok
+test checkpoint::quantization::tests::q8_fixture_has_exact_codes_scale_and_metadata ... ok
+test checkpoint::quantization::tests::smallest_subnormal_produces_a_positive_scale ... ok
+test checkpoint::quantization::tests::source_dtype_metadata_maps_every_supported_burn_storage_type ... ok
+test checkpoint::quantization::tests::source_float_dtypes_are_decoded_before_f32_math ... ok
+test checkpoint::quantization::tests::zero_and_empty_tensors_have_canonical_representations ... ok
+test checkpoint::report::tests::legacy_report_without_alias_equivalence_fields_deserializes_with_defaults ... ok
+test checkpoint::report::tests::report_finalization_is_deterministic_and_idempotent ... ok
+test checkpoint::report::tests::strict_validity_ignores_explicit_exceptions ... ok
+test checkpoint::quantization::load::tests::sidecar_preflight_rejects_duplicate_plan_targets ... ok
+test checkpoint::runtime::boundary_tests::checkpoint_contract_minimal_source_retries_a_lone_slice_after_io_failure ... ok
+test checkpoint::runtime::boundary_tests::checkpoint_contract_source_metadata_rejection_permits_corrected_retry ... ok
+test checkpoint::runtime::boundary_tests::install_accounting_overflow_is_atomic_before_sink_mutation ... ok
+test checkpoint::runtime::boundary_tests::failed_override_provider_preserves_prior_writes_and_closes_source ... ok
+test checkpoint::quantization::load::tests::partial_sidecar_revalidates_every_local_source ... ok
+test checkpoint::runtime::boundary_tests::invalid_plan_has_no_target_and_preserves_checkpoint_error_chain ... ok
+test checkpoint::runtime::boundary_tests::one_uncertified_concat_source_requires_complete_fallback_validation ... ok
+test checkpoint::runtime::boundary_tests::override_selection_is_frozen_and_uncertified_groups_read_once ... ok
+test checkpoint::runtime::boundary_tests::override_shape_mismatch_is_contextual_and_never_installed ... ok
+test checkpoint::runtime::boundary_tests::override_staging_limit_accounts_for_shared_payload_overlap ... ok
+test checkpoint::runtime::boundary_tests::partial_override_retains_one_shared_source_and_exact_sibling_values ... ok
+test checkpoint::quantization::provenance::tests::streamed_shard_hash_matches_complete_file_bytes_and_exact_plan ... ok
+test checkpoint::quantization::load::tests::partial_fused_split_reuses_one_source_around_a_packed_sibling ... ok
+test checkpoint::quantization::load::tests::sidecar_same_name_wrong_shape_is_rejected_before_payload_io ... ok
+test checkpoint::runtime::source::boundary_tests::source_payload_scalar_empty_and_storage_overflow_boundaries ... ok
+test checkpoint::runtime::source::boundary_tests::every_descriptor_field_is_revalidated_without_opening_a_shard ... ok
+test checkpoint::runtime::source::boundary_tests::directory_replacement_is_rejected_before_open ... ok
+test checkpoint::runtime::source::boundary_tests::removed_shard_is_not_certified_and_fails_when_payload_is_requested ... ok
+test checkpoint::runtime::source::boundary_tests::public_manifest_mutations_cannot_bypass_shard_membership ... ok
+test checkpoint::runtime::tests::accounting_contract_parameter_error_messages_preserve_metadata ... ok
+test checkpoint::quantization::load::tests::sidecar_target_mismatch_is_preflighted_before_source_io ... ok
+test checkpoint::runtime::source::boundary_tests::reused_handle_detects_truncated_payload_and_close_allows_reopen ... ok
+test checkpoint::runtime::tests::accounting_contract_override_peak_checks_shape_and_exact_combined_budget ... ok
+test checkpoint::runtime::tests::accounting_contract_install_overflow_precedes_sink_mutation ... ok
+test checkpoint::quantization::load::tests::source_close_failure_reports_packed_owner_without_pending_alias ... ok
+test checkpoint::quantization::load::tests::skipped_source_descriptor_is_still_checked_against_the_manifest ... ok
+test checkpoint::runtime::tests::atomicity_equivalence_pair_budget_rejects_before_reads_and_accepts_exactly ... ok
+test checkpoint::quantization::provenance::tests::shard_preflight_and_hashing_fail_closed_on_changed_files ... ok
+test checkpoint::runtime::tests::aliases_observe_a_closed_source_boundary ... ok
+test checkpoint::runtime::tests::alias_failure_does_not_claim_failed_or_later_aliases ... ok
+test checkpoint::runtime::source::boundary_tests::forged_tensor_offsets_are_checked_before_reading ... ok
+test checkpoint::runtime::tests::dense_parameter_payload_equations_fail_before_allocation ... ok
+test checkpoint::runtime::tests::accounting_contract_sink_failure_does_not_publish_install_counters ... ok
+test checkpoint::runtime::tests::aliases_are_flattened_and_installed_after_source_close ... ok
+test checkpoint::runtime::tests::bf16_to_f16_identity_rejects_a_bound_smaller_than_its_reused_buffer ... ok
+test checkpoint::runtime::tests::checkpoint_standards_override_alias_failure_keeps_successful_owner_and_alias ... ok
+test checkpoint::runtime::tests::close_failure_stops_before_aliases_with_primary_reported ... ok
+test checkpoint::runtime::tests::atomicity_concat_late_failures_preserve_only_prior_complete_targets ... ok
+test checkpoint::runtime::tests::dtype_policy_can_explicitly_cast_f64_to_bf16 ... ok
+test checkpoint::runtime::tests::equivalence_declarations_are_optional_but_physical_aliases_require_an_owner ... ok
+test checkpoint::runtime::tests::equivalence_preflight_reports_only_verified_prefix_and_still_writes_nothing ... ok
+test checkpoint::runtime::tests::custom_source_metadata_is_revalidated_and_closed_on_failure ... ok
+test checkpoint::runtime::source::boundary_tests::forged_manifest_lengths_fail_closed_at_each_arithmetic_boundary ... ok
+test checkpoint::runtime::source::boundary_tests::symlink_replacement_cannot_redirect_a_discovered_shard ... ok
+test checkpoint::runtime::tests::accounting_contract_override_provider_failures_close_without_publication ... ok
+test checkpoint::runtime::tests::executor_replaces_stale_runtime_report_records ... ok
+test checkpoint::runtime::tests::file_size_change_after_discovery_is_detected ... ok
+test checkpoint::runtime::tests::header_length_change_after_discovery_is_detected ... ok
+test checkpoint::runtime::tests::grouped_split_failure_reports_only_accepted_outputs_without_rereading_source ... ok
+test checkpoint::runtime::tests::every_burn_representable_safetensors_dtype_is_delivered_without_reinterpretation ... ok
+test checkpoint::runtime::tests::explicit_artifact_selection_still_streams_the_selected_file ... ok
+test checkpoint::runtime::tests::every_f16_bit_pattern_casts_to_bf16_with_half_semantics ... ok
+test checkpoint::runtime::tests::parameter_install_preserves_autodiff_leaf_and_frozen_layouts ... ok
+test checkpoint::runtime::tests::every_bf16_bit_pattern_casts_to_f16_with_half_semantics ... ok
+test checkpoint::runtime::tests::parameter_install_preserves_native_quantized_float_data ... ok
+test checkpoint::runtime::tests::concatenation_covers_every_axis_and_switches_one_shard_at_a_time ... ok
+test checkpoint::runtime::tests::parameter_install_rejects_bad_metadata_before_initialization ... ok
+test checkpoint::runtime::tests::parameter_install_rejects_truncated_float_storage_without_mutation ... ok
+test checkpoint::runtime::tests::parameter_install_uses_burns_checkpoint_layout_mapper ... ok
+test checkpoint::runtime::tests::runtime_coverage_empty_plan_runs_no_callbacks_and_finalizes_clean_progress ... ok
+test checkpoint::runtime::tests::equivalence_shape_dtype_and_public_plan_mutations_fail_closed ... ok
+test checkpoint::runtime::tests::identity_and_rename_deliver_native_burn_tensor_data ... ok
+test checkpoint::runtime::tests::runtime_coverage_initialized_column_parameter_keeps_checkpoint_shape_contract ... ok
+test checkpoint::runtime::tests::runtime_coverage_initialized_quantized_reload_rejects_before_mapper_without_mutation ... ok
+test checkpoint::runtime::tests::runtime_coverage_initialized_reload_preserves_autodiff_and_parameter_identity_on_error ... ok
+test checkpoint::runtime::tests::runtime_coverage_lazy_parameter_install_preserves_each_native_float_dtype ... ok
+test checkpoint::runtime::tests::runtime_coverage_parameter_size_overflow_leaves_lazy_storage_uninitialized ... ok
+test checkpoint::runtime::tests::physical_checkpoint_equivalence_mismatch_fails_before_any_sink_mutation ... ok
+test checkpoint::runtime::tests::mutated_plan_is_rejected_before_any_source_or_sink_action ... ok
+test checkpoint::runtime::tests::runtime_coverage_save_mapper_shape_inspection_preserves_original_on_error ... ok
+test checkpoint::runtime::tests::plan_source_descriptor_change_is_detected_by_local_source ... ok
+test checkpoint::runtime::tests::invalid_boolean_wire_values_are_rejected_before_the_sink ... ok
+test checkpoint::runtime::tests::runtime_coverage_payload_failure_keeps_primary_cause_when_close_also_fails ... ok
+test checkpoint::runtime::tests::source_tensor_constructor_rejects_bad_lengths_and_overflowing_shapes ... ok
+test checkpoint::runtime::tests::runtime_coverage_fused_transform_failure_preserves_successful_slice_prefix ... ok
+test checkpoint::runtime::tests::physical_checkpoint_equivalence_is_verified_before_model_writes ... ok
+test checkpoint::runtime::tests::runtime_coverage_equivalence_read_failures_preserve_verified_prefix_before_overrides ... ok
+test checkpoint::runtime::tests::preserve_float_identity_does_not_allocate_a_second_output_buffer ... ok
+test checkpoint::runtime::tests::non_float_dtype_reinterpretation_in_a_mutated_plan_is_rejected ... ok
+test checkpoint::quantization::load::tests::v2_rejects_source_dtype_metadata_that_differs_from_the_planned_target ... ok
+test checkpoint::runtime::tests::tiled_transpose_preserves_float_nan_payloads_signed_zero_and_tile_edges ... ok
+test checkpoint::runtime::tests::rank_two_transpose_changes_shape_and_row_major_order ... ok
+test checkpoint::runtime::tests::tiled_transpose_is_bit_exact_for_every_runtime_dtype ... ok
+test checkpoint::runtime::tests::interleaved_targets_execute_once_per_shard_in_physical_offset_order ... ok
+test checkpoint::runtime::tests::transpose_matches_index_equation ... ok
+test checkpoint::runtime::tests::runtime_coverage_shared_source_failure_precedes_override_and_keeps_prior_group ... ok
+test checkpoint::runtime::tests::tiled_equal_dtype_transpose_is_bit_exact ... ok
+test checkpoint::runtime::transform::boundary_tests::all_real_dtype_pairs_preserve_row_major_layout_and_signed_zero ... ok
+test checkpoint::runtime::transform::boundary_tests::checked_byte_ranges_and_staging_counters_reject_wraparound ... ok
+test checkpoint::runtime::transform::boundary_tests::concatenation_contract_rejects_each_distinct_shape_violation ... ok
+test checkpoint::runtime::transform::boundary_tests::copy_ranges_fail_contextually_for_equal_dtype_and_cast_paths ... ok
+test checkpoint::runtime::transform::boundary_tests::final_data_and_endian_boundaries_reject_malformed_storage ... ok
+test checkpoint::runtime::transform::boundary_tests::physical_equivalence_rejects_self_alias_and_equal_size_shape_changes ... ok
+test checkpoint::runtime::transform::boundary_tests::public_alias_entries_cannot_smuggle_sources_or_incompatible_owners ... ok
+test checkpoint::runtime::transform::boundary_tests::primary_operations_reject_duplicate_targets_and_invalid_unary_contracts ... ok
+test checkpoint::runtime::transform::boundary_tests::public_source_descriptors_require_names_extents_and_supported_dtypes ... ok
+test checkpoint::runtime::tests::source_read_failure_preserves_prior_sink_writes_and_closes ... ok
+test checkpoint::runtime::transform::boundary_tests::scalar_conversion_rejects_truncated_slots_and_non_real_dtypes ... ok
+test checkpoint::runtime::transform::boundary_tests::shared_slices_require_matching_payload_descriptors_and_slice_operations ... ok
+test checkpoint::runtime::transform::boundary_tests::slice_contract_rejects_axis_extent_shape_and_end_overflow ... ok
+test checkpoint::runtime::tests::staging_high_water_is_per_tensor_instead_of_complete_model_size ... ok
+test checkpoint::runtime::transform::boundary_tests::tiled_transpose_rejects_wrong_buffer_lengths_and_dimension_overflow ... ok
+test checkpoint::runtime::tests::splits_cover_first_middle_last_and_zero_length_axes ... ok
+test checkpoint::runtime::tests::sink_boundary_can_construct_a_rank_typed_burn_parameter_immediately ... ok
+test checkpoint::runtime::tests::understated_memory_plan_is_rejected_before_allocating ... ok
+test checkpoint::runtime::tests::valid_but_unrepresentable_safetensors_dtype_fails_before_io ... ok
+test checkpoint::runtime::tests::sink_write_failure_returns_an_exact_partial_report ... ok
+test checkpoint::runtime::tests::tiled_transpose_covers_zero_and_every_tile_boundary ... ok
+test checkpoint::runtime::tests::transpose_casts_bf16_directly_into_the_final_f16_layout ... ok
+test checkpoint::quantization::load::tests::local_overlay_postflight_rejects_source_path_changes_with_full_progress ... ok
+test checkpoint::tests::alias_cycles_and_unknown_alias_sources_are_rejected ... ok
+test checkpoint::tests::all_mapping_target_collision_paths_are_rejected ... ok
+test checkpoint::tests::artifact_contract_index_rejects_non_safetensors_storage ... ok
+test checkpoint::tests::allowlists_can_make_an_intentionally_partial_text_load_strict ... ok
+test checkpoint::tests::artifact_contract_index_rejects_escape_equivalent_tensor_names ... ok
+test checkpoint::tests::aliases_must_match_owner_shape_and_dtype ... ok
+test checkpoint::tests::artifact_contract_alias_storage_must_exist_in_the_shard_header ... ok
+test checkpoint::tests::artifact_contract_alias_storage_must_be_indexed ... ok
+test checkpoint::tests::artifact_contract_header_rejects_escape_equivalent_metadata_names ... ok
+test checkpoint::tests::auto_dtype_policy_plans_bf16_to_f16_conversion ... ok
+test checkpoint::tests::chained_aliases_resolve_to_the_storage_owner ... ok
+test checkpoint::tests::dtype_storage_bytes_scale_linearly ... ok
+test checkpoint::tests::concrete_expected_dtype_overrides_blanket_float_cast ... ok
+test checkpoint::tests::artifact_entrypoint_rejects_non_map_header_metadata_without_writes ... ok
+test checkpoint::tests::auto_discovery_accepts_one_nonstandard_artifact_and_rejects_ambiguity ... ok
+test checkpoint::tests::discovers_unsharded_checkpoint_without_reading_payload_semantics ... ok
+test checkpoint::tests::checkpoint_standards_duplicate_resolved_alias_is_rejected_before_planning ... ok
+test checkpoint::tests::artifact_entrypoint_rejects_non_map_index_inventory_without_writes ... ok
+test checkpoint::tests::discovers_shards_and_verifies_index_total_size ... ok
+test checkpoint::tests::artifact_extensions_and_regular_file_types_are_enforced ... ok
+test checkpoint::tests::duplicate_header_tensor_names_are_rejected ... ok
+test checkpoint::tests::index_alias_options_round_trip_and_default_when_absent ... ok
+test checkpoint::tests::duplicate_metadata_keys_and_missing_roots_fail_cleanly ... ok
+test checkpoint::tests::empty_allowlist_patterns_are_forbidden ... ok
+test checkpoint::tests::checkpoint_contract_bad_preferred_index_requires_explicit_selection_or_repair ... ok
+test checkpoint::tests::expected_inventory_rejects_empty_names_and_shape_overflow ... ok
+test checkpoint::tests::checkpoint_contract_missing_second_shard_keeps_partial_report_then_retries ... ok
+test checkpoint::tests::explicit_operation_push_and_report_runtime_records_are_available ... ok
+test checkpoint::tests::index_limits_apply_before_any_shard_is_opened ... ok
+test checkpoint::tests::exact_same_shard_index_alias_resolves_without_inventing_a_tensor ... ok
+test checkpoint::tests::index_must_match_headers_in_both_directions ... ok
+test checkpoint::tests::header_and_index_resource_limits_are_enforced_before_allocation ... ok
+test checkpoint::tests::explicit_nested_shard_path_is_allowed_when_contained ... ok
+test checkpoint::tests::index_total_size_accepts_exact_decimal_compatibility_form ... ok
+test checkpoint::tests::all_header_count_rank_name_and_arithmetic_bounds_are_enforced ... ok
+test checkpoint::tests::explicit_index_and_nonstandard_index_auto_discovery_work_without_total_size ... ok
+test checkpoint::tests::index_total_size_must_equal_validated_tensor_bytes ... ok
+test checkpoint::tests::malformed_index_json_and_duplicate_weight_keys_are_rejected ... ok
+test checkpoint::tests::mapping_contract_equivalence_rechecks_physical_alias_lengths ... ok
+test checkpoint::tests::mapping_contract_concatenation_validates_destination_and_preserves_order ... ok
+test checkpoint::tests::invalid_mapping_shapes_axes_and_consumption_are_rejected ... ok
+test checkpoint::tests::hostile_relative_paths_are_rejected_portably ... ok
+test checkpoint::tests::malformed_split_and_concatenate_operations_are_rejected ... ok
+test checkpoint::tests::mapping_contract_empty_tensor_concatenation_checks_dimension_overflow ... ok
+test checkpoint::tests::mapping_contract_split_casts_respect_mixed_precision_and_alias_storage ... ok
+test checkpoint::tests::mapping_contract_rejects_index_metadata_on_unsharded_sources ... ok
+test checkpoint::tests::mapping_contract_revalidates_accounting_before_target_shapes ... ok
+test checkpoint::tests::mapping_contract_split_validates_each_target_before_publishing_a_plan ... ok
+test checkpoint::tests::missing_artifact_and_nondirectory_roots_are_contextual ... ok
+test checkpoint::tests::index_assignment_mismatch_and_declared_but_absent_tensor_are_rejected ... ok
+test checkpoint::tests::multiple_nonstandard_indexes_are_ambiguous ... ok
+test checkpoint::tests::mapping_contract_revalidates_alias_shard_provenance ... ok
+test checkpoint::tests::missing_sources_unknown_targets_and_duplicate_expectations_fail_early ... ok
+test checkpoint::tests::preserve_and_cast_dtype_policies_are_strict ... ok
+test checkpoint::tests::rename_transpose_split_concatenate_and_alias_are_explicit ... ok
+test checkpoint::tests::safetensors_header_must_start_with_an_object_byte ... ok
+test delta_net::tests::all_valid_mask_preserves_activation_dtype_and_values ... ok
+test checkpoint::tests::split_and_concatenate_validate_empty_inputs_and_axes ... ok
+test checkpoint::tests::strict_identity_plan_and_memory_estimate_are_exact ... ok
+test delta_net::tests::config_validation_rejects_invalid_controls ... ok
+test delta_net::tests::delta_public_contract_decay_shape_validation_and_scalar_recurrence ... ok
+test checkpoint::tests::malformed_dtype_shape_and_range_metadata_are_rejected ... ok
+test delta_net::tests::delta_public_contract_rule_rejects_each_empty_query_axis ... ok
+test delta_net::tests::delta_public_contract_rule_rejects_value_alignment_and_empty_width ... ok
+test checkpoint::tests::strict_mismatch_report_preserves_all_keys ... ok
+test delta_net::tests::delta_public_contract_state_construction_checks_batch_and_zero_history ... ok
+test delta_net::tests::projected_config_rejects_invalid_topology ... ok
+test checkpoint::tests::pinned_total_size_policy_is_explicit_and_generic_paths_remain_strict ... ok
+test delta_net::tests::projected_mixer_rejects_wrong_state_shape ... ok
+test checkpoint::tests::index_total_size_rejects_ambiguous_or_non_integral_decimals ... ok
+test delta_net::tests::shape_validation_is_contextual ... ok
+test delta_net::tests::token_mask_blocks_state_updates ... ok
+test error::tests::configuration_error_is_contextual ... ok
+test delta_net::tests::projected_mixer_shape_rejections_preserve_both_state_buffers ... ok
+test delta_net::tests::recurrent_state_composes_across_decode_calls ... ok
+test error::tests::shape_error_is_contextual ... ok
+test checkpoint::tests::truncated_and_impossible_header_lengths_are_rejected ... ok
+test checkpoint::tests::shard_symlink_cannot_escape_canonical_root ... ok
+test experiment::tests::composition_context_rejects_invalid_extent_source_batch_positions_and_padding ... ok
+test experiment::tests::encoder_export_preserves_positions_validity_and_normalization_boundary ... ok
+test experiment::tests::composition_dense_and_gated_branches_expose_the_actual_nonlinearity ... ok
+test experiment::tests::composition_width_adapters_have_explicit_matrix_products_and_reject_bad_modules ... ok
+test experiment::tests::layer_overrides_do_not_change_other_layers_or_cross_attention ... ok
+test experiment::tests::composition_normalization_placements_follow_scalar_residual_equations ... ok
+test experiment::tests::policy_bias_broadcast_and_invalid_extents_are_explicit ... ok
+test experiment::tests::composition_gqa_obeys_causality_bias_padding_and_fully_masked_rows ... ok
+test experiment::tests::policy_broadcasts_allowed_links_and_intersects_padding ... ok
+test experiment::tests::source_positions_are_independent_of_target_extent_but_never_negative ... ok
+test experiment::tests::state_rejects_skipped_repeated_and_normalized_layer_ranges ... ok
+test checkpoint::tests::reversed_and_out_of_file_ranges_are_distinguished ... ok
+test experiment::tests::state_validation_rejects_mutated_width_positions_and_mask ... ok
+test checkpoint::tests::tensor_cannot_appear_in_two_shards ... ok
+test feed_forward::tests::activations_are_finite_and_shape_preserving ... ok
+test feed_forward::tests::dense_relu_matches_two_projection_definition ... ok
+test feed_forward::tests::dense_bias_builder_matches_independent_affine_relu_squared_equations ... ok
+test feed_forward::tests::feed_forward_preserves_residual_shape ... ok
+test feed_forward::tests::invalid_projection_width_is_rejected ... ok
+test feed_forward::tests::relu_squared_matches_definition ... ok
+test delta_net::tests::projected_mixer_prefill_matches_decode ... ok
+test generation::causal::tests::compact_position_metadata_has_checked_boundaries ... ok
+test generation::causal::tests::chunked_prefill_rejects_invalid_compact_metadata ... ok
+test generation::causal::tests::flex32_host_probability_storage_is_lossless_and_checked ... ok
+test generation::causal::tests::callback_failure_mid_batch_suppresses_later_rows_and_feedback ... ok
+test checkpoint::tests::index_alias_requires_exact_unique_same_shard_physical_storage ... ok
+test generation::causal::tests::host_probability_conversion_preserves_f64_and_rejects_invalid_storage ... ok
+test generation::causal::tests::explicit_positions_continue_from_last_valid_token ... ok
+test generation::causal::tests::model_boundary_failures_cancel_generation_at_the_exact_call ... ok
+test generation::causal::tests::greedy_generation_streams_complete_length_limited_output ... ok
+test generation::causal::tests::neutralization_is_row_local_and_checks_batch_metadata ... ok
+test generation::causal::tests::output_assembly_never_fabricates_terminal_metadata ... ok
+test generation::causal::tests::model_output_shape_errors_are_contextual_in_every_prefill_mode ... ok
+test generation::causal::tests::release_v2_empty_prompt_axes_reject_before_session_allocation ... ok
+test generation::causal::tests::request_position_and_capacity_boundaries_are_contextual ... ok
+test generation::causal::tests::request_validation_rejects_bad_masks_and_cache_geometry ... ok
+test generation::causal::tests::coordinator_contract_decode_logits_fail_after_exactly_one_valid_batch ... ok
+test generation::causal::tests::eos_and_stop_sequences_terminate_generation ... ok
+test generation::causal::tests::active_nonfinite_probabilities_cancel_before_the_invalid_token ... ok
+test generation::causal::tests::selected_log_probabilities_respect_runtime_float_dtype ... ok
+test generation::causal::tests::release_v2_overlapping_stops_stream_at_the_exact_cache_boundary ... ok
+test generation::causal::tests::ragged_batch_uses_true_valid_masks ... ok
+test generation::causal::tests::zero_prefill_chunk_size_is_invalid ... ok
+test generation::seq2seq::tests::beam_configuration_rejects_invalid_values ... ok
+test generation::seq2seq::tests::all_eos_frontier_and_length_boundary_preserve_eos_reason ... ok
+test generation::seq2seq::tests::batched_finished_rows_use_pad_noops_during_peer_decode ... ok
+test generation::causal::tests::streaming_callback_errors_cancel_generation ... ok
+test generation::seq2seq::tests::beam_contract_decode_encoder_diagnostic_failure_stops_after_one_step ... ok
+test generation::seq2seq::tests::beam_contract_prefill_encoder_mask_failure_stops_before_reordering ... ok
+test generation::seq2seq::tests::beam_gathers_preserve_masks_positions_and_optional_diagnostics ... ok
+test generation::seq2seq::tests::beam_contract_public_model_and_cache_failures_preserve_exact_errors ... ok
+test generation::seq2seq::tests::candidate_frontiers_validate_scores_geometry_and_stable_ties ... ok
+test generation::seq2seq::tests::eager_early_stopping_avoids_unnecessary_decode ... ok
+test generation::seq2seq::tests::decoder_prompt_length_counts_only_valid_mask_entries ... ok
+test generation::seq2seq::tests::beam_host_probabilities_respect_runtime_float_dtype ... ok
+test generation::seq2seq::tests::cached_multistep_search_reorders_external_state ... ok
+test generation::seq2seq::tests::explicit_positions_advance_after_beam_duplication ... ok
+test generation::seq2seq::tests::encoder_and_logit_geometry_helpers_reject_ragged_outputs ... ok
+test generation::seq2seq::tests::extending_candidates_preserves_parent_and_checks_positions ... ok
+test generation::seq2seq::tests::eager_stopping_ignores_eos_below_top_beam_ranks ... ok
+test generation::seq2seq::tests::extreme_length_penalty_returns_contextual_error_instead_of_infinite_score ... ok
+test generation::seq2seq::tests::finished_output_applies_tie_breakers_and_rejects_incomplete_pools ... ok
+test generation::seq2seq::tests::length_penalty_changes_finished_ranking ... ok
+test generation::seq2seq::tests::malformed_request_metadata_is_rejected_before_model_calls ... ok
+test generation::seq2seq::tests::malformed_model_outputs_stop_at_their_validation_boundary ... ok
+test generation::seq2seq::tests::non_eager_search_continues_after_enough_eos_hypotheses ... ok
+test generation::causal::tests::mixed_eos_batches_do_not_emit_or_cache_finished_row_tokens ... ok
+test generation::seq2seq::tests::one_beam_returns_one_length_limited_sequence ... ok
+test generation::seq2seq::tests::one_step_stable_ties_return_tokens_in_id_order ... ok
+test generation::seq2seq::tests::position_mask_and_expansion_boundaries_are_checked ... ok
+test generation::seq2seq::tests::nonfinite_model_probabilities_are_contextual_errors ... ok
+test generation::causal::tests::chunked_prefill_matches_one_shot_for_ragged_batches ... ok
+test generation::seq2seq::tests::ragged_positioned_beams_keep_finished_cache_rows_inert ... ok
+test generation::seq2seq::tests::release_v2_restricted_vocabulary_reports_insufficient_return_hypotheses ... ok
+test generation::seq2seq::tests::release_v2_restricted_vocabulary_keeps_unused_beam_slots_inert ... ok
+test generation::seq2seq::tests::request_preflight_rejects_shape_mask_and_cache_errors ... ok
+test generation::tests::configuration_validation_rejects_invalid_ranges ... ok
+test generation::tests::empty_tracker_batches_are_rejected_with_the_callers_exact_controls ... ok
+test generation::tests::flex32_sort_filters_fail_closed_before_backend_operations ... ok
+test generation::tests::greedy_selects_each_rows_maximum ... ok
+test generation::tests::masked_history_ignores_sentinels_and_validates_mask_shape ... ok
+test generation::causal::tests::coordinator_contract_later_chunk_logits_validate_every_output_axis ... ok
+test generation::tests::penalty_history_rejects_invalid_ids_and_accepts_empty_history ... ok
+test generation::tests::processor_rejects_invalid_shapes_before_backend_sampling ... ok
+test generation::tests::sampling_seed_is_deterministic ... ok
+test generation::tests::selection_reports_processed_log_probability ... ok
+test generation::tests::sampling_stream_boundaries_are_explicit ... ok
+test generation::tests::token_penalties_match_standard_logit_rules ... ok
+test generation::tests::top_k_is_exact_even_at_ties ... ok
+test generation::tests::top_p_keeps_crossing_token ... ok
+test generation::tests::tracker_handles_eos_and_is_idempotent ... ok
+test generation::tests::tracker_rejects_invalid_tokens_and_impossible_batch_capacity ... ok
+test generation::tests::tracker_resolves_stops_then_length ... ok
+test intervention::tests::attention_selection_distinguishes_head_and_query_axes ... ok
+test intervention::tests::borrowed_points_observe_without_changing_output ... ok
+test intervention::tests::callback_failure_identifies_the_selected_activation ... ok
+test intervention::tests::capture_from_clean_run_can_patch_another_input ... ok
+test intervention::tests::capture_order_and_sliced_edits_preserve_unselected_tokens ... ok
+test intervention::tests::constraint_failures_clear_captures_and_leave_hooks_reusable ... ok
+test intervention::tests::custom_rank_two_points_and_borrowed_callbacks_work ... ok
+test intervention::tests::dynamic_registration_cannot_bypass_preflight ... ok
+test intervention::tests::query_and_key_point_helpers_follow_declared_axes ... ok
+test intervention::tests::replacements_validate_shape_dtype_and_bounds ... ok
+test intervention::tests::run_reuse_discards_old_and_failed_partial_captures ... ok
+test intervention::tests::unavailable_and_impossible_selections_fail_before_computation ... ok
+test intervention::tests::unvisited_points_and_unscoped_execution_are_errors ... ok
+test intervention::tests::sliced_edits_and_captures_preserve_the_requested_gradient_policy ... ok
+test intervention::tests::zero_rank_registration_is_rejected_before_running_the_model ... ok
+test intervention::validity_tests::point_validity_applies_without_actions_and_does_not_leak_to_next_run ... ok
+test intervention::validity_tests::point_validity_errors_clear_captures_and_execution_masks ... ok
+test intervention::validity_tests::point_validity_keeps_mid_run_registration_guard ... ok
+test intervention::validity_tests::point_validity_preserves_gradients_only_at_valid_positions ... ok
+test intervention::validity_tests::point_validity_rejects_unknown_duplicate_and_nested_scopes ... ok
+test intervention::validity_tests::point_validity_zeroes_before_observation_and_after_each_edit ... ok
+test loaded::tests::legacy_quantized_bundle_rejects_each_nonempty_provenance_combination ... ok
+test generation::causal::tests::dense_chunking_and_unbounded_fast_paths_preserve_positions ... ok
+test loaded::tests::loaded_model_preserves_execution_stats_without_changing_legacy_parts ... ok
+test delta_net::tests::chunked_prefill_matches_recurrence ... ok
+test generation::causal::tests::coordinator_contract_later_chunk_model_errors_drop_state_before_any_emission ... ok
+test generation::tests::runtime_dtypes_support_penalties_and_probability_filters ... ok
+test generation::tests::sampling_runtime_dtypes_preserve_seeded_uniforms ... ok
+test loaded::tests::bundle_rejects_equivalence_bytes_above_total_source_bytes ... ok
+test loaded::tests::loaded_model_preserves_quantized_load_audit ... ok
+test loaded::tests::loaded_model_rejects_inconsistent_execution_stats ... ok
+test loaded::tests::loaded_model_rejects_unverified_equivalence_without_execution_stats ... ok
+test generation::causal::tests::stochastic_generation_is_reproducible ... ok
+test loaded::tests::loaded_model_rejects_invalid_runtime_metadata ... ok
+test loaded::tests::loaded_model_rejects_inconsistent_quantized_load_audit ... ok
+test loaded::tests::local_source_is_canonical_and_pinned ... ok
+test mla::tests::absorbed_attention_matches_reference_unabsorbed_path ... ok
+test loaded::tests::loaded_model_validates_and_preserves_components ... ok
+test loaded::tests::quantized_bundle_rejects_report_install_count_mismatch ... ok
+test loaded::tests::quantized_bundle_rejects_report_largest_payload_mismatch ... ok
+test loaded::tests::mutable_model_access_and_consumption_preserve_bundle_ownership ... ok
+test mla::tests::absorbed_decode_rejects_history_and_expansion_weight_mismatches ... ok
+test mla::tests::configuration_rejects_each_zero_extent_and_nonfinite_numerical_constant ... ok
+test mla::tests::attention_rejects_each_mixed_projection_dtype_and_bias_dtype ... ok
+test mla::tests::configuration_rejects_impossible_elements_in_every_registered_projection ... ok
+test mla::tests::interleaved_rotary_channels_are_permuted_to_split_halves ... ok
+test loaded::tests::provenance_bundle_checks_pair_coverage_without_a_memory_estimate ... ok
+test mla::tests::invalid_config_and_history_shapes_return_contextual_errors ... ok
+test loaded::tests::quantized_bundle_rejects_report_payload_total_mismatch ... ok
+test loaded::tests::provenance_bundle_rejects_each_empty_pre_and_post_hash_counter ... ok
+test mla::tests::mla_pattern_edits_reapply_causal_and_padding_masks ... ok
+test mla::tests::cross_attention_supports_unequal_lengths_and_independent_rotary_positions ... ok
+test mla::tests::latent_ablation_changes_values_and_restoration_recovers_attention ... ok
+test mla::tests::mla_rejects_bad_source_projection_and_masks_before_backend_kernels ... ok
+test mla::tests::latent_and_rotary_helpers_reject_invalid_channel_widths ... ok
+test mla::tests::malformed_query_module_topology_fails_both_projection_entry_points ... ok
+test loaded::tests::local_source_rejects_invalid_roots_and_labels ... ok
+test mla::tests::projection_accepts_yarn_and_preserves_cache_geometry ... ok
+test mla::tests::projection_checks_query_source_dtype_and_all_input_axes ... ok
+test mla::tests::projection_extent_overflow_is_rejected_before_parameter_allocation ... ok
+test loaded::tests::loaded_model_cross_validates_tokenizer_vocabulary ... ok
+test mla::tests::query_topology_matches_optional_lora_rank ... ok
+test mla::tests::rotary_projection_rejects_input_and_position_geometry_before_rotation ... ok
+test models::auto::load::tests::automatic_flan_load_bundles_and_executes_real_weights ... ignored, requires pinned google/flan-t5-small SafeTensors artifacts
+test mla::tests::public_attention_matches_scalar_oracle_and_allows_unmasked_pattern_interventions ... ok
+test mla::tests::public_projection_preserves_legacy_rotary_values ... ok
+test mla::tests::mla_latent_adapter_receives_gradients_along_with_encoder_states ... ok
+test mla::tests::absorbed_and_expanded_attention_agree_for_batched_masked_histories ... ok
+test models::auto::load::tests::automatic_options_keep_mtp_opt_in ... ok
+test models::auto::load::tests::automatic_packed_loading_rejects_uncertified_causal_families ... ok
+test models::auto::load::tests::automatic_load_rejects_wrong_family_options_and_registry ... ok
+test models::auto::load::tests::automatic_source_metadata_validates_optional_provenance ... ok
+test models::auto::load::tests::automatic_metadata_resolves_symlinks_without_escaping_model_root ... ok
+test models::auto::load::tests::automatic_muse_glimmer_loads_complete_strict_fixture ... ok
+test models::auto::load::tests::automatic_nemotron_h_loads_complete_strict_fixture ... ok
+test models::auto::load::tests::automatic_deepseek_loads_complete_strict_fixture ... ok
+test models::auto::load::tests::automatic_loads_preserve_family_config_error_context ... ok
+test models::auto::load::tests::contained_artifacts_enforce_boundaries_and_requiredness ... ok
+test models::auto::load::tests::generation_special_tokens_preserve_field_context_and_set_semantics ... ok
+test models::auto::load::tests::explicit_defaults_take_precedence_and_greedy_ignores_warpers ... ok
+test models::auto::load::tests::generation_special_tokens_reject_ids_wider_than_runtime ... ok
+test models::auto::load::tests::generation_defaults_are_normalized_from_local_metadata ... ok
+test models::auto::load::tests::explicit_generation_defaults_bypass_artifacts_and_validate_the_override ... ok
+test models::auto::load::tests::qwen_namespace_detection_is_unambiguous ... ok
+test models::auto::load::tests::muse_namespace_detection_is_unambiguous ... ok
+test models::auto::load::tests::automatic_t5_load_retains_execution_stats ... ok
+test models::auto::load::tests::enabled_tokenizer_rejects_escaping_artifact ... ok
+test models::auto::load::tests::generation_defaults_reject_invalid_artifacts_and_tokens ... ok
+test models::auto::tests::all_registry_parsers_preserve_configuration_error_context ... ok
+test models::auto::tests::automatic_config_discriminators_validate_and_match_runtime_registries ... ok
+test models::auto::tests::causal_registry_dispatches_deepseek_muse_and_nemotron ... ok
+test models::auto::tests::causal_registry_dispatches_qwen3_moe ... ok
+test models::auto::load::tests::optional_tokenizer_respects_absence_and_explicit_disable ... ok
+test models::auto::tests::causal_registry_parses_wrapped_config_and_dispatches_state ... ok
+test models::auto::tests::causal_registry_implements_generation_contract_end_to_end ... ok
+test models::auto::tests::auto_causal_dispatch_matches_bounded_and_one_shot_prefill ... ok
+test models::auto::tests::causal_registry_rejects_mismatched_state_atomically ... ok
+test models::auto::load::tests::required_config_is_bounded_and_regular ... ok
+test models::auto::load::tests::required_config_preserves_artifact_type_and_encoding_errors ... ok
+test models::auto::load::tests::automatic_qwen_namespaces_preserve_explicit_mtp_consumption ... ok
+test models::auto::tests::intervention_tests::automatic_t5_exposes_both_stacks_and_preserves_identity_outputs ... ok
+test models::auto::tests::model_detection_wrapper_precedence_and_typed_failures_are_stable ... ok
+test models::auto::load::tests::local_generation_defaults_validate_active_fields ... ok
+test models::auto::tests::intervention_tests::automatic_qwen_exposes_points_and_preserves_identity_outputs ... ok
+test models::auto::tests::intervention_tests::unsupported_automatic_hooks_fail_before_callbacks_and_clear_stale_captures ... ok
+test models::auto::tests::all_foreign_causal_state_pairs_reject_prefill_and_decode_atomically ... ok
+test models::auto::tests::registry_materialization_includes_experts_skipped_by_the_initial_prompt ... ok
+test models::auto::tests::registry_rejects_unknown_or_malformed_configurations ... ok
+test models::auto::tests::seq2seq_registry_parses_t5_and_allocates_cached_state ... ok
+test models::auto::load::tests::automatic_causal_load_preserves_namespace_and_sidecar_errors ... ok
+test models::config::tests::extracts_supported_text_wrapper_aliases ... ok
+test models::config::tests::invalid_effective_rope_width_is_rejected ... ok
+test models::config::tests::longrope_factor_vectors_match_complex_frequency_count ... ok
+test models::config::tests::multimodal_rope_sections_count_complex_pairs ... ok
+test models::config::tests::positive_infinity_is_normalized_only_outside_strings ... ok
+test models::auto::tests::seq2seq_auto_trait_dispatch_and_state_lifecycle ... ok
+test models::config::tests::scaled_rope_variants_require_their_shape_fields ... ok
+test models::auto::tests::qwen_moe_auto_trait_dispatch_and_state_lifecycle ... ok
+test models::config::tests::token_lists_must_be_nonempty_and_inside_the_vocabulary ... ok
+test models::config::tests::yarn_validates_one_sided_beta_overrides_against_defaults ... ok
+test models::custom::causal::intervention_tests::bidirectional_execution_rejects_causal_recurrent_mixers ... ok
+test models::custom::causal::intervention_tests::bidirectional_attention_still_excludes_padded_keys ... ok
+test models::auto::tests::muse_auto_trait_dispatch_and_state_lifecycle ... ok
+test models::custom::causal::intervention_tests::composition::explicit_bidirectional_policy_replaces_a_trailing_window_consistently ... ok
+test models::auto::tests::deepseek_auto_trait_dispatch_and_state_lifecycle ... ok
+test models::auto::tests::qwen_hybrid_auto_trait_dispatch_and_state_lifecycle ... ok
+test models::custom::causal::intervention_tests::composition::open_custom_module_and_both_width_adapters_receive_nonzero_gradients ... ok
+test models::custom::causal::intervention_tests::composition::per_layer_connectivity_preserves_padding_and_allows_fully_excluded_rows ... ok
+test models::custom::causal::intervention_tests::composition::open_mixer_and_width_adapters_are_registered_and_survive_record_roundtrip ... ok
+test models::custom::causal::intervention_tests::composition::staged_decoder_splits_resume_exactly_and_normalizes_only_when_requested ... ok
+test models::custom::causal::intervention_tests::composition::public_modular_blocks_can_be_initialized_with_independent_widths ... ok
+test models::custom::causal::intervention_tests::composition::staged_dtype_errors_are_contextual_before_matmul_or_callbacks ... ok
+test models::custom::causal::intervention_tests::composition::shared_mla_runs_in_encoder_decoder_and_exposes_compressed_activations ... ok
+test models::auto::tests::nemotron_auto_trait_dispatch_and_state_lifecycle ... ok
+test models::custom::causal::intervention_tests::composition::staged_encoder_decoder_matches_full_graph_and_accepts_separate_cross_policy ... ok
+test models::custom::causal::intervention_tests::explicit_eager_attention_exposes_causal_and_bidirectional_patterns ... ok
+test models::custom::causal::intervention_tests::composition::staged_models_reject_forged_normalization_boundaries ... ok
+test models::custom::causal::intervention_tests::composition::unsupported_later_recurrent_policy_is_rejected_before_any_callback ... ok
+test models::custom::causal::intervention_tests::gate_activation_capture_ablation_and_clean_patch_change_downstream_computation ... ok
+test models::custom::causal::intervention_tests::failed_validation_discards_previous_captures ... ok
+test models::custom::causal::intervention_tests::encoder_only_execution_rejects_decoder_requests ... ok
+test models::custom::causal::intervention_tests::composition::staged_models_reject_invalid_attention_addresses_before_callbacks ... ok
+test models::custom::causal::intervention_tests::future_token_changes_only_affect_earlier_outputs_with_bidirectional_attention ... ok
+test models::custom::causal::intervention_tests::eager_pattern_ablation_and_clean_patch_work_with_each_attention_direction ... ok
+test models::custom::causal::intervention_tests::selected_attention_head_can_be_removed_and_patched_with_native_kv_capture ... ok
+test models::custom::causal::intervention_tests::identity_hooks_preserve_each_normalization_topology_and_hidden_only_output ... ok
+test models::custom::tests::causal_heterogeneous_forward_returns_requested_diagnostics ... ok
+test models::custom::tests::causal_decode_compacts_ragged_steps ... ok
+test models::custom::causal::intervention_tests::seq2seq_hooks_keep_both_stacks_and_encoder_edits_reach_cross_attention ... ok
+test models::custom::causal::intervention_tests::seq2seq_eager_precision_reaches_both_stacks_and_cross_attention_patterns ... ok
+test models::custom::tests::cached_explicit_positions_and_selection_match_stateless ... ok
+test models::custom::tests::decode_rejects_state_from_another_topology ... ok
+test models::custom::tests::decode_state_rejects_batch_configuration_mismatch ... ok
+test models::custom::causal::intervention_tests::recurrent_and_moe_layers_advertise_only_executable_points ... ok
+test models::custom::tests::causal_moe_exposes_opt_in_router_diagnostics ... ok
+test models::custom::tests::decode_capacity_failure_is_atomic ... ok
+test models::custom::tests::forward_validation_is_contextual ... ok
+test models::custom::tests::modular_spec_round_trips_through_json ... ok
+test models::custom::tests::causal_stateless_graph_is_autodiff_safe ... ok
+test models::custom::tests::causal_state_lifecycle_is_checked ... ok
+test models::auto::load::tests::automatic_qwen3_moe_loads_v2_quantized_burnpack ... ok
+test models::custom::tests::seq2seq_encoder_router_diagnostics_are_not_silently_dropped ... ok
+test models::custom::tests::seq2seq_rejects_directionally_invalid_encoder_mixers ... ok
+test models::custom::causal::intervention_tests::composition::modular_partitions_preserve_both_stacks_and_reject_replayed_blocks ... ok
+test models::custom::tests::seq2seq_cached_decoder_matches_stateless_forward ... ok
+test models::custom::tests::seq2seq_forward_executes_both_stacks ... ok
+test models::custom::tests::sliding_sandwich_layernorm_graph_is_executable ... ok
+test models::custom::tests::full_and_sliding_attention_ignore_padding_columns ... ok
+test models::custom::tests::causal_reference_decode_matches_stateless_forward ... ok
+test models::custom::tests::seq2seq_stateless_graph_is_autodiff_safe ... ok
+test models::custom::tests::sliding_reference_parity_with_interior_padding ... ok
+test models::custom::tests::state_contracts::equal_decoder_topologies_do_not_allow_cross_role_state_reuse ... ok
+test models::custom::tests::t5_relative_bias_honors_explicit_position_gaps ... ok
+test models::custom::tests::masked_attention_continuations_survive_chunking_reorder_and_truncate ... ok
+test models::custom::tests::t5_relative_bias_is_executable_outside_t5_family_wiring ... ok
+test models::custom::tests::unavailable_or_ambiguous_components_are_rejected ... ok
+test models::custom::tests::tied_causal_head_reuses_embedding_weight ... ok
+test models::custom::tests::state_contracts::inactive_rows_obey_prefill_and_decode_state_contracts ... ok
+test models::custom::tests::yarn_and_post_norm_graph_is_executable ... ok
+test models::deepseek_v2::checkpoint::tests::optional_query_lora_changes_only_its_projection_contract ... ok
+test models::custom::tests::sliding_window_cardinality_is_independent_of_explicit_positions ... ok
+test models::custom::tests::state_contracts::seq2seq_output_validation_failure_does_not_commit_decoder_tokens ... ok
+test models::deepseek_v2::load::tests::query_lora_and_invalid_expert_targets_are_typed ... ok
+test models::deepseek_v2::load::tests::sink_rejects_wrong_parameter_shape ... ok
+test models::deepseek_v2::load::tests::target_parser_rejects_unknown_and_malformed_indices ... ok
+test models::custom::tests::state_contracts::invalid_cached_output_selection_preserves_committed_history ... ok
+test models::deepseek_v2::model::decode::tests::cache_configuration_and_lifecycle_errors_are_contextual ... ok
+test models::custom::tests::state_contracts::late_row_position_validation_preserves_committed_history ... ok
+test models::deepseek_v2::load::tests::complete_contract_installs_and_runs ... ok
+test models::deepseek_v2::model::decode::tests::compressed_cache_geometry_and_byte_count_are_exact ... ok
+test models::deepseek_v2::model::decode::tests::explicit_position_errors_are_atomic ... ok
+test models::deepseek_v2::model::decode::tests::decode_state_model_mismatch_is_atomic ... ok
+test models::deepseek_v2::model::decode::tests::failures_are_byte_and_metadata_atomic ... ok
+test models::deepseek_v2::load::tests::strict_planning_rejects_inventory_mismatches_before_loading ... ok
+test models::deepseek_v2::model::decode::tests::lifecycle_operations_update_metadata_and_storage ... ok
+test models::deepseek_v2::checkpoint::tests::pinned_lite_inventory_count_and_shapes_are_exact ... ok
+test models::deepseek_v2::load::tests::local_loader_streams_tied_and_untied_checkpoints ... ok
+test models::deepseek_v2::model::decode::tests::chunked_decode_matches_full_forward ... ok
+test models::deepseek_v2::model::decode::tests::query_lora_cached_path_matches_stateless ... ok
+test models::deepseek_v2::model::decode::tests::prefill_then_absorbed_decode_matches_full_forward ... ok
+test models::deepseek_v2::model::decode::tests::sparse_public_contract_stateless_shape_errors_are_contextual ... ok
+test models::deepseek_v2::model::tests::pinned_yarn_scaling_matches_closed_form ... ok
+test models::deepseek_v2::model::decode::tests::sparse_public_contract_cached_preflight_errors_are_atomic ... ok
+test models::deepseek_v2::model::tests::dense_prefix_and_sparse_shared_topology_are_distinct ... ok
+test models::deepseek_v2::model::decode::tests::ragged_batch_and_inactive_rows_are_supported ... ok
+test models::deepseek_v2::model::tests::invalid_runtime_values_are_rejected ... ok
+test models::deepseek_v2::model::tests::routed_mixture_accumulates_in_fp32_before_residual_cast ... ok
+test models::deepseek_v2::model::tests::stateless_device_affinity_errors_are_contextual ... ok
+test models::deepseek_v2::model::tests::top_one_routing_does_not_renormalize_away_confidence ... ok
+test models::deepseek_v2::model::tests::unsupported_runtime_variants_fail_during_initialization ... ok
+test models::deepseek_v2::model::tests::router_projection_is_fp32_and_dispatch_is_selected_only ... ok
+test models::deepseek_v2::model::tests::stateless_logits_match_pinned_reference_oracle ... ok
+test models::deepseek_v2::tests::defaults_match_the_pinned_v2_lite_topology ... ok
+test models::deepseek_v2::model::tests::yarn_beta_overrides_are_resolved_independently ... ok
+test models::deepseek_v2::model::tests::vocabulary_projection_always_returns_fp32 ... ok
+test models::deepseek_v2::tests::invalid_lora_schedule_and_router_scalars_fail_validation ... ok
+test models::deepseek_v2::tests::lite_checkpoint_may_omit_query_lora ... ok
+test models::deepseek_v2::tests::overflowing_head_dimensions_fail_without_panicking ... ok
+test models::deepseek_v2::model::tests::autodiff_stateless_smoke_reaches_embedding ... ok
+test models::deepseek_v2::model::decode::tests::sparse_public_contract_gapped_positions_and_diagnostics_match_compact_tokens ... ok
+test models::deepseek_v2::model::tests::semantic_padding_and_invalid_rows_are_validated ... ok
+test models::deepseek_v2::tests::routing_groups_must_offer_enough_experts ... ok
+test models::deepseek_v2::model::tests::stateless_shapes_and_diagnostics_are_exact ... ok
+test models::gpt2::model::tests::invalid_architecture_conventions_are_rejected_explicitly ... ok
+test models::custom::tests::seq2seq_full_attention_padding_preserves_encoded_and_decoded_outputs ... ok
+test models::gpt2::model::tests::invalid_input_unknown_points_and_readout_failures_are_recoverable_and_clear_captures ... ok
+test models::gpt2::model::tests::last_and_ordered_logit_selection_respect_valid_tokens ... ok
+test models::gpt2::model::tests::captures_edits_restoration_and_direct_readout_use_actual_residuals ... ok
+test models::gpt2::model::tests::pretrained_gpt2_matches_pytorch_last_logits_and_late_mlp_outputs ... ignored, requires pinned local GPT-2 weights and independent PyTorch reference; set GPT2_CHECKPOINT and GPT2_REFERENCE
+test models::gpt2::model::tests::language_model_namespace_verifies_tied_head_bytes_before_installing_parameters ... ok
+test models::gpt2::model::tests::imported_conv1d_weights_match_pytorch_logits_and_mlp_boundaries_for_both_gelus ... ok
+test models::gpt2::model::tests::imported_and_inserted_parameters_keep_optimizer_visible_gradients ... ok
+test models::gpt2::model::tests::empty_and_capture_only_hooks_preserve_imported_parameter_gradients ... ok
+test models::gpt_neox::load::tests::malformed_packed_payload_and_indices_return_errors ... ok
+test models::gpt2::model::tests::public_normalization_and_blocks_reject_incompatible_parameter_contracts ... ok
+test models::gpt2::model::tests::index_only_tied_alias_loads_both_checkpoint_namespaces ... ok
+test models::gpt_neox::load::tests::explicit_dtype_conversion_attributes_all_qkv_components ... ok
+test models::gpt_neox::load::tests::tied_checkpoint_topology_is_rejected_explicitly ... ok
+test models::gpt_neox::load::tests::packed_component_failure_is_atomic_and_retains_context ... ok
+test models::gpt2::model::tests::missing_unknown_and_wrong_shape_checkpoints_fail_before_parameter_initialization ... ok
+test models::gpt2::model::tests::public_blocks_reproduce_backbone_and_visibility_can_change_per_block ... ok
+test models::gpt_neox::load::tests::exact_legacy_buffer_exceptions_are_reported ... ok
+test models::gpt_neox::load::tests::local_import_reorders_qkv_heads_and_preserves_projection_layout ... ok
+test models::gpt_neox::tests::invalid_public_module_replacements_fail_before_backend_operations ... ok
+test models::gpt_neox::tests::activation_ablation_and_ordered_restoration_change_downstream_logits ... ok
+test models::gpt_neox::tests::invalid_inputs_and_unsupported_choices_return_contextual_errors ... ok
+test models::gpt_neox::tests::replacing_attention_derives_partial_rope_from_the_new_head_width ... ok
+test models::muse_glimmer::checkpoint::tests::strict_plan_rejects_non_float_parameter_dtypes ... ok
+test models::muse_glimmer::checkpoint::tests::dtype_conversion_is_explicit ... ok
+test models::gpt_neox::tests::matches_pytorch_partial_rope_parallel_residual_and_lens_boundaries ... ok
+test models::muse_glimmer::load::tests::complete_contract_installs_and_runs ... ok
+test models::gpt_neox::tests::attention_visibility_and_padding_remain_explicit ... ok
+test models::muse_glimmer::checkpoint::tests::official_contract_cardinality_and_shapes_are_exact ... ok
+test models::muse_glimmer::checkpoint::tests::strict_multimodal_plan_allowlists_only_visual_namespaces ... ok
+test models::muse_glimmer::checkpoint::tests::tied_head_uses_one_storage_owner ... ok
+test models::muse_glimmer::checkpoint::tests::strict_plan_rejects_text_inventory_mismatches ... ok
+test models::muse_glimmer::load::tests::sink_rejects_bad_targets_payloads_and_aliases ... ok
+test models::muse_glimmer::model::decode::tests::cached_mask_tracks_absolute_time_and_local_boundary ... ok
+test models::muse_glimmer::model::decode::tests::cache_layout_separates_ring_and_full_storage ... ok
+test models::muse_glimmer::model::decode::tests::bounded_cached_prefill_matches_unbounded_execution ... ok
+test models::muse_glimmer::model::decode::tests::experimental_contract_public_rejections_preserve_muse_history ... ok
+test models::muse_glimmer::model::decode::tests::decode_state_lifecycle_and_boundaries_are_checked ... ok
+test models::muse_glimmer::load::tests::local_loader_streams_tied_and_untied_text_checkpoints ... ok
+test models::muse_glimmer::model::decode::tests::chunked_decode_matches_one_shot_suffix ... ok
+test models::muse_glimmer::model::decode::tests::full_only_cache_needs_no_sliding_window ... ok
+test models::custom::tests::state_contracts::cached_sparse_diagnostics_match_new_tokens_not_entire_history ... ok
+test models::gpt_neox::load::tests::missing_wrong_shape_and_unknown_tensors_fail_before_parameter_writes ... ok
+test models::muse_glimmer::model::decode::tests::experimental_contract_muse_hidden_positions_and_inactive_rows ... ok
+test models::muse_glimmer::model::tests::aligned_local_key_ranges_respect_inclusive_window_boundary ... ok
+test models::muse_glimmer::model::tests::attention_options_preserve_non_f16_flash_eligibility ... ok
+test models::muse_glimmer::model::tests::attention_matches_pinned_fp32_softmax_oracle ... ok
+test models::muse_glimmer::model::decode::tests::recoverable_layer_failure_is_cache_atomic ... ok
+test models::muse_glimmer::model::tests::attention_gate_precedes_output_projection ... ok
+test models::muse_glimmer::load::tests::malformed_inventory_fails_before_parameter_initialization ... ok
+test models::muse_glimmer::model::tests::bounded_multichunk_autodiff_is_not_mislabeled_as_memory_bounded ... ok
+test models::muse_glimmer::model::decode::tests::stateless_prefill_decode_parity ... ok
+test models::muse_glimmer::model::decode::tests::sliding_ring_wrap_matches_stateless_attention ... ok
+test models::muse_glimmer::model::tests::chunk_schedule_fails_closed_on_plan_drift_and_key_underestimates ... ok
+test models::muse_glimmer::model::decode::tests::semantic_masks_compact_rows_and_allow_inactive_decode ... ok
+test models::muse_glimmer::model::tests::bounded_stateless_all_valid_mask_matches_absent_mask ... ok
+test models::muse_glimmer::model::tests::decoder_layer_matches_explicit_sandwich_equation ... ok
+test models::muse_glimmer::model::tests::bounded_stateless_attention_matches_unbounded_with_padding_holes ... ok
+test models::muse_glimmer::model::tests::f16_attention_uses_fp32_softmax_before_rounding ... ok
+test models::muse_glimmer::model::tests::model_selects_pinned_inverse_root_modes ... ok
+test models::muse_glimmer::model::tests::final_logit_softcap_matches_closed_form_and_bounds ... ok
+test models::muse_glimmer::model::tests::official_32k_chunk_schedules_bound_every_realized_plane ... ok
+test models::muse_glimmer::model::tests::public_forward_rejects_invalid_inputs_without_panicking ... ok
+test models::muse_glimmer::model::tests::nope_layer_does_not_consume_positions ... ok
+test models::muse_glimmer::model::tests::scale_free_norm_matches_pinned_f16_power_oracle ... ok
+test models::muse_glimmer::model::tests::model_exposes_validated_attention_execution_policy ... ok
+test models::muse_glimmer::model::tests::query_normalization_applies_extra_scale ... ok
+test models::muse_glimmer::model::tests::sliding_mask_uses_valid_token_ordinals ... ok
+test models::muse_glimmer::model::tests::stateless_device_affinity_errors_are_contextual ... ok
+test models::muse_glimmer::tests::default_schedule_is_three_rotary_local_layers_then_one_nope_global_layer ... ok
+test models::muse_glimmer::tests::explicit_schedule_and_head_width_allow_architecture_experiments ... ok
+test models::muse_glimmer::tests::rejects_a_negative_per_layer_rope_theta ... ok
+test models::muse_glimmer::model::tests::stateless_forward_shapes_and_options_are_exact ... ok
+test models::muse_glimmer::tests::sliding_schedule_requires_a_valid_window ... ok
+test models::muse_glimmer::model::decode::tests::semantic_padding_patterns_match_stateless_prefill_and_decode ... ok
+test models::nemotron_h::checkpoint::tests::lightning_total_size_policy_rejects_delta_alias_and_mtp_drift ... ok
+test models::nemotron_h::checkpoint::tests::lightning_total_size_policy_accepts_only_the_reviewed_router_delta ... ok
+test models::nemotron_h::checkpoint::tests::lightning_total_size_policy_rejects_dtype_shape_and_byte_length_drift ... ok
+test models::nemotron_h::checkpoint::tests::bf16_plan_preserves_fixed_fp32_router_buffers ... ok
+test models::nemotron_h::checkpoint::tests::lightning_total_size_policy_rejects_router_name_and_count_drift ... ok
+test models::nemotron_h::checkpoint::tests::lightning_total_size_policy_rejects_wrong_source_labels_and_other_families ... ok
+test models::nemotron_h::checkpoint::tests::lightning_total_size_policy_rejects_every_control_identity_near_miss ... ok
+test models::nemotron_h::checkpoint::tests::unsupported_mtp_schedule_is_rejected ... ok
+test models::nemotron_h::checkpoint::tests::complete_hybrid_contract_builds_strict_plan ... ok
+test models::nemotron_h::load::tests::sink_rejects_invalid_targets_and_payloads ... ok
+test models::muse_glimmer::model::tests::autodiff_smoke_reaches_embedding_weights ... ok
+test models::nemotron_h::load::tests::complete_contract_installs_and_runs ... ok
+test models::nemotron_h::load::tests::optional_projections_load_exact_bias_and_latent_payloads ... ok
+test models::nemotron_h::load::tests::local_loader_streams_tied_and_untied_checkpoints ... ok
+test models::nemotron_h::model::decode::tests::capacity_error_preserves_lengths ... ok
+test models::nemotron_h::load::tests::optional_projections_latent_moe_matches_independent_scalar_oracle ... ok
+test models::auto::tests::every_causal_family_matches_bounded_and_one_shot_prefill ... ok
+test models::nemotron_h::model::decode::tests::oversized_cached_attention_window_is_rejected ... ok
+test models::nemotron_h::load::tests::strict_mismatches_fail_before_writes ... ok
+test models::nemotron_h::checkpoint::tests::lightning_shape_contract_matches_pinned_inventory_count ... ok
+test models::nemotron_h::model::mamba2::tests::chunk_transition_sum_avoids_prefix_cancellation ... ok
+test models::nemotron_h::model::mamba2::tests::discretization_rounds_before_fp32_scan_math ... ok
+test models::nemotron_h::model::mamba2::tests::chunked_and_recurrent_paths_match ... ok
+test models::nemotron_h::model::mamba2::tests::grouped_gate_is_applied_before_rms_normalization ... ok
+test models::nemotron_h::model::mamba2::tests::f16_recurrent_cache_matches_repeated_single_token_updates ... ok
+test models::nemotron_h::model::decode::tests::failed_decode_is_atomic_across_cache_kinds ... ok
+test models::nemotron_h::model::mamba2::tests::grouped_norm_rejects_invalid_geometry ... ok
+test models::nemotron_h::model::mamba2::tests::grouped_norm_matches_pinned_reduced_precision_oracles ... ok
+test models::nemotron_h::model::decode::tests::experimental_contract_public_rejections_preserve_nemotron_history ... ok
+test models::nemotron_h::model::mamba2::tests::invalid_configuration_and_state_are_rejected ... ok
+test models::nemotron_h::model::mamba2::tests::recurrent_scan_matches_pinned_f16_operation_order ... ok
+test models::nemotron_h::model::mamba2::tests::recurrent_scan_matches_scalar_golden_values ... ok
+test models::nemotron_h::load::tests::optional_projections_loaded_cache_and_mtp_outputs_are_nonzero ... ok
+test models::nemotron_h::model::mamba2::tests::recurrent_and_chunked_scans_preserve_reference_output_dtypes ... ok
+test models::nemotron_h::model::mamba2::tests::semantic_mask_prevents_padding_decay ... ok
+test models::nemotron_h::model::decode::tests::cached_prefill_decode_matches_stateless ... ok
+test models::nemotron_h::model::mamba2::tests::recurrent_storage_dtype_round_trips_across_a_segment ... ok
+test models::nemotron_h::model::mamba2::tests::segmented_prefill_matches_one_shot_cache_and_outputs ... ok
+test models::nemotron_h::model::decode::tests::left_padded_prefill_matches_stateless_last_token ... ok
+test models::nemotron_h::model::decode::tests::ragged_decode_and_lifecycle_operations_are_safe ... ok
+test models::nemotron_h::model::mtp::tests::mtp_cache_validation_fails_before_mutation ... ok
+test models::nemotron_h::model::speculative::tests::config_defaults_and_validation_are_strict ... ok
+test models::nemotron_h::model::decode::tests::sliding_window_cached_path_matches_stateless ... ok
+test models::nemotron_h::model::speculative::tests::cycle_preflight_rejects_all_alignment_mismatches ... ok
+test models::nemotron_h::model::speculative::tests::eos_lead_rejects_a_caller_owned_active_transaction ... ok
+test models::nemotron_h::model::mtp::tests::prefill_mtp_cache_establishes_one_token_lag ... ok
+test models::nemotron_h::model::speculative::tests::greedy_acceptance_covers_every_prefix_length ... ok
+test models::nemotron_h::model::speculative::tests::probability_validation_rejects_non_finite_distributions ... ok
+test models::nemotron_h::model::speculative::tests::residual_sampling_respects_support_and_validates_weights ... ok
+test models::nemotron_h::model::speculative::tests::all_accepted_cycle_commits_catch_up ... ok
+test models::nemotron_h::model::speculative::tests::complete_cycles_cover_every_acceptance_prefix ... ok
+test models::nemotron_h::model::speculative::tests::inactive_and_recoverable_failure_restore_state_and_rng ... ok
+test models::nemotron_h::model::mtp::tests::transaction_rollback_restores_every_physical_bank ... ok
+test models::nemotron_h::model::speculative::tests::verifier_rng_is_reproducible ... ok
+test models::nemotron_h::model::speculative::tests::eos_placement_preserves_shifted_cache_alignment ... ok
+test models::nemotron_h::model::speculative::tests::trait_truncate_rewinds_target_and_mtp_to_independent_lengths ... ok
+test models::nemotron_h::model::mtp::tests::cached_mtp_matches_stateless_and_incremental ... ok
+test models::nemotron_h::model::mtp::tests::speculative_state_truncate_is_atomic_and_reusable ... ok
+test models::nemotron_h::model::tests::invalid_inputs_are_contextual_errors ... ok
+test models::nemotron_h::model::tests::moe_dispatches_only_selected_experts ... ok
+test models::nemotron_h::model::decode::tests::experimental_contract_nemotron_ragged_router_and_hidden_diagnostics ... ok
+test models::nemotron_h::model::tests::checkpoint_declared_next_token_head_runs ... ok
+test models::nemotron_h::model::tests::mtp_width_overflow_returns_configuration_error ... ok
+test models::nemotron_h::model::tests::moe_single_group_matches_all_groups_retained ... ok
+test models::nemotron_h::model::tests::moe_mixed_precision_keeps_router_and_accumulator_fp32 ... ok
+test models::nemotron_h::model::tests::rms_norm_matches_pinned_f16_operation_order ... ok
+test models::nemotron_h::model::tests::schedule_builds_each_mixer_kind ... ok
+test models::nemotron_h::tests::legacy_pattern_round_trips_to_normalized_blocks ... ok
+test models::nemotron_h::tests::nemotron_3_5_lightning_list_config_is_compatible ... ok
+test models::nemotron_h::tests::nemotron_3_nano_official_shape_config_is_compatible ... ok
+test models::nemotron_h::model::speculative::tests::sampled_cycles_are_reproducible ... ok
+test models::nemotron_h::tests::rejects_declared_depth_that_conflicts_with_pattern ... ok
+test models::nemotron_h::tests::rejects_unsupported_recurrent_and_shared_expert_edges ... ok
+test models::qwen3_5::checkpoint::tests::dedicated_mtp_embeddings_are_rejected_until_a_named_contract_exists ... ok
+test models::qwen3_5::checkpoint::tests::dimension_products_are_checked ... ok
+test models::qwen3_5::checkpoint::tests::malformed_gated_query_shape_fails_inventory_validation ... ok
+test models::nemotron_h::model::mtp::tests::transaction_partial_commit_discards_rejected_hybrid_suffix ... ok
+test models::nemotron_h::model::speculative::tests::stochastic_rejection_recovers_target_marginal ... ok
+test models::qwen3_5::checkpoint::tests::query_weight_and_bias_preserve_official_head_local_layout ... ok
+test models::nemotron_h::model::tests::stateless_forward_returns_requested_shapes ... ok
+test models::nemotron_h::model::speculative::tests::sampled_failure_after_rng_draw_retries_bit_for_bit ... ok
+test models::qwen3_5::checkpoint::tests::multimodal_exceptions_are_additive_and_deduplicated ... ok
+test models::qwen3_5::load::tests::invalid_dispatch_paths_are_contextual_and_non_panicking ... ok
+test models::nemotron_h::model::tests::last_logits_match_full_forward_tail ... ok
+test models::qwen3_5::checkpoint::tests::official_qwen35_point8_metadata_is_consumed_without_unknown_keys ... ok
+test models::qwen3_5::checkpoint::tests::tiny_text_fixture_is_an_exact_strict_contract ... ok
+test models::qwen3_5::checkpoint::tests::safe_base_only_default_classifies_optional_mtp_tensors_separately ... ok
+test models::qwen3_5::load::tests::mtp_contract_dispatches_all_fifteen_parameters ... ok
+test models::qwen3_5::load::tests::tiny_contract_dispatches_every_executable_parameter ... ok
+test models::nemotron_h::model::tests::autodiff_smoke_reaches_embedding ... ok
+test models::qwen3_5::model::decode::tests::cache_contract_mtp_cached_shapes_are_atomic ... ok
+test models::qwen3_5::model::decode::tests::cache_contract_model_schedule_mismatch_is_atomic ... ok
+test models::qwen3_5::model::decode::tests::cache_contract_mtp_transaction_rejections_are_atomic ... ok
+test models::qwen3_5::model::decode::tests::cache_contract_pending_cardinality_is_atomic ... ok
+test models::qwen3_5::model::decode::tests::cache_contract_pending_recurrent_coordinates_are_atomic ... ok
+test models::qwen3_5::model::decode::tests::cache_contract_pending_tensor_geometry_is_atomic ... ok
+test models::qwen3_5::model::decode::tests::cache_contract_transactional_hybrid_chunk_rejection_is_atomic ... ok
+test models::qwen3_5::model::decode::tests::cache_contract_mtp_truncate_preserves_shifted_continuation_parity ... ok
+test models::qwen3_5::model::decode::tests::cache_contract_invalid_rectangles_are_atomic ... ok
+test models::qwen3_5::model::decode::tests::cached_causal_mask_uses_bottom_right_alignment ... ok
+test models::qwen3_5::model::decode::tests::compact_scatter_restores_rectangular_positions ... ok
+test models::qwen3_5::model::decode::tests::cache_contract_pending_native_coordinates_are_atomic ... ok
+test models::qwen3_5::model::decode::tests::decode_state_maps_hybrid_layers_deterministically ... ok
+test models::qwen3_5::model::decode::tests::decode_state_rejects_batch_and_context_mismatch ... ok
+test models::qwen3_5::load::tests::qfloat_qwen_graph_matches_its_full_precision_reference ... ok
+test models::qwen3_5::model::decode::tests::dynamic_ntk_extension_is_rejected_before_cache_mutation ... ok
+test models::qwen3_5::model::decode::tests::cache_contract_mtp_prefill_alignment_is_atomic ... ok
+test models::qwen3_5::model::decode::tests::all_inactive_decode_is_an_exact_no_op ... ok
+test models::qwen3_5::checkpoint::tests::official_qwen38_27b_metadata_is_consumed_without_unknown_keys ... ok
+test models::qwen3_5::model::decode::tests::capacity_boundary_is_preflighted_atomically ... ok
+test models::qwen3_5::model::decode::tests::cache_contract_hybrid_reorder_preserves_continuation_parity ... ok
+test models::qwen3_5::model::decode::tests::invalid_positions_and_logit_selection_are_atomic ... ok
+test models::qwen3_5::model::decode::tests::fully_masked_prefill_is_rejected_without_advancing_state ... ok
+test models::qwen3_5::model::decode::tests::release_contract_capacity_rejects_unrepresentable_indices_before_allocation ... ok
+test models::qwen3_5::model::decode::tests::mtp_full_and_incremental_paths_are_equivalent ... ok
+test models::qwen3_5::model::decode::tests::decode_supports_mixed_active_and_inactive_rows ... ok
+test models::qwen3_5::model::decode::tests::multi_token_decode_matches_full_forward_suffix ... ok
+test models::qwen3_5::model::decode::tests::homogeneous_schedules_decode_without_unused_cache_groups ... ok
+test models::qwen3_5::model::decode::tests::speculative_transaction_restores_target_and_mtp_bytes ... ok
+test models::qwen3_5::model::decode::tests::release_contract_attention_capture_failure_preserves_hybrid_history ... ok
+test models::qwen3_5::model::decode::tests::prefill_matches_full_forward ... ok
+test models::qwen3_5::model::decode::tests::later_layer_failure_preserves_every_cache_tensor ... ok
+test models::qwen3_5::model::decode::tests::stateful_delta_net_rejects_unit_convolution_kernel ... ok
+test models::qwen3_5::model::execution_tests::changed_attention_bias_dtype_fails_before_callbacks ... ok
+test models::qwen3_5::model::execution_tests::explicit_independent_vocabulary_head_starts_equal_and_then_can_diverge ... ok
+test models::qwen3_5::model::execution_tests::custom_connectivity_broadcasts_and_fully_excluded_attention_rows_are_zero ... ok
+test models::qwen3_5::model::execution_tests::block_ranges_and_normalization_reject_implicit_repetition_or_skipping ... ok
+test models::qwen3_5::model::execution_tests::normalization_rejects_changed_latent_dtype_and_clears_previous_capture ... ok
+test models::qwen3_5::model::execution_tests::independent_vocabulary_head_uses_a_new_gradient_leaf ... ok
+test models::qwen3_5::model::execution_tests::unsupported_deltanet_policies_fail_before_any_block_callback ... ok
+test models::qwen3_5::model::execution_tests::changed_latent_dtype_fails_before_callbacks_and_clears_previous_captures ... ok
+test models::qwen3_5::model::execution_tests::scoped_range_hooks_keep_original_addresses_and_affect_the_continuation ... ok
+test models::qwen3_5::model::execution_tests::full_attention_policy_allows_future_token_influence_only_when_requested ... ok
+test models::qwen3_5::model::decode::tests::explicit_positions_match_implicit_decode_offsets ... ok
+test models::qwen3_5::model::intervention_tests::public_block_rejects_incompatible_hidden_and_position_shapes ... ok
+test models::qwen3_5::model::intervention_tests::eager_pattern_capture_preserves_causal_qwen_attention ... ok
+test models::qwen3_5::model::intervention_tests::no_hooks_preserve_hybrid_logits_and_retained_hidden_states ... ok
+test models::qwen3_5::model::intervention_tests::failed_vocabulary_selection_discards_partial_captures ... ok
+test models::qwen3_5::model::execution_tests::split_and_resume_preserve_explicit_positions_padding_and_full_backbone_values ... ok
+test models::qwen3_5::model::intervention_tests::gated_mlp_activation_is_before_content_multiplication_and_residual_addition ... ok
+test models::qwen3_5::model::decode::tests::ragged_prefill_and_decode_match_compacted_full_forward ... ok
+test models::qwen3_5::model::intervention_tests::public_blocks_reproduce_the_backbone_without_a_vocabulary_head ... ok
+test models::qwen3_5::model::intervention_tests::unavailable_hybrid_points_fail_before_callbacks_run ... ok
+test models::qwen3_5::model::intervention_tests::full_attention_capture_preserves_logits_and_native_key_value_heads ... ok
+test models::qwen3_5::model::speculative::tests::defaults_to_two_drafts_and_rejects_zero ... ok
+test models::qwen3_5::model::speculative::tests::cycle_preflight_rejects_vocabulary_history_token_and_hidden_mismatches ... ok
+test models::qwen3_5::model::speculative::tests::all_accepted_cycle_commits_catch_up_and_preserves_shift ... ok
+test models::qwen3_5::model::intervention_tests::selected_mlp_ablation_changes_logits_and_clean_patching_restores_them ... ok
+test models::qwen3_5::model::speculative::tests::complete_cycles_commit_every_acceptance_prefix ... ok
+test models::qwen3_5::model::decode::tests::release_contract_ragged_explicit_positions_match_chunk_and_recurrent_decode ... ok
+test models::qwen3_5::model::intervention_tests::registered_adapter_participates_in_gradients_and_record_roundtrip ... ok
+test models::qwen3_5::model::intervention_tests::no_hooks_preserve_hybrid_parameter_gradients ... ok
+test models::qwen3_5::model::speculative::tests::greedy_acceptance_covers_every_prefix_length ... ok
+test models::qwen3_5::model::speculative::tests::probability_normalization_matches_backend_softmax_and_rejects_non_finite_logits ... ok
+test models::qwen3_5::model::speculative::tests::residual_sampling_never_returns_non_positive_support ... ok
+test models::qwen3_5::model::speculative::tests::eos_lead_rejects_a_caller_owned_active_transaction ... ok
+test models::qwen3_5::model::speculative::tests::speculative_state_rejects_batch_capacity_and_missing_mtp ... ok
+test models::qwen3_5::model::speculative::tests::splitmix_stream_is_reproducible_and_strictly_unit_interval ... ok
+test models::qwen3_5::model::speculative::tests::inactive_and_recoverable_failure_leave_both_cursors_unchanged ... ok
+test models::qwen3_5::model::tests::input_validation_precedes_backend_indexing ... ok
+test models::qwen3_5::model::tests::stateless_device_affinity_errors_are_contextual ... ok
+test models::qwen3_5::model::speculative::tests::speculative_state_zero_truncate_rewinds_both_shifted_caches ... ok
+test models::qwen3_5::model::tests::last_selection_uses_semantic_mask ... ok
+test models::qwen3_5::model::speculative::tests::eos_lead_and_eos_draft_stop_without_cache_drift ... ok
+test models::qwen3_5::model::tests::official_qwen38_topology_initializes_lazily ... ok
+test models::qwen3_5::model::tests::stateless_positions_fail_before_embedding_or_attention_outside_context ... ok
+test models::qwen3_5::model::speculative::tests::stochastic_cycles_with_equal_seeds_are_reproducible ... ok
+test models::qwen3_5::model::tests::tiny_hybrid_forward_respects_output_selection ... ok
+test models::qwen3_5::model::tests::tied_embedding_head_runs_without_duplicate_parameter ... ok
+test models::qwen3_5::model::speculative::tests::stochastic_rejection_rule_recovers_target_marginal ... ok
+test models::qwen3_5::recipe::tests::recipe_backbones_cannot_silently_enter_homogeneous_family_caches ... ok
+test models::qwen3_5::recipe::tests::random_recipe_supports_heterogeneous_attention_heads_rotary_widths_and_extra_blocks ... ok
+test models::qwen3_5::recipe::tests::qwen_local_recipe_config_is_bounded_and_does_not_require_weight_files ... ok
+test models::qwen3_5::recipe::tests::qwen_recipe_empty_topology_prefix_and_source_contract_fail_contextually ... ok
+test models::auto::load::tests::automatic_muse_glimmer_rejects_unaligned_reference_only_burnpack ... ok
+test models::qwen3_5::recipe::tests::prefix_reads_only_selected_backbone_parameters_and_can_use_a_custom_head ... ok
+test models::qwen3_5::recipe::tests::qwen_recipe_namespace_ambiguity_is_rejected_and_explicit_layout_is_honored ... ok
+test models::qwen3_5::recipe::tests::newly_appended_blocks_are_initialized_without_requesting_nonexistent_checkpoint_layers ... ok
+test models::qwen3_5::model::tests::stateless_hybrid_graph_has_finite_nonzero_parameter_gradients ... ok
+test models::qwen3_5::tests::accepts_only_implemented_delta_gate_spellings ... ok
+test models::qwen3_5::tests::derives_the_documented_hybrid_schedule ... ok
+test models::qwen3_5::recipe::tests::changed_feed_forward_width_requires_explicit_reinitialization_and_is_audited ... ok
+test models::qwen3_5::tests::explicit_schedule_overrides_the_derived_interval ... ok
+test models::qwen3_5::tests::gated_query_projection_has_twice_the_attention_width ... ok
+test models::qwen3_5::tests::rejects_an_explicit_schedule_with_the_wrong_length ... ok
+test models::qwen3_5::tests::rejects_unimplemented_recurrent_and_layer_topologies ... ok
+test models::qwen3_moe::checkpoint::tests::dtype_policy_records_bf16_to_f16_conversion ... ok
+test models::qwen3_moe::checkpoint::tests::strict_contract_rejects_inventory_mismatches ... ok
+test models::qwen3_5::recipe::tests::reinitialized_mlp_parameters_keep_gradients_after_dtype_selection ... ok
+test models::qwen3_moe::checkpoint::tests::exact_inventory_builds_identity_plan ... ok
+test models::qwen3_moe::checkpoint::tests::tied_head_contract_uses_storage_alias ... ok
+test models::qwen3_moe::load::tests::complete_contract_installs_and_runs ... ok
+test models::qwen3_5::recipe::tests::source_layer_reordering_reuses_the_explicit_original_parameters ... ok
+test models::qwen3_5::recipe::tests::reinitialized_parameters_follow_preserved_or_explicit_checkpoint_dtype ... ok
+test models::qwen3_5::recipe::tests::unknown_source_parameters_and_changed_source_config_are_not_ignored ... ok
+test models::qwen3_5::recipe::tests::streamed_dtype_conversions_are_reported_as_transformations ... ok
+test models::qwen3_moe::load::tests::sink_rejects_invalid_targets_and_payloads ... ok
+test models::qwen3_5::recipe::tests::unchanged_recipe_matches_loaded_family_backbone_and_live_tied_logits ... ok
+test models::qwen3_moe::model::tests::auxiliary_loss_validates_family_inputs ... ok
+test models::qwen3_moe::load::tests::mixed_projections_load_dense_sparse_and_biased_attention_exactly ... ok
+test models::qwen3_moe::load::tests::local_loader_streams_tied_and_untied_checkpoints ... ok
+test models::qwen3_moe::model::tests::all_inactive_decode_is_exact_noop ... ok
+test models::qwen3_moe::model::tests::auxiliary_loss_only_retains_no_public_router_tensors ... ok
+test models::qwen3_moe::model::tests::config_can_enable_router_logits_by_default ... ok
+test models::qwen3_moe::load::tests::missing_shape_and_unexpected_fail_before_writes ... ok
+test models::qwen3_moe::model::tests::dense_override_uses_exactly_one_feed_forward_kind ... ok
+test models::qwen3_moe::model::tests::every_rms_norm_uses_the_upstream_precision_policy ... ok
+test models::qwen3_moe::model::tests::every_sparse_layer_uses_the_upstream_weighting_precision ... ok
+test models::qwen3_moe::model::tests::cached_auxiliary_loss_uses_the_stack_wide_path ... ok
+test models::qwen3_moe::model::tests::rms_norm_f16_matches_upstream_cast_before_scale_order ... ok
+test models::qwen3_moe::model::tests::autodiff_smoke_reaches_embedding_weights ... ok
+test models::qwen3_moe::model::tests::sliding_window_requires_enablement_and_a_configured_width ... ok
+test models::qwen3_moe::model::tests::sliding_window_schedule_matches_every_valid_boundary ... ok
+test models::qwen3_moe::model::tests::later_layer_failure_is_cache_atomic ... ok
+test models::qwen3_moe::load::tests::mixed_projections_scaled_positions_match_scalar_oracles ... ok
+test models::qwen3_moe::model::tests::stack_wide_auxiliary_loss_matches_transformers_5_2_golden ... ok
+test models::qwen3_moe::model::tests::decode_state_lifecycle_and_capacity_boundaries ... ok
+test models::qwen3_moe::model::tests::stateless_device_affinity_errors_are_contextual ... ok
+test models::qwen3_moe::model::tests::mixed_active_and_inactive_decode_rows_preserve_state ... ok
+test models::qwen3_moe::tests::rejects_more_selected_experts_than_exist ... ok
+test models::qwen3_moe::tests::sparse_step_and_dense_overrides_define_layer_kind ... ok
+test models::t5::checkpoint::tests::attention_and_feed_forward_shapes_follow_t5_projection_widths ... ok
+test models::qwen3_moe::model::tests::chunked_decode_matches_full_forward ... ok
+test models::t5::checkpoint::tests::dimension_overflow_is_reported_before_inventory_allocation ... ok
+test models::t5::checkpoint::tests::dense_and_gated_variants_have_exact_historical_keys ... ok
+test models::qwen3_moe::model::tests::sparse_public_contract_stateless_shape_errors_are_contextual ... ok
+test models::t5::checkpoint::tests::known_hugging_face_embedding_aliases_are_exact_and_reported ... ok
+test models::t5::checkpoint::tests::every_independent_linear_is_reported_as_an_element_equivalent_transpose ... ok
+test models::t5::checkpoint::tests::relative_bias_is_owned_only_by_each_stack_block_zero ... ok
+test models::t5::checkpoint::tests::official_reduced_flan_and_ul2_configs_generate_complete_contracts ... ok
+test models::t5::checkpoint::tests::tied_head_is_a_logical_alias_while_untied_head_consumes_storage ... ok
+test models::qwen3_moe::model::tests::sparse_public_contract_cached_preflight_errors_are_atomic ... ok
+test models::t5::generation::tests::family_token_defaults_reject_missing_empty_and_ambiguous_pad ... ok
+test models::t5::generation::tests::pinned_flan_small_beam_search_matches_reference_tokens ... ignored, requires pinned google/flan-t5-small SafeTensors artifacts
+test models::t5::checkpoint::tests::strict_planning_reports_missing_unexpected_and_shape_errors ... ok
+test models::t5::load::tests::checkpoint_error_helpers_expose_only_runtime_partial_reports ... ok
+test models::qwen3_moe::model::tests::stateless_shapes_and_router_options_are_exact ... ok
+test models::t5::generation::tests::family_helper_runs_a_tiny_real_t5_graph ... ok
+test models::qwen3_moe::checkpoint::tests::official_a3b_contract_has_expected_cardinality_and_shapes ... ok
+test models::qwen3_moe::model::tests::sliding_window_cached_and_stateless_parity ... ok
+test models::qwen3_moe::load::tests::mixed_projections_scaled_cached_forward_and_router_parity ... ok
+test models::t5::load::tests::linear_sink_rejects_checkpoint_layout_and_accepts_runtime_layout ... ok
+test models::t5::load::tests::invalid_dispatch_paths_are_contextual_and_non_panicking ... ok
+test models::t5::load::tests::pinned_flan_t5_small_loads_strictly_and_runs_forward ... ignored, requires pinned google/flan-t5-small SafeTensors artifacts
+test models::t5::load::tests::every_dense_gated_tied_and_untied_target_dispatches ... ok
+test models::t5::model::decode::tests::cache_contract_encoder_geometry_binding_is_atomic ... ok
+test models::t5::load::tests::zero_checkpoint_runs_a_complete_stateless_forward_pass ... ok
+test models::qwen3_moe::model::tests::sparse_public_contract_gapped_positions_and_diagnostics_match_compact_tokens ... ok
+test models::qwen3_moe::model::tests::stateless_prefill_decode_parity ... ok
+test models::t5::model::decode::tests::cache_contract_cross_geometry_rejection_is_atomic ... ok
+test models::t5::model::decode::tests::cache_contract_pending_active_rows_commit_without_touching_peers ... ok
+test models::t5::load::tests::synthetic_writer_uses_expected_float_storage_size ... ok
+test models::t5::model::decode::tests::cache_contract_cross_lookup_rejects_missing_layers_and_rows ... ok
+test models::t5::model::decode::tests::cache_contract_invalid_rectangles_are_atomic ... ok
+test models::t5::load::tests::execution_failure_preserves_partial_report_and_sink_cause ... ok
+test models::t5::model::decode::tests::cache_contract_pending_cardinality_is_atomic ... ok
+test models::t5::model::decode::tests::cache_contract_pending_coordinates_are_atomic ... ok
+test models::t5::model::decode::tests::cached_causal_mask_matches_absolute_query_positions ... ok
+test models::t5::model::decode::tests::cache_contract_encoder_mask_binding_is_atomic ... ok
+test models::t5::model::decode::tests::cached_cross_attention_preserves_gapped_encoder_masks ... ok
+test models::t5::model::decode::tests::cross_projection_rejects_missing_decoder_component ... ok
+test models::t5::model::decode::tests::cache_contract_same_shape_encoder_values_do_not_rebind ... ok
+test models::t5::model::decode::tests::cached_causal_mask_property ... ok
+test models::t5::model::decode::tests::cache_contract_pending_tensor_geometry_is_atomic ... ok
+test models::t5::model::decode::tests::capacity_boundary_failure_preserves_state ... ok
+test models::t5::model::decode::tests::cross_attention_key_values_are_projected_only_during_prefill ... ok
+test models::t5::model::decode::tests::incompatible_model_and_state_layout_is_rejected ... ok
+test models::t5::model::decode::tests::initial_prefill_output_failure_does_not_bind_encoder ... ok
+test models::t5::model::decode::tests::invalid_cached_inputs_fail_before_state_mutation ... ok
+test models::t5::model::decode::tests::release_contract_capacity_rejects_unrepresentable_indices_before_allocation ... ok
+test models::t5::load::tests::local_loader_plans_then_streams_tied_and_untied_checkpoints ... ok
+test models::t5::load::tests::planning_failures_precede_all_model_parameter_writes ... ok
+test models::t5::model::decode::tests::lifecycle_operations_coordinate_self_and_cross_caches ... ok
+test models::t5::model::decode::tests::chunked_and_recurrent_decode_match_full_forward ... ok
+test models::t5::model::decode::tests::later_layer_failure_is_result_atomic ... ok
+test models::t5::model::decode::tests::release_contract_encoder_dtype_rejection_preserves_unbound_state ... ok
+test models::t5::model::decode::tests::release_contract_encoder_dtype_rejection_preserves_populated_state ... ok
+test models::t5::model::decode::tests::mixed_and_all_inactive_decode_rows_are_exact_no_ops ... ok
+test models::t5::model::intervention_tests::t5_decoder_mask_preflight_runs_before_encoder_callbacks ... ok
+test models::t5::model::intervention_tests::t5_all_valid_decoder_masks_preserve_exact_noop_hook_results ... ok
+test models::t5::model::decode::tests::ragged_gapped_prefill_matches_stateless_valid_positions ... ok
+test models::t5::model::intervention_tests::t5_eager_attention_exposes_causal_patterns_without_changing_logits ... ok
+test models::t5::model::decode::tests::release_contract_selective_logits_rejections_preserve_bound_history ... ok
+test models::t5::model::intervention_tests::t5_encoder_hook_path_preserves_padding_semantics ... ok
+test models::t5::model::decode::tests::truncate_then_decode_matches_the_shortened_prefix ... ok
+test models::t5::model::intervention_tests::t5_attention_head_capture_uses_native_encoder_and_cross_attention_shapes ... ok
+test models::t5::model::intervention_tests::t5_empty_hooks_keep_ordinary_masked_decoder_support ... ok
+test models::t5::model::intervention_tests::t5_hook_errors_name_unavailable_points_and_invalid_replacements ... ok
+test models::t5::model::intervention_tests::t5_malformed_all_valid_decoder_mask_fails_shape_validation ... ok
+test models::t5::model::decode::tests::release_contract_masked_encoder_reorder_and_duplicate_preserve_continuation ... ok
+test models::t5::model::decode::tests::stateless_encoder_decoder_graph_has_parameter_gradients ... ok
+test models::t5::model::intervention_tests::t5_invalid_decoder_mask_clears_previous_forward_captures ... ok
+test models::t5::model::decode::tests::release_contract_matching_runtime_dtypes_accept_mixed_precision_norms ... ok
+test models::t5::model::intervention_tests::t5_mixed_padded_batch_retains_valid_rows_and_zero_diagnostics ... ok
+test models::t5::model::recipe::tests::t5_embedding_hooks_capture_and_edit_before_layers_and_clear_on_failure ... ok
+test models::t5::model::recipe::tests::heterogeneous_t5_recipe_shares_bias_only_between_compatible_head_counts ... ok
+test models::t5::model::intervention_tests::t5_noop_hooks_preserve_dense_and_gated_outputs ... ok
+test models::t5::model::intervention_tests::t5_padded_rank_four_points_stay_zero_after_edits ... ok
+test models::t5::model::intervention_tests::t5_padded_interventions_address_original_token_positions ... ok
+test models::t5::model::intervention_tests::t5_inserted_module_and_upstream_weights_receive_gradients ... ok
+test models::t5::model::decode::tests::prefill_matches_stateless_for_dense_gated_tied_and_untied_models ... ok
+test models::t5::model::intervention_tests::t5_selective_capture_and_cross_attention_patch_are_consumed ... ok
+test models::t5::model::recipe::tests::t5_invalid_continuation_clears_previous_hook_captures ... ok
+test models::t5::model::recipe::tests::t5_recipe_rejects_empty_inputs_and_reports_full_hidden_diagnostics ... ok
+test models::t5::model::recipe::tests::t5_recipe_rejects_missing_bias_owners_and_inconsistent_encoder_extraction ... ok
+test models::t5::model::recipe::tests::t5_recipe_rejects_incompatible_staged_contexts_before_callbacks ... ok
+test models::t5::model::intervention_tests::t5_padded_decoder_hooks_match_compacted_outputs_in_original_coordinates ... ok
+test models::t5::model::recipe::tests::t5_recipe_attention_policy_changes_future_visibility ... ok
+test models::t5::model::recipe::tests::t5_recipe_zero_layer_control_and_invalid_dimensions_are_explicit ... ok
+test models::t5::model::recipe::tests::t5_recipe_rejects_skipped_repeated_and_normalized_execution ... ok
+test models::t5::model::tests::attention_uses_unscaled_dot_products ... ok
+test models::t5::model::tests::cross_attention_changes_with_encoder_content ... ok
+test models::t5::model::tests::encoder_is_bidirectional_and_decoder_self_attention_is_causal ... ok
+test models::t5::model::recipe::tests::t5_recipe_split_resume_and_final_normalization_are_exact ... ok
+test models::t5::model::tests::feed_forward_variants_select_exact_topology_and_activation ... ok
+test models::t5::model::recipe::tests::unchanged_t5_recipe_matches_family_encoder_exactly_with_same_parameters ... ok
+test models::t5::model::tests::logit_selection_handles_gapped_masks_and_ordered_positions ... ok
+test models::t5::model::tests::official_flan_and_ul2_fixtures_initialize_when_reduced ... ok
+test models::t5::model::tests::semantic_padding_mask_excludes_encoder_keys ... ok
+test models::t5::model::tests::stateless_device_affinity_errors_are_contextual ... ok
+test models::t5::model::tests::stateless_input_validation_is_contextual ... ok
+test models::t5::model::tests::t5_norm_initializer_honors_global_factor ... ok
+test models::t5::model::recipe::tests::t5_recipe_relative_positions_are_explicit_and_translation_invariant ... ok
+test models::t5::model::tests::tied_lm_head_matches_shared_weight_scaling_equation ... ok
+test models::t5::tests::allocation_products_are_checked_before_backend_initialization ... ok
+test models::t5::model::tests::untied_flag_uses_separate_head_without_decoder_scaling ... ok
+test models::t5::tests::attention_inner_width_is_independent_of_residual_width ... ok
+test models::t5::tests::derived_ul2_fields_must_match_projection ... ok
+test models::t5::model::recipe::tests::t5_recipe_parameter_transfer_preserves_unchanged_graph_and_reports_new_shapes ... ok
+test models::t5::tests::gated_gelu_uses_t5s_historical_gelu_new_activation ... ok
+test models::t5::model::tests::stateless_forward_covers_encoder_decoder_and_cross_attention ... ok
+test moe::tests::auxiliary_loss_validates_selected_expert_range ... ok
+test moe::tests::config_validates_dimensions_top_k_and_finite_positive_scale ... ok
+test moe::tests::auxiliary_loss_validates_mask_shape ... ok
+test moe::tests::dispatcher_validates_each_independent_shape_and_expert_boundary ... ok
+test moe::tests::expert_grouping_rejects_extreme_backend_i32_ids ... ok
+test moe::tests::forward_rejects_empty_inputs_and_mutated_expert_cardinalities ... ok
+test moe::tests::grouping_rejects_empty_metadata_and_positive_out_of_range_ids ... ok
+test moe::tests::dispatch_counters_prove_unselected_experts_are_skipped ... ok
+test moe::tests::invalid_dispatch_metadata_is_rejected ... ok
+test moe::tests::invalid_runtime_shape_is_rejected ... ok
+test moe::tests::invalid_top_k_is_rejected ... ok
+test moe::tests::load_balancing_loss_validates_all_external_diagnostic_axes ... ok
+test moe::tests::load_balancing_loss_matches_two_expert_probability_oracle ... ok
+test moe::tests::expert_grouping_preserves_every_assignment_and_its_token_slot_order ... ok
+test models::t5::model::intervention_tests::t5_padded_noop_hooks_preserve_gradients ... ok
+test models::t5::model::recipe::tests::t5_recipe_staged_inserted_module_preserves_upstream_gradients ... ok
+test moe::tests::malformed_selected_and_shared_experts_propagate_linear_shape_errors ... ok
+test moe::tests::qwen_f16_route_weight_rounds_after_multiplication ... ok
+test moe::tests::non_normalized_weights_preserve_global_softmax_mass ... ok
+test moe::tests::selected_expert_grouping_is_stable_and_complete ... ok
+test moe::tests::routing_ties_are_lexicographically_deterministic ... ok
+test moe::tests::selected_expert_grouping_rejects_out_of_range_ids ... ok
+test moe::tests::selected_dispatch_retains_input_and_expert_gradients ... ok
+test moe::tests::weighting_precision_is_explicit_and_backward_compatible ... ok
+test moe::tests::selected_weights_are_renormalized ... ok
+test normalization::tests::invalid_config_is_rejected ... ok
+test moe::tests::shared_experts_add_exact_values_while_unselected_nan_experts_are_skipped ... ok
+test normalization::tests::mixed_precision_scale_preserves_activation_dtype ... ok
+test normalization::tests::initialization_conventions_have_identical_functions ... ok
+test moe::tests::sparse_moe_preserves_shapes ... ok
+test normalization::tests::muse_inverse_root_modes_match_pinned_f16_oracles ... ok
+test normalization::tests::round_before_scale_matches_early_rounding_operation_order ... ok
+test normalization::tests::t5_scale_only_norm_matches_closed_form ... ok
+test normalization::tests::zero_input_has_no_nan ... ok
+test operations::tests::full_precision_projection_matches_burn_linear ... ok
+test operations::tests::autodiff_linear_record_reload_preserves_values_gradients_and_freezing ... ok
+test models::t5::model::recipe::tests::t5_recipe_partitions_preserve_heterogeneous_graphs_and_relative_translation ... ok
+test operations::tests::inference_linear_records_preserve_layout_and_values ... ok
+test operations::tests::invalid_projection_shape_is_rejected ... ok
+test operations::tests::autodiff_linear_initializer_respects_frozen_parameters ... ok
+test operations::tests::autodiff_linear_initialization_preserves_layout_values_and_gradients ... ok
+test operations::tests::projection_contract_bias_width_rejection_preserves_weight_values ... ok
+test operations::tests::projection_contract_empty_inputs_are_contextual_errors ... ok
+test models::qwen3_5::recipe::tests::qwen_recipe_source_selections_are_exact_or_rejected_before_loading ... ok
+test operations::tests::projection_contract_packed_activations_require_explicit_dequantization ... ok
+test operations::tests::projection_rejects_mixed_float_dtypes_and_accepts_explicit_conversion ... ok
+test operations::tests::qfloat_weight_executes_without_changing_parameter_dtype ... ok
+test position::ids::tests::accepts_empty_shapes_without_inventing_positions ... ok
+test position::ids::tests::derives_ragged_batch_with_independent_cache_offsets ... ok
+test position::ids::tests::derives_unpadded_left_padded_right_padded_and_gapped_rows ... ok
+test position::ids::tests::errors_describe_shape_and_token_context ... ok
+test position::ids::tests::permits_max_position_once_and_rejects_the_next_valid_token ... ok
+test position::ids::tests::reports_every_shape_error ... ok
+test position::rope::tests::fractional_dimension_rejects_invalid_or_ambiguous_products ... ok
+test position::rope::tests::identity_scaling_factors_are_allowed ... ok
+test position::rope::tests::rejects_every_dimension_failure ... ok
+test position::rope::tests::rejects_invalid_theta_values ... ok
+test position::rope::tests::scaling_rejects_bad_factors_and_contexts ... ok
+test position::rope::tests::validates_full_and_partial_rotary_dimensions ... ok
+test position::rope::tests::validates_linear_and_dynamic_ntk_scaling ... ok
+test position::rope::tests::validation_errors_have_actionable_messages ... ok
+test position::ids::tests::exhaustive_masks_preserve_contiguous_valid_positions ... ok
+test position::rope::tests::yarn_cross_validates_frequency_base ... ok
+test position::rope::tests::yarn_defaults_and_overrides_are_validated ... ok
+test position::rope::tests::yarn_rejects_all_invalid_attention_and_beta_values ... ok
+test position::t5::tests::accessors_preserve_validated_configuration ... ok
+test position::t5::tests::buckets_are_monotonic_and_saturating_in_each_direction ... ok
+test position::t5::tests::matches_reference_bidirectional_buckets ... ok
+test position::t5::tests::matches_reference_causal_buckets ... ok
+test position::t5::tests::signed_and_unsigned_extremes_saturate_without_panicking ... ok
+test position::t5::tests::explicit_positions_match_signed_displacements ... ok
+test position::t5::tests::validates_bucket_geometry ... ok
+test position::t5::tests::validation_errors_explain_invalid_geometry ... ok
+test position::t5_bias::tests::bucket_count_signed_index_bound_is_checked_before_initialization ... ok
+test position::t5_bias::tests::host_index_capacity_overflow_is_contextual_before_iteration ... ok
+test position::t5_bias::tests::query_key_product_overflow_is_contextual_before_allocation ... ok
+test position::t5_bias::tests::query_offset_matches_absolute_bucket_positions ... ok
+test position::t5_bias::tests::tensor_bias_matches_bucket_lookup_and_head_layout ... ok
+test position::t5_bias::tests::validation_rejects_zero_invalid_and_overflowing_inputs ... ok
+test position::tensor::tests::distinct_mrope_axes_match_a_scalar_complex_phase_oracle ... ok
+test position::tensor::tests::empty_rotary_axes_and_inconsistent_mrope_sections_are_contextual ... ok
+test position::tensor::tests::equal_mrope_axes_match_standard_angles ... ok
+test position::tensor::tests::inverse_frequency_scaling_matches_closed_forms ... ok
+test position::tensor::tests::rejects_invalid_positions_sections_and_application_shapes ... ok
+test position::tensor::tests::split_half_rotation_matches_reference_values ... ok
+test position::tensor::tests::yarn_interpolates_and_scales_tables ... ok
+test position::tensor::tests::zero_position_and_partial_suffix_are_identity ... ok
+test tokenization::tests::chat_rendering_validates_selection_and_reserved_context ... ok
+test tokenization::tests::named_template_metadata_validates_each_entry ... ok
+test tokenization::tests::debug_reports_local_metadata_without_the_vocabulary_model ... ok
+test tokenization::tests::loads_only_local_artifacts_and_resolves_special_ids ... ok
+test tokenization::tests::chat_python_string_methods_match_supported_semantics ... ok
+test tokenization::tests::batches_with_semantic_left_padding_and_backend_conversion ... ok
+test tokenization::tests::encoding_failure_reports_the_row_and_allows_a_later_valid_batch ... ok
+test tokenization::tests::local_artifact_errors_identify_the_failing_file ... ok
+test tokenization::tests::validates_chat_template_metadata_shapes ... ok
+test tokenization::tests::rejects_empty_host_batches_and_tokenizer_vocabulary ... ok
+test tokenization::tests::rejects_ragged_backend_conversion ... ok
+test tokenization::tests::truncates_on_selected_side_and_rejects_fixed_overflow ... ok
+test training::tests::arbitrary_axis_odd_width_and_f64_precision_are_preserved ... ok
+test tokenization::tests::special_metadata_resolves_ids_precedence_and_rejects_conflicts ... ok
+test tokenization::tests::validates_encoding_limits_and_right_padding_boundaries ... ok
+test training::tests::autodiff::converted_evaluation_records_expose_burn_mapper_loss_including_square_weights ... ok
+test tokenization::tests::local_artifacts_reject_escaping_symlinks ... ok
+test training::tests::autodiff::kl_teacher_connectivity_and_explicit_loss_cast_remain_differentiable ... ok
+test training::tests::autodiff::column_records_saved_from_training_owner_reload_evaluate_and_resume_exactly ... ok
+test training::tests::autodiff::preflight_keeps_unique_parameters_lazy_and_accepts_one_owner_reused_in_forward ... ok
+test training::tests::autodiff::preflight_rejects_any_trainable_duplicate_and_accepts_frozen_duplicates ... ok
+test tokenization::tests::rejects_invalid_sides_limits_and_missing_padding_token ... ok
+test training::tests::autodiff::single_owner_tied_weights_accumulate_both_uses_and_resume_as_one_parameter ... ok
+test training::tests::kl_uses_teacher_to_student_direction_and_example_mean ... ok
+test training::tests::autodiff::stable_cross_entropy_gradient_matches_probability_minus_label ... ok
+test training::tests::large_vocabulary_loss_matches_f64_despite_sequential_f32_tail_loss ... ok
+test training::tests::loss_contract_rejects_invalid_axes_labels_shapes_and_dtypes ... ok
+test tokenization::tests::renders_chat_and_propagates_template_failures ... ok
+test training_capability_tests::packed_autodiff_checkpoint_install_is_rejected_before_initialization ... ok
+test training_capability_tests::packed_autodiff_projection_is_rejected_before_dispatch ... ok
+test transfer::tests::an_empty_plan_preserves_initialized_aliases_and_reports_all_dispositions ... ok
+test transfer::tests::changed_shapes_require_reinitialization_or_an_explicit_transform ... ok
+test transfer::tests::diverged_source_alias_values_are_never_silently_collapsed ... ok
+test transfer::tests::dtype_conversion_must_be_explicit_and_results_are_checked ... ok
+test transfer::tests::exact_overrides_and_explicit_initialization_are_unambiguous ... ok
+test training::tests::autodiff::records_restore_parameter_ids_optimizer_moments_and_next_update_exactly ... ok
+test transfer::tests::existing_module_prefixes_without_matching_parameter_suffixes_are_rejected ... ok
+test transfer::tests::failed_transforms_and_invalid_rules_leave_the_target_unchanged ... ok
+test transfer::tests::matching_nothing_returns_an_actionable_error ... ok
+test transfer::tests::partial_target_alias_updates_require_intentional_untying ... ok
+test transfer::tests::packed_parameters_require_explicit_conversion_but_unselected_sources_stay_packed ... ok
+test transfer::tests::prefix_transfer_reports_reused_omitted_and_new_parameters ... ok
+test transfer::tests::rule_preflight_rejects_empty_descriptions_and_unknown_keep_paths_before_callbacks ... ok
+test transfer::tests::source_ties_are_preserved_and_can_be_explicitly_removed ... ok
+test training::tests::autodiff::staged_t5_execution_preserves_every_parameter_gradient ... ok
+test transfer::tests::transfer_preserves_burn_parameter_layout_mappers_on_record_roundtrip ... ok
+test transfer::tests::transformed_aliases_reject_accidental_untying ... ok
+test transfer::tests::unselected_source_parameters_are_not_initialized_or_read ... ok
+test tokenization::tests::local_special_token_text_errors_cannot_be_hidden_by_valid_ids ... ok
+test transfer::tests::transferred_ties_share_gradients_without_linking_to_source_parameters ... ok
+test training_capability_tests::packed_autodiff_attention_projections_return_capability_errors ... ok
+test training::tests::autodiff::capture_only_intermediate_loss_trains_the_owned_inserted_module ... ok
+test training::tests::autodiff::optimizer_learns_through_selected_hook_and_frozen_downstream_module ... ok
+test tokenization::tests::local_special_tokens_reject_unbacked_text_even_with_a_declared_id ... ok
+test training_capability_tests::optimizer_learns_through_explicitly_dequantized_frozen_q4_and_q8_suffix ... ok
+test tokenization::tests::validates_metadata_objects_and_standalone_chat_templates ... ok
+test tokenization::tests::local_special_tokens_reject_invalid_id_types_and_ranges ... ok
+test checkpoint::tests::arbitrary_exhaustive_splits_preserve_shape_and_bytes ... ok
+test checkpoint::tests::transpose_plans_swap_exactly_two_dimensions ... ok
+test models::auto::load::tests::automatic_muse_glimmer_loads_q8_q4_and_preserves_all_execution_paths ... ok
+
+test result: ok. 1319 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 1.29s
+
+     Running tests/acceptance_records.rs (target/release/deps/acceptance_records-5b4728426a433ab3)
+
+running 3 tests
+test release_allowlist_rejects_mutated_release_decisions ... ok
+test release_allowlist_rejects_invalid_support_claims_and_profile_metadata ... ok
+test committed_acceptance_records_are_pinned_and_match_v0_1_release ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/deepseek_v2_artifacts.rs (target/release/deps/deepseek_v2_artifacts-6384e77df3565c96)
+
+running 2 tests
+test validates_pinned_deepseek_v2_lite_config_headers_plan_memory_and_tokenizer ... ignored, requires deepseek-ai/DeepSeek-V2-Lite revision 604d5664dddd88a0433dbae533b7fe9472482de0
+test committed_lite_fixture_has_exact_contract_topology ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/experiment_interface_properties.rs (target/release/deps/experiment_interface_properties-c3fe17ec93557e70)
+
+running 9 tests
+test malformed_selections_never_invoke_an_edit_or_publish_partial_captures ... ok
+test broadcast_validity_erases_poison_and_survives_ordered_edits ... ok
+test semantic_selection_edits_only_the_named_cartesian_slice ... ok
+test a_failed_transfer_leaves_every_original_parameter_and_alias_untouched ... ok
+test kl_matches_teacher_to_student_expectation_and_batch_replication ... ok
+test stable_losses_match_scalar_probabilities_and_ignore_row_offsets ... ok
+test transfer_preserves_exact_alias_partitions_or_explicitly_unties ... ok
+test attention_constraints_preserve_exact_exclusions_after_both_edit_layers ... ok
+test stable_loss_gradients_match_softmax_with_maximum_ties ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/flan_t5_small.rs (target/release/deps/flan_t5_small-aec08b535b1bffa6)
+
+running 6 tests
+test flan_t5_small_flex_encoder_extraction_and_staged_hooks_are_exact ... ignored, requires the pinned FLAN-T5-small checkpoint and reference bundle
+test flan_t5_small_flex_matches_official_reference ... ignored, requires the pinned FLAN-T5-small checkpoint and reference bundle
+test flan_t5_small_tokenizer_matches_pinned_reference_ids ... ignored, requires the pinned external FLAN-T5-small artifacts; executes no model graph
+test validates_pinned_flan_t5_small_reference_bundle ... ignored, requires the pinned external FLAN-T5-small reference bundle
+test reference_math_contract_is_stable ... ok
+test reference_parity_rejects_scaled_logits_with_perfect_cosine - should panic ... ok
+
+test result: ok. 2 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/local_artifacts.rs (target/release/deps/local_artifacts-72d6148ba6cbfc2f)
+
+running 9 tests
+test quantizes_pinned_qwen35_weights_to_burnpack ... ignored, requires a pinned external Qwen3.5 artifact directory and temporary artifact space
+test quantizes_pinned_qwen38_weights_to_q4_burnpack ... ignored, requires pinned Qwen3.8 weights and TRANSFORMERS_QWEN38_Q4_OUTPUT_DIR on external storage
+test quantizes_pinned_qwen38_weights_to_q8_burnpack ... ignored, requires pinned Qwen3.8 weights and TRANSFORMERS_QWEN38_Q8_OUTPUT_DIR on external storage
+test strictly_maps_pinned_qwen38_text_and_mtp ... ignored, requires Qwen/Qwen3.8-27B revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+test validates_pinned_qwen35_local_artifacts ... ignored, requires a pinned external Qwen3.5 artifact directory
+test validates_pinned_qwen38_chat_template ... ignored, requires Qwen/Qwen3.8-27B revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+test validates_pinned_qwen38_config_and_header_inventory ... ignored, requires Qwen/Qwen3.8-27B revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+test validates_pinned_qwen38_tokenizer ... ignored, requires Qwen/Qwen3.8-27B revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+test f32_acceptance_digest_is_stable ... ok
+
+test result: ok. 1 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/model_configs.rs (target/release/deps/model_configs-e5a051fc3fcc8aae)
+
+running 9 tests
+test parses_deepseek_v2_mla_and_yarn ... ok
+test parses_flan_and_ul2_as_t5_topologies ... ok
+test parses_legacy_nemotron_pattern_and_nonstandard_infinity ... ok
+test parses_nested_muse_text_and_derives_nope_schedule ... ok
+test rejects_unknown_layer_names_during_deserialization ... ok
+test parses_nested_qwen38_text_topology ... ok
+test parses_qwen3_a3b_routing_topology ... ok
+test rejects_invalid_dimensions_schedules_routing_and_positions ... ok
+test normalized_schemas_round_trip_without_losing_topology ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/muse_glimmer_artifacts.rs (target/release/deps/muse_glimmer_artifacts-1ec512d2ffd9cccc)
+
+running 33 tests
+test quantized_quality::tests::exact_regression_limit_is_inclusive ... ok
+test quantized_quality::tests::duplicate_backward_and_gapped_positions_are_rejected ... ok
+test quantized_quality::tests::incomplete_and_extra_row_sequences_are_rejected ... ok
+test quantized_quality::tests::lower_quantized_nll_is_not_treated_as_a_regression ... ok
+test committed_muse_burnpack_anchors_are_complete_and_non_claiming ... ok
+test quantized_quality::tests::nonfinite_and_zero_norm_quantized_rows_are_rejected ... ok
+test quantized_quality::tests::measured_nll_regression_drives_the_threshold_gate ... ok
+test quantized_quality::tests::nonfinite_measured_regressions_are_rejected ... ok
+test quantized_quality::tests::negative_nan_and_infinite_limits_are_rejected ... ok
+test quantized_quality::tests::nonfinite_reference_logits_are_rejected_with_their_coordinate ... ok
+test quantized_quality::tests::official_target_must_be_its_rows_top_one ... ok
+test quantized_quality::tests::out_of_range_target_is_rejected ... ok
+test quantized_quality::tests::position_successor_overflow_is_rejected ... ok
+test quantized_quality::tests::reference_shape_and_position_count_must_be_exact ... ok
+test quantized_quality::tests::regression_above_limit_is_rejected ... ok
+test quantized_quality::tests::runtime_position_target_and_width_must_match_before_scoring ... ok
+test quantized_quality::tests::shape_multiplication_overflow_is_rejected ... ok
+test quantized_quality::tests::signed_zero_ties_are_resolved_to_the_lowest_token_id ... ok
+test quantized_quality::tests::stable_log_sum_exp_is_invariant_to_large_offsets ... ok
+test quantized_quality::tests::top_one_mismatch_is_reported_but_does_not_replace_nll_policy ... ok
+test quantized_quality::tests::top_one_ties_are_resolved_to_the_lowest_token_id ... ok
+test quantized_quality::tests::unchanged_rows_have_zero_regression_and_complete_diagnostics ... ok
+test quantized_quality::tests::zero_norm_reference_is_rejected ... ok
+test quantized_quality::tests::zero_reference_baseline_is_rejected ... ok
+test quantizes_pinned_muse_glimmer_weights_to_q4_burnpack ... ignored, streams the pinned 59.6 GB Muse checkpoint into a create-only external Q4 Burnpack
+test quantized_quality::tests::zero_vocabulary_and_empty_sequence_are_rejected ... ok
+test quantizes_pinned_muse_glimmer_weights_to_q8_burnpack ... ignored, streams the pinned 59.6 GB Muse checkpoint into a create-only external Q8 Burnpack
+test validates_pinned_muse_glimmer_config_headers_plan_memory_and_tokenizer ... ignored, requires meta-models/Muse-Glimmer-30B revision a4e59da52a7bc87ae7251dd5545c0dd437c44b68
+test validates_pinned_muse_glimmer_full_shard_payload_hashes ... ignored, streams and hashes all 59.6 GB of pinned Muse-Glimmer-30B weights
+test committed_muse_glimmer_fixture_has_exact_schedule_and_contract ... ok
+test muse_official_reference_schema_is_weight_independent_and_strict ... ok
+test git_crate_provenance_requires_a_committed_repository ... ok
+test git_crate_provenance_supports_standalone_and_nested_layouts ... ok
+
+test result: ok. 29 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/nemotron_h_artifacts.rs (target/release/deps/nemotron_h_artifacts-a562d93a5bd7b4b4)
+
+running 33 tests
+test adversarial_component_oracle_is_strict_and_source_bound ... ok
+test nemotron_h_base_reference::tests::hidden_points_report_their_execution_path ... ok
+test nemotron_h_base_reference::tests::matrix_rows_require_one_complete_vocabulary_slice ... ok
+test nemotron_h_base_reference::tests::ranking_is_descending_and_tie_stable ... ok
+test acceptance_record_matches_pinned_header_evidence ... ok
+test nemotron_h_base_reference::tests::top_level_schema_rejects_unknown_fields ... ok
+test nemotron_h_base_reference::tests::reviewed_anchor_set_is_complete ... ok
+test nemotron_h_parity::tests::corresponding_row_accepts_exact_and_scaled_values ... ok
+test nemotron_h_parity::tests::corresponding_row_accepts_exact_threshold ... ok
+test nemotron_h_base_reference::tests::filename_policy_is_fail_closed ... ok
+test nemotron_h_parity::tests::corresponding_row_rejects_crossed_paths ... ok
+test nemotron_h_parity::tests::hidden_trace_gate_is_phase_specific ... ok
+test nemotron_h_parity::tests::top1_ties_select_the_lowest_token_id ... ok
+test nemotron_h_parity::tests::corresponding_row_rejects_every_invalid_numerical_class ... ok
+test nemotron_h_parity::tests::summary_enforces_contiguous_complete_coverage ... ok
+test nemotron_h_reference::tests::f32_hex_decoder_is_little_endian ... ok
+test nemotron_h_parity::tests::hidden_trace_gate_rejects_invalid_values ... ok
+test nemotron_h_base_reference::tests::validated_payload_accessors_preserve_path_identity ... ok
+test nemotron_h_reference::tests::bundle_filename_policy_is_fail_closed ... ok
+test nemotron_h_reference::tests::unreviewed_real_anchors_are_all_absent ... ok
+test nemotron_h_reference::tests::synthetic_schema_rejects_unknown_fields ... ok
+test official_base_reference_anchors_are_complete ... ok
+test official_mtp_reference_bundle_is_fail_closed_before_anchor_review ... ok
+test validates_pinned_nemotron_control_and_weight_payloads ... ignored, requires all 65.8 GB of nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 revision a9904d24bcc1d289a1950fa9d2b978c47cf903b9
+test pinned_index_schema_is_fail_closed ... ok
+test validates_pinned_nemotron_official_base_reference_bundle ... ignored, requires the independently reviewed external Nemotron base-reference bundle
+test validates_pinned_nemotron_official_mtp_reference_bundle ... ignored, requires separately reviewed pinned vLLM Nemotron MTP evidence
+test nemotron_h_reference::tests::f32_payload_validation_rejects_non_finite_and_trailing_data ... ok
+test physical_header_shape_and_dtype_histogram_is_exact ... ok
+test index_total_size_overcounts_only_base_router_matrices ... ok
+test pinned_config_index_and_headers_have_exact_identity ... ok
+test mtp_inventory_is_complete_isolated_and_matches_runtime_contract ... ok
+test corrected_metadata_produces_complete_f16_plan ... ok
+
+test result: ok. 30 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/packed_metal_kernels.rs (target/release/deps/packed_metal_kernels-abdb37922703bc69)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/qwen35_benchmarks.rs (target/release/deps/qwen35_benchmarks-81aafea4787909c4)
+
+running 18 tests
+test benchmark_metrics::tests::disabled_memory_phase_is_a_noop ... ok
+test benchmark_metrics::tests::invalid_metric_inputs_fail_closed ... ok
+test benchmark_metrics::tests::memory_marker_supervised_cpu_smoke ... ignored, CPU-only IPC smoke: run this exact test under scripts/profile_process_memory.py
+test benchmark_metrics::tests::flan_cache_arithmetic_and_output_hashes_are_canonical ... ok
+test benchmark_metrics::tests::protocol_and_environment_require_complete_evidence ... ok
+test benchmark_metrics::tests::quantiles_preserve_raw_pairing_and_valid_work ... ok
+test public_generation_benchmark::tests::cache_bounds_count_31_feedback_tokens_not_128_forced_steps ... ok
+test public_generation_benchmark::tests::altered_tokens_lengths_and_terminal_metadata_fail_closed ... ok
+test public_generation_benchmark::tests::controls_preserve_stopping_defaults_and_pin_seed ... ok
+test public_generation_benchmark::tests::complete_output_evidence_keeps_actual_coordinator_metadata ... ok
+test public_generation_benchmark::tests::incomplete_or_nonfinite_probability_readbacks_are_rejected ... ok
+test public_generation_benchmark::tests::protocol_separates_coordinator_work_and_rejects_drift ... ok
+test tests::cosine_gate_is_finite_and_sensitive_to_direction ... ok
+test tests::protocol_shapes_never_exceed_total_32k ... ok
+test tests::cache_geometry_matches_pinned_qwen35 ... ok
+test tests::cache_arithmetic_fails_closed ... ok
+test benchmark_metrics::tests::memory_channel_enforces_identity_and_order ... ok
+test benchmark_metrics::tests::memory_channel_failure_boundaries_are_bounded ... ok
+
+test result: ok. 17 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/qwen35_release_api.rs (target/release/deps/qwen35_release_api-78a9691567edb417)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/qwen3_moe_artifacts.rs (target/release/deps/qwen3_moe_artifacts-2a3048ad9a9ccfbe)
+
+running 8 tests
+test quantized_payload_accounting_is_stable ... ok
+test qwen3_moe_reference::tests::binary16_spacing_matches_ieee_boundaries ... ok
+test qwen3_moe_reference::tests::artifact_digest_is_order_independent ... ok
+test validates_pinned_qwen3_moe_config_headers_plan_memory_and_tokenizer ... ignored, requires Qwen/Qwen3-30B-A3B revision ad44e777bcd18fa416d9da3bd8f70d33ebb85d39
+test validates_pinned_qwen3_moe_official_reference_bundle ... ignored, requires the externally generated pinned Qwen3-MoE reference bundle
+test qwen3_moe_reference::tests::missing_generated_digest_fails_closed ... ok
+test qwen3_moe_reference::tests::row_top_two_recomputes_margin_and_ties ... ok
+test qwen3_moe_reference::tests::row_top1_breaks_ties_by_lowest_token_id ... ok
+
+test result: ok. 6 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/small_model_benchmarks.rs (target/release/deps/small_model_benchmarks-123403a204b814f9)
+
+running 9 tests
+test benchmark_metrics::tests::disabled_memory_phase_is_a_noop ... ok
+test benchmark_metrics::tests::flan_cache_arithmetic_and_output_hashes_are_canonical ... ok
+test benchmark_metrics::tests::invalid_metric_inputs_fail_closed ... ok
+test benchmark_metrics::tests::memory_marker_supervised_cpu_smoke ... ignored, CPU-only IPC smoke: run this exact test under scripts/profile_process_memory.py
+test flan::flan_small_flex_benchmark ... ignored, requires pinned local FLAN artifacts, reference bundle, environment metadata and --release
+test benchmark_metrics::tests::protocol_and_environment_require_complete_evidence ... ok
+test benchmark_metrics::tests::quantiles_preserve_raw_pairing_and_valid_work ... ok
+test benchmark_metrics::tests::memory_channel_enforces_identity_and_order ... ok
+test benchmark_metrics::tests::memory_channel_failure_boundaries_are_bounded ... ok
+
+test result: ok. 7 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/t5_xxl_artifacts.rs (target/release/deps/t5_xxl_artifacts-20a7aa5c5ef00d4a)
+
+running 3 tests
+test validates_pinned_flan_t5_xxl_config_headers_plan_memory_and_tokenizer ... ignored, requires google/flan-t5-xxl revision ae7c9136adc7555eeccc78cdd960dfd60fb346ce
+test validates_pinned_flan_t5_xxl_shard_payload_hashes ... ignored, streams and hashes all 45 GB of pinned FLAN-T5-XXL weights
+test committed_flan_t5_xxl_fixture_has_exact_contract_topology ... ok
+
+test result: ok. 1 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/t5_xxl_metal.rs (target/release/deps/t5_xxl_metal-9c92640f75e2d99f)
+
+running 1 test
+test validates_pinned_flan_t5_xxl_reference_bundle ... ignored, requires the pinned FLAN-T5-XXL external reference bundle
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/activation_workbench.rs (target/release/examples/activation_workbench-d9439894c5663a8f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/attention_head_attribution.rs (target/release/examples/attention_head_attribution-9ed735f324026e1a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/burn_training.rs (target/release/examples/burn_training-3c987d8106edf3a7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/clock_and_pizza.rs (target/release/examples/clock_and_pizza-4421455e8c77d307)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/clock_and_pizza_train.rs (target/release/examples/clock_and_pizza_train-60d8ac51af02c61a)
+
+running 2 tests
+test study::tests::split_is_deterministic_disjoint_and_complete ... ok
+test study::tests::optimizer_discovers_recipe_parameters_and_hooks_preserve_learning ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests examples/custom_composition.rs (target/release/examples/custom_composition-47ced50a2685458d)
+
+running 1 test
+test training::tests::custom_mixer_and_width_adapters_learn_and_survive_native_records ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running unittests examples/flan_t5_small.rs (target/release/examples/flan_t5_small-2bc9519c483386c2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/greater_than.rs (target/release/examples/greater_than-651c6e64ef0f8ba5)
+
+running 4 tests
+test study::tests::clean_suffix_and_neighbor_sharpness_use_original_cutoff ... ok
+test study::tests::recovery_keeps_negative_gaps_and_declares_negligible_ones_undefined ... ok
+test study::tests::numeric_subset_keeps_full_vocabulary_probability_mass ... ok
+test study::tests::frozen_fixture_preserves_alignment_and_clean_split_disjointness ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/greater_than_train.rs (target/release/examples/greater_than_train-69d0bdf2db212f76)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/grokking_fourier.rs (target/release/examples/grokking_fourier-a0801eae570baf44)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/grokking_train.rs (target/release/examples/grokking_train-668f31d6a1880ae8)
+
+running 6 tests
+test study::analyze::tests::affine_sinusoid_fit_retains_a_nonzero_activation_mean ... ok
+test study::tests::fourier_power_identifies_a_known_frequency_and_ignores_dc ... ok
+test study::tests::resume_rejects_earlier_targets_benchmarks_and_changed_training_sources ... ok
+test study::tests::native_optimizer_discovers_every_parameter_and_updates_the_transformer ... ok
+test study::tests::connected_activation_loss_reaches_the_prefix_without_the_readout ... ok
+test study::tests::burn_model_and_optimizer_records_resume_the_next_update_exactly ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests examples/mla_encoder_decoder.rs (target/release/examples/mla_encoder_decoder-18dd1fce18b28144)
+
+running 1 test
+test training::tests::noncausal_mla_and_hooked_latent_adapter_learn_and_reload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+
+     Running unittests examples/qwen35_chat.rs (target/release/examples/qwen35_chat-502ada9ce659a345)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/qwen_prefix.rs (target/release/examples/qwen_prefix-3d88e9616a9ea70f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/t5_classifier.rs (target/release/examples/t5_classifier-2781695ffb293865)
+
+running 1 test
+test training::tests::held_out_combinations_are_disjoint_and_classifier_learns_then_reloads ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running unittests examples/train_qwen_adapter.rs (target/release/examples/train_qwen_adapter-d0eb4cad86bf5ea0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/tuned_lens.rs (target/release/examples/tuned_lens-0800c9f81c59f8f2)
+
+running 1 test
+test study::tests::long_vocabulary_tail_remains_normalized_and_has_accurate_kl ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/tuned_lens_train.rs (target/release/examples/tuned_lens_train-781c5b6b42956ce9)
+
+running 2 tests
+test study::tests::frozen_decoder_propagates_translator_gradients_without_updating_its_weights ... ok
+test study::tests::saved_affine_and_momentum_records_reproduce_the_next_optimizer_step ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

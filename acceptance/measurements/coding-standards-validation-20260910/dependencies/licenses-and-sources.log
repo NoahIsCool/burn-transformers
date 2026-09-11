@@ -1,0 +1,12 @@
+2026-09-10 23:08:42 [INFO] using config from /Users/nover/repos/transformers/deny.toml
+2026-09-10 23:08:42 [INFO] fetching crates for Cargo.toml
+2026-09-10 23:08:42 [INFO] fetched crates in 3.573071584s
+2026-09-10 23:08:42 [INFO] gathering crates for Cargo.toml
+2026-09-10 23:08:42 [INFO] gathered 529 crates in 3490ms
+2026-09-10 23:08:42 [INFO] no workspace dependencies were declared
+2026-09-10 23:08:42 [INFO] checking licenses...
+2026-09-10 23:08:42 [INFO] checking sources...
+2026-09-10 23:08:42 [INFO] sources checked in 0ms
+2026-09-10 23:08:42 [INFO] licenses checked in 101ms
+ licenses ok: 0 errors, 0 warnings, 529 notes
+  sources ok: 0 errors, 0 warnings, 0 notes

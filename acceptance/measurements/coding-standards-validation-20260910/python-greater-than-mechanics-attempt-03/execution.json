@@ -1,0 +1,30 @@
+{
+  "id": "python-greater-than-mechanics",
+  "attempt": 3,
+  "command": [
+    "/usr/local/bin/python3",
+    "/tmp/v0_3_python_validation.py",
+    "--root",
+    "/Users/nover/repos/transformers",
+    "--start",
+    "examples/mechanistic/greater_than",
+    "--pattern",
+    "test_*.py",
+    "--audit",
+    "/Users/nover/repos/transformers/target/coding-standards-validation-records/python-greater-than-mechanics-attempt-03/python-reads.json"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "python",
+  "runner_sha256": "01ef9cb4d2f2dce23e169b7c6353d61cdefca88611f9cd05239ee083bd797437",
+  "started_utc": "2026-09-11T00:06:12.006819+00:00",
+  "finished_utc": "2026-09-11T00:06:13.870153+00:00",
+  "seconds": 1.8633333750185557,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "python-greater-than-mechanics-attempt-03/inputs-before.json",
+  "inputs_after": "python-greater-than-mechanics-attempt-03/inputs-after.json",
+  "output": "python-greater-than-mechanics-attempt-03/output.log",
+  "output_sha256": "6d6b67a973f1f98d914d9e08432ea4c0e48398e51d66784dcc83ed069ea7c98a",
+  "passed": true,
+  "python_read_audit": "python-greater-than-mechanics-attempt-03/python-reads.json"
+}

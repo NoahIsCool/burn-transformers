@@ -1,0 +1,30 @@
+{
+  "id": "rust-all-feature-clippy",
+  "attempt": 4,
+  "command": [
+    "cargo",
+    "+nightly",
+    "clippy",
+    "--release",
+    "--locked",
+    "--offline",
+    "--all-targets",
+    "--all-features",
+    "--",
+    "-D",
+    "warnings"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "runner_sha256": "01ef9cb4d2f2dce23e169b7c6353d61cdefca88611f9cd05239ee083bd797437",
+  "started_utc": "2026-09-11T00:03:38.635487+00:00",
+  "finished_utc": "2026-09-11T00:03:50.699306+00:00",
+  "seconds": 12.063801792042796,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "rust-all-feature-clippy-attempt-04/inputs-before.json",
+  "inputs_after": "rust-all-feature-clippy-attempt-04/inputs-after.json",
+  "output": "rust-all-feature-clippy-attempt-04/output.log",
+  "output_sha256": "0789b7e95528783c356afaac44f683ccc44394b5feb837b5d3aa29e5d7aaf93b",
+  "passed": true
+}

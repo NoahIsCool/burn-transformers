@@ -1,0 +1,21 @@
+{
+  "command": [
+    "cargo",
+    "+stable",
+    "test",
+    "--release",
+    "--manifest-path",
+    "/private/tmp/tfm-standards-doc_audit/scripts/coverage-layout/Cargo.toml",
+    "--locked",
+    "--offline",
+    "--target-dir",
+    "/Users/nover/repos/transformers/target"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "free_bytes_before": 21977395200,
+  "minimum_free_bytes": 21474836480,
+  "started": 1789082918.8449018,
+  "exit_code": 0,
+  "elapsed_seconds": 23.427213191986084,
+  "free_bytes_after": 21973499904
+}

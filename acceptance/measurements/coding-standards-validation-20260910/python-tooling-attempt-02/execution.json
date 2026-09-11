@@ -1,0 +1,30 @@
+{
+  "id": "python-tooling",
+  "attempt": 2,
+  "command": [
+    "/usr/local/bin/python3",
+    "/tmp/v0_3_python_validation.py",
+    "--root",
+    "/Users/nover/repos/transformers",
+    "--start",
+    "scripts/tests",
+    "--pattern",
+    "test*.py",
+    "--audit",
+    "/Users/nover/repos/transformers/acceptance/measurements/coding-standards-validation-20260910/python-tooling-attempt-02/python-reads.json"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "python",
+  "runner_sha256": "eae091a2036cdfc3159eda39a3079e83168b292511270aec7f3d633f159eec95",
+  "started_utc": "2026-09-10T23:40:09.688517+00:00",
+  "finished_utc": "2026-09-10T23:40:28.633745+00:00",
+  "seconds": 18.94528262503445,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "python-tooling-attempt-02/inputs-before.json",
+  "inputs_after": "python-tooling-attempt-02/inputs-after.json",
+  "output": "python-tooling-attempt-02/output.log",
+  "output_sha256": "609422d3f56de5cef158a328dfcd3c49c3b69c13c754ff17a73e48a90f6be876",
+  "passed": true,
+  "python_read_audit": "python-tooling-attempt-02/python-reads.json"
+}

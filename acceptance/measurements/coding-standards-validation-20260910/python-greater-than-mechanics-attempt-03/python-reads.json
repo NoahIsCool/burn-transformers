@@ -1,0 +1,16 @@
+{
+  "scope": "Actual read opens in this Python process beneath the repository; nested subprocesses additionally covered by the runner source/fixture inventory. Build outputs, models, git internals, bytecode caches and this validation output are excluded.",
+  "inputs_before_first_read": {
+    "examples/mechanistic/greater_than/test_reference.py": "da397f45aa1ea9eb48420d76921581cc4657fefb3f4059d668ec8617bca8cd69",
+    "examples/mechanistic/greater_than/manifest.json": "914684395a3caab027ca202d7a9473f8141569bde35a66a01f0e21b34057c990"
+  },
+  "inputs_after": {
+    "examples/mechanistic/greater_than/test_reference.py": "da397f45aa1ea9eb48420d76921581cc4657fefb3f4059d668ec8617bca8cd69",
+    "examples/mechanistic/greater_than/manifest.json": "914684395a3caab027ca202d7a9473f8141569bde35a66a01f0e21b34057c990"
+  },
+  "changed_inputs": [],
+  "tests_run": 5,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0
+}

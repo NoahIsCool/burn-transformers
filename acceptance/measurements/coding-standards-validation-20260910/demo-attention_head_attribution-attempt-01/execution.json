@@ -1,0 +1,30 @@
+{
+  "id": "demo-attention_head_attribution",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "run",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,flex,autodiff,train,tokenizers,chat-templates",
+    "--example",
+    "attention_head_attribution"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "runner_sha256": "d428bb39cc2ec00985bbd0d46c9740b3f79916c157207d33a638ddbc418c38a0",
+  "started_utc": "2026-09-10T23:57:39.785986+00:00",
+  "finished_utc": "2026-09-10T23:57:40.957417+00:00",
+  "seconds": 1.1714277499704622,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "demo-attention_head_attribution-attempt-01/inputs-before.json",
+  "inputs_after": "demo-attention_head_attribution-attempt-01/inputs-after.json",
+  "output": "demo-attention_head_attribution-attempt-01/output.log",
+  "output_sha256": "17995ca5868eb17c19d62ca054feaca6e621b1a5b4c547ee07bd5dc59e502b09",
+  "passed": true
+}

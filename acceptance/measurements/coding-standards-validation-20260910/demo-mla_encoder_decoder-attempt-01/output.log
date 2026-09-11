@@ -1,0 +1,6 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 2.06s
+     Running `target/release/examples/mla_encoder_decoder`
+Three source tokens compress to [1, 3, 3]; two target outputs have shape [1, 2, 3].
+Compressed-state adapter changed task logits by 0.008735.
+Restoration error: 0.000000.

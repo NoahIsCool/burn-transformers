@@ -1,0 +1,69 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/transformers_coverage_layout-aabb01f2c05a5f15)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/release/deps/transformers_coverage_layout-89d1b22c877bcd45)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/documentation.rs (target/release/deps/documentation-befd5c59755f8549)
+
+running 9 tests
+test truly_opaque_prefixes_are_review_blockers_and_strings_do_not_invent_functions ... ok
+test literal_doc_style_is_distinct_from_equivalent_block_and_attribute_docs ... ok
+test inline_production_modules_need_inner_docs_even_when_outer_docs_exist ... ok
+test a_production_alias_prevents_test_filename_exemption ... ok
+test macro_authored_item_fragments_and_metavariable_prefixes_use_real_doc_spans ... ok
+test private_functions_trait_implementations_and_default_methods_are_required ... ok
+test test_cfg_and_harness_bodies_are_exempt_but_test_names_are_not ... ok
+test malformed_sources_fail_closed_and_crlf_spelling_retains_exact_lines ... ok
+test inline_test_bodies_require_sibling_placement_without_requiring_test_docs ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/layout.rs (target/release/deps/layout-e835a604ca094b59)
+
+running 29 tests
+test associated_items_and_nested_local_items_have_independent_ownership ... ok
+test cfg_attr_implication_is_conservative_and_recursive ... ok
+test malformed_and_unsupported_cfg_remain_visible_and_retained ... ok
+test multiline_cfg_nested_inheritance_and_multiple_attributes ... ok
+test cfg_proofs_do_not_guess_other_atoms_or_module_names ... ok
+test empty_blank_and_unterminated_files_have_complete_physical_line_runs ... ok
+test active_path_cycle_is_explicit_and_bounded ... ok
+test invalid_inputs_fail_without_synthesizing_a_successful_layout ... ok
+test equivalent_aliases_are_reported_but_not_mistaken_for_cycles ... ok
+test raw_strings_comments_and_character_literals_cannot_forge_syntax ... ok
+test conditional_paths_never_choose_one_feature_assignment ... ok
+test external_test_modules_inherit_test_only_and_inner_file_cfg ... ok
+test report_json_is_versioned_and_never_encodes_a_coverage_gate_result ... ok
+test canonical_symlinks_cannot_escape_the_source_root ... ok
+test same_line_items_are_mixed_and_never_exclusively_test_only ... ok
+test structural_test_audit_covers_associated_items_expressions_and_statements ... ok
+test parse_errors_and_macro_expansion_remain_visible_without_generated_exclusions ... ok
+test conflicting_default_module_files_are_both_retained ... ok
+test missing_and_traversing_paths_are_unresolved_without_outside_reads ... ok
+test structural_test_audit_ignores_runtime_cfg_macro_tokens_strings_and_comments ... ok
+test opaque_production_edges_keep_candidate_reports_explicitly_unqualified ... ok
+test multiple_explicit_entries_merge_shared_physical_sources ... ok
+test shared_files_merge_production_and_test_contexts_in_both_orders ... ok
+test default_mod_rs_and_non_mod_rs_nested_paths_follow_rust_layout ... ok
+test unicode_crlf_bom_shebang_coordinates_hash_exact_original_bytes ... ok
+test structural_test_audit_distinguishes_external_inline_and_harness_owners ... ok
+test structural_test_audit_does_not_resolve_test_sensitive_uncertainty ... ok
+test explicit_paths_respect_inline_and_noninline_base_directories ... ok
+test structural_test_audit_records_file_cfg_and_fails_incomplete_syntax ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests transformers_coverage_layout
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

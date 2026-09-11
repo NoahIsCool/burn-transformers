@@ -1,0 +1,62 @@
+{
+  "scope": "Fresh connected dependency advisory, license, and source-policy checks; existing maintenance exceptions preserved.",
+  "cargo_lock_sha256": "7c57f9830fb5b93195fb8ac765106dd9db91234f9130e9f66494fbec0d808b9d",
+  "deny_policy_sha256": "ba350ff4078d26291c0b5a12dd6d7ab26cf5b56d4b62775fb9ae2a12a7f42fac",
+  "commands": [
+    {
+      "argv": [
+        "/private/tmp/tfm-release-tools/bin/cargo-audit",
+        "audit",
+        "--file",
+        "Cargo.lock",
+        "--db",
+        "/private/tmp/tfm-advisory-db",
+        "--deny",
+        "warnings",
+        "--ignore",
+        "RUSTSEC-2025-0141",
+        "--ignore",
+        "RUSTSEC-2024-0436",
+        "--color",
+        "never",
+        "--json"
+      ],
+      "environment": {
+        "CARGO_NET_OFFLINE": "false"
+      },
+      "exit_code": 0,
+      "stdout": "audit.json",
+      "stderr": "audit.log"
+    },
+    {
+      "argv": [
+        "/private/tmp/tfm-release-tools/bin/cargo-deny",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "--all-features",
+        "--config",
+        "deny.toml",
+        "--color",
+        "never",
+        "--log-level",
+        "info",
+        "check",
+        "licenses",
+        "sources",
+        "--show-stats"
+      ],
+      "environment": {
+        "CARGO_NET_OFFLINE": "false",
+        "RUSTUP_TOOLCHAIN": "stable"
+      },
+      "exit_code": 0,
+      "log": "licenses-and-sources.log"
+    }
+  ],
+  "artifacts": {
+    "licenses-and-sources.log": "91f254abe512c559b692dc95aa429e178e4225bc0613473a1ffcd5a4fa84054e",
+    "audit.json": "4ce134b3c2d9951935371e4f5957cc50a5bb152f2de9162e17bc15e7a96cc920",
+    "audit.log": "7d80482d2584373935327bfe23d5257196dbaeb126843c58c96583dc121bb1b3"
+  }
+}

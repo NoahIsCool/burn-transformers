@@ -1,0 +1,16 @@
+{
+  "scope": "Actual read opens in this Python process beneath the repository; nested subprocesses additionally covered by the runner source/fixture inventory. Build outputs, models, git internals, bytecode caches and this validation output are excluded.",
+  "inputs_before_first_read": {
+    "examples/mechanistic/grokking_training/manifest.json": "76bd595bf2923b9e337c2efed3815d18ed7bd69813a2d6971d5bd4f9e87c59cd",
+    "examples/mechanistic/grokking_training/train_split.json": "3465f33c67ced27f9ae36b377f5a14f1d3985a83d23f2a951cdd795ed64faa33"
+  },
+  "inputs_after": {
+    "examples/mechanistic/grokking_training/manifest.json": "76bd595bf2923b9e337c2efed3815d18ed7bd69813a2d6971d5bd4f9e87c59cd",
+    "examples/mechanistic/grokking_training/train_split.json": "3465f33c67ced27f9ae36b377f5a14f1d3985a83d23f2a951cdd795ed64faa33"
+  },
+  "changed_inputs": [],
+  "tests_run": 8,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0
+}

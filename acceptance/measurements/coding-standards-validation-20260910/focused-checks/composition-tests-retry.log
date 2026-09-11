@@ -1,0 +1,20 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 7m 54s
+     Running unittests src/lib.rs (target/release/deps/transformers-54ca225a3264fdac)
+
+running 12 tests
+test experiment::tests::state_rejects_skipped_repeated_and_normalized_layer_ranges ... ok
+test experiment::tests::encoder_export_preserves_positions_validity_and_normalization_boundary ... ok
+test experiment::tests::layer_overrides_do_not_change_other_layers_or_cross_attention ... ok
+test experiment::tests::policy_bias_broadcast_and_invalid_extents_are_explicit ... ok
+test experiment::tests::source_positions_are_independent_of_target_extent_but_never_negative ... ok
+test experiment::tests::composition_context_rejects_invalid_extent_source_batch_positions_and_padding ... ok
+test experiment::tests::state_validation_rejects_mutated_width_positions_and_mask ... ok
+test experiment::tests::policy_broadcasts_allowed_links_and_intersects_padding ... ok
+test experiment::tests::composition_dense_and_gated_branches_expose_the_actual_nonlinearity ... ok
+test experiment::tests::composition_width_adapters_have_explicit_matrix_products_and_reject_bad_modules ... ok
+test experiment::tests::composition_normalization_placements_follow_scalar_residual_equations ... ok
+test experiment::tests::composition_gqa_obeys_causality_bias_padding_and_fully_masked_rows ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 1301 filtered out; finished in 0.01s
+

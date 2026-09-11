@@ -1,0 +1,6 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 2.88s
+     Running `target/release/examples/train_qwen_adapter --output-dir /Users/nover/repos/transformers/target/coding-standards-validation/20260910T235431/qwen-adapter`
+Task loss: 0.584186 -> 0.020753; synthetic training accuracy: 100.0%
+Frozen backbone unchanged; adapter/head updated; restored Adam step matched exactly.
+Records and report: /Users/nover/repos/transformers/target/coding-standards-validation/20260910T235431/qwen-adapter

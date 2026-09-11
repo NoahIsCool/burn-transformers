@@ -1,0 +1,33 @@
+{
+  "id": "layout-clippy",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "clippy",
+    "--release",
+    "--locked",
+    "--offline",
+    "--manifest-path",
+    "/Users/nover/repos/transformers/scripts/coverage-layout/Cargo.toml",
+    "--target-dir",
+    "/Users/nover/repos/transformers/target",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "layout",
+  "runner_sha256": "d428bb39cc2ec00985bbd0d46c9740b3f79916c157207d33a638ddbc418c38a0",
+  "started_utc": "2026-09-10T23:57:29.170294+00:00",
+  "finished_utc": "2026-09-10T23:57:29.601259+00:00",
+  "seconds": 0.4309660000144504,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "layout-clippy-attempt-01/inputs-before.json",
+  "inputs_after": "layout-clippy-attempt-01/inputs-after.json",
+  "output": "layout-clippy-attempt-01/output.log",
+  "output_sha256": "e003e7d8cd19e5ebf28a633c4520ef081f6eb76bc2841deb7ca9daad35b8ec50",
+  "passed": true
+}

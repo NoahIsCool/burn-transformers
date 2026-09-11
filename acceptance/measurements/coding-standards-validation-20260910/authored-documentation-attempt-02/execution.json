@@ -1,0 +1,27 @@
+{
+  "id": "authored-documentation",
+  "attempt": 2,
+  "command": [
+    "/usr/local/bin/python3",
+    "/Users/nover/repos/transformers/scripts/check_documentation.py",
+    "--classifier",
+    "/Users/nover/repos/transformers/target/release/transformers-coverage-layout",
+    "--output",
+    "/Users/nover/repos/transformers/target/coding-standards-validation/20260911T000506/documentation.json"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "python",
+  "runner_sha256": "01ef9cb4d2f2dce23e169b7c6353d61cdefca88611f9cd05239ee083bd797437",
+  "started_utc": "2026-09-11T00:06:15.142875+00:00",
+  "finished_utc": "2026-09-11T00:06:17.310773+00:00",
+  "seconds": 2.1678922080318443,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "authored-documentation-attempt-02/inputs-before.json",
+  "inputs_after": "authored-documentation-attempt-02/inputs-after.json",
+  "output": "authored-documentation-attempt-02/output.log",
+  "output_sha256": "efefffc7c2e82918ea876e065c6ed1842e972fa82b89d9e2a893aa76f3850304",
+  "passed": true,
+  "replay_report": "authored-documentation-attempt-02/replay-report.json",
+  "replay_report_sha256": "823e86ffa421b9aae4b7c6e6ed6d33eb129e96b8c50d4a5ca42c77936c4c4180"
+}

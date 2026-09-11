@@ -1,0 +1,128 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+    Finished `release` profile [optimized] target(s) in 3m 00s
+     Running unittests examples/activation_workbench.rs (target/release/examples/activation_workbench-8ae38ed63026ecc5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/attention_head_attribution.rs (target/release/examples/attention_head_attribution-19860b826ed52a04)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/burn_training.rs (target/release/examples/burn_training-d28e665c82fd05bc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/clock_and_pizza.rs (target/release/examples/clock_and_pizza-d04b9ee83b3664c8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/clock_and_pizza_train.rs (target/release/examples/clock_and_pizza_train-45612ddeb996c3f5)
+
+running 2 tests
+test study::tests::split_is_deterministic_disjoint_and_complete ... ok
+test study::tests::optimizer_discovers_recipe_parameters_and_hooks_preserve_learning ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running unittests examples/custom_composition.rs (target/release/examples/custom_composition-04af390f62afc723)
+
+running 1 test
+test training::tests::custom_mixer_and_width_adapters_learn_and_survive_native_records ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running unittests examples/flan_t5_small.rs (target/release/examples/flan_t5_small-d0c546b7090fba6d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/greater_than.rs (target/release/examples/greater_than-e436730b1ead5385)
+
+running 4 tests
+test study::tests::clean_suffix_and_neighbor_sharpness_use_original_cutoff ... ok
+test study::tests::recovery_keeps_negative_gaps_and_declares_negligible_ones_undefined ... ok
+test study::tests::numeric_subset_keeps_full_vocabulary_probability_mass ... ok
+test study::tests::frozen_fixture_preserves_alignment_and_clean_split_disjointness ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/greater_than_train.rs (target/release/examples/greater_than_train-db329cfe5d86c466)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/grokking_fourier.rs (target/release/examples/grokking_fourier-1164419e70c1d327)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/grokking_train.rs (target/release/examples/grokking_train-e822b4d4bb29c6e6)
+
+running 6 tests
+test study::analyze::tests::affine_sinusoid_fit_retains_a_nonzero_activation_mean ... ok
+test study::tests::fourier_power_identifies_a_known_frequency_and_ignores_dc ... ok
+test study::tests::resume_rejects_earlier_targets_benchmarks_and_changed_training_sources ... ok
+test study::tests::native_optimizer_discovers_every_parameter_and_updates_the_transformer ... ok
+test study::tests::connected_activation_loss_reaches_the_prefix_without_the_readout ... ok
+test study::tests::burn_model_and_optimizer_records_resume_the_next_update_exactly ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests examples/mla_encoder_decoder.rs (target/release/examples/mla_encoder_decoder-792fae99c6983d8e)
+
+running 1 test
+test training::tests::noncausal_mla_and_hooked_latent_adapter_learn_and_reload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+
+     Running unittests examples/qwen35_chat.rs (target/release/examples/qwen35_chat-687e92e1acfaa384)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/qwen_prefix.rs (target/release/examples/qwen_prefix-ee327425fa974721)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/t5_classifier.rs (target/release/examples/t5_classifier-8b2f9279cbe5d429)
+
+running 1 test
+test training::tests::held_out_combinations_are_disjoint_and_classifier_learns_then_reloads ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running unittests examples/train_qwen_adapter.rs (target/release/examples/train_qwen_adapter-8db6113eaba73079)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/tuned_lens.rs (target/release/examples/tuned_lens-d7bd89b102d20d1e)
+
+running 1 test
+test study::tests::long_vocabulary_tail_remains_normalized_and_has_accurate_kl ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/tuned_lens_train.rs (target/release/examples/tuned_lens_train-8ca52c63eacea959)
+
+running 2 tests
+test study::tests::frozen_decoder_propagates_translator_gradients_without_updating_its_weights ... ok
+test study::tests::saved_affine_and_momentum_records_reproduce_the_next_optimizer_step ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

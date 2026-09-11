@@ -1,0 +1,18 @@
+{
+  "batch_size": 8,
+  "checkpoint_reload_error": 0.0,
+  "claim": "training integration on a symbolic fixture, not natural-language sentiment quality",
+  "dropout": 0.1,
+  "epochs": 30,
+  "evaluation_repeat_error": 0.0,
+  "final_accuracy": 1.0,
+  "final_loss": 0.0005317015456967056,
+  "held_out_examples": 16,
+  "initial_accuracy": 0.5,
+  "initial_loss": 1.0091356039047241,
+  "learning_rate": 0.02,
+  "native_burn_learner": true,
+  "seed": 42,
+  "task": "classify first token; held-out nuisance-token combinations",
+  "training_examples": 16
+}

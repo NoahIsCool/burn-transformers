@@ -1,0 +1,28 @@
+{
+  "id": "compile-metal",
+  "attempt": 1,
+  "command": [
+    "cargo",
+    "+nightly",
+    "check",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,metal,tokenizers,chat-templates"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "runner_sha256": "d428bb39cc2ec00985bbd0d46c9740b3f79916c157207d33a638ddbc418c38a0",
+  "started_utc": "2026-09-10T23:58:04.946243+00:00",
+  "finished_utc": "2026-09-10T23:58:21.321773+00:00",
+  "seconds": 16.375500583963003,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "compile-metal-attempt-01/inputs-before.json",
+  "inputs_after": "compile-metal-attempt-01/inputs-after.json",
+  "output": "compile-metal-attempt-01/output.log",
+  "output_sha256": "1aa946df133fc7d9e8eb2138e08b13f7c860cf167486c66b57d8abf13403a543",
+  "passed": true
+}

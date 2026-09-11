@@ -1,0 +1,15 @@
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers)
+error[E0034]: multiple applicable items in scope
+   --> src/experiment_tests.rs:437:58
+    |
+437 |                     Tensor::zeros([1, 1, 1, 1], &device).cast(burn::tensor::DType::F64),
+    |                                                          ^^^^ multiple `cast` found
+    |
+    = note: candidate #1 is defined in an impl for the type `burn::Tensor<B, D, burn::prelude::Bool>`
+    = note: candidate #2 is defined in an impl for the type `burn::Tensor<B, D>`
+    = note: candidate #3 is defined in an impl for the type `burn::Tensor<B, D, burn::prelude::Int>`
+
+error: could not compile `transformers` (lib test) due to 1 previous error
+
+Caused by:
+  process didn't exit successfully: `/Users/nover/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/rustc --crate-name transformers --edition=2024 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C opt-level=3 -C embed-bitcode=no --test --cfg 'feature="autodiff"' --cfg 'feature="chat-templates"' --cfg 'feature="flex"' --cfg 'feature="std"' --cfg 'feature="tokenizers"' --cfg 'feature="train"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("attention-kernel-tracing", "autodiff", "chat-templates", "cpu", "cuda", "default", "flex", "kernel-tracing", "metal", "rocm", "std", "tokenizers", "train"))' -C metadata=42e0e3c4613df14c -C extra-filename=-54ca225a3264fdac --out-dir /Users/nover/repos/transformers/target/release/deps -C strip=debuginfo -L dependency=/Users/nover/repos/transformers/target/release/deps --extern burn=/Users/nover/repos/transformers/target/release/deps/libburn-049104df6ab9d9c2.rlib --extern burn_store=/Users/nover/repos/transformers/target/release/deps/libburn_store-c771c9359bd3e6fe.rlib --extern minijinja=/Users/nover/repos/transformers/target/release/deps/libminijinja-c2e4cba56a2d568c.rlib --extern proptest=/Users/nover/repos/transformers/target/release/deps/libproptest-9c6d1ef46c24a590.rlib --extern safetensors=/Users/nover/repos/transformers/target/release/deps/libsafetensors-0222a1faaa714025.rlib --extern serde=/Users/nover/repos/transformers/target/release/deps/libserde-f3dbc17efb7cb4a3.rlib --extern serde_json=/Users/nover/repos/transformers/target/release/deps/libserde_json-c86db75c6b80ee30.rlib --extern sha2=/Users/nover/repos/transformers/target/release/deps/libsha2-2e1bc4fb67a5bb75.rlib --extern tempfile=/Users/nover/repos/transformers/target/release/deps/libtempfile-a7430130f4dc406c.rlib --extern thiserror=/Users/nover/repos/transformers/target/release/deps/libthiserror-c8153fbd98ea38d4.rlib --extern tokenizers=/Users/nover/repos/transformers/target/release/deps/libtokenizers-224ddd3c9c1fc8f5.rlib --extern tracing=/Users/nover/repos/transformers/target/release/deps/libtracing-68034174e8e7048a.rlib -L native=/Users/nover/repos/transformers/target/release/build/onig_sys-ed6d8edd5defc5c4/out` (signal: 15, SIGTERM: termination signal)

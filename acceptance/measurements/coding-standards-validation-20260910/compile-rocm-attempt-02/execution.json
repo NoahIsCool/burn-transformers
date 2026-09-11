@@ -1,0 +1,28 @@
+{
+  "id": "compile-rocm",
+  "attempt": 2,
+  "command": [
+    "cargo",
+    "+nightly",
+    "check",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,rocm,tokenizers,chat-templates"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "runner_sha256": "01ef9cb4d2f2dce23e169b7c6353d61cdefca88611f9cd05239ee083bd797437",
+  "started_utc": "2026-09-11T00:06:25.151146+00:00",
+  "finished_utc": "2026-09-11T00:06:43.519800+00:00",
+  "seconds": 18.368620458000805,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "compile-rocm-attempt-02/inputs-before.json",
+  "inputs_after": "compile-rocm-attempt-02/inputs-after.json",
+  "output": "compile-rocm-attempt-02/output.log",
+  "output_sha256": "7b97014a102ab79e9fb70cc065a5a066a4b6b6f8c214f113634fb15fded9a638",
+  "passed": true
+}

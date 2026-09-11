@@ -18,6 +18,16 @@ Every compile-capable release command records a fresh local storage preflight
 and stops below 20 GiB. Explicit target overrides remain visible in the report;
 the runner does not delete files or silently relocate build storage.
 
+The [coding-standards source validation](acceptance/measurements/coding-standards-validation-20260910/README.md)
+passes all 35 current checks at `af95066`, including Rust 1.92/stable and
+Metal/CUDA/ROCm compilation. The [separate coverage record](acceptance/measurements/coding-standards-coverage-20260910/README.md)
+passes the unchanged thresholds with qualified whole-test-file exclusions:
+39,578 / 43,778 lines (90.406140%) crate-wide and 18,322 / 19,255 (95.154505%)
+shared/core. No new exclusions or lowered thresholds were introduced to reach
+these results. This bounded line diagnostic does not claim macro closure,
+production-only coverage, or branch coverage. Earlier failures and unrun
+checkpoint/hardware checks remain explicit in the records.
+
 ## v0.1 release qualification
 
 The [release record](acceptance/measurements/v0_1-release-20260910.json) promotes

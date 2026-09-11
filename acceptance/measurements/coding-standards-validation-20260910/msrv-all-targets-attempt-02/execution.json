@@ -1,0 +1,29 @@
+{
+  "id": "msrv-all-targets",
+  "attempt": 2,
+  "command": [
+    "cargo",
+    "+1.92.0",
+    "test",
+    "--release",
+    "--locked",
+    "--offline",
+    "--no-default-features",
+    "--features",
+    "std,flex,autodiff,train,tokenizers,chat-templates",
+    "--all-targets"
+  ],
+  "cwd": "/Users/nover/repos/transformers",
+  "scope": "rust",
+  "runner_sha256": "01ef9cb4d2f2dce23e169b7c6353d61cdefca88611f9cd05239ee083bd797437",
+  "started_utc": "2026-09-11T00:05:20.644182+00:00",
+  "finished_utc": "2026-09-11T00:06:05.358331+00:00",
+  "seconds": 44.7140688750078,
+  "exit_code": 0,
+  "changed_inputs": [],
+  "inputs_before": "msrv-all-targets-attempt-02/inputs-before.json",
+  "inputs_after": "msrv-all-targets-attempt-02/inputs-after.json",
+  "output": "msrv-all-targets-attempt-02/output.log",
+  "output_sha256": "83525c1aeabc9207fc267e58308c8516661dc46c073e28e8e073b7af203f7436",
+  "passed": true
+}
