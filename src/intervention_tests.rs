@@ -8,6 +8,107 @@ use super::{Axis, Hooks, Layer, Point};
 type B = Flex<f32, i32>;
 
 #[test]
+fn query_and_key_point_helpers_follow_declared_axes() {
+    let point = Point::custom(
+        "permuted.pattern",
+        [Axis::Key, Axis::Batch, Axis::Query, Axis::Head],
+    );
+    let mut hooks = Hooks::<B>::new();
+    let query = hooks.capture(point.query_token(1));
+    let key = hooks.capture(point.key_token(2));
+    let input = Tensor::<B, 4>::from_data(
+        burn::tensor::TensorData::new(vec![0.0_f32, 1.0, 2.0, 3.0, 4.0, 5.0], [3, 1, 2, 1]),
+        &Default::default(),
+    );
+    hooks
+        .run(vec![point.info()], |hooks| hooks.apply(point, input))
+        .unwrap();
+    let query = hooks.get(&query).unwrap();
+    let key = hooks.get(&key).unwrap();
+    assert_eq!(query.dims(), [3, 1, 1, 1]);
+    assert_eq!(key.dims(), [1, 1, 2, 1]);
+    assert_eq!(
+        query.into_data().to_vec::<f32>().unwrap(),
+        vec![1.0, 3.0, 5.0]
+    );
+    assert_eq!(key.into_data().to_vec::<f32>().unwrap(), vec![4.0, 5.0]);
+}
+
+#[test]
+fn zero_rank_registration_is_rejected_before_running_the_model() {
+    let point = Point::<0>::custom("scalar", []);
+    let mut hooks = Hooks::<B>::new();
+    hooks.capture(&point);
+    let mut called = false;
+    let error = hooks
+        .run(vec![point.info()], |_| {
+            called = true;
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(!called);
+    assert!(
+        error
+            .to_string()
+            .contains("activation rank must be positive")
+    );
+}
+
+#[test]
+fn constraint_failures_clear_captures_and_leave_hooks_reusable() {
+    let point = Layer::decoder(0).residual_post();
+    for failure in 0..3 {
+        let mut hooks = Hooks::<B>::new();
+        let before = hooks.capture(&point);
+        hooks.edit(&point, |tensor| tensor);
+        let error = hooks
+            .run(vec![point.info()], |hooks| {
+                hooks.apply_constrained(
+                    point.clone(),
+                    Tensor::<B, 3>::ones([1, 2, 2], &Default::default()),
+                    |tensor| match failure {
+                        0 => Err(crate::Error::configuration(
+                            "custom.constraint",
+                            "rejected update",
+                        )),
+                        1 => Ok(Tensor::<B, 3>::zeros([1, 2, 3], &tensor.device())),
+                        _ => Ok(tensor.cast(DType::F64)),
+                    },
+                )
+            })
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("decoder.layers.0.residual.post"),
+            "{message}"
+        );
+        assert!(
+            message.contains(if failure == 0 {
+                "activation constraint failed"
+            } else {
+                "activation constraint must preserve"
+            }),
+            "{message}"
+        );
+        assert!(
+            hooks.get(&before).is_err(),
+            "failed runs must clear earlier captures"
+        );
+
+        let output = hooks
+            .run(vec![point.info()], |hooks| {
+                hooks.apply(
+                    point.clone(),
+                    Tensor::<B, 3>::ones([1, 2, 2], &Default::default()),
+                )
+            })
+            .unwrap();
+        assert_eq!(values(output), vec![1.0; 4]);
+        assert_eq!(values(hooks.get(&before).unwrap()), vec![1.0; 4]);
+    }
+}
+
+#[test]
 fn borrowed_points_observe_without_changing_output() {
     let point = Layer::decoder(0).mlp_activation();
     let mut mean = None;
