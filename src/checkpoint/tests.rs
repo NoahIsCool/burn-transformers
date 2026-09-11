@@ -534,6 +534,61 @@ fn pinned_total_size_policy_is_explicit_and_generic_paths_remain_strict() {
     assert_eq!(manifest.tensor_bytes, 4);
     assert_eq!(manifest.indexed_tensor_bytes, 4);
 
+    // Policy application must reject an edited artifact kind before reading controls.
+    for (source, reason) in [
+        (
+            ArtifactSource::Single {
+                relative_path: "part.safetensors".into(),
+            },
+            "pinned index accounting cannot apply to an unsharded artifact",
+        ),
+        (
+            ArtifactSource::Index {
+                relative_path: "model.safetensors.index.json".into(),
+                declared_total_size: None,
+            },
+            "pinned accounting requires index metadata.total_size",
+        ),
+    ] {
+        let mut edited = manifest.clone();
+        edited.source = source;
+        assert!(matches!(
+            super::artifact::validate_manifest_index_total_size_policy(&edited, &policy),
+            Err(CheckpointError::IndexTotalSizePolicyMismatch { reason: actual })
+                if actual == reason
+        ));
+    }
+
+    // Authentic control files cannot excuse an internally inconsistent policy.
+    let mut empty_policy = policy.clone();
+    empty_policy.duplicated_tensors.clear();
+    let mut overlapping_policy = policy.clone();
+    overlapping_policy.excluded_tensors = overlapping_policy.duplicated_tensors.clone();
+    for (edited_policy, fragment) in [
+        (empty_policy, "duplicate-counted tensor set is empty"),
+        (overlapping_policy, "also listed as duplicate-counted"),
+    ] {
+        assert!(matches!(
+            super::artifact::validate_manifest_index_total_size_policy(&manifest, &edited_policy),
+            Err(CheckpointError::IndexTotalSizePolicyMismatch { reason })
+                if reason.contains(fragment)
+        ));
+    }
+    let mut wrong_total_policy = policy.clone();
+    wrong_total_policy.expected_declared_total_size = 8;
+    let mut wrong_total_manifest = manifest.clone();
+    wrong_total_manifest.source = ArtifactSource::Index {
+        relative_path: "model.safetensors.index.json".into(),
+        declared_total_size: Some(8),
+    };
+    assert!(matches!(
+        super::artifact::validate_manifest_index_total_size_policy(
+            &wrong_total_manifest, &wrong_total_policy
+        ),
+        Err(CheckpointError::IndexTotalSizePolicyMismatch { reason })
+            if reason.contains("equal 6, not declared bytes 8")
+    ));
+
     let expected = [
         ExpectedTensor::new(base_router, [1]),
         ExpectedTensor::new(mtp_router, [1]),
@@ -2624,4 +2679,21 @@ proptest! {
         prop_assert_eq!(&plan.tensors[0].shape, &vec![cols, rows]);
         prop_assert_eq!(plan.memory.target_parameter_bytes, rows * cols * 4);
     }
+}
+
+/// Repeating a resolved alias must not double count or silently overwrite its identity.
+#[test]
+fn checkpoint_standards_duplicate_resolved_alias_is_rejected_before_planning() {
+    let (_directory, mut manifest, options) = indexed_mapping_contract_fixture();
+    let before = manifest.clone();
+    manifest
+        .index_aliases
+        .push(manifest.index_aliases[0].clone());
+    let error = plan_mapping_contract_fixture(&manifest, &options).unwrap_err();
+    assert!(
+        matches!(error, CheckpointError::InvalidIndexAlias { alias, reason }
+        if alias == "<duplicate>" && reason == "resolved manifest aliases must have unique alias keys")
+    );
+    assert_eq!(manifest.tensors, before.tensors);
+    assert_eq!(manifest.tensor_bytes, before.tensor_bytes);
 }

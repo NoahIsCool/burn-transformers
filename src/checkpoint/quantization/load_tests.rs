@@ -1866,6 +1866,20 @@ fn packed_sink_failure_preserves_partial_read_accounting() {
         failure.cause,
         ExecutionFailureCause::Sink(QuantizedSinkError::Architecture(_))
     ));
+    let text = audited.to_string();
+    assert!(text.contains("failed at `model.layers.0.self_attn.q_proj.weight`"));
+    assert!(text.contains("fixture architecture rejected"));
+    let execution_error = StdError::source(audited.as_ref()).unwrap();
+    assert!(
+        execution_error
+            .downcast_ref::<QuantizedExecutionFailure<SinkError>>()
+            .is_some()
+    );
+    let executor_cause = execution_error.source().unwrap();
+    let overlay_error = executor_cause.source().unwrap();
+    let architecture_error = overlay_error.source().unwrap();
+    assert!(architecture_error.downcast_ref::<SinkError>().is_some());
+    assert_eq!(overlay_error.to_string(), architecture_error.to_string());
 }
 
 /// A corrupt v2 packed payload fails before the first model sink mutation.
@@ -2148,4 +2162,79 @@ fn artifact_contract_legacy_dtype_must_match_source_or_target() {
     write_sidecar(&valid, &[(target, vec![32, 32])]);
     let artifact = QuantizedBurnpackArtifact::open(valid).unwrap();
     validate_sidecar_contract(&plan, &artifact).unwrap();
+}
+
+/// Half-precision target plans preserve their quantizer source type through packed loading.
+#[test]
+fn checkpoint_standards_half_precision_sidecars_match_target_dtype_contracts() {
+    for dtype in [TensorDType::F16, TensorDType::BF16] {
+        let directory = tempfile::tempdir().unwrap();
+        write_checkpoint(
+            directory.path(),
+            &[
+                ("model.embed_tokens.weight", vec![2, 32]),
+                ("model.layers.0.input_layernorm.weight", vec![32]),
+                ("model.layers.0.self_attn.q_proj.weight", vec![32, 32]),
+            ],
+        );
+        let (manifest, plan) = fixture_plan(directory.path(), Some(dtype));
+        let output = directory.path().join("half-source.bpk");
+        let target = "model.layers.0.self_attn.q_proj.weight";
+        let data = match dtype {
+            TensorDType::F16 => {
+                TensorData::new(vec![burn::tensor::f16::from_f32(1.0); 1024], [32, 32])
+            }
+            TensorDType::BF16 => {
+                TensorData::new(vec![burn::tensor::bf16::from_f32(1.0); 1024], [32, 32])
+            }
+            _ => unreachable!(),
+        };
+        let mut session = QuantizedBurnpackSession::new(&output).unwrap();
+        session
+            .append(
+                target,
+                &data,
+                WeightQuantizationConfig {
+                    group_size: QuantizationGroupSize::new(32).unwrap(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let (provenance, _) =
+            crate::checkpoint::quantization::hash_local_checkpoint_provenance(&manifest, &plan)
+                .unwrap();
+        session.bind_provenance(provenance).unwrap();
+        session.finalize().unwrap();
+        let mut artifact = QuantizedBurnpackArtifact::open(&output).unwrap();
+        assert_eq!(
+            source_tensor_dtype(artifact.manifest().tensors[target].source_dtype),
+            Some(dtype)
+        );
+        assert_eq!(
+            artifact.manifest().packed_execution,
+            burn_qfloat_execution_support()
+        );
+        let mut sink = RecordingSink::default();
+        let outcome =
+            execute_local_quantized_load_plan_audited(&manifest, &plan, &mut artifact, &mut sink)
+                .unwrap();
+        assert_eq!(outcome.execution.execution.tensors_applied, 3);
+        assert_eq!(outcome.execution.packed.tensors_applied, 1);
+        assert!(outcome.execution.report.is_strictly_valid());
+        assert_eq!(sink.tensors["model.embed_tokens.weight"].dtype, data.dtype);
+        assert!(matches!(sink.tensors[target].dtype, DType::QFloat(_)));
+    }
+}
+
+/// Standard error conversion retains the original typed quantization cause for callers.
+#[test]
+fn checkpoint_standards_quantization_error_conversion_retains_source() {
+    let wrapped: QuantizedSinkError<SinkError> =
+        QuantizationError::InvalidGroupSize { value: 17 }.into();
+    let source = StdError::source(&wrapped).unwrap();
+    assert!(matches!(
+        source.downcast_ref::<QuantizationError>(),
+        Some(QuantizationError::InvalidGroupSize { value: 17 })
+    ));
+    assert_eq!(wrapped.to_string(), source.to_string());
 }
