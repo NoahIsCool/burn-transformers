@@ -162,8 +162,11 @@ pub fn gradient_norm<B: Backend>(gradients: &GradientsParams, id: ParamId) -> f3
 
 /// Hash every parameter's exact tensor bytes without duplicating a large backbone record.
 pub fn fingerprint<B: Backend>(model: &impl Module<B>, frozen: bool) -> String {
+    /// Accumulates a parameter fingerprint while optionally enforcing frozen weights.
     struct Visitor {
+        /// Incremental digest of parameter shapes, dtypes, and exact tensor bytes.
         hash: Sha256,
+        /// Whether visiting a parameter must assert that gradient tracking is disabled.
         frozen: bool,
     }
     impl<B: Backend> ModuleVisitor<B> for Visitor {

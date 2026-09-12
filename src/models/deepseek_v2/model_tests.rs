@@ -1,3 +1,5 @@
+//! Deterministic DeepSeek-V2 forward, routing, numerical parity, and input-validation tests.
+
 use burn::{
     backend::Flex,
     module::Param,
@@ -7,6 +9,7 @@ use burn::{
 use super::*;
 use crate::architecture::TokenMask;
 
+/// CPU backend with F32 tensor values and I32 token indices for deterministic fixtures.
 type TestBackend = Flex<f32, i32>;
 
 /// Builds deterministic tiny weights for forward tests.
@@ -397,6 +400,7 @@ fn unsupported_runtime_variants_fail_during_initialization() {
 fn autodiff_stateless_smoke_reaches_embedding() {
     use burn::backend::Autodiff;
 
+    /// Reverse-mode backend used to verify gradients reach the embedding parameters.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     let model =

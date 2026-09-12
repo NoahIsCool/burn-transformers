@@ -1,4 +1,4 @@
-//! Test-only fixtures for mod.rs; excluded from non-test compiler inputs.
+//! Checkpoint execution descriptor validation and partial-failure accounting tests.
 
 use std::{cell::RefCell, io};
 
@@ -8,11 +8,17 @@ use crate::checkpoint::{MemoryEstimate, PlannedSource, PlannedTransform};
 /// Synthetic source whose descriptor certificates can be granted or rejected.
 #[derive(Default)]
 struct AuditedSource {
+    /// Grants descriptor certificates unless a tensor-specific override denies one.
     certified: bool,
+    /// Tensor name that returns an uncertified result even when certification is enabled.
     uncertified_name: Option<String>,
+    /// Tensor name whose certificate request returns a manifest-mismatch error.
     rejected_name: Option<String>,
+    /// Descriptor names in validation order, including requests that return errors.
     validated: RefCell<Vec<String>>,
+    /// Number of payload-read calls, including calls whose payload construction fails.
     reads: u64,
+    /// Number of source-release requests made during success or failure cleanup.
     closes: usize,
 }
 
@@ -59,9 +65,13 @@ impl TensorSource for AuditedSource {
 
 /// Minimal destination recording successful writes in their execution order.
 #[derive(Default)]
-struct RecordingSink(Vec<(String, TensorData)>);
+struct RecordingSink(
+    /// Destination names and final tensor buffers in successful write order.
+    Vec<(String, TensorData)>,
+);
 
 impl TensorSink for RecordingSink {
+    /// I/O-style failure used to reject aliases absent from these fixture plans.
     type Error = io::Error;
 
     /// Retains final buffers to distinguish overrides from ordinary payloads.

@@ -40,8 +40,11 @@ mod experiment {
         intervention::{Axis, Hooks, Layer, Point, PointInfo},
     };
 
+    /// CPU tensor backend for deterministic F32 attribution calculations.
     type B = Flex<f32, i32>;
+    /// Residual states with axes `[batch, token, channel]`.
     type Hidden = Tensor<B, 3>; // [batch, token, residual channel]
+    /// Maximum absolute discrepancy allowed in the attribution identities.
     const TOLERANCE: f32 = 2e-5;
 
     /// Expose one head after its output projection, with residual-channel axes.
@@ -53,14 +56,20 @@ mod experiment {
         )
     }
 
+    /// Attention visibility used when comparing head contributions.
     #[derive(Clone, Copy)]
     enum Visibility {
+        /// Allow each token to attend only to itself and earlier positions.
         Causal,
+        /// Allow each token to attend to every position in the unpadded sequence.
         Bidirectional,
     }
 
+    /// Fixed-weight attention model with a linear vocabulary readout.
     struct TinyTransformer {
+        /// Two-head attention whose projected contributions are captured separately.
         attention: GroupedQueryAttention<B>,
+        /// Readout weights with axes `[residual channel, vocabulary]`.
         unembedding: Tensor<B, 2>,
     }
 

@@ -1,3 +1,5 @@
+//! Nemotron-H hybrid forward, sparse routing, precision, and autodiff tests.
+
 use burn::{
     backend::Flex,
     tensor::{Tolerance, f16},
@@ -5,6 +7,7 @@ use burn::{
 
 use super::*;
 
+/// CPU Flex backend with F32 activations and I32 token indices for tiny models.
 type TestBackend = Flex<f32, i32>;
 
 /// Converts one test projection to F16 without changing its logical shape.
@@ -304,6 +307,7 @@ fn last_logits_match_full_forward_tail() {
 fn autodiff_smoke_reaches_embedding() {
     use burn::backend::Autodiff;
 
+    /// Autodiff wrapper used to check gradient flow back to the embedding table.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     let model = NemotronHForCausalLm::<AdBackend>::init(tiny_config(false), &device).unwrap();

@@ -3,7 +3,7 @@
 //! Source blocks use bidirectional self-attention. Target blocks use causal self-attention,
 //! then an independently parameterized cross-attention branch, then their configured dense or
 //! routed feed-forward branch. Every cross-attention block uses the decoder layer's mixer-side
-//! normalization convention because [`Seq2SeqSpec`] intentionally has no separate cross-norm
+//! normalization convention because [`crate::architecture::Seq2SeqSpec`] has no separate cross-norm
 //! field.
 
 use std::ops::Range;
@@ -686,6 +686,7 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
 }
 
 impl ArchitectureConfig for Seq2SeqSpec {
+    /// Architecture discriminator for configurable encoder-decoder graphs.
     const MODEL_TYPES: &'static [&'static str] = &["modular_seq2seq"];
 
     /// Validates cross-stack topology and the supported encoder/decoder mixer roles.
@@ -695,7 +696,9 @@ impl ArchitectureConfig for Seq2SeqSpec {
 }
 
 impl<B: Backend> Seq2SeqLanguageModel<B> for ModularSeq2SeqLm<B> {
+    /// Serializable encoder, decoder, and cross-attention specification.
     type Config = Seq2SeqSpec;
+    /// External decoder-token history paired with the encoder-decoder model role.
     type State = ModularDecodeState<B>;
 
     /// Runs the stateless bidirectional encoder through the common seq2seq interface.

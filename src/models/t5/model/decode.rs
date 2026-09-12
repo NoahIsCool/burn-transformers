@@ -81,8 +81,11 @@ impl StatefulPhase {
 /// the cache during beam operations.
 #[derive(Debug, Clone)]
 struct T5CrossAttentionCache<B: Backend> {
+    /// Bound source hidden states, mask, and optional encoder diagnostics.
     encoder: EncoderOutput<B>,
+    /// Per-layer projected keys with axes `[batch, heads, source, d_kv]`.
     keys: Vec<Tensor<B, 4>>,
+    /// Per-layer projected values with the same axes as the keys.
     values: Vec<Tensor<B, 4>>,
 }
 
@@ -247,8 +250,11 @@ impl<B: Backend> T5CrossAttentionCache<B> {
 /// `[layers, batch, heads, source, d_kv]`.
 #[derive(Debug)]
 pub struct T5DecodeState<B: Backend> {
+    /// Decoder self-attention tensors and committed sequence lengths.
     tensors: TensorDecodeState<B>,
+    /// Expected native self-cache geometry for model compatibility checks.
     self_spec: NativeKvCacheSpec,
+    /// Immutable source binding installed by the first successful prefill.
     cross: Option<T5CrossAttentionCache<B>>,
 }
 
@@ -442,7 +448,9 @@ impl<B: Backend> ArchitectureDecodeState<B> for T5DecodeState<B> {
 }
 
 impl<B: Backend> Seq2SeqLanguageModel<B> for T5ForConditionalGeneration<B> {
+    /// T5-family encoder, decoder, and vocabulary-head architecture metadata.
     type Config = T5Config;
+    /// External self-attention history and projected encoder cache.
     type State = T5DecodeState<B>;
 
     /// Evaluates the bidirectional encoder without allocating decoder state.
@@ -876,15 +884,21 @@ fn project_query<B: Backend>(
 
 /// One operation-local self-attention append.
 struct PendingT5SelfWrite<B: Backend> {
+    /// Decoder layer receiving this append.
     layer: usize,
+    /// Batch row whose committed prefix is extended.
     sequence: usize,
+    /// First cache position to write, equal to the row's current prefix length.
     start: usize,
+    /// New keys with axes `[1, heads, appended_tokens, d_kv]`.
     keys: Tensor<B, 4>,
+    /// New values with the same axes as the keys.
     values: Tensor<B, 4>,
 }
 
 /// Deferred self-attention writes for one public prefill or decode call.
 struct PendingT5SelfWrites<B: Backend> {
+    /// One deferred append per active batch row and decoder layer.
     writes: Vec<PendingT5SelfWrite<B>>,
 }
 
@@ -990,9 +1004,13 @@ impl<B: Backend> PendingT5SelfWrites<B> {
 
 /// Validated rectangular metadata for a stateful target operation.
 struct PreparedStatefulInput {
+    /// Number of decoder input rows, matching the decode state batch size.
     batch: usize,
+    /// Rectangular decoder input width before invalid tokens are compacted.
     sequence: usize,
+    /// Original valid token positions, ordered within each batch row.
     valid_indices: Vec<Vec<usize>>,
+    /// Number of appended tokens per row; zero marks an inactive decode row.
     token_counts: Vec<usize>,
 }
 

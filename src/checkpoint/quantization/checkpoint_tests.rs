@@ -11,8 +11,11 @@ use crate::checkpoint::{
 
 /// Minimal input tensor for a standards-compliant SafeTensors fixture.
 struct FixtureTensor {
+    /// Name stored in the fixture's header and expected load inventory.
     name: &'static str,
+    /// Logical F32 tensor dimensions.
     shape: Vec<u64>,
+    /// Row-major values serialized in little-endian order.
     values: Vec<f32>,
 }
 

@@ -75,4 +75,5 @@ pub use reference::{
 #[cfg(test)]
 mod burnpack_tests;
 #[cfg(test)]
+#[path = "quantization_tests.rs"]
 mod tests;

@@ -32,7 +32,9 @@ use super::{
     nemotron_load_balancing_loss, select_hidden, validate_token_ids,
 };
 
+/// Native-KV group index within either the target bank or the independent MTP bank.
 pub(super) const KV_GROUP: usize = 0;
+/// Recurrent group index within the target bank's separate recurrent group space.
 pub(super) const RECURRENT_GROUP: usize = 0;
 
 /// Stateful operation whose empty-row policy differs intentionally.
@@ -54,10 +56,15 @@ impl StatefulPhase {
 /// External KV, recurrent, convolution, and logical-length state.
 #[derive(Debug)]
 pub struct NemotronHDecodeState<B: Backend> {
+    /// Owned target/MTP tensor banks, cursors, and transaction metadata.
     pub(super) tensors: TensorDecodeState<B>,
+    /// Compact target attention topology, absent for attention-free schedules.
     kv_spec: Option<NativeKvCacheSpec>,
+    /// Compact Mamba matrix/convolution topology, absent without recurrent blocks.
     recurrent_spec: Option<RecurrentStateSpec>,
+    /// Independent auxiliary attention topology when the model has an MTP stage.
     mtp_kv_spec: Option<NativeKvCacheSpec>,
+    /// Maximum tentative suffix length per row reserved for speculation.
     staging_capacity: usize,
 }
 
@@ -281,7 +288,9 @@ impl<B: Backend> ArchitectureDecodeState<B> for NemotronHDecodeState<B> {
 }
 
 impl<B: Backend> CausalLanguageModel<B> for NemotronHForCausalLm<B> {
+    /// Validated heterogeneous backbone and optional MTP configuration.
     type Config = super::super::NemotronHConfig;
+    /// External state for attention, recurrence, convolution, and shifted MTP.
     type State = NemotronHDecodeState<B>;
 
     /// Runs the differentiable cache-free graph.
@@ -624,31 +633,45 @@ impl<B: Backend> NemotronHForCausalLm<B> {
 
 /// One compact row's model result.
 struct CompactRowOutput<B: Backend> {
+    /// Final normalized activations `[1, valid_tokens, hidden]`.
     hidden: Tensor<B, 3>,
+    /// Requested embedding, post-block, and final-normalized compact activations.
     hidden_states: Vec<Tensor<B, 3>>,
+    /// Requested routing outputs for valid tokens in MoE block order.
     routers: Vec<NemotronHMoeOutput<B>>,
 }
 
 /// Deferred native-KV append.
 struct PendingKvWrite<B: Backend> {
+    /// Attention-only layer index, independent of the interleaved block index.
     layer: usize,
+    /// Original batch row receiving the compact token suffix.
     row: usize,
+    /// Logical append position after committed and previously staged tokens.
     start: usize,
+    /// Newly projected keys `[1, kv_heads, valid_tokens, head_dim]`.
     keys: Tensor<B, 4>,
+    /// Newly projected values with the same axes as `keys`.
     values: Tensor<B, 4>,
 }
 
 /// Deferred recurrent terminal-state replacement.
 struct PendingRecurrentWrite<B: Backend> {
+    /// Mamba-only layer index, independent of the interleaved block index.
     layer: usize,
+    /// Original batch row whose terminal state will be replaced.
     row: usize,
+    /// Terminal selective state `[1, mamba_heads, head_dim, state_size]`.
     matrix: Tensor<B, 4>,
+    /// Terminal convolution history `[1, channels, kernel - 1]`.
     convolution: Tensor<B, 3>,
 }
 
 /// Complete operation-local cache write set.
 struct PendingHybridWrites<B: Backend> {
+    /// Unpublished attention appends for all active rows and attention layers.
     kv: Vec<PendingKvWrite<B>>,
+    /// Unpublished terminal states for all active rows and Mamba layers.
     recurrent: Vec<PendingRecurrentWrite<B>>,
 }
 
@@ -822,15 +845,21 @@ impl<B: Backend> PendingHybridWrites<B> {
 
 /// Reconstructed rectangular router tensors for one row.
 struct RowRouter<B: Backend> {
+    /// Router scores `[1, sequence, experts]`, with zero-filled inactive positions.
     logits: Tensor<B, 3>,
+    /// Selected expert IDs `[1, sequence, top_k]`, zero-filled where inactive.
     selected: Tensor<B, 3, Int>,
 }
 
 /// Validated host-side state transition metadata.
 struct PreparedStatefulInput {
+    /// Number of rows in the original rectangular token input.
     batch: usize,
+    /// Physical token columns per row, including masked positions.
     sequence: usize,
+    /// Ordered physical indices of semantic tokens for each batch row.
     valid_indices: Vec<Vec<usize>>,
+    /// Number of semantic tokens to append to each row's logical cursor.
     token_counts: Vec<usize>,
 }
 

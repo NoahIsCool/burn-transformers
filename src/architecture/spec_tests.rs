@@ -1,3 +1,5 @@
+//! Independent architecture validation boundaries and field-specific error checks.
+
 use super::*;
 
 /// Builds the smallest valid dense attention layer used by validation tests.

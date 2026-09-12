@@ -1,3 +1,5 @@
+//! Nemotron-H speculative acceptance, EOS alignment, sampling, and retry tests.
+
 use burn::{
     backend::Flex,
     tensor::{Int, Tensor, TensorData, backend::BackendTypes},
@@ -14,6 +16,7 @@ use crate::{
 
 use super::*;
 
+/// CPU Flex backend with F32 logits and I32 indices for reproducible draft fixtures.
 type TestBackend = Flex<f32, i32>;
 
 /// Uses a cheap base MLP while retaining Lightning's exact MTP stage.

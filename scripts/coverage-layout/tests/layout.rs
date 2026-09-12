@@ -12,7 +12,10 @@ use transformers_coverage_layout::{Classification, FileReport, Report, classify}
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// An isolated, explicitly owned temporary source tree.
-struct Fixture(PathBuf);
+struct Fixture(
+    /// Unique directory containing only this fixture's authored sources.
+    PathBuf,
+);
 
 impl Fixture {
     /// Creates a unique fixture root without reusing another test's directory.
@@ -67,6 +70,7 @@ fn expanded(file: &FileReport) -> Vec<Classification> {
         .collect()
 }
 
+/// Only cfg evidence proves test ownership; names and unknown feature atoms do not.
 #[test]
 fn cfg_proofs_do_not_guess_other_atoms_or_module_names() {
     let fixture = Fixture::new();
@@ -85,6 +89,7 @@ fn cfg_proofs_do_not_guess_other_atoms_or_module_names() {
     );
 }
 
+/// Nested modules and multiple cfg attributes conjoin multiline test requirements.
 #[test]
 fn multiline_cfg_nested_inheritance_and_multiple_attributes() {
     let fixture = Fixture::new();
@@ -97,6 +102,7 @@ fn multiline_cfg_nested_inheritance_and_multiple_attributes() {
     );
 }
 
+/// Recursive conditional attributes preserve implication semantics with unknown features.
 #[test]
 fn cfg_attr_implication_is_conservative_and_recursive() {
     let fixture = Fixture::new();
@@ -113,6 +119,7 @@ fn cfg_attr_implication_is_conservative_and_recursive() {
     );
 }
 
+/// Unsupported and malformed cfg predicates remain retained with actionable diagnostics.
 #[test]
 fn malformed_and_unsupported_cfg_remain_visible_and_retained() {
     let fixture = Fixture::new();
@@ -133,6 +140,7 @@ fn malformed_and_unsupported_cfg_remain_visible_and_retained() {
     );
 }
 
+/// Rust-looking text inside comments and literals cannot fabricate test ownership.
 #[test]
 fn raw_strings_comments_and_character_literals_cannot_forge_syntax() {
     let fixture = Fixture::new();
@@ -159,6 +167,7 @@ fn live() { let _brace = '}'; }
     );
 }
 
+/// A physical line shared by production and test syntax remains mixed and retained.
 #[test]
 fn same_line_items_are_mixed_and_never_exclusively_test_only() {
     let fixture = Fixture::new();
@@ -179,6 +188,7 @@ fn same_line_items_are_mixed_and_never_exclusively_test_only() {
     );
 }
 
+/// External modules inherit parent test conditions and their own file-level cfg.
 #[test]
 fn external_test_modules_inherit_test_only_and_inner_file_cfg() {
     let fixture = Fixture::new();
@@ -196,6 +206,7 @@ fn external_test_modules_inherit_test_only_and_inner_file_cfg() {
     }
 }
 
+/// Shared-source ownership is independent of production/test reference order.
 #[test]
 fn shared_files_merge_production_and_test_contexts_in_both_orders() {
     let fixture = Fixture::new();
@@ -229,6 +240,7 @@ fn shared_files_merge_production_and_test_contexts_in_both_orders() {
     assert_eq!(file(&first, "shared.rs").contexts.len(), 2);
 }
 
+/// Equivalent paths produce duplicate-context evidence without inventing recursion cycles.
 #[test]
 fn equivalent_aliases_are_reported_but_not_mistaken_for_cycles() {
     let fixture = Fixture::new();
@@ -257,6 +269,7 @@ fn equivalent_aliases_are_reported_but_not_mistaken_for_cycles() {
     );
 }
 
+/// An active recursive module path stops traversal and retains a cycle diagnostic.
 #[test]
 fn active_path_cycle_is_explicit_and_bounded() {
     let fixture = Fixture::new();
@@ -275,6 +288,7 @@ fn active_path_cycle_is_explicit_and_bounded() {
     );
 }
 
+/// Nested modules resolve both supported Rust filesystem layouts correctly.
 #[test]
 fn default_mod_rs_and_non_mod_rs_nested_paths_follow_rust_layout() {
     let fixture = Fixture::new();
@@ -288,6 +302,7 @@ fn default_mod_rs_and_non_mod_rs_nested_paths_follow_rust_layout() {
     assert!(report.diagnostics.is_empty());
 }
 
+/// Literal path attributes use the correct inline and external-module base directory.
 #[test]
 fn explicit_paths_respect_inline_and_noninline_base_directories() {
     let fixture = Fixture::new();
@@ -307,6 +322,7 @@ fn explicit_paths_respect_inline_and_noninline_base_directories() {
     assert!(report.diagnostics.is_empty());
 }
 
+/// Feature-dependent paths remain unresolved rather than choosing one configuration.
 #[test]
 fn conditional_paths_never_choose_one_feature_assignment() {
     let fixture = Fixture::new();
@@ -328,6 +344,7 @@ fn conditional_paths_never_choose_one_feature_assignment() {
     }
 }
 
+/// Conflicting default module candidates are both retained and diagnosed.
 #[test]
 fn conflicting_default_module_files_are_both_retained() {
     let fixture = Fixture::new();
@@ -346,6 +363,7 @@ fn conflicting_default_module_files_are_both_retained() {
     }
 }
 
+/// Missing and escaping module paths fail closed without reading outside the root.
 #[test]
 fn missing_and_traversing_paths_are_unresolved_without_outside_reads() {
     let outer = Fixture::new();
@@ -366,6 +384,7 @@ fn missing_and_traversing_paths_are_unresolved_without_outside_reads() {
     );
 }
 
+/// Canonical symlink containment prevents external source bytes from entering the report.
 #[cfg(unix)]
 #[test]
 fn canonical_symlinks_cannot_escape_the_source_root() {
@@ -383,6 +402,7 @@ fn canonical_symlinks_cannot_escape_the_source_root() {
     );
 }
 
+/// Syntax failures and opaque macros remain explicit instead of creating exclusions.
 #[test]
 fn parse_errors_and_macro_expansion_remain_visible_without_generated_exclusions() {
     let fixture = Fixture::new();
@@ -414,6 +434,7 @@ fn parse_errors_and_macro_expansion_remain_visible_without_generated_exclusions(
     );
 }
 
+/// Original Unicode, BOM, shebang, and CRLF bytes determine source hashes and positions.
 #[test]
 fn unicode_crlf_bom_shebang_coordinates_hash_exact_original_bytes() {
     let fixture = Fixture::new();
@@ -444,6 +465,7 @@ fn unicode_crlf_bom_shebang_coordinates_hash_exact_original_bytes() {
     assert_eq!(line(output, 2), Classification::Mixed);
 }
 
+/// Empty, whitespace-only, and unterminated files retain complete physical-line accounting.
 #[test]
 fn empty_blank_and_unterminated_files_have_complete_physical_line_runs() {
     let fixture = Fixture::new();
@@ -461,6 +483,7 @@ fn empty_blank_and_unterminated_files_have_complete_physical_line_runs() {
     }
 }
 
+/// Associated items and nested functions apply their own cfg within ancestor contexts.
 #[test]
 fn associated_items_and_nested_local_items_have_independent_ownership() {
     let fixture = Fixture::new();
@@ -475,6 +498,7 @@ fn associated_items_and_nested_local_items_have_independent_ownership() {
     }
 }
 
+/// Separate explicit crate entries merge every reference to the same physical source.
 #[test]
 fn multiple_explicit_entries_merge_shared_physical_sources() {
     let fixture = Fixture::new();
@@ -492,6 +516,7 @@ fn multiple_explicit_entries_merge_shared_physical_sources() {
     assert_eq!(line(file(&report, "shared.rs"), 1), Classification::Mixed);
 }
 
+/// Invalid roots, absent entries, escapes, and non-UTF-8 sources return input errors.
 #[test]
 fn invalid_inputs_fail_without_synthesizing_a_successful_layout() {
     let fixture = Fixture::new();
@@ -512,6 +537,7 @@ fn invalid_inputs_fail_without_synthesizing_a_successful_layout() {
     assert!(classify(&fixture.0, &[PathBuf::from("missing.rs")]).is_err());
 }
 
+/// Serialized reports retain their independent schema and never claim gate qualification.
 #[test]
 fn report_json_is_versioned_and_never_encodes_a_coverage_gate_result() {
     let fixture = Fixture::new();

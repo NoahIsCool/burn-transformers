@@ -8,8 +8,10 @@ use burn::{
 use super::*;
 use crate::architecture::TokenMask;
 
+/// CPU Flex backend for reproducible execution-boundary comparisons.
 type B = Flex<f32, i32>;
 
+/// Builds a tiny tied-embedding hybrid with one DeltaNet block and one full-attention block.
 fn config() -> Qwen3_5TextConfig {
     Qwen3_5TextConfig {
         vocab_size: 16,
@@ -37,6 +39,7 @@ fn config() -> Qwen3_5TextConfig {
     }
 }
 
+/// Builds one three-token prefix with a variable last token and implicit positions.
 fn input(last: i32) -> CausalLmInput<B> {
     CausalLmInput {
         token_ids: Tensor::<B, 2, Int>::from_ints([[1, 2, last]], &Default::default()),
@@ -45,6 +48,7 @@ fn input(last: i32) -> CausalLmInput<B> {
     }
 }
 
+/// Resuming consecutive layer ranges preserves masked tokens, explicit positions, and final states.
 #[test]
 fn split_and_resume_preserve_explicit_positions_padding_and_full_backbone_values() {
     let device = Default::default();
@@ -71,6 +75,7 @@ fn split_and_resume_preserve_explicit_positions_padding_and_full_backbone_values
     );
 }
 
+/// Hooks retain original layer addresses during continuation and reject points outside the range.
 #[test]
 fn scoped_range_hooks_keep_original_addresses_and_affect_the_continuation() {
     let device = Default::default();
@@ -102,6 +107,7 @@ fn scoped_range_hooks_keep_original_addresses_and_affect_the_continuation() {
     );
 }
 
+/// Execution rejects skipped or repeated layers and forbids resuming an already normalized state.
 #[test]
 fn block_ranges_and_normalization_reject_implicit_repetition_or_skipping() {
     let model = Qwen3_5TextModel::<B>::init(config(), &Default::default()).unwrap();
@@ -115,6 +121,7 @@ fn block_ranges_and_normalization_reject_implicit_repetition_or_skipping() {
     assert!(model.run_layers(normalized, 1..2).is_err());
 }
 
+/// A latent F64 replacement fails before callbacks and clears captures from the earlier valid run.
 #[test]
 fn changed_latent_dtype_fails_before_callbacks_and_clears_previous_captures() {
     use std::cell::Cell;
@@ -162,6 +169,7 @@ fn changed_latent_dtype_fails_before_callbacks_and_clears_previous_captures() {
     );
 }
 
+/// Final normalization rejects a changed latent dtype and discards its previous capture.
 #[test]
 fn normalization_rejects_changed_latent_dtype_and_clears_previous_capture() {
     let model = Qwen3_5TextModel::<B>::init(config(), &Default::default()).unwrap();
@@ -179,6 +187,7 @@ fn normalization_rejects_changed_latent_dtype_and_clears_previous_capture() {
     assert!(hooks.get(&capture).is_err());
 }
 
+/// An F64 attention bias fails input validation before a residual callback can run.
 #[test]
 fn changed_attention_bias_dtype_fails_before_callbacks() {
     use std::cell::Cell;
@@ -207,6 +216,7 @@ fn changed_attention_bias_dtype_fails_before_callbacks() {
     assert!(!called.get());
 }
 
+/// Builds a single full-attention block to isolate configurable connectivity from DeltaNet.
 fn full_attention_model() -> Qwen3_5TextModel<B> {
     let mut config = config();
     config.num_hidden_layers = 1;
@@ -214,6 +224,7 @@ fn full_attention_model() -> Qwen3_5TextModel<B> {
     Qwen3_5TextModel::init(config, &Default::default()).unwrap()
 }
 
+/// Changing the last token affects the first token only under explicitly bidirectional attention.
 #[test]
 fn full_attention_policy_allows_future_token_influence_only_when_requested() {
     let model = full_attention_model();
@@ -233,6 +244,7 @@ fn full_attention_policy_allows_future_token_influence_only_when_requested() {
     assert_ne!(run(3, true), run(4, true));
 }
 
+/// A broadcast custom mask excluding every key produces an exactly zero attention output.
 #[test]
 fn custom_connectivity_broadcasts_and_fully_excluded_attention_rows_are_zero() {
     let device = Default::default();
@@ -259,6 +271,7 @@ fn custom_connectivity_broadcasts_and_fully_excluded_attention_rows_are_zero() {
     );
 }
 
+/// Bidirectional policy on a hybrid containing DeltaNet fails before executing block callbacks.
 #[test]
 fn unsupported_deltanet_policies_fail_before_any_block_callback() {
     use std::cell::Cell;
@@ -280,6 +293,7 @@ fn unsupported_deltanet_policies_fail_before_any_block_callback() {
     assert!(!called.get());
 }
 
+/// An independent head initially matches tied projection and survives later embedding replacement.
 #[test]
 fn explicit_independent_vocabulary_head_starts_equal_and_then_can_diverge() {
     let device = Default::default();
@@ -306,11 +320,13 @@ fn explicit_independent_vocabulary_head_starts_equal_and_then_can_diverge() {
     );
 }
 
+/// Backpropagating through an independent head reaches its weight but not the source embedding.
 #[cfg(feature = "autodiff")]
 #[test]
 fn independent_vocabulary_head_uses_a_new_gradient_leaf() {
     use burn::backend::Autodiff;
 
+    /// Autodiff wrapper used to distinguish the independent head gradient leaf.
     type Ad = Autodiff<B>;
     let device = Default::default();
     let model = Qwen3_5TextModel::<Ad>::init(config(), &device).unwrap();

@@ -1,3 +1,5 @@
+//! Synthetic checkpoint tests for streamed Qwen3 MoE installation and malformed artifacts.
+
 use std::{fs::File, io::Write, path::Path};
 
 use burn::{
@@ -21,6 +23,7 @@ use crate::{
 use super::*;
 use crate::models::qwen3_moe::Qwen3MoeConfig;
 
+/// CPU Flex backend with F32 activations and portable I32 indices.
 type TestBackend = Flex<f32, i32>;
 
 /// Minimal routed topology used by sink and streaming tests.
@@ -348,7 +351,10 @@ fn mixed_projection_model(rope_type: RopeType) -> Qwen3MoeForCausalLm<TestBacken
 }
 
 /// Audits complete loading without accidentally initializing a skipped lazy parameter.
-struct MixedParameterAudit(usize);
+struct MixedParameterAudit(
+    /// Number of visited float parameters whose checkpoint payload is already installed.
+    usize,
+);
 
 impl ModuleVisitor<TestBackend> for MixedParameterAudit {
     /// Requires an installed payload before counting a model parameter.

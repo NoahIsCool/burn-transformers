@@ -1,3 +1,5 @@
+//! Nemotron-H shifted MTP parity, transaction rollback, and prefix-publication tests.
+
 use burn::{
     backend::Flex,
     tensor::{Tensor, TensorData, Tolerance, backend::BackendTypes},
@@ -10,6 +12,7 @@ use crate::{
 
 use super::*;
 
+/// CPU Flex backend with F32 activations and I32 indices for MTP cache fixtures.
 type TestBackend = Flex<f32, i32>;
 
 /// Prefills the target and returns its complete final hidden sequence.

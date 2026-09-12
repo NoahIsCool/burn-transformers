@@ -1,5 +1,8 @@
+//! Configuration checks for Qwen hybrid schedules, projection widths, and unsupported topology.
+
 use super::*;
 
+/// An implicit eight-layer schedule places full attention at every fourth block.
 #[test]
 fn derives_the_documented_hybrid_schedule() {
     let config = Qwen3_5TextConfig {
@@ -22,6 +25,7 @@ fn derives_the_documented_hybrid_schedule() {
     );
 }
 
+/// An explicit all-attention schedule validates independently of the default hybrid cadence.
 #[test]
 fn explicit_schedule_overrides_the_derived_interval() {
     let config = Qwen3_5TextConfig {
@@ -32,6 +36,7 @@ fn explicit_schedule_overrides_the_derived_interval() {
     config.validate().unwrap();
 }
 
+/// An explicit three-block schedule cannot satisfy a declared depth of four.
 #[test]
 fn rejects_an_explicit_schedule_with_the_wrong_length() {
     let config = Qwen3_5TextConfig {
@@ -42,6 +47,7 @@ fn rejects_an_explicit_schedule_with_the_wrong_length() {
     assert!(config.validate().is_err());
 }
 
+/// Twenty-four 256-wide query heads require 12,288 channels when output gating is enabled.
 #[test]
 fn gated_query_projection_has_twice_the_attention_width() {
     let config = Qwen3_5TextConfig {

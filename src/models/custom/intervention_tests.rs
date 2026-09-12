@@ -17,8 +17,10 @@ use crate::{
     models::custom::{ModularCausalLm, ModularSeq2SeqLm},
 };
 
+/// CPU backend with F32 tensor values and I32 indices for deterministic intervention fixtures.
 type B = Flex<f32, i32>;
 
+/// Builds one attention/MLP block with the requested normalization placement and a 16-token vocabulary.
 fn spec(placement: NormPlacement) -> DecoderSpec {
     let norm = NormalizationSpec::Rms {
         epsilon: 1e-6,
@@ -52,10 +54,15 @@ fn spec(placement: NormPlacement) -> DecoderSpec {
     }
 }
 
+/// Tracks parameter traversal so every matrix receives a reproducible distinct sinusoidal pattern.
 #[derive(Default)]
-struct FixedParameters(usize);
+struct FixedParameters(
+    /// Number of floating-point parameters already assigned fixture values.
+    usize,
+);
 
 impl ModuleMapper<B> for FixedParameters {
+    /// Assigns unit normalization scales and deterministic sinusoidal matrix weights per parameter ordinal.
     fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
         self.0 += 1;
         let ordinal = self.0;
@@ -74,6 +81,7 @@ impl ModuleMapper<B> for FixedParameters {
     }
 }
 
+/// Creates one unmasked three-token row on the default CPU device.
 fn input(ids: [[i32; 3]; 1]) -> CausalLmInput<B> {
     CausalLmInput {
         token_ids: Tensor::from_data(ids, &Default::default()),
@@ -82,6 +90,7 @@ fn input(ids: [[i32; 3]; 1]) -> CausalLmInput<B> {
     }
 }
 
+/// Pairs fixed three-token source and target rows for encoder-decoder hook tests.
 fn seq_input() -> Seq2SeqInput<B> {
     Seq2SeqInput {
         encoder: input([[1, 2, 3]]),
@@ -89,12 +98,14 @@ fn seq_input() -> Seq2SeqInput<B> {
     }
 }
 
+/// Initializes a one-block decoder and materializes reproducible fixture weights.
 fn causal(placement: NormPlacement) -> ModularCausalLm<B> {
     ModularCausalLm::init(spec(placement), &Default::default())
         .unwrap()
         .map(&mut FixedParameters::default())
 }
 
+/// Initializes a pre-normalized encoder-decoder graph with deterministic weights in both stacks.
 fn seq2seq() -> ModularSeq2SeqLm<B> {
     ModularSeq2SeqLm::init(
         Seq2SeqSpec {
@@ -109,16 +120,19 @@ fn seq2seq() -> ModularSeq2SeqLm<B> {
     .map(&mut FixedParameters::default())
 }
 
+/// Requires F32 tensors to agree within an absolute tolerance of one millionth.
 fn assert_close(actual: Tensor<B, 3>, expected: Tensor<B, 3>) {
     actual
         .into_data()
         .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(1e-6));
 }
 
+/// Returns the largest absolute tensor difference to detect consequential interventions.
 fn difference(actual: Tensor<B, 3>, expected: Tensor<B, 3>) -> f32 {
     (actual - expected).abs().max().into_scalar()
 }
 
+/// Identity edits preserve logits for pre, post, and sandwich norms; final-state captures match hidden-only output.
 #[test]
 fn identity_hooks_preserve_each_normalization_topology_and_hidden_only_output() {
     for placement in [
@@ -148,6 +162,7 @@ fn identity_hooks_preserve_each_normalization_topology_and_hidden_only_output() 
     }
 }
 
+/// Captured MLP activations equal ReLU of the pre-activation; ablation changes logits and a clean patch restores them.
 #[test]
 fn gate_activation_capture_ablation_and_clean_patch_change_downstream_computation() {
     let model = causal(NormPlacement::Pre);
@@ -180,6 +195,7 @@ fn gate_activation_capture_ablation_and_clean_patch_change_downstream_computatio
     assert_close(restored.logits, reference.logits);
 }
 
+/// Encoder final-state edits affect decoder logits through cross-attention, and restoring the source state restores logits.
 #[test]
 fn seq2seq_hooks_keep_both_stacks_and_encoder_edits_reach_cross_attention() {
     let model = seq2seq();
@@ -211,6 +227,7 @@ fn seq2seq_hooks_keep_both_stacks_and_encoder_edits_reach_cross_attention() {
     assert_close(restored.decoder.logits, reference.decoder.logits);
 }
 
+/// Encoding with a decoder-only activation request fails before returning an encoder result.
 #[test]
 fn encoder_only_execution_rejects_decoder_requests() {
     let model = seq2seq();
@@ -223,6 +240,7 @@ fn encoder_only_execution_rejects_decoder_requests() {
     );
 }
 
+/// Changing the last token preserves earlier causal logits but changes them under bidirectional attention.
 #[test]
 fn future_token_changes_only_affect_earlier_outputs_with_bidirectional_attention() {
     let model = causal(NormPlacement::Pre);
@@ -252,6 +270,7 @@ fn future_token_changes_only_affect_earlier_outputs_with_bidirectional_attention
     );
 }
 
+/// A DeltaNet mixer rejects bidirectional execution because its recurrence is causal.
 #[test]
 fn bidirectional_execution_rejects_causal_recurrent_mixers() {
     let mut spec = spec(NormPlacement::Pre);
@@ -270,6 +289,7 @@ fn bidirectional_execution_rejects_causal_recurrent_mixers() {
     );
 }
 
+/// Head-scoped context and native KV captures have expected shapes; removing and restoring one head changes and restores logits.
 #[test]
 fn selected_attention_head_can_be_removed_and_patched_with_native_kv_capture() {
     let model = causal(NormPlacement::Pre);
@@ -297,6 +317,7 @@ fn selected_attention_head_can_be_removed_and_patched_with_native_kv_capture() {
     assert_close(restored.logits, reference.logits);
 }
 
+/// Changing a masked token cannot alter valid hidden states even when attention is bidirectional.
 #[test]
 fn bidirectional_attention_still_excludes_padded_keys() {
     let model = causal(NormPlacement::Pre);
@@ -316,6 +337,7 @@ fn bidirectional_attention_still_excludes_padded_keys() {
     );
 }
 
+/// Unsupported diagnostic options clear captures saved by an earlier successful hooked forward.
 #[test]
 fn failed_validation_discards_previous_captures() {
     let model = causal(NormPlacement::Pre);
@@ -337,6 +359,7 @@ fn failed_validation_discards_previous_captures() {
     assert!(hooks.get(&saved).is_err());
 }
 
+/// DeltaNet and sparse MLP layers expose output captures while omitting unavailable query and dense-activation points.
 #[test]
 fn recurrent_and_moe_layers_advertise_only_executable_points() {
     let mut config = spec(NormPlacement::Pre);
@@ -375,6 +398,7 @@ fn recurrent_and_moe_layers_advertise_only_executable_points() {
     assert_eq!(hooks.get(&mlp).unwrap().dims(), [1, 3, 8]);
 }
 
+/// Eager precision exposes score/pattern hooks with zero future causal mass and positive bidirectional mass.
 #[test]
 fn explicit_eager_attention_exposes_causal_and_bidirectional_patterns() {
     use crate::attention::AttentionPrecisionMode;
@@ -422,6 +446,7 @@ fn explicit_eager_attention_exposes_causal_and_bidirectional_patterns() {
     assert!(!model.activation_points().contains(&points.pattern().info()));
 }
 
+/// Removing one attention-pattern head changes logits in either direction, and restoring it reproduces the clean result.
 #[test]
 fn eager_pattern_ablation_and_clean_patch_work_with_each_attention_direction() {
     use crate::attention::AttentionPrecisionMode;
@@ -457,6 +482,7 @@ fn eager_pattern_ablation_and_clean_patch_work_with_each_attention_direction() {
     }
 }
 
+/// Eager precision exposes patterns in both stacks and cross-attention; cross-pattern patching restores decoder logits.
 #[test]
 fn seq2seq_eager_precision_reaches_both_stacks_and_cross_attention_patterns() {
     use crate::attention::AttentionPrecisionMode;
@@ -501,4 +527,5 @@ fn seq2seq_eager_precision_reaches_both_stacks_and_cross_attention_patterns() {
 }
 
 #[path = "composition_tests.rs"]
+/// Staged execution, explicit attention connectivity, and consumer-defined module tests.
 mod composition;

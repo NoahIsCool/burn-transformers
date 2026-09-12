@@ -19,8 +19,11 @@ use crate::{Error, Result};
 /// that an optimized kernel would otherwise leave unmaterialized.
 #[derive(Clone, Debug)]
 pub struct PointValidity<B: Backend> {
+    /// Exact point name and semantic axes to which the indicator applies.
     pub(super) point: PointInfo,
+    /// Flattened Boolean indicator with `true` denoting a valid activation.
     valid: Tensor<B, 1, Bool>,
+    /// Original broadcast dimensions restored when the activation is emitted.
     shape: Vec<usize>,
 }
 

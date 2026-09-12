@@ -1,3 +1,5 @@
+//! Rotary tensor parity, partial-channel preservation, and scaling-boundary tests.
+
 use burn::{
     backend::Flex,
     tensor::{Int, Tensor, TensorData, Tolerance},
@@ -6,6 +8,7 @@ use burn::{
 use super::{apply_rotary, inverse_frequencies, mrope_angles, rotary_angles};
 use crate::position::{DynamicNtkScaling, LinearRopeScaling, RopeConfig, RopeScaling, YarnConfig};
 
+/// Deterministic CPU tensors with F32 values and I32 indices.
 type TestBackend = Flex<f32, i32>;
 
 /// Position zero is the identity and partial RoPE leaves suffix channels intact.

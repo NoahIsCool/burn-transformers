@@ -50,29 +50,45 @@ use super::{
 /// Reserved Burnpack U8 tensor containing the quantization manifest JSON.
 pub const BURNPACK_MANIFEST_TENSOR: &str = "__transformers_quantization_manifest_v1__";
 
+/// Burn Store's maximum tensor count, including the reserved manifest tensor.
 const UPSTREAM_MAX_TENSORS: usize = 100_000;
+/// Bounds staging below the address-space limit of a 32-bit host, in bytes.
 #[cfg(target_pointer_width = "32")]
 const DEFAULT_MAX_STAGED_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+/// Leaves serialized-header headroom below Burn Store's 100 GiB file limit.
 #[cfg(not(target_pointer_width = "32"))]
 const DEFAULT_MAX_STAGED_BYTES: u64 = 90 * 1024 * 1024 * 1024;
+/// Explains the staging restriction on 32-bit hosts.
 #[cfg(target_pointer_width = "32")]
 const MAX_STAGED_REASON: &str = "must be at most 3 GiB on a 32-bit host";
+/// Explains the staging restriction imposed by the upstream artifact format.
 #[cfg(not(target_pointer_width = "32"))]
 const MAX_STAGED_REASON: &str =
     "must be at most 90 GiB to leave room below Burnpack's 100 GiB file limit";
+/// Maximum in-memory JSON manifest bytes accepted by default.
 const DEFAULT_MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum UTF-8 bytes in one model tensor name.
 const DEFAULT_MAX_TENSOR_NAME_BYTES: usize = 16 * 1024;
+/// Maximum individually materialized payload bytes on a 32-bit host.
 #[cfg(target_pointer_width = "32")]
 const UPSTREAM_MAX_TENSOR_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Burn Store's maximum individually materialized tensor payload bytes.
 #[cfg(not(target_pointer_width = "32"))]
 const UPSTREAM_MAX_TENSOR_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+/// Conservative fixed bytes reserved for a serialized manifest envelope.
 const MANIFEST_BASE_ESTIMATE: u64 = 2048;
+/// Conservative serialized metadata bytes per tensor, before variable strings.
 const MANIFEST_ENTRY_OVERHEAD: u64 = 2048;
+/// Maximum estimated JSON bytes for each integer tensor dimension.
 const MANIFEST_SHAPE_DIMENSION_OVERHEAD: u64 = 32;
+/// Fixed estimated bytes for checkpoint provenance metadata.
 const MANIFEST_PROVENANCE_BASE_OVERHEAD: u64 = 1024;
+/// Estimated fixed bytes for each provenance shard record.
 const MANIFEST_PROVENANCE_SHARD_OVERHEAD: u64 = 512;
+/// Worst-case JSON escaping expands one source byte to six ASCII bytes.
 const JSON_STRING_ESCAPE_FACTOR: u64 = 6;
 
+/// Process-local suffix counter; exclusive file creation resolves cross-process collisions.
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Resource limits for an incremental Burnpack conversion session.
@@ -186,9 +202,15 @@ pub struct StagedTensorSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BurnpackAppendOutcome {
     /// Eligible matrix weight was quantized and appended to disk staging.
-    Staged(StagedTensorSummary),
+    Staged(
+        /// Appended payload identity, quantization policy, and bounded resource use.
+        StagedTensorSummary,
+    ),
     /// Policy left the tensor in its separate source checkpoint.
-    Excluded(QuantizationExclusion),
+    Excluded(
+        /// Policy reason the source tensor must remain in its original precision.
+        QuantizationExclusion,
+    ),
 }
 
 /// Summary returned after atomically publishing an official Burnpack artifact.
@@ -265,10 +287,14 @@ pub(super) struct BurnpackPayloadReadFailure {
     pub stats: BurnpackPayloadReadStats,
 }
 
+/// Immutable byte-range descriptor for one completed tensor in the staging file.
 #[derive(Debug, Clone)]
 struct StagedTensor {
+    /// Byte offset from the beginning of the staging file.
     offset: u64,
+    /// Number of packed-code and scale bytes owned by this tensor.
     payload_bytes: u64,
+    /// Hexadecimal SHA-256 of the exact staged payload bytes.
     payload_sha256: String,
 }
 
@@ -278,13 +304,21 @@ struct StagedTensor {
 /// The final output is never visible until Burn Store has written and synchronized
 /// a complete temporary Burnpack file.
 pub struct QuantizedBurnpackSession {
+    /// Canonical parent and caller-preserved final artifact filename.
     output_path: PathBuf,
+    /// Private adjacent payload spool, removed when the session closes.
     staging_path: PathBuf,
+    /// Open spool handle, absent after staging has been closed.
     staging_file: Option<File>,
+    /// Completed tensor byte ranges keyed by their unique parameter names.
     entries: BTreeMap<String, StagedTensor>,
+    /// Logical shapes, quantization contracts, and optional source provenance.
     manifest: BurnpackQuantizationManifest,
+    /// Validated upper bounds checked before allocation and append operations.
     limits: BurnpackSessionLimits,
+    /// Cumulative I/O and high-water allocation diagnostics.
     stats: BurnpackStagingStats,
+    /// Prevents further appends or publication once the output was finalized.
     finalized: bool,
 }
 
@@ -986,8 +1020,11 @@ impl Drop for QuantizedBurnpackSession {
 
 /// Memory-mapped, lazily materialized view of a quantized Burnpack artifact.
 pub struct QuantizedBurnpackArtifact {
+    /// Validated local artifact path used in contextual errors.
     path: PathBuf,
+    /// Upstream memory-mapped store that owns lazy payload access.
     store: BurnpackStore,
+    /// Validated decoded manifest describing the mapped payloads.
     manifest: BurnpackQuantizationManifest,
 }
 
@@ -1608,12 +1645,12 @@ fn staged_snapshot(
 
 /// Validates the `.bpk` filename and canonicalizes its existing parent directory.
 fn validate_bpk_path(path: &Path) -> Result<PathBuf> {
-    if path.as_os_str().is_empty() || path.file_name().is_none() {
+    let Some(filename) = path.file_name() else {
         return Err(QuantizationError::InvalidArtifactPath {
             path: path.to_owned(),
             reason: "expected a file path",
         });
-    }
+    };
     if path.extension() != Some(OsStr::new("bpk")) {
         return Err(QuantizationError::InvalidArtifactPath {
             path: path.to_owned(),
@@ -1633,10 +1670,7 @@ fn validate_bpk_path(path: &Path) -> Result<PathBuf> {
             path: parent.to_owned(),
             source,
         })?;
-    Ok(canonical_parent.join(
-        path.file_name()
-            .expect("validated artifact path always has a file name"),
-    ))
+    Ok(canonical_parent.join(filename))
 }
 
 /// Returns an explicit parent or the current directory for a bare artifact filename.
@@ -1772,8 +1806,11 @@ fn validate_nonzero_limit(field: &'static str, value: u64) -> Result<()> {
     }
 }
 
+/// Removes unpublished serialization output on success and every early-return path.
 struct TemporaryOutput {
+    /// Private adjacent directory created for the serialization attempt.
     directory: PathBuf,
+    /// Temporary Burnpack output inside the private directory.
     path: PathBuf,
 }
 

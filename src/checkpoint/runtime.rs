@@ -327,9 +327,15 @@ pub struct ExecutionOutcome {
 #[non_exhaustive]
 pub enum ExecutionFailureCause<E> {
     /// Source, plan, payload, transform, conversion, or staging failure.
-    Checkpoint(CheckpointError),
+    Checkpoint(
+        /// Original checkpoint executor diagnostic.
+        CheckpointError,
+    ),
     /// Architecture/backend sink rejected a tensor or alias.
-    Sink(E),
+    Sink(
+        /// Original architecture-owned destination error.
+        E,
+    ),
 }
 
 impl<E: fmt::Display> fmt::Display for ExecutionFailureCause<E> {
@@ -827,9 +833,15 @@ fn observe_equivalence_read(
 /// Error raised immediately before or while handing one tensor to its sink.
 enum InstallError<E> {
     /// Executor accounting rejected the materialized tensor.
-    Checkpoint(CheckpointError),
+    Checkpoint(
+        /// Shape, dtype, byte-count, or staging-accounting diagnostic.
+        CheckpointError,
+    ),
     /// The architecture-specific destination rejected the tensor.
-    Sink(E),
+    Sink(
+        /// Original parameter-installation error.
+        E,
+    ),
 }
 
 /// Accounts for one override buffer and any fused source retained beside it.
@@ -933,10 +945,15 @@ fn install_tensor<K: TensorSink>(
 /// Immutable descriptor key used to identify outputs of one fused split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct SharedSourceKey<'a> {
+    /// Physical checkpoint tensor name shared by the split outputs.
     name: &'a str,
+    /// Root-relative shard containing the source payload.
     shard: &'a str,
+    /// Logical source dimensions before splitting.
     shape: &'a [u64],
+    /// Source wire scalar representation.
     dtype: TensorDType,
+    /// Half-open source payload range within the shard's data section.
     data_offsets: [u64; 2],
 }
 
@@ -1113,8 +1130,9 @@ where
 }
 
 #[cfg(test)]
+#[path = "runtime_tests.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "boundary_tests.rs"]
+#[path = "runtime/boundary_tests.rs"]
 mod boundary_tests;

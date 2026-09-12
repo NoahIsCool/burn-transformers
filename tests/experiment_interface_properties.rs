@@ -21,6 +21,7 @@ use transformers::{
     transfer::{TiePolicy, TransferPlan},
 };
 
+/// Deterministic CPU backend with F32 values and I32 indices.
 type Cpu = Flex<f32, i32>;
 
 /// Read a small CPU tensor without changing its rank in the tested graph.
@@ -54,13 +55,17 @@ fn reference_log_probabilities(row: &[f32]) -> Vec<f64> {
         .collect()
 }
 
+/// One weight matrix whose parameter identity can participate in an alias group.
 #[derive(Module, Debug)]
 struct ParameterBlock<B: Backend> {
+    /// Matrix shared or independently owned according to the fixture alias partition.
     weight: Param<Tensor<B, 2>>,
 }
 
+/// Ordered blocks used to exercise parameter transfer across arbitrary alias groups.
 #[derive(Module, Debug)]
 struct ParameterSet<B: Backend> {
+    /// Blocks whose index determines the transfer path `blocks.<index>.weight`.
     blocks: Vec<ParameterBlock<B>>,
 }
 
@@ -92,6 +97,7 @@ proptest! {
         ..ProptestConfig::default()
     })]
 
+    /// Across axis permutations, edits and captures affect exactly the selected Cartesian slice.
     #[test]
     fn semantic_selection_edits_only_the_named_cartesian_slice(
         batch in 1usize..4, tokens in 1usize..6, channels in 1usize..8,
@@ -144,6 +150,7 @@ proptest! {
         prop_assert_eq!(values(restored), original);
     }
 
+    /// Malformed selections fail before invoking edits and invalidate pending captures.
     #[test]
     fn malformed_selections_never_invoke_an_edit_or_publish_partial_captures(
         tokens in 1usize..9, channels in 1usize..9, kind in 0usize..7,
@@ -170,6 +177,7 @@ proptest! {
         prop_assert!(hooks.get(&saved).is_err());
     }
 
+    /// Broadcast validity masks erase NaNs, survive ordered edits, and do not leak into later runs.
     #[test]
     fn broadcast_validity_erases_poison_and_survives_ordered_edits(
         dims in (1usize..4, 1usize..5, 1usize..6), broadcast in 0u8..8,
@@ -201,6 +209,7 @@ proptest! {
         prop_assert_eq!(values(unmasked), vec![4.0; dims.iter().product()]);
     }
 
+    /// Structural and consumer edits preserve masked and causal zeros and the scalar context sum.
     #[test]
     fn attention_constraints_preserve_exact_exclusions_after_both_edit_layers(
         batch in 1usize..3, heads in 1usize..4, queries in 1usize..5, keys in 1usize..6,
@@ -262,6 +271,7 @@ proptest! {
         }
     }
 
+    /// Transfers copy values into fresh parameters while preserving or explicitly breaking source ties.
     #[test]
     fn transfer_preserves_exact_alias_partitions_or_explicitly_unties(
         groups in proptest::collection::vec(0usize..6, 1..7), width in 1usize..6,
@@ -289,6 +299,7 @@ proptest! {
         }
     }
 
+    /// Callback errors and shape mismatches leave source values and target aliases unchanged.
     #[test]
     fn a_failed_transfer_leaves_every_original_parameter_and_alias_untouched(
         groups in proptest::collection::vec(0usize..6, 1..7), width in 1usize..6,
@@ -315,6 +326,7 @@ proptest! {
         }
     }
 
+    /// Stable categorical losses match an F64 oracle and remain invariant to rowwise offsets.
     #[test]
     fn stable_losses_match_scalar_probabilities_and_ignore_row_offsets(
         examples in 1usize..5, classes in 1usize..18,
@@ -347,6 +359,7 @@ proptest! {
         prop_assert_eq!(kl_divergence(input.clone(), input).unwrap().into_scalar(), 0.0);
     }
 
+    /// KL averages the teacher-to-student expectation independently of batch replication.
     #[test]
     fn kl_matches_teacher_to_student_expectation_and_batch_replication(
         classes in 1usize..18,
@@ -367,11 +380,13 @@ proptest! {
     }
 
     #[cfg(feature = "autodiff")]
+    /// Cross-entropy gradients match softmax minus labels even when row maxima are tied.
     #[test]
     fn stable_loss_gradients_match_softmax_with_maximum_ties(
         classes in 2usize..12, batch in 1usize..4,
         input in proptest::collection::vec(-16i16..1, 33), target in 0usize..20,
     ) {
+        /// Autodiff wrapper used to check gradients on the deterministic CPU backend.
         type Ad = burn::backend::Autodiff<Cpu>;
         let mut input = input.into_iter().take(batch * classes).map(|x| f32::from(x) / 4.0).collect::<Vec<_>>();
         for row in input.chunks_exact_mut(classes) {

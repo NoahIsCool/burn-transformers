@@ -1,6 +1,7 @@
 //! Grokking sinusoid-fit regression.
 
 use super::*;
+/// Checks an affine sinusoid fit explains a shifted sinusoid exactly while the zero-intercept metric penalizes its mean.
 #[test]
 fn affine_sinusoid_fit_retains_a_nonzero_activation_mean() {
     let mut fit = Fit::default();

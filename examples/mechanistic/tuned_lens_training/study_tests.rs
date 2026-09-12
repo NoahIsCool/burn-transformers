@@ -1,5 +1,7 @@
+//! Checks frozen-decoder gradient flow and exact next-update resumption of affine lens training.
 use super::*;
 
+/// Builds a four-channel, seven-class lens with an identity-initialized correction and frozen decoder.
 fn tiny_lens() -> Lens<B> {
     let device = Default::default();
     let backbone = GptNeoXModel::init(
@@ -18,6 +20,7 @@ fn tiny_lens() -> Lens<B> {
     Lens::new(&backbone)
 }
 
+/// Builds two deterministic hidden vectors, seven-class teacher logits, and aligned token IDs.
 fn batch() -> CachedRecord {
     CachedRecord {
         hidden: vec![Tensor::from_floats(
@@ -35,6 +38,7 @@ fn batch() -> CachedRecord {
     }
 }
 
+/// Checks zero correction matches the raw decoder, gradients reach only the translator, and SGD preserves frozen weights.
 #[test]
 fn frozen_decoder_propagates_translator_gradients_without_updating_its_weights() {
     let mut lens = tiny_lens();
@@ -68,6 +72,7 @@ fn frozen_decoder_propagates_translator_gradients_without_updating_its_weights()
     );
 }
 
+/// Checks restoring affine parameters and momentum reproduces the next optimizer update exactly.
 #[test]
 fn saved_affine_and_momentum_records_reproduce_the_next_optimizer_step() {
     let directory = tempfile::tempdir().unwrap();

@@ -1,5 +1,8 @@
+//! DeepSeek-V2 configuration defaults, sparse routing constraints, and checked dimension boundaries.
+
 use super::*;
 
+/// The default V2-Lite dimensions, expert counts, direct queries, and YaRN policy validate together.
 #[test]
 fn defaults_match_the_pinned_v2_lite_topology() {
     let config = DeepseekV2Config::default();
@@ -17,6 +20,7 @@ fn defaults_match_the_pinned_v2_lite_topology() {
     config.validate().unwrap();
 }
 
+/// A direct query projection remains valid when the optional query bottleneck is absent.
 #[test]
 fn lite_checkpoint_may_omit_query_lora() {
     let config = DeepseekV2Config {
@@ -26,6 +30,7 @@ fn lite_checkpoint_may_omit_query_lora() {
     config.validate().unwrap();
 }
 
+/// Selecting three experts from a group containing only two is rejected during validation.
 #[test]
 fn routing_groups_must_offer_enough_experts() {
     let config = DeepseekV2Config {
@@ -38,6 +43,7 @@ fn routing_groups_must_offer_enough_experts() {
     assert!(config.validate().is_err());
 }
 
+/// Zero query rank, an invalid dense-prefix schedule, and infinite routing scale are rejected.
 #[test]
 fn invalid_lora_schedule_and_router_scalars_fail_validation() {
     let config = DeepseekV2Config {
@@ -59,6 +65,7 @@ fn invalid_lora_schedule_and_router_scalars_fail_validation() {
     assert!(config.validate().is_err());
 }
 
+/// Combined query/key width saturates for inspection and fails validation when addition would overflow.
 #[test]
 fn overflowing_head_dimensions_fail_without_panicking() {
     let config = DeepseekV2Config {

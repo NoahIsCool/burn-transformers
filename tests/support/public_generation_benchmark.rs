@@ -153,6 +153,8 @@ pub fn validate_output(
 
 #[cfg(test)]
 mod tests {
+    //! Tests for fixed greedy controls and complete public-generation benchmark metadata.
+
     use super::*;
     use transformers::GeneratedSequence;
 

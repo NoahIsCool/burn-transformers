@@ -322,9 +322,17 @@ pub enum TensorCacheError {
 
     /// Backend-independent logical metadata rejected a transition.
     #[error(transparent)]
-    Metadata(#[from] DecodeStateError),
+    Metadata(
+        /// Underlying logical-state validation failure.
+        #[from]
+        DecodeStateError,
+    ),
 
     /// Ring-buffer index planning rejected a transition.
     #[error(transparent)]
-    Ring(#[from] RingPlanError),
+    Ring(
+        /// Underlying ring indexing or accepted-prefix validation failure.
+        #[from]
+        RingPlanError,
+    ),
 }

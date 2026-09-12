@@ -37,6 +37,7 @@ use super::{
 };
 use crate::models::config::ModelConfig;
 
+/// Local artifact loading and generation-default normalization for registry models.
 mod load;
 
 pub use load::AutoLoadOptions;
@@ -65,6 +66,7 @@ pub enum AutoCausalConfig {
 }
 
 impl ArchitectureConfig for AutoCausalConfig {
+    /// Checkpoint discriminators accepted by the causal configuration registry.
     const MODEL_TYPES: &'static [&'static str] = &[
         "deepseek_v2",
         "muse_glimmer_text",
@@ -91,6 +93,7 @@ pub enum AutoSeq2SeqConfig {
 }
 
 impl ArchitectureConfig for AutoSeq2SeqConfig {
+    /// Checkpoint discriminator accepted by the encoder-decoder configuration registry.
     const MODEL_TYPES: &'static [&'static str] = &["t5"];
 
     /// Registry discriminators are constructed only for executable families.
@@ -104,15 +107,30 @@ impl ArchitectureConfig for AutoSeq2SeqConfig {
 #[non_exhaustive]
 pub enum AutoCausalConfigRef<'a> {
     /// DeepSeek-V2 MLA and sparse-expert configuration.
-    DeepseekV2(&'a DeepseekV2Config),
+    DeepseekV2(
+        /// Borrowed DeepSeek configuration owned by the selected model.
+        &'a DeepseekV2Config,
+    ),
     /// Muse Glimmer dense hybrid text configuration.
-    MuseGlimmer(&'a MuseGlimmerTextConfig),
+    MuseGlimmer(
+        /// Borrowed Muse text configuration owned by the selected model.
+        &'a MuseGlimmerTextConfig,
+    ),
     /// NVIDIA Nemotron-H heterogeneous block configuration.
-    NemotronH(&'a NemotronHConfig),
+    NemotronH(
+        /// Borrowed Nemotron block schedule owned by the selected model.
+        &'a NemotronHConfig,
+    ),
     /// Qwen3.5/Qwen3.8 hybrid text configuration.
-    Qwen3_5(&'a Qwen3_5TextConfig),
+    Qwen3_5(
+        /// Borrowed Qwen hybrid configuration owned by the selected model.
+        &'a Qwen3_5TextConfig,
+    ),
     /// Qwen3 sparse mixture-of-experts decoder configuration.
-    Qwen3Moe(&'a Qwen3MoeConfig),
+    Qwen3Moe(
+        /// Borrowed sparse Qwen configuration owned by the selected model.
+        &'a Qwen3MoeConfig,
+    ),
 }
 
 impl AutoCausalConfigRef<'_> {
@@ -144,7 +162,10 @@ impl AutoCausalConfigRef<'_> {
 #[non_exhaustive]
 pub enum AutoSeq2SeqConfigRef<'a> {
     /// T5, FLAN-T5, T5 v1.1, or UL2 configuration.
-    T5(&'a T5Config),
+    T5(
+        /// Borrowed T5 configuration owned by the selected model.
+        &'a T5Config,
+    ),
 }
 
 impl AutoSeq2SeqConfigRef<'_> {
@@ -170,15 +191,30 @@ impl AutoSeq2SeqConfigRef<'_> {
 #[non_exhaustive]
 pub enum AutoCausalDecodeState<B: Backend> {
     /// DeepSeek-V2 compressed MLA and recurrent length state.
-    DeepseekV2(Box<DeepseekV2DecodeState<B>>),
+    DeepseekV2(
+        /// Compressed DeepSeek cache and sequence metadata.
+        Box<DeepseekV2DecodeState<B>>,
+    ),
     /// Muse sliding-ring and full-attention KV state.
-    MuseGlimmer(Box<MuseGlimmerDecodeState<B>>),
+    MuseGlimmer(
+        /// Muse local-ring and global-attention cache state.
+        Box<MuseGlimmerDecodeState<B>>,
+    ),
     /// Nemotron-H Mamba2 and grouped-query attention state.
-    NemotronH(Box<NemotronHDecodeState<B>>),
+    NemotronH(
+        /// Nemotron recurrent and attention cache state.
+        Box<NemotronHDecodeState<B>>,
+    ),
     /// Qwen native-KV and DeltaNet recurrent state.
-    Qwen3_5(Box<Qwen3_5DecodeState<B>>),
+    Qwen3_5(
+        /// Qwen hybrid recurrent and native-KV cache state.
+        Box<Qwen3_5DecodeState<B>>,
+    ),
     /// Qwen3 MoE native grouped-query KV state.
-    Qwen3Moe(Box<Qwen3MoeDecodeState<B>>),
+    Qwen3Moe(
+        /// Sparse Qwen grouped-query cache state.
+        Box<Qwen3MoeDecodeState<B>>,
+    ),
 }
 
 impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
@@ -265,7 +301,10 @@ impl<B: Backend> DecodeState<B> for AutoCausalDecodeState<B> {
 #[non_exhaustive]
 pub enum AutoSeq2SeqDecodeState<B: Backend> {
     /// T5 decoder self-attention and immutable encoder cross-attention state.
-    T5(T5DecodeState<B>),
+    T5(
+        /// T5 decoder cache and fixed encoder cross-attention state.
+        T5DecodeState<B>,
+    ),
 }
 
 impl<B: Backend> DecodeState<B> for AutoSeq2SeqDecodeState<B> {
@@ -329,15 +368,30 @@ impl<B: Backend> DecodeState<B> for AutoSeq2SeqDecodeState<B> {
 #[allow(clippy::large_enum_variant)]
 pub enum AutoCausalLm<B: Backend> {
     /// DeepSeek-V2 decoder with multi-head latent attention and sparse experts.
-    DeepseekV2(DeepseekV2ForCausalLm<B>),
+    DeepseekV2(
+        /// DeepSeek parameter graph selected for execution.
+        DeepseekV2ForCausalLm<B>,
+    ),
     /// Muse Glimmer dense decoder with sliding/full hybrid attention.
-    MuseGlimmer(MuseGlimmerForCausalLm<B>),
+    MuseGlimmer(
+        /// Muse parameter graph selected for execution.
+        MuseGlimmerForCausalLm<B>,
+    ),
     /// Nemotron-H decoder with interleaved Mamba2, attention, dense, and MoE blocks.
-    NemotronH(NemotronHForCausalLm<B>),
+    NemotronH(
+        /// Nemotron parameter graph selected for execution.
+        NemotronHForCausalLm<B>,
+    ),
     /// Qwen3.5/Qwen3.8 gated-DeltaNet and full-attention hybrid decoder.
-    Qwen3_5(Qwen3_5ForCausalLm<B>),
+    Qwen3_5(
+        /// Hybrid Qwen parameter graph selected for execution.
+        Qwen3_5ForCausalLm<B>,
+    ),
     /// Qwen3 decoder with token-routed sparse SwiGLU experts.
-    Qwen3Moe(Qwen3MoeForCausalLm<B>),
+    Qwen3Moe(
+        /// Sparse Qwen parameter graph selected for execution.
+        Qwen3MoeForCausalLm<B>,
+    ),
 }
 
 impl<B: Backend> AutoCausalLm<B> {
@@ -553,7 +607,9 @@ impl<B: Backend> AutoCausalLm<B> {
 }
 
 impl<B: Backend> CausalLanguageModel<B> for AutoCausalLm<B> {
+    /// Family discriminator used by generic causal-model clients.
     type Config = AutoCausalConfig;
+    /// External state tagged with its concrete causal family.
     type State = AutoCausalDecodeState<B>;
 
     /// Delegates the causal trait entry point to the checked enum dispatch.
@@ -636,7 +692,10 @@ impl<B: Backend> From<Qwen3MoeForCausalLm<B>> for AutoCausalLm<B> {
 #[non_exhaustive]
 pub enum AutoSeq2SeqLm<B: Backend> {
     /// T5, FLAN-T5, T5 v1.1, and UL2 encoder-decoder graph.
-    T5(T5ForConditionalGeneration<B>),
+    T5(
+        /// T5 encoder-decoder parameter graph selected for execution.
+        T5ForConditionalGeneration<B>,
+    ),
 }
 
 impl<B: Backend> AutoSeq2SeqLm<B> {
@@ -758,7 +817,9 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
 }
 
 impl<B: Backend> Seq2SeqLanguageModel<B> for AutoSeq2SeqLm<B> {
+    /// Family discriminator used by generic encoder-decoder clients.
     type Config = AutoSeq2SeqConfig;
+    /// External decoder state tagged with its encoder-decoder family.
     type State = AutoSeq2SeqDecodeState<B>;
 
     /// Dispatches bidirectional source encoding through the sequence-to-sequence trait.
@@ -842,4 +903,5 @@ pub(super) fn detect_model_type(json: &str) -> Result<String> {
 
 #[cfg(test)]
 #[path = "auto_tests.rs"]
+/// Registry parsing, family dispatch, and lifecycle regression tests.
 mod tests;

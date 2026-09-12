@@ -1,3 +1,5 @@
+//! Qwen hybrid forward, output-selection, input-validation, and gradient tests.
+
 use burn::{
     backend::Flex,
     tensor::{Bool, Int, Tensor, backend::Backend},
@@ -6,6 +8,7 @@ use burn::{
 use super::*;
 use crate::models::config::ModelConfig;
 
+/// CPU Flex backend with F32 activations and portable I32 indices.
 type TestBackend = Flex<f32, i32>;
 
 /// Builds a tiny hybrid model that exercises both mixer families.
@@ -127,6 +130,7 @@ fn assert_finite_nonzero_gradient<const D: usize>(
 fn stateless_hybrid_graph_has_finite_nonzero_parameter_gradients() {
     use burn::backend::Autodiff;
 
+    /// Autodiff wrapper for comparing gradients of registered model parameters.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     for tied in [false, true] {

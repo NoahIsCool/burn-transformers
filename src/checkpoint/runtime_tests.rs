@@ -1,3 +1,9 @@
+//! Synthetic checkpoint execution tests for payloads, transforms, and sink atomicity.
+//!
+//! Byte-level fixtures preserve wire dtypes and row-major axes independently of
+//! Burn construction. Instrumented sources and sinks expose read/write order,
+//! cleanup, and exact partial progress when a later operation fails.
+
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -30,15 +36,21 @@ use crate::checkpoint::{
     QuantizationRecord, TensorDType, build_load_plan, discover_checkpoint,
 };
 
+/// One tensor's descriptor and little-endian bytes for a synthetic shard.
 #[derive(Clone)]
 struct FixtureTensor {
+    /// Tensor key written into the shard header.
     name: String,
+    /// Safetensors scalar representation of the payload.
     dtype: TensorDType,
+    /// Tensor dimensions in checkpoint axis order.
     shape: Vec<u64>,
+    /// Contiguous payload bytes in the declared wire dtype.
     bytes: Vec<u8>,
 }
 
 impl FixtureTensor {
+    /// Builds a fixture, asserting its payload length matches shape and dtype.
     fn new(
         name: impl Into<String>,
         dtype: TensorDType,
@@ -57,6 +69,7 @@ impl FixtureTensor {
     }
 }
 
+/// Writes a padded safetensors header followed by fixtures in physical order.
 fn write_shard(root: &Path, relative: &str, tensors: &[FixtureTensor]) {
     let path = root.join(relative);
     if let Some(parent) = path.parent() {
@@ -89,6 +102,7 @@ fn write_shard(root: &Path, relative: &str, tensors: &[FixtureTensor]) {
     }
 }
 
+/// Writes the shard index mapping tensor names to paths and payload-byte totals.
 fn write_index(root: &Path, assignments: &[(&str, &str)], total_size: u64) {
     let weight_map: BTreeMap<_, _> = assignments.iter().copied().collect();
     fs::write(
@@ -102,6 +116,7 @@ fn write_index(root: &Path, assignments: &[(&str, &str)], total_size: u64) {
     .unwrap();
 }
 
+/// Serializes F32 bit patterns into little-endian checkpoint bytes.
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     values
         .iter()
@@ -109,6 +124,7 @@ fn f32_bytes(values: &[f32]) -> Vec<u8> {
         .collect()
 }
 
+/// Serializes U16 values, including raw half-precision bits, in wire order.
 fn u16_bytes(values: &[u16]) -> Vec<u8> {
     values
         .iter()
@@ -116,6 +132,7 @@ fn u16_bytes(values: &[u16]) -> Vec<u8> {
         .collect()
 }
 
+/// Serializes signed I32 checkpoint values in little-endian order.
 fn i32_bytes(values: &[i32]) -> Vec<u8> {
     values
         .iter()
@@ -123,6 +140,7 @@ fn i32_bytes(values: &[i32]) -> Vec<u8> {
         .collect()
 }
 
+/// Decodes native-endian F32 sink bytes for numerical comparisons.
 fn tensor_f32(data: &TensorData) -> Vec<f32> {
     data.as_bytes()
         .chunks_exact(4)
@@ -130,6 +148,7 @@ fn tensor_f32(data: &TensorData) -> Vec<f32> {
         .collect()
 }
 
+/// Decodes native-endian U16 sink bytes without changing their bit patterns.
 fn tensor_u16(data: &TensorData) -> Vec<u16> {
     data.as_bytes()
         .chunks_exact(2)
@@ -137,22 +156,34 @@ fn tensor_u16(data: &TensorData) -> Vec<u16> {
         .collect()
 }
 
+/// Injected sink failure identifying the rejected target or ownership rule.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error("synthetic sink rejected `{0}`")]
-struct SinkError(String);
+struct SinkError(
+    /// Rejected target name, optionally prefixed by the violated sink invariant.
+    String,
+);
 
+/// Records delivered data and aliases while allowing selected callback failures.
 #[derive(Default)]
 struct CollectingSink {
+    /// Successfully inserted owned tensor payloads by target name.
     tensors: BTreeMap<String, TensorData>,
+    /// Alias names mapped to their installed owner names.
     aliases: BTreeMap<String, String>,
+    /// Successful write and alias callbacks in execution order.
     events: Vec<String>,
+    /// Target whose write callback should reject its payload.
     fail_write: Option<String>,
+    /// Alias whose callback should fail before recording installation.
     fail_alias: Option<String>,
 }
 
 impl TensorSink for CollectingSink {
+    /// Synthetic callback rejection returned to the executor.
     type Error = SinkError;
 
+    /// Stores one payload unless its target is rejected or already installed.
     fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
         if self.fail_write.as_deref() == Some(target) {
             return Err(SinkError(target.into()));
@@ -164,6 +195,7 @@ impl TensorSink for CollectingSink {
         Ok(())
     }
 
+    /// Records an alias only after its owner exists and failure injection passes.
     fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error> {
         if self.fail_alias.as_deref() == Some(target) {
             return Err(SinkError(target.into()));
@@ -179,11 +211,14 @@ impl TensorSink for CollectingSink {
 
 /// Local fixture source that records each successful physical tensor read.
 struct TracingLocalSource<'a> {
+    /// Real local-file reader whose I/O and validation remain under test.
     inner: LocalShardSource<'a>,
+    /// Successful `(shard, tensor, byte_offset)` reads in execution order.
     reads: Vec<(String, String, u64)>,
 }
 
 impl TensorSource for TracingLocalSource<'_> {
+    /// Delegates the physical read and records its descriptor after success.
     fn read_tensor(&mut self, source: &PlannedSource) -> crate::checkpoint::Result<SourceTensor> {
         let payload = self.inner.read_tensor(source)?;
         self.reads.push((
@@ -194,15 +229,18 @@ impl TensorSource for TracingLocalSource<'_> {
         Ok(payload)
     }
 
+    /// Closes the delegated reader's current shard.
     fn close(&mut self) -> crate::checkpoint::Result<()> {
         self.inner.close()
     }
 
+    /// Returns the delegated reader's physical I/O accounting.
     fn stats(&self) -> SourceStats {
         self.inner.stats()
     }
 }
 
+/// Creates a temporary single-shard checkpoint and discovers its manifest.
 fn single_manifest(tensors: &[FixtureTensor]) -> (TempDir, crate::checkpoint::CheckpointManifest) {
     let temp = TempDir::new().unwrap();
     write_shard(temp.path(), "model.safetensors", tensors);
@@ -210,6 +248,7 @@ fn single_manifest(tensors: &[FixtureTensor]) -> (TempDir, crate::checkpoint::Ch
     (temp, manifest)
 }
 
+/// Builds a strict identity mapping retaining every fixture's shape and dtype.
 fn identity_plan(
     manifest: &crate::checkpoint::CheckpointManifest,
     tensors: &[FixtureTensor],
@@ -229,6 +268,7 @@ fn identity_plan(
     .unwrap()
 }
 
+/// A fresh execution replaces stale applied/quantized records with its actual progress.
 #[test]
 fn executor_replaces_stale_runtime_report_records() {
     let tensors = [FixtureTensor::new(
@@ -255,6 +295,7 @@ fn executor_replaces_stale_runtime_report_records() {
     assert_eq!(tensor_f32(&sink.tensors["weight"]), [2.0]);
 }
 
+/// Byte-equivalent physical aliases are verified and accounted before installing their owner.
 #[test]
 fn physical_checkpoint_equivalence_is_verified_before_model_writes() {
     let tensors = vec![
@@ -331,6 +372,7 @@ fn physical_checkpoint_equivalence_is_verified_before_model_writes() {
     );
 }
 
+/// Unequal alias payloads fail preflight with read accounting and an untouched sink.
 #[test]
 fn physical_checkpoint_equivalence_mismatch_fails_before_any_sink_mutation() {
     let tensors = vec![
@@ -393,6 +435,7 @@ fn physical_checkpoint_equivalence_mismatch_fails_before_any_sink_mutation() {
     assert_eq!(failure.stats.source_reads, 2);
 }
 
+/// A later alias mismatch retains only earlier verified pairs and installs no tensors.
 #[test]
 fn equivalence_preflight_reports_only_verified_prefix_and_still_writes_nothing() {
     let tensors = vec![
@@ -432,6 +475,7 @@ fn equivalence_preflight_reports_only_verified_prefix_and_still_writes_nothing()
     assert_eq!(failure.stats.source_payload_bytes, 16);
 }
 
+/// Absent optional aliases are ignored; a present physical alias needs its declared owner.
 #[test]
 fn equivalence_declarations_are_optional_but_physical_aliases_require_an_owner() {
     let mapped = FixtureTensor::new("mapped", TensorDType::F32, [1], f32_bytes(&[1.0]));
@@ -475,6 +519,7 @@ fn equivalence_declarations_are_optional_but_physical_aliases_require_an_owner()
     ));
 }
 
+/// Incompatible alias metadata and tampered plans reject before any source read or sink call.
 #[test]
 fn equivalence_shape_dtype_and_public_plan_mutations_fail_closed() {
     for alias in [
@@ -573,6 +618,7 @@ fn equivalence_shape_dtype_and_public_plan_mutations_fail_closed() {
     });
 }
 
+/// Identity and renamed mappings retain numeric values, shapes, and native Burn dtypes.
 #[test]
 fn identity_and_rename_deliver_native_burn_tensor_data() {
     let tensors = vec![
@@ -620,6 +666,7 @@ fn identity_and_rename_deliver_native_burn_tensor_data() {
     assert_eq!(outcome.stats.source.shard_open_order, ["model.safetensors"]);
 }
 
+/// Interleaved mappings read each shard in physical order while reporting targets consistently.
 #[test]
 fn interleaved_targets_execute_once_per_shard_in_physical_offset_order() {
     let first = [
@@ -783,6 +830,7 @@ fn interleaved_targets_execute_once_per_shard_in_physical_offset_order() {
     assert_eq!(outcome.report, expected_report);
 }
 
+/// Each runtime-supported wire dtype becomes its matching Burn scalar representation.
 #[test]
 fn every_burn_representable_safetensors_dtype_is_delivered_without_reinterpretation() {
     let tensors = vec![
@@ -846,13 +894,17 @@ fn every_burn_representable_safetensors_dtype_is_delivered_without_reinterpretat
     }
 }
 
+/// Installs one named rank-two payload directly into a Flex parameter.
 struct RankTwoParamSink {
+    /// Parameter populated by a successful write callback.
     parameter: Option<Param<Tensor<Flex, 2>>>,
 }
 
 impl TensorSink for RankTwoParamSink {
+    /// Rejection of a target name, tensor rank, or unsupported alias.
     type Error = SinkError;
 
+    /// Constructs `weight` as a rank-two parameter after checking its metadata.
     fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
         if target != "weight" || data.shape.as_slice().len() != 2 {
             return Err(SinkError(target.into()));
@@ -862,11 +914,13 @@ impl TensorSink for RankTwoParamSink {
         Ok(())
     }
 
+    /// Rejects aliases because this fixture owns only one independent parameter.
     fn alias_tensor(&mut self, target: &str, _source_target: &str) -> Result<(), Self::Error> {
         Err(SinkError(target.into()))
     }
 }
 
+/// Delivered rank-two data can initialize a Flex parameter without another mapping layer.
 #[test]
 fn sink_boundary_can_construct_a_rank_typed_burn_parameter_immediately() {
     let tensor = FixtureTensor::new(
@@ -885,6 +939,7 @@ fn sink_boundary_can_construct_a_rank_typed_burn_parameter_immediately() {
     assert_eq!(data.to_vec::<f32>().unwrap(), [1.0, 2.0, 3.0, 4.0]);
 }
 
+/// A rectangular transpose swaps axes, reorders payload values, and records both live buffers.
 #[test]
 fn rank_two_transpose_changes_shape_and_row_major_order() {
     let tensor = FixtureTensor::new(
@@ -910,6 +965,7 @@ fn rank_two_transpose_changes_shape_and_row_major_order() {
     assert_eq!(outcome.stats.peak_host_staging_bytes, 48);
 }
 
+/// Fused BF16-to-F16 transposition produces the expected half bits in destination axis order.
 #[test]
 fn transpose_casts_bf16_directly_into_the_final_f16_layout() {
     let values = [
@@ -940,6 +996,7 @@ fn transpose_casts_bf16_directly_into_the_final_f16_layout() {
     assert_eq!(actual, expected);
 }
 
+/// Splitting any rank-three axis preserves slice order, including empty slices, with one source read.
 #[test]
 fn splits_cover_first_middle_last_and_zero_length_axes() {
     let tensors = vec![
@@ -1009,6 +1066,7 @@ fn splits_cover_first_middle_last_and_zero_length_axes() {
     assert!(outcome.stats.peak_host_staging_bytes <= plan.memory.peak_host_staging_bytes);
 }
 
+/// A rejected second slice preserves the first output and never rereads their shared source.
 #[test]
 fn grouped_split_failure_reports_only_accepted_outputs_without_rereading_source() {
     let tensor = FixtureTensor::new(
@@ -1043,6 +1101,7 @@ fn grouped_split_failure_reports_only_accepted_outputs_without_rereading_source(
     assert_eq!(sink.events, ["write:first"]);
 }
 
+/// Concatenation preserves all rank-three axis layouts while limiting open shards to one.
 #[test]
 fn concatenation_covers_every_axis_and_switches_one_shard_at_a_time() {
     let first = vec![
@@ -1295,6 +1354,7 @@ fn atomicity_equivalence_pair_budget_rejects_before_reads_and_accepts_exactly() 
     }
 }
 
+/// All BF16 bit patterns match half conversion semantics, treating NaNs by classification.
 #[test]
 fn every_bf16_bit_pattern_casts_to_f16_with_half_semantics() {
     let bits: Vec<u16> = (0..=u16::MAX).collect();
@@ -1340,6 +1400,7 @@ fn every_bf16_bit_pattern_casts_to_f16_with_half_semantics() {
     assert_eq!(outcome.stats.largest_output_tensor_bytes, payload_bytes);
 }
 
+/// A reused eight-byte cast buffer still requires an eight-byte staging budget.
 #[test]
 fn bf16_to_f16_identity_rejects_a_bound_smaller_than_its_reused_buffer() {
     let tensor = FixtureTensor::new(
@@ -1373,6 +1434,7 @@ fn bf16_to_f16_identity_rejects_a_bound_smaller_than_its_reused_buffer() {
     assert!(sink.events.is_empty());
 }
 
+/// All F16 bit patterns match BF16 conversion semantics with explicit NaN handling.
 #[test]
 fn every_f16_bit_pattern_casts_to_bf16_with_half_semantics() {
     let bits: Vec<u16> = (0..=u16::MAX).collect();
@@ -1414,6 +1476,7 @@ fn every_f16_bit_pattern_casts_to_bf16_with_half_semantics() {
     assert_eq!(outcome.stats.peak_host_staging_bytes, 262_144);
 }
 
+/// An unchanged F32 payload records one live buffer rather than source-plus-output storage.
 #[test]
 fn preserve_float_identity_does_not_allocate_a_second_output_buffer() {
     let tensor = FixtureTensor::new(
@@ -1433,6 +1496,7 @@ fn preserve_float_identity_does_not_allocate_a_second_output_buffer() {
     assert!(outcome.stats.peak_host_staging_bytes <= plan.memory.peak_host_staging_bytes);
 }
 
+/// Sequential casts retain only the current source/output pair in peak staging accounting.
 #[test]
 fn staging_high_water_is_per_tensor_instead_of_complete_model_size() {
     let tensors = vec![
@@ -1462,6 +1526,7 @@ fn staging_high_water_is_per_tensor_instead_of_complete_model_size() {
     assert!(outcome.stats.peak_host_staging_bytes <= plan.memory.peak_host_staging_bytes);
 }
 
+/// Alias chains resolve directly to their owner and install after physical payload writes.
 #[test]
 fn aliases_are_flattened_and_installed_after_source_close() {
     let tensor = FixtureTensor::new("weight", TensorDType::F32, [1], f32_bytes(&[3.0]));
@@ -1493,6 +1558,7 @@ fn aliases_are_flattened_and_installed_after_source_close() {
     assert_eq!(outcome.report.applied, ["embedding", "lm_head", "weight"]);
 }
 
+/// A failed write reports only previously accepted tensors and identifies its target.
 #[test]
 fn sink_write_failure_returns_an_exact_partial_report() {
     let tensors = vec![
@@ -1518,6 +1584,7 @@ fn sink_write_failure_returns_an_exact_partial_report() {
     assert!(error.to_string().contains("`b`"));
 }
 
+/// Alias rejection retains prior owner progress without claiming uninstalled aliases.
 #[test]
 fn alias_failure_does_not_claim_failed_or_later_aliases() {
     let tensor = FixtureTensor::new("weight", TensorDType::F32, [1], f32_bytes(&[1.0]));
@@ -1546,27 +1613,38 @@ fn alias_failure_does_not_claim_failed_or_later_aliases() {
     assert!(!sink.aliases.contains_key("z_alias"));
 }
 
+/// In-memory payload source with injected read failures and cleanup accounting.
 #[derive(Default)]
 struct MemorySource {
+    /// Available payloads keyed by planned source name.
     tensors: BTreeMap<String, SourceTensor>,
+    /// Number of close callbacks performed by the executor.
     close_calls: usize,
+    /// Source name whose read callback should fail.
     fail_at: Option<String>,
 }
 
+/// Sink that permits aliases only after the paired source reports closure.
 struct CloseAwareSink {
+    /// Shared closure signal written by the corresponding source.
     closed: Arc<AtomicBool>,
+    /// Whether a primary tensor write has completed.
     owner_written: bool,
+    /// Whether an alias callback passed the closure check.
     alias_written: bool,
 }
 
 impl TensorSink for CloseAwareSink {
+    /// Synthetic rejection used when alias installation precedes source closure.
     type Error = SinkError;
 
+    /// Records successful installation of the primary tensor.
     fn write_tensor(&mut self, _target: &str, _data: TensorData) -> Result<(), Self::Error> {
         self.owner_written = true;
         Ok(())
     }
 
+    /// Rejects an alias if source cleanup has not yet signaled completion.
     fn alias_tensor(&mut self, target: &str, _source_target: &str) -> Result<(), Self::Error> {
         if !self.closed.load(Ordering::SeqCst) {
             return Err(SinkError(format!("source-open:{target}")));
@@ -1576,17 +1654,23 @@ impl TensorSink for CloseAwareSink {
     }
 }
 
+/// In-memory source exposing when cleanup occurs and optionally failing it.
 struct CloseAwareSource {
+    /// Payload provider used for read operations.
     inner: MemorySource,
+    /// Closure signal observed by the paired sink.
     closed: Arc<AtomicBool>,
+    /// Whether the close callback returns a synthetic checkpoint error.
     fail_close: bool,
 }
 
 impl TensorSource for CloseAwareSource {
+    /// Reads a planned payload through the wrapped in-memory source.
     fn read_tensor(&mut self, source: &PlannedSource) -> crate::checkpoint::Result<SourceTensor> {
         self.inner.read_tensor(source)
     }
 
+    /// Signals closure and optionally reports the injected cleanup failure.
     fn close(&mut self) -> crate::checkpoint::Result<()> {
         self.closed.store(true, Ordering::SeqCst);
         if self.fail_close {
@@ -1599,6 +1683,7 @@ impl TensorSource for CloseAwareSource {
     }
 }
 
+/// Creates one F32 owner and one alias backed by an in-memory source.
 fn aliased_memory_fixture() -> (crate::checkpoint::LoadPlan, MemorySource) {
     let tensor = FixtureTensor::new("weight", TensorDType::F32, [1], f32_bytes(&[1.0]));
     let (_temp, manifest) = single_manifest(std::slice::from_ref(&tensor));
@@ -1619,6 +1704,7 @@ fn aliased_memory_fixture() -> (crate::checkpoint::LoadPlan, MemorySource) {
     (plan, source)
 }
 
+/// Alias callbacks observe completed source cleanup after the primary tensor write.
 #[test]
 fn aliases_observe_a_closed_source_boundary() {
     let (plan, inner) = aliased_memory_fixture();
@@ -1640,6 +1726,7 @@ fn aliases_observe_a_closed_source_boundary() {
     assert!(sink.alias_written);
 }
 
+/// Source-close failure preserves the installed owner but prevents alias callbacks.
 #[test]
 fn close_failure_stops_before_aliases_with_primary_reported() {
     let (plan, inner) = aliased_memory_fixture();
@@ -1668,6 +1755,7 @@ fn close_failure_stops_before_aliases_with_primary_reported() {
 }
 
 impl TensorSource for MemorySource {
+    /// Clones a named payload or returns an injected/missing-payload diagnostic.
     fn read_tensor(&mut self, source: &PlannedSource) -> crate::checkpoint::Result<SourceTensor> {
         if self.fail_at.as_deref() == Some(&source.name) {
             return Err(CheckpointError::InvalidTensorPayload {
@@ -1683,12 +1771,14 @@ impl TensorSource for MemorySource {
         })
     }
 
+    /// Counts cleanup calls without releasing the reusable in-memory fixtures.
     fn close(&mut self) -> crate::checkpoint::Result<()> {
         self.close_calls += 1;
         Ok(())
     }
 }
 
+/// Mismatched custom-source descriptors are rejected, and the source is still closed.
 #[test]
 fn custom_source_metadata_is_revalidated_and_closed_on_failure() {
     let tensor = FixtureTensor::new("a", TensorDType::F32, [2], f32_bytes(&[1.0, 2.0]));
@@ -1712,6 +1802,7 @@ fn custom_source_metadata_is_revalidated_and_closed_on_failure() {
     assert!(sink.tensors.is_empty());
 }
 
+/// A later read failure retains earlier successful writes and executes source cleanup.
 #[test]
 fn source_read_failure_preserves_prior_sink_writes_and_closes() {
     let tensors = vec![
@@ -1749,6 +1840,7 @@ fn source_read_failure_preserves_prior_sink_writes_and_closes() {
     assert_eq!(sink.events, ["write:a"]);
 }
 
+/// Payload construction rejects truncated bytes and shape products exceeding u64.
 #[test]
 fn source_tensor_constructor_rejects_bad_lengths_and_overflowing_shapes() {
     assert!(matches!(
@@ -1761,6 +1853,7 @@ fn source_tensor_constructor_rejects_bad_lengths_and_overflowing_shapes() {
     ));
 }
 
+/// Boolean bytes outside zero and one cannot reach a tensor sink.
 #[test]
 fn invalid_boolean_wire_values_are_rejected_before_the_sink() {
     let tensor = FixtureTensor::new("mask", TensorDType::BOOL, [3], vec![0, 2, 1]);
@@ -1777,6 +1870,7 @@ fn invalid_boolean_wire_values_are_rejected_before_the_sink() {
     assert!(sink.tensors.is_empty());
 }
 
+/// A valid FP8 wire dtype unsupported by this runtime is rejected before opening a shard.
 #[test]
 fn valid_but_unrepresentable_safetensors_dtype_fails_before_io() {
     let tensor = FixtureTensor::new("fp8", TensorDType::F8_E5M2, [2], vec![0, 1]);
@@ -1797,6 +1891,7 @@ fn valid_but_unrepresentable_safetensors_dtype_fails_before_io() {
     assert!(error.failed_target.is_none());
 }
 
+/// A public plan with a changed destination shape fails preflight without I/O or writes.
 #[test]
 fn mutated_plan_is_rejected_before_any_source_or_sink_action() {
     let tensor = FixtureTensor::new("matrix", TensorDType::F32, [2, 2], f32_bytes(&[1.0; 4]));
@@ -1816,6 +1911,7 @@ fn mutated_plan_is_rejected_before_any_source_or_sink_action() {
     assert!(sink.events.is_empty());
 }
 
+/// A cast whose source/output pair exceeds its declared staging budget cannot reach the sink.
 #[test]
 fn understated_memory_plan_is_rejected_before_allocating() {
     let tensor = FixtureTensor::new("weight", TensorDType::F32, [8], f32_bytes(&[1.0; 8]));
@@ -1844,6 +1940,7 @@ fn understated_memory_plan_is_rejected_before_allocating() {
     assert!(sink.events.is_empty());
 }
 
+/// Changing a planned unsigned dtype to signed cannot reinterpret the same payload bytes.
 #[test]
 fn non_float_dtype_reinterpretation_in_a_mutated_plan_is_rejected() {
     let tensor = FixtureTensor::new(
@@ -1869,6 +1966,7 @@ fn non_float_dtype_reinterpretation_in_a_mutated_plan_is_rejected() {
     assert!(sink.events.is_empty());
 }
 
+/// Appending bytes after discovery invalidates the previously inspected checkpoint artifact.
 #[test]
 fn file_size_change_after_discovery_is_detected() {
     let tensor = FixtureTensor::new("weight", TensorDType::F32, [1], f32_bytes(&[1.0]));
@@ -1890,6 +1988,7 @@ fn file_size_change_after_discovery_is_detected() {
     ));
 }
 
+/// Changing the on-disk header length after discovery invalidates the artifact.
 #[test]
 fn header_length_change_after_discovery_is_detected() {
     let tensor = FixtureTensor::new("weight", TensorDType::F32, [1], f32_bytes(&[1.0]));
@@ -1910,6 +2009,7 @@ fn header_length_change_after_discovery_is_detected() {
     ));
 }
 
+/// A local reader rechecks planned metadata against the discovered shard descriptor.
 #[test]
 fn plan_source_descriptor_change_is_detected_by_local_source() {
     let tensor = FixtureTensor::new("weight", TensorDType::F32, [1], f32_bytes(&[1.0]));
@@ -1927,6 +2027,7 @@ fn plan_source_descriptor_change_is_detected_by_local_source() {
     ));
 }
 
+/// Explicit selection loads the named nondefault shard and records that physical path.
 #[test]
 fn explicit_artifact_selection_still_streams_the_selected_file() {
     let temp = TempDir::new().unwrap();
@@ -2045,6 +2146,7 @@ fn indexed_scalar_bytes(elements: usize, width: usize, seed: u8) -> Vec<u8> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
+    /// Random small U16 matrices match the scalar row-major transpose equation.
     #[test]
     fn transpose_matches_index_equation(
         rows in 0_u64..8,
@@ -2064,6 +2166,7 @@ proptest! {
         prop_assert_eq!(actual, expected);
     }
 
+    /// Random shapes and scalar widths match a byte-copy oracle across transpose tiles.
     #[cfg(target_endian = "little")]
     #[test]
     fn tiled_equal_dtype_transpose_is_bit_exact(
@@ -2090,6 +2193,7 @@ proptest! {
     }
 }
 
+/// Empty axes and sizes adjacent to each tile boundary preserve every scalar byte.
 #[cfg(target_endian = "little")]
 #[test]
 fn tiled_transpose_covers_zero_and_every_tile_boundary() {
@@ -2118,6 +2222,7 @@ fn tiled_transpose_covers_zero_and_every_tile_boundary() {
     }
 }
 
+/// F32 transposition preserves NaN payloads, signed zero, infinities, and edge-tile bits.
 #[cfg(target_endian = "little")]
 #[test]
 fn tiled_transpose_preserves_float_nan_payloads_signed_zero_and_tile_edges() {
@@ -2143,6 +2248,7 @@ fn tiled_transpose_preserves_float_nan_payloads_signed_zero_and_tile_edges() {
     assert_eq!(actual.as_bytes(), expected);
 }
 
+/// Every runtime dtype matches the byte-transpose oracle across partial tiles.
 #[cfg(target_endian = "little")]
 #[test]
 fn tiled_transpose_is_bit_exact_for_every_runtime_dtype() {
@@ -2179,6 +2285,7 @@ fn tiled_transpose_is_bit_exact_for_every_runtime_dtype() {
     }
 }
 
+/// An explicit dtype policy converts finite and infinite F64 values to expected BF16 bits.
 #[test]
 fn dtype_policy_can_explicitly_cast_f64_to_bf16() {
     let values = [1.0_f64, -2.5, f64::INFINITY, f64::NEG_INFINITY];
@@ -2212,6 +2319,7 @@ fn dtype_policy_can_explicitly_cast_f64_to_bf16() {
     assert_eq!(actual, expected);
 }
 
+/// Column-layout installation applies the checkpoint mapper before the tested linear forward.
 #[test]
 fn parameter_install_uses_burns_checkpoint_layout_mapper() {
     let device = Default::default();
@@ -2244,6 +2352,7 @@ fn parameter_install_uses_burns_checkpoint_layout_mapper() {
 fn parameter_install_preserves_autodiff_leaf_and_frozen_layouts() {
     use burn::{backend::Autodiff, module::Module};
 
+    /// Flex backend with autodiff for checking parameter leaf and freeze policies.
     type AdBackend = Autodiff<Flex>;
     let device = Default::default();
     for layout in [LinearLayout::Row, LinearLayout::Col] {
@@ -2284,6 +2393,7 @@ fn parameter_install_preserves_autodiff_leaf_and_frozen_layouts() {
     }
 }
 
+/// Installing Q8 data retains packed storage while applying the parameter layout contract.
 #[test]
 fn parameter_install_preserves_native_quantized_float_data() {
     let device = Default::default();
@@ -2315,6 +2425,7 @@ fn parameter_install_preserves_native_quantized_float_data() {
     assert!(matches!(linear.weight.val().dtype(), DType::QFloat(_)));
 }
 
+/// Wrong rank, shape, or nonfloat dtype leaves a lazy parameter uninitialized.
 #[test]
 fn parameter_install_rejects_bad_metadata_before_initialization() {
     let device = Default::default();
@@ -2799,6 +2910,7 @@ fn runtime_coverage_shared_source_failure_precedes_override_and_keeps_prior_grou
 #[cfg(feature = "autodiff")]
 #[test]
 fn runtime_coverage_initialized_reload_preserves_autodiff_and_parameter_identity_on_error() {
+    /// Flex backend with autodiff for checking parameter leaf and freeze policies.
     type AdBackend = burn::backend::Autodiff<Flex>;
     let device = Default::default();
     for layout in [LinearLayout::Row, LinearLayout::Col] {

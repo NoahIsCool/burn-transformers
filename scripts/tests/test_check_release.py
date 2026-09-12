@@ -665,6 +665,7 @@ class ReleaseGateTests(unittest.TestCase):
                 self.assertGreater(commands.index(audit), commands.index(selected[-1]))
                 self.assertEqual(audit[audit.index("--classifier") + 1], str(GATES.CRATE / "target/debug/transformers-coverage-layout"))
                 self.assertEqual(audit[audit.index("--output") + 1], "/tmp/output/documentation.json")
+                self.assertIn("--standards", audit)
                 self.assertNotIn("--inventory-only", audit)
 
     def test_msrv_alias_is_checked_exactly(self):

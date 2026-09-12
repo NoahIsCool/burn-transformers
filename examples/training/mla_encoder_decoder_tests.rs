@@ -1,6 +1,7 @@
 //! Training and native-record integration checks for `mla_encoder_decoder`.
 
 use super::*;
+/// Checks a disjoint complete source split, learning through MLA and the latent adapter, and native-record parity.
 #[test]
 fn noncausal_mla_and_hooked_latent_adapter_learn_and_reload() {
     let (train_rows, held) = dataset();

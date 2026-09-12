@@ -1,3 +1,5 @@
+//! Tests T5 beam-search configuration, execution, and pinned reference tokens.
+
 use std::{fs, path::PathBuf};
 
 use burn::{
@@ -15,6 +17,7 @@ use crate::{
     },
 };
 
+/// CPU backend used by T5 beam-search regressions.
 type TestBackend = Flex<f32, i32>;
 
 /// Builds a minimal real T5 graph for family-wrapper coverage.

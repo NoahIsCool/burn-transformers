@@ -20,7 +20,9 @@ use crate::{
 
 use super::{Qwen3_5DecodeState, Qwen3_5ForCausalLm};
 
+/// XOR domain separating the draft sampling stream from target token sampling.
 const DRAFT_SEED_DOMAIN: u64 = 0x4452_4146_545f_5157;
+/// XOR domain separating acceptance and residual draws from token sampling.
 const VERIFY_SEED_DOMAIN: u64 = 0x5645_5249_4659_5157;
 
 /// Validated controls for one Qwen MTP speculative decoder.
@@ -85,10 +87,15 @@ pub struct Qwen3_5SpeculativeOutput<B: Backend> {
 /// unrelated model instances therefore cannot perturb reproducibility.
 #[derive(Debug)]
 pub struct Qwen3_5SpeculativeDecoder<B: Backend> {
+    /// Validated proposal-count and ordinary generation controls.
     config: Qwen3_5SpeculativeConfig,
+    /// Expected probability-vector width and exclusive token-ID bound.
     vocabulary_size: usize,
+    /// Target penalties, truncation, and independent lead/bonus sampling stream.
     target: LogitsProcessor<B>,
+    /// Draft penalties, truncation, and independently seeded proposal stream.
     draft: LogitsProcessor<B>,
+    /// Independent uniforms used for acceptance and positive-residual sampling.
     verifier: SplitMix64,
 }
 
@@ -528,13 +535,21 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
 
 /// Target tensors and cache-prefix lengths awaiting atomic publication.
 struct PendingCycle<B: Backend> {
+    /// Suffix awaiting emission, including the guaranteed target lead token.
     token_ids: Vec<u32>,
+    /// Number of MTP proposals produced before verification.
     drafted_tokens: usize,
+    /// Number of proposals accepted by the target, including an accepted EOS.
     accepted_draft_tokens: usize,
+    /// Whether verification accepted every proposal and selected a bonus token.
     all_drafts_accepted: bool,
+    /// Whether the emitted suffix ends in a configured EOS token.
     terminated: bool,
+    /// Target state immediately before the last emitted token, absent after EOS.
     continuation_hidden_state: Option<Tensor<B, 3>>,
+    /// Number of staged target tokens to retain relative to the transaction mark.
     target_cache_tokens: usize,
+    /// Number of staged MTP tokens to retain relative to the transaction mark.
     mtp_cache_tokens: usize,
 }
 
@@ -720,6 +735,7 @@ fn sample_weights(weights: &[f64], uniform: f64) -> Result<u32> {
 /// Small deterministic stream dedicated to verification decisions.
 #[derive(Debug, Clone, Copy)]
 struct SplitMix64 {
+    /// Wrapping 64-bit counter mixed to produce the next verification uniform.
     state: u64,
 }
 

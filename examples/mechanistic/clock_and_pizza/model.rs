@@ -172,14 +172,21 @@ impl Fixture {
 pub struct Transformer<B: Backend = burn::backend::Flex<f32, i32>> {
     /// Token lookup table `[59,128]`, also exported for learned-geometry analysis.
     pub embedding: Param<Tensor<B, 2>>,
+    /// Learned positional vectors with shape `[2, 128]` for the two operands.
     position: Param<Tensor<B, 2>>,
+    /// Four-head attention mixed with unnormalized summation using `alpha`.
     attention: GroupedQueryAttention<B>,
     /// Attention mixture coefficient in `[0,1]`; zero selects unnormalized summation.
     pub alpha: f64,
+    /// Input projection from 128 residual channels to 512 ReLU neurons.
     mlp_in: Param<Tensor<B, 2>>,
+    /// Broadcast pre-ReLU bias with shape `[1, 512]`.
     mlp_in_bias: Param<Tensor<B, 2>>,
+    /// Output projection from 512 neurons to 128 residual channels.
     mlp_out: Param<Tensor<B, 2>>,
+    /// Broadcast MLP output bias with shape `[1, 128]`.
     mlp_out_bias: Param<Tensor<B, 2>>,
+    /// Readout weights with shape `[128, 59]` for modular-sum logits.
     unembedding: Param<Tensor<B, 2>>,
 }
 

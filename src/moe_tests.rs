@@ -1,3 +1,5 @@
+//! Mixture-of-experts tests for routing, grouping, numerical equivalence, and invalid configurations.
+
 use burn::{
     backend::Flex,
     module::Param,
@@ -237,6 +239,7 @@ fn dispatch_counters_prove_unselected_experts_are_skipped() {
 fn selected_dispatch_retains_input_and_expert_gradients() {
     use burn::backend::Autodiff;
 
+    /// Differentiable CPU backend used to inspect selected expert and input gradients.
     type AdBackend = Autodiff<Flex>;
     let device = Default::default();
     let mut config = SparseMoeConfig::new(4, 8, 2, 1);
@@ -544,6 +547,7 @@ fn load_balancing_loss_validates_all_external_diagnostic_axes() {
     );
 }
 
+/// Out-of-range I32 expert IDs return the offending value and flattened assignment index.
 #[test]
 fn expert_grouping_rejects_extreme_backend_i32_ids() {
     let device = Default::default();
@@ -561,6 +565,7 @@ fn expert_grouping_rejects_extreme_backend_i32_ids() {
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(48))]
 
+    /// Random routing assignments appear exactly once in stable token/slot order within each expert.
     #[test]
     fn expert_grouping_preserves_every_assignment_and_its_token_slot_order(
         experts in 1usize..=8,

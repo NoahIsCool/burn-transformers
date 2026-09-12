@@ -61,15 +61,22 @@ mod experiment {
         models::custom::ModularCausalLm,
     };
 
+    /// CPU tensor backend used for evaluation and data loading.
     type Cpu = Flex<f32, i32>;
+    /// Autodifferentiable CPU backend used by the native Burn learner.
     type Training = Autodiff<Cpu>;
 
     // Burn owns and discovers every parameter, including the inserted adapter.
+    /// Registers the symbolic classifier and inserted adapter as one trainable module.
     #[derive(Module, Debug)]
     struct Experiment<B: Backend> {
+        /// Bidirectionally executed decoder that encodes the three symbolic tokens.
         backbone: ModularCausalLm<B>,
+        /// Width-preserving projection inserted after the first decoder block.
         adapter: Linear<B>,
+        /// Training-time regularizer for the adapter contribution; disabled by `.valid()`.
         dropout: Dropout,
+        /// Binary readout from the first token's final hidden state.
         classifier: Linear<B>,
     }
 
@@ -118,7 +125,9 @@ mod experiment {
 
     // These are native Burn interfaces, with no transformers-specific trainer.
     impl<B: AutodiffBackend> TrainStep for Experiment<B> {
+        /// Batched symbolic token IDs and binary targets for one training step.
         type Input = Batch<B>;
+        /// Classification loss, logits, and targets passed to Burn training metrics.
         type Output = ClassificationOutput<B>;
         /// Build native Burn training output by differentiating the classification loss through the owning module.
         fn step(&self, batch: Self::Input) -> TrainOutput<Self::Output> {
@@ -128,7 +137,9 @@ mod experiment {
     }
 
     impl<B: Backend> InferenceStep for Experiment<B> {
+        /// Batched symbolic token IDs and binary targets for one evaluation step.
         type Input = Batch<B>;
+        /// Classification loss, logits, and targets passed to Burn evaluation metrics.
         type Output = ClassificationOutput<B>;
         /// Compute classification metrics without invoking backward; evaluation callers use the `.valid()` model.
         fn step(&self, batch: Self::Input) -> Self::Output {
@@ -227,16 +238,23 @@ mod experiment {
         Ok(())
     }
 
+    /// One symbolic sequence and its first-token classification target.
     #[derive(Clone, Debug)]
     struct Item {
+        /// Three input token IDs, including two nuisance tokens.
         tokens: [i32; 3],
+        /// Binary class determined by the first token.
         label: i32,
     }
+    /// Device-resident symbolic examples prepared for classification.
     #[derive(Clone, Debug)]
     struct Batch<B: Backend> {
+        /// Input token IDs with axes `[batch, 3]`.
         tokens: Tensor<B, 2, Int>,
+        /// Binary target IDs with shape `[batch]`.
         labels: Tensor<B, 1, Int>,
     }
+    /// Packs symbolic examples into device-resident token and target tensors.
     #[derive(Clone)]
     struct SymbolBatcher;
     impl<B: Backend> Batcher<B, Item, Batch<B>> for SymbolBatcher {

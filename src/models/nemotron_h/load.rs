@@ -84,13 +84,25 @@ pub enum NemotronHLoadError {
 pub enum NemotronHCheckpointLoadError {
     /// The family configuration cannot describe a supported checkpoint.
     #[error(transparent)]
-    Config(#[from] ConfigError),
+    Config(
+        /// Unsupported or invalid model configuration.
+        #[from]
+        ConfigError,
+    ),
     /// Artifact discovery or complete expected/observed validation failed.
     #[error(transparent)]
-    Checkpoint(#[from] CheckpointError),
+    Checkpoint(
+        /// Metadata, mapping, or artifact-integrity failure.
+        #[from]
+        CheckpointError,
+    ),
     /// Pass two failed after zero or more audited sink writes.
     #[error(transparent)]
-    Execution(#[from] Box<ExecutionFailure<NemotronHLoadError>>),
+    Execution(
+        /// Sink failure with the execution progress recorded before it occurred.
+        #[from]
+        Box<ExecutionFailure<NemotronHLoadError>>,
+    ),
 }
 
 impl NemotronHCheckpointLoadError {
@@ -105,6 +117,7 @@ impl NemotronHCheckpointLoadError {
 }
 
 impl<B: Backend> TensorSink for NemotronHForCausalLm<B> {
+    /// Parameter-target, component, shape, or alias installation failure.
     type Error = NemotronHLoadError;
 
     /// Installs one storage-owning tensor named by the strict family contract.

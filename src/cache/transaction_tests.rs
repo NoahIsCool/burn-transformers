@@ -1,11 +1,15 @@
+//! Single-use transaction marks, accepted prefixes, rollback, and atomic rejection.
+
 use super::*;
 use crate::cache::{CacheConfig, DecodeStateError};
 
+/// Builds a two-row transaction fixture from explicit baseline lengths.
 fn state(lengths: [usize; 2]) -> DecodeState {
     let config = CacheConfig::new(2, 32).expect("valid config");
     DecodeState::from_lengths(config, lengths.to_vec()).expect("valid state")
 }
 
+/// Restores every baseline length after speculative appends are rolled back.
 #[test]
 fn rollback_restores_exact_baseline() {
     let mut state = state([3, 7]);
@@ -17,6 +21,7 @@ fn rollback_restores_exact_baseline() {
     assert!(!state.has_active_transaction());
 }
 
+/// Keeps only the same accepted proposal prefix for each row.
 #[test]
 fn commits_uniform_prefix_and_drops_suffix() {
     for accepted in 0..=4 {
@@ -31,6 +36,7 @@ fn commits_uniform_prefix_and_drops_suffix() {
     }
 }
 
+/// Commits independent accepted-prefix lengths for different rows.
 #[test]
 fn commits_ragged_prefixes() {
     let mut state = state([3, 7]);
@@ -42,6 +48,7 @@ fn commits_ragged_prefixes() {
     assert_eq!(state.lengths(), &[7, 7]);
 }
 
+/// Rejects uniform acceptance when even one row proposed fewer tokens.
 #[test]
 fn uniform_commit_rejects_a_prefix_too_long_for_any_row() {
     let mut state = state([3, 7]);
@@ -61,6 +68,7 @@ fn uniform_commit_rejects_a_prefix_too_long_for_any_row() {
     state.rollback(rollback_mark).expect("still recoverable");
 }
 
+/// Leaves an invalid commit untouched so its original mark can still roll back.
 #[test]
 fn invalid_commit_is_atomic_and_can_be_rolled_back() {
     let mut state = state([3, 7]);
@@ -87,6 +95,7 @@ fn invalid_commit_is_atomic_and_can_be_rolled_back() {
     assert_eq!(state.lengths(), &[3, 7]);
 }
 
+/// Rejects nested transactions and marks from completed or unrelated transactions.
 #[test]
 fn rejects_nested_stale_and_foreign_marks() {
     let mut first = state([1, 2]);
@@ -115,6 +124,7 @@ fn rejects_nested_stale_and_foreign_marks() {
     );
 }
 
+/// Forbids reset, reorder, and truncate while a transaction is active.
 #[test]
 fn blocks_topology_changes_during_transaction() {
     let mut state = state([3, 7]);
@@ -138,6 +148,7 @@ fn blocks_topology_changes_during_transaction() {
     state.rollback(mark).expect("valid rollback");
 }
 
+/// Rejects an accepted-prefix vector with the wrong batch size.
 #[test]
 fn rejects_wrong_ragged_prefix_count() {
     let mut state = state([0, 0]);
@@ -154,6 +165,7 @@ fn rejects_wrong_ragged_prefix_count() {
     assert!(state.has_active_transaction());
 }
 
+/// Includes the failed lifecycle condition in transaction diagnostics.
 #[test]
 fn transaction_errors_have_actionable_messages() {
     let messages = [

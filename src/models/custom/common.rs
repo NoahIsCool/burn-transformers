@@ -57,9 +57,15 @@ impl AttentionDirection {
 #[derive(Module, Debug)]
 pub enum ModularNorm<B: Backend> {
     /// Crate-native RMS normalization, including zero-centered checkpoint weights.
-    Rms(RmsNorm<B>),
+    Rms(
+        /// RMS normalization parameters and epsilon for the residual width.
+        RmsNorm<B>,
+    ),
     /// Burn LayerNorm with an optional learned additive bias.
-    Layer(LayerNorm<B>),
+    Layer(
+        /// Mean-centering layer normalization parameters and epsilon.
+        LayerNorm<B>,
+    ),
 }
 
 impl<B: Backend> ModularNorm<B> {
@@ -394,8 +400,11 @@ impl<B: Backend> ModularAttention<B> {
 /// Shared latent attention with independently selected position encoding.
 #[derive(Module, Debug)]
 struct ModularMla<B: Backend> {
+    /// Shared latent projections, compressed KV normalization, and attention kernel.
     attention: MultiLatentAttention<B>,
+    /// Optional learned relative-position bias added before latent-attention softmax.
     relative_bias: Option<T5RelativePositionBias<B>>,
+    /// Optional rotary encoding applied to the latent attention rotary channels.
     #[module(skip)]
     rope: Option<RopeConfig>,
 }
@@ -534,11 +543,20 @@ impl<B: Backend> ModularMla<B> {
 #[allow(clippy::large_enum_variant)]
 enum ModularMixer<B: Backend> {
     /// Full or sliding projected attention.
-    Attention(ModularAttention<B>),
+    Attention(
+        /// Projected attention module with its positional and window policy.
+        ModularAttention<B>,
+    ),
     /// Multi-head latent attention, reusable in either stack.
-    Mla(ModularMla<B>),
+    Mla(
+        /// Compressed latent-attention module with independently selected position encoding.
+        ModularMla<B>,
+    ),
     /// Gated DeltaNet linear attention.
-    DeltaNet(GatedDeltaNet<B>),
+    DeltaNet(
+        /// Gated recurrent linear-attention module.
+        GatedDeltaNet<B>,
+    ),
 }
 
 impl<B: Backend> ModularMixer<B> {
@@ -632,9 +650,15 @@ impl<B: Backend> ModularMixer<B> {
 #[allow(clippy::large_enum_variant)]
 enum ModularFeedForward<B: Backend> {
     /// One always-active gated feed-forward network.
-    Dense(GatedFeedForward<B>),
+    Dense(
+        /// Dense gate, content, and output projection parameters.
+        GatedFeedForward<B>,
+    ),
     /// Top-k routed and optional shared experts.
-    MixtureOfExperts(SparseMoe<B>),
+    MixtureOfExperts(
+        /// Router and routed/shared expert parameters.
+        SparseMoe<B>,
+    ),
 }
 
 impl<B: Backend> ModularFeedForward<B> {

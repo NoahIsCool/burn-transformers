@@ -1,11 +1,13 @@
-//! Test-only fixtures for transform.rs; excluded from non-test compiler inputs.
+//! Checks load-plan contracts, tensor conversion, and staging arithmetic boundaries.
 
 use super::*;
 use crate::checkpoint::{LoadReport, MemoryEstimate};
 
 /// Supplies immutable synthetic payloads while counting actual materializations.
 struct FixtureSource {
+    /// Named wire payloads cloned by source reads without dtype or layout conversion.
     payloads: Vec<SourceTensor>,
+    /// Number of source-read attempts, including requests for absent payload names.
     reads: usize,
 }
 

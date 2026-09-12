@@ -279,11 +279,20 @@ pub struct Mamba2Spec {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MixerSpec {
     /// Unbounded causal attention.
-    Attention(AttentionSpec),
+    Attention(
+        /// Head grouping, projection dimensions, and positional encoding.
+        AttentionSpec,
+    ),
     /// Causal attention restricted to a trailing window.
-    SlidingAttention(SlidingWindowSpec),
+    SlidingAttention(
+        /// Attention geometry and the permitted trailing key window.
+        SlidingWindowSpec,
+    ),
     /// DeepSeek-style multi-head latent attention.
-    Mla(MlaSpec),
+    Mla(
+        /// Latent compression ranks and query/key/value head dimensions.
+        MlaSpec,
+    ),
     /// Gated DeltaNet linear attention.
     DeltaNet {
         /// Number of normalized query/key heads.
@@ -298,7 +307,10 @@ pub enum MixerSpec {
         convolution_kernel: usize,
     },
     /// Mamba2 structured state-space mixing.
-    Mamba2(Mamba2Spec),
+    Mamba2(
+        /// Recurrent state, head grouping, and convolution dimensions.
+        Mamba2Spec,
+    ),
 }
 
 impl MixerSpec {
@@ -420,9 +432,15 @@ pub struct MixtureOfExpertsSpec {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FeedForwardSpec {
     /// One dense gated feed-forward network.
-    Dense(DenseFeedForwardSpec),
+    Dense(
+        /// Intermediate width, activation, and projection-bias policy.
+        DenseFeedForwardSpec,
+    ),
     /// A sparse router plus independent expert networks.
-    MixtureOfExperts(MixtureOfExpertsSpec),
+    MixtureOfExperts(
+        /// Router selection and per-expert network configuration.
+        MixtureOfExpertsSpec,
+    ),
 }
 
 impl FeedForwardSpec {

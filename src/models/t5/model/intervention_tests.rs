@@ -7,8 +7,10 @@ use burn::{
 
 use super::*;
 
+/// CPU backend used for hook parity and padding regressions.
 type TestBackend = Flex<f32, i32>;
 
+/// Builds one small encoder and decoder block with the selected feed-forward topology.
 fn config(projection: T5FeedForwardProjection) -> T5Config {
     T5Config {
         vocab_size: 16,
@@ -29,6 +31,7 @@ fn config(projection: T5FeedForwardProjection) -> T5Config {
     }
 }
 
+/// Supplies one unpadded three-token sequence with implicit positions.
 fn tokens<B: Backend>(device: &B::Device) -> CausalLmInput<B> {
     CausalLmInput {
         token_ids: Tensor::<B, 2, Int>::from_ints([[1, 2, 3]], device),
@@ -37,6 +40,7 @@ fn tokens<B: Backend>(device: &B::Device) -> CausalLmInput<B> {
     }
 }
 
+/// Uses the same small token sequence for the encoder source and decoder target.
 fn input<B: Backend>(device: &B::Device) -> Seq2SeqInput<B> {
     Seq2SeqInput {
         encoder: tokens(device),
@@ -44,6 +48,7 @@ fn input<B: Backend>(device: &B::Device) -> Seq2SeqInput<B> {
     }
 }
 
+/// Requests logits at every decoder position and all hidden-state diagnostics.
 fn options() -> ForwardOptions {
     ForwardOptions {
         logits: LogitsSelection::All,
@@ -52,6 +57,7 @@ fn options() -> ForwardOptions {
     }
 }
 
+/// Identity encoder and cross-attention edits preserve logits and hidden states for both FFN layouts.
 #[test]
 fn t5_noop_hooks_preserve_dense_and_gated_outputs() {
     let device = Default::default();
@@ -100,6 +106,7 @@ fn t5_noop_hooks_preserve_dense_and_gated_outputs() {
     }
 }
 
+/// Capturing encoder attention leaves masked-source outputs equal to ordinary execution.
 #[test]
 fn t5_encoder_hook_path_preserves_padding_semantics() {
     let device = Default::default();
@@ -128,6 +135,7 @@ fn t5_encoder_hook_path_preserves_padding_semantics() {
         .assert_approx_eq::<f32>(&ordinary.hidden_state.into_data(), Tolerance::default());
 }
 
+/// Left, right, and gapped decoder padding preserve outputs and zero captured invalid positions.
 #[test]
 fn t5_padded_decoder_hooks_match_compacted_outputs_in_original_coordinates() {
     let device = Default::default();
@@ -187,6 +195,7 @@ fn t5_padded_decoder_hooks_match_compacted_outputs_in_original_coordinates() {
     }
 }
 
+/// Cross-attention ablation changes logits and restoring a clean capture recovers the baseline.
 #[test]
 fn t5_selective_capture_and_cross_attention_patch_are_consumed() {
     let device = Default::default();
@@ -241,6 +250,7 @@ fn t5_selective_capture_and_cross_attention_patch_are_consumed() {
         .assert_approx_eq::<f32>(&baseline.decoder.logits.into_data(), Tolerance::default());
 }
 
+/// Single-head captures retain `[batch, head, token, width]` axes without changing logits.
 #[test]
 fn t5_attention_head_capture_uses_native_encoder_and_cross_attention_shapes() {
     let device = Default::default();
@@ -265,6 +275,7 @@ fn t5_attention_head_capture_uses_native_encoder_and_cross_attention_shapes() {
         .assert_approx_eq::<f32>(&ordinary.decoder.logits.into_data(), Tolerance::default());
 }
 
+/// Unavailable activation points and shape-changing replacements return contextual hook errors.
 #[test]
 fn t5_hook_errors_name_unavailable_points_and_invalid_replacements() {
     let device = Default::default();
@@ -304,6 +315,7 @@ fn t5_hook_errors_name_unavailable_points_and_invalid_replacements() {
     );
 }
 
+/// An empty hook registry preserves ordinary logits for a gapped decoder mask.
 #[test]
 fn t5_empty_hooks_keep_ordinary_masked_decoder_support() {
     let device = Default::default();
@@ -331,11 +343,13 @@ fn t5_empty_hooks_keep_ordinary_masked_decoder_support() {
         .assert_approx_eq::<f32>(&ordinary.decoder.logits.into_data(), Tolerance::default());
 }
 
+/// An encoder residual edit preserves gradients for its inserted linear module and shared embeddings.
 #[cfg(feature = "autodiff")]
 #[test]
 fn t5_inserted_module_and_upstream_weights_receive_gradients() {
     use burn::{backend::Autodiff, nn::LinearConfig, optim::GradientsParams};
 
+    /// Autodiff wrapper used to inspect inserted-module and upstream parameter gradients.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     let model = T5ForConditionalGeneration::<AdBackend>::init(
@@ -365,6 +379,7 @@ fn t5_inserted_module_and_upstream_weights_receive_gradients() {
     );
 }
 
+/// Eager attention exposes zero future-token probabilities while capture preserves its logits.
 #[test]
 fn t5_eager_attention_exposes_causal_patterns_without_changing_logits() {
     let device = Default::default();
@@ -397,6 +412,7 @@ fn t5_eager_attention_exposes_causal_patterns_without_changing_logits() {
         .assert_approx_eq::<f32>(&ordinary.decoder.logits.into_data(), Tolerance::default());
 }
 
+/// An all-valid decoder mask preserves exact logits and diagnostics through identity hooks.
 #[test]
 fn t5_all_valid_decoder_masks_preserve_exact_noop_hook_results() {
     let device = Default::default();
@@ -442,6 +458,7 @@ fn t5_all_valid_decoder_masks_preserve_exact_noop_hook_results() {
     }
 }
 
+/// A short all-valid mask reports the decoder field and both expected and actual shapes.
 #[test]
 fn t5_malformed_all_valid_decoder_mask_fails_shape_validation() {
     let device = Default::default();
@@ -466,6 +483,7 @@ fn t5_malformed_all_valid_decoder_mask_fails_shape_validation() {
     assert!(message.contains("[1, 2]"), "{message}");
 }
 
+/// Fully masked or malformed decoder inputs fail before encoder callbacks can run.
 #[test]
 fn t5_decoder_mask_preflight_runs_before_encoder_callbacks() {
     use std::cell::Cell;
@@ -501,6 +519,8 @@ fn t5_decoder_mask_preflight_runs_before_encoder_callbacks() {
     }
 }
 
+/// Value and pattern edits preserve padding and causal zeros; cross-attention
+/// captures retain padding zeros.
 #[test]
 fn t5_padded_rank_four_points_stay_zero_after_edits() {
     let device = Default::default();
@@ -589,6 +609,7 @@ fn t5_padded_rank_four_points_stay_zero_after_edits() {
     }
 }
 
+/// Different source and target padding across batch rows preserves ordinary logits and diagnostics.
 #[test]
 fn t5_mixed_padded_batch_retains_valid_rows_and_zero_diagnostics() {
     let device = Default::default();
@@ -642,6 +663,7 @@ fn t5_mixed_padded_batch_retains_valid_rows_and_zero_diagnostics() {
     }
 }
 
+/// Editing an original valid token matches compact execution and editing padding remains a no-op.
 #[test]
 fn t5_padded_interventions_address_original_token_positions() {
     let device = Default::default();
@@ -717,10 +739,12 @@ fn t5_padded_interventions_address_original_token_positions() {
         .assert_approx_eq::<f32>(&expected.decoder.logits.into_data(), Tolerance::default());
 }
 
+/// Identity hooks preserve embedding, attention, and gated-MLP gradients with gapped padding.
 #[cfg(feature = "autodiff")]
 #[test]
 fn t5_padded_noop_hooks_preserve_gradients() {
     use burn::backend::Autodiff;
+    /// Autodiff wrapper used to compare ordinary and hooked parameter gradients.
     type Ad = Autodiff<TestBackend>;
     let device = Default::default();
     let model =
@@ -779,6 +803,7 @@ fn t5_padded_noop_hooks_preserve_gradients() {
     }
 }
 
+/// Invalid decoder-mask validation clears captures from a preceding successful forward pass.
 #[test]
 fn t5_invalid_decoder_mask_clears_previous_forward_captures() {
     let device = Default::default();

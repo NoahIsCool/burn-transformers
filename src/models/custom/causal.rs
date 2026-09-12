@@ -1,7 +1,7 @@
 //! Decoder-only modular language model assembly.
 //!
 //! The model owns only trainable parameters and immutable topology. Autoregressive session
-//! history remains in [`ModularDecodeState`](super::ModularDecodeState), preserving a clean
+//! history remains in [`ModularDecodeState`], preserving a clean
 //! stateless graph for autodiff and model surgery.
 
 use std::ops::Range;
@@ -514,6 +514,7 @@ impl<B: Backend> ModularCausalLm<B> {
 }
 
 impl ArchitectureConfig for DecoderSpec {
+    /// Architecture discriminator for configurable decoder-only graphs.
     const MODEL_TYPES: &'static [&'static str] = &["modular_causal"];
 
     /// Validates the decoder topology and its executable causal mixer capabilities.
@@ -523,7 +524,9 @@ impl ArchitectureConfig for DecoderSpec {
 }
 
 impl<B: Backend> CausalLanguageModel<B> for ModularCausalLm<B> {
+    /// Serializable decoder specification associated with the causal-model interface.
     type Config = DecoderSpec;
+    /// External token-history state used to recompute exact reference predictions.
     type State = ModularDecodeState<B>;
 
     /// Evaluates the ordinary stateless causal graph through the common model interface.
@@ -596,4 +599,5 @@ impl<B: Backend> CausalLanguageModel<B> for ModularCausalLm<B> {
 
 #[cfg(test)]
 #[path = "intervention_tests.rs"]
+/// Public activation-hook, staged execution, and consumer composition regressions.
 mod intervention_tests;

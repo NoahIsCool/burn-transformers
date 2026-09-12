@@ -1,6 +1,9 @@
+//! Automatic-family activation catalogs, identity hooks, and unsupported-hook cleanup.
+
 use super::*;
 use crate::intervention::{Hooks, Layer};
 
+/// Qwen registry hooks expose token-scoped MLP captures while empty and identity hooks preserve logits.
 #[test]
 fn automatic_qwen_exposes_points_and_preserves_identity_outputs() {
     let device = Default::default();
@@ -27,6 +30,7 @@ fn automatic_qwen_exposes_points_and_preserves_identity_outputs() {
     assert_eq!(hooks.get(&captured).unwrap().dims(), [2, 1, 16]);
 }
 
+/// T5 registry hooks capture both stacks and preserve encoder states and decoder logits under identity edits.
 #[test]
 fn automatic_t5_exposes_both_stacks_and_preserves_identity_outputs() {
     let device = Default::default();
@@ -63,6 +67,7 @@ fn automatic_t5_exposes_both_stacks_and_preserves_identity_outputs() {
     assert_eq!(hooks.get(&captured_decoder).unwrap().dims(), [2, 1, 16]);
 }
 
+/// Unsupported MoE hooks return family-specific capability errors and clear captures before any callback.
 #[test]
 fn unsupported_automatic_hooks_fail_before_callbacks_and_clear_stale_captures() {
     let device = Default::default();

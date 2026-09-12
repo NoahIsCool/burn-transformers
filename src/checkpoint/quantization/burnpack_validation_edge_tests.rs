@@ -3,6 +3,50 @@
 use super::*;
 use crate::checkpoint::quantization::{QuantizationGroupSize, SymmetricQuantization};
 
+/// Path validation resolves parent aliases without creating the requested artifact.
+#[test]
+fn artifact_path_retains_filename_and_canonicalizes_parent_without_writing() {
+    let directory = tempfile::tempdir().expect("temporary artifact directory");
+    let requested = directory.path().join(".").join("weights.bpk");
+    let validated = validate_bpk_path(&requested).expect("existing parent and valid extension");
+    assert_eq!(
+        validated,
+        fs::canonicalize(directory.path())
+            .expect("canonical temporary directory")
+            .join("weights.bpk")
+    );
+    assert!(
+        !validated.exists(),
+        "validation must not create an artifact"
+    );
+
+    let missing_parent = directory.path().join("missing").join("weights.bpk");
+    assert!(matches!(
+        validate_bpk_path(&missing_parent),
+        Err(QuantizationError::InvalidArtifactPath {
+            path,
+            reason: "parent directory does not exist",
+        }) if path == missing_parent
+    ));
+}
+
+/// Native Unix filenames remain byte-preserving even when their stem is not UTF-8.
+#[cfg(unix)]
+#[test]
+fn artifact_path_preserves_non_utf8_filename_bytes() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let directory = tempfile::tempdir().expect("temporary artifact directory");
+    let filename = std::ffi::OsString::from_vec(b"weights-\xff.bpk".to_vec());
+    let validated = validate_bpk_path(&directory.path().join(&filename))
+        .expect("native filename with a valid ASCII extension");
+    assert_eq!(validated.file_name(), Some(filename.as_os_str()));
+    assert!(
+        !validated.exists(),
+        "validation must not create an artifact"
+    );
+}
+
 /// Produces one small row-aligned payload with valid codes and positive scales.
 fn packed_fixture() -> (QuantizedTensorMetadata, Vec<u8>) {
     let weight = quantize_tensor_data(

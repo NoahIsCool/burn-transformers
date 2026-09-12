@@ -37,9 +37,13 @@ fn main() -> study::Result<()> {
 
     // All indices are zero-based. MLP outputs have axes [batch, token, channel]
     // and are selected after the output projection, before residual addition.
+    /// Zero-based final prompt position where logits and MLP interventions are measured.
     const READOUT: usize = 12;
+    /// Zero-based decoder layers included in individual node interventions.
     const NODE_LAYERS: [usize; 5] = [2, 8, 9, 10, 11];
+    /// Late decoder layers patched together in the joint-node condition.
     const LATE_LAYERS: [usize; 4] = [8, 9, 10, 11];
+    /// Maximum prompt pairs evaluated together in each tensor batch.
     const BATCH_SIZE: usize = 8;
     let root = std::env::args()
         .nth(1)

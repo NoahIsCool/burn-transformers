@@ -21,9 +21,13 @@
 //! three-projection gated MLP documented by that specification. These choices match the shared
 //! executable primitives rather than inferring behavior from a model-family name.
 
+/// Decoder-only assembly, staged residual execution, and language-model readout.
 mod causal;
+/// Shared modular normalization, mixing, feed-forward, and validation operations.
 mod common;
+/// Encoder-decoder assembly with explicit cross-attention and staged execution.
 mod seq2seq;
+/// External fixed-capacity token histories used by reference decoding.
 mod state;
 
 pub use causal::ModularCausalLm;
@@ -32,4 +36,5 @@ pub use seq2seq::ModularSeq2SeqLm;
 pub use state::ModularDecodeState;
 
 #[cfg(test)]
+/// Tiny modular graphs, serialization, validation, and state-lifecycle regressions.
 mod tests;

@@ -47,13 +47,17 @@ mod experiment {
         models::custom::ModularCausalLm,
     };
 
+    /// CPU tensor backend with F32 activations and I32 token IDs.
     type B = Flex<f32, i32>;
 
     // Owning both modules here registers all parameters for Burn optimizers and
     // serialization. Hooks borrow this owner only for the duration of a run.
+    /// Owns the causal model and hook-inserted adapter for native parameter traversal.
     #[derive(Module, Debug)]
     struct ExperimentModel<B: Backend> {
+        /// Configurable decoder whose named activations are inspected and edited.
         model: ModularCausalLm<B>,
+        /// Width-preserving projection inserted into a residual activation by a hook.
         adapter: Linear<B>,
     }
 

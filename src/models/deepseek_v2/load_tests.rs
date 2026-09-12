@@ -1,3 +1,5 @@
+//! DeepSeek-V2 streamed parameter installation and malformed-checkpoint rejection.
+
 use std::{fs::File, io::Write, path::Path};
 
 use burn::{
@@ -14,6 +16,7 @@ use crate::{
     models::deepseek_v2::model::tests_support::tiny_config,
 };
 
+/// CPU backend with F32 tensor values and I32 token indices for deterministic fixtures.
 type TestBackend = Flex<f32, i32>;
 
 /// Writes a complete zero-valued F32 SafeTensors artifact.

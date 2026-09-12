@@ -52,4 +52,5 @@ pub use runtime::{
 };
 
 #[cfg(test)]
+#[path = "checkpoint_tests.rs"]
 mod tests;

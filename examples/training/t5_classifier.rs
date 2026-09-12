@@ -25,9 +25,13 @@ use std::{path::Path, time::Instant};
 use support::{Cpu, Report, Result};
 use transformers::{CausalLmInput, TokenMask, training::cross_entropy};
 
+/// Autodifferentiable CPU backend for the symbolic adjective task.
 type Ad = Autodiff<Cpu>;
+/// Number of full-batch Adam updates in the fixed training budget.
 const STEPS: usize = 100;
+/// Adam step size for the encoder, inserted adapter, and task head.
 const LEARNING_RATE: f64 = 0.01;
+/// Initialization seed for the reproducible adjective fixture.
 const SEED: u64 = 73;
 
 /// Train the synthetic adjective classifier with the fixed seed and update budget in local ignored storage.
@@ -100,9 +104,12 @@ fn train(root: &Path, steps: usize) -> Result<()> {
     .save(root)
 }
 
+/// One padded or unpadded symbolic sentence and its adjective-polarity target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Example {
+    /// Four input token IDs, where zero denotes padding.
     tokens: [i32; 4],
+    /// One for a positive adjective and zero for a negative adjective.
     label: i32,
 }
 

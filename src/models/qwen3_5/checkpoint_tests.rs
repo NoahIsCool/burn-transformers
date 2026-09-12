@@ -1,3 +1,5 @@
+//! Metadata-only Qwen checkpoint tests against pinned inventories and malformed tensor geometry.
+
 use std::{collections::BTreeMap, path::PathBuf, str::FromStr};
 
 use serde::Deserialize;
@@ -13,39 +15,56 @@ use crate::{
 
 use super::*;
 
+/// Pinned Qwen3.5-0.8B topology used for metadata-only contract checks.
 const QWEN_08_CONFIG: &str = include_str!("../../../tests/fixtures/qwen3_5_0_8b.json");
+/// Pinned Qwen3.8-27B topology used for metadata-only contract checks.
 const QWEN_27_CONFIG: &str = include_str!("../../../tests/fixtures/qwen3_8_27b.json");
+/// Pinned tensor names, dtypes, shapes, and revision for the 0.8B checkpoint.
 const QWEN_08_INVENTORY: &str =
     include_str!("../../../tests/fixtures/qwen3_5_checkpoint/qwen3_5_0_8b_inventory.json");
+/// Pinned tensor names, dtypes, shapes, and revision for the 27B checkpoint.
 const QWEN_27_INVENTORY: &str =
     include_str!("../../../tests/fixtures/qwen3_5_checkpoint/qwen3_8_27b_inventory.json");
+/// Synthetic text-plus-MTP inventory with an embedded tiny configuration.
 const TINY_INVENTORY: &str =
     include_str!("../../../tests/fixtures/qwen3_5_checkpoint/tiny_text_inventory.json");
 
+/// Checkpoint provenance and tensor metadata read from a checked-in fixture.
 #[derive(Debug, Deserialize)]
 struct GoldenInventory {
+    /// Checkpoint identifier whose inventory is represented by the fixture.
     checkpoint: String,
+    /// Pinned upstream revision or synthetic fixture version.
     revision: String,
+    /// Embedded topology for synthetic fixtures; official cases use separate config files.
     #[serde(default)]
     config: Option<Value>,
+    /// Tensor metadata in the fixture inventory.
     tensors: Vec<GoldenTensor>,
 }
 
+/// Name, logical dimensions, and dtype of one fixture tensor.
 #[derive(Debug, Clone, Deserialize)]
 struct GoldenTensor {
+    /// Checkpoint tensor name before mapping to internal parameters.
     name: String,
+    /// Logical tensor dimensions in checkpoint storage order.
     shape: Vec<u64>,
+    /// Serialized dtype parsed by the checkpoint manifest builder.
     dtype: String,
 }
 
+/// Parses checked-in inventory metadata and fails the fixture setup if its JSON is invalid.
 fn golden(json: &str) -> GoldenInventory {
     serde_json::from_str(json).unwrap()
 }
 
+/// Parses a direct or wrapped fixture configuration through the public model-config contract.
 fn config(json: &str) -> Qwen3_5TextConfig {
     <Qwen3_5TextConfig as ModelConfig>::from_json_str(json).unwrap()
 }
 
+/// Requests the multimodal language namespace together with its MTP tensors.
 fn multimodal_with_mtp() -> Qwen3_5CheckpointOptions {
     Qwen3_5CheckpointOptions {
         source: Qwen3_5CheckpointSource::Multimodal,
@@ -53,6 +72,7 @@ fn multimodal_with_mtp() -> Qwen3_5CheckpointOptions {
     }
 }
 
+/// Builds a synthetic manifest with contiguous byte offsets without allocating tensor payloads.
 fn manifest(golden: &GoldenInventory) -> CheckpointManifest {
     let mut offset = 0_u64;
     let mut tensors = BTreeMap::new();
@@ -89,6 +109,7 @@ fn manifest(golden: &GoldenInventory) -> CheckpointManifest {
     }
 }
 
+/// Finds a required parameter shape, failing if the contract omitted that target.
 fn expected_shape<'a>(contract: &'a Qwen3_5CheckpointContract, name: &str) -> &'a [u64] {
     &contract
         .expected_tensors()
@@ -98,6 +119,7 @@ fn expected_shape<'a>(contract: &'a Qwen3_5CheckpointContract, name: &str) -> &'
         .shape
 }
 
+/// Finds the planned target tensor so tests can inspect its source mapping and transform.
 fn planned<'a>(plan: &'a LoadPlan, target: &str) -> &'a crate::checkpoint::PlannedTensor {
     plan.tensors
         .iter()
@@ -105,6 +127,7 @@ fn planned<'a>(plan: &'a LoadPlan, target: &str) -> &'a crate::checkpoint::Plann
         .unwrap()
 }
 
+/// The tiny inventory maps every required tensor and supplies the tied head through one alias.
 #[test]
 fn tiny_text_fixture_is_an_exact_strict_contract() {
     let fixture = golden(TINY_INVENTORY);
@@ -144,6 +167,7 @@ fn tiny_text_fixture_is_an_exact_strict_contract() {
     assert_eq!(expected_shape(&contract, "mtp.fc.weight"), [8, 16]);
 }
 
+/// The pinned 0.8B inventory maps text and MTP tensors while allowing only the vision tower.
 #[test]
 fn official_qwen35_point8_metadata_is_consumed_without_unknown_keys() {
     let fixture = golden(QWEN_08_INVENTORY);
@@ -189,6 +213,7 @@ fn official_qwen35_point8_metadata_is_consumed_without_unknown_keys() {
     ));
 }
 
+/// The pinned 27B inventory fixes DeltaNet, gated-query, and MTP shapes without tied aliases.
 #[test]
 fn official_qwen38_27b_metadata_is_consumed_without_unknown_keys() {
     let fixture = golden(QWEN_27_INVENTORY);
@@ -229,6 +254,7 @@ fn official_qwen38_27b_metadata_is_consumed_without_unknown_keys() {
     assert_eq!(expected_shape(&contract, "mtp.fc.weight"), [5_120, 10_240]);
 }
 
+/// Default base-only loading classifies omitted MTP tensors as explicit allowed exceptions.
 #[test]
 fn safe_base_only_default_classifies_optional_mtp_tensors_separately() {
     let fixture = golden(QWEN_08_INVENTORY);
@@ -256,6 +282,7 @@ fn safe_base_only_default_classifies_optional_mtp_tensors_separately() {
     );
 }
 
+/// Applying contract exceptions preserves caller allowances and adds the vision matcher only once.
 #[test]
 fn multimodal_exceptions_are_additive_and_deduplicated() {
     let contract = config(QWEN_08_CONFIG)
@@ -278,6 +305,7 @@ fn multimodal_exceptions_are_additive_and_deduplicated() {
     assert!(options.allow_unexpected.contains(&custom));
 }
 
+/// Base and MTP gated query tensors use identity mappings with their full gated width.
 #[test]
 fn query_weight_and_bias_preserve_official_head_local_layout() {
     let fixture = golden(TINY_INVENTORY);
@@ -317,6 +345,7 @@ fn query_weight_and_bias_preserve_official_head_local_layout() {
     );
 }
 
+/// A query matrix one output channel too narrow fails strict planning with a shape mismatch.
 #[test]
 fn malformed_gated_query_shape_fails_inventory_validation() {
     let mut fixture = golden(TINY_INVENTORY);
@@ -339,6 +368,7 @@ fn malformed_gated_query_shape_fails_inventory_validation() {
     ));
 }
 
+/// Dedicated MTP embeddings fail with their configuration field until a supported contract exists.
 #[test]
 fn dedicated_mtp_embeddings_are_rejected_until_a_named_contract_exists() {
     let fixture = golden(TINY_INVENTORY);
@@ -353,6 +383,7 @@ fn dedicated_mtp_embeddings_are_rejected_until_a_named_contract_exists() {
     assert_eq!(error.field, "mtp_use_dedicated_embeddings");
 }
 
+/// An overflowing attention projection width returns a configuration error before allocation.
 #[test]
 fn dimension_products_are_checked() {
     let fixture = golden(TINY_INVENTORY);

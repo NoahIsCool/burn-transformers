@@ -163,6 +163,7 @@ impl Qwen3MoeConfig {
 impl Validate for Qwen3MoeConfig {
     /// Checks attention grouping, expert routing, sparse cadence, RoPE, and tokens.
     fn validate(&self) -> Result<(), ConfigError> {
+        /// Family label attached to configuration validation errors.
         const FAMILY: &str = "qwen3_moe";
         model_type(FAMILY, &self.model_type, &["qwen3_moe"])?;
         for (field, value) in [
@@ -285,7 +286,9 @@ impl Validate for Qwen3MoeConfig {
 }
 
 impl ModelConfig for Qwen3MoeConfig {
+    /// Diagnostic family name used by generic configuration parsing.
     const FAMILY: &'static str = "qwen3_moe";
+    /// Checkpoint model discriminators accepted by this configuration.
     const MODEL_TYPES: &'static [&'static str] = &["qwen3_moe"];
 }
 

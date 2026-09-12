@@ -21,6 +21,7 @@ use crate::checkpoint::{
 
 use super::{ConfigError, MuseGlimmerTextConfig, Validate};
 
+/// Family label attached to checkpoint dimension errors.
 const FAMILY: &str = "muse_glimmer";
 
 /// Serialized namespace containing a Muse text decoder.
@@ -62,8 +63,11 @@ impl Default for MuseGlimmerCheckpointOptions {
 /// Complete expected language inventory, mapping plan, and visual exceptions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MuseGlimmerCheckpointContract {
+    /// Logical model parameters and their expected checkpoint shapes.
     expected: Vec<ExpectedTensor>,
+    /// Explicit source mappings and embedding/head storage aliases.
     mappings: MappingPlan,
+    /// Visual namespaces allowed by the selected source layout.
     allow_unexpected: Vec<KeyMatcher>,
 }
 
@@ -158,14 +162,20 @@ impl MuseGlimmerTextConfig {
 /// Checked shape terms shared across every layer mapping.
 #[derive(Debug, Clone, Copy)]
 struct Dimensions {
+    /// Number of embedding rows and vocabulary logits.
     vocab: u64,
+    /// Residual width used by embeddings and normalization scales.
     hidden: u64,
+    /// Expanded SwiGLU width.
     intermediate: u64,
+    /// Concatenated query-head width after checked multiplication.
     query: u64,
+    /// Concatenated native key/value-head width after checked multiplication.
     key_value: u64,
 }
 
 impl TryFrom<&MuseGlimmerTextConfig> for Dimensions {
+    /// Contextual dimension conversion or multiplication failure.
     type Error = ConfigError;
 
     /// Converts portable dimensions and checks projection-width products.
@@ -190,9 +200,13 @@ impl TryFrom<&MuseGlimmerTextConfig> for Dimensions {
 
 /// Incrementally builds deterministic model and source inventories.
 struct ContractBuilder {
+    /// Serialized language namespace used when constructing source keys.
     source: MuseGlimmerCheckpointSource,
+    /// Logical model parameters and their expected checkpoint shapes.
     expected: Vec<ExpectedTensor>,
+    /// Explicit source mappings and embedding/head storage aliases.
     mappings: MappingPlan,
+    /// Visual namespaces allowed by the selected source layout.
     allow_unexpected: Vec<KeyMatcher>,
 }
 

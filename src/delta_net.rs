@@ -723,13 +723,21 @@ pub fn chunked_gated_delta_rule<B: Backend>(
 
 /// Validated FP32 tensors in head-major layout used by both algorithms.
 struct PreparedDeltaRule<B: Backend> {
+    /// L2-normalized queries scaled by `key_width^-1/2`, in `[batch, heads, sequence, key_width]` order.
     query: Tensor<B, 4>,
+    /// Normalized keys with the same head-major layout as queries.
     key: Tensor<B, 4>,
+    /// Values in `[batch, heads, sequence, value_width]` order.
     value: Tensor<B, 4>,
+    /// Per-head logarithmic state decay in `[batch, heads, sequence]` order.
     log_decay: Tensor<B, 3>,
+    /// Per-head update strengths multiplied by the token validity indicator.
     beta: Tensor<B, 3>,
+    /// Optional incoming FP32 state `[batch, heads, key_width, value_width]`.
     initial_state: Option<Tensor<B, 4>>,
+    /// Original query dtype restored at the output boundary.
     output_dtype: DType,
+    /// Common input device used for temporary tensors.
     device: B::Device,
 }
 

@@ -1,3 +1,5 @@
+//! Multi-head latent attention tests for scalar parity, rotary positions, cache shapes, and gradients.
+
 use burn::{
     backend::Flex,
     module::Param,
@@ -8,6 +10,7 @@ use super::*;
 use crate::intervention::{Hooks, Layer};
 use crate::position::{RopeScaling, YarnConfig};
 
+/// Deterministic F32 CPU backend for latent-attention projections and scalar references.
 type TestBackend = Flex<f32, i32>;
 
 /// Creates deterministic non-zero MLA parameters for path-equivalence tests.
@@ -183,6 +186,7 @@ fn invalid_config_and_history_shapes_return_contextual_errors() {
     );
 }
 
+/// The public projection path reproduces legacy rotary tensors and attention with either query topology.
 #[test]
 fn public_projection_preserves_legacy_rotary_values() {
     for rank in [None, Some(4)] {
@@ -235,6 +239,7 @@ fn public_projection_preserves_legacy_rotary_values() {
     }
 }
 
+/// Cross-attention preserves distinct query/source lengths and rotary positions through latent captures.
 #[test]
 fn cross_attention_supports_unequal_lengths_and_independent_rotary_positions() {
     let (mla, device) = deterministic_mla(Some(4));
@@ -276,6 +281,7 @@ fn cross_attention_supports_unequal_lengths_and_independent_rotary_positions() {
     assert_eq!(hooks.get(&query_latent).unwrap().dims(), [1, 2, 4]);
 }
 
+/// Zeroing the key/value latent removes head context, and restoring it recovers the original output.
 #[test]
 fn latent_ablation_changes_values_and_restoration_recovers_attention() {
     let (mla, device) = deterministic_mla(None);
@@ -309,6 +315,7 @@ fn latent_ablation_changes_values_and_restoration_recovers_attention() {
     assert_eq!(restored.into_data(), expected.into_data());
 }
 
+/// Latent-attention pattern edits preserve future-key exclusion and zero fully padded query rows.
 #[test]
 fn mla_pattern_edits_reapply_causal_and_padding_masks() {
     let (mla, device) = deterministic_mla(None);
@@ -359,6 +366,7 @@ fn mla_pattern_edits_reapply_causal_and_padding_masks() {
     );
 }
 
+/// Malformed source, projected head geometry, masks, and bias return validation errors before attention.
 #[test]
 fn mla_rejects_bad_source_projection_and_masks_before_backend_kernels() {
     let (mla, device) = deterministic_mla(None);
@@ -399,9 +407,11 @@ fn mla_rejects_bad_source_projection_and_masks_before_backend_kernels() {
 }
 
 #[cfg(feature = "autodiff")]
+/// A latent adapter remains differentiable together with query inputs, source states, and KV expansion.
 #[test]
 fn mla_latent_adapter_receives_gradients_along_with_encoder_states() {
     use burn::backend::Autodiff;
+    /// Differentiable CPU backend for latent-adapter and source-state gradient checks.
     type Ad = Autodiff<TestBackend>;
     let device = Default::default();
     let mla = MultiLatentAttentionConfig::new(8, 2, 3, 2, 4, 5, Some(4))
@@ -429,6 +439,7 @@ fn mla_latent_adapter_receives_gradients_along_with_encoder_states() {
     assert!(mla.kv_b_proj.weight.grad(&gradients).is_some());
 }
 
+/// Every required width must be positive, and epsilon and softmax scale must be finite and positive.
 #[test]
 fn configuration_rejects_each_zero_extent_and_nonfinite_numerical_constant() {
     for field in [
@@ -472,6 +483,7 @@ fn configuration_rejects_each_zero_extent_and_nonfinite_numerical_constant() {
     }
 }
 
+/// Overflowing head sums and projection widths fail configuration before allocating parameter tensors.
 #[test]
 fn projection_extent_overflow_is_rejected_before_parameter_allocation() {
     let base = MultiLatentAttentionConfig::new(8, 2, 3, 2, 4, 5, None);
@@ -521,6 +533,7 @@ fn projection_extent_overflow_is_rejected_before_parameter_allocation() {
     assert!(matches!(error, Error::Configuration { field, .. } if field == "mla.query_width"));
 }
 
+/// Projection preflight identifies invalid query/source axes and mismatched floating dtypes.
 #[test]
 fn projection_checks_query_source_dtype_and_all_input_axes() {
     let (mla, device) = deterministic_mla(None);
@@ -549,6 +562,7 @@ fn projection_checks_query_source_dtype_and_all_input_axes() {
     assert!(matches!(error, Error::Configuration { field, .. } if field == "mla.inputs"));
 }
 
+/// Missing direct or low-rank query modules fail both ordinary and rotary projection APIs.
 #[test]
 fn malformed_query_module_topology_fails_both_projection_entry_points() {
     for rank in [None, Some(4)] {
@@ -577,6 +591,7 @@ fn malformed_query_module_topology_fails_both_projection_entry_points() {
     }
 }
 
+/// Rotary projection rejects invalid hidden-state extents and incompatible position tensors.
 #[test]
 fn rotary_projection_rejects_input_and_position_geometry_before_rotation() {
     let (mla, device) = deterministic_mla(None);
@@ -605,6 +620,7 @@ fn rotary_projection_rejects_input_and_position_geometry_before_rotation() {
     }
 }
 
+/// Each projected tensor and additive bias must match the attention computation's floating dtype.
 #[test]
 fn attention_rejects_each_mixed_projection_dtype_and_bias_dtype() {
     let (mla, device) = deterministic_mla(None);
@@ -633,6 +649,7 @@ fn attention_rejects_each_mixed_projection_dtype_and_bias_dtype() {
     assert!(matches!(error, Error::Configuration { field, .. } if field == "mla.attention_bias"));
 }
 
+/// Absorbed attention validates latent history, rotary history, query geometry, and expansion weights.
 #[test]
 fn absorbed_decode_rejects_history_and_expansion_weight_mismatches() {
     let (mut mla, device) = deterministic_mla(None);
@@ -682,6 +699,7 @@ fn absorbed_decode_rejects_history_and_expansion_weight_mismatches() {
     assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.kv_b_proj.weight"));
 }
 
+/// Latent expansion and rotary conversion reject incompatible channels, and masks require exact geometry.
 #[test]
 fn latent_and_rotary_helpers_reject_invalid_channel_widths() {
     let (mla, device) = deterministic_mla(None);
@@ -705,6 +723,7 @@ fn latent_and_rotary_helpers_reject_invalid_channel_widths() {
     assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.attention_mask"));
 }
 
+/// Latent attention matches a scalar dot-product oracle while explicit pattern edits may alter normalization.
 #[test]
 fn public_attention_matches_scalar_oracle_and_allows_unmasked_pattern_interventions() {
     let device = Default::default();
@@ -755,6 +774,7 @@ fn public_attention_matches_scalar_oracle_and_allows_unmasked_pattern_interventi
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(24))]
 
+    /// Random batched histories preserve absorbed/expanded parity, exclusion zeros, and row normalization.
     #[test]
     fn absorbed_and_expanded_attention_agree_for_batched_masked_histories(
         batch in 1usize..=2,
@@ -791,6 +811,7 @@ proptest::proptest! {
     }
 }
 
+/// Each registered projection rejects overflowing element counts without treating arithmetic checks as memory admission.
 #[test]
 fn configuration_rejects_impossible_elements_in_every_registered_projection() {
     let cases = [

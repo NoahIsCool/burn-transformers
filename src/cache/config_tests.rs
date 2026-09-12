@@ -1,11 +1,15 @@
+//! Configuration dimensions, retention bounds, and diagnostic contracts.
+
 use super::*;
 
+/// Rejects zero batch size and zero logical capacity.
 #[test]
 fn validates_required_dimensions() {
     assert_eq!(CacheConfig::new(0, 1), Err(CacheConfigError::ZeroSequences));
     assert_eq!(CacheConfig::new(1, 0), Err(CacheConfigError::ZeroCapacity));
 }
 
+/// Rejects zero or oversized windows and accepts a window equal to capacity.
 #[test]
 fn validates_sliding_window() {
     let config = CacheConfig::new(2, 8).expect("valid config");
@@ -22,6 +26,7 @@ fn validates_sliding_window() {
     );
 }
 
+/// Distinguishes absolute context capacity from retained physical slots.
 #[test]
 fn reports_logical_and_physical_capacity() {
     let global = CacheConfig::new(3, 128).expect("valid config");
@@ -36,6 +41,7 @@ fn reports_logical_and_physical_capacity() {
     assert_eq!(local.physical_capacity(), 32);
 }
 
+/// Includes invalid dimensions in configuration diagnostics.
 #[test]
 fn error_messages_include_invalid_values() {
     assert_eq!(

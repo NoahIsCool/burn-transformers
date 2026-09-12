@@ -1,9 +1,13 @@
+//! Ring-plan boundaries and exhaustive comparisons with direct storage simulation.
+
 use super::*;
 
+/// Constructs the positive ring dimensions required by each fixture.
 fn nonzero(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("test values are non-zero")
 }
 
+/// Retains absolute positions and saturates the window at an empty prefix.
 #[test]
 fn sliding_window_is_absolute_and_saturating() {
     assert_eq!(sliding_window_range(0, nonzero(4)), 0..0);
@@ -12,6 +16,7 @@ fn sliding_window_is_absolute_and_saturating() {
     assert_eq!(sliding_window_range(9, nonzero(4)), 5..9);
 }
 
+/// Plans empty, contiguous, wrapped, and oversized writes without losing retained order.
 #[test]
 fn write_plan_handles_empty_contiguous_wrapped_and_oversized_chunks() {
     let empty = plan_ring_write(3, 0, nonzero(4)).expect("valid plan");
@@ -37,6 +42,7 @@ fn write_plan_handles_empty_contiguous_wrapped_and_oversized_chunks() {
     assert_eq!(oversized.segments()[1].physical(), 0..1);
 }
 
+/// Copies only accepted proposal entries into committed ring storage.
 #[test]
 fn staged_transaction_commits_only_an_accepted_prefix() {
     let staged = plan_staged_ring_transaction(6, 4).expect("valid staging plan");
@@ -58,6 +64,7 @@ fn staged_transaction_commits_only_an_accepted_prefix() {
     );
 }
 
+/// Returns wrapped physical slices in absolute chronological order.
 #[test]
 fn read_plan_returns_chronological_slices() {
     let plan = plan_ring_read(10, nonzero(4), nonzero(4)).expect("valid plan");
@@ -74,6 +81,7 @@ fn read_plan_returns_chronological_slices() {
     assert_eq!(partial.segments()[0].physical(), 0..2);
 }
 
+/// Rejects a read window larger than its physical capacity.
 #[test]
 fn read_plan_rejects_impossible_window() {
     assert_eq!(
@@ -85,6 +93,7 @@ fn read_plan_rejects_impossible_window() {
     );
 }
 
+/// Duplicates ring writes into both halves and reads each suffix contiguously.
 #[test]
 fn mirrored_ring_writes_both_halves_and_reads_one_slice() {
     let writes = plan_mirrored_ring_write(3, 3, nonzero(4)).expect("valid plan");
@@ -100,6 +109,7 @@ fn mirrored_ring_writes_both_halves_and_reads_one_slice() {
     assert_eq!(read.physical(), 2..6);
 }
 
+/// Reports position, mirror-capacity, and accepted-prefix arithmetic errors.
 #[test]
 fn arithmetic_errors_are_reported() {
     assert_eq!(
@@ -131,6 +141,7 @@ fn arithmetic_errors_are_reported() {
     );
 }
 
+/// Includes ring capacity, positions, and accepted counts in planning diagnostics.
 #[test]
 fn error_messages_include_planning_context() {
     assert_eq!(
@@ -163,6 +174,7 @@ fn error_messages_include_planning_context() {
     );
 }
 
+/// Compares bounded write plans with direct per-token ring simulation.
 #[test]
 fn exhaustive_write_plans_match_ring_simulation() {
     for capacity in 1..=8 {
@@ -193,6 +205,7 @@ fn exhaustive_write_plans_match_ring_simulation() {
     }
 }
 
+/// Reconstructs every retained absolute position from bounded ring read plans.
 #[test]
 fn exhaustive_read_plans_reconstruct_absolute_order() {
     for capacity in 1..=8 {
@@ -214,6 +227,7 @@ fn exhaustive_read_plans_reconstruct_absolute_order() {
     }
 }
 
+/// Checks bounded mirrored reads recover chronological values in a single slice.
 #[test]
 fn exhaustive_mirrored_reads_are_contiguous() {
     for capacity in 1..=16 {
@@ -232,6 +246,7 @@ fn exhaustive_mirrored_reads_are_contiguous() {
     }
 }
 
+/// Compares staged acceptance and rollback with a direct ring reference.
 #[test]
 fn exhaustive_staged_commits_preserve_rollback_and_visible_values() {
     for capacity in 1..=8 {

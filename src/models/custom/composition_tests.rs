@@ -16,6 +16,7 @@ use burn::{
     tensor::Int,
 };
 
+/// Resuming a decoder at the next layer matches full execution and rejects replay or repeated final normalization.
 #[test]
 fn staged_decoder_splits_resume_exactly_and_normalizes_only_when_requested() {
     let mut config = spec(NormPlacement::Pre);
@@ -42,6 +43,7 @@ fn staged_decoder_splits_resume_exactly_and_normalizes_only_when_requested() {
     assert!(model.normalize(prefix).unwrap().normalized);
 }
 
+/// A custom first-layer policy admits future keys, zeros excluded rows and padding, and leaves the next layer causal.
 #[test]
 fn per_layer_connectivity_preserves_padding_and_allows_fully_excluded_rows() {
     let mut config = spec(NormPlacement::Pre);
@@ -125,6 +127,7 @@ fn per_layer_connectivity_preserves_padding_and_allows_fully_excluded_rows() {
     );
 }
 
+/// An invalid bidirectional policy on a later DeltaNet block is rejected before an earlier-layer hook can run.
 #[test]
 fn unsupported_later_recurrent_policy_is_rejected_before_any_callback() {
     let mut config = spec(NormPlacement::Pre);
@@ -156,6 +159,7 @@ fn unsupported_later_recurrent_policy_is_rejected_before_any_callback() {
     assert!(!called.get());
 }
 
+/// Staged source/target execution matches full states, while a separate cross policy restricts attention to one source key.
 #[test]
 fn staged_encoder_decoder_matches_full_graph_and_accepts_separate_cross_policy() {
     let model = seq2seq().with_attention_precision(AttentionPrecisionMode::EagerFp32Softmax);
@@ -219,6 +223,7 @@ fn staged_encoder_decoder_matches_full_graph_and_accepts_separate_cross_policy()
     );
 }
 
+/// Encoder MLA exposes compressed query/KV captures; ablation affects decoder logits and restoring latents restores them.
 #[test]
 fn shared_mla_runs_in_encoder_decoder_and_exposes_compressed_activations() {
     let mut encoder = spec(NormPlacement::Pre);
@@ -277,10 +282,12 @@ fn shared_mla_runs_in_encoder_decoder_and_exposes_compressed_activations() {
 /// A consumer-defined mixer with registered parameters and completely different sequence math.
 #[derive(Module, Debug)]
 struct MeanMixer<B: burn::tensor::backend::Backend> {
+    /// Learned projection applied to the broadcast sequence mean.
     projection: Linear<B>,
 }
 
 impl<B: burn::tensor::backend::Backend> HiddenTransform<B> for MeanMixer<B> {
+    /// Projects the mean over the token axis after broadcasting it to every original token position.
     fn forward(
         &self,
         hidden: Tensor<B, 3>,
@@ -293,6 +300,7 @@ impl<B: burn::tensor::backend::Backend> HiddenTransform<B> for MeanMixer<B> {
     }
 }
 
+/// Wraps a learned mean mixer and dense MLP at width 12 with input/output adapters of widths 8 and 6.
 fn open_composition()
 -> WidthAdapter<B, ResidualBlock<B, MeanMixer<B>, crate::feed_forward::DenseFeedForward<B>>> {
     let device = Default::default();
@@ -306,6 +314,7 @@ fn open_composition()
         .map(&mut FixedParameters::default())
 }
 
+/// Custom mixer and adapters contribute all parameters, survive a Burn record roundtrip, and reject invalid context or width.
 #[test]
 fn open_mixer_and_width_adapters_are_registered_and_survive_record_roundtrip() {
     let module = open_composition();
@@ -354,6 +363,7 @@ fn open_mixer_and_width_adapters_are_registered_and_survive_record_roundtrip() {
     );
 }
 
+/// An 8-wide block composes with a 12-wide block through adapters while preserving the external residual shape.
 #[test]
 fn public_modular_blocks_can_be_initialized_with_independent_widths() {
     let layer = &spec(NormPlacement::Pre).layers[0];
@@ -380,9 +390,11 @@ fn public_modular_blocks_can_be_initialized_with_independent_widths() {
     );
 }
 
+/// Backpropagation reaches the input, custom mixer projection, and both learned width adapters.
 #[cfg(feature = "autodiff")]
 #[test]
 fn open_custom_module_and_both_width_adapters_receive_nonzero_gradients() {
+    /// Reverse-mode backend used to check the custom mixer and both width adapters.
     type AD = burn::backend::Autodiff<B>;
     let device = Default::default();
     let mixer = MeanMixer::<AD> {
@@ -408,6 +420,7 @@ fn open_custom_module_and_both_width_adapters_receive_nonzero_gradients() {
     }
 }
 
+/// Wrong-stack and out-of-range attention policies fail staged validation before callbacks are invoked.
 #[test]
 fn staged_models_reject_invalid_attention_addresses_before_callbacks() {
     let model = causal(NormPlacement::Pre);
@@ -442,6 +455,7 @@ fn staged_models_reject_invalid_attention_addresses_before_callbacks() {
     assert!(model.run_encoder_layers(source, 0..1).is_err());
 }
 
+/// Forged layer cursors beyond either stack are rejected by final normalization.
 #[test]
 fn staged_models_reject_forged_normalization_boundaries() {
     let model = causal(NormPlacement::Pre);
@@ -454,6 +468,7 @@ fn staged_models_reject_forged_normalization_boundaries() {
     assert!(model.normalize_encoder(source).is_err());
 }
 
+/// F64 residuals against F32 parameters fail with dtype context before staged hooks or matrix multiplication.
 #[test]
 fn staged_dtype_errors_are_contextual_before_matmul_or_callbacks() {
     let model = causal(NormPlacement::Pre);
@@ -483,6 +498,7 @@ fn staged_dtype_errors_are_contextual_before_matmul_or_callbacks() {
     assert!(model.normalize_encoder(source).is_err());
 }
 
+/// Explicit bidirectional attention removes a trailing-window restriction consistently in direct and staged execution.
 #[test]
 fn explicit_bidirectional_policy_replaces_a_trailing_window_consistently() {
     let mut config = spec(NormPlacement::Pre);
@@ -540,6 +556,7 @@ proptest::proptest! {
         ..Default::default()
     })]
 
+    /// Generated depths, split points, and norm placements preserve both full-stack results and reject replay or renormalization.
     #[test]
     fn modular_partitions_preserve_both_stacks_and_reject_replayed_blocks(
         depth in 1usize..4,

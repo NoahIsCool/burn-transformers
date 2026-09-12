@@ -168,9 +168,13 @@ impl GenerationConfig {
 /// Applies penalties and probability truncation without leaving the backend.
 #[derive(Debug)]
 pub struct LogitsProcessor<B: Backend> {
+    /// Validated penalties, sampling controls, and deterministic seed policy.
     config: GenerationConfig,
+    /// Expected final-axis extent of every processed logit tensor.
     vocabulary_size: usize,
+    /// Position in the processor's reproducible sampling stream.
     sample_counter: AtomicU64,
+    /// Backend association for device-side processing without owned tensors.
     _backend: PhantomData<B>,
 }
 
@@ -615,9 +619,13 @@ pub enum FinishReason {
 /// Tracks emitted token suffixes and terminal state for a batch.
 #[derive(Debug, Clone)]
 pub struct GenerationTracker {
+    /// Validated stop conditions and generation length limit.
     config: GenerationConfig,
+    /// Upper bound used to validate every emitted token identifier.
     vocabulary_size: usize,
+    /// Generated suffix for each independent batch row, excluding the prompt.
     generated: Vec<Vec<u32>>,
+    /// Terminal reason for each row, or `None` while that row remains active.
     finished: Vec<Option<FinishReason>>,
 }
 

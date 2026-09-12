@@ -7,6 +7,7 @@ use burn::{
 
 use super::*;
 
+/// CPU Flex backend with F32 activations and portable I32 indices.
 type TestBackend = Flex<f32, i32>;
 
 /// Trainable additions belong to the experiment's Module tree. A temporary
@@ -14,12 +15,15 @@ type TestBackend = Flex<f32, i32>;
 #[cfg(feature = "autodiff")]
 #[derive(Module, Debug)]
 struct AdaptedQwen<B: Backend> {
+    /// Registered hybrid language model whose residual stream receives the intervention.
     backbone: Qwen3_5ForCausalLm<B>,
+    /// Registered trainable map applied at the second block residual output.
     adapter: Linear<B>,
 }
 
 #[cfg(feature = "autodiff")]
 impl<B: Backend> AdaptedQwen<B> {
+    /// Registers a tiny hybrid backbone and bias-free 8-by-8 adapter in one Burn module tree.
     fn init(device: &B::Device) -> Self {
         Self {
             backbone: Qwen3_5ForCausalLm::init(tiny_config(), device).expect("hybrid backbone"),
@@ -32,6 +36,7 @@ impl<B: Backend> AdaptedQwen<B> {
         }
     }
 
+    /// Applies the registered adapter to the second block residual through a temporary hook.
     fn forward(&self, input: CausalLmInput<B>) -> Result<CausalLmOutput<B>> {
         let mut hooks = Hooks::new();
         hooks.try_edit(Layer::decoder(1).residual_post(), |hidden| {
@@ -42,6 +47,7 @@ impl<B: Backend> AdaptedQwen<B> {
     }
 }
 
+/// Builds a two-block DeltaNet/full-attention hybrid with no auxiliary MTP graph.
 fn tiny_config() -> Qwen3_5TextConfig {
     Qwen3_5TextConfig {
         vocab_size: 16,
@@ -68,6 +74,7 @@ fn tiny_config() -> Qwen3_5TextConfig {
     }
 }
 
+/// Builds one unmasked three-token prefix with implicitly derived positions.
 fn input<B: Backend>(device: &B::Device) -> CausalLmInput<B> {
     CausalLmInput {
         token_ids: Tensor::<B, 2, Int>::from_ints([[1, 2, 3]], device),
@@ -76,10 +83,12 @@ fn input<B: Backend>(device: &B::Device) -> CausalLmInput<B> {
     }
 }
 
+/// Materializes an F32 tensor for exact output and gradient comparisons.
 fn values<const D: usize>(tensor: Tensor<TestBackend, D>) -> Vec<f32> {
     tensor.into_data().to_vec::<f32>().expect("F32 tensor")
 }
 
+/// Embedding, public block calls, and final normalization exactly reproduce the headless backbone.
 #[test]
 fn public_blocks_reproduce_the_backbone_without_a_vocabulary_head() {
     let device = Default::default();
@@ -99,6 +108,7 @@ fn public_blocks_reproduce_the_backbone_without_a_vocabulary_head() {
     assert_eq!(values(actual), values(expected));
 }
 
+/// An empty hook set leaves every selected logit and retained hidden-state value unchanged.
 #[test]
 fn no_hooks_preserve_hybrid_logits_and_retained_hidden_states() {
     let device = Default::default();
@@ -121,6 +131,7 @@ fn no_hooks_preserve_hybrid_logits_and_retained_hidden_states() {
     }
 }
 
+/// A selected MLP slice changes logits when ablated and restores them when clean values are patched.
 #[test]
 fn selected_mlp_ablation_changes_logits_and_clean_patching_restores_them() {
     let device = Default::default();
@@ -155,6 +166,7 @@ fn selected_mlp_ablation_changes_logits_and_clean_patching_restores_them() {
     assert_eq!(values(clean.logits), values(restored.logits));
 }
 
+/// Zeroing the gated activation removes the MLP contribution while preserving the residual path.
 #[test]
 fn gated_mlp_activation_is_before_content_multiplication_and_residual_addition() {
     let device = Default::default();
@@ -181,6 +193,7 @@ fn gated_mlp_activation_is_before_content_multiplication_and_residual_addition()
     );
 }
 
+/// Attention captures preserve logits and expose native GQA head counts before repetition.
 #[test]
 fn full_attention_capture_preserves_logits_and_native_key_value_heads() {
     let device = Default::default();
@@ -207,6 +220,7 @@ fn full_attention_capture_preserves_logits_and_native_key_value_heads() {
     );
 }
 
+/// Requesting an unavailable hybrid activation point fails before any edit callback executes.
 #[test]
 fn unavailable_hybrid_points_fail_before_callbacks_run() {
     use std::cell::Cell;
@@ -236,6 +250,7 @@ fn unavailable_hybrid_points_fail_before_callbacks_run() {
     }
 }
 
+/// Captured eager attention has zero future-token probabilities and preserves ordinary logits.
 #[test]
 fn eager_pattern_capture_preserves_causal_qwen_attention() {
     let device = Default::default();
@@ -265,6 +280,7 @@ fn eager_pattern_capture_preserves_causal_qwen_attention() {
     }
 }
 
+/// An out-of-range vocabulary-position request clears partial captures from the failed run.
 #[test]
 fn failed_vocabulary_selection_discards_partial_captures() {
     let device = Default::default();
@@ -284,6 +300,7 @@ fn failed_vocabulary_selection_discards_partial_captures() {
     assert!(hooks.get(&capture).is_err());
 }
 
+/// Public blocks report contextual errors for a wrong residual width or position sequence length.
 #[test]
 fn public_block_rejects_incompatible_hidden_and_position_shapes() {
     let device = Default::default();
@@ -313,11 +330,13 @@ fn public_block_rejects_incompatible_hidden_and_position_shapes() {
     assert!(error.to_string().contains("qwen.block.positions"));
 }
 
+/// Empty hooks preserve exact embedding and MLP gate gradients through the hybrid graph.
 #[cfg(feature = "autodiff")]
 #[test]
 fn no_hooks_preserve_hybrid_parameter_gradients() {
     use burn::backend::Autodiff;
 
+    /// Autodiff wrapper for comparing gradients of registered model parameters.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     AdBackend::seed(&device, 44);
@@ -381,6 +400,7 @@ fn no_hooks_preserve_hybrid_parameter_gradients() {
     }
 }
 
+/// A registered adapter has finite nonzero gradients and round-trips with the backbone record.
 #[cfg(feature = "autodiff")]
 #[test]
 fn registered_adapter_participates_in_gradients_and_record_roundtrip() {
@@ -390,6 +410,7 @@ fn registered_adapter_participates_in_gradients_and_record_roundtrip() {
         record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
     };
 
+    /// Autodiff wrapper for comparing gradients of registered model parameters.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     AdBackend::seed(&device, 46);

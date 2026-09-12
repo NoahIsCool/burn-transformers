@@ -50,7 +50,9 @@ const VOCABULARY: usize = 248_320;
 /// The shared oracle reader calls this function for target checkpoint identity.
 /// Fixed-size reads keep the 1.7 GB shard out of an additional host allocation.
 fn sha256_regular_file(path: &Path, expected_bytes: u64) -> String {
+    /// Darwin open flag rejecting a symlink in the final path component.
     const O_NOFOLLOW: i32 = 0x100;
+    /// Darwin nonblocking open flag preventing a substituted special file from blocking.
     const O_NONBLOCK: i32 = 0x4;
     let mut file = OpenOptions::new()
         .read(true)
@@ -342,6 +344,7 @@ fn qwen35_public_chat_generation_matches_official_32_tokens() {
 #[test]
 #[ignore = "requires authenticated Qwen3.5-0.8B artifacts and serialized Metal execution"]
 fn qwen35_padded_batch_matches_independent_prefill_decode_and_generation() {
+    /// Forced continuation length shared by padded and independent row comparisons.
     const STEPS: usize = 4;
     let device = Default::default();
     let (loaded, reference) = load_profile(&device);

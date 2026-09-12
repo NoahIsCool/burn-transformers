@@ -54,14 +54,21 @@ mod experiment {
         training::kl_divergence,
     };
 
+    /// Autodifferentiable CPU backend for the learned MLP replacement.
     type Ad = Autodiff<Cpu>;
+    /// Adam step size for the student's two projections.
     const LEARNING_RATE: f64 = 0.003;
+    /// Maximum number of cached prompt pairs per optimizer update.
     const BATCH_SIZE: usize = 8;
+    /// Initialization seed fixed by the learned-replacement experiment.
     const SEED: u64 = 20260910;
 
+    /// Capacity-limited network predicting a full-width MLP output from clean features.
     #[derive(Module, Debug)]
     struct Student<B: Backend> {
+        /// Projection from the 768-channel MLP input to a 32-channel bottleneck.
         down: Linear<B>,
+        /// Projection from the tanh bottleneck to the 768-channel replacement output.
         up: Linear<B>,
     }
 
@@ -85,9 +92,12 @@ mod experiment {
         }
     }
 
+    /// Owns the frozen GPT-2 graph and the trainable MLP replacement.
     #[derive(Module, Debug)]
     struct Experiment<B: Backend> {
+        /// Frozen causal model whose suffix carries gradients from logits to the replacement.
         backbone: Gpt2ForCausalLm<B>,
+        /// Registered bottleneck network substituted at layer 10, token 12.
         student: Student<B>,
     }
 

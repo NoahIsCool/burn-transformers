@@ -640,8 +640,11 @@ impl<B: Backend> NemotronHModel<B> {
 
 /// Internal backbone output before vocabulary projection.
 struct NemotronHBackboneOutput<B: Backend> {
+    /// Final normalized activations `[batch, sequence, hidden]`.
     hidden: Tensor<B, 3>,
+    /// Requested embedding, post-block, and final-normalized activations in order.
     hidden_states: Vec<Tensor<B, 3>>,
+    /// Requested routing diagnostics in the order of the backbone's MoE blocks.
     routers: Vec<RouterDiagnostics<B>>,
 }
 

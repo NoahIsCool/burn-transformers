@@ -7,13 +7,16 @@
 //! training. The path is intentionally a correctness oracle, not an advertised low-latency KV
 //! cache; concrete family runtimes provide optimized cache layouts.
 
-use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
+use burn::tensor::{Element, Int, Tensor, TensorData, backend::Backend};
 
 use crate::{
     CausalLmInput, CausalLmOutput, DecodeState as ArchitectureDecodeState, Error, ForwardOptions,
     Result,
     architecture::{DecoderSpec, EncoderOutput, RouterDiagnostics, Seq2SeqOutput, TokenMask},
-    cache::{CacheConfig, DecodeState as DecodeMetadata},
+    cache::{
+        CacheConfig, DecodeState as DecodeMetadata,
+        tensor::{validate_repeated_allocation, validate_tensor_shape},
+    },
     moe::SparseMoeOutput,
 };
 
@@ -40,16 +43,29 @@ pub(super) enum StatePurpose {
 /// host for checked lifecycle operations, while the actual histories stay as device tensors.
 #[derive(Debug)]
 pub struct ModularDecodeState<B: Backend> {
+    /// Checked per-row committed lengths and immutable batch/capacity geometry.
     metadata: DecodeMetadata,
+    /// Compacted token IDs in preallocated `[batch, capacity]` device storage.
     tokens: Tensor<B, 2, Int>,
+    /// Position IDs aligned with compacted tokens in `[batch, capacity]` device storage.
     positions: Tensor<B, 2, Int>,
+    /// Checked total element count of the fixed token and position history tensors.
+    allocated_integer_elements: usize,
+    /// Decoder topology that must match the model consuming this state.
     model_spec: DecoderSpec,
+    /// Causal or encoder-decoder role used to reject otherwise identical foreign state.
     purpose: StatePurpose,
+    /// Device shared by the state histories and every accepted input tensor.
     device: B::Device,
 }
 
 impl<B: Backend> ModularDecodeState<B> {
-    /// Allocates zeroed device history for one validated model topology.
+    /// Allocates zeroed device history after checking batch and tensor geometry.
+    ///
+    /// Histories use the backend's integer dtype and the cache-wide portable
+    /// `i32::MAX` element bound. Shape and aggregate byte overflow fail before
+    /// host metadata or device tensors are allocated; available memory remains
+    /// the backend's responsibility.
     pub(super) fn new(
         config: CacheConfig,
         batch_size: usize,
@@ -63,10 +79,24 @@ impl<B: Backend> ModularDecodeState<B> {
                 config.sequence_count()
             )));
         }
+        let elements_per_history = validate_tensor_shape(
+            "custom.decode.history",
+            &[batch_size, config.capacity()],
+            B::IntElem::dtype(),
+        )
+        .map_err(|error| Error::Cache(error.to_string()))?;
+        let allocated_integer_elements = validate_repeated_allocation(
+            "custom.decode.history",
+            elements_per_history,
+            2,
+            B::IntElem::dtype(),
+        )
+        .map_err(|error| Error::Cache(error.to_string()))?;
         Ok(Self {
             metadata: DecodeMetadata::new(config),
             tokens: Tensor::zeros([batch_size, config.capacity()], device),
             positions: Tensor::zeros([batch_size, config.capacity()], device),
+            allocated_integer_elements,
             model_spec,
             purpose,
             device: device.clone(),
@@ -76,7 +106,7 @@ impl<B: Backend> ModularDecodeState<B> {
     /// Returns the number of integer elements preallocated for token and position histories.
     #[must_use]
     pub fn allocated_integer_elements(&self) -> usize {
-        self.batch_size() * self.capacity() * 2
+        self.allocated_integer_elements
     }
 
     /// Executes an exact causal reference append and commits only after successful model math.
@@ -349,12 +379,19 @@ impl<B: Backend> ArchitectureDecodeState<B> for ModularDecodeState<B> {
 
 /// Prospective device history plus indexing metadata for one append operation.
 struct PreparedAppend<B: Backend> {
+    /// Prospective `[batch, capacity]` token history, published only after successful evaluation.
     tokens: Tensor<B, 2, Int>,
+    /// Prospective position history aligned with the compacted token storage.
     positions: Tensor<B, 2, Int>,
+    /// Per-row committed lengths if this append succeeds.
     new_lengths: Vec<usize>,
+    /// Number of valid newly supplied tokens to commit in each row.
     counts: Vec<usize>,
+    /// Row-major `[batch, step]` mask restored on newly gathered outputs.
     input_validity: Vec<bool>,
+    /// Row-major compact-history indices; masked columns select index zero before output masking.
     absolute_indices: Vec<i64>,
+    /// Supplied rectangular step width, including masked token columns.
     step: usize,
 }
 
@@ -567,3 +604,7 @@ fn validate_decode_positions<B: Backend>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "state_tests.rs"]
+mod tests;

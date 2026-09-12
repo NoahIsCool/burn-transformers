@@ -35,12 +35,18 @@ use transformers::{
     models::gpt2::{Gpt2Activation, Gpt2Config, Gpt2ForCausalLm},
 };
 
+/// CPU backend for frozen GPT-2 feature caches and evaluation.
 pub type Cpu = Flex<f32, i32>;
+/// Experiment result preserving contextual preparation, tensor, and output errors.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// Command-line paths and execution scope for learned-replacement training.
 pub struct Options {
+    /// Directory containing the verified GPT-2 preparation artifacts.
     pub prepared: PathBuf,
+    /// New directory receiving training records and evaluation results.
     pub output: PathBuf,
+    /// Whether to use development-only smoke settings instead of the full protocol.
     pub smoke: bool,
 }
 
@@ -93,36 +99,58 @@ impl Options {
     }
 }
 
+/// Immutable collection of aligned prompt pairs and fixed split labels.
 #[derive(Deserialize)]
 struct Fixture {
+    /// Prompt pairs in their stable source order.
     entries: Vec<Prompt>,
 }
 
+/// One aligned prompt pair with the original numeric cutoff and hook positions.
 #[derive(Deserialize)]
 struct Prompt {
+    /// Token IDs for the clean year-comparison prompt.
     clean_ids: Vec<i32>,
+    /// Token IDs for the same prompt with its start suffix corrupted.
     corrupt_ids: Vec<i32>,
+    /// Frozen split label used for caching and evaluation.
     split: String,
+    /// Original clean start year; modulo 100 determines the evaluation cutoff.
     year: usize,
+    /// Zero-based final token position used for predictions and replacement.
     readout_position: usize,
+    /// Zero-based token position containing the corrupted year suffix.
     start_suffix_position: usize,
 }
 
+/// Verified fixture, protocol, and provenance shared by training and evaluation.
 pub struct Study {
+    /// Directory containing the verified model preparation artifacts.
     prepared: PathBuf,
+    /// Immutable aligned prompts with development and held-out split labels.
     fixture: Fixture,
+    /// Embedded learned-replacement experiment settings and source identities.
     protocol: Value,
+    /// Vocabulary token IDs ordered by numeric suffix 00 through 99.
     numeric_ids: Vec<usize>,
+    /// Declared source-path digests recorded before training.
     source_hashes: BTreeMap<String, String>,
+    /// SHA-256 digest of the executable producing the training run.
     executable_sha256: String,
 }
 
+/// Frozen clean-source features and full-vocabulary teacher/control logits for one split.
 #[derive(Clone)]
 pub struct Cached {
+    /// Immutable fixture indices corresponding to cache rows.
     indices: Vec<usize>,
+    /// Clean layer-10 MLP inputs at token 12, shaped `[prompt, 1, 768]`.
     features: Tensor<Cpu, 3>,
+    /// Corrupted-run logits with the true clean MLP output restored, shaped `[prompt, 50257]`.
     teacher: Tensor<Cpu, 2>,
+    /// Unmodified clean-run logits with shape `[prompt, 50257]`.
     clean: Tensor<Cpu, 2>,
+    /// Unmodified corrupted-run logits with shape `[prompt, 50257]`.
     corrupt: Tensor<Cpu, 2>,
 }
 
@@ -460,17 +488,28 @@ impl Study {
     }
 }
 
+/// Evaluation metrics for one prompt under a teacher, control, or student condition.
 #[derive(Serialize)]
 pub struct Row {
+    /// Immutable source fixture index.
     index: usize,
+    /// Frozen split label for the evaluated prompt.
     split: String,
+    /// Original clean year modulo 100, used for all condition metrics.
     suffix: usize,
+    /// Name of the clean, corrupt, oracle, or student evaluation condition.
     condition: String,
+    /// Full-vocabulary forward KL from the oracle-patched teacher to this condition, in nats.
     teacher_kl: f64,
+    /// Probability mass above the clean cutoff minus mass at or below it.
     probability_difference: f64,
+    /// Numeric neighbor contrast `p[y+1] - p[y-1]` at the clean cutoff.
     cutoff_sharpness: f64,
+    /// Total numeric-token mass under the full-vocabulary softmax.
     numeric_mass: f64,
+    /// Signed fraction of the clean/corrupt metric gap recovered; absent for negligible gaps.
     clean_gap_recovery: Option<f64>,
+    /// Full-vocabulary probabilities of numeric tokens ordered by suffix.
     numeric_probabilities: Vec<f64>,
 }
 
@@ -563,8 +602,11 @@ pub fn gradient_norm(gradients: &GradientsParams, id: ParamId) -> f32 {
 
 /// Hash registered float layouts and bytes, optionally asserting all parameters are frozen.
 pub fn fingerprint<B: Backend>(model: &impl Module<B>, frozen: bool) -> String {
+    /// Accumulates an exact parameter fingerprint and optionally checks frozen flags.
     struct Visitor {
+        /// Incremental digest of parameter shapes, dtypes, and exact tensor bytes.
         hash: Sha256,
+        /// Whether every visited parameter must have gradient tracking disabled.
         frozen: bool,
     }
     impl<B: Backend> ModuleVisitor<B> for Visitor {

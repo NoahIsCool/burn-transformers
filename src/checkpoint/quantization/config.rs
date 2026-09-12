@@ -45,7 +45,10 @@ impl SymmetricQuantization {
 /// predictable for future kernels while retaining useful accuracy/size tradeoffs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
-pub struct QuantizationGroupSize(usize);
+pub struct QuantizationGroupSize(
+    /// Validated group size: exactly 32, 64, or 128 scalar values.
+    usize,
+);
 
 impl QuantizationGroupSize {
     /// Creates a supported group size.

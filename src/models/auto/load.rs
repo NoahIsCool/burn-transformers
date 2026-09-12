@@ -52,7 +52,9 @@ use crate::models::{
 };
 use burn::tensor::backend::Backend;
 
+/// Maximum accepted architecture JSON size, in bytes, before and after reading.
 const MAX_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum accepted generation-default JSON size, in bytes, before and after reading.
 const MAX_GENERATION_CONFIG_BYTES: u64 = 1024 * 1024;
 
 /// Causal families whose packed installation path has an acceptance contract.
@@ -338,9 +340,15 @@ impl<B: Backend> AutoCausalLm<B> {
 /// Successful causal checkpoint execution, preserving sidecar-only counters.
 enum CausalExecutionOutcome {
     /// Ordinary SafeTensors execution without a packed overlay.
-    FullPrecision(ExecutionOutcome),
+    FullPrecision(
+        /// Strict tensor load report and ordinary execution counters.
+        ExecutionOutcome,
+    ),
     /// Mixed source-precision and Burnpack execution with provenance counters.
-    Quantized(AuditedQuantizedExecutionOutcome),
+    Quantized(
+        /// Audited mixed-precision report, including packed-sidecar execution counters.
+        AuditedQuantizedExecutionOutcome,
+    ),
 }
 
 impl CausalExecutionOutcome {
@@ -634,15 +642,25 @@ fn normalize_generation_defaults(
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct LocalGenerationConfig {
+    /// Optional upper bound on newly generated tokens, excluding the prompt.
     max_new_tokens: Option<usize>,
+    /// Optional choice between stochastic sampling and greedy selection.
     do_sample: Option<bool>,
+    /// Optional positive temperature used to scale sampling logits.
     temperature: Option<f64>,
+    /// Optional cap on the number of candidate tokens retained for sampling.
     top_k: Option<usize>,
+    /// Optional cumulative probability threshold for nucleus sampling.
     top_p: Option<f64>,
+    /// Optional multiplicative penalty applied to previously seen token logits.
     repetition_penalty: Option<f64>,
+    /// Optional additive penalty for tokens already present in the sequence.
     presence_penalty: Option<f64>,
+    /// Optional deterministic sampling seed overriding the runtime default.
     seed: Option<u64>,
+    /// Optional scalar or list of stopping tokens, normalized against the vocabulary.
     eos_token_id: Option<TokenIds>,
+    /// Optional scalar or singleton list identifying the vocabulary padding token.
     pad_token_id: Option<TokenIds>,
 }
 
@@ -758,4 +776,5 @@ fn normalize_pad_token_named(
 
 #[cfg(test)]
 #[path = "load_tests.rs"]
+/// Automatic loading, artifact containment, and normalized generation-policy tests.
 mod tests;

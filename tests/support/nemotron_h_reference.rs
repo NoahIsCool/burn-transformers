@@ -822,6 +822,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    //! Tests for closed oracle schemas, bundle containment, and reference trust anchors.
+
     use super::*;
     use std::io::Write;
 

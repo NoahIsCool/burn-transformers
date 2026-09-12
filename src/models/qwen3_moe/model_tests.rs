@@ -1,3 +1,5 @@
+//! Qwen3 MoE numerical, routing, decode-cache, and public-input contract tests.
+
 use burn::{
     backend::Flex,
     module::Param,
@@ -10,6 +12,7 @@ use crate::{
     models::qwen3_moe::Qwen3MoeCheckpointOptions,
 };
 
+/// CPU Flex backend with F32 activations and portable I32 indices.
 type TestBackend = Flex<f32, i32>;
 
 /// Creates a small model that exercises routed and dense feed-forward paths.
@@ -1111,6 +1114,7 @@ fn sparse_public_contract_gapped_positions_and_diagnostics_match_compact_tokens(
 fn autodiff_smoke_reaches_embedding_weights() {
     use burn::backend::Autodiff;
 
+    /// Autodiff wrapper used to verify gradients reach the embedding parameter.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     // Burn's TensorData installation path creates an autodiff non-leaf;

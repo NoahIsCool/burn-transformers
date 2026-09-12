@@ -1,5 +1,7 @@
+//! Checks probability normalization and loss accuracy for a large vocabulary with a significant low-logit tail.
 use super::*;
 
+/// Checks tail mass, forward KL, and shifted-target cross entropy against independent scalar F64 formulas.
 #[test]
 fn long_vocabulary_tail_remains_normalized_and_has_accurate_kl() {
     // One large logit followed by 50,303 small but collectively significant

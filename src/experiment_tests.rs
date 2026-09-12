@@ -1,11 +1,15 @@
+//! Execution-context and module-composition tests with explicit numerical and masking references.
+
 use super::*;
 use burn::{
     backend::Flex,
     tensor::{Bool, Int, Tensor, TensorData},
 };
 
+/// Deterministic F32 CPU backend used by execution and composition fixtures.
 type B = Flex<f32, i32>;
 
+/// Build one three-token execution context with positions zero through two and no padding.
 fn context() -> ExecutionContext<B> {
     ExecutionContext::new(
         Tensor::<B, 2, Int>::from_data([[0, 1, 2]], &Default::default()),
@@ -14,6 +18,7 @@ fn context() -> ExecutionContext<B> {
     .unwrap()
 }
 
+/// Broadcast attention permissions are intersected with valid query/key positions before execution.
 #[test]
 fn policy_broadcasts_allowed_links_and_intersects_padding() {
     let device = Default::default();
@@ -40,6 +45,7 @@ fn policy_broadcasts_allowed_links_and_intersects_padding() {
     assert!(policy.causal);
 }
 
+/// Attention bias broadcasts over supported dimensions and rejects incompatible policy extents.
 #[test]
 fn policy_bias_broadcast_and_invalid_extents_are_explicit() {
     let device = Default::default();
@@ -69,6 +75,7 @@ fn policy_bias_broadcast_and_invalid_extents_are_explicit() {
     assert!(policy.validate([0, 1, 1, 1], &device).is_err());
 }
 
+/// A layer-specific policy override leaves other layers and cross-attention configuration unchanged.
 #[test]
 fn layer_overrides_do_not_change_other_layers_or_cross_attention() {
     let layer = Layer::decoder(1);
@@ -86,6 +93,7 @@ fn layer_overrides_do_not_change_other_layers_or_cross_attention() {
     assert!(!context.attention_for(layer, true).causal);
 }
 
+/// Staged execution rejects skipped or repeated layers and ranges beyond final normalization.
 #[test]
 fn state_rejects_skipped_repeated_and_normalized_layer_ranges() {
     let mut state =
@@ -101,6 +109,7 @@ fn state_rejects_skipped_repeated_and_normalized_layer_ranges() {
     assert!(state.validate_range(2..3, 3).is_err());
 }
 
+/// Resuming an edited state validates its residual width, position geometry, and token mask.
 #[test]
 fn state_validation_rejects_mutated_width_positions_and_mask() {
     let device = Default::default();
@@ -128,6 +137,7 @@ fn state_validation_rejects_mutated_width_positions_and_mask() {
     assert!(ExecutionContext::<B>::new(Tensor::from_data([[-1, 0]], &device), None).is_err());
 }
 
+/// Exported encoder state retains source positions, validity, and its normalization boundary.
 #[test]
 fn encoder_export_preserves_positions_validity_and_normalization_boundary() {
     let device = Default::default();
@@ -161,6 +171,7 @@ fn encoder_export_preserves_positions_validity_and_normalization_boundary() {
     );
 }
 
+/// Cross-attention accepts independent source lengths while rejecting negative source positions.
 #[test]
 fn source_positions_are_independent_of_target_extent_but_never_negative() {
     let device = Default::default();
@@ -206,6 +217,7 @@ fn composition_close(tensor: Tensor<B, 3>, expected: &[f32]) {
     }
 }
 
+/// Each supported normalization placement agrees with an explicit scalar residual-block reference.
 #[test]
 fn composition_normalization_placements_follow_scalar_residual_equations() {
     use crate::architecture::{NormPlacement, NormalizationSpec};
@@ -301,6 +313,7 @@ fn composition_normalization_placements_follow_scalar_residual_equations() {
     );
 }
 
+/// Dense and gated branches expose activation values at the configured nonlinear computation point.
 #[test]
 fn composition_dense_and_gated_branches_expose_the_actual_nonlinearity() {
     use crate::{
@@ -347,6 +360,7 @@ fn composition_dense_and_gated_branches_expose_the_actual_nonlinearity() {
     assert_eq!(output.into_data(), input.into_data());
 }
 
+/// Composed grouped-query attention respects causal policy, bias, padding, and empty allowed rows.
 #[test]
 fn composition_gqa_obeys_causality_bias_padding_and_fully_masked_rows() {
     use crate::attention::{AttentionPrecisionMode, GroupedQueryAttentionConfig};
@@ -447,12 +461,15 @@ fn composition_gqa_obeys_causality_bias_padding_and_fully_masked_rows() {
 /// A registered consumer module intentionally violating one output contract.
 #[derive(burn::module::Module, Debug)]
 struct BadComposition<B: burn::tensor::backend::Backend> {
+    /// Registered parameter module retained so the fixture obeys Burn's module contract.
     parameter: burn::nn::Linear<B>,
+    /// Choose a dtype violation instead of truncating the token axis.
     #[module(skip)]
     wrong_dtype: bool,
 }
 
 impl<B: burn::tensor::backend::Backend> HiddenTransform<B> for BadComposition<B> {
+    /// Deliberately return an incompatible dtype or token extent to test composition validation.
     fn forward(
         &self,
         hidden: Tensor<B, 3>,
@@ -468,6 +485,7 @@ impl<B: burn::tensor::backend::Backend> HiddenTransform<B> for BadComposition<B>
     }
 }
 
+/// Width adapters match hand-computed matrix products and reject invalid custom module outputs.
 #[test]
 fn composition_width_adapters_have_explicit_matrix_products_and_reject_bad_modules() {
     let device = Default::default();
@@ -545,6 +563,7 @@ fn composition_width_adapters_have_explicit_matrix_products_and_reject_bad_modul
     );
 }
 
+/// Composition preflight rejects empty extents and incompatible source, position, or padding metadata.
 #[test]
 fn composition_context_rejects_invalid_extent_source_batch_positions_and_padding() {
     let device = Default::default();

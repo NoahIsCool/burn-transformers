@@ -1,3 +1,5 @@
+//! Nemotron-H tensor-inventory, mapping, dtype, and pinned index-accounting tests.
+
 use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::checkpoint::{

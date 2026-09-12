@@ -498,10 +498,15 @@ pub struct T5Block<B: Backend> {
 
 /// Per-pass block inputs kept outside the parameter graph.
 struct T5BlockContext<'a, B: Backend> {
+    /// Valid self-attention token positions in the current stack.
     token_mask: Option<&'a TokenMask<B>>,
+    /// Shared relative-position bias broadcast over attention scores.
     position_bias: Tensor<B, 4>,
+    /// Encoder hidden states and source-key validity for decoder cross-attention.
     encoder: Option<(&'a Tensor<B, 3>, Option<&'a TokenMask<B>>)>,
+    /// Stack and block identity used to address activation hooks.
     layer: Layer,
+    /// Optional self-attention policy overriding the block's causal convention.
     attention_policy: Option<AttentionPolicy<B>>,
 }
 

@@ -24,8 +24,10 @@ use crate::{
     operations::linear,
 };
 
+/// Differentiable CPU backend used to exercise packed-weight training boundaries.
 type Ad = Autodiff<Flex>;
 
+/// Quantize a 32-by-32 identity matrix into the requested symmetric packed format.
 fn packed_identity(scheme: SymmetricQuantization) -> TensorData {
     let values = (0..32 * 32)
         .map(|index| if index / 32 == index % 32 { 1.0 } else { 0.0 })
@@ -42,9 +44,12 @@ fn packed_identity(scheme: SymmetricQuantization) -> TensorData {
     .unwrap()
 }
 
+/// Trainable inserted projection followed by an independently frozen linear suffix.
 #[derive(Module, Debug)]
 struct AdapterExperiment<B: Backend> {
+    /// Trainable adapter whose weights should receive optimization updates.
     adapter: Linear<B>,
+    /// Frozen suffix, explicitly expanded from packed checkpoint data.
     downstream: Linear<B>,
 }
 

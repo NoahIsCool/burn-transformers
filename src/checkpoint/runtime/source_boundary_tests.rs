@@ -1,4 +1,4 @@
-//! Test-only fixtures for source.rs; excluded from non-test compiler inputs.
+//! Checks descriptor integrity, shard replacement, and bounded source reads.
 
 use std::io::Write;
 

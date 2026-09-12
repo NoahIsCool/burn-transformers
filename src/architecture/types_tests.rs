@@ -1,3 +1,5 @@
+//! Tensor validity, output defaults, and logit-selection serialization contracts.
+
 use super::{CausalLmOutput, ForwardOptions, LogitsSelection};
 
 #[cfg(feature = "flex")]
@@ -10,6 +12,7 @@ use burn::tensor::Tensor;
 use burn::tensor::{Bool, TensorData};
 
 #[cfg(feature = "flex")]
+/// Deterministic CPU backend for portable tensor contract fixtures.
 type TestBackend = Flex<f32, i32>;
 
 /// Boolean host extraction preserves logical values independently of physical storage.

@@ -4,7 +4,7 @@
 //! layer retains every native key/value head, whereas a DeltaNet layer retains only
 //! its terminal association matrix and the last `kernel - 1` convolution inputs.
 //! [`Qwen3_5DecodeState`] maps model-layer indices monotonically into one cache group
-//! of each kind, keeping runtime state outside Burn's parameter [`Module`] graph.
+//! of each kind, keeping runtime state outside Burn's parameter [`burn::module::Module`] graph.
 //!
 //! Masked rectangular batches are compacted one row at a time before model math.
 //! This is more than an optimization detail: a padding token must not shift the
@@ -33,7 +33,9 @@ use super::{
 };
 use crate::models::qwen3_5::{Qwen3_5LayerType, Qwen3_5TextConfig};
 
+/// Single native-KV group within either the target or MTP cache bank.
 const NATIVE_KV_GROUP: usize = 0;
+/// Single recurrent group containing all target DeltaNet layer states.
 const RECURRENT_GROUP: usize = 0;
 
 /// Public stateful operation whose empty-row semantics differ intentionally.
@@ -68,9 +70,15 @@ impl StatefulPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Qwen3_5LayerCache {
     /// Layer slot in the single recurrent DeltaNet cache group.
-    DeltaNet(usize),
+    DeltaNet(
+        /// Dense layer slot in the recurrent group.
+        usize,
+    ),
     /// Layer slot in the single native-KV full-attention cache group.
-    FullAttention(usize),
+    FullAttention(
+        /// Dense layer slot in the native-KV group.
+        usize,
+    ),
 }
 
 impl Qwen3_5LayerCache {
@@ -95,10 +103,15 @@ impl Qwen3_5LayerCache {
 /// Immutable cache geometry associated with one Qwen model instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Qwen3_5CacheLayout {
+    /// Model-layer order mapped to dense slots within each physical cache family.
     schedule: Vec<Qwen3_5LayerCache>,
+    /// Native-head geometry, present when a target layer uses full attention.
     native_kv: Option<NativeKvCacheSpec>,
+    /// DeltaNet matrix and convolution geometry, present for recurrent layers.
     recurrent: Option<RecurrentStateSpec>,
+    /// Separate native-KV geometry for the optional MTP prediction layers.
     mtp_native_kv: Option<NativeKvCacheSpec>,
+    /// Maximum speculative suffix length retained before commit or rollback.
     staging_capacity: usize,
 }
 
@@ -110,7 +123,9 @@ struct Qwen3_5CacheLayout {
 /// [`TensorDecodeState`]; model weights and session history never share a record.
 #[derive(Debug)]
 pub struct Qwen3_5DecodeState<B: Backend> {
+    /// Shared physical tensors, logical cursors, and optional speculative transaction.
     tensors: TensorDecodeState<B>,
+    /// Immutable family-to-cache mapping used to reject incompatible models.
     layout: Qwen3_5CacheLayout,
 }
 
@@ -373,7 +388,9 @@ impl<B: Backend> ArchitectureDecodeState<B> for Qwen3_5DecodeState<B> {
 }
 
 impl<B: Backend> CausalLanguageModel<B> for Qwen3_5ForCausalLm<B> {
+    /// Hybrid topology used to allocate and validate inference state.
     type Config = Qwen3_5TextConfig;
+    /// External target and optional MTP cache state for one inference session.
     type State = Qwen3_5DecodeState<B>;
 
     /// Delegates to the stateless family graph without allocating or mutating decode history.
@@ -1057,10 +1074,15 @@ fn cache_layout<B: Backend>(
 
 /// Deferred native-KV append produced by one successful attention layer.
 struct PendingNativeKvWrite<B: Backend> {
+    /// Dense layer slot within the native-KV group.
     cache_layer: usize,
+    /// Independent batch row receiving the suffix.
     sequence: usize,
+    /// Absolute logical cursor where the new suffix begins.
     start: usize,
+    /// New rotated keys shaped `[1, kv_heads, suffix, head_dim]`.
     keys: Tensor<B, 4>,
+    /// New values with the same native-head axes as the keys.
     values: Tensor<B, 4>,
 }
 
@@ -1112,10 +1134,15 @@ fn commit_mtp_write<B: Backend>(
 
 /// Deferred terminal-state replacement produced by one DeltaNet layer.
 struct PendingRecurrentWrite<B: Backend> {
+    /// Dense DeltaNet layer slot within the recurrent group.
     cache_layer: usize,
+    /// Independent batch row whose terminal state will be replaced.
     sequence: usize,
+    /// Number of semantic tokens consumed to produce this terminal state.
     token_count: usize,
+    /// Terminal association matrix with batch, value-head, key, and value axes.
     matrix: Tensor<B, 4>,
+    /// Terminal causal-convolution history with batch, channel, and time axes.
     convolution: Tensor<B, 3>,
 }
 
@@ -1128,7 +1155,9 @@ struct PendingRecurrentWrite<B: Backend> {
 /// lengths advance and opaque write capabilities are applied without a further
 /// fallible branch.
 struct PendingQwenCacheWrites<B: Backend> {
+    /// Unpublished per-row full-attention suffixes for this operation.
     native_kv: Vec<PendingNativeKvWrite<B>>,
+    /// Unpublished per-row DeltaNet terminal states for this operation.
     recurrent: Vec<PendingRecurrentWrite<B>>,
 }
 
@@ -1339,10 +1368,15 @@ impl<B: Backend> PendingQwenCacheWrites<B> {
 
 /// Validated rectangular input metadata needed before any cache mutation.
 struct PreparedStatefulInput {
+    /// Number of independent rows in the rectangular input.
     batch: usize,
+    /// Input column count, including padding that will not enter the cache.
     sequence: usize,
+    /// Original column indices of semantic tokens in each row.
     valid_indices: Vec<Vec<usize>>,
+    /// Per-row append lengths; zero identifies an inactive decode row.
     token_counts: Vec<usize>,
+    /// Per-row RoPE context extent including explicit absolute positions.
     evaluated_contexts: Vec<usize>,
 }
 

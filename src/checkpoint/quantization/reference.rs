@@ -41,9 +41,13 @@ pub struct ReferenceQuantizationStats {
 /// Validated packed values and per-group scales for one weight tensor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuantizedWeight {
+    /// Validated logical shape, scheme, source dtype, and derived storage counts.
     metadata: QuantizedTensorMetadata,
+    /// Signed quantized codes packed in the format's defined byte/nibble order.
     packed_values: Vec<u8>,
+    /// Positive F32 scale for each flattened quantization group.
     scales: Vec<f32>,
+    /// Converter work and peak group size associated with this weight.
     stats: ReferenceQuantizationStats,
 }
 
@@ -261,9 +265,15 @@ impl QuantizedWeight {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WeightQuantizationOutcome {
     /// Eligible matrix weight converted to the requested packed format.
-    Quantized(QuantizedWeight),
+    Quantized(
+        /// Validated codes, scales, metadata, and conversion counters.
+        QuantizedWeight,
+    ),
     /// Parameter retained in source precision for the stated policy reason.
-    Excluded(QuantizationExclusion),
+    Excluded(
+        /// Policy reason for retaining source precision.
+        QuantizationExclusion,
+    ),
 }
 
 /// Applies eligibility policy and quantizes one architecture-owned parameter.

@@ -79,13 +79,25 @@ pub enum Qwen3MoeLoadError {
 pub enum Qwen3MoeCheckpointLoadError {
     /// The model topology cannot describe a valid Qwen3 MoE checkpoint.
     #[error(transparent)]
-    Config(#[from] ConfigError),
+    Config(
+        /// Invalid configuration and its field-level diagnostic.
+        #[from]
+        ConfigError,
+    ),
     /// Artifact discovery or complete expected/observed validation failed.
     #[error(transparent)]
-    Checkpoint(#[from] CheckpointError),
+    Checkpoint(
+        /// Discovery or load-plan validation failure.
+        #[from]
+        CheckpointError,
+    ),
     /// Pass two failed after zero or more audited sink writes.
     #[error(transparent)]
-    Execution(#[from] Box<ExecutionFailure<Qwen3MoeLoadError>>),
+    Execution(
+        /// Sink failure together with the writes and diagnostics completed so far.
+        #[from]
+        Box<ExecutionFailure<Qwen3MoeLoadError>>,
+    ),
 }
 
 impl Qwen3MoeCheckpointLoadError {
@@ -100,6 +112,7 @@ impl Qwen3MoeCheckpointLoadError {
 }
 
 impl<B: Backend> TensorSink for Qwen3MoeForCausalLm<B> {
+    /// Contextual parameter installation or alias validation failure.
     type Error = Qwen3MoeLoadError;
 
     /// Installs one storage-owning tensor named by the checkpoint contract.

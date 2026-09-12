@@ -83,9 +83,15 @@ pub struct CheckpointQuantizationOutcome {
 #[non_exhaustive]
 pub enum CheckpointQuantizationFailureCause {
     /// Strict plan validation, SafeTensors I/O, or transformation failed.
-    Checkpoint(CheckpointError),
+    Checkpoint(
+        /// Original discovery, planning, or execution diagnostic.
+        CheckpointError,
+    ),
     /// Eligibility, numerical conversion, staging, or Burnpack publication failed.
-    Quantization(QuantizationError),
+    Quantization(
+        /// Original quantizer or artifact-publication diagnostic.
+        QuantizationError,
+    ),
 }
 
 impl fmt::Display for CheckpointQuantizationFailureCause {
@@ -131,10 +137,15 @@ pub struct CheckpointQuantizationFailure {
 
 /// Progress fields shared by every conversion failure boundary.
 struct CheckpointQuantizationProgress {
+    /// Strict load report through the last accepted target.
     report: LoadReport,
+    /// Source reads and transformations completed before the failure.
     execution: ExecutionStats,
+    /// Private staging activity completed before the failure.
     staging: BurnpackStagingStats,
+    /// Targets skipped by the declared quantization policy.
     excluded: Vec<QuantizationExclusionRecord>,
+    /// Source hashing attempted around conversion execution.
     provenance: ProvenanceExecutionStats,
 }
 
@@ -364,9 +375,13 @@ fn first_changed_shard(before: &BurnpackProvenance, after: &BurnpackProvenance) 
 
 /// Tensor sink that applies quantization policy after load-plan transformations.
 struct BurnpackQuantizationSink<'a> {
+    /// Borrowed writer that owns unpublished staging bytes.
     session: &'a mut QuantizedBurnpackSession,
+    /// Quantization scheme and group size applied to eligible targets.
     config: WeightQuantizationConfig,
+    /// Successful staged target conversions, in execution order.
     quantized: Vec<QuantizationRecord>,
+    /// Ineligible targets and their explicit exclusion reasons.
     excluded: Vec<QuantizationExclusionRecord>,
 }
 
@@ -383,6 +398,7 @@ impl<'a> BurnpackQuantizationSink<'a> {
 }
 
 impl TensorSink for BurnpackQuantizationSink<'_> {
+    /// Quantizer or staging failure returned to the checkpoint executor.
     type Error = QuantizationError;
 
     /// Quantizes or explicitly excludes one final architecture parameter.

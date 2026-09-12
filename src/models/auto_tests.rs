@@ -1,3 +1,5 @@
+//! Registry dispatch, complete parameter materialization, and decode-state contract regressions.
+
 use burn::{
     backend::Flex,
     module::{ModuleVisitor, Param, ParamId},
@@ -13,8 +15,10 @@ use crate::{
     CausalGenerationRequest, GenerationConfig, LogitsSelection, TokenMask, generate_causal,
 };
 
+/// CPU backend with F32 tensor values and I32 token indices for deterministic fixtures.
 type TestBackend = Flex<f32, i32>;
 
+/// Registry-level activation-hook delegation and capability-failure regressions.
 #[path = "auto/intervention_tests.rs"]
 mod intervention_tests;
 

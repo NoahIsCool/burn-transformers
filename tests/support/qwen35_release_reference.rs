@@ -16,25 +16,41 @@ use std::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+/// Directory containing the authenticated metadata and three logit payloads.
 const BUNDLE_DIRECTORY: &str = "qwen3.5-0.8b-2fc06364-reference.bundle";
+/// Strict JSON record describing the pinned reference run and its payloads.
 const JSON_FILENAME: &str = "qwen3.5-0.8b-2fc06364-reference.json";
+/// Little-endian F32 vocabulary logits for the final prompt position.
 const PROMPT_FILENAME: &str = "qwen3.5-0.8b-2fc06364-prompt-logits.f32le";
+/// Little-endian F32 logits for all 32 cached generation decisions.
 const CACHED_FILENAME: &str = "qwen3.5-0.8b-2fc06364-cached-logits-32x248320.f32le";
+/// Little-endian F32 logits for the same decisions under stateless teacher forcing.
 const TEACHER_FILENAME: &str = "qwen3.5-0.8b-2fc06364-teacher-logits-32x248320.f32le";
+/// Official checkpoint repository whose local artifact bytes are authenticated.
 const REPOSITORY: &str = "Qwen/Qwen3.5-0.8B";
+/// Immutable official checkpoint revision required by the reference record.
 const REVISION: &str = "2fc06364715b967f1860aea9cf38778875588b17";
+/// Number of vocabulary logits stored for each prediction position.
 const VOCABULARY: usize = 248_320;
+/// Number of consecutive generation decisions retained in each matrix.
 const ROWS: usize = 32;
+/// Exact byte count of one full-vocabulary F32 prompt row.
 const PROMPT_BYTES: u64 = (VOCABULARY * size_of::<f32>()) as u64;
+/// Exact byte count of a row-major `[ROWS, VOCABULARY]` F32 matrix.
 const MATRIX_BYTES: u64 = (ROWS * VOCABULARY * size_of::<f32>()) as u64;
+/// Maximum accepted metadata size, also bounding each recorded reference source.
 const MAX_JSON_BYTES: u64 = 2 * 1024 * 1024;
+/// Independently pinned digest of the reference environment's package inventory.
 const DISTRIBUTION_MANIFEST_SHA256: &str =
     "b814bb3254d51a28c6d74e80c04c3532c9836a0aadc4fab0eed410d6612d59dd";
+/// Exact rendered non-thinking chat prompt consumed by the official graph.
 const EXPECTED_PROMPT: &str = "<|im_start|>user\nExplain why the seasons change in four complete sentences.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+/// Official tokenizer output for the fixed rendered prompt.
 const EXPECTED_INPUT_IDS: [i64; 23] = [
     248045, 846, 198, 814, 20139, 3069, 279, 15127, 2222, 303, 2943, 4434, 22157, 13, 248046, 198,
     248045, 74455, 198, 248068, 271, 248069, 271,
 ];
+/// Official greedy continuation in prediction order, with no EOS among its 32 tokens.
 const EXPECTED_GREEDY_TOKEN_IDS: [i64; ROWS] = [
     760, 8964, 579, 7772, 369, 82951, 506, 449, 8937, 314, 12805, 220, 17, 18, 13, 20, 11995, 8410,
     310, 1141, 62409, 10709, 11, 13969, 279, 11247, 310, 381, 11784, 310, 279, 7806,
@@ -42,233 +58,374 @@ const EXPECTED_GREEDY_TOKEN_IDS: [i64; ROWS] = [
 
 // Independently rehashed after create-only generation at commit 06f39e7, with
 // exact package/source inventories, checkpoint bytes, and all 32 margins reviewed.
+/// Reviewed JSON digest; an absent anchor disables bundle loading.
 const TRUSTED_JSON_SHA256: Option<&str> =
     Some("1a1fb75e193f82c48ef0494f3d64066d32133f7654e5c485cb193adc54acd20a");
+/// Reviewed prompt-logit payload digest; an absent anchor disables bundle loading.
 const TRUSTED_PROMPT_SHA256: Option<&str> =
     Some("96c1291aebb1c36c15b42ad684a0a5bed5917c40808ad8cbbe82a03deb646df1");
+/// Reviewed cached-logit payload digest; an absent anchor disables bundle loading.
 const TRUSTED_CACHED_SHA256: Option<&str> =
     Some("a100338b3b1c6f755b3ef3c1925c090fe9cf5b2a38b8ca2df42d57bc8b9ae4c9");
+/// Reviewed teacher-logit payload digest; an absent anchor disables bundle loading.
 const TRUSTED_TEACHER_SHA256: Option<&str> =
     Some("ec7786b3f837c97b7ee13c16a9fc742333075a84bf3da126b81191ec4a190f03");
 
+/// Strict metadata schema linking numerical evidence to its source and execution.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReferenceRecord {
+    /// Format version, currently required to be one.
     schema_version: u32,
+    /// Official checkpoint repository name.
     repository: String,
+    /// Immutable checkpoint revision used for generation.
     revision: String,
+    /// Fully qualified official causal language model class.
     reference_class: String,
+    /// Rendered chat prompt supplied to the official tokenizer.
     prompt: String,
+    /// Prompt token IDs consumed by the official model.
     input_ids: Vec<i64>,
+    /// Numerical, device, determinism, and kernel settings for inference.
     execution: Execution,
+    /// Interpreter, installed packages, and offline environment identity.
     environment: Environment,
+    /// Generator, reference code, checkpoint, and strict-loading identities.
     provenance: Provenance,
+    /// Storage metadata for the three full-vocabulary logit payloads.
     payloads: Payloads,
+    /// Greedy continuation and its numerical decision margins.
     generation: Generation,
+    /// Agreement between cached and stateless execution of the official model.
     self_parity: SelfParity,
+    /// Nonnegative wall-clock durations in seconds for the reference stages.
     timings_seconds: Timings,
 }
 
+/// Recorded inference settings required for the pinned official F16 MPS run.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Execution {
+    /// Model parameter and execution dtype, required to be `float16`.
     dtype: String,
+    /// Execution device identifier, required to be `mps`.
     device: String,
+    /// Official attention implementation, required to be `eager`.
     attention_implementation: String,
+    /// Whether PyTorch deterministic algorithms were enabled.
     deterministic_algorithms: bool,
+    /// Random seed fixed for the official reference run.
     seed: u64,
+    /// Whether the official model enabled its generation cache.
     use_cache: bool,
+    /// PyTorch F32 matrix multiplication precision setting.
     float32_matmul_precision: String,
+    /// Allowed fraction of recommended MPS process memory.
     mps_per_process_memory_fraction: f64,
+    /// Whether every reference call explicitly supplied unpadded attention masks.
     explicit_all_one_attention_masks: bool,
+    /// Whether optional Hub kernels were enabled; this reference requires false.
     hub_kernels_enabled: bool,
+    /// Availability flags for optional accelerated reference kernels.
     kernel_status: KernelStatus,
+    /// Generator's description of the provenance integrity assumptions.
     integrity_threat_model: String,
 }
 
+/// Optional official acceleration paths, all required to be unavailable here.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KernelStatus {
+    /// Whether the reference exposes its combined accelerated execution path.
     fast_path_available: bool,
+    /// Whether an accelerated causal one-dimensional convolution kernel is present.
     causal_conv1d_kernel_available: bool,
+    /// Whether an accelerated chunked gated-delta kernel is present.
     chunk_gated_delta_kernel_available: bool,
+    /// Whether an accelerated recurrent gated-delta kernel is present.
     recurrent_gated_delta_kernel_available: bool,
 }
 
+/// Host and package provenance captured when the external bundle was generated.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Environment {
+    /// Recorded generation timestamp in UTC.
     generated_at_utc: String,
+    /// Generator command and arguments as separate strings.
     command: Vec<String>,
+    /// Python interpreter and host-platform details.
     python: Python,
+    /// Exact installed versions keyed by the six required package names.
     packages: BTreeMap<String, String>,
+    /// Installed distribution metadata identities keyed by package name.
     distribution_provenance: BTreeMap<String, Distribution>,
+    /// Digest of the complete installed-distribution manifest.
     distribution_manifest_sha256: String,
+    /// MPS build and runtime availability recorded by the generator.
     device: Device,
+    /// Exact environment settings enforcing offline inference and kernel policy.
     offline_environment: BTreeMap<String, String>,
 }
 
+/// Installed package version and identities of its distribution metadata files.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Distribution {
+    /// Package version matching the pinned environment inventory.
     version: String,
+    /// Identity of the installed `.dist-info/METADATA` file.
     metadata: FileIdentity,
+    /// Identity of the installed `.dist-info/RECORD` file.
     record: FileIdentity,
 }
 
+/// Recorded relative path, length, and digest of an installed metadata file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileIdentity {
+    /// Recorded relative location of the file within the installed environment.
     relative_path: String,
+    /// Nonzero file length in bytes.
     bytes: u64,
+    /// Canonical lowercase SHA-256 digest of the file bytes.
     sha256: String,
 }
 
+/// Python interpreter identity and platform recorded for the reference run.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Python {
+    /// Interpreter version string.
     version: String,
+    /// Executable path reported by the generator.
     executable: String,
+    /// Python implementation name.
     implementation: String,
+    /// Host-platform description reported by Python.
     platform: String,
 }
 
+/// Availability evidence for the required official MPS execution device.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Device {
+    /// Backend identifier, required to be `mps`.
     kind: String,
+    /// Whether PyTorch was built with MPS support.
     built: bool,
+    /// Whether MPS was available to the running generator.
     available: bool,
 }
 
+/// Source and checkpoint identities supporting the official numerical evidence.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Provenance {
+    /// Git and source-file identities for the bundle generation tooling.
     generator: Generator,
+    /// Complete inventory of official Python modules checked for the graph.
     reference_sources: Vec<ReferenceSource>,
+    /// Exact checkpoint and tokenizer artifacts authenticated for loading.
     artifacts: Vec<Artifact>,
+    /// Canonical digest of the checkpoint artifact manifest.
     artifact_manifest_sha256: String,
+    /// Total bytes occupied by checkpoint tensor storage.
     checkpoint_tensor_bytes: u64,
+    /// Number of parameter elements loaded into the official model.
     loaded_parameter_count: u64,
+    /// Loaded parameter element counts grouped by dtype.
     parameter_dtype_elements: BTreeMap<String, u64>,
+    /// Strict-loading diagnostic counts and digests grouped by diagnostic class.
     loading_info: BTreeMap<String, LoadingClass>,
 }
 
+/// Source-file identity for one official Python module used by the reference.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReferenceSource {
+    /// Fully qualified Python import name.
     module: String,
+    /// Absolute path to the installed source file during generation.
     path: String,
+    /// Relative source path that must suffix the recorded absolute path.
     relative_path: String,
+    /// Source-file length, bounded by the metadata safety limit.
     bytes: u64,
+    /// Canonical lowercase SHA-256 digest of the source bytes.
     sha256: String,
 }
 
+/// Git snapshot and individual script identities for the reference generator.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Generator {
+    /// Recorded Git commit object ID in SHA-1 or SHA-256 spelling.
     git_head: String,
+    /// Recorded Git tree object ID in SHA-1 or SHA-256 spelling.
     git_tree: String,
+    /// Two generator scripts whose bytes must match the current checkout.
     files: Vec<GeneratorFile>,
 }
 
+/// Generator script identity checked against bytes embedded from this checkout.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GeneratorFile {
+    /// Repository-relative generator script path.
     relative_path: String,
+    /// Exact script length in bytes.
     bytes: usize,
+    /// Canonical lowercase SHA-256 digest of the script bytes.
     sha256: String,
 }
 
+/// Immutable official checkpoint or tokenizer artifact authenticated before use.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Artifact {
+    /// Artifact filename relative to the selected checkpoint root.
     relative_path: String,
+    /// Exact artifact length in bytes.
     bytes: u64,
+    /// Canonical lowercase SHA-256 digest of the complete artifact.
     sha256: String,
 }
 
+/// Identity and size of one strict-loading diagnostic collection.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LoadingClass {
+    /// Number of diagnostics, required to be zero for each class.
     count: usize,
+    /// Canonical SHA-256 digest recorded for the diagnostic collection.
     sha256: String,
 }
 
+/// Storage descriptions for prompt, cached, and teacher-forced logit evidence.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Payloads {
+    /// Full-vocabulary logits for the final prompt position.
     prompt: Payload,
+    /// Logit matrix for the cached greedy generation decisions.
     cached: Payload,
+    /// Logit matrix for the same decisions under stateless teacher forcing.
     teacher: Payload,
 }
 
+/// Raw tensor metadata cross-checked against authenticated payload bytes.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Payload {
+    /// Exact payload filename relative to the bundle directory.
     relative_path: String,
+    /// Encoding identifier, required to specify little-endian IEEE-754 F32.
     encoding: String,
+    /// Tensor dimensions, either `[vocabulary]` or `[rows, vocabulary]`.
     shape: Vec<usize>,
+    /// Number of scalar elements, equal to the product of the dimensions.
     elements: usize,
+    /// Exact encoded payload length in bytes.
     bytes: usize,
+    /// Canonical lowercase SHA-256 digest of the encoded payload.
     sha256: String,
 }
 
+/// Fixed greedy continuation with per-decision numerical stability evidence.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Generation {
+    /// Requested continuation length, fixed to the number of stored matrix rows.
     max_new_tokens: usize,
+    /// Selected token IDs in generation order.
     token_ids: Vec<i64>,
+    /// EOS token IDs used by the official generation policy.
     eos_token_ids: Vec<i64>,
+    /// Whether all requested decisions completed without producing EOS.
     completed_without_eos: bool,
+    /// Winner and runner-up evidence for each generated token.
     decision_stability: Vec<DecisionStability>,
+    /// Recorded minimum winner-to-runner-up logit margin across the continuation.
     minimum_observed_margin: f64,
+    /// Recorded minimum margin divided by its per-decision perturbation budget.
     minimum_margin_to_epsilon_ratio: f64,
+    /// Nonempty official decoding of the generated continuation.
     decoded_text: String,
 }
 
+/// Greedy winner margin compared with an elementwise F16 rounding budget.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DecisionStability {
+    /// Zero-based generation decision index.
     step: usize,
+    /// Token ID with the greatest reference logit.
     top1_token_id: i64,
+    /// Distinct token ID with the second-greatest reference logit.
     top2_token_id: i64,
+    /// Finite logit of the greedy winner.
     top1_logit: f64,
+    /// Finite logit of the runner-up.
     top2_logit: f64,
+    /// Positive difference between the winning and runner-up logits.
     margin: f64,
+    /// Positive F16 unit in the last place recorded at the winning logit.
     top1_f16_ulp: f64,
+    /// Positive F16 unit in the last place recorded at the runner-up logit.
     top2_f16_ulp: f64,
+    /// Elementwise perturbation budget, the larger of the two recorded F16 ULPs.
     elementwise_epsilon: f64,
+    /// Winning margin divided by the elementwise perturbation budget.
     margin_to_epsilon_ratio: f64,
+    /// Whether the margin exceeds twice the elementwise perturbation budget.
     stable_under_budget: bool,
 }
 
+/// Official-model agreement between cached generation and stateless evaluation.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SelfParity {
+    /// Required cosine similarity threshold, fixed to `0.999`.
     gate: f64,
+    /// Cosine similarity between stateless prompt logits and the first cached row.
     prompt_cached_cosine: f64,
+    /// Cosine similarity for each corresponding cached and teacher-forced row.
     cached_teacher_cosines: Vec<f64>,
+    /// Recorded minimum cosine similarity across the cached and teacher rows.
     minimum_cached_teacher_cosine: f64,
+    /// Greedy token IDs independently read from the cached logit rows.
     cached_top1_token_ids: Vec<i64>,
+    /// Greedy token IDs independently read from the teacher-forced logit rows.
     teacher_top1_token_ids: Vec<i64>,
+    /// Whether the cached and teacher-forced greedy token sequences agree.
     top1_equal: bool,
 }
 
+/// Finite, nonnegative durations in seconds recorded for the reference stages.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Timings {
+    /// Duration of official checkpoint loading.
     load: f64,
+    /// Duration of stateless prompt inference.
     stateless_prompt: f64,
+    /// Duration of the complete 32-decision cached continuation.
     cached_generation_32: f64,
+    /// Duration of stateless teacher forcing with all-position logits.
     teacher_forced_all_logits: f64,
 }
 
 /// Fully authenticated numerical evidence retained in host memory for one gate.
 pub(super) struct ReferenceBundle {
+    /// Authenticated metadata after strict schema and invariant validation.
     record: ReferenceRecord,
+    /// Decoded full-vocabulary logits for the final prompt position.
     prompt: Vec<f32>,
+    /// Decoded cached logits flattened in `[ROWS, VOCABULARY]` row-major order.
     cached: Vec<f32>,
+    /// Corresponding stateless teacher logits in the same flattened row order.
     teacher: Vec<f32>,
 }
 
@@ -785,7 +942,9 @@ fn validate_payload(payload: &Payload, filename: &str, shape: &[usize], bytes: &
 
 /// Opens a bounded regular file without following its final path component.
 fn read_bounded(path: &Path, expected: Option<u64>, maximum: u64) -> Vec<u8> {
+    /// Darwin flag preventing a symlink at the final opened path component.
     const DARWIN_O_NOFOLLOW: i32 = 0x0000_0100;
+    /// Darwin nonblocking flag preventing a substituted FIFO from blocking open.
     const DARWIN_O_NONBLOCK: i32 = 0x0000_0004;
 
     let file = OpenOptions::new()
@@ -890,17 +1049,21 @@ fn assert_git_oid(value: &str) {
 
 #[cfg(test)]
 mod tests {
+    //! Checks fixed payload geometry, decoding, and fail-closed authentication.
+
     use super::{
         Artifact, MATRIX_BYTES, PROMPT_BYTES, assert_sha256, decode_f32, matrix_row,
         require_trusted_anchor, sha256, validate_checkpoint_artifacts,
     };
 
+    /// The pinned vocabulary and decision count produce exact F32 payload sizes.
     #[test]
     fn fixed_payload_geometry_is_exact() {
         assert_eq!(PROMPT_BYTES, 993_280);
         assert_eq!(MATRIX_BYTES, 31_784_960);
     }
 
+    /// Little-endian bytes decode correctly and rows retain vocabulary offsets.
     #[test]
     fn f32_decoder_and_matrix_rows_are_little_endian() {
         let bytes = [1.0_f32, -2.0, 3.5]
@@ -915,18 +1078,21 @@ mod tests {
         assert_eq!(matrix_row(&matrix, 1)[0], 248_320.0);
     }
 
+    /// Loading without an independently pinned trust anchor must panic.
     #[test]
     #[should_panic(expected = "trusted Qwen3.5-0.8B fixture SHA-256 is not pinned")]
     fn missing_trust_anchor_fails_closed() {
         require_trusted_anchor("fixture", None);
     }
 
+    /// A short uppercase digest is rejected as a malformed SHA-256 anchor.
     #[test]
     #[should_panic(expected = "malformed SHA-256")]
     fn malformed_trust_anchor_is_rejected() {
         assert_sha256("ABC");
     }
 
+    /// Decoding a NaN payload fails instead of admitting non-finite evidence.
     #[test]
     #[should_panic(expected = "contains non-finite value")]
     fn non_finite_reference_value_is_rejected() {

@@ -7,12 +7,15 @@ publish an archive, or waive any real-weight gate.
 
 ## Required development checks
 
-The source gate also runs the [authored Rust documentation check](scripts/coverage-layout/README.md#authored-documentation-check).
-It checks literal `///` function and `//!` module documentation, including
-private helpers, and rejects inline test bodies in production files. Its
-source-bound report states the limits of macro inspection; generated methods
-are not represented as audited authored functions. The check supplements
-compiler-enforced public documentation and review of mathematical explanations.
+The source gate runs the [comprehensive authored-item documentation check](scripts/coverage-layout/README.md#comprehensive-authored-item-standards)
+with `--standards`. It requires literal `///` declarations and `//!` module
+documentation, including private types, members, constants, and tests. It rejects
+inline unit-test bodies in production modules; nested integration-harness tests
+retain their separate placement policy. The source-bound schema 2 report states
+the limits of macro inspection; generated declarations are outside the authored
+scope. This check supplements compiler-enforced public documentation and review
+of mathematical explanations. The raw helper and wrapper retain their legacy
+default mode for callers that explicitly need the earlier policy.
 
 Every compile-capable release command records a fresh local storage preflight
 and stops below 20 GiB. Explicit target overrides remain visible in the report;

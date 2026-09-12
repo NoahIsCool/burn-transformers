@@ -1,3 +1,5 @@
+//! Delta-rule tests comparing recurrent and chunked updates, state continuation, and validation.
+
 use burn::{
     backend::Flex,
     tensor::{Bool, DType, Int, Tensor, TensorData, Tolerance, backend::Backend},
@@ -10,6 +12,7 @@ use super::{
     chunked_gated_delta_rule, mask_hidden, recurrent_gated_delta_rule,
 };
 
+/// Deterministic F32 CPU backend for recurrent and chunked delta-rule comparisons.
 type TestBackend = Flex<f32, i32>;
 
 /// Supplying an all-valid mask cannot promote an F16 residual stream to F32.

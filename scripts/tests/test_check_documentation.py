@@ -97,7 +97,7 @@ class DocumentationWrapperTests(unittest.TestCase):
         """Read-only checks fail if another process edits a source during inspection."""
         report = self.report(["src/lib.rs"])
 
-        def changed(*_):
+        def changed(*_, **__):
             self.write("src/lib.rs", "fn changed() {}\n")
             return report
 
@@ -137,6 +137,78 @@ class DocumentationWrapperTests(unittest.TestCase):
                  contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 actual = AUDIT.main(arguments + (["--inventory-only"] if inventory else []))
             self.assertEqual(actual, expected)
+
+    def test_standards_discovers_integration_and_tool_tests_but_preserves_evidence(self):
+        """Strict inventory includes authored harnesses, with fixtures still explicit exclusions."""
+        names = ["src/lib.rs", "tests/harness.rs", "tests/support/data.rs",
+                 "scripts/tool/tests/integration.rs", "scripts/tests/fixtures/old.rs",
+                 "acceptance/history/old.rs"]
+        completed = subprocess.CompletedProcess([], 0, stdout="\0".join(names).encode())
+        for name in names:
+            self.write(name, "//! Source.\n")
+        with mock.patch.object(AUDIT.subprocess, "run", return_value=completed):
+            sources, excluded = AUDIT.discover_sources(self.root, standards=True)
+        self.assertEqual(sources, sorted(names[:4]))
+        self.assertEqual({item["path"] for item in excluded}, set(names[4:]))
+        self.assertEqual(AUDIT.default_entries(self.root, sources, standards=True),
+                         sorted([names[0], names[1], names[3]]))
+
+    def test_standards_invocation_requires_schema_two_without_changing_default(self):
+        """Strict dispatch requests its own version and rejects legacy helper output."""
+        for standards, schema, expected_flag in [
+            (False, 1, "--documentation"), (True, 2, "--standards")
+        ]:
+            completed = subprocess.CompletedProcess([], 0, stdout=json.dumps({
+                "schema_version": schema, "root": str(self.root)}).encode())
+            with mock.patch.object(AUDIT.subprocess, "run", return_value=completed) as run:
+                AUDIT.invoke(self.classifier, self.root, ["src/lib.rs"], standards=standards)
+            self.assertEqual(run.call_args.args[0][1], expected_flag)
+        legacy = subprocess.CompletedProcess([], 0, stdout=json.dumps({
+            "schema_version": 1, "root": str(self.root)}).encode())
+        with mock.patch.object(AUDIT.subprocess, "run", return_value=legacy):
+            with self.assertRaisesRegex(ValueError, "unsupported schema"):
+                AUDIT.invoke(self.classifier, self.root, ["src/lib.rs"], standards=True)
+
+    def test_standards_counts_members_and_test_sites_without_function_misclassification(self):
+        """Strict findings identify declaration kinds and include opaque test macro items."""
+        self.write("tests/harness.rs", "//! Tests.\n")
+        report = self.report(["src/lib.rs", "tests/harness.rs"], passed=False, complete=False)
+        report["schema_version"] = 2
+        report["files"][1]["sites"] = [{
+            "name": "payload", "kind": "field", "test_only": True,
+            "style_present": False, "span": {"start": {"line": 2}},
+            "required_style": "///", "rustdoc_present": False,
+            "computed_documentation": False, "origin": "parsed_item",
+        }]
+        report["files"][1]["macros"] = [{"name": "template", "test_only": True,
+            "unresolved_functions": [{"start": {"line": 3}}],
+            "unresolved_items": [{"start": {"line": 4}}]}]
+        with mock.patch.object(AUDIT, "discover_sources", return_value=(["src/lib.rs", "tests/harness.rs"], [])), \
+             mock.patch.object(AUDIT, "invoke", return_value=report):
+            result = AUDIT.audit(self.root, self.classifier, standards=True)
+        counts = result["inventory"]["groups"]["integration_tests"]
+        self.assertEqual(counts["authored_sites"], 1)
+        self.assertEqual(counts["test_sites"], 1)
+        self.assertEqual(counts["missing_style"], 1)
+        self.assertEqual(counts["by_kind"], {"field": {"sites": 1, "missing": 1}})
+        self.assertNotIn("production_functions", counts)
+        self.assertTrue(result["inventory"]["missing"][0]["test_only"])
+        self.assertEqual(result["inventory"]["unresolved_macro_items"][0]["line"], 4)
+        self.assertEqual(counts["unresolved_macro_functions"], 1)
+
+    def test_standards_cli_keeps_style_and_completeness_exit_codes(self):
+        """Opt-in summaries and dispatch preserve the established three-way exit contract."""
+        arguments = ["--root", str(self.root), "--classifier", str(self.classifier), "--standards"]
+        report = self.report([], passed=False)
+        report["schema_version"] = 2
+        report["inventory"] = {"groups": {"shared": {"authored_sites": 2, "test_sites": 1,
+            "missing_style": 1, "inline_test_bodies": 0,
+            "unresolved_macro_functions": 0, "unresolved_macro_items": 0}}}
+        with mock.patch.object(AUDIT, "audit", return_value=report) as audit, \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(AUDIT.main(arguments), 1)
+        self.assertTrue(audit.call_args.kwargs["standards"])
+        self.assertIn("1/2 authored sites", output.getvalue())
 
 
 if __name__ == "__main__":

@@ -39,37 +39,58 @@ use transformers::{
     models::t5::{T5BeamSearchOptions, generate_t5_beam_search},
 };
 
+/// Official model repository authenticated by these acceptance gates.
 const REPOSITORY: &str = "google/flan-t5-small";
+/// Immutable upstream checkpoint revision used to produce the reference bundle.
 const REVISION: &str = "0fc9ddf78a1e988dac52e2dac162b0ede4fd74ab";
+/// Padded vocabulary width of each complete reference-logit row.
 const VOCABULARY_SIZE: usize = 32_128;
+/// Encoder and decoder hidden-state width of the pinned model.
 const HIDDEN_SIZE: usize = 512;
+/// Number of consecutive greedy decisions authenticated by the reference.
 const GREEDY_DECISIONS: usize = 32;
+/// Manifest filename within the local immutable reference bundle.
 const MANIFEST_FILE: &str = "flan-t5-small-0fc9ddf7-reference.json";
+/// Expected reference-manifest length in bytes.
 const MANIFEST_BYTES: u64 = 19_584;
+/// SHA-256 of the exact reference-manifest bytes.
 const MANIFEST_SHA256: &str = "f031fa015480699ce85f099f5112feb682a6ffc9ca61757377780329c336229e";
+/// SHA-256 of the Python generator that produced the reference.
 const GENERATOR_SHA256: &str = "7d76915b38fbae0f8a744025cd3579937ea975a8f02d5197e8d09d2cc114dcea";
+/// Repository commit containing the authenticated reference generator.
 const GENERATOR_COMMIT: &str = "2dcf44c283dbc48377249b79c82f5483b912b2a7";
+/// SHA-256 of the pinned checkpoint artifact manifest.
 const ARTIFACT_MANIFEST_SHA256: &str =
     "bbfad80d704b2e9d1a02b8fc3350847c3a165dc563c91d425bf8a7e3ad1d1412";
+/// SHA-256 of the pinned checkpoint header inventory.
 const HEADER_INVENTORY_SHA256: &str =
     "501913dd79c6780c1c92f40b103c4f2d141fd11aea2e6ac29b047c21e0dea4b2";
+/// SHA-256 of the canonical 512-token boundary source IDs.
 const BOUNDARY_IDS_SHA256: &str =
     "08e561703c88bc7e2d08db781798024bbd09c4be470ae2ab200fde44198cbfe8";
 
+/// Exact SentencePiece source IDs for the long prompt, including terminal EOS.
 const LONG_SOURCE_IDS: &[i64] = &[
     13_959, 1_566, 12, 2_968, 10, 86, 8, 778, 1_379, 6, 8, 17_901, 3, 6_412, 5_665, 190, 8, 4_354,
     2_004, 6, 4_321, 5_592, 149, 16_285, 15_880, 334, 8_384, 6, 149, 6_331, 2_301, 344, 8, 9_678,
     6, 11, 149, 8, 1_633, 799, 2_130, 38, 8, 690, 1_553, 12, 7_178, 300, 160, 5, 1,
 ];
+/// Exact 32-token greedy continuation from the pinned F32 reference.
 const GREEDY_IDS: &[u32] = &[
     86, 74, 13_558, 35, 20_147, 3, 49, 3, 49, 3, 49, 3, 49, 3, 49, 3, 49, 3, 49, 3, 49, 3, 49, 3,
     49, 3, 49, 3, 49, 3, 49, 3,
 ];
+/// Exact SentencePiece IDs for the translation prompt, including terminal EOS.
 const TRANSLATION_IDS: &[i64] = &[13_959, 1_566, 12, 2_968, 10, 37, 629, 19, 1_627, 5, 1];
+/// Exact unpadded IDs for the shorter row of the padded batch fixture.
 const PADDED_SECOND_IDS: &[i64] = &[21_603, 10, 31_220, 7, 169, 1_388, 5, 1];
+/// Expected EOS-terminated four-beam translation token IDs.
 const BEAM_IDS: &[u32] = &[644, 4_598, 229, 9_685, 5, 1];
+/// Long translation prompt used for encoder, decoder, and greedy parity.
 const LONG_PROMPT: &str = "translate English to German: In the early morning, the scientist walked slowly through the quiet garden, carefully recording how sunlight touched every leaf, how birds moved between the branches, and how the cool air changed as the city began to wake around her.";
+/// Short translation prompt used for the beam-search reference.
 const TRANSLATION_PROMPT: &str = "translate English to German: The house is wonderful.";
+/// Shorter source prompt used to test right-padding semantics.
 const PADDED_SECOND_PROMPT: &str = "summarize: Transformers use attention.";
 
 /// Authenticates local artifacts and checks exact token IDs without loading model tensors.
@@ -158,6 +179,7 @@ struct ArtifactFile {
     sha256: &'static str,
 }
 
+/// Complete seven-file checkpoint allowlist with immutable lengths and hashes.
 const ARTIFACT_FILES: &[ArtifactFile] = &[
     ArtifactFile {
         name: "config.json",
@@ -213,6 +235,7 @@ struct RawFile {
     columns: usize,
 }
 
+/// Complete raw F32 reference payload allowlist with shapes and immutable hashes.
 const RAW_FILES: &[RawFile] = &[
     RawFile {
         key: "boundary_first_logits",
@@ -1044,6 +1067,7 @@ fn flan_t5_small_flex_matches_official_reference() {
 fn flan_t5_small_flex_encoder_extraction_and_staged_hooks_are_exact() {
     use transformers::intervention::{Hooks, Layer, Stack};
 
+    /// F32 Flex backend used for exact encoder extraction and hook comparisons.
     type B = Flex<f32, i32>;
     let device = Default::default();
     let reference = ReferenceBundle::open(&reference_root());

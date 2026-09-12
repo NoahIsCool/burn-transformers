@@ -389,10 +389,15 @@ where
 
 /// Validated dimensions and position metadata derived before model mutation.
 struct PreparedRequest {
+    /// Independent encoder rows before expansion into beam slots.
     source_batch: usize,
+    /// Decoder batch after allocating a fixed number of beams per source.
     expanded_batch: usize,
+    /// Number of valid decoder prompt tokens for each source row.
     decoder_prompt_lengths: Vec<usize>,
+    /// Optional absolute position to assign after each decoder prompt.
     initial_next_positions: Option<Vec<i64>>,
+    /// Whether later decode calls must provide explicit decoder position IDs.
     has_explicit_decoder_positions: bool,
 }
 
@@ -494,21 +499,32 @@ impl PreparedRequest {
 /// Internal unfinished or finalized hypothesis.
 #[derive(Clone, Debug)]
 struct BeamHypothesis {
+    /// Generated suffix, excluding the decoder prompt.
     token_ids: Vec<u32>,
+    /// Processed conditional log probability of each suffix token.
     log_probabilities: Vec<f64>,
+    /// Sum of token log probabilities before length normalization.
     cumulative_log_probability: f64,
+    /// Explicit absolute position for the next token, when supplied by the request.
     next_position: Option<i64>,
+    /// Stopping condition for a finalized hypothesis; absent for a live beam.
     finish_reason: Option<FinishReason>,
+    /// Stable insertion order used to break otherwise equal ranking ties.
     ordinal: usize,
 }
 
 /// One not-yet-materialized child from a model probability row.
 #[derive(Clone, Copy, Debug)]
 struct Candidate {
+    /// Parent row in the complete expanded decoder batch.
     parent_global: usize,
+    /// Parent beam slot within its independent source row.
     parent_slot: usize,
+    /// Proposed next vocabulary token.
     token_id: u32,
+    /// Conditional log probability of the proposed token.
     log_probability: f64,
+    /// Parent cumulative log probability plus the candidate token contribution.
     cumulative_log_probability: f64,
 }
 

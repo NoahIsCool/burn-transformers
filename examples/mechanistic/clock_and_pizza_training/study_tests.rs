@@ -6,6 +6,7 @@ use burn::{
     module::AutodiffModule,
     optim::{AdamWConfig, GradientsParams, Optimizer},
 };
+/// Checks a seeded 2784/697 split repeats exactly and partitions every modular-addition pair once.
 #[test]
 fn split_is_deterministic_disjoint_and_complete() {
     let data = Dataset::new(20260910);
@@ -17,8 +18,10 @@ fn split_is_deterministic_disjoint_and_complete() {
     all.sort();
     assert_eq!(all, (0..P * P).collect::<Vec<_>>());
 }
+/// Checks both attention-mixture endpoints expose trainable parameters and connected captures while one update lowers loss.
 #[test]
 fn optimizer_discovers_recipe_parameters_and_hooks_preserve_learning() {
+    /// Autodifferentiable CPU backend for optimizer and activation-gradient checks.
     type Ad = Autodiff<Flex>;
     let device = Default::default();
     Ad::seed(&device, 42);

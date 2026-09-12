@@ -1,3 +1,5 @@
+//! Tests quantization policy, exact packed formats, persistence validation, and error boundaries.
+
 use std::{
     collections::BTreeMap,
     io::{self, Write},
@@ -14,6 +16,7 @@ use proptest::prelude::*;
 
 use super::*;
 
+/// Constructs a fixture quantizer after validating its group size.
 fn config(scheme: SymmetricQuantization, group_size: usize) -> WeightQuantizationConfig {
     WeightQuantizationConfig {
         scheme,
@@ -21,11 +24,13 @@ fn config(scheme: SymmetricQuantization, group_size: usize) -> WeightQuantizatio
     }
 }
 
+/// Reads fixture tensor storage as F32 for numerical comparisons.
 fn f32_values(data: &TensorData) -> Vec<f32> {
     data.as_slice::<f32>().unwrap().to_vec()
 }
 
 #[test]
+/// Only group sizes 32, 64, and 128 are accepted; the default is 64.
 fn group_sizes_are_closed_and_default_to_sixty_four() {
     assert_eq!(QuantizationGroupSize::default().get(), 64);
     for supported in [32, 64, 128] {
@@ -43,6 +48,7 @@ fn group_sizes_are_closed_and_default_to_sixty_four() {
 }
 
 #[test]
+/// Deserialization preserves group-size validation and rejects unknown fields.
 fn group_size_deserialization_cannot_bypass_validation() {
     let parsed: WeightQuantizationConfig = serde_json::from_str("{}").unwrap();
     assert_eq!(parsed, WeightQuantizationConfig::default());
@@ -59,6 +65,7 @@ fn group_size_deserialization_cannot_bypass_validation() {
 }
 
 #[test]
+/// Each excluded parameter class reports its explicit policy reason.
 fn eligibility_policy_explains_every_exclusion_class() {
     let cases = [
         (
@@ -167,6 +174,7 @@ fn eligibility_policy_explains_every_exclusion_class() {
 }
 
 #[test]
+/// Excluded tensors bypass numerical conversion, including unsupported source dtypes.
 fn policy_is_applied_before_dtype_conversion() {
     let source = TensorData::new(vec![1_i8; 16], [4, 4]);
     let outcome = quantize_weight(
@@ -245,6 +253,7 @@ fn non_weight_matrix_names_preserve_source_before_numerical_conversion() {
 }
 
 #[test]
+/// The Q8 reference fixture produces exact expected codes, scale, and metadata.
 fn q8_fixture_has_exact_codes_scale_and_metadata() {
     let mut values = vec![0.0_f32; 32];
     values[..5].copy_from_slice(&[-127.0, -64.0, 0.0, 64.0, 127.0]);
@@ -268,6 +277,7 @@ fn q8_fixture_has_exact_codes_scale_and_metadata() {
 }
 
 #[test]
+/// The Q4 fixture fixes nibble order and signed two's-complement encoding.
 fn q4_fixture_defines_nibble_order_and_twos_complement() {
     let mut values = vec![0.0_f32; 32];
     values[..5].copy_from_slice(&[-7.0, -1.0, 0.0, 1.0, 7.0]);
@@ -285,6 +295,7 @@ fn q4_fixture_defines_nibble_order_and_twos_complement() {
 }
 
 #[test]
+/// An odd Q4 tail occupies the low nibble and leaves the unused high nibble zero.
 fn q4_odd_tail_uses_low_nibble_and_zeroes_unused_high_nibble() {
     let mut values = vec![0.0_f32; 33];
     values[32] = 7.0;
@@ -306,6 +317,7 @@ fn q4_odd_tail_uses_low_nibble_and_zeroes_unused_high_nibble() {
 }
 
 #[test]
+/// Each group receives its own scale, including a partial final group.
 fn each_group_has_an_independent_scale_and_partial_final_group() {
     let mut values = vec![0.0_f32; 65];
     values[0] = 127.0;
@@ -322,6 +334,7 @@ fn each_group_has_an_independent_scale_and_partial_final_group() {
 }
 
 #[test]
+/// Zero-valued and empty inputs produce canonical packed representations.
 fn zero_and_empty_tensors_have_canonical_representations() {
     let zeros = quantize_tensor_data(
         &TensorData::new(vec![0.0_f32; 32], [32]),
@@ -344,6 +357,7 @@ fn zero_and_empty_tensors_have_canonical_representations() {
 }
 
 #[test]
+/// The smallest source subnormal retains a positive representable quantization scale.
 fn smallest_subnormal_produces_a_positive_scale() {
     let mut values = vec![0.0_f32; 32];
     values[0] = f32::from_bits(1);
@@ -357,6 +371,7 @@ fn smallest_subnormal_produces_a_positive_scale() {
 }
 
 #[test]
+/// Supported source float formats are decoded before F32 reference arithmetic.
 fn source_float_dtypes_are_decoded_before_f32_math() {
     let f16_source = TensorData::new(vec![f16::from_f32(2.0); 32], [4, 8]);
     let bf16_source = TensorData::new(vec![bf16::from_f32(-2.0); 32], [4, 8]);
@@ -383,6 +398,7 @@ fn source_float_dtypes_are_decoded_before_f32_math() {
 }
 
 #[test]
+/// Source metadata maps each supported Burn floating storage representation.
 fn source_dtype_metadata_maps_every_supported_burn_storage_type() {
     let cases = [
         (SourceFloatDType::F16, DType::F16, 2),
@@ -399,6 +415,7 @@ fn source_dtype_metadata_maps_every_supported_burn_storage_type() {
 }
 
 #[test]
+/// Malformed source metadata returns errors before numerical processing.
 fn malformed_sources_fail_without_panicking() {
     let unsupported = TensorData::new(vec![1_i8; 32], [4, 8]);
     assert!(matches!(
@@ -431,6 +448,7 @@ fn malformed_sources_fail_without_panicking() {
 }
 
 #[test]
+/// Nonfinite values and overflowing F64 conversions fail explicitly.
 fn non_finite_values_and_f64_to_f32_overflow_are_rejected() {
     for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         let mut values = vec![0.0_f32; 32];
@@ -452,6 +470,7 @@ fn non_finite_values_and_f64_to_f32_overflow_are_rejected() {
 }
 
 #[test]
+/// Persisted codes and scales must satisfy lengths, numerical bounds, and reserved-code rules.
 fn persisted_parts_validate_lengths_scales_and_reserved_codes() {
     let base = quantize_tensor_data(
         &TensorData::new(vec![1.0_f32; 32], [4, 8]),
@@ -501,6 +520,7 @@ fn persisted_parts_validate_lengths_scales_and_reserved_codes() {
 }
 
 #[test]
+/// Digest-verified construction retains structural validation after integrity has been established.
 fn digest_verified_constructor_skips_only_the_completed_integrity_check() {
     let weight = quantize_tensor_data(
         &TensorData::new(vec![1.0_f32; 32], [4, 8]),
@@ -536,6 +556,7 @@ fn digest_verified_constructor_skips_only_the_completed_integrity_check() {
 }
 
 #[test]
+/// Redundant metadata counts expose inconsistent persisted tensor descriptions.
 fn metadata_redundancy_detects_tampering() {
     let mut metadata = QuantizedTensorMetadata::new(
         &[4, 8],
@@ -586,6 +607,7 @@ fn metadata_redundancy_detects_tampering() {
 }
 
 #[test]
+/// Manifest JSON is deterministic, sorted, and validated during round trips.
 fn manifest_json_is_deterministic_validated_and_sorted() {
     let q8 = QuantizedTensorMetadata::new(
         &[32, 64],
@@ -658,6 +680,7 @@ fn manifest_json_is_deterministic_validated_and_sorted() {
 }
 
 #[test]
+/// Unknown manifest fields and inconsistent derived counts are rejected.
 fn manifest_rejects_unknown_fields_and_invalid_derived_counts() {
     let metadata = QuantizedTensorMetadata::new(
         &[32],
@@ -775,6 +798,7 @@ fn manifest_duplicate_conflicting_tensor_values_cannot_select_a_winner() {
 }
 
 #[test]
+/// Version two requires provenance while version one retains its compatibility contract.
 fn manifest_v2_requires_provenance_while_v1_remains_compatible() {
     let mut manifest = BurnpackQuantizationManifest::new_legacy_v1();
     manifest
@@ -880,6 +904,7 @@ fn compatibility_manifest_api_remains_v1_compatible_without_changing_current_v2(
 }
 
 #[test]
+/// Payload serialization places packed codes before little-endian F32 scales.
 fn payload_writer_uses_packed_then_little_endian_scales() {
     let mut values = vec![0.0_f32; 32];
     values[0] = 127.0;
@@ -895,14 +920,18 @@ fn payload_writer_uses_packed_then_little_endian_scales() {
 }
 
 #[test]
+/// Payload writer failures retain their underlying I/O cause.
 fn payload_writer_preserves_context_for_io_failures() {
+    /// Writer that rejects payload bytes to exercise I/O error propagation.
     struct FailingWriter;
 
     impl Write for FailingWriter {
+        /// Returns the deterministic injected writer failure.
         fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
             Err(io::Error::other("fixture failure"))
         }
 
+        /// Has no buffered state to flush.
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
@@ -920,6 +949,7 @@ fn payload_writer_preserves_context_for_io_failures() {
 }
 
 #[test]
+/// Compatible Q4/Q8 matrices preserve exact packed storage when adapted to Burn QFloat.
 fn compatible_q4_and_q8_matrices_map_exactly_to_burn_qfloat() {
     let device = Default::default();
     let values = (0..128)
@@ -953,6 +983,7 @@ fn compatible_q4_and_q8_matrices_map_exactly_to_burn_qfloat() {
 }
 
 #[test]
+/// QFloat adaptation rejects unsupported ranks and groups crossing row boundaries.
 fn burn_qfloat_adapter_rejects_rank_and_cross_row_groups() {
     let rank_one = quantize_tensor_data(
         &TensorData::new(vec![1.0_f32; 64], [64]),
@@ -976,6 +1007,7 @@ fn burn_qfloat_adapter_rejects_rank_and_cross_row_groups() {
 }
 
 #[test]
+/// Unsupported native packed execution reports a capability error.
 fn packed_backend_execution_is_explicitly_unavailable() {
     let support = PackedExecutionSupport::Unavailable;
     assert!(!support.is_available());
@@ -1233,6 +1265,7 @@ fn manifest_contract_packed_layout_checks_metadata_before_backend_geometry() {
 
 proptest! {
     #[test]
+    /// Finite generated inputs reconstruct within half a group quantization step.
     fn finite_inputs_round_trip_within_half_a_quantization_step(
         values in prop::collection::vec(-10_000.0_f32..10_000.0_f32, 1..520),
         q4 in any::<bool>(),

@@ -26,7 +26,9 @@ use crate::{
 
 use super::{NemotronHDecodeState, NemotronHForCausalLm};
 
+/// XOR seed domain separating MTP proposal sampling from target sampling.
 const DRAFT_SEED_DOMAIN: u64 = 0x4452_4146_545f_4e48;
+/// XOR seed domain separating acceptance/residual draws from token sampling.
 const VERIFY_SEED_DOMAIN: u64 = 0x5645_5249_4659_4e48;
 
 /// Validated controls for one Nemotron-H MTP speculative decoder.
@@ -91,10 +93,15 @@ pub struct NemotronHSpeculativeOutput<B: Backend> {
 /// retry is bit-for-bit deterministic.
 #[derive(Debug)]
 pub struct NemotronHSpeculativeDecoder<B: Backend> {
+    /// Validated draft capacity and generation policy shared by every cycle.
     config: NemotronHSpeculativeConfig,
+    /// Fixed vocabulary extent checked against the target model before each cycle.
     vocabulary_size: usize,
+    /// Target-logit processing and target token sampling stream.
     target: LogitsProcessor<B>,
+    /// MTP-logit processing with an independent proposal sampling stream.
     draft: LogitsProcessor<B>,
+    /// Independent randomness for acceptance and residual correction sampling.
     verifier: SplitMix64,
 }
 
@@ -512,13 +519,21 @@ impl<B: Backend> NemotronHSpeculativeDecoder<B> {
 
 /// Model outputs and cache-prefix lengths waiting for atomic publication.
 struct PendingCycle<B: Backend> {
+    /// Lead token, accepted drafts, and any correction or target bonus to emit.
     token_ids: Vec<u32>,
+    /// Number of proposals produced, possibly shortened by a draft EOS.
     drafted_tokens: usize,
+    /// Verified proposals retained in `token_ids`, including an accepted EOS.
     accepted_draft_tokens: usize,
+    /// Whether all proposals were accepted and target sampling supplied a bonus.
     all_drafts_accepted: bool,
+    /// Whether the final emitted token is EOS.
     terminated: bool,
+    /// Target state before the last emitted token; absent when EOS ends the cycle.
     continuation_hidden_state: Option<Tensor<B, 3>>,
+    /// Number of staged target tokens to publish from this transaction.
     target_cache_tokens: usize,
+    /// Number of staged auxiliary pairs to publish, including any catch-up step.
     mtp_cache_tokens: usize,
 }
 
@@ -700,6 +715,7 @@ fn sample_weights(weights: &[f64], uniform: f64) -> Result<u32> {
 /// Small deterministic stream dedicated to acceptance decisions.
 #[derive(Debug, Clone, Copy)]
 struct SplitMix64 {
+    /// Wrapping generator counter restored together with the cache on failure.
     state: u64,
 }
 

@@ -551,6 +551,7 @@ fn transpose_scalar_bytes<const WIDTH: usize>(
     rows: usize,
     columns: usize,
 ) {
+    /// Maximum row/column tile edge in scalar elements, independent of byte width.
     const TILE_EDGE: usize = 32;
 
     let source_row_bytes = columns * WIDTH;

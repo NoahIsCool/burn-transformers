@@ -15,8 +15,11 @@ use core::num::NonZeroUsize;
 /// layer retains physically; it does not change absolute token positions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CacheConfig {
+    /// Number of independently tracked sequences, always nonzero.
     sequence_count: NonZeroUsize,
+    /// Maximum absolute token count of each sequence, always nonzero.
     capacity: NonZeroUsize,
+    /// Optional physical retention width, no greater than logical capacity.
     sliding_window: Option<NonZeroUsize>,
 }
 

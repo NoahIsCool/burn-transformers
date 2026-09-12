@@ -213,6 +213,7 @@ impl MuseGlimmerTextConfig {
 impl Validate for MuseGlimmerTextConfig {
     /// Checks head grouping, backward schedule, NoPE coupling, scales, and tokens.
     fn validate(&self) -> Result<(), ConfigError> {
+        /// Family label attached to configuration diagnostics.
         const FAMILY: &str = "muse_glimmer";
         model_type(FAMILY, &self.model_type, &["muse_glimmer_text"])?;
         for (field, value) in [
@@ -325,7 +326,9 @@ impl Validate for MuseGlimmerTextConfig {
 }
 
 impl ModelConfig for MuseGlimmerTextConfig {
+    /// Canonical family name used by configuration dispatch.
     const FAMILY: &'static str = "muse_glimmer";
+    /// Accepted discriminator for the text-only configuration schema.
     const MODEL_TYPES: &'static [&'static str] = &["muse_glimmer_text"];
 }
 

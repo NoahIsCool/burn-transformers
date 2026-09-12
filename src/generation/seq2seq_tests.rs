@@ -1,3 +1,5 @@
+//! Scripted beam-search tests for ranking, cache reordering, sequence validity, and lifecycle failures.
+
 use std::sync::{Arc, Mutex};
 
 use burn::{
@@ -19,7 +21,9 @@ use crate::{
     TokenMask, cache::CacheConfig,
 };
 
+/// Deterministic F32 CPU backend used for scripted beam-search outcomes.
 type TestBackend = Flex<f32, i32>;
+/// Device type associated with the beam-search fixture backend.
 type TestDevice = <TestBackend as BackendTypes>::Device;
 
 /// Half-precision beam probabilities retain masking and match the F32 reference.
@@ -46,11 +50,14 @@ fn beam_host_probabilities_respect_runtime_float_dtype() {
 /// Minimal configuration for the coordinator's scripted model.
 #[derive(Clone, Debug)]
 struct ScriptedConfig {
+    /// Number of scripted score columns emitted per decoder row.
     vocabulary_size: usize,
+    /// Whether the fixture emits nonfinite logits to exercise rejection.
     emit_nonfinite: bool,
 }
 
 impl ArchitectureConfig for ScriptedConfig {
+    /// Private architecture discriminator used only by the scripted fixture.
     const MODEL_TYPES: &'static [&'static str] = &["beam_search_script"];
 
     /// The test configuration only requires a non-empty vocabulary.
@@ -69,40 +76,65 @@ impl ArchitectureConfig for ScriptedConfig {
 /// Observable lifecycle events emitted by the scripted cache and model.
 #[derive(Debug, Default)]
 struct ScriptTrace {
+    /// Ordered model and cache method boundaries reached by the coordinator.
     boundaries: Vec<&'static str>,
+    /// Count of encoder executions, which should not repeat for each beam.
     encode_calls: usize,
+    /// Count of external decoder cache allocations.
     state_allocations: usize,
+    /// Count of decoder prompt prefill calls.
     prefill_calls: usize,
+    /// Exact global parent indices supplied to each beam-cache reorder.
     reorders: Vec<Vec<usize>>,
+    /// Token IDs passed to successive decoder calls.
     decode_tokens: Vec<Vec<i64>>,
+    /// Validity flags passed with each decoder token batch.
     decode_valid: Vec<Vec<bool>>,
+    /// Explicit decoder positions when the request supplies them.
     decode_positions: Vec<Option<Vec<i64>>>,
+    /// Committed logical row lengths observed after each decoder call.
     decode_lengths: Vec<Vec<usize>>,
 }
 
 /// Public model/cache failures and malformed outputs at coordinator boundaries.
 #[derive(Clone, Copy, Debug)]
 enum ScriptFault {
+    /// Return encoder output with the wrong batch extent.
     EncodeBatch,
+    /// Return decoder prefill logits with invalid dimensions.
     PrefillLogits,
+    /// Return one-step decoder logits with invalid dimensions.
     DecodeLogits,
+    /// Fail while encoding the source batch.
     EncodeError,
+    /// Fail while allocating external decoder state.
     StateError,
+    /// Fail during decoder prompt prefill.
     PrefillError,
+    /// Fail while reordering beam cache rows.
     ReorderError,
+    /// Fail during a one-token decoder step.
     DecodeError,
+    /// Corrupt the encoder validity mask returned by decoder prefill.
     PrefillEncoderMask,
+    /// Corrupt encoder hidden states returned by a decoder step.
     DecodeEncoderHiddenState,
 }
 
 /// Fixed-batch logical state used to prove coordinator reorder behavior.
 #[derive(Debug)]
 struct ScriptedState<B: Backend> {
+    /// Fixed expanded decoder batch, including every beam slot.
     batch: usize,
+    /// Maximum logical decoder length accepted by the fixture.
     capacity: usize,
+    /// Committed valid-token count for each expanded decoder row.
     lengths: Vec<usize>,
+    /// Device shared by the scripted tensors and state.
     device: B::Device,
+    /// Shared event log used to assert cache and coordinator lifecycle behavior.
     trace: Arc<Mutex<ScriptTrace>>,
+    /// Optional cache or model boundary failure selected for this run.
     fault: Option<ScriptFault>,
 }
 
@@ -185,11 +217,15 @@ impl<B: Backend> DecodeState<B> for ScriptedState<B> {
 /// Tiny deterministic seq2seq graph whose logits expose beam decisions.
 #[derive(Module, Debug)]
 struct ScriptedModel<B: Backend> {
+    /// Minimal registered tensor satisfying Burn's derived module contract.
     dummy: Param<Tensor<B, 1>>,
+    /// Vocabulary extent and nonfinite-output controls.
     #[module(skip)]
     config: ScriptedConfig,
+    /// Model and cache events shared with the assertions.
     #[module(skip)]
     trace: Arc<Mutex<ScriptTrace>>,
+    /// Optional malformed output or recoverable error injection.
     #[module(skip)]
     fault: Option<ScriptFault>,
     /// Optional hard vocabulary restriction, represented by valid negative-infinity logits.
@@ -289,7 +325,9 @@ impl<B: Backend> ScriptedModel<B> {
 }
 
 impl<B: Backend> Seq2SeqLanguageModel<B> for ScriptedModel<B> {
+    /// Configuration of the deterministic scripted vocabulary.
     type Config = ScriptedConfig;
+    /// Fixed-batch logical cache used to observe reorder and validity decisions.
     type State = ScriptedState<B>;
 
     /// Encodes source IDs as one-channel floating markers.

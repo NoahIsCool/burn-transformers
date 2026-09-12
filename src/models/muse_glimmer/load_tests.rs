@@ -1,3 +1,5 @@
+//! Synthetic SafeTensors tests for Muse parameter installation and recoverable loader failures.
+
 use std::{fs::File, io::Write, path::Path};
 
 use burn::{
@@ -15,6 +17,7 @@ use crate::{
 use super::*;
 use crate::models::muse_glimmer::{MuseGlimmerCheckpointSource, MuseGlimmerTextConfig};
 
+/// Deterministic CPU backend using F32 values and I32 token indices.
 type TestBackend = Flex<f32, i32>;
 
 /// Builds a one-layer miniature suitable for sink and I/O tests.

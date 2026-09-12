@@ -1,5 +1,8 @@
+//! Configuration checks for sparse-layer cadence, dense overrides, and router bounds.
+
 use super::*;
 
+/// Sparse cadence selects every second block, while an explicit dense override takes precedence.
 #[test]
 fn sparse_step_and_dense_overrides_define_layer_kind() {
     let config = Qwen3MoeConfig {
@@ -13,6 +16,7 @@ fn sparse_step_and_dense_overrides_define_layer_kind() {
     assert!(!config.is_moe_layer(3));
 }
 
+/// Selecting five experts from a four-expert bank must fail configuration validation.
 #[test]
 fn rejects_more_selected_experts_than_exist() {
     let config = Qwen3MoeConfig {

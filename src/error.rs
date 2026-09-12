@@ -35,11 +35,18 @@ pub enum Error {
 
     /// An operation would violate cache state invariants.
     #[error("cache error: {0}")]
-    Cache(String),
+    Cache(
+        /// Description of the violated cache invariant.
+        String,
+    ),
 
     /// A typed tensor-cache validation or lifecycle error.
     #[error("tensor cache error: {0}")]
-    TensorCache(#[from] crate::cache::TensorCacheError),
+    TensorCache(
+        /// Typed cache failure retained for programmatic inspection.
+        #[from]
+        crate::cache::TensorCacheError,
+    ),
 
     /// A local model directory or one of its files is invalid.
     #[error("artifact error at {path}: {reason}")]
@@ -52,23 +59,38 @@ pub enum Error {
 
     /// Checkpoint tensors fail strict validation or application.
     #[error("checkpoint error: {0}")]
-    Checkpoint(String),
+    Checkpoint(
+        /// Checkpoint validation or application failure with tensor context.
+        String,
+    ),
 
     /// Tokenizer files or operations are invalid.
     #[error("tokenizer error: {0}")]
-    Tokenizer(String),
+    Tokenizer(
+        /// Invalid tokenizer artifact or failed text operation.
+        String,
+    ),
 
     /// The selected backend cannot execute a required operation faithfully.
     #[error("backend capability error: {0}")]
-    BackendCapability(String),
+    BackendCapability(
+        /// Required operation or numerical contract unsupported by this backend.
+        String,
+    ),
 
     /// Generation parameters or state are invalid.
     #[error("generation error: {0}")]
-    Generation(String),
+    Generation(
+        /// Invalid generation configuration, state, or model boundary result.
+        String,
+    ),
 
     /// No compiled architecture matches a checkpoint model type.
     #[error("unsupported architecture: {0}")]
-    UnsupportedArchitecture(String),
+    UnsupportedArchitecture(
+        /// Checkpoint model type for which no architecture is registered.
+        String,
+    ),
 
     /// A local filesystem operation failed.
     #[error("I/O error at {path}: {source}")]

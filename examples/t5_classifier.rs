@@ -55,14 +55,19 @@ mod experiment {
         models::t5::{T5Config, T5Encoder, T5EncoderRecipe, T5FeedForwardProjection},
     };
 
+    /// CPU backend for F32 classifier evaluation and native-record checks.
     type Cpu = Flex<f32, i32>;
 
     // Own every trainable component in one Burn module so parameter traversal,
     // checkpoint records, and optimizers include the inserted small model.
+    /// Owns the heterogeneous T5 encoder and hook-inserted classification components.
     #[derive(Module, Debug)]
     pub(super) struct SentimentClassifier<B: Backend> {
+        /// Three-layer encoder with caller-selected attention visibility.
         encoder: T5Encoder<B>,
+        /// Width-preserving linear adapter inserted between encoder blocks.
         adapter: Linear<B>,
+        /// Binary readout from the pooled final encoder states.
         classifier: Linear<B>,
     }
 

@@ -227,6 +227,8 @@ fn sha256_regular_file(path: &std::path::Path, expected_bytes: u64) -> String {
     not(feature = "rocm")
 ))]
 mod qwen {
+    //! Opt-in authenticated Metal timing for Qwen prefill, cached decode, and public generation.
+
     use super::benchmark_metrics::{
         DECODE_STEPS, MEASURED_REPETITIONS, MemoryPhase, RunEnvironment, WARMUP_REPETITIONS,
         memory_profiling_enabled, summarize, token_hash,
@@ -1002,6 +1004,8 @@ mod qwen {
 
 #[cfg(test)]
 mod tests {
+    //! Host-only checks for hybrid cache accounting and overflow rejection.
+
     use super::*;
     use transformers::models::config::ModelConfig;
 

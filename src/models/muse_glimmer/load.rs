@@ -82,13 +82,25 @@ pub enum MuseGlimmerLoadError {
 pub enum MuseGlimmerCheckpointLoadError {
     /// The model topology cannot describe a valid checkpoint.
     #[error(transparent)]
-    Config(#[from] ConfigError),
+    Config(
+        /// Invalid topology or dimension reported before loading.
+        #[from]
+        ConfigError,
+    ),
     /// Artifact discovery or full expected/observed validation failed.
     #[error(transparent)]
-    Checkpoint(#[from] CheckpointError),
+    Checkpoint(
+        /// Artifact discovery or strict load-plan failure.
+        #[from]
+        CheckpointError,
+    ),
     /// Pass two failed after zero or more audited writes.
     #[error(transparent)]
-    Execution(#[from] Box<ExecutionFailure<MuseGlimmerLoadError>>),
+    Execution(
+        /// Partial write report and underlying parameter failure.
+        #[from]
+        Box<ExecutionFailure<MuseGlimmerLoadError>>,
+    ),
 }
 
 impl MuseGlimmerCheckpointLoadError {
@@ -103,6 +115,7 @@ impl MuseGlimmerCheckpointLoadError {
 }
 
 impl<B: Backend> TensorSink for MuseGlimmerForCausalLm<B> {
+    /// Family-specific parameter installation or alias failure.
     type Error = MuseGlimmerLoadError;
 
     /// Installs one storage-owning target from the validated language contract.

@@ -10,24 +10,36 @@ use super::*;
 use crate::checkpoint::LoadOptions;
 use crate::models::gpt2::{Gpt2Activation, Gpt2Config};
 
+/// Deterministic CPU backend using F32 activations and I32 token indices.
 type B = Flex<f32, i32>;
 
+/// Synthetic checkpoint geometry, masked inputs, and independent activation references.
 #[derive(Deserialize)]
 struct Fixture {
+    /// Tiny architecture shared by the synthetic checkpoint and PyTorch reference.
     config: Gpt2Config,
+    /// Checkpoint-native tensor shapes keyed by source parameter name.
     parameter_shapes: std::collections::BTreeMap<String, Vec<usize>>,
+    /// Two equal-length token-ID rows used by the numerical oracle.
     input_ids: Vec<Vec<i32>>,
+    /// Integer validity mask aligned with the input rows.
     token_mask: Vec<Vec<i32>>,
+    /// Expected outputs keyed by exact or tanh GELU convention.
     references: std::collections::BTreeMap<String, Reference>,
 }
 
+/// Independent PyTorch outputs for one activation convention and input batch.
 #[derive(Deserialize)]
 struct Reference {
+    /// Vocabulary scores shaped `[batch, token, vocabulary]`.
     logits: Vec<Vec<Vec<f32>>>,
+    /// Ordered reference snapshots shaped `[snapshot, batch, token, channel]`.
     hidden_states: Vec<Vec<Vec<Vec<f32>>>>,
+    /// Block MLP outputs keyed by layer, each shaped `[batch, token, channel]`.
     mlp_outputs: std::collections::BTreeMap<String, Vec<Vec<Vec<f32>>>>,
 }
 
+/// Parses the checked-in tiny reference generated independently of the Rust graph.
 fn fixture() -> Fixture {
     serde_json::from_str(include_str!("fixtures/tiny_reference.json")).unwrap()
 }
@@ -72,14 +84,17 @@ fn synthetic_checkpoint() -> Vec<u8> {
     serialize(views, None).unwrap()
 }
 
+/// Flattens batch/token/channel reference arrays into contiguous comparison order.
 fn flat(values: &[Vec<Vec<f32>>]) -> Vec<f32> {
     values.iter().flatten().flatten().copied().collect()
 }
 
+/// Materializes an F32 CPU tensor for exact or tolerance-based comparison.
 fn values<const D: usize>(tensor: Tensor<B, D>) -> Vec<f32> {
     tensor.into_data().to_vec().unwrap()
 }
 
+/// Requires equal lengths, finite actual values, and a bounded maximum absolute error.
 fn close(actual: &[f32], expected: &[f32], tolerance: f32) {
     assert_eq!(actual.len(), expected.len());
     let error = actual
@@ -93,6 +108,7 @@ fn close(actual: &[f32], expected: &[f32], tolerance: f32) {
     );
 }
 
+/// Builds the reference two-row, four-token input with its semantic padding mask.
 fn input(fixture: &Fixture) -> CausalLmInput<B> {
     CausalLmInput {
         token_ids: Tensor::<B, 2, Int>::from_data(
@@ -116,6 +132,7 @@ fn input(fixture: &Fixture) -> CausalLmInput<B> {
     }
 }
 
+/// Imports synthetic Conv1D weights and checks that the tied head has one alias.
 fn loaded(config: Gpt2Config) -> Gpt2ForCausalLm<B> {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -131,6 +148,7 @@ fn loaded(config: Gpt2Config) -> Gpt2ForCausalLm<B> {
     model
 }
 
+/// Both distinct GELU conventions reproduce PyTorch logits, hidden states, and MLP outputs.
 #[test]
 fn imported_conv1d_weights_match_pytorch_logits_and_mlp_boundaries_for_both_gelus() {
     let fixture = fixture();
@@ -186,6 +204,7 @@ fn imported_conv1d_weights_match_pytorch_logits_and_mlp_boundaries_for_both_gelu
     }
 }
 
+/// Captures preserve logits, ablations change them, replacement restores them, and residual readout agrees.
 #[test]
 fn captures_edits_restoration_and_direct_readout_use_actual_residuals() {
     let fixture = fixture();
@@ -229,6 +248,7 @@ fn captures_edits_restoration_and_direct_readout_use_actual_residuals() {
     assert_eq!(values(restored.logits), values(baseline.logits));
 }
 
+/// Manual block composition matches the backbone and disabling causality exposes a future key.
 #[test]
 fn public_blocks_reproduce_backbone_and_visibility_can_change_per_block() {
     let fixture = fixture();
@@ -269,6 +289,7 @@ fn public_blocks_reproduce_backbone_and_visibility_can_change_per_block() {
     );
 }
 
+/// Last logits follow each row's valid-token mask; explicit positions preserve order and duplicates.
 #[test]
 fn last_and_ordered_logit_selection_respect_valid_tokens() {
     let fixture = fixture();
@@ -320,6 +341,7 @@ fn last_and_ordered_logit_selection_respect_valid_tokens() {
     );
 }
 
+/// Bad selections, hook points, IDs, and readout widths return errors and invalidate stale captures.
 #[test]
 fn invalid_input_unknown_points_and_readout_failures_are_recoverable_and_clear_captures() {
     let fixture = fixture();
@@ -364,6 +386,7 @@ fn invalid_input_unknown_points_and_readout_failures_are_recoverable_and_clear_c
     );
 }
 
+/// Matching duplicate head bytes preserve reference logits; mismatches leave fresh parameters uninitialized.
 #[test]
 fn language_model_namespace_verifies_tied_head_bytes_before_installing_parameters() {
     use safetensors::{
@@ -437,6 +460,7 @@ fn language_model_namespace_verifies_tied_head_bytes_before_installing_parameter
     );
 }
 
+/// Missing, unexpected, or wrong-shaped MLP inventory fails before embedding initialization.
 #[test]
 fn missing_unknown_and_wrong_shape_checkpoints_fail_before_parameter_initialization() {
     use safetensors::{SafeTensors, tensor::serialize};
@@ -476,6 +500,7 @@ fn missing_unknown_and_wrong_shape_checkpoints_fail_before_parameter_initializat
     }
 }
 
+/// Invalid head divisibility, MLP width, epsilon, attention ordering, and untied readout are rejected.
 #[test]
 fn invalid_architecture_conventions_are_rejected_explicitly() {
     let config = fixture().config;
@@ -505,6 +530,7 @@ fn invalid_architecture_conventions_are_rejected_explicitly() {
     }
 }
 
+/// Wrong dtypes or norm-bias widths fail before callbacks and clear pending captures.
 #[test]
 fn public_normalization_and_blocks_reject_incompatible_parameter_contracts() {
     use burn::{module::Param, tensor::DType};
@@ -541,6 +567,7 @@ fn public_normalization_and_blocks_reject_incompatible_parameter_contracts() {
     assert!(hooks.get(&embedding).is_err());
 }
 
+/// A sharded index may declare the tied head without storing duplicate bytes in either namespace.
 #[test]
 fn index_only_tied_alias_loads_both_checkpoint_namespaces() {
     use safetensors::{SafeTensors, tensor::serialize};
@@ -594,10 +621,12 @@ fn index_only_tied_alias_loads_both_checkpoint_namespaces() {
     }
 }
 
+/// Empty and capture-only hooks preserve nonzero imported embedding, attention, and MLP gradients exactly.
 #[cfg(feature = "autodiff")]
 #[test]
 fn empty_and_capture_only_hooks_preserve_imported_parameter_gradients() {
     use burn::{backend::Autodiff, optim::GradientsParams};
+    /// Reverse-mode F32 backend for optimizer-visible parameter-gradient checks.
     type Ad = Autodiff<B>;
     let root = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -648,14 +677,19 @@ fn empty_and_capture_only_hooks_preserve_imported_parameter_gradients() {
     }
 }
 
+/// A hook-inserted adapter and imported backbone all expose finite nonzero optimizer gradients.
 #[cfg(feature = "autodiff")]
 #[test]
 fn imported_and_inserted_parameters_keep_optimizer_visible_gradients() {
     use burn::{backend::Autodiff, module::Module, nn::LinearConfig, optim::GradientsParams};
+    /// Reverse-mode F32 backend for optimizer-visible parameter-gradient checks.
     type Ad = Autodiff<B>;
+    /// Composite trainable module registering the imported GPT-2 backbone and inserted adapter.
     #[derive(Module, Debug)]
     struct Experiment<B: Backend> {
+        /// Imported language model whose parameter IDs remain optimizer-visible.
         backbone: Gpt2ForCausalLm<B>,
+        /// Trainable channel projection inserted at the first block's MLP output.
         adapter: Linear<B>,
     }
     let device = Default::default();
@@ -708,13 +742,18 @@ fn imported_and_inserted_parameters_keep_optimizer_visible_gradients() {
     }
 }
 
+/// Opt-in local checkpoint validation compares final logits, probabilities, and layers 8–11 MLP outputs.
 #[test]
 #[ignore = "requires pinned local GPT-2 weights and independent PyTorch reference; set GPT2_CHECKPOINT and GPT2_REFERENCE"]
 fn pretrained_gpt2_matches_pytorch_last_logits_and_late_mlp_outputs() {
+    /// Pinned real-checkpoint configuration and PyTorch outputs for unmasked input sequences.
     #[derive(Deserialize)]
     struct RealFixture {
+        /// Architecture corresponding to the pinned local checkpoint.
         config: Gpt2Config,
+        /// Unmasked token-ID rows submitted to both implementations.
         input_ids: Vec<Vec<i32>>,
+        /// Independent final logits and intermediate MLP outputs.
         reference: Reference,
     }
     let checkpoint = std::env::var("GPT2_CHECKPOINT").expect("GPT2_CHECKPOINT");

@@ -87,9 +87,13 @@ pub(super) enum OfficialExecutionPath {
 /// One authenticated full-vocabulary row and its execution-path identity.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OfficialLogitRow<'a> {
+    /// Official stateless or cached numerical stream that produced the row.
     path: OfficialExecutionPath,
+    /// Zero-based generation decision represented by these logits.
     decision: usize,
+    /// Complete vocabulary logits in token-ID order.
     values: &'a [f32],
+    /// Authenticated stable argmax token for this decision.
     top1_token_id: u32,
 }
 
@@ -155,9 +159,13 @@ impl OfficialHiddenPoint {
 /// One authenticated hidden trace paired with its exact semantic point.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OfficialHiddenTrace<'a> {
+    /// Prompt, prefill, or recurrent-decode location represented by this trace.
     point: OfficialHiddenPoint,
+    /// Number of embedding, block-output, and final-normalization boundaries.
     rows: usize,
+    /// Residual-channel count stored at every boundary.
     width: usize,
+    /// Flattened row-major `[boundary, hidden]` F32 activations.
     values: &'a [f32],
 }
 
@@ -414,18 +422,31 @@ struct OutputDescriptors {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PromptDescriptor {
+    /// Payload filename relative to the authenticated bundle root.
     relative_path: String,
+    /// Declared binary scalar encoding, required to be little-endian F32.
     encoding: String,
+    /// Numerical dtype used by the official model before export.
     source_dtype: String,
+    /// Scalar dtype used in the exported binary payload.
     storage_dtype: String,
+    /// Ordered tensor-axis lengths used to validate payload geometry.
     shape: Vec<usize>,
+    /// Total number of scalar elements described by the payload.
     elements: usize,
+    /// Exact binary payload length in bytes.
     bytes: u64,
+    /// Lowercase SHA-256 digest authenticating the complete payload.
     sha256: String,
+    /// Whether every exported scalar was reported finite.
     finite: bool,
+    /// F64 diagnostic sum of all prompt logits.
     sum: f64,
+    /// Euclidean norm of the full prompt vocabulary vector.
     l2_norm: f64,
+    /// Ten highest-scoring vocabulary entries in rank order.
     top10: Vec<RankedLogit>,
+    /// Stable highest-scoring token ID for the prompt.
     top1_token_id: u32,
 }
 
@@ -433,7 +454,9 @@ struct PromptDescriptor {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RankedLogit {
+    /// Vocabulary index of the ranked entry.
     token_id: u32,
+    /// Exported F32 score for this vocabulary entry.
     logit: f32,
 }
 
@@ -441,17 +464,29 @@ struct RankedLogit {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HiddenDescriptor {
+    /// Payload filename relative to the authenticated bundle root.
     relative_path: String,
+    /// Declared binary scalar encoding, required to be little-endian F32.
     encoding: String,
+    /// Numerical dtype used by the official model before export.
     source_dtype: String,
+    /// Scalar dtype used in the exported binary payload.
     storage_dtype: String,
+    /// Ordered tensor-axis lengths used to validate payload geometry.
     shape: Vec<usize>,
+    /// Total number of scalar elements described by the payload.
     elements: usize,
+    /// Exact binary payload length in bytes.
     bytes: u64,
+    /// Lowercase SHA-256 digest authenticating the complete payload.
     sha256: String,
+    /// Whether every exported scalar was reported finite.
     finite: bool,
+    /// Ordered names of the embedding, block, and final-normalization boundaries.
     labels: Vec<String>,
+    /// Execution phase identifying stateless prompt, cached prefill, or recurrent decode.
     phase: String,
+    /// Absolute token position whose boundary activations were exported.
     token_position: usize,
 }
 
@@ -459,16 +494,27 @@ struct HiddenDescriptor {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MatrixDescriptor {
+    /// Payload filename relative to the authenticated bundle root.
     relative_path: String,
+    /// Declared binary scalar encoding, required to be little-endian F32.
     encoding: String,
+    /// Numerical dtype used by the official model before export.
     source_dtype: String,
+    /// Scalar dtype used in the exported binary payload.
     storage_dtype: String,
+    /// Ordered tensor-axis lengths used to validate payload geometry.
     shape: Vec<usize>,
+    /// Total number of scalar elements described by the payload.
     elements: usize,
+    /// Exact binary payload length in bytes.
     bytes: u64,
+    /// Lowercase SHA-256 digest authenticating the complete payload.
     sha256: String,
+    /// Whether every exported scalar was reported finite.
     finite: bool,
+    /// Absolute prediction positions aligned with the matrix rows.
     row_position_ids: Vec<usize>,
+    /// Stable highest-scoring token ID for each vocabulary row.
     row_top1_token_ids: Vec<u32>,
 }
 
@@ -2353,6 +2399,8 @@ fn sha256_file_hex(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    //! Tests for oracle geometry, authenticated schemas, and adversarial bundle validation.
+
     use super::*;
 
     /// Every base-only anchor is populated and distinct by filename.

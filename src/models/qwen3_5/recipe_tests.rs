@@ -16,8 +16,10 @@ use crate::{
     models::qwen3_5::Qwen3_5ForCausalLm,
 };
 
+/// Deterministic CPU tensor backend for small checkpoint fixtures.
 type B = Flex<f32, i32>;
 
+/// Builds one DeltaNet and one full-attention block with tied vocabulary weights.
 fn tiny_config() -> Qwen3_5TextConfig {
     Qwen3_5TextConfig {
         vocab_size: 16,
@@ -45,6 +47,7 @@ fn tiny_config() -> Qwen3_5TextConfig {
     }
 }
 
+/// Supplies three unpadded tokens to exercise both sequence-mixer types.
 fn input() -> CausalLmInput<B> {
     CausalLmInput {
         token_ids: Tensor::<B, 2, Int>::from_ints([[1, 2, 3]], &Default::default()),
@@ -53,6 +56,7 @@ fn input() -> CausalLmInput<B> {
     }
 }
 
+/// Writes deterministic F32 SafeTensors and optionally one unexplained source key.
 fn fixture(root: &Path, config: &Qwen3_5TextConfig, extra: bool) {
     fs::write(
         root.join("config.json"),
@@ -111,6 +115,7 @@ fn fixture(root: &Path, config: &Qwen3_5TextConfig, extra: bool) {
     fs::write(root.join("model.safetensors"), bytes).unwrap();
 }
 
+/// Loads every fixture parameter through the ordinary family contract for comparison.
 fn original(root: &Path, config: Qwen3_5TextConfig) -> Qwen3_5ForCausalLm<B> {
     let contract = config
         .checkpoint_contract(Qwen3_5CheckpointOptions {
@@ -127,6 +132,7 @@ fn original(root: &Path, config: Qwen3_5TextConfig) -> Qwen3_5ForCausalLm<B> {
     model
 }
 
+/// Unedited recipes preserve backbone states and a vocabulary view tied to live embeddings.
 #[test]
 fn unchanged_recipe_matches_loaded_family_backbone_and_live_tied_logits() {
     let directory = tempfile::tempdir().unwrap();
@@ -170,6 +176,7 @@ fn unchanged_recipe_matches_loaded_family_backbone_and_live_tied_logits() {
     );
 }
 
+/// Prefix loading reads exactly its selected payload bytes and permits a custom task head.
 #[test]
 fn prefix_reads_only_selected_backbone_parameters_and_can_use_a_custom_head() {
     let directory = tempfile::tempdir().unwrap();
@@ -212,6 +219,7 @@ fn prefix_reads_only_selected_backbone_parameters_and_can_use_a_custom_head() {
     assert_eq!(head.forward(state.hidden.mean_dim(1)).dims(), [1, 1, 2]);
 }
 
+/// Changed MLP shapes require explicit reinitialization while compatible norms retain weights.
 #[test]
 fn changed_feed_forward_width_requires_explicit_reinitialization_and_is_audited() {
     let directory = tempfile::tempdir().unwrap();
@@ -259,6 +267,49 @@ fn changed_feed_forward_width_requires_explicit_reinitialization_and_is_audited(
     assert!(loaded.model.forward(&input(), false).is_ok());
 }
 
+/// Replacing DeltaNet with full attention initializes absent projections and reuses its MLP.
+#[test]
+fn changed_sequence_mixer_reuses_only_existing_compatible_source_parameters() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    fixture(directory.path(), &tiny_config(), false);
+    let mut recipe = Qwen3_5BackboneRecipe::from_local_config(directory.path())
+        .expect("fixture source topology");
+    recipe.layers[0].layer_type = Qwen3_5LayerType::FullAttention;
+    let loaded = recipe
+        .load_pretrained::<B>(directory.path(), &Default::default(), &Default::default())
+        .expect("a new mixer may initialize absent source components");
+    assert!(!loaded.report.newly_initialized.is_empty());
+    assert!(loaded.report.newly_initialized.iter().all(|item| {
+        item.name.starts_with("model.layers.0.self_attn.")
+            && item.reason.contains("no selected pretrained source")
+    }));
+    assert!(
+        loaded
+            .report
+            .omitted
+            .iter()
+            .any(|item| { item.name.starts_with("model.layers.0.linear_attn.") })
+    );
+    let source = original(directory.path(), tiny_config());
+    assert_eq!(
+        loaded.model.layers[0].mlp.up_proj.weight.val().to_data(),
+        source.model.layers[0].mlp.up_proj.weight.val().to_data(),
+    );
+    let (hidden, _) = loaded
+        .model
+        .forward(&input(), false)
+        .expect("edited backbone");
+    assert!(
+        hidden
+            .to_data()
+            .to_vec::<f32>()
+            .expect("F32 states")
+            .iter()
+            .all(|value| value.is_finite())
+    );
+}
+
+/// Random recipes execute heterogeneous rotary geometries and an extra block without weights.
 #[test]
 fn random_recipe_supports_heterogeneous_attention_heads_rotary_widths_and_extra_blocks() {
     let mut recipe = Qwen3_5BackboneRecipe::from_config(tiny_config()).unwrap();
@@ -278,6 +329,7 @@ fn random_recipe_supports_heterogeneous_attention_heads_rotary_widths_and_extra_
     assert_eq!(hidden.dims(), [1, 3, 8]);
 }
 
+/// Reordered execution loads weights from each block's explicit original source index.
 #[test]
 fn source_layer_reordering_reuses_the_explicit_original_parameters() {
     let directory = tempfile::tempdir().unwrap();
@@ -293,6 +345,7 @@ fn source_layer_reordering_reuses_the_explicit_original_parameters() {
     assert!(loaded.model.forward(&input(), false).is_ok());
 }
 
+/// Appended blocks with no source keep random initialization without requesting missing tensors.
 #[test]
 fn newly_appended_blocks_are_initialized_without_requesting_nonexistent_checkpoint_layers() {
     let directory = tempfile::tempdir().unwrap();
@@ -315,6 +368,7 @@ fn newly_appended_blocks_are_initialized_without_requesting_nonexistent_checkpoi
     assert!(loaded.model.forward(&input(), false).is_ok());
 }
 
+/// Rewrites fixture payloads and metadata to BF16 while retaining parameter shapes and names.
 fn convert_fixture_to_bfloat16(root: &Path) {
     let path = root.join("model.safetensors");
     let original = fs::read(&path).unwrap();
@@ -346,6 +400,7 @@ fn convert_fixture_to_bfloat16(root: &Path) {
     fs::write(path, bytes).unwrap();
 }
 
+/// Requested checkpoint dtype changes move parameters from reuse to the transformation report.
 #[test]
 fn streamed_dtype_conversions_are_reported_as_transformations() {
     use crate::checkpoint::{DTypePolicy, TensorDType};
@@ -386,6 +441,7 @@ fn streamed_dtype_conversions_are_reported_as_transformations() {
     assert!(loaded.model.forward(&input(), false).is_ok());
 }
 
+/// Newly initialized owners follow either preserved BF16 or explicitly requested F32 source dtype.
 #[test]
 fn reinitialized_parameters_follow_preserved_or_explicit_checkpoint_dtype() {
     use crate::checkpoint::DTypePolicy;
@@ -443,8 +499,10 @@ fn reinitialized_parameters_follow_preserved_or_explicit_checkpoint_dtype() {
 }
 
 #[cfg(feature = "autodiff")]
+/// Dtype casting preserves trainable leaves for reinitialized MLP parameters.
 #[test]
 fn reinitialized_mlp_parameters_keep_gradients_after_dtype_selection() {
+    /// Autodiff wrapper used to verify gradients through newly initialized owners.
     type Ad = burn::backend::Autodiff<B>;
 
     let directory = tempfile::tempdir().unwrap();
@@ -480,6 +538,7 @@ fn reinitialized_mlp_parameters_keep_gradients_after_dtype_selection() {
     }
 }
 
+/// Strict loading rejects unexplained keys and a checkpoint config changed after recipe creation.
 #[test]
 fn unknown_source_parameters_and_changed_source_config_are_not_ignored() {
     let directory = tempfile::tempdir().unwrap();
@@ -508,6 +567,7 @@ fn unknown_source_parameters_and_changed_source_config_are_not_ignored() {
     );
 }
 
+/// Stateless heterogeneous backbones reject creation of homogeneous family decode caches.
 #[test]
 fn recipe_backbones_cannot_silently_enter_homogeneous_family_caches() {
     let model = Qwen3_5BackboneRecipe::from_config(tiny_config())
@@ -532,6 +592,7 @@ proptest::proptest! {
         ..Default::default()
     })]
 
+    /// Unique in-range selections preserve source identity; duplicates and invalid indices fail.
     #[test]
     fn qwen_recipe_source_selections_are_exact_or_rejected_before_loading(
         selected in proptest::collection::vec(0usize..5, 1..5),
@@ -574,6 +635,7 @@ proptest::proptest! {
     }
 }
 
+/// Invalid prefixes, empty stacks, and broad checkpoint exceptions return contextual errors.
 #[test]
 fn qwen_recipe_empty_topology_prefix_and_source_contract_fail_contextually() {
     let recipe = Qwen3_5BackboneRecipe::from_config(tiny_config()).unwrap();
@@ -609,6 +671,7 @@ fn qwen_recipe_empty_topology_prefix_and_source_contract_fail_contextually() {
     }
 }
 
+/// Config-only recipes enforce the 16 MiB JSON bound and initialize without checkpoint payloads.
 #[test]
 fn qwen_local_recipe_config_is_bounded_and_does_not_require_weight_files() {
     let directory = tempfile::tempdir().unwrap();
@@ -630,6 +693,7 @@ fn qwen_local_recipe_config_is_bounded_and_does_not_require_weight_files() {
     assert!(recipe.init_random::<B>(&Default::default()).is_ok());
 }
 
+/// Explicit source layout loads successfully while two automatic embedding namespaces fail.
 #[test]
 fn qwen_recipe_namespace_ambiguity_is_rejected_and_explicit_layout_is_honored() {
     let directory = tempfile::tempdir().unwrap();

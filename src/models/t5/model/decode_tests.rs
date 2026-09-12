@@ -1,3 +1,5 @@
+//! Tests cached T5 decoding, state preservation, stateless parity, and gradient connectivity.
+
 use burn::{
     backend::Flex,
     module::{Initializer, Module, ModuleMapper, Param},
@@ -174,7 +176,10 @@ fn release_contract_encoder_dtype_rejection_preserves_populated_state() {
 }
 
 /// Selects a real parameter dtype while retaining T5 normalization scales in F32.
-struct RuntimeDtypeParameters(DType);
+struct RuntimeDtypeParameters(
+    /// Dtype applied to non-normalization parameters.
+    DType,
+);
 
 impl ModuleMapper<TestBackend> for RuntimeDtypeParameters {
     /// Replaces lazy weights with deterministic small matrices and unit F32 normalization scales.
@@ -631,8 +636,11 @@ fn self_cache_snapshot(state: &T5DecodeState<TestBackend>) -> Vec<Vec<f32>> {
 /// Includes source tensors and diagnostics because a rejected operation must retain its binding.
 #[derive(Debug, PartialEq)]
 struct ContractSnapshot {
+    /// Materialized self-attention keys and values for every layer and sequence.
     self_kv: Vec<Vec<f32>>,
+    /// Bound encoder tensors, projected cross-attention keys and values, and diagnostics.
     cross: Option<Vec<TensorData>>,
+    /// Committed decoder prefix length for each sequence.
     lengths: Vec<usize>,
 }
 
@@ -1896,6 +1904,7 @@ fn cross_projection_rejects_missing_decoder_component() {
 fn stateless_encoder_decoder_graph_has_parameter_gradients() {
     use burn::backend::Autodiff;
 
+    /// Autodiff wrapper used to verify encoder and decoder parameter gradients.
     type AdBackend = Autodiff<TestBackend>;
 
     let device = Default::default();

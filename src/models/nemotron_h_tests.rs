@@ -1,8 +1,11 @@
+//! Nemotron-H schedule normalization, configuration rejection, and pinned schema tests.
+
 use super::*;
 
 /// Published 52-block Nemotron 3/3.5 topology: 23 Mamba, 23 MoE, 6 GQA.
 const OFFICIAL_30B_PATTERN: &str = "MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME";
 
+/// Legacy characters deserialize to ordered block types and reconstruct unchanged.
 #[test]
 fn legacy_pattern_round_trips_to_normalized_blocks() {
     let json = r#"{
@@ -15,6 +18,7 @@ fn legacy_pattern_round_trips_to_normalized_blocks() {
     config.validate().unwrap();
 }
 
+/// A declared depth that disagrees with the configured block schedule is rejected.
 #[test]
 fn rejects_declared_depth_that_conflicts_with_pattern() {
     let config = NemotronHConfig {

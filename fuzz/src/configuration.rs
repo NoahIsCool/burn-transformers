@@ -18,7 +18,10 @@ use transformers::{
 /// JSON value wrapper that exercises the legacy Infinity lexer without topology loops.
 #[derive(Deserialize)]
 #[serde(transparent)]
-struct LexicalValue(Value);
+struct LexicalValue(
+    /// Parsed JSON payload, retained only to validate lexer acceptance.
+    Value,
+);
 
 impl Validate for LexicalValue {
     /// Arbitrary parsed JSON has no model-shape invariants.

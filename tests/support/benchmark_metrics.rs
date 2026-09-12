@@ -210,6 +210,7 @@ pub fn memory_profiling_enabled() -> bool {
 
 /// Resolves the opt-in supervisor endpoint once for this benchmark process.
 fn memory_endpoint() -> &'static Option<std::path::PathBuf> {
+    /// Process-wide cached supervisor socket path; absence disables instrumentation.
     static ENDPOINT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     ENDPOINT.get_or_init(|| std::env::var_os("TRANSFORMERS_BENCH_MEMORY_SOCKET").map(Into::into))
 }
@@ -261,6 +262,7 @@ impl MemoryPhase {
 /// Connects once to the supervisor's private socket; stale endpoints fail closed.
 #[cfg(target_os = "macos")]
 fn memory_channel() -> &'static std::sync::Mutex<MemoryChannel> {
+    /// Single serialized supervisor connection reused across memory phases.
     static CHANNEL: std::sync::OnceLock<std::sync::Mutex<MemoryChannel>> =
         std::sync::OnceLock::new();
     CHANNEL.get_or_init(|| {
@@ -388,6 +390,8 @@ impl MemoryChannel {
 
 #[cfg(test)]
 mod tests {
+    //! Tests for benchmark statistics, environment validation, and memory-phase coordination.
+
     use super::*;
 
     /// Disabled instrumentation has no external side effects or required supervisor.

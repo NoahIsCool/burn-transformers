@@ -1,3 +1,5 @@
+//! Muse forward, numerical-oracle, autodiff, and opt-in Metal attention tests.
+
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use std::sync::Mutex;
 #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
@@ -30,6 +32,7 @@ use crate::{
     models::muse_glimmer::MuseGlimmerCheckpointOptions,
 };
 
+/// Deterministic CPU backend using F32 values and I32 token indices.
 type TestBackend = Flex<f32, i32>;
 
 /// Serializes the allocation-heavy 32K Metal envelope with other unit gates.
@@ -111,10 +114,12 @@ impl MetalKernelFieldVisitor {
 
 #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
 impl Visit for MetalKernelFieldVisitor {
+    /// Records a debug-formatted kernel field through the shared string decoder.
     fn record_debug(&mut self, field: &Field, value: &dyn core::fmt::Debug) {
         self.record_text(field, format!("{value:?}"));
     }
 
+    /// Records a string-valued kernel field without debug formatting.
     fn record_str(&mut self, field: &Field, value: &str) {
         self.record_text(field, value.to_owned());
     }
@@ -132,10 +137,12 @@ struct MetalKernelSubscriber {
 
 #[cfg(all(feature = "attention-kernel-tracing", target_os = "macos"))]
 impl Subscriber for MetalKernelSubscriber {
+    /// Accepts only CubeCL launch spans for kernel-dispatch evidence.
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
         metadata.name() == "launch_inner"
     }
 
+    /// Stores complete kernel name/identifier pairs and assigns a nonzero span ID.
     fn new_span(&self, attributes: &Attributes<'_>) -> Id {
         let mut visitor = MetalKernelFieldVisitor::default();
         attributes.record(&mut visitor);
@@ -148,14 +155,19 @@ impl Subscriber for MetalKernelSubscriber {
         Id::from_u64(self.next_span.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
+    /// Ignores later field updates because launch metadata is captured when the span opens.
     fn record(&self, _span: &Id, _values: &Record<'_>) {}
 
+    /// Ignores span causality because launch identity is independent of relationships.
     fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
 
+    /// Ignores standalone events; kernel evidence comes from launch spans.
     fn event(&self, _event: &Event<'_>) {}
 
+    /// Ignores span entry because launch metadata was already recorded.
     fn enter(&self, _span: &Id) {}
 
+    /// Ignores span exit because no timing or nesting information is retained.
     fn exit(&self, _span: &Id) {}
 }
 
@@ -838,6 +850,7 @@ fn stress_muse_32k_attention_envelope_on_metal() {
     <Metal as Backend>::memory_cleanup(&device);
 
     let attention = metal_32k_stress_attention(&config, &device);
+    /// Global suffix length crossing the policy's 64-row chunk boundary.
     const GLOBAL_QUERY_ROWS: usize = 65;
     let representative_global_plan = policy
         .plan(
@@ -890,6 +903,7 @@ fn stress_muse_32k_attention_envelope_on_metal() {
     <Metal as Backend>::sync(&device).expect("synchronize global stress attention");
     <Metal as Backend>::memory_cleanup(&device);
 
+    /// Local suffix length spanning multiple bounded attention chunks.
     const LOCAL_QUERY_ROWS: usize = 513;
     let representative_local_bound =
         MUSE_32K_STRESS_WINDOW + policy.maximum_query_tokens(LOCAL_QUERY_ROWS) - 1;
@@ -961,8 +975,11 @@ fn stress_muse_32k_attention_envelope_on_metal() {
 fn metal_score_rounding_fixture(
     device: &<Metal as BackendTypes>::Device,
 ) -> (MuseGlimmerAttention<Metal>, MuseAttentionProjection<Metal>) {
+    /// Single-head fixture isolating the eager score-rounding boundary.
     const HEADS: usize = 1;
+    /// Residual width matching the identity attention projection.
     const HIDDEN_SIZE: usize = HEADS * METAL_ATTENTION_HEAD_DIM;
+    /// Nonzero key rows controlling the last-query rounding oracle.
     const VISIBLE_KEYS: usize = 4;
 
     let config = MuseGlimmerTextConfig {
@@ -1271,9 +1288,13 @@ fn aligned_local_key_ranges_respect_inclusive_window_boundary() {
 /// recorded `[batch, head, query, key]` geometry.
 #[test]
 fn official_32k_chunk_schedules_bound_every_realized_plane() {
+    /// Synthetic context length used to enumerate production chunk geometry.
     const SEQUENCE: usize = 32_768;
+    /// Released query-head count retained by the chunk-geometry test.
     const HEADS: usize = 32;
+    /// Released local-attention window measured in semantic tokens.
     const WINDOW: usize = 2048;
+    /// Maximum permitted element count in each realized score-like plane.
     const LIMIT: usize = 1 << 26;
 
     let policy = AttentionExecutionPolicy::default();
@@ -1765,6 +1786,7 @@ fn stateless_device_affinity_errors_are_contextual() {
 fn autodiff_smoke_reaches_embedding_weights() {
     use burn::backend::Autodiff;
 
+    /// Reverse-mode backend for checking gradient propagation through Muse attention.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     let model = MuseGlimmerForCausalLm::<AdBackend>::init(tiny_config(), &device).unwrap();
@@ -1790,6 +1812,7 @@ fn autodiff_smoke_reaches_embedding_weights() {
 fn bounded_multichunk_autodiff_is_not_mislabeled_as_memory_bounded() {
     use burn::backend::Autodiff;
 
+    /// Reverse-mode backend for checking gradient propagation through Muse attention.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     let model = MuseGlimmerForCausalLm::<AdBackend>::init(tiny_config(), &device)

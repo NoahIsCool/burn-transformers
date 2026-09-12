@@ -99,15 +99,21 @@ pub fn validate_trainable_module<B: AutodiffBackend, M: Module<B>>(model: &M) ->
     Ok(())
 }
 
+/// First-pass ownership inventory that leaves parameter payloads lazy.
 #[derive(Default)]
 struct ParameterOwners {
+    /// Module segments leading to the currently visited parameter.
     path: Vec<String>,
+    /// Registered module paths grouped by Burn parameter identity.
     groups: HashMap<ParamId, ParameterGroup>,
 }
 
+/// Registered fields sharing an identity and their combined trainability.
 #[derive(Default)]
 struct ParameterGroup {
+    /// Complete module paths that register this parameter identity.
     paths: Vec<String>,
+    /// Whether any inspected owner participates in differentiation.
     trainable: bool,
 }
 
@@ -137,7 +143,9 @@ impl<B: Backend> ModuleVisitor<B> for ParameterOwners {
     }
 }
 
+/// Second-pass visitor that materializes only duplicated parameter owners.
 struct DuplicateTrainability<'a> {
+    /// Duplicated identities whose trainability still needs inspection.
     groups: &'a mut HashMap<ParamId, ParameterGroup>,
 }
 

@@ -21,9 +21,11 @@ use crate::{
 
 use super::{ModularCausalLm, ModularSeq2SeqLm, common::relative_bias_from_positions};
 
+/// CPU backend with F32 values and I32 indices for compact modular-model fixtures.
 type TestBackend = Flex<f32, i32>;
 
 #[path = "state_contracts_tests.rs"]
+/// Sparse decode diagnostics and transactional failure contract tests.
 mod state_contracts;
 
 /// Standard scale-only normalization for compact fixtures.
@@ -1483,6 +1485,7 @@ fn seq2seq_encoder_router_diagnostics_are_not_silently_dropped() {
 fn causal_stateless_graph_is_autodiff_safe() {
     use burn::backend::Autodiff;
 
+    /// Reverse-mode CPU backend used to check the stateless graph's embedding gradients.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     let model = ModularCausalLm::<AdBackend>::init(
@@ -1512,6 +1515,7 @@ fn causal_stateless_graph_is_autodiff_safe() {
 fn seq2seq_stateless_graph_is_autodiff_safe() {
     use burn::backend::Autodiff;
 
+    /// Reverse-mode CPU backend used to check the stateless graph's embedding gradients.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     let model = ModularSeq2SeqLm::<AdBackend>::init(seq2seq_spec(), &device).unwrap();

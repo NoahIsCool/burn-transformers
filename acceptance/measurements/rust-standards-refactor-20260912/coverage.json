@@ -1,0 +1,7958 @@
+{
+  "schema_version": 1,
+  "source_revision": "8444a38ecb9c2eb3aa50ae5af21828c1146b821d",
+  "scope": "All native reported src file summaries for std,flex,autodiff,tokenizers,chat-templates; authored tests and generated mappings included. Native default filename filters remain in effect.",
+  "production_only": false,
+  "release_promotion": false,
+  "toolchain": "rustc 1.94.0-nightly (4f14395c3 2025-12-22), LLVM 21.1.8",
+  "tool": "cargo-llvm-cov 0.6.21 --branch (unstable)",
+  "native_totals": {
+    "branches": {
+      "count": 7388,
+      "covered": 5893,
+      "notcovered": 1495,
+      "percent": 79.76448294531673
+    },
+    "functions": {
+      "count": 6364,
+      "covered": 5499,
+      "percent": 86.40791954745443
+    },
+    "instantiations": {
+      "count": 15039,
+      "covered": 7994,
+      "percent": 53.15512999534544
+    },
+    "lines": {
+      "count": 93548,
+      "covered": 87418,
+      "percent": 93.4472142643349
+    },
+    "mcdc": {
+      "count": 0,
+      "covered": 0,
+      "notcovered": 0,
+      "percent": 0
+    },
+    "regions": {
+      "count": 140959,
+      "covered": 133240,
+      "notcovered": 7719,
+      "percent": 94.52393958526947
+    }
+  },
+  "src_totals": {
+    "branches": {
+      "count": 7388,
+      "covered": 5893,
+      "notcovered": 1495,
+      "percent": 79.76448294531673
+    },
+    "lines": {
+      "count": 93548,
+      "covered": 87418,
+      "notcovered": 6130,
+      "percent": 93.44721426433489
+    },
+    "regions": {
+      "count": 140959,
+      "covered": 133240,
+      "notcovered": 7719,
+      "percent": 94.52393958526947
+    }
+  },
+  "shared_core_totals": {
+    "branches": {
+      "count": 3624,
+      "covered": 3094,
+      "notcovered": 530,
+      "percent": 85.37527593818984
+    },
+    "lines": {
+      "count": 44211,
+      "covered": 42532,
+      "notcovered": 1679,
+      "percent": 96.20230259437696
+    },
+    "regions": {
+      "count": 69353,
+      "covered": 66865,
+      "notcovered": 2488,
+      "percent": 96.41255605381166
+    }
+  },
+  "files": [
+    {
+      "path": "src/architecture/spec.rs",
+      "summary": {
+        "branches": {
+          "count": 114,
+          "covered": 114,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 10,
+          "covered": 10,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 20,
+          "covered": 10,
+          "percent": 50.0
+        },
+        "lines": {
+          "count": 248,
+          "covered": 248,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 233,
+          "covered": 230,
+          "notcovered": 3,
+          "percent": 98.71244635193133
+        }
+      }
+    },
+    {
+      "path": "src/architecture/spec_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 16,
+          "covered": 12,
+          "notcovered": 4,
+          "percent": 75.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 18,
+          "covered": 18,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 18,
+          "covered": 18,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 448,
+          "covered": 443,
+          "percent": 98.88392857142857
+        },
+        "regions": {
+          "count": 382,
+          "covered": 376,
+          "notcovered": 6,
+          "percent": 98.42931937172776
+        }
+      }
+    },
+    {
+      "path": "src/architecture/types.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 2,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 12,
+          "covered": 10,
+          "percent": 83.33333333333334
+        },
+        "instantiations": {
+          "count": 55,
+          "covered": 17,
+          "percent": 30.909090909090907
+        },
+        "lines": {
+          "count": 64,
+          "covered": 57,
+          "percent": 89.0625
+        },
+        "regions": {
+          "count": 65,
+          "covered": 58,
+          "notcovered": 7,
+          "percent": 89.23076923076925
+        }
+      }
+    },
+    {
+      "path": "src/architecture/types_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 48,
+          "covered": 48,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 98,
+          "covered": 98,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/attention.rs",
+      "summary": {
+        "branches": {
+          "count": 192,
+          "covered": 184,
+          "notcovered": 8,
+          "percent": 95.83333333333334
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 54,
+          "covered": 50,
+          "percent": 92.5925925925926
+        },
+        "instantiations": {
+          "count": 220,
+          "covered": 95,
+          "percent": 43.18181818181818
+        },
+        "lines": {
+          "count": 898,
+          "covered": 863,
+          "percent": 96.10244988864143
+        },
+        "regions": {
+          "count": 1181,
+          "covered": 1137,
+          "notcovered": 44,
+          "percent": 96.27434377646063
+        }
+      }
+    },
+    {
+      "path": "src/attention_intervention_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 10,
+          "covered": 10,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 56,
+          "covered": 52,
+          "percent": 92.85714285714286
+        },
+        "instantiations": {
+          "count": 57,
+          "covered": 53,
+          "percent": 92.98245614035088
+        },
+        "lines": {
+          "count": 556,
+          "covered": 547,
+          "percent": 98.38129496402878
+        },
+        "regions": {
+          "count": 1209,
+          "covered": 1196,
+          "notcovered": 13,
+          "percent": 98.9247311827957
+        }
+      }
+    },
+    {
+      "path": "src/attention_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 34,
+          "covered": 23,
+          "notcovered": 11,
+          "percent": 67.64705882352942
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 30,
+          "covered": 30,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 30,
+          "covered": 30,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 501,
+          "covered": 500,
+          "percent": 99.8003992015968
+        },
+        "regions": {
+          "count": 932,
+          "covered": 930,
+          "notcovered": 2,
+          "percent": 99.78540772532189
+        }
+      }
+    },
+    {
+      "path": "src/cache/config.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 2,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 7,
+          "covered": 7,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 14,
+          "covered": 7,
+          "percent": 50.0
+        },
+        "lines": {
+          "count": 43,
+          "covered": 43,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 66,
+          "covered": 66,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/cache/config_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 4,
+          "covered": 4,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 4,
+          "covered": 4,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 36,
+          "covered": 36,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 65,
+          "covered": 65,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/cache/ring.rs",
+      "summary": {
+        "branches": {
+          "count": 12,
+          "covered": 12,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 27,
+          "covered": 27,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 54,
+          "covered": 27,
+          "percent": 50.0
+        },
+        "lines": {
+          "count": 222,
+          "covered": 222,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 259,
+          "covered": 258,
+          "notcovered": 1,
+          "percent": 99.61389961389962
+        }
+      }
+    },
+    {
+      "path": "src/cache/ring_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 17,
+          "covered": 17,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 17,
+          "covered": 17,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 187,
+          "covered": 187,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 425,
+          "covered": 425,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/cache/state.rs",
+      "summary": {
+        "branches": {
+          "count": 10,
+          "covered": 10,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 26,
+          "covered": 26,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 54,
+          "covered": 26,
+          "percent": 48.148148148148145
+        },
+        "lines": {
+          "count": 251,
+          "covered": 251,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 308,
+          "covered": 302,
+          "notcovered": 6,
+          "percent": 98.05194805194806
+        }
+      }
+    },
+    {
+      "path": "src/cache/state_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 11,
+          "covered": 11,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 11,
+          "covered": 11,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 142,
+          "covered": 142,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 263,
+          "covered": 263,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/cache/tensor/allocation.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 2,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 3,
+          "covered": 3,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 6,
+          "covered": 3,
+          "percent": 50.0
+        },
+        "lines": {
+          "count": 46,
+          "covered": 46,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 45,
+          "covered": 44,
+          "notcovered": 1,
+          "percent": 97.77777777777777
+        }
+      }
+    },
+    {
+      "path": "src/cache/tensor/allocation_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 3,
+          "covered": 3,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 3,
+          "covered": 3,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 32,
+          "covered": 32,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 58,
+          "covered": 58,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/cache/tensor/kv.rs",
+      "summary": {
+        "branches": {
+          "count": 80,
+          "covered": 76,
+          "notcovered": 4,
+          "percent": 95.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 82,
+          "covered": 82,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 228,
+          "covered": 82,
+          "percent": 35.96491228070175
+        },
+        "lines": {
+          "count": 990,
+          "covered": 979,
+          "percent": 98.88888888888889
+        },
+        "regions": {
+          "count": 1283,
+          "covered": 1237,
+          "notcovered": 46,
+          "percent": 96.41465315666406
+        }
+      }
+    },
+    {
+      "path": "src/cache/tensor/kv_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 6,
+          "covered": 6,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 57,
+          "covered": 57,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 118,
+          "covered": 116,
+          "notcovered": 2,
+          "percent": 98.30508474576273
+        }
+      }
+    },
+    {
+      "path": "src/cache/tensor/recurrent.rs",
+      "summary": {
+        "branches": {
+          "count": 74,
+          "covered": 68,
+          "notcovered": 6,
+          "percent": 91.8918918918919
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 91,
+          "covered": 89,
+          "percent": 97.8021978021978
+        },
+        "instantiations": {
+          "count": 214,
+          "covered": 95,
+          "percent": 44.39252336448598
+        },
+        "lines": {
+          "count": 1050,
+          "covered": 1021,
+          "percent": 97.23809523809526
+        },
+        "regions": {
+          "count": 1260,
+          "covered": 1217,
+          "notcovered": 43,
+          "percent": 96.58730158730158
+        }
+      }
+    },
+    {
+      "path": "src/cache/tensor/recurrent_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 10,
+          "covered": 10,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 7,
+          "covered": 7,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 113,
+          "covered": 113,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 204,
+          "covered": 202,
+          "notcovered": 2,
+          "percent": 99.01960784313727
+        }
+      }
+    },
+    {
+      "path": "src/cache/tensor/state.rs",
+      "summary": {
+        "branches": {
+          "count": 68,
+          "covered": 61,
+          "notcovered": 7,
+          "percent": 89.70588235294117
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 92,
+          "covered": 91,
+          "percent": 98.91304347826086
+        },
+        "instantiations": {
+          "count": 236,
+          "covered": 91,
+          "percent": 38.559322033898304
+        },
+        "lines": {
+          "count": 703,
+          "covered": 685,
+          "percent": 97.43954480796586
+        },
+        "regions": {
+          "count": 1115,
+          "covered": 1061,
+          "notcovered": 54,
+          "percent": 95.15695067264573
+        }
+      }
+    },
+    {
+      "path": "src/cache/tensor/state_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 2,
+          "covered": 2,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 2,
+          "covered": 2,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 59,
+          "covered": 59,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 147,
+          "covered": 146,
+          "notcovered": 1,
+          "percent": 99.31972789115646
+        }
+      }
+    },
+    {
+      "path": "src/cache/tensor_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 46,
+          "covered": 42,
+          "notcovered": 4,
+          "percent": 91.30434782608695
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 49,
+          "covered": 49,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 49,
+          "covered": 49,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 1699,
+          "covered": 1698,
+          "percent": 99.94114184814597
+        },
+        "regions": {
+          "count": 3738,
+          "covered": 3659,
+          "notcovered": 79,
+          "percent": 97.88657035848047
+        }
+      }
+    },
+    {
+      "path": "src/cache/transaction.rs",
+      "summary": {
+        "branches": {
+          "count": 10,
+          "covered": 9,
+          "notcovered": 1,
+          "percent": 90.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 10,
+          "covered": 10,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 20,
+          "covered": 10,
+          "percent": 50.0
+        },
+        "lines": {
+          "count": 107,
+          "covered": 107,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 134,
+          "covered": 133,
+          "notcovered": 1,
+          "percent": 99.25373134328359
+        }
+      }
+    },
+    {
+      "path": "src/cache/transaction_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 10,
+          "covered": 10,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 10,
+          "covered": 10,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 115,
+          "covered": 115,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 275,
+          "covered": 275,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/accounting.rs",
+      "summary": {
+        "branches": {
+          "count": 40,
+          "covered": 38,
+          "notcovered": 2,
+          "percent": 95.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 16,
+          "covered": 15,
+          "percent": 93.75
+        },
+        "instantiations": {
+          "count": 36,
+          "covered": 18,
+          "percent": 50.0
+        },
+        "lines": {
+          "count": 181,
+          "covered": 173,
+          "percent": 95.58011049723756
+        },
+        "regions": {
+          "count": 216,
+          "covered": 207,
+          "notcovered": 9,
+          "percent": 95.83333333333334
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/artifact.rs",
+      "summary": {
+        "branches": {
+          "count": 130,
+          "covered": 116,
+          "notcovered": 14,
+          "percent": 89.23076923076925
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 68,
+          "covered": 48,
+          "percent": 70.58823529411765
+        },
+        "instantiations": {
+          "count": 197,
+          "covered": 64,
+          "percent": 32.48730964467005
+        },
+        "lines": {
+          "count": 844,
+          "covered": 765,
+          "percent": 90.63981042654027
+        },
+        "regions": {
+          "count": 1042,
+          "covered": 925,
+          "notcovered": 117,
+          "percent": 88.77159309021113
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/dtype.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 2,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 6,
+          "covered": 6,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 12,
+          "covered": 11,
+          "percent": 91.66666666666666
+        },
+        "lines": {
+          "count": 82,
+          "covered": 82,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 102,
+          "covered": 102,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/dtype_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 4,
+          "covered": 4,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 4,
+          "covered": 4,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 40,
+          "covered": 40,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 54,
+          "covered": 51,
+          "notcovered": 3,
+          "percent": 94.44444444444444
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/error.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 1,
+          "covered": 1,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 6,
+          "covered": 3,
+          "percent": 50.0
+        },
+        "lines": {
+          "count": 7,
+          "covered": 7,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 5,
+          "covered": 5,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/mapping.rs",
+      "summary": {
+        "branches": {
+          "count": 114,
+          "covered": 109,
+          "notcovered": 5,
+          "percent": 95.6140350877193
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 66,
+          "covered": 62,
+          "percent": 93.93939393939394
+        },
+        "instantiations": {
+          "count": 152,
+          "covered": 114,
+          "percent": 75.0
+        },
+        "lines": {
+          "count": 909,
+          "covered": 890,
+          "percent": 97.9097909790979
+        },
+        "regions": {
+          "count": 1060,
+          "covered": 1021,
+          "notcovered": 39,
+          "percent": 96.32075471698111
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/options.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 2,
+          "covered": 2,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 8,
+          "covered": 6,
+          "percent": 75.0
+        },
+        "lines": {
+          "count": 16,
+          "covered": 16,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 8,
+          "covered": 8,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization/burnpack.rs",
+      "summary": {
+        "branches": {
+          "count": 118,
+          "covered": 109,
+          "notcovered": 9,
+          "percent": 92.37288135593221
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 118,
+          "covered": 85,
+          "percent": 72.03389830508475
+        },
+        "instantiations": {
+          "count": 262,
+          "covered": 98,
+          "percent": 37.404580152671755
+        },
+        "lines": {
+          "count": 1292,
+          "covered": 1098,
+          "percent": 84.98452012383902
+        },
+        "regions": {
+          "count": 1584,
+          "covered": 1348,
+          "notcovered": 236,
+          "percent": 85.10101010101012
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization/burnpack_test_support.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 4,
+          "covered": 4,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 4,
+          "covered": 4,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 28,
+          "covered": 28,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 45,
+          "covered": 45,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization/burnpack_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 52,
+          "covered": 33,
+          "notcovered": 19,
+          "percent": 63.46153846153846
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 55,
+          "covered": 54,
+          "percent": 98.18181818181819
+        },
+        "instantiations": {
+          "count": 55,
+          "covered": 54,
+          "percent": 98.18181818181819
+        },
+        "lines": {
+          "count": 1276,
+          "covered": 1263,
+          "percent": 98.98119122257052
+        },
+        "regions": {
+          "count": 2807,
+          "covered": 2763,
+          "notcovered": 44,
+          "percent": 98.43249020306376
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization/burnpack_validation_edge_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 28,
+          "covered": 17,
+          "notcovered": 11,
+          "percent": 60.714285714285715
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 17,
+          "covered": 16,
+          "percent": 94.11764705882352
+        },
+        "instantiations": {
+          "count": 17,
+          "covered": 16,
+          "percent": 94.11764705882352
+        },
+        "lines": {
+          "count": 310,
+          "covered": 308,
+          "percent": 99.35483870967742
+        },
+        "regions": {
+          "count": 530,
+          "covered": 523,
+          "notcovered": 7,
+          "percent": 98.67924528301889
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization/checkpoint.rs",
+      "summary": {
+        "branches": {
+          "count": 4,
+          "covered": 3,
+          "notcovered": 1,
+          "percent": 75.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 20,
+          "covered": 19,
+          "percent": 95.0
+        },
+        "instantiations": {
+          "count": 48,
+          "covered": 19,
+          "percent": 39.58333333333333
+        },
+        "lines": {
+          "count": 266,
+          "covered": 223,
+          "percent": 83.83458646616542
+        },
+        "regions": {
+          "count": 305,
+          "covered": 268,
+          "notcovered": 37,
+          "percent": 87.8688524590164
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization/checkpoint_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 10,
+          "covered": 6,
+          "notcovered": 4,
+          "percent": 60.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 19,
+          "covered": 19,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 19,
+          "covered": 19,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 485,
+          "covered": 484,
+          "percent": 99.79381443298969
+        },
+        "regions": {
+          "count": 684,
+          "covered": 681,
+          "notcovered": 3,
+          "percent": 99.56140350877193
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization/config.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 7,
+          "covered": 7,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 16,
+          "covered": 7,
+          "percent": 43.75
+        },
+        "lines": {
+          "count": 33,
+          "covered": 33,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 33,
+          "covered": 32,
+          "notcovered": 1,
+          "percent": 96.96969696969698
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization/load.rs",
+      "summary": {
+        "branches": {
+          "count": 50,
+          "covered": 45,
+          "notcovered": 5,
+          "percent": 90.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 43,
+          "covered": 43,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 239,
+          "covered": 122,
+          "percent": 51.04602510460251
+        },
+        "lines": {
+          "count": 568,
+          "covered": 527,
+          "percent": 92.78169014084507
+        },
+        "regions": {
+          "count": 612,
+          "covered": 570,
+          "notcovered": 42,
+          "percent": 93.13725490196079
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization/load_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 38,
+          "covered": 26,
+          "notcovered": 12,
+          "percent": 68.42105263157895
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 83,
+          "covered": 71,
+          "percent": 85.54216867469879
+        },
+        "instantiations": {
+          "count": 83,
+          "covered": 71,
+          "percent": 85.54216867469879
+        },
+        "lines": {
+          "count": 1680,
+          "covered": 1659,
+          "percent": 98.75
+        },
+        "regions": {
+          "count": 3063,
+          "covered": 2983,
+          "notcovered": 80,
+          "percent": 97.38818152138427
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization/manifest.rs",
+      "summary": {
+        "branches": {
+          "count": 40,
+          "covered": 35,
+          "notcovered": 5,
+          "percent": 87.5
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 33,
+          "covered": 23,
+          "percent": 69.6969696969697
+        },
+        "instantiations": {
+          "count": 68,
+          "covered": 24,
+          "percent": 35.294117647058826
+        },
+        "lines": {
+          "count": 322,
+          "covered": 258,
+          "percent": 80.12422360248446
+        },
+        "regions": {
+          "count": 396,
+          "covered": 345,
+          "notcovered": 51,
+          "percent": 87.12121212121212
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization/policy.rs",
+      "summary": {
+        "branches": {
+          "count": 50,
+          "covered": 43,
+          "notcovered": 7,
+          "percent": 86.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 14,
+          "covered": 14,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 28,
+          "covered": 14,
+          "percent": 50.0
+        },
+        "lines": {
+          "count": 108,
+          "covered": 108,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 145,
+          "covered": 145,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization/provenance.rs",
+      "summary": {
+        "branches": {
+          "count": 70,
+          "covered": 63,
+          "notcovered": 7,
+          "percent": 90.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 37,
+          "covered": 31,
+          "percent": 83.78378378378379
+        },
+        "instantiations": {
+          "count": 74,
+          "covered": 31,
+          "percent": 41.891891891891895
+        },
+        "lines": {
+          "count": 428,
+          "covered": 399,
+          "percent": 93.22429906542057
+        },
+        "regions": {
+          "count": 558,
+          "covered": 525,
+          "notcovered": 33,
+          "percent": 94.08602150537635
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization/provenance_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 36,
+          "covered": 24,
+          "notcovered": 12,
+          "percent": 66.66666666666666
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 14,
+          "covered": 14,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 14,
+          "covered": 14,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 478,
+          "covered": 474,
+          "percent": 99.16317991631799
+        },
+        "regions": {
+          "count": 804,
+          "covered": 789,
+          "notcovered": 15,
+          "percent": 98.13432835820896
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization/reference.rs",
+      "summary": {
+        "branches": {
+          "count": 40,
+          "covered": 36,
+          "notcovered": 4,
+          "percent": 90.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 30,
+          "covered": 25,
+          "percent": 83.33333333333334
+        },
+        "instantiations": {
+          "count": 62,
+          "covered": 27,
+          "percent": 43.54838709677419
+        },
+        "lines": {
+          "count": 327,
+          "covered": 296,
+          "percent": 90.51987767584097
+        },
+        "regions": {
+          "count": 515,
+          "covered": 478,
+          "notcovered": 37,
+          "percent": 92.81553398058252
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/quantization_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 8,
+          "covered": 5,
+          "notcovered": 3,
+          "percent": 62.5
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 44,
+          "covered": 43,
+          "percent": 97.72727272727273
+        },
+        "instantiations": {
+          "count": 44,
+          "covered": 43,
+          "percent": 97.72727272727273
+        },
+        "lines": {
+          "count": 858,
+          "covered": 853,
+          "percent": 99.41724941724942
+        },
+        "regions": {
+          "count": 1347,
+          "covered": 1308,
+          "notcovered": 39,
+          "percent": 97.10467706013364
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/report.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 2,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 11,
+          "covered": 11,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 29,
+          "covered": 18,
+          "percent": 62.06896551724138
+        },
+        "lines": {
+          "count": 51,
+          "covered": 51,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 84,
+          "covered": 84,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/report_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 3,
+          "covered": 3,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 3,
+          "covered": 3,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 88,
+          "covered": 88,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 101,
+          "covered": 101,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/runtime.rs",
+      "summary": {
+        "branches": {
+          "count": 68,
+          "covered": 56,
+          "notcovered": 12,
+          "percent": 82.35294117647058
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 51,
+          "covered": 37,
+          "percent": 72.54901960784314
+        },
+        "instantiations": {
+          "count": 698,
+          "covered": 257,
+          "percent": 36.81948424068768
+        },
+        "lines": {
+          "count": 671,
+          "covered": 482,
+          "percent": 71.83308494783904
+        },
+        "regions": {
+          "count": 823,
+          "covered": 641,
+          "notcovered": 182,
+          "percent": 77.88578371810449
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/runtime/boundary_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 42,
+          "covered": 32,
+          "notcovered": 10,
+          "percent": 76.19047619047619
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 34,
+          "covered": 33,
+          "percent": 97.05882352941178
+        },
+        "instantiations": {
+          "count": 34,
+          "covered": 33,
+          "percent": 97.05882352941178
+        },
+        "lines": {
+          "count": 409,
+          "covered": 406,
+          "percent": 99.26650366748166
+        },
+        "regions": {
+          "count": 621,
+          "covered": 617,
+          "notcovered": 4,
+          "percent": 99.35587761674718
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/runtime/source.rs",
+      "summary": {
+        "branches": {
+          "count": 36,
+          "covered": 32,
+          "notcovered": 4,
+          "percent": 88.88888888888889
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 36,
+          "covered": 29,
+          "percent": 80.55555555555556
+        },
+        "instantiations": {
+          "count": 89,
+          "covered": 39,
+          "percent": 43.82022471910113
+        },
+        "lines": {
+          "count": 304,
+          "covered": 273,
+          "percent": 89.80263157894737
+        },
+        "regions": {
+          "count": 372,
+          "covered": 327,
+          "notcovered": 45,
+          "percent": 87.90322580645162
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/runtime/source_boundary_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 30,
+          "covered": 18,
+          "notcovered": 12,
+          "percent": 60.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 10,
+          "covered": 10,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 10,
+          "covered": 10,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 215,
+          "covered": 212,
+          "percent": 98.6046511627907
+        },
+        "regions": {
+          "count": 501,
+          "covered": 497,
+          "notcovered": 4,
+          "percent": 99.20159680638723
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/runtime/transform.rs",
+      "summary": {
+        "branches": {
+          "count": 112,
+          "covered": 109,
+          "notcovered": 3,
+          "percent": 97.32142857142857
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 80,
+          "covered": 67,
+          "percent": 83.75
+        },
+        "instantiations": {
+          "count": 341,
+          "covered": 121,
+          "percent": 35.483870967741936
+        },
+        "lines": {
+          "count": 914,
+          "covered": 864,
+          "percent": 94.52954048140045
+        },
+        "regions": {
+          "count": 1464,
+          "covered": 1333,
+          "notcovered": 131,
+          "percent": 91.05191256830602
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/runtime/transform_boundary_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 64,
+          "covered": 41,
+          "notcovered": 23,
+          "percent": 64.0625
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 23,
+          "covered": 22,
+          "percent": 95.65217391304348
+        },
+        "instantiations": {
+          "count": 23,
+          "covered": 22,
+          "percent": 95.65217391304348
+        },
+        "lines": {
+          "count": 466,
+          "covered": 456,
+          "percent": 97.85407725321888
+        },
+        "regions": {
+          "count": 838,
+          "covered": 823,
+          "notcovered": 15,
+          "percent": 98.21002386634844
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint/runtime_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 98,
+          "covered": 71,
+          "notcovered": 27,
+          "percent": 72.44897959183673
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 138,
+          "covered": 127,
+          "percent": 92.02898550724636
+        },
+        "instantiations": {
+          "count": 140,
+          "covered": 129,
+          "percent": 92.14285714285714
+        },
+        "lines": {
+          "count": 2417,
+          "covered": 2369,
+          "percent": 98.01406702523789
+        },
+        "regions": {
+          "count": 4229,
+          "covered": 4133,
+          "notcovered": 96,
+          "percent": 97.72995980137148
+        }
+      }
+    },
+    {
+      "path": "src/checkpoint_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 72,
+          "covered": 38,
+          "notcovered": 34,
+          "percent": 52.77777777777778
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 89,
+          "covered": 88,
+          "percent": 98.87640449438202
+        },
+        "instantiations": {
+          "count": 91,
+          "covered": 90,
+          "percent": 98.9010989010989
+        },
+        "lines": {
+          "count": 1997,
+          "covered": 1991,
+          "percent": 99.69954932398598
+        },
+        "regions": {
+          "count": 3302,
+          "covered": 3237,
+          "notcovered": 65,
+          "percent": 98.03149606299213
+        }
+      }
+    },
+    {
+      "path": "src/delta_net.rs",
+      "summary": {
+        "branches": {
+          "count": 66,
+          "covered": 60,
+          "notcovered": 6,
+          "percent": 90.9090909090909
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 30,
+          "covered": 29,
+          "percent": 96.66666666666667
+        },
+        "instantiations": {
+          "count": 73,
+          "covered": 44,
+          "percent": 60.273972602739725
+        },
+        "lines": {
+          "count": 588,
+          "covered": 584,
+          "percent": 99.31972789115646
+        },
+        "regions": {
+          "count": 968,
+          "covered": 949,
+          "notcovered": 19,
+          "percent": 98.03719008264463
+        }
+      }
+    },
+    {
+      "path": "src/delta_net_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 8,
+          "covered": 4,
+          "notcovered": 4,
+          "percent": 50.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 17,
+          "covered": 17,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 17,
+          "covered": 17,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 457,
+          "covered": 455,
+          "percent": 99.56236323851203
+        },
+        "regions": {
+          "count": 719,
+          "covered": 717,
+          "notcovered": 2,
+          "percent": 99.72183588317107
+        }
+      }
+    },
+    {
+      "path": "src/error.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 4,
+          "covered": 4,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 48,
+          "covered": 21,
+          "percent": 43.75
+        },
+        "lines": {
+          "count": 29,
+          "covered": 29,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 20,
+          "covered": 20,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/error_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 2,
+          "covered": 2,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 2,
+          "covered": 2,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 10,
+          "covered": 10,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 14,
+          "covered": 14,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/experiment.rs",
+      "summary": {
+        "branches": {
+          "count": 84,
+          "covered": 67,
+          "notcovered": 17,
+          "percent": 79.76190476190477
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 44,
+          "covered": 37,
+          "percent": 84.0909090909091
+        },
+        "instantiations": {
+          "count": 151,
+          "covered": 57,
+          "percent": 37.74834437086093
+        },
+        "lines": {
+          "count": 397,
+          "covered": 338,
+          "percent": 85.13853904282117
+        },
+        "regions": {
+          "count": 414,
+          "covered": 374,
+          "notcovered": 40,
+          "percent": 90.33816425120773
+        }
+      }
+    },
+    {
+      "path": "src/experiment/block.rs",
+      "summary": {
+        "branches": {
+          "count": 32,
+          "covered": 27,
+          "notcovered": 5,
+          "percent": 84.375
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 27,
+          "covered": 27,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 133,
+          "covered": 100,
+          "percent": 75.18796992481201
+        },
+        "lines": {
+          "count": 306,
+          "covered": 298,
+          "percent": 97.38562091503267
+        },
+        "regions": {
+          "count": 496,
+          "covered": 459,
+          "notcovered": 37,
+          "percent": 92.54032258064517
+        }
+      }
+    },
+    {
+      "path": "src/experiment_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 4,
+          "covered": 4,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 24,
+          "covered": 24,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 24,
+          "covered": 24,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 482,
+          "covered": 482,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 866,
+          "covered": 866,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/feed_forward.rs",
+      "summary": {
+        "branches": {
+          "count": 4,
+          "covered": 4,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 14,
+          "covered": 14,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 49,
+          "covered": 25,
+          "percent": 51.02040816326531
+        },
+        "lines": {
+          "count": 110,
+          "covered": 110,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 145,
+          "covered": 141,
+          "notcovered": 4,
+          "percent": 97.24137931034483
+        }
+      }
+    },
+    {
+      "path": "src/feed_forward_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 6,
+          "covered": 6,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 13,
+          "covered": 13,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 13,
+          "covered": 13,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 141,
+          "covered": 141,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 285,
+          "covered": 285,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/generation.rs",
+      "summary": {
+        "branches": {
+          "count": 82,
+          "covered": 79,
+          "notcovered": 3,
+          "percent": 96.34146341463415
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 49,
+          "covered": 42,
+          "percent": 85.71428571428571
+        },
+        "instantiations": {
+          "count": 98,
+          "covered": 44,
+          "percent": 44.89795918367347
+        },
+        "lines": {
+          "count": 509,
+          "covered": 466,
+          "percent": 91.55206286836936
+        },
+        "regions": {
+          "count": 664,
+          "covered": 630,
+          "notcovered": 34,
+          "percent": 94.87951807228916
+        }
+      }
+    },
+    {
+      "path": "src/generation/causal.rs",
+      "summary": {
+        "branches": {
+          "count": 68,
+          "covered": 63,
+          "notcovered": 5,
+          "percent": 92.64705882352942
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 62,
+          "covered": 36,
+          "percent": 58.06451612903226
+        },
+        "instantiations": {
+          "count": 371,
+          "covered": 101,
+          "percent": 27.22371967654987
+        },
+        "lines": {
+          "count": 621,
+          "covered": 520,
+          "percent": 83.73590982286635
+        },
+        "regions": {
+          "count": 910,
+          "covered": 786,
+          "notcovered": 124,
+          "percent": 86.37362637362638
+        }
+      }
+    },
+    {
+      "path": "src/generation/causal_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 34,
+          "covered": 27,
+          "notcovered": 7,
+          "percent": 79.41176470588235
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 77,
+          "covered": 64,
+          "percent": 83.11688311688312
+        },
+        "instantiations": {
+          "count": 77,
+          "covered": 64,
+          "percent": 83.11688311688312
+        },
+        "lines": {
+          "count": 1131,
+          "covered": 1078,
+          "percent": 95.31388152077808
+        },
+        "regions": {
+          "count": 1589,
+          "covered": 1519,
+          "notcovered": 70,
+          "percent": 95.59471365638767
+        }
+      }
+    },
+    {
+      "path": "src/generation/seq2seq.rs",
+      "summary": {
+        "branches": {
+          "count": 124,
+          "covered": 121,
+          "notcovered": 3,
+          "percent": 97.58064516129032
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 101,
+          "covered": 73,
+          "percent": 72.27722772277228
+        },
+        "instantiations": {
+          "count": 307,
+          "covered": 76,
+          "percent": 24.7557003257329
+        },
+        "lines": {
+          "count": 922,
+          "covered": 854,
+          "percent": 92.62472885032538
+        },
+        "regions": {
+          "count": 1237,
+          "covered": 1135,
+          "notcovered": 102,
+          "percent": 91.75424413904608
+        }
+      }
+    },
+    {
+      "path": "src/generation/seq2seq_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 40,
+          "covered": 26,
+          "notcovered": 14,
+          "percent": 65.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 63,
+          "covered": 52,
+          "percent": 82.53968253968253
+        },
+        "instantiations": {
+          "count": 63,
+          "covered": 52,
+          "percent": 82.53968253968253
+        },
+        "lines": {
+          "count": 1206,
+          "covered": 1145,
+          "percent": 94.94195688225538
+        },
+        "regions": {
+          "count": 1934,
+          "covered": 1856,
+          "notcovered": 78,
+          "percent": 95.96690796277146
+        }
+      }
+    },
+    {
+      "path": "src/generation_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 6,
+          "covered": 3,
+          "notcovered": 3,
+          "percent": 50.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 22,
+          "covered": 22,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 22,
+          "covered": 22,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 467,
+          "covered": 467,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 780,
+          "covered": 779,
+          "notcovered": 1,
+          "percent": 99.87179487179488
+        }
+      }
+    },
+    {
+      "path": "src/intervention.rs",
+      "summary": {
+        "branches": {
+          "count": 68,
+          "covered": 57,
+          "notcovered": 11,
+          "percent": 83.82352941176471
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 82,
+          "covered": 76,
+          "percent": 92.68292682926831
+        },
+        "instantiations": {
+          "count": 1398,
+          "covered": 869,
+          "percent": 62.160228898426325
+        },
+        "lines": {
+          "count": 528,
+          "covered": 481,
+          "percent": 91.09848484848484
+        },
+        "regions": {
+          "count": 656,
+          "covered": 616,
+          "notcovered": 40,
+          "percent": 93.90243902439023
+        }
+      }
+    },
+    {
+      "path": "src/intervention/validity.rs",
+      "summary": {
+        "branches": {
+          "count": 10,
+          "covered": 7,
+          "notcovered": 3,
+          "percent": 70.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 4,
+          "covered": 3,
+          "percent": 75.0
+        },
+        "instantiations": {
+          "count": 39,
+          "covered": 15,
+          "percent": 38.46153846153847
+        },
+        "lines": {
+          "count": 43,
+          "covered": 30,
+          "percent": 69.76744186046511
+        },
+        "regions": {
+          "count": 53,
+          "covered": 45,
+          "notcovered": 8,
+          "percent": 84.90566037735849
+        }
+      }
+    },
+    {
+      "path": "src/intervention/validity_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 21,
+          "covered": 18,
+          "percent": 85.71428571428571
+        },
+        "instantiations": {
+          "count": 21,
+          "covered": 18,
+          "percent": 85.71428571428571
+        },
+        "lines": {
+          "count": 146,
+          "covered": 143,
+          "percent": 97.94520547945207
+        },
+        "regions": {
+          "count": 351,
+          "covered": 348,
+          "notcovered": 3,
+          "percent": 99.14529914529915
+        }
+      }
+    },
+    {
+      "path": "src/intervention_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 2,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 48,
+          "covered": 44,
+          "percent": 91.66666666666666
+        },
+        "instantiations": {
+          "count": 48,
+          "covered": 44,
+          "percent": 91.66666666666666
+        },
+        "lines": {
+          "count": 345,
+          "covered": 335,
+          "percent": 97.10144927536231
+        },
+        "regions": {
+          "count": 801,
+          "covered": 790,
+          "notcovered": 11,
+          "percent": 98.62671660424469
+        }
+      }
+    },
+    {
+      "path": "src/loaded.rs",
+      "summary": {
+        "branches": {
+          "count": 84,
+          "covered": 81,
+          "notcovered": 3,
+          "percent": 96.42857142857143
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 38,
+          "covered": 36,
+          "percent": 94.73684210526316
+        },
+        "instantiations": {
+          "count": 128,
+          "covered": 71,
+          "percent": 55.46875
+        },
+        "lines": {
+          "count": 487,
+          "covered": 475,
+          "percent": 97.5359342915811
+        },
+        "regions": {
+          "count": 397,
+          "covered": 383,
+          "notcovered": 14,
+          "percent": 96.4735516372796
+        }
+      }
+    },
+    {
+      "path": "src/loaded_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 6,
+          "covered": 6,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 24,
+          "covered": 24,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 24,
+          "covered": 24,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 884,
+          "covered": 884,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 983,
+          "covered": 975,
+          "notcovered": 8,
+          "percent": 99.18616480162767
+        }
+      }
+    },
+    {
+      "path": "src/mla.rs",
+      "summary": {
+        "branches": {
+          "count": 124,
+          "covered": 108,
+          "notcovered": 16,
+          "percent": 87.09677419354838
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 33,
+          "covered": 33,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 76,
+          "covered": 46,
+          "percent": 60.526315789473685
+        },
+        "lines": {
+          "count": 705,
+          "covered": 693,
+          "percent": 98.29787234042554
+        },
+        "regions": {
+          "count": 1039,
+          "covered": 993,
+          "notcovered": 46,
+          "percent": 95.57266602502406
+        }
+      }
+    },
+    {
+      "path": "src/mla_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 54,
+          "covered": 32,
+          "notcovered": 22,
+          "percent": 59.259259259259245
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 41,
+          "covered": 41,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 41,
+          "covered": 41,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 664,
+          "covered": 661,
+          "percent": 99.54819277108435
+        },
+        "regions": {
+          "count": 1339,
+          "covered": 1330,
+          "notcovered": 9,
+          "percent": 99.32785660941
+        }
+      }
+    },
+    {
+      "path": "src/models/auto.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 66,
+          "covered": 66,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 138,
+          "covered": 66,
+          "percent": 47.82608695652174
+        },
+        "lines": {
+          "count": 461,
+          "covered": 461,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 690,
+          "covered": 689,
+          "notcovered": 1,
+          "percent": 99.85507246376812
+        }
+      }
+    },
+    {
+      "path": "src/models/auto/intervention_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 5,
+          "covered": 4,
+          "percent": 80.0
+        },
+        "instantiations": {
+          "count": 5,
+          "covered": 4,
+          "percent": 80.0
+        },
+        "lines": {
+          "count": 85,
+          "covered": 83,
+          "percent": 97.6470588235294
+        },
+        "regions": {
+          "count": 250,
+          "covered": 245,
+          "notcovered": 5,
+          "percent": 98.0
+        }
+      }
+    },
+    {
+      "path": "src/models/auto/load.rs",
+      "summary": {
+        "branches": {
+          "count": 68,
+          "covered": 62,
+          "notcovered": 6,
+          "percent": 91.17647058823528
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 52,
+          "covered": 31,
+          "percent": 59.61538461538461
+        },
+        "instantiations": {
+          "count": 136,
+          "covered": 40,
+          "percent": 29.411764705882355
+        },
+        "lines": {
+          "count": 603,
+          "covered": 525,
+          "percent": 87.06467661691542
+        },
+        "regions": {
+          "count": 924,
+          "covered": 796,
+          "notcovered": 128,
+          "percent": 86.14718614718615
+        }
+      }
+    },
+    {
+      "path": "src/models/auto/load_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 126,
+          "covered": 72,
+          "notcovered": 54,
+          "percent": 57.14285714285714
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 62,
+          "covered": 53,
+          "percent": 85.48387096774194
+        },
+        "instantiations": {
+          "count": 69,
+          "covered": 60,
+          "percent": 86.95652173913044
+        },
+        "lines": {
+          "count": 1520,
+          "covered": 1455,
+          "percent": 95.72368421052632
+        },
+        "regions": {
+          "count": 2286,
+          "covered": 2201,
+          "notcovered": 85,
+          "percent": 96.28171478565181
+        }
+      }
+    },
+    {
+      "path": "src/models/auto_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 26,
+          "covered": 15,
+          "notcovered": 11,
+          "percent": 57.692307692307686
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 50,
+          "covered": 39,
+          "percent": 78.0
+        },
+        "instantiations": {
+          "count": 115,
+          "covered": 64,
+          "percent": 55.65217391304348
+        },
+        "lines": {
+          "count": 1021,
+          "covered": 997,
+          "percent": 97.64936336924583
+        },
+        "regions": {
+          "count": 1558,
+          "covered": 1512,
+          "notcovered": 46,
+          "percent": 97.04749679075738
+        }
+      }
+    },
+    {
+      "path": "src/models/config.rs",
+      "summary": {
+        "branches": {
+          "count": 72,
+          "covered": 55,
+          "notcovered": 17,
+          "percent": 76.38888888888889
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 32,
+          "covered": 27,
+          "percent": 84.375
+        },
+        "instantiations": {
+          "count": 149,
+          "covered": 102,
+          "percent": 68.45637583892618
+        },
+        "lines": {
+          "count": 336,
+          "covered": 272,
+          "percent": 80.95238095238095
+        },
+        "regions": {
+          "count": 396,
+          "covered": 347,
+          "notcovered": 49,
+          "percent": 87.62626262626263
+        }
+      }
+    },
+    {
+      "path": "src/models/config_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 11,
+          "covered": 11,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 11,
+          "covered": 11,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 125,
+          "covered": 124,
+          "percent": 99.2
+        },
+        "regions": {
+          "count": 178,
+          "covered": 176,
+          "notcovered": 2,
+          "percent": 98.87640449438202
+        }
+      }
+    },
+    {
+      "path": "src/models/custom/causal.rs",
+      "summary": {
+        "branches": {
+          "count": 34,
+          "covered": 29,
+          "notcovered": 5,
+          "percent": 85.29411764705883
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 43,
+          "covered": 41,
+          "percent": 95.34883720930233
+        },
+        "instantiations": {
+          "count": 99,
+          "covered": 53,
+          "percent": 53.535353535353536
+        },
+        "lines": {
+          "count": 411,
+          "covered": 382,
+          "percent": 92.94403892944038
+        },
+        "regions": {
+          "count": 536,
+          "covered": 503,
+          "notcovered": 33,
+          "percent": 93.84328358208955
+        }
+      }
+    },
+    {
+      "path": "src/models/custom/common.rs",
+      "summary": {
+        "branches": {
+          "count": 98,
+          "covered": 71,
+          "notcovered": 27,
+          "percent": 72.44897959183673
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 91,
+          "covered": 69,
+          "percent": 75.82417582417582
+        },
+        "instantiations": {
+          "count": 240,
+          "covered": 98,
+          "percent": 40.833333333333336
+        },
+        "lines": {
+          "count": 1269,
+          "covered": 1084,
+          "percent": 85.42159180457053
+        },
+        "regions": {
+          "count": 1658,
+          "covered": 1446,
+          "notcovered": 212,
+          "percent": 87.21351025331725
+        }
+      }
+    },
+    {
+      "path": "src/models/custom/composition_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 1,
+          "notcovered": 1,
+          "percent": 50.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 19,
+          "covered": 16,
+          "percent": 84.21052631578947
+        },
+        "instantiations": {
+          "count": 20,
+          "covered": 17,
+          "percent": 85.0
+        },
+        "lines": {
+          "count": 446,
+          "covered": 433,
+          "percent": 97.08520179372198
+        },
+        "regions": {
+          "count": 949,
+          "covered": 933,
+          "notcovered": 16,
+          "percent": 98.31401475237091
+        }
+      }
+    },
+    {
+      "path": "src/models/custom/intervention_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 4,
+          "covered": 3,
+          "notcovered": 1,
+          "percent": 75.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 33,
+          "covered": 33,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 39,
+          "covered": 39,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 420,
+          "covered": 419,
+          "percent": 99.76190476190474
+        },
+        "regions": {
+          "count": 864,
+          "covered": 863,
+          "notcovered": 1,
+          "percent": 99.88425925925925
+        }
+      }
+    },
+    {
+      "path": "src/models/custom/seq2seq.rs",
+      "summary": {
+        "branches": {
+          "count": 58,
+          "covered": 43,
+          "notcovered": 15,
+          "percent": 74.13793103448276
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 53,
+          "covered": 47,
+          "percent": 88.67924528301889
+        },
+        "instantiations": {
+          "count": 121,
+          "covered": 61,
+          "percent": 50.413223140495866
+        },
+        "lines": {
+          "count": 653,
+          "covered": 576,
+          "percent": 88.208269525268
+        },
+        "regions": {
+          "count": 801,
+          "covered": 719,
+          "notcovered": 82,
+          "percent": 89.76279650436953
+        }
+      }
+    },
+    {
+      "path": "src/models/custom/state.rs",
+      "summary": {
+        "branches": {
+          "count": 44,
+          "covered": 36,
+          "notcovered": 8,
+          "percent": 81.81818181818183
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 43,
+          "covered": 33,
+          "percent": 76.74418604651163
+        },
+        "instantiations": {
+          "count": 86,
+          "covered": 33,
+          "percent": 38.372093023255815
+        },
+        "lines": {
+          "count": 468,
+          "covered": 410,
+          "percent": 87.6068376068376
+        },
+        "regions": {
+          "count": 704,
+          "covered": 638,
+          "notcovered": 66,
+          "percent": 90.625
+        }
+      }
+    },
+    {
+      "path": "src/models/custom/state_contracts_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 16,
+          "covered": 12,
+          "notcovered": 4,
+          "percent": 75.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 18,
+          "covered": 18,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 18,
+          "covered": 18,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 545,
+          "covered": 544,
+          "percent": 99.81651376146789
+        },
+        "regions": {
+          "count": 845,
+          "covered": 843,
+          "notcovered": 2,
+          "percent": 99.76331360946745
+        }
+      }
+    },
+    {
+      "path": "src/models/custom/state_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 142,
+          "covered": 142,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 230,
+          "covered": 228,
+          "notcovered": 2,
+          "percent": 99.1304347826087
+        }
+      }
+    },
+    {
+      "path": "src/models/custom/tests.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 1,
+          "notcovered": 1,
+          "percent": 50.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 54,
+          "covered": 54,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 66,
+          "covered": 63,
+          "percent": 95.45454545454545
+        },
+        "lines": {
+          "count": 1320,
+          "covered": 1318,
+          "percent": 99.84848484848486
+        },
+        "regions": {
+          "count": 1644,
+          "covered": 1642,
+          "notcovered": 2,
+          "percent": 99.87834549878345
+        }
+      }
+    },
+    {
+      "path": "src/models/deepseek_v2.rs",
+      "summary": {
+        "branches": {
+          "count": 26,
+          "covered": 18,
+          "notcovered": 8,
+          "percent": 69.23076923076923
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 7,
+          "covered": 6,
+          "percent": 85.71428571428571
+        },
+        "instantiations": {
+          "count": 14,
+          "covered": 11,
+          "percent": 78.57142857142857
+        },
+        "lines": {
+          "count": 197,
+          "covered": 157,
+          "percent": 79.69543147208121
+        },
+        "regions": {
+          "count": 168,
+          "covered": 145,
+          "notcovered": 23,
+          "percent": 86.30952380952381
+        }
+      }
+    },
+    {
+      "path": "src/models/deepseek_v2/checkpoint.rs",
+      "summary": {
+        "branches": {
+          "count": 10,
+          "covered": 7,
+          "notcovered": 3,
+          "percent": 70.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 16,
+          "covered": 13,
+          "percent": 81.25
+        },
+        "instantiations": {
+          "count": 32,
+          "covered": 24,
+          "percent": 75.0
+        },
+        "lines": {
+          "count": 255,
+          "covered": 223,
+          "percent": 87.45098039215686
+        },
+        "regions": {
+          "count": 299,
+          "covered": 259,
+          "notcovered": 40,
+          "percent": 86.62207357859532
+        }
+      }
+    },
+    {
+      "path": "src/models/deepseek_v2/checkpoint_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 4,
+          "covered": 3,
+          "notcovered": 1,
+          "percent": 75.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 48,
+          "covered": 48,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 56,
+          "covered": 56,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/models/deepseek_v2/load.rs",
+      "summary": {
+        "branches": {
+          "count": 18,
+          "covered": 11,
+          "notcovered": 7,
+          "percent": 61.111111111111114
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 30,
+          "covered": 17,
+          "percent": 56.666666666666664
+        },
+        "instantiations": {
+          "count": 62,
+          "covered": 18,
+          "percent": 29.03225806451613
+        },
+        "lines": {
+          "count": 295,
+          "covered": 198,
+          "percent": 67.11864406779661
+        },
+        "regions": {
+          "count": 413,
+          "covered": 301,
+          "notcovered": 112,
+          "percent": 72.88135593220339
+        }
+      }
+    },
+    {
+      "path": "src/models/deepseek_v2/load_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 2,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 20,
+          "covered": 18,
+          "percent": 90.0
+        },
+        "instantiations": {
+          "count": 29,
+          "covered": 27,
+          "percent": 93.10344827586206
+        },
+        "lines": {
+          "count": 197,
+          "covered": 195,
+          "percent": 98.98477157360406
+        },
+        "regions": {
+          "count": 334,
+          "covered": 324,
+          "notcovered": 10,
+          "percent": 97.0059880239521
+        }
+      }
+    },
+    {
+      "path": "src/models/deepseek_v2/model.rs",
+      "summary": {
+        "branches": {
+          "count": 116,
+          "covered": 89,
+          "notcovered": 27,
+          "percent": 76.72413793103449
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 53,
+          "covered": 36,
+          "percent": 67.9245283018868
+        },
+        "instantiations": {
+          "count": 139,
+          "covered": 59,
+          "percent": 42.44604316546763
+        },
+        "lines": {
+          "count": 735,
+          "covered": 625,
+          "percent": 85.03401360544217
+        },
+        "regions": {
+          "count": 1082,
+          "covered": 934,
+          "notcovered": 148,
+          "percent": 86.32162661737523
+        }
+      }
+    },
+    {
+      "path": "src/models/deepseek_v2/model/decode.rs",
+      "summary": {
+        "branches": {
+          "count": 140,
+          "covered": 105,
+          "notcovered": 35,
+          "percent": 75.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 76,
+          "covered": 57,
+          "percent": 75.0
+        },
+        "instantiations": {
+          "count": 152,
+          "covered": 57,
+          "percent": 37.5
+        },
+        "lines": {
+          "count": 932,
+          "covered": 800,
+          "percent": 85.83690987124464
+        },
+        "regions": {
+          "count": 1262,
+          "covered": 1122,
+          "notcovered": 140,
+          "percent": 88.90649762282092
+        }
+      }
+    },
+    {
+      "path": "src/models/deepseek_v2/model/decode_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 14,
+          "covered": 11,
+          "notcovered": 3,
+          "percent": 78.57142857142857
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 29,
+          "covered": 29,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 29,
+          "covered": 29,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 660,
+          "covered": 659,
+          "percent": 99.84848484848486
+        },
+        "regions": {
+          "count": 952,
+          "covered": 951,
+          "notcovered": 1,
+          "percent": 99.89495798319328
+        }
+      }
+    },
+    {
+      "path": "src/models/deepseek_v2/model_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 6,
+          "covered": 3,
+          "notcovered": 3,
+          "percent": 50.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 16,
+          "covered": 16,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 16,
+          "covered": 16,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 334,
+          "covered": 331,
+          "percent": 99.10179640718563
+        },
+        "regions": {
+          "count": 518,
+          "covered": 515,
+          "notcovered": 3,
+          "percent": 99.42084942084942
+        }
+      }
+    },
+    {
+      "path": "src/models/deepseek_v2/model_tests_support.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 5,
+          "covered": 4,
+          "percent": 80.0
+        },
+        "instantiations": {
+          "count": 5,
+          "covered": 4,
+          "percent": 80.0
+        },
+        "lines": {
+          "count": 74,
+          "covered": 73,
+          "percent": 98.64864864864865
+        },
+        "regions": {
+          "count": 60,
+          "covered": 59,
+          "notcovered": 1,
+          "percent": 98.33333333333333
+        }
+      }
+    },
+    {
+      "path": "src/models/deepseek_v2_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 56,
+          "covered": 56,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 59,
+          "covered": 59,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/models/gpt2.rs",
+      "summary": {
+        "branches": {
+          "count": 18,
+          "covered": 13,
+          "notcovered": 5,
+          "percent": 72.22222222222221
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 9,
+          "covered": 6,
+          "percent": 66.66666666666666
+        },
+        "instantiations": {
+          "count": 18,
+          "covered": 6,
+          "percent": 33.33333333333333
+        },
+        "lines": {
+          "count": 78,
+          "covered": 64,
+          "percent": 82.05128205128204
+        },
+        "regions": {
+          "count": 71,
+          "covered": 59,
+          "notcovered": 12,
+          "percent": 83.09859154929578
+        }
+      }
+    },
+    {
+      "path": "src/models/gpt2/checkpoint.rs",
+      "summary": {
+        "branches": {
+          "count": 20,
+          "covered": 15,
+          "notcovered": 5,
+          "percent": 75.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 27,
+          "covered": 18,
+          "percent": 66.66666666666666
+        },
+        "instantiations": {
+          "count": 77,
+          "covered": 29,
+          "percent": 37.66233766233766
+        },
+        "lines": {
+          "count": 278,
+          "covered": 248,
+          "percent": 89.20863309352518
+        },
+        "regions": {
+          "count": 431,
+          "covered": 392,
+          "notcovered": 39,
+          "percent": 90.95127610208816
+        }
+      }
+    },
+    {
+      "path": "src/models/gpt2/model.rs",
+      "summary": {
+        "branches": {
+          "count": 52,
+          "covered": 37,
+          "notcovered": 15,
+          "percent": 71.15384615384616
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 37,
+          "covered": 30,
+          "percent": 81.0810810810811
+        },
+        "instantiations": {
+          "count": 105,
+          "covered": 54,
+          "percent": 51.42857142857142
+        },
+        "lines": {
+          "count": 482,
+          "covered": 420,
+          "percent": 87.13692946058092
+        },
+        "regions": {
+          "count": 775,
+          "covered": 690,
+          "notcovered": 85,
+          "percent": 89.03225806451613
+        }
+      }
+    },
+    {
+      "path": "src/models/gpt2/model_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 34,
+          "covered": 16,
+          "notcovered": 18,
+          "percent": 47.05882352941176
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 53,
+          "covered": 40,
+          "percent": 75.47169811320755
+        },
+        "instantiations": {
+          "count": 55,
+          "covered": 42,
+          "percent": 76.36363636363637
+        },
+        "lines": {
+          "count": 698,
+          "covered": 586,
+          "percent": 83.95415472779369
+        },
+        "regions": {
+          "count": 1235,
+          "covered": 1035,
+          "notcovered": 200,
+          "percent": 83.80566801619433
+        }
+      }
+    },
+    {
+      "path": "src/models/gpt_neox.rs",
+      "summary": {
+        "branches": {
+          "count": 22,
+          "covered": 14,
+          "notcovered": 8,
+          "percent": 63.63636363636363
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 6,
+          "covered": 6,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 8,
+          "covered": 6,
+          "percent": 75.0
+        },
+        "lines": {
+          "count": 98,
+          "covered": 82,
+          "percent": 83.6734693877551
+        },
+        "regions": {
+          "count": 75,
+          "covered": 71,
+          "notcovered": 4,
+          "percent": 94.66666666666667
+        }
+      }
+    },
+    {
+      "path": "src/models/gpt_neox/load.rs",
+      "summary": {
+        "branches": {
+          "count": 44,
+          "covered": 36,
+          "notcovered": 8,
+          "percent": 81.81818181818183
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 45,
+          "covered": 36,
+          "percent": 80.0
+        },
+        "instantiations": {
+          "count": 90,
+          "covered": 37,
+          "percent": 41.11111111111111
+        },
+        "lines": {
+          "count": 440,
+          "covered": 407,
+          "percent": 92.5
+        },
+        "regions": {
+          "count": 647,
+          "covered": 593,
+          "notcovered": 54,
+          "percent": 91.65378670788253
+        }
+      }
+    },
+    {
+      "path": "src/models/gpt_neox/load_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 12,
+          "covered": 9,
+          "notcovered": 3,
+          "percent": 75.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 26,
+          "covered": 26,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 36,
+          "covered": 36,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 283,
+          "covered": 282,
+          "percent": 99.64664310954063
+        },
+        "regions": {
+          "count": 433,
+          "covered": 428,
+          "notcovered": 5,
+          "percent": 98.84526558891456
+        }
+      }
+    },
+    {
+      "path": "src/models/gpt_neox/model.rs",
+      "summary": {
+        "branches": {
+          "count": 80,
+          "covered": 54,
+          "notcovered": 26,
+          "percent": 67.5
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 37,
+          "covered": 27,
+          "percent": 72.97297297297295
+        },
+        "instantiations": {
+          "count": 75,
+          "covered": 28,
+          "percent": 37.333333333333336
+        },
+        "lines": {
+          "count": 658,
+          "covered": 541,
+          "percent": 82.21884498480243
+        },
+        "regions": {
+          "count": 875,
+          "covered": 736,
+          "notcovered": 139,
+          "percent": 84.11428571428571
+        }
+      }
+    },
+    {
+      "path": "src/models/gpt_neox/model_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 60,
+          "covered": 60,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 76,
+          "covered": 76,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/models/gpt_neox/tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 19,
+          "covered": 19,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 21,
+          "covered": 21,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 288,
+          "covered": 288,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 476,
+          "covered": 476,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/models/muse_glimmer.rs",
+      "summary": {
+        "branches": {
+          "count": 24,
+          "covered": 18,
+          "notcovered": 6,
+          "percent": 75.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 16,
+          "covered": 14,
+          "percent": 87.5
+        },
+        "lines": {
+          "count": 164,
+          "covered": 138,
+          "percent": 84.14634146341463
+        },
+        "regions": {
+          "count": 157,
+          "covered": 140,
+          "notcovered": 17,
+          "percent": 89.171974522293
+        }
+      }
+    },
+    {
+      "path": "src/models/muse_glimmer/checkpoint.rs",
+      "summary": {
+        "branches": {
+          "count": 8,
+          "covered": 7,
+          "notcovered": 1,
+          "percent": 87.5
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 19,
+          "covered": 16,
+          "percent": 84.21052631578947
+        },
+        "instantiations": {
+          "count": 38,
+          "covered": 29,
+          "percent": 76.31578947368422
+        },
+        "lines": {
+          "count": 192,
+          "covered": 182,
+          "percent": 94.79166666666666
+        },
+        "regions": {
+          "count": 226,
+          "covered": 209,
+          "notcovered": 17,
+          "percent": 92.47787610619469
+        }
+      }
+    },
+    {
+      "path": "src/models/muse_glimmer/checkpoint_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 6,
+          "covered": 5,
+          "notcovered": 1,
+          "percent": 83.33333333333334
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 12,
+          "covered": 12,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 12,
+          "covered": 12,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 192,
+          "covered": 192,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 236,
+          "covered": 232,
+          "notcovered": 4,
+          "percent": 98.30508474576273
+        }
+      }
+    },
+    {
+      "path": "src/models/muse_glimmer/load.rs",
+      "summary": {
+        "branches": {
+          "count": 12,
+          "covered": 7,
+          "notcovered": 5,
+          "percent": 58.333333333333336
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 19,
+          "covered": 13,
+          "percent": 68.42105263157895
+        },
+        "instantiations": {
+          "count": 40,
+          "covered": 14,
+          "percent": 35.0
+        },
+        "lines": {
+          "count": 195,
+          "covered": 140,
+          "percent": 71.7948717948718
+        },
+        "regions": {
+          "count": 290,
+          "covered": 241,
+          "notcovered": 49,
+          "percent": 83.10344827586206
+        }
+      }
+    },
+    {
+      "path": "src/models/muse_glimmer/load_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 2,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 17,
+          "covered": 16,
+          "percent": 94.11764705882352
+        },
+        "instantiations": {
+          "count": 26,
+          "covered": 25,
+          "percent": 96.15384615384616
+        },
+        "lines": {
+          "count": 199,
+          "covered": 198,
+          "percent": 99.49748743718592
+        },
+        "regions": {
+          "count": 308,
+          "covered": 300,
+          "notcovered": 8,
+          "percent": 97.40259740259741
+        }
+      }
+    },
+    {
+      "path": "src/models/muse_glimmer/model.rs",
+      "summary": {
+        "branches": {
+          "count": 158,
+          "covered": 107,
+          "notcovered": 51,
+          "percent": 67.72151898734177
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 92,
+          "covered": 60,
+          "percent": 65.21739130434783
+        },
+        "instantiations": {
+          "count": 247,
+          "covered": 98,
+          "percent": 39.67611336032389
+        },
+        "lines": {
+          "count": 1167,
+          "covered": 931,
+          "percent": 79.77720651242502
+        },
+        "regions": {
+          "count": 1719,
+          "covered": 1427,
+          "notcovered": 292,
+          "percent": 83.01337987201862
+        }
+      }
+    },
+    {
+      "path": "src/models/muse_glimmer/model/decode.rs",
+      "summary": {
+        "branches": {
+          "count": 104,
+          "covered": 76,
+          "notcovered": 28,
+          "percent": 73.07692307692307
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 59,
+          "covered": 48,
+          "percent": 81.35593220338984
+        },
+        "instantiations": {
+          "count": 118,
+          "covered": 48,
+          "percent": 40.67796610169492
+        },
+        "lines": {
+          "count": 791,
+          "covered": 668,
+          "percent": 84.45006321112515
+        },
+        "regions": {
+          "count": 1085,
+          "covered": 969,
+          "notcovered": 116,
+          "percent": 89.30875576036867
+        }
+      }
+    },
+    {
+      "path": "src/models/muse_glimmer/model/decode_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 30,
+          "covered": 21,
+          "notcovered": 9,
+          "percent": 70.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 30,
+          "covered": 26,
+          "percent": 86.66666666666667
+        },
+        "instantiations": {
+          "count": 30,
+          "covered": 26,
+          "percent": 86.66666666666667
+        },
+        "lines": {
+          "count": 821,
+          "covered": 803,
+          "percent": 97.80755176613886
+        },
+        "regions": {
+          "count": 1012,
+          "covered": 997,
+          "notcovered": 15,
+          "percent": 98.51778656126481
+        }
+      }
+    },
+    {
+      "path": "src/models/muse_glimmer/model_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 1,
+          "notcovered": 1,
+          "percent": 50.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 40,
+          "covered": 37,
+          "percent": 92.5
+        },
+        "instantiations": {
+          "count": 40,
+          "covered": 37,
+          "percent": 92.5
+        },
+        "lines": {
+          "count": 613,
+          "covered": 602,
+          "percent": 98.20554649265905
+        },
+        "regions": {
+          "count": 924,
+          "covered": 899,
+          "notcovered": 25,
+          "percent": 97.2943722943723
+        }
+      }
+    },
+    {
+      "path": "src/models/muse_glimmer_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 2,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 4,
+          "covered": 4,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 4,
+          "covered": 4,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 57,
+          "covered": 57,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 72,
+          "covered": 72,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h.rs",
+      "summary": {
+        "branches": {
+          "count": 88,
+          "covered": 56,
+          "notcovered": 32,
+          "percent": 63.63636363636363
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 13,
+          "covered": 10,
+          "percent": 76.92307692307693
+        },
+        "instantiations": {
+          "count": 35,
+          "covered": 18,
+          "percent": 51.42857142857142
+        },
+        "lines": {
+          "count": 373,
+          "covered": 287,
+          "percent": 76.94369973190348
+        },
+        "regions": {
+          "count": 346,
+          "covered": 288,
+          "notcovered": 58,
+          "percent": 83.23699421965318
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h/checkpoint.rs",
+      "summary": {
+        "branches": {
+          "count": 20,
+          "covered": 16,
+          "notcovered": 4,
+          "percent": 80.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 26,
+          "covered": 21,
+          "percent": 80.76923076923077
+        },
+        "instantiations": {
+          "count": 54,
+          "covered": 38,
+          "percent": 70.37037037037037
+        },
+        "lines": {
+          "count": 497,
+          "covered": 467,
+          "percent": 93.96378269617706
+        },
+        "regions": {
+          "count": 509,
+          "covered": 470,
+          "notcovered": 39,
+          "percent": 92.33791748526524
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h/checkpoint_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 10,
+          "covered": 8,
+          "notcovered": 2,
+          "percent": 80.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 27,
+          "covered": 27,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 28,
+          "covered": 28,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 389,
+          "covered": 384,
+          "percent": 98.7146529562982
+        },
+        "regions": {
+          "count": 542,
+          "covered": 534,
+          "notcovered": 8,
+          "percent": 98.5239852398524
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h/load.rs",
+      "summary": {
+        "branches": {
+          "count": 36,
+          "covered": 28,
+          "notcovered": 8,
+          "percent": 77.77777777777779
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 37,
+          "covered": 21,
+          "percent": 56.75675675675676
+        },
+        "instantiations": {
+          "count": 78,
+          "covered": 23,
+          "percent": 29.48717948717949
+        },
+        "lines": {
+          "count": 391,
+          "covered": 284,
+          "percent": 72.63427109974424
+        },
+        "regions": {
+          "count": 597,
+          "covered": 502,
+          "notcovered": 95,
+          "percent": 84.08710217755444
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h/load_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 28,
+          "covered": 20,
+          "notcovered": 8,
+          "percent": 71.42857142857143
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 43,
+          "covered": 42,
+          "percent": 97.67441860465115
+        },
+        "instantiations": {
+          "count": 54,
+          "covered": 53,
+          "percent": 98.14814814814817
+        },
+        "lines": {
+          "count": 584,
+          "covered": 582,
+          "percent": 99.65753424657534
+        },
+        "regions": {
+          "count": 918,
+          "covered": 908,
+          "notcovered": 10,
+          "percent": 98.91067538126362
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h/model.rs",
+      "summary": {
+        "branches": {
+          "count": 106,
+          "covered": 62,
+          "notcovered": 44,
+          "percent": 58.490566037735846
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 55,
+          "covered": 42,
+          "percent": 76.36363636363637
+        },
+        "instantiations": {
+          "count": 159,
+          "covered": 66,
+          "percent": 41.509433962264154
+        },
+        "lines": {
+          "count": 860,
+          "covered": 687,
+          "percent": 79.88372093023256
+        },
+        "regions": {
+          "count": 1297,
+          "covered": 1112,
+          "notcovered": 185,
+          "percent": 85.73631457208944
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h/model/decode.rs",
+      "summary": {
+        "branches": {
+          "count": 168,
+          "covered": 125,
+          "notcovered": 43,
+          "percent": 74.40476190476193
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 81,
+          "covered": 71,
+          "percent": 87.65432098765432
+        },
+        "instantiations": {
+          "count": 162,
+          "covered": 71,
+          "percent": 43.82716049382716
+        },
+        "lines": {
+          "count": 982,
+          "covered": 859,
+          "percent": 87.47454175152751
+        },
+        "regions": {
+          "count": 1378,
+          "covered": 1244,
+          "notcovered": 134,
+          "percent": 90.27576197387518
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h/model/decode_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 52,
+          "covered": 42,
+          "notcovered": 10,
+          "percent": 80.76923076923077
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 22,
+          "covered": 22,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 22,
+          "covered": 22,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 651,
+          "covered": 651,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 900,
+          "covered": 900,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h/model/mamba2.rs",
+      "summary": {
+        "branches": {
+          "count": 82,
+          "covered": 50,
+          "notcovered": 32,
+          "percent": 60.97560975609756
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 31,
+          "covered": 26,
+          "percent": 83.87096774193549
+        },
+        "instantiations": {
+          "count": 78,
+          "covered": 43,
+          "percent": 55.12820512820513
+        },
+        "lines": {
+          "count": 580,
+          "covered": 503,
+          "percent": 86.72413793103448
+        },
+        "regions": {
+          "count": 975,
+          "covered": 915,
+          "notcovered": 60,
+          "percent": 93.84615384615384
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h/model/mamba2_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 17,
+          "covered": 17,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 17,
+          "covered": 17,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 528,
+          "covered": 528,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 970,
+          "covered": 970,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h/model/mtp.rs",
+      "summary": {
+        "branches": {
+          "count": 64,
+          "covered": 41,
+          "notcovered": 23,
+          "percent": 64.0625
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 23,
+          "covered": 9,
+          "percent": 39.130434782608695
+        },
+        "instantiations": {
+          "count": 46,
+          "covered": 9,
+          "percent": 19.565217391304348
+        },
+        "lines": {
+          "count": 340,
+          "covered": 230,
+          "percent": 67.64705882352942
+        },
+        "regions": {
+          "count": 440,
+          "covered": 339,
+          "notcovered": 101,
+          "percent": 77.04545454545455
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h/model/mtp_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 392,
+          "covered": 392,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 633,
+          "covered": 633,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h/model/speculative.rs",
+      "summary": {
+        "branches": {
+          "count": 82,
+          "covered": 60,
+          "notcovered": 22,
+          "percent": 73.17073170731707
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 53,
+          "covered": 27,
+          "percent": 50.943396226415096
+        },
+        "instantiations": {
+          "count": 100,
+          "covered": 27,
+          "percent": 27.0
+        },
+        "lines": {
+          "count": 586,
+          "covered": 461,
+          "percent": 78.66894197952219
+        },
+        "regions": {
+          "count": 773,
+          "covered": 612,
+          "notcovered": 161,
+          "percent": 79.17205692108668
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h/model/speculative_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 20,
+          "covered": 19,
+          "notcovered": 1,
+          "percent": 95.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 22,
+          "covered": 22,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 22,
+          "covered": 22,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 474,
+          "covered": 474,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 779,
+          "covered": 776,
+          "notcovered": 3,
+          "percent": 99.61489088575097
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h/model_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 6,
+          "covered": 3,
+          "notcovered": 3,
+          "percent": 50.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 16,
+          "covered": 16,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 16,
+          "covered": 16,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 257,
+          "covered": 254,
+          "percent": 98.83268482490271
+        },
+        "regions": {
+          "count": 365,
+          "covered": 355,
+          "notcovered": 10,
+          "percent": 97.26027397260275
+        }
+      }
+    },
+    {
+      "path": "src/models/nemotron_h_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 102,
+          "covered": 101,
+          "percent": 99.01960784313727
+        },
+        "regions": {
+          "count": 119,
+          "covered": 118,
+          "notcovered": 1,
+          "percent": 99.15966386554622
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5.rs",
+      "summary": {
+        "branches": {
+          "count": 36,
+          "covered": 30,
+          "notcovered": 6,
+          "percent": 83.33333333333334
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 5,
+          "covered": 5,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 10,
+          "covered": 10,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 175,
+          "covered": 148,
+          "percent": 84.57142857142857
+        },
+        "regions": {
+          "count": 150,
+          "covered": 134,
+          "notcovered": 16,
+          "percent": 89.33333333333333
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/checkpoint.rs",
+      "summary": {
+        "branches": {
+          "count": 24,
+          "covered": 20,
+          "notcovered": 4,
+          "percent": 83.33333333333334
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 28,
+          "covered": 26,
+          "percent": 92.85714285714286
+        },
+        "instantiations": {
+          "count": 56,
+          "covered": 26,
+          "percent": 46.42857142857143
+        },
+        "lines": {
+          "count": 344,
+          "covered": 325,
+          "percent": 94.47674418604652
+        },
+        "regions": {
+          "count": 523,
+          "covered": 497,
+          "notcovered": 26,
+          "percent": 95.02868068833652
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/checkpoint_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 6,
+          "covered": 4,
+          "notcovered": 2,
+          "percent": 66.66666666666666
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 23,
+          "covered": 23,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 23,
+          "covered": 23,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 274,
+          "covered": 274,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 402,
+          "covered": 398,
+          "notcovered": 4,
+          "percent": 99.00497512437812
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/execution_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 2,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 21,
+          "covered": 19,
+          "percent": 90.47619047619048
+        },
+        "instantiations": {
+          "count": 21,
+          "covered": 19,
+          "percent": 90.47619047619048
+        },
+        "lines": {
+          "count": 270,
+          "covered": 262,
+          "percent": 97.03703703703704
+        },
+        "regions": {
+          "count": 550,
+          "covered": 540,
+          "notcovered": 10,
+          "percent": 98.18181818181819
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/intervention_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 24,
+          "covered": 22,
+          "percent": 91.66666666666666
+        },
+        "instantiations": {
+          "count": 27,
+          "covered": 25,
+          "percent": 92.5925925925926
+        },
+        "lines": {
+          "count": 356,
+          "covered": 351,
+          "percent": 98.59550561797754
+        },
+        "regions": {
+          "count": 714,
+          "covered": 707,
+          "notcovered": 7,
+          "percent": 99.01960784313727
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/load.rs",
+      "summary": {
+        "branches": {
+          "count": 20,
+          "covered": 13,
+          "notcovered": 7,
+          "percent": 65.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 30,
+          "covered": 13,
+          "percent": 43.333333333333336
+        },
+        "instantiations": {
+          "count": 80,
+          "covered": 22,
+          "percent": 27.500000000000004
+        },
+        "lines": {
+          "count": 302,
+          "covered": 198,
+          "percent": 65.56291390728477
+        },
+        "regions": {
+          "count": 467,
+          "covered": 347,
+          "notcovered": 120,
+          "percent": 74.30406852248393
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/load_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 4,
+          "covered": 4,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 21,
+          "covered": 15,
+          "percent": 71.42857142857143
+        },
+        "instantiations": {
+          "count": 21,
+          "covered": 15,
+          "percent": 71.42857142857143
+        },
+        "lines": {
+          "count": 273,
+          "covered": 267,
+          "percent": 97.8021978021978
+        },
+        "regions": {
+          "count": 391,
+          "covered": 379,
+          "notcovered": 12,
+          "percent": 96.93094629156012
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/model.rs",
+      "summary": {
+        "branches": {
+          "count": 106,
+          "covered": 77,
+          "notcovered": 29,
+          "percent": 72.64150943396226
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 65,
+          "covered": 46,
+          "percent": 70.76923076923077
+        },
+        "instantiations": {
+          "count": 162,
+          "covered": 70,
+          "percent": 43.20987654320987
+        },
+        "lines": {
+          "count": 882,
+          "covered": 725,
+          "percent": 82.19954648526077
+        },
+        "regions": {
+          "count": 1387,
+          "covered": 1153,
+          "notcovered": 234,
+          "percent": 83.12905551550107
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/model/decode.rs",
+      "summary": {
+        "branches": {
+          "count": 224,
+          "covered": 186,
+          "notcovered": 38,
+          "percent": 83.03571428571429
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 108,
+          "covered": 79,
+          "percent": 73.14814814814817
+        },
+        "instantiations": {
+          "count": 224,
+          "covered": 82,
+          "percent": 36.607142857142854
+        },
+        "lines": {
+          "count": 1380,
+          "covered": 1201,
+          "percent": 87.02898550724636
+        },
+        "regions": {
+          "count": 1867,
+          "covered": 1653,
+          "notcovered": 214,
+          "percent": 88.53776111408676
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/model/decode_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 32,
+          "covered": 27,
+          "notcovered": 5,
+          "percent": 84.375
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 48,
+          "covered": 48,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 48,
+          "covered": 48,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 1614,
+          "covered": 1609,
+          "percent": 99.69021065675341
+        },
+        "regions": {
+          "count": 2596,
+          "covered": 2580,
+          "notcovered": 16,
+          "percent": 99.38366718027734
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/model/mtp.rs",
+      "summary": {
+        "branches": {
+          "count": 20,
+          "covered": 11,
+          "notcovered": 9,
+          "percent": 55.00000000000001
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 7,
+          "covered": 5,
+          "percent": 71.42857142857143
+        },
+        "instantiations": {
+          "count": 18,
+          "covered": 5,
+          "percent": 27.77777777777778
+        },
+        "lines": {
+          "count": 112,
+          "covered": 76,
+          "percent": 67.85714285714286
+        },
+        "regions": {
+          "count": 137,
+          "covered": 113,
+          "notcovered": 24,
+          "percent": 82.48175182481752
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/model/speculative.rs",
+      "summary": {
+        "branches": {
+          "count": 82,
+          "covered": 57,
+          "notcovered": 25,
+          "percent": 69.51219512195121
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 56,
+          "covered": 25,
+          "percent": 44.642857142857146
+        },
+        "instantiations": {
+          "count": 106,
+          "covered": 25,
+          "percent": 23.58490566037736
+        },
+        "lines": {
+          "count": 620,
+          "covered": 449,
+          "percent": 72.41935483870968
+        },
+        "regions": {
+          "count": 803,
+          "covered": 609,
+          "notcovered": 194,
+          "percent": 75.84059775840598
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/model/speculative_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 12,
+          "covered": 11,
+          "notcovered": 1,
+          "percent": 91.66666666666666
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 21,
+          "covered": 21,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 21,
+          "covered": 21,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 499,
+          "covered": 499,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 798,
+          "covered": 796,
+          "notcovered": 2,
+          "percent": 99.74937343358395
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/model_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 6,
+          "covered": 6,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 13,
+          "covered": 12,
+          "percent": 92.3076923076923
+        },
+        "instantiations": {
+          "count": 21,
+          "covered": 18,
+          "percent": 85.71428571428571
+        },
+        "lines": {
+          "count": 272,
+          "covered": 271,
+          "percent": 99.63235294117648
+        },
+        "regions": {
+          "count": 345,
+          "covered": 343,
+          "notcovered": 2,
+          "percent": 99.42028985507247
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/recipe.rs",
+      "summary": {
+        "branches": {
+          "count": 44,
+          "covered": 39,
+          "notcovered": 5,
+          "percent": 88.63636363636364
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 39,
+          "covered": 31,
+          "percent": 79.48717948717949
+        },
+        "instantiations": {
+          "count": 108,
+          "covered": 51,
+          "percent": 47.22222222222222
+        },
+        "lines": {
+          "count": 417,
+          "covered": 385,
+          "percent": 92.32613908872902
+        },
+        "regions": {
+          "count": 546,
+          "covered": 499,
+          "notcovered": 47,
+          "percent": 91.39194139194139
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5/recipe_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 18,
+          "covered": 17,
+          "notcovered": 1,
+          "percent": 94.44444444444444
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 37,
+          "covered": 37,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 37,
+          "covered": 37,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 583,
+          "covered": 582,
+          "percent": 99.82847341337907
+        },
+        "regions": {
+          "count": 1005,
+          "covered": 1004,
+          "notcovered": 1,
+          "percent": 99.90049751243781
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_5_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 6,
+          "covered": 6,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 6,
+          "covered": 6,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 86,
+          "covered": 86,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 77,
+          "covered": 77,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_moe.rs",
+      "summary": {
+        "branches": {
+          "count": 26,
+          "covered": 16,
+          "notcovered": 10,
+          "percent": 61.53846153846154
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 5,
+          "covered": 4,
+          "percent": 80.0
+        },
+        "instantiations": {
+          "count": 10,
+          "covered": 8,
+          "percent": 80.0
+        },
+        "lines": {
+          "count": 146,
+          "covered": 107,
+          "percent": 73.28767123287672
+        },
+        "regions": {
+          "count": 123,
+          "covered": 103,
+          "notcovered": 20,
+          "percent": 83.73983739837398
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_moe/checkpoint.rs",
+      "summary": {
+        "branches": {
+          "count": 6,
+          "covered": 6,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 13,
+          "covered": 11,
+          "percent": 84.61538461538461
+        },
+        "instantiations": {
+          "count": 26,
+          "covered": 11,
+          "percent": 42.30769230769231
+        },
+        "lines": {
+          "count": 190,
+          "covered": 183,
+          "percent": 96.3157894736842
+        },
+        "regions": {
+          "count": 222,
+          "covered": 206,
+          "notcovered": 16,
+          "percent": 92.7927927927928
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_moe/checkpoint_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 6,
+          "covered": 5,
+          "notcovered": 1,
+          "percent": 83.33333333333334
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 12,
+          "covered": 12,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 12,
+          "covered": 12,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 171,
+          "covered": 171,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 232,
+          "covered": 229,
+          "notcovered": 3,
+          "percent": 98.70689655172413
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_moe/load.rs",
+      "summary": {
+        "branches": {
+          "count": 16,
+          "covered": 9,
+          "notcovered": 7,
+          "percent": 56.25
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 28,
+          "covered": 15,
+          "percent": 53.57142857142857
+        },
+        "instantiations": {
+          "count": 58,
+          "covered": 16,
+          "percent": 27.58620689655172
+        },
+        "lines": {
+          "count": 264,
+          "covered": 180,
+          "percent": 68.18181818181817
+        },
+        "regions": {
+          "count": 372,
+          "covered": 288,
+          "notcovered": 84,
+          "percent": 77.41935483870968
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_moe/load_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 36,
+          "covered": 23,
+          "notcovered": 13,
+          "percent": 63.888888888888886
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 38,
+          "covered": 37,
+          "percent": 97.36842105263156
+        },
+        "instantiations": {
+          "count": 48,
+          "covered": 47,
+          "percent": 97.91666666666666
+        },
+        "lines": {
+          "count": 544,
+          "covered": 541,
+          "percent": 99.44852941176472
+        },
+        "regions": {
+          "count": 889,
+          "covered": 878,
+          "notcovered": 11,
+          "percent": 98.76265466816648
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_moe/model.rs",
+      "summary": {
+        "branches": {
+          "count": 96,
+          "covered": 77,
+          "notcovered": 19,
+          "percent": 80.20833333333334
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 47,
+          "covered": 32,
+          "percent": 68.08510638297872
+        },
+        "instantiations": {
+          "count": 127,
+          "covered": 52,
+          "percent": 40.94488188976378
+        },
+        "lines": {
+          "count": 630,
+          "covered": 515,
+          "percent": 81.74603174603175
+        },
+        "regions": {
+          "count": 887,
+          "covered": 741,
+          "notcovered": 146,
+          "percent": 83.54002254791432
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_moe/model/decode.rs",
+      "summary": {
+        "branches": {
+          "count": 120,
+          "covered": 92,
+          "notcovered": 28,
+          "percent": 76.66666666666667
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 58,
+          "covered": 47,
+          "percent": 81.03448275862068
+        },
+        "instantiations": {
+          "count": 116,
+          "covered": 47,
+          "percent": 40.51724137931034
+        },
+        "lines": {
+          "count": 773,
+          "covered": 670,
+          "percent": 86.67529107373868
+        },
+        "regions": {
+          "count": 1075,
+          "covered": 962,
+          "notcovered": 113,
+          "percent": 89.48837209302326
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_moe/model_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 14,
+          "covered": 11,
+          "notcovered": 3,
+          "percent": 78.57142857142857
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 46,
+          "covered": 45,
+          "percent": 97.82608695652173
+        },
+        "instantiations": {
+          "count": 46,
+          "covered": 45,
+          "percent": 97.82608695652173
+        },
+        "lines": {
+          "count": 952,
+          "covered": 950,
+          "percent": 99.78991596638656
+        },
+        "regions": {
+          "count": 1275,
+          "covered": 1273,
+          "notcovered": 2,
+          "percent": 99.84313725490196
+        }
+      }
+    },
+    {
+      "path": "src/models/qwen3_moe_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 2,
+          "covered": 2,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 2,
+          "covered": 2,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 19,
+          "covered": 19,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 18,
+          "covered": 18,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/models/t5.rs",
+      "summary": {
+        "branches": {
+          "count": 26,
+          "covered": 17,
+          "notcovered": 9,
+          "percent": 65.38461538461539
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 7,
+          "covered": 7,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 14,
+          "covered": 14,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 164,
+          "covered": 127,
+          "percent": 77.4390243902439
+        },
+        "regions": {
+          "count": 150,
+          "covered": 129,
+          "notcovered": 21,
+          "percent": 86.0
+        }
+      }
+    },
+    {
+      "path": "src/models/t5/checkpoint.rs",
+      "summary": {
+        "branches": {
+          "count": 14,
+          "covered": 12,
+          "notcovered": 2,
+          "percent": 85.71428571428571
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 28,
+          "covered": 25,
+          "percent": 89.28571428571429
+        },
+        "instantiations": {
+          "count": 68,
+          "covered": 48,
+          "percent": 70.58823529411765
+        },
+        "lines": {
+          "count": 233,
+          "covered": 219,
+          "percent": 93.99141630901288
+        },
+        "regions": {
+          "count": 325,
+          "covered": 297,
+          "notcovered": 28,
+          "percent": 91.38461538461539
+        }
+      }
+    },
+    {
+      "path": "src/models/t5/checkpoint_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 36,
+          "covered": 27,
+          "notcovered": 9,
+          "percent": 75.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 23,
+          "covered": 23,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 23,
+          "covered": 23,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 362,
+          "covered": 362,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 524,
+          "covered": 523,
+          "notcovered": 1,
+          "percent": 99.80916030534351
+        }
+      }
+    },
+    {
+      "path": "src/models/t5/generation.rs",
+      "summary": {
+        "branches": {
+          "count": 4,
+          "covered": 3,
+          "notcovered": 1,
+          "percent": 75.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 13,
+          "covered": 7,
+          "percent": 53.84615384615385
+        },
+        "instantiations": {
+          "count": 40,
+          "covered": 7,
+          "percent": 17.5
+        },
+        "lines": {
+          "count": 101,
+          "covered": 88,
+          "percent": 87.12871287128714
+        },
+        "regions": {
+          "count": 126,
+          "covered": 104,
+          "notcovered": 22,
+          "percent": 82.53968253968253
+        }
+      }
+    },
+    {
+      "path": "src/models/t5/generation_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 6,
+          "covered": 3,
+          "notcovered": 3,
+          "percent": 50.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 6,
+          "covered": 4,
+          "percent": 66.66666666666666
+        },
+        "instantiations": {
+          "count": 6,
+          "covered": 4,
+          "percent": 66.66666666666666
+        },
+        "lines": {
+          "count": 95,
+          "covered": 52,
+          "percent": 54.736842105263165
+        },
+        "regions": {
+          "count": 114,
+          "covered": 62,
+          "notcovered": 52,
+          "percent": 54.385964912280706
+        }
+      }
+    },
+    {
+      "path": "src/models/t5/load.rs",
+      "summary": {
+        "branches": {
+          "count": 32,
+          "covered": 27,
+          "notcovered": 5,
+          "percent": 84.375
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 22,
+          "covered": 17,
+          "percent": 77.27272727272727
+        },
+        "instantiations": {
+          "count": 87,
+          "covered": 19,
+          "percent": 21.839080459770116
+        },
+        "lines": {
+          "count": 256,
+          "covered": 220,
+          "percent": 85.9375
+        },
+        "regions": {
+          "count": 336,
+          "covered": 303,
+          "notcovered": 33,
+          "percent": 90.17857142857143
+        }
+      }
+    },
+    {
+      "path": "src/models/t5/load_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 22,
+          "covered": 21,
+          "notcovered": 1,
+          "percent": 95.45454545454545
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 30,
+          "covered": 24,
+          "percent": 80.0
+        },
+        "instantiations": {
+          "count": 46,
+          "covered": 40,
+          "percent": 86.95652173913044
+        },
+        "lines": {
+          "count": 468,
+          "covered": 315,
+          "percent": 67.3076923076923
+        },
+        "regions": {
+          "count": 764,
+          "covered": 565,
+          "notcovered": 199,
+          "percent": 73.95287958115183
+        }
+      }
+    },
+    {
+      "path": "src/models/t5/model.rs",
+      "summary": {
+        "branches": {
+          "count": 130,
+          "covered": 108,
+          "notcovered": 22,
+          "percent": 83.07692307692308
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 74,
+          "covered": 60,
+          "percent": 81.0810810810811
+        },
+        "instantiations": {
+          "count": 322,
+          "covered": 114,
+          "percent": 35.40372670807454
+        },
+        "lines": {
+          "count": 1221,
+          "covered": 1072,
+          "percent": 87.7968877968878
+        },
+        "regions": {
+          "count": 1685,
+          "covered": 1506,
+          "notcovered": 179,
+          "percent": 89.37685459940653
+        }
+      }
+    },
+    {
+      "path": "src/models/t5/model/decode.rs",
+      "summary": {
+        "branches": {
+          "count": 142,
+          "covered": 123,
+          "notcovered": 19,
+          "percent": 86.61971830985915
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 87,
+          "covered": 74,
+          "percent": 85.0574712643678
+        },
+        "instantiations": {
+          "count": 332,
+          "covered": 86,
+          "percent": 25.903614457831324
+        },
+        "lines": {
+          "count": 1120,
+          "covered": 1013,
+          "percent": 90.44642857142857
+        },
+        "regions": {
+          "count": 1481,
+          "covered": 1366,
+          "notcovered": 115,
+          "percent": 92.23497636731938
+        }
+      }
+    },
+    {
+      "path": "src/models/t5/model/decode_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 40,
+          "covered": 34,
+          "notcovered": 6,
+          "percent": 85.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 65,
+          "covered": 63,
+          "percent": 96.92307692307692
+        },
+        "instantiations": {
+          "count": 70,
+          "covered": 67,
+          "percent": 95.71428571428572
+        },
+        "lines": {
+          "count": 1640,
+          "covered": 1633,
+          "percent": 99.57317073170732
+        },
+        "regions": {
+          "count": 2436,
+          "covered": 2416,
+          "notcovered": 20,
+          "percent": 99.17898193760263
+        }
+      }
+    },
+    {
+      "path": "src/models/t5/model/intervention_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 2,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 38,
+          "covered": 37,
+          "percent": 97.36842105263156
+        },
+        "instantiations": {
+          "count": 40,
+          "covered": 39,
+          "percent": 97.5
+        },
+        "lines": {
+          "count": 703,
+          "covered": 699,
+          "percent": 99.43100995732574
+        },
+        "regions": {
+          "count": 1122,
+          "covered": 1116,
+          "notcovered": 6,
+          "percent": 99.46524064171123
+        }
+      }
+    },
+    {
+      "path": "src/models/t5/model/padded_hooks.rs",
+      "summary": {
+        "branches": {
+          "count": 28,
+          "covered": 18,
+          "notcovered": 10,
+          "percent": 64.28571428571429
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 9,
+          "covered": 7,
+          "percent": 77.77777777777779
+        },
+        "instantiations": {
+          "count": 27,
+          "covered": 11,
+          "percent": 40.74074074074074
+        },
+        "lines": {
+          "count": 142,
+          "covered": 125,
+          "percent": 88.02816901408451
+        },
+        "regions": {
+          "count": 246,
+          "covered": 223,
+          "notcovered": 23,
+          "percent": 90.65040650406505
+        }
+      }
+    },
+    {
+      "path": "src/models/t5/model/recipe.rs",
+      "summary": {
+        "branches": {
+          "count": 40,
+          "covered": 34,
+          "notcovered": 6,
+          "percent": 85.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 39,
+          "covered": 33,
+          "percent": 84.61538461538461
+        },
+        "instantiations": {
+          "count": 139,
+          "covered": 53,
+          "percent": 38.1294964028777
+        },
+        "lines": {
+          "count": 414,
+          "covered": 376,
+          "percent": 90.82125603864735
+        },
+        "regions": {
+          "count": 574,
+          "covered": 528,
+          "notcovered": 46,
+          "percent": 91.98606271777003
+        }
+      }
+    },
+    {
+      "path": "src/models/t5/model/recipe_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 6,
+          "covered": 6,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 27,
+          "covered": 26,
+          "percent": 96.29629629629629
+        },
+        "instantiations": {
+          "count": 28,
+          "covered": 27,
+          "percent": 96.42857142857143
+        },
+        "lines": {
+          "count": 440,
+          "covered": 436,
+          "percent": 99.0909090909091
+        },
+        "regions": {
+          "count": 836,
+          "covered": 831,
+          "notcovered": 5,
+          "percent": 99.4019138755981
+        }
+      }
+    },
+    {
+      "path": "src/models/t5/model_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 2,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 18,
+          "covered": 18,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 18,
+          "covered": 18,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 423,
+          "covered": 423,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 613,
+          "covered": 612,
+          "notcovered": 1,
+          "percent": 99.836867862969
+        }
+      }
+    },
+    {
+      "path": "src/models/t5_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 4,
+          "covered": 4,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 4,
+          "covered": 4,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 59,
+          "covered": 59,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 43,
+          "covered": 43,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/moe.rs",
+      "summary": {
+        "branches": {
+          "count": 86,
+          "covered": 83,
+          "notcovered": 3,
+          "percent": 96.51162790697676
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 27,
+          "covered": 17,
+          "percent": 62.96296296296296
+        },
+        "instantiations": {
+          "count": 71,
+          "covered": 26,
+          "percent": 36.61971830985916
+        },
+        "lines": {
+          "count": 487,
+          "covered": 428,
+          "percent": 87.88501026694045
+        },
+        "regions": {
+          "count": 657,
+          "covered": 602,
+          "notcovered": 55,
+          "percent": 91.62861491628614
+        }
+      }
+    },
+    {
+      "path": "src/moe_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 32,
+          "covered": 17,
+          "notcovered": 15,
+          "percent": 53.125
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 30,
+          "covered": 30,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 30,
+          "covered": 30,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 413,
+          "covered": 412,
+          "percent": 99.75786924939467
+        },
+        "regions": {
+          "count": 948,
+          "covered": 945,
+          "notcovered": 3,
+          "percent": 99.68354430379746
+        }
+      }
+    },
+    {
+      "path": "src/normalization.rs",
+      "summary": {
+        "branches": {
+          "count": 12,
+          "covered": 11,
+          "notcovered": 1,
+          "percent": 91.66666666666666
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 28,
+          "covered": 13,
+          "percent": 46.42857142857143
+        },
+        "lines": {
+          "count": 65,
+          "covered": 65,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 89,
+          "covered": 88,
+          "notcovered": 1,
+          "percent": 98.87640449438202
+        }
+      }
+    },
+    {
+      "path": "src/normalization_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 7,
+          "covered": 7,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 7,
+          "covered": 7,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 140,
+          "covered": 140,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 272,
+          "covered": 272,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/operations.rs",
+      "summary": {
+        "branches": {
+          "count": 28,
+          "covered": 21,
+          "notcovered": 7,
+          "percent": 75.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 7,
+          "covered": 6,
+          "percent": 85.71428571428571
+        },
+        "instantiations": {
+          "count": 51,
+          "covered": 17,
+          "percent": 33.33333333333333
+        },
+        "lines": {
+          "count": 114,
+          "covered": 91,
+          "percent": 79.82456140350878
+        },
+        "regions": {
+          "count": 134,
+          "covered": 126,
+          "notcovered": 8,
+          "percent": 94.02985074626868
+        }
+      }
+    },
+    {
+      "path": "src/operations_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 20,
+          "covered": 13,
+          "notcovered": 7,
+          "percent": 65.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 14,
+          "covered": 14,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 14,
+          "covered": 14,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 265,
+          "covered": 265,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 549,
+          "covered": 546,
+          "notcovered": 3,
+          "percent": 99.4535519125683
+        }
+      }
+    },
+    {
+      "path": "src/position/ids.rs",
+      "summary": {
+        "branches": {
+          "count": 6,
+          "covered": 6,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 3,
+          "covered": 3,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 3,
+          "covered": 3,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 78,
+          "covered": 78,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 88,
+          "covered": 88,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/position/ids_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 2,
+          "covered": 2,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 89,
+          "covered": 89,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 107,
+          "covered": 107,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/position/rope.rs",
+      "summary": {
+        "branches": {
+          "count": 42,
+          "covered": 42,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 31,
+          "covered": 31,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 62,
+          "covered": 31,
+          "percent": 50.0
+        },
+        "lines": {
+          "count": 246,
+          "covered": 246,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 259,
+          "covered": 259,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/position/rope_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 11,
+          "covered": 11,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 11,
+          "covered": 11,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 172,
+          "covered": 172,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 290,
+          "covered": 287,
+          "notcovered": 3,
+          "percent": 98.9655172413793
+        }
+      }
+    },
+    {
+      "path": "src/position/t5.rs",
+      "summary": {
+        "branches": {
+          "count": 26,
+          "covered": 26,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 16,
+          "covered": 8,
+          "percent": 50.0
+        },
+        "lines": {
+          "count": 91,
+          "covered": 91,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 111,
+          "covered": 111,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/position/t5_bias.rs",
+      "summary": {
+        "branches": {
+          "count": 14,
+          "covered": 13,
+          "notcovered": 1,
+          "percent": 92.85714285714286
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 12,
+          "covered": 10,
+          "percent": 83.33333333333334
+        },
+        "instantiations": {
+          "count": 47,
+          "covered": 13,
+          "percent": 27.659574468085108
+        },
+        "lines": {
+          "count": 119,
+          "covered": 111,
+          "percent": 93.27731092436974
+        },
+        "regions": {
+          "count": 126,
+          "covered": 116,
+          "notcovered": 10,
+          "percent": 92.06349206349206
+        }
+      }
+    },
+    {
+      "path": "src/position/t5_bias_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 12,
+          "covered": 6,
+          "notcovered": 6,
+          "percent": 50.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 7,
+          "covered": 7,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 7,
+          "covered": 7,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 115,
+          "covered": 114,
+          "percent": 99.1304347826087
+        },
+        "regions": {
+          "count": 209,
+          "covered": 208,
+          "notcovered": 1,
+          "percent": 99.52153110047848
+        }
+      }
+    },
+    {
+      "path": "src/position/t5_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 10,
+          "covered": 6,
+          "notcovered": 4,
+          "percent": 60.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 132,
+          "covered": 132,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 196,
+          "covered": 196,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/position/tensor.rs",
+      "summary": {
+        "branches": {
+          "count": 36,
+          "covered": 28,
+          "notcovered": 8,
+          "percent": 77.77777777777779
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 13,
+          "covered": 13,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 31,
+          "covered": 18,
+          "percent": 58.06451612903226
+        },
+        "lines": {
+          "count": 213,
+          "covered": 213,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 351,
+          "covered": 349,
+          "notcovered": 2,
+          "percent": 99.43019943019942
+        }
+      }
+    },
+    {
+      "path": "src/position/tensor_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 24,
+          "covered": 12,
+          "notcovered": 12,
+          "percent": 50.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 8,
+          "covered": 8,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 172,
+          "covered": 172,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 430,
+          "covered": 430,
+          "notcovered": 0,
+          "percent": 100.0
+        }
+      }
+    },
+    {
+      "path": "src/tokenization.rs",
+      "summary": {
+        "branches": {
+          "count": 104,
+          "covered": 101,
+          "notcovered": 3,
+          "percent": 97.11538461538461
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 87,
+          "covered": 78,
+          "percent": 89.65517241379311
+        },
+        "instantiations": {
+          "count": 212,
+          "covered": 80,
+          "percent": 37.735849056603776
+        },
+        "lines": {
+          "count": 725,
+          "covered": 705,
+          "percent": 97.24137931034483
+        },
+        "regions": {
+          "count": 1013,
+          "covered": 975,
+          "notcovered": 38,
+          "percent": 96.248766041461
+        }
+      }
+    },
+    {
+      "path": "src/tokenization_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 36,
+          "covered": 18,
+          "notcovered": 18,
+          "percent": 50.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 23,
+          "covered": 23,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 23,
+          "covered": 23,
+          "percent": 100.0
+        },
+        "lines": {
+          "count": 718,
+          "covered": 718,
+          "percent": 100.0
+        },
+        "regions": {
+          "count": 1109,
+          "covered": 1108,
+          "notcovered": 1,
+          "percent": 99.90982867448152
+        }
+      }
+    },
+    {
+      "path": "src/training.rs",
+      "summary": {
+        "branches": {
+          "count": 36,
+          "covered": 29,
+          "notcovered": 7,
+          "percent": 80.55555555555556
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 11,
+          "covered": 11,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 49,
+          "covered": 37,
+          "percent": 75.51020408163265
+        },
+        "lines": {
+          "count": 164,
+          "covered": 154,
+          "percent": 93.90243902439023
+        },
+        "regions": {
+          "count": 246,
+          "covered": 235,
+          "notcovered": 11,
+          "percent": 95.52845528455285
+        }
+      }
+    },
+    {
+      "path": "src/training_capability_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 10,
+          "covered": 8,
+          "notcovered": 2,
+          "percent": 80.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 10,
+          "covered": 9,
+          "percent": 90.0
+        },
+        "instantiations": {
+          "count": 10,
+          "covered": 9,
+          "percent": 90.0
+        },
+        "lines": {
+          "count": 146,
+          "covered": 145,
+          "percent": 99.31506849315068
+        },
+        "regions": {
+          "count": 279,
+          "covered": 276,
+          "notcovered": 3,
+          "percent": 98.9247311827957
+        }
+      }
+    },
+    {
+      "path": "src/training_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 14,
+          "covered": 13,
+          "notcovered": 1,
+          "percent": 92.85714285714286
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 42,
+          "covered": 42,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 51,
+          "covered": 49,
+          "percent": 96.07843137254902
+        },
+        "lines": {
+          "count": 535,
+          "covered": 534,
+          "percent": 99.81308411214953
+        },
+        "regions": {
+          "count": 1257,
+          "covered": 1255,
+          "notcovered": 2,
+          "percent": 99.84089101034208
+        }
+      }
+    },
+    {
+      "path": "src/transfer.rs",
+      "summary": {
+        "branches": {
+          "count": 122,
+          "covered": 99,
+          "notcovered": 23,
+          "percent": 81.14754098360656
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 61,
+          "covered": 61,
+          "percent": 100.0
+        },
+        "instantiations": {
+          "count": 325,
+          "covered": 211,
+          "percent": 64.92307692307693
+        },
+        "lines": {
+          "count": 601,
+          "covered": 567,
+          "percent": 94.34276206322795
+        },
+        "regions": {
+          "count": 777,
+          "covered": 742,
+          "notcovered": 35,
+          "percent": 95.4954954954955
+        }
+      }
+    },
+    {
+      "path": "src/transfer_tests.rs",
+      "summary": {
+        "branches": {
+          "count": 4,
+          "covered": 4,
+          "notcovered": 0,
+          "percent": 100.0
+        },
+        "mcdc": {
+          "count": 0,
+          "covered": 0,
+          "notcovered": 0,
+          "percent": 0.0
+        },
+        "functions": {
+          "count": 47,
+          "covered": 44,
+          "percent": 93.61702127659576
+        },
+        "instantiations": {
+          "count": 48,
+          "covered": 45,
+          "percent": 93.75
+        },
+        "lines": {
+          "count": 548,
+          "covered": 536,
+          "percent": 97.81021897810218
+        },
+        "regions": {
+          "count": 1083,
+          "covered": 1067,
+          "notcovered": 16,
+          "percent": 98.52262234533703
+        }
+      }
+    }
+  ],
+  "limits": [
+    "Not a production-only measurement or a refreshed qualified whole-test-file exclusion diagnostic.",
+    "Hardware-only features and examples are outside this coverage profile.",
+    "Native branch instrumentation is unstable; branch, line and region counters are distinct.",
+    "Remaining reachable branches include defensive validation and device/dtype rejection; unexecuted assertion, generic, and generated mappings are retained."
+  ]
+}

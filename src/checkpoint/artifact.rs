@@ -26,7 +26,9 @@ use super::{
     accounting::{IndexTotalSizeEvidence, PinnedControlFile, PinnedIndexTotalSizePolicy},
 };
 
+/// Preferred Hugging Face index filename during automatic discovery.
 const STANDARD_INDEX: &str = "model.safetensors.index.json";
+/// Preferred unsharded filename when no standard index exists.
 const STANDARD_SINGLE: &str = "model.safetensors";
 
 /// Describes how a checkpoint manifest was selected.
@@ -941,16 +943,23 @@ fn limit(kind: &'static str, actual: usize, configured: usize) -> CheckpointErro
 
 // Serde visitors preserve exact key and integer semantics at the trust boundary.
 
+/// Unvalidated SafeTensors header entry, with exact integer dimensions and offsets.
 #[derive(Debug, Deserialize)]
 struct RawTensor {
+    /// Wire dtype spelling, validated before calculating storage size.
     dtype: String,
+    /// Dimensions before checked conversion to host indexing sizes.
     shape: Vec<u64>,
+    /// Half-open payload byte range relative to the data section.
     data_offsets: [u64; 2],
 }
 
+/// Header maps after duplicate decoded keys have been rejected.
 #[derive(Debug, Default)]
 struct RawHeader {
+    /// User metadata separated from tensor descriptors.
     metadata: BTreeMap<String, String>,
+    /// Tensor descriptors ordered by their decoded names.
     tensors: BTreeMap<String, RawTensor>,
 }
 
@@ -960,9 +969,11 @@ impl<'de> Deserialize<'de> for RawHeader {
     where
         D: Deserializer<'de>,
     {
+        /// Rejects duplicate keys while separating metadata from tensor entries.
         struct HeaderVisitor;
 
         impl<'de> de::Visitor<'de> for HeaderVisitor {
+            /// Header retaining every uniquely named tensor and metadata entry.
             type Value = RawHeader;
 
             /// Describes the expected top-level object for Serde's parse diagnostics.
@@ -997,8 +1008,12 @@ impl<'de> Deserialize<'de> for RawHeader {
     }
 }
 
+/// String map whose deserializer rejects duplicate keys instead of replacing values.
 #[derive(Debug, Default)]
-struct UniqueStringMap(BTreeMap<String, String>);
+struct UniqueStringMap(
+    /// Uniquely named string values in deterministic key order.
+    BTreeMap<String, String>,
+);
 
 impl<'de> Deserialize<'de> for UniqueStringMap {
     /// Uses the shared duplicate-rejecting map parser for SafeTensors metadata.
@@ -1025,9 +1040,13 @@ where
     V: Deserialize<'de>,
 {
     /// Carries only the value type; the visitor never allocates from a size hint.
-    struct UniqueMapVisitor<V>(std::marker::PhantomData<fn() -> V>);
+    struct UniqueMapVisitor<V>(
+        /// Carries the deserialized value type without owning a value.
+        std::marker::PhantomData<fn() -> V>,
+    );
 
     impl<'de, V: Deserialize<'de>> de::Visitor<'de> for UniqueMapVisitor<V> {
+        /// Decoded values keyed by their unique string names.
         type Value = BTreeMap<String, V>;
 
         /// Describes the uniqueness requirement in contextual Serde errors.
@@ -1061,10 +1080,13 @@ where
     deserializer.deserialize_map(UniqueMapVisitor(std::marker::PhantomData))
 }
 
+/// Index fields before shard paths, tensor membership, and byte totals are validated.
 #[derive(Debug, Deserialize)]
 struct RawIndex {
+    /// Optional byte-accounting metadata supplied by the checkpoint producer.
     #[serde(default)]
     metadata: Option<RawIndexMetadata>,
+    /// Unique tensor names mapped to root-relative shard names.
     #[serde(deserialize_with = "deserialize_unique_string_map")]
     weight_map: BTreeMap<String, String>,
 }
@@ -1079,8 +1101,10 @@ struct RawIndexDocument {
     sha256: String,
 }
 
+/// Byte accounting declared in a checkpoint index.
 #[derive(Debug, Deserialize)]
 struct RawIndexMetadata {
+    /// Nonnegative integral payload byte count, if the index declares one.
     #[serde(default, deserialize_with = "deserialize_optional_integral_u64")]
     total_size: Option<u64>,
 }

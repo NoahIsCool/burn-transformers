@@ -89,9 +89,15 @@ pub enum ArtifactSelection {
     #[default]
     Auto,
     /// Load a specific checkpoint index, relative to the repository root.
-    Index(String),
+    Index(
+        /// Root-relative index path checked for containment during discovery.
+        String,
+    ),
     /// Load a specific unsharded SafeTensors file, relative to the repository root.
-    Single(String),
+    Single(
+        /// Root-relative SafeTensors path checked for containment during discovery.
+        String,
+    ),
 }
 
 /// Determines the dtype produced by the second-pass tensor loader.
@@ -108,7 +114,10 @@ pub enum DTypePolicy {
     ///
     /// An architecture's concrete [`super::ExpectedTensor`] dtype remains
     /// authoritative for numerically sensitive parameters and buffers.
-    Cast(TensorDType),
+    Cast(
+        /// Requested real floating-point destination dtype.
+        TensorDType,
+    ),
 }
 
 /// Options shared by artifact discovery and strict load-plan construction.

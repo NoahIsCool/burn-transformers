@@ -60,13 +60,17 @@ mod experiment {
         normalization::{RmsNorm, RmsNormConfig},
     };
 
+    /// CPU tensor backend for the F32 encoder-decoder demonstration.
     type B = Flex<f32, i32>;
 
     // Every attention operation is the same shared module. The caller chooses
     // where queries/keys originate and whether future tokens are visible.
+    /// Pre-normalized MLA residual branch with caller-selected attention visibility.
     #[derive(Module, Debug)]
     struct AttentionBlock<B: Backend> {
+        /// RMS normalization applied to queries before projection.
         norm: RmsNorm<B>,
+        /// Shared MLA module used for self-attention and cross-attention.
         attention: MultiLatentAttention<B>,
     }
 
@@ -104,9 +108,12 @@ mod experiment {
         }
     }
 
+    /// Pre-normalized gated feed-forward residual branch.
     #[derive(Module, Debug)]
     struct FeedForwardBlock<B: Backend> {
+        /// RMS normalization before the gated feed-forward projection.
         norm: RmsNorm<B>,
+        /// Gated channel transformation whose output is added to the residual.
         feed_forward: GatedFeedForward<B>,
     }
 
@@ -128,17 +135,28 @@ mod experiment {
     // The wiring follows encoder self-attention → decoder causal attention →
     // decoder cross-attention. It is an experimental architecture, not a T5
     // checkpoint recipe. The adapter is registered alongside the other modules.
+    /// Owns the MLA encoder, decoder, task head, and hook-inserted latent adapter.
     #[derive(Module, Debug)]
     pub(super) struct EncoderDecoder<B: Backend> {
+        /// Shared token lookup producing eight-channel source and query states.
         embedding: Embedding<B>,
+        /// Bidirectional MLA over the source tokens.
         encoder_attention: AttentionBlock<B>,
+        /// Channel transformation following encoder attention.
         encoder_feed_forward: FeedForwardBlock<B>,
+        /// Final normalization of the encoder states supplied to cross-attention.
         encoder_norm: RmsNorm<B>,
+        /// Decoder self-attention with visibility selected by the caller.
         decoder_attention: AttentionBlock<B>,
+        /// MLA from decoder queries to the encoded source.
         cross_attention: AttentionBlock<B>,
+        /// Channel transformation following decoder cross-attention.
         decoder_feed_forward: FeedForwardBlock<B>,
+        /// Final normalization before the task readout.
         decoder_norm: RmsNorm<B>,
+        /// Three-class readout for each decoder query.
         task_head: Linear<B>,
+        /// Three-channel projection inserted into cross-attention KV latents.
         latent_adapter: Linear<B>,
     }
 

@@ -1,3 +1,5 @@
+//! GPT-NeoX checkpoint preflight, packed-QKV installation, and failure-atomicity tests.
+
 use std::{fs, path::Path};
 
 use burn::{
@@ -11,9 +13,12 @@ use crate::checkpoint::{DTypePolicy, TensorDType, TensorOperation};
 
 use super::*;
 
+/// Deterministic CPU backend using F32 parameters and I32 tensor indices.
 type TestBackend = Flex<f32, i32>;
+/// Serialized source tensor name paired with its checkpoint dimensions.
 type FixtureTensor = (String, Vec<u64>);
 
+/// Builds a one-layer, two-head fixture with full-head RoPE and an independent vocabulary head.
 fn tiny() -> GptNeoXConfig {
     GptNeoXConfig {
         hidden_size: 4,
@@ -27,6 +32,7 @@ fn tiny() -> GptNeoXConfig {
     }
 }
 
+/// Writes a synthetic F32 SafeTensors inventory with ascending values and distinct bias offsets.
 fn write_checkpoint(root: &Path, mutate: impl FnOnce(&mut Vec<FixtureTensor>)) {
     let contract = tiny().checkpoint_contract().unwrap();
     let mut tensors = contract
@@ -70,6 +76,7 @@ fn write_checkpoint(root: &Path, mutate: impl FnOnce(&mut Vec<FixtureTensor>)) {
     fs::write(root.join("model.safetensors"), bytes).unwrap();
 }
 
+/// Reads a parameter in checkpoint layout so tests can inspect packed-QKV row ordering.
 fn saved<const D: usize>(parameter: &Param<Tensor<TestBackend, D>>) -> Vec<f32> {
     parameter
         .transform_for_save()
@@ -79,6 +86,7 @@ fn saved<const D: usize>(parameter: &Param<Tensor<TestBackend, D>>) -> Vec<f32> 
         .unwrap()
 }
 
+/// Head-interleaved QKV data splits into the expected weights/biases and reports six component transforms.
 #[test]
 fn local_import_reorders_qkv_heads_and_preserves_projection_layout() {
     let directory = TempDir::new().unwrap();
@@ -157,6 +165,7 @@ fn local_import_reorders_qkv_heads_and_preserves_projection_layout() {
     );
 }
 
+/// Invalid packed-QKV inventories fail during preflight and preserve the embedding bytes.
 #[test]
 fn missing_wrong_shape_and_unknown_tensors_fail_before_parameter_writes() {
     for case in 0..3 {
@@ -183,6 +192,7 @@ fn missing_wrong_shape_and_unknown_tensors_fail_before_parameter_writes() {
     }
 }
 
+/// The exact causal-mask, masked-bias, and rotary-frequency buffers are audited as three exceptions.
 #[test]
 fn exact_legacy_buffer_exceptions_are_reported() {
     let directory = TempDir::new().unwrap();
@@ -203,6 +213,7 @@ fn exact_legacy_buffer_exceptions_are_reported() {
     assert!(outcome.report.is_strictly_valid());
 }
 
+/// A missing value bias rejects the whole packed-bias write while preserving query/key biases.
 #[test]
 fn packed_component_failure_is_atomic_and_retains_context() {
     let mut model = GptNeoXModel::<TestBackend>::init(tiny(), &Default::default()).unwrap();
@@ -228,6 +239,7 @@ fn packed_component_failure_is_atomic_and_retains_context() {
     );
 }
 
+/// Bad payloads, target syntax, aliases, and mutated head geometry return recoverable errors.
 #[test]
 fn malformed_packed_payload_and_indices_return_errors() {
     let mut model = GptNeoXModel::<TestBackend>::init(tiny(), &Default::default()).unwrap();
@@ -281,6 +293,7 @@ fn malformed_packed_payload_and_indices_return_errors() {
     ));
 }
 
+/// F16 conversion reports each split component; integer targets and integer source storage are rejected.
 #[test]
 fn explicit_dtype_conversion_attributes_all_qkv_components() {
     let directory = TempDir::new().unwrap();
@@ -331,6 +344,7 @@ fn explicit_dtype_conversion_attributes_all_qkv_components() {
     );
 }
 
+/// A tied-head configuration cannot produce the independent-head checkpoint contract.
 #[test]
 fn tied_checkpoint_topology_is_rejected_explicitly() {
     let mut config = tiny();

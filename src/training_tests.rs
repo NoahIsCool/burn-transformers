@@ -1,8 +1,12 @@
+//! Training tests for stable losses, graph connectivity, optimizer ownership, and exact resumption.
+
 use super::*;
 use burn::{backend::Flex, tensor::TensorData};
 
+/// Deterministic F32 CPU backend for stable-loss numerical references.
 type Cpu = Flex<f32, i32>;
 
+/// Balanced F32 loss preserves small tail mass against an F64 oracle where sequential accumulation loses it.
 #[test]
 fn large_vocabulary_loss_matches_f64_despite_sequential_f32_tail_loss() {
     let device = Default::default();
@@ -23,6 +27,7 @@ fn large_vocabulary_loss_matches_f64_despite_sequential_f32_tail_loss() {
     assert!((f64::from(sequential) - expected).abs() > 1e-4);
 }
 
+/// Log-softmax on an odd-width nonfinal axis preserves F64 precision and tensor geometry.
 #[test]
 fn arbitrary_axis_odd_width_and_f64_precision_are_preserved() {
     let device = Default::default();
@@ -42,6 +47,7 @@ fn arbitrary_axis_odd_width_and_f64_precision_are_preserved() {
     }
 }
 
+/// Loss preflight rejects invalid axes, labels, batch shapes, and unsupported or mixed dtypes.
 #[test]
 fn loss_contract_rejects_invalid_axes_labels_shapes_and_dtypes() {
     let device = Default::default();
@@ -55,6 +61,7 @@ fn loss_contract_rejects_invalid_axes_labels_shapes_and_dtypes() {
     assert!(kl_divergence(input.clone(), input.cast(burn::tensor::FloatDType::F64)).is_err());
 }
 
+/// KL matches a teacher-to-student scalar reference averaged over examples and vanishes for identical logits.
 #[test]
 fn kl_uses_teacher_to_student_direction_and_example_mean() {
     let device = Default::default();
@@ -82,6 +89,8 @@ fn kl_uses_teacher_to_student_direction_and_example_mean() {
 
 #[cfg(feature = "autodiff")]
 mod autodiff {
+    //! Differentiable loss, intervention, parameter-ownership, and optimizer-resumption tests.
+
     use super::*;
     use crate::{
         intervention::{Hooks, Layer},
@@ -95,8 +104,10 @@ mod autodiff {
         record::{BinBytesRecorder, FullPrecisionSettings, Recorder},
         tensor::backend::Backend,
     };
+    /// Differentiable wrapper around the stable-loss fixture backend.
     type Ad = Autodiff<Cpu>;
 
+    /// Cross-entropy gradients match the analytic batch-mean probability-minus-label formula.
     #[test]
     fn stable_cross_entropy_gradient_matches_probability_minus_label() {
         let device = Default::default();
@@ -122,6 +133,7 @@ mod autodiff {
         }
     }
 
+    /// KL exposes analytic student and teacher derivatives, honors detached teachers, and differentiates explicit casts.
     #[test]
     fn kl_teacher_connectivity_and_explicit_loss_cast_remain_differentiable() {
         let device = Default::default();
@@ -175,13 +187,17 @@ mod autodiff {
         assert!(half.grad(&loss.backward()).is_some());
     }
 
+    /// Adapter inserted through a hook before a frozen two-channel suffix.
     #[derive(Module, Debug)]
     struct EditedModel<B: Backend> {
+        /// Trainable two-channel projection applied to the selected token.
         adapter: Linear<B>,
+        /// Fixed downstream projection through which adapter gradients must propagate.
         suffix: Linear<B>,
     }
 
     impl<B: Backend> EditedModel<B> {
+        /// Initialize a zero adapter and a fixed, frozen suffix on the requested device.
         fn init(device: &B::Device) -> Self {
             let mut adapter = LinearConfig::new(2, 2).with_bias(false).init(device);
             adapter.weight = Param::from_tensor(Tensor::zeros([2, 2], device));
@@ -194,6 +210,7 @@ mod autodiff {
             }
         }
 
+        /// Compute classification loss, optionally adding a connected intermediate activation penalty.
         fn forward(&self, input: Tensor<B, 3>, auxiliary: bool) -> Tensor<B, 1> {
             let point = Layer::decoder(0).residual_post();
             let mut hooks = Hooks::new();
@@ -219,6 +236,7 @@ mod autodiff {
         }
     }
 
+    /// Return four one-token examples aligned with the fixture's alternating class labels.
     fn input<B: Backend>(device: &B::Device) -> Tensor<B, 3> {
         Tensor::from_data(
             [[[1.0, 0.0]], [[0.0, 1.0]], [[2.0, 0.0]], [[0.0, 2.0]]],
@@ -226,6 +244,7 @@ mod autodiff {
         )
     }
 
+    /// An inserted adapter learns through a frozen suffix while the suffix's values remain unchanged.
     #[test]
     fn optimizer_learns_through_selected_hook_and_frozen_downstream_module() {
         let device = Default::default();
@@ -246,6 +265,7 @@ mod autodiff {
         assert!(final_loss < initial * 0.2, "{initial} -> {final_loss}");
     }
 
+    /// Model and Adam records preserve identities, freezing, and the exact next optimization update.
     #[test]
     fn records_restore_parameter_ids_optimizer_moments_and_next_update_exactly() {
         let device = Default::default();
@@ -288,8 +308,10 @@ mod autodiff {
         );
 
         // Native records intentionally follow the destination's trainability.
+        /// Mapper explicitly making every destination parameter trainable before record loading.
         struct Enable;
         impl ModuleMapper<Ad> for Enable {
+            /// Enable gradients while retaining each parameter identity and layout mapper.
             fn map_float<const D: usize>(
                 &mut self,
                 param: Param<Tensor<Ad, D>>,
@@ -303,6 +325,7 @@ mod autodiff {
         assert!(trainable.suffix.weight.val().is_require_grad());
     }
 
+    /// A connected intermediate capture alone supplies a learning signal to the registered adapter.
     #[test]
     fn capture_only_intermediate_loss_trains_the_owned_inserted_module() {
         let device = Default::default();
@@ -335,6 +358,7 @@ mod autodiff {
         assert!(final_loss < first_loss * 0.2);
     }
 
+    /// Layer-by-layer T5 execution with an identity hook matches full-forward values and all parameter gradients.
     #[test]
     fn staged_t5_execution_preserves_every_parameter_gradient() {
         use crate::{
@@ -381,12 +405,17 @@ mod autodiff {
         let staged = encoder.normalize(state).unwrap().hidden;
         assert_eq!(direct.into_data(), staged.clone().into_data());
         let staged_grads = (staged * weights()).sum().backward();
+        /// Visitor comparing every owned parameter's full and staged execution gradients.
         struct Compare<'a> {
+            /// Gradients from the uninterrupted encoder forward pass.
             direct: &'a <Ad as burn::tensor::backend::AutodiffBackend>::Gradients,
+            /// Gradients from layer-by-layer execution with an identity hook.
             staged: &'a <Ad as burn::tensor::backend::AutodiffBackend>::Gradients,
+            /// Number of parameter tensors compared, guarding against empty traversal.
             count: usize,
         }
         impl ModuleVisitor<Ad> for Compare<'_> {
+            /// Require both gradients and compare every F32 element within absolute tolerance `1e-6`.
             fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<Ad, D>>) {
                 let direct = param
                     .val()
@@ -417,17 +446,21 @@ mod autodiff {
         assert!(compare.count > 15);
     }
 
+    /// One registered matrix reused as both input and transposed output projection.
     #[derive(Module, Debug)]
     struct TiedProjection<B: Backend> {
+        /// Sole parameter owner, shared by both matrix multiplications in the graph.
         weight: Param<Tensor<B, 2>>,
     }
 
     impl<B: Backend> TiedProjection<B> {
+        /// Initialize a nonsymmetric two-by-two weight with hand-computable derivatives.
         fn init(device: &B::Device) -> Self {
             Self {
                 weight: Param::from_tensor(Tensor::from_data([[0.5, 0.1], [-0.2, 0.4]], device)),
             }
         }
+        /// Apply `input * W * W^T` using the same registered weight twice.
         fn forward(&self, input: Tensor<B, 2>) -> Tensor<B, 2> {
             // One registered owner, with two uses that must accumulate gradients.
             input
@@ -436,6 +469,7 @@ mod autodiff {
         }
     }
 
+    /// A twice-used registered weight matches its analytic gradient and reloads as one parameter owner.
     #[test]
     fn single_owner_tied_weights_accumulate_both_uses_and_resume_as_one_parameter() {
         let device = Default::default();
@@ -482,19 +516,28 @@ mod autodiff {
         );
     }
 
-    struct ParameterIds(Vec<ParamId>);
+    /// Visitor collecting registered identities without materializing parameter tensors.
+    struct ParameterIds(
+        /// Parameter identifiers in module traversal order.
+        Vec<ParamId>,
+    );
     impl ModuleVisitor<Ad> for ParameterIds {
+        /// Append one registered floating parameter's identity.
         fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<Ad, D>>) {
             self.0.push(param.id);
         }
     }
 
+    /// Two independently registered module fields that may share a parameter identity.
     #[derive(Module, Debug)]
     struct DuplicateOwners<B: Backend> {
+        /// First owner with its own trainability flag.
         first: Linear<B>,
+        /// Second owner sharing the first projection's identity in duplicate fixtures.
         second: Linear<B>,
     }
 
+    /// Duplicate registered identities fail training preflight whenever either owner is trainable.
     #[test]
     fn preflight_rejects_any_trainable_duplicate_and_accepts_frozen_duplicates() {
         let device = Default::default();
@@ -530,6 +573,7 @@ mod autodiff {
         }
     }
 
+    /// Ownership preflight leaves unique parameters lazy and permits multiple forward uses of one owner.
     #[test]
     fn preflight_keeps_unique_parameters_lazy_and_accepts_one_owner_reused_in_forward() {
         let device = Default::default();
@@ -542,12 +586,15 @@ mod autodiff {
         validate_trainable_module(&TiedProjection::<Ad>::init(&device)).unwrap();
     }
 
+    /// Single column-record-layout projection used to detect lost serialization mappers.
     #[derive(Module, Debug)]
     struct ColumnModel<B: Backend> {
+        /// Runtime input-by-output weight saved through Burn's column-layout record mapper.
         projection: Linear<B>,
     }
 
     impl<B: Backend> ColumnModel<B> {
+        /// Initialize a bias-free column-layout projection with explicit input and output widths.
         fn init(input_width: usize, output_width: usize, device: &B::Device) -> Self {
             let config = LinearConfig::new(input_width, output_width)
                 .with_layout(LinearLayout::Col)
@@ -557,11 +604,13 @@ mod autodiff {
             }
         }
 
+        /// Evaluate the fixture through the checked projection operation.
         fn forward(&self, input: Tensor<B, 2>) -> Tensor<B, 2> {
             operations::linear(input, &self.projection).unwrap()
         }
     }
 
+    /// Records saved from the training owner retain column mapping, evaluation values, and exact Adam resumption.
     #[test]
     fn column_records_saved_from_training_owner_reload_evaluate_and_resume_exactly() {
         let device = Default::default();
@@ -621,6 +670,7 @@ mod autodiff {
         }
     }
 
+    /// Saving a converted evaluation owner exposes lost column mapping for rectangular and square weights.
     #[test]
     fn converted_evaluation_records_expose_burn_mapper_loss_including_square_weights() {
         let device = Default::default();

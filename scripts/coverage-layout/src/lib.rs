@@ -21,6 +21,7 @@ mod test_audit;
 
 pub use documentation::{
     DocumentationFile, DocumentationReport, DocumentationSite, MacroBoundary, audit_documentation,
+    audit_standards,
 };
 pub use scanner::classify;
 pub use source::{

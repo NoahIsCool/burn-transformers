@@ -15,6 +15,7 @@ use crate::checkpoint::{
 
 use super::{ConfigError, Qwen3_5LayerType, Qwen3_5TextConfig, Validate};
 
+/// Family label attached to checkpoint geometry errors.
 const FAMILY: &str = "qwen3_5";
 
 /// Serialized namespace used by a Qwen3.5-family checkpoint.
@@ -65,8 +66,11 @@ impl Default for Qwen3_5CheckpointOptions {
 /// Complete logical inventory, source mapping, and intentional-key exceptions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Qwen3_5CheckpointContract {
+    /// Required parameter names and shapes in deterministic topology order.
     expected: Vec<ExpectedTensor>,
+    /// Explicit source-to-parameter transformations and tied-storage aliases.
     mappings: MappingPlan,
+    /// Known vision or excluded MTP keys permitted outside the selected graph.
     allow_unexpected: Vec<KeyMatcher>,
 }
 
@@ -173,24 +177,39 @@ impl Qwen3_5TextConfig {
 
 // Checked checkpoint geometry: no tensor data is allocated below.
 
+/// Portable checkpoint shape terms computed with checked arithmetic.
 #[derive(Debug, Clone, Copy)]
 struct Dimensions {
+    /// Vocabulary rows in the embedding and output projection.
     vocab: u64,
+    /// Residual-stream width shared by decoder blocks.
     hidden: u64,
+    /// Intermediate width of the gated feed-forward network.
     intermediate: u64,
+    /// Query width before gating: query heads times head dimension.
     query: u64,
+    /// Twice the query width for the combined query and output-gate projection.
     gated_query: u64,
+    /// Native key/value heads times head dimension, before head repetition.
     key_value: u64,
+    /// DeltaNet value heads times value-head dimension.
     delta_value: u64,
+    /// DeltaNet convolution channels: twice the key width plus the value width.
     delta_conv: u64,
+    /// Concatenated embedding and hidden-state width at the MTP input.
     double_hidden: u64,
+    /// Per-head query/key width used by headwise normalization.
     head_dim: u64,
+    /// Number of DeltaNet value heads and scalar gate outputs.
     delta_value_heads: u64,
+    /// Value width normalized independently within each DeltaNet head.
     delta_value_head_dim: u64,
+    /// Number of causal-convolution taps in each DeltaNet channel.
     conv_kernel: u64,
 }
 
 impl TryFrom<&Qwen3_5TextConfig> for Dimensions {
+    /// Configuration field and reason for a nonportable or overflowing dimension.
     type Error = ConfigError;
 
     /// Computes portable tensor dimensions with checked products and sums.
@@ -241,10 +260,15 @@ impl TryFrom<&Qwen3_5TextConfig> for Dimensions {
 
 // Topology-to-inventory translation and explicit source namespaces.
 
+/// Accumulates required tensors and mappings for a selected source namespace.
 struct ContractBuilder {
+    /// Checkpoint wrapper whose language namespace supplies tensor names.
     source: Qwen3_5CheckpointSource,
+    /// Required parameter names and shapes in deterministic topology order.
     expected: Vec<ExpectedTensor>,
+    /// Explicit source-to-parameter transformations and tied-storage aliases.
     mappings: MappingPlan,
+    /// Known vision or excluded MTP keys permitted outside the selected graph.
     allow_unexpected: Vec<KeyMatcher>,
 }
 

@@ -22,8 +22,11 @@ use core::fmt;
 /// causal attention maps every future key to distance zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct T5RelativePositionBuckets {
+    /// Total learned bias-table entries across both directions, when bidirectional.
     num_buckets: usize,
+    /// Positive distance at which the logarithmic region reaches its final bucket.
     max_distance: usize,
+    /// Whether future keys receive a separate half of the learned bucket table.
     bidirectional: bool,
 }
 

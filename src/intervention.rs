@@ -58,7 +58,10 @@ pub enum Axis {
     /// Key positions of an attention score or probability matrix.
     Key,
     /// An experiment-defined dimension without a built-in selection helper.
-    Other(&'static str),
+    Other(
+        /// Stable experiment-defined label for this tensor dimension.
+        &'static str,
+    ),
 }
 
 /// Discoverable description of a computation point, independent of tensor rank.
@@ -73,6 +76,7 @@ pub struct PointInfo {
 /// A computation point with a statically known rank.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Point<const D: usize> {
+    /// Runtime point name and semantic axes, constrained to rank `D` at construction.
     info: PointInfo,
 }
 
@@ -133,7 +137,9 @@ impl<const D: usize> Point<D> {
 /// A point and optional tensor slices; selections preserve rank and axis order.
 #[derive(Clone, Debug)]
 pub struct Selection<const D: usize> {
+    /// Typed computation point selected by this operation.
     point: Point<D>,
+    /// Requested semantic-axis ranges; unspecified axes retain their full extent.
     slices: Vec<(Axis, Range<usize>)>,
 }
 
@@ -232,10 +238,13 @@ impl Stack {
 /// Address a zero-based layer without knowing its checkpoint parameter names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layer {
+    /// Encoder or decoder stack containing the layer.
     stack: Stack,
+    /// Zero-based layer index within the stack.
     index: usize,
 }
 
+/// Generate documented hidden-state accessors with consistent tensor-axis semantics.
 macro_rules! hidden_points {
     ($($method:ident => ($suffix:literal, $doc:literal)),* $(,)?) => {$ (
         /// The returned axes are `[batch, token, channel]`; token and channel selections preserve rank.
@@ -305,7 +314,9 @@ fn hidden_point(name: String) -> Point<3> {
 /// Typed attention points; only advertise points the executing model can expose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AttentionPoints {
+    /// Layer whose attention computation emits these activations.
     layer: Layer,
+    /// Whether names address cross-attention instead of self-attention.
     cross: bool,
 }
 
@@ -394,28 +405,48 @@ impl AttentionPoints {
 /// Typed handle to a selected capture, owned by the [`Hooks`] that created it.
 #[derive(Clone, Debug)]
 pub struct Capture<const D: usize> {
+    /// Unique hook-collection identity that prevents cross-collection handle reuse.
     owner: u64,
+    /// Index of the capture action in its owning collection.
     entry: usize,
 }
 
+/// Rank-independent captured activation retained with its original shape.
 struct Saved<B: Backend> {
+    /// Flattened activation, detached only when requested by the capture policy.
     tensor: Tensor<B, 1>,
+    /// Runtime dimensions restored when reading or editing the capture.
     shape: Vec<usize>,
 }
+/// Borrowed mutable callback receiving a flattened activation and its runtime shape.
 type Edit<'a, B> = Box<dyn FnMut(Tensor<B, 1>, Vec<usize>) -> Result<Saved<B>> + 'a>;
+/// One ordered observer or mutation registered at a computation point.
 enum Action<'a, B: Backend> {
+    /// Retain the selected activation when its point is emitted.
     Capture {
+        /// Whether the saved tensor must start outside the active gradient graph.
         detach: bool,
+        /// Most recent successful capture, cleared at each run boundary or failure.
         saved: Option<Saved<B>>,
     },
-    Edit(Edit<'a, B>),
+    /// Replace a selection through a shape-checked callback.
+    Edit(
+        /// Rank-erased edit callback invoked in registration order.
+        Edit<'a, B>,
+    ),
 }
+/// Registered point selection and action together with run-local visit accounting.
 struct Entry<'a, B: Backend> {
+    /// Point name and semantic axes used during preflight and execution.
     point: PointInfo,
+    /// Optional rank-preserving ranges to capture or replace.
     slices: Vec<(Axis, Range<usize>)>,
+    /// Observer or edit to perform when the selected point is reached.
     action: Action<'a, B>,
+    /// Number of emissions seen during the current scoped execution.
     visits: usize,
 }
+/// Next hook-collection identity used to reject captures belonging to another owner.
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
 // Run-scoped action registration, capture ownership, and execution.
@@ -423,10 +454,15 @@ static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 /// Scoped, ordered activation actions. Create one collection per experiment run policy.
 /// No `Send` or `'static` bound is imposed on callbacks, so local modules can be borrowed.
 pub struct Hooks<'a, B: Backend> {
+    /// Collection identity attached to all capture handles issued here.
     owner: u64,
+    /// Registered actions in the exact order that execution must apply them.
     entries: Vec<Entry<'a, B>>,
+    /// Whether a validated model execution scope is currently active.
     running: bool,
+    /// Registration count fixed by preflight to detect mid-run additions.
     run_entry_count: usize,
+    /// Execution-scoped validity masks, applied even when no action is registered.
     validity: Vec<PointValidity<B>>,
 }
 

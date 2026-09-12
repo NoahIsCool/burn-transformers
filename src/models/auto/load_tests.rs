@@ -1,3 +1,5 @@
+//! Local automatic loading, artifact containment, and generation-default precedence regressions.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
@@ -31,6 +33,7 @@ use crate::{
     },
 };
 
+/// CPU backend with F32 tensor values and I32 token indices for deterministic fixtures.
 type TestBackend = Flex<f32, i32>;
 
 /// Writes one complete zero-valued F32 checkpoint from a family contract.

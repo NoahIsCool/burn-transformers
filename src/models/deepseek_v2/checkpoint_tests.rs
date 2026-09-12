@@ -1,3 +1,5 @@
+//! DeepSeek-V2 checkpoint inventory, expert mappings, and strict shape-validation regressions.
+
 use crate::checkpoint::TensorOperation;
 
 use super::*;

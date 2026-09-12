@@ -1,3 +1,5 @@
+//! Muse cache lifecycle, failure atomicity, and stateless-versus-cached parity tests.
+
 use burn::{
     backend::Flex,
     tensor::{Bool, Tensor, TensorData, Tolerance, backend::BackendTypes},
@@ -9,6 +11,7 @@ use crate::{
     models::muse_glimmer::MuseGlimmerCheckpointOptions,
 };
 
+/// Deterministic CPU backend using F32 values and I32 token indices.
 type TestBackend = Flex<f32, i32>;
 
 /// Materializes every public KV buffer so failures are compared against host bytes.

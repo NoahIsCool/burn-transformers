@@ -1,4 +1,4 @@
-//! Source-only enforcement of authored function and module documentation style.
+//! Source-only enforcement of authored Rust documentation style.
 //!
 //! Syn supplies item and attribute boundaries; the existing classifier supplies
 //! all module-reference contexts and structural test ownership. Literal `///`
@@ -34,7 +34,7 @@ pub struct DocumentationReport {
     pub macro_expansion_resolved: bool,
     /// Whether all authored syntax was resolved without opaque function tokens.
     pub complete: bool,
-    /// True only when complete and every production site uses its required style.
+    /// True only when complete and every required site uses its required style.
     pub passed: bool,
     /// Audited physical sources in deterministic path order.
     pub files: Vec<DocumentationFile>,
@@ -51,12 +51,18 @@ pub struct DocumentationFile {
     pub sha256: String,
     /// Number of bytes in that source snapshot.
     pub byte_length: usize,
-    /// Authored functions/methods and physical or inline module definitions.
+    /// Authored documentation sites, with the scope selected by the report schema.
     pub sites: Vec<DocumentationSite>,
     /// Macro boundaries, including successfully parsed fragments and opaque tokens.
     pub macros: Vec<MacroBoundary>,
     /// Inline test-module bodies that must move to a sibling test source.
     pub inline_test_bodies: Vec<SourceSpan>,
+    /// Schema 2 only: all observed entry contexts are conventional integration harnesses.
+    ///
+    /// This exempts nested harness tests from unit-test relocation only. It is
+    /// entry-path policy, not cfg evidence, and never exempts documentation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_harness_only: Option<bool>,
 }
 
 /// One real syntax node; visibility never exempts a production helper.
@@ -64,7 +70,7 @@ pub struct DocumentationFile {
 pub struct DocumentationSite {
     /// Source span including attributes and function/module body.
     pub span: SourceSpan,
-    /// free_function, impl_method, trait_method, foreign_function, or module kind.
+    /// Parsed declaration kind; schema 2 additionally includes types and members.
     pub kind: String,
     /// Authored name, or the physical filename for a file module.
     pub name: String,
@@ -89,10 +95,22 @@ pub struct MacroBoundary {
     pub span: SourceSpan,
     /// Macro path or macro_rules definition name.
     pub name: String,
-    /// Actual test-owned macros require no production documentation review.
+    /// Whether the macro is test-owned; schema 2 still audits its authored items.
     pub test_only: bool,
     /// Unresolved authored `fn name` / `fn $name` tokens, excluding function-pointer types.
     pub unresolved_functions: Vec<SourceSpan>,
+    /// Schema 2 only: opaque named non-function declarations requiring review.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unresolved_items: Option<Vec<SourceSpan>>,
+}
+
+/// Selects legacy production checks or comprehensive authored-item requirements.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum AuditMode {
+    /// Preserve schema 1, production function/module scope, and test exemptions.
+    Production,
+    /// Require line docs for authored types, members, constants, and tests too.
+    Standards,
 }
 
 /// Audits the parsed module graph while preserving its source and cfg evidence.
@@ -100,7 +118,29 @@ pub fn audit_documentation(
     root: &Path,
     entries: &[PathBuf],
 ) -> Result<DocumentationReport, String> {
+    audit(root, entries, AuditMode::Production)
+}
+
+/// Audits all parsed authored declarations, including private members and tests.
+///
+/// Schema 2 preserves source coordinates and macro limitations from the legacy
+/// audit. Imports, implementation blocks, generic parameters, and local bindings
+/// introduce no separate documentation requirement. Opaque declaration templates
+/// remain explicit blockers; compiler-generated items are outside this audit.
+pub fn audit_standards(root: &Path, entries: &[PathBuf]) -> Result<DocumentationReport, String> {
+    audit(root, entries, AuditMode::Standards)
+}
+
+/// Shares exact source snapshots and traversal between the versioned policies.
+fn audit(root: &Path, entries: &[PathBuf], mode: AuditMode) -> Result<DocumentationReport, String> {
     let layout = crate::classify(root, entries)?;
+    let harness_contexts: BTreeSet<_> = layout
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| integration_entry(entry))
+        .map(|(index, _)| format!("entry[{index}]"))
+        .collect();
     let root = Path::new(&layout.root);
     let mut diagnostics: Vec<_> = layout
         .diagnostics
@@ -129,7 +169,14 @@ pub fn audit_documentation(
         };
         let offset = usize::from(source.text.starts_with('\u{feff}')) * '\u{feff}'.len_utf8()
             + parsed.shebang.as_ref().map_or(0, String::len);
+        let test_harness_only = mode == AuditMode::Standards
+            && !file.contexts.is_empty()
+            && file.contexts.iter().all(|context| {
+                harness_contexts.contains(context.module.split("::").next().unwrap_or_default())
+            });
         let mut walker = DocumentationWalker {
+            mode,
+            test_harness_only,
             source: &source,
             file,
             offset,
@@ -154,25 +201,28 @@ pub fn audit_documentation(
             sites: walker.sites,
             macros: walker.macros,
             inline_test_bodies: walker.inline_test_bodies,
+            test_harness_only: (mode == AuditMode::Standards).then_some(test_harness_only),
         });
     }
     let complete = diagnostics
         .iter()
         .all(|issue| issue.code == "duplicate_context")
         && files.iter().all(|file| {
-            file.macros
-                .iter()
-                .all(|boundary| boundary.test_only || boundary.unresolved_functions.is_empty())
+            file.macros.iter().all(|boundary| {
+                (mode == AuditMode::Production && boundary.test_only)
+                    || (boundary.unresolved_functions.is_empty()
+                        && boundary.unresolved_items.as_ref().is_none_or(Vec::is_empty))
+            })
         });
     let passed = complete
         && files.iter().all(|file| file.inline_test_bodies.is_empty())
         && files.iter().all(|file| {
             file.sites
                 .iter()
-                .all(|site| site.test_only || site.style_present)
+                .all(|site| (mode == AuditMode::Production && site.test_only) || site.style_present)
         });
     Ok(DocumentationReport {
-        schema_version: 1,
+        schema_version: if mode == AuditMode::Production { 1 } else { 2 },
         root: layout.root,
         entries: layout.entries,
         macro_expansion_resolved: false,
@@ -185,6 +235,10 @@ pub fn audit_documentation(
 
 /// Parsed visitor tied to the original bytes and every incoming module context.
 struct DocumentationWalker<'a> {
+    /// Controls declaration scope while keeping the legacy JSON contract stable.
+    mode: AuditMode,
+    /// Relocation exemption for sources referenced only from explicit integration harnesses.
+    test_harness_only: bool,
     /// Immutable source-coordinate index.
     source: &'a Source,
     /// Existing module/cfg/test evidence for this physical source.
@@ -337,6 +391,28 @@ impl DocumentationWalker<'_> {
         }
     }
 
+    /// Adds a non-function declaration only in the comprehensive standards mode.
+    fn declaration(
+        &mut self,
+        span: proc_macro2::Span,
+        kind: &str,
+        name: &str,
+        attrs: &[Attribute],
+    ) {
+        if self.mode != AuditMode::Standards {
+            return;
+        }
+        self.remember_test_owner(span, attrs);
+        if let Some(span) = self.span(span) {
+            self.record(span, kind, name, attrs, false);
+        } else {
+            self.issue(
+                "unresolved_documentation_span",
+                "declaration coordinates do not map to source",
+            );
+        }
+    }
+
     /// Records explicit harness/cfg ownership for parsed source macro fragments too.
     fn remember_test_owner(&mut self, span: proc_macro2::Span, attrs: &[Attribute]) {
         if (attrs
@@ -360,14 +436,59 @@ impl DocumentationWalker<'_> {
     }
 
     /// Inspects valid Rust item fragments within macro groups, with a depth bound.
-    fn macro_fragments(&mut self, tokens: TokenStream, functions: &mut Vec<MacroFunction>) {
+    fn macro_fragments(
+        &mut self,
+        tokens: TokenStream,
+        functions: &mut Vec<MacroFunction>,
+        opaque_items: &mut Vec<SourceSpan>,
+    ) {
         if self.depth >= 128 {
             self.issue("documentation_traversal_limit", "macro nesting exceeds 128");
             return;
         }
         self.depth += 1;
+        if self.mode == AuditMode::Standards
+            && let Ok(parsed) = syn::parse2::<syn::File>(tokens.clone())
+        {
+            let previous = self.origin;
+            self.origin = "parseable_macro_fragment";
+            for item in &parsed.items {
+                self.visit_item(item);
+            }
+            self.origin = previous;
+            self.depth -= 1;
+            return;
+        }
+        if self.mode == AuditMode::Standards {
+            // The braces are only a parser envelope. Every visited declaration
+            // keeps the original token coordinates inside the authored group.
+            let envelope = TokenTree::Group(proc_macro2::Group::new(
+                proc_macro2::Delimiter::Brace,
+                tokens.clone(),
+            ));
+            if let Ok(parsed) = syn::parse2::<syn::Block>(TokenStream::from(envelope)) {
+                let previous = self.origin;
+                self.origin = "parseable_macro_fragment";
+                self.visit_block(&parsed);
+                self.origin = previous;
+                self.depth -= 1;
+                return;
+            }
+        }
         let trees: Vec<_> = tokens.clone().into_iter().collect();
         for (index, pair) in trees.windows(2).enumerate() {
+            if self.mode == AuditMode::Standards
+                && let TokenTree::Ident(keyword) = &pair[0]
+                && matches!(
+                    keyword.to_string().as_str(),
+                    "struct" | "enum" | "union" | "trait" | "type" | "static" | "const"
+                )
+                && (matches!(&pair[1], TokenTree::Ident(name) if name != "fn")
+                    || matches!(&pair[1], TokenTree::Punct(punct) if punct.as_char() == '$'))
+                && let Some(span) = self.span(pair[0].span())
+            {
+                opaque_items.push(span);
+            }
             if matches!(&pair[0], TokenTree::Ident(name) if name == "fn")
                 && (matches!(&pair[1], TokenTree::Ident(_))
                     || matches!(&pair[1], TokenTree::Punct(punct) if punct.as_char() == '$'))
@@ -390,7 +511,9 @@ impl DocumentationWalker<'_> {
                 });
             }
         }
-        if let Ok(parsed) = syn::parse2::<syn::File>(tokens) {
+        if self.mode == AuditMode::Production
+            && let Ok(parsed) = syn::parse2::<syn::File>(tokens)
+        {
             let previous = self.origin;
             self.origin = "parseable_macro_fragment";
             for item in &parsed.items {
@@ -400,7 +523,7 @@ impl DocumentationWalker<'_> {
         }
         for tree in trees {
             if let TokenTree::Group(group) = tree {
-                self.macro_fragments(group.stream(), functions);
+                self.macro_fragments(group.stream(), functions, opaque_items);
             }
         }
         self.depth -= 1;
@@ -416,24 +539,43 @@ impl DocumentationWalker<'_> {
             return;
         };
         let mut functions = Vec::new();
-        self.macro_fragments(mac.tokens.clone(), &mut functions);
+        let mut opaque_items = Vec::new();
+        self.macro_fragments(mac.tokens.clone(), &mut functions, &mut opaque_items);
         functions.retain(|token| {
             !self
                 .sites
                 .iter()
-                .any(|site| site.kind != "module" && contains(&site.span, &token.span))
+                .any(|site| function_kind(&site.kind) && contains(&site.span, &token.span))
         });
         let mut unresolved_functions = Vec::new();
         for function in functions {
             // Only the authored prefix is parsed here. The fixed dummy signature
             // validates attributes/visibility without expanding or guessing `$name`.
             let (mut prefix, computed_documentation) = without_template_doc_values(function.prefix);
-            prefix.extend(
-                "fn __documentation_prefix_probe() {}"
-                    .parse::<TokenStream>()
-                    .expect("fixed valid Rust tokens"),
-            );
-            if let Ok(parsed) = syn::parse2::<syn::ItemFn>(prefix) {
+            let signature = "fn __documentation_prefix_probe() {}".parse::<TokenStream>();
+            let Ok(signature) = signature else {
+                self.issue(
+                    "invalid_prefix_probe",
+                    "fixed documentation probe did not tokenize",
+                );
+                return;
+            };
+            prefix.extend(signature);
+            let parsed = if self.mode == AuditMode::Standards {
+                // Property-test macros accept macro-level inner configuration
+                // attributes before their first function. A file envelope
+                // separates those from the function's own outer documentation.
+                syn::parse2::<syn::File>(prefix).ok().and_then(|file| {
+                    let mut items = file.items.into_iter();
+                    match (items.next(), items.next()) {
+                        (Some(syn::Item::Fn(function)), None) => Some(function),
+                        _ => None,
+                    }
+                })
+            } else {
+                syn::parse2::<syn::ItemFn>(prefix).ok()
+            };
+            if let Some(parsed) = parsed {
                 if parsed.attrs.iter().any(|attr| attr.path().is_ident("test"))
                     || crate::cfg::attributes(&parsed.attrs).0.test_only()
                 {
@@ -458,11 +600,14 @@ impl DocumentationWalker<'_> {
         }
         unresolved_functions.sort_by_key(|span| span.start.byte);
         unresolved_functions.dedup_by_key(|span| span.start.byte);
+        opaque_items.sort_by_key(|span| span.start.byte);
+        opaque_items.dedup_by_key(|span| span.start.byte);
         self.macros.push(MacroBoundary {
             test_only: self.test_only(&span),
             span,
             name,
             unresolved_functions,
+            unresolved_items: (self.mode == AuditMode::Standards).then_some(opaque_items),
         });
     }
 }
@@ -477,8 +622,107 @@ impl<'ast> Visit<'ast> for DocumentationWalker<'_> {
         self.depth += 1;
         let attrs = crate::scanner::item_attributes(item).0;
         self.remember_test_owner(item.span(), attrs);
+        let declaration = match item {
+            syn::Item::Struct(item) => Some(("struct", &item.ident)),
+            syn::Item::Enum(item) => Some(("enum", &item.ident)),
+            syn::Item::Union(item) => Some(("union", &item.ident)),
+            syn::Item::Trait(item) => Some(("trait", &item.ident)),
+            syn::Item::TraitAlias(item) => Some(("trait_alias", &item.ident)),
+            syn::Item::Type(item) => Some(("type_alias", &item.ident)),
+            syn::Item::Const(item) => Some(("constant", &item.ident)),
+            syn::Item::Static(item) => Some(("static", &item.ident)),
+            _ => None,
+        };
+        if let Some((kind, name)) = declaration {
+            self.declaration(item.span(), kind, &name.to_string(), attrs);
+        }
         visit::visit_item(self, item);
         self.depth -= 1;
+    }
+    /// Checks trait-implementation associated constants and type definitions.
+    fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+        match item {
+            syn::ImplItem::Const(item) => self.declaration(
+                item.span(),
+                "impl_constant",
+                &item.ident.to_string(),
+                &item.attrs,
+            ),
+            syn::ImplItem::Type(item) => self.declaration(
+                item.span(),
+                "impl_type",
+                &item.ident.to_string(),
+                &item.attrs,
+            ),
+            _ => {}
+        }
+        visit::visit_impl_item(self, item);
+    }
+    /// Checks required/default associated constants and types in trait contracts.
+    fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+        match item {
+            syn::TraitItem::Const(item) => self.declaration(
+                item.span(),
+                "trait_constant",
+                &item.ident.to_string(),
+                &item.attrs,
+            ),
+            syn::TraitItem::Type(item) => self.declaration(
+                item.span(),
+                "trait_type",
+                &item.ident.to_string(),
+                &item.attrs,
+            ),
+            _ => {}
+        }
+        visit::visit_trait_item(self, item);
+    }
+    /// Checks externally defined statics and opaque types alongside foreign functions.
+    fn visit_foreign_item(&mut self, item: &'ast syn::ForeignItem) {
+        match item {
+            syn::ForeignItem::Static(item) => self.declaration(
+                item.span(),
+                "foreign_static",
+                &item.ident.to_string(),
+                &item.attrs,
+            ),
+            syn::ForeignItem::Type(item) => self.declaration(
+                item.span(),
+                "foreign_type",
+                &item.ident.to_string(),
+                &item.attrs,
+            ),
+            _ => {}
+        }
+        visit::visit_foreign_item(self, item);
+    }
+    /// Requires each enum variant to explain its own case independently of its enum.
+    fn visit_variant(&mut self, item: &'ast syn::Variant) {
+        self.declaration(item.span(), "variant", &item.ident.to_string(), &item.attrs);
+        visit::visit_variant(self, item);
+    }
+    /// Uses declared names for struct, union, and record-variant member findings.
+    fn visit_fields_named(&mut self, fields: &'ast syn::FieldsNamed) {
+        for field in &fields.named {
+            let name = field
+                .ident
+                .as_ref()
+                .map_or_else(String::new, ToString::to_string);
+            self.declaration(field.span(), "field", &name, &field.attrs);
+        }
+        visit::visit_fields_named(self, fields);
+    }
+    /// Uses zero-based positions for tuple-struct and tuple-variant member findings.
+    fn visit_fields_unnamed(&mut self, fields: &'ast syn::FieldsUnnamed) {
+        for (index, field) in fields.unnamed.iter().enumerate() {
+            self.declaration(
+                field.span(),
+                "tuple_field",
+                &index.to_string(),
+                &field.attrs,
+            );
+        }
+        visit::visit_fields_unnamed(self, fields);
     }
 
     /// Bounds nested expressions independently of module nesting.
@@ -529,6 +773,7 @@ impl<'ast> Visit<'ast> for DocumentationWalker<'_> {
         }
         visit::visit_item_mod(self, item);
         if item.content.is_some()
+            && !self.test_harness_only
             && let Some(span) = self.span(item.span())
             && self.test_only(&span)
             && !self.test_only(&self.source.whole_span())
@@ -539,6 +784,14 @@ impl<'ast> Visit<'ast> for DocumentationWalker<'_> {
     }
     /// Records named macro_rules definitions and ordinary item invocations.
     fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+        if let Some(name) = &item.ident {
+            self.declaration(
+                item.span(),
+                "macro_definition",
+                &name.to_string(),
+                &item.attrs,
+            );
+        }
         self.macro_boundary(
             &item.mac,
             item.span(),
@@ -560,6 +813,28 @@ impl<'ast> Visit<'ast> for DocumentationWalker<'_> {
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         self.macro_boundary(mac, mac.span(), macro_name(mac));
     }
+}
+
+/// Identifies function findings without treating enclosing type spans as functions.
+fn function_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "free_function"
+            | "impl_method"
+            | "trait_method"
+            | "foreign_function"
+            | "macro_function_template"
+    )
+}
+
+/// Recognizes explicit repository integration roots, never a helper filename alone.
+fn integration_entry(entry: &str) -> bool {
+    let path = Path::new(entry);
+    matches!(path.components().next(), Some(std::path::Component::Normal(root)) if root == "tests" || root == "scripts")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "tests")
 }
 
 /// Tests containment using the immutable original-byte coordinate system.

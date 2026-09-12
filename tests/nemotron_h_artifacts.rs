@@ -449,7 +449,10 @@ struct PinnedIndex {
 
 /// A map whose deserializer rejects duplicate tensor names.
 #[derive(Debug)]
-struct UniqueWeightMap(BTreeMap<String, String>);
+struct UniqueWeightMap(
+    /// Unique tensor names mapped to their physical checkpoint shard.
+    BTreeMap<String, String>,
+);
 
 impl<'de> Deserialize<'de> for UniqueWeightMap {
     /// Parses an index map without serde_json's usual last-value-wins behavior.
@@ -457,9 +460,11 @@ impl<'de> Deserialize<'de> for UniqueWeightMap {
     where
         D: Deserializer<'de>,
     {
+        /// Serde visitor that detects repeated tensor names before constructing the index map.
         struct UniqueWeightMapVisitor;
 
         impl<'de> Visitor<'de> for UniqueWeightMapVisitor {
+            /// Validated tensor-to-shard mapping returned by this visitor.
             type Value = UniqueWeightMap;
 
             /// Describes the exact JSON construct accepted here.

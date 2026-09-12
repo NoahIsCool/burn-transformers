@@ -24,9 +24,13 @@ use std::{path::Path, time::Instant};
 use support::{Cpu, Report, Result};
 use transformers::training::cross_entropy;
 
+/// Autodifferentiable CPU backend for the MLA counting task.
 type Ad = Autodiff<Cpu>;
+/// Number of full-batch AdamW updates in the fixed training budget.
 const STEPS: usize = 600;
+/// AdamW step size for the encoder, decoder, and latent adapter.
 const LEARNING_RATE: f64 = 0.003;
+/// Initialization seed for the reproducible counting fixture.
 const SEED: u64 = 101;
 
 /// Train the bidirectional MLA counting task with its fixed AdamW budget in ignored local storage.
@@ -110,9 +114,12 @@ fn train(root: &Path, steps: usize) -> Result<()> {
     .save(root)
 }
 
+/// One source pair with the warm-count and cool-count query targets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Example {
+    /// Two source color token IDs, each in `1..=8`.
     source: [i32; 2],
+    /// Warm and cool counts in query order, each in `0..=2`.
     labels: [i32; 2],
 }
 

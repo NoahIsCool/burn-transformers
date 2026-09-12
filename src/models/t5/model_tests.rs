@@ -1,3 +1,5 @@
+//! Tests T5 attention, feed-forward layers, masks, initialization, and stateless execution.
+
 use burn::{
     backend::Flex,
     module::Param,
@@ -7,6 +9,7 @@ use burn::{
 use super::*;
 use crate::models::config::ModelConfig;
 
+/// CPU backend used by T5 component and stateless execution tests.
 type TestBackend = Flex<f32, i32>;
 
 /// Returns a tiny topology that still exercises every T5 attention path.

@@ -496,13 +496,21 @@ fn analytical_t5_cache_bytes(
 /// read and preserves its byte length.
 #[cfg(all(feature = "metal", target_os = "macos"))]
 fn assert_pinned_f32_load_accounting(report: &LoadReport, execution: &ExecutionStats) {
+    /// Number of destination tensors in the pinned strict load plan.
     const TARGET_TENSORS: usize = 558;
+    /// Number of destination tensors requiring a transpose.
     const TRANSPOSED_TENSORS: usize = 433;
+    /// Physical tensor payload bytes across the checkpoint shards.
     const CHECKPOINT_TENSOR_BYTES: u64 = 45_067_714_560;
+    /// F32 destination parameter bytes after resolving shared embeddings.
     const TARGET_PARAMETER_BYTES: u64 = 44_541_329_408;
+    /// Bytes in one complete F32 embedding matrix.
     const EMBEDDING_BYTES: u64 = 526_385_152;
+    /// Bytes read when comparing the redundant and canonical embedding matrices.
     const EQUIVALENCE_PAIR_BYTES: u64 = 2 * EMBEDDING_BYTES;
+    /// Total source payload bytes read for equivalence preflight and parameter loading.
     const SOURCE_PAYLOAD_BYTES: u64 = TARGET_PARAMETER_BYTES + EQUIVALENCE_PAIR_BYTES;
+    /// Total payload reads, including the two embedding-equivalence reads.
     const SOURCE_READS: u64 = TARGET_TENSORS as u64 + 2;
 
     assert!(report.is_strictly_valid());

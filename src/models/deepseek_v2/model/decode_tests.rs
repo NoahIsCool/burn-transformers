@@ -1,3 +1,5 @@
+//! DeepSeek-V2 compressed-cache parity, lifecycle, ragged batches, and atomic failure tests.
+
 use burn::{
     backend::Flex,
     tensor::{Bool, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
@@ -9,6 +11,7 @@ use crate::{
     models::deepseek_v2::model::tests_support::{initialized_model, tiny_config},
 };
 
+/// CPU backend with F32 tensor values and I32 token indices for deterministic fixtures.
 type TestBackend = Flex<f32, i32>;
 
 /// Returns a deterministic tiny model and device.

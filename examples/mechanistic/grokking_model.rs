@@ -44,13 +44,21 @@ pub fn mlp_activation() -> Point<2> {
 #[derive(Module, Debug)]
 /// One registered transformer block with independently editable final-token neurons.
 pub struct GrokkingTransformer<B: Backend = self::B> {
+    /// Token lookup with shape `[114, 128]`, including the equals-sign token.
     embedding: Param<Tensor<B, 2>>,
+    /// Learned position vectors with shape `[3, 128]` for operand/operand/equals inputs.
     position: Param<Tensor<B, 2>>,
+    /// Four-head attention producing the single block's residual update.
     attention: GroupedQueryAttention<B>,
+    /// Input projection from 128 residual channels to 512 ReLU neurons.
     mlp_in: Param<Tensor<B, 2>>,
+    /// Broadcast pre-ReLU bias with shape `[1, 512]`.
     mlp_in_bias: Param<Tensor<B, 2>>,
+    /// Output projection from 512 neurons to 128 residual channels.
     mlp_out: Param<Tensor<B, 2>>,
+    /// Broadcast MLP output bias with shape `[1, 128]`.
     mlp_out_bias: Param<Tensor<B, 2>>,
+    /// Readout matrix `[128, classes]`; analysis loads 113 classes and training retains 114.
     unembedding: Param<Tensor<B, 2>>,
 }
 

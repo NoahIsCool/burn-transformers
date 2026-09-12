@@ -1,3 +1,5 @@
+//! Tests official Burnpack interoperability, staging atomicity, limits, and payload integrity.
+
 use std::fs::{self, OpenOptions};
 use std::mem::size_of;
 use std::path::Path;
@@ -10,6 +12,7 @@ use tempfile::tempdir;
 use super::provenance::packed_payload_sha256;
 use super::*;
 
+/// Builds a fixture quantizer with the requested scheme and 32-value groups.
 fn config(scheme: SymmetricQuantization) -> WeightQuantizationConfig {
     WeightQuantizationConfig {
         scheme,
@@ -17,12 +20,14 @@ fn config(scheme: SymmetricQuantization) -> WeightQuantizationConfig {
     }
 }
 
+/// Serializes packed codes followed by little-endian scales for byte comparisons.
 fn payload(weight: &QuantizedWeight) -> Vec<u8> {
     let mut bytes = Vec::new();
     weight.write_burnpack_payload(&mut bytes).unwrap();
     bytes
 }
 
+/// Builds a named upstream Burnpack snapshot with a deterministic parameter identity.
 fn official_snapshot(name: &str, data: TensorData, id: u64) -> TensorSnapshot {
     TensorSnapshot::from_data(
         data,
@@ -32,6 +37,7 @@ fn official_snapshot(name: &str, data: TensorData, id: u64) -> TensorSnapshot {
     )
 }
 
+/// Writes fixture tensors through Burn's own Burnpack writer.
 fn write_official(path: &Path, tensors: Vec<(&str, TensorData)>) {
     let snapshots = tensors
         .into_iter()
@@ -41,12 +47,14 @@ fn write_official(path: &Path, tensors: Vec<(&str, TensorData)>) {
     BurnpackWriter::new(snapshots).write_to_file(path).unwrap();
 }
 
+/// Encodes the reserved JSON manifest as a one-dimensional U8 tensor.
 fn manifest_tensor(manifest: &BurnpackQuantizationManifest) -> TensorData {
     let bytes = manifest.to_json_pretty().unwrap().into_bytes();
     let length = bytes.len();
     TensorData::new(bytes, [length])
 }
 
+/// Locates known fixture bytes before a deliberate corruption; panics if absent.
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> usize {
     haystack
         .windows(needle.len())
@@ -54,6 +62,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> usize {
         .expect("fixture payload must occur in Burnpack bytes")
 }
 
+/// Builds structurally valid synthetic digests for provenance-contract tests.
 fn fixture_provenance() -> BurnpackProvenance {
     BurnpackProvenance {
         load_plan_sha256: "1".repeat(64),
@@ -167,6 +176,7 @@ fn artifact_contract_open_rejects_invalid_manifest_version_provenance_pairs() {
 }
 
 #[test]
+/// Official writer/reader round trips preserve quantized payload bytes and manifest metadata.
 fn official_burnpack_round_trip_preserves_exact_payloads_and_metadata() {
     let directory = tempdir().unwrap();
     let output = directory.path().join("weights.bpk");
@@ -262,6 +272,7 @@ fn official_burnpack_round_trip_preserves_exact_payloads_and_metadata() {
 }
 
 #[test]
+/// Staging keeps range metadata in memory and removes its private file when the session drops.
 fn staging_retains_only_ranges_and_is_removed_with_the_session() {
     let directory = tempdir().unwrap();
     let output = directory.path().join("bounded.bpk");
@@ -285,6 +296,7 @@ fn staging_retains_only_ranges_and_is_removed_with_the_session() {
 }
 
 #[test]
+/// Excluded targets require neither floating storage nor a staging write.
 fn exclusions_never_reach_staging_or_require_a_float_dtype() {
     let directory = tempdir().unwrap();
     let output = directory.path().join("excluded.bpk");
@@ -306,6 +318,7 @@ fn exclusions_never_reach_staging_or_require_a_float_dtype() {
 }
 
 #[test]
+/// Invalid and duplicate names fail before any payload is appended.
 fn duplicate_empty_reserved_and_long_names_are_rejected_before_writing() {
     let directory = tempdir().unwrap();
     let output = directory.path().join("names.bpk");
@@ -352,6 +365,7 @@ fn duplicate_empty_reserved_and_long_names_are_rejected_before_writing() {
 }
 
 #[test]
+/// Configured count, byte, manifest, and parameter limits reject excess work before publication.
 fn limits_bound_counts_payloads_manifests_and_configuration() {
     let invalid = BurnpackSessionLimits {
         max_tensors: 0,
@@ -480,6 +494,7 @@ fn limits_bound_counts_payloads_manifests_and_configuration() {
 }
 
 #[test]
+/// An existing output survives a publication collision and the session remains retryable.
 fn output_collision_is_non_destructive_and_session_can_retry() {
     let directory = tempdir().unwrap();
     let output = directory.path().join("collision.bpk");
@@ -577,6 +592,7 @@ fn atomicity_dangling_output_symlink_survives_publication_and_retry() {
 }
 
 #[test]
+/// Finalization closes further mutation and removes temporary publication state.
 fn successful_finalization_closes_mutation_and_leaves_no_partial_file() {
     let directory = tempdir().unwrap();
     let output = directory.path().join("final.bpk");
@@ -604,6 +620,7 @@ fn successful_finalization_closes_mutation_and_leaves_no_partial_file() {
 }
 
 #[test]
+/// Provenance binding adds payload digests and freezes the staged inventory.
 fn provenance_binding_adds_payload_digests_updates_size_and_freezes_staging() {
     let directory = tempdir().unwrap();
     let output = directory.path().join("bound.bpk");
@@ -640,6 +657,7 @@ fn provenance_binding_adds_payload_digests_updates_size_and_freezes_staging() {
 }
 
 #[test]
+/// Version-two publication detects changed staged bytes even when their length is unchanged.
 fn v2_same_size_staging_corruption_is_rejected_before_publication() {
     let directory = tempdir().unwrap();
     let output = directory.path().join("staging-content-corrupt.bpk");
@@ -682,6 +700,7 @@ fn v2_same_size_staging_corruption_is_rejected_before_publication() {
 }
 
 #[test]
+/// An externally changed staging length prevents a subsequent append.
 fn unexpected_staging_mutation_is_detected_before_another_append() {
     let directory = tempdir().unwrap();
     let output = directory.path().join("stage-corrupt.bpk");
@@ -699,6 +718,7 @@ fn unexpected_staging_mutation_is_detected_before_another_append() {
 }
 
 #[test]
+/// An empty session still produces a valid upstream-readable artifact.
 fn empty_session_is_still_a_valid_official_burnpack() {
     let directory = tempdir().unwrap();
     let output = directory.path().join("empty.bpk");
@@ -721,6 +741,7 @@ fn empty_session_is_still_a_valid_official_burnpack() {
 }
 
 #[test]
+/// The manifest and physical payload inventory must agree exactly.
 fn missing_manifest_and_unexpected_or_missing_payloads_are_rejected() {
     let directory = tempdir().unwrap();
     let missing_manifest = directory.path().join("missing-manifest.bpk");
@@ -767,6 +788,7 @@ fn missing_manifest_and_unexpected_or_missing_payloads_are_rejected() {
 }
 
 #[test]
+/// Reserved payloads must use the required one-dimensional U8 representation.
 fn physical_dtype_and_shape_must_match_the_reserved_u8_contract() {
     let directory = tempdir().unwrap();
     let metadata = QuantizedTensorMetadata::new(
@@ -819,6 +841,7 @@ fn physical_dtype_and_shape_must_match_the_reserved_u8_contract() {
 }
 
 #[test]
+/// Truncated and corrupted headers or manifests produce contextual artifact errors.
 fn truncation_header_corruption_and_manifest_corruption_are_contextual() {
     let directory = tempdir().unwrap();
     let source = TensorData::new(vec![127.0_f32; 32], [4, 8]);
@@ -868,6 +891,7 @@ fn truncation_header_corruption_and_manifest_corruption_are_contextual() {
 }
 
 #[test]
+/// Sequential validation rejects reserved quantized codes in persisted payloads.
 fn invalid_packed_codes_are_found_by_sequential_validation() {
     let directory = tempdir().unwrap();
     let output = directory.path().join("payload-corrupt.bpk");
@@ -906,6 +930,7 @@ fn invalid_packed_codes_are_found_by_sequential_validation() {
 }
 
 #[test]
+/// Sequential validation rejects malformed persisted quantization scales.
 fn invalid_scales_are_found_by_sequential_validation() {
     let directory = tempdir().unwrap();
     let output = directory.path().join("scale-corrupt.bpk");
@@ -933,6 +958,7 @@ fn invalid_scales_are_found_by_sequential_validation() {
 }
 
 #[test]
+/// Path and manifest size checks complete before payload access.
 fn path_and_open_manifest_limits_are_enforced_before_payload_use() {
     let directory = tempdir().unwrap();
     assert!(matches!(

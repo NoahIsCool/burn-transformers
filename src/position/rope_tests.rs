@@ -1,5 +1,8 @@
+//! RoPE configuration invariants, scaling policies, and singular numerical inputs.
+
 use super::*;
 
+/// Full and partial even rotary widths retain their validated head geometry.
 #[test]
 fn validates_full_and_partial_rotary_dimensions() {
     let full = RopeConfig::new(128, 128, 10_000.0, RopeScaling::None).expect("valid full RoPE");
@@ -15,6 +18,7 @@ fn validates_full_and_partial_rotary_dimensions() {
     assert_eq!(partial.partial_rotary_factor(), 0.25);
 }
 
+/// Zero, odd, and over-wide rotary dimensions report their specific configuration errors.
 #[test]
 fn rejects_every_dimension_failure() {
     assert_eq!(
@@ -40,6 +44,7 @@ fn rejects_every_dimension_failure() {
     );
 }
 
+/// Nonpositive and nonfinite frequency bases cannot construct a rotary configuration.
 #[test]
 fn rejects_invalid_theta_values() {
     for theta in [0.0, -1.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
@@ -50,6 +55,7 @@ fn rejects_invalid_theta_values() {
     }
 }
 
+/// Fractional widths must resolve unambiguously to a positive even integer prefix.
 #[test]
 fn fractional_dimension_rejects_invalid_or_ambiguous_products() {
     assert_eq!(
@@ -78,6 +84,7 @@ fn fractional_dimension_rejects_invalid_or_ambiguous_products() {
     );
 }
 
+/// Linear and dynamic-NTK policies preserve their validated extension parameters.
 #[test]
 fn validates_linear_and_dynamic_ntk_scaling() {
     let linear = LinearRopeScaling::new(4.0).expect("valid factor");
@@ -98,6 +105,7 @@ fn validates_linear_and_dynamic_ntk_scaling() {
     );
 }
 
+/// Invalid extension multipliers, zero original context, and singular NTK widths fail.
 #[test]
 fn scaling_rejects_bad_factors_and_contexts() {
     for factor in [0.5, 0.0, -2.0, f64::INFINITY, f64::NAN] {
@@ -129,6 +137,7 @@ fn scaling_rejects_bad_factors_and_contexts() {
     );
 }
 
+/// YaRN defaults and independent overrides preserve ordered transition boundaries.
 #[test]
 fn yarn_defaults_and_overrides_are_validated() {
     let yarn = YarnConfig::new(4.0, 8192).expect("valid YaRN config");
@@ -159,6 +168,7 @@ fn yarn_defaults_and_overrides_are_validated() {
     assert_eq!(slow_only.beta_slow(), 2.0);
 }
 
+/// YaRN rejects nonfinite, nonpositive, and inverted amplitude or beta parameters.
 #[test]
 fn yarn_rejects_all_invalid_attention_and_beta_values() {
     let yarn = YarnConfig::new(2.0, 4096).expect("valid YaRN config");
@@ -200,6 +210,7 @@ fn yarn_rejects_all_invalid_attention_and_beta_values() {
     );
 }
 
+/// YaRN's logarithmic transition rejects a unit frequency base before execution.
 #[test]
 fn yarn_cross_validates_frequency_base() {
     let yarn = YarnConfig::new(2.0, 4096).expect("valid YaRN config");
@@ -210,6 +221,7 @@ fn yarn_cross_validates_frequency_base() {
     assert!(RopeConfig::new(64, 64, 10_000.0, yarn.into()).is_ok());
 }
 
+/// An extension factor of one is valid for every scaling policy.
 #[test]
 fn identity_scaling_factors_are_allowed() {
     assert!(LinearRopeScaling::new(1.0).is_ok());
@@ -218,6 +230,7 @@ fn identity_scaling_factors_are_allowed() {
     assert_eq!(yarn.attention_factor(), 1.0);
 }
 
+/// Every error variant explains the invalid scalar or dimensional constraint.
 #[test]
 fn validation_errors_have_actionable_messages() {
     let errors = [

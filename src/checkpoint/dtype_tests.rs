@@ -1,6 +1,9 @@
+//! Tests exact SafeTensors dtype names and checked wire-storage sizes.
+
 use super::*;
 
 #[test]
+/// Every supported dtype round-trips through its exact wire spelling.
 fn every_dtype_round_trips_through_its_wire_name() {
     let all = [
         TensorDType::BOOL,
@@ -30,6 +33,7 @@ fn every_dtype_round_trips_through_its_wire_name() {
 }
 
 #[test]
+/// Sub-byte storage rejects element counts that leave a partial byte.
 fn sub_byte_tensors_must_end_on_a_byte_boundary() {
     assert_eq!(TensorDType::F4.storage_bytes(2).unwrap(), 1);
     assert!(matches!(
@@ -40,6 +44,7 @@ fn sub_byte_tensors_must_end_on_a_byte_boundary() {
 }
 
 #[test]
+/// Overflowing dtype storage calculations return arithmetic errors.
 fn storage_size_overflow_is_reported() {
     assert!(matches!(
         TensorDType::F64.storage_bytes(u64::MAX),
@@ -48,6 +53,7 @@ fn storage_size_overflow_is_reported() {
 }
 
 #[test]
+/// Unknown dtype spellings fail instead of being guessed.
 fn unknown_dtype_is_not_guessed() {
     assert!(matches!(
         "FP16".parse::<TensorDType>(),

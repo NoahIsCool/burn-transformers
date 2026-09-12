@@ -52,9 +52,15 @@ impl Error for ConfigError {}
 #[derive(Debug)]
 pub enum ConfigLoadError {
     /// The input was not compatible JSON or a field had the wrong serialized type.
-    Json(serde_json::Error),
+    Json(
+        /// Parser diagnostic preserving the malformed field or source location.
+        serde_json::Error,
+    ),
     /// JSON decoding succeeded, but the described network cannot be wired safely.
-    Validation(ConfigError),
+    Validation(
+        /// Field-specific topology invariant that prevented model construction.
+        ConfigError,
+    ),
 }
 
 impl Display for ConfigLoadError {
@@ -114,6 +120,7 @@ impl<T> crate::ArchitectureConfig for T
 where
     T: ModelConfig + Clone + core::fmt::Debug + Send + Sync,
 {
+    /// Accepted source-family discriminators from the concrete topology schema.
     const MODEL_TYPES: &'static [&'static str] = T::MODEL_TYPES;
 
     /// Reuses the family schema's field-level validation in the runtime API.
@@ -158,18 +165,14 @@ where
 /// to adopting a permissive JSON dialect for every model. Quoted text is copied
 /// byte-for-byte, including escaped quotes, so metadata strings cannot be changed.
 fn normalize_positive_infinity(input: &str) -> String {
+    /// Legacy non-JSON numeric literal accepted outside quoted metadata.
     const TOKEN: &[u8] = b"Infinity";
     let mut normalized = String::with_capacity(input.len());
-    let mut index = 0;
+    let mut remaining = input;
     let mut in_string = false;
     let mut escaped = false;
 
-    while index < input.len() {
-        let remaining = &input[index..];
-        let character = remaining
-            .chars()
-            .next()
-            .expect("index is always below the UTF-8 string length");
+    while let Some(character) = remaining.chars().next() {
         if in_string {
             normalized.push(character);
             if escaped {
@@ -179,20 +182,21 @@ fn normalize_positive_infinity(input: &str) -> String {
             } else if character == '"' {
                 in_string = false;
             }
-            index += character.len_utf8();
+            remaining = &remaining[character.len_utf8()..];
             continue;
         }
 
         if character == '"' {
             in_string = true;
             normalized.push('"');
-            index += character.len_utf8();
+            remaining = &remaining[character.len_utf8()..];
         } else if remaining.as_bytes().starts_with(TOKEN) {
             normalized.push_str("null");
-            index += TOKEN.len();
+            // The matched token is ASCII, so its end is a UTF-8 boundary.
+            remaining = &remaining[TOKEN.len()..];
         } else {
             normalized.push(character);
-            index += character.len_utf8();
+            remaining = &remaining[character.len_utf8()..];
         }
     }
 
@@ -204,9 +208,15 @@ fn normalize_positive_infinity(input: &str) -> String {
 #[serde(untagged)]
 pub enum TokenIds {
     /// One token ID.
-    One(usize),
+    One(
+        /// Sole token identifier, checked against the vocabulary by the model config.
+        usize,
+    ),
     /// Multiple token IDs, as used by several chat checkpoints.
-    Many(Vec<usize>),
+    Many(
+        /// Ordered token identifiers, checked for emptiness and vocabulary bounds.
+        Vec<usize>,
+    ),
 }
 
 impl TokenIds {

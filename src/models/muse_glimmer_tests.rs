@@ -1,5 +1,8 @@
+//! Configuration tests for Muse schedules, rotary parameters, and local-window requirements.
+
 use super::*;
 
+/// Default layers repeat three theta-500,000 local blocks followed by a zero-theta global block.
 #[test]
 fn default_schedule_is_three_rotary_local_layers_then_one_nope_global_layer() {
     let config = MuseGlimmerTextConfig::default();
@@ -62,6 +65,7 @@ fn sliding_schedule_requires_a_valid_window() {
     assert!(config.validate().is_err());
 }
 
+/// Negative per-layer theta is rejected even when the schedule length is valid.
 #[test]
 fn rejects_a_negative_per_layer_rope_theta() {
     let config = MuseGlimmerTextConfig {

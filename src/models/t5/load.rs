@@ -3,7 +3,7 @@
 //! Checkpoint planning operates on dynamic names, ranks, and byte buffers, while
 //! Burn encodes tensor rank and linear layouts in concrete Rust fields.
 //! The [`TensorSink`] implementation below is therefore deliberately owned by
-//! the T5 architecture. It accepts only names emitted by [`T5CheckpointContract`]
+//! the T5 architecture. It accepts only names emitted by [`super::T5CheckpointContract`]
 //! and installs weights through Burn's record-loading path. The generic load plan
 //! has already transformed official T5 `[output, input]` matrices into Burn's
 //! gradient-safe `[input, output]` runtime layout. Keeping layout conversion out
@@ -87,13 +87,25 @@ pub enum T5LoadError {
 pub enum T5CheckpointLoadError {
     /// The serialized T5 topology is not mathematically valid.
     #[error(transparent)]
-    Config(#[from] ConfigError),
+    Config(
+        /// Architecture validation error raised before checkpoint planning.
+        #[from]
+        ConfigError,
+    ),
     /// Artifact discovery or strict expected-versus-observed planning failed.
     #[error(transparent)]
-    Checkpoint(#[from] CheckpointError),
+    Checkpoint(
+        /// Artifact or mapping error raised before tensor installation.
+        #[from]
+        CheckpointError,
+    ),
     /// Pass two failed after zero or more audited model writes.
     #[error(transparent)]
-    Execution(#[from] Box<ExecutionFailure<T5LoadError>>),
+    Execution(
+        /// Partial execution report and the cause of the failed streamed write.
+        #[from]
+        Box<ExecutionFailure<T5LoadError>>,
+    ),
 }
 
 impl T5CheckpointLoadError {
@@ -131,6 +143,7 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
 }
 
 impl<B: Backend> TensorSink for T5ForConditionalGeneration<B> {
+    /// Target-dispatch, parameter-installation, or tied-alias failure.
     type Error = T5LoadError;
 
     /// Installs one storage-owning parameter recognized by the T5 contract.

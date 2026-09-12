@@ -113,9 +113,13 @@ impl ModelSourceMetadata {
 /// provenance passes are not checkpoint tensor reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QuantizedLoadAudit {
+    /// Burnpack manifest version used by this load.
     format_version: u32,
+    /// Packed payload validation completed before installing model tensors.
     preflight: PackedPreflightStats,
+    /// Packed tensor decoding and installation work.
     packed: PackedLoadStats,
+    /// Full-checkpoint hashing passes that bind version-two sidecars to their source.
     provenance: ProvenanceExecutionStats,
 }
 
@@ -157,12 +161,19 @@ struct RetainedLoadAudit {
 /// An executable model and all host-side state established by a strict load.
 #[derive(Debug)]
 pub struct LoadedModel<M> {
+    /// Strictly loaded executable model.
     model: M,
+    /// Local tokenizer when the bundle includes text-processing artifacts.
     tokenizer: Option<ModelTokenizer>,
+    /// Validated checkpoint defaults used to initialize generation requests.
     generation_defaults: GenerationConfig,
+    /// Local artifact path and recorded upstream identity.
     source: ModelSourceMetadata,
+    /// Finalized accounting of all checkpoint tensor dispositions.
     load_report: LoadReport,
+    /// SafeTensors execution counters when supplied by the loader.
     execution_stats: Option<ExecutionStats>,
+    /// Additional Burnpack validation and provenance work when applicable.
     quantized_load_audit: Option<QuantizedLoadAudit>,
 }
 

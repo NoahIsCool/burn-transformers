@@ -28,6 +28,7 @@ use crate::checkpoint::{
 
 use super::{ConfigError, NemotronHBlockType, NemotronHConfig, Validate};
 
+/// Family label attached to checkpoint topology and dimension errors.
 const FAMILY: &str = "nemotron_h";
 
 /// Caller-supplied upstream identity for a local Nemotron-H checkpoint.
@@ -79,8 +80,11 @@ impl NemotronHCheckpointOptions {
 /// Complete internal tensor inventory plus explicit source renames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NemotronHCheckpointContract {
+    /// Required internal parameter names, shapes, and dtype constraints.
     expected: Vec<ExpectedTensor>,
+    /// Explicit source renames and parameter aliases for the complete graph.
     mappings: MappingPlan,
+    /// Authenticated exception for the pinned Lightning index's router overcount.
     total_size_policy: Option<PinnedIndexTotalSizePolicy>,
 }
 
@@ -287,23 +291,38 @@ fn lightning_total_size_policy(
 /// Checked dimensions reused by contract sections.
 #[derive(Debug, Clone, Copy)]
 struct Dimensions {
+    /// Vocabulary rows in the embedding and output projection.
     vocab: u64,
+    /// Residual-stream width.
     hidden: u64,
+    /// Expanded width of each dense feed-forward block.
     intermediate: u64,
+    /// Query projection width, `num_attention_heads * head_dim`.
     attention_query: u64,
+    /// Key/value projection width, `num_key_value_heads * head_dim`.
     attention_kv: u64,
+    /// Mamba value channels, `mamba_num_heads * mamba_head_dim`.
     mamba_intermediate: u64,
+    /// Convolved channels: Mamba values plus both grouped B/C state projections.
     mamba_convolution: u64,
+    /// Fused Mamba gate, convolution-input, and per-head timestep width.
     mamba_projection: u64,
+    /// Independent Mamba heads with learned timestep, decay, and skip scalars.
     mamba_heads: u64,
+    /// Temporal width of the depthwise convolution kernel.
     mamba_kernel: u64,
+    /// Routed experts and router output channels.
     routed_experts: u64,
+    /// Expanded width inside each routed expert.
     moe_intermediate: u64,
+    /// Expanded width inside the shared expert.
     shared_intermediate: u64,
+    /// Routed expert input/output width, using latent width when configured.
     expert_input: u64,
 }
 
 impl TryFrom<&NemotronHConfig> for Dimensions {
+    /// Invalid or overflowing checkpoint geometry.
     type Error = ConfigError;
 
     /// Converts runtime dimensions and rejects every overflowing product/sum.

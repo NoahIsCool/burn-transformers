@@ -28,9 +28,13 @@ pub(super) struct RowParityObservation {
 /// Ordered aggregate for one complete official execution stream.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct CorrespondingPathSummary {
+    /// Official numerical execution stream required for every observed row.
     path: OfficialExecutionPath,
+    /// Number of contiguous generation decisions successfully compared.
     rows: usize,
+    /// Smallest corresponding-row cosine, initially positive infinity.
     minimum_cosine: f64,
+    /// Zero-based decision that first attained the smallest observed cosine.
     minimum_decision: usize,
 }
 
@@ -274,6 +278,8 @@ fn assert_finite(label: &str, side: &str, values: &[f32]) {
 
 #[cfg(test)]
 mod tests {
+    //! Synthetic tests for path identity, row ordering, and numerical parity gates.
+
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use super::*;

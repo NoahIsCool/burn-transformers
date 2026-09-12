@@ -1,3 +1,5 @@
+//! Loaded-model tests for strict artifact accounting, retained provenance, and bundle validation.
+
 use crate::checkpoint::{
     CheckpointEquivalenceRecord, ExecutionStats, LoadReport, MemoryEstimate, QuantizationRecord,
     SourceStats,

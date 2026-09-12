@@ -1,3 +1,5 @@
+//! Grouped-query attention tests for numerical parity, precision, masks, and projection contracts.
+
 use burn::{
     backend::Flex,
     tensor::{Bool, Tensor, ops::AttentionModuleOptions},

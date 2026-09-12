@@ -1,3 +1,5 @@
+//! Mamba2 recurrence, chunked-scan, masking, and reduced-precision oracle tests.
+
 use burn::{
     backend::Flex,
     module::Param,
@@ -6,6 +8,7 @@ use burn::{
 
 use super::*;
 
+/// CPU Flex backend for full-precision fixtures and explicit reduced-precision casts.
 type TestBackend = Flex<f32, i32>;
 
 /// Small grouped topology that exercises two chunks and head repetition.

@@ -8,10 +8,12 @@ use burn::{
 use super::*;
 use crate::intervention::Layer;
 
+/// Read a fixture activation as dense F32 values for exact or tolerance-based comparisons.
 fn values<const D: usize>(tensor: Tensor<Flex, D>) -> Vec<f32> {
     tensor.into_data().to_vec::<f32>().unwrap()
 }
 
+/// Build two query heads and one shared key/value head with hand-computable values.
 fn projection() -> AttentionProjection<Flex> {
     let device = Default::default();
     AttentionProjection {
@@ -22,6 +24,7 @@ fn projection() -> AttentionProjection<Flex> {
     }
 }
 
+/// Projection shape and dtype mismatches fail before observers or structural pattern callbacks run.
 #[test]
 fn incompatible_projection_inputs_fail_before_observers_or_pattern_transforms() {
     use std::cell::Cell;
@@ -113,6 +116,7 @@ fn incompatible_projection_inputs_fail_before_observers_or_pattern_transforms() 
     }
 }
 
+/// Attention observers preserve packed output weights and agree with the unobserved output.
 #[test]
 fn projection_preflight_preserves_quantized_output_weights() {
     use crate::checkpoint::quantization::{
@@ -159,6 +163,7 @@ fn projection_preflight_preserves_quantized_output_weights() {
     ));
 }
 
+/// Capturing available points leaves native and eager attention numerically unchanged under gating and masks.
 #[test]
 fn attention_captures_preserve_native_and_eager_outputs() {
     let device = Default::default();
@@ -213,6 +218,7 @@ fn attention_captures_preserve_native_and_eager_outputs() {
     }
 }
 
+/// Eager attention capture preserves F16 score, pattern, and output boundaries exactly.
 #[test]
 fn eager_score_and_pattern_captures_preserve_reduced_precision_boundaries() {
     use burn::{module::Param, tensor::DType};
@@ -244,6 +250,7 @@ fn eager_score_and_pattern_captures_preserve_reduced_precision_boundaries() {
     assert_eq!(hooks.get(&pattern).unwrap().dtype(), DType::F16);
 }
 
+/// A selected head ablation matches explicit context slicing followed by the output projection.
 #[test]
 fn selected_head_edit_matches_manual_context_ablation() {
     let device = Default::default();
@@ -283,6 +290,7 @@ fn selected_head_edit_matches_manual_context_ablation() {
     );
 }
 
+/// Editing queries matches direct projection modification on the native attention path.
 #[test]
 fn query_edits_feed_native_attention_without_requiring_materialized_scores() {
     let device = Default::default();
@@ -305,6 +313,7 @@ fn query_edits_feed_native_attention_without_requiring_materialized_scores() {
     assert_eq!(values(actual), values(expected));
 }
 
+/// Pattern replacements cannot reactivate future keys or entirely masked query rows.
 #[test]
 fn pattern_edits_cannot_restore_causal_or_padding_exclusions() {
     let device = Default::default();
@@ -343,6 +352,7 @@ fn pattern_edits_cannot_restore_causal_or_padding_exclusions() {
     );
 }
 
+/// Captured scores match scaled, soft-capped dot products before bias and causal exclusion.
 #[test]
 fn scores_are_after_scale_and_softcap_before_additive_bias() {
     let device = Default::default();
@@ -374,6 +384,7 @@ fn scores_are_after_scale_and_softcap_before_additive_bias() {
     );
 }
 
+/// All-negative-infinity rows produce zero probabilities and context through score edits or bias.
 #[test]
 fn entirely_negative_infinity_scores_have_finite_zero_pattern() {
     let device = Default::default();
@@ -424,6 +435,7 @@ fn entirely_negative_infinity_scores_have_finite_zero_pattern() {
     }
 }
 
+/// Requesting unavailable native scores fails before any action can observe or edit tensors.
 #[test]
 fn native_score_requests_fail_before_any_callback() {
     let device = Default::default();
@@ -445,6 +457,7 @@ fn native_score_requests_fail_before_any_callback() {
     assert!(hooks.get(&query).is_err());
 }
 
+/// Structural pattern transforms run with empty hooks and appear unchanged in subsequent captures.
 #[test]
 fn structural_pattern_runs_without_hooks_and_is_visible_to_observers() {
     let device = Default::default();
@@ -482,6 +495,7 @@ fn structural_pattern_runs_without_hooks_and_is_visible_to_observers() {
     );
 }
 
+/// Structural edits retain causal exclusions, reject changed shapes, and preserve identity-transform output.
 #[test]
 fn structural_pattern_preserves_masks_and_checks_shape() {
     let device = Default::default();
@@ -530,6 +544,7 @@ fn structural_pattern_preserves_masks_and_checks_shape() {
     assert_eq!(values(actual), values(expected));
 }
 
+/// Execution validity affects native queries without observers but materialized patterns require eager attention.
 #[test]
 fn point_validity_runs_without_observers_and_keeps_precision_explicit() {
     use crate::intervention::PointValidity;
@@ -579,9 +594,11 @@ fn point_validity_runs_without_observers_and_keeps_precision_explicit() {
 }
 
 #[cfg(feature = "autodiff")]
+/// Halving a materialized attention pattern halves value gradients relative to the ordinary graph.
 #[test]
 fn materialized_pattern_edits_preserve_value_gradients() {
     use burn::backend::Autodiff;
+    /// Differentiable CPU backend used to compare ordinary and edited attention gradients.
     type Ad = Autodiff<Flex>;
     let device = Default::default();
     let module = GroupedQueryAttentionConfig::new(4, 2, 1, 2)

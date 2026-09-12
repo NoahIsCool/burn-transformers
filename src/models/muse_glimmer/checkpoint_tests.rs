@@ -1,3 +1,5 @@
+//! Metadata-only tests for strict Muse text inventories, visual exceptions, and tied storage.
+
 use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::checkpoint::{

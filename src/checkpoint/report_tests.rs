@@ -1,6 +1,9 @@
+//! Tests deterministic report finalization, compatibility defaults, and strict validity.
+
 use super::*;
 
 #[test]
+/// Finalization orders report entries deterministically and is idempotent.
 fn report_finalization_is_deterministic_and_idempotent() {
     let mut report = LoadReport {
         applied: vec!["z".into(), "a".into(), "a".into()],
@@ -40,6 +43,7 @@ fn report_finalization_is_deterministic_and_idempotent() {
 }
 
 #[test]
+/// Legacy reports deserialize with empty defaults for newer alias-equivalence fields.
 fn legacy_report_without_alias_equivalence_fields_deserializes_with_defaults() {
     let mut value = serde_json::to_value(LoadReport {
         memory: Some(MemoryEstimate {
@@ -92,6 +96,7 @@ fn legacy_report_without_alias_equivalence_fields_deserializes_with_defaults() {
 }
 
 #[test]
+/// Explicitly allowed mismatches do not invalidate a strict report.
 fn strict_validity_ignores_explicit_exceptions() {
     let mut report = LoadReport {
         allowlisted_ignored: vec!["vision.weight".into()],

@@ -1,3 +1,5 @@
+//! Learned T5 bias lookup layout, cached offsets, and allocation-boundary tests.
+
 use burn::{
     backend::Flex,
     module::Param,

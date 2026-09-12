@@ -238,10 +238,13 @@ fn values(tensor: burn::tensor::Tensor<model::B, 2>) -> Vec<f32> {
     values
 }
 
+/// Host-side accumulated correctness and negative log likelihood over the complete modular grid.
 #[cfg(feature = "flex")]
 #[derive(Default)]
 struct Metrics {
+    /// Number of grid pairs whose largest numeric-class logit matches the modular sum.
     correct: usize,
+    /// Sum of per-pair negative log likelihoods in nats over 113 numeric classes.
     loss: f64,
 }
 
@@ -283,9 +286,13 @@ impl Metrics {
 #[cfg(feature = "flex")]
 #[derive(Clone, Copy, Default)]
 struct FourierFit {
+    /// Sum of squared theoretical sinusoid values, `Σ x²`.
     x2: f64,
+    /// Sum of sinusoid/activation products, `Σ xy`.
     xy: f64,
+    /// Sum of activation projections, `Σ y`, used to center total variation.
     y: f64,
+    /// Sum of squared activation projections, `Σ y²`.
     y2: f64,
 }
 

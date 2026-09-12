@@ -27,9 +27,13 @@ use transformers::{
     training::cross_entropy,
 };
 
+/// Autodifferentiable CPU backend for the color-majority training task.
 type Ad = Autodiff<Cpu>;
+/// Number of full-batch Adam updates in the fixed training budget.
 const STEPS: usize = 120;
+/// Adam step size for all registered model parameters.
 const LEARNING_RATE: f64 = 0.01;
+/// Initialization seed for the reproducible training fixture.
 const SEED: u64 = 89;
 
 /// Train the color-majority experiment using the fixed native Adam budget and local output directory.
@@ -102,9 +106,12 @@ fn train(root: &Path, steps: usize) -> Result<()> {
     .save(root)
 }
 
+/// One ordered color triple and its warm-majority target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Example {
+    /// Three color token IDs; the ordering defines sequence-level split membership.
     tokens: [i32; 3],
+    /// One when at least two tokens are warm colors, otherwise zero.
     label: i32,
 }
 

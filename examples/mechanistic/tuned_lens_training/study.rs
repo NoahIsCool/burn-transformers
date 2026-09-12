@@ -44,17 +44,28 @@ use transformers::{
     models::gpt_neox::{GptNeoXConfig, GptNeoXModel},
 };
 
+/// CPU inference backend for frozen-data evaluation.
 pub type Cpu = Flex<f32, i32>;
+/// Autodifferentiable CPU backend for fitting affine residual corrections.
 pub type B = Autodiff<Cpu>;
+/// Experiment result carrying contextual artifact, gradient, and checkpoint errors.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+/// Native SGD adaptor owning momentum state for a trainable lens module.
 pub type SgdOptimizer = OptimizerAdaptor<Sgd<Cpu>, Lens<B>, B>;
 
+/// Pinned training settings and separate input/output artifact directories.
 pub struct Settings {
+    /// Directory containing the frozen model and reference preparation artifacts.
     pub base: PathBuf,
+    /// Directory receiving fresh training fixtures, native records, and results.
     pub output: PathBuf,
+    /// Residual stages to fit: zero denotes embeddings and i denotes post-block i - 1.
     pub stages: Vec<usize>,
+    /// Number of leading cached documents used for fitting; later documents are held out.
     pub train_records: usize,
+    /// Number of optimizer updates in the fixed training schedule.
     pub steps: usize,
+    /// Embedded protocol containing pinned source and base-artifact identities.
     protocol: Value,
 }
 
@@ -95,10 +106,14 @@ impl Settings {
     }
 }
 
+/// Trainable residual affine correction followed by the frozen final decoder.
 #[derive(Module, Debug)]
 pub struct Lens<B: Backend> {
+    /// Width-preserving correction `Wh + b`, initialized to zero and added to the input.
     pub translator: Linear<B>,
+    /// Frozen final LayerNorm that retains input-gradient propagation.
     final_norm: LayerNorm<B>,
+    /// Frozen vocabulary projection that retains input-gradient propagation.
     unembedding: Linear<B>,
 }
 
@@ -154,9 +169,12 @@ pub fn optimizer() -> SgdOptimizer {
         .init()
 }
 
+/// One prepared document with exact source identity and token IDs.
 #[derive(Deserialize, Serialize)]
 pub struct Record {
+    /// Stable source-document index defining the frozen fitting/validation split.
     pub record_index: usize,
+    /// BOS-prefixed document token IDs truncated to the protocol's 32 positions.
     pub input_ids: Vec<i32>,
 }
 
@@ -217,9 +235,13 @@ pub fn load(settings: &Settings) -> Result<(GptNeoXModel<B>, Vec<Record>, Value)
     Ok((backbone, records, provenance))
 }
 
+/// Detached residuals, teacher logits, and token IDs for one fixed document.
 pub struct CachedRecord {
+    /// Captured `[tokens, hidden]` residual tensors in the requested stage order.
     pub hidden: Vec<Tensor<B, 2>>,
+    /// Final-model teacher logits with axes `[tokens, vocabulary]`.
     pub teacher: Tensor<B, 2>,
+    /// Input token IDs; each next token supplies the previous position's CE target.
     pub tokens: Vec<i32>,
 }
 
@@ -311,11 +333,16 @@ pub fn gradients(
     Ok((grads, norm))
 }
 
+/// Mean evaluation losses and their distinct token populations.
 #[derive(Clone, Copy, Serialize)]
 pub struct Metrics {
+    /// Mean forward KL from final-model teacher to lens predictions, in nats per position.
     pub kl: f64,
+    /// Mean next-token negative log likelihood, in nats per valid target.
     pub ce: f64,
+    /// Number of prediction positions included in forward KL.
     pub kl_tokens: usize,
+    /// Number of shifted targets included in cross entropy.
     pub ce_tokens: usize,
 }
 
@@ -479,7 +506,11 @@ pub fn identity_error(
 
 /// Hash each registered float tensor in traversal order, including its shape and dtype.
 pub fn fingerprint<T: Backend, M: Module<T>>(model: &M) -> String {
-    struct HashParameters(Sha256);
+    /// Accumulates a digest over registered parameter layouts and exact values.
+    struct HashParameters(
+        /// Incremental SHA-256 state in native parameter visitation order.
+        Sha256,
+    );
     impl<T: Backend> ModuleVisitor<T> for HashParameters {
         /// Append one parameter layout and raw values without including unstable parameter IDs.
         fn visit_float<const D: usize>(&mut self, parameter: &Param<Tensor<T, D>>) {

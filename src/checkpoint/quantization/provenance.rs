@@ -565,6 +565,7 @@ fn hash_usize(hasher: &mut Sha256, value: usize) {
 
 /// Encodes a digest without adding a separate hexadecimal dependency.
 fn hex_digest(digest: impl AsRef<[u8]>) -> String {
+    /// Lowercase hexadecimal digits indexed by a four-bit nibble.
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let bytes = digest.as_ref();
     let mut encoded = String::with_capacity(bytes.len() * 2);

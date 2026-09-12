@@ -19,8 +19,11 @@ use super::{CacheConfig, TransactionError};
 /// write or invalidation range without duplicating overflow checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LengthTransition {
+    /// Batch-row index affected by this transition.
     sequence: usize,
+    /// Absolute token count before the transition.
     previous: usize,
+    /// Absolute token count after the transition.
     current: usize,
 }
 
@@ -61,8 +64,11 @@ impl LengthTransition {
 /// offsets. Physical cache tensors are intentionally not stored here.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DecodeState {
+    /// Validated batch, capacity, and retention geometry.
     pub(crate) config: CacheConfig,
+    /// Absolute processed-token counts, each at most the configured capacity.
     pub(crate) lengths: Vec<usize>,
+    /// Baseline checkpoint while speculative appends are active.
     pub(crate) active_transaction: Option<super::transaction::ActiveTransaction>,
 }
 
@@ -414,7 +420,10 @@ pub enum DecodeStateError {
         operation: &'static str,
     },
     /// A transactional operation failed.
-    Transaction(TransactionError),
+    Transaction(
+        /// Underlying mark, lifecycle, or accepted-prefix validation failure.
+        TransactionError,
+    ),
 }
 
 impl fmt::Display for DecodeStateError {

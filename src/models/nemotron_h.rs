@@ -76,9 +76,15 @@ impl NemotronHBlockType {
 #[serde(untagged)]
 enum BlockScheduleWire {
     /// Compact legacy string such as `M-M-M*`.
-    Pattern(String),
+    Pattern(
+        /// Unvalidated characters converted to block types during deserialization.
+        String,
+    ),
     /// Modern list of descriptive layer names.
-    List(Vec<NemotronHBlockType>),
+    List(
+        /// Normalized block types in execution order.
+        Vec<NemotronHBlockType>,
+    ),
 }
 
 /// Deserializes and normalizes a Nemotron block schedule.
@@ -346,6 +352,7 @@ impl NemotronHConfig {
 impl Validate for NemotronHConfig {
     /// Checks heterogeneous schedule, per-mixer dimensions, routing, time steps, and IDs.
     fn validate(&self) -> Result<(), ConfigError> {
+        /// Family label attached to configuration diagnostics.
         const FAMILY: &str = "nemotron_h";
         model_type(FAMILY, &self.model_type, &["nemotron_h"])?;
         for (field, value) in [
@@ -633,7 +640,9 @@ impl Validate for NemotronHConfig {
 }
 
 impl ModelConfig for NemotronHConfig {
+    /// Family identifier used by configuration dispatch and diagnostics.
     const FAMILY: &'static str = "nemotron_h";
+    /// Accepted Hugging Face configuration discriminator.
     const MODEL_TYPES: &'static [&'static str] = &["nemotron_h"];
 }
 

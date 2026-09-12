@@ -1,3 +1,5 @@
+//! Qwen hybrid cache parity, masked-row, lifecycle, and failure-atomicity tests.
+
 use burn::{
     backend::Flex,
     tensor::{
@@ -15,6 +17,7 @@ use crate::{
     models::qwen3_5::{Qwen3_5LayerType, Qwen3_5TextConfig},
 };
 
+/// CPU Flex backend with F32 activations and portable I32 indices.
 type TestBackend = Flex<f32, i32>;
 
 /// Builds a small interleaved topology with every cache family represented.
@@ -83,6 +86,7 @@ fn assert_zero<const D: usize>(tensor: Tensor<TestBackend, D>) {
 /// Exact physical cache contents for one batch row across every group.
 #[derive(Debug, PartialEq)]
 struct CacheRowSnapshot {
+    /// Materialized main-cache keys, values, association matrices, and convolution history.
     tensors: Vec<TensorData>,
 }
 
@@ -1136,13 +1140,21 @@ fn speculative_transaction_restores_target_and_mtp_bytes() {
 /// Captures committed bytes, proposal cursors, and both logical cache timelines.
 #[derive(Debug, PartialEq)]
 struct ContractSnapshot {
+    /// Physical main-cache contents captured independently for every batch row.
     rows: Vec<CacheRowSnapshot>,
+    /// Full native-KV buffers from the main bank and optional MTP bank.
     auxiliary: Vec<TensorData>,
+    /// Committed target-cache cursor for each sequence.
     lengths: Vec<usize>,
+    /// Target cursor including unpublished transactional appends.
     working: Vec<usize>,
+    /// Committed shifted MTP cursors when the auxiliary bank is enabled.
     mtp_lengths: Option<Vec<usize>>,
+    /// MTP cursors including unpublished transactional appends.
     mtp_working: Option<Vec<usize>>,
+    /// Per-layer, per-row staging lengths across both cache banks.
     staged: Vec<usize>,
+    /// Whether a transaction mark is active at capture time.
     transaction: bool,
 }
 

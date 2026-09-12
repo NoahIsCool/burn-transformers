@@ -1,3 +1,5 @@
+//! Local-tokenizer tests for artifact validation, batching, padding, and chat-template boundaries.
+
 use std::{collections::HashMap, fs};
 
 use burn::backend::Flex;

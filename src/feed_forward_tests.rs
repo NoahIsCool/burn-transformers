@@ -1,3 +1,5 @@
+//! Feed-forward tests covering activation formulas, gating, validation, and tensor layouts.
+
 use burn::{backend::Flex, tensor::Tensor};
 
 use crate::architecture::Activation;

@@ -1,3 +1,5 @@
+//! Tests exact source, plan, payload, and manifest provenance binding.
+
 use std::io::Write;
 
 use super::*;

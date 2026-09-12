@@ -15,6 +15,7 @@ use crate::checkpoint::{
 
 use super::{ConfigError, Qwen3MoeConfig, Validate};
 
+/// Family label attached to checkpoint geometry errors.
 const FAMILY: &str = "qwen3_moe";
 
 /// Reserved family-specific checkpoint policy.
@@ -29,7 +30,9 @@ pub struct Qwen3MoeCheckpointOptions {}
 /// Complete expected tensor inventory and explicit source mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Qwen3MoeCheckpointContract {
+    /// Required parameter names and shapes in deterministic topology order.
     expected: Vec<ExpectedTensor>,
+    /// Explicit checkpoint source-to-parameter mappings, including tied aliases.
     mappings: MappingPlan,
 }
 
@@ -180,17 +183,26 @@ impl Qwen3MoeConfig {
 /// Checked shape terms used by the contract builder.
 #[derive(Debug, Clone, Copy)]
 struct Dimensions {
+    /// Number of vocabulary rows in embedding and output matrices.
     vocab: u64,
+    /// Residual-stream width shared by decoder blocks.
     hidden: u64,
+    /// Intermediate width of dense feed-forward layers.
     intermediate: u64,
+    /// Intermediate width of each routed expert.
     moe_intermediate: u64,
+    /// Number of routed experts and router output channels.
     experts: u64,
+    /// Concatenated query width: query heads times head dimension.
     query: u64,
+    /// Concatenated native key/value width before head repetition.
     key_value: u64,
+    /// Per-head query/key width used by headwise RMS normalization.
     head_dim: u64,
 }
 
 impl TryFrom<&Qwen3MoeConfig> for Dimensions {
+    /// Configuration field and reason for a nonportable or overflowing dimension.
     type Error = ConfigError;
 
     /// Converts every dimension and checks projection-width products.

@@ -1,3 +1,5 @@
+//! Tensor-cache allocation, numerical storage parity, and coordinated lifecycle contracts.
+
 use burn::backend::Flex;
 use burn::tensor::{DType, Tensor, TensorData};
 
@@ -6,24 +8,30 @@ use crate::cache::CacheConfig;
 
 use super::*;
 
+/// Deterministic Flex backend with F32 values and portable I32 indices.
 type TestBackend = Flex<f32, i32>;
 
+/// Returns the deterministic Flex host device used by every tensor fixture.
 fn device() -> <TestBackend as burn::tensor::backend::BackendTypes>::Device {
     Default::default()
 }
 
+/// Creates a rank-three F32 fixture with explicit values and shape.
 fn tensor3(values: Vec<f32>, shape: [usize; 3]) -> Tensor<TestBackend, 3> {
     Tensor::from_data(TensorData::new(values, shape), &device())
 }
 
+/// Creates a rank-four F32 fixture with explicit values and shape.
 fn tensor4(values: Vec<f32>, shape: [usize; 4]) -> Tensor<TestBackend, 4> {
     Tensor::from_data(TensorData::new(values, shape), &device())
 }
 
+/// Creates a rank-five F32 fixture with explicit values and shape.
 fn tensor5(values: Vec<f32>, shape: [usize; 5]) -> Tensor<TestBackend, 5> {
     Tensor::from_data(TensorData::new(values, shape), &device())
 }
 
+/// Creates scalar-head keys and values ten times larger to detect pair mix-ups.
 fn scalar_kv(values: &[f32]) -> (Tensor<TestBackend, 4>, Tensor<TestBackend, 4>) {
     let shape = [1, 1, values.len(), 1];
     (
@@ -32,6 +40,7 @@ fn scalar_kv(values: &[f32]) -> (Tensor<TestBackend, 4>, Tensor<TestBackend, 4>)
     )
 }
 
+/// Reads committed keys in chronological order and transfers them for exact assertions.
 fn materialized_keys(
     cache: &NativeKvCache<TestBackend>,
     layer: usize,
@@ -49,6 +58,7 @@ fn materialized_keys(
         .expect("f32 cache")
 }
 
+/// Reads committed and proposed keys in chronological order for exact assertions.
 fn working_keys(
     cache: &NativeKvCache<TestBackend>,
     layer: usize,
@@ -66,18 +76,21 @@ fn working_keys(
         .expect("f32 cache")
 }
 
+/// Builds one scalar-head attention layer with the selected storage and proposal capacity.
 fn scalar_kv_spec(storage: KvCacheStorage, staging: usize) -> NativeKvCacheSpec {
     NativeKvCacheSpec::new(1, 1, 1, storage, DType::F32)
         .expect("valid KV spec")
         .with_staging_capacity(staging)
 }
 
+/// Builds one scalar recurrent layer with a two-token convolution history.
 fn scalar_recurrent_spec(staging: usize) -> RecurrentStateSpec {
     RecurrentStateSpec::new(1, 1, 1, 1, 1, 2, DType::F32)
         .expect("valid recurrent spec")
         .with_staging_capacity(staging)
 }
 
+/// Rejects invalid tensor dimensions and dtypes and round-trips validated geometry.
 #[test]
 fn specs_validate_dimensions_dtype_and_accessors() {
     for (field, args) in [
@@ -166,6 +179,7 @@ fn specs_validate_dimensions_dtype_and_accessors() {
     ));
 }
 
+/// Checks physical tensor extents for full, standard-ring, and mirrored storage.
 #[test]
 fn allocation_shapes_match_full_ring_and_mirrored_layouts() {
     let device = device();
@@ -211,6 +225,7 @@ fn allocation_shapes_match_full_ring_and_mirrored_layouts() {
     assert_eq!(mirrored.committed_time_slots(), 4);
 }
 
+/// Checks full-cache value preservation and rejects invalid indices and tensor metadata.
 #[test]
 fn full_cache_writes_reads_and_checks_every_tensor_boundary() {
     let device = device();
@@ -277,6 +292,7 @@ fn full_cache_writes_reads_and_checks_every_tensor_boundary() {
     ));
 }
 
+/// Compares wrapped standard and mirrored cache reads with chronological token values.
 #[test]
 fn ring_and_mirrored_cache_reads_preserve_chronology() {
     let device = device();
@@ -318,6 +334,7 @@ fn ring_and_mirrored_cache_reads_preserve_chronology() {
     }
 }
 
+/// Preserves committed ring tensors exactly when proposed writes are discarded.
 #[test]
 fn speculative_ring_rollback_never_overwrites_committed_slots() {
     let device = device();
@@ -392,6 +409,7 @@ fn speculative_ring_rollback_never_overwrites_committed_slots() {
     );
 }
 
+/// Rejects missing or excessive staging without changing committed values or the active mark.
 #[test]
 fn incomplete_or_oversized_staging_is_atomic_and_recoverable() {
     let device = device();
@@ -439,6 +457,7 @@ fn incomplete_or_oversized_staging_is_atomic_and_recoverable() {
     ));
 }
 
+/// Publishes the recurrent snapshot after the last accepted proposal token.
 #[test]
 fn recurrent_transactions_select_the_accepted_terminal_snapshot() {
     let device = device();
@@ -523,6 +542,7 @@ fn recurrent_transactions_select_the_accepted_terminal_snapshot() {
     );
 }
 
+/// Reorders and duplicates attention, recurrent, and auxiliary state consistently.
 #[test]
 fn reorder_duplicates_main_recurrent_and_separate_mtp_rows() {
     let device = device();
@@ -608,6 +628,7 @@ fn reorder_duplicates_main_recurrent_and_separate_mtp_rows() {
     state.reset().expect("reset recurrent bank");
 }
 
+/// Clears all tensor storage and logical cursors through the architecture reset contract.
 #[test]
 fn reset_clears_every_tensor_and_satisfies_architecture_contract() {
     let device = device();
@@ -656,6 +677,7 @@ fn reset_clears_every_tensor_and_satisfies_architecture_contract() {
     );
 }
 
+/// Allows recoverable rewinds and rejects missing ring or recurrent history.
 #[test]
 fn truncate_accepts_safe_prefixes_and_rejects_irreversible_rewinds() {
     let device = device();
@@ -708,6 +730,7 @@ fn truncate_accepts_safe_prefixes_and_rejects_irreversible_rewinds() {
     recurrent.truncate(&[0]).expect("initial state restorable");
 }
 
+/// Rejects incompatible batch geometry, lifecycle operations, and attached banks.
 #[test]
 fn lifecycle_validates_batch_capacity_transactions_and_bank_topology() {
     let device = device();
@@ -765,6 +788,7 @@ fn lifecycle_validates_batch_capacity_transactions_and_bank_topology() {
     ));
 }
 
+/// Locks bank topology and lifecycle mutations until the active transaction ends.
 #[test]
 fn active_transactions_block_topology_and_lifecycle_changes() {
     let device = device();
@@ -811,6 +835,7 @@ fn active_transactions_block_topology_and_lifecycle_changes() {
     state.rollback(mark).expect("rollback");
 }
 
+/// Handles empty inputs and arithmetic failures before invalid backend slicing.
 #[test]
 fn zero_length_and_arithmetic_edges_never_reach_invalid_backend_slices() {
     let device = device();
@@ -870,6 +895,7 @@ fn zero_length_and_arithmetic_edges_never_reach_invalid_backend_slices() {
     ));
 }
 
+/// Rejects recurrent shape, row, layer, and transaction-lifecycle violations.
 #[test]
 fn recurrent_cache_validates_shapes_indices_and_staging_lifecycle() {
     let device = device();
@@ -1023,6 +1049,7 @@ fn recurrent_cache_validates_shapes_indices_and_staging_lifecycle() {
     ));
 }
 
+/// Keeps auxiliary accepted progress and tensor storage independent of the main decoder.
 #[test]
 fn mtp_transactions_commit_and_rollback_without_aliasing_main_state() {
     let device = device();
@@ -1132,6 +1159,7 @@ fn mtp_transactions_commit_and_rollback_without_aliasing_main_state() {
     );
 }
 
+/// Rejects foreign marks and excessive acceptance while allowing valid recovery.
 #[test]
 fn transaction_marks_and_accepted_counts_are_state_local_and_recoverable() {
     let device = device();
@@ -1167,6 +1195,7 @@ fn transaction_marks_and_accepted_counts_are_state_local_and_recoverable() {
     second.rollback(second_rollback).expect("second rollback");
 }
 
+/// Validates bank compatibility and reports unavailable group indices with context.
 #[test]
 fn bank_attachment_accessors_and_errors_are_contextual() {
     let device = device();
@@ -1222,6 +1251,7 @@ fn bank_attachment_accessors_and_errors_are_contextual() {
     );
 }
 
+/// Checks direct staging lifecycle and zero or positive accepted prefixes across storage modes.
 #[test]
 fn low_level_commit_validation_covers_full_mirrored_and_zero_prefixes() {
     let device = device();
@@ -1310,6 +1340,7 @@ fn low_level_commit_validation_covers_full_mirrored_and_zero_prefixes() {
     );
 }
 
+/// Preserves recurrent terminal values for zero acceptance and empty snapshots.
 #[test]
 fn recurrent_zero_prefix_and_empty_snapshots_keep_terminal_state_exact() {
     let device = device();
@@ -1359,6 +1390,7 @@ fn recurrent_zero_prefix_and_empty_snapshots_keep_terminal_state_exact() {
     cache.rollback_staging();
 }
 
+/// Applies independent auxiliary rewinds and architecture lifecycle operations safely.
 #[test]
 fn mtp_truncate_and_trait_lifecycle_apply_to_auxiliary_storage() {
     let device = device();
@@ -1389,6 +1421,7 @@ fn mtp_truncate_and_trait_lifecycle_apply_to_auxiliary_storage() {
     ));
 }
 
+/// Preserves nonzero main and auxiliary tensors when either requested rewind is unsafe.
 #[test]
 fn paired_main_mtp_truncate_validates_both_banks_before_mutation() {
     let device = device();
@@ -1409,12 +1442,45 @@ fn paired_main_mtp_truncate_validates_both_banks_before_mutation() {
     state.advance(&[3]).expect("main length");
     state.advance_mtp(&[3]).expect("MTP length");
 
+    let (keys, values) = scalar_kv(&[1.0, 2.0, 3.0]);
+    state
+        .main_mut()
+        .native_kv_mut(0)
+        .expect("main cache")
+        .write_sequence(0, 0, 0, keys, values)
+        .expect("main sentinel values");
+    let (keys, values) = scalar_kv(&[7.0, 8.0, 9.0]);
+    state
+        .mtp_mut()
+        .expect("MTP bank")
+        .native_kv_mut(0)
+        .expect("MTP cache")
+        .write_sequence(0, 0, 0, keys, values)
+        .expect("MTP sentinel values");
+
     assert!(matches!(
-        state.truncate_prefixes(&[2], &[2]),
+        state.truncate_prefixes(&[0], &[2]),
         Err(TensorCacheError::UnsafeWrappedTruncate { .. })
     ));
     assert_eq!(state.lengths(), &[3]);
     assert_eq!(state.mtp_lengths(), Some([3].as_slice()));
+    assert_eq!(
+        materialized_keys(state.main().native_kv(0).expect("main cache"), 0, 0, 3),
+        [1.0, 2.0, 3.0]
+    );
+    assert_eq!(
+        materialized_keys(
+            state
+                .mtp()
+                .expect("MTP bank")
+                .native_kv(0)
+                .expect("MTP cache"),
+            0,
+            0,
+            3
+        ),
+        [8.0, 9.0]
+    );
 
     let mark = state.begin_transaction().expect("transaction");
     assert!(matches!(
@@ -1430,6 +1496,53 @@ fn paired_main_mtp_truncate_validates_both_banks_before_mutation() {
     assert_eq!(state.mtp_lengths(), Some([0].as_slice()));
 }
 
+/// A mirrored commit crossing the ring boundary retains chronology and duplicates both halves.
+#[test]
+fn mirrored_commit_crosses_wrap_with_independent_layer_values() {
+    let config = CacheConfig::new(1, 8)
+        .expect("config")
+        .with_sliding_window(3)
+        .expect("window");
+    let spec = NativeKvCacheSpec::new(2, 1, 1, KvCacheStorage::MirroredSlidingRing, DType::F32)
+        .expect("geometry")
+        .with_staging_capacity(3);
+    let mut cache = NativeKvCache::<TestBackend>::new(config, 1, spec, &device()).expect("cache");
+    for layer in 0..2 {
+        let offset = (layer * 10) as f32;
+        let (keys, values) = scalar_kv(&[offset + 1.0, offset + 2.0]);
+        cache
+            .write_sequence(layer, 0, 0, keys, values)
+            .expect("baseline");
+    }
+    cache.begin_staging().expect("staging");
+    for layer in 0..2 {
+        let offset = (layer * 10) as f32;
+        let (keys, values) = scalar_kv(&[offset + 3.0, offset + 4.0, offset + 5.0]);
+        cache
+            .stage_sequence(layer, 0, keys, values)
+            .expect("proposal");
+    }
+    let plan = cache
+        .prepare_staging_commit(&[2], &[3], &[2])
+        .expect("accepted prefix");
+    cache.apply_staging_commit(plan);
+    for layer in 0..2 {
+        let offset = (layer * 10) as f32;
+        assert_eq!(
+            materialized_keys(&cache, layer, 0, 4),
+            [offset + 2.0, offset + 3.0, offset + 4.0]
+        );
+        for tensor in [
+            cache.keys(layer).expect("keys"),
+            cache.values(layer).expect("values"),
+        ] {
+            let data = tensor.clone().into_data().to_vec::<f32>().expect("F32");
+            assert_eq!(data[..3], data[3..]);
+        }
+    }
+}
+
+/// Commits different accepted prefix lengths for rows sharing one tensor cache.
 #[test]
 fn ragged_batch_transactions_commit_independent_prefix_lengths() {
     let device = device();
@@ -1468,6 +1581,7 @@ fn ragged_batch_transactions_commit_independent_prefix_lengths() {
     );
 }
 
+/// Keeps committed cursors fixed while working reads reveal each newly staged token.
 #[test]
 fn committed_lengths_stay_stable_while_working_kv_grows_iteratively() {
     let device = device();
@@ -1513,6 +1627,7 @@ fn committed_lengths_stay_stable_while_working_kv_grows_iteratively() {
     assert_eq!(state.working_lengths(), &[1]);
 }
 
+/// Trims committed history and oversized proposals to the correct visible ring suffix.
 #[test]
 fn working_reads_trim_wrapped_history_and_support_proposals_larger_than_window() {
     let device = device();
@@ -1577,6 +1692,7 @@ fn working_reads_trim_wrapped_history_and_support_proposals_larger_than_window()
     }
 }
 
+/// Preserves independent recurrent dtypes through working reads and batched state updates.
 #[test]
 fn recurrent_working_reads_and_whole_batch_io_preserve_split_dtypes() {
     let device = device();
@@ -1714,6 +1830,7 @@ fn recurrent_working_reads_and_whole_batch_io_preserve_split_dtypes() {
     ));
 }
 
+/// Tracks separate main and auxiliary proposal cursors and accepted prefix lengths.
 #[test]
 fn main_and_mtp_proposals_have_independent_cursors_and_prefixes() {
     let device = device();
@@ -1780,6 +1897,7 @@ fn main_and_mtp_proposals_have_independent_cursors_and_prefixes() {
     state.rollback(mark).expect("recoverable rollback");
 }
 
+/// Exercises tensor transaction semantics through the public generic lifecycle trait.
 #[test]
 fn public_transaction_trait_drives_tensor_state_without_downcasting() {
     use crate::cache::TransactionalCache;
@@ -1804,6 +1922,7 @@ fn public_transaction_trait_drives_tensor_state_without_downcasting() {
     assert_eq!(state.lengths(), &[1]);
 }
 
+/// Locks initially empty banks against adding groups during speculation.
 #[test]
 fn empty_banks_are_topology_locked_for_the_entire_transaction() {
     let device = device();
@@ -1833,6 +1952,7 @@ fn empty_banks_are_topology_locked_for_the_entire_transaction() {
         .expect("topology unlocked");
 }
 
+/// Rejects invalid auxiliary staging before publishing any main-bank tensor.
 #[test]
 fn cross_bank_commit_validation_is_atomic_before_any_tensor_write() {
     let device = device();
@@ -1905,6 +2025,7 @@ fn cross_bank_commit_validation_is_atomic_before_any_tensor_write() {
         .expect("rollback after validation error");
 }
 
+/// Rejects invalid allocation geometry before invoking the tensor backend.
 #[test]
 fn allocation_arithmetic_is_rejected_before_backend_tensor_creation() {
     let device = device();
@@ -1945,6 +2066,7 @@ fn allocation_arithmetic_is_rejected_before_backend_tensor_creation() {
     ));
 }
 
+/// Checks invalid transaction and auxiliary-prefix requests preserve recoverability.
 #[test]
 fn tensor_transaction_edge_contracts_remain_recoverable() {
     use crate::cache::TransactionalCache;

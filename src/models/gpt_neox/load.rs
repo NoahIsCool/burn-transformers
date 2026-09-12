@@ -41,9 +41,13 @@ use super::{GptNeoXConfig, GptNeoXLayer, GptNeoXModel};
 /// targets. Their three resulting parameters appear in the plan's report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GptNeoXCheckpointContract {
+    /// Logical parameters and packed staging targets with exact checkpoint shapes.
     expected: Vec<ExpectedTensor>,
+    /// Explicit source-to-runtime target mappings before packed-QKV expansion.
     mappings: MappingPlan,
+    /// Exact optional causal-mask and rotary-buffer names reconstructed by the graph.
     buffers: Vec<KeyMatcher>,
+    /// Query-head count used to attribute packed-QKV component transformations.
     heads: usize,
 }
 
@@ -303,13 +307,25 @@ pub enum GptNeoXLoadError {
 pub enum GptNeoXCheckpointLoadError {
     /// Invalid or unsupported architecture configuration.
     #[error(transparent)]
-    Configuration(#[from] crate::Error),
+    Configuration(
+        /// Invalid architecture configuration or dimension contract.
+        #[from]
+        crate::Error,
+    ),
     /// Discovery or strict metadata validation failed before execution.
     #[error(transparent)]
-    Checkpoint(#[from] CheckpointError),
+    Checkpoint(
+        /// Local discovery or strict metadata validation failure.
+        #[from]
+        CheckpointError,
+    ),
     /// Execution failed; discard the partially initialized model.
     #[error(transparent)]
-    Execution(#[from] Box<ExecutionFailure<GptNeoXLoadError>>),
+    Execution(
+        /// Partial execution report and contextual installation failure.
+        #[from]
+        Box<ExecutionFailure<GptNeoXLoadError>>,
+    ),
 }
 
 impl GptNeoXCheckpointLoadError {
@@ -355,6 +371,7 @@ impl<B: Backend> GptNeoXModel<B> {
 // Exact target routing and atomic packed-projection installation.
 
 impl<B: Backend> TensorSink for GptNeoXModel<B> {
+    /// Contextual target or packed-component parameter installation failure.
     type Error = GptNeoXLoadError;
 
     /// Dispatches exact parameter targets, checking layer bounds before ordinary or packed installation.

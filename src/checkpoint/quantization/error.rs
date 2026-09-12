@@ -290,13 +290,25 @@ pub enum QuantizationError {
     },
     /// UTF-8 decoding failed for the reserved JSON manifest tensor.
     #[error("Burnpack quantization manifest tensor is not UTF-8: {0}")]
-    ManifestUtf8(#[from] std::str::Utf8Error),
+    ManifestUtf8(
+        /// Original UTF-8 validation failure.
+        #[from]
+        std::str::Utf8Error,
+    ),
     /// JSON encoding or decoding failed.
     #[error("invalid Burnpack quantization manifest JSON: {0}")]
-    ManifestJson(#[from] serde_json::Error),
+    ManifestJson(
+        /// Original serialization or parsing failure.
+        #[from]
+        serde_json::Error,
+    ),
     /// Writing a packed payload failed.
     #[error("failed to write Burnpack quantized payload: {0}")]
-    PayloadIo(#[from] std::io::Error),
+    PayloadIo(
+        /// Original payload writer failure.
+        #[from]
+        std::io::Error,
+    ),
     /// No backend has a native packed operator for this format yet.
     #[error("native packed quantized execution is unavailable; dequantize to f32 first")]
     PackedExecutionUnavailable,

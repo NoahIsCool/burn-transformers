@@ -13,8 +13,10 @@ use burn::{
     tensor::{Tensor, TensorData},
 };
 
+/// CPU tensor backend used for exact small-graph reference comparisons.
 type B = Flex<f32, i32>;
 
+/// Two-block topology with half-head RoPE and a compact vocabulary.
 fn config() -> GptNeoXConfig {
     GptNeoXConfig {
         vocab_size: 13,
@@ -28,6 +30,7 @@ fn config() -> GptNeoXConfig {
     }
 }
 
+/// Generates fixed sinusoidal parameter values independently of backend RNG behavior.
 fn tensor<const D: usize>(shape: [usize; D], offset: f64, scale: f64) -> Tensor<B, D> {
     let values = (0..shape.iter().product())
         .map(|i| ((i as f64 * 0.17 + offset).sin() * scale) as f32)
@@ -35,11 +38,13 @@ fn tensor<const D: usize>(shape: [usize; D], offset: f64, scale: f64) -> Tensor<
     Tensor::from_data(TensorData::new(values, shape), &Default::default())
 }
 
+/// Installs deterministic weight and bias tensors using Burn's linear orientation.
 fn linear(module: &mut Linear<B>, input: usize, output: usize, offset: f64) {
     module.weight = Param::from_tensor(tensor([output, input], offset, 0.15).transpose());
     module.bias = Some(Param::from_tensor(tensor([output], offset + 0.4, 0.03)));
 }
 
+/// Installs nontrivial affine LayerNorm parameters at the fixture's eight-channel width.
 fn norm(module: &mut LayerNorm<B>, offset: f64) {
     let scales = (0..8)
         .map(|i| (0.7 + i as f64 * 0.05) as f32)
@@ -51,6 +56,7 @@ fn norm(module: &mut LayerNorm<B>, offset: f64) {
     module.beta = Some(Param::from_tensor(tensor([8], offset, 0.03)));
 }
 
+/// Materializes all model parameters to match the retained PyTorch oracle fixture.
 fn model() -> GptNeoXModel<B> {
     let mut model = GptNeoXModel::init(config(), &Default::default()).unwrap();
     model.embed_in.weight = Param::from_tensor(tensor([13, 8], 0.1, 0.15));
@@ -70,6 +76,7 @@ fn model() -> GptNeoXModel<B> {
     model
 }
 
+/// Three tokens with nonconsecutive positions distinguish physical RoPE indexing.
 fn input() -> CausalLmInput<B> {
     CausalLmInput {
         token_ids: Tensor::from_data([[1, 4, 2]], &Default::default()),
@@ -78,6 +85,7 @@ fn input() -> CausalLmInput<B> {
     }
 }
 
+/// Requests every logit position and retained residuals for boundary comparisons.
 fn options() -> ForwardOptions {
     ForwardOptions {
         logits: LogitsSelection::All,
@@ -86,10 +94,12 @@ fn options() -> ForwardOptions {
     }
 }
 
+/// Returns the largest absolute elementwise difference between equal-shaped tensors.
 fn difference(left: Tensor<B, 3>, right: Tensor<B, 3>) -> f32 {
     (left - right).abs().max().into_scalar()
 }
 
+/// Checks one retained PyTorch tensor with the declared 2e-6 absolute tolerance.
 fn assert_fixture(actual: Tensor<B, 3>, key: &str) {
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/oracle.json")).unwrap();
@@ -106,6 +116,7 @@ fn assert_fixture(actual: Tensor<B, 3>, key: &str) {
     );
 }
 
+/// Partial RoPE, parallel residuals, and hidden-state lens boundaries match the PyTorch oracle.
 #[test]
 fn matches_pytorch_partial_rope_parallel_residual_and_lens_boundaries() {
     let model = model();
@@ -142,6 +153,7 @@ fn matches_pytorch_partial_rope_parallel_residual_and_lens_boundaries() {
     );
 }
 
+/// Ablating one MLP token changes logits and a later restoration recovers the clean result.
 #[test]
 fn activation_ablation_and_ordered_restoration_change_downstream_logits() {
     let model = model();
@@ -166,6 +178,7 @@ fn activation_ablation_and_ordered_restoration_change_downstream_logits() {
     assert!(difference(clean.logits, restored.logits) < 1e-7);
 }
 
+/// Causal, bidirectional, and padded execution preserve their distinct visibility contracts.
 #[test]
 fn attention_visibility_and_padding_remain_explicit() {
     let model = model();
@@ -202,6 +215,7 @@ fn attention_visibility_and_padding_remain_explicit() {
     assert!(difference(last.logits, all.logits.narrow(1, 1, 1)) < 1e-7);
 }
 
+/// Invalid token, position, mask, output, and unsupported topology requests return errors.
 #[test]
 fn invalid_inputs_and_unsupported_choices_return_contextual_errors() {
     let model = model();
@@ -282,6 +296,7 @@ fn invalid_inputs_and_unsupported_choices_return_contextual_errors() {
     );
 }
 
+/// Edited embedding, final norm, and MLP shapes fail before incompatible tensor operations.
 #[test]
 fn invalid_public_module_replacements_fail_before_backend_operations() {
     let mut changed = model();
@@ -313,6 +328,7 @@ fn invalid_public_module_replacements_fail_before_backend_operations() {
     );
 }
 
+/// Replacing attention derives partial rotary angles from its actual new head width.
 #[test]
 fn replacing_attention_derives_partial_rope_from_the_new_head_width() {
     use crate::{

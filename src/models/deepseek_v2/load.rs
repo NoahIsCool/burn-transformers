@@ -80,13 +80,25 @@ pub enum DeepseekV2LoadError {
 pub enum DeepseekV2CheckpointLoadError {
     /// Model topology is invalid.
     #[error(transparent)]
-    Config(#[from] ConfigError),
+    Config(
+        /// Topology or dimension validation failure.
+        #[from]
+        ConfigError,
+    ),
     /// Artifact discovery or strict inventory validation failed.
     #[error(transparent)]
-    Checkpoint(#[from] CheckpointError),
+    Checkpoint(
+        /// Artifact discovery or inventory-planning failure.
+        #[from]
+        CheckpointError,
+    ),
     /// Pass two failed after zero or more audited writes.
     #[error(transparent)]
-    Execution(#[from] Box<ExecutionFailure<DeepseekV2LoadError>>),
+    Execution(
+        /// Streamed execution failure with its partial write report.
+        #[from]
+        Box<ExecutionFailure<DeepseekV2LoadError>>,
+    ),
 }
 
 impl DeepseekV2CheckpointLoadError {
@@ -101,6 +113,7 @@ impl DeepseekV2CheckpointLoadError {
 }
 
 impl<B: Backend> TensorSink for DeepseekV2ForCausalLm<B> {
+    /// Typed parameter-target, tensor-shape, and tied-alias installation failure.
     type Error = DeepseekV2LoadError;
 
     /// Installs one planned tensor into its uniquely typed model parameter.
@@ -443,4 +456,5 @@ fn install<B: Backend, const D: usize>(
 
 #[cfg(test)]
 #[path = "load_tests.rs"]
+/// Successful streamed loading and malformed parameter-target regressions.
 mod tests;

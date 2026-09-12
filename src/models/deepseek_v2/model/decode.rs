@@ -44,7 +44,9 @@ pub enum MlaExecutionPath {
 /// Stateful phase whose inactive-row and MLA-path policies differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatefulPhase {
+    /// Requires every row to contribute tokens and uses expanded-key/value attention.
     Prefill,
+    /// Allows inactive rows and selects absorbed MLA for single-token steps.
     Decode,
 }
 
@@ -440,7 +442,9 @@ impl<B: Backend> ArchitectureDecodeState<B> for DeepseekV2DecodeState<B> {
 }
 
 impl<B: Backend> CausalLanguageModel<B> for DeepseekV2ForCausalLm<B> {
+    /// Validated family configuration associated with the causal-model interface.
     type Config = super::super::DeepseekV2Config;
+    /// External per-layer compressed latents, rotary keys, and sequence metadata.
     type State = DeepseekV2DecodeState<B>;
 
     /// Executes the cache-free reference graph.
@@ -1153,4 +1157,5 @@ fn ensure_device<D: PartialEq>(tensor: &'static str, actual: &D, expected: &D) -
 
 #[cfg(test)]
 #[path = "decode_tests.rs"]
+/// Cached-versus-stateless parity and atomic decode-state lifecycle regressions.
 mod tests;

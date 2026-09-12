@@ -1,5 +1,8 @@
+//! Tests T5 configuration widths, historical activation aliases, and allocation bounds.
+
 use super::*;
 
+/// Valid attention projections may be narrower than the residual stream.
 #[test]
 fn attention_inner_width_is_independent_of_residual_width() {
     let config = T5Config {
@@ -12,6 +15,7 @@ fn attention_inner_width_is_independent_of_residual_width() {
     assert_eq!(config.attention_inner_dim(), 384);
 }
 
+/// UL2's derived activation must agree with its selected feed-forward projection.
 #[test]
 fn derived_ul2_fields_must_match_projection() {
     let config = T5Config {
@@ -23,6 +27,7 @@ fn derived_ul2_fields_must_match_projection() {
     assert!(config.validate().is_err());
 }
 
+/// Gated GELU accepts the historical `gelu_new` activation and gating metadata.
 #[test]
 fn gated_gelu_uses_t5s_historical_gelu_new_activation() {
     assert_eq!(T5FeedForwardProjection::GatedGelu.activation(), "gelu_new");
@@ -35,6 +40,7 @@ fn gated_gelu_uses_t5s_historical_gelu_new_activation() {
     config.validate().unwrap();
 }
 
+/// Projection and relative-bias element-count overflow produce contextual errors.
 #[test]
 fn allocation_products_are_checked_before_backend_initialization() {
     let attention_overflow = T5Config {

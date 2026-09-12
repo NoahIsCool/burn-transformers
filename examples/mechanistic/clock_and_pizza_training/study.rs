@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use std::{error::Error, path::PathBuf, time::Instant};
 use transformers::intervention::{Hooks, Layer};
 
+/// Experiment result carrying contextual configuration, tensor, and artifact errors.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 #[derive(Clone, Serialize)]
@@ -129,21 +130,32 @@ impl Dataset {
     }
 }
 
+/// One full-grid evaluation snapshot during modular-addition training.
 #[derive(Serialize)]
 struct Measurement {
+    /// Number of completed optimizer updates at this measurement.
     step: usize,
+    /// Wall-clock seconds since the run began.
     seconds: f64,
+    /// Fraction of training pairs with the correct modular-sum prediction.
     train_accuracy: f64,
+    /// Fraction of held-out pairs with the correct modular-sum prediction.
     test_accuracy: f64,
+    /// Mean training negative log likelihood in nats over 59 output classes.
     train_cross_entropy: f64,
+    /// Mean held-out negative log likelihood in nats over 59 output classes.
     test_cross_entropy: f64,
+    /// Mean fixed-difference correct-logit variation divided by global variation.
     distance_irrelevance: f64,
 }
 
 /// Protocol provenance, elapsed wall time, and measurements for one experiment.
 pub struct Run {
+    /// Validated settings and output directory recorded with this run.
     options: Options,
+    /// Wall-clock origin used for elapsed-time measurements.
     started: Instant,
+    /// Ordered training and held-out measurement snapshots.
     measurements: Vec<Measurement>,
 }
 impl Run {

@@ -1,3 +1,5 @@
+//! Nemotron-H streamed installation, optional parameter, and scalar-oracle tests.
+
 use std::{fs::File, io::Write, path::Path};
 
 use burn::{
@@ -18,6 +20,7 @@ use crate::{
 use super::*;
 use crate::models::nemotron_h::{NemotronHBlockType, NemotronHCheckpointContract, NemotronHConfig};
 
+/// CPU Flex backend with F32 activations and I32 token indices for loader fixtures.
 type TestBackend = Flex<f32, i32>;
 
 /// Reduced hybrid topology retaining every sink-dispatch branch and MTP.
@@ -368,7 +371,10 @@ fn optional_projection_model() -> NemotronHForCausalLm<TestBackend> {
 }
 
 /// Inspects initialization without materializing a missing parameter as a side effect.
-struct OptionalParameterAudit(usize);
+struct OptionalParameterAudit(
+    /// Count of visited parameters whose payloads were already initialized.
+    usize,
+);
 
 impl ModuleVisitor<TestBackend> for OptionalParameterAudit {
     /// Counts only parameters whose payload was already installed by the loader.

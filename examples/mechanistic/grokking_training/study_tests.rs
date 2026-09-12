@@ -8,8 +8,10 @@ use burn::{
     tensor::ElementConversion,
 };
 use transformers::intervention::Hooks;
+/// Autodifferentiable CPU backend for native-training and checkpoint regressions.
 type TestBackend = Autodiff<Flex>;
 
+/// Checks every registered parameter receives gradients and one native optimizer update changes finite logits.
 #[test]
 fn native_optimizer_discovers_every_parameter_and_updates_the_transformer() {
     let device = Default::default();
@@ -57,6 +59,7 @@ fn native_optimizer_discovers_every_parameter_and_updates_the_transformer() {
     );
 }
 
+/// Checks an intermediate activation loss reaches exactly the upstream parameter set.
 #[test]
 fn connected_activation_loss_reaches_the_prefix_without_the_readout() {
     let device = Default::default();
@@ -75,6 +78,7 @@ fn connected_activation_loss_reaches_the_prefix_without_the_readout() {
     );
 }
 
+/// Checks restoring both native model and AdamW records reproduces the next update's logits exactly.
 #[test]
 fn burn_model_and_optimizer_records_resume_the_next_update_exactly() {
     let device = Default::default();
@@ -130,6 +134,7 @@ fn burn_model_and_optimizer_records_resume_the_next_update_exactly() {
     );
 }
 
+/// Checks resumption accepts matching evidence and rejects earlier targets, benchmark records, or changed source/protocol hashes.
 #[test]
 fn resume_rejects_earlier_targets_benchmarks_and_changed_training_sources() {
     let config = Settings {
@@ -186,6 +191,7 @@ fn resume_rejects_earlier_targets_benchmarks_and_changed_training_sources() {
     );
 }
 
+/// Checks a shifted frequency-seven sinusoid concentrates normalized non-DC Fourier power at that frequency.
 #[test]
 fn fourier_power_identifies_a_known_frequency_and_ignores_dc() {
     let weights: Vec<f32> = (0..P)

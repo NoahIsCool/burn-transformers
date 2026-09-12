@@ -213,6 +213,7 @@ impl Qwen3_5TextConfig {
 impl Validate for Qwen3_5TextConfig {
     /// Checks full-attention, gated-delta, RoPE, schedule, MTP, and token topology.
     fn validate(&self) -> Result<(), ConfigError> {
+        /// Family label attached to configuration validation errors.
         const FAMILY: &str = "qwen3_5";
         model_type(FAMILY, &self.model_type, &["qwen3_5_text"])?;
         for (field, value) in [
@@ -354,7 +355,9 @@ impl Validate for Qwen3_5TextConfig {
 }
 
 impl ModelConfig for Qwen3_5TextConfig {
+    /// Diagnostic family name used by generic configuration parsing.
     const FAMILY: &'static str = "qwen3_5";
+    /// Checkpoint discriminator accepted after extracting a wrapped text configuration.
     const MODEL_TYPES: &'static [&'static str] = &["qwen3_5_text"];
 }
 

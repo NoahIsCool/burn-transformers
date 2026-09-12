@@ -32,6 +32,7 @@ use super::{
     select_hidden, validate_logits_selection, validate_position_range, validate_token_ids,
 };
 
+/// Single homogeneous native-KV cache group used by all decoder layers.
 const NATIVE_KV_GROUP: usize = 0;
 
 /// Stateful operation whose fully masked-row policy differs intentionally.
@@ -53,7 +54,9 @@ impl StatefulPhase {
 /// Qwen3-specific external decode state.
 #[derive(Debug)]
 pub struct Qwen3MoeDecodeState<B: Backend> {
+    /// Shared physical cache tensors and logical per-sequence cursors.
     tensors: TensorDecodeState<B>,
+    /// Validated native-head geometry used to reject incompatible models.
     spec: NativeKvCacheSpec,
 }
 
@@ -157,7 +160,9 @@ impl<B: Backend> ArchitectureDecodeState<B> for Qwen3MoeDecodeState<B> {
 }
 
 impl<B: Backend> CausalLanguageModel<B> for Qwen3MoeForCausalLm<B> {
+    /// Architecture configuration needed to allocate and validate decode state.
     type Config = super::super::Qwen3MoeConfig;
+    /// External native-KV state owned by an inference session.
     type State = Qwen3MoeDecodeState<B>;
 
     /// Delegates to the stateless family graph without allocating or mutating decode history.
@@ -448,8 +453,11 @@ impl<B: Backend> Qwen3MoeModel<B> {
 
 /// Result of evaluating one compact semantic batch row.
 struct CompactRowOutput<B: Backend> {
+    /// Final-normalized compact states shaped `[1, valid_tokens, hidden]`.
     hidden: Tensor<B, 3>,
+    /// Optional compact embedding, post-block, and normalized snapshots.
     hidden_states: Vec<Tensor<B, 3>>,
+    /// Compact sparse-layer results awaiting rectangular diagnostic assembly.
     routers: Vec<SparseMoeOutput<B>>,
 }
 
@@ -522,15 +530,21 @@ impl<B: Backend> Qwen3MoeDecoderLayer<B> {
 
 /// One deferred native-KV append.
 struct PendingKvWrite<B: Backend> {
+    /// Decoder-layer index within the homogeneous native-KV cache group.
     layer: usize,
+    /// Independent batch row receiving this append.
     row: usize,
+    /// Absolute logical cursor at which this suffix begins.
     start: usize,
+    /// New rotated keys shaped `[1, kv_heads, suffix, head_dim]`.
     keys: Tensor<B, 4>,
+    /// New values with the same native-head axes as the keys.
     values: Tensor<B, 4>,
 }
 
 /// Complete operation-local write set used for atomic publication.
 struct PendingKvWrites<B: Backend> {
+    /// Unpublished per-layer, per-row appends for the complete operation.
     writes: Vec<PendingKvWrite<B>>,
 }
 
@@ -621,15 +635,21 @@ impl<B: Backend> PendingKvWrites<B> {
 
 /// Rectangular router tensors reconstructed from one compact row.
 struct RowRouter<B: Backend> {
+    /// Router logits restored to `[1, rectangular_sequence, experts]`.
     logits: Tensor<B, 3>,
 }
 
 /// Validated host metadata for a stateful input.
 struct PreparedStatefulInput {
+    /// Number of independent rows in the rectangular input.
     batch: usize,
+    /// Input column count, including padding that will not enter the cache.
     sequence: usize,
+    /// Original column indices of semantic tokens in each row.
     valid_indices: Vec<Vec<usize>>,
+    /// Number of tokens to append to each row; zero denotes an inactive row.
     token_counts: Vec<usize>,
+    /// Per-row RoPE context extent including explicit absolute positions.
     evaluated_contexts: Vec<usize>,
 }
 

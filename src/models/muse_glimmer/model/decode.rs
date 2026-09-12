@@ -105,15 +105,20 @@ impl MuseGlimmerLayerCache {
 /// Immutable physical layout associated with one model and logical capacity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MuseGlimmerCacheLayout {
+    /// Maps each model layer to its physical cache group and local layer slot.
     schedule: Vec<MuseGlimmerLayerCache>,
+    /// Homogeneous KV allocation specifications in tensor-bank order.
     groups: Vec<NativeKvCacheSpec>,
+    /// Effective retained token window for sliding groups; absent for full-only models.
     window: Option<usize>,
 }
 
 /// External Muse decode state backed by shared preallocated tensor caches.
 #[derive(Debug)]
 pub struct MuseGlimmerDecodeState<B: Backend> {
+    /// Shared tensor bank and committed semantic token counts.
     tensors: TensorDecodeState<B>,
+    /// Model geometry used to validate reuse of this state.
     layout: MuseGlimmerCacheLayout,
 }
 
@@ -249,7 +254,9 @@ impl<B: Backend> ArchitectureDecodeState<B> for MuseGlimmerDecodeState<B> {
 }
 
 impl<B: Backend> CausalLanguageModel<B> for MuseGlimmerForCausalLm<B> {
+    /// Validated Muse text architecture associated with the model.
     type Config = MuseGlimmerTextConfig;
+    /// External hybrid KV history used by prefill and decode.
     type State = MuseGlimmerDecodeState<B>;
 
     /// Delegates to the stateless family graph without allocating or mutating decode history.
@@ -461,7 +468,9 @@ impl<B: Backend> MuseGlimmerModel<B> {
 
 /// Result of one compact row before rectangular scatter.
 struct CompactRowOutput<B: Backend> {
+    /// Final normalized compact row, shaped `[1, valid_tokens, hidden_size]`.
     hidden: Tensor<B, 3>,
+    /// Requested embedding, block-residual, and final-normalized row snapshots.
     hidden_states: Vec<Tensor<B, 3>>,
 }
 
@@ -528,17 +537,25 @@ impl<B: Backend> MuseGlimmerDecoderLayer<B> {
 
 /// One deferred native-KV append tagged with its model and group coordinates.
 struct PendingKvWrite<B: Backend> {
+    /// Model layer whose append must appear exactly once for this active row.
     model_layer: usize,
+    /// Native-KV group receiving the append.
     group: usize,
+    /// Layer slot within the destination KV group.
     group_layer: usize,
+    /// Batch row receiving the append.
     row: usize,
+    /// Committed semantic token count before this append.
     start: usize,
+    /// New keys shaped `[1, kv_heads, valid_tokens, head_dim]`.
     keys: Tensor<B, 4>,
+    /// New values with the same geometry as the staged keys.
     values: Tensor<B, 4>,
 }
 
 /// Complete operation-local write set used for atomic publication.
 struct PendingKvWrites<B: Backend> {
+    /// Deferred appends checked for complete layer/row coverage before publication.
     writes: Vec<PendingKvWrite<B>>,
 }
 
@@ -636,10 +653,15 @@ impl<B: Backend> PendingKvWrites<B> {
 
 /// Host-side metadata prepared before any model layer executes.
 struct PreparedStatefulInput {
+    /// Number of rows in the rectangular input.
     batch: usize,
+    /// Physical input columns before removing padding.
     sequence: usize,
+    /// Valid physical token columns retained for each compact row.
     valid_indices: Vec<Vec<usize>>,
+    /// Number of new semantic tokens contributed by each row.
     token_counts: Vec<usize>,
+    /// Per-row rotary context lengths derived from validated positions.
     evaluated_contexts: Vec<usize>,
 }
 

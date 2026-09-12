@@ -30,8 +30,11 @@ use crate::{
     architecture::{TokenMask, bool_tensor_from_values},
 };
 
+/// Maximum accepted tokenizer JSON size in bytes before parsing.
 const MAX_TOKENIZER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Maximum accepted auxiliary metadata file size in bytes.
 const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+/// Instruction budget limiting each local chat-template evaluation.
 #[cfg(feature = "chat-templates")]
 const CHAT_TEMPLATE_FUEL: u64 = 250_000;
 
@@ -67,7 +70,10 @@ pub enum Padding {
     /// Pad every row to the longest encoded row in the call.
     Longest,
     /// Pad every row to exactly the supplied length.
-    Fixed(usize),
+    Fixed(
+        /// Required length of each padded token row.
+        usize,
+    ),
 }
 
 /// Host-side controls for text tokenization and rectangular batching.
@@ -214,7 +220,9 @@ pub struct ChatTemplateOptions {
 /// Token IDs and semantic validity masks retained on the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchEncoding {
+    /// Encoded token rows, including any explicitly requested padding.
     token_ids: Vec<Vec<u32>>,
+    /// Per-token indicators distinguishing real input from added padding.
     valid_tokens: Vec<Vec<bool>>,
 }
 
@@ -281,8 +289,11 @@ impl BatchEncoding {
 
 /// A tokenizer loaded exclusively from a local model directory.
 pub struct LocalTokenizer {
+    /// Locally deserialized tokenizer and its vocabulary processing rules.
     tokenizer: Tokenizer,
+    /// Validated special tokens, padding defaults, and optional chat templates.
     metadata: TokenizerMetadata,
+    /// Source model directory used for diagnostics and artifact resolution.
     root: PathBuf,
 }
 

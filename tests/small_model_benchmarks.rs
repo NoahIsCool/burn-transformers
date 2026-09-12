@@ -38,6 +38,8 @@ mod benchmark_metrics;
     )
 ))]
 mod flan {
+    //! Authenticated FLAN-T5-small benchmark runner with explicit timing and memory boundaries.
+
     use std::{
         collections::BTreeSet,
         fs,

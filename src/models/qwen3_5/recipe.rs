@@ -130,6 +130,7 @@ pub struct Qwen3_5BackboneRecipe {
     pub config: Qwen3_5TextConfig,
     /// Blocks in execution order. Remove, reorder, or edit entries directly.
     pub layers: Vec<Qwen3_5LayerRecipe>,
+    /// Original checkpoint topology used to resolve stable parameter identities.
     source_config: Qwen3_5TextConfig,
 }
 
@@ -310,14 +311,18 @@ impl Qwen3_5BackboneRecipe {
         let mut consumed = BTreeSet::new();
         let mut report = TransferReport::default();
         for (target, source_target) in self.parameter_selection(&configurations)? {
-            let source_entry = source_target
+            let selected_source = source_target
                 .as_ref()
-                .and_then(|source| source_expected.get(source));
-            let compatible = source_entry.is_some_and(|source| source.shape == target.shape);
-            if !compatible {
-                if let Some(source_entry) = source_entry
-                    && options.shape_changes == ShapeChangePolicy::Reject
-                {
+                .and_then(|name| source_expected.get(name).map(|entry| (name, entry)));
+            let Some((source_target, source_entry)) = selected_source else {
+                report.newly_initialized.push(ParameterDisposition::new(
+                    &target.name,
+                    "new block or component has no selected pretrained source",
+                ));
+                continue;
+            };
+            if source_entry.shape != target.shape {
+                if options.shape_changes == ShapeChangePolicy::Reject {
                     return Err(Error::shape(
                         &target.name,
                         format!("checkpoint shape {:?}", source_entry.shape),
@@ -327,18 +332,13 @@ impl Qwen3_5BackboneRecipe {
                         ),
                     ));
                 }
-                let reason = if source_entry.is_some() {
-                    "retained new initialization because the edited shape differs from the checkpoint"
-                } else {
-                    "new block or component has no selected pretrained source"
-                };
-                report
-                    .newly_initialized
-                    .push(ParameterDisposition::new(&target.name, reason));
+                report.newly_initialized.push(ParameterDisposition::new(
+                    &target.name,
+                    "retained new initialization because the edited shape differs from the checkpoint",
+                ));
                 continue;
             }
-            let source_target = source_target.expect("compatible source");
-            let Some((source, transform)) = source_operations.get(&source_target) else {
+            let Some((source, transform)) = source_operations.get(source_target) else {
                 return Err(Error::configuration(
                     "qwen.recipe.mapping",
                     format!("missing physical source for {source_target}"),
@@ -509,8 +509,11 @@ impl Qwen3_5BackboneRecipe {
 
 /// Cast only new parameters, leaving overwritten pretrained parameters lazy.
 struct InitializeDtype {
+    /// Current module components used to construct fully qualified parameter names.
     path: Vec<String>,
+    /// Parameter owners whose checkpoint shapes cannot or should not be reused.
     new_parameters: BTreeSet<String>,
+    /// Floating dtype selected by the source embedding's resolved load plan.
     dtype: DType,
 }
 

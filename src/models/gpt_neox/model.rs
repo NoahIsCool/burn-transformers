@@ -198,6 +198,7 @@ pub struct GptNeoXModel<B: Backend> {
     pub final_layer_norm: LayerNorm<B>,
     /// Bias-free vocabulary projection.
     pub embed_out: Linear<B>,
+    /// Original validated topology and shared numerical conventions for edited modules.
     #[module(skip)]
     pub(super) config: GptNeoXConfig,
 }
@@ -491,8 +492,6 @@ impl<B: Backend> GptNeoXModel<B> {
                 &format!("{label}.post_attention_layernorm"),
             )?;
             let attention = &layer.attention;
-            let query_width = attention.query_heads.checked_mul(attention.head_dim);
-            let key_width = attention.key_value_heads.checked_mul(attention.head_dim);
             if attention.hidden_size != width
                 || attention.query_heads == 0
                 || attention.key_value_heads == 0
@@ -500,16 +499,22 @@ impl<B: Backend> GptNeoXModel<B> {
                 || !attention
                     .query_heads
                     .is_multiple_of(attention.key_value_heads)
-                || query_width.is_none()
-                || key_width.is_none()
             {
                 return Err(Error::configuration(
                     format!("{label}.attention"),
                     "head dimensions must be nonzero, compatible, and preserve residual width",
                 ));
             }
-            let query_width = query_width.unwrap();
-            let key_width = key_width.unwrap();
+            let (query_width, key_width) = attention
+                .query_heads
+                .checked_mul(attention.head_dim)
+                .zip(attention.key_value_heads.checked_mul(attention.head_dim))
+                .ok_or_else(|| {
+                    Error::configuration(
+                        format!("{label}.attention"),
+                        "attention projection widths overflow usize",
+                    )
+                })?;
             let q_projection_width = query_width
                 .checked_mul(if attention.output_gate == AttentionOutputGate::None {
                     1
@@ -818,3 +823,7 @@ fn select_hidden<B: Backend>(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "model_tests.rs"]
+mod tests;

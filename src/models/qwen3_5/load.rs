@@ -69,6 +69,7 @@ pub enum Qwen3_5LoadError {
 }
 
 impl<B: Backend> TensorSink for Qwen3_5TextModel<B> {
+    /// Contextual parameter installation or alias validation failure.
     type Error = Qwen3_5LoadError;
 
     /// Installs a headless-backbone tensor after resolving its exact layer and mixer field.
@@ -105,6 +106,7 @@ impl<B: Backend> TensorSink for Qwen3_5TextModel<B> {
 }
 
 impl<B: Backend> TensorSink for Qwen3_5ForCausalLm<B> {
+    /// Contextual parameter installation or alias validation failure.
     type Error = Qwen3_5LoadError;
 
     /// Installs one storage-owning base-model or MTP tensor by its contract target.

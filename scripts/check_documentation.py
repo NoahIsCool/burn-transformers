@@ -3,7 +3,8 @@
 
 This wrapper never compiles code. Build scripts/coverage-layout first, then pass
 its binary with --classifier or place it in the repository's normal target dir.
-Only syntax-proven test bodies are exempt; file naming never proves test status.
+The default policy exempts syntax-proven test bodies; --standards includes them
+and all parsed authored declarations, including integration-test roots.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def discover_sources(root: Path) -> tuple[list[str], list[dict[str, str]]]:
+def discover_sources(root: Path, *, standards: bool = False) -> tuple[list[str], list[dict[str, str]]]:
     """Inventory authored Rust roots, preserving explicit test/fixture inputs."""
     output = subprocess.run(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "*.rs"],
@@ -34,22 +35,23 @@ def discover_sources(root: Path) -> tuple[list[str], list[dict[str, str]]]:
     included, excluded = [], []
     for name in sorted(set(output.decode().split("\0")) - {""}):
         parts = Path(name).parts
-        if not parts or parts[0] not in SOURCE_ROOTS:
+        if not parts or parts[0] not in SOURCE_ROOTS + (("tests",) if standards else ()):
             excluded.append({"path": name, "reason": "outside authored production roots (historical evidence, integration tests, or retained artifacts)"})
-        elif "fixtures" in parts or "tests" in parts:
+        elif "fixtures" in parts or (not standards and "tests" in parts):
             excluded.append({"path": name, "reason": "test-harness/fixture discovery root; a production module reference still causes auditing"})
         else:
             included.append(name)
     return included, excluded
 
 
-def default_entries(root: Path, sources: list[str]) -> list[str]:
+def default_entries(root: Path, sources: list[str], *, standards: bool = False) -> list[str]:
     """Select explicit crate roots; later orphan inspection prevents silent omissions."""
     entries = {
         name for name in sources
         if (name in {"src/lib.rs", "fuzz/src/lib.rs"}
             or (name.startswith("examples/") and len(Path(name).parts) == 2)
             or name.startswith("fuzz/fuzz_targets/")
+            or (standards and Path(name).parent.name == "tests")
             or (name.startswith("scripts/") and Path(name).name in {"lib.rs", "main.rs"}
                 and Path(name).parent.name == "src"))
     }
@@ -70,40 +72,42 @@ def component(path: str) -> str:
         return "fuzz"
     if path.startswith("examples/"):
         return "examples"
+    if path.startswith("tests/"):
+        return "integration_tests"
     return "other"
 
 
-def invoke(classifier: Path, root: Path, entries: list[str]) -> dict:
+def invoke(classifier: Path, root: Path, entries: list[str], *, standards: bool = False) -> dict:
     """Run the source-only parser with explicit containment and entry arguments."""
     try:
         result = subprocess.run(
-            [str(classifier), "--documentation", str(root), *entries],
+            [str(classifier), "--standards" if standards else "--documentation", str(root), *entries],
             cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180,
         )
     except subprocess.CalledProcessError as error:
         detail = (error.stderr or b"").decode(errors="replace").strip()
         raise ValueError(f"documentation helper exited {error.returncode}: {detail}") from error
     report = json.loads(result.stdout)
-    if report.get("schema_version") != 1 or Path(report.get("root", "")).resolve() != root:
+    if report.get("schema_version") != (2 if standards else 1) or Path(report.get("root", "")).resolve() != root:
         raise ValueError("documentation helper returned an unsupported schema or another source root")
     return report
 
 
-def audit(root: Path, classifier: Path, entries: list[str] | None = None) -> dict:
+def audit(root: Path, classifier: Path, entries: list[str] | None = None, *, standards: bool = False) -> dict:
     """Bind syntax findings to a stable authored-source inventory and helper binary."""
-    sources, excluded = discover_sources(root)
+    sources, excluded = discover_sources(root, standards=standards)
     before = {name: digest(root / name) for name in sources}
-    selected = entries if entries is not None else default_entries(root, sources)
+    selected = entries if entries is not None else default_entries(root, sources, standards=standards)
     if not selected:
         raise ValueError("no Rust crate entries found")
-    report = invoke(classifier, root, selected)
+    report = invoke(classifier, root, selected, standards=standards)
     visited = {file["path"] for file in report["files"]}
     orphans = sorted(set(sources) - visited)
     if orphans:
         # An unreferenced *_tests.rs name is not evidence of test ownership.
         # Audit it conservatively as source, rather than silently dropping it.
-        report = invoke(classifier, root, selected + orphans)
-    after_sources, _ = discover_sources(root)
+        report = invoke(classifier, root, selected + orphans, standards=standards)
+    after_sources, _ = discover_sources(root, standards=standards)
     if sources != after_sources or any(digest(root / name) != value for name, value in before.items()):
         raise ValueError("authored Rust sources changed during documentation auditing")
     for file in report["files"]:
@@ -111,36 +115,54 @@ def audit(root: Path, classifier: Path, entries: list[str] | None = None) -> dic
         if not path.is_relative_to(root) or digest(path) != file["sha256"]:
             raise ValueError(f"{file['path']}: source no longer matches the parsed snapshot")
     groups: dict[str, dict[str, int]] = {}
-    missing, placements, opaque = [], [], []
+    missing, placements, opaque, opaque_items = [], [], [], []
     for file in report["files"]:
         group = component(file["path"])
-        counts = groups.setdefault(group, {"production_functions": 0, "production_modules": 0,
+        counts = groups.setdefault(group, {"authored_sites": 0, "test_sites": 0, "missing_style": 0,
+            "inline_test_bodies": 0, "unresolved_macro_functions": 0, "unresolved_macro_items": 0,
+            "by_kind": {}} if standards else {"production_functions": 0, "production_modules": 0,
             "missing_function_style": 0, "missing_module_style": 0, "excluded_test_sites": 0,
             "inline_test_bodies": 0, "unresolved_macro_functions": 0})
         for site in file["sites"]:
-            if site["test_only"]:
+            if site["test_only"] and not standards:
                 counts["excluded_test_sites"] += 1
                 continue
             module = site["kind"] == "module"
-            counts["production_modules" if module else "production_functions"] += 1
+            if standards:
+                counts["authored_sites"] += 1
+                counts["test_sites"] += int(site["test_only"])
+                kind_counts = counts["by_kind"].setdefault(site["kind"], {"sites": 0, "missing": 0})
+                kind_counts["sites"] += 1
+            else:
+                counts["production_modules" if module else "production_functions"] += 1
             if not site["style_present"]:
-                counts["missing_module_style" if module else "missing_function_style"] += 1
+                if standards:
+                    counts["missing_style"] += 1
+                    kind_counts["missing"] += 1
+                else:
+                    counts["missing_module_style" if module else "missing_function_style"] += 1
                 missing.append({"component": group, "path": file["path"], "line": site["span"]["start"]["line"],
                     "name": site["name"], "kind": site["kind"], "required_style": site["required_style"],
                     "rustdoc_present": site["rustdoc_present"], "computed_documentation": site["computed_documentation"],
-                    "origin": site["origin"]})
+                    "origin": site["origin"], **({"test_only": site["test_only"]} if standards else {})})
         for span in file.get("inline_test_bodies", []):
             counts["inline_test_bodies"] += 1
             placements.append({"component": group, "path": file["path"], "line": span["start"]["line"]})
         for boundary in file["macros"]:
-            if not boundary["test_only"]:
+            if standards or not boundary["test_only"]:
                 for span in boundary["unresolved_functions"]:
                     counts["unresolved_macro_functions"] += 1
                     opaque.append({"component": group, "path": file["path"], "line": span["start"]["line"], "macro": boundary["name"]})
+                if standards:
+                    for span in boundary["unresolved_items"]:
+                        counts["unresolved_macro_items"] += 1
+                        opaque_items.append({"component": group, "path": file["path"], "line": span["start"]["line"], "macro": boundary["name"]})
     report["inventory"] = {"source_sha256": before, "excluded_discovery_sources": excluded,
         "conservative_orphan_entries": orphans, "classifier_sha256": digest(classifier),
         "classifier": str(classifier), "groups": groups, "missing": missing,
         "inline_test_bodies": placements, "unresolved_macro_functions": opaque}
+    if standards:
+        report["inventory"]["unresolved_macro_items"] = opaque_items
     return report
 
 
@@ -150,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--classifier", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--standards", action="store_true", help="require docs for all authored declarations and tests using schema 2")
     parser.add_argument("--inventory-only", action="store_true", help="report style findings without failing for them; unresolved syntax still fails")
     args = parser.parse_args(argv)
     root = args.root.resolve()
@@ -158,11 +181,17 @@ def main(argv: list[str] | None = None) -> int:
         classifier = root / "target/debug/transformers-coverage-layout"
     try:
         classifier = classifier.resolve(strict=True)
-        report = audit(root, classifier)
+        report = audit(root, classifier, standards=args.standards)
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(report, indent=2) + "\n")
         for group, counts in sorted(report["inventory"]["groups"].items()):
+            if args.standards:
+                print(f"{group}: {counts['missing_style']}/{counts['authored_sites']} authored sites missing required line docs; "
+                    f"{counts['test_sites']} test sites included; {counts['inline_test_bodies']} inline test bodies; "
+                    f"{counts['unresolved_macro_functions']} opaque authored functions; "
+                    f"{counts['unresolved_macro_items']} opaque authored declarations")
+                continue
             print(f"{group}: {counts['missing_function_style']}/{counts['production_functions']} functions and "
                 f"{counts['missing_module_style']}/{counts['production_modules']} modules missing required line docs; "
                 f"{counts['inline_test_bodies']} inline test bodies; {counts['unresolved_macro_functions']} opaque authored functions")

@@ -8,8 +8,10 @@ use burn::{
 use super::*;
 use crate::experiment::AttentionPolicy;
 
+/// CPU backend used to compare complete and staged encoder execution.
 type TestBackend = Flex<f32, i32>;
 
+/// Builds three small gated-GELU encoder layers with shared relative-position bias.
 fn config() -> T5Config {
     T5Config {
         vocab_size: 16,
@@ -28,6 +30,7 @@ fn config() -> T5Config {
     }
 }
 
+/// Supplies one unpadded three-token sequence with implicit relative positions.
 fn input<B: Backend>(device: &B::Device) -> CausalLmInput<B> {
     CausalLmInput {
         token_ids: Tensor::<B, 2, Int>::from_ints([[1, 2, 3]], device),
@@ -36,10 +39,12 @@ fn input<B: Backend>(device: &B::Device) -> CausalLmInput<B> {
     }
 }
 
+/// Materializes F32 activations for exact comparisons of the same parameter graph.
 fn values(tensor: Tensor<TestBackend, 3>) -> Vec<f32> {
     tensor.into_data().to_vec::<f32>().unwrap()
 }
 
+/// Extracted encoder records preserve shared parameter identity, bias ownership, and outputs.
 #[test]
 fn unchanged_t5_recipe_matches_family_encoder_exactly_with_same_parameters() {
     let device = Default::default();
@@ -76,6 +81,7 @@ fn unchanged_t5_recipe_matches_family_encoder_exactly_with_same_parameters() {
     assert_eq!(values(actual.hidden_state), values(expected.hidden_state));
 }
 
+/// Splitting layer execution preserves cursor progression, captures, and final normalized outputs.
 #[test]
 fn t5_recipe_split_resume_and_final_normalization_are_exact() {
     let device = Default::default();
@@ -105,6 +111,7 @@ fn t5_recipe_split_resume_and_final_normalization_are_exact() {
     );
 }
 
+/// Different head counts allocate separate bias owners while edited MLP widths retain residual shape.
 #[test]
 fn heterogeneous_t5_recipe_shares_bias_only_between_compatible_head_counts() {
     let device = Default::default();
@@ -143,6 +150,7 @@ fn heterogeneous_t5_recipe_shares_bias_only_between_compatible_head_counts() {
     assert_eq!(hooks.get(&last).unwrap().dims(), [1, 3, 5]);
 }
 
+/// Causal policy hides a changed future token that bidirectional attention can observe.
 #[test]
 fn t5_recipe_attention_policy_changes_future_visibility() {
     let device = Default::default();
@@ -164,6 +172,7 @@ fn t5_recipe_attention_policy_changes_future_visibility() {
     assert_ne!(execute(3, false), execute(4, false));
 }
 
+/// Translating every position preserves outputs, while changing relative distances affects them.
 #[test]
 fn t5_recipe_relative_positions_are_explicit_and_translation_invariant() {
     let device = Default::default();
@@ -188,6 +197,7 @@ fn t5_recipe_relative_positions_are_explicit_and_translation_invariant() {
     assert_ne!(execute([0, 1, 2]), execute([0, 10, 11]));
 }
 
+/// Continuation rejects skipped or repeated layers and already normalized states.
 #[test]
 fn t5_recipe_rejects_skipped_repeated_and_normalized_execution() {
     let device = Default::default();
@@ -209,6 +219,7 @@ fn t5_recipe_rejects_skipped_repeated_and_normalized_execution() {
     assert!(encoder.normalize(normalized).is_err());
 }
 
+/// Empty recipes support embedding controls and invalid head counts name their layer.
 #[test]
 fn t5_recipe_zero_layer_control_and_invalid_dimensions_are_explicit() {
     let device = Default::default();
@@ -229,11 +240,13 @@ fn t5_recipe_zero_layer_control_and_invalid_dimensions_are_explicit() {
     assert!(error.to_string().contains("layers.1"));
 }
 
+/// A linear module inserted between layer ranges remains connected to upstream embeddings.
 #[cfg(feature = "autodiff")]
 #[test]
 fn t5_recipe_staged_inserted_module_preserves_upstream_gradients() {
     use burn::{backend::Autodiff, nn::LinearConfig};
 
+    /// Autodiff wrapper used to inspect inserted-module and embedding gradients.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
     let encoder = T5EncoderRecipe::from_config(config())
@@ -252,6 +265,7 @@ fn t5_recipe_staged_inserted_module_preserves_upstream_gradients() {
     assert!(encoder.shared.weight.val().grad(&grads).is_some());
 }
 
+/// Encoder transfer preserves unchanged outputs and reports reinitialization for edited shapes.
 #[test]
 fn t5_recipe_parameter_transfer_preserves_unchanged_graph_and_reports_new_shapes() {
     use crate::transfer::{ShapeChangePolicy, TransferPlan};
@@ -318,6 +332,7 @@ fn t5_recipe_parameter_transfer_preserves_unchanged_graph_and_reports_new_shapes
     );
 }
 
+/// A rejected layer range clears captures retained from a previous successful continuation.
 #[test]
 fn t5_invalid_continuation_clears_previous_hook_captures() {
     let device = Default::default();
@@ -343,6 +358,7 @@ fn t5_invalid_continuation_clears_previous_hook_captures() {
     assert!(hooks.get(&saved).is_err());
 }
 
+/// Embedding hooks capture before edits, preserve the initial cursor, and clear on invalid tokens.
 #[test]
 fn t5_embedding_hooks_capture_and_edit_before_layers_and_clear_on_failure() {
     use burn::nn::LinearConfig;
@@ -383,6 +399,7 @@ proptest::proptest! {
         ..Default::default()
     })]
 
+    /// Arbitrary heterogeneous layer partitions preserve translated-position outputs and final captures.
     #[test]
     fn t5_recipe_partitions_preserve_heterogeneous_graphs_and_relative_translation(
         geometry in proptest::collection::vec((1usize..4, 1usize..5, 1usize..16), 1..5),
@@ -430,6 +447,7 @@ proptest::proptest! {
     }
 }
 
+/// Invalid dtypes, cursors, and attention policies fail before any hook callback runs.
 #[test]
 fn t5_recipe_rejects_incompatible_staged_contexts_before_callbacks() {
     use burn::tensor::DType;
@@ -489,6 +507,7 @@ fn t5_recipe_rejects_incompatible_staged_contexts_before_callbacks() {
     }
 }
 
+/// Missing learned biases and encoder depth or role mismatches produce topology diagnostics.
 #[test]
 fn t5_recipe_rejects_missing_bias_owners_and_inconsistent_encoder_extraction() {
     let device = Default::default();
@@ -517,6 +536,7 @@ fn t5_recipe_rejects_missing_bias_owners_and_inconsistent_encoder_extraction() {
     }
 }
 
+/// Empty input axes fail validation and requested diagnostics include embeddings, blocks, and normalization.
 #[test]
 fn t5_recipe_rejects_empty_inputs_and_reports_full_hidden_diagnostics() {
     let device = Default::default();

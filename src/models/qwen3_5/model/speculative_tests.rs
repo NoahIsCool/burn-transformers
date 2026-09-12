@@ -1,3 +1,5 @@
+//! Qwen MTP acceptance, sampling, cache alignment, and transaction-recovery tests.
+
 use burn::{
     backend::Flex,
     tensor::{Int, Tensor, TensorData, backend::BackendTypes},
@@ -13,6 +15,7 @@ use crate::{
     },
 };
 
+/// CPU Flex backend with F32 activations and portable I32 indices.
 type TestBackend = Flex<f32, i32>;
 
 /// Creates a zero-logit graph whose greedy target and draft both select ID zero.
@@ -158,6 +161,7 @@ fn aligned_state(
     (state, hidden.narrow(1, 1, 1))
 }
 
+/// The default proposes two tokens, while a zero-length speculative proposal is invalid.
 #[test]
 fn defaults_to_two_drafts_and_rejects_zero() {
     assert_eq!(Qwen3_5SpeculativeConfig::default().max_draft_tokens, 2);
@@ -168,6 +172,7 @@ fn defaults_to_two_drafts_and_rejects_zero() {
     assert!(config.validate(8).is_err());
 }
 
+/// Softmax preserves zero mass at negative infinity and rejects positive infinity or no finite mass.
 #[test]
 fn probability_normalization_matches_backend_softmax_and_rejects_non_finite_logits() {
     let device = Default::default();
@@ -189,6 +194,7 @@ fn probability_normalization_matches_backend_softmax_and_rejects_non_finite_logi
     assert!(empty_mass.is_err());
 }
 
+/// Greedy verification accepts exactly the matching zero-, one-, or two-token proposal prefix.
 #[test]
 fn greedy_acceptance_covers_every_prefix_length() {
     for accepted_prefix in 0..=2 {
@@ -217,6 +223,7 @@ fn greedy_acceptance_covers_every_prefix_length() {
     }
 }
 
+/// Inverse-CDF samples stay on positive weights, and an all-zero residual is rejected.
 #[test]
 fn residual_sampling_never_returns_non_positive_support() {
     for uniform in [0.0, 0.1, 0.499, 0.999_999] {
@@ -226,6 +233,7 @@ fn residual_sampling_never_returns_non_positive_support() {
     assert!(sample_weights(&[0.0, 0.0], 0.5).is_err());
 }
 
+/// Equal SplitMix seeds yield equal draws in the half-open unit interval.
 #[test]
 fn splitmix_stream_is_reproducible_and_strictly_unit_interval() {
     let mut left = SplitMix64::new(19);
@@ -237,6 +245,7 @@ fn splitmix_stream_is_reproducible_and_strictly_unit_interval() {
     }
 }
 
+/// Accepting both drafts emits a bonus and leaves target and MTP cursors one token apart.
 #[test]
 fn all_accepted_cycle_commits_catch_up_and_preserves_shift() {
     let device = Default::default();
@@ -261,6 +270,7 @@ fn all_accepted_cycle_commits_catch_up_and_preserves_shift() {
     assert_eq!(state.tensor_state().mtp_lengths(), Some([4].as_slice()));
 }
 
+/// Controlled zero- and one-draft acceptance retains exactly the verified cache prefix.
 #[test]
 fn complete_cycles_commit_every_acceptance_prefix() {
     let device = Default::default();
@@ -287,6 +297,7 @@ fn complete_cycles_commit_every_acceptance_prefix() {
     }
 }
 
+/// EOS at the lead or either draft position ends emission with the expected shifted cursors.
 #[test]
 fn eos_lead_and_eos_draft_stop_without_cache_drift() {
     let device = Default::default();
@@ -348,6 +359,7 @@ fn eos_lead_and_eos_draft_stop_without_cache_drift() {
     assert_eq!(state.tensor_state().mtp_lengths(), Some([3].as_slice()));
 }
 
+/// Even an EOS lead refuses an existing caller transaction without consuming its mark.
 #[test]
 fn eos_lead_rejects_a_caller_owned_active_transaction() {
     let device = Default::default();
@@ -376,6 +388,7 @@ fn eos_lead_rejects_a_caller_owned_active_transaction() {
     state.rollback(mark).unwrap();
 }
 
+/// Inactive cycles and a staged-draft failure preserve both cursors and a repeatable retry error.
 #[test]
 fn inactive_and_recoverable_failure_leave_both_cursors_unchanged() {
     let device = Default::default();
@@ -422,6 +435,7 @@ fn inactive_and_recoverable_failure_leave_both_cursors_unchanged() {
     assert_eq!(first.to_string(), second.to_string());
 }
 
+/// State creation rejects multiple rows, insufficient proposal capacity, and missing MTP layers.
 #[test]
 fn speculative_state_rejects_batch_capacity_and_missing_mtp() {
     let device = Default::default();
@@ -445,6 +459,7 @@ fn speculative_state_rejects_batch_capacity_and_missing_mtp() {
     );
 }
 
+/// Invalid vocabulary, history, lead ID, or hidden shape fails before either cache cursor changes.
 #[test]
 fn cycle_preflight_rejects_vocabulary_history_token_and_hidden_mismatches() {
     let device = Default::default();
@@ -499,6 +514,7 @@ fn cycle_preflight_rejects_vocabulary_history_token_and_hidden_mismatches() {
     assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
 }
 
+/// Truncating both shifted caches to zero permits a fresh target and MTP prefill.
 #[test]
 fn speculative_state_zero_truncate_rewinds_both_shifted_caches() {
     let device = Default::default();
@@ -535,6 +551,7 @@ fn speculative_state_zero_truncate_rewinds_both_shifted_caches() {
     assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
 }
 
+/// A seeded 100,000-draw rejection experiment matches each target mass within 0.01.
 #[test]
 fn stochastic_rejection_rule_recovers_target_marginal() {
     let p = [0.1, 0.2, 0.7];
@@ -567,6 +584,7 @@ fn stochastic_rejection_rule_recovers_target_marginal() {
     }
 }
 
+/// Equal sampling seeds produce identical speculative tokens and acceptance diagnostics.
 #[test]
 fn stochastic_cycles_with_equal_seeds_are_reproducible() {
     let device = Default::default();

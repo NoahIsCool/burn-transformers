@@ -19,6 +19,7 @@ mod kv;
 mod recurrent;
 mod state;
 
+pub(crate) use allocation::{validate_repeated_allocation, validate_tensor_shape};
 pub use error::{TensorCacheError, TensorCacheResult};
 pub use kv::{KvCacheRead, KvCacheReadSegment, KvCacheStorage, NativeKvCache, NativeKvCacheSpec};
 pub use recurrent::{
@@ -27,4 +28,5 @@ pub use recurrent::{
 pub use state::{TensorCacheBank, TensorCacheMark, TensorDecodeState};
 
 #[cfg(test)]
+#[path = "tensor_tests.rs"]
 mod tests;

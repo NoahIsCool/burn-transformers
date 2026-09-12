@@ -17,7 +17,9 @@ use core::ops::Range;
 /// One contiguous piece of an incoming chunk written into a standard ring.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingWriteSegment {
+    /// Contiguous interval within the incoming token chunk.
     input: Range<usize>,
+    /// Equally sized destination interval inside the physical ring.
     physical: Range<usize>,
 }
 
@@ -42,8 +44,11 @@ impl RingWriteSegment {
 /// two segments are needed because the retained suffix wraps at most once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingWritePlan {
+    /// Absolute positions covered by the entire incoming chunk.
     appended_positions: Range<usize>,
+    /// Newest incoming suffix that survives ring eviction.
     retained_input: Range<usize>,
+    /// Contiguous destination writes in incoming-token order.
     segments: Vec<RingWriteSegment>,
 }
 
@@ -60,7 +65,9 @@ pub struct RingWritePlan {
 /// `p - capacity`; restoring only a logical length cannot reconstruct it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedRingTransactionPlan {
+    /// Absolute proposal positions held outside committed storage.
     staged_positions: Range<usize>,
+    /// Linear staging interval beginning at proposal offset zero.
     staged_input: Range<usize>,
 }
 
@@ -126,7 +133,9 @@ impl RingWritePlan {
 /// One chronological piece read from a wrapped standard ring.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingReadSegment {
+    /// Absolute token positions represented by this slice.
     absolute: Range<usize>,
+    /// Equally sized interval inside physical ring storage.
     physical: Range<usize>,
 }
 
@@ -147,7 +156,9 @@ impl RingReadSegment {
 /// Chronological read plan for the retained suffix of a standard ring.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingReadPlan {
+    /// Absolute suffix still visible under the retention policy.
     retained_positions: Range<usize>,
+    /// Physical slices ordered from oldest to newest retained token.
     segments: Vec<RingReadSegment>,
 }
 
@@ -171,8 +182,11 @@ impl RingReadPlan {
 /// `capacity` tokens readable as one contiguous physical slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirroredRingWriteSegment {
+    /// Contiguous interval within the incoming token chunk.
     input: Range<usize>,
+    /// Destination interval in the first ring half.
     primary: Range<usize>,
+    /// Duplicate destination offset by one ring capacity.
     mirror: Range<usize>,
 }
 
@@ -199,7 +213,9 @@ impl MirroredRingWriteSegment {
 /// Single-slice read plan for a mirrored ring.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirroredRingReadPlan {
+    /// Absolute suffix visible to sliding attention.
     retained_positions: Range<usize>,
+    /// Contiguous interval spanning at most two mirrored halves.
     physical: Range<usize>,
 }
 
@@ -394,6 +410,7 @@ pub fn plan_mirrored_ring_read(
 ///
 /// The caller ensures `count <= capacity` and nonzero capacity; the first range
 /// starts at `absolute_start % capacity`, and any remainder starts at slot zero.
+/// It also ensures `input_start <= usize::MAX - count`, so both input endpoints fit.
 fn write_segments(
     input_start: usize,
     absolute_start: usize,

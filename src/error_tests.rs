@@ -1,3 +1,5 @@
+//! Tests for contextual configuration and tensor-shape diagnostics.
+
 use super::Error;
 
 /// Verifies configuration errors retain both machine-localizing and human context.

@@ -1,3 +1,5 @@
+//! Linear-operation tests for dense and packed execution, record layouts, and gradient ownership.
+
 use burn::{
     backend::Flex,
     module::Param,
@@ -43,6 +45,7 @@ fn projection_rejects_mixed_float_dtypes_and_accepts_explicit_conversion() {
 fn autodiff_linear_initialization_preserves_layout_values_and_gradients() {
     use burn::{backend::Autodiff, module::Initializer, nn::LinearLayout};
 
+    /// Differentiable CPU backend for lazy layout initialization and gradient comparisons.
     type AdBackend = Autodiff<Flex>;
     let device = Default::default();
     for layout in [LinearLayout::Row, LinearLayout::Col] {
@@ -84,6 +87,7 @@ fn autodiff_linear_initialization_preserves_layout_values_and_gradients() {
 fn autodiff_linear_initializer_respects_frozen_parameters() {
     use burn::{backend::Autodiff, nn::LinearLayout};
 
+    /// Differentiable CPU backend used to test freezing before and after materialization.
     type AdBackend = Autodiff<Flex>;
     let device = Default::default();
     for materialize_before_freeze in [false, true] {
@@ -115,6 +119,7 @@ fn autodiff_linear_initializer_respects_frozen_parameters() {
 fn autodiff_linear_record_reload_preserves_values_gradients_and_freezing() {
     use burn::{backend::Autodiff, module::Module, nn::LinearLayout};
 
+    /// Differentiable CPU backend for model-record layout and trainability checks.
     type AdBackend = Autodiff<Flex>;
     let device = Default::default();
     let config = LinearConfig::new(2, 3)

@@ -25,14 +25,19 @@ use crate::checkpoint::{
 
 use super::{ConfigError, T5Config, Validate};
 
+/// Family label attached to checkpoint dimension conversion errors.
 const FAMILY: &str = "t5";
 
 /// Complete logical parameter inventory and explicit source mapping for T5.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct T5CheckpointContract {
+    /// Logical parameters and shapes in the executable Burn layout.
     expected: Vec<ExpectedTensor>,
+    /// Source-key transformations and aliases that produce the logical parameters.
     mappings: MappingPlan,
+    /// Family-owned source keys explicitly permitted to remain unused.
     allow_unexpected: Vec<KeyMatcher>,
+    /// Shared embedding names that a checkpoint index may deduplicate.
     index_aliases: Vec<IndexTensorAlias>,
 }
 
@@ -128,7 +133,9 @@ impl T5CheckpointContract {
 /// A pass-one T5 manifest paired with its strictly validated execution plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct T5CheckpointPlan {
+    /// Discovered artifact inventory whose offsets the execution plan references.
     manifest: CheckpointManifest,
+    /// Validated streaming operations for the paired artifact inventory.
     plan: LoadPlan,
 }
 
@@ -198,15 +205,22 @@ impl T5Config {
 /// Portable checkpoint dimensions converted once after topology validation.
 #[derive(Debug, Clone, Copy)]
 struct Dimensions {
+    /// Number of rows in the shared token embedding table.
     vocab: u64,
+    /// Residual-stream width, equal to the embedding column count.
     model: u64,
+    /// Combined attention projection width, `num_heads * d_kv`.
     attention: u64,
+    /// Intermediate width of each feed-forward branch.
     feed_forward: u64,
+    /// Number of learned relative-position buckets.
     buckets: u64,
+    /// Number of attention heads, also the relative-bias table width.
     heads: u64,
 }
 
 impl TryFrom<&T5Config> for Dimensions {
+    /// Configuration diagnostic for an unrepresentable dimension or product.
     type Error = ConfigError;
 
     /// Converts `usize` runtime extents to SafeTensors' portable `u64` shape form.
@@ -227,9 +241,13 @@ impl TryFrom<&T5Config> for Dimensions {
 
 /// Accumulates one deterministic inventory and its one-to-one source mappings.
 struct ContractBuilder {
+    /// Logical parameter inventory accumulated in deterministic traversal order.
     expected: Vec<ExpectedTensor>,
+    /// Operations converting checkpoint storage into the expected runtime layout.
     mappings: MappingPlan,
+    /// Explicit architecture-owned exceptions to strict source-key consumption.
     allow_unexpected: Vec<KeyMatcher>,
+    /// Exact shared-embedding equivalences accepted during index discovery.
     index_aliases: Vec<IndexTensorAlias>,
 }
 

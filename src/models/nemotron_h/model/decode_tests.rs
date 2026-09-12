@@ -1,3 +1,5 @@
+//! Nemotron-H cached parity, ragged diagnostics, and atomic cache-lifecycle tests.
+
 use burn::{
     backend::Flex,
     tensor::{Bool, Tensor, TensorData, Tolerance},
@@ -7,6 +9,7 @@ use crate::{DecodeState, architecture::TokenMask, models::nemotron_h::model::tes
 
 use super::*;
 
+/// CPU Flex backend with F32 activations and I32 indices for cache comparisons.
 type TestBackend = Flex<f32, i32>;
 
 /// Loads deterministic nonzero parameters through the public checkpoint sink.

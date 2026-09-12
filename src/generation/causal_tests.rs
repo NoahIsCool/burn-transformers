@@ -1,3 +1,5 @@
+//! Causal-generation coordinator tests with real caches and injected public model failures.
+
 use burn::{
     backend::Flex,
     tensor::{
@@ -13,6 +15,7 @@ use crate::{
     models::qwen3_5::{Qwen3_5ForCausalLm, Qwen3_5LayerType, Qwen3_5TextConfig},
 };
 
+/// Deterministic F32 CPU backend used by causal generation fixtures.
 type TestBackend = Flex<f32, i32>;
 
 /// Replaces one real model output with an exact nonfinite score fixture.
@@ -22,19 +25,26 @@ type TestBackend = Flex<f32, i32>;
 /// Qwen cache makes this a coordinator boundary test, not a tracker-only test.
 #[derive(burn::module::Module, Debug)]
 struct NonfiniteModel<B: Backend> {
+    /// Real Qwen graph and cache implementation exercised by the coordinator.
     inner: Qwen3_5ForCausalLm<B>,
+    /// Select decode rather than prefill as the corrupted output boundary.
     #[module(skip)]
     fail_on_decode: bool,
+    /// NaN or infinite score inserted into the selected model output.
     #[module(skip)]
     corrupt_value: f32,
+    /// Number of prefill calls observed before generation rejects the result.
     #[module(skip)]
     prefill_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Number of decode calls observed before generation rejects the result.
     #[module(skip)]
     decode_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl<B: Backend> crate::CausalLanguageModel<B> for NonfiniteModel<B> {
+    /// Configuration of the wrapped Qwen graph.
     type Config = Qwen3_5TextConfig;
+    /// Unmodified external decode state of the wrapped Qwen model.
     type State = <Qwen3_5ForCausalLm<B> as crate::CausalLanguageModel<B>>::State;
 
     /// Leaves stateless evaluation untouched; only cached outputs inject faults.
@@ -250,6 +260,7 @@ fn native_flex32_generation_readback() {
         tensor::DType,
     };
 
+    /// Metal backend using the native flexible-precision float representation.
     type NativeFlex32 = Metal<flex32>;
     let device = Default::default();
     for strategy in [SamplingStrategy::Greedy, SamplingStrategy::Sample] {
@@ -917,11 +928,15 @@ struct FinishedRowFeedback {
 /// may be neutralized, and it must never receive a second token or cache write.
 #[derive(burn::module::Module, Debug)]
 struct FinishedRowModel<B: Backend> {
+    /// Real Qwen model retaining production cache behavior.
     inner: Qwen3_5ForCausalLm<B>,
+    /// Ordered model boundaries reached by the generation coordinator.
     #[module(skip)]
     calls: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+    /// Tokens, masks, and cache lengths fed back after a row has finished.
     #[module(skip)]
     feedback: std::sync::Arc<std::sync::Mutex<Vec<FinishedRowFeedback>>>,
+    /// Optional model boundary that returns an injected recoverable failure.
     #[module(skip)]
     fail_at: Option<&'static str>,
 }
@@ -953,7 +968,9 @@ impl FinishedRowModel<TestBackend> {
 }
 
 impl crate::CausalLanguageModel<TestBackend> for FinishedRowModel<TestBackend> {
+    /// Configuration inherited from the wrapped Qwen fixture.
     type Config = Qwen3_5TextConfig;
+    /// Real cache state used to verify finished-row no-op updates.
     type State =
         <Qwen3_5ForCausalLm<TestBackend> as crate::CausalLanguageModel<TestBackend>>::State;
 
@@ -1165,7 +1182,10 @@ enum CoordinatorFault {
     /// A model error after a real cache update must still discard the session.
     ModelError,
     /// A wrong output axis must fail before selecting another token.
-    LogitShape([usize; 3]),
+    LogitShape(
+        /// Invalid `[batch, sequence, vocabulary]` dimensions returned to the caller.
+        [usize; 3],
+    ),
 }
 
 /// Records real cached calls and the committed prefix just before a model fault.
@@ -1229,11 +1249,15 @@ impl<B: Backend> Drop for CoordinatorState<B> {
 /// Fault-injecting public model adapter; numerical execution and caches stay real.
 #[derive(burn::module::Module, Debug)]
 struct CoordinatorModel<B: Backend> {
+    /// Production Qwen numerical graph retained under fault injection.
     inner: Qwen3_5ForCausalLm<B>,
+    /// Committed cache work observed at each public model return boundary.
     #[module(skip)]
     calls: std::sync::Arc<std::sync::Mutex<Vec<CoordinatorCall>>>,
+    /// Number of dropped cache sessions, proving cleanup after errors.
     #[module(skip)]
     drops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// One-based call ordinal and fault injected after that model call.
     #[module(skip)]
     fault: Option<(usize, CoordinatorFault)>,
 }
@@ -1272,7 +1296,9 @@ impl CoordinatorModel<TestBackend> {
 }
 
 impl crate::CausalLanguageModel<TestBackend> for CoordinatorModel<TestBackend> {
+    /// Configuration inherited from the real model fixture.
     type Config = Qwen3_5TextConfig;
+    /// Real cache state augmented with a destruction counter.
     type State = CoordinatorState<TestBackend>;
 
     /// Leaves stateless inference unchanged.

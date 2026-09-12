@@ -288,9 +288,13 @@ impl<B: Backend> Qwen3MoeModel<B> {
 
 /// Internal backbone result whose diagnostic fields evolve independently.
 struct Qwen3MoeBackboneOutput<B: Backend> {
+    /// Final-normalized decoder states shaped `[batch, sequence, hidden]`.
     hidden: Tensor<B, 3>,
+    /// Optional embedding, post-block, and final-normalized snapshots.
     hidden_states: Vec<Tensor<B, 3>>,
+    /// Public sparse-layer routing diagnostics retained when requested.
     routers: Vec<RouterDiagnostics<B>>,
+    /// Sparse-layer logits retained internally for stack-wide balancing loss.
     auxiliary_router_logits: Vec<Tensor<B, 3>>,
 }
 

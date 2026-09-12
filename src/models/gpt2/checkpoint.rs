@@ -69,9 +69,13 @@ impl Gpt2CheckpointLayout {
 /// Auditable expected parameter inventory and HF Conv1D mapping.
 #[derive(Clone, Debug)]
 pub struct Gpt2CheckpointContract {
+    /// Logical runtime parameters and their expected serialized shapes.
     expected: Vec<ExpectedTensor>,
+    /// Explicit Conv1D splits and source-to-runtime tensor transformations.
     mappings: MappingPlan,
+    /// Permitted index-only declarations of the tied vocabulary head.
     aliases: Vec<IndexTensorAlias>,
+    /// Exact legacy mask-buffer names reconstructed by the executable graph.
     ignored_buffers: Vec<KeyMatcher>,
 }
 
@@ -230,13 +234,24 @@ impl Gpt2CheckpointContract {
 pub enum Gpt2LoadError {
     /// The declared graph is invalid.
     #[error(transparent)]
-    Configuration(#[from] Error),
+    Configuration(
+        /// Invalid graph configuration or dimension contract.
+        #[from]
+        Error,
+    ),
     /// Bounded local discovery or mapping failed.
     #[error(transparent)]
-    Checkpoint(#[from] CheckpointError),
+    Checkpoint(
+        /// Local artifact discovery or strict metadata failure.
+        #[from]
+        CheckpointError,
+    ),
     /// The target did not name a parameter in this exact graph.
     #[error("invalid GPT-2 checkpoint target: {0}")]
-    Target(String),
+    Target(
+        /// Rejected parameter target or namespace diagnostic.
+        String,
+    ),
     /// Rank, layout, dtype, device storage, or payload disagreed with a parameter.
     #[error("cannot install GPT-2 parameter `{target}`: {source}")]
     Parameter {
@@ -248,7 +263,11 @@ pub enum Gpt2LoadError {
     },
     /// Streaming failed after zero or more writes; includes the partial report.
     #[error(transparent)]
-    Execution(#[from] Box<ExecutionFailure<Gpt2LoadError>>),
+    Execution(
+        /// Partial execution report and underlying parameter failure.
+        #[from]
+        Box<ExecutionFailure<Gpt2LoadError>>,
+    ),
 }
 
 impl<B: Backend> Gpt2Model<B> {
@@ -307,6 +326,7 @@ impl<B: Backend> Gpt2ForCausalLm<B> {
 // Checked installation into existing parameter owners.
 
 impl<B: Backend> TensorSink for Gpt2Model<B> {
+    /// Contextual GPT-2 target, payload, or alias installation failure.
     type Error = Gpt2LoadError;
 
     /// Installs one preplanned embedding, affine normalization, or split projection target.

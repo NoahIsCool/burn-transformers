@@ -44,7 +44,10 @@ pub enum QuantizationEligibility {
     /// Tensor may be converted by the symmetric reference quantizer.
     Eligible,
     /// Tensor must remain in its original representation.
-    Excluded(QuantizationExclusion),
+    Excluded(
+        /// Policy reason requiring the original representation.
+        QuantizationExclusion,
+    ),
 }
 
 /// Classifies a model parameter for conservative weight-only quantization.

@@ -52,14 +52,21 @@ mod experiment {
 
     use super::support::{self, Options};
 
+    /// CPU backend used to evaluate the trained adapter and readout.
     type Cpu = Flex<f32, i32>;
+    /// Autodifferentiable CPU backend for adapter training through a frozen prefix.
     type Ad = Autodiff<Cpu>;
+    /// Adam step size for the registered adapter and task head.
     const LEARNING_RATE: f64 = 0.01;
+    /// Multiplier on the downstream captured-feature regularization loss.
     const AUXILIARY_WEIGHT: f32 = 0.01;
 
+    /// Bottleneck adapter mapping hidden states back to the backbone width.
     #[derive(Module, Debug)]
     struct Adapter<B: Backend> {
+        /// Projection from the backbone residual width to the bottleneck.
         down: Linear<B>,
+        /// Projection from the tanh bottleneck to the backbone residual width.
         up: Linear<B>,
     }
 
@@ -71,9 +78,12 @@ mod experiment {
     }
 
     // Save these small records separately from the original frozen checkpoint.
+    /// Small trainable modules saved separately from the frozen checkpoint.
     #[derive(Module, Debug)]
     struct TrainableParts<B: Backend> {
+        /// Bottleneck transform inserted after decoder block zero.
         adapter: Adapter<B>,
+        /// Binary classifier on the final token of the selected prefix.
         head: Linear<B>,
     }
 
@@ -91,9 +101,12 @@ mod experiment {
         }
     }
 
+    /// Owns the frozen backbone and the modules optimized for the symbolic task.
     #[derive(Module, Debug)]
     struct Experiment<B: Backend> {
+        /// Qwen prefix whose weights remain frozen while propagating adapter gradients.
         backbone: Qwen3_5TextModel<B>,
+        /// Registered adapter and binary head visible to the optimizer.
         trainable: TrainableParts<B>,
     }
 

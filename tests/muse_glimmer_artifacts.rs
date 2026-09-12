@@ -1138,17 +1138,29 @@ fn reference_distribution_digest(
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseOfficialReference {
+    /// Version of the strict official-reference JSON schema.
     schema_version: u32,
+    /// Official model repository authenticated by the reference run.
     repository: String,
+    /// Immutable checkpoint revision loaded by the reference generator.
     revision: String,
+    /// Pinned official implementation and its source identity.
     reference: MuseReferenceImplementation,
+    /// Exact rendered source prompt used for all reference comparisons.
     prompt: String,
+    /// Tokenized prompt without additional special-token insertion.
     input_ids: Vec<u32>,
+    /// Graph precision, cache geometry, import integrity, and execution controls.
     execution: MuseReferenceExecution,
+    /// Interpreter, dependency, memory, and offline-environment provenance.
     environment: MuseReferenceEnvironment,
+    /// Authenticated generator and checkpoint identities with strict load accounting.
     provenance: MuseReferenceProvenance,
+    /// Descriptors of all numerical payloads in the external reference bundle.
     outputs: MuseReferenceOutputs,
+    /// Greedy continuation, stability margins, and cached/stateless parity summaries.
     generation: MuseReferenceGeneration,
+    /// Synchronized phase durations in seconds, retained only as diagnostics.
     timings_seconds: MuseReferenceTimings,
 }
 
@@ -1156,12 +1168,19 @@ struct MuseOfficialReference {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceImplementation {
+    /// Repository containing the official reference implementation.
     repository: String,
+    /// Immutable commit of the official implementation checkout.
     revision: String,
+    /// Fully qualified official model class used for reference inference.
     class: String,
+    /// Package version declared by the pinned official source checkout.
     source_version: String,
+    /// Producer Transformers version embedded in the checkpoint configuration.
     checkpoint_config_transformers_version: String,
+    /// Byte identity of the official Muse model implementation file.
     source: MuseReferenceSource,
+    /// Whether the official implementation checkout was clean during generation.
     checkout_clean: bool,
 }
 
@@ -1169,8 +1188,11 @@ struct MuseReferenceImplementation {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceSource {
+    /// Model implementation path relative to the official checkout.
     relative_path: String,
+    /// Exact implementation-file length in bytes.
     bytes: u64,
+    /// SHA-256 of the pinned official implementation bytes.
     sha256: String,
 }
 
@@ -1178,22 +1200,39 @@ struct MuseReferenceSource {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceExecution {
+    /// Floating-point dtype requested from the official model loader.
     dtype: String,
+    /// Device used for official tensor execution.
     device: String,
+    /// Selected official attention implementation.
     attention_implementation: String,
+    /// Score equation and the softmax precision boundary.
     attention_precision: MuseReferenceAttentionPrecision,
+    /// Whether dynamically supplied model-hub kernels were enabled.
     hub_kernels_enabled: bool,
+    /// Whether PyTorch deterministic algorithms were enabled.
     deterministic_algorithms: bool,
+    /// Random seed recorded for official execution.
     seed: u64,
+    /// Whether official generation used a decode cache.
     use_cache: bool,
+    /// Whether each model call used an explicit all-valid attention mask.
     explicit_all_one_attention_masks: bool,
+    /// PyTorch policy controlling F32 matrix multiplication precision.
     float32_matmul_precision: String,
+    /// Fraction of device memory permitted to the MPS process.
     mps_per_process_memory_fraction: f64,
+    /// Explicit limits of the reference preflight and postflight integrity checks.
     integrity_threat_model: String,
+    /// Authenticated import-origin paths keyed by primary package or official source.
     authenticated_import_resolutions: BTreeMap<String, String>,
+    /// Actual imported module paths keyed by primary package.
     imported_module_bindings: BTreeMap<String, String>,
+    /// Controls forcing imports through authenticated source instead of stale bytecode.
     authenticated_import_bytecode_policy: MuseReferenceBytecodePolicy,
+    /// Observed wrapper around the official MPS allocator-warmup no-op.
     allocator_warmup_override: MuseReferenceWarmupOverride,
+    /// Official cache topology, lengths, and absolute positions for the short run.
     cache: MuseReferenceCacheContract,
 }
 
@@ -1201,25 +1240,45 @@ struct MuseReferenceExecution {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceCacheContract {
+    /// Fully qualified official cache implementation class.
     class: String,
+    /// Batch size established from physical key/value tensor axis zero.
     batch_size: usize,
+    /// Batch size reported by the cache API, including its unknown-value sentinel.
     api_reported_batch_size: i64,
+    /// Recorded authority used to resolve the cache API batch-size sentinel.
     batch_size_authority: String,
+    /// Number of cache-bearing transformer layers.
     layer_count: usize,
+    /// Ordered sliding-attention and full-attention layer schedule.
     layer_types: Vec<String>,
+    /// Number of layers retaining sliding-window key/value history.
     sliding_layers: usize,
+    /// Number of layers retaining full key/value history.
     full_layers: usize,
+    /// Maximum retained token window for sliding-attention layers.
     sliding_window: usize,
+    /// Number of key/value heads in each cache tensor.
     key_value_heads: usize,
+    /// Channels per key/value head.
     head_dimension: usize,
+    /// Storage dtype of the official key/value cache tensors.
     tensor_dtype: String,
+    /// Device holding the official key/value cache tensors.
     tensor_device: String,
+    /// Consumed token count when each cached decision is produced.
     decision_logical_lengths: Vec<usize>,
+    /// Physical key/value token extent observed at each short-run decision.
     decision_physical_lengths: Vec<usize>,
+    /// Absolute position of the input whose output produces each decision.
     decision_position_ids: Vec<usize>,
+    /// Absolute positions of the recurrent single-token inputs after prefill.
     decode_input_position_ids: Vec<usize>,
+    /// Absolute input positions in the teacher-forced stateless comparison.
     teacher_position_ids: Vec<usize>,
+    /// Whether implicitly inferred positions were checked against explicit positions.
     implicit_position_ids_verified: bool,
+    /// Whether every layer cache was inspected at each decision boundary.
     all_layers_validated_at_every_decision: bool,
 }
 
@@ -1227,9 +1286,13 @@ struct MuseReferenceCacheContract {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceBytecodePolicy {
+    /// Whether adjacent cached Python bytecode was bypassed during authenticated imports.
     adjacent_bytecode_ignored: bool,
+    /// Whether Python bytecode-cache writes were disabled.
     writes_disabled: bool,
+    /// Whether the private import-cache directory remained empty.
     private_cache_remained_empty: bool,
+    /// Whether the original interpreter bytecode settings were restored.
     restored: bool,
 }
 
@@ -1237,8 +1300,11 @@ struct MuseReferenceBytecodePolicy {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceAttentionPrecision {
+    /// Recorded normalized-query/key scaling equation before softmax.
     score_equation: String,
+    /// Accumulation dtype used to compute attention softmax.
     softmax_accumulator_dtype: String,
+    /// Dtype of attention probabilities passed to the value contraction.
     probability_output_dtype: String,
 }
 
@@ -1246,14 +1312,23 @@ struct MuseReferenceAttentionPrecision {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceWarmupOverride {
+    /// Fully qualified allocator-warmup function observed by the wrapper.
     target: String,
+    /// Named policy verifying the official MPS no-op branch.
     policy: String,
+    /// Official loader call during which the wrapper was active.
     scope: String,
+    /// Rationale for observing the warmup branch without changing tensor computation.
     reason: String,
+    /// Number of allocator-warmup calls observed by the wrapper.
     call_count: usize,
+    /// Number of entries inspected in the expanded parameter device map.
     expanded_device_map_entries: usize,
+    /// Distinct device types present in the expanded map.
     expanded_device_types: Vec<String>,
+    /// Whether a Hugging Face quantizer was passed to the wrapped call.
     hf_quantizer_present: bool,
+    /// Whether the original allocator-warmup function was restored.
     restored: bool,
 }
 
@@ -1261,15 +1336,25 @@ struct MuseReferenceWarmupOverride {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceEnvironment {
+    /// UTC timestamp at which the reference record was generated.
     generated_at_utc: String,
+    /// Exact interpreter version and virtual-environment identity.
     python: MuseReferencePython,
+    /// Primary package versions keyed by distribution name.
     packages: BTreeMap<String, String>,
+    /// Authenticated primary-wheel payload inventories keyed by distribution name.
     distribution_provenance: BTreeMap<String, MuseReferenceDistribution>,
+    /// SHA-256 of the canonical primary-distribution provenance manifest.
     distribution_manifest_sha256: String,
+    /// Optional packages required to be absent from the reference environment.
     absent_optional_distributions: Vec<String>,
+    /// Versions of imported transitive distributions whose payload bytes remain trusted.
     transitive_distributions: BTreeMap<String, String>,
+    /// Boundary between content-authenticated inputs and trusted environment state.
     trust_boundary: MuseReferenceTrustBoundary,
+    /// MPS availability and conservative model-load memory preflight.
     device: MuseReferenceDevice,
+    /// Environment variables enforcing offline execution and backend controls.
     offline_environment: BTreeMap<String, String>,
 }
 
@@ -1277,13 +1362,21 @@ struct MuseReferenceEnvironment {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferencePython {
+    /// Complete interpreter version string.
     version: String,
+    /// Structured interpreter version components.
     version_info: MuseReferencePythonVersion,
+    /// Interpreter executable path reported by Python.
     executable: String,
+    /// Resolved interpreter executable path after following environment links.
     resolved_executable: String,
+    /// Active Python virtual-environment prefix.
     prefix: String,
+    /// Base interpreter installation prefix outside the active virtual environment.
     base_prefix: String,
+    /// Interpreter implementation name, required to be CPython.
     implementation: String,
+    /// Platform description reported by the interpreter.
     platform: String,
 }
 
@@ -1291,11 +1384,17 @@ struct MuseReferencePython {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceTrustBoundary {
+    /// Statement of the trusted interpreter, standard-library, and operating-system boundary.
     interpreter_and_stdlib: String,
+    /// Whether interpreter and standard-library payload bytes were authenticated.
     interpreter_and_stdlib_content_authenticated: bool,
+    /// Primary distributions whose installed payloads were checked against RECORD.
     record_authenticated_primary_distributions: Vec<String>,
+    /// Statement of the trusted imported-transitive-distribution boundary.
     transitive_distributions: String,
+    /// Whether imported transitive-distribution payload bytes were authenticated.
     transitive_distribution_content_authenticated: bool,
+    /// Whether every imported module origin was attributed to a recorded source.
     all_module_origins_attributed: bool,
 }
 
@@ -1303,10 +1402,15 @@ struct MuseReferenceTrustBoundary {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferencePythonVersion {
+    /// Major interpreter version component.
     major: u8,
+    /// Minor interpreter version component.
     minor: u8,
+    /// Patch interpreter version component.
     micro: u8,
+    /// Interpreter release stage, required to be final for the pinned environment.
     releaselevel: String,
+    /// Interpreter release-stage serial number.
     serial: u8,
 }
 
@@ -1314,11 +1418,17 @@ struct MuseReferencePythonVersion {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceDistribution {
+    /// Installed version of the authenticated primary distribution.
     version: String,
+    /// Number of wheel payload files verified against RECORD.
     verified_files: usize,
+    /// Total bytes in the verified wheel payload files.
     verified_bytes: u64,
+    /// Number of bytecode files ignored by the authenticated source-import policy.
     ignored_bytecode_files: usize,
+    /// RECORD-listed external scripts excluded from the in-environment payload manifest.
     excluded_external_scripts: Vec<String>,
+    /// SHA-256 of the canonical verified payload manifest for this wheel.
     payload_manifest_sha256: String,
 }
 
@@ -1326,9 +1436,13 @@ struct MuseReferenceDistribution {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceDevice {
+    /// Whether the MPS backend was available for reference execution.
     backend_available: bool,
+    /// Device-recommended maximum working-set bytes observed before loading.
     recommended_max_memory_bytes: u64,
+    /// Conservative full F16 model-load requirement, including reserved headroom, in bytes.
     required_f16_load_bytes: u64,
+    /// Additional bytes reserved beyond checkpoint tensor payload for loading headroom.
     minimum_load_headroom_bytes: u64,
 }
 
@@ -1336,14 +1450,23 @@ struct MuseReferenceDevice {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceProvenance {
+    /// Exact committed generator source and repository state.
     generator: MuseReferenceGenerator,
+    /// Checkpoint control files and weight shards authenticated for the run.
     artifacts: Vec<MuseReferenceArtifact>,
+    /// SHA-256 of the canonical checkpoint artifact manifest.
     artifact_manifest_sha256: String,
+    /// Number of physical tensors in the complete multimodal checkpoint.
     physical_tensor_count: usize,
+    /// Total physical checkpoint tensor payload bytes.
     checkpoint_tensor_bytes: u64,
+    /// Number of parameter elements loaded by the official model.
     loaded_parameter_count: u64,
+    /// Loaded parameter element counts grouped by dtype.
     parameter_dtype_elements: BTreeMap<String, u64>,
+    /// Official loader classifications, each required to be empty.
     loading_info: MuseReferenceLoadingInfo,
+    /// Whether all post-execution artifact and source integrity checks passed.
     integrity_postflight_passed: bool,
 }
 
@@ -1351,11 +1474,17 @@ struct MuseReferenceProvenance {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceGenerator {
+    /// Generator path relative to its repository root.
     relative_path: String,
+    /// Exact generator-source length in bytes.
     bytes: usize,
+    /// SHA-256 of the generator-source bytes.
     sha256: String,
+    /// Generator repository HEAD recorded at reference creation.
     git_head: String,
+    /// Git root-tree identity recorded for the generator repository.
     git_tree: String,
+    /// Whether the generator repository had uncommitted changes.
     git_dirty: bool,
 }
 
@@ -1363,8 +1492,11 @@ struct MuseReferenceGenerator {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceArtifact {
+    /// Artifact path relative to the pinned checkpoint root.
     relative_path: String,
+    /// Exact checkpoint artifact length in bytes.
     bytes: u64,
+    /// SHA-256 of the exact checkpoint artifact bytes.
     sha256: String,
 }
 
@@ -1372,9 +1504,13 @@ struct MuseReferenceArtifact {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceLoadingInfo {
+    /// Expected checkpoint keys absent during official loading.
     missing_keys: MuseReferenceDiagnostic,
+    /// Checkpoint keys unused by the official model.
     unexpected_keys: MuseReferenceDiagnostic,
+    /// Checkpoint keys whose shapes disagreed with the official model.
     mismatched_keys: MuseReferenceDiagnostic,
+    /// Other errors reported by the official loader.
     error_msgs: MuseReferenceDiagnostic,
 }
 
@@ -1382,7 +1518,9 @@ struct MuseReferenceLoadingInfo {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceDiagnostic {
+    /// Number of entries in this loader diagnostic class.
     count: usize,
+    /// SHA-256 of the canonical diagnostic-class contents.
     sha256: String,
 }
 
@@ -1390,11 +1528,17 @@ struct MuseReferenceDiagnostic {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceOutputs {
+    /// Complete vocabulary logits from the final prompt position.
     prompt_logits: MuseReferencePromptLogits,
+    /// Stateless prompt-final embedding, per-layer, and final-normalized hidden trace.
     hidden_last_trace: MuseReferenceHiddenTrace,
+    /// Complete vocabulary logits for all 32 cached decisions.
     cached_prefix_logits: MuseReferenceLogitMatrix,
+    /// Complete vocabulary logits at the corresponding teacher-forced positions.
     teacher_prefix_logits: MuseReferenceLogitMatrix,
+    /// Prompt-final hidden trace produced by cached prefill.
     cached_prefill_hidden_trace: MuseReferenceHiddenTrace,
+    /// Hidden trace produced by the first recurrent single-token decode.
     cached_decode_hidden_trace: MuseReferenceHiddenTrace,
 }
 
@@ -1402,18 +1546,31 @@ struct MuseReferenceOutputs {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferencePromptLogits {
+    /// Prompt-logit payload path relative to the reference bundle.
     relative_path: String,
+    /// Raw payload element encoding, required to be little-endian F32.
     encoding: String,
+    /// Official computation dtype before exporting the prompt logits.
     source_dtype: String,
+    /// Floating-point dtype stored in the exported payload.
     storage_dtype: String,
+    /// Payload dimensions, consisting of the complete vocabulary width.
     shape: Vec<usize>,
+    /// Number of vocabulary logits in the payload.
     elements: usize,
+    /// Exact exported payload length in bytes.
     bytes: usize,
+    /// SHA-256 of the raw prompt-logit payload.
     sha256: String,
+    /// Whether every prompt logit is finite.
     finite: bool,
+    /// Sum of all prompt-final vocabulary logits.
     sum: f64,
+    /// Euclidean norm of the prompt-final logit vector.
     l2_norm: f64,
+    /// Ten highest logits ordered with deterministic token-ID tie breaking.
     top10: Vec<MuseReferenceRankedLogit>,
+    /// Vocabulary index of the largest prompt-final logit.
     top1_token_id: u32,
 }
 
@@ -1421,7 +1578,9 @@ struct MuseReferencePromptLogits {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceRankedLogit {
+    /// Vocabulary index of this ranked logit.
     token_id: u32,
+    /// Reference logit at the associated vocabulary index.
     logit: f64,
 }
 
@@ -1429,17 +1588,29 @@ struct MuseReferenceRankedLogit {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceHiddenTrace {
+    /// Hidden-trace payload path relative to the reference bundle.
     relative_path: String,
+    /// Raw payload element encoding, required to be little-endian F32.
     encoding: String,
+    /// Official hidden-state computation dtype before export.
     source_dtype: String,
+    /// Floating-point dtype stored in the exported hidden trace.
     storage_dtype: String,
+    /// Trace dimensions ordered as named activation rows and hidden channels.
     shape: Vec<usize>,
+    /// Total scalar values across all trace rows.
     elements: usize,
+    /// Exact hidden-trace payload length in bytes.
     bytes: usize,
+    /// SHA-256 of the raw hidden-trace payload.
     sha256: String,
+    /// Whether every hidden-trace value is finite.
     finite: bool,
+    /// Ordered activation names for the embedding, block outputs, and final norm.
     labels: Vec<String>,
+    /// Execution phase producing this trace: stateless, cached prefill, or cached decode.
     phase: String,
+    /// Zero-based absolute input-token position represented by each trace row.
     token_position: usize,
 }
 
@@ -1447,16 +1618,27 @@ struct MuseReferenceHiddenTrace {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceLogitMatrix {
+    /// Logit-matrix payload path relative to the reference bundle.
     relative_path: String,
+    /// Raw payload element encoding, required to be little-endian F32.
     encoding: String,
+    /// Official logit computation dtype before export.
     source_dtype: String,
+    /// Floating-point dtype stored in the exported logit matrix.
     storage_dtype: String,
+    /// Matrix dimensions ordered as decision rows and vocabulary channels.
     shape: Vec<usize>,
+    /// Total scalar logits across all decision rows.
     elements: usize,
+    /// Exact logit-matrix payload length in bytes.
     bytes: usize,
+    /// SHA-256 of the raw logit-matrix payload.
     sha256: String,
+    /// Whether every exported matrix value is finite.
     finite: bool,
+    /// Absolute input position whose output supplies each decision row.
     row_position_ids: Vec<usize>,
+    /// Argmax vocabulary index for each decision row.
     row_top1_token_ids: Vec<u32>,
 }
 
@@ -1464,17 +1646,29 @@ struct MuseReferenceLogitMatrix {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceGeneration {
+    /// Requested number of autoregressive decisions.
     max_new_tokens: usize,
+    /// Token IDs treated as end-of-sequence by the reference run.
     eos_token_ids: Vec<u32>,
+    /// Greedy continuation IDs excluding the source prompt.
     token_ids: Vec<u32>,
+    /// Argmax token ID at every cached continuation prefix.
     cached_prefix_top1: Vec<u32>,
+    /// Argmax token ID at the matching stateless continuation prefixes.
     stateless_prefix_top1: Vec<u32>,
+    /// Top-two logits and binary16 stability evidence for each decision.
     decisions: Vec<MuseReferenceDecision>,
+    /// Smallest top-two logit gap across all decisions.
     minimum_margin: f64,
+    /// Smallest top-two gap divided by its elementwise binary16 perturbation budget.
     minimum_margin_to_epsilon_ratio: f64,
+    /// Continuation text decoded by the official tokenizer.
     decoded_text: String,
+    /// Cosine between stateless prompt logits and cached-prefill logits.
     prompt_cached_cosine: f64,
+    /// Minimum cached-versus-stateless logit cosine over all continuation prefixes.
     minimum_cached_stateless_prefix_cosine: f64,
+    /// Minimum cached-prefill-versus-stateless cosine across corresponding hidden-trace rows.
     minimum_cached_prefill_stateless_hidden_cosine: f64,
 }
 
@@ -1482,14 +1676,23 @@ struct MuseReferenceGeneration {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceDecision {
+    /// Zero-based position in the greedy continuation.
     step: usize,
+    /// Vocabulary index of the largest decision logit.
     top1_token_id: u32,
+    /// Vocabulary index of the runner-up decision logit.
     top2_token_id: u32,
+    /// Largest decision logit.
     top1_logit: f64,
+    /// Runner-up decision logit.
     top2_logit: f64,
+    /// Difference between the highest and second-highest logits.
     margin: f64,
+    /// One local binary16 ULP at the wider-spaced top-two logit.
     elementwise_f16_ulp: f64,
+    /// Top-two logit gap divided by the elementwise binary16 perturbation budget.
     margin_to_epsilon_ratio: f64,
+    /// Whether the top-two gap exceeds twice the one-ULP elementwise budget.
     stable_under_two_sided_one_ulp_budget: bool,
 }
 
@@ -1497,9 +1700,13 @@ struct MuseReferenceDecision {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MuseReferenceTimings {
+    /// Synchronized checkpoint loading duration in seconds.
     load: f64,
+    /// Synchronized stateless prompt inference duration in seconds.
     stateless_prompt: f64,
+    /// Synchronized cached continuation duration in seconds.
     cached_generation: f64,
+    /// Synchronized teacher-forced stateless inference duration in seconds.
     teacher_forced_stateless: f64,
 }
 
@@ -2447,7 +2654,9 @@ fn pinned_reference_root() -> PathBuf {
 /// Opens an exact-size reference file without following its final component.
 #[cfg(all(feature = "metal", feature = "tokenizers", target_os = "macos"))]
 fn open_reference_file_no_follow(path: &Path, expected_bytes: u64, maximum_bytes: u64) -> File {
+    /// Darwin open flag rejecting a symlink in the final path component.
     const DARWIN_O_NOFOLLOW: i32 = 0x0000_0100;
+    /// Darwin nonblocking open flag avoiding a hang on a substituted special file.
     const DARWIN_O_NONBLOCK: i32 = 0x0000_0004;
 
     assert!(
@@ -2626,12 +2835,19 @@ fn assert_reference_close(label: &str, actual: f64, expected: f64) {
 /// Fully authenticated numerical tensors from one strict external bundle.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 struct LoadedMuseReference {
+    /// Validated manifest describing every authenticated numerical payload.
     reference: MuseOfficialReference,
+    /// Decoded complete-vocabulary prompt-final logit vector.
     prompt_logits: Vec<f32>,
+    /// Decoded stateless prompt-final hidden trace in row-major order.
     stateless_prompt_hidden: Vec<f32>,
+    /// Decoded cached decision-by-vocabulary logit matrix in row-major order.
     cached_prefix_logits: Vec<f32>,
+    /// Decoded teacher-forced decision-by-vocabulary logit matrix in row-major order.
     teacher_prefix_logits: Vec<f32>,
+    /// Decoded cached-prefill hidden trace in row-major order.
     cached_prefill_hidden: Vec<f32>,
+    /// Decoded first recurrent-decode hidden trace in row-major order.
     cached_decode_hidden: Vec<f32>,
 }
 
@@ -2676,6 +2892,7 @@ fn read_reference_tensor(
 /// Reads and independently authenticates the complete external oracle bundle.
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 fn read_pinned_muse_reference() -> LoadedMuseReference {
+    /// Maximum accepted reference-manifest length in bytes before allocating a read buffer.
     const MAXIMUM_JSON_BYTES: u64 = 1024 * 1024;
 
     let supplied_root = pinned_reference_root();
@@ -3035,16 +3252,27 @@ fn assert_muse_cache_geometry(
 #[cfg(all(feature = "metal", feature = "tokenizers"))]
 #[derive(Debug, serde::Serialize)]
 struct MuseRustAcceptanceProvenance {
+    /// Repository HEAD used for the Rust acceptance execution.
     git_head: String,
+    /// Root Git tree of the repository containing the Rust crate.
     git_tree: String,
+    /// Exact committed crate tree, including support for a historically nested checkout.
     transformers_tree: String,
+    /// Whether the crate subtree has source changes; acceptance requires false.
     transformers_tree_dirty: bool,
+    /// SHA-256 of the test source verified against its compiled-in bytes.
     test_source_sha256: String,
+    /// SHA-256 of the quantized-quality helper verified against its compiled-in bytes.
     quantized_quality_source_sha256: String,
+    /// Minimum Rust version declared by the compiled Cargo package.
     cargo_package_rust_version: String,
+    /// Verbose compiler identity returned by `rustc -Vv`.
     rustc_verbose: String,
+    /// Build profile recorded for this acceptance executable.
     profile: String,
+    /// Target architecture and operating system of the acceptance executable.
     target: String,
+    /// Enabled crate features recorded for the acceptance executable.
     features: Vec<String>,
 }
 

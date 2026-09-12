@@ -47,7 +47,7 @@ pub(crate) fn select_bool_tensor<B: Backend, const D: usize>(
 ///
 /// Burn backends may expose logical booleans as native bits, `u8`, or another backend-selected
 /// representation. Converting through the backend's integer element type avoids asking
-/// [`TensorData`](burn::tensor::TensorData) to reinterpret one Boolean representation as another;
+/// [`TensorData`] to reinterpret one Boolean representation as another;
 /// every nonzero integer retains the public `true == valid token` convention.
 pub(crate) fn tensor_bool_values<B: Backend, const D: usize>(
     tensor: Tensor<B, D, Bool>,
@@ -74,6 +74,7 @@ pub(crate) fn tensor_bool_values<B: Backend, const D: usize>(
 /// A token-validity mask with the unambiguous convention `true == real token`.
 #[derive(Clone, Debug)]
 pub struct TokenMask<B: Backend> {
+    /// Logical validity values with axes `[batch, sequence]` on the input device.
     tensor: Tensor<B, 2, Bool>,
 }
 
@@ -126,7 +127,10 @@ pub enum LogitsSelection {
     #[default]
     Last,
     /// Project an explicit ordered set of zero-based sequence positions.
-    Positions(Vec<usize>),
+    Positions(
+        /// Projection positions in output order, checked against the input length.
+        Vec<usize>,
+    ),
 }
 
 /// Controls optional, potentially expensive model diagnostics.

@@ -176,7 +176,7 @@ self-attention with cross-attention to $H$. This separates source understanding
 from target generation and lets the encoder run exactly once per request.
 
 **Implementation:** [`t5/model.rs`](src/models/t5/model.rs) and the public
-sequence-to-sequence contracts in [`architecture/mod.rs`](src/architecture/mod.rs).
+sequence-to-sequence contracts in [`architecture.rs`](src/architecture.rs).
 **Reference:** [T5](https://arxiv.org/abs/1910.10683).
 
 <a id="innovation-bidirectional-encoder"></a>

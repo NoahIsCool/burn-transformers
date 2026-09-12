@@ -20,7 +20,9 @@ use super::{DecodeState, DecodeStateError};
 /// commits or rolls back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheMark {
+    /// Allocation identity linking this mark to one transaction.
     token: TransactionToken,
+    /// Absolute per-row lengths before speculative appends.
     baseline_lengths: Vec<usize>,
 }
 
@@ -32,8 +34,12 @@ impl CacheMark {
     }
 }
 
+/// Shared allocation identity that remains distinct from every unrelated transaction.
 #[derive(Clone)]
-struct TransactionToken(Arc<()>);
+struct TransactionToken(
+    /// Address identity shared by cloned handles; the payload itself carries no state.
+    Arc<()>,
+);
 
 impl TransactionToken {
     /// Allocates a unique transaction identity whose cloned handles still identify the same mark.
@@ -58,9 +64,12 @@ impl PartialEq for TransactionToken {
 
 impl Eq for TransactionToken {}
 
+/// Committed baselines and mark identity while a logical transaction is active.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActiveTransaction {
+    /// Identity required by the mark that can finish this transaction.
     token: TransactionToken,
+    /// Committed per-row lengths restored by rollback.
     pub(crate) baseline_lengths: Vec<usize>,
 }
 
@@ -170,7 +179,9 @@ impl DecodeState {
 }
 
 impl TransactionalCache for DecodeState {
+    /// Single-use checkpoint carrying the transaction identity and baseline lengths.
     type Mark = CacheMark;
+    /// Logical metadata and transaction validation errors.
     type Error = DecodeStateError;
 
     /// Begins one append-only transaction, rejecting nesting and retaining every baseline length.

@@ -17,6 +17,9 @@ Run these commands from the transformer crate. The first positional argument is
 the containment root; the remaining arguments are explicit crate entry files.
 The selected `stable` alias must resolve to Rust 1.92 or newer. The tool has its
 own lockfile. Redirect stdout to a fresh audit artifact if retaining a report.
+`--help` prints the command syntax. Place `--` before the root to preserve a
+dash-prefixed path; native operating-system path bytes are retained. Missing
+entries and unknown leading options fail before any source reads or JSON output.
 
 ## Meaning of the report
 
@@ -132,3 +135,65 @@ Focused regression checks:
 cargo +stable test --locked --manifest-path scripts/coverage-layout/Cargo.toml --test documentation
 python3 -m unittest discover -s scripts/tests -p test_check_documentation.py -v
 ```
+
+## Comprehensive authored-item standards
+
+The opt-in `--standards ROOT ENTRY [ENTRY ...]` mode emits schema 2. It retains
+the exact source hashes, spans, literal documentation requirements, and macro
+expansion limitations above. The existing `--documentation` mode continues to
+emit schema 1 with its original function/module scope and test exemptions.
+
+Schema 2 additionally requires documentation on private and public structs,
+enums, unions, traits, trait/type aliases, constants, statics, associated
+constants/types, foreign statics/types, macro definitions, enum variants, and
+each named or tuple field. Tuple fields use their zero-based position as their
+reported name. Test functions, helpers, and module bodies require documentation
+as well; `test_only` remains ownership evidence rather than an exemption.
+Imports, implementation blocks, generic parameters, and local bindings introduce
+no separate documentation requirement. File/module documentation explains those
+contexts; documentation on a container cannot satisfy its members' requirements.
+
+Parseable authored macro fragments retain their original source spans. Opaque
+named declaration templates appear in `macros[].unresolved_items`, including in
+test-owned macros, and block completion. A syntax audit cannot evaluate generated
+fields or declarations introduced by macro expansion. `complete` describes the
+parsed authored scope, and `macro_expansion_resolved` remains false.
+
+Run the raw mode against explicit crate roots, for example:
+
+```sh
+cargo +stable run --locked --manifest-path scripts/coverage-layout/Cargo.toml -- --standards . src/lib.rs scripts/coverage-layout/src/lib.rs scripts/coverage-layout/src/main.rs
+```
+
+As in the legacy raw CLI, exit 0 means JSON was written successfully; inspect
+`complete`, `passed`, and per-site `style_present` before treating an audit as
+successful. This mode checks documentation presence and placement, not prose
+quality, behavioral correctness, test coverage, or formal verification.
+
+For a source-inventory-bound repository audit, opt the wrapper into the same
+policy. It additionally discovers `tests/` and nested tooling test harnesses,
+selects their crate roots, and adds any unreferenced source as an explicit entry.
+It retains fixture and historical-evidence discovery exclusions visibly in JSON;
+an actual module reference still brings excluded sources into the parsed graph.
+
+```sh
+python3 scripts/check_documentation.py --standards --classifier target/debug/transformers-coverage-layout --output target/standards.json
+```
+
+Schema 2 inventories group authored sites and missing documentation by declaration
+kind, with test ownership recorded separately. Missing entries include the path,
+one-based line, name, kind, expected spelling, and observed alternative doc forms.
+`--inventory-only` permits missing prose for an exploratory report while still
+failing incomplete inspection. The default wrapper invocation retains its legacy
+schema, discovery scope, summaries, and exit codes. The repository source gate
+explicitly selects `--standards` so contributor validation enforces the expanded
+requirements.
+
+The sibling-test rule applies to unit tests embedded in production modules.
+Schema 2 exempts nested tests from relocation when every observed reference to
+their physical source originates in an explicit integration entry directly under
+`tests/` or a tooling package's `scripts/.../tests/` directory. The report records
+that placement policy as `test_harness_only`; it neither changes structural
+`test_only` evidence nor exempts any documentation. A production reference to the
+same source prevents the relocation exemption. This is a repository layout
+convention over the observed graph, not a compiler test-harness proof.

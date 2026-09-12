@@ -62,8 +62,10 @@ mod experiment {
 
     // This custom mixer has no attention scores or softmax. It projects the sequence
     // mean and shares that context with every token. This example has no padding.
+    /// Projects an unmasked sequence mean and broadcasts it to every token.
     #[derive(Module, Debug)]
     struct MeanMixer<B: Backend> {
+        /// Learned channel projection applied to the broadcast sequence mean.
         projection: Linear<B>,
     }
 
@@ -82,16 +84,23 @@ mod experiment {
         }
     }
 
+    /// Residual block pairing grouped-query attention with a dense feed-forward layer.
     type AttentionBlock<B> = ResidualBlock<B, GroupedQueryAttention<B>, DenseFeedForward<B>>;
+    /// Mean-mixing residual block wrapped by explicit input/output width adapters.
     type ChangedBlock<B> = WidthAdapter<B, ResidualBlock<B, MeanMixer<B>, DenseFeedForward<B>>>;
 
     // All new modules, width adapters, and the task head are owned here. Burn records
     // and optimizers can therefore see their parameters without inspecting callbacks.
+    /// Owns the heterogeneous encoder blocks, width adapters, and task readout.
     #[derive(Module, Debug)]
     pub(super) struct Classifier<B: Backend> {
+        /// Token lookup producing eight-channel residual states.
         embeddings: Embedding<B>,
+        /// Eight-channel attention block at encoder layer zero.
         first: AttentionBlock<B>,
+        /// Twelve-channel mean-mixing block with eight-channel input and six-channel output.
         changed: ChangedBlock<B>,
+        /// Binary classifier applied to the mean-pooled six-channel residual.
         head: Linear<B>,
     }
 
@@ -189,6 +198,7 @@ mod experiment {
 
     /// Verify that a selected custom-block activation can be ablated and restored without editing weights.
     pub fn run() -> Result<()> {
+        /// CPU backend for the deterministic activation intervention demonstration.
         type B = Flex<f32, i32>;
         let device = Default::default();
         B::seed(&device, 42);

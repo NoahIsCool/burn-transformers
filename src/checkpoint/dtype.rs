@@ -150,6 +150,7 @@ impl fmt::Display for TensorDType {
 }
 
 impl FromStr for TensorDType {
+    /// Diagnostic for a wire spelling outside the supported dtype vocabulary.
     type Err = CheckpointError;
 
     /// Parses only recognized SafeTensors scalar spellings; unknown types fail closed.

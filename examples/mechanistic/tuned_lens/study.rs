@@ -33,13 +33,17 @@ use transformers::{
     models::gpt_neox::{GptNeoXConfig, GptNeoXModel},
 };
 
+/// CPU backend for F32 released-lens evaluation and parity checks.
 pub type B = Flex<f32, i32>;
+/// Experiment result carrying contextual artifact, tensor, and validation errors.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Owning both modules registers backbone and auxiliary parameters with Burn.
 #[derive(Module, Debug)]
 pub struct Experiment<B: Backend> {
+    /// Pinned GPT-NeoX backbone supplying residuals and the shared final decoder.
     pub backbone: GptNeoXModel<B>,
+    /// Released affine corrections; stage zero uses embeddings and stage i uses block i - 1 residuals.
     pub translators: Vec<Linear<B>>,
 }
 
@@ -161,14 +165,19 @@ pub fn load_reference(
     Ok((reference, Tensors::load(&path)?))
 }
 
+/// Bounded collection of unpadded documents used by the frozen evaluation protocol.
 #[derive(Deserialize)]
 pub struct Fixture {
+    /// Documents in their stable fixture order.
     pub records: Vec<Record>,
 }
 
+/// One source document with its prepared tokenization.
 #[derive(Deserialize)]
 pub struct Record {
+    /// Stable source-document index recorded by preparation.
     pub record_index: usize,
+    /// Unpadded token IDs including the protocol's initial BOS token.
     pub input_ids: Vec<i64>,
 }
 
@@ -186,7 +195,9 @@ impl Record {
     }
 }
 
+/// Owns a safetensors container for lazily decoded reference tensors.
 pub struct Tensors {
+    /// Immutable serialized tensor bytes loaded from the prepared artifact.
     bytes: Vec<u8>,
 }
 
@@ -328,26 +339,42 @@ pub fn max_error(left: Tensor<B, 3>, right: Tensor<B, 3>) -> Result<f32> {
     Ok(error)
 }
 
+/// Raw and translated decoder losses for one residual stage.
 #[derive(Clone, Default, Serialize)]
 pub struct LayerMetrics {
+    /// Zero-based translator stage, with stage zero selecting embeddings.
     pub index: usize,
+    /// Named activation boundary corresponding to the translator stage.
     pub point: String,
+    /// Forward KL from final-model predictions to raw-lens predictions; a sum until report normalization.
     pub raw_kl: f64,
+    /// Forward KL from final-model predictions to tuned-lens predictions; a sum until report normalization.
     pub tuned_kl: f64,
+    /// Raw-lens next-token negative log likelihood in nats; a sum until report normalization.
     pub raw_ce: f64,
+    /// Tuned-lens next-token negative log likelihood in nats; a sum until report normalization.
     pub tuned_ce: f64,
 }
 
 /// Unnormalized loss totals and controls collected by the visible experiment.
 pub struct Measurements {
+    /// Per-stage raw and tuned loss totals before token-count normalization.
     pub layers: Vec<LayerMetrics>,
+    /// Number of input positions contributing to every forward-KL total.
     pub input_tokens: usize,
+    /// Number of next-token targets, excluding the final position of each document.
     pub ce_tokens: usize,
+    /// Final-model next-token negative log likelihood summed over valid targets, in nats.
     pub final_ce: f64,
+    /// Largest absolute logit discrepancy against independently prepared reference tensors.
     pub parity_error: f32,
+    /// Largest absolute logit change when hooks only observe activations.
     pub observation_error: f32,
+    /// Largest absolute raw-lens logit discrepancy after zeroing one affine correction.
     pub replacement_error: f32,
+    /// Index of the translator zeroed for the raw-lens identity control.
     pub replacement_translator: usize,
+    /// Wall-clock seconds spent loading artifacts and executing the experiment.
     pub wall_seconds: f64,
 }
 

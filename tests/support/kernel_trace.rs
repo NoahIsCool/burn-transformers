@@ -29,14 +29,18 @@ pub(crate) struct KernelLaunch {
 /// Thread-safe subscriber state shared with the capture caller.
 #[derive(Clone, Default)]
 struct KernelLaunchSubscriber {
+    /// Quantized or dequantization launches captured in submission order.
     launches: Arc<Mutex<Vec<KernelLaunch>>>,
+    /// Shared counter allocating distinct nonzero tracing span identifiers.
     next_span: Arc<AtomicU64>,
 }
 
 /// Visitor for the two display-valued fields attached to `launch_inner`.
 #[derive(Default)]
 struct KernelFieldVisitor {
+    /// Generated kernel name, populated only when its tracing field is present.
     name: Option<String>,
+    /// Configuration-bearing kernel identifier collected from the launch span.
     id: Option<String>,
 }
 
@@ -57,20 +61,25 @@ impl KernelFieldVisitor {
 }
 
 impl Visit for KernelFieldVisitor {
+    /// Collects a debug-formatted kernel field, removing enclosing string quotes.
     fn record_debug(&mut self, field: &Field, value: &dyn core::fmt::Debug) {
         self.record_text(field, format!("{value:?}"));
     }
 
+    /// Collects a string-valued kernel field, removing enclosing quotes if present.
     fn record_str(&mut self, field: &Field, value: &str) {
         self.record_text(field, value.to_owned());
     }
 }
 
 impl Subscriber for KernelLaunchSubscriber {
+    /// Enables only the CubeCL launch boundary used to identify actual kernels.
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
         metadata.name() == "launch_inner"
     }
 
+    /// Records packed or dequantization launches and allocates a distinct span ID.
+    /// Panics if the shared launch mutex was poisoned or the span counter is exhausted.
     fn new_span(&self, attributes: &Attributes<'_>) -> Id {
         let mut visitor = KernelFieldVisitor::default();
         attributes.record(&mut visitor);
@@ -85,14 +94,19 @@ impl Subscriber for KernelLaunchSubscriber {
         Id::from_u64(self.next_span.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
+    /// Ignores later field updates because launch identity is captured at span creation.
     fn record(&self, _span: &Id, _values: &Record<'_>) {}
 
+    /// Ignores causal span links; launch capture does not reconstruct execution graphs.
     fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
 
+    /// Ignores standalone events because kernel identities are carried by spans.
     fn event(&self, _event: &Event<'_>) {}
 
+    /// Ignores span entry because submission order is recorded when spans are created.
     fn enter(&self, _span: &Id) {}
 
+    /// Ignores span exit because no duration measurements are collected.
     fn exit(&self, _span: &Id) {}
 }
 

@@ -1,3 +1,5 @@
+//! Synthetic Qwen parameter installation, tied aliases, and malformed payload tests.
+
 use burn::{
     backend::Flex,
     tensor::{Int, Tensor, TensorData},
@@ -17,6 +19,7 @@ use crate::models::qwen3_5::{
     Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5TextConfig,
 };
 
+/// CPU Flex backend with F32 activations and portable I32 indices.
 type TestBackend = Flex<f32, i32>;
 
 /// Loads every base-graph target from the synthetic contract and runs forward.

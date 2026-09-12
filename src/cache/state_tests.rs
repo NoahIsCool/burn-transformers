@@ -1,9 +1,13 @@
+//! Atomic logical-length updates, invalid inputs, and sequence lifecycle boundaries.
+
 use super::*;
 
+/// Builds a three-row logical cache fixture with capacity eight.
 fn config() -> CacheConfig {
     CacheConfig::new(3, 8).expect("valid config")
 }
 
+/// Constructs zero lengths and preserves explicitly initialized lengths.
 #[test]
 fn constructs_empty_and_initialized_states() {
     let empty = DecodeState::new(config());
@@ -17,6 +21,7 @@ fn constructs_empty_and_initialized_states() {
     assert_eq!(initialized.remaining_capacity(2), Ok(0));
 }
 
+/// Rejects initial lengths with the wrong batch size or excess capacity.
 #[test]
 fn rejects_invalid_initial_lengths() {
     assert_eq!(
@@ -36,6 +41,7 @@ fn rejects_invalid_initial_lengths() {
     );
 }
 
+/// Reports absolute appended ranges while advancing independent sequences.
 #[test]
 fn advances_and_reports_absolute_ranges() {
     let mut state = DecodeState::from_lengths(config(), vec![2, 3, 4]).expect("valid state");
@@ -50,6 +56,7 @@ fn advances_and_reports_absolute_ranges() {
     assert_eq!(no_op.appended_range(), 6..6);
 }
 
+/// Leaves every row unchanged when a batched append fails validation.
 #[test]
 fn advance_all_is_atomic_on_every_error() {
     let mut state = DecodeState::from_lengths(config(), vec![2, 7, 4]).expect("valid state");
@@ -74,6 +81,7 @@ fn advance_all_is_atomic_on_every_error() {
     assert_eq!(state.lengths(), original);
 }
 
+/// Distinguishes invalid row indices, capacity excess, and integer overflow.
 #[test]
 fn reports_index_and_arithmetic_failures() {
     let mut state = DecodeState::from_lengths(config(), vec![1, 2, 3]).expect("valid state");
@@ -104,6 +112,7 @@ fn reports_index_and_arithmetic_failures() {
     assert_eq!(state.lengths(), &[1, 2, 3]);
 }
 
+/// Truncates valid prefixes and rejects extensions before changing any row.
 #[test]
 fn truncates_atomically_and_never_extends() {
     let mut state = DecodeState::from_lengths(config(), vec![5, 6, 7]).expect("valid state");
@@ -137,6 +146,7 @@ fn truncates_atomically_and_never_extends() {
     assert_eq!(state.lengths(), &[0, 1, 6]);
 }
 
+/// Resets all lengths and preserves repeated row selections during reordering.
 #[test]
 fn resets_and_reorders_with_duplicates() {
     let mut state = DecodeState::from_lengths(config(), vec![2, 5, 7]).expect("valid state");
@@ -154,6 +164,7 @@ fn resets_and_reorders_with_duplicates() {
     assert_eq!(state.lengths(), &[0, 0, 0]);
 }
 
+/// Rejects invalid reorder vectors without modifying the original lengths.
 #[test]
 fn reorder_validation_is_atomic() {
     let mut state = DecodeState::from_lengths(config(), vec![2, 5, 7]).expect("valid state");
@@ -177,6 +188,7 @@ fn reorder_validation_is_atomic() {
     assert_eq!(state.lengths(), original);
 }
 
+/// Includes operation, index, and dimension context in logical-state diagnostics.
 #[test]
 fn display_messages_are_actionable() {
     let messages = [

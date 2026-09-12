@@ -39,56 +39,97 @@ use transformers::{
     models::gpt2::{Gpt2Activation, Gpt2Config, Gpt2ForCausalLm},
 };
 
+/// CPU backend used for F32 GPT-2 execution and activation comparisons.
 pub type B = Flex<f32, i32>;
+/// Experiment result preserving contextual artifact, tensor, and validation errors.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// Immutable inventory of aligned clean/corrupt prompt pairs.
 #[derive(Deserialize)]
 struct Fixture {
+    /// Ordered prompt pairs, including the fixed development and evaluation splits.
     entries: Vec<Prompt>,
 }
+/// One aligned prompt pair with the original year cutoff and intervention positions.
 #[derive(Deserialize)]
 struct Prompt {
+    /// Original year-comparison prompt text.
     clean: String,
+    /// Prompt text after replacing the start-year suffix with 01.
     corrupt: String,
+    /// Token IDs for the original clean prompt.
     clean_ids: Vec<i32>,
+    /// Token IDs for the aligned corrupted prompt.
     corrupt_ids: Vec<i32>,
+    /// Frozen split label used when aggregating outcomes.
     split: String,
+    /// Original clean start year; its final two digits define the comparison cutoff.
     year: usize,
+    /// Zero-based final token position used for the prediction and MLP interventions.
     readout_position: usize,
+    /// Zero-based token position containing the start-year suffix.
     start_suffix_position: usize,
 }
+/// Independent reference metrics for one prompt and intervention condition.
 #[derive(Clone, Deserialize)]
 struct ReferenceRow {
+    /// Index of the prompt in the immutable fixture.
     index: usize,
+    /// Name of the independently evaluated intervention or control.
     condition: String,
+    /// Reference probability mass above the clean cutoff minus mass at or below it.
     pd: f64,
+    /// Reference neighboring probability difference `p[y+1] - p[y-1]`.
     sharpness: f64,
+    /// Reference total full-vocabulary probability assigned to the 100 numeric tokens.
     numeric_mass: f64,
+    /// Reference probabilities ordered by numeric suffix, without subset renormalization.
     probabilities: Vec<f64>,
 }
+/// Predeclared thresholds for numerical agreement and resolvable recovery gaps.
 #[derive(Clone, Copy, Deserialize)]
 struct Tolerances {
+    /// Maximum absolute error permitted for independent full-vocabulary logits.
     oracle_logits_absolute: f64,
+    /// Absolute term in the captured-MLP element tolerance.
     captured_mlp_absolute: f64,
+    /// Relative term multiplying each reference MLP element's absolute value.
     captured_mlp_relative: f64,
+    /// Maximum absolute discrepancy in the greater-than probability difference.
     probability_difference_absolute: f64,
+    /// Maximum absolute discrepancy in neighboring cutoff sharpness.
     cutoff_sharpness_absolute: f64,
+    /// Maximum absolute discrepancy in an individual numeric-token probability.
     numeric_probabilities_absolute: f64,
+    /// Maximum absolute logit change permitted for identity and restoration controls.
     controls_logits_absolute: f64,
+    /// Absolute clean/corrupt gap below which recovery is left undefined.
     negligible_gap: f64,
 }
+/// Measured metrics for one prompt and intervention condition.
 #[derive(Serialize)]
 struct Row {
+    /// Index of the prompt in the immutable fixture.
     index: usize,
+    /// Frozen prompt split retained for separate aggregation.
     split: String,
+    /// Original clean year modulo 100, used as the numeric cutoff.
     suffix: usize,
+    /// Name of the executed intervention or control.
     condition: String,
+    /// Probability mass above the cutoff minus mass at or below it.
     pd: f64,
+    /// Neighboring cutoff contrast `p[y+1] - p[y-1]`.
     sharpness: f64,
+    /// Total probability of numeric suffix tokens under the full-vocabulary softmax.
     numeric_mass: f64,
+    /// Signed difference between the clean and corrupt probability-difference metrics.
     clean_corrupt_gap: f64,
+    /// Condition probability difference minus the corresponding clean value.
     change_from_clean: f64,
+    /// Fraction of the signed clean/corrupt gap recovered; absent when undefined or inapplicable.
     recovery: Option<f64>,
+    /// Numeric probability curve retained only for selected conditions.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     probabilities: Vec<f64>,
 }
@@ -96,39 +137,71 @@ struct Row {
 /// Validation measures numerical agreement and identities, not a fitted effect size.
 #[derive(Default, Serialize)]
 struct Validation {
+    /// Whether every required numerical agreement threshold passed.
     passed: bool,
+    /// Largest absolute discrepancy against independent oracle logits.
     maximum_oracle_logit_error: f64,
+    /// Largest absolute discrepancy in captured MLP values.
     maximum_mlp_error: f64,
+    /// Number of MLP elements exceeding the combined absolute and relative tolerance.
     mlp_tolerance_failures: usize,
+    /// Largest absolute discrepancy in the greater-than probability difference.
     maximum_pd_error: f64,
+    /// Largest absolute discrepancy in neighboring cutoff sharpness.
     maximum_sharpness_error: f64,
+    /// Largest absolute discrepancy in any numeric-token probability.
     maximum_numeric_probability_error: f64,
+    /// Largest absolute discrepancy in total numeric-token probability mass.
     maximum_numeric_mass_error: f64,
+    /// Largest absolute logit change across identity and restoration controls.
     maximum_control_logit_error: f64,
+    /// Largest absolute discrepancy between explicit residual projection and clean logits.
     maximum_readout_identity_error: f64,
+    /// Largest absolute discrepancy between final-layer direct-path and reverse-node logits.
     maximum_final_layer_path_node_error: f64,
+    /// Maximum absolute clean-logit discrepancy indexed by control condition.
     control_errors: BTreeMap<String, f64>,
+    /// Number of full-vocabulary oracle logit elements compared.
     oracle_elements_compared: usize,
+    /// Number of captured MLP elements compared against the oracle.
     mlp_elements_compared: usize,
+    /// Number of prompt/condition metric rows compared against independent references.
     metric_rows_compared: usize,
 }
 
+/// Validates prepared artifacts and accumulates greater-than intervention evidence.
 pub struct Study {
+    /// Immutable aligned prompt pairs and split assignments.
     fixture: Fixture,
+    /// Embedded experiment specification with pinned artifact identities and thresholds.
     manifest: Value,
+    /// Prepared artifact metadata and fingerprints loaded from disk.
     preparation: Value,
+    /// Independent reference report including provenance and expected metrics.
     reference: Value,
+    /// Reference metrics indexed by condition name and immutable prompt index.
     expected: BTreeMap<(String, usize), ReferenceRow>,
+    /// Prepared independent tensor values used for logit and MLP parity.
     oracle: Oracle,
+    /// Numerical thresholds loaded from the pinned experiment manifest.
     tolerances: Tolerances,
+    /// Vocabulary token IDs ordered by the numeric suffixes 00 through 99.
     indices: Vec<usize>,
+    /// Fixture row indices for which independent full tensor outputs are retained.
     oracle_indices: Vec<usize>,
+    /// Measured prompt/condition metrics accumulated for the final report.
     rows: Vec<Row>,
+    /// Condition/prompt keys already recorded, used to reject duplicates and omissions.
     seen: BTreeSet<(String, usize)>,
+    /// Clean full-vocabulary logits retained for controls in the current batch.
     clean_logits: BTreeMap<usize, Vec<f32>>,
+    /// Final-layer reverse-node logits retained for the matching direct-path identity.
     reverse_last: BTreeMap<usize, Vec<f32>>,
+    /// Accumulated numerical errors and comparison counts.
     validation: Validation,
+    /// Declared source-path SHA-256 digests captured before execution.
     source_inventory: BTreeMap<String, String>,
+    /// SHA-256 digest of the executable producing the measurements.
     executable_sha256: String,
 }
 
@@ -768,7 +841,9 @@ fn summary(rows: &[&Row]) -> Value {
         "mean_change_from_clean": change["mean"], "sd_change_from_clean": change["sd"]})
 }
 
+/// Owns the prepared safetensors bytes used as an independent numerical reference.
 struct Oracle {
+    /// Immutable serialized oracle tensors decoded on demand.
     bytes: Vec<u8>,
 }
 impl Oracle {

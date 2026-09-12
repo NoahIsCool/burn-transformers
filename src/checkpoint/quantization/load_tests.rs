@@ -28,25 +28,34 @@ use crate::checkpoint::{
 /// Minimal architecture sink that retains delivered metadata and payloads.
 #[derive(Default)]
 struct RecordingSink {
+    /// Final tensors delivered to each architecture target.
     tensors: BTreeMap<String, TensorData>,
+    /// Ordered alias-to-owner installation requests.
     aliases: Vec<(String, String)>,
+    /// Write/alias event order observed at the sink boundary.
     operations: Vec<String>,
 }
 
 /// Deterministic architecture rejection used to inspect error wrapping.
 #[derive(Debug, Error)]
 #[error("fixture architecture rejected `{0}`")]
-struct SinkError(String);
+struct SinkError(
+    /// Target name or injected failure detail.
+    String,
+);
 
 impl TensorSink for RecordingSink {
+    /// Synthetic architecture error used by wrapper failure tests.
     type Error = SinkError;
 
+    /// Retains the delivered tensor and records its write event.
     fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
         self.operations.push(format!("write:{target}"));
         self.tensors.insert(target.into(), data);
         Ok(())
     }
 
+    /// Records the alias request and its position in the event stream.
     fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error> {
         self.operations.push(format!("alias:{target}"));
         self.aliases
@@ -57,14 +66,19 @@ impl TensorSink for RecordingSink {
 
 /// Sink that persistently changes one checkpoint byte after its first write.
 struct SameSizeMutatingSink {
+    /// Recorder retaining successful architecture writes.
     inner: RecordingSink,
+    /// Fixture file whose last byte is changed after the first accepted write.
     checkpoint: PathBuf,
+    /// Whether the one-time corruption has already occurred.
     mutated: bool,
 }
 
 impl TensorSink for SameSizeMutatingSink {
+    /// Wraps fixture mutation I/O failures and architecture diagnostics.
     type Error = SinkError;
 
+    /// Accepts a tensor, then flips one source byte without changing file length.
     fn write_tensor(&mut self, target: &str, data: TensorData) -> Result<(), Self::Error> {
         self.inner.write_tensor(target, data)?;
         if !self.mutated {
@@ -93,6 +107,7 @@ impl TensorSink for SameSizeMutatingSink {
         Ok(())
     }
 
+    /// Forwards alias installation without another source mutation.
     fn alias_tensor(&mut self, target: &str, source_target: &str) -> Result<(), Self::Error> {
         self.inner.alias_tensor(target, source_target)
     }
@@ -100,14 +115,20 @@ impl TensorSink for SameSizeMutatingSink {
 
 /// Changes a checkpoint pathname only after every fixture tensor is installed.
 struct FinalWritePathMutatingSink {
+    /// Recorder counting successfully installed tensors.
     inner: RecordingSink,
+    /// Source pathname removed or replaced at the last write boundary.
     checkpoint: PathBuf,
+    /// Number of successful writes triggering pathname mutation.
     final_write_count: usize,
+    /// Replacement file size, or `None` to remove the pathname.
     replacement_length: Option<u64>,
+    /// Whether the one-time pathname mutation has occurred.
     mutated: bool,
 }
 
 impl TensorSink for FinalWritePathMutatingSink {
+    /// Wraps fixture filesystem or architecture failures.
     type Error = SinkError;
 
     /// Leaves an existing mapped inode intact while removing or replacing its path.
@@ -138,18 +159,22 @@ impl TensorSink for FinalWritePathMutatingSink {
 
 /// Local source wrapper that deliberately cannot certify descriptors without I/O.
 struct NonCertifyingLocalSource<'a> {
+    /// Ordinary local source retained for payload reads and accounting.
     inner: LocalShardSource<'a>,
 }
 
 impl TensorSource for NonCertifyingLocalSource<'_> {
+    /// Performs the ordinary payload read without descriptor-only certification.
     fn read_tensor(&mut self, source: &PlannedSource) -> crate::checkpoint::Result<SourceTensor> {
         self.inner.read_tensor(source)
     }
 
+    /// Closes the underlying local shard handle.
     fn close(&mut self) -> crate::checkpoint::Result<()> {
         self.inner.close()
     }
 
+    /// Returns the underlying source's read/open counters.
     fn stats(&self) -> SourceStats {
         self.inner.stats()
     }
@@ -157,12 +182,16 @@ impl TensorSource for NonCertifyingLocalSource<'_> {
 
 /// Local source that records closure while retaining fail-closed descriptor validation.
 struct CloseAwareLocalSource<'a> {
+    /// Source supplying validated descriptors and payload reads.
     inner: LocalShardSource<'a>,
+    /// Shared signal observed by the alias sink after closure.
     closed: Rc<Cell<bool>>,
+    /// Whether closure should return the injected failure after closing the handle.
     fail_close: bool,
 }
 
 impl TensorSource for CloseAwareLocalSource<'_> {
+    /// Delegates descriptor validation without changing certification semantics.
     fn validate_tensor_descriptor(
         &self,
         source: &PlannedSource,
@@ -170,10 +199,12 @@ impl TensorSource for CloseAwareLocalSource<'_> {
         self.inner.validate_tensor_descriptor(source)
     }
 
+    /// Reads the requested payload from the underlying source.
     fn read_tensor(&mut self, source: &PlannedSource) -> crate::checkpoint::Result<SourceTensor> {
         self.inner.read_tensor(source)
     }
 
+    /// Records closure, releases the handle, then optionally injects an error.
     fn close(&mut self) -> crate::checkpoint::Result<()> {
         self.closed.set(true);
         self.inner.close()?;
@@ -186,6 +217,7 @@ impl TensorSource for CloseAwareLocalSource<'_> {
         }
     }
 
+    /// Exposes underlying read and handle counters.
     fn stats(&self) -> SourceStats {
         self.inner.stats()
     }
@@ -193,18 +225,23 @@ impl TensorSource for CloseAwareLocalSource<'_> {
 
 /// Sink whose alias boundary proves that source closure precedes tied storage.
 struct CloseAwareSink {
+    /// Signal indicating the source has reached its closure boundary.
     closed: Rc<Cell<bool>>,
+    /// Accepted tensor and alias event sequence.
     operations: Vec<String>,
 }
 
 impl TensorSink for CloseAwareSink {
+    /// Diagnostic for aliases attempted before source closure.
     type Error = SinkError;
 
+    /// Records a tensor write without retaining its payload.
     fn write_tensor(&mut self, target: &str, _data: TensorData) -> Result<(), Self::Error> {
         self.operations.push(format!("write:{target}"));
         Ok(())
     }
 
+    /// Accepts an alias only after the shared source-closure signal is set.
     fn alias_tensor(&mut self, target: &str, _source_target: &str) -> Result<(), Self::Error> {
         if !self.closed.get() {
             return Err(SinkError(format!("source-open:{target}")));
@@ -217,12 +254,16 @@ impl TensorSink for CloseAwareSink {
 /// Source with a configurable bare descriptor boolean that rejects payload reads.
 #[derive(Default)]
 struct FailingSource {
+    /// Bare descriptor-certification result returned by the synthetic source.
     certify: bool,
+    /// Whether the executor called source closure.
     closed: bool,
+    /// Number of attempted payload reads, all of which fail.
     reads: usize,
 }
 
 impl TensorSource for FailingSource {
+    /// Returns the configured descriptor boolean without reading payload bytes.
     fn validate_tensor_descriptor(
         &self,
         _source: &PlannedSource,
@@ -230,6 +271,7 @@ impl TensorSource for FailingSource {
         Ok(self.certify)
     }
 
+    /// Counts the attempted read and returns the named synthetic payload failure.
     fn read_tensor(&mut self, source: &PlannedSource) -> crate::checkpoint::Result<SourceTensor> {
         self.reads += 1;
         Err(CheckpointError::InvalidTensorPayload {
@@ -238,6 +280,7 @@ impl TensorSource for FailingSource {
         })
     }
 
+    /// Records successful closure without owning any real file handle.
     fn close(&mut self) -> crate::checkpoint::Result<()> {
         self.closed = true;
         Ok(())
@@ -1800,11 +1843,14 @@ fn incompatible_artifact_is_marked_and_rejected_before_loading() {
 /// An architecture rejection remains distinguishable from sidecar corruption.
 #[test]
 fn packed_sink_failure_preserves_partial_read_accounting() {
+    /// Rejects query-projection installation while accepting other fixture targets.
     #[derive(Default)]
     struct RejectingSink;
     impl TensorSink for RejectingSink {
+        /// Injected architecture rejection returned through the packed overlay.
         type Error = SinkError;
 
+        /// Rejects only the configured query-projection target suffix.
         fn write_tensor(&mut self, target: &str, _data: TensorData) -> Result<(), Self::Error> {
             if target.ends_with("q_proj.weight") {
                 Err(SinkError(target.into()))
@@ -1813,6 +1859,7 @@ fn packed_sink_failure_preserves_partial_read_accounting() {
             }
         }
 
+        /// Accepts alias calls so the test isolates tensor-write failure accounting.
         fn alias_tensor(&mut self, _target: &str, _source_target: &str) -> Result<(), Self::Error> {
             Ok(())
         }

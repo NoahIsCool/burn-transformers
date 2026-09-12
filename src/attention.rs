@@ -39,6 +39,7 @@ use crate::intervention::{AttentionPoints, Hooks};
 use crate::normalization::RmsNorm;
 use crate::{Error, Result, architecture::TokenMask, normalization::RmsNormConfig, operations};
 
+/// Borrowed structural edit applied to materialized attention probabilities.
 type PatternTransform<'a, B> = dyn FnMut(Tensor<B, 4>) -> Result<Tensor<B, 4>> + 'a;
 
 /// Multiplicative gate emitted alongside Qwen/Muse query projections.

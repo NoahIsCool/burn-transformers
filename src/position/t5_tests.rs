@@ -1,5 +1,8 @@
+//! Exact T5 relative-bucket reference cases, saturation, and geometry diagnostics.
+
 use super::*;
 
+/// Directional bucket counts and logarithmic boundaries enforce constructor invariants.
 #[test]
 fn validates_bucket_geometry() {
     assert_eq!(
@@ -38,6 +41,7 @@ fn validates_bucket_geometry() {
     );
 }
 
+/// Causal exact and logarithmic regions match fixed reference bucket assignments.
 #[test]
 fn matches_reference_causal_buckets() {
     let buckets = T5RelativePositionBuckets::new(32, 128, false).expect("valid config");
@@ -64,6 +68,7 @@ fn matches_reference_causal_buckets() {
     }
 }
 
+/// Past and future displacements use the expected independent table halves.
 #[test]
 fn matches_reference_bidirectional_buckets() {
     let buckets = T5RelativePositionBuckets::new(32, 128, true).expect("valid config");
@@ -95,6 +100,7 @@ fn matches_reference_bidirectional_buckets() {
     }
 }
 
+/// Absolute query/key coordinates agree with signed key-minus-query displacement.
 #[test]
 fn explicit_positions_match_signed_displacements() {
     let buckets = T5RelativePositionBuckets::new(32, 128, true).expect("valid config");
@@ -109,6 +115,7 @@ fn explicit_positions_match_signed_displacements() {
     }
 }
 
+/// Signed minima and maximum absolute indices saturate without arithmetic overflow.
 #[test]
 fn signed_and_unsigned_extremes_saturate_without_panicking() {
     let bidirectional = T5RelativePositionBuckets::new(32, 128, true).expect("valid config");
@@ -122,6 +129,7 @@ fn signed_and_unsigned_extremes_saturate_without_panicking() {
     assert_eq!(causal.bucket(i64::MAX), 0);
 }
 
+/// Increasing distance never decreases a directional bucket and reaches its last bucket.
 #[test]
 fn buckets_are_monotonic_and_saturating_in_each_direction() {
     for num_buckets in [4, 8, 16, 32, 64] {
@@ -151,6 +159,7 @@ fn buckets_are_monotonic_and_saturating_in_each_direction() {
     }
 }
 
+/// Accessors return the constructor's accepted table and direction settings.
 #[test]
 fn accessors_preserve_validated_configuration() {
     let buckets = T5RelativePositionBuckets::new(32, 128, true).expect("valid config");
@@ -159,6 +168,7 @@ fn accessors_preserve_validated_configuration() {
     assert!(buckets.is_bidirectional());
 }
 
+/// Rejected table sizes and distance thresholds retain actionable numerical diagnostics.
 #[test]
 fn validation_errors_explain_invalid_geometry() {
     let messages = [

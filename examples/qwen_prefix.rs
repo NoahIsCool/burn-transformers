@@ -54,14 +54,19 @@ mod experiment {
         },
     };
 
+    /// CPU backend used to initialize or load the selected Qwen blocks in F32.
     type B = Flex<f32, i32>;
 
     // Register every trainable component in one ordinary Burn module. The
     // backbone itself contains only the selected blocks, embedding, and norm.
+    /// Registers a selected Qwen prefix and an untrained classification head.
     #[derive(Module, Debug)]
     struct PrefixClassifier<B: Backend> {
+        /// Embedding, selected decoder blocks, and final normalization of the Qwen prefix.
         backbone: Qwen3_5TextModel<B>,
+        /// Projection reducing each normalized residual to the head's bottleneck width.
         bottleneck: Linear<B>,
+        /// Binary task readout from the bottleneck features.
         classifier: Linear<B>,
     }
 

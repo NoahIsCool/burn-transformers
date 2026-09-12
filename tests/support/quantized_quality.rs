@@ -197,7 +197,9 @@ pub(crate) struct QualitySummary {
 /// Small compensated sum used to prevent row-order-dependent mean drift.
 #[derive(Debug, Clone, Copy, Default)]
 struct CompensatedSum {
+    /// Running F64 total after applying each compensated increment.
     sum: f64,
+    /// Rounding error subtracted from the next increment in Kahan summation.
     correction: f64,
 }
 
@@ -213,14 +215,23 @@ impl CompensatedSum {
 
 /// Stateful row-order guard and quality accumulator.
 pub(crate) struct FixedSequenceQuality<'a> {
+    /// Authenticated row-major `[decision, vocabulary]` reference logits.
     official_logits: &'a [f32],
+    /// Fixed official top-one token ID scored at each decision.
     target_token_ids: &'a [u32],
+    /// Contiguous absolute prediction positions aligned with the reference rows.
     row_position_ids: &'a [usize],
+    /// Number of token logits in each reference and observed row.
     vocabulary_size: usize,
+    /// Index of the next reference row that `observe` must consume.
     next_row: usize,
+    /// Compensated total of official target-token negative log likelihoods.
     official_nll: CompensatedSum,
+    /// Compensated total of observed quantized target-token negative log likelihoods.
     quantized_nll: CompensatedSum,
+    /// Observed rows whose deterministic argmax matches the official target.
     exact_top1_matches: usize,
+    /// Smallest full-vocabulary cosine across successfully observed row pairs.
     minimum_full_vector_cosine: f64,
 }
 
@@ -544,6 +555,8 @@ fn full_vector_cosine(
 
 #[cfg(test)]
 mod tests {
+    //! Tests for fixed-sequence alignment, numerical diagnostics, and NLL regression limits.
+
     use super::*;
 
     /// Builds a two-row contract whose committed tokens are exact top-one IDs.
@@ -564,6 +577,7 @@ mod tests {
         quality.finish().unwrap()
     }
 
+    /// A common large logit offset leaves stable NLL equal to the analytic result.
     #[test]
     fn stable_log_sum_exp_is_invariant_to_large_offsets() {
         let ordinary = negative_log_likelihood(&[2.0, 1.0], 0, LogitStream::Official, 0).unwrap();
@@ -573,6 +587,7 @@ mod tests {
         assert!((ordinary - (1.0_f64 + (-1.0_f64).exp()).ln()).abs() < 1.0e-15);
     }
 
+    /// Identical reference and observed rows produce zero regression and perfect agreement.
     #[test]
     fn unchanged_rows_have_zero_regression_and_complete_diagnostics() {
         let summary = identical_summary();
@@ -583,6 +598,7 @@ mod tests {
         assert!((summary.minimum_full_vector_cosine - 1.0).abs() < 1.0e-15);
     }
 
+    /// Improved target likelihood yields a negative regression accepted by a zero limit.
     #[test]
     fn lower_quantized_nll_is_not_treated_as_a_regression() {
         let (logits, targets, positions) = fixture();
@@ -594,6 +610,7 @@ mod tests {
         enforce_regression_limit(&summary, 0.0).unwrap();
     }
 
+    /// A measured regression exactly equal to the configured limit passes.
     #[test]
     fn exact_regression_limit_is_inclusive() {
         let mut summary = identical_summary();
@@ -601,6 +618,7 @@ mod tests {
         enforce_regression_limit(&summary, 0.01).unwrap();
     }
 
+    /// A regression just above the limit returns the measured excess and bound.
     #[test]
     fn regression_above_limit_is_rejected() {
         let mut summary = identical_summary();
@@ -614,6 +632,7 @@ mod tests {
         );
     }
 
+    /// Analytic two-token NLL values determine the measured regression gate outcome.
     #[test]
     fn measured_nll_regression_drives_the_threshold_gate() {
         let official = [2.0, 0.0];
@@ -632,6 +651,7 @@ mod tests {
         ));
     }
 
+    /// Negative, NaN, and infinite regression limits are rejected before comparison.
     #[test]
     fn negative_nan_and_infinite_limits_are_rejected() {
         let summary = identical_summary();
@@ -643,6 +663,7 @@ mod tests {
         }
     }
 
+    /// NaN and either infinite measured regression fail even with a valid limit.
     #[test]
     fn nonfinite_measured_regressions_are_rejected() {
         for regression in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
@@ -655,6 +676,7 @@ mod tests {
         }
     }
 
+    /// Empty vocabulary or decision sequences cannot construct a quality accumulator.
     #[test]
     fn zero_vocabulary_and_empty_sequence_are_rejected() {
         assert!(matches!(
@@ -667,6 +689,7 @@ mod tests {
         ));
     }
 
+    /// Reference element counts and position counts must match the fixed sequence exactly.
     #[test]
     fn reference_shape_and_position_count_must_be_exact() {
         assert_eq!(
@@ -685,6 +708,7 @@ mod tests {
         );
     }
 
+    /// Overflow in decision-count times vocabulary-width calculation returns a shape error.
     #[test]
     fn shape_multiplication_overflow_is_rejected() {
         assert!(matches!(
@@ -693,6 +717,7 @@ mod tests {
         ));
     }
 
+    /// Duplicate, backward, and skipped positions violate the contiguous sequence contract.
     #[test]
     fn duplicate_backward_and_gapped_positions_are_rejected() {
         let logits = [2.0, 0.0, 2.0, 0.0];
@@ -704,6 +729,7 @@ mod tests {
         }
     }
 
+    /// A reference position at the integer maximum cannot be advanced to another row.
     #[test]
     fn position_successor_overflow_is_rejected() {
         assert_eq!(
@@ -712,6 +738,7 @@ mod tests {
         );
     }
 
+    /// A target token equal to the vocabulary width is rejected with its row coordinate.
     #[test]
     fn out_of_range_target_is_rejected() {
         assert_eq!(
@@ -724,6 +751,7 @@ mod tests {
         );
     }
 
+    /// Each fixed target must equal its official row argmax before scoring can begin.
     #[test]
     fn official_target_must_be_its_rows_top_one() {
         assert_eq!(
@@ -736,6 +764,7 @@ mod tests {
         );
     }
 
+    /// Equal maximum logits select the smallest token ID in the reference contract.
     #[test]
     fn top_one_ties_are_resolved_to_the_lowest_token_id() {
         assert!(FixedSequenceQuality::new(&[2.0, 2.0, 0.0], &[0], &[0], 3).is_ok());
@@ -745,6 +774,7 @@ mod tests {
         ));
     }
 
+    /// Positive and negative zero compare as a tie resolved by the smallest token ID.
     #[test]
     fn signed_zero_ties_are_resolved_to_the_lowest_token_id() {
         assert!(FixedSequenceQuality::new(&[-0.0, 0.0, -1.0], &[0], &[0], 3).is_ok());
@@ -754,6 +784,7 @@ mod tests {
         ));
     }
 
+    /// Nonfinite reference logits report their stream, row, and vocabulary coordinate.
     #[test]
     fn nonfinite_reference_logits_are_rejected_with_their_coordinate() {
         for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
@@ -768,6 +799,7 @@ mod tests {
         }
     }
 
+    /// A numerically zero reference NLL is rejected as an undefined regression denominator.
     #[test]
     fn zero_reference_baseline_is_rejected() {
         assert!(matches!(
@@ -776,6 +808,7 @@ mod tests {
         ));
     }
 
+    /// An all-zero reference row is rejected because its cosine norm vanishes.
     #[test]
     fn zero_norm_reference_is_rejected() {
         assert_eq!(
@@ -787,6 +820,7 @@ mod tests {
         );
     }
 
+    /// Mismatched position, target, or width fails without consuming the expected row.
     #[test]
     fn runtime_position_target_and_width_must_match_before_scoring() {
         let (logits, targets, positions) = fixture();
@@ -810,6 +844,7 @@ mod tests {
         quality.observe(8, 0, &logits[..3]).unwrap();
     }
 
+    /// Nonfinite or zero-norm quantized rows fail before contributing quality measurements.
     #[test]
     fn nonfinite_and_zero_norm_quantized_rows_are_rejected() {
         let (logits, targets, positions) = fixture();
@@ -834,6 +869,7 @@ mod tests {
         );
     }
 
+    /// Finishing early or observing beyond the fixed sequence reports the exact row count.
     #[test]
     fn incomplete_and_extra_row_sequences_are_rejected() {
         let (logits, targets, positions) = fixture();
@@ -856,6 +892,7 @@ mod tests {
         );
     }
 
+    /// Argmax disagreement reduces its diagnostic count while retaining finite cosine reporting.
     #[test]
     fn top_one_mismatch_is_reported_but_does_not_replace_nll_policy() {
         let (logits, targets, positions) = fixture();

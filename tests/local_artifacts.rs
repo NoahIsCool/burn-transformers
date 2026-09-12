@@ -74,16 +74,22 @@ use transformers::{
 /// Immutable identity recorded alongside the committed Qwen3.8 header inventory.
 #[derive(Debug, serde::Deserialize)]
 struct PinnedQwen38Inventory {
+    /// Official repository name associated with the committed header inventory.
     checkpoint: String,
+    /// Immutable upstream revision from which the headers were collected.
     revision: String,
+    /// Expected physical tensor names, shapes, and storage dtypes.
     tensors: Vec<PinnedTensorInventory>,
 }
 
 /// One expected physical tensor from the pinned Qwen3.8 SafeTensors headers.
 #[derive(Debug, serde::Deserialize)]
 struct PinnedTensorInventory {
+    /// Exact tensor key in the upstream SafeTensors headers.
     name: String,
+    /// Tensor dimensions in checkpoint storage order.
     shape: Vec<u64>,
+    /// SafeTensors storage dtype name.
     dtype: String,
 }
 
@@ -92,18 +98,31 @@ struct PinnedTensorInventory {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38OfficialReference {
+    /// Version of the strict official-reference JSON schema.
     schema_version: u32,
+    /// Official model repository used by the reference run.
     repository: String,
+    /// Immutable checkpoint revision loaded by the reference generator.
     revision: String,
+    /// Fully qualified official model class used for inference.
     reference_class: String,
+    /// Exact source text selected for the reference continuation.
     prompt: String,
+    /// Tokenized source prefix supplied to the official model.
     input_ids: Vec<i64>,
+    /// Graph precision, cache, deterministic, and kernel settings.
     execution: Qwen38ReferenceExecution,
+    /// Recorded interpreter, package, device, and offline environment.
     environment: Qwen38ReferenceEnvironment,
+    /// Authenticated generator, source files, checkpoint artifacts, and load accounting.
     provenance: Qwen38ReferenceProvenance,
+    /// Complete prompt-final logit payload and recomputable diagnostics.
     last_logits: Qwen38ReferenceLogits,
+    /// Cached greedy continuation and decision-stability evidence.
     generation: Qwen38ReferenceGeneration,
+    /// Stateless teacher-forced comparisons against cached predictions.
     teacher_forced: Qwen38ReferenceTeacherForced,
+    /// Diagnostic phase durations measured in seconds.
     timings_seconds: Qwen38ReferenceTimings,
 }
 
@@ -112,16 +131,27 @@ struct Qwen38OfficialReference {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceExecution {
+    /// Floating-point dtype requested from the official model loader.
     dtype: String,
+    /// Device selected for official model execution.
     device: String,
+    /// Official attention implementation selected for the graph.
     attention_implementation: String,
+    /// Whether PyTorch deterministic algorithms were enabled.
     deterministic_algorithms: bool,
+    /// Random seed recorded for the official run.
     seed: u64,
+    /// Whether official generation used a decode cache.
     use_cache: bool,
+    /// PyTorch policy controlling F32 matrix multiplication precision.
     float32_matmul_precision: String,
+    /// Fraction of device memory permitted to the MPS process.
     mps_per_process_memory_fraction: f64,
+    /// Whether every model call received an explicit all-valid attention mask.
     explicit_all_one_attention_masks: bool,
+    /// Scoped performance-only allocator override and its observed calls.
     allocator_warmup_override: Qwen38AllocatorWarmupOverride,
+    /// Availability flags for optional official fast kernels.
     kernel_status: BTreeMap<String, bool>,
 }
 
@@ -130,15 +160,25 @@ struct Qwen38ReferenceExecution {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38AllocatorWarmupOverride {
+    /// Fully qualified allocator-warmup function temporarily replaced during loading.
     target: String,
+    /// Named policy governing the temporary warmup replacement.
     policy: String,
+    /// Loader call during which the replacement was active.
     scope: String,
+    /// Recorded rationale for bypassing the oversized MPS warmup allocation.
     reason: String,
+    /// Official source module containing the replaced function.
     upstream_source_module: String,
+    /// Number of intercepted allocator-warmup calls.
     call_count: usize,
+    /// Number of entries in the expanded loader device map.
     expanded_device_map_entries: usize,
+    /// Distinct device types observed in the expanded map.
     expanded_device_types: Vec<String>,
+    /// Whether a Hugging Face quantizer was passed to the intercepted call.
     hf_quantizer_present: bool,
+    /// Whether the original warmup function was restored after loading.
     restored: bool,
 }
 
@@ -147,13 +187,21 @@ struct Qwen38AllocatorWarmupOverride {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceEnvironment {
+    /// UTC timestamp at which the reference record was generated.
     generated_at_utc: String,
+    /// Generator invocation as an ordered argument vector.
     command: Vec<String>,
+    /// Interpreter version, executable, implementation, and platform.
     python: Qwen38ReferencePython,
+    /// Installed package versions keyed by package name.
     packages: BTreeMap<String, String>,
+    /// Wheel versions and dist-info file identities keyed by distribution name.
     distribution_provenance: BTreeMap<String, Qwen38ReferenceDistribution>,
+    /// SHA-256 of the canonical distribution provenance manifest.
     distribution_manifest_sha256: String,
+    /// Recorded accelerator identity and runtime availability metadata.
     device: serde_json::Value,
+    /// Environment variables enforcing offline execution and backend controls.
     offline_environment: BTreeMap<String, String>,
 }
 
@@ -162,8 +210,11 @@ struct Qwen38ReferenceEnvironment {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceDistribution {
+    /// Installed version of this Python distribution.
     version: String,
+    /// Byte identity of the distribution METADATA file.
     metadata: Qwen38ReferenceDistributionFile,
+    /// Byte identity of the distribution RECORD file.
     record: Qwen38ReferenceDistributionFile,
 }
 
@@ -172,8 +223,11 @@ struct Qwen38ReferenceDistribution {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceDistributionFile {
+    /// Relative path to the distribution metadata file.
     relative_path: String,
+    /// Exact metadata-file length in bytes.
     bytes: usize,
+    /// SHA-256 of the exact metadata-file bytes.
     sha256: String,
 }
 
@@ -182,9 +236,13 @@ struct Qwen38ReferenceDistributionFile {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferencePython {
+    /// Complete Python interpreter version string.
     version: String,
+    /// Path to the interpreter executable used for generation.
     executable: String,
+    /// Python implementation name.
     implementation: String,
+    /// Interpreter platform description.
     platform: String,
 }
 
@@ -193,13 +251,21 @@ struct Qwen38ReferencePython {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceProvenance {
+    /// Exact reference-generator content and Git state.
     generator: Qwen38ReferenceGenerator,
+    /// Official source modules used by the reference implementation.
     reference_sources: Vec<Qwen38ReferenceSource>,
+    /// Checkpoint control files and weight shards authenticated for loading.
     artifacts: Vec<Qwen38ReferenceArtifact>,
+    /// SHA-256 of the canonical checkpoint artifact manifest.
     artifact_manifest_sha256: String,
+    /// Total physical checkpoint tensor payload bytes.
     checkpoint_tensor_bytes: u64,
+    /// Number of parameter elements loaded by the official model.
     loaded_parameter_count: u64,
+    /// Loaded parameter element counts grouped by dtype.
     parameter_dtype_elements: BTreeMap<String, u64>,
+    /// Official loader classifications, each expected to be empty.
     loading_info: Qwen38ReferenceLoadingInfo,
 }
 
@@ -208,9 +274,13 @@ struct Qwen38ReferenceProvenance {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceGenerator {
+    /// Generator path relative to its repository root.
     relative_path: String,
+    /// SHA-256 of the reference-generator source bytes.
     sha256: String,
+    /// Generator repository HEAD at reference creation.
     git_head: String,
+    /// Whether the generator repository had uncommitted changes.
     git_dirty: bool,
 }
 
@@ -219,10 +289,15 @@ struct Qwen38ReferenceGenerator {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceSource {
+    /// Importable official module containing the reference code.
     module: String,
+    /// Source-file path relative to the installed package.
     relative_path: String,
+    /// Absolute installed source-file path recorded by the generator.
     path: String,
+    /// Exact installed source-file length in bytes.
     bytes: u64,
+    /// SHA-256 of the installed source-file bytes.
     sha256: String,
 }
 
@@ -231,8 +306,11 @@ struct Qwen38ReferenceSource {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceArtifact {
+    /// Artifact path relative to the pinned checkpoint root.
     relative_path: String,
+    /// Exact checkpoint artifact length in bytes.
     bytes: u64,
+    /// SHA-256 of the exact checkpoint artifact bytes.
     sha256: String,
 }
 
@@ -241,9 +319,13 @@ struct Qwen38ReferenceArtifact {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceLoadingInfo {
+    /// Expected checkpoint keys absent during official loading.
     missing_keys: Qwen38ReferenceLoadingClass,
+    /// Checkpoint keys unused by the official model.
     unexpected_keys: Qwen38ReferenceLoadingClass,
+    /// Checkpoint keys whose dimensions disagreed with the official model.
     mismatched_keys: Qwen38ReferenceLoadingClass,
+    /// Other errors reported by the official loader.
     error_msgs: Qwen38ReferenceLoadingClass,
 }
 
@@ -252,7 +334,9 @@ struct Qwen38ReferenceLoadingInfo {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceLoadingClass {
+    /// Number of entries in this loader classification.
     count: usize,
+    /// SHA-256 of the canonical classification contents.
     sha256: String,
 }
 
@@ -261,16 +345,27 @@ struct Qwen38ReferenceLoadingClass {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceLogits {
+    /// Raw logit filename relative to the reference bundle.
     relative_path: String,
+    /// Element encoding of the raw payload, required to be little-endian F32.
     encoding: String,
+    /// Number of vocabulary logits in the raw vector.
     elements: usize,
+    /// Exact raw logit payload length in bytes.
     bytes: usize,
+    /// SHA-256 of the raw logit payload.
     sha256: String,
+    /// Whether every recorded logit is finite.
     finite: bool,
+    /// Vocabulary index of the largest prompt-final logit.
     top1_token_id: i64,
+    /// Ten highest logits with their vocabulary indices.
     top10: Vec<Qwen38ReferenceLogit>,
+    /// Additional token-indexed values used to verify raw decoding.
     probes: Vec<Qwen38ReferenceLogit>,
+    /// Euclidean norm of the complete logit vector.
     l2_norm: f64,
+    /// Sum of all values in the complete logit vector.
     sum: f64,
 }
 
@@ -279,7 +374,9 @@ struct Qwen38ReferenceLogits {
 #[derive(Debug, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceLogit {
+    /// Vocabulary index sampled from the reference vector.
     token_id: usize,
+    /// Reference logit at the given vocabulary index.
     logit: f64,
 }
 
@@ -288,16 +385,27 @@ struct Qwen38ReferenceLogit {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceGeneration {
+    /// Requested number of cached greedy decisions.
     max_new_tokens: usize,
+    /// Greedy continuation IDs in decision order, excluding the source prefix.
     token_ids: Vec<i64>,
+    /// Top-one minus top-two logit gap for each decision.
     margins: Vec<f64>,
+    /// Binary16 perturbation budget used to screen decision stability.
     stability_policy: Qwen38Top1StabilityPolicy,
+    /// Top-two logits and stability calculation for each cached decision.
     decision_stability: Vec<Qwen38DecisionStability>,
+    /// Decoded continuation text recorded by the official tokenizer.
     decoded_text: String,
+    /// Token IDs recognized as end-of-sequence by the reference run.
     eos_token_ids: Vec<i64>,
+    /// Zero-based index of the first generated EOS, or none if absent.
     first_eos_position: Option<usize>,
+    /// Whether all 32 decisions completed without generating EOS.
     completed_32_decisions: bool,
+    /// Smallest top-two logit gap across the continuation.
     minimum_observed_margin: f64,
+    /// Smallest decision margin divided by its elementwise perturbation budget.
     minimum_margin_to_epsilon_ratio: f64,
 }
 
@@ -306,9 +414,13 @@ struct Qwen38ReferenceGeneration {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38Top1StabilityPolicy {
+    /// Stable identifier of the binary16 perturbation policy.
     name: String,
+    /// Allowed local binary16 representable steps per logit.
     elementwise_perturbation_ulps: f64,
+    /// Required margin-to-budget ratio accounting for both top scores moving.
     safety_factor: f64,
+    /// Mathematical rationale and limitations of the stability screen.
     rationale: String,
 }
 
@@ -317,16 +429,27 @@ struct Qwen38Top1StabilityPolicy {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38DecisionStability {
+    /// Zero-based position in the cached greedy continuation.
     step: usize,
+    /// Vocabulary index of the largest decision logit.
     top1_token_id: i64,
+    /// Vocabulary index of the runner-up decision logit.
     top2_token_id: i64,
+    /// Largest decision logit.
     top1_logit: f64,
+    /// Runner-up decision logit.
     top2_logit: f64,
+    /// Difference between the highest and second-highest logits.
     margin: f64,
+    /// Local binary16 representable spacing at the highest logit.
     top1_f16_ulp: f64,
+    /// Local binary16 representable spacing at the runner-up logit.
     top2_f16_ulp: f64,
+    /// Allowed absolute perturbation per logit using the wider top-two spacing.
     elementwise_epsilon: f64,
+    /// Top-two gap divided by the allowed elementwise perturbation.
     margin_to_epsilon_ratio: f64,
+    /// Whether the margin-to-budget ratio exceeds the policy safety factor.
     stable_under_budget: bool,
 }
 
@@ -335,16 +458,27 @@ struct Qwen38DecisionStability {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceTeacherForced {
+    /// Source prefix followed by the first 31 generated continuation IDs.
     input_ids: Vec<i64>,
+    /// Zero-based input positions whose outputs predict the 32 continuation tokens.
     prediction_positions: Vec<usize>,
+    /// Argmax vocabulary indices for every teacher-forced input position.
     all_position_top1_token_ids: Vec<i64>,
+    /// Teacher-forced argmax IDs restricted to continuation prediction positions.
     continuation_top1_token_ids: Vec<i64>,
+    /// Cached argmax IDs for the same continuation predictions.
     cached_top1_token_ids: Vec<i64>,
+    /// Whether cached and teacher-forced continuation argmax IDs match exactly.
     top1_equal: bool,
+    /// Cached-versus-stateless full-vocabulary cosine at each continuation prefix.
     per_prefix_cosine: Vec<f64>,
+    /// Minimum cached-versus-stateless cosine across all continuation prefixes.
     minimum_cosine: f64,
+    /// Largest absolute cached-versus-stateless logit difference at each prefix.
     per_prefix_max_abs_error: Vec<f64>,
+    /// Largest absolute logit difference across all compared prefixes.
     maximum_abs_error: f64,
+    /// Cosine between cached and stateless predictions for the original prompt.
     prompt_cached_stateless_cosine: f64,
 }
 
@@ -353,9 +487,13 @@ struct Qwen38ReferenceTeacherForced {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Qwen38ReferenceTimings {
+    /// Official checkpoint loading duration in seconds.
     load: f64,
+    /// Stateless source-prefix inference duration in seconds.
     stateless_prompt: f64,
+    /// Duration of the complete 32-decision cached continuation in seconds.
     cached_generation_32: f64,
+    /// All-position teacher-forced inference duration in seconds.
     teacher_forced_all_logits: f64,
 }
 
@@ -851,6 +989,7 @@ fn loads_pinned_qwen38_text_and_mtp_and_runs_metal() {
 /// Loads the external official-reference directory selected for Qwen3.8 acceptance.
 #[cfg(feature = "metal")]
 fn pinned_qwen38_reference_root() -> PathBuf {
+    /// Fixed immutable bundle directory beneath the configured reference parent.
     const BUNDLE_DIRECTORY: &str = "qwen3.8-27b-1d4bf0f2-reference.bundle";
 
     PathBuf::from(
@@ -898,7 +1037,9 @@ fn open_regular_file_no_follow(path: &Path, expected_bytes: u64, maximum_bytes: 
     // Darwin's O_NOFOLLOW value is stable ABI. `OpenOptionsExt` is used instead
     // of a path metadata check so a symlink swap between inspection and open
     // cannot redirect the descriptor.
+    /// Darwin open flag rejecting a symlink in the final path component.
     const DARWIN_O_NOFOLLOW: i32 = 0x0000_0100;
+    /// Darwin nonblocking open flag avoiding a hang on a substituted special file.
     const DARWIN_O_NONBLOCK: i32 = 0x0000_0004;
 
     assert!(
@@ -980,6 +1121,7 @@ fn read_regular_file_exact(path: &Path, expected_bytes: u64, maximum_bytes: u64)
 /// Streams one regular file into SHA-256 while enforcing its recorded length.
 #[cfg(feature = "metal")]
 fn sha256_regular_file(path: &Path, expected_bytes: u64) -> String {
+    /// Host buffer size for bounded streaming SHA-256 reads.
     const HASH_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
     let mut file = open_regular_file_no_follow(path, expected_bytes, expected_bytes);
@@ -1185,10 +1327,15 @@ fn assert_reference_close(label: &str, actual: f64, expected: f64) {
 /// Reads and exhaustively validates the official JSON and raw F32 prompt vector.
 #[cfg(feature = "metal")]
 fn read_pinned_qwen38_reference() -> (Qwen38OfficialReference, Vec<f32>) {
+    /// Expected manifest basename in the pinned Qwen3.8 reference bundle.
     const JSON_FILENAME: &str = "qwen3.8-27b-1d4bf0f2-reference.json";
+    /// Expected raw prompt-logit basename in the pinned reference bundle.
     const RAW_FILENAME: &str = "qwen3.8-27b-1d4bf0f2-six-token-f16-last-logits.f32le";
+    /// Maximum accepted manifest length in bytes before allocating a read buffer.
     const MAXIMUM_JSON_BYTES: u64 = 1024 * 1024;
+    /// SHA-256 of the empty payload required for empty loader classifications.
     const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    /// Independently pinned SHA-256 of the checkpoint artifact manifest.
     const ARTIFACT_MANIFEST_SHA256: &str =
         "188de1fbf58b9e6897b9dc218d5afc4d9b9082657121db3ddb238b5296d66833";
 
@@ -3160,8 +3307,11 @@ const TRUSTED_QWEN35_Q4_V2_LOAD_PLAN_SHA256: &str =
 /// Authenticates and loads the exact source-bound Q4/v2 artifact for 32K tests.
 #[cfg(all(feature = "metal", not(feature = "rocm")))]
 fn load_reviewed_qwen35_q4_v2() -> transformers::LoadedModel<AutoCausalLm<Metal>> {
+    /// Original SafeTensors shard bound into the reviewed Q4 sidecar.
     const SOURCE_SHARD: &str = "model.safetensors-00001-of-00001.safetensors";
+    /// Exact source-shard length in bytes.
     const SOURCE_SHARD_BYTES: u64 = 1_746_942_600;
+    /// SHA-256 of the original source-shard bytes.
     const SOURCE_SHARD_SHA256: &str =
         "04b1c301231dd422b8860db31311ab2721511346a32cb1e079c4c4e5f1fe4696";
 
@@ -3250,6 +3400,7 @@ fn load_reviewed_qwen35_q4_v2() -> transformers::LoadedModel<AutoCausalLm<Metal>
 #[test]
 #[ignore = "requires the reviewed Qwen3.5-0.8B Q4/v2 Burnpack and about 1 GiB of Metal memory; this is a cache/position envelope, not 32K prefill"]
 fn qwen35_q4_v2_allocates_and_executes_the_32k_envelope_on_metal() {
+    /// Cache capacity and positional envelope exercised by the allocation gate.
     const CONTEXT: usize = 32_768;
     let loaded = load_reviewed_qwen35_q4_v2();
     let device = Default::default();
@@ -3357,8 +3508,11 @@ fn qwen35_q4_v2_allocates_and_executes_the_32k_envelope_on_metal() {
 fn qwen35_q4_v2_populates_and_decodes_the_32k_history_on_metal() {
     use burn::tensor::backend::Backend;
 
+    /// Total populated token capacity of the long-history stress gate.
     const CONTEXT: usize = 32_768;
+    /// Tokens processed per prefill chunk during long-history population.
     const CHUNK: usize = 256;
+    /// Authenticated prompt token cycle repeated to populate the full history.
     const PATTERN: [i64; 23] = [
         248_045, 846, 198, 814, 20_139, 3_069, 279, 15_127, 2_222, 303, 2_943, 4_434, 22_157, 13,
         248_046, 198, 248_045, 74_455, 198, 248_068, 271, 248_069, 271,

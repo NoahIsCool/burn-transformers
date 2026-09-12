@@ -13,6 +13,7 @@ use crate::checkpoint::{
 
 use super::{ConfigError, DeepseekV2Config, Validate};
 
+/// Family identifier retained in checked checkpoint-dimension errors.
 const FAMILY: &str = "deepseek_v2";
 
 /// Reserved explicit policy for future wrapper namespaces.
@@ -22,7 +23,9 @@ pub struct DeepseekV2CheckpointOptions {}
 /// Complete expected tensor inventory and source-to-field mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeepseekV2CheckpointContract {
+    /// Required tensor names and shapes in deterministic topology order.
     expected: Vec<ExpectedTensor>,
+    /// Checkpoint-to-runtime target mappings, including the optional tied-head alias.
     mappings: MappingPlan,
 }
 
@@ -240,6 +243,7 @@ struct Dimensions {
 }
 
 impl TryFrom<&DeepseekV2Config> for Dimensions {
+    /// Configuration failure from a dimension conversion, sum, or product.
     type Error = ConfigError;
 
     /// Converts all host dimensions to checked checkpoint extents.
@@ -370,4 +374,5 @@ fn product(field: &'static str, left: usize, right: usize) -> Result<u64, Config
 
 #[cfg(test)]
 #[path = "checkpoint_tests.rs"]
+/// Expected-inventory and strict checkpoint-planning regressions.
 mod tests;

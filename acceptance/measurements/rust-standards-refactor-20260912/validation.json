@@ -1,0 +1,535 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-12",
+  "baseline": "103c6ffeb5c5def6f2ce2c273717d65822ec6d07",
+  "source_revision": "8444a38ecb9c2eb3aa50ae5af21828c1146b821d",
+  "branch": "codex/tfm-rust-standards",
+  "worktree": "/private/tmp/tfm-rust-standards",
+  "storage": {
+    "local_free_gib_observed": [
+      15,
+      12,
+      11
+    ],
+    "required_preflight_gib": 20,
+    "external_free_gib_observed": [
+      788,
+      768,
+      756
+    ],
+    "fallback": "Dedicated targets on /Volumes/bag of holding preserve user caches and avoid stale source artifacts across worktrees.",
+    "consolidated_source_runner": "Dry-run plan inspected; consolidated runner not executed because its source-filesystem 20 GiB preflight cannot accept this necessary external-target fallback. Individual required source checks are recorded here; full release qualification is not claimed."
+  },
+  "targets": {
+    "FINAL_TARGET": "/Volumes/bag of holding/cargo-targets/tfm-rust-standards-final",
+    "MSRV_TARGET": "/Volumes/bag of holding/cargo-targets/tfm-rust-standards-msrv",
+    "STABLE_TARGET": "/Volumes/bag of holding/cargo-targets/tfm-rust-standards-stable",
+    "AUDIT_TARGET": "/Volumes/bag of holding/cargo-targets/tfm-rust-standards-audit-final",
+    "COVERAGE_TARGET": "/Volumes/bag of holding/cargo-targets/tfm-rust-standards-coverage"
+  },
+  "checks": [
+    {
+      "name": "rust-tests",
+      "command": "cargo test --locked --offline --features autodiff,tokenizers,chat-templates --target-dir \"$FINAL_TARGET\"",
+      "result": "1462 Rust tests and 3 doctests passed; 32 opt-in tests ignored.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-tests.log",
+      "log_sha256": "c52d558ba430cedf8d4ce78c38cd72c569f638785dc5b90ebdc53921d7bd6102",
+      "log_bytes": 155847
+    },
+    {
+      "name": "msrv-tests",
+      "command": "cargo +1.92.0 test --locked --offline --features autodiff,tokenizers,chat-templates --target-dir \"$MSRV_TARGET\"",
+      "result": "1462 Rust tests and 3 doctests passed; 32 opt-in tests ignored.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-msrv-tests.log",
+      "log_sha256": "13a712b1da2ef0a0b7ebc9b41c4a5173e1c827082ea90e0907f5ff9312c63ef6",
+      "log_bytes": 156439
+    },
+    {
+      "name": "all-target-tests",
+      "command": "cargo test --locked --offline --features train,tokenizers,chat-templates --all-targets --target-dir \"$FINAL_TARGET\"",
+      "result": "1480 tests passed; 32 opt-in tests ignored. Includes CPU training example test harnesses.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-all-target-tests.log",
+      "log_sha256": "898a52826a82bcdcd25a8cbaa82338f1bc57da562fdc4b2cc9da6a3b805948a3",
+      "log_bytes": 159631
+    },
+    {
+      "name": "stable-build",
+      "command": "cargo +1.98.0 build --locked --offline --features train,tokenizers,chat-templates --target-dir \"$STABLE_TARGET\"",
+      "result": "Build passed on installed Rust 1.98.0; installed stable alias resolves to 1.92.0.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-stable-build.log",
+      "log_sha256": "d237cd0c2b26da319721613bb283dbbde94eaab7d9f9ff26e3f65db33c66f31c",
+      "log_bytes": 8023
+    },
+    {
+      "name": "clippy",
+      "command": "cargo clippy --locked --offline --all-targets --all-features --target-dir \"$FINAL_TARGET\" -- -D warnings",
+      "result": "Passed, including Metal/CUDA/ROCm feature compilation; hardware execution not performed.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-clippy.log",
+      "log_sha256": "980c9a7a95d5c0ad58f02bcddea50a8165cd28a7649b838ea285174905e17073",
+      "log_bytes": 140
+    },
+    {
+      "name": "minimal",
+      "command": "cargo check --locked --offline --no-default-features --target-dir \"$FINAL_TARGET\"",
+      "result": "Passed.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-minimal.log",
+      "log_sha256": "7b22034a9483043a68381b1c60d5cf7ef9a481998c85b9ecaf5d359f97b09847",
+      "log_bytes": 2142
+    },
+    {
+      "name": "std",
+      "command": "cargo check --locked --offline --no-default-features --features std --target-dir \"$FINAL_TARGET\"",
+      "result": "Passed.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-std.log",
+      "log_sha256": "22aa1785fb0e8e8b23618918517d29c9c0f157dcd0cab8bba81a3ab31f186648",
+      "log_bytes": 226
+    },
+    {
+      "name": "minimal-autodiff",
+      "command": "cargo check --locked --offline --no-default-features --features std,autodiff --target-dir \"$FINAL_TARGET\"",
+      "result": "Passed.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-autodiff-minimal.log",
+      "log_sha256": "b37e28f3394417fac180a4fd3d02b52fbd0923c434c5c659975ebb2c798a4f67",
+      "log_bytes": 520
+    },
+    {
+      "name": "private-rustdoc",
+      "command": "RUSTDOCFLAGS=\"-D warnings\" cargo doc --locked --offline --no-deps --document-private-items --all-features --lib --target-dir \"$FINAL_TARGET\"",
+      "result": "Passed.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-private-doc.log",
+      "log_sha256": "2626f303c6c6cdcede39382213d6c1413eb3aff78a825b3515ac05be54c86ab3",
+      "log_bytes": 243
+    },
+    {
+      "name": "example-rustdoc",
+      "command": "RUSTDOCFLAGS=\"-D warnings\" cargo doc --locked --offline --no-deps --document-private-items --all-features --examples --target-dir \"$FINAL_TARGET\"",
+      "result": "18 example documentation targets passed; this does not execute experiment main functions.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-doc.log",
+      "log_sha256": "1934ba43a83b90e99814ee8ed17578d895aec9ff89a99a7cc6dc8757f28869c4",
+      "log_bytes": 338
+    },
+    {
+      "name": "python",
+      "command": "python3 -m unittest discover -s scripts/tests -v",
+      "result": "392 tests ran successfully, including 14 explicitly skipped optional native checks; 378 executed.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-python.log",
+      "log_sha256": "9e89ce332d6c1c1959fac0099039f041b6b369ed758c207d30672b8770288a69",
+      "log_bytes": 86633
+    },
+    {
+      "name": "tool-tests",
+      "command": "cargo test --locked --offline --manifest-path scripts/coverage-layout/Cargo.toml --target-dir \"$AUDIT_TARGET\"",
+      "result": "52 tests passed.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-tool-tests.log",
+      "log_sha256": "f20f7c3d1419264fa743692455b37a9cdd5539c3280e7cd31c0ad18b0b56c55e",
+      "log_bytes": 5976
+    },
+    {
+      "name": "tool-msrv-tests",
+      "command": "cargo +1.92.0 test --locked --offline --manifest-path scripts/coverage-layout/Cargo.toml --target-dir \"$MSRV_TARGET\"",
+      "result": "52 tests passed.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-tool-msrv.log",
+      "log_sha256": "2597ec1c90aba96f64128fd6e9bd80cba208d60688319933e8bef55cc5ceb42d",
+      "log_bytes": 5648
+    },
+    {
+      "name": "tool-clippy",
+      "command": "cargo clippy --locked --offline --manifest-path scripts/coverage-layout/Cargo.toml --all-targets --target-dir \"$AUDIT_TARGET\" -- -D warnings",
+      "result": "Passed.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-tool-clippy.log",
+      "log_sha256": "4e399ed93a008ba92e1ac6a90fc2e792a362efcf2f9d9864a0231d4af5862bf1",
+      "log_bytes": 806
+    },
+    {
+      "name": "tool-build",
+      "command": "cargo build --locked --offline --manifest-path scripts/coverage-layout/Cargo.toml --target-dir \"$AUDIT_TARGET\"",
+      "result": "Passed; final source audit uses this freshly built helper.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-tool-build.log",
+      "log_sha256": "02db5a66fa0c60ca8618bd08aac556eac4f3ec863e8630a0d353dba6a0f6e126",
+      "log_bytes": 72
+    },
+    {
+      "name": "authored-documentation",
+      "command": "python3 scripts/check_documentation.py --standards --classifier \"$AUDIT_TARGET/debug/transformers-coverage-layout\" --output /private/tmp/tfm-final-documentation.json",
+      "result": "11516 authored sites; zero missing documentation, misplaced inline unit tests or opaque authored declarations.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-documentation.log",
+      "log_sha256": "3959b24113a349c98da733c75b785d9f58dc7e35442a0185098f8643b84139f1",
+      "log_bytes": 1165
+    },
+    {
+      "name": "branch-coverage",
+      "command": "CARGO_TARGET_DIR=\"$COVERAGE_TARGET\" cargo llvm-cov --branch --locked --offline --lib --tests --features autodiff,tokenizers,chat-templates --json --output-path /private/tmp/tfm-final-branch-coverage.json",
+      "result": "1462 tests passed; 32 ignored; native branch, line and region summaries exported. Expected unstable-option notice retained.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-final-branch-coverage.log",
+      "log_sha256": "4130468240ae39aefd86576d3cb328b4f323961cb8e2706f838471230d6ad3e6",
+      "log_bytes": 150049
+    },
+    {
+      "name": "verus",
+      "command": "RUSTUP_TOOLCHAIN=1.98.0 VERUS_Z3_PATH=/private/tmp/z3-4.16.0-arm64-osx/z3-4.16.0-arm64-osx-15.7.3/bin/z3 /private/tmp/verus-0.2026.09.06.8dea4a2/verus-arm64-macos/verus --crate-type lib --no-cheating verus/cache_ring.rs",
+      "result": "3 verified, 0 errors; separate exact-integer model, manual runtime correspondence.",
+      "exit_code": 0,
+      "log": "/private/tmp/tfm-verus-final.log",
+      "log_sha256": "3c25f41d00f776556053537ef13d1ade995c7cac38eb514a16183d9e78df62f1",
+      "log_bytes": 44
+    }
+  ],
+  "format_checks": [
+    "cargo fmt --check",
+    "cargo fmt --manifest-path scripts/coverage-layout/Cargo.toml --check",
+    "git diff --check"
+  ],
+  "commits": [
+    {
+      "revision": "c9adf2498f0b49452e95fed56c3d2e6b54b297fd",
+      "author_name": "Codex (transformer-refactor)",
+      "author_email": "codex+transformer-refactor@localhost",
+      "subject": "refactor(transformers): modernize module roots and validate artifact paths"
+    },
+    {
+      "revision": "c096e4a3625bb7c0a417695f18f3523a3b2e27ee",
+      "author_name": "Codex (transformer-refactor)",
+      "author_email": "codex+transformer-refactor@localhost",
+      "subject": "refactor(transformers): align checkpoint suites with sibling test layout"
+    },
+    {
+      "revision": "dcda33162946edbe30f459056f9590b6abd29fa2",
+      "author_name": "Codex (transformer-refactor)",
+      "author_email": "codex+transformer-refactor@localhost",
+      "subject": "docs(transformers): complete architecture and position item contracts"
+    },
+    {
+      "revision": "71a44797c6a4af39554b145b41320b92b8589797",
+      "author_name": "Codex (transformer-cache)",
+      "author_email": "codex+transformer-cache@localhost",
+      "subject": "refactor(transformers): modernize cache module layout"
+    },
+    {
+      "revision": "891d03ab0c71eac9f56c5907c4cde071dddce821",
+      "author_name": "Codex (transformer-cache)",
+      "author_email": "codex+transformer-cache@localhost",
+      "subject": "refactor(transformers): validate cache staging before publication"
+    },
+    {
+      "revision": "5750cdae6229f94277ee6a7365a3a25bdeef6670",
+      "author_name": "Codex (transformer-transfer)",
+      "author_email": "codex+transformer-transfer@localhost",
+      "subject": "refactor(transformers): resolve transfer aliases through checked entries"
+    },
+    {
+      "revision": "4c96adfdc4501344429b62d70501fde6b0a4f9a7",
+      "author_name": "Codex (transformer-audit)",
+      "author_email": "codex+transformer-audit@localhost",
+      "subject": "feat(transformers): audit authored Rust item documentation"
+    },
+    {
+      "revision": "365609b07e8b750a3172a1bd899168845c76c2b2",
+      "author_name": "Codex (transformer-models)",
+      "author_email": "codex+transformer-models@localhost",
+      "subject": "refactor(transformers): make model config scanning explicitly total"
+    },
+    {
+      "revision": "e1c2dc69a3785104f4e2509f32b555f68208d6ff",
+      "author_name": "Codex (transformer-models)",
+      "author_email": "codex+transformer-models@localhost",
+      "subject": "refactor(transformers): make edited model preconditions explicit"
+    },
+    {
+      "revision": "917f14269189215463051c07f6be212698b48db9",
+      "author_name": "Codex",
+      "author_email": "codex@localhost",
+      "subject": "docs(transformers): specify checkpoint ownership and wire-field contracts"
+    },
+    {
+      "revision": "01652c513a56d1fafd48ee29c02950de0ca94f61",
+      "author_name": "Codex (transformer-cache)",
+      "author_email": "codex+transformer-cache@localhost",
+      "subject": "refactor(transformers): reuse checked cache allocation counts"
+    },
+    {
+      "revision": "25f0d080f358b51a7b87f0049c41ab268be4959a",
+      "author_name": "Codex (transformer-audit)",
+      "author_email": "codex+transformer-audit@localhost",
+      "subject": "feat(transformers): bind strict documentation audits to source inventories"
+    },
+    {
+      "revision": "5d453500cc9c76b8c729b5534c6d4142f27097ec",
+      "author_name": "Codex (transformer-cache)",
+      "author_email": "codex+transformer-cache@localhost",
+      "subject": "docs(transformers): document cache state and regression contracts"
+    },
+    {
+      "revision": "398dd696c1425f835c21ee97f4d5efbd521520be",
+      "author_name": "Codex (cache-proof)",
+      "author_email": "codex+cache-proof@localhost",
+      "subject": "test(transformers): verify ring-write scalar partition bounds"
+    },
+    {
+      "revision": "99b6e0fae8ee29c5d30ca06f16d3a22ac9c7a4b3",
+      "author_name": "Codex (transformer-integration-docs)",
+      "author_email": "codex+transformer-integration-docs@localhost",
+      "subject": "docs(transformers): explain integration properties and artifact constants"
+    },
+    {
+      "revision": "552589e7c6abc0bedfb8371347800f2995214d5f",
+      "author_name": "Codex (transformer-examples)",
+      "author_email": "codex+transformer-examples@localhost",
+      "subject": "docs(transformers): document composition and training example contracts"
+    },
+    {
+      "revision": "fb24cd14a2e580735a44bb1141b4f6a81af6c18f",
+      "author_name": "Codex (transformer-models)",
+      "author_email": "codex+transformer-models@localhost",
+      "subject": "fix(transformers): preflight modular history allocation geometry"
+    },
+    {
+      "revision": "fd51a4bc2c5d9af4b586d1a47acd8eb9f9492e8f",
+      "author_name": "Codex (transformer-models)",
+      "author_email": "codex+transformer-models@localhost",
+      "subject": "docs(transformers): describe model config payload invariants"
+    },
+    {
+      "revision": "965e5f875d9b6fa1b45f5a4a675550878912c48d",
+      "author_name": "Codex (model-docs-a)",
+      "author_email": "codex+model-docs-a@localhost",
+      "subject": "docs(transformers): document registry and DeepSeek contracts"
+    },
+    {
+      "revision": "cd5ad6c510450601fb95ed2b214debcdea448671",
+      "author_name": "Codex (model-docs-a)",
+      "author_email": "codex+model-docs-a@localhost",
+      "subject": "docs(transformers): specify modular model test and state contracts"
+    },
+    {
+      "revision": "0e3f4bab06c675bd1027175f2bc21896e451f7e5",
+      "author_name": "Codex (muse-docs)",
+      "author_email": "codex+muse-docs@localhost",
+      "subject": "docs(transformers): explain Muse private state and test contracts"
+    },
+    {
+      "revision": "475d18ee87f9a0e6c70f2352873690325c616b35",
+      "author_name": "Codex (muse-docs)",
+      "author_email": "codex+muse-docs@localhost",
+      "subject": "docs(transformers): describe GPT-2 fixture and loader contracts"
+    },
+    {
+      "revision": "3b6a13a13caa5283432b3402134533e4346a3035",
+      "author_name": "Codex (muse-docs)",
+      "author_email": "codex+muse-docs@localhost",
+      "subject": "docs(transformers): explain NeoX packed checkpoint validation"
+    },
+    {
+      "revision": "90795c06af69d955c6e0deb97d185a789b3559d7",
+      "author_name": "Codex (model-docs-a)",
+      "author_email": "codex+model-docs-a@localhost",
+      "subject": "docs(transformers): close model payload and phase documentation gaps"
+    },
+    {
+      "revision": "9fe421e2e1f36c354f8c7aeb526330ff59a0d853",
+      "author_name": "Codex (model-docs-b)",
+      "author_email": "codex+model-docs-b@localhost",
+      "subject": "docs(transformers): document Qwen3 MoE state and test contracts"
+    },
+    {
+      "revision": "9fa3743e8303040881ec26dba96226a9ec396175",
+      "author_name": "Codex (model-docs-b)",
+      "author_email": "codex+model-docs-b@localhost",
+      "subject": "docs(transformers): explain Qwen hybrid checkpoint and cache geometry"
+    },
+    {
+      "revision": "05d2152c71e97c23f2364b21f6e8cb7f13eb2102",
+      "author_name": "Codex (model-docs-b)",
+      "author_email": "codex+model-docs-b@localhost",
+      "subject": "docs(transformers): explain Qwen test scenarios and fixture state"
+    },
+    {
+      "revision": "6def8e666b591c63fe85e3b67bfcd1aecb8b3ff6",
+      "author_name": "Codex (model-docs-t5)",
+      "author_email": "codex+model-docs-t5@localhost",
+      "subject": "docs(transformers): document T5 checkpoint and cache metadata"
+    },
+    {
+      "revision": "b85eac32037e68a679d69b0f858f970eaa59a4b0",
+      "author_name": "Codex (model-docs-t5)",
+      "author_email": "codex+model-docs-t5@localhost",
+      "subject": "docs(transformers): explain T5 test scenarios and fixtures"
+    },
+    {
+      "revision": "10d93b21907a3647e5b11fe56a1d52d96e4a8fdc",
+      "author_name": "Codex (model-docs-nemotron)",
+      "author_email": "codex+model-docs-nemotron@localhost",
+      "subject": "docs(transformers): describe Nemotron private state contracts"
+    },
+    {
+      "revision": "55547993a058494b88c63bc85a68301be7a3823e",
+      "author_name": "Codex (model-docs-nemotron)",
+      "author_email": "codex+model-docs-nemotron@localhost",
+      "subject": "docs(transformers): document Nemotron test modules and fixtures"
+    },
+    {
+      "revision": "80265808147139f600cdccdf247057958224e872",
+      "author_name": "Codex (transformer-models)",
+      "author_email": "codex+transformer-models@localhost",
+      "subject": "docs(transformers): resolve model internal rustdoc links"
+    },
+    {
+      "revision": "3086f5028393272639f3a3e3c7764bfe4a72c78e",
+      "author_name": "Codex (transformer-models)",
+      "author_email": "codex+transformer-models@localhost",
+      "subject": "test(transformers): reuse copied normalization fixture values"
+    },
+    {
+      "revision": "1c53040f161c734abfe71e9550d9ebf4d9f69e7e",
+      "author_name": "Codex",
+      "author_email": "codex@localhost",
+      "subject": "docs(transformers): explain checkpoint test scenarios and fixture contracts"
+    },
+    {
+      "revision": "430ec489179405f23c7cfcb1d4d33c9d35055549",
+      "author_name": "Codex (transformer-examples)",
+      "author_email": "codex+transformer-examples@localhost",
+      "subject": "docs(transformers): specify greater-than study data and metric contracts"
+    },
+    {
+      "revision": "cd4d479a0ad248c9fcd24c1620778424c52db4a4",
+      "author_name": "Codex (transformer-test-support-docs)",
+      "author_email": "codex+transformer-test-support-docs@localhost",
+      "subject": "docs(transformers): document benchmark and parity test contracts"
+    },
+    {
+      "revision": "a64ac0db897ec476fdb45c6d547c02843b5f7a17",
+      "author_name": "Codex (transformer-integration-docs)",
+      "author_email": "codex+transformer-integration-docs@localhost",
+      "subject": "docs(transformers): specify Qwen reference evidence fields"
+    },
+    {
+      "revision": "fce57d95923d17fe7de7ed1aa8de7ab9b5b50f9b",
+      "author_name": "Codex (checkpoint-runtime-docs)",
+      "author_email": "codex+checkpoint-runtime-docs@localhost",
+      "subject": "docs(transformers): explain checkpoint runtime fixtures and ownership probes"
+    },
+    {
+      "revision": "86017d85cf6215fb16895bcd460a6d991b4c1ab4",
+      "author_name": "Codex (checkpoint-runtime-docs)",
+      "author_email": "codex+checkpoint-runtime-docs@localhost",
+      "subject": "docs(transformers): state runtime payload and failure regression scenarios"
+    },
+    {
+      "revision": "0d712eba6bf01dc6ea28bec0eed97500497a49a7",
+      "author_name": "Codex (checkpoint-runtime-subtests)",
+      "author_email": "codex+checkpoint-runtime-subtests@localhost",
+      "subject": "docs(transformers): explain checkpoint runtime test fixture state"
+    },
+    {
+      "revision": "446ce7efabd3d99551bb88b2c87c9ae0b8e24386",
+      "author_name": "Codex (transformer-integration-docs)",
+      "author_email": "codex+transformer-integration-docs@localhost",
+      "subject": "docs(transformers): specify Muse oracle and execution provenance"
+    },
+    {
+      "revision": "eee8d35f12d72de2d6a8b82683027610f48e2694",
+      "author_name": "Codex (transformer-transfer)",
+      "author_email": "codex+transformer-transfer@localhost",
+      "subject": "docs(transformers): explain core state and test invariants"
+    },
+    {
+      "revision": "26d66488a46773c567a0d4d1ab43e2392dbbb5b0",
+      "author_name": "Codex (transformer-test-support-docs)",
+      "author_email": "codex+transformer-test-support-docs@localhost",
+      "subject": "docs(transformers): define authenticated oracle schema fields"
+    },
+    {
+      "revision": "33fb468fd37b477a685bb5337a26c721a9bc6554",
+      "author_name": "Codex (qwen35-fixture-docs)",
+      "author_email": "codex+qwen35-fixture-docs@localhost",
+      "subject": "docs(transformers): document Qwen3.5 reference fixture contracts"
+    },
+    {
+      "revision": "de470315e57c5f2887c8e563d48f34e421c9b2e8",
+      "author_name": "Codex (transformer-examples)",
+      "author_email": "codex+transformer-examples@localhost",
+      "subject": "docs(transformers): explain modular-addition model and diagnostic state"
+    },
+    {
+      "revision": "90489cdd76cf1becd7ab82f858dcbf55281bf750",
+      "author_name": "Codex (transformer-examples)",
+      "author_email": "codex+transformer-examples@localhost",
+      "subject": "docs(transformers): document tuned-lens stages losses and frozen ownership"
+    },
+    {
+      "revision": "fbd80c33de0d0abd5d8330bf1375ca0b2c61f04c",
+      "author_name": "Codex (transformer-audit)",
+      "author_email": "codex+transformer-audit@localhost",
+      "subject": "refactor(transformers): make audit CLI boundaries testable"
+    },
+    {
+      "revision": "99ec96d6342343d0dc8d8707ac03f888c343cab4",
+      "author_name": "Codex (transformer-audit)",
+      "author_email": "codex+transformer-audit@localhost",
+      "subject": "chore(transformers): enforce authored-item docs in source validation"
+    },
+    {
+      "revision": "edb6d0d33fa6fca7503080bf4b699144fd1ca71e",
+      "author_name": "Codex (transformer-models)",
+      "author_email": "codex+transformer-models@localhost",
+      "subject": "test(transformers): check history invariants immediately after reorder"
+    },
+    {
+      "revision": "8444a38ecb9c2eb3aa50ae5af21828c1146b821d",
+      "author_name": "Codex (transformer-refactor)",
+      "author_email": "codex+transformer-refactor@localhost",
+      "subject": "docs(transformers): complete artifact payload and private link documentation"
+    }
+  ],
+  "raw_artifacts": [
+    {
+      "source": "/private/tmp/tfm-final-branch-coverage.json",
+      "path": "/Volumes/bag of holding/cargo-targets/tfm-rust-standards-final/evidence/tfm-final-branch-coverage.json.xz",
+      "sha256": "4a52c3fcbbeb849b50afa312327546083747cde4aa183a98936ed592296c727c",
+      "bytes": 72014080,
+      "compressed_sha256": "a82713d20bd717fb5e152ec94b0f1d68eaae3174a27e24b5337a038380d58259",
+      "compressed_bytes": 5756980
+    },
+    {
+      "source": "/private/tmp/tfm-final-documentation.json",
+      "path": "/Volumes/bag of holding/cargo-targets/tfm-rust-standards-final/evidence/tfm-final-documentation.json.xz",
+      "sha256": "4b9905a9b362f795748400176b578cc85d1ab467bd62882bab3eb7a83d617810",
+      "bytes": 14529146,
+      "compressed_sha256": "0f41ecd5a7ce5299c671fc42a01cb20f750a00ea54eecae4c0418cb01b0cecbf",
+      "compressed_bytes": 547736
+    },
+    {
+      "source": "/private/tmp/tfm-standards-audit-coverage.json",
+      "path": "/Volumes/bag of holding/cargo-targets/tfm-rust-standards-final/evidence/tfm-standards-audit-coverage.json.xz",
+      "sha256": "460c5f8cf0d0498e5349d618fafcbe579823d76fb67d0f13297482f6f5cf71ed",
+      "bytes": 6701013,
+      "compressed_sha256": "2a210f413d07131d1947e5559b2908a9d5205c6a989b5994a22aa083dd7f02de",
+      "compressed_bytes": 502212
+    }
+  ],
+  "review": "Independent read-only review of substantive runtime changes found no actionable regression; strengthened reorder-before-reset invariant assertions followed review.",
+  "limits": [
+    "No checkpoint support promotion, scientific training run replay, new performance benchmark, hardware execution, fresh dependency advisory scan, or package qualification.",
+    "Authored syntax audit does not expand arbitrary macros or verify the semantic correctness of every prose description.",
+    "Coverage includes generated/test mappings; 100% reachable branch coverage is not established.",
+    "Standalone tool coverage was independently measured at e9e7b58: 320/388 branches and 1566/1697 lines; CLI 20/20 branches. Final helper source was separately built and tested on both compilers.",
+    "Large raw exports remain external with hashes; tracked summaries are sufficient for review, not compiler attestation."
+  ]
+}

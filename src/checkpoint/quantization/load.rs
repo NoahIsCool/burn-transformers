@@ -123,9 +123,15 @@ impl AuditedQuantizedExecutionOutcome {
 #[non_exhaustive]
 pub enum QuantizedSinkError<E> {
     /// Burnpack metadata, payload, or QFloat conversion failed.
-    Quantization(QuantizationError),
+    Quantization(
+        /// Original packed artifact validation or conversion failure.
+        QuantizationError,
+    ),
     /// The architecture rejected the final source-precision or packed tensor.
-    Architecture(E),
+    Architecture(
+        /// Error returned by the architecture's parameter sink.
+        E,
+    ),
 }
 
 impl<E: fmt::Display> fmt::Display for QuantizedSinkError<E> {
@@ -650,13 +656,17 @@ pub fn validate_sidecar_contract(
 
 /// Local source whose positive descriptor result follows a complete SHA-256 gate.
 struct ProvenanceLocalSource<'a> {
+    /// Source retained for descriptors and ordinary payload reads.
     inner: LocalShardSource<'a>,
+    /// Whether complete source content has passed the provenance digest gate.
     content_verified: bool,
 }
 
 /// Masks generic descriptor booleans unless the caller established artifact binding.
 struct DescriptorBypassPolicySource<'a, S> {
+    /// Borrowed source whose descriptor decisions are restricted by this wrapper.
     inner: &'a mut S,
+    /// Whether artifact binding authorizes descriptor-only payload bypass.
     allow_descriptor_bypass: bool,
 }
 
@@ -806,9 +816,13 @@ fn post_audited_execution_failure<E>(
 
 /// Sink wrapper that chooses packed or original data at the final target boundary.
 struct QuantizedOverlaySink<'a, K> {
+    /// Validated sidecar supplying packed payloads for overridden targets.
     artifact: &'a mut QuantizedBurnpackArtifact,
+    /// Architecture sink receiving final packed or source-precision tensors.
     inner: &'a mut K,
+    /// Packed targets accepted by the architecture sink.
     records: Vec<QuantizationRecord>,
+    /// Sidecar reads and packed application counters.
     stats: PackedLoadStats,
 }
 
@@ -830,6 +844,7 @@ impl<'a, K> QuantizedOverlaySink<'a, K> {
 }
 
 impl<K: TensorSink> TensorSink for QuantizedOverlaySink<'_, K> {
+    /// Distinguishes packed-payload failures from architecture rejections.
     type Error = QuantizedSinkError<K::Error>;
 
     /// Forwards a final tensor and records packed application only after sink success.

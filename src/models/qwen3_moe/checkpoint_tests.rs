@@ -1,3 +1,5 @@
+//! Metadata-only tests of Qwen3 MoE tensor geometry, mappings, and strict load plans.
+
 use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::{

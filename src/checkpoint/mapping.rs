@@ -29,9 +29,15 @@ use super::{
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum KeyMatcher {
     /// Matches exactly one tensor name.
-    Exact(String),
+    Exact(
+        /// Complete tensor key to match.
+        String,
+    ),
     /// Matches all tensor names beginning with a nonempty prefix.
-    Prefix(String),
+    Prefix(
+        /// Nonempty leading substring shared by permitted keys.
+        String,
+    ),
 }
 
 impl KeyMatcher {
@@ -153,6 +159,7 @@ pub enum TensorOperation {
 /// Architecture-owned sequence of explicit mapping operations.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MappingPlan {
+    /// Ordered transformations and aliases requested by the architecture.
     operations: Vec<TensorOperation>,
 }
 

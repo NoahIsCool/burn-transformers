@@ -1,3 +1,5 @@
+//! Generation-policy tests for deterministic sampling, penalties, stopping, and invalid requests.
+
 use burn::backend::Flex;
 use burn::tensor::{DType, Int, Tensor, TensorData, Tolerance};
 
@@ -7,6 +9,7 @@ use super::{
 };
 use crate::TokenMask;
 
+/// Deterministic F32 CPU backend for token-selection and stopping fixtures.
 type TestBackend = Flex<f32, i32>;
 
 /// Invalid sampling controls fail before any tensor operation can panic.

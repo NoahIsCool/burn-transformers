@@ -1,5 +1,8 @@
+//! Checked absolute positions for ragged batches, padding, and integer boundaries.
+
 use super::*;
 
+/// Padding at either end or between tokens never advances the valid-position count.
 #[test]
 fn derives_unpadded_left_padded_right_padded_and_gapped_rows() {
     assert_eq!(
@@ -20,6 +23,7 @@ fn derives_unpadded_left_padded_right_padded_and_gapped_rows() {
     );
 }
 
+/// Each ragged row starts at its own cached-prefix offset without cross-row leakage.
 #[test]
 fn derives_ragged_batch_with_independent_cache_offsets() {
     let mask = [true, true, false, false, true, false, true, true];
@@ -29,6 +33,7 @@ fn derives_ragged_batch_with_independent_cache_offsets() {
     );
 }
 
+/// Zero rows and zero columns both produce empty position storage.
 #[test]
 fn accepts_empty_shapes_without_inventing_positions() {
     assert_eq!(
@@ -41,6 +46,7 @@ fn accepts_empty_shapes_without_inventing_positions() {
     );
 }
 
+/// Product overflow, flat mask length, and row-offset count report distinct errors.
 #[test]
 fn reports_every_shape_error() {
     assert_eq!(
@@ -66,6 +72,7 @@ fn reports_every_shape_error() {
     );
 }
 
+/// The largest position is valid once; a subsequent real token reports its location.
 #[test]
 fn permits_max_position_once_and_rejects_the_next_valid_token() {
     assert_eq!(
@@ -83,6 +90,7 @@ fn permits_max_position_once_and_rejects_the_next_valid_token() {
     );
 }
 
+/// Shape and overflow diagnostics identify the actual and expected input geometry.
 #[test]
 fn errors_describe_shape_and_token_context() {
     let messages = [
@@ -115,6 +123,7 @@ fn errors_describe_shape_and_token_context() {
     assert!(messages[3].contains("sequence 1, token 3"));
 }
 
+/// Every short Boolean mask agrees with a simple contiguous valid-token counter.
 #[test]
 fn exhaustive_masks_preserve_contiguous_valid_positions() {
     for length in 0..=10 {

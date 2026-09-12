@@ -1,3 +1,5 @@
+//! Normalization tests for formula parity, finite-precision behavior, and configuration validation.
+
 use burn::{
     backend::Flex,
     module::Param,

@@ -1,6 +1,7 @@
 //! Training and native-record integration checks for `custom_composition`.
 
 use super::*;
+/// Checks a disjoint complete sequence split, learning through custom blocks, and native-record logit parity.
 #[test]
 fn custom_mixer_and_width_adapters_learn_and_survive_native_records() {
     let (train_rows, held) = dataset();

@@ -21,7 +21,7 @@
 //! The source and target are borrowed. Validation and explicit transforms finish
 //! before a cloned target receives any replacement. Tensor payloads stay on device;
 //! validating a tied group synchronizes a Boolean equality reduction.
-//! copying neither casts dtype nor moves devices. Copied parameters start a new
+//! Copying neither casts dtype nor moves devices. Copied parameters start a new
 //! gradient graph, preserve the target's trainability, and retain ties by default.
 //! This API transfers dense floating parameters of already constructed modules.
 //! Checkpoint subset loaders use the same [`TransferReport`] while streaming files.
@@ -174,26 +174,43 @@ pub fn parameters<B: Backend, M: Module<B>>(module: &M) -> Result<Vec<ParameterI
         .collect())
 }
 
+/// Rank-independent dense tensor payload staged on its original device.
 struct Value<B: Backend> {
+    /// Flattened floating tensor; its element order is unchanged by staging.
     tensor: Tensor<B, 1>,
+    /// Runtime dimensions restored before invoking transforms or installing values.
     shape: Vec<usize>,
 }
+/// Borrowable callback that explicitly transforms one staged tensor payload.
 type Transform<'a, B> = Box<dyn Fn(&Value<B>) -> Result<Value<B>> + 'a>;
 
+/// Parameter-selection rule before path validation and precedence resolution.
 enum Rule<'a, B: Backend> {
+    /// Copy one source path to one target path without a numerical change.
     Copy {
+        /// Exact source parameter path.
         source: String,
+        /// Exact target parameter path.
         target: String,
     },
+    /// Match relative parameter paths below a pair of module prefixes.
     Prefix {
+        /// Existing source module or parameter prefix.
         source: String,
+        /// Existing target module or parameter prefix.
         target: String,
     },
+    /// Copy parameters whose complete paths occur in both modules.
     Matching,
+    /// Produce one target value through an explicit, auditable callback.
     Transform {
+        /// Exact source parameter path consumed by the callback.
         source: String,
+        /// Exact target parameter path receiving the callback result.
         target: String,
+        /// Human-readable description recorded in the transfer report.
         operation: String,
+        /// Rank-erased callback whose result must match the target layout.
         transform: Transform<'a, B>,
     },
 }
@@ -204,9 +221,13 @@ enum Rule<'a, B: Backend> {
 /// Exact copy/transform rules override prefix rules; duplicate exact targets and
 /// overlapping prefixes are rejected. Unselected target parameters remain initialized.
 pub struct TransferPlan<'a, B: Backend> {
+    /// Ordered rules; indices distinguish independently requested transforms.
     rules: Vec<Rule<'a, B>>,
+    /// Target prefixes whose initialization takes precedence over all copy rules.
     keep: Vec<String>,
+    /// Handling for direct copies with incompatible dimensions.
     shape_policy: ShapeChangePolicy,
+    /// Whether transferred parameter identities retain their original sharing.
     tie_policy: TiePolicy,
 }
 
@@ -595,17 +616,26 @@ fn under<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
 
 // Lazy discovery, value staging, and alias-aware installation.
 
+/// Discovered parameter metadata and tensor handle used to validate a transfer.
 struct Parameter<B: Backend> {
+    /// Named runtime layout, differentiation status, and alias metadata.
     info: ParameterInfo,
+    /// Burn identity used to distinguish aliases from numerically equal values.
     id: ParamId,
+    /// Device on which any replacement must already reside.
     device: B::Device,
+    /// Flattened dense value, without a host copy.
     tensor: Tensor<B, 1>,
 }
 
+/// Visitor that discovers parameter paths without initializing lazy tensors.
 #[derive(Default)]
 struct Names {
+    /// Module segments from the root to the current parameter.
     path: Vec<String>,
+    /// Distinct paths discovered so far, ordered for deterministic selection.
     names: BTreeSet<String>,
+    /// Duplicate-path failure retained until module traversal completes.
     error: Option<Error>,
 }
 
@@ -640,10 +670,15 @@ fn parameter_names<B: Backend, M: Module<B>>(module: &M) -> Result<BTreeSet<Stri
     }
 }
 
+/// Visitor that materializes only selected dense parameter handles and metadata.
 struct Collect<'a, B: Backend> {
+    /// Module segments from the root to the current parameter.
     path: Vec<String>,
+    /// Validated parameter entries indexed by their complete paths.
     parameters: BTreeMap<String, Parameter<B>>,
+    /// First capability or path error, after which collection stops.
     error: Option<Error>,
+    /// Optional path subset; absent selection requests all floating parameters.
     selected: Option<&'a BTreeSet<String>>,
 }
 
@@ -739,11 +774,17 @@ fn collect_filtered<B: Backend, M: Module<B>>(
     Ok(visitor.parameters)
 }
 
+/// Validated replacement awaiting alias resolution and transactional installation.
 struct Staged<B: Backend> {
+    /// Replacement tensor and target-compatible runtime dimensions.
     value: Value<B>,
+    /// Source parameter identity, retained to detect shared origins.
     origin: ParamId,
+    /// Transform rule index, or `None` for a direct copy.
     transform: Option<usize>,
+    /// Fresh output identity, unified only when tie validation succeeds.
     id: ParamId,
+    /// Target differentiation policy applied to the new gradient leaf.
     trainable: bool,
 }
 
@@ -758,74 +799,90 @@ fn resolve_ties<B: Backend>(
     policy: TiePolicy,
     report: &mut TransferReport,
 ) -> Result<()> {
-    let mut original_groups = BTreeMap::<ParamId, Vec<String>>::new();
+    // Carry the checked lookup with each target path so alias validation cannot
+    // accidentally assume that every original alias was selected for transfer.
+    let mut original_groups = BTreeMap::<ParamId, Vec<_>>::new();
     for (name, target) in targets {
         original_groups
             .entry(target.id)
             .or_default()
-            .push(name.clone());
+            .push((name, staged.get(name)));
     }
-    for group in original_groups.values().filter(|group| group.len() > 1) {
-        let selected = group
+    for group in original_groups
+        .into_values()
+        .filter(|group| group.len() > 1)
+    {
+        let names = group
             .iter()
-            .filter_map(|name| staged.get(name))
+            .map(|(name, _)| (*name).clone())
             .collect::<Vec<_>>();
-        if selected.is_empty() {
-            report.preserved_ties.push(group.clone());
+        let Some(first) = group.iter().find_map(|(_, selected)| *selected) else {
+            report.preserved_ties.push(names);
             continue;
-        }
+        };
         if policy == TiePolicy::Untie {
-            report.untied.push(group.clone());
+            report.untied.push(names);
             continue;
         }
-        if selected.len() != group.len()
-            || selected.iter().any(|value| {
-                value.origin != selected[0].origin
-                    || value.transform != selected[0].transform
-                    || value.trainable != selected[0].trainable
+        if group.iter().any(|(_, selected)| {
+            selected.is_none_or(|value| {
+                value.origin != first.origin
+                    || value.transform != first.transform
+                    || value.trainable != first.trainable
             })
-        {
-            return Err(Error::configuration(
-                "transfer.ties",
-                format!(
-                    "target aliases {group:?} require the same source and transformation; select TiePolicy::Untie to separate them"
-                ),
-            ));
-        }
-    }
-    let mut source_groups = BTreeMap::<ParamId, Vec<String>>::new();
-    for (name, value) in staged.iter() {
-        source_groups
-            .entry(value.origin)
-            .or_default()
-            .push(name.clone());
-    }
-    for group in source_groups.values().filter(|group| group.len() > 1) {
-        if policy == TiePolicy::Untie {
-            report.untied.push(group.clone());
-            continue;
-        }
-        let first = &staged[&group[0]];
-        if group.iter().any(|name| {
-            staged[name].transform != first.transform
-                || staged[name].value.shape != first.value.shape
-                || staged[name].value.tensor.dtype() != first.value.tensor.dtype()
-                || staged[name].value.tensor.device() != first.value.tensor.device()
-                || staged[name].trainable != first.trainable
         }) {
             return Err(Error::configuration(
                 "transfer.ties",
                 format!(
-                    "source aliases mapped to {group:?} have conflicting transforms, shapes, or trainability; select TiePolicy::Untie"
+                    "target aliases {names:?} require the same source and transformation; select TiePolicy::Untie to separate them"
                 ),
             ));
         }
-        for name in group.iter().skip(1) {
+    }
+    // Mutable map iteration yields disjoint entries. Keep those references in
+    // each group through validation and identity assignment, avoiding a second
+    // lookup whose success would otherwise have to be asserted.
+    let mut source_groups = BTreeMap::<ParamId, Vec<_>>::new();
+    for (name, value) in staged.iter_mut() {
+        source_groups
+            .entry(value.origin)
+            .or_default()
+            .push((name, value));
+    }
+    for mut group in source_groups.into_values() {
+        let Some(((first_name, first), aliases)) = group.split_first_mut() else {
+            continue;
+        };
+        if aliases.is_empty() {
+            continue;
+        }
+        let names = std::iter::once((*first_name).clone())
+            .chain(aliases.iter().map(|(name, _)| (*name).clone()))
+            .collect::<Vec<_>>();
+        if policy == TiePolicy::Untie {
+            report.untied.push(names);
+            continue;
+        }
+        if aliases.iter().any(|(_, value)| {
+            value.transform != first.transform
+                || value.value.shape != first.value.shape
+                || value.value.tensor.dtype() != first.value.tensor.dtype()
+                || value.value.tensor.device() != first.value.tensor.device()
+                || value.trainable != first.trainable
+        }) {
+            return Err(Error::configuration(
+                "transfer.ties",
+                format!(
+                    "source aliases mapped to {names:?} have conflicting transforms, shapes, or trainability; select TiePolicy::Untie"
+                ),
+            ));
+        }
+        for (_, value) in aliases.iter() {
             let equal = first
                 .value
                 .tensor
                 .clone()
-                .equal(staged[name].value.tensor.clone())
+                .equal(value.value.tensor.clone())
                 .all()
                 .int()
                 .into_scalar()
@@ -835,24 +892,29 @@ fn resolve_ties<B: Backend>(
                 return Err(Error::configuration(
                     "transfer.ties",
                     format!(
-                        "source parameters mapped to {group:?} share a parameter identity but have unequal values; select TiePolicy::Untie to retain both values"
+                        "source parameters mapped to {names:?} share a parameter identity but have unequal values; select TiePolicy::Untie to retain both values"
                     ),
                 ));
             }
         }
         let shared_id = first.id;
-        for name in group {
-            staged.get_mut(name).unwrap().id = shared_id;
+        for (_, value) in aliases {
+            value.id = shared_id;
         }
-        report.preserved_ties.push(group.clone());
+        report.preserved_ties.push(names);
     }
     Ok(())
 }
 
+/// Mapper that installs staged tensors into a cloned target after validation.
 struct Install<B: Backend> {
+    /// Module segments identifying the parameter currently being mapped.
     path: Vec<String>,
+    /// Validated replacements removed as the target mapper consumes them.
     staged: BTreeMap<String, Staged<B>>,
+    /// First installed tensor for each preserved identity, erased over rank.
     shared: BTreeMap<ParamId, Box<dyn Any>>,
+    /// Mapping failure retained so the partially modified clone can be discarded.
     error: Option<Error>,
 }
 
@@ -906,4 +968,5 @@ impl<B: Backend> ModuleMapper<B> for Install<B> {
 
 #[cfg(test)]
 #[path = "transfer_tests.rs"]
+/// Transfer behavior, alias invariants, and transactional failure regressions.
 mod tests;

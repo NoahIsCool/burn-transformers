@@ -141,7 +141,9 @@ pub fn learned_circuit<B: Backend>(
 #[derive(Clone, Copy, Default)]
 /// Host-side sums for full-grid accuracy and mean negative log likelihood.
 struct Metrics {
+    /// Number of correctly predicted modular sums among the evaluated grid pairs.
     correct: usize,
+    /// Sum of per-pair negative log likelihoods in nats, excluding the equals output class.
     loss: f64,
 }
 impl Metrics {
@@ -175,9 +177,13 @@ impl Metrics {
 #[derive(Clone, Copy, Default)]
 /// F64 sufficient statistics; each instance receives exactly 113² grid pairs.
 struct Fit {
+    /// Sum of squared theoretical sinusoid values, `Σ x²`.
     x2: f64,
+    /// Sum of sinusoid/activation products, `Σ xy`.
     xy: f64,
+    /// Sum of activation projections, `Σ y`, used to compute their mean.
     y: f64,
+    /// Sum of squared activation projections, `Σ y²`.
     y2: f64,
 }
 impl Fit {

@@ -18,6 +18,7 @@ where
     assert_eq!(&reparsed, config);
 }
 
+/// Nested Qwen3.8 JSON preserves layer count, projection width, full attention, and MTP depth.
 #[test]
 fn parses_nested_qwen38_text_topology() {
     let config = Qwen38TextConfig::from_json_str(include_str!("fixtures/qwen3_8_27b.json"))
@@ -31,6 +32,7 @@ fn parses_nested_qwen38_text_topology() {
     assert_eq!(config.mtp_num_hidden_layers, 1);
 }
 
+/// Qwen3 A3B JSON preserves expert count, top-k routing, and the first MoE layer.
 #[test]
 fn parses_qwen3_a3b_routing_topology() {
     let config =
@@ -40,6 +42,7 @@ fn parses_qwen3_a3b_routing_topology() {
     assert!(config.is_moe_layer(0));
 }
 
+/// DeepSeek V2 JSON preserves the MLA head width, latent KV rank, and MoE schedule.
 #[test]
 fn parses_deepseek_v2_mla_and_yarn() {
     let config =
@@ -49,6 +52,7 @@ fn parses_deepseek_v2_mla_and_yarn() {
     assert!(config.is_moe_layer(1));
 }
 
+/// Nested Muse text JSON derives the final full-attention layer with RoPE disabled.
 #[test]
 fn parses_nested_muse_text_and_derives_nope_schedule() {
     let config =
@@ -61,6 +65,7 @@ fn parses_nested_muse_text_and_derives_nope_schedule() {
     assert_eq!(config.resolved_layer_rope_theta()[51], 0.0);
 }
 
+/// FLAN and UL2 JSON retain their distinct gated projections and attention dimensions.
 #[test]
 fn parses_flan_and_ul2_as_t5_topologies() {
     let flan = T5Config::from_json_str(include_str!("fixtures/flan_t5_xl.json")).unwrap();
@@ -72,6 +77,7 @@ fn parses_flan_and_ul2_as_t5_topologies() {
     assert_eq!(ul2.decoder_layers(), 32);
 }
 
+/// Legacy Nemotron syntax expands the block pattern and accepts an unbounded time-step limit.
 #[test]
 fn parses_legacy_nemotron_pattern_and_nonstandard_infinity() {
     let config =
@@ -85,6 +91,7 @@ fn parses_legacy_nemotron_pattern_and_nonstandard_infinity() {
     );
 }
 
+/// Validation rejects inconsistent attention widths, routing, positions, buckets, and schedules.
 #[test]
 fn rejects_invalid_dimensions_schedules_routing_and_positions() {
     let mut qwen =
@@ -117,6 +124,7 @@ fn rejects_invalid_dimensions_schedules_routing_and_positions() {
     assert!(nemotron.validate().is_err());
 }
 
+/// Deserialization rejects unsupported Nemotron layer names.
 #[test]
 fn rejects_unknown_layer_names_during_deserialization() {
     let json = r#"{
@@ -126,6 +134,7 @@ fn rejects_unknown_layer_names_during_deserialization() {
     assert!(NemotronHConfig::from_json_str(json).is_err());
 }
 
+/// Normalized family configs survive JSON round trips without changing any fields.
 #[test]
 fn normalized_schemas_round_trip_without_losing_topology() {
     let qwen = Qwen38TextConfig::from_json_str(include_str!("fixtures/qwen3_8_27b.json")).unwrap();

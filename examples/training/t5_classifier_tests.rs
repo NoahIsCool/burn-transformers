@@ -1,6 +1,7 @@
 //! Training and native-record integration checks for `t5_classifier`.
 
 use super::*;
+/// Checks disjoint held-out combinations, classifier learning, and identical logits after native-record reload.
 #[test]
 fn held_out_combinations_are_disjoint_and_classifier_learns_then_reloads() {
     let (train_rows, held) = dataset();

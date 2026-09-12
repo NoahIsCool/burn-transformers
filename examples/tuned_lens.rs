@@ -37,7 +37,9 @@ fn main() -> study::Result<()> {
 
     // Change the inspected translator here. Translator 0 sees embeddings;
     // translator i>0 sees the residual after block i-1, before its next block.
+    /// Index of the released translator replaced by a zero correction for the identity control.
     const REPLACE_TRANSLATOR: usize = 6;
+    /// Number of positions from the first document shown in the prediction visualization.
     const DISPLAY_TOKENS: usize = 8;
     let root = std::env::args()
         .nth(1)

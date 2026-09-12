@@ -12,7 +12,9 @@
 
 use core::fmt;
 
+/// Rotation-count threshold above which YaRN retains original frequencies.
 const DEFAULT_YARN_BETA_FAST: f64 = 32.0;
+/// Rotation-count threshold below which YaRN interpolates frequencies fully.
 const DEFAULT_YARN_BETA_SLOW: f64 = 1.0;
 
 /// Validated linear RoPE position scaling.
@@ -22,6 +24,7 @@ const DEFAULT_YARN_BETA_SLOW: f64 = 1.0;
 /// the trained position interval over a longer context.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinearRopeScaling {
+    /// Finite position divisor, at least one.
     factor: f64,
 }
 
@@ -51,7 +54,9 @@ impl LinearRopeScaling {
 /// [`RopeConfig`] additionally rejects rotary dimensions of two or less.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DynamicNtkScaling {
+    /// Finite context-extension multiplier, at least one.
     factor: f64,
+    /// Positive trained context length before dynamic base scaling begins.
     original_max_position_embeddings: usize,
 }
 
@@ -98,10 +103,15 @@ impl DynamicNtkScaling {
 /// those fields to this final amplitude before constructing [`YarnConfig`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct YarnConfig {
+    /// Finite requested context-extension multiplier, at least one.
     factor: f64,
+    /// Positive trained context length used to locate frequency transition bounds.
     original_max_position_embeddings: usize,
+    /// Positive cosine/sine amplitude multiplier applied after frequency scaling.
     attention_factor: f64,
+    /// Upper positive rotation-count boundary for the frequency transition.
     beta_fast: f64,
+    /// Lower positive rotation-count boundary, strictly below `beta_fast`.
     beta_slow: f64,
 }
 
@@ -225,11 +235,20 @@ pub enum RopeScaling {
     #[default]
     None,
     /// Divides absolute positions by a constant extension factor.
-    Linear(LinearRopeScaling),
+    Linear(
+        /// Validated constant position-divisor policy.
+        LinearRopeScaling,
+    ),
     /// Changes the frequency base dynamically beyond the trained context.
-    DynamicNtk(DynamicNtkScaling),
+    DynamicNtk(
+        /// Validated extension multiplier and original context length.
+        DynamicNtkScaling,
+    ),
     /// Blends interpolated and extrapolated frequencies with YaRN.
-    Yarn(YarnConfig),
+    Yarn(
+        /// Validated frequency-transition and amplitude parameters.
+        YarnConfig,
+    ),
 }
 
 impl From<LinearRopeScaling> for RopeScaling {
@@ -261,9 +280,13 @@ impl From<YarnConfig> for RopeScaling {
 /// suffix features pass through attention without rotation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RopeConfig {
+    /// Total channels per attention head, including any unrotated suffix.
     head_dimension: usize,
+    /// Positive even prefix width rotated as coordinate pairs.
     rotary_dimension: usize,
+    /// Positive geometric base of the unscaled inverse-frequency sequence.
     theta: f64,
+    /// Validated scaling policy compatible with the rotary dimension and base.
     scaling: RopeScaling,
 }
 

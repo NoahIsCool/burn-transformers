@@ -1,3 +1,5 @@
+//! Tests T5 checkpoint installation, streaming loads, failure reports, and reference execution.
+
 use std::{
     fs::{self, File},
     io::Write,
@@ -25,6 +27,7 @@ use crate::{
 use super::*;
 use crate::models::t5::{T5Config, T5FeedForwardProjection};
 
+/// CPU backend used by checkpoint installation and execution tests.
 type TestBackend = Flex<f32, i32>;
 
 /// Returns a minimal but complete asymmetric encoder-decoder topology.
@@ -132,6 +135,7 @@ fn install_contract(model: &mut T5ForConditionalGeneration<TestBackend>, config:
     }
 }
 
+/// Every projection and head-tying combination accepts all checkpoint targets.
 #[test]
 fn every_dense_gated_tied_and_untied_target_dispatches() {
     use T5FeedForwardProjection::*;
@@ -147,6 +151,7 @@ fn every_dense_gated_tied_and_untied_target_dispatches() {
     }
 }
 
+/// Installed zero weights produce correctly shaped zero logits through both model stacks.
 #[test]
 fn zero_checkpoint_runs_a_complete_stateless_forward_pass() {
     let device = Default::default();
@@ -185,6 +190,7 @@ fn zero_checkpoint_runs_a_complete_stateless_forward_pass() {
     );
 }
 
+/// Invalid aliases, target paths, components, and shapes return structured installation errors.
 #[test]
 fn invalid_dispatch_paths_are_contextual_and_non_panicking() {
     let device = Default::default();
@@ -266,6 +272,7 @@ fn invalid_dispatch_paths_are_contextual_and_non_panicking() {
     ));
 }
 
+/// Local loads report expected tensor transforms, aliases, and single-shard streaming statistics.
 #[test]
 fn local_loader_plans_then_streams_tied_and_untied_checkpoints() {
     let device = Default::default();
@@ -300,6 +307,7 @@ fn local_loader_plans_then_streams_tied_and_untied_checkpoints() {
     }
 }
 
+/// Missing tensors, unexpected tensors, and shape errors leave model parameters uninitialized.
 #[test]
 fn planning_failures_precede_all_model_parameter_writes() {
     let device = Default::default();
@@ -357,6 +365,7 @@ fn planning_failures_precede_all_model_parameter_writes() {
     assert!(!wrong_shape_model.shared.weight.is_initialized());
 }
 
+/// A corrupted topology yields a sink error with the failed target and partial application report.
 #[test]
 fn execution_failure_preserves_partial_report_and_sink_cause() {
     let device = Default::default();
@@ -383,6 +392,7 @@ fn execution_failure_preserves_partial_report_and_sink_cause() {
     assert!(error.report.applied.len() < planned.load_plan().parameter_count());
 }
 
+/// Checkpoint planning errors expose no runtime execution-failure report.
 #[test]
 fn checkpoint_error_helpers_expose_only_runtime_partial_reports() {
     let checkpoint = T5CheckpointLoadError::Checkpoint(CheckpointError::InvalidMapping {
@@ -391,6 +401,7 @@ fn checkpoint_error_helpers_expose_only_runtime_partial_reports() {
     assert!(checkpoint.execution_failure().is_none());
 }
 
+/// F32 storage accounts for four bytes per element and the temporary fixture supports writes.
 #[test]
 fn synthetic_writer_uses_expected_float_storage_size() {
     assert_eq!(TensorDType::F32.storage_bytes(13 * 4).unwrap(), 208);

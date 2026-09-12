@@ -1,3 +1,5 @@
+//! Activation-hook tests for semantic selections, ordered edits, capture ownership, and gradients.
+
 use burn::{
     backend::Flex,
     tensor::{DType, Tensor},
@@ -5,8 +7,10 @@ use burn::{
 
 use super::{Axis, Hooks, Layer, Point};
 
+/// Deterministic F32 CPU backend used to inspect hook values exactly.
 type B = Flex<f32, i32>;
 
+/// Query and key selectors follow semantic axes even when tensor dimensions are permuted.
 #[test]
 fn query_and_key_point_helpers_follow_declared_axes() {
     let point = Point::custom(
@@ -34,6 +38,7 @@ fn query_and_key_point_helpers_follow_declared_axes() {
     assert_eq!(key.into_data().to_vec::<f32>().unwrap(), vec![4.0, 5.0]);
 }
 
+/// A rank-zero point fails registration preflight before the model callback executes.
 #[test]
 fn zero_rank_registration_is_rejected_before_running_the_model() {
     let point = Point::<0>::custom("scalar", []);
@@ -54,6 +59,7 @@ fn zero_rank_registration_is_rejected_before_running_the_model() {
     );
 }
 
+/// Constraint errors and invalid replacement layouts clear captures while allowing a fresh run.
 #[test]
 fn constraint_failures_clear_captures_and_leave_hooks_reusable() {
     let point = Layer::decoder(0).residual_post();
@@ -108,6 +114,7 @@ fn constraint_failures_clear_captures_and_leave_hooks_reusable() {
     }
 }
 
+/// An observer may borrow local state while captures and model values remain unchanged.
 #[test]
 fn borrowed_points_observe_without_changing_output() {
     let point = Layer::decoder(0).mlp_activation();
@@ -130,6 +137,7 @@ fn borrowed_points_observe_without_changing_output() {
     assert_eq!(values(output), vec![1.; 4]);
 }
 
+/// Adding an action during execution fails instead of evading selection validation.
 #[test]
 fn dynamic_registration_cannot_bypass_preflight() {
     let point = Layer::decoder(0).mlp_activation();
@@ -143,6 +151,7 @@ fn dynamic_registration_cannot_bypass_preflight() {
     assert!(error.to_string().contains("before starting"));
 }
 
+/// A failed edit reports both the named activation and the callback's original context.
 #[test]
 fn callback_failure_identifies_the_selected_activation() {
     let point = Layer::encoder(4).mlp_output();
@@ -159,10 +168,12 @@ fn callback_failure_identifies_the_selected_activation() {
     assert!(error.to_string().contains("bad projection"));
 }
 
+/// Read rank-three fixture activations for exact selected-element assertions.
 fn values(tensor: Tensor<B, 3>) -> Vec<f32> {
     tensor.into_data().to_vec::<f32>().unwrap()
 }
 
+/// Ordered captures observe a channel edit while all unselected tokens retain their values.
 #[test]
 fn capture_order_and_sliced_edits_preserve_unselected_tokens() {
     let point = Layer::decoder(2).mlp_activation();
@@ -183,6 +194,7 @@ fn capture_order_and_sliced_edits_preserve_unselected_tokens() {
     assert_eq!(values(hooks.get(&after).unwrap()), values(output));
 }
 
+/// A saved clean activation replaces only the requested token in a separate input.
 #[test]
 fn capture_from_clean_run_can_patch_another_input() {
     let point = Layer::encoder(0).residual_post();
@@ -203,6 +215,7 @@ fn capture_from_clean_run_can_patch_another_input() {
     assert_eq!(values(output), vec![0., 0., 1., 1.]);
 }
 
+/// A rank-two custom point supports channel edits whose callback borrows local variables.
 #[test]
 fn custom_rank_two_points_and_borrowed_callbacks_work() {
     let point = Point::custom("probe.neurons", [Axis::Batch, Axis::Channel]);
@@ -227,6 +240,7 @@ fn custom_rank_two_points_and_borrowed_callbacks_work() {
     assert_eq!(observed, 1);
 }
 
+/// Unavailable points, absent axes, and duplicate axis selections fail before model execution.
 #[test]
 fn unavailable_and_impossible_selections_fail_before_computation() {
     let point = Layer::decoder(0).mlp_activation();
@@ -262,6 +276,7 @@ fn unavailable_and_impossible_selections_fail_before_computation() {
     );
 }
 
+/// Edits must preserve selected shape and dtype, and selection indices must fit runtime extents.
 #[test]
 fn replacements_validate_shape_dtype_and_bounds() {
     let point = Layer::decoder(0).residual_pre();
@@ -297,6 +312,7 @@ fn replacements_validate_shape_dtype_and_bounds() {
     );
 }
 
+/// Each run replaces old captures, and failed runs invalidate even captures produced before failure.
 #[test]
 fn run_reuse_discards_old_and_failed_partial_captures() {
     let point = Layer::decoder(0).mlp_output();
@@ -330,6 +346,7 @@ fn run_reuse_discards_old_and_failed_partial_captures() {
     assert!(Hooks::<B>::new().get(&saved).is_err());
 }
 
+/// Actions require an active execution scope and every registered point must be visited.
 #[test]
 fn unvisited_points_and_unscoped_execution_are_errors() {
     let point = Layer::decoder(0).mlp_activation();
@@ -349,6 +366,7 @@ fn unvisited_points_and_unscoped_execution_are_errors() {
     );
 }
 
+/// A head-and-query edit changes exactly one probability row without touching adjacent rows.
 #[test]
 fn attention_selection_distinguishes_head_and_query_axes() {
     let point = Layer::decoder(0).self_attention().pattern();
@@ -366,9 +384,11 @@ fn attention_selection_distinguishes_head_and_query_axes() {
 }
 
 #[cfg(feature = "autodiff")]
+/// Slice edits scale only selected gradients; connected and detached captures obey their policies.
 #[test]
 fn sliced_edits_and_captures_preserve_the_requested_gradient_policy() {
     use burn::backend::Autodiff;
+    /// Differentiable fixture backend for capture and sliced-edit gradient policies.
     type Ad = Autodiff<B>;
     let point = Layer::decoder(0).mlp_activation();
     let input = Tensor::<Ad, 3>::ones([1, 2, 2], &Default::default()).require_grad();

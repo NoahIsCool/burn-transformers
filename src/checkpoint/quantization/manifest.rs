@@ -122,6 +122,7 @@ impl SourceFloatDType {
 }
 
 impl TryFrom<DType> for SourceFloatDType {
+    /// Unsupported source representation diagnostic.
     type Error = QuantizationError;
 
     /// Rejects non-floating storage before a quantizer interprets source bytes.

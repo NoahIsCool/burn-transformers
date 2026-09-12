@@ -9,9 +9,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Strict tensor inventory and mapping derived from the validated DeepSeek topology.
 mod checkpoint;
+/// Streamed installation of validated DeepSeek tensors into Burn parameters.
 mod load;
+/// DeepSeek-specific composition of the shared latent-attention primitives.
 pub mod mla;
+/// Executable DeepSeek decoder blocks, language-model graph, and compressed decode state.
 pub mod model;
 
 pub use checkpoint::{DeepseekV2CheckpointContract, DeepseekV2CheckpointOptions};
@@ -222,6 +226,7 @@ impl DeepseekV2Config {
 impl Validate for DeepseekV2Config {
     /// Checks MLA ranks, head spaces, expert grouping/cadence, YaRN, and tokens.
     fn validate(&self) -> Result<(), ConfigError> {
+        /// Family identifier attached to configuration validation errors.
         const FAMILY: &str = "deepseek_v2";
         model_type(FAMILY, &self.model_type, &["deepseek_v2"])?;
         for (field, value) in [
@@ -379,10 +384,13 @@ impl Validate for DeepseekV2Config {
 }
 
 impl ModelConfig for DeepseekV2Config {
+    /// Architecture family used when reporting configuration parse failures.
     const FAMILY: &'static str = "deepseek_v2";
+    /// Checkpoint discriminator accepted by the DeepSeek-V2 configuration parser.
     const MODEL_TYPES: &'static [&'static str] = &["deepseek_v2"];
 }
 
 #[cfg(test)]
 #[path = "deepseek_v2_tests.rs"]
+/// Configuration defaults, invalid routing policies, and dimension-overflow tests.
 mod tests;

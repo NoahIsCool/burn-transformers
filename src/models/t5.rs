@@ -182,6 +182,7 @@ impl T5Config {
 impl Validate for T5Config {
     /// Checks both stack depths, independent attention width, buckets, FFN, and IDs.
     fn validate(&self) -> Result<(), ConfigError> {
+        /// Family label attached to configuration validation errors.
         const FAMILY: &str = "t5";
         model_type(FAMILY, &self.model_type, &["t5"])?;
         for (field, value) in [
@@ -317,7 +318,9 @@ impl Validate for T5Config {
 }
 
 impl ModelConfig for T5Config {
+    /// Family label used by generic configuration dispatch and diagnostics.
     const FAMILY: &'static str = "t5";
+    /// Serialized model discriminators supported by this T5 schema.
     const MODEL_TYPES: &'static [&'static str] = &["t5"];
 }
 

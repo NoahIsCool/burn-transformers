@@ -23,6 +23,7 @@ use std::{error::Error, fs, path::PathBuf, time::Instant};
 #[path = "analyze.rs"]
 mod analyze;
 
+/// Experiment result carrying contextual configuration, record, and analysis errors.
 type AnyResult<T> = Result<T, Box<dyn Error>>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,23 +84,38 @@ impl Settings {
     }
 }
 
+/// One training/held-out evaluation snapshot with Fourier diagnostics.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Observation {
+    /// Number of completed optimizer updates at this snapshot.
     step: usize,
+    /// Accumulated run wall time in seconds, including time recorded before resumption.
     elapsed_seconds: f64,
+    /// Mean training negative log likelihood in nats over all 114 training classes.
     train_loss: f64,
+    /// Mean held-out negative log likelihood in nats over all 114 training classes.
     test_loss: f64,
+    /// Fraction of training pairs with the correct modular-sum prediction.
     train_accuracy: f64,
+    /// Fraction of held-out pairs with the correct modular-sum prediction.
     test_accuracy: f64,
+    /// Normalized nonzero-frequency sine/cosine energy of the numeric-token embeddings.
     embedding_fourier_power: Vec<f64>,
+    /// Normalized nonzero-frequency energy of the neuron-to-numeric-class readout.
     readout_fourier_power: Vec<f64>,
 }
+/// Metadata joining native model/optimizer records to their settings and exact split.
 #[derive(Serialize, Deserialize)]
 struct Checkpoint {
+    /// Number of optimizer updates already represented by the saved records.
     step: usize,
+    /// Directory containing the matching model and optimizer records.
     directory: PathBuf,
+    /// Run settings captured when this checkpoint was written.
     settings: Settings,
+    /// Ordered evaluation snapshots retained across resumed training.
     observations: Vec<Observation>,
+    /// SHA-256 digest of the checked-in training split specification.
     train_split_sha256: String,
 }
 
@@ -117,8 +133,10 @@ pub fn train<B: AutodiffBackend>(config: Settings) -> AnyResult<()> {
             "output already contains a run; use --resume or a new --output directory".into(),
         );
     }
+    /// Decoded membership of the checked-in training split.
     #[derive(Deserialize)]
     struct Split {
+        /// Training grid indices `a * 113 + b`; held-out indices are their complement.
         train_indices: Vec<usize>,
     }
     let train = serde_json::from_str::<Split>(include_str!("train_split.json"))?.train_indices;

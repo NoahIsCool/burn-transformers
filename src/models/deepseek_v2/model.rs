@@ -35,6 +35,7 @@ use super::{
 };
 use crate::models::config::RopeType;
 
+/// External compressed MLA caches and transactional prefill/decode execution.
 mod decode;
 
 pub use decode::{DeepseekV2DecodeState, MlaExecutionPath};
@@ -984,8 +985,10 @@ fn validate_logits_selection(selection: &LogitsSelection, sequence: usize) -> Re
 
 #[cfg(test)]
 #[path = "model_tests_support.rs"]
+/// Deterministic tiny topology and checkpoint weights shared by family tests.
 pub(crate) mod tests_support;
 
 #[cfg(test)]
 #[path = "model_tests.rs"]
+/// Forward diagnostics, reference parity, routing, and input-validation regressions.
 mod tests;

@@ -47,9 +47,13 @@ pub struct SourceStats {
 /// representation immediately before delivery to a [`super::TensorSink`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceTensor {
+    /// Physical checkpoint tensor name retained in conversion diagnostics.
     name: String,
+    /// Validated logical dimensions in row-major axis order.
     shape: Vec<u64>,
+    /// Wire scalar representation used to interpret the payload.
     dtype: TensorDType,
+    /// Owned little-endian payload whose length matches the shape and dtype.
     bytes: Vec<u8>,
 }
 
@@ -171,8 +175,11 @@ pub trait TensorSource {
 /// that handle before opening the next, making `max_open_shards <= 1` a structural
 /// property rather than a convention.
 pub struct LocalShardSource<'a> {
+    /// Immutable discovery descriptors used to revalidate execution requests.
     manifest: &'a CheckpointManifest,
+    /// Sole live shard handle, replaced when a read switches shards.
     open: Option<OpenShard>,
+    /// Cumulative read and open-handle accounting.
     stats: SourceStats,
 }
 
@@ -420,8 +427,11 @@ impl TensorSource for LocalShardSource<'_> {
 
 /// A single open shard and the absolute start of its tensor data section.
 struct OpenShard {
+    /// Root-relative identity of the currently open shard.
     relative_path: String,
+    /// Read-only file handle retained across same-shard reads.
     file: File,
+    /// Absolute byte offset immediately after the SafeTensors header.
     data_start: u64,
 }
 

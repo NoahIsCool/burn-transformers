@@ -1,3 +1,5 @@
+//! Tests artifact discovery, strict checkpoint mapping, alias topology, and memory accounting.
+
 use std::{
     collections::BTreeMap,
     fs::{self, File},
@@ -11,14 +13,19 @@ use tempfile::TempDir;
 
 use super::*;
 
+/// Borrowed tensor descriptor whose payload bytes are synthesized by the writer.
 #[derive(Clone)]
 struct FixtureTensor<'a> {
+    /// Fixture tensor name stored in the shard header.
     name: &'a str,
+    /// Wire scalar format used to calculate payload bytes.
     dtype: TensorDType,
+    /// Logical dimensions in row-major axis order.
     shape: Vec<u64>,
 }
 
 impl<'a> FixtureTensor<'a> {
+    /// Creates a named tensor descriptor for a discovery or planning fixture.
     fn new(name: &'a str, dtype: TensorDType, shape: impl Into<Vec<u64>>) -> Self {
         Self {
             name,
@@ -27,16 +34,19 @@ impl<'a> FixtureTensor<'a> {
         }
     }
 
+    /// Calculates the exact wire payload size for the fixture's shape and dtype.
     fn bytes(&self) -> u64 {
         let elements = self.shape.iter().product();
         self.dtype.storage_bytes(elements).unwrap()
     }
 }
 
+/// Writes a zero-filled SafeTensors fixture without user metadata.
 fn write_shard(root: &Path, relative: &str, tensors: &[FixtureTensor<'_>]) {
     write_shard_with_metadata(root, relative, tensors, BTreeMap::new());
 }
 
+/// Writes deterministic aligned SafeTensors headers and zero-filled payloads.
 fn write_shard_with_metadata(
     root: &Path,
     relative: &str,
@@ -78,6 +88,7 @@ fn write_shard_with_metadata(
     file.write_all(&vec![0_u8; offset as usize]).unwrap();
 }
 
+/// Writes supplied header bytes unchanged for malformed-artifact tests.
 fn write_raw_shard(root: &Path, relative: &str, header: &[u8], data_bytes: usize) {
     let path = root.join(relative);
     let mut file = File::create(path).unwrap();
@@ -87,6 +98,7 @@ fn write_raw_shard(root: &Path, relative: &str, header: &[u8], data_bytes: usize
     file.write_all(&vec![0_u8; data_bytes]).unwrap();
 }
 
+/// Writes tensor-to-shard assignments with an optional declared byte total.
 fn write_index(root: &Path, map: &[(&str, &str)], total_size: Option<u64>) {
     let weight_map: BTreeMap<_, _> = map.iter().copied().collect();
     let value = json!({
@@ -100,6 +112,7 @@ fn write_index(root: &Path, map: &[(&str, &str)], total_size: Option<u64>) {
     .unwrap();
 }
 
+/// Creates and discovers a temporary single-shard fixture while retaining its directory.
 fn fixture_manifest(tensors: &[FixtureTensor<'_>]) -> (TempDir, CheckpointManifest) {
     let temp = TempDir::new().unwrap();
     write_shard(temp.path(), "model.safetensors", tensors);
@@ -108,6 +121,7 @@ fn fixture_manifest(tensors: &[FixtureTensor<'_>]) -> (TempDir, CheckpointManife
 }
 
 #[test]
+/// Unsharded discovery validates descriptors and metadata without interpreting payload values.
 fn discovers_unsharded_checkpoint_without_reading_payload_semantics() {
     let temp = TempDir::new().unwrap();
     let metadata = BTreeMap::from([("format".into(), "pt".into())]);
@@ -133,6 +147,7 @@ fn discovers_unsharded_checkpoint_without_reading_payload_semantics() {
 }
 
 #[test]
+/// Sharded discovery verifies tensor assignments and the index's declared byte total.
 fn discovers_shards_and_verifies_index_total_size() {
     let temp = TempDir::new().unwrap();
     write_shard(
@@ -168,6 +183,7 @@ fn discovers_shards_and_verifies_index_total_size() {
 }
 
 #[test]
+/// Exact integer-valued decimal byte totals are accepted without floating-point rounding.
 fn index_total_size_accepts_exact_decimal_compatibility_form() {
     let temp = TempDir::new().unwrap();
     write_shard(
@@ -192,6 +208,7 @@ fn index_total_size_accepts_exact_decimal_compatibility_form() {
 }
 
 #[test]
+/// Ambiguous and nonintegral decimal byte totals are rejected.
 fn index_total_size_rejects_ambiguous_or_non_integral_decimals() {
     for invalid in [
         "2.5",
@@ -219,6 +236,7 @@ fn index_total_size_rejects_ambiguous_or_non_integral_decimals() {
 }
 
 #[test]
+/// Explicit nested shard paths are accepted when canonical containment is preserved.
 fn explicit_nested_shard_path_is_allowed_when_contained() {
     let temp = TempDir::new().unwrap();
     write_shard(
@@ -232,6 +250,7 @@ fn explicit_nested_shard_path_is_allowed_when_contained() {
 }
 
 #[test]
+/// Automatic discovery accepts a unique nonstandard artifact and rejects ambiguous candidates.
 fn auto_discovery_accepts_one_nonstandard_artifact_and_rejects_ambiguity() {
     let temp = TempDir::new().unwrap();
     write_shard(
@@ -252,6 +271,7 @@ fn auto_discovery_accepts_one_nonstandard_artifact_and_rejects_ambiguity() {
 }
 
 #[test]
+/// Missing artifacts and roots that are not directories produce contextual errors.
 fn missing_artifact_and_nondirectory_roots_are_contextual() {
     let temp = TempDir::new().unwrap();
     assert!(matches!(
@@ -267,6 +287,7 @@ fn missing_artifact_and_nondirectory_roots_are_contextual() {
 }
 
 #[test]
+/// Portable path validation rejects traversal, absolute paths, and other hostile spellings.
 fn hostile_relative_paths_are_rejected_portably() {
     for path in [
         "../outside.safetensors",
@@ -294,6 +315,7 @@ fn hostile_relative_paths_are_rejected_portably() {
 
 #[cfg(unix)]
 #[test]
+/// A shard symlink cannot escape the canonical artifact root.
 fn shard_symlink_cannot_escape_canonical_root() {
     use std::os::unix::fs::symlink;
 
@@ -316,6 +338,7 @@ fn shard_symlink_cannot_escape_canonical_root() {
 }
 
 #[test]
+/// Header and index resource limits reject oversized inputs before allocation.
 fn header_and_index_resource_limits_are_enforced_before_allocation() {
     let temp = TempDir::new().unwrap();
     write_shard(
@@ -347,6 +370,7 @@ fn header_and_index_resource_limits_are_enforced_before_allocation() {
 }
 
 #[test]
+/// Truncated files and impossible declared header lengths fail discovery.
 fn truncated_and_impossible_header_lengths_are_rejected() {
     let temp = TempDir::new().unwrap();
     fs::write(temp.path().join("model.safetensors"), b"tiny").unwrap();
@@ -365,6 +389,7 @@ fn truncated_and_impossible_header_lengths_are_rejected() {
 }
 
 #[test]
+/// Malformed tensor dtypes, dimensions, and payload ranges fail validation.
 fn malformed_dtype_shape_and_range_metadata_are_rejected() {
     let cases = [
         (
@@ -399,6 +424,7 @@ fn malformed_dtype_shape_and_range_metadata_are_rejected() {
 }
 
 #[test]
+/// SafeTensors headers must begin with the JSON object marker.
 fn safetensors_header_must_start_with_an_object_byte() {
     let temp = TempDir::new().unwrap();
     write_raw_shard(temp.path(), "model.safetensors", b" {}", 0);
@@ -412,6 +438,7 @@ fn safetensors_header_must_start_with_an_object_byte() {
 }
 
 #[test]
+/// Duplicate decoded tensor names cannot overwrite an earlier header entry.
 fn duplicate_header_tensor_names_are_rejected() {
     let temp = TempDir::new().unwrap();
     let header = br#"{"a":{"dtype":"F16","shape":[1],"data_offsets":[0,2]},"a":{"dtype":"F16","shape":[1],"data_offsets":[0,2]}}"#;
@@ -422,6 +449,7 @@ fn duplicate_header_tensor_names_are_rejected() {
 }
 
 #[test]
+/// Every index entry and every shard tensor must have a consistent counterpart.
 fn index_must_match_headers_in_both_directions() {
     let temp = TempDir::new().unwrap();
     write_shard(
@@ -437,6 +465,7 @@ fn index_must_match_headers_in_both_directions() {
 }
 
 #[test]
+/// Generic index totals must equal the validated tensor payload byte sum.
 fn index_total_size_must_equal_validated_tensor_bytes() {
     let temp = TempDir::new().unwrap();
     write_shard(
@@ -455,6 +484,7 @@ fn index_total_size_must_equal_validated_tensor_bytes() {
 }
 
 #[test]
+/// Pinned byte-accounting exceptions are explicit and do not weaken generic discovery.
 fn pinned_total_size_policy_is_explicit_and_generic_paths_remain_strict() {
     use sha2::{Digest, Sha256};
 
@@ -618,6 +648,7 @@ fn pinned_total_size_policy_is_explicit_and_generic_paths_remain_strict() {
 }
 
 #[test]
+/// Explicit and unique nonstandard indexes can omit optional total-size metadata.
 fn explicit_index_and_nonstandard_index_auto_discovery_work_without_total_size() {
     let temp = TempDir::new().unwrap();
     write_shard(
@@ -644,6 +675,7 @@ fn explicit_index_and_nonstandard_index_auto_discovery_work_without_total_size()
 }
 
 #[test]
+/// Index size and entry limits are enforced before opening referenced shards.
 fn index_limits_apply_before_any_shard_is_opened() {
     let temp = TempDir::new().unwrap();
     write_index(
@@ -667,6 +699,7 @@ fn index_limits_apply_before_any_shard_is_opened() {
 }
 
 #[test]
+/// Selected artifacts require supported extensions and regular-file semantics.
 fn artifact_extensions_and_regular_file_types_are_enforced() {
     let temp = TempDir::new().unwrap();
     fs::write(temp.path().join("weights.bin"), b"not tensors").unwrap();
@@ -708,6 +741,7 @@ fn artifact_extensions_and_regular_file_types_are_enforced() {
 }
 
 #[test]
+/// Multiple nonstandard indexes produce an ambiguity error.
 fn multiple_nonstandard_indexes_are_ambiguous() {
     let temp = TempDir::new().unwrap();
     fs::write(temp.path().join("a.safetensors.index.json"), b"{}").unwrap();
@@ -723,6 +757,7 @@ fn multiple_nonstandard_indexes_are_ambiguous() {
 }
 
 #[test]
+/// Incorrect shard assignments and declared-but-absent tensors are rejected.
 fn index_assignment_mismatch_and_declared_but_absent_tensor_are_rejected() {
     let temp = TempDir::new().unwrap();
     write_shard(
@@ -762,6 +797,7 @@ fn index_assignment_mismatch_and_declared_but_absent_tensor_are_rejected() {
 }
 
 #[test]
+/// An exact same-shard index alias resolves to its physical owner without inventing payload storage.
 fn exact_same_shard_index_alias_resolves_without_inventing_a_tensor() {
     let temp = TempDir::new().unwrap();
     write_shard(
@@ -954,6 +990,7 @@ fn exact_same_shard_index_alias_resolves_without_inventing_a_tensor() {
 }
 
 #[test]
+/// Index-alias options round-trip and preserve compatibility defaults when omitted.
 fn index_alias_options_round_trip_and_default_when_absent() {
     let options = LoadOptions {
         index_aliases: vec![IndexTensorAlias::new("alias.weight", "owner.weight")],
@@ -985,6 +1022,7 @@ fn index_alias_options_round_trip_and_default_when_absent() {
 }
 
 #[test]
+/// Index aliases require a unique exact owner in the same physical shard.
 fn index_alias_requires_exact_unique_same_shard_physical_storage() {
     let make = || {
         let temp = TempDir::new().unwrap();
@@ -1068,6 +1106,7 @@ fn index_alias_requires_exact_unique_same_shard_physical_storage() {
 }
 
 #[test]
+/// A physical tensor name cannot occur in two shards.
 fn tensor_cannot_appear_in_two_shards() {
     let temp = TempDir::new().unwrap();
     write_shard(
@@ -1102,6 +1141,7 @@ fn tensor_cannot_appear_in_two_shards() {
 }
 
 #[test]
+/// Malformed index objects and duplicate decoded weight keys fail deterministically.
 fn malformed_index_json_and_duplicate_weight_keys_are_rejected() {
     let temp = TempDir::new().unwrap();
     fs::write(temp.path().join("model.safetensors.index.json"), b"{").unwrap();
@@ -1357,6 +1397,7 @@ fn artifact_contract_header_rejects_escape_equivalent_metadata_names() {
 }
 
 #[test]
+/// Tensor count, rank, name length, and checked-arithmetic limits are enforced.
 fn all_header_count_rank_name_and_arithmetic_bounds_are_enforced() {
     let temp = TempDir::new().unwrap();
     write_shard(
@@ -1433,6 +1474,7 @@ fn all_header_count_rank_name_and_arithmetic_bounds_are_enforced() {
 }
 
 #[test]
+/// Reversed payload ranges and ranges outside the file produce distinct diagnostics.
 fn reversed_and_out_of_file_ranges_are_distinguished() {
     let temp = TempDir::new().unwrap();
     write_raw_shard(
@@ -1460,6 +1502,7 @@ fn reversed_and_out_of_file_ranges_are_distinguished() {
 }
 
 #[test]
+/// Duplicate metadata keys and absent roots fail without ambiguous interpretation.
 fn duplicate_metadata_keys_and_missing_roots_fail_cleanly() {
     let temp = TempDir::new().unwrap();
     write_raw_shard(
@@ -1482,6 +1525,7 @@ fn duplicate_metadata_keys_and_missing_roots_fail_cleanly() {
 }
 
 #[test]
+/// An identity plan records exact tensor transformations and memory estimates.
 fn strict_identity_plan_and_memory_estimate_are_exact() {
     let (_temp, manifest) = fixture_manifest(&[
         FixtureTensor::new("a", TensorDType::F16, [2, 3]),
@@ -1507,6 +1551,7 @@ fn strict_identity_plan_and_memory_estimate_are_exact() {
 }
 
 #[test]
+/// Each supported mapping operation retains its explicit source/target transformation.
 fn rename_transpose_split_concatenate_and_alias_are_explicit() {
     let (_temp, manifest) = fixture_manifest(&[
         FixtureTensor::new("matrix", TensorDType::F16, [2, 3]),
@@ -1554,6 +1599,7 @@ fn rename_transpose_split_concatenate_and_alias_are_explicit() {
 }
 
 #[test]
+/// Alias chains resolve to a single physical storage owner.
 fn chained_aliases_resolve_to_the_storage_owner() {
     let (_temp, manifest) =
         fixture_manifest(&[FixtureTensor::new("shared", TensorDType::F16, [4, 2])]);
@@ -1577,6 +1623,7 @@ fn chained_aliases_resolve_to_the_storage_owner() {
 }
 
 #[test]
+/// Automatic dtype policy records the required BF16-to-F16 conversion.
 fn auto_dtype_policy_plans_bf16_to_f16_conversion() {
     let (_temp, manifest) =
         fixture_manifest(&[FixtureTensor::new("weight", TensorDType::BF16, [2, 2])]);
@@ -1588,6 +1635,7 @@ fn auto_dtype_policy_plans_bf16_to_f16_conversion() {
 }
 
 #[test]
+/// Preserve and explicit-cast policies honor architecture dtype constraints.
 fn preserve_and_cast_dtype_policies_are_strict() {
     let (_temp, manifest) = fixture_manifest(&[
         FixtureTensor::new("float", TensorDType::BF16, [2]),
@@ -1690,6 +1738,7 @@ fn concrete_expected_dtype_overrides_blanket_float_cast() {
 }
 
 #[test]
+/// Strict mismatch reports retain all missing and unexpected tensor keys.
 fn strict_mismatch_report_preserves_all_keys() {
     let (_temp, manifest) = fixture_manifest(&[
         FixtureTensor::new("used", TensorDType::F16, [1]),
@@ -1719,6 +1768,7 @@ fn strict_mismatch_report_preserves_all_keys() {
 }
 
 #[test]
+/// Explicit allowlists permit an intentional partial load to satisfy strict validation.
 fn allowlists_can_make_an_intentionally_partial_text_load_strict() {
     let (_temp, manifest) = fixture_manifest(&[
         FixtureTensor::new("text.weight", TensorDType::F16, [1]),
@@ -1740,6 +1790,7 @@ fn allowlists_can_make_an_intentionally_partial_text_load_strict() {
 }
 
 #[test]
+/// Empty allowlist patterns cannot silently permit every checkpoint key.
 fn empty_allowlist_patterns_are_forbidden() {
     let (_temp, manifest) = fixture_manifest(&[]);
     let options = LoadOptions {
@@ -1753,6 +1804,7 @@ fn empty_allowlist_patterns_are_forbidden() {
 }
 
 #[test]
+/// Mapping validation rejects incompatible shapes, axes, and source consumption.
 fn invalid_mapping_shapes_axes_and_consumption_are_rejected() {
     let (_temp, manifest) = fixture_manifest(&[
         FixtureTensor::new("rank1", TensorDType::F16, [6]),
@@ -1785,6 +1837,7 @@ fn invalid_mapping_shapes_axes_and_consumption_are_rejected() {
 }
 
 #[test]
+/// Malformed split and concatenation requests fail planning.
 fn malformed_split_and_concatenate_operations_are_rejected() {
     let (_temp, manifest) = fixture_manifest(&[
         FixtureTensor::new("a", TensorDType::F16, [2, 3]),
@@ -1819,6 +1872,7 @@ fn malformed_split_and_concatenate_operations_are_rejected() {
 }
 
 #[test]
+/// Cyclic aliases and aliases without known owners fail planning.
 fn alias_cycles_and_unknown_alias_sources_are_rejected() {
     let (_temp, manifest) = fixture_manifest(&[]);
     let expected = [ExpectedTensor::new("a", [1]), ExpectedTensor::new("b", [1])];
@@ -1838,6 +1892,7 @@ fn alias_cycles_and_unknown_alias_sources_are_rejected() {
 }
 
 #[test]
+/// Unknown sources/targets and duplicate expected tensors fail before execution.
 fn missing_sources_unknown_targets_and_duplicate_expectations_fail_early() {
     let (_temp, manifest) = fixture_manifest(&[]);
     let expected = [ExpectedTensor::new("known", [1])];
@@ -1873,6 +1928,7 @@ fn missing_sources_unknown_targets_and_duplicate_expectations_fail_early() {
 }
 
 #[test]
+/// Splits and concatenations validate empty input sets and axis bounds.
 fn split_and_concatenate_validate_empty_inputs_and_axes() {
     let (_temp, manifest) =
         fixture_manifest(&[FixtureTensor::new("source", TensorDType::F16, [2, 3])]);
@@ -1908,6 +1964,7 @@ fn split_and_concatenate_validate_empty_inputs_and_axes() {
 }
 
 #[test]
+/// Every mapping operation rejects collisions with an existing target.
 fn all_mapping_target_collision_paths_are_rejected() {
     let (_temp, manifest) = fixture_manifest(&[
         FixtureTensor::new("first", TensorDType::F16, [1]),
@@ -1956,6 +2013,7 @@ fn all_mapping_target_collision_paths_are_rejected() {
 }
 
 #[test]
+/// Aliases must match their storage owner's logical shape and dtype.
 fn aliases_must_match_owner_shape_and_dtype() {
     let (_temp, manifest) =
         fixture_manifest(&[FixtureTensor::new("source", TensorDType::F16, [2])]);
@@ -1991,6 +2049,7 @@ fn aliases_must_match_owner_shape_and_dtype() {
 }
 
 #[test]
+/// Expected inventories reject unnamed tensors and overflowing shape products.
 fn expected_inventory_rejects_empty_names_and_shape_overflow() {
     let (_temp, manifest) = fixture_manifest(&[]);
     let empty = [ExpectedTensor::new("", [1])];
@@ -2017,6 +2076,7 @@ fn expected_inventory_rejects_empty_names_and_shape_overflow() {
 }
 
 #[test]
+/// Explicit operation insertion and runtime report recording preserve their public contracts.
 fn explicit_operation_push_and_report_runtime_records_are_available() {
     let (_temp, manifest) =
         fixture_manifest(&[FixtureTensor::new("source", TensorDType::F16, [1])]);
@@ -2437,6 +2497,7 @@ struct CheckpointContractSink {
 }
 
 impl TensorSink for CheckpointContractSink {
+    /// I/O-style failure used when an alias cannot resolve its installed owner.
     type Error = std::io::Error;
 
     /// Stores a completed target; a retry may replace an earlier complete value.
@@ -2615,6 +2676,7 @@ fn checkpoint_contract_bad_preferred_index_requires_explicit_selection_or_repair
 
 proptest! {
     #[test]
+    /// Generated dtype storage calculations scale linearly for byte-aligned element counts.
     fn dtype_storage_bytes_scale_linearly(elements in 0_u64..1_000_000) {
         prop_assert_eq!(TensorDType::F16.storage_bytes(elements).unwrap(), elements * 2);
         prop_assert_eq!(TensorDType::F32.storage_bytes(elements).unwrap(), elements * 4);
@@ -2622,6 +2684,7 @@ proptest! {
     }
 
     #[test]
+    /// Generated exhaustive splits preserve the original shape extent and payload byte count.
     fn arbitrary_exhaustive_splits_preserve_shape_and_bytes(
         left in 1_u64..32,
         middle in 1_u64..32,
@@ -2666,6 +2729,7 @@ proptest! {
     }
 
     #[test]
+    /// Generated transpose plans swap only the two selected dimensions.
     fn transpose_plans_swap_exactly_two_dimensions(rows in 1_u64..64, cols in 1_u64..64) {
         let (_temp, manifest) = fixture_manifest(&[FixtureTensor::new(
             "source",

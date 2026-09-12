@@ -1,3 +1,5 @@
+//! Tests T5 checkpoint keys, tensor layouts, aliases, load planning, and dimension bounds.
+
 use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::{
@@ -93,6 +95,7 @@ fn shape<'a>(contract: &'a T5CheckpointContract, name: &str) -> &'a [u64] {
         .shape
 }
 
+/// Dense and gated projections retain their historical checkpoint keys and tensor counts.
 #[test]
 fn dense_and_gated_variants_have_exact_historical_keys() {
     use super::super::T5FeedForwardProjection::*;
@@ -127,6 +130,7 @@ fn dense_and_gated_variants_have_exact_historical_keys() {
     }
 }
 
+/// Only the first block of each stack owns a relative-attention bias table.
 #[test]
 fn relative_bias_is_owned_only_by_each_stack_block_zero() {
     let contract = tiny(super::super::T5FeedForwardProjection::GatedGelu, false)
@@ -149,6 +153,7 @@ fn relative_bias_is_owned_only_by_each_stack_block_zero() {
     assert_eq!(bias[0].shape, [8, 2]);
 }
 
+/// Attention, feed-forward, and vocabulary-head shapes follow independent T5 widths.
 #[test]
 fn attention_and_feed_forward_shapes_follow_t5_projection_widths() {
     let mut config = tiny(super::super::T5FeedForwardProjection::GatedGelu, false);
@@ -182,6 +187,7 @@ fn attention_and_feed_forward_shapes_follow_t5_projection_widths() {
     assert_eq!(shape(&contract, "lm_head.weight"), [4, 11]);
 }
 
+/// Linear mappings transpose axes while preserving element counts and physical storage accounting.
 #[test]
 fn every_independent_linear_is_reported_as_an_element_equivalent_transpose() {
     use super::super::T5FeedForwardProjection::{GatedGelu, Relu};
@@ -242,6 +248,7 @@ fn every_independent_linear_is_reported_as_an_element_equivalent_transpose() {
     }
 }
 
+/// Tied vocabulary heads alias shared embeddings while untied heads own transposed storage.
 #[test]
 fn tied_head_is_a_logical_alias_while_untied_head_consumes_storage() {
     let tied = tiny(super::super::T5FeedForwardProjection::Relu, true)
@@ -276,6 +283,7 @@ fn tied_head_is_a_logical_alias_while_untied_head_consumes_storage() {
     assert!(untied_plan.aliases.is_empty());
 }
 
+/// Known embedding copies require equivalence checks while custom load exceptions are preserved.
 #[test]
 fn known_hugging_face_embedding_aliases_are_exact_and_reported() {
     for tied in [false, true] {
@@ -335,6 +343,7 @@ fn known_hugging_face_embedding_aliases_are_exact_and_reported() {
     }
 }
 
+/// Strict planning rejects missing or unexpected tensors, incompatible shapes, and integer weights.
 #[test]
 fn strict_planning_reports_missing_unexpected_and_shape_errors() {
     let contract = tiny(super::super::T5FeedForwardProjection::GatedSilu, false)
@@ -385,6 +394,7 @@ fn strict_planning_reports_missing_unexpected_and_shape_errors() {
     ));
 }
 
+/// FLAN and UL2 fixtures produce complete inventories, expected transposes, and configured aliases.
 #[test]
 fn official_reduced_flan_and_ul2_configs_generate_complete_contracts() {
     let flan =
@@ -450,6 +460,7 @@ fn official_reduced_flan_and_ul2_configs_generate_complete_contracts() {
     );
 }
 
+/// Overflowing attention dimensions fail before checkpoint inventory allocation.
 #[test]
 fn dimension_overflow_is_reported_before_inventory_allocation() {
     let config = T5Config {
