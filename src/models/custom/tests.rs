@@ -28,6 +28,10 @@ type TestBackend = Flex<f32, i32>;
 /// Sparse decode diagnostics and transactional failure contract tests.
 mod state_contracts;
 
+#[path = "prepared_input_tests.rs"]
+/// Host-validated causal inputs, output/gradient parity, and compatibility failures.
+mod prepared_input;
+
 /// Standard scale-only normalization for compact fixtures.
 fn rms() -> NormalizationSpec {
     NormalizationSpec::Rms {

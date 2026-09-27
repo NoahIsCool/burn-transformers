@@ -30,7 +30,7 @@ mod seq2seq;
 /// External fixed-capacity token histories used by reference decoding.
 mod state;
 
-pub use causal::ModularCausalLm;
+pub use causal::{ModularCausalLm, PreparedCausalInput};
 pub use common::{ModularLayer, ModularNorm, NormLayout};
 pub use seq2seq::ModularSeq2SeqLm;
 pub use state::ModularDecodeState;

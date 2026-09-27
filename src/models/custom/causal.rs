@@ -9,7 +9,7 @@ use std::ops::Range;
 use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
-    tensor::{Tensor, backend::Backend},
+    tensor::{Int, Tensor, TensorData, backend::Backend},
 };
 
 use crate::{
@@ -31,6 +31,32 @@ use super::{
     },
     state::{ModularDecodeState, StatePurpose},
 };
+
+/// Immutable, host-validated tokens for unpadded causal sequence training.
+///
+/// Construct with [`ModularCausalLm::prepare_host_tokens`]. Tokens have contiguous
+/// positions starting at zero in every row. Private fields prevent replacing the
+/// checked payload or its bounds; forwarding checks model compatibility using
+/// metadata only, without GPU-to-host token or position reductions. This is an
+/// input capability, not model state, and can be reused across optimizer updates.
+#[derive(Clone, Debug)]
+pub struct PreparedCausalInput<B: Backend> {
+    /// Checked token payload; no padding or caller-specified positions.
+    input: CausalLmInput<B>,
+    /// Generated contiguous positions, shared by all blocks and repeated calls.
+    positions: Tensor<B, 2, Int>,
+    /// Vocabulary bound against which every host token was validated.
+    vocabulary_size: usize,
+    /// Position-capacity contract of the model that prepared the input.
+    max_position_embeddings: usize,
+}
+
+impl<B: Backend> PreparedCausalInput<B> {
+    /// Returns the checked `[batch, sequence]` shape without reading the device.
+    pub fn shape(&self) -> [usize; 2] {
+        self.input.token_ids.dims()
+    }
+}
 
 /// A heterogeneous decoder-only transformer assembled from [`DecoderSpec`].
 #[derive(Module, Debug)]
@@ -97,6 +123,117 @@ impl<B: Backend> ModularCausalLm<B> {
     #[must_use]
     pub const fn spec(&self) -> &DecoderSpec {
         &self.spec
+    }
+
+    /// Checks complete host token rows once, then uploads an opaque causal input.
+    ///
+    /// Every row has `shape[1]` valid tokens at positions `0..shape[1]`, without
+    /// BOS insertion or target shifting. Rejects zero/overflowing dimensions,
+    /// mismatched storage, tokens outside this vocabulary, and excessive context
+    /// before allocating device tensors. The input uses this model's device and
+    /// may be reused by compatible models with the same vocabulary and context
+    /// capacity. Use ordinary [`Self::forward`] for padding or explicit positions.
+    pub fn prepare_host_tokens(
+        &self,
+        tokens: Vec<i32>,
+        shape: [usize; 2],
+    ) -> Result<PreparedCausalInput<B>> {
+        let [batch, sequence] = shape;
+        let count = batch
+            .checked_mul(sequence)
+            .filter(|_| batch > 0 && sequence > 0);
+        if count != Some(tokens.len()) {
+            return Err(Error::shape(
+                "custom.prepared.token_ids",
+                "nonempty [batch, sequence] matching host token storage",
+                format!("shape {shape:?}, {} tokens", tokens.len()),
+            ));
+        }
+        if sequence > self.spec.max_position_embeddings || sequence > i32::MAX as usize {
+            return Err(Error::shape(
+                "custom.prepared.positions",
+                format!(
+                    "sequence at most {} and within I32 positions",
+                    self.spec.max_position_embeddings
+                ),
+                sequence.to_string(),
+            ));
+        }
+        if let Some((index, token)) = tokens
+            .iter()
+            .enumerate()
+            .find(|(_, token)| **token < 0 || **token as usize >= self.spec.vocabulary_size)
+        {
+            return Err(Error::configuration(
+                "custom.prepared.token_ids",
+                format!(
+                    "token {token} at flat index {index} is outside 0..{}",
+                    self.spec.vocabulary_size
+                ),
+            ));
+        }
+        let device = self.embed_tokens.weight.lazy_device();
+        let token_ids = Tensor::from_data(TensorData::new(tokens, shape), &device);
+        let positions = Tensor::<B, 1, Int>::arange(0..sequence as i64, &device)
+            .reshape([1, sequence])
+            .expand(shape);
+        Ok(PreparedCausalInput {
+            input: CausalLmInput {
+                token_ids,
+                token_mask: None,
+                position_ids: None,
+            },
+            positions,
+            vocabulary_size: self.spec.vocabulary_size,
+            max_position_embeddings: self.spec.max_position_embeddings,
+        })
+    }
+
+    /// Executes host-validated causal inputs without redundant device scalar reads.
+    ///
+    /// Computes the same differentiable graph and output selection as
+    /// [`Self::forward`]. Preparation changes input validation, not transformer
+    /// arithmetic, model parameters, attention visibility, or target timing.
+    pub fn forward_prepared(
+        &self,
+        input: &PreparedCausalInput<B>,
+        options: &ForwardOptions,
+    ) -> Result<CausalLmOutput<B>> {
+        self.forward_prepared_with_hooks(input, options, &mut Hooks::new())
+    }
+
+    /// Executes prepared causal inputs with ordinary activation captures and edits.
+    ///
+    /// Rejects different vocabulary/context contracts or model devices before
+    /// invoking hooks. Tensor storage remains private and cannot be substituted
+    /// after host validation. No device values are read to establish compatibility.
+    pub fn forward_prepared_with_hooks(
+        &self,
+        input: &PreparedCausalInput<B>,
+        options: &ForwardOptions,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<CausalLmOutput<B>> {
+        hooks.run(self.activation_points(), |hooks| {
+            validate_forward_options(options)?;
+            if input.vocabulary_size != self.spec.vocabulary_size
+                || input.max_position_embeddings != self.spec.max_position_embeddings
+                || input.input.token_ids.device() != self.embed_tokens.weight.lazy_device()
+            {
+                return Err(Error::configuration(
+                    "custom.prepared.compatibility",
+                    "prepared input must match the model vocabulary, context capacity, and device",
+                ));
+            }
+            let backbone = self.forward_resolved_backbone_with_hooks(
+                &input.input,
+                input.positions.clone(),
+                input.shape()[1],
+                options.hidden_states,
+                AttentionDirection::Causal,
+                hooks,
+            )?;
+            self.finish_forward(backbone, &input.input, options)
+        })
     }
 
     /// Lists the exact activations that this model can observe or replace.
@@ -305,6 +442,29 @@ impl<B: Backend> ModularCausalLm<B> {
             "custom.causal",
         )?;
         let context = evaluated_context(positions.clone())?;
+        self.forward_resolved_backbone_with_hooks(
+            input,
+            positions,
+            context,
+            retain_hidden_states,
+            direction,
+            hooks,
+        )
+    }
+
+    /// Executes a backbone after either host or device input validation.
+    ///
+    /// Callers supply checked positions and their exclusive maximum. Keeping one
+    /// arithmetic path preserves ordinary/prepared output, hook, and gradient parity.
+    fn forward_resolved_backbone_with_hooks(
+        &self,
+        input: &CausalLmInput<B>,
+        positions: Tensor<B, 2, Int>,
+        context: usize,
+        retain_hidden_states: bool,
+        direction: AttentionDirection,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<BackboneOutput<B>> {
         let hidden = self.embed_tokens.forward(input.token_ids.clone());
         let mut hidden = hooks.apply(Stack::Decoder.embedding(), hidden)?;
         let mut hidden_states = Vec::with_capacity(if retain_hidden_states {

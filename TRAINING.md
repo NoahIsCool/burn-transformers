@@ -137,6 +137,19 @@ Pairwise reduction does not remove every F32 limit: very small cross entropy
 can round to zero near probability one. Paper guides identify F64-reference
 and F32-training differences explicitly.
 
+For unpadded host-generated batches, modular causal models also offer
+`prepare_host_tokens(Vec<i32>, [batch, sequence])` and
+`forward_prepared(&prepared, &options)`. Preparation checks every token and the
+complete shape on the host, uploads the tokens, and constructs contiguous
+positions starting at zero. The opaque input binds the checked payload to its
+vocabulary/context bounds and device. Repeated forwarding validates metadata
+without the ordinary path's five token/position scalar readbacks. It uses the
+same arithmetic and supports `forward_prepared_with_hooks`; output logits still
+default to the last position, so sequence training must request `All`. Input
+preparation adds no BOS or label shift. Padded data and explicit position IDs
+continue to use the ordinary checked tensor-input API. This avoids redundant
+validation synchronizations; backend kernel speedups must be measured separately.
+
 | Computation | Training contract |
 | --- | --- |
 | Floating-point stateless graph | Native Burn autodiff; custom operations must support gradients. |

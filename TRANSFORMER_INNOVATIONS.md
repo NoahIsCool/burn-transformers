@@ -39,6 +39,7 @@ complete consumer workflows.
 | Editable T5/Qwen recipes and parameter transfer | Change block geometry, extract prefixes, and transfer compatible tensors with explicit transformations and tie reports. Tiny synthetic tests and bounded real-prefix comparisons do not promote arbitrary modified graphs to checkpoint support. |
 | Reusable mixers and residual blocks | Compose shared MLA, GQA, feed-forward modules, optional norms, and width adapters. The MLA encoder-decoder example trains a custom graph without DeepSeek family wiring. |
 | Native Burn training compatibility | Full-precision graphs use Burn autodiff, optimizers, records, and optional Learner integration. Single parameter ownership, freezing, differentiable captures, dropout in inserted modules, and optimizer resume have explicit tests. Packed quantized inference remains separate from training support. |
+| Prepared host token batches | Modular causal models validate unpadded host IDs once and retain opaque contiguous-position inputs. The same forward graph and hooks execute without repeated token/position scalar readbacks; CPU tests cover outputs, gradients, bounds, and model compatibility. GPU throughput remains a separately measured property. |
 
 The [v0.3 training record](acceptance/measurements/v0_3-training-validation-20260910/README.md)
 retains exact source identities and executed experiments. Grokking actually
