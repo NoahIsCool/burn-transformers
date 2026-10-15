@@ -669,3 +669,600 @@ fn causal_mask_rejects_lengths_beyond_i64() {
         assert!(error.to_string().contains(message));
     }
 }
+
+/// A padded cached suffix (`Q < K`) gives the same projected output in both graphs.
+#[test]
+fn cached_suffix_gqa_output_agrees_between_native_and_eager_graphs() {
+    use burn::tensor::{TensorData, Tolerance};
+
+    let device = Default::default();
+    // One module whose lazily initialized parameters are shared by both graphs.
+    let mut module = GroupedQueryAttentionConfig::new(8, 4, 2, 2)
+        .init::<Flex>(&device)
+        .unwrap();
+    let hidden = |sequence: usize, seed: usize| {
+        let values = (0..2 * sequence * 8)
+            .map(|index| ((index * 7 + seed) % 13) as f32 * 0.15 - 0.9)
+            .collect::<Vec<_>>();
+        Tensor::<Flex, 3>::from_data(TensorData::new(values, [2, sequence, 8]), &device)
+    };
+    let projection = module.project(hidden(3, 1), hidden(7, 2)).unwrap();
+    let valid = TokenMask::new(Tensor::<Flex, 2, Bool>::from_bool(
+        [
+            [true, true, true, true, true, true, true],
+            [false, false, true, true, true, true, true],
+        ]
+        .into(),
+        &device,
+    ));
+    let mask = padding_attention_mask(None, Some(&valid), 2, 4, 3, 7).unwrap();
+    let actual = module
+        .attend(projection.clone(), mask.clone(), None, true)
+        .unwrap();
+    module.precision_mode = AttentionPrecisionMode::EagerFp32Softmax;
+    let expected = module.attend(projection, mask, None, true).unwrap();
+    actual
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::rel_abs(1e-5, 1e-5));
+}
+
+/// Planned query ranges partition the rows and stop after the final chunk.
+#[test]
+fn execution_plan_ranges_partition_queries() {
+    let plan = AttentionExecutionPolicy::query_chunked(4, 30)
+        .plan(1, 2, 7, 5)
+        .unwrap();
+    assert_eq!(plan.query_ranges().collect::<Vec<_>>(), [0..3, 3..6, 6..7]);
+    assert_eq!(plan.query_range(2), Some(6..7));
+    assert_eq!(plan.query_range(3), None);
+    let unbounded = AttentionExecutionPolicy::Unbounded
+        .plan(1, 1, 5, 5)
+        .unwrap();
+    let ranges = unbounded.query_ranges().collect::<Vec<_>>();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0], 0..5);
+}
+
+/// Public sliding-window key ranges follow bottom-right alignment and reject invalid input.
+#[test]
+fn sliding_window_key_ranges_cover_each_chunk() {
+    use super::sliding_window_key_range;
+    // Rows 2..4 of 4 sit at positions 6 and 7 of 8 keys; window 3 sees 4..8.
+    assert_eq!(sliding_window_key_range(4, 8, 2..4, 3), Some(4..8));
+    assert_eq!(sliding_window_key_range(4, 4, 0..2, 8), Some(0..2));
+    assert_eq!(sliding_window_key_range(4, 3, 0..2, 2), None);
+    assert_eq!(sliding_window_key_range(4, 8, 2..2, 2), None);
+}
+
+/// Sinks are opt-in, default off in serialized configs, and initialize one zero logit per query head.
+#[test]
+fn attention_sinks_are_opt_in_per_query_head_parameters() {
+    let device = Default::default();
+    let config = GroupedQueryAttentionConfig::new(8, 4, 2, 2);
+    let mut json = serde_json::to_value(&config).unwrap();
+    json.as_object_mut().unwrap().remove("attention_sinks");
+    let restored: GroupedQueryAttentionConfig = serde_json::from_value(json).unwrap();
+    assert!(!restored.attention_sinks);
+    assert!(config.init::<Flex>(&device).unwrap().sinks.is_none());
+    let module = config
+        .with_attention_sinks(true)
+        .init::<Flex>(&device)
+        .unwrap();
+    let sinks = module.sinks.as_ref().unwrap().val();
+    assert_eq!(sinks.dims(), [4]);
+    assert_eq!(sinks.into_data().to_vec::<f32>().unwrap(), [0.0; 4]);
+}
+
+/// Backend-default sinks cannot be soft-capped, while the eager graph supports it.
+#[test]
+fn backend_default_sinks_reject_softcap_at_configuration() {
+    let mut config = GroupedQueryAttentionConfig::new(8, 2, 1, 4).with_attention_sinks(true);
+    config.softcap = Some(30.0);
+    assert!(matches!(config.validate(),
+        Err(crate::Error::Configuration { field, .. }) if field == "attention.attention_sinks"));
+    config
+        .with_precision_mode(AttentionPrecisionMode::EagerFp32Softmax)
+        .validate()
+        .unwrap();
+}
+
+/// Builds a GQA module with sinks and a deterministic projection for sink tests.
+fn sink_module(
+    precision: AttentionPrecisionMode,
+    sinks: [f32; 4],
+) -> (
+    super::GroupedQueryAttention<Flex>,
+    AttentionProjection<Flex>,
+) {
+    use burn::{module::Param, tensor::TensorData};
+
+    let device = Default::default();
+    let mut module = GroupedQueryAttentionConfig::new(8, 4, 2, 2)
+        .with_attention_sinks(true)
+        .with_precision_mode(precision)
+        .init::<Flex>(&device)
+        .unwrap();
+    module.sinks = Some(Param::from_tensor(Tensor::from_floats(sinks, &device)));
+    module.o_proj.weight = Param::from_tensor(Tensor::eye(8, &device));
+    let tensor = |shape: [usize; 4], seed: usize| {
+        let count = shape.iter().product::<usize>();
+        let values = (0..count)
+            .map(|index| ((index * 5 + seed) % 11) as f32 * 0.2 - 1.0)
+            .collect::<Vec<_>>();
+        Tensor::<Flex, 4>::from_data(TensorData::new(values, shape), &device)
+    };
+    let projection = AttentionProjection {
+        query: tensor([2, 4, 3, 2], 1),
+        key: tensor([2, 2, 5, 2], 2),
+        value: tensor([2, 2, 5, 2], 3),
+        gate: None,
+    };
+    (module, projection)
+}
+
+/// Native and eager sinks agree, and a vanishing sink recovers ordinary attention.
+#[test]
+fn module_sinks_agree_across_graphs_and_vanish_when_very_negative() {
+    use burn::tensor::Tolerance;
+
+    let sinks = [0.3, -0.7, 1.1, 0.0];
+    let (native, projection) = sink_module(AttentionPrecisionMode::BackendDefault, sinks);
+    let (eager, _) = sink_module(AttentionPrecisionMode::EagerFp32Softmax, sinks);
+    let mut eager = eager;
+    eager.o_proj = native.o_proj.clone();
+    for causal in [false, true] {
+        let expected = eager
+            .attend(projection.clone(), None, None, causal)
+            .unwrap();
+        native
+            .attend(projection.clone(), None, None, causal)
+            .unwrap()
+            .into_data()
+            .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::rel_abs(1e-5, 1e-5));
+    }
+    let (mut vanishing, _) = sink_module(AttentionPrecisionMode::BackendDefault, [-60.0; 4]);
+    let with_sinks = vanishing
+        .attend(projection.clone(), None, None, true)
+        .unwrap();
+    vanishing.sinks = None;
+    let without_sinks = vanishing.attend(projection, None, None, true).unwrap();
+    with_sinks
+        .into_data()
+        .assert_approx_eq::<f32>(&without_sinks.into_data(), Tolerance::rel_abs(1e-6, 1e-6));
+}
+
+/// Pattern rows exclude the sink column, and fully excluded rows have zero context.
+#[test]
+fn sink_patterns_sum_below_one_and_fully_excluded_rows_are_zero() {
+    use crate::intervention::{Hooks, Layer};
+
+    let (module, mut projection) =
+        sink_module(AttentionPrecisionMode::EagerFp32Softmax, [2.0_f32.ln(); 4]);
+    // Zero queries give equal scores, so with 5 keys p_key = 1 / (5 + 2).
+    projection.query = projection.query.zeros_like();
+    let device = Default::default();
+    let mut excluded = vec![false; 2 * 4 * 3 * 5];
+    excluded[..5].fill(true);
+    let mask = Tensor::<Flex, 4, Bool>::from_data(
+        burn::tensor::TensorData::new(excluded, [2, 4, 3, 5]),
+        &device,
+    );
+    let points = Layer::decoder(0).self_attention();
+    let mut hooks = Hooks::new();
+    let pattern = hooks.capture(points.pattern());
+    let context = hooks.capture(points.head_context());
+    hooks
+        .run(points.all(), |hooks| {
+            module.attend_with_hooks(projection, Some(mask), None, false, points, hooks)
+        })
+        .unwrap();
+    let pattern = hooks
+        .get(&pattern)
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    assert!(pattern[..5].iter().all(|value| *value == 0.0));
+    for value in &pattern[5..] {
+        assert!((value - 1.0 / 7.0).abs() < 1e-6, "{value}");
+    }
+    let context = hooks
+        .get(&context)
+        .unwrap()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    assert_eq!(&context[..2], &[0.0, 0.0]);
+}
+
+/// Sink parameters must match the query-head count, dtype, and device.
+#[test]
+fn malformed_sinks_fail_projection_validation() {
+    use burn::{module::Param, tensor::DType};
+
+    let device = Default::default();
+    let (mut module, projection) = sink_module(AttentionPrecisionMode::BackendDefault, [0.0; 4]);
+    module.sinks = Some(Param::from_tensor(Tensor::zeros([3], &device)));
+    let error = module
+        .attend(projection.clone(), None, None, false)
+        .unwrap_err();
+    assert!(error.to_string().contains("attention.sinks"));
+    module.sinks = Some(Param::from_tensor(
+        Tensor::<Flex, 1>::zeros([4], &device).cast(DType::F64),
+    ));
+    let error = module.attend(projection, None, None, false).unwrap_err();
+    assert!(error.to_string().contains("attention.sinks"));
+}
+
+/// Sink logits receive gradients through both operation graphs.
+#[cfg(feature = "autodiff")]
+#[test]
+fn attention_sinks_are_trainable() {
+    use burn::backend::Autodiff;
+    /// Differentiable CPU backend for the sink-gradient smoke test.
+    type Ad = Autodiff<Flex>;
+    let device = Default::default();
+    for precision in [
+        AttentionPrecisionMode::BackendDefault,
+        AttentionPrecisionMode::EagerFp32Softmax,
+    ] {
+        let module = GroupedQueryAttentionConfig::new(4, 2, 1, 2)
+            .with_attention_sinks(true)
+            .with_precision_mode(precision)
+            .init::<Ad>(&device)
+            .unwrap();
+        let output = module
+            .forward_without_position_encoding(
+                Tensor::<Ad, 3>::ones([1, 3, 4], &device),
+                None,
+                true,
+            )
+            .unwrap();
+        let gradients = output.sum().backward();
+        let sink_gradient = module
+            .sinks
+            .as_ref()
+            .unwrap()
+            .grad(&gradients)
+            .expect("sink logits receive gradients");
+        assert!(
+            sink_gradient
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()
+                .iter()
+                .all(|value| value.is_finite())
+        );
+    }
+}
+
+/// Independent bias flags allocate exactly the requested projection biases.
+#[test]
+fn projection_bias_flags_are_independent() {
+    use super::ProjectionBias;
+
+    let device = Default::default();
+    let has_bias = |config: GroupedQueryAttentionConfig| {
+        let module = config.init::<Flex>(&device).unwrap();
+        [
+            module.q_proj.bias.is_some(),
+            module.k_proj.bias.is_some(),
+            module.v_proj.bias.is_some(),
+            module.o_proj.bias.is_some(),
+        ]
+    };
+    let base = GroupedQueryAttentionConfig::new(8, 4, 2, 2);
+    assert_eq!(has_bias(base.clone()), [false; 4]);
+    let mut uniform = base.clone();
+    uniform.bias = true;
+    assert_eq!(has_bias(uniform.clone()), [true; 4]);
+    // Qwen2-style biased Q/K/V with an unbiased output projection.
+    let qwen2 = uniform.with_projection_bias(ProjectionBias::query_key_value_only());
+    assert_eq!(has_bias(qwen2.clone()), [true, true, true, false]);
+    assert_eq!(
+        qwen2.effective_projection_bias(),
+        ProjectionBias::query_key_value_only()
+    );
+    let output_only = base.with_projection_bias(ProjectionBias {
+        output: true,
+        ..ProjectionBias::uniform(false)
+    });
+    assert_eq!(has_bias(output_only), [false, false, false, true]);
+    // Older serialized configs without the field keep the uniform `bias` meaning.
+    let mut json = serde_json::to_value(&qwen2).unwrap();
+    json.as_object_mut().unwrap().remove("projection_bias");
+    let legacy: GroupedQueryAttentionConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        legacy.effective_projection_bias(),
+        ProjectionBias::uniform(true)
+    );
+    let round_trip: GroupedQueryAttentionConfig =
+        serde_json::from_str(&serde_json::to_string(&qwen2).unwrap()).unwrap();
+    assert_eq!(round_trip, qwen2);
+}
+
+/// Full-width Q/K norms normalize every projected channel of a token before the head split.
+#[test]
+fn full_width_query_key_norm_reduces_over_all_heads() {
+    use super::QueryKeyNormScope;
+    use burn::{module::Param, tensor::Tolerance};
+
+    let device = Default::default();
+    for gate in [AttentionOutputGate::None, AttentionOutputGate::Sigmoid] {
+        let mut config = GroupedQueryAttentionConfig::new(4, 2, 1, 2)
+            .with_query_key_norm(1e-6, QueryKeyNormScope::FullWidth);
+        config.output_gate = gate;
+        let mut module = config.init::<Flex>(&device).unwrap();
+        assert_eq!(module.query_norm.as_ref().unwrap().weight.dims(), [4]);
+        assert_eq!(module.key_norm.as_ref().unwrap().weight.dims(), [2]);
+        let query_width = if gate == AttentionOutputGate::None {
+            4
+        } else {
+            8
+        };
+        // Identity-like projections: query channels are [1, 2, 3, 4], keys [1, 2].
+        let mut query_weight = vec![0.0_f32; 4 * query_width];
+        for channel in 0..4 {
+            // Gated projections interleave [query_0, gate_0, query_1, gate_1] per head.
+            let column = if gate == AttentionOutputGate::None {
+                channel
+            } else {
+                (channel / 2) * 4 + channel % 2
+            };
+            query_weight[channel * query_width + column] = 1.0;
+        }
+        module.q_proj.weight = Param::from_tensor(Tensor::from_data(
+            burn::tensor::TensorData::new(query_weight, [4, query_width]),
+            &device,
+        ));
+        module.k_proj.weight = Param::from_tensor(Tensor::from_floats(
+            [[1.0, 0.0], [0.0, 1.0], [0.0, 0.0], [0.0, 0.0]],
+            &device,
+        ));
+        let projection = module
+            .project_self(Tensor::from_floats([[[1.0, 2.0, 3.0, 4.0]]], &device))
+            .unwrap();
+        let rms = (30.0_f32 / 4.0 + 1e-6).sqrt();
+        projection.query.into_data().assert_approx_eq::<f32>(
+            &burn::tensor::TensorData::from([[[[1.0 / rms, 2.0 / rms]], [[3.0 / rms, 4.0 / rms]]]]),
+            Tolerance::absolute(1e-6),
+        );
+        let key_rms = (5.0_f32 / 2.0 + 1e-6).sqrt();
+        projection.key.into_data().assert_approx_eq::<f32>(
+            &burn::tensor::TensorData::from([[[[1.0 / key_rms, 2.0 / key_rms]]]]),
+            Tolerance::absolute(1e-6),
+        );
+    }
+}
+
+/// Builds a GQA module and a deterministic self-attention projection of `sequence` tokens.
+fn bounded_fixture(
+    precision: AttentionPrecisionMode,
+    sinks: bool,
+    queries: usize,
+    keys: usize,
+) -> (
+    super::GroupedQueryAttention<Flex>,
+    AttentionProjection<Flex>,
+) {
+    use burn::tensor::TensorData;
+
+    let device = Default::default();
+    let module = GroupedQueryAttentionConfig::new(8, 4, 2, 2)
+        .with_precision_mode(precision)
+        .with_attention_sinks(sinks)
+        .init::<Flex>(&device)
+        .unwrap();
+    let tensor = |shape: [usize; 4], seed: usize| {
+        let count = shape.iter().product::<usize>();
+        let values = (0..count)
+            .map(|index| ((index * 7 + seed) % 13) as f32 * 0.17 - 1.0)
+            .collect::<Vec<_>>();
+        Tensor::<Flex, 4>::from_data(TensorData::new(values, shape), &device)
+    };
+    let projection = AttentionProjection {
+        query: tensor([2, 4, queries, 2], 1),
+        key: tensor([2, 2, keys, 2], 2),
+        value: tensor([2, 2, keys, 2], 3),
+        gate: None,
+    };
+    (module, projection)
+}
+
+/// Query-chunked execution equals full-plane attention for every rule, mask, and graph.
+#[test]
+fn bounded_attention_matches_full_planes() {
+    use super::{AttentionConnectivity, MaskGeometry};
+    use burn::tensor::Tolerance;
+
+    let device = Default::default();
+    let valid = TokenMask::new(Tensor::<Flex, 2, Bool>::from_bool(
+        [
+            [true, true, true, true, true, true, true],
+            [false, true, false, true, true, true, true],
+        ]
+        .into(),
+        &device,
+    ));
+    for precision in [
+        AttentionPrecisionMode::BackendDefault,
+        AttentionPrecisionMode::EagerFp32Softmax,
+    ] {
+        for connectivity in [
+            AttentionConnectivity::Global,
+            AttentionConnectivity::SlidingWindow { window: 3 },
+            AttentionConnectivity::ChunkedLocal { chunk: 2 },
+        ] {
+            for (queries, causal, padded, sinks) in [
+                (7, true, false, false),
+                (7, true, true, true),
+                (4, true, false, true),
+                (7, false, true, false),
+            ] {
+                let (module, projection) = bounded_fixture(precision, sinks, queries, 7);
+                let query_valid =
+                    TokenMask::new(valid.as_tensor().clone().narrow(1, 7 - queries, queries));
+                let (query_mask, key_mask) = if padded {
+                    (Some(&query_valid), Some(&valid))
+                } else {
+                    (None, None)
+                };
+                let full_mask = connectivity
+                    .exclusion_mask(
+                        causal,
+                        MaskGeometry::new(2, 4, queries, 7),
+                        query_mask,
+                        key_mask,
+                        &device,
+                    )
+                    .unwrap();
+                let expected = module
+                    .attend(projection.clone(), full_mask, None, false)
+                    .unwrap();
+                let bounded = module
+                    .attend_bounded(
+                        projection,
+                        query_mask,
+                        key_mask,
+                        causal,
+                        connectivity,
+                        AttentionExecutionPolicy::query_chunked(2, 1 << 20),
+                    )
+                    .unwrap();
+                bounded
+                    .into_data()
+                    .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::rel_abs(1e-5, 1e-5));
+            }
+        }
+    }
+}
+
+/// A causal sliding window narrows chunk keys, so its plan fits where the full key axis cannot.
+#[test]
+fn bounded_sliding_window_needs_only_local_keys() {
+    use super::AttentionConnectivity;
+
+    let (module, projection) =
+        bounded_fixture(AttentionPrecisionMode::EagerFp32Softmax, false, 7, 7);
+    // One row over all 7 keys needs 2 * 4 * 7 = 56 elements; a 2-row chunk with
+    // window 2 needs keys 2 + 2 - 1 = 3, i.e. 2 * 4 * 2 * 3 = 48 elements.
+    let policy = AttentionExecutionPolicy::query_chunked(2, 48);
+    let local = AttentionConnectivity::SlidingWindow { window: 2 };
+    module
+        .attend_bounded(projection.clone(), None, None, true, local, policy)
+        .unwrap();
+    let error = module
+        .attend_bounded(
+            projection,
+            None,
+            None,
+            true,
+            AttentionConnectivity::Global,
+            policy,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("one attention query row"));
+}
+
+/// Bounded execution with both token masks builds mask planes only one chunk at a time.
+///
+/// Regression: validating the masks used to OR the full `[batch, 1, Q, K]`
+/// padding plane before chunking (256 MiB at `Q = K = 16384`).
+#[test]
+fn bounded_attention_with_both_masks_builds_no_full_plane() {
+    use super::{AttentionConnectivity, mask::plane_audit};
+
+    let device = Default::default();
+    let (module, projection) =
+        bounded_fixture(AttentionPrecisionMode::BackendDefault, false, 64, 64);
+    let rows = [vec![true; 64], [vec![false; 5], vec![true; 59]].concat()];
+    let valid = TokenMask::new(Tensor::<Flex, 2, Bool>::from_data(
+        burn::tensor::TensorData::new(rows.concat(), [2, 64]),
+        &device,
+    ));
+    plane_audit::reset();
+    module
+        .attend_bounded(
+            projection,
+            Some(&valid),
+            Some(&valid),
+            true,
+            AttentionConnectivity::Global,
+            AttentionExecutionPolicy::query_chunked(8, 1 << 20),
+        )
+        .unwrap();
+    // Every plane is one chunk: batch 2 x 8 query rows x 64 keys.
+    assert_eq!(plane_audit::largest(), 2 * 8 * 64);
+}
+
+/// Bounded execution validates projections and connectivity before any chunk runs.
+#[test]
+fn bounded_attention_rejects_invalid_inputs() {
+    use super::AttentionConnectivity;
+
+    let (module, mut projection) =
+        bounded_fixture(AttentionPrecisionMode::BackendDefault, false, 3, 3);
+    let error = module
+        .attend_bounded(
+            projection.clone(),
+            None,
+            None,
+            true,
+            AttentionConnectivity::SlidingWindow { window: 0 },
+            AttentionExecutionPolicy::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("attention.connectivity.window"));
+    projection.key = projection.key.narrow(1, 0, 1).repeat_dim(1, 3);
+    let error = module
+        .attend_bounded(
+            projection,
+            None,
+            None,
+            true,
+            AttentionConnectivity::Global,
+            AttentionExecutionPolicy::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("attention.key"));
+}
+
+/// Multi-chunk execution is refused on autodiff backends; a single chunk stays differentiable.
+#[cfg(feature = "autodiff")]
+#[test]
+fn bounded_attention_refuses_multi_chunk_autodiff() {
+    use super::AttentionConnectivity;
+    use burn::backend::Autodiff;
+    /// Differentiable CPU backend for the bounded-attention policy check.
+    type Ad = Autodiff<Flex>;
+    let device = Default::default();
+    let module = GroupedQueryAttentionConfig::new(4, 2, 1, 2)
+        .init::<Ad>(&device)
+        .unwrap();
+    let projection = module
+        .project_self(Tensor::<Ad, 3>::ones([1, 4, 4], &device))
+        .unwrap();
+    let error = module
+        .attend_bounded(
+            projection.clone(),
+            None,
+            None,
+            true,
+            AttentionConnectivity::Global,
+            AttentionExecutionPolicy::query_chunked(2, 1 << 20),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("inference-only"));
+    let output = module
+        .attend_bounded(
+            projection,
+            None,
+            None,
+            true,
+            AttentionConnectivity::Global,
+            AttentionExecutionPolicy::Unbounded,
+        )
+        .unwrap();
+    let gradients = output.sum().backward();
+    assert!(module.q_proj.weight.grad(&gradients).is_some());
+}

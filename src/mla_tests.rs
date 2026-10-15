@@ -3,7 +3,7 @@
 use burn::{
     backend::Flex,
     module::Param,
-    tensor::{Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
+    tensor::{DType, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 
 use super::*;
@@ -858,4 +858,261 @@ fn configuration_rejects_impossible_elements_in_every_registered_projection() {
     ] {
         config.validate().unwrap();
     }
+}
+
+/// Builds a deterministic multi-head MLA module with the given head count and latent rank.
+fn deterministic_wide_mla(
+    heads: usize,
+    rank: usize,
+) -> (
+    MultiLatentAttention<TestBackend>,
+    <TestBackend as BackendTypes>::Device,
+) {
+    let device = Default::default();
+    let mut mla = MultiLatentAttentionConfig::new(8, heads, 3, 2, 4, rank, None)
+        .init::<TestBackend>(&device)
+        .unwrap();
+    for (offset, linear) in [
+        mla.q_proj.as_mut().unwrap(),
+        &mut mla.kv_a_proj_with_mqa,
+        &mut mla.kv_b_proj,
+        &mut mla.o_proj,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let [input, output] = linear.weight.val().dims();
+        let values = (0..input * output)
+            .map(|index| ((index * 7 + offset * 5) % 17) as f32 * 0.02 - 0.16)
+            .collect::<Vec<_>>();
+        linear.weight = Param::from_tensor(Tensor::from_data(
+            TensorData::new(values, [input, output]),
+            &device,
+        ));
+    }
+    (mla, device)
+}
+
+/// The previous absorbed algorithm: latents expanded per head and one GEMV per head.
+///
+/// Retained in tests as the parity and timing reference for the folded path.
+fn per_head_absorbed_reference(
+    mla: &MultiLatentAttention<TestBackend>,
+    projection: &MlaProjection<TestBackend>,
+    latents: Tensor<TestBackend, 3>,
+    rotary_keys: Tensor<TestBackend, 4>,
+    mask: Option<Tensor<TestBackend, 4, Bool>>,
+) -> Tensor<TestBackend, 3> {
+    let config = &mla.config;
+    let [batch, heads, queries, _] = projection.query_content.dims();
+    let keys = latents.dims()[1];
+    let per_head = config.qk_nope_head_dim + config.value_head_dim;
+    let per_head_weight = mla
+        .kv_b_proj
+        .weight
+        .val()
+        .reshape([config.kv_lora_rank, heads, per_head])
+        .swap_dims(0, 1);
+    let key_weight = per_head_weight
+        .clone()
+        .narrow(2, 0, config.qk_nope_head_dim)
+        .swap_dims(1, 2)
+        .unsqueeze_dim::<4>(0)
+        .expand([batch, heads, config.qk_nope_head_dim, config.kv_lora_rank]);
+    let value_weight = per_head_weight
+        .narrow(2, config.qk_nope_head_dim, config.value_head_dim)
+        .unsqueeze_dim::<4>(0)
+        .expand([batch, heads, config.kv_lora_rank, config.value_head_dim]);
+    let latent_heads =
+        latents
+            .unsqueeze_dim::<4>(1)
+            .expand([batch, heads, keys, config.kv_lora_rank]);
+    let content = projection
+        .query_content
+        .clone()
+        .matmul(key_weight)
+        .matmul(latent_heads.clone().swap_dims(2, 3));
+    let rotary = projection.query_rotary.clone().matmul(
+        rotary_keys
+            .expand([batch, heads, keys, config.qk_rope_head_dim])
+            .swap_dims(2, 3),
+    );
+    let probabilities =
+        attention_probabilities((content + rotary) * config.softmax_scale, mask).unwrap();
+    let mixed = probabilities
+        .matmul(latent_heads)
+        .matmul(value_weight)
+        .swap_dims(1, 2)
+        .reshape([batch, queries, heads * config.value_head_dim]);
+    operations::linear(mixed, &mla.o_proj).unwrap()
+}
+
+/// Folded multi-head decode matches the per-head reference and the expanded path,
+/// including a fully padded history row.
+#[test]
+fn folded_absorbed_decode_matches_per_head_and_expanded_paths() {
+    let (mla, device) = deterministic_wide_mla(4, 5);
+    let hidden = Tensor::<TestBackend, 3>::from_data(
+        TensorData::new(
+            (0..2 * 6 * 8)
+                .map(|index| ((index % 11) as f32 - 5.0) * 0.09)
+                .collect::<Vec<_>>(),
+            [2, 6, 8],
+        ),
+        &device,
+    );
+    let history = mla.project_self(hidden.clone()).unwrap();
+    let query = mla.project(hidden.clone().narrow(1, 5, 1), hidden).unwrap();
+    // Batch 1's single query sees no key: every history link is padding.
+    let mut exclusions = vec![false; 2 * 4 * 6];
+    for (index, excluded) in exclusions.iter_mut().enumerate() {
+        *excluded = index >= 4 * 6 || index % 6 == 0;
+    }
+    let mask = Tensor::<TestBackend, 4, Bool>::from_data(
+        TensorData::new(exclusions, [2, 4, 1, 6]),
+        &device,
+    );
+    let absorbed = mla
+        .mix_absorbed(
+            &query,
+            history.normalized_latent.clone(),
+            history.rotated_key.clone(),
+            Some(mask.clone()),
+            true,
+        )
+        .unwrap();
+    let expanded = mla
+        .mix_unabsorbed(
+            &query,
+            history.normalized_latent.clone(),
+            history.rotated_key.clone(),
+            Some(mask.clone()),
+            false,
+        )
+        .unwrap();
+    let reference = per_head_absorbed_reference(
+        &mla,
+        &query,
+        history.normalized_latent,
+        history.rotated_key,
+        Some(mask),
+    );
+    absorbed
+        .hidden_state
+        .clone()
+        .into_data()
+        .assert_approx_eq::<f32>(&reference.into_data(), Tolerance::absolute(1e-6));
+    absorbed.hidden_state.into_data().assert_approx_eq::<f32>(
+        &expanded.hidden_state.into_data(),
+        Tolerance::absolute(1e-5),
+    );
+    let probabilities = absorbed
+        .probabilities
+        .unwrap()
+        .narrow(0, 1, 1)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    assert!(probabilities.iter().all(|value| *value == 0.0));
+}
+
+/// Single-tensor rotation equals the former self-paired rotation exactly.
+#[test]
+fn with_rotary_rotates_each_tensor_once_with_identical_values() {
+    let (mla, device) = deterministic_mla(Some(4));
+    let projection = mla
+        .project(
+            Tensor::ones([1, 2, 8], &device) * 0.4,
+            Tensor::ones([1, 3, 8], &device) * -0.2,
+        )
+        .unwrap();
+    let rope = RopeConfig::new(2, 2, 10_000.0, RopeScaling::None).unwrap();
+    let query_positions = Tensor::<TestBackend, 2, Int>::from_ints([[3, 4]], &device);
+    let key_positions = Tensor::<TestBackend, 2, Int>::from_ints([[0, 1, 2]], &device);
+    let rotated = projection
+        .clone()
+        .with_rotary(query_positions.clone(), key_positions.clone(), rope, 5)
+        .unwrap();
+    let query_angles = rotary_angles(rope, query_positions, 5).unwrap();
+    let key_angles = rotary_angles(rope, key_positions, 5).unwrap();
+    let expected_query = apply_rotary(
+        projection.query_rotary.clone(),
+        projection.query_rotary,
+        &query_angles,
+    )
+    .unwrap()
+    .0;
+    let expected_key = apply_rotary(
+        projection.rotated_key.clone(),
+        projection.rotated_key,
+        &key_angles,
+    )
+    .unwrap()
+    .0;
+    assert_eq!(rotated.query_rotary.into_data(), expected_query.into_data());
+    assert_eq!(rotated.rotated_key.into_data(), expected_key.into_data());
+}
+
+/// Measures one-token absorbed decode: folded heads versus per-head GEMVs.
+///
+/// Run with `cargo test --release --lib absorbed_decode_benchmark -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing benchmark; run explicitly in release mode"]
+fn absorbed_decode_benchmark() {
+    use std::time::Instant;
+    let device = Default::default();
+    let (heads, rank, rotary, keys) = (16, 512, 64, 4096);
+    let mut config = MultiLatentAttentionConfig::new(512, heads, 128, rotary, 128, rank, None);
+    config.softmax_scale = 0.07;
+    let mla = config.init::<TestBackend>(&device).unwrap();
+    let projection = mla
+        .project_self(Tensor::random(
+            [1, 1, 512],
+            burn::tensor::Distribution::Default,
+            &device,
+        ))
+        .unwrap();
+    let latents = Tensor::<TestBackend, 3>::random(
+        [1, keys, rank],
+        burn::tensor::Distribution::Default,
+        &device,
+    );
+    let rotary_keys = Tensor::<TestBackend, 4>::random(
+        [1, 1, keys, rotary],
+        burn::tensor::Distribution::Default,
+        &device,
+    );
+    let iterations = 10;
+    let time = |folded: bool| {
+        let started = Instant::now();
+        for _ in 0..iterations {
+            let output = if folded {
+                mla.mix_absorbed(
+                    &projection,
+                    latents.clone(),
+                    rotary_keys.clone(),
+                    None,
+                    false,
+                )
+                .unwrap()
+                .hidden_state
+            } else {
+                per_head_absorbed_reference(
+                    &mla,
+                    &projection,
+                    latents.clone(),
+                    rotary_keys.clone(),
+                    None,
+                )
+            };
+            let _ = output.into_data();
+        }
+        started.elapsed().as_secs_f64() * 1e3 / f64::from(iterations)
+    };
+    let _ = (time(true), time(false));
+    let (folded, per_head) = (time(true), time(false));
+    println!(
+        "absorbed MLA decode h={heads} r={rank} dr={rotary} k={keys}: folded {folded:.3} ms, per-head {per_head:.3} ms, speedup {:.2}x",
+        per_head / folded
+    );
 }
