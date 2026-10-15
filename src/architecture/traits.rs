@@ -14,6 +14,13 @@
 //! method-call syntax, so `model.activation_points()` on a concrete type still
 //! returns that family's own type, while generic code bounded by these traits
 //! sees the uniform signatures below.
+//!
+//! The automatic enums dispatch to the selected family:
+//! [`crate::models::AutoCausalLm`] implements both traits and
+//! [`crate::models::AutoSeq2SeqLm`] implements [`HookedModel`]. A
+//! [`crate::LoadedModel`] forwards both to its model, so one generic
+//! experiment function runs unchanged on a concrete family, an automatic
+//! enum, or a checkpoint loaded from disk.
 
 use core::ops::Range;
 
