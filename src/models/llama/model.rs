@@ -377,12 +377,10 @@ impl<B: Backend> LlamaModel<B> {
         let validated = validate_input(input, &device, &self.input_contract())?;
         let positions = validated.require_positions(INPUT_NAMES.position_ids)?;
         let angles = self.rotary_tables(positions, validated.evaluated_context)?;
-        let mut keys = SequenceKeys::new(
-            self,
-            angles,
-            input.token_mask.as_ref(),
-            input.token_ids.dims(),
-        )?;
+        // A mask proven all-valid is dropped: ordinals then equal columns, so
+        // global layers keep the fused causal path and build no plane.
+        let padding = input.token_mask.as_ref().filter(|_| !validated.fully_valid);
+        let mut keys = SequenceKeys::new(self, angles, padding, input.token_ids.dims())?;
         let mut hidden = hooks.apply(
             Stack::Decoder.embedding(),
             self.embed_tokens.forward(input.token_ids.clone()),

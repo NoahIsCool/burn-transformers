@@ -17,8 +17,10 @@
 //! One `[batch, 1, token, token]` Boolean plane is built per distinct rule
 //! and call and shared by every layer using that rule; an unpadded global
 //! layer builds none and lets the backend apply causality in its fused
-//! kernel. Staged execution can replace a layer's rule with an explicit
-//! [`AttentionPolicy`]; padding stays excluded and the policy's bias is added.
+//! kernel. The stateless forward passes no mask when validation proved
+//! every token valid, so an all-true mask is unpadded too. Staged execution
+//! can replace a layer's rule with an explicit [`AttentionPolicy`]; padding
+//! stays excluded and the policy's bias is added.
 
 use burn::tensor::{Bool, Tensor, backend::Backend};
 

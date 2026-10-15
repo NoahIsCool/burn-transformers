@@ -95,6 +95,28 @@ fn left_padding_does_not_shift_positions() {
     }
 }
 
+/// An all-valid token mask takes the unpadded path: logits are bit-identical to no mask.
+///
+/// Validation already proves every token valid, so no exclusion plane is
+/// built and global layers keep the attention call's own causality; sliding
+/// layers build the same window plane either way (ordinals equal columns).
+#[test]
+fn an_all_valid_mask_is_the_unpadded_pass() {
+    for variant in LlamaVariant::ALL {
+        let model = tiny_model(variant, 4);
+        let tokens = ints([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]]);
+        let run = |token_mask| {
+            model
+                .forward(input(tokens.clone(), token_mask, None), &everything())
+                .unwrap()
+                .logits
+        };
+        let plain = run(None);
+        let all_valid = run(Some(mask([[true; 5]; 2])));
+        assert_close(all_valid, plain, 0.0, &format!("{variant:?}"));
+    }
+}
+
 /// Invalid inputs fail before any computation with contextual errors.
 #[test]
 fn invalid_inputs_are_rejected() {
