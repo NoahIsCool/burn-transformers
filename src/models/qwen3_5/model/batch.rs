@@ -330,7 +330,8 @@ pub(crate) struct CachedAttention<B: Backend> {
     plan: KvBatchReadPlan<B>,
     /// Native-KV group the layers read and write.
     group: usize,
-    /// Exclusion masks `[B, heads, N, K]` per sliding window (`None` = global).
+    /// Exclusion planes `[B, 1, N, K]` (`true` = excluded, broadcast over heads
+    /// by attention) per sliding window (`None` = global).
     masks: Vec<(Option<NonZeroUsize>, Tensor<B, 4, Bool>)>,
 }
 
