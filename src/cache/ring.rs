@@ -18,11 +18,14 @@
 //! returned segments partition the retained suffix in order, that every segment
 //! fits inside the ring, and that each token lands in, or is read from, physical
 //! slot `absolute_position mod capacity`. Writes of a full ring touch every
-//! slot exactly once. Mirrored writes stay below `2 * capacity` with the
-//! mirror exactly one capacity after the primary, a mirrored read's offset `j`
-//! reads the slot of position `start + j`, and a staged commit plans only the
-//! accepted prefix. Tensor copies driven by these plans remain covered by
-//! the cache test suite.
+//! slot exactly once. Mirrored writes cover the same retained suffix as the
+//! standard plan, stay below `2 * capacity` with the mirror exactly one
+//! capacity after the primary, a mirrored read's offset `j` reads the slot of
+//! position `start + j`, and a staged commit succeeds exactly for a staged,
+//! representable prefix and plans only that prefix. Staging plans, sliding
+//! window starts (`max(0, L - W)`), and window-capacity validation of reads
+//! are exact. Every error is returned exactly when its condition holds.
+//! Tensor copies driven by these plans remain covered by the cache test suite.
 
 use core::fmt;
 use core::num::NonZeroUsize;
@@ -71,6 +74,55 @@ proof fn lemma_slot_after_offset(a: int, k: int, c: int)
         vstd::arithmetic::div_mod::lemma_mod_multiples_vanish(q + 1, r + k - c, c);
         vstd::arithmetic::div_mod::lemma_small_mod((r + k - c) as nat, c as nat);
     }
+}
+
+/// `plan` is the exact write plan for `token_count` inputs starting at absolute
+/// `start_position` in a ring of `capacity` slots.
+///
+/// Only the newest `retained = min(token_count, capacity)` inputs survive.
+/// Their at most two segments are non-empty, ordered, contiguous, and cover
+/// exactly the retained suffix `[token_count - retained, token_count)` of the
+/// input; input `j` lands in slot `(start_position + j) mod capacity`; and the
+/// two physical ranges never overlap, tiling the whole ring when it is full.
+spec fn write_plan_correct(
+    plan: RingWritePlan,
+    start_position: usize,
+    token_count: usize,
+    capacity: usize,
+) -> bool {
+    let retained = if token_count <= capacity { token_count } else { capacity };
+    let segments = plan.segments;
+    &&& start_position + token_count <= usize::MAX
+    &&& plan.appended_positions.start == start_position
+    &&& plan.appended_positions.end == start_position + token_count
+    &&& plan.retained_input.start == token_count - retained
+    &&& plan.retained_input.end == token_count
+    &&& segments.len() <= 2
+    &&& (segments.len() == 0) == (token_count == 0)
+    &&& segments.len() >= 1 ==> segments[0].input.start == token_count - retained
+    &&& segments.len() >= 1 ==> segments[segments.len() - 1].input.end == token_count
+    &&& segments.len() == 2 ==> segments[1].input.start == segments[0].input.end
+    &&& forall|i: int| #![auto] 0 <= i < segments.len() ==> {
+        &&& segments[i].input.start < segments[i].input.end
+        &&& segments[i].physical.start < segments[i].physical.end
+        &&& segments[i].physical.end <= capacity
+        &&& segments[i].input.end - segments[i].input.start
+            == segments[i].physical.end - segments[i].physical.start
+        &&& forall|j: int| segments[i].input.start <= j < segments[i].input.end ==>
+            #[trigger] ring_slot(start_position as int, j, capacity as int)
+                == segments[i].physical.start + (j - segments[i].input.start)
+    }
+    &&& segments.len() == 2 ==> segments[1].physical.end <= segments[0].physical.start
+    &&& retained == capacity && segments.len() == 1 ==>
+        segments[0].physical.start == 0 && segments[0].physical.end == capacity
+    &&& retained == capacity && segments.len() == 2 ==>
+        segments[0].physical.end == capacity
+            && segments[1].physical.end == segments[0].physical.start
+}
+
+/// First absolute position of the sliding window ending at `length`: `max(0, length - window)`.
+pub open spec fn window_start(length: int, window: int) -> int {
+    if length >= window { length - window } else { 0 }
 }
 
 } // verus!
@@ -126,6 +178,7 @@ pub struct RingWritePlan {
 /// This staging rule is necessary once a ring is full. Writing proposal
 /// position `p` directly to `p mod capacity` may destroy committed position
 /// `p - capacity`; restoring only a logical length cannot reconstruct it.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedRingTransactionPlan {
     /// Absolute proposal positions held outside committed storage.
@@ -174,30 +227,26 @@ impl StagedRingTransactionPlan {
 /// Verified core of [`StagedRingTransactionPlan::commit_prefix`].
 ///
 /// Accepting `accepted` of `staged` proposals at absolute `staged_start`
-/// writes exactly the accepted prefix: every input range lies inside
-/// `[0, accepted)`, hence inside the staging buffer, and proposal `j` lands
-/// in slot `(staged_start + j) mod capacity`. Rejected proposals are never
-/// planned, so rollback needs no ring write at all.
+/// succeeds exactly when `accepted <= staged` and the accepted end is
+/// representable, and then plans exactly the accepted prefix: the segments
+/// cover the newest `min(accepted, capacity)` accepted entries in order, all
+/// inside `[0, accepted)` and hence inside the staging buffer, and proposal
+/// `j` lands in slot `(staged_start + j) mod capacity`. Rejected proposals are
+/// never planned, so rollback needs no ring write at all.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(result =>
     requires
         capacity > 0,
     ensures
+        result is Ok <==> (accepted <= staged && staged_start + accepted <= usize::MAX),
         accepted > staged ==> result == Err::<RingWritePlan, RingPlanError>(
             RingPlanError::CommitPrefixExceedsStaged { accepted, staged }),
-        result matches Ok(plan) ==> {
-            &&& accepted <= staged
-            &&& plan.appended_positions.start == staged_start
-            &&& plan.appended_positions.end == staged_start + accepted
-            &&& plan.retained_input.end == accepted
-            &&& forall|i: int| #![auto] 0 <= i < plan.segments.len() ==> {
-                &&& plan.segments[i].input.end <= accepted
-                &&& plan.segments[i].physical.end <= capacity
-                &&& forall|j: int| plan.segments[i].input.start <= j < plan.segments[i].input.end
-                    ==> #[trigger] ring_slot(staged_start as int, j, capacity as int)
-                        == plan.segments[i].physical.start + (j - plan.segments[i].input.start)
-            }
-        },
+        accepted <= staged && staged_start + accepted > usize::MAX ==>
+            result == Err::<RingWritePlan, RingPlanError>(RingPlanError::PositionOverflow {
+                start_position: staged_start,
+                token_count: accepted,
+            }),
+        result matches Ok(plan) ==> write_plan_correct(plan, staged_start, accepted, capacity),
 ))]
 fn commit_prefix_slots(
     staged_start: usize,
@@ -256,6 +305,7 @@ impl RingReadSegment {
 }
 
 /// Chronological read plan for the retained suffix of a standard ring.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingReadPlan {
     /// Absolute suffix still visible under the retention policy.
@@ -344,7 +394,27 @@ impl MirroredRingReadPlan {
 /// one-token local-attention decode at position `L - 1`.
 #[must_use]
 pub fn sliding_window_range(sequence_length: usize, window: NonZeroUsize) -> Range<usize> {
-    sequence_length.saturating_sub(window.get())..sequence_length
+    sliding_window_start(sequence_length, window.get())..sequence_length
+}
+
+/// Verified start of [`sliding_window_range`]: exactly `max(0, length - window)`.
+///
+/// The returned start never exceeds `sequence_length`, and the window it
+/// opens holds exactly `min(sequence_length, window)` positions.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(start =>
+    ensures
+        start as int == window_start(sequence_length as int, window as int),
+        start <= sequence_length,
+        sequence_length - start
+            == if sequence_length <= window { sequence_length } else { window },
+))]
+fn sliding_window_start(sequence_length: usize, window: usize) -> usize {
+    if sequence_length >= window {
+        sequence_length - window
+    } else {
+        0
+    }
 }
 
 /// Plans physical writes for an appended token chunk in a standard ring.
@@ -380,36 +450,7 @@ pub fn plan_ring_write(
                 &&& start_position + token_count > usize::MAX
                 &&& error == (RingPlanError::PositionOverflow { start_position, token_count })
             },
-            Ok(plan) => {
-                let retained = if token_count <= capacity { token_count } else { capacity };
-                let segments = plan.segments;
-                &&& start_position + token_count <= usize::MAX
-                &&& plan.appended_positions.start == start_position
-                &&& plan.appended_positions.end == start_position + token_count
-                &&& plan.retained_input.start == token_count - retained
-                &&& plan.retained_input.end == token_count
-                &&& segments.len() <= 2
-                &&& (segments.len() == 0) == (token_count == 0)
-                &&& segments.len() >= 1 ==> segments[0].input.start == token_count - retained
-                &&& segments.len() >= 1 ==> segments[segments.len() - 1].input.end == token_count
-                &&& segments.len() == 2 ==> segments[1].input.start == segments[0].input.end
-                &&& forall|i: int| #![auto] 0 <= i < segments.len() ==> {
-                    &&& segments[i].input.start < segments[i].input.end
-                    &&& segments[i].physical.start < segments[i].physical.end
-                    &&& segments[i].physical.end <= capacity
-                    &&& segments[i].input.end - segments[i].input.start
-                        == segments[i].physical.end - segments[i].physical.start
-                    &&& forall|j: int| segments[i].input.start <= j < segments[i].input.end ==>
-                        #[trigger] ring_slot(start_position as int, j, capacity as int)
-                            == segments[i].physical.start + (j - segments[i].input.start)
-                }
-                &&& segments.len() == 2 ==> segments[1].physical.end <= segments[0].physical.start
-                &&& retained == capacity && segments.len() == 1 ==>
-                    segments[0].physical.start == 0 && segments[0].physical.end == capacity
-                &&& retained == capacity && segments.len() == 2 ==>
-                    segments[0].physical.end == capacity
-                        && segments[1].physical.end == segments[0].physical.start
-            },
+            Ok(plan) => write_plan_correct(plan, start_position, token_count, capacity),
         }
 ))]
 fn plan_ring_write_slots(
@@ -472,13 +513,41 @@ pub fn plan_staged_ring_transaction(
     start_position: usize,
     token_count: usize,
 ) -> Result<StagedRingTransactionPlan, RingPlanError> {
-    let end_position =
-        start_position
-            .checked_add(token_count)
-            .ok_or(RingPlanError::PositionOverflow {
-                start_position,
-                token_count,
-            })?;
+    staged_transaction_slots(start_position, token_count)
+}
+
+/// Verified core of [`plan_staged_ring_transaction`].
+///
+/// The plan exists exactly when `start_position + token_count` fits, and then
+/// stages the absolute positions `[start_position, start_position +
+/// token_count)` at linear offsets `[0, token_count)`, one offset per proposal.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        match result {
+            Err(error) => {
+                &&& start_position + token_count > usize::MAX
+                &&& error == (RingPlanError::PositionOverflow { start_position, token_count })
+            },
+            Ok(plan) => {
+                &&& start_position + token_count <= usize::MAX
+                &&& plan.staged_positions.start == start_position
+                &&& plan.staged_positions.end == start_position + token_count
+                &&& plan.staged_input.start == 0
+                &&& plan.staged_input.end == token_count
+            },
+        }
+))]
+fn staged_transaction_slots(
+    start_position: usize,
+    token_count: usize,
+) -> Result<StagedRingTransactionPlan, RingPlanError> {
+    let Some(end_position) = start_position.checked_add(token_count) else {
+        return Err(RingPlanError::PositionOverflow {
+            start_position,
+            token_count,
+        });
+    };
     Ok(StagedRingTransactionPlan {
         staged_positions: start_position..end_position,
         staged_input: 0..token_count,
@@ -499,15 +568,64 @@ pub fn plan_ring_read(
     window: NonZeroUsize,
     capacity: NonZeroUsize,
 ) -> Result<RingReadPlan, RingPlanError> {
-    validate_window(window, capacity)?;
-    let retained_positions = sliding_window_range(sequence_length, window);
+    ring_read_slots(sequence_length, window.get(), capacity.get())
+}
+
+/// Verified core of [`plan_ring_read`] over raw, positive widths.
+///
+/// The plan exists exactly when `window <= capacity`. It then retains the
+/// absolute window `[max(0, L - window), L)` and reads it in at most two
+/// chronological slices that partition it in order, with position `p` read
+/// from physical slot `p mod capacity`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    requires
+        window > 0,
+        capacity > 0,
+    ensures
+        match result {
+            Err(error) => {
+                &&& window > capacity
+                &&& error == (RingPlanError::WindowExceedsCapacity { window, capacity })
+            },
+            Ok(plan) => {
+                let segments = plan.segments;
+                &&& window <= capacity
+                &&& plan.retained_positions.start as int
+                    == window_start(sequence_length as int, window as int)
+                &&& plan.retained_positions.end == sequence_length
+                &&& segments.len() <= 2
+                &&& (segments.len() == 0) == (plan.retained_positions.start == sequence_length)
+                &&& segments.len() >= 1 ==>
+                    segments[0].absolute.start == plan.retained_positions.start
+                &&& segments.len() >= 1 ==>
+                    segments[segments.len() - 1].absolute.end == sequence_length
+                &&& segments.len() == 2 ==> segments[1].absolute.start == segments[0].absolute.end
+                &&& forall|i: int| #![auto] 0 <= i < segments.len() ==> {
+                    &&& segments[i].absolute.start < segments[i].absolute.end
+                    &&& segments[i].physical.start < segments[i].physical.end
+                    &&& segments[i].physical.end <= capacity
+                    &&& segments[i].absolute.end - segments[i].absolute.start
+                        == segments[i].physical.end - segments[i].physical.start
+                    &&& forall|p: int| segments[i].absolute.start <= p < segments[i].absolute.end
+                        ==> #[trigger] ring_slot(p, 0, capacity as int)
+                            == segments[i].physical.start + (p - segments[i].absolute.start)
+                }
+            },
+        }
+))]
+fn ring_read_slots(
+    sequence_length: usize,
+    window: usize,
+    capacity: usize,
+) -> Result<RingReadPlan, RingPlanError> {
+    if window > capacity {
+        return Err(RingPlanError::WindowExceedsCapacity { window, capacity });
+    }
+    let retained_start = sliding_window_start(sequence_length, window);
     Ok(RingReadPlan {
-        segments: read_segments(
-            retained_positions.start,
-            retained_positions.end,
-            capacity.get(),
-        ),
-        retained_positions,
+        segments: read_segments(retained_start, sequence_length, capacity),
+        retained_positions: retained_start..sequence_length,
     })
 }
 
@@ -593,21 +711,36 @@ pub fn plan_mirrored_ring_write(
 
 /// Verified core of [`plan_mirrored_ring_write`] over a raw, positive capacity.
 ///
-/// Each standard ring segment is written twice: at its primary slots and at
-/// the same slots shifted by `capacity`, so both copies stay below `2 * capacity`
-/// and every token still lands in slot `(start_position + j) mod capacity`.
+/// The plan exists exactly when `2 * capacity` and the absolute chunk end are
+/// representable. Its segments are the standard ring plan's segments, each
+/// written twice: at its primary slots and at the same slots shifted by
+/// `capacity`. They therefore cover exactly the retained input suffix
+/// `[token_count - min(token_count, capacity), token_count)` in order, both
+/// copies stay below `2 * capacity`, the primary ranges never overlap, and
+/// every token lands in slot `(start_position + j) mod capacity`.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(result =>
     requires
         capacity > 0,
     ensures
-        result is Err ==> start_position + token_count > usize::MAX || 2 * capacity > usize::MAX,
+        result is Ok <==> (2 * capacity <= usize::MAX && start_position + token_count <= usize::MAX),
+        2 * capacity > usize::MAX ==> result
+            == Err::<Vec<MirroredRingWriteSegment>, RingPlanError>(
+                RingPlanError::DoubledCapacityOverflow { capacity }),
+        2 * capacity <= usize::MAX && start_position + token_count > usize::MAX ==> result
+            == Err::<Vec<MirroredRingWriteSegment>, RingPlanError>(
+                RingPlanError::PositionOverflow { start_position, token_count }),
         result matches Ok(segments) ==> {
-            &&& 2 * capacity <= usize::MAX
-            &&& start_position + token_count <= usize::MAX
+            let retained = if token_count <= capacity { token_count } else { capacity };
             &&& segments.len() <= 2
+            &&& (segments.len() == 0) == (token_count == 0)
+            &&& segments.len() >= 1 ==> segments[0].input.start == token_count - retained
+            &&& segments.len() >= 1 ==> segments[segments.len() - 1].input.end == token_count
+            &&& segments.len() == 2 ==> segments[1].input.start == segments[0].input.end
+            &&& segments.len() == 2 ==> segments[1].primary.end <= segments[0].primary.start
             &&& forall|i: int| #![auto] 0 <= i < segments.len() ==> {
                 &&& segments[i].input.start < segments[i].input.end <= token_count
+                &&& segments[i].primary.start < segments[i].primary.end
                 &&& segments[i].primary.end <= capacity
                 &&& segments[i].input.end - segments[i].input.start
                     == segments[i].primary.end - segments[i].primary.start
@@ -634,22 +767,10 @@ fn mirrored_write_slots(
     #[cfg_attr(verus_keep_ghost, verus_spec(
         invariant
             index <= standard.segments.len(),
-            standard.segments.len() <= 2,
             capacity > 0,
             2 * capacity <= usize::MAX,
+            write_plan_correct(standard, start_position, token_count, capacity),
             mirrored.len() == index,
-            forall|i: int| #![auto] 0 <= i < standard.segments.len() ==> {
-                &&& standard.segments[i].input.start < standard.segments[i].input.end
-                &&& standard.segments[i].input.end <= token_count
-                &&& standard.segments[i].physical.end <= capacity
-                &&& standard.segments[i].input.end - standard.segments[i].input.start
-                    == standard.segments[i].physical.end - standard.segments[i].physical.start
-                &&& forall|j: int| standard.segments[i].input.start <= j
-                    < standard.segments[i].input.end ==>
-                    #[trigger] ring_slot(start_position as int, j, capacity as int)
-                        == standard.segments[i].physical.start
-                            + (j - standard.segments[i].input.start)
-            },
             forall|i: int| #![auto] 0 <= i < index ==> {
                 &&& mirrored[i].input == standard.segments[i].input
                 &&& mirrored[i].primary == standard.segments[i].physical
@@ -808,18 +929,6 @@ fn write_segments(
         });
     }
     segments
-}
-
-/// Rejects a retained window wider than the nonzero physical ring capacity.
-fn validate_window(window: NonZeroUsize, capacity: NonZeroUsize) -> Result<(), RingPlanError> {
-    if window <= capacity {
-        Ok(())
-    } else {
-        Err(RingPlanError::WindowExceedsCapacity {
-            window: window.get(),
-            capacity: capacity.get(),
-        })
-    }
 }
 
 /// Invalid dimensions or arithmetic in ring-buffer planning.

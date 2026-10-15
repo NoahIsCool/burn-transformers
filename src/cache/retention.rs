@@ -97,7 +97,9 @@ pub(crate) fn recurrent_rewind_is_exact(from: usize, to: usize) -> bool {
 
 /// Returns the first row whose ring rewind would expose overwritten history.
 ///
-/// Rows are checked in order so diagnostics name the lowest offending row.
+/// Rows are checked in order so diagnostics name the lowest offending row:
+/// the proof shows the result is `None` exactly when every row is safe, and
+/// otherwise names an unsafe row before which every row is safe.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(first =>
     requires
@@ -111,6 +113,9 @@ pub(crate) fn recurrent_rewind_is_exact(from: usize, to: usize) -> bool {
             &&& row < current.len()
             &&& !ring_rewind_safe(current[row as int] as int, requested[row as int] as int,
                 window as int)
+            &&& forall|i: int| 0 <= i < row ==>
+                ring_rewind_safe(#[trigger] current[i] as int, requested[i] as int,
+                    window as int)
         },
 ))]
 pub(crate) fn first_unsafe_ring_rewind(
@@ -140,6 +145,9 @@ pub(crate) fn first_unsafe_ring_rewind(
 }
 
 /// Returns the first row whose recurrent state cannot represent its requested length.
+///
+/// Proved: `None` exactly when every row stays put or restarts from zero;
+/// otherwise the lowest row that does neither.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(first =>
     requires
@@ -151,6 +159,8 @@ pub(crate) fn first_unsafe_ring_rewind(
             &&& row < current.len()
             &&& requested[row as int] != current[row as int]
             &&& requested[row as int] != 0
+            &&& forall|i: int| 0 <= i < row ==>
+                (#[trigger] requested[i] == current[i] || requested[i] == 0)
         },
 ))]
 pub(crate) fn first_inexact_recurrent_rewind(
