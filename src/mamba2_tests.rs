@@ -1,4 +1,4 @@
-//! Mamba2 recurrence, chunked-scan, masking, and reduced-precision oracle tests.
+//! Mamba-2 recurrence, chunked-scan, masking, and reduced-precision oracle tests.
 
 use burn::{
     backend::Flex,
@@ -12,8 +12,8 @@ use super::*;
 type TestBackend = Flex<f32, i32>;
 
 /// Small grouped topology that exercises two chunks and head repetition.
-fn config() -> NemotronMamba2Config {
-    NemotronMamba2Config {
+fn config() -> Mamba2Config {
+    Mamba2Config {
         hidden_size: 8,
         num_heads: 4,
         head_dim: 2,
@@ -21,8 +21,7 @@ fn config() -> NemotronMamba2Config {
         groups: 2,
         convolution_kernel: 3,
         chunk_size: 2,
-        time_step_min: 0.001,
-        time_step_max: None,
+        time_step_clamp: TimeStepClamp::chunked_only(TimeStepLimits::at_least(0.001)),
         normalization_epsilon: 1e-5,
         projection_bias: false,
         convolution_bias: true,
@@ -44,14 +43,14 @@ fn chunked_and_recurrent_paths_match() {
         ]],
         &device,
     );
-    let mut state = NemotronMamba2State::zeros(&config(), 1, DType::F32, &device).unwrap();
+    let mut state = Mamba2State::zeros(&config(), 1, DType::F32, &device).unwrap();
     state.recurrent = Tensor::ones([1, 4, 2, 3], &device) * 0.07;
     state.convolution = Tensor::ones([1, 20, 2], &device) * -0.03;
     let (reference, reference_state) = mixer
-        .forward_with_state(input.clone(), None, &state, NemotronMamba2Mode::Recurrent)
+        .forward_with_state(input.clone(), None, &state, Mamba2Mode::Recurrent)
         .unwrap();
     let (chunked, chunked_state) = mixer
-        .forward_with_state(input, None, &state, NemotronMamba2Mode::ChunkedPrefill)
+        .forward_with_state(input, None, &state, Mamba2Mode::ChunkedPrefill)
         .unwrap();
     chunked
         .into_data()
@@ -88,24 +87,19 @@ fn segmented_prefill_matches_one_shot_cache_and_outputs() {
         ]],
         &device,
     );
-    let mut initial = NemotronMamba2State::zeros(&config(), 1, DType::F32, &device).unwrap();
+    let mut initial = Mamba2State::zeros(&config(), 1, DType::F32, &device).unwrap();
     initial.recurrent = Tensor::ones([1, 4, 2, 3], &device) * 0.037;
     initial.convolution = Tensor::ones([1, 20, 2], &device) * -0.019;
 
     let (one_shot, one_shot_state) = mixer
-        .forward_with_state(
-            input.clone(),
-            None,
-            &initial,
-            NemotronMamba2Mode::ChunkedPrefill,
-        )
+        .forward_with_state(input.clone(), None, &initial, Mamba2Mode::ChunkedPrefill)
         .unwrap();
     let (prefix, prefix_state) = mixer
         .forward_with_state(
             input.clone().narrow(1, 0, 3),
             None,
             &initial,
-            NemotronMamba2Mode::ChunkedPrefill,
+            Mamba2Mode::ChunkedPrefill,
         )
         .unwrap();
     let (suffix, segmented_state) = mixer
@@ -113,7 +107,7 @@ fn segmented_prefill_matches_one_shot_cache_and_outputs() {
             input.narrow(1, 3, 2),
             None,
             &prefix_state,
-            NemotronMamba2Mode::ChunkedPrefill,
+            Mamba2Mode::ChunkedPrefill,
         )
         .unwrap();
     let segmented = Tensor::cat(vec![prefix, suffix], 1);
@@ -178,7 +172,7 @@ fn chunk_transition_sum_avoids_prefix_cancellation() {
 #[test]
 fn grouped_gate_is_applied_before_rms_normalization() {
     let device = Default::default();
-    let norm = NemotronGroupedGatedRmsNorm::<TestBackend> {
+    let norm = GatedGroupRmsNorm::<TestBackend> {
         weight: Param::from_tensor(Tensor::ones([4], &device)),
         groups: 2,
         epsilon: 1e-6,
@@ -204,7 +198,7 @@ fn grouped_gate_is_applied_before_rms_normalization() {
 #[test]
 fn grouped_norm_matches_pinned_reduced_precision_oracles() {
     let device = Default::default();
-    let norm = NemotronGroupedGatedRmsNorm::<TestBackend> {
+    let norm = GatedGroupRmsNorm::<TestBackend> {
         weight: Param::from_tensor(
             Tensor::from_floats(
                 [-1.934_570_3, 0.954_101_56, -0.644_531_25, -2.945_312_5],
@@ -247,7 +241,7 @@ fn grouped_norm_matches_pinned_reduced_precision_oracles() {
         .collect::<Vec<_>>();
     assert_eq!(divided_bits[0], 0xbfaa);
 
-    let bf16_norm = NemotronGroupedGatedRmsNorm::<TestBackend> {
+    let bf16_norm = GatedGroupRmsNorm::<TestBackend> {
         weight: Param::from_tensor(
             Tensor::from_floats(
                 [-1.934_570_3, 0.954_101_56, -0.644_531_25, -2.945_312_5],
@@ -289,14 +283,7 @@ fn discretization_rounds_before_fp32_scan_math() {
     let raw = Tensor::<TestBackend, 3>::from_floats([[[-9.726_562_5]]], &device).cast(DType::F16);
     let bias = Tensor::<TestBackend, 1>::from_floats([0.501_464_84], &device).cast(DType::F16);
     let valid = Tensor::<TestBackend, 2, Bool>::from_bool([[true]].into(), &device);
-    let actual = discretization_steps(
-        raw.clone(),
-        bias.clone(),
-        0.0,
-        None,
-        NemotronMamba2Mode::Recurrent,
-        valid,
-    );
+    let actual = discretization_steps(raw.clone(), bias.clone(), None, valid);
     assert_eq!(actual.dtype(), DType::F16);
     let actual_bits = actual
         .into_data()
@@ -322,20 +309,20 @@ fn discretization_rounds_before_fp32_scan_math() {
     assert_eq!(promoted_bits, [0x0675]);
 
     let all_valid = || Tensor::<TestBackend, 2, Bool>::from_bool([[true]].into(), &device);
+    let clamp = TimeStepClamp::chunked_only(TimeStepLimits {
+        lower: 0.001,
+        upper: Some(0.01),
+    });
     let recurrent = discretization_steps(
         raw.clone(),
         bias.clone(),
-        0.001,
-        Some(0.01),
-        NemotronMamba2Mode::Recurrent,
+        clamp.for_mode(Mamba2Mode::Recurrent),
         all_valid(),
     );
     let chunked = discretization_steps(
         raw,
         bias,
-        0.001,
-        Some(0.01),
-        NemotronMamba2Mode::ChunkedPrefill,
+        clamp.for_mode(Mamba2Mode::ChunkedPrefill),
         all_valid(),
     );
     assert_eq!(
@@ -356,9 +343,7 @@ fn discretization_rounds_before_fp32_scan_math() {
     let bf16_dt = discretization_steps(
         Tensor::<TestBackend, 3>::from_floats([[[-9.726_562_5]]], &device).cast(DType::BF16),
         Tensor::<TestBackend, 1>::from_floats([0.501_464_84], &device).cast(DType::BF16),
-        0.0,
         None,
-        NemotronMamba2Mode::Recurrent,
         all_valid(),
     );
     let bf16_bits = bf16_dt
@@ -546,9 +531,7 @@ fn semantic_mask_prevents_padding_decay() {
     let dt = discretization_steps(
         Tensor::zeros([1, 1, 1], &device),
         Tensor::ones([1], &device),
-        0.001,
-        None,
-        NemotronMamba2Mode::Recurrent,
+        Some(TimeStepLimits::at_least(0.001)),
         valid,
     );
     assert_eq!(dt.to_data(), TensorData::zeros::<f32, _>([1, 1, 1]));
@@ -573,21 +556,21 @@ fn grouped_norm_rejects_invalid_geometry() {
     let device = Default::default();
     let values = Tensor::<TestBackend, 3>::ones([1, 2, 4], &device);
     let gate = Tensor::<TestBackend, 3>::ones([1, 2, 4], &device);
-    let norm = NemotronGroupedGatedRmsNorm::<TestBackend> {
+    let norm = GatedGroupRmsNorm::<TestBackend> {
         weight: Param::from_tensor(Tensor::ones([4], &device)),
         groups: 3,
         epsilon: 1e-6,
     };
     assert!(norm.forward(values.clone(), gate.clone()).is_err());
 
-    let norm = NemotronGroupedGatedRmsNorm::<TestBackend> {
+    let norm = GatedGroupRmsNorm::<TestBackend> {
         weight: Param::from_tensor(Tensor::ones([3], &device)),
         groups: 2,
         epsilon: 1e-6,
     };
     assert!(norm.forward(values.clone(), gate).is_err());
 
-    let norm = NemotronGroupedGatedRmsNorm::<TestBackend> {
+    let norm = GatedGroupRmsNorm::<TestBackend> {
         weight: Param::from_tensor(Tensor::ones([4], &device)),
         groups: 2,
         epsilon: 1e-6,
@@ -597,7 +580,7 @@ fn grouped_norm_rejects_invalid_geometry() {
             .is_err()
     );
 
-    let norm = NemotronGroupedGatedRmsNorm::<TestBackend> {
+    let norm = GatedGroupRmsNorm::<TestBackend> {
         weight: Param::from_tensor(Tensor::ones([4], &device)),
         groups: 2,
         epsilon: f64::NAN,
@@ -620,14 +603,14 @@ fn invalid_configuration_and_state_are_rejected() {
     assert!(invalid.validate().is_err());
 
     let mixer = config().init::<TestBackend>(&device).unwrap();
-    let mut state = NemotronMamba2State::zeros(&config(), 1, DType::F32, &device).unwrap();
+    let mut state = Mamba2State::zeros(&config(), 1, DType::F32, &device).unwrap();
     state.recurrent = state.recurrent.cast(DType::F64);
     let error = mixer
         .forward_with_state(
             Tensor::zeros([1, 1, 8], &device),
             None,
             &state,
-            NemotronMamba2Mode::Recurrent,
+            Mamba2Mode::Recurrent,
         )
         .unwrap_err();
     assert!(error.to_string().contains("recurrent"));
@@ -639,20 +622,19 @@ fn recurrent_storage_dtype_round_trips_across_a_segment() {
     let device = Default::default();
     let mixer = config().init::<TestBackend>(&device).unwrap();
     let state =
-        NemotronMamba2State::zeros_with_dtypes(&config(), 1, DType::F16, DType::F32, &device)
-            .unwrap();
+        Mamba2State::zeros_with_dtypes(&config(), 1, DType::F16, DType::F32, &device).unwrap();
     let (_, next) = mixer
         .forward_with_state(
             Tensor::zeros([1, 2, 8], &device),
             None,
             &state,
-            NemotronMamba2Mode::ChunkedPrefill,
+            Mamba2Mode::ChunkedPrefill,
         )
         .unwrap();
     assert_eq!(next.recurrent.dtype(), DType::F16);
     assert_eq!(next.convolution.dtype(), DType::F32);
     assert!(
-        NemotronMamba2State::<TestBackend>::zeros_with_dtypes(
+        Mamba2State::<TestBackend>::zeros_with_dtypes(
             &config(),
             1,
             DType::I32,

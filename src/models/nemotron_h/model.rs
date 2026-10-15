@@ -48,7 +48,9 @@ mod mtp;
 mod speculative;
 
 pub use decode::NemotronHDecodeState;
-use mamba2::{NemotronMamba2, NemotronMamba2Config, NemotronMamba2Mode};
+use mamba2::{
+    NemotronMamba2, NemotronMamba2Config, NemotronMamba2Mode, TimeStepClamp, TimeStepLimits,
+};
 pub use mtp::NemotronHMtpPrediction;
 pub use speculative::{
     NemotronHSpeculativeConfig, NemotronHSpeculativeDecoder, NemotronHSpeculativeOutput,
@@ -109,8 +111,13 @@ pub struct NemotronHMoeOutput<B: Backend> {
 impl<B: Backend> NemotronHMoeOutput<B> {
     /// Computes NVIDIA's differentiable sigmoid-router load-balancing loss.
     ///
-    /// See [`nemotron_load_balancing_loss`] for the exact Megatron-LM formula;
-    /// `token_mask` (`true == valid`) excludes padding from every sum.
+    /// This is Megatron-LM's switch loss for sigmoid routers, without its
+    /// coefficient: with per-token normalized scores
+    /// `s = sigmoid(z) / (sum sigmoid(z) + 1e-20)` and assignments `m` given by
+    /// the top-k of `s` (uncorrected, ignoring groups), the loss is
+    /// `E / (K T^2) * sum_e (sum_t s[t,e]) (sum_t m[t,e])`, exactly one under
+    /// perfect balance. `token_mask` (`true == valid`) excludes padding from
+    /// every sum and from `T`.
     ///
     /// # Errors
     ///
@@ -985,8 +992,10 @@ fn mamba_config(config: &NemotronHConfig) -> NemotronMamba2Config {
         groups: config.n_groups,
         convolution_kernel: config.conv_kernel,
         chunk_size: config.chunk_size,
-        time_step_min: config.time_step_min,
-        time_step_max: config.time_step_limit.get(1).copied().flatten(),
+        time_step_clamp: TimeStepClamp::chunked_only(TimeStepLimits {
+            lower: config.time_step_min,
+            upper: config.time_step_limit.get(1).copied().flatten(),
+        }),
         normalization_epsilon: config.layer_norm_epsilon,
         projection_bias: config.use_bias,
         convolution_bias: config.use_conv_bias,
