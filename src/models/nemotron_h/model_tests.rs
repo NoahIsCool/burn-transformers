@@ -60,6 +60,72 @@ pub(crate) fn tiny_config(mtp: bool) -> NemotronHConfig {
     }
 }
 
+/// Overwrites every Mamba-2 `dt_bias` with `bias`.
+///
+/// `bias = -12` makes `softplus(dt + dt_bias)` about `6e-6`, far below the
+/// default `time_step_min = 1e-3`. The reference chunk scan then clamps every
+/// step up to `1e-3` while the single-step update keeps `6e-6`, so the two
+/// Mamba-2 paths leave recurrent states that differ by an order one *relative*
+/// amount. Tests use it to observe which path a row took; without it both
+/// paths agree to rounding on ordinary fixtures.
+pub(crate) fn with_dt_bias<B: Backend>(
+    mut model: NemotronHForCausalLm<B>,
+    bias: f32,
+) -> NemotronHForCausalLm<B> {
+    for layer in &mut model.model.layers {
+        if let Some(mamba) = &mut layer.mamba {
+            mamba.dt_bias = mamba
+                .dt_bias
+                .clone()
+                .map(|values| values.ones_like() * bias);
+        }
+    }
+    model
+}
+
+/// Asserts `|actual - expected| <= tolerance * max|expected|` for every finite F32 element.
+///
+/// Recurrent states scale with the discretization step, so an absolute
+/// tolerance chosen for logits can hide a wrong Mamba-2 path when steps are
+/// tiny; scaling by the reference's largest magnitude keeps the comparison
+/// meaningful at any state scale. The reference must not be all zeros.
+pub(crate) fn assert_relative_close(
+    actual: TensorData,
+    expected: TensorData,
+    tolerance: f32,
+    context: &str,
+) {
+    assert_eq!(actual.shape, expected.shape, "{context}: shape");
+    let actual = actual.convert::<f32>().to_vec::<f32>().unwrap();
+    let expected = expected.convert::<f32>().to_vec::<f32>().unwrap();
+    let scale = expected
+        .iter()
+        .fold(0.0_f32, |max, value| max.max(value.abs()));
+    assert!(scale > 0.0, "{context}: the reference is identically zero");
+    for (index, (actual, expected)) in actual.into_iter().zip(expected).enumerate() {
+        assert!(
+            actual.is_finite() && (actual - expected).abs() <= tolerance * scale,
+            "{context}: element {index}: {actual} != {expected} (scale {scale})"
+        );
+    }
+}
+
+/// Largest elementwise difference of two F32 tensors relative to the reference's largest magnitude.
+pub(crate) fn relative_difference(actual: TensorData, expected: TensorData) -> f32 {
+    let actual = actual.convert::<f32>().to_vec::<f32>().unwrap();
+    let expected = expected.convert::<f32>().to_vec::<f32>().unwrap();
+    let scale = expected
+        .iter()
+        .fold(0.0_f32, |max, value| max.max(value.abs()));
+    actual
+        .into_iter()
+        .zip(expected)
+        .fold(0.0_f32, |max, (actual, expected)| {
+            max.max((actual - expected).abs())
+        })
+        / scale
+}
+
 /// The schedule instantiates exactly one matching component in every block.
 #[test]
 fn schedule_builds_each_mixer_kind() {

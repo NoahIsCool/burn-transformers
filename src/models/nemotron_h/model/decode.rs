@@ -52,7 +52,9 @@
 //! verifier can evaluate a whole draft in one pass and commit any accepted
 //! prefix. Per-token states come from the reference recurrent update, so a
 //! multi-token transactional step requires every active row to have been
-//! prefilled already.
+//! prefilled already, and it equals token-by-token decoding rather than a
+//! multi-token decode outside a transaction (which runs the chunk scan with
+//! its prefill `dt` clamp; see [`NemotronHDecodeState::mark`]).
 
 use core::num::NonZeroUsize;
 
@@ -226,6 +228,22 @@ impl<B: Backend> NemotronHDecodeState<B> {
 
     /// Begins an atomic target-plus-MTP proposal suffix.
     ///
+    /// # Transactional step semantics
+    ///
+    /// Inside a transaction, a stateful call in which some row appends several
+    /// tokens follows **token-by-token decode** semantics: every Mamba-2 block
+    /// runs the reference single-step update once per token and stages the
+    /// state after each one, so [`Self::commit_prefixes`] can keep any prefix.
+    /// The single-step update does not apply the prefill `dt` clamp
+    /// (`[time_step_min, +inf)`), so whenever a learned step falls below
+    /// `time_step_min`, `mark(); decode([a, b, c]); commit_prefixes(.., 3, ..)`
+    /// yields different logits and recurrent state than the same
+    /// `decode([a, b, c])` outside a transaction, which runs the reference
+    /// chunk scan. It equals three one-token decodes, which is what lossless
+    /// speculative verification needs. Every active row must already hold
+    /// state for such a step; one-token steps behave exactly as outside a
+    /// transaction.
+    ///
     /// # Errors
     ///
     /// Returns a cache error for a nested transaction or a state allocated
@@ -235,6 +253,10 @@ impl<B: Backend> NemotronHDecodeState<B> {
     }
 
     /// Retains independent prefixes of the target and shifted MTP suffixes.
+    ///
+    /// The committed target prefix holds the per-token state of a
+    /// multi-token transactional step, which follows token-by-token decode
+    /// semantics (see [`Self::mark`]).
     ///
     /// # Errors
     ///

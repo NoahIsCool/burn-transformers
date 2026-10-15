@@ -5,7 +5,13 @@ use burn::{
     tensor::{Bool, Tensor, TensorData, Tolerance},
 };
 
-use crate::{DecodeState, architecture::TokenMask, models::nemotron_h::model::tests::tiny_config};
+use crate::{
+    DecodeState,
+    architecture::TokenMask,
+    models::nemotron_h::model::tests::{
+        assert_relative_close, relative_difference, tiny_config, with_dt_bias,
+    },
+};
 
 use super::*;
 
@@ -14,9 +20,14 @@ type TestBackend = Flex<f32, i32>;
 
 /// Loads deterministic nonzero parameters through the public checkpoint sink.
 fn contract_model() -> NemotronHForCausalLm<TestBackend> {
+    contract_model_with(false)
+}
+
+/// [`contract_model`], optionally with the MTP stage that speculative states require.
+fn contract_model_with(mtp: bool) -> NemotronHForCausalLm<TestBackend> {
     use crate::{checkpoint::TensorSink, models::nemotron_h::NemotronHCheckpointOptions};
     let device = Default::default();
-    let mut config = tiny_config(false);
+    let mut config = tiny_config(mtp);
     // One eligible group makes top-k independently reproducible from raw logits.
     config.n_group = 1;
     config.topk_group = 1;
@@ -803,15 +814,10 @@ impl burn::module::ModuleMapper<TestBackend> for HalfPrecision {
 ///
 /// `softplus(dt + dt_bias)` with `dt_bias = -12` is about `6e-6`, far below
 /// the `1e-3` prefill clamp, so chunked prefill and the unclamped recurrent
-/// update observably disagree on the same token.
+/// update observably disagree on the same token (see [`with_dt_bias`]).
 fn clamped_dt_model(half: bool) -> NemotronHForCausalLm<TestBackend> {
     use burn::module::Module;
-    let mut model = contract_model();
-    for layer in &mut model.model.layers {
-        if let Some(mamba) = &mut layer.mamba {
-            mamba.dt_bias = mamba.dt_bias.clone().map(|bias| bias.ones_like() * -12.0);
-        }
-    }
+    let model = with_dt_bias(contract_model(), -12.0);
     if half {
         model.map(&mut HalfPrecision)
     } else {
@@ -1156,11 +1162,19 @@ fn assert_batched_matches_rows(
     for (row, single) in singles.iter().enumerate() {
         assert_eq!(batched.lengths()[row], single.lengths()[0]);
         contract_close(row_keys(&batched, row), row_keys(single, 0));
+        // Relative: with tiny steps the matrix state is far below the
+        // logits' absolute tolerance, yet the two Mamba-2 paths differ by an
+        // order one relative amount there.
         for (actual, expected) in row_recurrent(&batched, row)
             .into_iter()
             .zip(row_recurrent(single, 0))
         {
-            contract_close(actual, expected);
+            assert_relative_close(
+                actual.into_data(),
+                expected.into_data(),
+                1e-4,
+                &format!("row {row} recurrent state"),
+            );
         }
     }
 }
@@ -1170,10 +1184,18 @@ fn assert_batched_matches_rows(
 /// The prefill mixes left padding, right padding, and an interior hole; the
 /// decode steps include a finished row and ragged multi-token suffixes, so
 /// both Mamba-2 modes, the attention exclusion mask, and MoE packing run with
-/// padding.
+/// padding. The clamped-`dt` model makes the two Mamba-2 paths disagree, so
+/// a batched row that took another path than its batch-one run would fail
+/// the relative state comparison.
 #[test]
 fn batched_ragged_steps_match_independent_rows() {
-    let model = contract_model();
+    for model in [contract_model(), clamped_dt_model(false)] {
+        assert_ragged_steps_match_independent_rows(&model);
+    }
+}
+
+/// The ragged prefill and decode schedule of [`batched_ragged_steps_match_independent_rows`].
+fn assert_ragged_steps_match_independent_rows(model: &NemotronHForCausalLm<TestBackend>) {
     let pad = |token| (token, false);
     let valid = |token| (token, true);
     let steps = vec![
@@ -1190,25 +1212,141 @@ fn batched_ragged_steps_match_independent_rows() {
         ],
         vec![vec![valid(17)], vec![valid(18)], vec![valid(19)]],
     ];
-    assert_batched_matches_rows(&model, &steps);
+    assert_batched_matches_rows(model, &steps);
 }
 
 /// Sliding-window exclusions follow every row's own positions.
+///
+/// The left-padded second row has padded query slots beyond the window of
+/// its valid keys under the former `W_b + j` numbering (review NEMR-6).
 #[test]
 fn batched_sliding_window_matches_independent_rows() {
-    let mut model = contract_model();
-    model.model.config.sliding_window = Some(2);
-    let pad = |token| (token, false);
-    let valid = |token| (token, true);
-    let steps = vec![
-        vec![
-            vec![valid(1), valid(2), valid(3), valid(4)],
-            vec![pad(31), pad(31), valid(5), valid(6)],
-        ],
-        vec![vec![valid(7), valid(8)], vec![valid(9), pad(31)]],
-        vec![vec![valid(10)], vec![valid(11)]],
+    for mut model in [contract_model(), clamped_dt_model(false)] {
+        model.model.config.sliding_window = Some(2);
+        let pad = |token| (token, false);
+        let valid = |token| (token, true);
+        let steps = vec![
+            vec![
+                vec![valid(1), valid(2), valid(3), valid(4)],
+                vec![pad(31), pad(31), valid(5), valid(6)],
+            ],
+            vec![vec![valid(7), valid(8)], vec![valid(9), pad(31)]],
+            vec![vec![valid(10)], vec![valid(11)]],
+        ];
+        assert_batched_matches_rows(&model, &steps);
+    }
+}
+
+/// Mamba-2 layer-zero state of `tokens` from a zero state, run by the mixer directly in `mode`.
+///
+/// Layer zero is a Mamba-2 block fed by the normalized embedding, so this is
+/// the state the stateless forward reaches after `tokens`.
+fn layer_zero_state(
+    model: &NemotronHForCausalLm<TestBackend>,
+    segments: &[(&[i64], NemotronMamba2Mode)],
+) -> NemotronMamba2State<TestBackend> {
+    let device = Default::default();
+    let mixer = model.model.layers[0].mamba.as_ref().unwrap();
+    let mut state = NemotronMamba2State::zeros(&mixer.config(), 1, DType::F32, &device).unwrap();
+    for &(tokens, mode) in segments {
+        let normalized = model.model.layers[0]
+            .norm
+            .forward(model.model.embed_tokens.forward(Tensor::from_data(
+                TensorData::new(tokens.to_vec(), [1, tokens.len()]),
+                &device,
+            )));
+        state = mixer
+            .forward_with_state(normalized, None, &state, mode)
+            .unwrap()
+            .1;
+    }
+    state
+}
+
+/// Batched rows take the reference Mamba-2 path, anchored to the stateless chunk scan.
+///
+/// Review NEMR-1: batched-versus-batch-one comparisons cannot detect a mode
+/// choice that is wrong on both sides. Here, in one ragged decode call, the
+/// row appending one token must take the single-step update and the row
+/// appending two must continue the chunk scan, whose state equals the scan of
+/// the whole sequence from zero (the stateless graph). With the clamped `dt`
+/// the alternative paths are far outside the tolerance, which the test
+/// checks so it cannot pass vacuously.
+#[test]
+fn batched_mamba_modes_match_the_reference_scan() {
+    use crate::mamba2::Mamba2Mode::{ChunkedPrefill, Recurrent};
+    let model = clamped_dt_model(false);
+    let device = Default::default();
+    let options = ForwardOptions::default();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2], [3, 4]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &options,
+        )
+        .unwrap();
+    let input = ragged_input(&[vec![(5, true), (31, false)], vec![(6, true), (7, true)]]);
+    model
+        .decode(
+            DecodeInput {
+                token_ids: input.token_ids,
+                token_mask: input.token_mask,
+                position_ids: None,
+            },
+            &mut state,
+            &options,
+        )
+        .unwrap();
+    assert_eq!(state.lengths(), &[3, 4]);
+    // Each row: (index, reference state, the other path's state).
+    let cases = [
+        (
+            0,
+            layer_zero_state(&model, &[(&[1, 2], ChunkedPrefill), (&[5], Recurrent)]),
+            layer_zero_state(&model, &[(&[1, 2, 5], ChunkedPrefill)]),
+        ),
+        (
+            1,
+            layer_zero_state(&model, &[(&[3, 4, 6, 7], ChunkedPrefill)]),
+            layer_zero_state(&model, &[(&[3, 4], ChunkedPrefill), (&[6, 7], Recurrent)]),
+        ),
     ];
-    assert_batched_matches_rows(&model, &steps);
+    for (row, expected, alternative) in cases {
+        let [matrix, convolution] = row_recurrent(&state, row);
+        let [heads, rows, columns] = [
+            expected.recurrent.dims()[1],
+            expected.recurrent.dims()[2],
+            expected.recurrent.dims()[3],
+        ];
+        let flatten = |tensor: Tensor<TestBackend, 4>| tensor.reshape([1, heads * rows, columns]);
+        assert_relative_close(
+            matrix.clone().into_data(),
+            flatten(expected.recurrent).into_data(),
+            1e-4,
+            &format!("row {row} matrix state"),
+        );
+        assert_relative_close(
+            convolution.into_data(),
+            expected.convolution.into_data(),
+            1e-5,
+            &format!("row {row} convolution state"),
+        );
+        let gap = relative_difference(
+            matrix.into_data(),
+            flatten(alternative.recurrent).into_data(),
+        );
+        assert!(
+            gap > 0.05,
+            "row {row}: the other Mamba-2 path is indistinguishable ({gap})"
+        );
+    }
 }
 
 /// Batched rows survive reorder and truncation like independent sequences.
@@ -1288,11 +1426,13 @@ fn batched_rows_follow_reorder_and_reset() {
 ///
 /// The staged logits equal token-by-token decoding, and after committing the
 /// first `k` of three proposals the state continues exactly like a reference
-/// that decoded only those `k` tokens.
+/// that decoded only those `k` tokens. The clamped-`dt` model makes a step
+/// that ran the prefill chunk scan (with its `dt` clamp) instead of the
+/// single-step update fail the relative state comparison.
 #[test]
 fn multi_token_transaction_commits_any_prefix() {
     let device = Default::default();
-    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let model = with_dt_bias(contract_model_with(true), -12.0);
     let options = ForwardOptions {
         logits: crate::LogitsSelection::All,
         ..Default::default()
@@ -1325,12 +1465,67 @@ fn multi_token_transaction_commits_any_prefix() {
             .into_iter()
             .zip(row_recurrent(&reference, 0))
         {
-            contract_close(actual, expected);
+            assert_relative_close(
+                actual.into_data(),
+                expected.into_data(),
+                1e-4,
+                &format!("{accepted} accepted tokens"),
+            );
         }
         let next = single_row_step(&model, &mut speculative, &[7], false, &options);
         let expected = single_row_step(&model, &mut reference, &[7], false, &options);
         contract_close(next.logits, expected.logits);
     }
+}
+
+/// A multi-token transactional step follows token-by-token decode semantics (review NEMR-3).
+///
+/// Inside a transaction the step runs the single-step update per token, which
+/// skips the prefill `dt` clamp; the same multi-token decode outside a
+/// transaction runs the chunk scan. With steps below `time_step_min` the two
+/// committed states differ, and the transactional one equals one-token
+/// decodes. This pins the documented contract of `NemotronHDecodeState::mark`.
+#[test]
+fn transactional_multi_token_steps_follow_token_by_token_decoding() {
+    let device = Default::default();
+    let model = with_dt_bias(contract_model_with(true), -12.0);
+    let options = ForwardOptions::default();
+    let prompt = [1, 2, 3];
+    let suffix = [4, 5, 6];
+    let mut transactional = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 3, &device)
+        .unwrap();
+    single_row_step(&model, &mut transactional, &prompt, true, &options);
+    let mark = transactional.mark().unwrap();
+    single_row_step(&model, &mut transactional, &suffix, false, &options);
+    transactional
+        .commit_prefixes(mark, suffix.len(), 0)
+        .unwrap();
+
+    let mut stepwise = model
+        .new_decode_state(CacheConfig::new(1, 16).unwrap(), 1, &device)
+        .unwrap();
+    single_row_step(&model, &mut stepwise, &prompt, true, &options);
+    for token in suffix {
+        single_row_step(&model, &mut stepwise, &[token], false, &options);
+    }
+    let mut chunked = model
+        .new_decode_state(CacheConfig::new(1, 16).unwrap(), 1, &device)
+        .unwrap();
+    single_row_step(&model, &mut chunked, &prompt, true, &options);
+    single_row_step(&model, &mut chunked, &suffix, false, &options);
+
+    let [matrix, _] = row_recurrent(&transactional, 0);
+    let [stepwise_matrix, _] = row_recurrent(&stepwise, 0);
+    let [chunked_matrix, _] = row_recurrent(&chunked, 0);
+    assert_relative_close(
+        matrix.clone().into_data(),
+        stepwise_matrix.into_data(),
+        1e-4,
+        "transactional against one-token decodes",
+    );
+    let gap = relative_difference(matrix.into_data(), chunked_matrix.into_data());
+    assert!(gap > 0.05, "chunked decode is indistinguishable ({gap})");
 }
 
 /// Multi-token proposals need prefilled rows; the failed step leaves the transaction usable.
