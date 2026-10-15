@@ -29,7 +29,8 @@ use crate::{
     moe::{
         ExpertSelection, GroupLimitedSelection, GroupScore, PrunedExpertScore,
         RenormalizationDenominator, RoutedExpertPrecision, RouterConfig, RouterProjectionPrecision,
-        RouterScoring, RoutingPolicy, ScoringOrder, dispatch_routed_experts, router_logits,
+        RouterScoring, RoutingPolicy, ScoringOrder, deterministic_top_k, dispatch_routed_experts,
+        router_logits,
     },
     normalization::{RmsNorm, RmsNormConfig, RmsNormRootMode},
     operations,
@@ -106,65 +107,109 @@ pub struct NemotronHMoeOutput<B: Backend> {
 }
 
 impl<B: Backend> NemotronHMoeOutput<B> {
-    /// Computes a differentiable sigmoid-router load-balancing diagnostic.
+    /// Computes NVIDIA's differentiable sigmoid-router load-balancing loss.
+    ///
+    /// See [`nemotron_load_balancing_loss`] for the exact Megatron-LM formula;
+    /// `token_mask` (`true == valid`) excludes padding from every sum.
+    ///
+    /// # Errors
+    ///
+    /// Returns a shape error when the mask does not match the routed grid.
     pub fn load_balancing_loss(&self, token_mask: Option<&TokenMask<B>>) -> Result<Tensor<B, 1>> {
         nemotron_load_balancing_loss(
             self.router_logits.clone(),
-            self.selected_experts.clone(),
+            self.selected_experts.dims()[2],
             token_mask,
         )
     }
 }
 
-/// Computes load balance from reconstructed cached router diagnostics.
+/// Additive guard of Megatron's per-token sigmoid-score normalization.
+const AUXILIARY_SCORE_EPSILON: f64 = 1e-20;
+
+/// Computes Megatron-LM's switch load-balancing loss for a sigmoid router.
+///
+/// NVIDIA trains Nemotron-H with Megatron-LM, whose sigmoid routers feed the
+/// auxiliary loss *normalized* scores (`compute_routing_scores_for_aux_loss`
+/// in `megatron/core/transformer/moe/moe_utils.py`):
+///
+/// ```text
+/// s[t,e] = sigmoid(z[t,e]) / (sum_e' sigmoid(z[t,e']) + 1e-20)
+/// m[t,e] = 1 if e is among the top-k of s[t,:] else 0
+/// loss   = E / (K * T^2) * sum_e (sum_t s[t,e]) * (sum_t m[t,e])
+/// ```
+///
+/// which is `switch_load_balancing_loss_func` without its coefficient (the
+/// trainer multiplies by `moe_aux_loss_coeff`). Perfectly balanced routing
+/// gives exactly one, so NVIDIA's published coefficient keeps its meaning.
+/// Like Megatron, the assignment map `m` is recomputed from the uncorrected,
+/// group-unrestricted scores rather than taken from the correction-biased
+/// routing decision; ties select the smallest expert ID. Sums run over the
+/// `T` valid tokens of the whole batch (Megatron's global `aux_loss`, not its
+/// per-sequence variant), all in F32. Gradients flow through `s` only; `m` is
+/// a discrete decision.
+///
+/// # Errors
+///
+/// Returns a shape error for empty logits, an invalid `experts_per_token`, or a
+/// token mask that does not match `[batch, sequence]`.
 pub(super) fn nemotron_load_balancing_loss<B: Backend>(
     router_logits: Tensor<B, 3>,
-    selected_experts: Tensor<B, 3, Int>,
+    experts_per_token: usize,
     token_mask: Option<&TokenMask<B>>,
 ) -> Result<Tensor<B, 1>> {
     let [batch, sequence, experts] = router_logits.dims();
-    let top_k = selected_experts.dims()[2];
-    if selected_experts.dims()[..2] != [batch, sequence] {
+    if batch == 0
+        || sequence == 0
+        || experts == 0
+        || experts_per_token == 0
+        || experts_per_token > experts
+    {
         return Err(Error::shape(
-            "nemotron_h.moe.selected_experts",
-            format!("[{batch}, {sequence}, top_k]"),
-            format!("{:?}", selected_experts.dims()),
+            "nemotron_h.moe.router_logits",
+            format!("non-empty [batch, sequence, experts >= {experts_per_token} >= 1]"),
+            format!("{:?} with top-k {experts_per_token}", router_logits.dims()),
         ));
     }
-    let valid = token_mask.map_or_else(
-        || Tensor::<B, 2, Bool>::ones([batch, sequence], &router_logits.device()),
-        |mask| mask.as_tensor().clone(),
-    );
-    if valid.dims() != [batch, sequence] {
-        return Err(Error::shape(
-            "nemotron_h.moe.token_mask",
-            format!("[{batch}, {sequence}]"),
-            format!("{:?}", valid.dims()),
-        ));
+    let tokens = batch.checked_mul(sequence).ok_or_else(|| {
+        Error::configuration("nemotron_h.moe", "batch * sequence overflows usize")
+    })?;
+    let device = router_logits.device();
+    let valid = match token_mask {
+        Some(mask) if mask.as_tensor().dims() != [batch, sequence] => {
+            return Err(Error::shape(
+                "nemotron_h.moe.token_mask",
+                format!("[{batch}, {sequence}]"),
+                format!("{:?}", mask.as_tensor().dims()),
+            ));
+        }
+        Some(mask) => mask.as_tensor().clone().float().cast(DType::F32),
+        None => Tensor::<B, 2>::ones([batch, sequence], (&device, DType::F32)),
     }
-    let denominator = valid.clone().float().sum().clamp_min(1.0);
-    let assignments = selected_experts.one_hot::<4>(experts).float()
-        * valid
-            .clone()
-            .float()
-            .reshape([batch, sequence, 1, 1])
-            .expand([batch, sequence, top_k, experts]);
-    let assignment_rate = assignments
-        .sum_dim(0)
+    .reshape([tokens, 1]);
+    let scores = activation::sigmoid(router_logits.cast(DType::F32).reshape([tokens, experts]));
+    let scores = scores.clone() / (scores.sum_dim(1) + AUXILIARY_SCORE_EPSILON);
+    let assignments = if experts == 1 {
+        // Burn's one-hot needs two classes; one expert receives every token.
+        Tensor::<B, 2>::ones([tokens, 1], (&device, DType::F32))
+    } else {
+        deterministic_top_k(
+            scores.clone().detach().unsqueeze_dim::<3>(0),
+            experts_per_token,
+        )
+        .1
+        .reshape([tokens, experts_per_token])
+        .one_hot::<3>(experts)
         .sum_dim(1)
-        .sum_dim(2)
-        .reshape([experts])
-        / (denominator.clone() * top_k as f64);
-    let score_rate = (activation::sigmoid(router_logits)
-        * valid
-            .float()
-            .reshape([batch, sequence, 1])
-            .expand([batch, sequence, experts]))
-    .sum_dim(0)
-    .sum_dim(1)
-    .reshape([experts])
-        / denominator;
-    Ok((assignment_rate * score_rate).sum() * experts as f64)
+        .reshape([tokens, experts])
+        .float()
+        .cast(DType::F32)
+    };
+    let valid_tokens = valid.clone().sum().clamp_min(1.0);
+    let tokens_per_expert = (assignments * valid.clone()).sum_dim(0);
+    let score_per_expert = (scores * valid).sum_dim(0);
+    let scale = experts as f64 / experts_per_token as f64;
+    Ok((score_per_expert * tokens_per_expert).sum() * scale / valid_tokens.square())
 }
 
 /// Nemotron's correction-biased sigmoid router plus shared ReLU² expert.

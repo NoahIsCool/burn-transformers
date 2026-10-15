@@ -230,21 +230,32 @@ fn experimental_contract_public_rejections_preserve_nemotron_history() {
     assert_eq!(state.lengths(), &[3]);
 }
 
-/// Independently averages sigmoid scores and unbiased top-two assignment frequencies.
+/// Host oracle of Megatron-LM's normalized-sigmoid top-two switch loss over four experts.
+///
+/// Scores are `sigmoid(z) / sum sigmoid(z)` per token; assignments are the
+/// top two normalized scores (smallest ID on ties); the loss is
+/// `E / (K T^2) * sum_e (sum_t s[t,e]) (sum_t m[t,e])`.
 fn contract_sigmoid_load_loss(logits: &[f32]) -> f64 {
     assert!(!logits.is_empty() && logits.len().is_multiple_of(4));
     let tokens = (logits.len() / 4) as f64;
     let mut scores = [0.0_f64; 4];
     let mut assignments = [0.0_f64; 4];
     for row in logits.chunks_exact(4) {
+        let sigmoid = row
+            .iter()
+            .map(|&logit| {
+                assert!(logit.is_finite());
+                1.0 / (1.0 + (-f64::from(logit)).exp())
+            })
+            .collect::<Vec<_>>();
+        let total = sigmoid.iter().sum::<f64>() + 1e-20;
         let mut indices = [0, 1, 2, 3];
-        indices.sort_by(|&left, &right| row[right].total_cmp(&row[left]));
+        indices.sort_by(|&left, &right| sigmoid[right].total_cmp(&sigmoid[left]));
         for &expert in &indices[..2] {
-            assignments[expert] += 1.0 / (tokens * 2.0);
+            assignments[expert] += 1.0;
         }
-        for (expert, &logit) in row.iter().enumerate() {
-            assert!(logit.is_finite());
-            scores[expert] += (1.0 / (1.0 + (-f64::from(logit)).exp())) / tokens;
+        for (expert, value) in sigmoid.into_iter().enumerate() {
+            scores[expert] += value / total;
         }
     }
     scores
@@ -253,6 +264,7 @@ fn contract_sigmoid_load_loss(logits: &[f32]) -> f64 {
         .map(|(score, assignment)| score * assignment)
         .sum::<f64>()
         * 4.0
+        / (2.0 * tokens * tokens)
 }
 
 /// Cached diagnostics describe new valid tokens, excluding history and inactive rows.
@@ -269,7 +281,7 @@ fn experimental_contract_nemotron_ragged_router_and_hidden_diagnostics() {
     let reference = model
         .forward(
             CausalLmInput {
-                token_ids: Tensor::from_ints([[1, 2, 3, 4]], &device),
+                token_ids: Tensor::from_ints([[1, 2, 3, 4, 5]], &device),
                 token_mask: None,
                 position_ids: None,
             },
@@ -281,7 +293,7 @@ fn experimental_contract_nemotron_ragged_router_and_hidden_diagnostics() {
         .as_ref()
         .unwrap()
         .clone()
-        .narrow(1, 2, 2);
+        .narrow(1, 2, 3);
     let expected_loss =
         contract_sigmoid_load_loss(&reference_router.to_data().to_vec::<f32>().unwrap());
     let historical_loss = contract_sigmoid_load_loss(
@@ -322,13 +334,20 @@ fn experimental_contract_nemotron_ragged_router_and_hidden_diagnostics() {
         let actual = model
             .decode(
                 DecodeInput {
-                    token_ids: Tensor::from_ints([[31, 3, 31, 4], [31, 31, 31, 31]], &device),
+                    token_ids: Tensor::from_ints(
+                        [[31, 3, 31, 4, 5], [31, 31, 31, 31, 31]],
+                        &device,
+                    ),
                     token_mask: Some(TokenMask::new(Tensor::from_bool(
-                        [[false, true, false, true], [false, false, false, false]].into(),
+                        [
+                            [false, true, false, true, true],
+                            [false, false, false, false, false],
+                        ]
+                        .into(),
                         &device,
                     ))),
                     position_ids: Some(Tensor::from_ints(
-                        [[-1, 9, 99, 12], [-1, 99, 100, 101]],
+                        [[-1, 9, 99, 12, 13], [-1, 99, 100, 101, 102]],
                         &device,
                     )),
                 },
@@ -336,11 +355,11 @@ fn experimental_contract_nemotron_ragged_router_and_hidden_diagnostics() {
                 &options,
             )
             .unwrap();
-        assert_eq!(state.lengths(), &[4, 2]);
+        assert_eq!(state.lengths(), &[5, 2]);
         assert_eq!(actual.hidden_states.len(), 6);
         for (hidden, expected) in actual.hidden_states.iter().zip(&reference.hidden_states) {
-            assert_eq!(hidden.dims(), [2, 4, 8]);
-            for (column, reference_column) in [(1, 2), (3, 3)] {
+            assert_eq!(hidden.dims(), [2, 5, 8]);
+            for (column, reference_column) in [(1, 2), (3, 3), (4, 4)] {
                 contract_close(
                     hidden.clone().slice([0..1, column..column + 1, 0..8]),
                     expected.clone().narrow(1, reference_column, 1),
@@ -353,12 +372,12 @@ fn experimental_contract_nemotron_ragged_router_and_hidden_diagnostics() {
                 .into_iter()
                 .enumerate()
             {
-                if !(8..16).contains(&index) && !(24..32).contains(&index) {
+                if !(8..16).contains(&index) && !(24..40).contains(&index) {
                     assert_eq!(value, 0.0);
                 }
             }
         }
-        for (column, reference_column) in [(1, 2), (3, 3)] {
+        for (column, reference_column) in [(1, 2), (3, 3), (4, 4)] {
             contract_close(
                 actual
                     .logits
@@ -376,8 +395,8 @@ fn experimental_contract_nemotron_ragged_router_and_hidden_diagnostics() {
             assert_eq!(router.load_balancing_loss.is_some(), auxiliary_losses);
             assert!(router.z_loss.is_none());
             if let Some(logits) = &router.logits {
-                assert_eq!(logits.dims(), [2, 4, 4]);
-                for (column, reference_column) in [(1, 0), (3, 1)] {
+                assert_eq!(logits.dims(), [2, 5, 4]);
+                for (column, reference_column) in [(1, 0), (3, 1), (4, 2)] {
                     contract_close(
                         logits.clone().slice([0..1, column..column + 1, 0..4]),
                         reference_router.clone().narrow(1, reference_column, 1),
@@ -390,7 +409,7 @@ fn experimental_contract_nemotron_ragged_router_and_hidden_diagnostics() {
                     .into_iter()
                     .enumerate()
                 {
-                    if !(4..8).contains(&index) && !(12..16).contains(&index) {
+                    if !(4..8).contains(&index) && !(12..20).contains(&index) {
                         assert_eq!(value, 0.0);
                     }
                 }
@@ -419,7 +438,7 @@ fn experimental_contract_nemotron_ragged_router_and_hidden_diagnostics() {
                 &options,
             )
             .unwrap();
-        assert_eq!(state.lengths(), &[4, 2]);
+        assert_eq!(state.lengths(), &[5, 2]);
         assert_eq!(contract_cache_snapshot(&state), baseline);
         assert!(
             empty

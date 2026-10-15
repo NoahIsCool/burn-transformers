@@ -475,7 +475,7 @@ impl<B: Backend> NemotronHForCausalLm<B> {
                         .then(|| {
                             nemotron_load_balancing_loss(
                                 logits,
-                                selected,
+                                selected.dims()[2],
                                 input.token_mask.as_ref(),
                             )
                         })

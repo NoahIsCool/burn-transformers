@@ -701,3 +701,142 @@ fn moe_router_config_matches_the_reference_policy() {
         RenormalizationDenominator::ClampedBelow(1e-20)
     );
 }
+
+/// Megatron-LM's normalized sigmoid switch loss is exactly one under perfect balance.
+///
+/// Token 0 prefers experts {0, 1} and token 1 prefers {2, 3}, so every expert
+/// receives `K T / E = 1` assignment and normalized score mass `T / E = 0.5`.
+/// The former raw-sigmoid formula reported `2.0` here (scores summed to
+/// `sigmoid(1) + sigmoid(-1) = 1` per expert), inflating the loss by `E/2`.
+#[test]
+fn load_balancing_loss_is_one_under_perfect_balance() {
+    let device = Default::default();
+    let logits = Tensor::<TestBackend, 3>::from_floats(
+        [[[1.0, 1.0, -1.0, -1.0], [-1.0, -1.0, 1.0, 1.0]]],
+        &device,
+    );
+    let loss = nemotron_load_balancing_loss(logits, 2, None).unwrap();
+    assert_eq!(loss.dims(), [1]);
+    let value = f64::from(loss.into_scalar());
+    assert!((value - 1.0).abs() < 1e-6, "{value}");
+}
+
+/// A host oracle of Megatron-LM's formula pins masked, unbalanced routing.
+///
+/// The oracle normalizes `sigmoid` per token with `+1e-20`, recomputes top-k
+/// on the normalized (uncorrected) scores, and evaluates
+/// `E / (K T^2) * sum_e (sum_t s) (sum_t m)` over valid tokens only.
+#[test]
+fn load_balancing_loss_matches_megatron_oracle_with_padding() {
+    let device = Default::default();
+    let rows = [
+        [2.0_f32, -0.5, 0.25, -3.0, 1.5],
+        [-1.0, 0.75, 0.75, 2.5, -0.25],
+        [9.0, 9.0, 9.0, 9.0, 9.0],
+        [0.1, -0.2, 0.3, -0.4, 0.5],
+    ];
+    let valid = [true, true, false, true];
+    let (experts, top_k) = (5usize, 2usize);
+    let mut scores = vec![0.0_f64; experts];
+    let mut assignments = vec![0.0_f64; experts];
+    let mut tokens = 0.0;
+    for (row, &valid) in rows.iter().zip(&valid) {
+        if !valid {
+            continue;
+        }
+        tokens += 1.0;
+        let sigmoid = row
+            .iter()
+            .map(|&logit| 1.0 / (1.0 + (-f64::from(logit)).exp()))
+            .collect::<Vec<_>>();
+        let total = sigmoid.iter().sum::<f64>() + 1e-20;
+        let mut order = (0..experts).collect::<Vec<_>>();
+        order.sort_by(|&left, &right| sigmoid[right].total_cmp(&sigmoid[left]));
+        for &expert in &order[..top_k] {
+            assignments[expert] += 1.0;
+        }
+        for expert in 0..experts {
+            scores[expert] += sigmoid[expert] / total;
+        }
+    }
+    let expected = scores
+        .iter()
+        .zip(&assignments)
+        .map(|(score, assignment)| score * assignment)
+        .sum::<f64>()
+        * experts as f64
+        / (top_k as f64 * tokens * tokens);
+    let logits = Tensor::<TestBackend, 3>::from_floats([rows], &device);
+    let mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        TensorData::new(valid.to_vec(), [1, 4]),
+        &device,
+    ));
+    let actual = f64::from(
+        nemotron_load_balancing_loss(logits.clone(), top_k, Some(&mask))
+            .unwrap()
+            .into_scalar(),
+    );
+    assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+    // The padded token's extreme logits must not influence the result.
+    let mut changed = rows;
+    changed[2] = [-50.0, 50.0, -50.0, 50.0, -50.0];
+    let unchanged = f64::from(
+        nemotron_load_balancing_loss(
+            Tensor::<TestBackend, 3>::from_floats([changed], &device),
+            top_k,
+            Some(&mask),
+        )
+        .unwrap()
+        .into_scalar(),
+    );
+    assert!((unchanged - actual).abs() < 1e-7);
+    // Mismatched masks and impossible top-k values are contextual errors.
+    assert!(nemotron_load_balancing_loss(logits.clone(), 6, None).is_err());
+    assert!(nemotron_load_balancing_loss(logits.clone(), 0, None).is_err());
+    let short = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        TensorData::new(vec![true; 3], [1, 3]),
+        &device,
+    ));
+    assert!(nemotron_load_balancing_loss(logits, top_k, Some(&short)).is_err());
+}
+
+/// A single routed expert receives every assignment without a one-hot kernel.
+#[test]
+fn load_balancing_loss_supports_one_expert() {
+    let logits = Tensor::<TestBackend, 3>::from_floats([[[0.3], [-2.0]]], &Default::default());
+    let value = f64::from(
+        nemotron_load_balancing_loss(logits, 1, None)
+            .unwrap()
+            .into_scalar(),
+    );
+    assert!((value - 1.0).abs() < 1e-6, "{value}");
+}
+
+/// Gradients of the auxiliary loss reach the router projection.
+#[cfg(feature = "autodiff")]
+#[test]
+fn load_balancing_loss_is_differentiable() {
+    use burn::backend::Autodiff;
+
+    /// Autodiff wrapper used to check gradient flow into router logits.
+    type AdBackend = Autodiff<TestBackend>;
+    let device = Default::default();
+    let logits = Tensor::<AdBackend, 3>::from_floats(
+        // Both tokens select expert 0, so assignments are unbalanced; under
+        // perfectly balanced routing normalized scores make the loss constant.
+        [[[1.0, 0.2, -1.0, 0.4], [0.9, 0.8, 0.1, -0.6]]],
+        &device,
+    )
+    .require_grad();
+    let loss = nemotron_load_balancing_loss(logits.clone(), 2, None).unwrap();
+    let gradients = loss.backward();
+    let gradient = logits.grad(&gradients).unwrap();
+    assert!(
+        gradient
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .any(|value| value.abs() > 1e-6)
+    );
+}
