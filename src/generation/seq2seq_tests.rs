@@ -240,8 +240,9 @@ struct ScriptedModel<B: Backend> {
 /// First-order Markov decoder: logits depend only on the previous token.
 #[derive(Clone, Debug)]
 struct MarkovTable {
-    /// Logits returned by decoder prefill for every row.
-    first: Vec<f32>,
+    /// Logits returned by decoder prefill, one row per source: a source row
+    /// whose first token (its marker) is `m` receives `first[m % first.len()]`.
+    first: Vec<Vec<f32>>,
     /// Row `t` holds the logits returned after decoding token `t`.
     next: Vec<Vec<f32>>,
 }
@@ -307,8 +308,9 @@ impl<B: Backend> ScriptedModel<B> {
             .map_err(|error| Error::BackendCapability(error.to_string()))?;
         let mut logits = Vec::with_capacity(batch * self.config.vocabulary_size);
         if let Some(table) = &self.table {
-            for _ in markers {
-                logits.extend(&table.first);
+            for marker in markers {
+                let source = marker.elem::<f64>() as usize % table.first.len();
+                logits.extend(&table.first[source]);
             }
             return Ok(logits);
         }
@@ -1673,7 +1675,9 @@ fn release_v2_restricted_vocabulary_reports_insufficient_return_hypotheses() {
     assert_eq!(trace.decode_lengths, [vec![2, 1, 1]]);
 }
 
-/// Builds a Markov-table model and a matching one-source request.
+/// Builds a Markov-table model and a request with one source per first-step row.
+///
+/// Source `m` has marker token `m`, so it receives `table.first[m]`.
 fn markov_fixture(
     table: MarkovTable,
     search: BeamSearchConfig,
@@ -1682,7 +1686,8 @@ fn markov_fixture(
     Seq2SeqBeamSearchRequest<TestBackend>,
 ) {
     let device = Default::default();
-    let vocabulary_size = table.first.len();
+    let vocabulary_size = table.first[0].len();
+    let sources = table.first.len();
     let mut model = ScriptedModel::<TestBackend>::new(
         ScriptedConfig {
             vocabulary_size,
@@ -1693,6 +1698,17 @@ fn markov_fixture(
     model.table = Some(table);
     let mut request = request(&device, search);
     request.vocabulary_size = vocabulary_size;
+    if sources > 1 {
+        let markers = (0..sources as i64).flat_map(|marker| [marker, 0]).collect();
+        request.source.token_ids =
+            Tensor::from_data(TensorData::new(markers, [sources, 2]), &device);
+        request.decoder_prompt.token_ids = Tensor::zeros([sources, 1], &device);
+        request.cache = CacheConfig::new(
+            sources * request.search.num_beams,
+            request.search.max_new_tokens + 1,
+        )
+        .expect("multi-source cache");
+    }
     (model, request)
 }
 
@@ -1702,7 +1718,7 @@ fn settled_pools_stop_early_with_identical_results() {
     // EOS (token 2) dominates the first step; any live extension already
     // scores below it, so nothing can enter the one-beam pool afterwards.
     let table = MarkovTable {
-        first: vec![0.0, 0.0, 5.0],
+        first: vec![vec![0.0, 0.0, 5.0]],
         next: vec![vec![0.0, 0.0, 0.0]; 3],
     };
     let mut config = search(10, 1);
@@ -1922,24 +1938,28 @@ proptest::proptest! {
         );
     }
 
-    /// Pruning settled sources never changes beam-search output.
+    /// Pruning settled sources never changes any returned hypothesis.
+    ///
+    /// Every rank up to `num_beams` is compared, and with two sources one
+    /// may be pruned while the other keeps decoding through PAD no-op rows.
     #[test]
     fn pruned_search_equals_exhaustive_search(
         vocabulary in 3_usize..6,
         beams in 1_usize..4,
+        sources in 1_usize..3,
         max_new_tokens in 1_usize..6,
         eos_flags in proptest::collection::vec(proptest::bool::ANY, 6),
         penalty in proptest::sample::select(vec![-1.0, 0.0, 0.5, 1.0, 2.0]),
-        logits in proptest::collection::vec(-3.0_f32..3.0, 42),
+        logits in proptest::collection::vec(-3.0_f32..3.0, 48),
     ) {
         let beams = beams.min(vocabulary);
         let row = |offset: usize| logits[offset..offset + vocabulary].to_vec();
         let table = MarkovTable {
-            first: row(0),
-            next: (0..vocabulary).map(|token| row(6 * (token + 1))).collect(),
+            first: (0..sources).map(|source| row(6 * source)).collect(),
+            next: (0..vocabulary).map(|token| row(12 + 6 * token)).collect(),
         };
+        // `search` returns every hypothesis of each source's finished pool.
         let mut config = search(max_new_tokens, beams);
-        config.num_return_sequences = 1;
         config.length_penalty = penalty;
         config.eos_token_ids = (0..vocabulary as u32)
             .filter(|&token| eos_flags[token as usize])
@@ -1958,10 +1978,75 @@ proptest::proptest! {
                 "pruning changed the outcome: {pruned:?} vs {exhaustive:?}"
             ),
         }
+        let pruned_trace = pruned_model.trace.lock().unwrap();
         proptest::prop_assert!(
-            pruned_model.trace.lock().unwrap().decode_tokens.len()
+            pruned_trace.decode_tokens.len()
                 <= exhaustive_model.trace.lock().unwrap().decode_tokens.len()
         );
+        for reorder in &pruned_trace.reorders {
+            proptest::prop_assert!(super::reorder_preserves_groups(reorder, beams), "{:?}", reorder);
+        }
+    }
+}
+
+/// One settled source is pruned to PAD no-op rows while its peer keeps decoding.
+#[test]
+fn settled_source_is_pruned_while_its_peer_keeps_decoding() {
+    // Source 0 emits EOS (token 2) at once and through token 3 one step
+    // later, which fills its two-hypothesis pool; its best live beam
+    // (cumulative log-probability about -5.4) can no longer beat the worst
+    // finished score (about -0.66), so the source settles after step 1.
+    // Source 1 starts on token 0 and its live beams cycle 0 -> 1 -> 0
+    // without reaching EOS, so it keeps decoding to the length limit.
+    let table = MarkovTable {
+        first: vec![vec![0.0, 0.0, 5.0, 4.0], vec![4.0, 1.0, -9.0, -9.0]],
+        next: vec![
+            vec![0.0, 3.0, -9.0, -9.0],
+            vec![3.0, 0.0, -9.0, -9.0],
+            vec![0.0, 0.0, 0.0, 0.0],
+            vec![-9.0, -9.0, 5.0, -9.0],
+        ],
+    };
+    let mut config = search(4, 2);
+    config.eos_token_ids = vec![2];
+    let (pruned_model, request) = markov_fixture(table.clone(), config.clone());
+    let pruned = super::run_beam_search(&pruned_model, request.clone(), true).unwrap();
+    let (exhaustive_model, request) = markov_fixture(table, config);
+    let exhaustive = super::run_beam_search(&exhaustive_model, request, false).unwrap();
+    assert_eq!(pruned, exhaustive);
+    assert_eq!(pruned.sequences.len(), 2);
+    assert_eq!(pruned.sequences[0].len(), 2);
+    assert_eq!(pruned.sequences[0][0].token_ids, [2]);
+    assert_eq!(pruned.sequences[0][1].token_ids, [3, 2]);
+    assert!(
+        pruned.sequences[1]
+            .iter()
+            .all(|sequence| sequence.finish_reason == FinishReason::Length)
+    );
+
+    let pruned_trace = pruned_model.trace.lock().unwrap();
+    let exhaustive_trace = exhaustive_model.trace.lock().unwrap();
+    assert_eq!(pruned_trace.decode_valid.len(), 3);
+    assert_eq!(exhaustive_trace.decode_valid.len(), 3);
+    // Rows 0..2 belong to source 0, rows 2..4 to source 1.
+    let settled_step = pruned_trace
+        .decode_valid
+        .iter()
+        .position(|valid| !valid[0] && !valid[1])
+        .expect("source 0 is pruned");
+    assert_eq!(settled_step, 1);
+    for valid in &pruned_trace.decode_valid[settled_step..] {
+        assert_eq!(valid[..2], [false, false], "{valid:?}");
+        assert_eq!(valid[2..], [true, true], "{valid:?}");
+    }
+    assert!(
+        exhaustive_trace.decode_valid[settled_step..]
+            .iter()
+            .any(|valid| valid[0] || valid[1]),
+        "exhaustive search keeps decoding source 0"
+    );
+    for reorder in &pruned_trace.reorders {
+        assert!(super::reorder_preserves_groups(reorder, 2), "{reorder:?}");
     }
 }
 
