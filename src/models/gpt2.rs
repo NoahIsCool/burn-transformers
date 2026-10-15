@@ -62,6 +62,7 @@ use crate::{
 };
 
 mod checkpoint;
+pub(crate) mod extents;
 mod model;
 
 pub use checkpoint::{Gpt2CheckpointContract, Gpt2CheckpointLayout, Gpt2LoadError};
@@ -168,9 +169,7 @@ impl Default for Gpt2Config {
 impl Gpt2Config {
     /// Returns the explicit or conventional MLP width, rejecting overflow.
     pub fn intermediate_size(&self) -> Result<usize> {
-        self.n_inner
-            .or_else(|| self.n_embd.checked_mul(4))
-            .filter(|width| *width != 0)
+        extents::intermediate_width(self.n_inner, self.n_embd)
             .ok_or_else(|| Error::configuration("gpt2.n_inner", "must be positive and fit usize"))
     }
 
@@ -234,20 +233,19 @@ impl Validate for Gpt2Config {
         /// Family label attached to configuration validation errors.
         const FAMILY: &str = "gpt2";
         model_type(FAMILY, &self.model_type, &["gpt2"])?;
-        for (field, value) in [
+        let fields = [
             ("vocab_size", self.vocab_size),
             ("n_embd", self.n_embd),
             ("n_layer", self.n_layer),
             ("n_head", self.n_head),
             ("n_positions", self.n_positions),
-        ] {
-            if value == 0 || value > i32::MAX as usize {
-                return Err(ConfigError::new(
-                    FAMILY,
-                    field,
-                    "must be positive and fit the portable integer index range",
-                ));
-            }
+        ];
+        if let Some(position) = extents::first_invalid_extent(&fields.map(|(_, value)| value)) {
+            return Err(ConfigError::new(
+                FAMILY,
+                fields[position].0,
+                "must be positive and fit the portable integer index range",
+            ));
         }
         if !self.n_embd.is_multiple_of(self.n_head) {
             return Err(ConfigError::new(FAMILY, "n_head", "must divide n_embd"));
@@ -275,15 +273,16 @@ impl Validate for Gpt2Config {
                 return Err(ConfigError::new(FAMILY, field, reason));
             }
         }
-        let intermediate = self
-            .n_inner
-            .or_else(|| self.n_embd.checked_mul(4))
-            .filter(|width| *width != 0)
+        let intermediate = extents::intermediate_width(self.n_inner, self.n_embd)
             .ok_or_else(|| ConfigError::new(FAMILY, "n_inner", "must be positive and fit usize"))?;
         for width in [self.vocab_size, self.n_positions, intermediate, 3] {
-            self.n_embd.checked_mul(width).ok_or_else(|| {
-                ConfigError::new(FAMILY, "n_embd", "parameter dimensions overflow usize")
-            })?;
+            if !extents::product_fits(&[self.n_embd, width]) {
+                return Err(ConfigError::new(
+                    FAMILY,
+                    "n_embd",
+                    "parameter dimensions overflow usize",
+                ));
+            }
         }
         Ok(())
     }

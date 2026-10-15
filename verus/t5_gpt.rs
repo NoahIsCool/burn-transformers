@@ -40,6 +40,12 @@
 //! each rejection's cause, and the explicit-position bias table has radius
 //! `min(bound, max_distance)` with every clamped displacement inside it.
 //!
+//! For the GPT families it verifies `src/models/gpt2/extents.rs` (the first
+//! extent outside `1..=i32::MAX`, GPT-2's MLP width rule `n_inner` or `4 d`,
+//! and the checked parameter-size product chains of both configurations)
+//! and `src/models/gpt_neox/widths.rs` (an edited attention layer's
+//! projection widths are exact and every invalid geometry is named).
+//!
 //! See `verus/README.md` for the method, toolchain, and command.
 //!
 //! The planning files are dependency-free, so each is included as a single module.
@@ -58,3 +64,9 @@ pub mod packing;
 
 #[path = "../src/models/t5/buckets.rs"]
 pub mod buckets;
+
+#[path = "../src/models/gpt2/extents.rs"]
+pub mod extents;
+
+#[path = "../src/models/gpt_neox/widths.rs"]
+pub mod widths;

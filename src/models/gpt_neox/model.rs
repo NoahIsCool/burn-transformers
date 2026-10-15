@@ -58,6 +58,7 @@ use crate::{
 mod experiment;
 
 use super::GptNeoXConfig;
+use super::widths::{LayerWidthError, layer_widths};
 use crate::models::shared::{
     ImplicitPositions, InputContract, InputNames, ValidatedInput, select_hidden, validate_input,
     validate_nonempty_mask,
@@ -600,41 +601,36 @@ impl<B: Backend> GptNeoXForCausalLm<B> {
                 label("post_attention_layernorm"),
             )?;
             let attention = &layer.attention;
-            if attention.hidden_size != width
-                || attention.query_heads == 0
-                || attention.key_value_heads == 0
-                || attention.head_dim == 0
-                || !attention
-                    .query_heads
-                    .is_multiple_of(attention.key_value_heads)
-            {
-                return Err(Error::configuration(
-                    label("attention").render(),
-                    "head dimensions must be nonzero, compatible, and preserve residual width",
-                ));
-            }
-            let (query_width, key_width) = attention
-                .query_heads
-                .checked_mul(attention.head_dim)
-                .zip(attention.key_value_heads.checked_mul(attention.head_dim))
-                .ok_or_else(|| {
-                    Error::configuration(
+            let widths = match layer_widths(
+                attention.hidden_size,
+                width,
+                attention.query_heads,
+                attention.key_value_heads,
+                attention.head_dim,
+                attention.output_gate != AttentionOutputGate::None,
+            ) {
+                Ok(widths) => widths,
+                Err(LayerWidthError::Geometry) => {
+                    return Err(Error::configuration(
+                        label("attention").render(),
+                        "head dimensions must be nonzero, compatible, and preserve residual width",
+                    ));
+                }
+                Err(LayerWidthError::Overflow) => {
+                    return Err(Error::configuration(
                         label("attention").render(),
                         "attention projection widths overflow usize",
-                    )
-                })?;
-            let q_projection_width = query_width
-                .checked_mul(if attention.output_gate == AttentionOutputGate::None {
-                    1
-                } else {
-                    2
-                })
-                .ok_or_else(|| {
-                    Error::configuration(
+                    ));
+                }
+                Err(LayerWidthError::GatedOverflow) => {
+                    return Err(Error::configuration(
                         Label::Layer(index, "").render(),
                         "gated query width overflows usize",
-                    )
-                })?;
+                    ));
+                }
+            };
+            let (query_width, key_width, q_projection_width) =
+                (widths.query, widths.key_value, widths.query_projection);
             expect.linear(
                 &attention.q_proj,
                 width,
