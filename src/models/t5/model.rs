@@ -23,6 +23,14 @@
 //! cross-KV outside this parameter graph in [`T5DecodeState`] and evaluates
 //! every batch row in one pass (see [`decode`]).
 //!
+//! # Experiment interfaces
+//!
+//! [`T5ForConditionalGeneration`] and [`T5Encoder`] implement
+//! [`crate::architecture::HookedModel`], and [`T5Encoder`] implements
+//! [`crate::architecture::StagedModel`] over the encoder stack, so
+//! family-generic caches and patching sweeps run on T5 unchanged (see
+//! `experiment.rs`).
+//!
 //! # Padded targets
 //!
 //! A target mask (`true == valid`) never lets padding enter a valid token's
@@ -65,6 +73,7 @@ use crate::models::shared::{
 mod bias;
 mod block;
 mod decode;
+mod experiment;
 mod packing;
 mod padded_hooks;
 mod recipe;
