@@ -36,6 +36,14 @@
 //!   earlier check passed, and differential widths that add the even
 //!   query-head requirement last.
 //!
+//! It also verifies `src/feed_forward/widths.rs`, which shares this area:
+//! feed-forward validation accepts exactly non-empty residual and
+//! intermediate widths and names the residual width first.
+//!
+//! Not proved here: Burn tensor kernels, floating-point softmax and masking
+//! numerics, and the unannotated wrappers that call these cores; the attention
+//! and feed-forward unit tests cover those.
+//!
 //! See `verus/README.md` for the method, toolchain, and command.
 
 #![allow(unused)]
@@ -54,3 +62,6 @@ pub mod rules;
 
 #[path = "../src/attention/widths.rs"]
 pub mod widths;
+
+#[path = "../src/feed_forward/widths.rs"]
+pub mod feed_forward_widths;

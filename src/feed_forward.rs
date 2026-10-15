@@ -22,6 +22,8 @@
 //! precision; the `alpha`-scaled sigmoid and the `+c` offset are learned
 //! conventions of those checkpoints.
 
+mod widths;
+
 use burn::{
     module::Module,
     nn::{Linear, LinearConfig, LinearLayout},
@@ -363,20 +365,20 @@ pub fn apply_activation<B: Backend, const D: usize>(
 }
 
 /// Checks dimensions shared by dense and gated feed-forward layouts.
+///
+/// The check order is the Verus-verified `widths::width_fault`.
 fn validate_projection_widths(hidden_size: usize, intermediate_size: usize) -> Result<()> {
-    if hidden_size == 0 {
-        return Err(Error::configuration(
+    match widths::width_fault(hidden_size, intermediate_size) {
+        None => Ok(()),
+        Some(widths::WidthFault::HiddenSize) => Err(Error::configuration(
             "feed_forward.hidden_size",
             "must be non-zero",
-        ));
-    }
-    if intermediate_size == 0 {
-        return Err(Error::configuration(
+        )),
+        Some(widths::WidthFault::IntermediateSize) => Err(Error::configuration(
             "feed_forward.intermediate_size",
             "must be non-zero",
-        ));
+        )),
     }
-    Ok(())
 }
 
 #[cfg(test)]
