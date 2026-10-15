@@ -72,71 +72,158 @@ fn raise_exception(message: String) -> Result<Value, Error> {
     Err(Error::new(ErrorKind::InvalidOperation, message))
 }
 
-// Assistant-mask blocks.
+// Lexical tag scanning shared by the source rewrites.
 
-/// Makes Hugging Face's `{% generation %}` blocks transparent.
+/// The kinds of Jinja tag a source rewrite may change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TagKind {
+    /// An expression tag, `{{ ... }}`.
+    Expression,
+    /// A statement tag, `{% ... %}`.
+    Statement,
+}
+
+/// Applies `rewrite` to every expression and statement tag MiniJinja would parse.
 ///
-/// Hugging Face's `AssistantTracker` extension uses
-/// `{% generation %}...{% endgeneration %}` only to record which characters an
-/// assistant produced; the rendered text is the block body unchanged. MiniJinja
-/// has no such tag, so each one is rewritten to `{% if true %}`/`{% endif %}`
-/// with its whitespace-control markers (`-`, `+`) preserved, which renders
-/// byte-for-byte the same text. Comments and `{% raw %}` sections are copied
-/// verbatim. Templates without the word `generation` are borrowed unchanged.
-pub(crate) fn rewrite_generation_blocks(source: &str) -> Cow<'_, str> {
-    if !source.contains("generation") {
-        return Cow::Borrowed(source);
-    }
-    let mut rewritten = String::with_capacity(source.len());
-    let mut rest = source;
-    let mut in_raw = false;
-    while let Some(start) = rest.find("{%").into_iter().chain(rest.find("{#")).min() {
-        let closing = if rest[start..].starts_with("{#") {
-            "#}"
-        } else {
-            "%}"
-        };
-        let Some(length) = rest[start + 2..].find(closing) else {
-            // Unterminated: copy the remainder verbatim for the parser to reject.
-            break;
-        };
-        let end = start + 2 + length + 2;
-        rewritten.push_str(&rest[..start]);
-        let tag = &rest[start..end];
-        rest = &rest[end..];
-        if closing == "#}" {
-            rewritten.push_str(tag);
+/// The scan follows MiniJinja's lexer so a rewrite can never see text the
+/// engine treats as data:
+///
+/// - template text, `{# comments #}`, and `{% raw %}...{% endraw %}` sections
+///   are copied byte for byte;
+/// - a tag ends at the first closing delimiter that lies outside string
+///   literals and outside open `(`, `[`, or `{` brackets, so neither
+///   `{{ '%}' }}` nor `{{ {'a': {'b': 1}} }}` is cut short.
+///
+/// `rewrite` receives a tag's full text, delimiters included, and returns its
+/// replacement, or `None` to keep it. An unterminated tag or raw section ends
+/// the scan, and the remainder is copied for MiniJinja's parser to reject.
+/// An unchanged source is borrowed, not copied.
+fn rewrite_tags(
+    source: &str,
+    mut rewrite: impl FnMut(TagKind, &str) -> Option<String>,
+) -> Cow<'_, str> {
+    let mut rewritten = String::new();
+    // Bytes of `source` already copied into `rewritten`; zero until the first change.
+    let mut copied = 0;
+    let mut position = 0;
+    while let Some((start, opening)) = next_tag_opening(source, position) {
+        let body_start = start + 2;
+        if opening == "{#" {
+            let Some(length) = source[body_start..].find("#}") else {
+                break;
+            };
+            position = body_start + length + 2;
             continue;
         }
-        let (open_marker, keyword, close_marker) = statement_parts(tag);
-        let replacement = match keyword {
-            "raw" if !in_raw => {
-                in_raw = true;
-                None
-            }
-            "endraw" if in_raw => {
-                in_raw = false;
-                None
-            }
-            "generation" if !in_raw => Some("if true"),
-            "endgeneration" if !in_raw => Some("endif"),
-            _ => None,
+        if opening == "{%"
+            && let Some(length) = basic_tag_length(&source[body_start..], "raw")
+        {
+            // Like MiniJinja, copy everything up to the matching `{% endraw %}`.
+            let Some(raw_length) = raw_section_length(&source[body_start + length..]) else {
+                break;
+            };
+            position = body_start + length + raw_length;
+            continue;
+        }
+        let (kind, closing) = if opening == "{{" {
+            (TagKind::Expression, "}}")
+        } else {
+            (TagKind::Statement, "%}")
         };
-        match replacement {
-            Some(statement) => {
-                rewritten.push_str("{%");
-                rewritten.push_str(open_marker);
-                rewritten.push(' ');
-                rewritten.push_str(statement);
-                rewritten.push(' ');
-                rewritten.push_str(close_marker);
-                rewritten.push_str("%}");
-            }
-            None => rewritten.push_str(tag),
+        let Some(length) = find_tag_end(&source[body_start..], closing) else {
+            break;
+        };
+        let end = body_start + length + closing.len();
+        if let Some(replacement) = rewrite(kind, &source[start..end]) {
+            rewritten.push_str(&source[copied..start]);
+            rewritten.push_str(&replacement);
+            copied = end;
+        }
+        position = end;
+    }
+    if copied == 0 {
+        Cow::Borrowed(source)
+    } else {
+        rewritten.push_str(&source[copied..]);
+        Cow::Owned(rewritten)
+    }
+}
+
+/// Returns the byte offset and delimiter of the first `{{`, `{%`, or `{#` at or after `from`.
+fn next_tag_opening(source: &str, from: usize) -> Option<(usize, &'static str)> {
+    let bytes = source.as_bytes();
+    let mut index = from;
+    while let Some(offset) = source[index..].find('{') {
+        let brace = index + offset;
+        match bytes.get(brace + 1) {
+            Some(b'{') => return Some((brace, "{{")),
+            Some(b'%') => return Some((brace, "{%")),
+            Some(b'#') => return Some((brace, "{#")),
+            _ => index = brace + 1,
         }
     }
-    rewritten.push_str(rest);
-    Cow::Owned(rewritten)
+    None
+}
+
+/// Matches `[-+]? ws* name ws* [-+]? %}` at the start of `text` (the text after `{%`).
+///
+/// Returns the matched length. This is MiniJinja's `skip_basic_tag`, which
+/// recognizes `raw` and `endraw` before any expression parsing.
+fn basic_tag_length(text: &str, name: &str) -> Option<usize> {
+    /// Skips the ASCII whitespace MiniJinja allows around the tag name.
+    fn skip_whitespace(text: &str) -> &str {
+        text.trim_start_matches(|character: char| character.is_ascii_whitespace())
+    }
+    let rest = text.strip_prefix(['-', '+']).unwrap_or(text);
+    let rest = skip_whitespace(rest).strip_prefix(name)?;
+    let rest = skip_whitespace(rest);
+    let rest = rest.strip_prefix(['-', '+']).unwrap_or(rest);
+    let rest = rest.strip_prefix("%}")?;
+    Some(text.len() - rest.len())
+}
+
+/// Returns the length of a raw section's body plus its `{% endraw %}` tag.
+///
+/// As in MiniJinja, the first `{%` that starts an `endraw` tag ends the
+/// section; every other byte is data.
+fn raw_section_length(text: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(offset) = text[from..].find("{%") {
+        let after_opening = from + offset + 2;
+        if let Some(length) = basic_tag_length(&text[after_opening..], "endraw") {
+            return Some(after_opening + length);
+        }
+        from = after_opening;
+    }
+    None
+}
+
+/// Finds a tag's closing delimiter outside string literals and open brackets.
+///
+/// `body` starts just after the opening delimiter. Like MiniJinja's lexer,
+/// the delimiter only counts at bracket depth zero, so a `}}` that closes a
+/// nested dict literal does not end an expression tag.
+fn find_tag_end(body: &str, closing: &str) -> Option<usize> {
+    let bytes = body.as_bytes();
+    let mut depth = 0_isize;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            quote @ (b'\'' | b'"') => {
+                index = skip_string(bytes, index, quote);
+                continue;
+            }
+            // Byte comparison: `index` may sit inside a multi-byte character.
+            _ if depth == 0 && bytes[index..].starts_with(closing.as_bytes()) => {
+                return Some(index);
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 /// Splits `{%- keyword -%}` into its opening marker, trimmed body, and closing marker.
@@ -149,6 +236,37 @@ fn statement_parts(tag: &str) -> (&str, &str, &str) {
     (&inner[..open], body.trim(), &inner[inner.len() - close..])
 }
 
+// Assistant-mask blocks.
+
+/// Makes Hugging Face's `{% generation %}` blocks transparent.
+///
+/// Hugging Face's `AssistantTracker` extension uses
+/// `{% generation %}...{% endgeneration %}` only to record which characters an
+/// assistant produced; the rendered text is the block body unchanged. MiniJinja
+/// has no such tag, so each one is rewritten to `{% if true %}`/`{% endif %}`
+/// with its whitespace-control markers (`-`, `+`) preserved, which renders
+/// byte-for-byte the same text. Only real statement tags are rewritten: the
+/// same words inside text, comments, raw sections, or string literals (such as
+/// `{{ '{% generation %}' }}`) are data and stay unchanged. Templates without
+/// the word `generation` are borrowed unchanged.
+pub(crate) fn rewrite_generation_blocks(source: &str) -> Cow<'_, str> {
+    if !source.contains("generation") {
+        return Cow::Borrowed(source);
+    }
+    rewrite_tags(source, |kind, tag| {
+        if kind != TagKind::Statement {
+            return None;
+        }
+        let (open_marker, keyword, close_marker) = statement_parts(tag);
+        let statement = match keyword {
+            "generation" => "if true",
+            "endgeneration" => "endif",
+            _ => return None,
+        };
+        Some(format!("{{%{open_marker} {statement} {close_marker}%}}"))
+    })
+}
+
 // Conditional keyword arguments.
 
 /// Parenthesizes conditional expressions used as keyword-argument values.
@@ -159,77 +277,22 @@ fn statement_parts(tag: &str) -> (&str, &str, &str) {
 /// Wrapping such a value in parentheses, `name=(tcid if tcid else '')`, is
 /// semantically neutral in Jinja and accepted by both engines.
 ///
-/// Only expression and statement tags are scanned; template text, comments,
-/// and `{% raw %}` sections are copied unchanged. Inside a tag, string
-/// literals are skipped, and a keyword argument is an identifier followed by a
-/// single `=` directly inside parentheses. Its value ends at the next `,` or
-/// `)` at the same nesting depth and is wrapped only if it contains a
-/// top-level `if`.
+/// Only expression and statement tags are scanned (see [`rewrite_tags`]).
+/// Inside a tag, string literals are skipped, and a keyword argument is an
+/// identifier followed by a single `=` directly inside parentheses. Its value
+/// ends at the next `,` or `)` at the same nesting depth and is wrapped only
+/// if it contains a top-level `if`.
 pub(crate) fn parenthesize_conditional_keyword_arguments(source: &str) -> Cow<'_, str> {
-    if !source.contains(" if ") {
+    if !source.contains("if") {
         return Cow::Borrowed(source);
     }
-    let mut rewritten = String::with_capacity(source.len() + 16);
-    let mut rest = source;
-    let mut in_raw = false;
-    let mut changed = false;
-    while let Some(start) = ["{{", "{%", "{#"]
-        .iter()
-        .filter_map(|opening| rest.find(opening))
-        .min()
-    {
-        let opening = &rest[start..start + 2];
-        let closing = match opening {
-            "{{" => "}}",
-            "{%" => "%}",
-            _ => "#}",
-        };
-        let Some(length) = find_tag_end(&rest[start + 2..], closing) else {
-            break;
-        };
-        let end = start + 2 + length + 2;
-        rewritten.push_str(&rest[..start]);
-        let tag = &rest[start..end];
-        rest = &rest[end..];
-        if opening == "{%" {
-            match statement_parts(tag).1 {
-                "raw" => in_raw = true,
-                "endraw" => in_raw = false,
-                _ => {}
-            }
+    rewrite_tags(source, |_, tag| {
+        let (opening, body, closing) = (&tag[..2], &tag[2..tag.len() - 2], &tag[tag.len() - 2..]);
+        match wrap_conditional_keyword_values(body) {
+            Cow::Borrowed(_) => None,
+            Cow::Owned(wrapped) => Some(format!("{opening}{wrapped}{closing}")),
         }
-        if in_raw || opening == "{#" {
-            rewritten.push_str(tag);
-            continue;
-        }
-        let body = &tag[2..tag.len() - 2];
-        let wrapped = wrap_conditional_keyword_values(body);
-        changed |= matches!(wrapped, Cow::Owned(_));
-        rewritten.push_str(opening);
-        rewritten.push_str(&wrapped);
-        rewritten.push_str(closing);
-    }
-    rewritten.push_str(rest);
-    if changed {
-        Cow::Owned(rewritten)
-    } else {
-        Cow::Borrowed(source)
-    }
-}
-
-/// Finds the closing delimiter of a tag body, skipping quoted string literals.
-fn find_tag_end(body: &str, closing: &str) -> Option<usize> {
-    let bytes = body.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            quote @ (b'\'' | b'"') if closing != "#}" => index = skip_string(bytes, index, quote),
-            // Byte comparison: `index` may sit inside a multi-byte character.
-            _ if bytes[index..].starts_with(closing.as_bytes()) => return Some(index),
-            _ => index += 1,
-        }
-    }
-    None
+    })
 }
 
 /// Returns the index just past the string literal opened by `quote` at `start`.

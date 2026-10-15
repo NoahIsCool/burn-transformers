@@ -98,6 +98,67 @@ fn generation_rewrite_preserves_comments_raw_blocks_and_other_tags() {
     );
 }
 
+/// Tag-like text inside string literals, nested brackets, and raw sections stays data.
+///
+/// Goldens from transformers 5.2.0. The first case is the review probe: a
+/// rewrite that ignored `{{ }}` tags changed `'x{% generation %}y'` into
+/// `'x{% if true %}y'`.
+#[test]
+fn generation_rewrite_leaves_literals_and_raw_text_alone() {
+    assert_eq!(
+        rendered(
+            "{{ 'x{% generation %}y' }}|{% set s = '%}' %}{% generation %}a{% endgeneration %}{{ s }}|{{ {'a': {'b': 1}} }}|{{ {'k': '{% generation %}'}['k'] }}",
+            json!({}),
+        ),
+        "x{% generation %}y|a%}|{'a': {'b': 1}}|{% generation %}"
+    );
+    // A raw section ends at the first `endraw` tag even inside an unterminated literal.
+    assert_eq!(
+        rendered(
+            "{% raw %}{{ '{% endraw %}{% generation %}x{% endgeneration %}",
+            json!({})
+        ),
+        "{{ 'x"
+    );
+}
+
+/// The shared scanner ends tags exactly where MiniJinja's lexer does.
+#[test]
+fn tag_scanner_mirrors_minijinja_boundaries() {
+    // `}}` closing a nested dict does not end the expression, so the keyword
+    // argument after it is still inside the tag.
+    assert_eq!(
+        parenthesize_conditional_keyword_arguments("{{ f(d={'a': {'b': 1}}, k=v if c else w) }}"),
+        "{{ f(d={'a': {'b': 1}}, k=(v if c else w)) }}"
+    );
+    // Whitespace-controlled raw markers, and `{%` inside a raw section, are data.
+    assert_eq!(
+        rewrite_generation_blocks(
+            "{%- raw +%}{% generation {% x %}{%+ endraw -%}{% generation %}y{% endgeneration %}"
+        ),
+        "{%- raw +%}{% generation {% x %}{%+ endraw -%}{% if true %}y{% endif %}"
+    );
+    // Unterminated raw sections, comments, and bracketed tags leave the source borrowed.
+    for source in [
+        "{% raw %}{% generation %}",
+        "{# {% generation %}",
+        "{% generation (%}{% endgeneration %}",
+        "{ % generation %}",
+    ] {
+        assert!(
+            matches!(rewrite_generation_blocks(source), Cow::Borrowed(_)),
+            "{source}"
+        );
+    }
+    assert_eq!(basic_tag_length("- endraw\t+%}tail", "endraw"), Some(12));
+    assert_eq!(basic_tag_length(" endrawx %}", "endraw"), None);
+    assert_eq!(basic_tag_length(" endraw", "endraw"), None);
+    assert_eq!(raw_section_length("a{%x%}b{% endraw %}c"), Some(19));
+    assert_eq!(raw_section_length("a{% endraw"), None);
+    assert_eq!(find_tag_end(" ')}}' ) }}", "}}"), None);
+    assert_eq!(find_tag_end(" ( ')}}' ) }}", "}}"), Some(11));
+}
+
 /// `raise_exception` aborts rendering with the template's message.
 #[test]
 fn raise_exception_propagates_the_message() {
@@ -288,8 +349,15 @@ proptest! {
         )
     ) {
         let source = pieces.concat();
-        let _ = rewrite_generation_blocks(&source);
+        // Each rewrite is a fixed point after one pass: it never creates a
+        // tag that a second pass would change.
+        let generation = rewrite_generation_blocks(&source);
+        prop_assert_eq!(rewrite_generation_blocks(&generation), generation.clone());
+        if !source.contains("generation") {
+            prop_assert!(matches!(generation, Cow::Borrowed(_)));
+        }
         let wrapped = parenthesize_conditional_keyword_arguments(&source);
+        prop_assert_eq!(parenthesize_conditional_keyword_arguments(&wrapped), wrapped.clone());
         let without_parentheses = |text: &str| text.replace(['(', ')'], "");
         prop_assert_eq!(without_parentheses(&wrapped), without_parentheses(&source));
         prop_assert_eq!(
