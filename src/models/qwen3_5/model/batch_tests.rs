@@ -219,6 +219,8 @@ fn invalid_plans_are_rejected() {
     assert!(CompactBatch::<TestBackend>::new(&[vec![0]], 1, &[0, 1], &device).is_err());
     assert!(CompactBatch::<TestBackend>::new(&[], 1, &[], &device).is_err());
     assert!(CompactBatch::<TestBackend>::new(&[vec![0]], 1, &[usize::MAX], &device).is_err());
+    // Columns must be strictly increasing, as a mask produces them.
+    assert!(CompactBatch::<TestBackend>::new(&[vec![2, 1]], 3, &[0], &device).is_err());
 }
 
 proptest! {

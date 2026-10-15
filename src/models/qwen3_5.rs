@@ -38,6 +38,7 @@ pub const QWEN3_5_DEFAULT_PARTIAL_ROTARY_FACTOR: f64 = 0.25;
 
 mod checkpoint;
 mod load;
+pub(crate) mod plan;
 mod recipe;
 
 pub use checkpoint::{
@@ -204,10 +205,9 @@ impl Qwen3_5TextConfig {
         if !self.layer_types.is_empty() {
             return self.layer_types.clone();
         }
-        let interval = self.full_attention_interval.max(1);
         (0..self.num_hidden_layers)
             .map(|index| {
-                if (index + 1).is_multiple_of(interval) {
+                if plan::default_full_attention(index, self.full_attention_interval) {
                     Qwen3_5LayerType::FullAttention
                 } else {
                     Qwen3_5LayerType::LinearAttention

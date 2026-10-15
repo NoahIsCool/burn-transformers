@@ -44,7 +44,7 @@ use crate::{
     },
 };
 
-use crate::models::shared::select_hidden_with_last_columns;
+use crate::models::{qwen3_5::plan::compact_row_plan, shared::select_hidden_with_last_columns};
 
 /// Compact right-padded layout of one stateful call, built once per call.
 #[derive(Debug, Clone)]
@@ -129,17 +129,20 @@ impl<B: Backend> CompactBatch<B> {
             let mut sources = Vec::with_capacity(batch * width);
             let mut slots = Vec::with_capacity(batch * sequence);
             for columns in valid_columns {
-                // Padding slots read any valid column of their row (column 0
-                // for an inactive row); they are masked everywhere.
-                let filler = columns.first().copied().unwrap_or(0);
-                sources.extend(
-                    (0..width).map(|slot| signed(columns.get(slot).copied().unwrap_or(filler))),
-                );
-                let mut row = vec![signed(width); sequence];
-                for (slot, &column) in columns.iter().enumerate() {
-                    row[column] = signed(slot);
+                if !columns.windows(2).all(|pair| pair[0] < pair[1]) {
+                    return Err(Error::shape(
+                        "compact_batch.valid_columns",
+                        "strictly increasing columns",
+                        format!("{columns:?}"),
+                    ));
                 }
-                slots.extend(row);
+                // Verified in `verus/qwen.rs`: slot k reads column c_k,
+                // padding slots read a valid column of their row (column 0
+                // for an inactive row), and restoring maps c_k back to k and
+                // every other column to the zero slot `width`.
+                let plan = compact_row_plan(columns, sequence, width);
+                sources.extend(plan.sources.into_iter().map(signed));
+                slots.extend(plan.slots.into_iter().map(signed));
             }
             (Some(index(sources, width)), Some(index(slots, sequence)))
         };

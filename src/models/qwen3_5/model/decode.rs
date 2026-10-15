@@ -59,7 +59,10 @@ use super::{
     INPUT_NAMES, Qwen3_5DecoderLayer, Qwen3_5ForCausalLm, Qwen3_5MtpPrediction, Qwen3_5TextModel,
     batch::{CachedAttention, CompactBatch, ensure_cacheable_rotary_context},
 };
-use crate::models::qwen3_5::{Qwen3_5LayerType, Qwen3_5TextConfig};
+use crate::models::qwen3_5::{
+    Qwen3_5LayerType, Qwen3_5TextConfig,
+    plan::{self, shifted_mtp_length},
+};
 
 /// Single native-KV group within either the target or MTP cache bank.
 const NATIVE_KV_GROUP: usize = 0;
@@ -384,7 +387,7 @@ impl<B: Backend> ArchitectureDecodeState<B> for Qwen3_5DecodeState<B> {
         let mtp_lengths = lengths
             .iter()
             .zip(current_mtp)
-            .map(|(&target, &mtp)| mtp.min(target.saturating_sub(1)))
+            .map(|(&target, &mtp)| shifted_mtp_length(target, mtp))
             .collect::<Vec<_>>();
         self.tensors
             .truncate_prefixes(lengths, &mtp_lengths)
@@ -1157,20 +1160,22 @@ fn cache_layout<B: Backend>(
 ///
 /// The `k`th DeltaNet layer gets recurrent slot `k` and the `k`th
 /// full-attention layer native-KV slot `k`, so each family's slots are exactly
-/// `0..count` (proved for the integer core in `verus/qwen.rs`).
+/// `0..count` (the integer core, [`plan::cache_slots`], is verified in
+/// `verus/qwen.rs`).
 fn cache_schedule(layer_types: &[Qwen3_5LayerType]) -> Vec<Qwen3_5LayerCache> {
-    let mut full_layers = 0usize;
-    let mut delta_layers = 0usize;
-    layer_types
+    let full_attention = layer_types
         .iter()
-        .map(|layer_type| match layer_type {
-            Qwen3_5LayerType::LinearAttention => {
-                delta_layers += 1;
-                Qwen3_5LayerCache::DeltaNet(delta_layers - 1)
-            }
-            Qwen3_5LayerType::FullAttention => {
-                full_layers += 1;
-                Qwen3_5LayerCache::FullAttention(full_layers - 1)
+        .map(|layer_type| *layer_type == Qwen3_5LayerType::FullAttention)
+        .collect::<Vec<_>>();
+    let slots = plan::cache_slots(&full_attention);
+    full_attention
+        .iter()
+        .zip(slots.slots)
+        .map(|(&full, slot)| {
+            if full {
+                Qwen3_5LayerCache::FullAttention(slot)
+            } else {
+                Qwen3_5LayerCache::DeltaNet(slot)
             }
         })
         .collect()

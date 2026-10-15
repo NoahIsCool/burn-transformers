@@ -1121,9 +1121,12 @@ impl Qwen3MoeConfig {
     /// the feature, so every layer in that checkpoint returns `None`.
     #[must_use]
     pub fn layer_sliding_window(&self, layer_index: usize) -> Option<usize> {
-        (self.use_sliding_window && layer_index >= self.max_window_layers)
-            .then_some(self.sliding_window)
-            .flatten()
+        super::plan::layer_window(
+            layer_index,
+            self.use_sliding_window,
+            self.max_window_layers,
+            self.sliding_window,
+        )
     }
 }
 

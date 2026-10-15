@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 mod checkpoint;
 mod load;
 pub mod model;
+mod plan;
 
 pub use checkpoint::{Qwen3MoeCheckpointContract, Qwen3MoeCheckpointOptions};
 pub use load::{Qwen3MoeCheckpointLoadError, Qwen3MoeLoadError};
@@ -153,11 +154,17 @@ impl Default for Qwen3MoeConfig {
 
 impl Qwen3MoeConfig {
     /// Reports whether the indexed decoder block owns routed expert matrices.
+    ///
+    /// Block `i` is sparse when it is not in `mlp_only_layers`, the model has
+    /// experts, and `(i + 1) mod decoder_sparse_step = 0` (a zero step
+    /// disables sparsity); the predicate is verified in `verus/qwen.rs`.
     pub fn is_moe_layer(&self, layer_index: usize) -> bool {
-        self.decoder_sparse_step != 0
-            && !self.mlp_only_layers.contains(&layer_index)
-            && self.num_experts > 0
-            && (layer_index + 1).is_multiple_of(self.decoder_sparse_step)
+        plan::sparse_layer(
+            layer_index,
+            self.decoder_sparse_step,
+            self.num_experts,
+            self.mlp_only_layers.contains(&layer_index),
+        )
     }
 
     /// Translates the serialized RoPE metadata into the executable rotary configuration.
