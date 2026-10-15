@@ -2,8 +2,9 @@
 //!
 //! Verifies, in place, the specifications attached to:
 //!
-//! * `src/cache/ring.rs`: ring write and read planning, including the slot
-//!   invariant `slot(p) = p mod capacity` for every token written or read.
+//! * `src/cache/ring.rs`: standard and mirrored ring write and read planning
+//!   and staged-commit planning, including the slot invariant
+//!   `slot(p) = p mod capacity` for every token written, mirrored, or read.
 //! * `src/cache/lengths.rs`: the length ledger behind every decode state and
 //!   speculative transaction. Each transition (advance, begin, commit,
 //!   rollback, truncate, reorder, reset) preserves `committed <= working <=

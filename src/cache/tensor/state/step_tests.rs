@@ -741,3 +741,69 @@ fn latent_groups_publish_through_steps() {
     batched.commit_prefix(mark, &[1, 0]).expect("commit");
     assert_eq!(batched.lengths(), &[3, 1]);
 }
+
+/// State-level reads use the state's cursors and reject layers out of step.
+#[test]
+fn checked_reads_use_state_cursors_and_detect_stray_staging() {
+    let mut state = state(3, false);
+    state
+        .publish_step(batched_step(&state, &[2, 1, 1], 2, 1.0))
+        .expect("prefill");
+    let mark = state.begin_transaction().expect("transaction");
+    state
+        .publish_step(batched_step(&state, &[1, 1, 1], 1, 2.0))
+        .expect("proposal");
+    let read = state
+        .read_kv(StepBank::Main, 0, 1, 0)
+        .expect("checked read");
+    assert_eq!(read.retained_positions(), 0..3);
+    let recurrent = state
+        .read_recurrent(StepBank::Main, 0, 0, 2)
+        .expect("checked recurrent read");
+    assert_eq!(recurrent.staged_snapshot(), Some(0));
+    // Stage one more token for one layer only, outside any step.
+    state
+        .main_mut()
+        .native_kv_mut(0)
+        .expect("group")
+        .stage_sequence(0, 0, kv_block(1, 1, 3.0), kv_block(1, 1, 3.0))
+        .expect("stray staging");
+    state
+        .main_mut()
+        .recurrent_mut(0)
+        .expect("group")
+        .stage_sequence_snapshots(
+            0,
+            1,
+            Tensor::ones([1, 1, 1, 2, 2], &device()),
+            Tensor::ones([1, 1, 2, 2], &device()),
+        )
+        .expect("stray snapshot");
+    assert!(matches!(
+        state.read_kv(StepBank::Main, 0, 0, 0),
+        Err(TensorCacheError::TransactionCursorMismatch {
+            expected: 1,
+            actual: 2,
+            ..
+        })
+    ));
+    assert!(state.read_kv(StepBank::Main, 0, 1, 0).is_ok());
+    assert!(matches!(
+        state.read_recurrent(StepBank::Main, 0, 0, 1),
+        Err(TensorCacheError::TransactionCursorMismatch {
+            expected: 1,
+            actual: 2,
+            ..
+        })
+    ));
+    assert!(matches!(
+        state.read_kv(StepBank::Main, 0, 0, ROWS),
+        Err(TensorCacheError::Metadata(_))
+    ));
+    assert!(matches!(
+        state.read_kv(StepBank::Mtp, 0, 0, 0),
+        Err(TensorCacheError::MtpNotEnabled)
+    ));
+    state.rollback(mark).expect("rollback");
+    assert!(state.read_kv(StepBank::Main, 0, 0, 0).is_ok());
+}

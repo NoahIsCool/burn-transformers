@@ -39,10 +39,13 @@ use core::ops::Range;
 use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 
 use crate::cache::SequenceLengths;
-use crate::cache::tensor::kv::{KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment};
+use crate::cache::tensor::kv::{
+    KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment, KvCacheRead,
+};
 use crate::cache::tensor::kv::{PreparedNativeKvBatchWrite, PreparedNativeKvWrite};
 use crate::cache::tensor::recurrent::{
     PreparedRecurrentBatchWrite, PreparedRecurrentStage, PreparedRecurrentStateWrite,
+    RecurrentStateRead,
 };
 
 use super::{
@@ -532,6 +535,59 @@ impl<B: Backend> TensorDecodeState<B> {
         }
     }
 
+    /// Reads one row's working KV history using this state's own cursors.
+    ///
+    /// Unlike [`NativeKvCache::read_working_sequence`](super::NativeKvCache::read_working_sequence),
+    /// the caller cannot pass a stale committed length, and inside a
+    /// transaction the layer's staged proposal must equal the row's logical
+    /// proposal length, so a layer left behind by a failed or skipped staging
+    /// step is reported instead of silently attended over.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled bank, invalid indices, or a staged
+    /// length that disagrees with the working cursor.
+    pub fn read_kv(
+        &self,
+        bank: StepBank,
+        group: usize,
+        layer: usize,
+        row: usize,
+    ) -> TensorCacheResult<KvCacheRead<B>> {
+        let (cache_bank, lengths) = self.step_target(bank)?;
+        let cache = cache_bank.native_kv(group)?;
+        let (committed, proposed) = row_cursors(lengths, row)?;
+        if cache.has_active_staging() {
+            check_staged(row, proposed, cache.staged_length(layer, row)?)?;
+        }
+        cache.read_working_sequence(layer, row, committed)
+    }
+
+    /// Reads one row's working recurrent state, checking its snapshot count.
+    ///
+    /// Inside a transaction the layer must hold exactly one snapshot per
+    /// proposal token; the read then returns the snapshot after the last one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled bank, invalid indices, or a snapshot
+    /// count that disagrees with the working cursor.
+    pub fn read_recurrent(
+        &self,
+        bank: StepBank,
+        group: usize,
+        layer: usize,
+        row: usize,
+    ) -> TensorCacheResult<RecurrentStateRead<B>> {
+        let (cache_bank, lengths) = self.step_target(bank)?;
+        let cache = cache_bank.recurrent(group)?;
+        let (_, proposed) = row_cursors(lengths, row)?;
+        if cache.has_active_staging() {
+            check_staged(row, proposed, cache.staged_length(layer, row)?)?;
+        }
+        cache.read_working_sequence(layer, row)
+    }
+
     /// Plans a batched read of one group's working history (committed plus staged).
     ///
     /// Use it to attend over the history *before* the step's own tokens; the
@@ -801,6 +857,26 @@ impl<B: Backend> TensorDecodeState<B> {
         apply_step(bank, prepared);
         self.sync_history_locks();
         Ok(())
+    }
+}
+
+/// Returns a row's committed length and proposal length.
+fn row_cursors(lengths: &SequenceLengths, row: usize) -> TensorCacheResult<(usize, usize)> {
+    let committed = lengths.length(row)?;
+    Ok((committed, lengths.working_lengths()[row] - committed))
+}
+
+/// Requires a layer's staged count to equal the row's logical proposal length.
+fn check_staged(row: usize, proposed: usize, staged: usize) -> TensorCacheResult<()> {
+    if staged == proposed {
+        Ok(())
+    } else {
+        Err(TensorCacheError::TransactionCursorMismatch {
+            sequence: row,
+            cursor: "staged proposal length",
+            expected: proposed,
+            actual: staged,
+        })
     }
 }
 
