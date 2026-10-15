@@ -43,21 +43,26 @@ pub mod transfer;
 
 pub use architecture::{
     ArchitectureConfig, CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput,
-    DecodeState, EncoderOutput, ForwardOptions, LogitsSelection, Seq2SeqInput,
-    Seq2SeqLanguageModel, Seq2SeqOutput, TokenMask,
+    DecodeState, EncoderOutput, ForwardOptions, HookedModel, LogitsSelection, Seq2SeqInput,
+    Seq2SeqLanguageModel, Seq2SeqOutput, StagedModel, TokenMask,
 };
 pub use error::{Error, Result};
 pub use generation::{
     CausalGenerationOutput, CausalGenerationRequest, FinishReason, GeneratedSequence,
-    GenerationConfig, GenerationToken, GenerationTracker, LogitsProcessor, SamplingStrategy,
-    TokenSelection, generate_causal, generate_causal_streaming,
+    GenerationConfig, GenerationToken, GenerationTracker, LogitsProcessor, PenaltyScope,
+    SamplingStrategy, SplitMix64, TokenHistory, TokenSelection, generate_causal,
+    generate_causal_streaming, upcast_half_precision,
 };
-pub use loaded::{LoadedModel, ModelSourceMetadata, ModelTokenizer, QuantizedLoadAudit};
+pub use initialization::InitPolicy;
+pub use loaded::{
+    LoadedModel, LoadedModelParts, ModelSourceMetadata, ModelTokenizer, QuantizedLoadAudit,
+};
 pub use models::{
     AutoCausalConfig, AutoCausalLm, AutoLoadOptions, AutoSeq2SeqConfig, AutoSeq2SeqLm,
 };
 #[cfg(feature = "tokenizers")]
 pub use tokenization::{
     BatchEncoding, ChatMessage, ChatTemplateOptions, EncodeOptions, LocalTokenizer, Padding,
-    PaddingSide, SpecialToken, SpecialTokens, TokenizerMetadata, TruncationSide,
+    PaddingSide, SpecialToken, SpecialTokens, TokenStreamDecoder, TokenizerMetadata,
+    TruncationSide,
 };

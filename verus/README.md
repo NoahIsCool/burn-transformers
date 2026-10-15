@@ -42,6 +42,15 @@ fn split_ring_write(absolute_start: usize, count: usize, capacity: usize) -> Rin
   a verified body is also a proof that its arithmetic never panics.
 - `usize::from(bool)`, iterator adaptors, and some standard helpers have no
   Verus specification. Prefer `if`, index `while` loops, and `min`/`max`.
+- Loop invariants are attributes on `while` statements, which needs
+  `#![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]` at the harness
+  root. Only the Verus compiler sees it; ordinary builds are unaffected.
+- Verus compiles verified bodies with an older edition, so they cannot use
+  let-chains. Associated functions without a `self` receiver cannot carry
+  `verus_spec`; make the verified core a free function and call it.
+- Ghost snapshots of mutable state inside a body use `proof_decl!` under the
+  same `cfg`; lemmas live in a `#[cfg(verus_keep_ghost)] verus! { … }` block
+  next to the code they justify.
 
 ## Harnesses
 
@@ -49,6 +58,18 @@ Each `verus/*.rs` file other than this guide is an independent Verus crate root
 for one area. It includes the real source files with `#[path = "../src/…"]`
 attributes, mirroring their crate paths when they refer to one another. Areas
 therefore verify independently and can be extended in parallel.
+
+| Harness | Verified source | What the proofs establish |
+| --- | --- | --- |
+| `attention.rs` | `src/attention/plan.rs`, `src/attention/widths.rs` | Score-bounded query chunks are maximal, partition the queries, and respect both limits; sliding-window key ranges contain every visible key; chunk frames keep absolute chunk indices; grouped-query projection widths are exact and representable. |
+| `cache.rs` | `src/cache/{ring,lengths,retention,rows}.rs` | Ring writes and reads land in slot `p mod capacity`; the length ledger keeps `committed <= working <= capacity` across advance, begin, commit, rollback, truncate, reorder, and reset; rewind predicates are sound and complete; row plans stay in bounds. |
+| `checkpoint.rs` | `src/checkpoint/layout.rs`, `src/checkpoint/quantization/packing.rs` | Shape products and storage sizes are exact or rejected on overflow; accepted SafeTensors byte intervals tile the data section exactly; packed Q4/Q8 code reads decode the stored nibble or byte. |
+| `experiment.rs` | `src/intervention/selection.rs`, `src/experiment/bounds.rs` | Activation selections expand to exactly the requested in-bounds ranges; position, label, broadcast, and staged-block bounds are overflow-free; the pairwise loss reduction terminates. |
+| `generation.rs` | `src/generation/bookkeeping.rs` | Stop matching and finish precedence, prefill chunking, beam-row group preservation, the beam frontier, position preflights, speculative accepted-prefix arithmetic, and prompt-lookup drafting. |
+| `models.rs` | `src/models/shared/plan.rs` | Padded-row compaction and scatter plans restore the rectangular layout; logits selection, implicit cached positions, rotary extents, value ranges, and per-row cache appends are exact and bounded. |
+| `moe.rs` | `src/moe/assignment.rs` | The expert counting sort partitions every routed assignment by expert in stable order; memory-bounded dispatch blocks are maximal runs of whole experts. |
+| `position.rs` | `src/position/{index_plan,t5,ids}.rs` | MRoPE axis selection, T5 displacement tables and bucket indices, and batched position IDs are in bounds and exact. |
+| `tokenization.rs` | `src/tokenization/{layout,calendar}.rs` | Truncation budgets reserve exactly the template width; padding splits and masks are exact; calendar arithmetic for `strftime_now` is correct. |
 
 Proof code must not use `admit`, `assume`, `assume_specification`,
 `external_body`, or `external_fn_specification`; the `verus_harness`
