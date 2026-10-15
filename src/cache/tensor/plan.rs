@@ -11,7 +11,9 @@
 //!   backends and selector tensors use. `k` repeated tensors hold `N · k`
 //!   scalars and `N · k · s` bytes.
 //! * **Write ends.** Appending `t` tokens at absolute `s` ends at `s + t`,
-//!   which must be representable and at most the logical capacity.
+//!   which must be representable and at most the logical capacity; staging
+//!   `t` more entries after `s` staged ones likewise needs `s + t` within
+//!   the staging capacity.
 //! * **Staged commits.** Every layer must hold exactly the proposed number of
 //!   staged tokens or snapshots per row, and every accepted prefix must lie
 //!   within its row's proposal.
@@ -245,6 +247,35 @@ pub(crate) fn write_end(
         Err(WriteEndViolation::ExceedsCapacity { end })
     } else {
         Ok(end)
+    }
+}
+
+/// Returns the staged length `staged + count` after appending to a staging buffer.
+///
+/// Proved: the new length is exact and accepted exactly when it is
+/// representable and at most `staging_capacity`; a rejection reports the
+/// requested length saturated at `usize::MAX`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        result is Ok <==> staged + count <= staging_capacity,
+        result matches Ok(end) ==> end == staged + count,
+        result matches Err(requested) ==>
+            requested as int == if staged + count <= usize::MAX {
+                staged + count
+            } else {
+                usize::MAX as int
+            },
+))]
+pub(crate) fn staging_end(
+    staged: usize,
+    count: usize,
+    staging_capacity: usize,
+) -> Result<usize, usize> {
+    match staged.checked_add(count) {
+        Some(end) if end <= staging_capacity => Ok(end),
+        Some(end) => Err(end),
+        None => Err(usize::MAX),
     }
 }
 

@@ -28,7 +28,13 @@
 //!   append ends are exact and within capacity; the staged-commit scan
 //!   accepts exactly fully staged, in-proposal prefixes and names the first
 //!   failure; truncation clears exactly the rows reset from history; beam
-//!   sources and host index vectors are checked and converted exactly.
+//!   sources and host index vectors are checked and converted exactly;
+//!   staging lengths stay within the staging capacity.
+//! * `src/cache/tensor/recurrent/plan.rs`: recurrent snapshot indexing. The
+//!   working and committed snapshot of `n` tokens is `n - 1`, a uniform batch
+//!   shares one snapshot exactly when every row staged the same positive
+//!   count, and each flat gather index `b * P + max(s_b, 1) - 1` decodes to
+//!   row `b` and its own snapshot, failing exactly beyond `i32::MAX`.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 
@@ -45,3 +51,5 @@ pub mod ring;
 pub mod rows;
 #[path = "../src/cache/tensor/plan.rs"]
 pub mod tensor_plan;
+#[path = "../src/cache/tensor/recurrent/plan.rs"]
+pub mod recurrent_plan;

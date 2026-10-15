@@ -65,6 +65,15 @@ fn write_end_checks_overflow_then_capacity() {
     );
 }
 
+/// Staging ends are exact within capacity and report the saturated request otherwise.
+#[test]
+fn staging_end_reports_saturated_request() {
+    assert_eq!(staging_end(2, 3, 5), Ok(5));
+    assert_eq!(staging_end(2, 4, 5), Err(6));
+    assert_eq!(staging_end(usize::MAX, 1, usize::MAX), Err(usize::MAX));
+    assert_eq!(staging_end(0, 0, 0), Ok(0));
+}
+
 /// The staged-commit scan reports the first failing check in layer-then-row order.
 #[test]
 fn staged_commit_scan_reports_first_failure() {
