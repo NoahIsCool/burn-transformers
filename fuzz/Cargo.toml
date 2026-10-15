@@ -72,6 +72,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "rope_parameters"
+path = "fuzz_targets/rope_parameters.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
 

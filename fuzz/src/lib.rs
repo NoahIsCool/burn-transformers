@@ -21,6 +21,7 @@ pub mod experiment_interfaces;
 pub mod generation;
 pub mod logits_processing;
 pub mod masks;
+pub mod rope_parameters;
 
 /// Maximum bytes consumed from any one fuzzer input.
 pub const MAX_INPUT_BYTES: usize = 4096;
@@ -156,6 +157,30 @@ pub(crate) fn floats_round_trip(left: f64, right: f64) -> bool {
     left == right
         || difference <= 1e-14 * left.abs().max(right.abs())
         || difference <= f64::MIN_POSITIVE
+}
+
+/// Whether two JSON values are equal, with numbers compared by [`floats_round_trip`].
+pub(crate) fn json_equal(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => {
+            left == right
+                || matches!(
+                    (left.as_f64(), right.as_f64()),
+                    (Some(left), Some(right)) if floats_round_trip(left, right)
+                )
+        }
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len() && left.iter().zip(right).all(|(a, b)| json_equal(a, b))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, value)| {
+                    right.get(key).is_some_and(|other| json_equal(value, other))
+                })
+        }
+        _ => left == right,
+    }
 }
 
 /// Deterministic pseudo-random inputs for unit tests that stand in for a fuzzer.
