@@ -49,7 +49,10 @@ use crate::{Error, Result, architecture::TokenMask, normalization::RmsNormConfig
 ///
 /// Larger blocks issue fewer kernels but hold `[batch, heads, block, C, C]`
 /// F32 matrices; 16 chunks of 64 tokens keep that at 256 KiB per head and
-/// batch row while cutting the triangular-solve launches sixteenfold.
+/// batch row while cutting the triangular-solve launches sixteenfold. The
+/// launch savings target GPU backends; on the scalar Flex CPU backend the
+/// arithmetic is unchanged and the ignored `prefill_timing` benchmark measures
+/// batching as roughly neutral for 128-wide heads and faster for narrow ones.
 pub const CHUNKS_PER_BLOCK: usize = 16;
 
 /// Default stabilizer of the query/key L2 normalization (Qwen and FLA reference).
@@ -858,11 +861,13 @@ pub fn recurrent_gated_delta_rule<B: Backend>(
 ///
 /// Everything except the last three lines is independent of `S`, so it runs
 /// batched over blocks of up to [`CHUNKS_PER_BLOCK`] chunks: one
-/// `C - 1`-step substitution per block instead of per chunk. A trailing
-/// partial chunk is zero-padded, which is exact because padded tokens have
-/// `k = v = beta = 0` and `log_decay = 0`, so they neither change `S` nor the
-/// valid rows of `T`. The sequential dependency is `ceil(L / C)` short state
-/// updates.
+/// `C - 1`-step substitution per block instead of per chunk. Inside a
+/// multi-chunk block a trailing partial chunk is zero-padded, which is exact
+/// because padded tokens have `k = v = beta = 0` and `log_decay = 0`, so they
+/// neither change `S` nor the valid rows of `T`. A block that fits in one
+/// chunk is never padded: it runs at its own width, so a prompt of `L < C`
+/// tokens costs an `L - 1`-step substitution on `L x L` tiles. The sequential
+/// dependency is `ceil(L / C)` short state updates.
 ///
 /// # Errors
 ///
@@ -883,14 +888,13 @@ pub fn chunked_gated_delta_rule<B: Backend>(
     });
     let chunk = config.chunk_size;
     let block_tokens = chunk.saturating_mul(CHUNKS_PER_BLOCK);
-    let mut outputs = Vec::with_capacity(sequence.div_ceil(block_tokens));
+    // One `[batch, heads, <= C, value]` output per chunk, concatenated once.
+    let mut outputs = Vec::with_capacity(sequence.div_ceil(chunk));
     let mut start = 0;
     while start < sequence {
         let width = block_tokens.min(sequence - start);
         let block = ChunkBlock::new(&prepared, start, width, chunk);
-        let (block_output, next_state) = block.scan(state);
-        outputs.push(block_output);
-        state = next_state;
+        state = block.scan(state, &mut outputs);
         start += width;
     }
 
@@ -905,8 +909,9 @@ pub fn chunked_gated_delta_rule<B: Backend>(
 
 /// State-independent terms of up to [`CHUNKS_PER_BLOCK`] consecutive chunks.
 ///
-/// Every tensor is laid out `[batch, heads, chunks, C, ·]`; the trailing chunk
-/// of the last block is zero-padded to `C` tokens.
+/// Every tensor is laid out `[batch, heads, chunks, C, ·]`. In a multi-chunk
+/// block the trailing chunk is zero-padded to `C` tokens; a single-chunk block
+/// uses `C = width` and has no padding.
 struct ChunkBlock<B: Backend> {
     /// `T (beta v)`: values with all intra-chunk delta writes resolved.
     transformed_value: Tensor<B, 5>,
@@ -926,7 +931,13 @@ struct ChunkBlock<B: Backend> {
 
 impl<B: Backend> ChunkBlock<B> {
     /// Pads, reshapes, and computes every state-independent term for one block.
+    ///
+    /// A block of at most one chunk (a short prompt, a decode-sized segment, or
+    /// the tail of a long prompt) uses its own width as `C`. Padding it to the
+    /// configured chunk would run a `C - 1`-step substitution on `C x C` tiles
+    /// for a handful of tokens; only multi-chunk blocks share one padded `C`.
     fn new(prepared: &PreparedDeltaRule<B>, start: usize, width: usize, chunk: usize) -> Self {
+        let chunk = chunk.min(width);
         let chunks = width.div_ceil(chunk);
         let padded = chunks * chunk;
         let split = |tensor: &Tensor<B, 4>| split_chunks(tensor, start, width, padded, chunk);
@@ -963,21 +974,26 @@ impl<B: Backend> ChunkBlock<B> {
 
     /// Carries the recurrent state across the block's chunks in order.
     ///
-    /// Returns the block's `[batch, heads, width, value_width]` outputs and the
-    /// outgoing FP32 state.
-    fn scan(self, mut state: Tensor<B, 4>) -> (Tensor<B, 4>, Tensor<B, 4>) {
-        let chunks = self.chunk_decay.dims()[2];
+    /// Appends one `[batch, heads, tokens, value_width]` output per chunk to
+    /// `outputs` (the padded tail of a trailing chunk is dropped) and returns
+    /// the outgoing FP32 state. Collecting chunks across blocks lets the
+    /// caller concatenate the whole sequence with a single copy.
+    fn scan(self, mut state: Tensor<B, 4>, outputs: &mut Vec<Tensor<B, 4>>) -> Tensor<B, 4> {
+        let [_, _, chunks, chunk, _] = self.attention.dims();
         let take = |tensor: &Tensor<B, 5>, index: usize| {
             tensor.clone().narrow(2, index, 1).squeeze_dim::<4>(2)
         };
-        let mut outputs = Vec::with_capacity(chunks);
         for index in 0..chunks {
             let corrected = take(&self.transformed_value, index)
                 - take(&self.cumulative_key, index).matmul(state.clone());
-            outputs.push(
-                take(&self.decayed_query, index).matmul(state.clone())
-                    + take(&self.attention, index).matmul(corrected.clone()),
-            );
+            let output = take(&self.decayed_query, index).matmul(state.clone())
+                + take(&self.attention, index).matmul(corrected.clone());
+            let real_tokens = chunk.min(self.width - index * chunk);
+            outputs.push(if real_tokens == chunk {
+                output
+            } else {
+                output.narrow(2, 0, real_tokens)
+            });
             // `[batch, heads, 1, 1]` broadcasts over the `[key, value]` state.
             let decay = self.chunk_decay.clone().narrow(2, index, 1);
             state = state * decay
@@ -985,14 +1001,18 @@ impl<B: Backend> ChunkBlock<B> {
                     .swap_dims(2, 3)
                     .matmul(corrected);
         }
-        let output = Tensor::cat(outputs, 2).narrow(2, 0, self.width);
-        (output, state)
+        state
     }
 }
 
 /// Narrows `[batch, heads, sequence, d]` to a block, zero-pads it, and splits it into chunks.
 ///
-/// Returns `[batch, heads, padded / chunk, chunk, d]`.
+/// Returns `[batch, heads, padded / chunk, chunk, d]`. The prepared tensors
+/// are head-major views of sequence-major `[batch, sequence, heads, d]`
+/// storage, so the split happens in that storage order and the result is a
+/// permuted view: for an unmasked block starting at token zero no element is
+/// copied. Other blocks (an offset narrow, padding, or masked inputs) cost
+/// the one contiguous copy that any reshape of a strided tensor needs.
 fn split_chunks<B: Backend>(
     tensor: &Tensor<B, 4>,
     start: usize,
@@ -1001,17 +1021,19 @@ fn split_chunks<B: Backend>(
     chunk: usize,
 ) -> Tensor<B, 5> {
     let [batch, heads, _, depth] = tensor.dims();
-    let block = tensor.clone().narrow(2, start, width);
+    let block = tensor.clone().swap_dims(1, 2).narrow(1, start, width);
     let block = if padded == width {
         block
     } else {
         let padding = Tensor::zeros(
-            [batch, heads, padded - width, depth],
+            [batch, padded - width, heads, depth],
             (&block.device(), block.dtype()),
         );
-        Tensor::cat(vec![block, padding], 2)
+        Tensor::cat(vec![block, padding], 1)
     };
-    block.reshape([batch, heads, padded / chunk, chunk, depth])
+    block
+        .reshape([batch, padded / chunk, chunk, heads, depth])
+        .permute([0, 3, 1, 2, 4])
 }
 
 /// Returns `(I + L)^-1` for strictly lower-triangular `L` over the last two axes.

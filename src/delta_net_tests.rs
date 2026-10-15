@@ -8,9 +8,9 @@ use burn::{
 use crate::architecture::TokenMask;
 
 use super::{
-    CHUNKS_PER_BLOCK, DeltaNetMode, DeltaRuleConfig, DeltaRuleInput, GatedDeltaNetConfig,
-    GatedDeltaNetState, PreparedDeltaRule, chunked_gated_delta_rule, mask_hidden,
-    recurrent_gated_delta_rule, softplus,
+    CHUNKS_PER_BLOCK, ChunkBlock, DeltaNetMode, DeltaRuleConfig, DeltaRuleInput,
+    GatedDeltaNetConfig, GatedDeltaNetState, PreparedDeltaRule, chunked_gated_delta_rule,
+    mask_hidden, recurrent_gated_delta_rule, softplus,
 };
 
 /// Deterministic F32 CPU backend for recurrent and chunked delta-rule comparisons.
@@ -638,8 +638,22 @@ fn legacy_chunked(
 
 /// Builds smooth `[batch=1, sequence, heads=2, width]` inputs for long-sequence checks.
 fn long_fixture(sequence: usize) -> DeltaRuleInput<TestBackend> {
+    smooth_fixture(sequence, 2, 4, 3)
+}
+
+/// Builds smooth `[1, sequence, heads, key_width | value_width]` inputs from sine patterns.
+///
+/// Decays lie in `[-0.25, -0.05]` and `beta = 0.7`, so every chunk exercises
+/// non-trivial decay matrices and delta corrections without overflow.
+fn smooth_fixture(
+    sequence: usize,
+    heads: usize,
+    key_width: usize,
+    value_width: usize,
+) -> DeltaRuleInput<TestBackend> {
     let device = Default::default();
-    let pattern = |count: usize, scale: f64, shape: [usize; 4]| {
+    let pattern = |scale: f64, shape: [usize; 4]| {
+        let count = shape.iter().product::<usize>();
         (Tensor::<TestBackend, 1, Int>::arange(0..count as i64, &device)
             .float()
             .mul_scalar(scale))
@@ -647,17 +661,17 @@ fn long_fixture(sequence: usize) -> DeltaRuleInput<TestBackend> {
         .reshape(shape)
     };
     DeltaRuleInput {
-        query: pattern(sequence * 2 * 4, 0.37, [1, sequence, 2, 4]),
-        key: pattern(sequence * 2 * 4, 0.53, [1, sequence, 2, 4]),
-        value: pattern(sequence * 2 * 3, 0.71, [1, sequence, 2, 3]),
-        log_decay: (Tensor::<TestBackend, 1, Int>::arange(0..(sequence * 2) as i64, &device)
+        query: pattern(0.37, [1, sequence, heads, key_width]),
+        key: pattern(0.53, [1, sequence, heads, key_width]),
+        value: pattern(0.71, [1, sequence, heads, value_width]),
+        log_decay: (Tensor::<TestBackend, 1, Int>::arange(0..(sequence * heads) as i64, &device)
             .float()
             .mul_scalar(0.29))
         .cos()
         .mul_scalar(0.1)
         .sub_scalar(0.15)
-        .reshape([1, sequence, 2]),
-        beta: Tensor::full([1, sequence, 2], 0.7, &device),
+        .reshape([1, sequence, heads]),
+        beta: Tensor::full([1, sequence, heads], 0.7, &device),
         initial_state: None,
         token_mask: None,
     }
@@ -684,6 +698,44 @@ fn batched_prefill_matches_the_per_chunk_algorithm() {
     }
     // 70 tokens with C = 4 spans two blocks of up to 16 chunks plus a padded tail.
     const { assert!(70 > 4 * CHUNKS_PER_BLOCK) };
+}
+
+/// Prompts shorter than one chunk run unpadded and still match the per-chunk algorithm.
+///
+/// A single-chunk block must use its own width as `C`: padding `L` tokens to
+/// the configured chunk would run a `C - 1`-step substitution on `C x C`
+/// tiles, which made short prompts several times slower than the per-chunk
+/// algorithm. The tile shape pins that; the parity loop pins the values,
+/// including a long prompt whose final block is a lone partial chunk.
+#[test]
+fn short_prompts_and_partial_tails_run_unpadded() {
+    let config = DeltaRuleConfig {
+        chunk_size: 64,
+        ..Default::default()
+    };
+    let prepared = PreparedDeltaRule::new(long_fixture(10), config.normalization_epsilon).unwrap();
+    let block = ChunkBlock::new(&prepared, 0, 10, config.chunk_size);
+    assert_eq!(block.attention.dims(), [1, 2, 1, 10, 10]);
+    assert_eq!(block.transformed_value.dims(), [1, 2, 1, 10, 3]);
+    assert_eq!(block.chunk_decay.dims(), [1, 2, 1, 1]);
+    // A multi-chunk block still shares one padded `C`.
+    let block = ChunkBlock::new(&prepared, 0, 10, 4);
+    assert_eq!(block.attention.dims(), [1, 2, 3, 4, 4]);
+
+    // 1, 10, and 63 tokens fit in one chunk; 64 * 16 + 5 = 1029 tokens end
+    // with a 5-token block after one full block of 16 chunks.
+    for sequence in [1, 10, 63, 64 * CHUNKS_PER_BLOCK + 5] {
+        let (legacy_values, legacy_state) = legacy_chunked(long_fixture(sequence), config);
+        let batched = chunked_gated_delta_rule(long_fixture(sequence), config).unwrap();
+        batched
+            .values
+            .into_data()
+            .assert_approx_eq::<f32>(&legacy_values.into_data(), Tolerance::rel_abs(1e-5, 1e-6));
+        batched
+            .final_state
+            .into_data()
+            .assert_approx_eq::<f32>(&legacy_state.into_data(), Tolerance::rel_abs(1e-5, 1e-6));
+    }
 }
 
 /// Multi-block prefill with a padded final chunk equals the recurrence.
@@ -897,6 +949,103 @@ fn padded_rows_match_their_compacted_tokens() {
     }
 }
 
+/// Rows with different padding in one batch each match their own unpadded run.
+///
+/// Token compaction gathers, scatters, and offsets the convolution history
+/// per row (`valid_counts[b]`), so a row-mixing or broadcast mistake would
+/// only show when rows disagree. Row 0 is right-padded, row 1 interior-padded
+/// with a leading gap, and row 2 fully masked; every row carries a different
+/// non-zero state. Each row must reproduce a batch-of-one, unmasked run of its
+/// valid tokens from its own carried state, and the fully masked row must
+/// leave its state untouched.
+#[test]
+fn batch_rows_with_different_padding_match_isolated_rows() {
+    let device = Default::default();
+    TestBackend::seed(&device, 9);
+    let mut config = GatedDeltaNetConfig::new(4, 1, 2, 2, 2);
+    config.convolution_kernel = 3;
+    config.prefill_chunk_size = 2;
+    let mixer = config.init::<TestBackend>(&device).unwrap();
+    let tokens = (Tensor::<TestBackend, 1, Int>::arange(0..48, &device).float() * 0.3)
+        .sin()
+        .reshape([3, 4, 4]);
+    let mut carried = GatedDeltaNetState::zeros(&config, 3, &device).unwrap();
+    mixer
+        .forward_with_state(
+            tokens.clone().flip([1]),
+            None,
+            &mut carried,
+            DeltaNetMode::ChunkedPrefill,
+        )
+        .unwrap();
+    let row_state = |row: usize| GatedDeltaNetState {
+        convolution: carried.convolution.clone().narrow(0, row, 1),
+        recurrent: carried.recurrent.clone().narrow(0, row, 1),
+    };
+
+    let valid_positions: [&[usize]; 3] = [&[0, 1, 2, 3], &[1, 3, 4], &[]];
+    let mut mask = vec![false; 3 * 7];
+    let mut padded = Tensor::<TestBackend, 3>::zeros([3, 7, 4], &device);
+    for (row, positions) in valid_positions.iter().enumerate() {
+        for (token, &position) in positions.iter().enumerate() {
+            mask[row * 7 + position] = true;
+            padded = padded.slice_assign(
+                [row..row + 1, position..position + 1, 0..4],
+                tokens.clone().slice([row..row + 1, token..token + 1, 0..4]),
+            );
+        }
+    }
+    let mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        TensorData::new(mask, [3, 7]),
+        &device,
+    ));
+
+    let tolerance = Tolerance::rel_abs(1e-4, 1e-5);
+    for mode in [DeltaNetMode::ChunkedPrefill, DeltaNetMode::Recurrent] {
+        let mut state = carried.clone();
+        let output = mixer
+            .forward_with_state(padded.clone(), Some(&mask), &mut state, mode)
+            .unwrap();
+        for (row, positions) in valid_positions.iter().enumerate() {
+            let mut expected_state = row_state(row);
+            if !positions.is_empty() {
+                let reference = mixer
+                    .forward_with_state(
+                        tokens
+                            .clone()
+                            .slice([row..row + 1, 0..positions.len(), 0..4]),
+                        None,
+                        &mut expected_state,
+                        DeltaNetMode::ChunkedPrefill,
+                    )
+                    .unwrap();
+                for (token, &position) in positions.iter().enumerate() {
+                    output
+                        .clone()
+                        .slice([row..row + 1, position..position + 1, 0..4])
+                        .into_data()
+                        .assert_approx_eq::<f32>(
+                            &reference.clone().narrow(1, token, 1).into_data(),
+                            tolerance,
+                        );
+                }
+            }
+            state
+                .recurrent
+                .clone()
+                .narrow(0, row, 1)
+                .into_data()
+                .assert_approx_eq::<f32>(&expected_state.recurrent.into_data(), tolerance);
+            state
+                .convolution
+                .clone()
+                .narrow(0, row, 1)
+                .into_data()
+                .assert_approx_eq::<f32>(&expected_state.convolution.into_data(), tolerance);
+        }
+    }
+}
+
 /// The query/key and output-norm epsilons are separate, validated, and serialized compatibly.
 #[test]
 fn query_key_and_output_norm_epsilons_are_independent() {
@@ -1075,33 +1224,56 @@ fn half_precision_default_child() {
     }
 }
 
-/// Measures batched-block versus per-chunk prefill on a prompt-sized problem.
+/// Measures batched-block versus per-chunk prefill from short prompts to long prefills.
 ///
-/// Run with `cargo test --release --lib delta_net::tests::prefill_timing -- --ignored --nocapture`.
+/// Covers prompts below one chunk (where batching must not add padding work),
+/// the toy two-head geometry, and a 16-head, 128-wide geometry like Qwen3.5's
+/// linear-attention layers. Inputs are built outside the timed region, the two
+/// algorithms alternate to cancel drift, and each reports the median of nine
+/// runs. Run with
+/// `cargo test --release --lib delta_net::tests::prefill_timing -- --ignored --nocapture`.
 #[test]
 #[ignore = "timing measurement; run explicitly in release mode"]
 fn prefill_timing() {
-    for (sequence, chunk_size) in [(1024, 64), (2048, 64)] {
-        let config = DeltaRuleConfig {
-            chunk_size,
-            ..Default::default()
-        };
+    let cases = [
+        (8, 2, 4, 3),
+        (32, 2, 4, 3),
+        (1024, 2, 4, 3),
+        (2048, 2, 4, 3),
+        (8, 16, 128, 128),
+        (32, 16, 128, 128),
+        (256, 16, 128, 128),
+        (1024, 16, 128, 128),
+    ];
+    let config = DeltaRuleConfig::default();
+    let median = |mut samples: Vec<std::time::Duration>| {
+        samples.sort();
+        samples[samples.len() / 2]
+    };
+    for (sequence, heads, key_width, value_width) in cases {
+        let input = smooth_fixture(sequence, heads, key_width, value_width);
         let time = |run: &dyn Fn() -> Tensor<TestBackend, 4>| {
-            let _warm = run().into_data();
             let start = std::time::Instant::now();
-            for _ in 0..3 {
-                let _ = run().into_data();
-            }
-            start.elapsed() / 3
+            let _ = run().into_data();
+            start.elapsed()
         };
-        let batched = time(&|| {
-            chunked_gated_delta_rule(long_fixture(sequence), config)
+        let batched_run = || {
+            chunked_gated_delta_rule(input.clone(), config)
                 .unwrap()
                 .values
-        });
-        let legacy = time(&|| legacy_chunked(long_fixture(sequence), config).0);
+        };
+        let legacy_run = || legacy_chunked(input.clone(), config).0;
+        let (_, _) = (time(&batched_run), time(&legacy_run));
+        let (mut batched, mut legacy) = (Vec::new(), Vec::new());
+        for _ in 0..9 {
+            batched.push(time(&batched_run));
+            legacy.push(time(&legacy_run));
+        }
+        let (batched, legacy) = (median(batched), median(legacy));
         println!(
-            "sequence={sequence} chunk={chunk_size}: batched {batched:?}, per-chunk {legacy:?}, speedup {:.2}x",
+            "sequence={sequence} heads={heads} key={key_width} value={value_width} chunk={}: \
+             batched {batched:?}, per-chunk {legacy:?}, speedup {:.2}x",
+            config.chunk_size,
             legacy.as_secs_f64() / batched.as_secs_f64()
         );
     }
