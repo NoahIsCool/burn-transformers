@@ -45,7 +45,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "chat-templates")]
 use serde_json::Map;
 use serde_json::Value;
-use tokenizers::{PostProcessor, Tokenizer, TruncationDirection};
+use tokenizers::{
+    DecodeStream, PostProcessor, Tokenizer, TruncationDirection, decoders::DecoderWrapper,
+    models::ModelWrapper, normalizers::NormalizerWrapper, pre_tokenizers::PreTokenizerWrapper,
+    processors::PostProcessorWrapper,
+};
 
 use crate::{
     CausalLmInput, Error, Result,
@@ -472,6 +476,55 @@ impl BatchEncoding {
     }
 }
 
+/// Incremental detokenizer for text streamed one generated token at a time.
+///
+/// Byte-level BPE vocabularies (GPT-2, Qwen, Llama 3) split multi-byte UTF-8
+/// characters such as CJK text and emoji across several tokens. Decoding each
+/// token alone therefore yields U+FFFD fragments, while re-decoding the whole
+/// prefix after every step is correct but costs `O(T^2)` for `T` tokens. This
+/// decoder keeps only the short window of IDs needed to finish the current
+/// character (the `tokenizers` crate's `DecodeStream`) and returns each piece
+/// of text exactly once, as soon as it is complete. Concatenating the pieces
+/// reproduces [`LocalTokenizer::decode`] of the whole sequence whenever that
+/// sequence ends on a character boundary.
+///
+/// A decoded piece ending in a literal U+FFFD is indistinguishable from an
+/// unfinished character, so it is withheld until a later token completes more
+/// text; such text is rare outside corrupted inputs.
+pub struct TokenStreamDecoder<'a> {
+    /// Pending-ID window and the text already emitted from it.
+    stream: DecodeStream<
+        'a,
+        ModelWrapper,
+        NormalizerWrapper,
+        PreTokenizerWrapper,
+        PostProcessorWrapper,
+        DecoderWrapper,
+    >,
+}
+
+impl fmt::Debug for TokenStreamDecoder<'_> {
+    /// Identifies the decoder without dumping the borrowed tokenizer.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TokenStreamDecoder")
+            .finish_non_exhaustive()
+    }
+}
+
+impl TokenStreamDecoder<'_> {
+    /// Feeds one generated ID and returns the text it completes, if any.
+    ///
+    /// `None` means the ID only extended an unfinished character (or decoded
+    /// to nothing, like a skipped special token); its text arrives with a
+    /// later step.
+    pub fn step(&mut self, id: u32) -> Result<Option<String>> {
+        self.stream.step(id).map_err(|error| {
+            Error::Tokenizer(format!("failed to decode streamed token {id}: {error}"))
+        })
+    }
+}
+
 /// A tokenizer loaded exclusively from a local model directory.
 pub struct LocalTokenizer {
     /// Locally deserialized tokenizer and its vocabulary processing rules.
@@ -726,10 +779,23 @@ impl LocalTokenizer {
     }
 
     /// Decodes vocabulary IDs using the tokenizer's configured decoder.
+    ///
+    /// For text produced one token at a time, prefer [`Self::decode_stream`].
     pub fn decode(&self, ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         self.tokenizer
             .decode(ids, skip_special_tokens)
             .map_err(|error| Error::Tokenizer(format!("failed to decode token IDs: {error}")))
+    }
+
+    /// Starts an incremental decoder for streamed generation.
+    ///
+    /// Feed each generated ID to [`TokenStreamDecoder::step`] and print the
+    /// returned pieces; multi-byte characters split across tokens are emitted
+    /// whole, without re-decoding the full prefix at every step.
+    pub fn decode_stream(&self, skip_special_tokens: bool) -> TokenStreamDecoder<'_> {
+        TokenStreamDecoder {
+            stream: self.tokenizer.decode_stream(skip_special_tokens),
+        }
     }
 
     /// Renders one bounded checkpoint chat template without filesystem access.

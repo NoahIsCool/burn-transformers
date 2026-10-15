@@ -5,8 +5,10 @@ use std::{collections::HashMap, fs};
 use burn::backend::Flex;
 use tempfile::TempDir;
 use tokenizers::{
-    PaddingParams, PaddingStrategy, Tokenizer, TruncationParams, models::wordlevel::WordLevel,
-    pre_tokenizers::whitespace::Whitespace, processors::template::TemplateProcessing,
+    PaddingParams, PaddingStrategy, Tokenizer, TruncationParams,
+    models::{bpe::BPE, wordlevel::WordLevel},
+    pre_tokenizers::{byte_level::ByteLevel, whitespace::Whitespace},
+    processors::template::TemplateProcessing,
 };
 
 use super::*;
@@ -1521,5 +1523,137 @@ fn muse_glimmer_tool_prompt_matches_hugging_face() {
     assert_eq!(
         tokenizer.render_chat(&messages, &options).unwrap(),
         expected
+    );
+}
+
+/// Writes a byte-level BPE tokenizer with one token per byte and no merges.
+///
+/// Every multi-byte UTF-8 character therefore spans several tokens, the
+/// worst case for streamed decoding.
+fn byte_level_fixture() -> (TempDir, LocalTokenizer) {
+    let directory = TempDir::new().unwrap();
+    let mut alphabet = ByteLevel::alphabet().into_iter().collect::<Vec<_>>();
+    alphabet.sort_unstable();
+    let vocabulary = alphabet
+        .iter()
+        .enumerate()
+        .map(|(id, character)| (character.to_string(), u32::try_from(id).unwrap()))
+        .collect::<tokenizers::models::bpe::Vocab>();
+    let model = BPE::builder()
+        .vocab_and_merges(vocabulary, Vec::new())
+        .build()
+        .unwrap();
+    let mut tokenizer = Tokenizer::new(model);
+    tokenizer.with_pre_tokenizer(Some(ByteLevel::new(false, true, false)));
+    tokenizer.with_decoder(Some(ByteLevel::default()));
+    tokenizer
+        .save(directory.path().join("tokenizer.json"), false)
+        .unwrap();
+    let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+    (directory, tokenizer)
+}
+
+/// Encodes text without special tokens and returns its single row of IDs.
+fn content_ids(tokenizer: &LocalTokenizer, text: &str) -> Vec<u32> {
+    tokenizer
+        .encode(
+            text,
+            &EncodeOptions {
+                add_special_tokens: false,
+                ..EncodeOptions::default()
+            },
+        )
+        .unwrap()
+        .token_ids()[0]
+        .clone()
+}
+
+/// Streams IDs through a decoder and collects the emitted pieces.
+fn stream_pieces(tokenizer: &LocalTokenizer, ids: &[u32]) -> Vec<String> {
+    let mut stream = tokenizer.decode_stream(false);
+    ids.iter()
+        .filter_map(|id| stream.step(*id).unwrap())
+        .collect()
+}
+
+/// Multi-byte characters split across tokens are emitted whole, exactly once (TOK-4).
+#[test]
+fn decode_stream_emits_whole_characters_for_split_bytes() {
+    let (_directory, tokenizer) = byte_level_fixture();
+    let text = "héllo 中文 😀!";
+    let ids = content_ids(&tokenizer, text);
+    assert_eq!(ids.len(), text.len(), "one token per UTF-8 byte");
+    // Decoding tokens one at a time corrupts every multi-byte character.
+    let naive = ids
+        .iter()
+        .map(|id| tokenizer.decode(&[*id], false).unwrap())
+        .collect::<String>();
+    assert!(naive.contains('\u{fffd}'), "{naive}");
+
+    let pieces = stream_pieces(&tokenizer, &ids);
+    assert_eq!(pieces.concat(), text);
+    assert!(pieces.iter().all(|piece| !piece.contains('\u{fffd}')));
+    assert!(pieces.iter().any(|piece| piece == "😀"), "{pieces:?}");
+    assert!(pieces.iter().any(|piece| piece == "中"), "{pieces:?}");
+    assert!(format!("{:?}", tokenizer.decode_stream(true)).starts_with("TokenStreamDecoder"));
+}
+
+/// A stream that stops mid-character withholds the incomplete bytes instead of emitting U+FFFD.
+#[test]
+fn decode_stream_withholds_incomplete_trailing_characters() {
+    let (_directory, tokenizer) = byte_level_fixture();
+    let ids = content_ids(&tokenizer, "a😀");
+    let pieces = stream_pieces(&tokenizer, &ids[..3]);
+    assert_eq!(pieces, ["a"]);
+    // Unknown IDs decode to nothing, as with `decode`.
+    let mut stream = tokenizer.decode_stream(false);
+    assert_eq!(stream.step(u32::MAX).unwrap(), None);
+}
+
+proptest::proptest! {
+    /// Streaming any text token by token reproduces whole-sequence decoding.
+    ///
+    /// Text containing a literal U+FFFD is excluded: the stream cannot tell it
+    /// from an unfinished character and withholds it until later text arrives.
+    #[test]
+    fn decode_stream_matches_whole_sequence_decoding(
+        text in proptest::strategy::Strategy::prop_filter(
+            "\\PC{1,24}",
+            "a literal U+FFFD is indistinguishable from an unfinished character",
+            |text: &String| !text.contains('\u{fffd}'),
+        )
+    ) {
+        let (_directory, tokenizer) = byte_level_fixture();
+        let ids = content_ids(&tokenizer, &text);
+        let whole = tokenizer.decode(&ids, false).unwrap();
+        proptest::prop_assert_eq!(&whole, &text);
+        proptest::prop_assert_eq!(stream_pieces(&tokenizer, &ids).concat(), whole);
+    }
+}
+
+/// Measures streaming against re-decoding the growing prefix at every step.
+///
+/// Run with `cargo test --release --features tokenizers --lib
+/// decode_stream_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing measurement; run explicitly in release mode"]
+fn decode_stream_timing() {
+    let (_directory, tokenizer) = byte_level_fixture();
+    let text = "Streaming 中文 and emoji 😀 text. ".repeat(64);
+    let ids = content_ids(&tokenizer, &text);
+    let started = std::time::Instant::now();
+    let mut emitted = 0;
+    for end in 1..=ids.len() {
+        emitted = tokenizer.decode(&ids[..end], false).unwrap().len();
+    }
+    let prefix = started.elapsed();
+    let started = std::time::Instant::now();
+    let streamed = stream_pieces(&tokenizer, &ids).concat();
+    let stream = started.elapsed();
+    assert_eq!(streamed.len(), emitted);
+    println!(
+        "{} tokens: prefix re-decoding {prefix:?}, streaming {stream:?} ({:.1}x)",
+        ids.len(),
+        prefix.as_secs_f64() / stream.as_secs_f64()
     );
 }
