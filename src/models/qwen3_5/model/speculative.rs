@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     CausalLmInput, Error, ForwardOptions, GenerationConfig, LogitsProcessor, LogitsSelection,
     Result, SamplingStrategy,
+    cache::TensorCacheMark,
     generation::{
         SplitMix64,
         speculative::{
@@ -303,7 +304,8 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
         let mark = state.mark()?;
         match self.verify_and_stage(model, cycle, &drafts, state) {
             Ok((output, commit)) => {
-                state.commit_prefixes(
+                commit_or_roll_back(
+                    state,
                     mark,
                     commit.target_cache_tokens,
                     commit.draft_cache_tokens,
@@ -664,6 +666,31 @@ fn read_tokens<B: Backend>(tokens: Tensor<B, 1, Int>) -> Result<Vec<u32>> {
             })
         })
         .collect()
+}
+
+/// Commits `target_tokens` and `mtp_tokens` of the transaction opened by `mark`, or rolls it back.
+///
+/// [`Qwen3_5DecodeState::commit_prefixes`] consumes its mark, and a commit
+/// that fails validation (stale mark, over-acceptance, incomplete staging)
+/// leaves the transaction open. A clone of the mark is therefore kept so the
+/// failure path can still discard the staged suffix: on every exit the state
+/// has no open transaction, and after an error both cursors are unchanged.
+fn commit_or_roll_back<B: Backend>(
+    state: &mut Qwen3_5DecodeState<B>,
+    mark: TensorCacheMark,
+    target_tokens: usize,
+    mtp_tokens: usize,
+) -> Result<()> {
+    let recovery = mark.clone();
+    if let Err(error) = state.commit_prefixes(mark, target_tokens, mtp_tokens) {
+        state.rollback(recovery).map_err(|rollback| {
+            Error::Cache(format!(
+                "Qwen speculative commit failed ({error}); rollback also failed ({rollback})"
+            ))
+        })?;
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Reads exactly one selected backend token.

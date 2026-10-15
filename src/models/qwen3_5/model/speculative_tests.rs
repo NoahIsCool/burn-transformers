@@ -400,6 +400,65 @@ fn inactive_and_recoverable_failure_leave_both_cursors_unchanged() {
     assert_eq!(first.to_string(), second.to_string());
 }
 
+/// A commit that fails validation rolls the staged cycle back instead of stranding the transaction.
+///
+/// `commit_prefixes` consumes its mark and leaves the transaction open when
+/// validation fails, so a cycle that called it directly could neither retry
+/// nor reset afterwards. The cycle's commit helper keeps a recovery mark.
+#[test]
+fn failed_commit_rolls_back_the_staged_cycle() {
+    let device = Default::default();
+    let model = zero_model(&device);
+    let (mut state, hidden) = aligned_state(&model, &device);
+    let stage = |state: &mut Qwen3_5DecodeState<TestBackend>| {
+        let mark = state.mark().unwrap();
+        model
+            .forward_mtp_cached(
+                Tensor::<TestBackend, 2, Int>::from_ints([[1]], &device),
+                hidden.clone(),
+                None,
+                0,
+                state,
+            )
+            .unwrap();
+        model
+            .decode(
+                crate::DecodeInput {
+                    token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 4]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                state,
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(state.tensor_state().working_lengths(), &[4]);
+        mark
+    };
+
+    // The raw commit rejects over-acceptance but leaves the transaction open.
+    let mark = stage(&mut state);
+    let recovery = mark.clone();
+    assert!(state.commit_prefixes(mark, 3, 1).is_err());
+    assert!(state.tensor_state().has_active_transaction());
+    state.rollback(recovery).unwrap();
+
+    // The cycle helper reports the same error with no open transaction.
+    let mark = stage(&mut state);
+    let error = commit_or_roll_back(&mut state, mark, 3, 1).unwrap_err();
+    assert!(matches!(error, Error::TensorCache(_)), "{error}");
+    assert!(!state.tensor_state().has_active_transaction());
+    assert_eq!(state.tensor_state().lengths(), &[2]);
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
+
+    // The state stays usable: a later valid commit succeeds.
+    let mark = stage(&mut state);
+    commit_or_roll_back(&mut state, mark, 2, 1).unwrap();
+    assert!(!state.tensor_state().has_active_transaction());
+    assert_eq!(state.tensor_state().lengths(), &[4]);
+    assert_eq!(state.tensor_state().mtp_lengths(), Some([2].as_slice()));
+}
+
 /// State creation rejects multiple rows, insufficient proposal capacity, and missing MTP layers.
 #[test]
 fn speculative_state_rejects_batch_capacity_and_missing_mtp() {
