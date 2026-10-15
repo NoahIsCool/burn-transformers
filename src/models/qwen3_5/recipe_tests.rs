@@ -1,6 +1,6 @@
 //! Small deterministic fixtures exercise recipe edits without external weights.
 
-use std::{fs, path::Path};
+use std::{collections::BTreeSet, fs, path::Path};
 
 use burn::{
     backend::Flex,
@@ -496,6 +496,153 @@ fn reinitialized_parameters_follow_preserved_or_explicit_checkpoint_dtype() {
             expected_dtype
         );
     }
+}
+
+/// Collects the fully qualified Burn path and dtype of every floating parameter.
+///
+/// Paths are prefixed with `model.` exactly as the recipe's dtype mapper and
+/// the checkpoint contract name backbone parameters.
+struct FloatParameterPaths {
+    /// Module components entered so far.
+    path: Vec<String>,
+    /// `(path, dtype)` of each visited floating parameter, in visit order.
+    parameters: Vec<(String, DType)>,
+}
+
+impl burn::module::ModuleVisitor<B> for FloatParameterPaths {
+    /// Pushes a module name onto the current path.
+    fn enter_module(&mut self, name: &str, _: &str) {
+        self.path.push(name.into());
+    }
+
+    /// Pops the module that just finished.
+    fn exit_module(&mut self, _: &str, _: &str) {
+        self.path.pop();
+    }
+
+    /// Records the qualified path and dtype of one floating parameter.
+    fn visit_float<const D: usize>(&mut self, param: &burn::module::Param<Tensor<B, D>>) {
+        self.parameters.push((
+            format!("model.{}", self.path.join(".")),
+            param.val().dtype(),
+        ));
+    }
+}
+
+/// Returns `(path, dtype)` for every floating parameter of a backbone.
+fn float_parameters(model: &Qwen3_5TextModel<B>) -> Vec<(String, DType)> {
+    let mut visitor = FloatParameterPaths {
+        path: Vec::new(),
+        parameters: Vec::new(),
+    };
+    model.visit(&mut visitor);
+    visitor.parameters
+}
+
+/// Every checkpoint name maps onto exactly one Burn parameter path, and back.
+///
+/// The recipe's dtype mapper identifies new parameters by Burn path while
+/// the transfer report names them by checkpoint tensor; this pins the
+/// translation table for both mixer kinds so a renamed field cannot silently
+/// escape dtype selection again (QW-8).
+#[test]
+fn checkpoint_names_translate_to_every_backbone_parameter_path() {
+    let config = tiny_config();
+    let model = Qwen3_5TextModel::<B>::init(config.clone(), &Default::default()).unwrap();
+    let module_paths = float_parameters(&model)
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect::<BTreeSet<_>>();
+    let contract = config
+        .checkpoint_contract(Qwen3_5CheckpointOptions {
+            source: Qwen3_5CheckpointSource::TextOnly,
+            include_mtp: false,
+        })
+        .unwrap();
+    let translated = contract
+        .expected_tensors()
+        .iter()
+        .filter(|tensor| tensor.name.starts_with("model."))
+        .map(|tensor| module_parameter_path(&tensor.name))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(translated, module_paths);
+    for (checkpoint, module) in [
+        (
+            "model.layers.1.self_attn.q_norm.weight",
+            "model.layers.1.self_attn.query_norm.weight",
+        ),
+        (
+            "model.layers.1.self_attn.k_norm.weight",
+            "model.layers.1.self_attn.key_norm.weight",
+        ),
+        (
+            "model.layers.0.linear_attn.A_log",
+            "model.layers.0.linear_attn.a_log",
+        ),
+        (
+            "model.layers.0.linear_attn.dt_bias",
+            "model.layers.0.linear_attn.dt_bias",
+        ),
+    ] {
+        assert_eq!(module_parameter_path(checkpoint), module);
+    }
+}
+
+/// Fresh attention and DeltaNet blocks adopt the checkpoint dtype in every parameter (QW-8).
+///
+/// Q/K RMSNorm scales and `A_log` used to keep the backend default F32
+/// because their checkpoint names differ from their Burn field names, while
+/// the report claimed they were initialized in BF16.
+#[test]
+fn appended_attention_and_delta_blocks_initialize_every_parameter_in_checkpoint_dtype() {
+    let directory = tempfile::tempdir().unwrap();
+    fixture(directory.path(), &tiny_config(), false);
+    convert_fixture_to_bfloat16(directory.path());
+    let mut recipe = Qwen3_5BackboneRecipe::from_local_config(directory.path()).unwrap();
+    for source in [0, 1] {
+        let mut extra = recipe.layers[source].clone();
+        extra.source_layer = None;
+        recipe.layers.push(extra);
+    }
+    assert_eq!(
+        recipe
+            .layers
+            .iter()
+            .map(|layer| layer.layer_type)
+            .collect::<Vec<_>>(),
+        [
+            Qwen3_5LayerType::LinearAttention,
+            Qwen3_5LayerType::FullAttention,
+            Qwen3_5LayerType::LinearAttention,
+            Qwen3_5LayerType::FullAttention,
+        ]
+    );
+    let loaded = recipe
+        .load_pretrained::<B>(directory.path(), &Default::default(), &Default::default())
+        .unwrap();
+    let new_names = loaded
+        .report
+        .newly_initialized
+        .iter()
+        .map(|item| item.name.as_str())
+        .collect::<BTreeSet<_>>();
+    for name in [
+        "model.layers.2.linear_attn.A_log",
+        "model.layers.3.self_attn.q_norm.weight",
+        "model.layers.3.self_attn.k_norm.weight",
+    ] {
+        assert!(new_names.contains(name), "{name} must be reported as new");
+    }
+    let mismatched = float_parameters(&loaded.model)
+        .into_iter()
+        .filter(|(_, dtype)| *dtype != DType::BF16)
+        .collect::<Vec<_>>();
+    assert!(
+        mismatched.is_empty(),
+        "parameters outside the checkpoint dtype: {mismatched:?}"
+    );
+    let output = loaded.model.forward(&input(), false).unwrap().0;
+    assert_eq!(output.dtype(), DType::BF16);
 }
 
 #[cfg(feature = "autodiff")]
