@@ -352,3 +352,153 @@ fn official_qwen38_topology_initializes_lazily() {
     assert_eq!(model.config().vocab_size, 248_320);
     assert_eq!(model.model.rope.rotary_dimension(), 64);
 }
+
+/// Two full-attention blocks with distinct RoPE configurations each read their own shared table.
+///
+/// The fused forward builds one rotary table per distinct configuration and
+/// one padding plane per call; chaining the public per-block API, which
+/// builds its own tables, must give bit-identical hidden states.
+#[test]
+fn shared_position_tables_match_per_block_evaluation() {
+    let device = Default::default();
+    TestBackend::seed(&device, 23);
+    let mut config = tiny_config();
+    config.layer_types = vec![
+        Qwen3_5LayerType::FullAttention,
+        Qwen3_5LayerType::LinearAttention,
+        Qwen3_5LayerType::FullAttention,
+        Qwen3_5LayerType::FullAttention,
+    ];
+    let mut model = Qwen3_5ForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    // A recipe may give one block another rotary configuration.
+    model.model.layer_rope[2] =
+        RopeConfig::from_partial_factor(4, 0.5, 500.0, crate::position::RopeScaling::None).unwrap();
+    let input = CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3, 4], [5, 6, 7, 8]], &device),
+        token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [[false, true, true, true], [true, true, true, true]].into(),
+            &device,
+        ))),
+        position_ids: None,
+    };
+    let (fused, _) = model.model.forward(&input, false).unwrap();
+
+    let state = model.model.embed(&input).unwrap();
+    let mut hidden = state.hidden;
+    for (index, block) in model.model.layers.iter().enumerate() {
+        hidden = block
+            .forward(
+                hidden,
+                state.context.positions.clone(),
+                input.token_mask.as_ref(),
+                model.model.layer_rope[index],
+                state.context.evaluated_context,
+            )
+            .unwrap();
+    }
+    let chained = model.model.norm.forward(hidden);
+    assert_eq!(
+        fused.into_data().to_vec::<f32>().unwrap(),
+        chained.into_data().to_vec::<f32>().unwrap()
+    );
+}
+
+/// Generic experiment code drives Qwen3.5 through the hook and staged-execution traits.
+#[test]
+fn qwen_implements_hooked_and_staged_model_traits() {
+    use crate::architecture::{HookedModel, StagedModel};
+
+    /// Captures every activation point through the generic hook trait.
+    fn capture_count<M: HookedModel<TestBackend, Input = CausalLmInput<TestBackend>>>(
+        model: &M,
+        input: CausalLmInput<TestBackend>,
+    ) -> usize {
+        let mut hooks = crate::intervention::Hooks::new();
+        let handles = model
+            .activation_points()
+            .unwrap()
+            .into_iter()
+            .map(|point| hooks.capture_dynamic(point))
+            .collect::<Vec<_>>();
+        model
+            .forward_with_hooks(input, &ForwardOptions::default(), &mut hooks)
+            .unwrap();
+        handles
+            .iter()
+            .filter(|handle| hooks.get_dynamic(handle).is_ok())
+            .count()
+    }
+
+    let device = Default::default();
+    TestBackend::seed(&device, 29);
+    let model = Qwen3_5ForCausalLm::<TestBackend>::init(tiny_config(), &device).unwrap();
+    let input = CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let points = Qwen3_5ForCausalLm::activation_points(&model).len();
+    assert_eq!(capture_count(&model, input.clone()), points);
+
+    let (expected, _) = model.model.forward(&input, false).unwrap();
+    for staged in [
+        StagedModel::run_stack(&model, input.clone()).unwrap(),
+        StagedModel::run_stack(&model.model, input.clone()).unwrap(),
+    ] {
+        assert!(staged.normalized);
+        assert_eq!(
+            staged.hidden.into_data().to_vec::<f32>().unwrap(),
+            expected.clone().into_data().to_vec::<f32>().unwrap()
+        );
+    }
+    assert_eq!(StagedModel::num_layers(&model), 4);
+    assert_eq!(StagedModel::stack(&model), Stack::Decoder);
+}
+
+/// Linear-attention-only calls build no padding plane; full-attention calls share one.
+///
+/// Gated DeltaNet reads the token mask directly, so a range without a
+/// full-attention block must not pay for the `[batch, 1, S, S]` plane.
+#[test]
+fn position_tables_build_the_padding_plane_only_for_full_attention() {
+    let device = Default::default();
+    let config = tiny_config();
+    let rope = config.rope_config().unwrap();
+    let positions = Tensor::<TestBackend, 2, Int>::from_ints([[0, 1, 2], [0, 0, 1]], &device);
+    let mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        [[true, true, true], [false, true, true]].into(),
+        &device,
+    ));
+
+    let linear_only =
+        PositionTables::new(None, &positions, Some(&mask), 3, burn::tensor::DType::F32).unwrap();
+    assert!(linear_only.rotary.is_empty());
+    assert!(linear_only.padding.is_none());
+
+    let hybrid = PositionTables::new(
+        [rope, rope],
+        &positions,
+        Some(&mask),
+        3,
+        burn::tensor::DType::F32,
+    )
+    .unwrap();
+    assert_eq!(
+        hybrid.rotary.len(),
+        1,
+        "one table per distinct configuration"
+    );
+    let plane = hybrid
+        .padding
+        .expect("masked full attention needs the plane");
+    assert_eq!(plane.dims(), [2, 1, 3, 3]);
+    assert_eq!(
+        plane.into_data().to_vec::<bool>().unwrap()[9..12],
+        [true, true, true],
+        "the padded query row of the second sequence excludes every key"
+    );
+
+    let unmasked =
+        PositionTables::new([rope], &positions, None, 3, burn::tensor::DType::F32).unwrap();
+    assert!(unmasked.padding.is_none());
+}

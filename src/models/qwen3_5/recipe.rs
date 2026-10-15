@@ -41,7 +41,7 @@ use crate::{
 
 use super::{
     Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5DecoderLayer, Qwen3_5LayerType,
-    Qwen3_5TextConfig, Qwen3_5TextModel, model::qwen_rope_config,
+    Qwen3_5TextConfig, Qwen3_5TextModel,
 };
 use crate::models::config::ModelConfig;
 
@@ -205,7 +205,7 @@ impl Qwen3_5BackboneRecipe {
         config.mtp_num_hidden_layers = 0;
         let layer_rope = configurations
             .iter()
-            .map(qwen_rope_config)
+            .map(Qwen3_5TextConfig::rope_config)
             .collect::<Result<Vec<_>>>()?;
         let layers = configurations
             .iter()
@@ -390,7 +390,7 @@ impl Qwen3_5BackboneRecipe {
                 parameter.reason.push_str(&format!(
                     "; initialized in the resolved embedding dtype {initialization_dtype:?}"
                 ));
-                parameter.name.clone()
+                module_parameter_path(&parameter.name)
             })
             .collect();
         let mut model = self.init_random(device)?.map(&mut InitializeDtype {
@@ -452,7 +452,7 @@ impl Qwen3_5BackboneRecipe {
             }
             let config = layer.config(&self.config);
             ArchitectureConfig::validate(&config)?;
-            qwen_rope_config(&config)?;
+            config.rope_config()?;
             configurations.push(config);
         }
         Ok(configurations)
@@ -507,11 +507,40 @@ impl Qwen3_5BackboneRecipe {
 
 // Selective installation: preserve lazy pretrained data and explicit dtype policy.
 
+/// Checkpoint parameter suffixes whose Burn field names differ from Hugging Face's.
+///
+/// Burn's derived module paths use Rust field names, while the checkpoint
+/// contract (and therefore the transfer report) uses Hugging Face tensor
+/// names. These are the only Qwen3.5 backbone parameters where the two
+/// disagree; every other segment, including `layers.{index}`, is identical,
+/// and `Option` containers add no path segment. The family loader's
+/// `install_layer_tensor` dispatch encodes the same correspondence.
+const CHECKPOINT_TO_MODULE_SUFFIXES: [(&str, &str); 3] = [
+    (".self_attn.q_norm.weight", ".self_attn.query_norm.weight"),
+    (".self_attn.k_norm.weight", ".self_attn.key_norm.weight"),
+    (".linear_attn.A_log", ".linear_attn.a_log"),
+];
+
+/// Translates a checkpoint parameter name into the Burn module path that owns it.
+///
+/// For example `model.layers.3.self_attn.q_norm.weight` becomes
+/// `model.layers.3.self_attn.query_norm.weight`. Names without a differing
+/// suffix are returned unchanged.
+fn module_parameter_path(checkpoint_name: &str) -> String {
+    for (checkpoint_suffix, module_suffix) in CHECKPOINT_TO_MODULE_SUFFIXES {
+        if let Some(prefix) = checkpoint_name.strip_suffix(checkpoint_suffix) {
+            return format!("{prefix}{module_suffix}");
+        }
+    }
+    checkpoint_name.to_owned()
+}
+
 /// Cast only new parameters, leaving overwritten pretrained parameters lazy.
 struct InitializeDtype {
     /// Current module components used to construct fully qualified parameter names.
     path: Vec<String>,
-    /// Parameter owners whose checkpoint shapes cannot or should not be reused.
+    /// Burn module paths (see [`module_parameter_path`]) of parameters whose
+    /// checkpoint shapes cannot or should not be reused.
     new_parameters: BTreeSet<String>,
     /// Floating dtype selected by the source embedding's resolved load plan.
     dtype: DType,

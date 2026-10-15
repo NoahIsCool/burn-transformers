@@ -152,21 +152,27 @@ fn rms_norm_f16_matches_upstream_cast_before_scale_order() {
     assert_ne!(actual.to_data(), late_round.to_data());
 }
 
-/// The v4.51 boundary is a full-attention prefix length, not a windowed prefix.
+/// An enabled window covers every block; `max_window_layers` is inert, as in Transformers 5.2.
+///
+/// Transformers 4.51 kept blocks `0..max_window_layers` on full attention;
+/// the pinned 5.2 reference windows the whole stack (see `reference_tests`
+/// for the logit-level golden).
 #[test]
-fn sliding_window_schedule_matches_every_valid_boundary() {
+fn sliding_window_covers_every_block_whatever_max_window_layers() {
     let mut config = tiny_config();
     config.num_hidden_layers = 8;
     config.use_sliding_window = true;
     config.sliding_window = Some(3);
 
-    for boundary in 0..=config.num_hidden_layers {
+    for boundary in [0, 1, 4, 8, 9, usize::MAX] {
         config.max_window_layers = boundary;
+        config
+            .validate()
+            .unwrap_or_else(|error| panic!("boundary={boundary}: {error}"));
         for layer_index in 0..config.num_hidden_layers {
-            let expected = (layer_index >= boundary).then_some(3);
             assert_eq!(
                 config.layer_sliding_window(layer_index),
-                expected,
+                Some(3),
                 "boundary={boundary}, layer={layer_index}"
             );
         }
@@ -640,48 +646,55 @@ fn all_inactive_decode_is_exact_noop() {
     );
 }
 
-/// A later-layer recoverable error leaves earlier pending cache writes unpublished.
+/// A later-layer recoverable error publishes nothing, and a retry equals a fresh call.
+///
+/// Earlier layers may already have written their keys ahead into slots beyond
+/// the committed lengths; those slots are unreadable, so the failed call is
+/// logically atomic: lengths are unchanged and the retry sees no trace of it.
 #[test]
 fn later_layer_failure_is_cache_atomic() {
     let (mut model, device) = tiny_model();
+    let prompt = || CausalLmInput {
+        token_ids: Tensor::from_ints([[1, 2]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..Default::default()
+    };
     let mut state = model
         .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
         .unwrap();
-    let before = state
-        .tensor_state()
-        .main()
-        .native_kv(0)
-        .unwrap()
-        .keys(0)
-        .unwrap()
-        .clone()
-        .into_data();
-    model.model.layers[1].sparse_mlp = None;
+    let sparse = model.model.layers[1].sparse_mlp.take();
     let error = model
-        .prefill(
-            CausalLmInput {
-                token_ids: Tensor::from_ints([[1, 2]], &device),
-                token_mask: None,
-                position_ids: None,
-            },
-            &mut state,
-            &ForwardOptions::default(),
-        )
+        .prefill(prompt(), &mut state, &options)
         .expect_err("invalid later layer must fail");
     assert!(error.to_string().contains("feed-forward topology"));
     assert_eq!(state.lengths(), &[0]);
-    assert_eq!(
-        before,
-        state
-            .tensor_state()
-            .main()
-            .native_kv(0)
+    model.model.layers[1].sparse_mlp = sparse;
+    let retry = model.prefill(prompt(), &mut state, &options).unwrap();
+    let mut fresh_state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let fresh = model.prefill(prompt(), &mut fresh_state, &options).unwrap();
+    assert_eq!(retry.logits.to_data(), fresh.logits.to_data());
+    let next = |state: &mut Qwen3MoeDecodeState<TestBackend>| {
+        model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[3]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                state,
+                &options,
+            )
             .unwrap()
-            .keys(0)
-            .unwrap()
-            .clone()
-            .into_data()
-    );
+            .logits
+            .to_data()
+    };
+    assert_eq!(next(&mut state), next(&mut fresh_state));
 }
 
 /// Reorder/duplicate, safe truncate, reset, and capacity errors use common lifecycle rules.
@@ -1135,4 +1148,215 @@ fn autodiff_smoke_reaches_embedding_weights() {
         .sum();
     let gradients = loss.backward();
     assert!(model.model.embed_tokens.weight.grad(&gradients).is_some());
+}
+
+/// Builds a three-layer windowed model: dense layer 0 and sparse layers 1 and 2, all windowed.
+fn experiment_model() -> (
+    Qwen3MoeForCausalLm<TestBackend>,
+    <TestBackend as BackendTypes>::Device,
+) {
+    let device = Default::default();
+    let mut config = tiny_config();
+    config.num_hidden_layers = 3;
+    config.mlp_only_layers = vec![0];
+    config.use_sliding_window = true;
+    config.sliding_window = Some(2);
+    (initialized_model(config, &device), device)
+}
+
+/// A padded two-row input for the experimentation tests.
+fn experiment_input(device: &<TestBackend as BackendTypes>::Device) -> CausalLmInput<TestBackend> {
+    CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3, 4], [5, 6, 7, 8]], device),
+        token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [[false, true, true, true], [true, true, true, true]].into(),
+            device,
+        ))),
+        position_ids: None,
+    }
+}
+
+/// The catalog lists router points for sparse layers and gate points for dense ones, in order.
+#[test]
+fn activation_catalog_names_router_and_dense_points() {
+    let (model, _) = experiment_model();
+    let names = model
+        .activation_points()
+        .into_iter()
+        .map(|point| point.name)
+        .collect::<Vec<_>>();
+    assert_eq!(names.first().unwrap(), "decoder.embedding");
+    assert_eq!(names.last().unwrap(), "decoder.final_norm");
+    assert!(names.contains(&"decoder.layers.0.mlp.pre_activation".to_string()));
+    assert!(!names.contains(&"decoder.layers.0.mlp.router_logits".to_string()));
+    for layer in [1, 2] {
+        let router = format!("decoder.layers.{layer}.mlp.router_logits");
+        let weights = format!("decoder.layers.{layer}.mlp.router_weights");
+        let input = names
+            .iter()
+            .position(|name| *name == format!("decoder.layers.{layer}.mlp.input"))
+            .unwrap();
+        assert_eq!(names[input + 1], router);
+        assert_eq!(names[input + 2], weights);
+        assert_eq!(
+            router_logits_point(Layer::decoder(layer)).info().name,
+            router
+        );
+        assert_eq!(
+            router_weights_point(Layer::decoder(layer)).info().name,
+            weights
+        );
+    }
+}
+
+/// Capturing every point leaves logits, routers, and loss bit-identical to the plain forward.
+#[test]
+fn observing_every_point_preserves_the_forward_exactly() {
+    let (model, device) = experiment_model();
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        hidden_states: true,
+        router_logits: true,
+        auxiliary_losses: true,
+        ..Default::default()
+    };
+    let plain = model.forward(experiment_input(&device), &options).unwrap();
+    let mut hooks = crate::intervention::Hooks::new();
+    let captures = model
+        .activation_points()
+        .into_iter()
+        .map(|point| hooks.capture_dynamic(point))
+        .collect::<Vec<_>>();
+    let hooked = model
+        .forward_with_hooks(experiment_input(&device), &options, &mut hooks)
+        .unwrap();
+    assert_eq!(plain.logits.to_data(), hooked.logits.to_data());
+    for (left, right) in plain.routers.iter().zip(&hooked.routers) {
+        assert_eq!(
+            left.logits.as_ref().unwrap().to_data(),
+            right.logits.as_ref().unwrap().to_data()
+        );
+    }
+    assert_eq!(
+        plain.load_balancing_loss.unwrap().to_data(),
+        hooked.load_balancing_loss.unwrap().to_data()
+    );
+    // Router logits captured at the point equal the reported diagnostics.
+    let router = captures
+        .iter()
+        .find(|capture| capture.point().name == "decoder.layers.1.mlp.router_logits")
+        .unwrap();
+    let captured: Tensor<TestBackend, 3> =
+        hooks.get_dynamic(router).unwrap().into_tensor().unwrap();
+    assert_eq!(
+        captured.to_data(),
+        plain.routers[0].logits.as_ref().unwrap().to_data()
+    );
+    let weights = captures
+        .iter()
+        .find(|capture| capture.point().name == "decoder.layers.1.mlp.router_weights")
+        .unwrap();
+    let weights: Tensor<TestBackend, 3> =
+        hooks.get_dynamic(weights).unwrap().into_tensor().unwrap();
+    assert_eq!(weights.dims(), [2, 4, 2]);
+    // Renormalized top-2 weights sum to one per token.
+    weights.sum_dim(2).into_data().assert_approx_eq::<f32>(
+        &Tensor::<TestBackend, 3>::ones([2, 4, 1], &device).into_data(),
+        Tolerance::rel_abs(1e-6, 1e-6),
+    );
+}
+
+/// Editing router logits changes which experts run, and zeroing weights removes the routed output.
+#[test]
+fn router_edits_change_the_routed_computation() {
+    let (model, device) = experiment_model();
+    let plain = model
+        .forward(experiment_input(&device), &ForwardOptions::default())
+        .unwrap()
+        .logits;
+    let mut forced = crate::intervention::Hooks::new();
+    // Force experts 2 and 3 for every token of layer 1.
+    forced.edit(
+        router_logits_point(Layer::decoder(1)),
+        |logits: Tensor<TestBackend, 3>| {
+            let bonus =
+                Tensor::<TestBackend, 1>::from_floats([0.0, 0.0, 50.0, 40.0], &logits.device())
+                    .reshape([1, 1, 4]);
+            logits + bonus
+        },
+    );
+    let rerouted = model
+        .forward_with_hooks(
+            experiment_input(&device),
+            &ForwardOptions::default(),
+            &mut forced,
+        )
+        .unwrap()
+        .logits;
+    assert_ne!(plain.to_data(), rerouted.to_data());
+
+    let mut silenced = crate::intervention::Hooks::new();
+    silenced.edit(
+        router_weights_point(Layer::decoder(1)),
+        |weights: Tensor<TestBackend, 3>| weights.zeros_like(),
+    );
+    let mlp = silenced.capture(Layer::decoder(1).mlp_output());
+    model
+        .forward_with_hooks(
+            experiment_input(&device),
+            &ForwardOptions::default(),
+            &mut silenced,
+        )
+        .unwrap();
+    let output = silenced.get(&mlp).unwrap();
+    assert!(
+        output
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .all(|&value| value == 0.0),
+        "zero mixture weights must cancel every routed contribution"
+    );
+}
+
+/// Staged execution and the generic traits reproduce the fused backbone exactly.
+#[test]
+fn staged_execution_matches_the_fused_backbone() {
+    use crate::architecture::{HookedModel, StagedModel};
+
+    let (model, device) = experiment_model();
+    let input = experiment_input(&device);
+    let fused = model.model.forward(&input, true, true).unwrap();
+    assert_eq!(fused.hidden_states.len(), 5);
+    assert_eq!(fused.router_logits.len(), 2);
+    // One block at a time: each range builds its own tables.
+    let mut state = model.model.embed(&input).unwrap();
+    for index in 0..3 {
+        state = model.model.run_layers(state, index..index + 1).unwrap();
+    }
+    let staged = model.model.normalize(state).unwrap();
+    assert_eq!(staged.hidden.to_data(), fused.hidden.to_data());
+    for traced in [
+        StagedModel::run_stack(&model, input.clone()).unwrap(),
+        StagedModel::run_stack(&model.model, input.clone()).unwrap(),
+    ] {
+        assert_eq!(traced.hidden.to_data(), fused.hidden.to_data());
+    }
+    assert_eq!(StagedModel::num_layers(&model), 3);
+    let points = HookedModel::activation_points(&model).unwrap();
+    assert_eq!(points, model.activation_points());
+    // A hooked range emits exactly its own blocks' points.
+    let mut hooks = crate::intervention::Hooks::new();
+    let router = hooks.capture(router_logits_point(Layer::decoder(2)));
+    let state = model.model.embed(&input).unwrap();
+    let state = model.model.run_layers(state, 0..2).unwrap();
+    model
+        .model
+        .run_layers_with_hooks(state, 2..3, &mut hooks)
+        .unwrap();
+    assert_eq!(
+        hooks.get(&router).unwrap().to_data(),
+        fused.router_logits[1].to_data()
+    );
 }

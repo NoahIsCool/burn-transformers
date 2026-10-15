@@ -8,9 +8,11 @@ use burn::{
 use crate::architecture::TokenMask;
 
 use super::{
-    CHUNKS_PER_BLOCK, ChunkBlock, DeltaNetMode, DeltaRuleConfig, DeltaRuleInput,
-    GatedDeltaNetConfig, GatedDeltaNetState, PreparedDeltaRule, chunked_gated_delta_rule,
-    mask_hidden, recurrent_gated_delta_rule, softplus,
+    CHUNKS_PER_BLOCK, ChunkBlock, ChunkOperands, DeltaNetMode, DeltaRuleConfig, DeltaRuleInput,
+    GatedDeltaNetConfig, GatedDeltaNetState, PreparedDeltaRule, block_chunk_ranges,
+    causal_decay_matrix, chunked_gated_delta_rule, mask_hidden, prefers_recurrence,
+    recurrent_gated_delta_rule, recurrent_gated_delta_rule_with_snapshots, softplus,
+    unit_lower_inverse,
 };
 
 /// Deterministic F32 CPU backend for recurrent and chunked delta-rule comparisons.
@@ -579,19 +581,31 @@ fn legacy_chunked(
     config: DeltaRuleConfig,
 ) -> (Tensor<TestBackend, 4>, Tensor<TestBackend, 4>) {
     let prepared = PreparedDeltaRule::new(input, config.normalization_epsilon).unwrap();
-    let [batch, heads, sequence, key_width] = prepared.query.dims();
-    let value_width = prepared.value.dims()[3];
+    // The oracle works head-major: `[batch, heads, sequence, ·]`.
+    let head_major = |tensor: &Tensor<TestBackend, 4>| tensor.clone().swap_dims(1, 2);
+    let head_scalars = |tensor: &Tensor<TestBackend, 3>| tensor.clone().swap_dims(1, 2);
+    let (query_all, key_all, value_all) = (
+        head_major(&prepared.query),
+        head_major(&prepared.key),
+        head_major(&prepared.value),
+    );
+    let (beta_all, decay_all) = (
+        head_scalars(&prepared.beta),
+        head_scalars(&prepared.log_decay),
+    );
+    let [batch, heads, sequence, key_width] = query_all.dims();
+    let value_width = value_all.dims()[3];
     let mut state = prepared
         .initial_state
         .unwrap_or_else(|| Tensor::zeros([batch, heads, key_width, value_width], &prepared.device));
     let mut outputs = Vec::new();
     for start in (0..sequence).step_by(config.chunk_size) {
         let width = config.chunk_size.min(sequence - start);
-        let query = prepared.query.clone().narrow(2, start, width);
-        let key = prepared.key.clone().narrow(2, start, width);
-        let value = prepared.value.clone().narrow(2, start, width);
-        let beta = prepared.beta.clone().narrow(2, start, width);
-        let cumulative_decay = prepared.log_decay.clone().narrow(2, start, width).cumsum(2);
+        let query = query_all.clone().narrow(2, start, width);
+        let key = key_all.clone().narrow(2, start, width);
+        let value = value_all.clone().narrow(2, start, width);
+        let beta = beta_all.clone().narrow(2, start, width);
+        let cumulative_decay = decay_all.clone().narrow(2, start, width).cumsum(2);
         let beta_expanded = beta.unsqueeze_dim::<4>(3);
         let value_beta = value.clone() * beta_expanded.clone();
         let key_beta = key.clone() * beta_expanded;
@@ -702,11 +716,12 @@ fn batched_prefill_matches_the_per_chunk_algorithm() {
 
 /// Prompts shorter than one chunk run unpadded and still match the per-chunk algorithm.
 ///
-/// A single-chunk block must use its own width as `C`: padding `L` tokens to
-/// the configured chunk would run a `C - 1`-step substitution on `C x C`
-/// tiles, which made short prompts several times slower than the per-chunk
-/// algorithm. The tile shape pins that; the parity loop pins the values,
-/// including a long prompt whose final block is a lone partial chunk.
+/// A prompt of `L < chunk_size` tokens must use `C = L`: padding it to the
+/// configured chunk would run a `C - 1`-step substitution on `C x C` tiles,
+/// which made short prompts several times slower than the per-chunk
+/// algorithm. The operand shapes pin that, and that chunk-major operands are
+/// laid out `[chunks, batch, heads, C, width]`; the parity loop pins the
+/// values, including a long prompt whose last chunk is partial.
 #[test]
 fn short_prompts_and_partial_tails_run_unpadded() {
     let config = DeltaRuleConfig {
@@ -714,16 +729,20 @@ fn short_prompts_and_partial_tails_run_unpadded() {
         ..Default::default()
     };
     let prepared = PreparedDeltaRule::new(long_fixture(10), config.normalization_epsilon).unwrap();
-    let block = ChunkBlock::new(&prepared, 0, 10, config.chunk_size);
-    assert_eq!(block.attention.dims(), [1, 2, 1, 10, 10]);
-    assert_eq!(block.transformed_value.dims(), [1, 2, 1, 10, 3]);
-    assert_eq!(block.chunk_decay.dims(), [1, 2, 1, 1]);
-    // A multi-chunk block still shares one padded `C`.
-    let block = ChunkBlock::new(&prepared, 0, 10, 4);
-    assert_eq!(block.attention.dims(), [1, 2, 3, 4, 4]);
+    let operands = ChunkOperands::new(&prepared, config.chunk_size);
+    assert_eq!((operands.chunk, operands.chunks), (10, 1));
+    let block = ChunkBlock::new(&operands, 0..1);
+    assert_eq!(block.attention.dims(), [1, 1, 2, 10, 10]);
+    assert_eq!(block.transformed_value.dims(), [1, 1, 2, 10, 3]);
+    assert_eq!(block.chunk_decay.dims(), [1, 1, 2, 1, 1]);
+    // Several chunks share one padded `C`.
+    let operands = ChunkOperands::new(&prepared, 4);
+    assert_eq!((operands.chunk, operands.chunks), (4, 3));
+    let block = ChunkBlock::new(&operands, 0..3);
+    assert_eq!(block.attention.dims(), [3, 1, 2, 4, 4]);
 
     // 1, 10, and 63 tokens fit in one chunk; 64 * 16 + 5 = 1029 tokens end
-    // with a 5-token block after one full block of 16 chunks.
+    // with a 5-token chunk, which balanced blocks keep beside full chunks.
     for sequence in [1, 10, 63, 64 * CHUNKS_PER_BLOCK + 5] {
         let (legacy_values, legacy_state) = legacy_chunked(long_fixture(sequence), config);
         let batched = chunked_gated_delta_rule(long_fixture(sequence), config).unwrap();
@@ -1224,13 +1243,13 @@ fn half_precision_default_child() {
     }
 }
 
-/// Measures batched-block versus per-chunk prefill from short prompts to long prefills.
+/// Measures the chunked, per-chunk, and recurrent rules from short prompts to long prefills.
 ///
-/// Covers prompts below one chunk (where batching must not add padding work),
-/// the toy two-head geometry, and a 16-head, 128-wide geometry like Qwen3.5's
-/// linear-attention layers. Inputs are built outside the timed region, the two
-/// algorithms alternate to cancel drift, and each reports the median of nine
-/// runs. Run with
+/// Covers prompts below one chunk, the toy two-head geometry, and a 16-head,
+/// 128-wide geometry like Qwen3.5's linear-attention layers. Inputs are built
+/// outside the timed region, the algorithms alternate to cancel drift, and
+/// each reports the median of nine runs; `selected` names the algorithm that
+/// [`prefers_recurrence`] picks for a prefill of that shape. Run with
 /// `cargo test --release --lib delta_net::tests::prefill_timing -- --ignored --nocapture`.
 #[test]
 #[ignore = "timing measurement; run explicitly in release mode"]
@@ -1240,6 +1259,7 @@ fn prefill_timing() {
         (32, 2, 4, 3),
         (1024, 2, 4, 3),
         (2048, 2, 4, 3),
+        (1, 16, 128, 128),
         (8, 16, 128, 128),
         (32, 16, 128, 128),
         (256, 16, 128, 128),
@@ -1257,24 +1277,463 @@ fn prefill_timing() {
             let _ = run().into_data();
             start.elapsed()
         };
-        let batched_run = || {
+        let chunked_run = || {
             chunked_gated_delta_rule(input.clone(), config)
                 .unwrap()
                 .values
         };
         let legacy_run = || legacy_chunked(input.clone(), config).0;
-        let (_, _) = (time(&batched_run), time(&legacy_run));
-        let (mut batched, mut legacy) = (Vec::new(), Vec::new());
+        let recurrent_run = || {
+            recurrent_gated_delta_rule(input.clone(), config)
+                .unwrap()
+                .values
+        };
+        let _ = (time(&chunked_run), time(&legacy_run), time(&recurrent_run));
+        let (mut chunked, mut legacy, mut recurrent) = (Vec::new(), Vec::new(), Vec::new());
         for _ in 0..9 {
-            batched.push(time(&batched_run));
+            chunked.push(time(&chunked_run));
             legacy.push(time(&legacy_run));
+            recurrent.push(time(&recurrent_run));
         }
-        let (batched, legacy) = (median(batched), median(legacy));
+        let (chunked, legacy, recurrent) = (median(chunked), median(legacy), median(recurrent));
+        let selected = if prefers_recurrence(sequence, heads * key_width * value_width) {
+            "recurrent"
+        } else {
+            "chunked"
+        };
         println!(
             "sequence={sequence} heads={heads} key={key_width} value={value_width} chunk={}: \
-             batched {batched:?}, per-chunk {legacy:?}, speedup {:.2}x",
+             chunked {chunked:?}, per-chunk {legacy:?} ({:.2}x), recurrent {recurrent:?}, \
+             selected {selected}",
             config.chunk_size,
-            legacy.as_secs_f64() / batched.as_secs_f64()
+            legacy.as_secs_f64() / chunked.as_secs_f64()
+        );
+    }
+}
+
+/// Balanced blocks partition the chunks, respect the limit, and never strand a short tail.
+#[test]
+fn block_ranges_are_balanced_partitions() {
+    assert!(block_chunk_ranges(0, 16).is_empty());
+    assert_eq!(block_chunk_ranges(16, 16), vec![0..16]);
+    // 17 chunks: two blocks of 9 and 8 instead of 16 and a lone 1.
+    assert_eq!(block_chunk_ranges(17, 16), vec![0..9, 9..17]);
+    assert_eq!(block_chunk_ranges(5, 0), block_chunk_ranges(5, 1));
+}
+
+proptest::proptest! {
+    /// Every chunk lies in exactly one block, in order, and block sizes differ by at most one.
+    #[test]
+    fn block_ranges_partition_every_chunk(chunks in 0usize..600, limit in 1usize..40) {
+        let ranges = block_chunk_ranges(chunks, limit);
+        proptest::prop_assert_eq!(ranges.len(), chunks.div_ceil(limit));
+        let mut next = 0;
+        for range in &ranges {
+            proptest::prop_assert_eq!(range.start, next);
+            proptest::prop_assert!(!range.is_empty() && range.len() <= limit);
+            next = range.end;
+        }
+        proptest::prop_assert_eq!(next, chunks);
+        if let (Some(largest), Some(smallest)) = (
+            ranges.iter().map(|range| range.len()).max(),
+            ranges.iter().map(|range| range.len()).min(),
+        ) {
+            proptest::prop_assert!(largest - smallest <= 1);
+        }
+    }
+
+    /// The recurrence is chosen monotonically: shorter segments and smaller states never flip it off.
+    #[test]
+    fn recurrence_choice_is_monotone(sequence in 1usize..64, state in 1usize..300_000) {
+        if prefers_recurrence(sequence, state) {
+            proptest::prop_assert!(sequence == 1 || prefers_recurrence(sequence - 1, state));
+            proptest::prop_assert!(prefers_recurrence(sequence, state / 2));
+        }
+        proptest::prop_assert!(prefers_recurrence(1, state));
+    }
+}
+
+/// Qwen3.5-sized states always prefill with the chunked rule; tiny states use the recurrence briefly.
+#[test]
+fn recurrence_is_preferred_only_for_short_tiny_segments() {
+    let qwen_state = 16 * 128 * 128;
+    assert!(
+        prefers_recurrence(1, qwen_state),
+        "one token is one exact step"
+    );
+    assert!((2..=4096).all(|sequence| !prefers_recurrence(sequence, qwen_state)));
+    let toy_state = 2 * 4 * 3;
+    assert!(prefers_recurrence(1, toy_state) && prefers_recurrence(11, toy_state));
+    assert!(!prefers_recurrence(13, toy_state));
+    assert!(
+        !prefers_recurrence(usize::MAX, toy_state),
+        "overflow means chunked"
+    );
+}
+
+/// Every decay entry is the single rounded subtraction, bit-identical to the direct formula.
+///
+/// The input is the strided heads-major view of a token-minor
+/// `[chunks, batch, C, heads, 1]` tensor, as in the chunked rule, with
+/// cumulative log decays reaching about `-120` so that any rounding of `G`
+/// before the subtraction (as a TF32 matrix product would do) is visible
+/// after `exp`.
+#[test]
+fn causal_decay_matrix_is_exactly_the_masked_exponential() {
+    let device = Default::default();
+    let (chunks, batch, width, heads) = (2, 2, 7, 3);
+    let token_minor =
+        Tensor::<TestBackend, 1, Int>::arange(0..(chunks * batch * width * heads) as i64, &device)
+            .float()
+            .mul_scalar(0.731)
+            .sin()
+            .abs()
+            .mul_scalar(-30.0)
+            .reshape([chunks, batch, width, heads, 1])
+            .cumsum(2);
+    let cumulative = token_minor.swap_dims(2, 3);
+    let direct = (cumulative.clone() - cumulative.clone().swap_dims(3, 4))
+        .tril(0)
+        .exp()
+        .tril(0);
+    let actual = causal_decay_matrix(cumulative.clone());
+    assert_eq!(actual.dims(), [chunks, batch, heads, width, width]);
+    assert_eq!(
+        actual.into_data().to_vec::<f32>().unwrap(),
+        direct.into_data().to_vec::<f32>().unwrap()
+    );
+    let deepest = cumulative.min().into_scalar();
+    assert!(
+        deepest < -100.0,
+        "fixture must exercise large |G|: {deepest}"
+    );
+}
+
+/// Blocked doubling inverts every width, including non-powers of two and width one.
+#[test]
+fn blocked_inverse_matches_substitution_for_every_width() {
+    let device = Default::default();
+    for width in [1, 2, 3, 5, 8, 10, 31, 64] {
+        let lower =
+            Tensor::<TestBackend, 1, Int>::arange(0..(2 * 3 * width * width) as i64, &device)
+                .float()
+                .mul_scalar(0.37)
+                .cos()
+                .mul_scalar(0.4)
+                .reshape([2, 1, 3, width, width])
+                .tril(-1);
+        let inverse = unit_lower_inverse(lower.clone());
+        // Reference: row-by-row forward substitution on host values.
+        let values = lower.clone().into_data().to_vec::<f32>().unwrap();
+        let mut expected = vec![0.0_f64; values.len()];
+        for matrix in 0..6 {
+            let at = |row: usize, column: usize| matrix * width * width + row * width + column;
+            for row in 0..width {
+                for column in 0..=row {
+                    let mut entry = if row == column { 1.0 } else { 0.0 };
+                    for inner in column..row {
+                        entry -= f64::from(values[at(row, inner)]) * expected[at(inner, column)];
+                    }
+                    expected[at(row, column)] = entry;
+                }
+            }
+        }
+        let expected = expected
+            .into_iter()
+            .map(|value| value as f32)
+            .collect::<Vec<_>>();
+        inverse.into_data().assert_approx_eq::<f32>(
+            &TensorData::new(expected, [2, 1, 3, width, width]),
+            Tolerance::rel_abs(1e-5, 1e-6),
+        );
+    }
+}
+
+/// Per-token states replay the recurrence exactly and end at its final state.
+#[test]
+fn recurrent_snapshots_record_every_post_token_state() {
+    let config = DeltaRuleConfig::default();
+    let mut input = fixture(5);
+    input.token_mask = Some(Tensor::<TestBackend, 2, Bool>::from_bool(
+        [
+            [true, true, false, true, true],
+            [false, true, true, true, false],
+        ]
+        .into(),
+        &Default::default(),
+    ));
+    let reference = recurrent_gated_delta_rule(input.clone(), config).unwrap();
+    let snapshots = recurrent_gated_delta_rule_with_snapshots(input.clone(), config).unwrap();
+    assert_eq!(
+        snapshots
+            .values
+            .clone()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap(),
+        reference.values.into_data().to_vec::<f32>().unwrap()
+    );
+    let [batch, tokens, heads, key_width, value_width] = snapshots.states.dims();
+    assert_eq!(tokens, 5);
+    let last = snapshots.states.clone().narrow(1, tokens - 1, 1).reshape([
+        batch,
+        heads,
+        key_width,
+        value_width,
+    ]);
+    assert_eq!(
+        last.into_data().to_vec::<f32>().unwrap(),
+        reference.final_state.into_data().to_vec::<f32>().unwrap()
+    );
+    // State after token t equals a fresh recurrence over the first t + 1 tokens.
+    for prefix in 1..=tokens {
+        let mut truncated = input.clone();
+        truncated.query = truncated.query.narrow(1, 0, prefix);
+        truncated.key = truncated.key.narrow(1, 0, prefix);
+        truncated.value = truncated.value.narrow(1, 0, prefix);
+        truncated.log_decay = truncated.log_decay.narrow(1, 0, prefix);
+        truncated.beta = truncated.beta.narrow(1, 0, prefix);
+        truncated.token_mask = truncated.token_mask.map(|mask| mask.narrow(1, 0, prefix));
+        let expected = recurrent_gated_delta_rule(truncated, config)
+            .unwrap()
+            .final_state;
+        let actual = snapshots.states.clone().narrow(1, prefix - 1, 1).reshape([
+            batch,
+            heads,
+            key_width,
+            value_width,
+        ]);
+        assert_eq!(
+            actual.into_data().to_vec::<f32>().unwrap(),
+            expected.into_data().to_vec::<f32>().unwrap()
+        );
+    }
+}
+
+/// Several batch rows share one chunk-major layout and still match row-by-row recurrences.
+#[test]
+fn batched_rows_match_their_recurrences() {
+    let config = DeltaRuleConfig {
+        chunk_size: 4,
+        ..Default::default()
+    };
+    let rows = [smooth_fixture(19, 2, 4, 3), {
+        let mut input = smooth_fixture(19, 2, 4, 3);
+        input.query = input.query.flip([1]);
+        input.value = input.value.mul_scalar(-0.5);
+        input
+    }];
+    let stack = |pick: &dyn Fn(&DeltaRuleInput<TestBackend>) -> Tensor<TestBackend, 4>| {
+        Tensor::cat(rows.iter().map(pick).collect(), 0)
+    };
+    let stack3 = |pick: &dyn Fn(&DeltaRuleInput<TestBackend>) -> Tensor<TestBackend, 3>| {
+        Tensor::cat(rows.iter().map(pick).collect(), 0)
+    };
+    let batched = DeltaRuleInput {
+        query: stack(&|input| input.query.clone()),
+        key: stack(&|input| input.key.clone()),
+        value: stack(&|input| input.value.clone()),
+        log_decay: stack3(&|input| input.log_decay.clone()),
+        beta: stack3(&|input| input.beta.clone()),
+        initial_state: None,
+        token_mask: None,
+    };
+    let chunked = chunked_gated_delta_rule(batched, config).unwrap();
+    for (row, input) in rows.into_iter().enumerate() {
+        let recurrent = recurrent_gated_delta_rule(input, config).unwrap();
+        chunked
+            .values
+            .clone()
+            .narrow(0, row, 1)
+            .into_data()
+            .assert_approx_eq::<f32>(
+                &recurrent.values.into_data(),
+                Tolerance::rel_abs(1e-4, 1e-5),
+            );
+        chunked
+            .final_state
+            .clone()
+            .narrow(0, row, 1)
+            .into_data()
+            .assert_approx_eq::<f32>(
+                &recurrent.final_state.into_data(),
+                Tolerance::rel_abs(1e-4, 1e-5),
+            );
+    }
+}
+
+/// Builds `[batch, sequence, width]` smooth hidden states for mixer tests.
+fn smooth_hidden(batch: usize, sequence: usize, width: usize) -> Tensor<TestBackend, 3> {
+    Tensor::<TestBackend, 1, Int>::arange(0..(batch * sequence * width) as i64, &Default::default())
+        .float()
+        .mul_scalar(0.613)
+        .sin()
+        .reshape([batch, sequence, width])
+}
+
+/// A long projected prefill takes the chunked rule and still equals token-by-token decode.
+#[test]
+fn projected_mixer_chunked_prefill_matches_decode() {
+    let device = Default::default();
+    TestBackend::seed(&device, 11);
+    let mut config = GatedDeltaNetConfig::new(4, 1, 2, 2, 2);
+    config.convolution_kernel = 3;
+    config.prefill_chunk_size = 4;
+    let mixer = config.init::<TestBackend>(&device).unwrap();
+    let sequence = 23;
+    assert!(
+        !prefers_recurrence(sequence, 2 * 2 * 2),
+        "must exercise the chunked rule"
+    );
+    let hidden = smooth_hidden(2, sequence, 4);
+    let mut prefill_state = GatedDeltaNetState::zeros(&config, 2, &device).unwrap();
+    let prefill = mixer
+        .forward_with_state(
+            hidden.clone(),
+            None,
+            &mut prefill_state,
+            DeltaNetMode::ChunkedPrefill,
+        )
+        .unwrap();
+    let mut decode_state = GatedDeltaNetState::zeros(&config, 2, &device).unwrap();
+    let decode = Tensor::cat(
+        (0..sequence)
+            .map(|index| {
+                mixer
+                    .forward_with_state(
+                        hidden.clone().narrow(1, index, 1),
+                        None,
+                        &mut decode_state,
+                        DeltaNetMode::Recurrent,
+                    )
+                    .unwrap()
+            })
+            .collect(),
+        1,
+    );
+    let tolerance = Tolerance::rel_abs(2e-4, 2e-5);
+    prefill
+        .into_data()
+        .assert_approx_eq::<f32>(&decode.into_data(), tolerance);
+    prefill_state
+        .recurrent
+        .into_data()
+        .assert_approx_eq::<f32>(&decode_state.recurrent.into_data(), tolerance);
+    prefill_state
+        .convolution
+        .into_data()
+        .assert_approx_eq::<f32>(&decode_state.convolution.into_data(), tolerance);
+}
+
+/// Mixer snapshots equal the state after feeding each column alone, padding included.
+#[test]
+fn mixer_snapshots_match_column_by_column_states() {
+    let device = Default::default();
+    TestBackend::seed(&device, 13);
+    for kernel in [1, 3] {
+        let mut config = GatedDeltaNetConfig::new(4, 1, 2, 2, 2);
+        config.convolution_kernel = kernel;
+        let mixer = config.init::<TestBackend>(&device).unwrap();
+        let hidden = smooth_hidden(2, 5, 4);
+        let mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [
+                [true, false, true, true, false],
+                [false, true, true, false, true],
+            ]
+            .into(),
+            &device,
+        ));
+        let mut start = GatedDeltaNetState::zeros(&config, 2, &device).unwrap();
+        // A non-zero incoming state makes the convolution history observable.
+        start.convolution = start.convolution.clone() + 0.25;
+        start.recurrent = start.recurrent.clone() + 0.125;
+
+        let mut snapshot_state = start.clone();
+        let (output, snapshots) = mixer
+            .forward_with_snapshots(hidden.clone(), Some(&mask), &mut snapshot_state)
+            .unwrap();
+        let mut recurrent_state = start.clone();
+        let recurrent = mixer
+            .forward_with_state(
+                hidden.clone(),
+                Some(&mask),
+                &mut recurrent_state,
+                DeltaNetMode::Recurrent,
+            )
+            .unwrap();
+        assert_eq!(
+            output.into_data().to_vec::<f32>().unwrap(),
+            recurrent.into_data().to_vec::<f32>().unwrap()
+        );
+
+        let mut column_state = start.clone();
+        for column in 0..5 {
+            let column_mask = TokenMask::new(mask.as_tensor().clone().narrow(1, column, 1));
+            mixer
+                .forward_with_state(
+                    hidden.clone().narrow(1, column, 1),
+                    Some(&column_mask),
+                    &mut column_state,
+                    DeltaNetMode::Recurrent,
+                )
+                .unwrap();
+            let [batch, _, heads, key_dim, value_dim] = snapshots.recurrent.dims();
+            snapshots
+                .recurrent
+                .clone()
+                .narrow(1, column, 1)
+                .reshape([batch, heads, key_dim, value_dim])
+                .into_data()
+                .assert_approx_eq::<f32>(
+                    &column_state.recurrent.clone().into_data(),
+                    Tolerance::rel_abs(1e-5, 1e-6),
+                );
+            let [_, _, channels, width] = snapshots.convolution.dims();
+            assert_eq!(width, kernel - 1);
+            if width == 0 {
+                // Burn reads a zero in a reshape target as "keep this axis".
+                continue;
+            }
+            assert_eq!(
+                snapshots
+                    .convolution
+                    .clone()
+                    .narrow(1, column, 1)
+                    .reshape([batch, channels, width])
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap(),
+                column_state
+                    .convolution
+                    .clone()
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            snapshot_state
+                .recurrent
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap(),
+            recurrent_state
+                .recurrent
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()
+        );
+        assert_eq!(
+            snapshot_state
+                .convolution
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap(),
+            recurrent_state
+                .convolution
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()
         );
     }
 }

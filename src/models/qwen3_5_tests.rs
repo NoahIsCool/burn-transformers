@@ -110,3 +110,88 @@ fn rejects_unimplemented_recurrent_and_layer_topologies() {
         assert_eq!(error.field, expected_field);
     }
 }
+
+/// Builds the nested RoPE object of a config that rotates `factor` of each head.
+fn nested_partial(factor: Option<f64>) -> Option<RopeParameters> {
+    Some(RopeParameters {
+        partial_rotary_factor: factor,
+        ..RopeParameters::default()
+    })
+}
+
+/// A nested partial factor without a top-level value is honoured (QW-13).
+///
+/// The Qwen default of 0.25 is Transformers' `setdefault`, the weakest
+/// source. It previously filled the top-level field at deserialization and
+/// was then compared against the nested value as if a user had written it,
+/// rejecting `rope_parameters.partial_rotary_factor = 0.5`.
+#[test]
+fn nested_partial_rotary_factor_wins_over_the_family_default() {
+    let config = Qwen3_5TextConfig {
+        head_dim: 16,
+        rope_parameters: nested_partial(Some(0.5)),
+        ..Qwen3_5TextConfig::default()
+    };
+    config
+        .validate()
+        .expect("a nested factor alone must validate");
+    let rope = config.rope_config().expect("nested factor translates");
+    assert_eq!(rope.rotary_dimension(), 8);
+
+    let parsed: Qwen3_5TextConfig = serde_json::from_str(
+        r#"{"head_dim": 16, "rope_parameters": {"rope_type": "default", "partial_rotary_factor": 0.5}}"#,
+    )
+    .expect("config JSON without a top-level factor parses");
+    assert_eq!(parsed.partial_rotary_factor, None);
+    parsed.validate().expect("parsed nested factor validates");
+    assert_eq!(parsed.rope_config().unwrap().rotary_dimension(), 8);
+}
+
+/// The partial factor resolves nested, then top level, then the family default.
+#[test]
+fn partial_rotary_factor_resolution_follows_transformers_precedence() {
+    let resolve = |nested: Option<f64>, top_level: Option<f64>| {
+        let config = Qwen3_5TextConfig {
+            head_dim: 16,
+            rope_parameters: nested_partial(nested),
+            partial_rotary_factor: top_level,
+            ..Qwen3_5TextConfig::default()
+        };
+        config.validate().map(|()| config.rope_config())
+    };
+    // Neither source: the Qwen default rotates a quarter of each head.
+    assert_eq!(
+        resolve(None, None).unwrap().unwrap().rotary_dimension(),
+        4,
+        "default 0.25 of 16 channels"
+    );
+    assert_eq!(
+        Qwen3_5TextConfig {
+            head_dim: 16,
+            ..Qwen3_5TextConfig::default()
+        }
+        .rope_config()
+        .unwrap()
+        .rotary_dimension(),
+        4,
+        "an absent rope_parameters object also uses the default"
+    );
+    // A top-level value alone, and agreeing values, are accepted.
+    assert_eq!(
+        resolve(None, Some(1.0))
+            .unwrap()
+            .unwrap()
+            .rotary_dimension(),
+        16
+    );
+    assert_eq!(
+        resolve(Some(0.5), Some(0.5))
+            .unwrap()
+            .unwrap()
+            .rotary_dimension(),
+        8
+    );
+    // Two serialized values that disagree are rejected rather than guessed.
+    let error = resolve(Some(0.5), Some(0.25)).expect_err("serialized disagreement");
+    assert_eq!(error.field, "partial_rotary_factor");
+}

@@ -25,18 +25,20 @@ use serde::{Deserialize, Serialize};
 mod checkpoint;
 mod load;
 pub mod model;
+mod plan;
 
 pub use checkpoint::{Qwen3MoeCheckpointContract, Qwen3MoeCheckpointOptions};
 pub use load::{Qwen3MoeCheckpointLoadError, Qwen3MoeLoadError};
 pub use model::{
-    Qwen3MoeDecodeState, Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm, Qwen3MoeModel,
-    qwen3_moe_load_balancing_loss,
+    Qwen3MoeBackboneOutput, Qwen3MoeDecodeState, Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm,
+    Qwen3MoeModel, qwen3_moe_load_balancing_loss, router_logits_point, router_weights_point,
 };
 
 use super::config::{
-    ConfigError, ModelConfig, RopeParameters, TokenIds, Validate, divisible, model_type, nonzero,
-    positive_finite, probability, token_ids,
+    ConfigError, ModelConfig, PartialRotary, RopeContext, RopeParameters, TokenIds, Validate,
+    divisible, model_type, nonzero, positive_finite, probability, token_ids,
 };
+use crate::position::RopeConfig;
 
 /// Serialized topology for Qwen3 MoE models such as Qwen3-30B-A3B.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,7 +85,10 @@ pub struct Qwen3MoeConfig {
     pub use_sliding_window: bool,
     /// Number of preceding tokens visible under sliding attention.
     pub sliding_window: Option<usize>,
-    /// Legacy limit on layers eligible for a sliding window.
+    /// Legacy per-layer window boundary, retained for configuration round trips.
+    ///
+    /// Ignored: the pinned Transformers 5.2 Qwen3-MoE applies an enabled
+    /// window to every block (see [`Qwen3MoeConfig::layer_sliding_window`]).
     pub max_window_layers: usize,
     /// Period between MoE feed-forward blocks.
     pub decoder_sparse_step: usize,
@@ -152,11 +157,41 @@ impl Default for Qwen3MoeConfig {
 
 impl Qwen3MoeConfig {
     /// Reports whether the indexed decoder block owns routed expert matrices.
+    ///
+    /// Block `i` is sparse when it is not in `mlp_only_layers`, the model has
+    /// experts, and `(i + 1) mod decoder_sparse_step = 0` (a zero step
+    /// disables sparsity); the predicate is verified in `verus/qwen.rs`.
     pub fn is_moe_layer(&self, layer_index: usize) -> bool {
-        self.decoder_sparse_step != 0
-            && !self.mlp_only_layers.contains(&layer_index)
-            && self.num_experts > 0
-            && (layer_index + 1).is_multiple_of(self.decoder_sparse_step)
+        plan::sparse_layer(
+            layer_index,
+            self.decoder_sparse_step,
+            self.num_experts,
+            self.mlp_only_layers.contains(&layer_index),
+        )
+    }
+
+    /// Translates the serialized RoPE metadata into the executable rotary configuration.
+    ///
+    /// Qwen3-MoE rotates whole heads, so a partial factor other than one is
+    /// rejected as an unused field. Resolution and strictness follow the shared
+    /// [`RopeParameters::to_rope_config`] translator: the nested
+    /// `rope_parameters` are authoritative, the legacy top-level `rope_theta`
+    /// is a fallback, and a disagreement between the two is an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error at `qwen3_moe.rope.<field>` (or
+    /// `qwen3_moe.head_dim`) for a missing, out-of-range, conflicting, or
+    /// unused RoPE field.
+    pub fn rope_config(&self) -> crate::Result<RopeConfig> {
+        self.rope_parameters
+            .clone()
+            .unwrap_or_default()
+            .to_rope_config(
+                &RopeContext::new("qwen3_moe", self.head_dim, self.max_position_embeddings)
+                    .with_rope_theta(self.rope_theta)
+                    .with_partial_rotary(PartialRotary::FullHeadOnly),
+            )
     }
 }
 
@@ -225,13 +260,6 @@ impl Validate for Qwen3MoeConfig {
                     FAMILY,
                     "sliding_window",
                     "cannot exceed max_position_embeddings",
-                ));
-            }
-            if self.max_window_layers > self.num_hidden_layers {
-                return Err(ConfigError::new(
-                    FAMILY,
-                    "max_window_layers",
-                    "cannot exceed num_hidden_layers",
                 ));
             }
         }
