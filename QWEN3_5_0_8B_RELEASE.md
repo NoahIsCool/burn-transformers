@@ -111,10 +111,10 @@ order, because templates see keys sorted. For streaming text, decode tokens
 incrementally with `LocalTokenizer::decode_stream`.
 
 Since this profile was recorded, cached prefill and decode run batched through
-shared cache steps, grouped-query attention reads native KV heads without
-repetition, and DeltaNet chunked prefill uses an exact block-doubling inverse.
-Presence penalties now count generated tokens only by default, and F16 logits
-are processed in F32. The profile's Metal/F16 parity gate must be replayed on
+shared cache steps, cached grouped-query attention folds query groups over
+native KV heads instead of repeating K/V, and DeltaNet chunked prefill uses an
+exact block-doubling inverse. Presence penalties now count generated tokens
+only by default, and F16 logits are processed in F32. The profile's Metal/F16 parity gate must be replayed on
 the integrated source before the next release (see
 [RELEASE_GATES.md](RELEASE_GATES.md#replays-required-after-the-polish-cycle)).
 

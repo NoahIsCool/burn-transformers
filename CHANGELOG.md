@@ -38,10 +38,13 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
 
 #### Experiment interface
 
-- `architecture::HookedModel` and `StagedModel`, implemented by every family,
-  by `AutoCausalLm` (both) and `AutoSeq2SeqLm` (hooks), and forwarded by
-  `LoadedModel`, so one generic experiment runs on any model or loaded
-  checkpoint. `AutoCausalConfig::supports_experiments()` reports support.
+- `architecture::HookedModel` and `StagedModel`, both implemented by every
+  causal family; T5 and modular seq2seq models implement `HookedModel`, with
+  `StagedModel` on `T5Encoder` and the modular encoder/decoder stage views.
+  `AutoCausalLm` implements both, `AutoSeq2SeqLm` implements `HookedModel`,
+  and `LoadedModel` forwards them, so one generic experiment runs on any model
+  or loaded checkpoint. `AutoCausalConfig::supports_experiments()` reports
+  support.
 - New activation catalogs: DeepSeek MLA and router points, Muse gate and
   sandwich-norm points, Nemotron-H points per block kind, Qwen3-MoE router
   points (`router_logits_point`, `router_weights_point`) and a headless
@@ -320,10 +323,12 @@ per-chunk algorithm, which each test keeps as an oracle.
   family.
 - Memory-bounded MoE dispatch: 313 MiB versus 885 MiB peak RSS on the
   dispatch benchmark.
-- Grouped-query attention reads native KV heads without repeating them; Muse
-  cached sliding attention slices window unions (13.6× fewer score elements at
-  32K); input validation and generation bookkeeping read back to the host once
-  per step.
+- Cached grouped-query decoding and suffixes fold query groups over native KV
+  heads instead of repeating K/V (square causal prefill on the backend-native
+  path still repeats K/V to keep the fused `is_causal` kernel); Muse cached
+  sliding attention slices window unions (13.6× fewer score elements at 32K);
+  input validation and generation bookkeeping read back to the host once per
+  step.
 
 ### Verification
 

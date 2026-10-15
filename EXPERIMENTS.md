@@ -39,12 +39,13 @@ Two traits make an experiment independent of the model family:
 - `StagedModel` runs a stack in explicit stages: `embed`, `run_layers` over a
   contiguous block range, and `normalize`, exchanging a `HiddenState`.
 
-Every built-in family implements both (T5 implements `HookedModel` for the
-full model and both traits for its encoder). `AutoCausalLm` implements both for
-every registered family, `AutoSeq2SeqLm` implements `HookedModel`, and a
-`LoadedModel` forwards both to its model, so the same function runs on a
-concrete family, on an automatically selected model, or directly on a
-checkpoint loaded with `load_local`:
+Every causal family implements both. T5 implements `HookedModel` for the full
+model and both traits for `T5Encoder`; a modular seq2seq model implements
+`HookedModel` and stages through `encoder_stages()` and `decoder_stages(…)`.
+`AutoCausalLm` implements both for every registered family, `AutoSeq2SeqLm`
+implements `HookedModel`, and a `LoadedModel` forwards both to its model, so
+the same function runs on a concrete family, on an automatically selected
+model, or directly on a checkpoint loaded with `load_local`:
 
 ```rust
 use burn::tensor::backend::Backend;

@@ -8,10 +8,11 @@ runs batched cached inference, and its numerics are checked against pinned
 reference implementations, from tiny Transformers-generated goldens to opt-in
 real-checkpoint gates.
 
-- **One experiment interface for every model.** The `HookedModel` and
-  `StagedModel` traits capture, ablate, patch, and steer activations, and
-  split a stack into resumable stages, on every built-in family, on a model
-  loaded from disk, and on your own compositions.
+- **One experiment interface for every model.** The `HookedModel` trait
+  captures, ablates, patches, and steers activations on every built-in family,
+  on a model loaded from disk, and on your own compositions; `StagedModel`
+  splits a causal stack into resumable stages (T5 and modular encoder-decoder
+  models expose it on their encoder and decoder stage views).
 - **Shared, model-independent mechanisms.** Grouped-query, latent, sliding,
   chunked-local, differential, and sink attention; every Hugging Face RoPE
   rule; Gated DeltaNet and Mamba-2 mixers; dense, gated, clamped, and sparse
@@ -235,7 +236,8 @@ cargo run --release --locked --features autodiff --example t5_classifier -- --tr
 ### Model families and status
 
 `AutoCausalLm` dispatches the causal families below by `model_type`, and
-`AutoSeq2SeqLm` dispatches `t5`; both implement the experiment traits. A family
+`AutoSeq2SeqLm` dispatches `t5`. `AutoCausalLm` implements both experiment
+traits and `AutoSeq2SeqLm` implements `HookedModel`. A family
 being implemented is not a support claim: support requires a committed
 acceptance record for an exact checkpoint, backend, and dtype
 ([SUPPORT.md](SUPPORT.md)). Evidence for every row is on the

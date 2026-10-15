@@ -55,8 +55,10 @@ Architecture modules translate checkpoint configuration, wire exact layer
 schedules, and declare explicit checkpoint mappings. They do not own reusable
 mathematics. Reusable implementations are separated into these domains:
 
-- **Attention:** MHA/GQA/MQA computed on native KV heads (query groups are
-  folded, never repeated), bottom-right causal alignment on every backend,
+- **Attention:** MHA/GQA/MQA over native KV heads (cached decoding and
+  suffixes fold query groups instead of repeating K/V; square causal prefill on
+  the backend-native path keeps the fused `is_causal` kernel and repeats K/V
+  there), bottom-right causal alignment on every backend,
   global/sliding/chunked-local connectivity, learned sinks, score soft caps,
   projection biases, per-head or full-width Q/K norms, output gating,
   differential attention, score-bounded chunked execution, and MLA

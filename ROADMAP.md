@@ -49,8 +49,9 @@ The experiment interfaces are implemented and documented in
   clean-run replacement, validation, and custom typed computation points.
 - Stateless hooks on custom causal/seq2seq, Qwen3.5/3.8, T5, and shared attention;
   discoverable catalogs identify the points each execution path supports.
-  Every family now implements the generic `HookedModel` and `StagedModel`
-  traits (see [after v0.3](#progress-after-v03)).
+  Every family now implements the generic `HookedModel` trait, and every
+  causal family also implements `StagedModel` (see
+  [after v0.3](#progress-after-v03)).
 - Attention Q/K/V and head contexts retain native dispatch. An explicit eager
   precision choice enables score/pattern edits while preserving exclusions.
 - Ordinary Burn modules can be borrowed by edits and registered in an owning
@@ -325,11 +326,12 @@ release work; this implementation does not promote checkpoint support.
 A polish cycle broadened and hardened the implementation without changing the
 milestones above or the advertised checkpoint support:
 
-- **One experiment interface for every model.** `HookedModel` and
-  `StagedModel` are implemented by every family (including DeepSeek-V2, Muse
-  Glimmer, Nemotron-H, Qwen3-MoE, GPT-2, GPT-NeoX, and the modular models),
-  dispatched by `AutoCausalLm`/`AutoSeq2SeqLm`, and forwarded by
-  `LoadedModel`. The workbench runs one generic experiment on three families.
+- **One experiment interface for every model.** `HookedModel` is implemented
+  by every family and `StagedModel` by every causal family (including
+  DeepSeek-V2, Muse Glimmer, Nemotron-H, Qwen3-MoE, GPT-2, GPT-NeoX, and the
+  modular models); T5 and modular seq2seq models stage through their encoder
+  and decoder views. Both are dispatched by `AutoCausalLm` (`AutoSeq2SeqLm`
+  dispatches hooks) and forwarded by `LoadedModel`. The workbench runs one generic experiment on three families.
 - **New families.** The dense-decoder Llama family (`llama`, `mistral`,
   `qwen2`, `qwen3`, `smollm3`, `olmo2`), Gemma 2/3 text, and gpt-oss, each with
   tiny Transformers goldens and Flex/F32 real-checkpoint gates. Their
