@@ -53,7 +53,13 @@ use burn::{
     },
 };
 
-use crate::{Error, Result, experiment::read_int_scalars};
+use crate::{
+    Error, Result,
+    experiment::{
+        bounds::{fold_widths, range_within},
+        read_int_scalars,
+    },
+};
 
 // Parameter ownership and native optimizer compatibility.
 
@@ -217,7 +223,7 @@ pub fn cross_entropy<B: Backend>(
         "training target labels",
     )?;
     let (minimum, maximum) = (range[0], range[1]);
-    if !labels_within(minimum, maximum, classes) {
+    if !range_within(minimum, maximum, classes) {
         return Err(Error::configuration(
             "training.targets",
             format!("expected labels in 0..{classes}, found range {minimum}..={maximum}"),
@@ -261,11 +267,6 @@ pub fn kl_divergence<B: Backend>(
     let teacher = log_softmax(teacher_logits, 1)?;
     let per_example = sum_dim(teacher.clone().exp() * (teacher - student), 1).reshape([examples]);
     Ok(sum_dim(per_example, 0) / examples as f64)
-}
-
-/// Whether every label in `minimum..=maximum` indexes one of `classes` columns.
-fn labels_within(minimum: i64, maximum: i64, classes: usize) -> bool {
-    minimum >= 0 && usize::try_from(maximum).is_ok_and(|maximum| maximum < classes)
 }
 
 /// Checks nonempty tensor geometry and F32/F64 storage without reading logit values.
@@ -330,16 +331,6 @@ fn pairwise_row_sums<B: Backend>(mut values: Tensor<B, 2>) -> Tensor<B, 2> {
         width = next;
     }
     values
-}
-
-/// One folding level of [`pairwise_row_sums`]: the pair count and the next width.
-///
-/// For `width >= 2`, `half = floor(width / 2)` column pairs are added and an
-/// odd middle column is carried, so `next = ceil(width / 2)`, which is at
-/// least one and strictly less than `width`; the tree therefore terminates.
-fn fold_widths(width: usize) -> (usize, usize) {
-    let half = width / 2;
-    (half, half + width % 2)
 }
 
 #[cfg(all(test, feature = "flex"))]

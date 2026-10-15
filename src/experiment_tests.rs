@@ -716,22 +716,6 @@ fn batched_integer_readback_preserves_order_and_handles_empty_input() {
     );
 }
 
-proptest::proptest! {
-    /// Position-range predicates agree with exact 128-bit integer arithmetic.
-    #[test]
-    fn position_range_helpers_match_a_wide_integer_reference(
-        low in proptest::num::i64::ANY,
-        high in proptest::num::i64::ANY,
-        extent in proptest::num::usize::ANY,
-    ) {
-        let expected_extent = (high >= 0 && i128::from(high) < usize::MAX as i128)
-            .then(|| (i128::from(high) + 1) as usize);
-        proptest::prop_assert_eq!(extent_after(high), expected_extent);
-        let expected_within = low >= 0 && low <= high && i128::from(high) < extent as i128;
-        proptest::prop_assert_eq!(positions_within(low, high, extent), expected_within);
-    }
-}
-
 /// Reports per-call validation cost; run with `--ignored --nocapture`.
 ///
 /// Compares the sync-free layout check, the one-readback value check, and the

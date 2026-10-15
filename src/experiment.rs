@@ -25,6 +25,7 @@ use crate::{
 };
 
 mod block;
+pub(crate) mod bounds;
 mod rotary;
 pub use block::{ResidualBlock, WidthAdapter};
 pub use rotary::RotaryAttention;
@@ -155,11 +156,7 @@ impl<B: Backend> AttentionPolicy<B> {
 
 /// Checks broadcasting into `[batch, head, query_token, key_token]` one axis at a time.
 fn validate_plane(field: &str, actual: [usize; 4], expected: [usize; 4]) -> Result<()> {
-    if actual
-        .iter()
-        .zip(expected)
-        .any(|(actual, expected)| *actual != 1 && *actual != expected)
-    {
+    if !bounds::broadcasts_to(&actual, &expected) {
         return Err(Error::shape(
             field,
             format!("broadcastable to {expected:?}"),
@@ -239,7 +236,7 @@ impl<B: Backend> ExecutionContext<B> {
                 "positions must be nonnegative",
             ));
         }
-        let evaluated_context = extent_after(high).ok_or_else(|| {
+        let evaluated_context = bounds::extent_after(high).ok_or_else(|| {
             Error::configuration("execution.positions", "positional extent overflows usize")
         })?;
         let device = positions.device();
@@ -373,7 +370,7 @@ impl<B: Backend> ExecutionContext<B> {
         }
         let values = read_int_scalars(extrema, "execution positions")?;
         let (low, high) = (values[0], values[1]);
-        if !positions_within(low, high, self.evaluated_context) {
+        if !bounds::range_within(low, high, self.evaluated_context) {
             return Err(Error::configuration(
                 "execution.positions",
                 format!(
@@ -463,7 +460,7 @@ impl<B: Backend> ExecutionContext<B> {
     }
 }
 
-// Host readback and pure position-range arithmetic.
+// Host readback of device-side integer extrema.
 
 /// Reads one-element integer tensors from one device with a single synchronization.
 ///
@@ -490,18 +487,6 @@ pub(crate) fn read_int_scalars<B: Backend>(
         )));
     }
     Ok(values)
-}
-
-/// Returns the positional extent `high + 1` for a nonnegative maximum position.
-///
-/// `None` means `high` is negative or `high + 1` does not fit in `usize`.
-fn extent_after(high: i64) -> Option<usize> {
-    usize::try_from(high).ok()?.checked_add(1)
-}
-
-/// Whether every position in `low..=high` lies in `0..extent`.
-fn positions_within(low: i64, high: i64, extent: usize) -> bool {
-    low >= 0 && low <= high && usize::try_from(high).is_ok_and(|high| high < extent)
 }
 
 /// A representation at an explicit block and normalization boundary.
@@ -552,7 +537,7 @@ impl<B: Backend> HiddenState<B> {
                 "blocks require raw states before final normalization",
             ));
         }
-        if range.start != self.next_layer || range.start > range.end || range.end > total {
+        if !bounds::follows_cursor(self.next_layer, range.start, range.end, total) {
             return Err(Error::configuration(
                 "execution.range",
                 format!(

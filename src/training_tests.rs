@@ -732,20 +732,6 @@ mod autodiff {
     }
 }
 
-proptest::proptest! {
-    /// Label-range acceptance matches exact 128-bit comparisons for every class count.
-    #[test]
-    fn label_range_check_matches_a_wide_integer_reference(
-        minimum in proptest::num::i64::ANY,
-        maximum in proptest::num::i64::ANY,
-        classes in proptest::num::usize::ANY,
-    ) {
-        let expected =
-            minimum >= 0 && maximum >= 0 && i128::from(maximum) < classes as i128;
-        proptest::prop_assert_eq!(labels_within(minimum, maximum, classes), expected);
-    }
-}
-
 // Pairwise reduction: accuracy against F64, parity with the previous tree, and cost.
 
 /// The previous adjacent-pair tree, kept as the reference the folding tree must match.
@@ -792,19 +778,6 @@ fn folded_reduction_matches_f64_and_the_previous_tree_for_any_peak_position() {
             // Both trees are within 2e-7 of F64, possibly on opposite sides.
             assert!((folded - previous).abs() < 4e-7);
         }
-    }
-}
-
-/// Fold widths shrink by about half and carry exactly the odd middle column.
-#[test]
-fn fold_widths_halve_and_carry_odd_columns() {
-    assert_eq!(fold_widths(2), (1, 1));
-    assert_eq!(fold_widths(3), (1, 2));
-    assert_eq!(fold_widths(151_936), (75_968, 75_968));
-    for width in 2..1_000 {
-        let (half, next) = fold_widths(width);
-        assert_eq!(2 * half + width % 2, width);
-        assert!(next >= 1 && next < width);
     }
 }
 
