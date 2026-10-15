@@ -18,17 +18,19 @@
 use burn::{
     module::{Module, Param},
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
-    tensor::{
-        Bool, DType, IndexingUpdateOp, Int, Tensor, TensorData, activation, backend::Backend,
-    },
+    tensor::{Bool, DType, Int, Tensor, activation, backend::Backend},
 };
 
 use crate::{
     ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
     architecture::{Activation, RouterDiagnostics, TokenMask},
     attention::{GroupedQueryAttention, GroupedQueryAttentionConfig, padding_attention_mask},
-    feed_forward::apply_activation,
-    moe::group_selected_experts,
+    feed_forward::{DenseFeedForward, DenseFeedForwardConfig},
+    moe::{
+        ExpertSelection, GroupLimitedSelection, GroupScore, PrunedExpertScore,
+        RenormalizationDenominator, RoutedExpertPrecision, RouterConfig, RouterProjectionPrecision,
+        RouterScoring, RoutingPolicy, ScoringOrder, dispatch_routed_experts, router_logits,
+    },
     normalization::{RmsNorm, RmsNormConfig, RmsNormRootMode},
     operations,
 };
@@ -62,58 +64,28 @@ const INPUT_NAMES: InputNames<'static> = InputNames {
 const PARAMETERS: &str = "Nemotron-H model parameters";
 
 /// Ordinary two-projection MLP used by dense, routed, and shared blocks.
-#[derive(Module, Debug)]
-pub struct NemotronHDense<B: Backend> {
-    /// Projection into intermediate channels.
-    pub up_proj: Linear<B>,
-    /// Projection back to the residual/latent width.
-    pub down_proj: Linear<B>,
-    /// ReLU² for released checkpoints, with SiLU retained for legacy configs.
-    pub activation: Activation,
-    /// Input and output width.
-    pub hidden_size: usize,
-    /// Intermediate activation width.
-    pub intermediate_size: usize,
-}
+///
+/// Nemotron-H's MLPs are ungated `down(phi(up(x)))` with `phi = ReLU²` for the
+/// released checkpoints (SiLU remains accepted for legacy configs), exactly the
+/// crate's shared [`DenseFeedForward`]. The alias keeps the family name
+/// stable for loaders and downstream code.
+pub type NemotronHDense<B> = DenseFeedForward<B>;
 
-impl<B: Backend> NemotronHDense<B> {
-    /// Initializes a checkpoint-native `[out, in]` MLP.
-    fn init(
-        hidden_size: usize,
-        intermediate_size: usize,
-        activation: Activation,
-        bias: bool,
-        device: &B::Device,
-    ) -> Result<Self> {
-        if hidden_size == 0 || intermediate_size == 0 {
-            return Err(Error::configuration(
-                "nemotron_h.mlp",
-                "hidden and intermediate widths must be non-zero",
-            ));
-        }
-        let linear = |input, output| {
-            operations::init_linear(
-                &LinearConfig::new(input, output)
-                    .with_bias(bias)
-                    .with_layout(LinearLayout::Col),
-                device,
-            )
-        };
-        Ok(Self {
-            up_proj: linear(hidden_size, intermediate_size),
-            down_proj: linear(intermediate_size, hidden_size),
-            activation,
-            hidden_size,
-            intermediate_size,
-        })
-    }
-
-    /// Evaluates `down(activation(up(x)))` without a multiplicative gate.
-    pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Result<Tensor<B, D>> {
-        let activated =
-            apply_activation(operations::linear(input, &self.up_proj)?, self.activation);
-        operations::linear(activated, &self.down_proj)
-    }
+/// Initializes one checkpoint-native `[out, in]` Nemotron-H MLP.
+///
+/// Widths are validated by [`DenseFeedForwardConfig::init`], which reports a
+/// contextual error for zero extents before allocating.
+fn dense_mlp<B: Backend>(
+    hidden_size: usize,
+    intermediate_size: usize,
+    activation: Activation,
+    bias: bool,
+    device: &B::Device,
+) -> Result<NemotronHDense<B>> {
+    DenseFeedForwardConfig::new(hidden_size, intermediate_size)
+        .with_activation(activation)
+        .with_bias(bias)
+        .init(device)
 }
 
 /// Sparse routing output retained for requested diagnostics and tests.
@@ -231,7 +203,7 @@ impl<B: Backend> NemotronHMoe<B> {
         let latent = config.moe_latent_size.unwrap_or(config.hidden_size);
         let routed = (0..config.n_routed_experts)
             .map(|_| {
-                NemotronHDense::init(
+                dense_mlp(
                     latent,
                     config.moe_intermediate_size,
                     activation,
@@ -263,7 +235,7 @@ impl<B: Backend> NemotronHMoe<B> {
             ))
             .set_require_grad(false),
             routed,
-            shared: NemotronHDense::init(
+            shared: dense_mlp(
                 config.hidden_size,
                 config.moe_shared_expert_intermediate_size,
                 activation,
@@ -285,10 +257,62 @@ impl<B: Backend> NemotronHMoe<B> {
         })
     }
 
-    /// Selects and evaluates only routed experts receiving at least one token.
+    /// Returns the shared routing specification this module executes.
+    ///
+    /// NVIDIA's router is DeepSeek-V3's `noaux_tc` policy: experts are scored
+    /// by `s = sigmoid(z)` from an F32 projection, a frozen F32 correction bias
+    /// `b` changes only the discrete choice (`top-k(s + b)` after keeping the
+    /// best `topk_group` groups ranked by their top-two corrected scores, with
+    /// pruned experts at `-inf`), and the mixture weights are the uncorrected
+    /// `s` of the chosen experts, renormalized as `s / max(sum s, 1e-20)` when
+    /// `norm_topk_prob` holds and multiplied by `routed_scaling_factor`.
+    ///
+    /// The denominator guard is a clamp rather than the Hugging Face
+    /// `sum + 1e-20`: both are the identity for every sum of positive sigmoid
+    /// scores representable in F32 (the smallest such sum is far above the
+    /// guard), and the clamp keeps this module bit-identical to its earlier
+    /// releases.
+    #[must_use]
+    pub fn router_config(&self) -> RouterConfig {
+        RouterConfig {
+            experts: self.routed.len(),
+            experts_per_token: self.experts_per_token,
+            policy: RoutingPolicy {
+                scoring: RouterScoring::Sigmoid,
+                order: ScoringOrder::ScoreThenTopK,
+                selection: ExpertSelection::GroupLimited(GroupLimitedSelection {
+                    groups: self.groups,
+                    top_groups: self.top_groups,
+                    group_score: GroupScore::TopTwoSum,
+                    pruned_score: PrunedExpertScore::NegativeInfinity,
+                }),
+                correction_bias: true,
+                router_bias: false,
+                projection: RouterProjectionPrecision::Fp32,
+                denominator: RenormalizationDenominator::ClampedBelow(ROUTER_DENOMINATOR_FLOOR),
+            },
+            renormalize_selected: self.renormalize_selected,
+            routed_scale: self.routed_scale,
+        }
+    }
+
+    /// Routes `[batch, sequence, hidden]` tokens and evaluates only selected experts.
+    ///
+    /// Routing ranks, normalizes, and weights in F32 even when the expert
+    /// projections run in F16/BF16, matching the reference; every routed
+    /// contribution `expert(x) * w` is formed and summed in F32 and rounded to
+    /// the expert dtype once, before the optional latent up-projection. The
+    /// always-active shared expert is then added in the residual dtype.
+    ///
+    /// # Errors
+    ///
+    /// Returns a shape error for an empty or mis-sized input, a configuration
+    /// error when the instantiated cardinalities cannot be routed (for example
+    /// `experts_per_token` above the experts left after group pruning), and a
+    /// contextual `moe.router_scores` shape error naming the first token whose
+    /// router scores or weights are not finite.
     pub fn forward(&self, input: Tensor<B, 3>) -> Result<NemotronHMoeOutput<B>> {
         let [batch, sequence, hidden] = input.dims();
-        let experts = self.routed.len();
         if batch == 0 || sequence == 0 || hidden != self.hidden_size {
             return Err(Error::shape(
                 "nemotron_h.moe.input",
@@ -296,141 +320,87 @@ impl<B: Backend> NemotronHMoe<B> {
                 format!("[{batch}, {sequence}, {hidden}]"),
             ));
         }
-        if experts == 0
-            || self.experts_per_token == 0
-            || self.experts_per_token > experts
-            || self.groups == 0
-            || !experts.is_multiple_of(self.groups)
-            || self.top_groups == 0
-            || self.top_groups > self.groups
-        {
-            return Err(Error::configuration(
-                "nemotron_h.moe.router",
-                "instantiated routing cardinalities are inconsistent",
-            ));
-        }
         let tokens = batch.checked_mul(sequence).ok_or_else(|| {
             Error::configuration("nemotron_h.moe", "batch * sequence overflows usize")
         })?;
-        let flat = input.clone().reshape([tokens, hidden]);
-        let router_weight = self.router.weight.val().cast(DType::F32);
-        let router_logits = flat
-            .clone()
-            .cast(DType::F32)
-            .matmul(router_weight)
-            .reshape([batch, sequence, experts]);
-        let scores = activation::sigmoid(router_logits.clone()).reshape([tokens, experts]);
-        let corrected = scores.clone()
-            + self
-                .correction_bias
-                .val()
-                .cast(DType::F32)
-                .reshape([1, experts]);
-        let eligible = if self.groups == 1 {
-            // Lightning's `n_group = topk_group = 1` makes group pruning the
-            // identity. Besides avoiding unnecessary work, this branch is
-            // required because Burn intentionally rejects one-hot tensors with
-            // fewer than two classes.
-            corrected
-        } else {
-            let experts_per_group = experts / self.groups;
-            let group_candidates = deterministic_top_k(
-                corrected
-                    .clone()
-                    .reshape([tokens, self.groups, experts_per_group]),
-                2.min(experts_per_group),
-            )
-            .0
-            .sum_dim(2)
-            .reshape([1, tokens, self.groups]);
-            let selected_groups = deterministic_top_k(group_candidates, self.top_groups)
-                .1
-                .reshape([tokens, self.top_groups]);
-            let group_mask = selected_groups
-                .one_hot::<3>(self.groups)
-                .sum_dim(1)
-                .greater_elem(0)
-                .reshape([tokens, self.groups, 1])
-                .expand([tokens, self.groups, experts_per_group])
-                .reshape([tokens, experts]);
-            corrected.mask_fill(group_mask.bool_not(), f32::NEG_INFINITY)
-        };
-        let (ignored_corrected_weights, selected_experts) = deterministic_top_k(
-            eligible.reshape([1, tokens, experts]),
-            self.experts_per_token,
-        );
-        drop(ignored_corrected_weights);
-        let selected_experts_flat = selected_experts.reshape([tokens, self.experts_per_token]);
-        let mut selected_weights = scores.gather(1, selected_experts_flat.clone());
-        if self.renormalize_selected {
-            let denominator = selected_weights.clone().sum_dim(1).clamp_min(1e-20);
-            selected_weights = selected_weights / denominator;
-        }
-        // The reference keeps sigmoid routing and the sparse weighted sum in
-        // FP32 even when expert projections execute in BF16/F16.
-        selected_weights = selected_weights * self.routed_scale;
+        let output = self.forward_tokens(input.reshape([tokens, hidden]))?;
+        let k = self.experts_per_token;
+        Ok(NemotronHMoeOutput {
+            hidden_state: output.hidden_state.reshape([batch, sequence, hidden]),
+            router_logits: output
+                .router_logits
+                .reshape([batch, sequence, self.routed.len()]),
+            selected_experts: output.selected_experts.reshape([batch, sequence, k]),
+            selected_weights: output.selected_weights.reshape([batch, sequence, k]),
+            expert_token_counts: output.expert_token_counts,
+            evaluated_experts: output.evaluated_experts,
+        })
+    }
 
+    /// Routes flattened `[tokens, hidden]` states; the core of [`Self::forward`].
+    ///
+    /// Stateful execution uses this directly on packed valid tokens so padded
+    /// batch slots never reach the router or an expert.
+    pub(crate) fn forward_tokens(&self, flat: Tensor<B, 2>) -> Result<NemotronHFlatMoeOutput<B>> {
+        let [tokens, hidden] = flat.dims();
+        if tokens == 0 || hidden != self.hidden_size {
+            return Err(Error::shape(
+                "nemotron_h.moe.input",
+                format!("[tokens>0, {}]", self.hidden_size),
+                format!("[{tokens}, {hidden}]"),
+            ));
+        }
+        let config = self.router_config();
+        let router_logits = router_logits(flat.clone(), &self.router, config.policy.projection)?;
+        let decision = config.route(router_logits.clone(), Some(self.correction_bias.val()))?;
         let routed_input = match &self.fc1_latent_proj {
             Some(projection) => operations::linear(flat.clone(), projection)?,
             None => flat.clone(),
         };
         let routed_dtype = routed_input.dtype();
-        let latent = routed_input.dims()[1];
-        let assignment_count = tokens.checked_mul(self.experts_per_token).ok_or_else(|| {
-            Error::configuration(
-                "nemotron_h.moe",
-                "tokens * experts_per_token overflows usize",
-            )
-        })?;
-        let groups = group_selected_experts(selected_experts_flat.clone(), experts)?;
-        let flat_selected_weights = selected_weights.clone().reshape([assignment_count]);
-        let mut routed_output =
-            Tensor::<B, 2>::zeros([tokens, latent], (&flat.device(), DType::F32));
-        let mut counts = Vec::with_capacity(experts);
-        let mut evaluated = 0;
-        for (expert, group) in self.routed.iter().zip(groups) {
-            let assignments = group.token_indices.len();
-            counts.push(assignments);
-            if assignments == 0 {
-                continue;
-            }
-            evaluated += 1;
-            let token_indices = Tensor::<B, 1, Int>::from_data(
-                TensorData::new(group.token_indices, [assignments]),
-                &flat.device(),
-            );
-            let weight_indices = Tensor::<B, 1, Int>::from_data(
-                TensorData::new(group.weight_indices, [assignments]),
-                &flat.device(),
-            );
-            let weights = flat_selected_weights
-                .clone()
-                .select(0, weight_indices)
-                .unsqueeze_dim::<2>(1);
-            let expert_input = routed_input.clone().select(0, token_indices.clone());
-            let contribution = expert.forward(expert_input)?.cast(DType::F32) * weights;
-            routed_output =
-                routed_output.select_assign(0, token_indices, contribution, IndexingUpdateOp::Add);
-        }
-        let routed_output = routed_output.cast(routed_dtype);
+        let dispatch = dispatch_routed_experts(
+            routed_input,
+            decision.weights.clone(),
+            decision.experts.clone(),
+            Some(decision.non_finite_tokens),
+            self.routed.len(),
+            RoutedExpertPrecision::uniform(DType::F32),
+            |expert, rows| self.routed[expert].forward(rows),
+        )?;
+        let routed_output = dispatch.hidden_state.cast(routed_dtype);
         let routed_output = match &self.fc2_latent_proj {
             Some(projection) => operations::linear(routed_output, projection)?,
             None => routed_output,
         };
         let shared = self.shared.forward(flat)?;
-        Ok(NemotronHMoeOutput {
-            hidden_state: (routed_output + shared).reshape([batch, sequence, hidden]),
+        Ok(NemotronHFlatMoeOutput {
+            hidden_state: routed_output + shared,
             router_logits,
-            selected_experts: selected_experts_flat.reshape([
-                batch,
-                sequence,
-                self.experts_per_token,
-            ]),
-            selected_weights: selected_weights.reshape([batch, sequence, self.experts_per_token]),
-            expert_token_counts: counts,
-            evaluated_experts: evaluated,
+            selected_experts: decision.experts,
+            selected_weights: decision.weights,
+            expert_token_counts: dispatch.expert_token_counts,
+            evaluated_experts: dispatch.evaluated_experts,
         })
     }
+}
+
+/// Smallest renormalization denominator of selected sigmoid router weights.
+const ROUTER_DENOMINATOR_FLOOR: f32 = 1e-20;
+
+/// Routing result over flattened tokens, before reshaping to `[batch, sequence, ..]`.
+pub(crate) struct NemotronHFlatMoeOutput<B: Backend> {
+    /// Sum of routed and shared expert outputs `[tokens, hidden]`.
+    pub(crate) hidden_state: Tensor<B, 2>,
+    /// F32 router logits `[tokens, experts]`.
+    pub(crate) router_logits: Tensor<B, 2>,
+    /// Selected expert IDs `[tokens, top_k]`.
+    pub(crate) selected_experts: Tensor<B, 2, Int>,
+    /// F32 mixture weights `[tokens, top_k]` after renormalization and scaling.
+    pub(crate) selected_weights: Tensor<B, 2>,
+    /// Assignment count of every routed expert.
+    pub(crate) expert_token_counts: Vec<usize>,
+    /// Number of routed expert graphs evaluated.
+    pub(crate) evaluated_experts: usize,
 }
 
 /// One pre-normalized heterogeneous residual block.
@@ -476,7 +446,7 @@ impl<B: Backend> NemotronHBlock<B> {
             NemotronHBlockType::Mlp => (
                 None,
                 None,
-                Some(NemotronHDense::init(
+                Some(dense_mlp(
                     config.hidden_size,
                     config.intermediate_size,
                     activation,
@@ -976,38 +946,6 @@ fn mamba_config(config: &NemotronHConfig) -> NemotronMamba2Config {
         projection_bias: config.use_bias,
         convolution_bias: config.use_conv_bias,
     }
-}
-
-/// Deterministically selects largest values, resolving ties by smallest index.
-fn deterministic_top_k<B: Backend>(
-    values: Tensor<B, 3>,
-    k: usize,
-) -> (Tensor<B, 3>, Tensor<B, 3, Int>) {
-    let [batch, rows, columns] = values.dims();
-    let ids = Tensor::<B, 1, Int>::arange(0..columns as i64, &values.device())
-        .reshape([1, 1, columns])
-        .expand([batch, rows, columns]);
-    let mut remaining = values.clone();
-    let mut selected_values = Vec::with_capacity(k);
-    let mut selected_indices = Vec::with_capacity(k);
-    for _ in 0..k {
-        let maximum = remaining.clone().max_dim(2);
-        let ties = remaining.clone().equal(maximum);
-        let index = ids
-            .clone()
-            .mask_fill(ties.bool_not(), columns as i64)
-            .min_dim(2);
-        selected_values.push(values.clone().gather(2, index.clone()));
-        selected_indices.push(index.clone());
-        remaining = remaining.mask_fill(
-            ids.clone().equal(index.expand([batch, rows, columns])),
-            f32::NEG_INFINITY,
-        );
-    }
-    (
-        Tensor::cat(selected_values, 2),
-        Tensor::cat(selected_indices, 2),
-    )
 }
 
 /// Combines true-valid padding semantics with an optional causal left window.
