@@ -32,7 +32,11 @@ autodiff = ["burn/autodiff"]
 # loops require only `autodiff`; the crate does not provide a separate trainer.
 train = ["std", "autodiff", "burn/train"]
 cpu = ["burn/cpu"]
-flex = ["burn/flex"]
+# Burn's own default enables Flex's SIMD kernels and rayon-parallel GEMM, but
+# this crate disables Burn defaults to keep backends opt-in. Re-enable both for
+# Flex explicitly; without them every elementwise op takes the scalar path and
+# matrix products run on one core.
+flex = ["burn/flex", "burn/simd", "dep:burn-flex", "burn-flex/rayon"]
 metal = ["burn/metal"]
 cuda = ["burn/cuda"]
 rocm = ["burn/rocm"]
@@ -49,6 +53,9 @@ attention-kernel-tracing = ["kernel-tracing", "burn/autotune"]
 
 [dependencies]
 burn = { version = "=0.21.0", default-features = false }
+# Direct handle used only to enable burn-flex's rayon feature (already in the
+# dependency graph through burn); see the `flex` feature.
+burn-flex = { version = "=0.21.0", default-features = false, optional = true }
 burn-store = { version = "=0.21.0", default-features = false, features = ["burnpack", "memmap"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["raw_value"] }

@@ -753,7 +753,9 @@ dependencies = [
  "burn-backend",
  "burn-ir",
  "burn-std",
+ "bytemuck",
  "const-random",
+ "itertools 0.14.0",
  "libm",
  "macerator",
  "matrixmultiply",
@@ -763,6 +765,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "rand 0.10.2",
+ "seq-macro",
 ]
 
 [[package]]
@@ -5886,6 +5889,7 @@ name = "transformers"
 version = "0.1.0"
 dependencies = [
  "burn",
+ "burn-flex",
  "burn-store",
  "minijinja",
  "proptest",
