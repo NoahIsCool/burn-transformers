@@ -13,10 +13,13 @@
 //!
 //! [`InitPolicy::apply`] rejects residual-projection names that match no
 //! `Linear` field, so the names are derived from the blocks the spec actually
-//! contains: attention, MLA, and differential-attention output projections are `o_proj`, Gated DeltaNet
-//! writes through `out_proj`, and every dense or expert MLP through
-//! `down_proj`. Attention-only stacks have no `down_proj`, and Mamba2 blocks
-//! (not yet executable) contribute nothing.
+//! contains: attention, MLA, and differential-attention output projections are
+//! `o_proj`, Gated DeltaNet and Mamba-2 write through `out_proj`, and every
+//! dense or expert MLP through `down_proj`. Attention-only stacks have no
+//! `down_proj`. Mamba-2's fused input projection is an ordinary projection;
+//! its convolution, decay (`A_log`), step bias, skip `D`, and norm scale are
+//! [`crate::initialization::ParameterRole::Other`] and keep their reference
+//! initialization.
 
 use std::collections::BTreeSet;
 
@@ -41,10 +44,9 @@ pub(super) fn scaled_init_policy<'a>(
     }
     for layer in stacks.into_iter().flat_map(|spec| &spec.layers) {
         match &layer.mixer {
-            MixerSpec::DeltaNet { .. } => {
+            MixerSpec::DeltaNet { .. } | MixerSpec::Mamba2(_) => {
                 residual_projections.insert("out_proj");
             }
-            MixerSpec::Mamba2(_) => {}
             MixerSpec::Attention(_)
             | MixerSpec::SlidingAttention(_)
             | MixerSpec::AttentionWithOptions { .. }

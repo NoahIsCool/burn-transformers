@@ -10,7 +10,7 @@
 //! | piece | module | role |
 //! | --- | --- | --- |
 //! | [`ModularLayer`] | `layer` | one block: mixer, optional cross-attention, optional feed-forward |
-//! | mixers | `mixer` | grouped-query, latent (MLA), and differential attention; Gated DeltaNet |
+//! | mixers | `mixer` | grouped-query, latent (MLA), and differential attention; Gated DeltaNet; Mamba-2 |
 //! | feed-forward | `feed_forward` | gated, ungated, clamped SwiGLU, routed experts |
 //! | [`NormLayout`] | `norm` | identity, pre, post, or sandwich normalization per branch |
 //! | stack pass | `pass` | positions, padding, overrides, and tables shared by all blocks |
@@ -29,9 +29,11 @@
 //! # Contracts
 //!
 //! The builders are deliberately strict. A valid serialized specification can still ask for
-//! a mechanism whose shared executable kernel has not landed yet (Mamba2, gated residuals).
-//! Such a request fails before any parameter is allocated; it is never substituted with
-//! ordinary attention or another mathematically different operation. Stateful inference uses
+//! a mechanism whose shared executable kernel has not landed yet (gated residuals). Such a
+//! request fails before any parameter is allocated; it is never substituted with ordinary
+//! attention or another mathematically different operation. Mamba-2 blocks run the shared
+//! [`crate::mamba2`] mixer; settings its specification does not carry take the documented
+//! Hugging Face `Mamba2Config` defaults (see the `mixer` module). Stateful inference uses
 //! a preallocated token-history state and recomputes the stateless graph for the whole batch
 //! in one pass. That reference path is exact and useful for parity experiments, while family
 //! runtimes retain the optimized native-KV and recurrent caches. Semantic masks exclude

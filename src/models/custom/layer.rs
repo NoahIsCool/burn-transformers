@@ -42,7 +42,7 @@ use crate::{
 
 use super::{
     feed_forward::ModularFeedForward,
-    mixer::{ModularAttention, ModularMixer},
+    mixer::{ModularAttention, ModularMixer, mamba2_config},
     norm::NormLayout,
     pass::{StackPass, explicit_cross_policy, explicit_self_policy},
 };
@@ -76,8 +76,10 @@ impl<B: Backend> ModularLayer<B> {
     /// `cross_attention` adds a decoder-to-encoder branch (seq2seq decoder
     /// blocks). Specification errors name fields below `layer` (and
     /// `cross_attention`); a well-formed block whose mechanism has no
-    /// executable kernel (Mamba2, gated residuals) fails with a capability
-    /// error before any parameter is allocated.
+    /// executable kernel (gated residuals) fails with a capability error, and
+    /// a Mamba-2 geometry the shared kernel cannot run (a convolution kernel
+    /// below two) with a configuration error, before any parameter is
+    /// allocated.
     pub fn init(
         spec: &DecoderLayerSpec,
         hidden_size: usize,
@@ -94,7 +96,7 @@ impl<B: Backend> ModularLayer<B> {
         if let Some(cross) = cross_attention {
             cross.validate("cross_attention", hidden_size)?;
         }
-        ensure_executable(spec, "layer")?;
+        ensure_executable(spec, hidden_size, "layer")?;
         Self::build(spec, hidden_size, cross_attention, device)
     }
 
@@ -278,6 +280,7 @@ impl<B: Backend> ModularLayer<B> {
             ModularMixer::Mla(mla) => mla.attention.kv_a_proj_with_mqa.weight.val(),
             ModularMixer::Differential(differential) => differential.attention.q_proj.weight.val(),
             ModularMixer::DeltaNet(delta) => delta.in_proj_qkv.weight.val(),
+            ModularMixer::Mamba2(mamba) => mamba.in_proj.weight.val(),
         };
         let packed_weight = matches!(projection.dtype(), DType::QFloat(_));
         if projection.device() != hidden.device()
@@ -306,15 +309,15 @@ impl<B: Backend> ModularLayer<B> {
         let [batch, tokens, _] = hidden.dims();
         let explicit = explicit_self_policy(context, layer);
         let encoder_default = explicit.is_none() && layer.stack() == Stack::Encoder;
-        if matches!(&self.mixer, ModularMixer::DeltaNet(_)) {
+        if let Some(name) = self.mixer.recurrent_name() {
             let unsupported = encoder_default
                 || explicit.as_ref().is_some_and(|policy| {
                     !policy.causal || policy.allowed.is_some() || policy.bias.is_some()
                 });
             if unsupported {
-                return Err(Error::BackendCapability(
-                    "DeltaNet requires ordinary causal execution; choose another mixer for bidirectional or custom connectivity".into(),
-                ));
+                return Err(Error::BackendCapability(format!(
+                    "{name} requires ordinary causal execution; choose another mixer for bidirectional or custom connectivity"
+                )));
             }
         }
         if encoder_default
@@ -392,7 +395,7 @@ impl<B: Backend> ModularLayer<B> {
             ModularMixer::Differential(differential) => {
                 differential.attention.precision_mode = mode;
             }
-            ModularMixer::Mla(_) | ModularMixer::DeltaNet(_) => {}
+            ModularMixer::Mla(_) | ModularMixer::DeltaNet(_) | ModularMixer::Mamba2(_) => {}
         }
         if let Some(attention) = &mut self.cross_attention {
             attention.attention.precision_mode = mode;
@@ -427,19 +430,34 @@ impl<B: Backend> HiddenTransform<B> for ModularLayer<B> {
     }
 }
 
-/// Rejects well-formed blocks whose mechanism has no executable kernel yet.
+/// Rejects well-formed blocks that the shared kernels cannot execute.
 ///
-/// Errors name fields below `field`, such as `custom.causal.layers[2]`.
-pub(super) fn ensure_executable(spec: &DecoderLayerSpec, field: &str) -> Result<()> {
+/// A gated residual has no defined gate and fails with a capability error. A
+/// Mamba-2 mixer is translated to the shared kernel's configuration (with the
+/// block width `hidden_size` and the mixer-norm epsilon) and validated, so a
+/// geometry the kernel rejects, such as a convolution kernel below two, fails
+/// here with a configuration error. Errors name fields below `field`, such as
+/// `custom.causal.layers[2]`.
+pub(super) fn ensure_executable(
+    spec: &DecoderLayerSpec,
+    hidden_size: usize,
+    field: &str,
+) -> Result<()> {
     if spec.residual == ResidualTopology::Gated {
         return Err(Error::BackendCapability(format!(
             "{field}.residual requests a learned gate but the specification does not define its activation, shape, or initialization"
         )));
     }
-    if matches!(spec.mixer, MixerSpec::Mamba2(_)) {
-        return Err(Error::BackendCapability(format!(
-            "{field}.mixer requests Mamba2; the selective state-space kernel is not yet available as a shared module"
-        )));
+    if let MixerSpec::Mamba2(mamba) = &spec.mixer {
+        mamba2_config(mamba, hidden_size, spec.mixer_norm.epsilon())
+            .validate()
+            .map_err(|error| match error {
+                Error::Configuration {
+                    field: inner,
+                    reason,
+                } => Error::configuration(format!("{field}.mixer.{inner}"), reason),
+                other => other,
+            })?;
     }
     Ok(())
 }

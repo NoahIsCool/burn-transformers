@@ -55,7 +55,7 @@ pub(super) fn validate_stack_execution(
     }
     for (index, layer) in spec.layers.iter().enumerate() {
         let layer_field = format!("{field}.layers[{index}]");
-        ensure_executable(layer, &layer_field)?;
+        ensure_executable(layer, spec.hidden_size, &layer_field)?;
         if stack == Stack::Encoder {
             if layer.mixer.is_recurrent() {
                 return Err(Error::BackendCapability(format!(

@@ -109,9 +109,10 @@ impl<B: Backend> ModularCausalLm<B> {
     ///
     /// Embeddings and projections draw from `N(0, std^2)` with zero biases (Hugging Face's
     /// `initializer_range`, typically `0.02`), and projections that write into the residual
-    /// stream (`o_proj`, `down_proj`, DeltaNet `out_proj`, present in this spec) are scaled
-    /// by `1/sqrt(2 * layers)` as in GPT-2. Normalization scales, T5 biases, DeltaNet decay
-    /// parameters, and other non-projection parameters keep their constructed values.
+    /// stream (`o_proj`, `down_proj`, DeltaNet and Mamba-2 `out_proj`, present in this spec)
+    /// are scaled by `1/sqrt(2 * layers)` as in GPT-2. Normalization scales, T5 biases,
+    /// DeltaNet and Mamba-2 decay and step parameters, convolutions, and other non-projection
+    /// parameters keep their constructed values.
     #[must_use]
     pub fn scaled_init_policy(spec: &DecoderSpec, std: f64) -> InitPolicy {
         scaled_init_policy([spec], spec.layers.len(), false, std)
@@ -124,7 +125,8 @@ impl<B: Backend> ModularCausalLm<B> {
     /// materializes attention matrices with quadratic sequence memory cost; select
     /// it explicitly for experiments that need those points. Initialization uses
     /// [`AttentionPrecisionMode::BackendDefault`] unless this method is called.
-    /// DeltaNet keeps its recurrent computation; MLA retains its explicit eager graph.
+    /// DeltaNet and Mamba-2 keep their recurrent computation; MLA retains its explicit eager
+    /// graph.
     #[must_use]
     pub fn with_attention_precision(mut self, mode: AttentionPrecisionMode) -> Self {
         for layer in &mut self.layers {
@@ -144,8 +146,8 @@ impl<B: Backend> ModularCausalLm<B> {
     /// Residual points have shape `[batch, token, hidden]`. Dense feed-forward
     /// pre/activation points expose the gate (or up) projection before/after its nonlinearity.
     /// MoE layers expose only MLP input/output, and attention-only blocks no MLP point.
-    /// Attention input/output surround the configured mixer, including DeltaNet when that
-    /// layer uses a recurrent mixer.
+    /// Attention input/output surround the configured mixer, including DeltaNet or Mamba-2
+    /// when that layer uses a recurrent mixer.
     pub fn activation_points(&self) -> Vec<PointInfo> {
         let mut points = vec![Stack::Decoder.embedding().info()];
         for (index, layer) in self.layers.iter().enumerate() {
@@ -432,8 +434,8 @@ impl<B: Backend> ModularCausalLm<B> {
     /// Evaluates full-sequence attention with future tokens visible.
     ///
     /// Padding is still excluded, and every block's structural connectivity (trailing
-    /// windows, local chunks) is replaced by full bidirectional visibility. DeltaNet
-    /// returns a capability error. Positional encoding parameters are retained,
+    /// windows, local chunks) is replaced by full bidirectional visibility. A causal
+    /// recurrent mixer (DeltaNet, Mamba-2) returns a capability error. Positional encoding parameters are retained,
     /// including any directional relative bias.
     pub fn forward_bidirectional(
         &self,
@@ -474,7 +476,7 @@ impl<B: Backend> ModularCausalLm<B> {
     /// Returns bidirectional final normalized states without evaluating a vocabulary head.
     ///
     /// Padding remains excluded and structural connectivity is replaced. Intrinsically
-    /// causal DeltaNet is rejected, as in [`Self::forward_bidirectional`].
+    /// causal DeltaNet and Mamba-2 are rejected, as in [`Self::forward_bidirectional`].
     pub fn forward_hidden_bidirectional(&self, input: CausalLmInput<B>) -> Result<Tensor<B, 3>> {
         self.forward_hidden_bidirectional_with_hooks(input, &mut Hooks::new())
     }
@@ -516,7 +518,7 @@ impl<B: Backend> ModularCausalLm<B> {
                 .any(|layer| layer.mixer.is_recurrent())
         {
             return Err(Error::BackendCapability(
-                "DeltaNet is a causal recurrent mixer and cannot execute a bidirectional policy"
+                "DeltaNet and Mamba2 are causal recurrent mixers and cannot execute a bidirectional policy"
                     .into(),
             ));
         }

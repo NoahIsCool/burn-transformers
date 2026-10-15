@@ -1,4 +1,5 @@
-//! Sequence mixers of a modular block: grouped-query, latent, and differential attention, and Gated DeltaNet.
+//! Sequence mixers of a modular block: grouped-query, latent, and differential attention,
+//! Gated DeltaNet, and Mamba-2.
 //!
 //! Each mixer maps `[batch, token, hidden]` to the same shape. Attention mixers
 //! combine three independently specified ingredients:
@@ -15,6 +16,24 @@
 //! so every block of a stack reuses them. Padded query rows are defined as
 //! zero after the output projection; their softmax rows are not masked, which
 //! keeps every row well defined without special-casing fully padded rows.
+//!
+//! # Recurrent mixers
+//!
+//! Gated DeltaNet and Mamba-2 are causal scans from a zero initial state and
+//! have no attention connectivity. The token mask is semantic: a padded token
+//! passes no recurrent time (Mamba-2 sets its step `dt = 0`, an exact
+//! identity transition) and contributes no input, so left- and right-padded
+//! rows equal their unpadded scans. Mamba-2 runs the shared chunked
+//! state-space-duality scan ([`Mamba2Mode::ChunkedPrefill`]) of
+//! [`crate::mamba2`], whose state arithmetic is F32.
+//!
+//! [`Mamba2Spec`] fixes only the tensor geometry, so the remaining Mamba-2
+//! settings take the Hugging Face `Mamba2Config` defaults (transformers
+//! `cfa309cf`): `chunk_size = 256`, `time_step_limit = (0, inf)` on the
+//! chunked scan (a no-op bound, since `softplus >= 0`), no input/output
+//! projection bias (`use_bias = False`), a convolution bias
+//! (`use_conv_bias = True`), `n_groups = heads / group_size`, and the block's
+//! mixer-normalization epsilon for the gated group RMS norm.
 
 use burn::{
     module::Module,
@@ -24,7 +43,7 @@ use burn::{
 use crate::{
     Error, Result,
     architecture::{
-        AttentionOptions, AttentionSpec, DifferentialAttentionSpec, MixerSpec, MlaSpec,
+        AttentionOptions, AttentionSpec, DifferentialAttentionSpec, Mamba2Spec, MixerSpec, MlaSpec,
         NormalizationSpec, PositionEncodingSpec, TokenMask,
     },
     attention::{
@@ -32,9 +51,42 @@ use crate::{
     },
     delta_net::GatedDeltaNet,
     intervention::{AttentionPoints, Hooks, Layer, PointInfo},
+    mamba2::{Mamba2, Mamba2Config, Mamba2Mode, TimeStepClamp, TimeStepLimits},
     mla::MultiLatentAttention,
     position::{RopeConfig, T5RelativePositionBias, T5RelativePositionBiasConfig, apply_rotary},
 };
+
+/// Maximum SSD chunk width of a modular Mamba-2 mixer (Hugging Face `Mamba2Config` default).
+const MAMBA2_CHUNK_SIZE: usize = 256;
+
+/// Translates a validated [`Mamba2Spec`] into the shared mixer configuration.
+///
+/// `hidden_size` is the residual width and `norm_epsilon` the block's mixer
+/// normalization epsilon, reused by the gated group RMS norm (as DeltaNet
+/// reuses it). Settings the spec does not carry take the Hugging Face
+/// `Mamba2Config` defaults listed in the module documentation. The result is
+/// not validated here; [`Mamba2Config::validate`] rejects, for example, a
+/// convolution kernel below two, which the spec alone accepts.
+pub(super) fn mamba2_config(
+    spec: &Mamba2Spec,
+    hidden_size: usize,
+    norm_epsilon: f64,
+) -> Mamba2Config {
+    Mamba2Config {
+        hidden_size,
+        num_heads: spec.heads,
+        head_dim: spec.head_dim,
+        state_size: spec.state_dim,
+        // `group_size` heads share one B/C group; spec validation guarantees it divides `heads`.
+        groups: spec.heads.checked_div(spec.group_size).unwrap_or(0),
+        convolution_kernel: spec.convolution_kernel,
+        chunk_size: MAMBA2_CHUNK_SIZE,
+        time_step_clamp: TimeStepClamp::chunked_only(TimeStepLimits::at_least(0.0)),
+        normalization_epsilon: norm_epsilon,
+        projection_bias: false,
+        convolution_bias: true,
+    }
+}
 
 use super::pass::StackPass;
 
@@ -315,6 +367,7 @@ impl<B: Backend> ModularDifferential<B> {
 /// Burn records store an enum module by variant (by index in binary
 /// recorders), so variants are append-only: the original `Attention`, `Mla`,
 /// and `DeltaNet` keep their positions and later mixers follow them.
+/// Every variant maps `[batch, token, hidden]` residual inputs to the same shape.
 #[derive(Module, Debug)]
 // Burn 0.21 does not implement `Module` for `Box<M>`. Keeping modules inline is required so
 // generated records can visit every parameter; the per-layer host metadata cost is negligible
@@ -341,10 +394,15 @@ pub(super) enum ModularMixer<B: Backend> {
         /// Paired-head projections, lambda parameters, and optional RoPE.
         ModularDifferential<B>,
     ),
+    /// Mamba-2 selective state-space mixing (causal chunked scan).
+    Mamba2(
+        /// Shared Mamba-2 mixer built from the spec's geometry and documented defaults.
+        Mamba2<B>,
+    ),
 }
 
 impl<B: Backend> ModularMixer<B> {
-    /// Builds the mixer of a validated spec; Mamba2 has no shared kernel yet.
+    /// Builds the mixer of a validated spec from the shared kernels.
     pub(super) fn init(
         spec: &MixerSpec,
         hidden_size: usize,
@@ -364,9 +422,9 @@ impl<B: Backend> ModularMixer<B> {
                 ModularDifferential::init(differential, hidden_size, norm, device)
                     .map(Self::Differential)
             }
-            MixerSpec::Mamba2(_) => Err(Error::BackendCapability(
-                "the Mamba2 mixer is describable but has no shared executable kernel yet".into(),
-            )),
+            MixerSpec::Mamba2(mamba) => mamba2_config(mamba, hidden_size, norm.epsilon())
+                .init(device)
+                .map(Self::Mamba2),
             // Translated by `grouped_query_attention` and `delta_net_config` above.
             MixerSpec::Attention(_)
             | MixerSpec::SlidingAttention(_)
@@ -381,7 +439,7 @@ impl<B: Backend> ModularMixer<B> {
             Self::Attention(attention) => Some(attention.connectivity()),
             Self::Mla(mla) => Some(mla.connectivity()),
             Self::Differential(differential) => Some(differential.connectivity()),
-            Self::DeltaNet(_) => None,
+            Self::DeltaNet(_) | Self::Mamba2(_) => None,
         }
     }
 
@@ -391,18 +449,27 @@ impl<B: Backend> ModularMixer<B> {
             Self::Attention(attention) => Some(attention.attention.query_heads),
             Self::Mla(mla) => Some(mla.attention.config.num_heads),
             Self::Differential(differential) => Some(differential.attention.query_heads),
-            Self::DeltaNet(_) => None,
+            Self::DeltaNet(_) | Self::Mamba2(_) => None,
         }
     }
 
     /// Lists the projection, latent, and attention points this mixer emits.
     ///
-    /// Differential attention and DeltaNet expose only the surrounding mixer points.
+    /// Differential attention, DeltaNet, and Mamba-2 expose only the surrounding mixer points.
     pub(super) fn activation_points(&self, layer: Layer) -> Vec<PointInfo> {
         match self {
             Self::Attention(attention) => attention.activation_points(layer.self_attention()),
             Self::Mla(mla) => mla.attention.activation_points(layer.self_attention()),
-            Self::Differential(_) | Self::DeltaNet(_) => Vec::new(),
+            Self::Differential(_) | Self::DeltaNet(_) | Self::Mamba2(_) => Vec::new(),
+        }
+    }
+
+    /// Display name of a causal recurrent mixer, or `None` for attention mixers.
+    pub(super) const fn recurrent_name(&self) -> Option<&'static str> {
+        match self {
+            Self::DeltaNet(_) => Some("DeltaNet"),
+            Self::Mamba2(_) => Some("Mamba2"),
+            Self::Attention(_) | Self::Mla(_) | Self::Differential(_) => None,
         }
     }
 
@@ -419,6 +486,9 @@ impl<B: Backend> ModularMixer<B> {
             Self::Mla(mla) => mla.forward(hidden, pass, layer, hooks),
             Self::Differential(differential) => differential.forward(hidden, pass, layer),
             Self::DeltaNet(delta) => delta.forward(hidden, pass.token_mask()),
+            Self::Mamba2(mamba) => {
+                mamba.forward(hidden, pass.token_mask(), Mamba2Mode::ChunkedPrefill)
+            }
         }
     }
 }
@@ -467,3 +537,8 @@ pub(super) fn zero_padded_queries<B: Backend>(
         None => output,
     }
 }
+
+#[cfg(test)]
+#[path = "mixer_tests.rs"]
+/// Mamba-2 translation, shared-kernel parity, padding, caching, causality, hooks, and gradients.
+mod tests;
