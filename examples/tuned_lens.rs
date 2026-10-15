@@ -46,6 +46,14 @@ fn main() -> study::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/mechanistic/tuned_lens"));
     let started = Instant::now();
+    if !root.join("preparation.json").is_file() {
+        return Err(format!(
+            "{}: no prepared artifacts; run python3 examples/mechanistic/tuned_lens/prepare.py, \
+             or pass the prepared directory as the first argument",
+            root.display()
+        )
+        .into());
+    }
     let (study, fixture, preparation) = Experiment::load(&root)?;
     let (reference, oracle) = study::load_reference(&root, &preparation)?;
     if REPLACE_TRANSLATOR >= study.translators.len()

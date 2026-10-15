@@ -41,7 +41,7 @@ use transformers::{
     CausalLmInput, ForwardOptions, LogitsSelection,
     checkpoint::LoadOptions,
     intervention::{Hooks, Layer, Stack},
-    models::gpt_neox::{GptNeoXConfig, GptNeoXModel},
+    models::gpt_neox::{GptNeoXConfig, GptNeoXForCausalLm},
 };
 
 /// CPU inference backend for frozen-data evaluation.
@@ -89,6 +89,14 @@ impl Settings {
                 "training output must differ from the frozen v0.2 artifact directory".into(),
             );
         }
+        if !base.join("preparation.json").is_file() {
+            return Err(format!(
+                "{}: no prepared artifacts; run python3 examples/mechanistic/tuned_lens/prepare.py, \
+                 or pass the prepared directory as the first argument",
+                base.display()
+            )
+            .into());
+        }
         fs::create_dir_all(&output)?;
         Ok(Self {
             base,
@@ -122,7 +130,7 @@ impl<T: Backend> Lens<T> {
     ///
     /// Only the correction has trainable parameters; the LayerNorm and
     /// unembedding remain in the graph so their input gradients reach it.
-    pub fn new(backbone: &GptNeoXModel<T>) -> Self {
+    pub fn new(backbone: &GptNeoXForCausalLm<T>) -> Self {
         let width = backbone.embed_out.weight.val().dims()[0];
         Self {
             translator: LinearConfig::new(width, width)
@@ -182,7 +190,7 @@ pub struct Record {
 ///
 /// Records 4..15 train and records 16..19 validate; each receives BOS and is
 /// truncated to 32 tokens. Save their exact IDs and the compiled-source hashes.
-pub fn load(settings: &Settings) -> Result<(GptNeoXModel<B>, Vec<Record>, Value)> {
+pub fn load(settings: &Settings) -> Result<(GptNeoXForCausalLm<B>, Vec<Record>, Value)> {
     let mut artifacts = serde_json::Map::new();
     for (name, expected) in settings.protocol["base_artifacts"].as_object().unwrap() {
         let path = settings.base.join(name);
@@ -196,7 +204,7 @@ pub fn load(settings: &Settings) -> Result<(GptNeoXModel<B>, Vec<Record>, Value)
     }
     let config: GptNeoXConfig =
         serde_json::from_slice(&fs::read(settings.base.join("model/config.json"))?)?;
-    let mut backbone = GptNeoXModel::<B>::init(config, &Default::default())?;
+    let mut backbone = GptNeoXForCausalLm::<B>::init(config, &Default::default())?;
     backbone.load_checkpoint(settings.base.join("model"), &LoadOptions::default())?;
     let backbone = backbone.no_grad();
     let tokenizer = tokenizers::Tokenizer::from_file(settings.base.join("model/tokenizer.json"))
@@ -251,7 +259,7 @@ pub struct CachedRecord {
 /// i - 1. Inputs have no padding, and the backbone retains causal attention.
 /// Caching reduces compute because neither backbone nor data changes during fitting.
 pub fn capture(
-    backbone: &GptNeoXModel<B>,
+    backbone: &GptNeoXForCausalLm<B>,
     records: &[Record],
     stages: &[usize],
 ) -> Result<Vec<CachedRecord>> {
@@ -492,7 +500,7 @@ fn max_difference<const D: usize>(left: Tensor<B, D>, right: Tensor<B, D>) -> Re
 /// checks correction placement, final normalization, and unembedding order.
 pub fn identity_error(
     lens: &Lens<B>,
-    backbone: &GptNeoXModel<B>,
+    backbone: &GptNeoXForCausalLm<B>,
     batch: &CachedRecord,
     slot: usize,
 ) -> Result<f32> {

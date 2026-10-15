@@ -50,6 +50,14 @@ fn main() -> study::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/mechanistic/greater_than"));
     let started = Instant::now();
+    if !root.join("preparation.json").is_file() {
+        return Err(format!(
+            "{}: no prepared artifacts; run python3 examples/mechanistic/greater_than/prepare.py \
+             --checkpoint /local/gpt2, or pass the prepared directory as the first argument",
+            root.display()
+        )
+        .into());
+    }
     let (model, mut study) = Study::load(&root)?;
     let options = ForwardOptions::default(); // Only the final input token's logits.
 
