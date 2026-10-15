@@ -4,8 +4,31 @@
 //! select a sequence mixer, feed-forward operator, normalization placement, and
 //! residual topology independently. Exact family models may bypass this surface
 //! when a checkpoint quirk cannot be represented faithfully.
+//!
+//! # One source of truth for validation
+//!
+//! Position encodings are validated by constructing the shared runtime objects
+//! they describe ([`RopeConfig`], [`YarnConfig`], [`T5RelativePositionBuckets`])
+//! and mapping their errors to spec field paths. A spec that validates therefore
+//! builds the same objects at initialization; the spec cannot drift from the
+//! components it configures. [`PositionEncodingSpec::rope_config`] and
+//! [`PositionEncodingSpec::t5_buckets`] expose those objects to consumers.
+//!
+//! `validate` checks that a spec is well formed. A few well-formed variants
+//! ([`ResidualTopology::Gated`], [`MixerSpec::Mamba2`]) are describable but not
+//! yet executable by the modular models, whose `init` rejects them with a
+//! capability error before allocating parameters.
 
-use crate::{Error, Result};
+use crate::{
+    Error, Result,
+    attention::{AttentionOutputGate, GroupedQueryAttentionConfig},
+    delta_net::GatedDeltaNetConfig,
+    mla::MultiLatentAttentionConfig,
+    position::{
+        RopeConfig, RopeConfigError, RopeScaling as RuntimeRopeScaling, T5BucketError,
+        T5RelativePositionBuckets, YarnConfig,
+    },
+};
 
 /// Nonlinearity applied by a feed-forward expert or gated projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -108,85 +131,112 @@ pub enum PositionEncodingSpec {
 
 impl PositionEncodingSpec {
     /// Validates pairwise rotary dimensions or T5 bucket boundaries.
+    ///
+    /// Delegates to the shared constructors used at initialization:
+    /// [`Self::rope_config`] for RoPE over `head_dim` channels and
+    /// [`Self::t5_buckets`] for T5 relative buckets. Errors name the spec field
+    /// below `field`, such as `layers[0].mixer.position.rotary_dim`.
     pub fn validate(&self, head_dim: usize, field: &str) -> Result<()> {
-        match self {
-            Self::None => Ok(()),
-            Self::Rope {
-                theta,
-                rotary_dim,
-                scaling,
+        self.rope_config_at(head_dim, field)?;
+        self.t5_buckets_at(field)?;
+        Ok(())
+    }
+
+    /// Builds the shared RoPE policy for heads of `head_dim` channels.
+    ///
+    /// Returns `None` for non-rotary encodings. YaRN parameters pass through
+    /// [`YarnConfig`] with the same defaults and bounds as checkpoint configs
+    /// (factor at least one, `0 < beta_slow < beta_fast`, `theta > 1`).
+    pub fn rope_config(&self, head_dim: usize) -> Result<Option<RopeConfig>> {
+        self.rope_config_at(head_dim, "position")
+    }
+
+    /// Builds the shared T5 bucket mapping, or `None` for non-T5 encodings.
+    ///
+    /// Bidirectional tables need an even bucket count of at least four, and
+    /// `max_distance` must exceed the exact region `buckets_per_direction / 2`.
+    pub fn t5_buckets(&self) -> Result<Option<T5RelativePositionBuckets>> {
+        self.t5_buckets_at("position")
+    }
+
+    /// [`Self::rope_config`] with errors reported below an explicit field path.
+    fn rope_config_at(&self, head_dim: usize, field: &str) -> Result<Option<RopeConfig>> {
+        let Self::Rope {
+            theta,
+            rotary_dim,
+            scaling,
+        } = self
+        else {
+            return Ok(None);
+        };
+        let at = |error: RopeConfigError| {
+            Error::configuration(
+                format!("{field}.{}", rope_error_field(&error)),
+                error.to_string(),
+            )
+        };
+        let scaling = match *scaling {
+            RopeScaling::None => RuntimeRopeScaling::None,
+            RopeScaling::Yarn {
+                factor,
+                original_max_positions,
+                attention_factor,
+                beta_slow,
+                beta_fast,
             } => {
-                if !theta.is_finite() || *theta <= 0.0 {
-                    return Err(Error::configuration(
-                        format!("{field}.theta"),
-                        "must be finite and greater than zero",
-                    ));
+                let mut yarn = YarnConfig::new(factor, original_max_positions)
+                    .and_then(|yarn| yarn.with_betas(beta_fast, beta_slow))
+                    .map_err(at)?;
+                if let Some(attention_factor) = attention_factor {
+                    yarn = yarn.with_attention_factor(attention_factor).map_err(at)?;
                 }
-                if *rotary_dim == 0 || !rotary_dim.is_multiple_of(2) || *rotary_dim > head_dim {
-                    return Err(Error::configuration(
-                        format!("{field}.rotary_dim"),
-                        "must be a non-zero even number no larger than head_dim",
-                    ));
-                }
-                if let RopeScaling::Yarn {
-                    factor,
-                    original_max_positions,
-                    attention_factor,
-                    beta_slow,
-                    beta_fast,
-                } = scaling
-                {
-                    if !factor.is_finite() || *factor <= 1.0 {
-                        return Err(Error::configuration(
-                            format!("{field}.scaling.factor"),
-                            "must be finite and greater than one",
-                        ));
-                    }
-                    if *original_max_positions == 0 {
-                        return Err(Error::configuration(
-                            format!("{field}.scaling.original_max_positions"),
-                            "must be non-zero",
-                        ));
-                    }
-                    if attention_factor.is_some_and(|value| !value.is_finite() || value <= 0.0) {
-                        return Err(Error::configuration(
-                            format!("{field}.scaling.attention_factor"),
-                            "must be finite and greater than zero when present",
-                        ));
-                    }
-                    if !beta_slow.is_finite()
-                        || !beta_fast.is_finite()
-                        || *beta_slow <= 0.0
-                        || *beta_fast <= *beta_slow
-                    {
-                        return Err(Error::configuration(
-                            format!("{field}.scaling.beta"),
-                            "requires finite 0 < beta_slow < beta_fast",
-                        ));
-                    }
-                }
-                Ok(())
+                RuntimeRopeScaling::Yarn(yarn)
             }
-            Self::T5RelativeBias {
-                buckets,
-                max_distance,
-                ..
-            } => {
-                if *buckets < 2 {
-                    return Err(Error::configuration(
-                        format!("{field}.buckets"),
-                        "must contain at least two buckets",
-                    ));
-                }
-                let exact_buckets = buckets / 2;
-                if *max_distance <= exact_buckets {
-                    return Err(Error::configuration(
-                        format!("{field}.max_distance"),
-                        "must exceed the exact-distance bucket region",
-                    ));
-                }
-                Ok(())
-            }
+        };
+        RopeConfig::new(head_dim, *rotary_dim, *theta, scaling)
+            .map(Some)
+            .map_err(at)
+    }
+
+    /// [`Self::t5_buckets`] with errors reported below an explicit field path.
+    fn t5_buckets_at(&self, field: &str) -> Result<Option<T5RelativePositionBuckets>> {
+        let Self::T5RelativeBias {
+            buckets,
+            max_distance,
+            bidirectional,
+        } = self
+        else {
+            return Ok(None);
+        };
+        T5RelativePositionBuckets::new(*buckets, *max_distance, *bidirectional)
+            .map(Some)
+            .map_err(|error| {
+                let name = match error {
+                    T5BucketError::TooFewBuckets { .. }
+                    | T5BucketError::OddBidirectionalBucketCount { .. } => "buckets",
+                    T5BucketError::MaxDistanceNotBeyondExact { .. } => "max_distance",
+                };
+                Error::configuration(format!("{field}.{name}"), error.to_string())
+            })
+    }
+}
+
+/// Maps a shared RoPE construction error to the spec field a caller can repair.
+fn rope_error_field(error: &RopeConfigError) -> &'static str {
+    match error {
+        RopeConfigError::ZeroHeadDimension => "head_dim",
+        RopeConfigError::ZeroRotaryDimension
+        | RopeConfigError::RotaryDimensionExceedsHead { .. }
+        | RopeConfigError::OddRotaryDimension { .. }
+        | RopeConfigError::InvalidPartialRotaryFactor { .. }
+        | RopeConfigError::NonIntegralPartialRotaryDimension { .. }
+        | RopeConfigError::DynamicNtkDimensionTooSmall { .. } => "rotary_dim",
+        RopeConfigError::InvalidTheta { .. } | RopeConfigError::YarnThetaTooSmall { .. } => "theta",
+        RopeConfigError::InvalidScalingFactor { .. } => "scaling.factor",
+        RopeConfigError::ZeroOriginalContext { .. } => "scaling.original_max_positions",
+        RopeConfigError::InvalidYarnAttentionFactor { .. } => "scaling.attention_factor",
+        RopeConfigError::InvalidYarnBeta { .. } | RopeConfigError::InvalidYarnBetaOrder { .. } => {
+            "scaling.beta"
         }
     }
 }
@@ -202,7 +252,10 @@ pub struct AttentionSpec {
     pub head_dim: usize,
     /// Whether Q and K are normalized independently before their dot product.
     pub query_key_norm: bool,
-    /// Whether the query projection also emits a sigmoid/SiLU output gate.
+    /// Whether the query projection also emits a per-head sigmoid output gate.
+    ///
+    /// The modular models map `true` to `AttentionOutputGate::Sigmoid`; a SiLU
+    /// gate is available on `GroupedQueryAttentionConfig` but not through this spec.
     pub output_gate: bool,
     /// Position transformation used by this attention layer.
     pub position: PositionEncodingSpec,
@@ -210,7 +263,15 @@ pub struct AttentionSpec {
 
 impl AttentionSpec {
     /// Validates grouped-head divisibility and positional dimensions.
+    ///
+    /// Width-independent form of the check [`DecoderSpec::validate`] performs at
+    /// the stack's residual width.
     pub fn validate(&self, field: &str) -> Result<()> {
+        self.validate_for_width(field, 1)
+    }
+
+    /// Validates spec invariants, the shared projection config, and the position encoding.
+    fn validate_for_width(&self, field: &str, hidden_size: usize) -> Result<()> {
         if self.query_heads == 0 || self.key_value_heads == 0 || self.head_dim == 0 {
             return Err(Error::configuration(
                 field,
@@ -223,8 +284,46 @@ impl AttentionSpec {
                 "must divide query_heads exactly",
             ));
         }
+        self.projection_config(hidden_size)
+            .validate()
+            .map_err(|error| nested(field, error))?;
         self.position
             .validate(self.head_dim, &format!("{field}.position"))
+    }
+
+    /// The shared projection configuration this spec describes at `hidden_size`.
+    ///
+    /// Mirrors the modular models: `output_gate` selects a sigmoid gate and T5
+    /// relative bias uses unit score scaling. Q/K-norm epsilon comes from the
+    /// block's normalization spec, which is validated separately.
+    fn projection_config(&self, hidden_size: usize) -> GroupedQueryAttentionConfig {
+        let mut config = GroupedQueryAttentionConfig::new(
+            hidden_size,
+            self.query_heads,
+            self.key_value_heads,
+            self.head_dim,
+        );
+        if self.output_gate {
+            config.output_gate = AttentionOutputGate::Sigmoid;
+        }
+        if matches!(self.position, PositionEncodingSpec::T5RelativeBias { .. }) {
+            config.scale = Some(1.0);
+        }
+        config
+    }
+}
+
+/// Prefixes a shared component's configuration field with the spec path that produced it.
+///
+/// For example, an MLA error at `mla.qk_rope_head_dim` raised while validating
+/// `layers[0].mixer` becomes `layers[0].mixer.mla.qk_rope_head_dim`.
+fn nested(field: &str, error: Error) -> Error {
+    match error {
+        Error::Configuration {
+            field: component,
+            reason,
+        } => Error::configuration(format!("{field}.{component}"), reason),
+        other => other,
     }
 }
 
@@ -307,6 +406,9 @@ pub enum MixerSpec {
         convolution_kernel: usize,
     },
     /// Mamba2 structured state-space mixing.
+    ///
+    /// Describable and validated, but not yet executable: the modular models
+    /// reject it at `init` with a capability error.
     Mamba2(
         /// Recurrent state, head grouping, and convolution dimensions.
         Mamba2Spec,
@@ -315,9 +417,20 @@ pub enum MixerSpec {
 
 impl MixerSpec {
     /// Validates head grouping and non-zero recurrent-state dimensions.
+    ///
+    /// Each executable mixer is also checked by its shared component
+    /// configuration (grouped-query attention, MLA, or Gated DeltaNet), so a
+    /// mixer that validates can be constructed. This width-independent form
+    /// uses residual width one; [`DecoderSpec::validate`] repeats the component
+    /// checks at the stack's real width, which also bounds projection sizes.
     pub fn validate(&self, field: &str) -> Result<()> {
+        self.validate_for_width(field, 1)
+    }
+
+    /// Validates this mixer as it would be built inside a stack of `hidden_size` channels.
+    fn validate_for_width(&self, field: &str, hidden_size: usize) -> Result<()> {
         match self {
-            Self::Attention(spec) => spec.validate(field),
+            Self::Attention(spec) => spec.validate_for_width(field, hidden_size),
             Self::SlidingAttention(spec) => {
                 if spec.window == 0 {
                     return Err(Error::configuration(
@@ -325,7 +438,8 @@ impl MixerSpec {
                         "must be non-zero",
                     ));
                 }
-                spec.attention.validate(&format!("{field}.attention"))
+                spec.attention
+                    .validate_for_width(&format!("{field}.attention"), hidden_size)
             }
             Self::Mla(spec) => {
                 if spec.query_heads == 0
@@ -340,17 +454,31 @@ impl MixerSpec {
                         "MLA dimensions must be non-zero",
                     ));
                 }
-                let head_dim = spec
+                if spec
                     .content_head_dim
                     .checked_add(spec.rotary_head_dim)
-                    .ok_or_else(|| {
-                        Error::configuration(
-                            format!("{field}.head_dim"),
-                            "MLA content and rotary dimensions overflow usize",
-                        )
-                    })?;
+                    .is_none()
+                {
+                    return Err(Error::configuration(
+                        format!("{field}.head_dim"),
+                        "MLA content and rotary dimensions overflow usize",
+                    ));
+                }
+                MultiLatentAttentionConfig::new(
+                    hidden_size,
+                    spec.query_heads,
+                    spec.content_head_dim,
+                    spec.rotary_head_dim,
+                    spec.value_head_dim,
+                    spec.key_value_lora_rank,
+                    spec.query_lora_rank,
+                )
+                .validate()
+                .map_err(|error| nested(field, error))?;
+                // MLA rotates only its decoupled rotary sub-head; the content
+                // channels are never position-encoded.
                 spec.position
-                    .validate(head_dim, &format!("{field}.position"))
+                    .validate(spec.rotary_head_dim, &format!("{field}.position"))
             }
             Self::DeltaNet {
                 key_heads,
@@ -376,7 +504,15 @@ impl MixerSpec {
                         "must be an integer multiple of key_heads",
                     ));
                 }
-                Ok(())
+                let mut config = GatedDeltaNetConfig::new(
+                    hidden_size,
+                    *key_heads,
+                    *value_heads,
+                    *key_head_dim,
+                    *value_head_dim,
+                );
+                config.convolution_kernel = *convolution_kernel;
+                config.validate().map_err(|error| nested(field, error))
             }
             Self::Mamba2(spec) => {
                 if spec.heads == 0
@@ -496,6 +632,9 @@ pub enum ResidualTopology {
     /// Add the sublayer output directly to its input.
     Add,
     /// Apply a learned multiplicative gate before the residual addition.
+    ///
+    /// Reserved: the gate's activation, shape, and initialization are not yet
+    /// specified, so the modular models reject it at `init`.
     Gated,
 }
 
@@ -518,9 +657,17 @@ pub struct DecoderLayerSpec {
 
 impl DecoderLayerSpec {
     /// Validates every independently configurable subcomponent.
+    ///
+    /// Width-independent form of the per-layer check in [`DecoderSpec::validate`].
     pub fn validate(&self, index: usize) -> Result<()> {
+        self.validate_for_width(index, 1)
+    }
+
+    /// Validates this layer as it would be built inside a stack of `hidden_size` channels.
+    fn validate_for_width(&self, index: usize, hidden_size: usize) -> Result<()> {
         let field = format!("layers[{index}]");
-        self.mixer.validate(&format!("{field}.mixer"))?;
+        self.mixer
+            .validate_for_width(&format!("{field}.mixer"), hidden_size)?;
         self.feed_forward
             .validate(&format!("{field}.feed_forward"))?;
         self.mixer_norm.validate(&format!("{field}.mixer_norm"))?;
@@ -566,7 +713,7 @@ impl DecoderSpec {
         }
         self.final_norm.validate("final_norm")?;
         for (index, layer) in self.layers.iter().enumerate() {
-            layer.validate(index)?;
+            layer.validate_for_width(index, self.hidden_size)?;
         }
         Ok(())
     }
@@ -587,6 +734,10 @@ pub struct Seq2SeqSpec {
 
 impl Seq2SeqSpec {
     /// Validates stack compatibility and cross-attention projection width.
+    ///
+    /// Cross-attention projects `hidden_size -> heads * head_dim -> hidden_size`,
+    /// so the inner width may differ from the residual width (as in T5-3B/11B);
+    /// it must only be nonzero and its projection matrices must not overflow.
     pub fn validate(&self) -> Result<()> {
         self.encoder.validate()?;
         self.decoder.validate()?;
@@ -596,16 +747,17 @@ impl Seq2SeqSpec {
                 "must equal encoder.hidden_size",
             ));
         }
+        let projection_elements = self
+            .cross_attention_heads
+            .checked_mul(self.cross_attention_head_dim)
+            .and_then(|inner| inner.checked_mul(self.decoder.hidden_size));
         if self.cross_attention_heads == 0
             || self.cross_attention_head_dim == 0
-            || self
-                .cross_attention_heads
-                .checked_mul(self.cross_attention_head_dim)
-                != Some(self.decoder.hidden_size)
+            || projection_elements.is_none()
         {
             return Err(Error::configuration(
                 "cross_attention",
-                "heads and head_dim must be non-zero and multiply to hidden_size",
+                "heads and head_dim must be non-zero, and hidden_size * heads * head_dim must fit in usize",
             ));
         }
         Ok(())

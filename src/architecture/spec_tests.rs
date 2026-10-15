@@ -168,7 +168,9 @@ fn yarn_validation_reports_expansion_temperature_and_transition_errors() {
     };
     validate(2.0, 128, None, 1.0, 32.0).unwrap();
     validate(2.0, 128, Some(1.0), 1.0, 32.0).unwrap();
-    for factor in [1.0, 0.0, f64::NAN, f64::INFINITY] {
+    // Like Hugging Face and the shared YarnConfig, a factor of one (no extension) is valid.
+    validate(1.0, 128, None, 1.0, 32.0).unwrap();
+    for factor in [0.999, 0.0, f64::NAN, f64::INFINITY] {
         assert_configuration_field(
             validate(factor, 128, None, 1.0, 32.0),
             "position.scaling.factor",
@@ -456,7 +458,12 @@ fn rope_rejects_unpaired_channel() {
     };
     *rotary_dim = 7;
     let error = spec.validate().expect_err("odd rotary width must fail");
-    assert!(error.to_string().contains("non-zero even number"));
+    let message = error.to_string();
+    assert!(
+        message.contains("layers[0].mixer.position.rotary_dim"),
+        "{message}"
+    );
+    assert!(message.contains("must be even"), "{message}");
 }
 
 /// Rejects routers that select more experts than the checkpoint owns.
@@ -512,10 +519,16 @@ fn seq2seq_rejects_overflowing_cross_attention_width() {
     assert!(error.to_string().contains("cross_attention"));
 }
 
-/// Accepts exact dimensions but rejects zero and mismatched products.
+/// Accepts any nonzero cross-attention inner width, including widths unequal to the residual.
 #[test]
 fn seq2seq_checks_cross_attention_width() {
-    for (heads, head_dim, valid) in [(4, 8, true), (0, 8, false), (4, 0, false), (3, 8, false)] {
+    for (heads, head_dim, valid) in [
+        (4, 8, true),
+        (0, 8, false),
+        (4, 0, false),
+        (3, 8, true),
+        (32, 128, true),
+    ] {
         let spec = Seq2SeqSpec {
             encoder: decoder(),
             decoder: decoder(),
@@ -546,6 +559,251 @@ proptest::proptest! {
         proptest::prop_assert_eq!(
             spec.validate("attention").is_ok(),
             query_heads.is_multiple_of(key_value_heads)
+        );
+    }
+}
+
+// Delegation to the shared position components.
+
+/// T5 bucket validation follows the shared, direction-aware exact region.
+///
+/// Bidirectional tables halve the buckets before `max_exact = per_direction / 2`,
+/// as Hugging Face's `_relative_position_bucket` does.
+#[test]
+fn t5_bucket_validation_matches_the_direction_aware_component() {
+    let t5 = |buckets, max_distance, bidirectional| PositionEncodingSpec::T5RelativeBias {
+        buckets,
+        max_distance,
+        bidirectional,
+    };
+    // Previously rejected although valid: max_exact is 8 for 32 bidirectional buckets.
+    t5(32, 12, true).validate(4, "position").unwrap();
+    t5(32, 9, true).validate(4, "position").unwrap();
+    assert_configuration_field(
+        t5(32, 8, true).validate(4, "position"),
+        "position.max_distance",
+    );
+    // Previously accepted although the runtime table cannot be built.
+    assert_configuration_field(
+        t5(33, 128, true).validate(4, "position"),
+        "position.buckets",
+    );
+    for buckets in [2, 3] {
+        assert_configuration_field(
+            t5(buckets, 128, true).validate(4, "position"),
+            "position.buckets",
+        );
+    }
+    t5(3, 128, false).validate(4, "position").unwrap();
+    let buckets = t5(32, 12, true).t5_buckets().unwrap().unwrap();
+    assert_eq!(
+        (
+            buckets.num_buckets(),
+            buckets.max_distance(),
+            buckets.is_bidirectional()
+        ),
+        (32, 12, true)
+    );
+    assert!(PositionEncodingSpec::None.t5_buckets().unwrap().is_none());
+}
+
+/// MLA RoPE is checked against the rotary sub-head, not the combined head width.
+#[test]
+fn mla_rope_width_is_bounded_by_the_rotary_sub_head() {
+    let mla = |rotary_dim| {
+        MixerSpec::Mla(MlaSpec {
+            query_heads: 2,
+            content_head_dim: 4,
+            rotary_head_dim: 2,
+            value_head_dim: 4,
+            key_value_lora_rank: 2,
+            query_lora_rank: None,
+            position: PositionEncodingSpec::Rope {
+                theta: 10_000.0,
+                rotary_dim,
+                scaling: RopeScaling::None,
+            },
+        })
+    };
+    mla(2).validate("mla").unwrap();
+    for rotary_dim in [4, 6] {
+        assert_configuration_field(mla(rotary_dim).validate("mla"), "mla.position.rotary_dim");
+    }
+    // Found by the initialization-agreement property: the shared MLA component
+    // rotates complete channel pairs, so an odd rotary sub-head is invalid even
+    // when the RoPE prefix itself is even.
+    let MixerSpec::Mla(mut odd) = mla(2) else {
+        unreachable!("fixture is MLA")
+    };
+    odd.rotary_head_dim = 5;
+    assert_configuration_field(
+        MixerSpec::Mla(odd).validate("mla"),
+        "mla.mla.qk_rope_head_dim",
+    );
+}
+
+/// Component checks run at the stack's real residual width, bounding projection sizes.
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn decoder_validation_checks_projection_sizes_at_the_residual_width() {
+    let mut spec = decoder();
+    // 2^33 * 2^32 query-projection elements overflow 64-bit usize; one layer of
+    // width one does not, so only the stack-level check can catch it.
+    spec.hidden_size = 1 << 33;
+    let MixerSpec::Attention(attention) = &mut spec.layers[0].mixer else {
+        unreachable!("fixture uses attention")
+    };
+    attention.query_heads = 1 << 24;
+    attention.key_value_heads = 1;
+    attention.head_dim = 1 << 8;
+    let PositionEncodingSpec::Rope { rotary_dim, .. } = &mut attention.position else {
+        unreachable!("fixture uses RoPE")
+    };
+    *rotary_dim = 2;
+    spec.layers[0].validate(0).unwrap();
+    assert_configuration_field(spec.validate(), "layers[0].mixer.attention");
+}
+
+/// YaRN's logarithmic correction needs `theta > 1`, which plain RoPE does not.
+#[test]
+fn yarn_requires_a_base_above_one() {
+    let rope = |theta, scaling| PositionEncodingSpec::Rope {
+        theta,
+        rotary_dim: 4,
+        scaling,
+    };
+    let yarn = RopeScaling::Yarn {
+        factor: 2.0,
+        original_max_positions: 64,
+        attention_factor: None,
+        beta_slow: 1.0,
+        beta_fast: 32.0,
+    };
+    rope(1.0, RopeScaling::None)
+        .validate(4, "position")
+        .unwrap();
+    for theta in [1.0, 0.5] {
+        assert_configuration_field(rope(theta, yarn).validate(4, "position"), "position.theta");
+    }
+    let config = rope(10_000.0, yarn).rope_config(4).unwrap().unwrap();
+    assert_eq!(config.rotary_dimension(), 4);
+    match config.scaling() {
+        RuntimeRopeScaling::Yarn(runtime) => {
+            assert_eq!(runtime.factor(), 2.0);
+            assert_eq!(runtime.original_max_position_embeddings(), 64);
+            // The default amplitude follows YarnConfig: 1 + 0.1 ln(factor).
+            assert!((runtime.attention_factor() - (1.0 + 0.1 * 2.0_f64.ln())).abs() < 1e-12);
+        }
+        other => panic!("expected YaRN, found {other:?}"),
+    }
+    assert!(PositionEncodingSpec::None.rope_config(4).unwrap().is_none());
+}
+
+/// A cross-attention inner width unequal to the residual width builds and runs.
+#[cfg(feature = "flex")]
+#[test]
+fn seq2seq_with_a_narrower_cross_attention_width_builds_and_runs() {
+    use crate::{CausalLmInput, ForwardOptions, Seq2SeqInput, models::custom::ModularSeq2SeqLm};
+    use burn::{backend::Flex, tensor::Tensor};
+    let device = Default::default();
+    let spec = Seq2SeqSpec {
+        encoder: decoder(),
+        decoder: decoder(),
+        cross_attention_heads: 3,
+        cross_attention_head_dim: 8,
+    };
+    spec.validate().unwrap();
+    let model = ModularSeq2SeqLm::<Flex>::init(spec, &device).unwrap();
+    let input = |ids: [[i32; 3]; 1]| CausalLmInput {
+        token_ids: Tensor::from_ints(ids, &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let output = model
+        .forward(
+            Seq2SeqInput {
+                encoder: input([[4, 5, 6]]),
+                decoder: input([[0, 1, 2]]),
+            },
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(output.decoder.logits.dims(), [1, 1, 128]);
+}
+
+#[cfg(feature = "flex")]
+proptest::proptest! {
+    /// A layer spec validates exactly when the modular layer it describes can be built.
+    ///
+    /// Covers RoPE (plain and YaRN), T5 buckets in both directions, and MLA,
+    /// across zero, odd, oversized, and boundary dimensions.
+    #[test]
+    fn layer_validation_agrees_with_modular_initialization(
+        query_heads in 1usize..4,
+        head_dim in 1usize..7,
+        rotary_dim in 0usize..8,
+        theta_choice in 0usize..3,
+        yarn in proptest::bool::ANY,
+        buckets in 0usize..12,
+        max_distance in 0usize..12,
+        bidirectional in proptest::bool::ANY,
+        encoding in 0usize..4,
+    ) {
+        use crate::models::custom::ModularLayer;
+        let theta = [0.5, 1.0, 10_000.0][theta_choice];
+        let scaling = if yarn {
+            RopeScaling::Yarn {
+                factor: 2.0,
+                original_max_positions: 16,
+                attention_factor: None,
+                beta_slow: 1.0,
+                beta_fast: 32.0,
+            }
+        } else {
+            RopeScaling::None
+        };
+        let rope = PositionEncodingSpec::Rope { theta, rotary_dim, scaling };
+        let mixer = match encoding {
+            0 | 1 => MixerSpec::Attention(AttentionSpec {
+                query_heads,
+                key_value_heads: 1,
+                head_dim,
+                query_key_norm: false,
+                output_gate: false,
+                position: if encoding == 0 {
+                    rope
+                } else {
+                    PositionEncodingSpec::T5RelativeBias { buckets, max_distance, bidirectional }
+                },
+            }),
+            2 => MixerSpec::Mla(MlaSpec {
+                query_heads,
+                content_head_dim: head_dim,
+                rotary_head_dim: rotary_dim.max(1),
+                value_head_dim: head_dim,
+                key_value_lora_rank: 2,
+                query_lora_rank: None,
+                position: PositionEncodingSpec::Rope { theta, rotary_dim: head_dim, scaling },
+            }),
+            _ => MixerSpec::Attention(AttentionSpec {
+                query_heads,
+                key_value_heads: 1,
+                head_dim,
+                query_key_norm: true,
+                output_gate: true,
+                position: PositionEncodingSpec::None,
+            }),
+        };
+        let mut layer = dense_layer();
+        layer.mixer = mixer;
+        let validated = layer.validate(0);
+        let built = ModularLayer::<burn::backend::Flex>::init(&layer, 8, None, &Default::default());
+        proptest::prop_assert_eq!(
+            validated.is_ok(),
+            built.is_ok(),
+            "validate: {:?}, init: {:?}",
+            validated.err(),
+            built.err().map(|error| error.to_string())
         );
     }
 }
