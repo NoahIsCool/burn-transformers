@@ -1,39 +1,85 @@
-//! Atomic external cache execution for the Nemotron-H hybrid decoder.
+//! Batched external-cache execution for the Nemotron-H hybrid decoder.
+//!
+//! # Cache layout
 //!
 //! Attention and Mamba blocks occupy separate compact cache index spaces even
-//! though checkpoint layers are interleaved. Attention storage is
-//! `[batch, kv_heads, capacity, head_dim]`; recurrent storage is
+//! though checkpoint layers are interleaved. Attention storage is full (never
+//! evicting) `[batch, kv_heads, capacity, head_dim]`; recurrent storage is
 //! `[batch, mamba_heads, head_dim, state_size]` plus the final `kernel - 1`
-//! convolution inputs. Dense and MoE blocks require no persistent state.
+//! convolution inputs. Dense and MoE blocks keep no state.
 //!
-//! Each call compacts semantic tokens per batch row, evaluates every block into
-//! operation-local tensor handles, validates exact cache coverage, advances the
-//! shared logical cursor, and only then publishes KV and recurrent tensors. A
-//! returned error therefore leaves both cache representations byte-for-byte at
-//! their retry baseline. Fully masked decode rows are exact no-ops; fully masked
-//! prefill rows are rejected.
+//! # One pass per call
+//!
+//! A prefill or decode call evaluates every batch row in **one** model pass.
+//! Each row's valid tokens are compacted into a right-padded `[B, N]` batch
+//! (`N` = most valid tokens in any row; see the planning module):
+//!
+//! - Mamba-2 blocks advance all rows together; padding is an identity
+//!   transition and each row keeps the convolution history at its own end.
+//!   A row takes the reference single-step update only when it appends one
+//!   token to existing state, and the chunk scan otherwise.
+//! - Attention blocks write the step's keys and values into the full cache
+//!   *ahead* of attention and attend over one zero-copy view `[0, L_b + n_b)`
+//!   of every row. Keys are excluded by absolute position (`k > q`, outside
+//!   the sliding window, or beyond a row's end); a dense batch with equal
+//!   lengths needs no mask at all, only bottom-right causality.
+//! - MoE blocks route only the `T = sum_b n_b` packed valid tokens, so padding
+//!   never reaches a router or an expert and routing costs one host
+//!   synchronization per block for the whole batch.
+//!
+//! Outputs are scattered back to the caller's rectangular layout with exact
+//! zeros at padding, and `LogitsSelection::Last` projects each row's last
+//! valid token without materializing the rectangular hidden state.
+//!
+//! # Atomicity
+//!
+//! Every cache update of a call is recorded in one
+//! [`TensorStepWrites`](crate::cache::TensorStepWrites) and published only
+//! after the whole forward pass and its outputs succeed. A failed call
+//! therefore leaves every length and every *readable* cache position
+//! unchanged; only slots beyond the committed lengths may hold the abandoned
+//! write-ahead keys, which no read can reach and the next write overwrites.
+//! Fully masked decode rows are exact no-ops; fully masked prefill rows are
+//! rejected.
+//!
+//! # Speculative transactions
+//!
+//! Inside a transaction the same pass stages its writes. The attention cache
+//! stages in place, which keeps write-ahead available, and Mamba-2 blocks
+//! record their state after *every* token of a multi-token step, so a
+//! verifier can evaluate a whole draft in one pass and commit any accepted
+//! prefix. Per-token states come from the reference recurrent update, so a
+//! multi-token transactional step requires every active row to have been
+//! prefilled already.
 
-use std::collections::BTreeSet;
+use core::num::NonZeroUsize;
 
-use burn::tensor::{Bool, Int, Tensor, backend::Backend};
+use burn::tensor::{DType, Int, Tensor, backend::Backend};
 
 use crate::{
-    CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, Result,
+    CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions,
+    LogitsSelection, Result,
     architecture::{DecodeState as ArchitectureDecodeState, RouterDiagnostics},
+    attention::GroupedQueryAttention,
     cache::{
-        CacheConfig, DecodeStateError, KvCacheStorage, NativeKvCacheSpec, RecurrentStateSpec,
-        TensorCacheError, TensorCacheMark, TensorDecodeState,
+        CacheConfig, DecodeStateError, KvBatchReadPlan, KvCacheStorage, NativeKvCacheSpec,
+        RecurrentStateSpec, TensorCacheError, TensorCacheMark, TensorDecodeState, TensorStepWrites,
     },
+    mamba2::Mamba2Row,
     models::shared::{
-        EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_same_device,
-        prepare_stateful_rows, select_hidden_with_last_columns, validate_logits_selection,
+        EmptyRows, StatefulContract, StatefulRows, ensure_same_device, prepare_stateful_rows,
+        select_hidden_with_last_columns, validate_logits_selection,
     },
 };
 
-use super::mamba2::NemotronMamba2State;
+use super::batch::CompactBatch;
+use super::mamba2::{NemotronMamba2, NemotronMamba2State};
+use super::plan::{
+    MambaStep, TransactionalMamba, mamba_step, mtp_length_after_truncate, transactional_mamba,
+};
 use super::{
-    INPUT_NAMES, NemotronHBlockType, NemotronHForCausalLm, NemotronHMoeOutput, NemotronMamba2Mode,
-    nemotron_load_balancing_loss,
+    BlockMixer, INPUT_NAMES, NemotronHBlockType, NemotronHFlatMoeOutput, NemotronHForCausalLm,
+    NemotronMamba2Mode, nemotron_load_balancing_loss,
 };
 
 /// Owner named when an input tensor is on another device than the cache.
@@ -177,11 +223,20 @@ impl<B: Backend> NemotronHDecodeState<B> {
     }
 
     /// Begins an atomic target-plus-MTP proposal suffix.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error for a nested transaction or a state allocated
+    /// without staging capacity.
     pub fn mark(&mut self) -> Result<TensorCacheMark> {
         self.tensors.begin_transaction().map_err(Into::into)
     }
 
     /// Retains independent prefixes of the target and shifted MTP suffixes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error for a stale mark or a prefix longer than the proposal.
     pub fn commit_prefixes(
         &mut self,
         mark: TensorCacheMark,
@@ -194,6 +249,10 @@ impl<B: Backend> NemotronHDecodeState<B> {
     }
 
     /// Discards every target and MTP tensor staged after `mark`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error for a stale mark.
     pub fn rollback(&mut self, mark: TensorCacheMark) -> Result<()> {
         self.tensors.rollback(mark).map_err(Into::into)
     }
@@ -268,6 +327,9 @@ impl<B: Backend> ArchitectureDecodeState<B> for NemotronHDecodeState<B> {
     }
 
     /// Applies only cache-representation-safe logical truncations.
+    ///
+    /// The shifted MTP cursor follows the target: it rewinds to at most
+    /// `target - 1` and never advances.
     fn truncate(&mut self, lengths: &[usize]) -> Result<()> {
         let Some(current_mtp) = self.tensors.mtp_lengths() else {
             return self.tensors.truncate(lengths).map_err(Into::into);
@@ -284,7 +346,7 @@ impl<B: Backend> ArchitectureDecodeState<B> for NemotronHDecodeState<B> {
         let mtp_lengths = lengths
             .iter()
             .zip(current_mtp)
-            .map(|(&target, &mtp)| mtp.min(target.saturating_sub(1)))
+            .map(|(&target, &mtp)| mtp_length_after_truncate(target, mtp))
             .collect::<Vec<_>>();
         self.tensors
             .truncate_prefixes(lengths, &mtp_lengths)
@@ -352,8 +414,45 @@ impl<B: Backend> CausalLanguageModel<B> for NemotronHForCausalLm<B> {
     }
 }
 
+/// Activations a cached pass keeps besides the final normalized states.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Retain {
+    /// Embedding, every block output, and the final normalized states.
+    pub(super) hidden_states: bool,
+    /// Packed router outputs of every MoE block.
+    pub(super) routers: bool,
+}
+
+/// Compact result of one cached backbone pass.
+pub(super) struct CachedPass<B: Backend> {
+    /// Final normalized states `[B, N, hidden]`; padded slots are unspecified.
+    pub(super) hidden: Tensor<B, 3>,
+    /// Requested embedding, post-block, and final states, compact `[B, N, hidden]`.
+    pub(super) hidden_states: Vec<Tensor<B, 3>>,
+    /// Requested router outputs over the `T` packed valid tokens, in MoE block order.
+    pub(super) routers: Vec<NemotronHFlatMoeOutput<B>>,
+}
+
+/// Per-call constants shared by every block of a cached pass.
+struct PassContext<'a, B: Backend> {
+    /// Compact layout of the call.
+    batch: &'a CompactBatch<B>,
+    /// Working length `W_b` of every row before this call.
+    baselines: Vec<usize>,
+    /// Mamba-2 row plans in ordinary execution.
+    mamba_rows: Vec<Mamba2Row>,
+    /// Recurrent staging policy inside a transaction; `None` outside one.
+    transactional: Option<TransactionalMamba>,
+    /// Batched KV read plan through this step, when the model has attention.
+    kv_plan: Option<KvBatchReadPlan<B>>,
+    /// Absolute query positions `[B, N]`, when exclusions are needed.
+    query_positions: Option<Tensor<B, 2, Int>>,
+    /// Sliding window that can exclude a key in this call, if any.
+    window: Option<NonZeroUsize>,
+}
+
 impl<B: Backend> NemotronHForCausalLm<B> {
-    /// Evaluates a compact segment and atomically publishes all cache kinds.
+    /// Evaluates a stateful call in one batched pass and atomically publishes its cache writes.
     fn forward_with_decode_state(
         &self,
         input: CausalLmInput<B>,
@@ -369,133 +468,210 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         state.validate_for_model(self)?;
         let prepared = prepare_stateful_input(self, &input, state, phase)?;
         validate_logits_selection(&options.logits, prepared.sequence)?;
-        if state.tensors.has_active_transaction()
-            && (prepared.batch != 1 || prepared.token_counts != [1])
-        {
-            return Err(Error::Generation(
-                "transactional Nemotron-H target decoding accepts exactly one active batch-one token per call"
-                    .into(),
-            ));
-        }
-        let diagnostics = self.model.layers.len() + 2;
-        let moe_layers = self
-            .model
-            .layers
-            .iter()
-            .filter(|layer| layer.block_type == NemotronHBlockType::Moe)
-            .count();
-        let retain_routers = options.router_logits || options.auxiliary_losses;
         let device = input.token_ids.device();
-        let mut pending = PendingHybridWrites::default();
-        let mut final_rows = Vec::with_capacity(prepared.batch);
-        let mut hidden_rows: Vec<Vec<Tensor<B, 3>>> = if options.hidden_states {
-            (0..diagnostics)
-                .map(|_| Vec::with_capacity(prepared.batch))
-                .collect()
-        } else {
-            Vec::new()
+        let batch = CompactBatch::new(&prepared.valid_indices, prepared.sequence, &device)?;
+        let retain = Retain {
+            hidden_states: options.hidden_states,
+            routers: options.router_logits || options.auxiliary_losses,
         };
-        let mut router_rows: Vec<Vec<RowRouter<B>>> = if retain_routers {
-            (0..moe_layers)
-                .map(|_| Vec::with_capacity(prepared.batch))
-                .collect()
+        if batch.width() == 0 {
+            // Every row is finished: no model work and no cache change.
+            return self.inactive_output(&prepared, options, &device);
+        }
+        let tokens = batch.compact_tokens(input.token_ids)?;
+        let (pass, step) = self.cached_pass(tokens, &batch, state, retain)?;
+        let output = self.stateful_output(pass, &batch, &prepared, options)?;
+        state.tensors.publish_step(step)?;
+        Ok(output)
+    }
+
+    /// Runs the backbone over a compact batch and records its cache writes in one step.
+    ///
+    /// The returned step is not yet published: callers publish it once every
+    /// fallible output computation has succeeded. Attention keys are already
+    /// written ahead into unreachable slots (see the module documentation).
+    pub(super) fn cached_pass(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        batch: &CompactBatch<B>,
+        state: &mut NemotronHDecodeState<B>,
+        retain: Retain,
+    ) -> Result<(CachedPass<B>, TensorStepWrites<B>)> {
+        let counts = batch.counts().to_vec();
+        let baselines = state.tensors.working_lengths().to_vec();
+        let transactional = if state.tensors.has_active_transaction() {
+            Some(transactional_mamba(&counts, &baselines).map_err(|row| {
+                Error::Cache(format!(
+                    "Nemotron-H row {row} must be prefilled before a multi-token speculative step"
+                ))
+            })?)
         } else {
-            Vec::new()
+            None
+        };
+        let mut step = state.tensors.step(&counts)?;
+        let has_attention = self.model.count_blocks(NemotronHBlockType::FullAttention) > 0;
+        let kv_plan = has_attention
+            .then(|| state.tensors.kv_read_plan_through(&step, KV_GROUP))
+            .transpose()?;
+        let longest = baselines
+            .iter()
+            .zip(&counts)
+            .map(|(&baseline, &count)| baseline + count)
+            .max()
+            .unwrap_or(0);
+        // A window wider than every row's history can exclude nothing.
+        let window = self
+            .config()
+            .sliding_window
+            .filter(|&window| window < longest)
+            .and_then(NonZeroUsize::new);
+        let uniform = batch.plan().is_dense()
+            && baselines.windows(2).all(|pair| pair[0] == pair[1])
+            && window.is_none();
+        let query_positions = (has_attention && !uniform)
+            .then(|| batch.query_positions(&baselines))
+            .transpose()?;
+        let context = PassContext {
+            batch,
+            mamba_rows: counts
+                .iter()
+                .zip(&baselines)
+                .map(|(&tokens, &baseline)| Mamba2Row {
+                    tokens,
+                    mode: match mamba_step(tokens, baseline) {
+                        MambaStep::Recurrent => NemotronMamba2Mode::Recurrent,
+                        MambaStep::Chunked => NemotronMamba2Mode::ChunkedPrefill,
+                    },
+                })
+                .collect(),
+            baselines,
+            transactional,
+            kv_plan,
+            query_positions,
+            window,
         };
 
-        for row in 0..prepared.batch {
-            let Some(plan) = prepared.compact_row::<B>(row, &device)? else {
-                let empty = Tensor::zeros(
-                    [1, prepared.sequence, self.config().hidden_size],
-                    (&device, self.model.embed_tokens.weight.val().dtype()),
-                );
-                final_rows.push(empty.clone());
-                for destination in &mut hidden_rows {
-                    destination.push(empty.clone());
+        let mut hidden = self.model.embed_tokens.forward(tokens);
+        let mut hidden_states = Vec::with_capacity(if retain.hidden_states {
+            self.model.layers.len() + 2
+        } else {
+            0
+        });
+        if retain.hidden_states {
+            hidden_states.push(hidden.clone());
+        }
+        let mut routers = Vec::new();
+        let mut attention_index = 0;
+        let mut mamba_index = 0;
+        for layer in &self.model.layers {
+            let residual = hidden.clone();
+            let normalized = layer.norm.forward(hidden);
+            let mixed = match layer.mixer()? {
+                BlockMixer::Mamba2(mixer) => {
+                    let mixed =
+                        cached_mamba(mixer, normalized, mamba_index, state, &mut step, &context)?;
+                    mamba_index += 1;
+                    mixed
                 }
-                for destination in &mut router_rows {
-                    destination.push(RowRouter {
-                        logits: Tensor::zeros(
-                            [1, prepared.sequence, self.config().n_routed_experts],
-                            (&device, burn::tensor::DType::F32),
-                        ),
-                        selected: Tensor::zeros(
-                            [1, prepared.sequence, self.config().num_experts_per_tok],
-                            &device,
-                        ),
-                    });
+                BlockMixer::Attention(attention) => {
+                    let mixed = cached_attention(
+                        attention,
+                        normalized,
+                        attention_index,
+                        state,
+                        &mut step,
+                        &context,
+                    )?;
+                    attention_index += 1;
+                    mixed
                 }
-                continue;
+                BlockMixer::Mlp(mlp) => mlp.forward(normalized)?,
+                BlockMixer::Moe(moe) => {
+                    let routed = moe.forward_tokens(batch.pack(normalized)?)?;
+                    let mixed = batch.unpack(routed.hidden_state.clone())?;
+                    if retain.routers {
+                        routers.push(routed);
+                    }
+                    mixed
+                }
             };
-            let tokens = plan.compact(&input.token_ids);
-            let committed_baseline = state.tensors.lengths()[row];
-            let baseline = state.tensors.working_lengths()[row];
-            let compact = self.forward_compact_row(
-                tokens,
-                row,
-                committed_baseline,
-                baseline,
-                state.tensors.main(),
-                &mut pending,
-                options.hidden_states,
-                retain_routers,
-            )?;
-            final_rows.push(plan.scatter(compact.hidden)?);
-            for (destination, hidden) in hidden_rows.iter_mut().zip(compact.hidden_states) {
-                destination.push(plan.scatter(hidden)?);
-            }
-            for (destination, router) in router_rows.iter_mut().zip(compact.routers) {
-                destination.push(RowRouter {
-                    logits: plan.scatter(router.router_logits)?,
-                    selected: plan.scatter(router.selected_experts)?,
-                });
+            hidden = residual + mixed;
+            if retain.hidden_states {
+                hidden_states.push(hidden.clone());
             }
         }
+        hidden = self.model.norm.forward(hidden);
+        if retain.hidden_states {
+            hidden_states.push(hidden.clone());
+        }
+        Ok((
+            CachedPass {
+                hidden,
+                hidden_states,
+                routers,
+            },
+            step,
+        ))
+    }
 
-        let hidden = concat_rows(final_rows, "nemotron_h.hidden")?;
-        let hidden_states = hidden_rows
+    /// Scatters a compact pass back to the caller's rectangular layout and projects logits.
+    fn stateful_output(
+        &self,
+        pass: CachedPass<B>,
+        batch: &CompactBatch<B>,
+        prepared: &StatefulRows,
+        options: &ForwardOptions,
+    ) -> Result<CausalLmOutput<B>> {
+        let needs_rectangular =
+            options.hidden_states || !matches!(options.logits, LogitsSelection::Last);
+        let rectangular = needs_rectangular
+            .then(|| batch.to_rectangular(pass.hidden.clone()))
+            .transpose()?;
+        let selected = match &rectangular {
+            Some(hidden) if !matches!(options.logits, LogitsSelection::Last) => {
+                select_hidden_with_last_columns(
+                    hidden.clone(),
+                    prepared.last_columns(),
+                    &options.logits,
+                )?
+            }
+            _ => batch.last_tokens(pass.hidden)?,
+        };
+        let logits = self.project_logits(selected)?.cast(DType::F32);
+        let hidden_states = pass
+            .hidden_states
             .into_iter()
-            .map(|rows| concat_rows(rows, "nemotron_h.hidden_states"))
+            .map(|hidden| batch.to_rectangular(hidden))
             .collect::<Result<Vec<_>>>()?;
-        let routers = router_rows
+        let routers = pass
+            .routers
             .into_iter()
-            .map(|rows| {
-                let logits = concat_rows(
-                    rows.iter().map(|row| row.logits.clone()).collect(),
-                    "nemotron_h.router_logits",
-                )?;
-                let selected = concat_rows(
-                    rows.into_iter().map(|row| row.selected).collect(),
-                    "nemotron_h.selected_experts",
-                )?;
+            .map(|routed| {
+                let experts_per_token = routed.selected_experts.dims()[1];
+                let loss = options
+                    .auxiliary_losses
+                    .then(|| {
+                        nemotron_load_balancing_loss(
+                            routed.router_logits.clone().unsqueeze_dim(0),
+                            experts_per_token,
+                            None,
+                        )
+                    })
+                    .transpose()?;
+                let logits = options
+                    .router_logits
+                    .then(|| batch.to_rectangular(batch.unpack(routed.router_logits)?))
+                    .transpose()?;
                 Ok(RouterDiagnostics {
-                    logits: options.router_logits.then(|| logits.clone()),
-                    load_balancing_loss: options
-                        .auxiliary_losses
-                        .then(|| {
-                            nemotron_load_balancing_loss(
-                                logits,
-                                selected.dims()[2],
-                                input.token_mask.as_ref(),
-                            )
-                        })
-                        .transpose()?,
+                    logits,
+                    load_balancing_loss: loss,
                     z_loss: None,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let selected = select_hidden_with_last_columns(
-            hidden.clone(),
-            prepared.last_columns(),
-            &options.logits,
-        )?;
-        let logits = self
-            .project_logits(selected)?
-            .cast(burn::tensor::DType::F32);
-        pending.commit(self, state, &prepared.token_counts)?;
         Ok(CausalLmOutput {
             logits,
-            final_hidden_state: options.hidden_states.then_some(hidden),
+            final_hidden_state: rectangular.filter(|_| options.hidden_states),
             hidden_states,
             attentions: Vec::new(),
             routers,
@@ -503,364 +679,167 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         })
     }
 
-    /// Runs one compact semantic row against unpublished cache snapshots.
-    #[allow(clippy::too_many_arguments)]
-    fn forward_compact_row(
+    /// Builds the zero output of a call whose every row is inactive.
+    ///
+    /// Inactive rows produce exact zeros for logits and every requested
+    /// diagnostic; their load-balancing loss over zero valid tokens is zero.
+    fn inactive_output(
         &self,
-        tokens: Tensor<B, 2, Int>,
-        row: usize,
-        committed_baseline: usize,
-        baseline: usize,
-        bank: &crate::cache::TensorCacheBank<B>,
-        pending: &mut PendingHybridWrites<B>,
-        retain_hidden: bool,
-        retain_routers: bool,
-    ) -> Result<CompactRowOutput<B>> {
-        let mut hidden = self.model.embed_tokens.forward(tokens);
-        let mut hidden_states = Vec::with_capacity(if retain_hidden {
+        prepared: &StatefulRows,
+        options: &ForwardOptions,
+        device: &B::Device,
+    ) -> Result<CausalLmOutput<B>> {
+        let config = self.config();
+        let dtype = self.model.embed_tokens.weight.val().dtype();
+        let hidden = Tensor::<B, 3>::zeros(
+            [prepared.batch, prepared.sequence, config.hidden_size],
+            (device, dtype),
+        );
+        let selected = select_hidden_with_last_columns(
+            hidden.clone(),
+            prepared.last_columns(),
+            &options.logits,
+        )?;
+        let logits = self.project_logits(selected)?.cast(DType::F32);
+        let blocks = if options.hidden_states {
             self.model.layers.len() + 2
         } else {
             0
-        });
-        let mut routers = Vec::new();
-        if retain_hidden {
-            hidden_states.push(hidden.clone());
-        }
-        let mut attention_index = 0;
-        let mut mamba_index = 0;
-        for layer in &self.model.layers {
-            let residual = hidden.clone();
-            let normalized = layer.norm.forward(hidden);
-            match layer.block_type {
-                NemotronHBlockType::LinearAttention => {
-                    let mixer = layer.mamba.as_ref().ok_or_else(|| {
-                        Error::Cache("Nemotron-H Mamba block lost its mixer".into())
-                    })?;
-                    let cache = bank.recurrent(RECURRENT_GROUP)?;
-                    let cached = if cache.has_active_staging() {
-                        cache.read_working_sequence(mamba_index, row)?
-                    } else {
-                        cache.read_sequence(mamba_index, row)?
-                    };
-                    let state = NemotronMamba2State {
-                        recurrent: cached.matrix().clone(),
-                        convolution: cached.convolution().clone(),
-                    };
-                    // The reference takes its single-step update only when the
-                    // layer already has state (`use_precomputed_states and
-                    // seq_len == 1`); a first prompt token uses the chunk scan,
-                    // with its dt clamp and F32 arithmetic.
-                    let mode = if normalized.dims()[1] == 1 && baseline > 0 {
-                        NemotronMamba2Mode::Recurrent
-                    } else {
-                        NemotronMamba2Mode::ChunkedPrefill
-                    };
-                    let (mixed, next) = mixer.forward_with_state(normalized, None, &state, mode)?;
-                    hidden = residual + mixed;
-                    pending.recurrent.push(PendingRecurrentWrite {
-                        layer: mamba_index,
-                        row,
-                        matrix: next.recurrent,
-                        convolution: next.convolution,
-                    });
-                    mamba_index += 1;
-                }
-                NemotronHBlockType::FullAttention => {
-                    let attention = layer.attention.as_ref().ok_or_else(|| {
-                        Error::Cache("Nemotron-H attention block lost its mixer".into())
-                    })?;
-                    let mut projection = attention.project_self(normalized)?;
-                    let keys = projection.key.clone();
-                    let values = projection.value.clone();
-                    let query = projection.query.dims()[2];
-                    let cache = bank.native_kv(KV_GROUP)?;
-                    let history = if cache.has_active_staging() {
-                        cache.read_working_sequence(attention_index, row, committed_baseline)?
-                    } else {
-                        cache.read_sequence(attention_index, row, baseline)?
-                    };
-                    if history.retained_positions() != (0..baseline) {
-                        return Err(Error::Cache(
-                            "Nemotron-H full cache unexpectedly evicted history".into(),
-                        ));
-                    }
-                    if let Some((past_keys, past_values)) = history.materialize() {
-                        projection.key = Tensor::cat(vec![past_keys, projection.key], 2);
-                        projection.value = Tensor::cat(vec![past_values, projection.value], 2);
-                    }
-                    let mask = cached_attention_mask::<B>(
-                        baseline,
-                        query,
-                        attention.query_heads,
-                        self.config().sliding_window,
-                        &projection.query.device(),
-                    )?;
-                    hidden = residual + attention.attend(projection, Some(mask), None, false)?;
-                    pending.kv.push(PendingKvWrite {
-                        layer: attention_index,
-                        row,
-                        start: baseline,
-                        keys,
-                        values,
-                    });
-                    attention_index += 1;
-                }
-                NemotronHBlockType::Mlp => {
-                    hidden = residual
-                        + layer
-                            .mlp
-                            .as_ref()
-                            .ok_or_else(|| {
-                                Error::Cache("Nemotron-H MLP block lost its mixer".into())
-                            })?
-                            .forward(normalized)?;
-                }
-                NemotronHBlockType::Moe => {
-                    let routed = layer
-                        .moe
-                        .as_ref()
-                        .ok_or_else(|| Error::Cache("Nemotron-H MoE block lost its mixer".into()))?
-                        .forward(normalized)?;
-                    hidden = residual + routed.hidden_state.clone();
-                    if retain_routers {
-                        routers.push(routed);
-                    }
-                }
-            }
-            if retain_hidden {
-                hidden_states.push(hidden.clone());
-            }
-        }
-        hidden = self.model.norm.forward(hidden);
-        if retain_hidden {
-            hidden_states.push(hidden.clone());
-        }
-        Ok(CompactRowOutput {
-            hidden,
-            hidden_states,
+        };
+        let moe_blocks = if options.router_logits || options.auxiliary_losses {
+            self.model.count_blocks(NemotronHBlockType::Moe)
+        } else {
+            0
+        };
+        let routers = (0..moe_blocks)
+            .map(|_| RouterDiagnostics {
+                logits: options.router_logits.then(|| {
+                    Tensor::zeros(
+                        [prepared.batch, prepared.sequence, config.n_routed_experts],
+                        (device, DType::F32),
+                    )
+                }),
+                load_balancing_loss: options
+                    .auxiliary_losses
+                    .then(|| Tensor::zeros([1], (device, DType::F32))),
+                z_loss: None,
+            })
+            .collect();
+        Ok(CausalLmOutput {
+            logits,
+            final_hidden_state: options.hidden_states.then(|| hidden.clone()),
+            hidden_states: vec![hidden; blocks],
+            attentions: Vec::new(),
             routers,
+            load_balancing_loss: None,
         })
     }
 }
 
-/// One compact row's model result.
-struct CompactRowOutput<B: Backend> {
-    /// Final normalized activations `[1, valid_tokens, hidden]`.
-    hidden: Tensor<B, 3>,
-    /// Requested embedding, post-block, and final-normalized compact activations.
-    hidden_states: Vec<Tensor<B, 3>>,
-    /// Requested routing outputs for valid tokens in MoE block order.
-    routers: Vec<NemotronHMoeOutput<B>>,
-}
-
-/// Deferred native-KV append.
-struct PendingKvWrite<B: Backend> {
-    /// Attention-only layer index, independent of the interleaved block index.
+/// Advances one Mamba-2 block for every row and records its new state in `step`.
+///
+/// Outside a transaction (and for single-token transactional steps) each row
+/// runs its reference mode and the terminal states are recorded for the whole
+/// batch; inactive rows keep their state. A multi-token transactional step
+/// runs the recurrent update for every row and records the state after each
+/// token, so any accepted prefix can be committed.
+fn cached_mamba<B: Backend>(
+    mixer: &NemotronMamba2<B>,
+    normalized: Tensor<B, 3>,
     layer: usize,
-    /// Original batch row receiving the compact token suffix.
-    row: usize,
-    /// Logical append position after committed and previously staged tokens.
-    start: usize,
-    /// Newly projected keys `[1, kv_heads, valid_tokens, head_dim]`.
-    keys: Tensor<B, 4>,
-    /// Newly projected values with the same axes as `keys`.
-    values: Tensor<B, 4>,
-}
-
-/// Deferred recurrent terminal-state replacement.
-struct PendingRecurrentWrite<B: Backend> {
-    /// Mamba-only layer index, independent of the interleaved block index.
-    layer: usize,
-    /// Original batch row whose terminal state will be replaced.
-    row: usize,
-    /// Terminal selective state `[1, mamba_heads, head_dim, state_size]`.
-    matrix: Tensor<B, 4>,
-    /// Terminal convolution history `[1, channels, kernel - 1]`.
-    convolution: Tensor<B, 3>,
-}
-
-/// Complete operation-local cache write set.
-struct PendingHybridWrites<B: Backend> {
-    /// Unpublished attention appends for all active rows and attention layers.
-    kv: Vec<PendingKvWrite<B>>,
-    /// Unpublished terminal states for all active rows and Mamba layers.
-    recurrent: Vec<PendingRecurrentWrite<B>>,
-}
-
-impl<B: Backend> Default for PendingHybridWrites<B> {
-    /// Creates an empty operation-local write set.
-    fn default() -> Self {
-        Self {
-            kv: Vec::new(),
-            recurrent: Vec::new(),
-        }
+    state: &NemotronHDecodeState<B>,
+    step: &mut TensorStepWrites<B>,
+    context: &PassContext<'_, B>,
+) -> Result<Tensor<B, 3>> {
+    let read = state
+        .tensors
+        .main()
+        .recurrent(RECURRENT_GROUP)?
+        .read_working_batch(layer)?;
+    let current = NemotronMamba2State {
+        recurrent: read.matrix().clone(),
+        convolution: read.convolution().clone(),
+    };
+    if context.transactional != Some(TransactionalMamba::Snapshots) {
+        let (mixed, next) = mixer.forward_rows(normalized, &context.mamba_rows, &current)?;
+        step.push_recurrent_batch(RECURRENT_GROUP, layer, next.recurrent, next.convolution);
+        return Ok(mixed);
     }
-}
-
-impl<B: Backend> PendingHybridWrites<B> {
-    /// Validates complete active-row coverage then publishes both cache kinds.
-    fn commit(
-        self,
-        model: &NemotronHForCausalLm<B>,
-        state: &mut NemotronHDecodeState<B>,
-        token_counts: &[usize],
-    ) -> Result<()> {
-        let attention_layers = model
-            .model
-            .layers
-            .iter()
-            .filter(|layer| layer.block_type == NemotronHBlockType::FullAttention)
-            .count();
-        let mamba_layers = model
-            .model
-            .layers
-            .iter()
-            .filter(|layer| layer.block_type == NemotronHBlockType::LinearAttention)
-            .count();
-        self.validate_coverage(state, token_counts, attention_layers, mamba_layers)?;
-        if state.tensors.has_active_transaction() {
-            // Every speculative target step is exactly one token. Keeping a
-            // snapshot at each call boundary is required for Mamba2 because
-            // its terminal recurrence cannot be inverted after rejection.
-            if token_counts.iter().any(|&count| count > 1) {
-                return Err(Error::Cache(
-                    "transactional Nemotron-H hybrid decode accepts at most one token per row and call"
-                        .into(),
-                ));
-            }
-            let PendingHybridWrites { kv, recurrent } = self;
-            if !kv.is_empty() {
-                let cache = state.tensors.main_mut().native_kv_mut(KV_GROUP)?;
-                for write in kv {
-                    cache.stage_sequence(write.layer, write.row, write.keys, write.values)?;
-                }
-            }
-            if !recurrent.is_empty() {
-                let cache = state.tensors.main_mut().recurrent_mut(RECURRENT_GROUP)?;
-                for write in recurrent {
-                    cache.stage_sequence_snapshots(
-                        write.layer,
-                        write.row,
-                        write.matrix.unsqueeze_dim::<5>(1),
-                        write.convolution.unsqueeze_dim::<4>(1),
-                    )?;
-                }
-            }
-            state.tensors.advance(token_counts)?;
-            return Ok(());
-        }
-        let kv = if attention_layers > 0 {
-            let cache = state.tensors.main().native_kv(KV_GROUP)?;
-            Some((
-                KV_GROUP,
-                self.kv
-                    .into_iter()
-                    .map(|write| {
-                        cache.prepare_sequence_write(
-                            write.layer,
-                            write.row,
-                            write.start,
-                            write.keys,
-                            write.values,
-                        )
-                    })
-                    .collect::<core::result::Result<Vec<_>, _>>()?,
-            ))
-        } else {
-            None
-        };
-        let recurrent = if mamba_layers > 0 {
-            let cache = state.tensors.main().recurrent(RECURRENT_GROUP)?;
-            Some((
+    let counts = context.batch.counts();
+    let (mixed, snapshots) = mixer.forward_rows_with_snapshots(normalized, counts, &current)?;
+    for (row, &count) in counts.iter().enumerate() {
+        if count > 0 {
+            step.push_recurrent_row_snapshots(
                 RECURRENT_GROUP,
-                self.recurrent
-                    .into_iter()
-                    .map(|write| {
-                        cache.prepare_sequence_state(
-                            write.layer,
-                            write.row,
-                            write.matrix,
-                            write.convolution,
-                        )
-                    })
-                    .collect::<core::result::Result<Vec<_>, _>>()?,
-            ))
-        } else {
-            None
-        };
-        let prepared = state.tensors.main().prepare_direct_writes(kv, recurrent)?;
-        state.tensors.advance(token_counts)?;
-        state
-            .tensors
-            .main_mut()
-            .apply_prepared_direct_writes(prepared);
-        Ok(())
+                layer,
+                row,
+                snapshots
+                    .recurrent
+                    .clone()
+                    .narrow(0, row, 1)
+                    .narrow(1, 0, count),
+                snapshots
+                    .convolution
+                    .clone()
+                    .narrow(0, row, 1)
+                    .narrow(1, 0, count),
+            );
+        }
     }
-
-    /// Proves exact `(layer,row)` coverage for both state representations.
-    fn validate_coverage(
-        &self,
-        state: &NemotronHDecodeState<B>,
-        token_counts: &[usize],
-        attention_layers: usize,
-        mamba_layers: usize,
-    ) -> Result<()> {
-        if token_counts.len() != state.tensors.batch_size() {
-            return Err(Error::Cache(
-                "Nemotron-H pending token counts have the wrong batch size".into(),
-            ));
-        }
-        let active = token_counts.iter().filter(|&&count| count > 0).count();
-        if self.kv.len() != attention_layers * active
-            || self.recurrent.len() != mamba_layers * active
-        {
-            return Err(Error::Cache(format!(
-                "Nemotron-H pending coverage is kv={}/{}, recurrent={}/{}",
-                self.kv.len(),
-                attention_layers * active,
-                self.recurrent.len(),
-                mamba_layers * active
-            )));
-        }
-        let mut kv_seen = BTreeSet::new();
-        for write in &self.kv {
-            let count = token_counts.get(write.row).copied().unwrap_or(0);
-            if count == 0
-                || write.layer >= attention_layers
-                || write.start != state.tensors.working_lengths()[write.row]
-                || write.keys.dims()[2] != count
-                || write.values.dims()[2] != count
-                || !kv_seen.insert((write.layer, write.row))
-            {
-                return Err(Error::Cache(format!(
-                    "invalid Nemotron-H KV write at layer {}, row {}",
-                    write.layer, write.row
-                )));
-            }
-        }
-        let mut recurrent_seen = BTreeSet::new();
-        for write in &self.recurrent {
-            let count = token_counts.get(write.row).copied().unwrap_or(0);
-            if count == 0
-                || write.layer >= mamba_layers
-                || !recurrent_seen.insert((write.layer, write.row))
-            {
-                return Err(Error::Cache(format!(
-                    "invalid Nemotron-H recurrent write at layer {}, row {}",
-                    write.layer, write.row
-                )));
-            }
-        }
-        Ok(())
-    }
+    Ok(mixed)
 }
 
-/// Reconstructed rectangular router tensors for one row.
-struct RowRouter<B: Backend> {
-    /// Router scores `[1, sequence, experts]`, with zero-filled inactive positions.
-    logits: Tensor<B, 3>,
-    /// Selected expert IDs `[1, sequence, top_k]`, zero-filled where inactive.
-    selected: Tensor<B, 3, Int>,
+/// Writes one attention block's keys ahead and attends over every row's history.
+///
+/// Keys and values `[B, kv_heads, N, head_dim]` land in slots
+/// `[W_b, W_b + n_b)` of the full cache; attention then reads the zero-copy
+/// view `[0, max_b(W_b + n_b))`. Invalid slots (beyond a row's end) are
+/// excluded and their values zeroed, so stale bytes can never reach a row.
+fn cached_attention<B: Backend>(
+    attention: &GroupedQueryAttention<B>,
+    normalized: Tensor<B, 3>,
+    layer: usize,
+    state: &mut NemotronHDecodeState<B>,
+    step: &mut TensorStepWrites<B>,
+    context: &PassContext<'_, B>,
+) -> Result<Tensor<B, 3>> {
+    let mut projection = attention.project_self(normalized)?;
+    let plan = context
+        .kv_plan
+        .as_ref()
+        .ok_or_else(|| Error::Cache("Nemotron-H attention block has no KV read plan".into()))?;
+    state.tensors.write_kv_ahead(
+        step,
+        KV_GROUP,
+        layer,
+        projection.key.clone(),
+        projection.value.clone(),
+    )?;
+    let read = state.tensors.read_kv_through(step, KV_GROUP, layer, plan)?;
+    let complete = read
+        .retained_positions()
+        .iter()
+        .zip(context.baselines.iter().zip(context.batch.counts()))
+        .all(|(retained, (&baseline, &count))| *retained == (0..baseline + count));
+    if !complete {
+        return Err(Error::Cache(
+            "Nemotron-H full attention cache unexpectedly evicted history".into(),
+        ));
+    }
+    let segment = read
+        .materialize()
+        .ok_or_else(|| Error::Cache("Nemotron-H attention read returned no keys".into()))?;
+    projection.key = segment.keys().clone();
+    projection.value = segment.masked_values();
+    match &context.query_positions {
+        // Dense rows of equal length without an active window: the keys are
+        // `[0, W + N)` for every row, which is exactly bottom-right causality.
+        None => attention.attend(projection, None, None, true),
+        Some(positions) => {
+            let mask = segment.exclusion_mask(positions, attention.query_heads, context.window)?;
+            attention.attend(projection, Some(mask), None, false)
+        }
+    }
 }
 
 /// Validates devices, shapes, semantic tokens, and capacity before model work.
@@ -910,43 +889,11 @@ fn prepare_stateful_input<B: Backend>(
     Ok(rows)
 }
 
-/// Builds `excluded(q,k) = k > q || k + window <= q` for cached attention.
-pub(super) fn cached_attention_mask<B: Backend>(
-    baseline: usize,
-    query_sequence: usize,
-    heads: usize,
-    window: Option<usize>,
-    device: &B::Device,
-) -> Result<Tensor<B, 4, Bool>> {
-    let key_sequence = baseline.checked_add(query_sequence).ok_or_else(|| {
-        Error::configuration("nemotron_h.attention_mask", "key length overflows usize")
-    })?;
-    let start = i64::try_from(baseline)
-        .map_err(|_| Error::configuration("nemotron_h.attention_mask", "offset exceeds i64"))?;
-    let end = i64::try_from(key_sequence)
-        .map_err(|_| Error::configuration("nemotron_h.attention_mask", "length exceeds i64"))?;
-    let query = Tensor::<B, 1, Int>::arange(start..end, device)
-        .reshape([1, 1, query_sequence, 1])
-        .expand([1, heads, query_sequence, key_sequence]);
-    let key = Tensor::<B, 1, Int>::arange(0..end, device)
-        .reshape([1, 1, 1, key_sequence])
-        .expand([1, heads, query_sequence, key_sequence]);
-    let causal = key.clone().greater(query.clone());
-    Ok(match window {
-        Some(window) => {
-            let window = i64::try_from(window).map_err(|_| {
-                Error::configuration(
-                    "nemotron_h.sliding_window",
-                    "window exceeds portable signed index range",
-                )
-            })?;
-            causal.bool_or((key + window).lower_equal(query))
-        }
-        None => causal,
-    })
-}
-
 /// Derives compact cache geometry from model weights and schedule counts.
+///
+/// Speculative states stage attention proposals in place: full storage never
+/// evicts, so proposals can live at their final slots and attention keeps its
+/// zero-copy write-ahead view inside transactions.
 fn cache_specs<B: Backend>(
     model: &NemotronHForCausalLm<B>,
     staging_capacity: usize,
@@ -955,19 +902,19 @@ fn cache_specs<B: Backend>(
     Option<RecurrentStateSpec>,
     Option<NativeKvCacheSpec>,
 )> {
-    let attention_layers = model
-        .model
-        .layers
-        .iter()
-        .filter(|layer| layer.block_type == NemotronHBlockType::FullAttention)
-        .count();
+    let attention_layers = model.model.count_blocks(NemotronHBlockType::FullAttention);
     let mamba_layers = model
         .model
-        .layers
-        .iter()
-        .filter(|layer| layer.block_type == NemotronHBlockType::LinearAttention)
-        .count();
+        .count_blocks(NemotronHBlockType::LinearAttention);
     let dtype = model.model.embed_tokens.weight.val().dtype();
+    let staged = |spec: NativeKvCacheSpec| {
+        let spec = spec.with_staging_capacity(staging_capacity);
+        if staging_capacity > 0 {
+            spec.with_in_place_staging()
+        } else {
+            spec
+        }
+    };
     let kv = (attention_layers > 0)
         .then(|| {
             NativeKvCacheSpec::new(
@@ -977,7 +924,7 @@ fn cache_specs<B: Backend>(
                 KvCacheStorage::Full,
                 dtype,
             )
-            .map(|spec| spec.with_staging_capacity(staging_capacity))
+            .map(staged)
         })
         .transpose()?;
     let recurrent = (mamba_layers > 0)
@@ -1032,11 +979,11 @@ fn cache_specs<B: Backend>(
 }
 
 /// Converts NVIDIA's serialized recurrent-cache dtype into Burn's runtime dtype.
-fn mamba_state_dtype(name: &str) -> Result<burn::tensor::DType> {
+fn mamba_state_dtype(name: &str) -> Result<DType> {
     match name {
-        "float32" => Ok(burn::tensor::DType::F32),
-        "float16" => Ok(burn::tensor::DType::F16),
-        "bfloat16" => Ok(burn::tensor::DType::BF16),
+        "float32" => Ok(DType::F32),
+        "float16" => Ok(DType::F16),
+        "bfloat16" => Ok(DType::BF16),
         _ => Err(Error::configuration(
             "nemotron_h.mamba_ssm_cache_dtype",
             format!("unsupported recurrent cache dtype {name:?}"),

@@ -40,21 +40,32 @@ fn prefill_target(
         .unwrap()
 }
 
-/// Captures every committed physical state kind in the tiny hybrid graph.
-fn physical_cache_snapshot(state: &NemotronHDecodeState<TestBackend>) -> Vec<TensorData> {
+/// Captures every *readable* state of the tiny hybrid graph.
+///
+/// Attention caches contribute each bank's committed prefix `[0, L)`;
+/// slots beyond it are unreachable (in-place proposals or abandoned
+/// write-ahead keys may remain there), so equality of these snapshots is the
+/// observable cache state. Recurrent matrices and convolution histories are
+/// committed terminal states and are compared in full.
+fn logical_cache_snapshot(state: &NemotronHDecodeState<TestBackend>) -> Vec<TensorData> {
     let main = state.tensors.main();
     let target_kv = main.native_kv(KV_GROUP).unwrap();
     let recurrent = main
         .recurrent(super::super::decode::RECURRENT_GROUP)
         .unwrap();
     let mtp_kv = state.tensors.mtp().unwrap().native_kv(KV_GROUP).unwrap();
+    let target_length = state.tensors.lengths()[0];
+    let mtp_length = state.tensors.mtp_lengths().unwrap()[0];
+    let prefix = |tensor: &Tensor<TestBackend, 4>, length: usize| {
+        tensor.clone().narrow(2, 0, length).into_data()
+    };
     vec![
-        target_kv.keys(0).unwrap().clone().into_data(),
-        target_kv.values(0).unwrap().clone().into_data(),
+        prefix(target_kv.keys(0).unwrap(), target_length),
+        prefix(target_kv.values(0).unwrap(), target_length),
         recurrent.matrix(0).unwrap().clone().into_data(),
         recurrent.convolution(0).unwrap().clone().into_data(),
-        mtp_kv.keys(0).unwrap().clone().into_data(),
-        mtp_kv.values(0).unwrap().clone().into_data(),
+        prefix(mtp_kv.keys(0).unwrap(), mtp_length),
+        prefix(mtp_kv.values(0).unwrap(), mtp_length),
     ]
 }
 
@@ -147,9 +158,9 @@ fn prefill_mtp_cache_establishes_one_token_lag() {
     assert_eq!(history.materialize().unwrap().0.dims()[2], 2);
 }
 
-/// Rollback restores target KV, Mamba, convolution, and MTP KV bytes.
+/// Rollback restores every readable target KV, Mamba, convolution, and MTP KV value.
 #[test]
-fn transaction_rollback_restores_every_physical_bank() {
+fn transaction_rollback_restores_every_readable_bank() {
     let device = Default::default();
     let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
     let mut state = model
@@ -163,43 +174,7 @@ fn transaction_rollback_restores_every_physical_bank() {
             &mut state,
         )
         .unwrap();
-    let target_keys = state
-        .tensors
-        .main()
-        .native_kv(KV_GROUP)
-        .unwrap()
-        .keys(0)
-        .unwrap()
-        .clone()
-        .into_data();
-    let recurrent = state
-        .tensors
-        .main()
-        .recurrent(super::super::decode::RECURRENT_GROUP)
-        .unwrap()
-        .matrix(0)
-        .unwrap()
-        .clone()
-        .into_data();
-    let convolution = state
-        .tensors
-        .main()
-        .recurrent(super::super::decode::RECURRENT_GROUP)
-        .unwrap()
-        .convolution(0)
-        .unwrap()
-        .clone()
-        .into_data();
-    let mtp_keys = state
-        .tensors
-        .mtp()
-        .unwrap()
-        .native_kv(KV_GROUP)
-        .unwrap()
-        .keys(0)
-        .unwrap()
-        .clone()
-        .into_data();
+    let baseline = logical_cache_snapshot(&state);
 
     let mark = state.mark().unwrap();
     model
@@ -231,55 +206,7 @@ fn transaction_rollback_restores_every_physical_bank() {
     state.rollback(mark).unwrap();
     assert_eq!(state.tensor_state().lengths(), &[3]);
     assert_eq!(state.tensor_state().mtp_lengths(), Some([2].as_slice()));
-    assert_eq!(
-        state
-            .tensors
-            .main()
-            .native_kv(KV_GROUP)
-            .unwrap()
-            .keys(0)
-            .unwrap()
-            .clone()
-            .into_data(),
-        target_keys
-    );
-    assert_eq!(
-        state
-            .tensors
-            .main()
-            .recurrent(super::super::decode::RECURRENT_GROUP)
-            .unwrap()
-            .matrix(0)
-            .unwrap()
-            .clone()
-            .into_data(),
-        recurrent
-    );
-    assert_eq!(
-        state
-            .tensors
-            .main()
-            .recurrent(super::super::decode::RECURRENT_GROUP)
-            .unwrap()
-            .convolution(0)
-            .unwrap()
-            .clone()
-            .into_data(),
-        convolution
-    );
-    assert_eq!(
-        state
-            .tensors
-            .mtp()
-            .unwrap()
-            .native_kv(KV_GROUP)
-            .unwrap()
-            .keys(0)
-            .unwrap()
-            .clone()
-            .into_data(),
-        mtp_keys
-    );
+    assert_eq!(logical_cache_snapshot(&state), baseline);
 }
 
 /// A partial commit publishes one target/MTP step and drops later snapshots.
@@ -384,8 +311,8 @@ fn transaction_partial_commit_discards_rejected_hybrid_suffix() {
         Some([3].as_slice())
     );
     assert_eq!(
-        physical_cache_snapshot(&speculative),
-        physical_cache_snapshot(&reference)
+        logical_cache_snapshot(&speculative),
+        logical_cache_snapshot(&reference)
     );
 }
 

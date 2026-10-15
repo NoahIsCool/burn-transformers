@@ -601,6 +601,32 @@ fn left_padded_prefill_matches_stateless_last_token() {
         .assert_approx_eq::<f32>(&full.into_data(), Tolerance::absolute(3e-5));
 }
 
+/// Readable keys of attention layer `layer`: every row's committed prefix.
+///
+/// Slots beyond a row's length are unreachable and may hold abandoned
+/// write-ahead keys, so atomicity is stated over this prefix.
+fn readable_keys(state: &NemotronHDecodeState<TestBackend>, layer: usize) -> Vec<TensorData> {
+    let keys = state
+        .tensors
+        .main()
+        .native_kv(KV_GROUP)
+        .unwrap()
+        .keys(layer)
+        .unwrap()
+        .clone();
+    state
+        .lengths()
+        .iter()
+        .enumerate()
+        .map(|(row, &length)| {
+            keys.clone()
+                .narrow(0, row, 1)
+                .narrow(2, 0, length)
+                .into_data()
+        })
+        .collect()
+}
+
 /// A failed decode leaves logical, KV, recurrent, and convolution state intact.
 #[test]
 fn failed_decode_is_atomic_across_cache_kinds() {
@@ -620,15 +646,7 @@ fn failed_decode_is_atomic_across_cache_kinds() {
             &ForwardOptions::default(),
         )
         .unwrap();
-    let kv = state
-        .tensors
-        .main()
-        .native_kv(KV_GROUP)
-        .unwrap()
-        .keys(0)
-        .unwrap()
-        .clone()
-        .into_data();
+    let kv = readable_keys(&state, 0);
     let recurrent = state
         .tensors
         .main()
@@ -664,18 +682,7 @@ fn failed_decode_is_atomic_across_cache_kinds() {
             .is_err()
     );
     assert_eq!(state.lengths(), &[2]);
-    assert_eq!(
-        state
-            .tensors
-            .main()
-            .native_kv(KV_GROUP)
-            .unwrap()
-            .keys(0)
-            .unwrap()
-            .clone()
-            .into_data(),
-        kv
-    );
+    assert_eq!(readable_keys(&state, 0), kv);
     assert_eq!(
         state
             .tensors
@@ -777,14 +784,6 @@ fn capacity_error_preserves_lengths() {
             .is_err()
     );
     assert_eq!(state.lengths(), &[2]);
-}
-
-/// Cached mask construction rejects windows that cannot enter signed indices.
-#[cfg(target_pointer_width = "64")]
-#[test]
-fn oversized_cached_attention_window_is_rejected() {
-    let device = Default::default();
-    assert!(cached_attention_mask::<TestBackend>(0, 1, 1, Some(usize::MAX), &device).is_err());
 }
 
 /// Casts every floating parameter to F16, emulating a reduced-precision checkpoint.
@@ -944,5 +943,569 @@ fn left_padded_single_token_row_matches_stateless() {
             (actual - expected).abs() <= 1e-4 * scale,
             "{actual} != {expected}"
         );
+    }
+}
+
+/// Builds a rectangular input from per-row `(token, valid)` columns.
+fn ragged_input(rows: &[Vec<(i64, bool)>]) -> CausalLmInput<TestBackend> {
+    let device = Default::default();
+    let width = rows[0].len();
+    let tokens = rows
+        .iter()
+        .flat_map(|row| row.iter().map(|&(token, _)| token))
+        .collect::<Vec<_>>();
+    let mask = rows
+        .iter()
+        .flat_map(|row| row.iter().map(|&(_, valid)| valid))
+        .collect::<Vec<_>>();
+    CausalLmInput {
+        token_ids: Tensor::from_data(TensorData::new(tokens, [rows.len(), width]), &device),
+        token_mask: Some(TokenMask::new(Tensor::from_data(
+            TensorData::new(mask, [rows.len(), width]),
+            &device,
+        ))),
+        position_ids: None,
+    }
+}
+
+/// Valid token IDs of one ragged row.
+fn valid_tokens(row: &[(i64, bool)]) -> Vec<i64> {
+    row.iter()
+        .filter_map(|&(token, valid)| valid.then_some(token))
+        .collect()
+}
+
+/// Columns of one ragged row that hold valid tokens.
+fn valid_columns(row: &[(i64, bool)]) -> Vec<usize> {
+    row.iter()
+        .enumerate()
+        .filter_map(|(column, &(_, valid))| valid.then_some(column))
+        .collect()
+}
+
+/// Runs one row's valid tokens through its own batch-one state.
+fn single_row_step(
+    model: &NemotronHForCausalLm<TestBackend>,
+    state: &mut NemotronHDecodeState<TestBackend>,
+    tokens: &[i64],
+    prefill: bool,
+    options: &ForwardOptions,
+) -> CausalLmOutput<TestBackend> {
+    let token_ids = Tensor::from_data(
+        TensorData::new(tokens.to_vec(), [1, tokens.len()]),
+        &Default::default(),
+    );
+    if prefill {
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids,
+                    token_mask: None,
+                    position_ids: None,
+                },
+                state,
+                options,
+            )
+            .unwrap()
+    } else {
+        model
+            .decode(
+                DecodeInput {
+                    token_ids,
+                    token_mask: None,
+                    position_ids: None,
+                },
+                state,
+                options,
+            )
+            .unwrap()
+    }
+}
+
+/// Readable recurrent matrix and convolution of one row of Mamba layer zero.
+fn row_recurrent(
+    state: &NemotronHDecodeState<TestBackend>,
+    row: usize,
+) -> [Tensor<TestBackend, 3>; 2] {
+    let cache = state.tensors.main().recurrent(RECURRENT_GROUP).unwrap();
+    let matrix = cache.matrix(0).unwrap().clone().narrow(0, row, 1);
+    let [_, heads, rows, columns] = matrix.dims();
+    [
+        matrix.reshape([1, heads * rows, columns]),
+        cache.convolution(0).unwrap().clone().narrow(0, row, 1),
+    ]
+}
+
+/// Readable keys `[1, kv_heads * length, head_dim]` of one row of attention layer zero.
+fn row_keys(state: &NemotronHDecodeState<TestBackend>, row: usize) -> Tensor<TestBackend, 3> {
+    let length = state.lengths()[row];
+    let keys = state
+        .tensors
+        .main()
+        .native_kv(KV_GROUP)
+        .unwrap()
+        .keys(0)
+        .unwrap()
+        .clone()
+        .narrow(0, row, 1)
+        .narrow(2, 0, length);
+    let [_, heads, _, width] = keys.dims();
+    keys.reshape([1, heads * length, width])
+}
+
+/// Compares every batched row with an independent batch-one run of the same steps.
+///
+/// `steps[s][b]` is row `b`'s rectangular columns in step `s` (step zero is
+/// the prefill). Logits, every hidden state, router logits, committed KV,
+/// and recurrent state must agree at every valid column; padded columns of
+/// every output are exact zeros.
+fn assert_batched_matches_rows(
+    model: &NemotronHForCausalLm<TestBackend>,
+    steps: &[Vec<Vec<(i64, bool)>>],
+) {
+    let device = Default::default();
+    let rows = steps[0].len();
+    let options = ForwardOptions {
+        logits: crate::LogitsSelection::All,
+        hidden_states: true,
+        router_logits: true,
+        ..Default::default()
+    };
+    let mut batched = model
+        .new_decode_state(CacheConfig::new(rows, 16).unwrap(), rows, &device)
+        .unwrap();
+    let mut singles = (0..rows)
+        .map(|_| {
+            model
+                .new_decode_state(CacheConfig::new(1, 16).unwrap(), 1, &device)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for (index, step) in steps.iter().enumerate() {
+        let prefill = index == 0;
+        let input = ragged_input(step);
+        let output = if prefill {
+            model.prefill(input, &mut batched, &options).unwrap()
+        } else {
+            model
+                .decode(
+                    DecodeInput {
+                        token_ids: input.token_ids,
+                        token_mask: input.token_mask,
+                        position_ids: input.position_ids,
+                    },
+                    &mut batched,
+                    &options,
+                )
+                .unwrap()
+        };
+        let width = step[0].len();
+        assert_eq!(output.logits.dims(), [rows, width, 32]);
+        for (row, columns) in step.iter().enumerate() {
+            let tokens = valid_tokens(columns);
+            let valid = valid_columns(columns);
+            let padding = (0..width).filter(|column| !valid.contains(column));
+            for column in padding {
+                let zero = |tensor: &Tensor<TestBackend, 3>| {
+                    let channels = tensor.dims()[2];
+                    tensor
+                        .clone()
+                        .slice([row..row + 1, column..column + 1, 0..channels])
+                        .into_data()
+                        .to_vec::<f32>()
+                        .unwrap()
+                        .into_iter()
+                        .all(|value| value == 0.0)
+                };
+                assert!(zero(&output.logits));
+                assert!(output.hidden_states.iter().all(zero));
+            }
+            if tokens.is_empty() {
+                continue;
+            }
+            let expected = single_row_step(model, &mut singles[row], &tokens, prefill, &options);
+            let pick = |tensor: &Tensor<TestBackend, 3>, compact: usize| {
+                let channels = tensor.dims()[2];
+                tensor.clone().slice([
+                    row..row + 1,
+                    valid[compact]..valid[compact] + 1,
+                    0..channels,
+                ])
+            };
+            for compact in 0..tokens.len() {
+                contract_close(
+                    pick(&output.logits, compact),
+                    expected.logits.clone().narrow(1, compact, 1),
+                );
+                for (actual, reference) in output.hidden_states.iter().zip(&expected.hidden_states)
+                {
+                    contract_close(
+                        pick(actual, compact),
+                        reference.clone().narrow(1, compact, 1),
+                    );
+                }
+                let router = output.routers[0].logits.as_ref().unwrap();
+                let reference = expected.routers[0].logits.as_ref().unwrap();
+                contract_close(
+                    pick(router, compact),
+                    reference.clone().narrow(1, compact, 1),
+                );
+            }
+        }
+    }
+    for (row, single) in singles.iter().enumerate() {
+        assert_eq!(batched.lengths()[row], single.lengths()[0]);
+        contract_close(row_keys(&batched, row), row_keys(single, 0));
+        for (actual, expected) in row_recurrent(&batched, row)
+            .into_iter()
+            .zip(row_recurrent(single, 0))
+        {
+            contract_close(actual, expected);
+        }
+    }
+}
+
+/// One batched pass equals independent per-row passes for ragged prefill and decode.
+///
+/// The prefill mixes left padding, right padding, and an interior hole; the
+/// decode steps include a finished row and ragged multi-token suffixes, so
+/// both Mamba-2 modes, the attention exclusion mask, and MoE packing run with
+/// padding.
+#[test]
+fn batched_ragged_steps_match_independent_rows() {
+    let model = contract_model();
+    let pad = |token| (token, false);
+    let valid = |token| (token, true);
+    let steps = vec![
+        vec![
+            vec![pad(31), valid(1), valid(2), valid(3)],
+            vec![valid(4), valid(5), pad(31), pad(31)],
+            vec![valid(6), pad(31), valid(7), pad(31)],
+        ],
+        vec![vec![valid(10)], vec![pad(31)], vec![valid(12)]],
+        vec![
+            vec![valid(13), valid(14)],
+            vec![valid(15), pad(31)],
+            vec![pad(31), valid(16)],
+        ],
+        vec![vec![valid(17)], vec![valid(18)], vec![valid(19)]],
+    ];
+    assert_batched_matches_rows(&model, &steps);
+}
+
+/// Sliding-window exclusions follow every row's own positions.
+#[test]
+fn batched_sliding_window_matches_independent_rows() {
+    let mut model = contract_model();
+    model.model.config.sliding_window = Some(2);
+    let pad = |token| (token, false);
+    let valid = |token| (token, true);
+    let steps = vec![
+        vec![
+            vec![valid(1), valid(2), valid(3), valid(4)],
+            vec![pad(31), pad(31), valid(5), valid(6)],
+        ],
+        vec![vec![valid(7), valid(8)], vec![valid(9), pad(31)]],
+        vec![vec![valid(10)], vec![valid(11)]],
+    ];
+    assert_batched_matches_rows(&model, &steps);
+}
+
+/// Batched rows survive reorder and truncation like independent sequences.
+#[test]
+fn batched_rows_follow_reorder_and_reset() {
+    let model = contract_model();
+    let device = Default::default();
+    let options = ForwardOptions::default();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2], [3, 4]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &options,
+        )
+        .unwrap();
+    state.reorder(&[1, 0]).unwrap();
+    let swapped = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[5], [6]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &options,
+        )
+        .unwrap();
+    for (row, prompt) in [(0, [3, 4, 5]), (1, [1, 2, 6])] {
+        let expected = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([prompt], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &options,
+            )
+            .unwrap();
+        contract_close(swapped.logits.clone().narrow(0, row, 1), expected.logits);
+    }
+    state.truncate(&[0, 0]).unwrap();
+    let fresh = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[7], [8]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &options,
+        )
+        .unwrap();
+    assert_eq!(state.lengths(), &[1, 1]);
+    for (row, token) in [(0, 7), (1, 8)] {
+        let expected = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[token]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &options,
+            )
+            .unwrap();
+        contract_close(fresh.logits.clone().narrow(0, row, 1), expected.logits);
+    }
+}
+
+/// A multi-token transactional step stages per-token states, so any prefix commits exactly.
+///
+/// The staged logits equal token-by-token decoding, and after committing the
+/// first `k` of three proposals the state continues exactly like a reference
+/// that decoded only those `k` tokens.
+#[test]
+fn multi_token_transaction_commits_any_prefix() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let options = ForwardOptions {
+        logits: crate::LogitsSelection::All,
+        ..Default::default()
+    };
+    let draft = [4, 5, 6];
+    for accepted in 1..=draft.len() {
+        let mut speculative = model
+            .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 3, &device)
+            .unwrap();
+        single_row_step(&model, &mut speculative, &[1, 2, 3], true, &options);
+        let mark = speculative.mark().unwrap();
+        let staged = single_row_step(&model, &mut speculative, &draft, false, &options);
+        assert_eq!(speculative.tensor_state().working_lengths(), &[6]);
+        speculative.commit_prefixes(mark, accepted, 0).unwrap();
+        assert_eq!(speculative.lengths(), &[3 + accepted]);
+
+        let mut reference = model
+            .new_decode_state(CacheConfig::new(1, 16).unwrap(), 1, &device)
+            .unwrap();
+        single_row_step(&model, &mut reference, &[1, 2, 3], true, &options);
+        for (index, &token) in draft.iter().enumerate() {
+            let expected = single_row_step(&model, &mut reference, &[token], false, &options);
+            contract_close(staged.logits.clone().narrow(1, index, 1), expected.logits);
+            if index + 1 == accepted {
+                break;
+            }
+        }
+        contract_close(row_keys(&speculative, 0), row_keys(&reference, 0));
+        for (actual, expected) in row_recurrent(&speculative, 0)
+            .into_iter()
+            .zip(row_recurrent(&reference, 0))
+        {
+            contract_close(actual, expected);
+        }
+        let next = single_row_step(&model, &mut speculative, &[7], false, &options);
+        let expected = single_row_step(&model, &mut reference, &[7], false, &options);
+        contract_close(next.logits, expected.logits);
+    }
+}
+
+/// Multi-token proposals need prefilled rows; the failed step leaves the transaction usable.
+#[test]
+fn multi_token_transaction_requires_existing_state() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let options = ForwardOptions::default();
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 3, &device)
+        .unwrap();
+    let mark = state.mark().unwrap();
+    let error = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &options,
+        )
+        .unwrap_err();
+    assert!(matches!(&error, Error::Cache(reason) if reason.contains("prefilled")));
+    assert_eq!(state.tensor_state().working_lengths(), &[0]);
+    // A single first token still runs the reference chunk scan inside a transaction.
+    single_row_step(&model, &mut state, &[1], false, &options);
+    assert_eq!(state.tensor_state().working_lengths(), &[1]);
+    state.rollback(mark).unwrap();
+    assert_eq!(state.lengths(), &[0]);
+}
+
+/// Release-mode timing of one batched pass against one pass per row.
+///
+/// The per-row baseline evaluates every row through its own batch-one state,
+/// which is the cost model of the former row-by-row implementation. Run with
+/// `cargo test --release --lib nemotron_h::model::decode::tests::batched_decode_timing
+/// -- --ignored --nocapture`.
+#[test]
+#[ignore = "release-mode timing benchmark"]
+fn batched_decode_timing() {
+    use std::time::Instant;
+
+    let device = Default::default();
+    let mut config = tiny_config(false);
+    config.vocab_size = 512;
+    config.hidden_size = 256;
+    config.layers_block_type = vec![
+        NemotronHBlockType::LinearAttention,
+        NemotronHBlockType::Moe,
+        NemotronHBlockType::FullAttention,
+        NemotronHBlockType::Moe,
+        NemotronHBlockType::LinearAttention,
+        NemotronHBlockType::Moe,
+        NemotronHBlockType::LinearAttention,
+        NemotronHBlockType::Mlp,
+    ];
+    config.num_hidden_layers = Some(8);
+    config.num_attention_heads = 4;
+    config.num_key_value_heads = 2;
+    config.head_dim = 64;
+    config.max_position_embeddings = 512;
+    config.intermediate_size = 512;
+    config.ssm_state_size = 32;
+    config.mamba_num_heads = 8;
+    config.mamba_head_dim = 32;
+    config.n_groups = 2;
+    config.conv_kernel = 4;
+    config.chunk_size = 32;
+    config.n_routed_experts = 16;
+    config.num_experts_per_tok = 4;
+    config.n_group = 1;
+    config.topk_group = 1;
+    config.moe_intermediate_size = 128;
+    config.moe_shared_expert_intermediate_size = 256;
+    let model = NemotronHForCausalLm::<TestBackend>::init(config, &device).unwrap();
+    let (rows, prompt, steps) = (8, 64, 16);
+    let prompt_tokens = |row: usize| {
+        (0..prompt)
+            .map(|column| ((row * 131 + column * 17) % 500) as i64 + 1)
+            .collect::<Vec<_>>()
+    };
+    let options = ForwardOptions::default();
+    let timed = |label: &str, run: &mut dyn FnMut()| {
+        let started = Instant::now();
+        run();
+        let seconds = started.elapsed().as_secs_f64();
+        eprintln!("nemotron batched timing: {label}: {:.1} ms", seconds * 1e3);
+        seconds
+    };
+    for repeat in 0..2 {
+        let mut batched = model
+            .new_decode_state(
+                CacheConfig::new(rows, prompt + steps).unwrap(),
+                rows,
+                &device,
+            )
+            .unwrap();
+        let mut singles = (0..rows)
+            .map(|_| {
+                model
+                    .new_decode_state(CacheConfig::new(1, prompt + steps).unwrap(), 1, &device)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let flat = (0..rows).flat_map(prompt_tokens).collect::<Vec<_>>();
+        let batched_prefill = timed("batched prefill", &mut || {
+            model
+                .prefill(
+                    CausalLmInput {
+                        token_ids: Tensor::from_data(
+                            TensorData::new(flat.clone(), [rows, prompt]),
+                            &device,
+                        ),
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                    &mut batched,
+                    &options,
+                )
+                .unwrap()
+                .logits
+                .into_data();
+        });
+        let per_row_prefill = timed("per-row prefill", &mut || {
+            for (row, state) in singles.iter_mut().enumerate() {
+                single_row_step(&model, state, &prompt_tokens(row), true, &options)
+                    .logits
+                    .into_data();
+            }
+        });
+        let batched_decode = timed("batched decode", &mut || {
+            for step in 0..steps {
+                let tokens = (0..rows)
+                    .map(|row| ((row + step * 7) % 500) as i64 + 1)
+                    .collect::<Vec<_>>();
+                model
+                    .decode(
+                        DecodeInput {
+                            token_ids: Tensor::from_data(
+                                TensorData::new(tokens, [rows, 1]),
+                                &device,
+                            ),
+                            token_mask: None,
+                            position_ids: None,
+                        },
+                        &mut batched,
+                        &options,
+                    )
+                    .unwrap()
+                    .logits
+                    .into_data();
+            }
+        });
+        let per_row_decode = timed("per-row decode", &mut || {
+            for step in 0..steps {
+                for (row, state) in singles.iter_mut().enumerate() {
+                    single_row_step(
+                        &model,
+                        state,
+                        &[((row + step * 7) % 500) as i64 + 1],
+                        false,
+                        &options,
+                    )
+                    .logits
+                    .into_data();
+                }
+            }
+        });
+        if repeat == 1 {
+            eprintln!(
+                "nemotron batched timing: prefill speedup {:.2}x, decode speedup {:.2}x",
+                per_row_prefill / batched_prefill,
+                per_row_decode / batched_decode
+            );
+        }
     }
 }

@@ -42,9 +42,11 @@ use crate::models::shared::{
     validate_token_values,
 };
 
+mod batch;
 mod decode;
 pub mod mamba2;
 mod mtp;
+mod plan;
 mod speculative;
 
 pub use decode::NemotronHDecodeState;
@@ -472,7 +474,53 @@ pub struct NemotronHBlock<B: Backend> {
     pub block_type: NemotronHBlockType,
 }
 
+/// Borrowed view of a block's single mixer, checked against its declared type.
+///
+/// [`NemotronHBlock`] stores its mixer in four optional fields so that
+/// checkpoint record paths (`layers.{i}.mamba`, `.attention`, `.mlp`, `.moe`)
+/// stay stable. Every execution path matches on this view instead, so the
+/// topology is validated in exactly one place.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum BlockMixer<'a, B: Backend> {
+    /// Mamba-2 selective state-space mixer.
+    Mamba2(&'a NemotronMamba2<B>),
+    /// Causal grouped-query attention.
+    Attention(&'a GroupedQueryAttention<B>),
+    /// Dense two-projection MLP.
+    Mlp(&'a NemotronHDense<B>),
+    /// Sparse routed-plus-shared MoE.
+    Moe(&'a NemotronHMoe<B>),
+}
+
 impl<B: Backend> NemotronHBlock<B> {
+    /// Returns the block's mixer after checking that exactly the declared one is present.
+    ///
+    /// # Errors
+    ///
+    /// Returns a checkpoint error when the optional fields disagree with
+    /// `block_type` (for example after manual module surgery).
+    pub(super) fn mixer(&self) -> Result<BlockMixer<'_, B>> {
+        match (
+            self.block_type,
+            &self.mamba,
+            &self.attention,
+            &self.mlp,
+            &self.moe,
+        ) {
+            (NemotronHBlockType::LinearAttention, Some(mamba), None, None, None) => {
+                Ok(BlockMixer::Mamba2(mamba))
+            }
+            (NemotronHBlockType::FullAttention, None, Some(attention), None, None) => {
+                Ok(BlockMixer::Attention(attention))
+            }
+            (NemotronHBlockType::Mlp, None, None, Some(mlp), None) => Ok(BlockMixer::Mlp(mlp)),
+            (NemotronHBlockType::Moe, None, None, None, Some(moe)) => Ok(BlockMixer::Moe(moe)),
+            _ => Err(Error::Checkpoint(
+                "Nemotron-H block contains an invalid mixer topology".into(),
+            )),
+        }
+    }
+
     /// Initializes exactly one mixer selected by the authoritative schedule.
     fn init(
         config: &NemotronHConfig,
@@ -530,19 +578,13 @@ impl<B: Backend> NemotronHBlock<B> {
     ) -> Result<(Tensor<B, 3>, Option<NemotronHMoeOutput<B>>)> {
         let residual = hidden.clone();
         let normalized = self.norm.forward(hidden);
-        match (
-            self.block_type,
-            &self.mamba,
-            &self.attention,
-            &self.mlp,
-            &self.moe,
-        ) {
-            (NemotronHBlockType::LinearAttention, Some(mamba), None, None, None) => Ok((
+        match self.mixer()? {
+            BlockMixer::Mamba2(mamba) => Ok((
                 residual
                     + mamba.forward(normalized, token_mask, NemotronMamba2Mode::ChunkedPrefill)?,
                 None,
             )),
-            (NemotronHBlockType::FullAttention, None, Some(attention), None, None) => {
+            BlockMixer::Attention(attention) => {
                 let projection = attention.project_self(normalized)?;
                 let [batch, _, sequence, _] = projection.query.dims();
                 let mask = stateless_attention_mask(
@@ -558,16 +600,11 @@ impl<B: Backend> NemotronHBlock<B> {
                     None,
                 ))
             }
-            (NemotronHBlockType::Mlp, None, None, Some(mlp), None) => {
-                Ok((residual + mlp.forward(normalized)?, None))
-            }
-            (NemotronHBlockType::Moe, None, None, None, Some(moe)) => {
+            BlockMixer::Mlp(mlp) => Ok((residual + mlp.forward(normalized)?, None)),
+            BlockMixer::Moe(moe) => {
                 let output = moe.forward(normalized)?;
                 Ok((residual + output.hidden_state.clone(), Some(output)))
             }
-            _ => Err(Error::Checkpoint(
-                "Nemotron-H block contains an invalid mixer topology".into(),
-            )),
         }
     }
 }
@@ -612,6 +649,14 @@ impl<B: Backend> NemotronHModel<B> {
             norm: nemotron_rms_norm(config.hidden_size, config.layer_norm_epsilon, device)?,
             config,
         })
+    }
+
+    /// Counts blocks of one kind; cache groups index attention and Mamba blocks separately.
+    pub(super) fn count_blocks(&self, kind: NemotronHBlockType) -> usize {
+        self.layers
+            .iter()
+            .filter(|layer| layer.block_type == kind)
+            .count()
     }
 
     /// Evaluates the stateless backbone and retains requested diagnostics.

@@ -12,17 +12,14 @@
 //! recurrent terminal states cannot be reconstructed by deleting a rejected
 //! token after the fact.
 
-use burn::tensor::{DType, ElementConversion, Int, Tensor, backend::Backend};
+use burn::tensor::{Bool, DType, ElementConversion, Int, Tensor, backend::Backend};
 
 use crate::{
     Error, Result,
     cache::{CacheConfig, DecodeStateError, TensorCacheError, TensorDecodeState},
 };
 
-use super::{
-    INPUT_NAMES, NemotronHDecodeState, NemotronHForCausalLm,
-    decode::{KV_GROUP, cached_attention_mask},
-};
+use super::{INPUT_NAMES, NemotronHDecodeState, NemotronHForCausalLm, decode::KV_GROUP};
 use crate::models::shared::validate_token_values;
 
 /// One cached MTP prediction after projection through the shared target head.
@@ -389,6 +386,42 @@ fn commit_mtp_kv<B: Backend>(
         .ok_or_else(|| Error::Cache("Nemotron-H MTP cache bank is not enabled".into()))?
         .apply_prepared_direct_writes(writes);
     Ok(())
+}
+
+/// Builds `excluded(q,k) = k > q || k + window <= q` for cached MTP attention.
+fn cached_attention_mask<B: Backend>(
+    baseline: usize,
+    query_sequence: usize,
+    heads: usize,
+    window: Option<usize>,
+    device: &B::Device,
+) -> Result<Tensor<B, 4, Bool>> {
+    let key_sequence = baseline.checked_add(query_sequence).ok_or_else(|| {
+        Error::configuration("nemotron_h.attention_mask", "key length overflows usize")
+    })?;
+    let start = i64::try_from(baseline)
+        .map_err(|_| Error::configuration("nemotron_h.attention_mask", "offset exceeds i64"))?;
+    let end = i64::try_from(key_sequence)
+        .map_err(|_| Error::configuration("nemotron_h.attention_mask", "length exceeds i64"))?;
+    let query = Tensor::<B, 1, Int>::arange(start..end, device)
+        .reshape([1, 1, query_sequence, 1])
+        .expand([1, heads, query_sequence, key_sequence]);
+    let key = Tensor::<B, 1, Int>::arange(0..end, device)
+        .reshape([1, 1, 1, key_sequence])
+        .expand([1, heads, query_sequence, key_sequence]);
+    let causal = key.clone().greater(query.clone());
+    Ok(match window {
+        Some(window) => {
+            let window = i64::try_from(window).map_err(|_| {
+                Error::configuration(
+                    "nemotron_h.sliding_window",
+                    "window exceeds portable signed index range",
+                )
+            })?;
+            causal.bool_or((key + window).lower_equal(query))
+        }
+        None => causal,
+    })
 }
 
 /// Rejects mixed-device MTP inputs before backend dispatch.
