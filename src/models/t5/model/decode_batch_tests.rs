@@ -21,7 +21,7 @@ use super::*;
 use crate::{
     LogitsSelection,
     attention::{AttentionProjection, padding_attention_mask},
-    models::shared::{concat_rows, select_hidden_with_last_columns},
+    models::shared::{rows::concat_rows, select_hidden_with_last_columns},
     models::t5::{T5FeedForwardProjection, T5ForConditionalGeneration},
 };
 

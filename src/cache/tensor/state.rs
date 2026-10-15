@@ -18,10 +18,8 @@ use crate::cache::lengths::LengthViolation;
 use crate::cache::state::length_error;
 use crate::cache::{CacheConfig, CacheMark, DecodeStateError, SequenceLengths, TransactionalCache};
 
-use super::kv::{
-    KvCommitPlan, PreparedNativeKvWrite, selection_tensor, validate_batch, validate_reorder_indices,
-};
-use super::recurrent::{PreparedRecurrentStateWrite, RecurrentCommitPlan};
+use super::kv::{KvCommitPlan, selection_tensor, validate_batch, validate_reorder_indices};
+use super::recurrent::RecurrentCommitPlan;
 use super::{
     KvCacheStorage, NativeKvCache, NativeKvCacheSpec, RecurrentStateCache, RecurrentStateSpec,
     TensorCacheError, TensorCacheResult,
@@ -232,52 +230,6 @@ impl<B: Backend> TensorCacheBank<B> {
             })
     }
 
-    /// Seals already validated ordinary writes into one bank-level capability.
-    ///
-    /// Both group indices and the bank transaction state are checked before a
-    /// model advances logical metadata. The returned value can subsequently be
-    /// applied without another lookup or recoverable branch.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error while speculative staging is active or when either
-    /// requested group index is absent.
-    pub(crate) fn prepare_direct_writes(
-        &self,
-        native_kv: Option<(usize, Vec<PreparedNativeKvWrite<B>>)>,
-        recurrent: Option<(usize, Vec<PreparedRecurrentStateWrite<B>>)>,
-    ) -> TensorCacheResult<PreparedTensorBankWrites<B>> {
-        if self.staging_active {
-            return Err(TensorCacheError::TransactionActive {
-                operation: "prepare ordinary cache writes",
-            });
-        }
-        if let Some((index, _)) = &native_kv {
-            self.native_kv(*index)?;
-        }
-        if let Some((index, _)) = &recurrent {
-            self.recurrent(*index)?;
-        }
-        Ok(PreparedTensorBankWrites {
-            native_kv,
-            recurrent,
-        })
-    }
-
-    /// Publishes a bank-level capability after all recoverable work succeeds.
-    ///
-    /// The prepare phase proved every index and individual tensor write, so the
-    /// application phase consists solely of Burn assignments and cannot return
-    /// an error between cache families.
-    pub(crate) fn apply_prepared_direct_writes(&mut self, writes: PreparedTensorBankWrites<B>) {
-        if let Some((index, writes)) = writes.native_kv {
-            self.native_kv[index].apply_prepared_writes(writes);
-        }
-        if let Some((index, writes)) = writes.recurrent {
-            self.recurrent[index].apply_prepared_state_writes(writes);
-        }
-    }
-
     /// Returns whether this bank is locked for a model-level transaction.
     ///
     /// The marker is bank-owned rather than inferred from child caches, so an
@@ -433,19 +385,6 @@ struct TensorBankCommitPlan<B: Backend> {
     native_kv: Vec<KvCommitPlan<B>>,
     /// Per-group recurrent plans retaining validated snapshot allocations.
     recurrent: Vec<RecurrentCommitPlan<B>>,
-}
-
-/// Fully prepared ordinary writes spanning both cache families in one bank.
-///
-/// This capability is distinct from speculative staging: it lets a normal
-/// prefill or decode call defer all physical cache publication until its model
-/// computation and every recoverable write validation have succeeded.
-#[derive(Debug)]
-pub(crate) struct PreparedTensorBankWrites<B: Backend> {
-    /// Optional KV group index and validated ordinary writes.
-    native_kv: Option<(usize, Vec<PreparedNativeKvWrite<B>>)>,
-    /// Optional recurrent group index and validated state replacements.
-    recurrent: Option<(usize, Vec<PreparedRecurrentStateWrite<B>>)>,
 }
 
 // Session transactions and lifecycle operations.

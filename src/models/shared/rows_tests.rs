@@ -381,23 +381,6 @@ fn active_contexts_skip_inactive_rows() {
     );
 }
 
-/// Cached dynamic-NTK decoding is limited to the original window; static scalings are not.
-#[test]
-fn dynamic_ntk_contexts_are_bounded_by_the_original_window() {
-    use crate::position::{DynamicNtkScaling, RopeScaling};
-
-    let dynamic = RopeScaling::DynamicNtk(DynamicNtkScaling::new(2.0, 16).unwrap());
-    assert!(ensure_static_rotary_context(dynamic, 16, "Test").is_ok());
-    assert_same_error(
-        ensure_static_rotary_context(dynamic, 17, "Test").unwrap_err(),
-        Error::BackendCapability(
-            "Test dynamic-NTK decoding beyond the original context requires re-rotating cached keys"
-                .into(),
-        ),
-    );
-    assert!(ensure_static_rotary_context(RopeScaling::None, usize::MAX, "Test").is_ok());
-}
-
 proptest! {
     /// Every scatter layout reproduces the former per-token concatenation exactly.
     #[test]

@@ -19,18 +19,21 @@
 //! constant number of kernels per tensor (identity, one concatenation, or one
 //! gather), instead of one slice per valid token.
 
-use burn::tensor::{BasicOps, Int, Tensor, TensorData, TensorKind, backend::Backend};
+#[cfg(test)]
+use burn::tensor::{BasicOps, TensorKind};
+use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
 
 use crate::{
     CausalLmInput, Error, Result,
     cache::{DecodeStateError, TensorCacheError},
-    position::RopeScaling,
 };
 
+#[cfg(test)]
+use super::plan::ScatterLayout;
 use super::{
     checks::{ensure_grid, ensure_nonempty, ensure_same_device, range_error, read_int_tensors},
     input::InputNames,
-    plan::{self, AppendError, ScatterLayout},
+    plan::{self, AppendError},
 };
 
 /// Policy for rows that contain no valid token in a stateful call.
@@ -84,6 +87,7 @@ impl StatefulRows {
     ///
     /// Returns [`Error::Shape`] for an out-of-range row and
     /// [`Error::Configuration`] for indices beyond Burn's signed range.
+    #[cfg(test)]
     pub(crate) fn compact_row<B: Backend>(
         &self,
         row: usize,
@@ -349,6 +353,10 @@ fn append_error(error: AppendError, capacity: usize) -> Error {
 }
 
 /// Device-side layout of one compact row.
+///
+/// Test-only: batched families no longer compact rows one at a time; the
+/// per-row algorithm survives as the oracle their batched paths are proven against.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 enum RowLayout<B: Backend> {
     /// Every column is valid.
@@ -373,6 +381,7 @@ enum RowLayout<B: Backend> {
 ///
 /// Index tensors are uploaded once and reused for the token IDs, positions,
 /// final states, every requested hidden state, and router diagnostics.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct CompactRow<B: Backend> {
     /// Batch row this plan addresses.
@@ -385,6 +394,7 @@ pub(crate) struct CompactRow<B: Backend> {
     layout: RowLayout<B>,
 }
 
+#[cfg(test)]
 impl<B: Backend> CompactRow<B> {
     /// Plans row `row` from its valid columns `0 <= c_0 < … < c_{n-1} < sequence`.
     ///
@@ -528,32 +538,6 @@ pub(crate) fn implicit_position_ids<B: Backend>(
     ))
 }
 
-/// Rejects a dynamic-NTK rotary context that cached keys cannot follow.
-///
-/// Dynamic NTK rescales the rotary base `θ` once the evaluated context exceeds
-/// the original window `L₀`. Keys cached under the previous base would then
-/// disagree with queries rotated under the new one, so cached decoding supports
-/// only `context <= L₀`; static scalings are always accepted. `family` names
-/// the model in the error.
-///
-/// # Errors
-///
-/// Returns [`Error::BackendCapability`] for a dynamic-NTK context beyond `L₀`.
-pub(crate) fn ensure_static_rotary_context(
-    scaling: RopeScaling,
-    context: usize,
-    family: &str,
-) -> Result<()> {
-    if let RopeScaling::DynamicNtk(dynamic) = scaling
-        && context > dynamic.original_max_position_embeddings()
-    {
-        return Err(Error::BackendCapability(format!(
-            "{family} dynamic-NTK decoding beyond the original context requires re-rotating cached keys"
-        )));
-    }
-    Ok(())
-}
-
 /// Concatenates per-row `[1, S, d]` results into `[B, S, d]`.
 ///
 /// Rows must share one dtype; a mismatch (for example an F16 placeholder next
@@ -564,6 +548,7 @@ pub(crate) fn ensure_static_rotary_context(
 ///
 /// Returns [`Error::Shape`] for an empty row list and
 /// [`Error::BackendCapability`] for mixed dtypes.
+#[cfg(test)]
 pub(crate) fn concat_rows<B, K>(rows: Vec<Tensor<B, 3, K>>, name: &str) -> Result<Tensor<B, 3, K>>
 where
     B: Backend,

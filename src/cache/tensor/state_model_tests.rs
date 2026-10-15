@@ -303,7 +303,9 @@ impl Harness {
     fn apply(&mut self, operation: &Operation) -> bool {
         match operation {
             Operation::Append(counts) if self.oracle.proposals.is_some() => self.stage(counts),
-            Operation::Append(counts) => self.append(counts),
+            // Ordinary appends publish through the per-row step API, the path every
+            // family's stateful call uses; batched pushes are `Step(_, true)`.
+            Operation::Append(counts) => self.step(counts, false),
             Operation::Step(counts, batched) => self.step(counts, *batched),
             Operation::WriteAhead(counts, finish) => self.write_ahead(counts, *finish),
             Operation::Begin => self.begin(),
@@ -313,74 +315,6 @@ impl Harness {
             Operation::Truncate(lengths) => self.truncate(lengths),
             Operation::Reset => self.reset(),
         }
-    }
-
-    /// Publishes committed tokens through prepare, advance, and infallible apply.
-    fn append(&mut self, counts: &[usize]) -> bool {
-        let rows = self.setup.rows;
-        let valid = counts.len() == rows
-            && (0..rows)
-                .all(|row| self.oracle.committed[row].len() + counts[row] <= self.setup.capacity);
-        if !valid {
-            assert!(
-                self.state.advance(counts).is_err(),
-                "advance accepted {counts:?}"
-            );
-            return false;
-        }
-        let tokens = self.fresh_tokens(counts);
-        let active: Vec<usize> = (0..rows).filter(|&row| counts[row] > 0).collect();
-        let bank = self.state.main();
-        let mut prepared = Vec::new();
-        for group in [FULL, RING, MIRRORED, LATENT] {
-            let cache = bank.native_kv(group).expect("group");
-            let shape = self.setup.plane_shape(group);
-            let mut writes = Vec::new();
-            for layer in 0..self.setup.layers {
-                for &row in &active {
-                    let row_tokens = [tokens[row].clone()];
-                    let planes = if group == LATENT {
-                        let latent = latent_input(shape.1, &row_tokens, counts[row], layer);
-                        cache.latent_planes(latent).expect("latent group")
-                    } else {
-                        let (keys, values) = kv_input(shape, &row_tokens, counts[row], layer);
-                        cache.pair_planes(keys, values).expect("KV group")
-                    };
-                    let start = self.oracle.committed[row].len();
-                    writes.push(
-                        cache
-                            .prepare_planes_write(layer, row, start, planes)
-                            .expect("valid write"),
-                    );
-                }
-            }
-            let recurrent = (group == FULL && self.setup.recurrent).then(|| {
-                let cache = bank.recurrent(0).expect("recurrent group");
-                let writes = active
-                    .iter()
-                    .map(|&row| {
-                        let last = *tokens[row].last().expect("non-empty");
-                        let (matrix, convolution) = recurrent_state(last);
-                        cache
-                            .prepare_sequence_state(0, row, matrix, convolution)
-                            .expect("valid state")
-                    })
-                    .collect();
-                (0, writes)
-            });
-            prepared.push(
-                bank.prepare_direct_writes(Some((group, writes)), recurrent)
-                    .expect("ordinary writes"),
-            );
-        }
-        self.state.advance(counts).expect("validated advance");
-        for writes in prepared {
-            self.state.main_mut().apply_prepared_direct_writes(writes);
-        }
-        for (history, new) in self.oracle.committed.iter_mut().zip(tokens) {
-            history.extend(new);
-        }
-        true
     }
 
     /// Stages proposal tokens in every group and layer, then advances the working cursor.
@@ -954,14 +888,6 @@ fn batch_recurrent_state(last: &[f32]) -> (Tensor<TestBackend, 4>, Tensor<TestBa
             TensorData::new(convolution, [rows, 1, CONVOLUTION_WIDTH]),
             &Default::default(),
         ),
-    )
-}
-
-/// Builds the terminal recurrent state "last token value" for one row.
-fn recurrent_state(value: f32) -> (Tensor<TestBackend, 4>, Tensor<TestBackend, 3>) {
-    (
-        Tensor::full([1, 1, 1, 1], value, &Default::default()),
-        Tensor::full([1, 1, CONVOLUTION_WIDTH], value, &Default::default()),
     )
 }
 

@@ -19,7 +19,7 @@ use crate::{
     DecodeInput, DecodeState, LogitsSelection,
     architecture::TokenMask,
     models::qwen3_5::{Qwen3_5LayerType, Qwen3_5TextConfig},
-    models::shared::concat_rows,
+    models::shared::rows::concat_rows,
     position::{apply_rotary, rotary_angles},
 };
 

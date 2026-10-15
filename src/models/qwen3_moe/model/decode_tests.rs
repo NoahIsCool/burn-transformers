@@ -21,7 +21,7 @@ use crate::{
     checkpoint::TensorSink,
     models::{
         qwen3_moe::{Qwen3MoeCheckpointOptions, Qwen3MoeConfig},
-        shared::{concat_rows, implicit_position_ids},
+        shared::{implicit_position_ids, rows::concat_rows},
     },
     position::{apply_rotary, rotary_angles},
 };
