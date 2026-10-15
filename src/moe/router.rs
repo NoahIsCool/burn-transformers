@@ -21,7 +21,7 @@
 //!
 //! All routing arithmetic runs in F32 because nearby scores collapse in F16 or
 //! BF16 and a flipped selection changes an entire expert computation.
-//! [`deterministic_top_k`] breaks ties by the smallest expert ID on every
+//! Top-k selection breaks ties by the smallest expert ID on every
 //! backend and never emits an out-of-range or repeated ID, even for NaN scores;
 //! [`RouteDecision::non_finite_tokens`] lets callers report such tokens.
 
