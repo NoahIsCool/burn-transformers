@@ -3,16 +3,22 @@
 
 //! Bounded fuzz oracles shared by libFuzzer entry points and ordinary unit tests.
 //!
-//! Inputs never initialize a model or read downloaded weights. Configuration parsing keeps
-//! adversarial numeric dimensions while bounding layer counts that control validation loops.
-//! Tensor tests use at most four sequences and sixteen tokens on the host-only Flex backend.
-//! Artifact discovery sees only tiny, disposable local files and strict metadata limits.
+//! Inputs never read downloaded weights; the only models built are modular specifications of
+//! at most two layers and sixteen channels. Configuration parsing keeps adversarial numeric
+//! dimensions while bounding layer counts that control validation loops. Tensor tests use at
+//! most four sequences and sixteen tokens on the host-only Flex backend. Artifact and
+//! tokenizer discovery see only tiny, disposable local files and strict metadata limits.
+//!
+//! Every harness decodes its input with [`Bytes`], a total decoder: exhausted input reads as
+//! zero, so every byte string is a valid test case and libFuzzer never wastes executions on
+//! rejected framing. Each module documents its byte layout next to its `exercise` function.
 
 pub mod artifacts;
 pub mod cache;
 pub mod configuration;
 pub mod experiment_interfaces;
 pub mod generation;
+pub mod logits_processing;
 pub mod masks;
 
 /// Maximum bytes consumed from any one fuzzer input.
@@ -43,6 +49,27 @@ impl<'a> Bytes<'a> {
         }
     }
 
+    /// Returns whether the low bit of the next byte is set.
+    pub(crate) fn flag(&mut self) -> bool {
+        self.byte() & 1 == 1
+    }
+
+    /// Returns a value in `0..bound` (zero when `bound` is zero).
+    ///
+    /// The modulo bias is irrelevant for fuzzing: every value stays reachable.
+    pub(crate) fn below(&mut self, bound: usize) -> usize {
+        if bound == 0 {
+            0
+        } else {
+            usize::from(self.byte()) % bound
+        }
+    }
+
+    /// Selects one entry of a non-empty table.
+    pub(crate) fn pick<T: Clone>(&mut self, table: &[T]) -> T {
+        table[self.below(table.len())].clone()
+    }
+
     /// Samples small values plus machine-integer overflow boundaries without allocation.
     pub(crate) fn size(&mut self) -> usize {
         match self.byte() {
@@ -57,4 +84,87 @@ impl<'a> Bytes<'a> {
         let bits = core::array::from_fn(|_| self.byte());
         f64::from_le_bytes(bits)
     }
+
+    /// Mostly boundary values that validators treat specially, sometimes raw bits.
+    ///
+    /// Raw IEEE-754 patterns rarely land on `0`, `1`, or the edges of `f32`, so a
+    /// fuzzer reading only raw bits would almost never reach the branches a
+    /// validator spends most of its code on. One selector byte chooses between
+    /// [`INTERESTING_FLOATS`] (selector below 200) and an arbitrary bit pattern.
+    pub(crate) fn interesting_float(&mut self) -> f64 {
+        let selector = self.byte();
+        if selector < 200 {
+            INTERESTING_FLOATS[usize::from(selector) % INTERESTING_FLOATS.len()]
+        } else {
+            self.float()
+        }
+    }
+}
+
+/// Boundary floats for [`Bytes::interesting_float`].
+///
+/// The table covers the signed zeros, the identities `1` and `0.5`/`2` of
+/// multiplicative parameters, non-finite values, the extremes of `f64`, and the
+/// values just past the `f32` range (`f32::MAX * 2`, `1e-46`) at which a
+/// finite `f64` parameter becomes infinite or zero once a kernel rounds it to
+/// `f32`.
+pub(crate) const INTERESTING_FLOATS: [f64; 24] = [
+    0.0,
+    -0.0,
+    1.0,
+    -1.0,
+    0.5,
+    2.0,
+    0.25,
+    1.5,
+    32.0,
+    100.0,
+    1e-300,
+    1e300,
+    f64::MIN_POSITIVE,
+    f64::MAX,
+    f64::NAN,
+    f64::INFINITY,
+    f64::NEG_INFINITY,
+    1.0 + f64::EPSILON,
+    1.0 - f64::EPSILON / 2.0,
+    f32::MAX as f64,
+    f32::MAX as f64 * 2.0,
+    f32::MIN_POSITIVE as f64,
+    1e-46,
+    10_000.0,
+];
+
+/// Whether `right` is an acceptable JSON round trip of the float `left`.
+///
+/// `serde_json` serializes the shortest exact decimal but, without its
+/// `float_roundtrip` feature (which neither crate enables), parses long
+/// mantissas with large exponents approximately: a campaign found
+/// `3.7997969716361836e-262` read back four ulps away. Values must agree to a
+/// relative `1e-14`, or absolutely within `f64::MIN_POSITIVE` for subnormals.
+pub(crate) fn floats_round_trip(left: f64, right: f64) -> bool {
+    let difference = (left - right).abs();
+    left == right
+        || difference <= 1e-14 * left.abs().max(right.abs())
+        || difference <= f64::MIN_POSITIVE
+}
+
+/// Deterministic pseudo-random inputs for unit tests that stand in for a fuzzer.
+///
+/// A 32-bit linear congruential generator (Numerical Recipes constants) emits
+/// `count` inputs of `length` bytes each, taking the high byte of every state.
+/// The stream depends only on `seed`, so failures reproduce exactly.
+#[cfg(test)]
+pub(crate) fn lcg_inputs(seed: u32, count: usize, length: usize) -> Vec<Vec<u8>> {
+    let mut state = seed;
+    (0..count)
+        .map(|_| {
+            (0..length)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    state.to_le_bytes()[3]
+                })
+                .collect()
+        })
+        .collect()
 }

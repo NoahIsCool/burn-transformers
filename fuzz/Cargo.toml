@@ -58,7 +58,13 @@ test = false
 doc = false
 bench = false
 
-# Keep fuzz-only dependencies and sanitizer artifacts outside the runtime package.
+[[bin]]
+name = "logits_processing"
+path = "fuzz_targets/logits_processing.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
 
