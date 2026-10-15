@@ -6,7 +6,7 @@ use burn::{
 };
 
 use super::*;
-use crate::models::config::ModelConfig;
+use crate::{LogitsSelection, models::config::ModelConfig};
 
 /// CPU Flex backend with F32 activations and portable I32 indices.
 type TestBackend = Flex<f32, i32>;
@@ -267,18 +267,22 @@ fn last_selection_uses_semantic_mask() {
 #[test]
 fn input_validation_precedes_backend_indexing() {
     let device = Default::default();
-    assert!(
-        validate_token_ids(
-            Tensor::<TestBackend, 2, Int>::from_ints([[32]], &device),
-            32
-        )
-        .is_err()
+    let mut checks = DeferredChecks::new();
+    checks.values_below(
+        &Tensor::<TestBackend, 2, Int>::from_ints([[32]], &device),
+        32,
+        INPUT_NAMES.token_ids,
+        "token",
     );
+    assert!(checks.run("test").is_err());
     let empty = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
         [[false, false]].into(),
         &device,
     ));
-    assert!(validate_mask(Some(&empty), 1, 2).is_err());
+    let mut checks = DeferredChecks::new();
+    check_nonempty_mask(&mut checks, Some(&empty), 1, 2, INPUT_NAMES.token_mask)
+        .expect("mask extent matches");
+    assert!(checks.run("test").is_err());
     assert!(
         select_hidden(
             Tensor::<TestBackend, 3>::zeros([1, 2, 3], &device),
@@ -316,7 +320,7 @@ fn stateless_positions_fail_before_embedding_or_attention_outside_context() {
 /// Stateless device preflight identifies every independently supplied tensor.
 #[test]
 fn stateless_device_affinity_errors_are_contextual() {
-    assert!(ensure_model_device("qwen.input_ids", &0_u8, &0_u8).is_ok());
+    assert!(ensure_same_device("qwen.input_ids", &0_u8, &0_u8, PARAMETERS).is_ok());
     for tensor in [
         "qwen.input_ids",
         "qwen.token_mask",
@@ -324,7 +328,7 @@ fn stateless_device_affinity_errors_are_contextual() {
         "qwen.mtp.target_hidden_state",
         "qwen.lm_head",
     ] {
-        let error = ensure_model_device(tensor, &1_u8, &0_u8)
+        let error = ensure_same_device(tensor, &1_u8, &0_u8, PARAMETERS)
             .expect_err("different device identities must fail preflight");
         assert!(error.to_string().contains(tensor));
         assert!(error.to_string().contains("model parameters"));

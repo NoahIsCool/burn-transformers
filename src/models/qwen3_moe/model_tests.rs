@@ -3,13 +3,13 @@
 use burn::{
     backend::Flex,
     module::Param,
-    tensor::{Bool, DType, Int, Tensor, Tolerance, backend::BackendTypes},
+    tensor::{Bool, DType, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 
 use super::*;
 use crate::{
-    CausalLanguageModel, DecodeInput, DecodeState, cache::CacheConfig, checkpoint::TensorSink,
-    models::qwen3_moe::Qwen3MoeCheckpointOptions,
+    CausalLanguageModel, DecodeInput, DecodeState, LogitsSelection, cache::CacheConfig,
+    checkpoint::TensorSink, models::qwen3_moe::Qwen3MoeCheckpointOptions,
 };
 
 /// CPU Flex backend with F32 activations and portable I32 indices.
@@ -363,14 +363,14 @@ fn auxiliary_loss_validates_family_inputs() {
 /// Stateless device preflight names every independently supplied tensor.
 #[test]
 fn stateless_device_affinity_errors_are_contextual() {
-    assert!(ensure_model_device("qwen3_moe.input_ids", &0_u8, &0_u8).is_ok());
+    assert!(ensure_same_device("qwen3_moe.input_ids", &0_u8, &0_u8, PARAMETERS).is_ok());
     for tensor in [
         "qwen3_moe.input_ids",
         "qwen3_moe.token_mask",
         "qwen3_moe.position_ids",
         "qwen3_moe.lm_head",
     ] {
-        let error = ensure_model_device(tensor, &1_u8, &0_u8)
+        let error = ensure_same_device(tensor, &1_u8, &0_u8, PARAMETERS)
             .expect_err("different device identities must fail preflight");
         assert!(error.to_string().contains(tensor));
         assert!(error.to_string().contains("model parameters"));

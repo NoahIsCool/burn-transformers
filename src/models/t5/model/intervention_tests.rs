@@ -6,6 +6,7 @@ use burn::{
 };
 
 use super::*;
+use crate::LogitsSelection;
 
 /// CPU backend used for hook parity and padding regressions.
 type TestBackend = Flex<f32, i32>;
@@ -829,4 +830,50 @@ fn t5_invalid_decoder_mask_clears_previous_forward_captures() {
             .is_err()
     );
     assert!(hooks.get(&saved).is_err());
+}
+
+proptest::proptest! {
+    /// Device logical positions equal the former host loop: valid tokens strictly before each column.
+    #[test]
+    fn logical_decoder_positions_count_preceding_valid_tokens(
+        rows in proptest::strategy::Strategy::prop_flat_map(1usize..7, |width| {
+            proptest::collection::vec(proptest::collection::vec(proptest::bool::ANY, width), 1..4)
+        })
+    ) {
+        let device = Default::default();
+        let (batch, sequence) = (rows.len(), rows[0].len());
+        let mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_data(
+            burn::tensor::TensorData::new(rows.concat(), [batch, sequence]),
+            &device,
+        ));
+        let expected = rows
+            .iter()
+            .flat_map(|row| {
+                row.iter().scan(0_i64, |next, &valid| {
+                    let position = *next;
+                    *next += i64::from(valid);
+                    Some(position)
+                })
+            })
+            .collect::<Vec<_>>();
+        let actual = padded_hooks::logical_decoder_positions(&mask)
+            .unwrap()
+            .into_data()
+            .iter::<i64>()
+            .collect::<Vec<_>>();
+        proptest::prop_assert_eq!(actual, expected);
+    }
+}
+
+/// An empty decoder mask has no logical positions to derive.
+#[test]
+fn logical_decoder_positions_reject_empty_masks() {
+    let empty = TokenMask::new(Tensor::<TestBackend, 2, Bool>::empty(
+        [1, 0],
+        &Default::default(),
+    ));
+    assert!(matches!(
+        padded_hooks::logical_decoder_positions(&empty),
+        Err(Error::Configuration { .. })
+    ));
 }

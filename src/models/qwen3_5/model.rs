@@ -15,12 +15,11 @@ use std::ops::Range;
 use burn::{
     module::{Module, Param},
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
-    tensor::{DType, ElementConversion, Int, Tensor, TensorData, backend::Backend},
+    tensor::{DType, Int, Tensor, backend::Backend},
 };
 
 use crate::{
-    ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, LogitsSelection,
-    Result,
+    ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
     architecture::TokenMask,
     attention::{
         AttentionOutputGate, AttentionPrecisionMode, GroupedQueryAttention,
@@ -39,7 +38,13 @@ use crate::{
 };
 
 use super::{Qwen3_5LayerType, Qwen3_5TextConfig};
-use crate::models::config::RopeType;
+use crate::models::{
+    config::RopeType,
+    shared::{
+        DeferredChecks, InputContract, InputNames, ValidatedInput, check_nonempty_mask,
+        ensure_same_device, select_hidden, validate_input,
+    },
+};
 
 mod decode;
 mod mtp;
@@ -50,6 +55,16 @@ pub use mtp::{Qwen3_5Mtp, Qwen3_5MtpOutput, Qwen3_5MtpPrediction};
 pub use speculative::{
     Qwen3_5SpeculativeConfig, Qwen3_5SpeculativeDecoder, Qwen3_5SpeculativeOutput,
 };
+
+/// Tensor names reported by Qwen3.5 input errors.
+const INPUT_NAMES: InputNames<'static> = InputNames {
+    token_ids: "qwen.input_ids",
+    token_mask: "qwen.token_mask",
+    position_ids: "qwen.position_ids",
+};
+
+/// Owner named when a stateless tensor is on another device than the weights.
+const PARAMETERS: &str = "Qwen3.5 model parameters";
 
 /// One Qwen decoder block with exactly one active sequence mixer.
 #[derive(Module, Debug)]
@@ -157,17 +172,40 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
             ));
         }
         let device = self.input_layernorm.weight.lazy_device();
-        ensure_model_device("qwen.block.hidden", &hidden.device(), &device)?;
+        ensure_same_device("qwen.block.hidden", &hidden.device(), &device, PARAMETERS)?;
         let projection_dtype = self.mlp.gate_proj.weight.val().dtype();
         if !matches!(projection_dtype, DType::QFloat(_)) {
             ensure_model_dtype("qwen.block.hidden", hidden.dtype(), projection_dtype)?;
         }
-        ensure_model_device("qwen.block.positions", &positions.device(), &device)?;
+        ensure_same_device(
+            "qwen.block.positions",
+            &positions.device(),
+            &device,
+            PARAMETERS,
+        )?;
         if let Some(mask) = token_mask {
-            ensure_model_device("qwen.block.token_mask", &mask.as_tensor().device(), &device)?;
+            ensure_same_device(
+                "qwen.block.token_mask",
+                &mask.as_tensor().device(),
+                &device,
+                PARAMETERS,
+            )?;
         }
-        validate_mask(token_mask, batch, sequence)?;
-        decode::validate_position_range(positions.clone(), evaluated_context)?;
+        let mut checks = DeferredChecks::new();
+        check_nonempty_mask(
+            &mut checks,
+            token_mask,
+            batch,
+            sequence,
+            INPUT_NAMES.token_mask,
+        )?;
+        checks.values_below(
+            &positions,
+            evaluated_context,
+            INPUT_NAMES.position_ids,
+            "position",
+        );
+        checks.run("qwen.block")?;
         self.forward_inner(
             hidden,
             positions,
@@ -309,6 +347,19 @@ pub struct Qwen3_5TextModel<B: Backend> {
 }
 
 impl<B: Backend> Qwen3_5TextModel<B> {
+    /// Validates a public input and resolves Qwen's valid-token-ordinal positions.
+    ///
+    /// Token IDs, the mask, and positions are checked against the vocabulary
+    /// and the declared context with a single device-to-host readback.
+    fn validate_public_input(&self, input: &CausalLmInput<B>) -> Result<ValidatedInput<B>> {
+        validate_input(
+            input,
+            &self.embed_tokens.weight.lazy_device(),
+            &InputContract::new(INPUT_NAMES, PARAMETERS, self.config.vocab_size)
+                .with_position_limit(self.config.max_position_embeddings),
+        )
+    }
+
     /// Initializes lazy parameters for the exact configured hybrid schedule.
     pub fn init(config: Qwen3_5TextConfig, device: &B::Device) -> Result<Self> {
         ArchitectureConfig::validate(&config)?;
@@ -337,19 +388,9 @@ impl<B: Backend> Qwen3_5TextModel<B> {
     /// Edit `state.context` to select attention connectivity, then pass the state
     /// through explicit block ranges. This method never applies final normalization.
     pub fn embed(&self, input: &CausalLmInput<B>) -> Result<HiddenState<B>> {
-        let [batch, sequence] = input.token_ids.dims();
-        if batch == 0 || sequence == 0 {
-            return Err(Error::shape(
-                "qwen.input_ids",
-                "non-empty [batch, sequence]",
-                format!("[{batch}, {sequence}]"),
-            ));
-        }
-        validate_input_devices(input, &self.embed_tokens.weight.lazy_device())?;
-        validate_token_ids(input.token_ids.clone(), self.config.vocab_size)?;
-        validate_mask(input.token_mask.as_ref(), batch, sequence)?;
-        let positions = resolve_positions(input, batch, sequence)?;
-        decode::validate_position_range(positions.clone(), self.config.max_position_embeddings)?;
+        let positions = self
+            .validate_public_input(input)?
+            .require_positions(INPUT_NAMES.position_ids)?;
         let context = ExecutionContext::new(positions, input.token_mask.clone())?;
         HiddenState::new(self.embed_tokens.forward(input.token_ids.clone()), context)
     }
@@ -412,10 +453,11 @@ impl<B: Backend> Qwen3_5TextModel<B> {
     ) -> Result<HiddenState<B>> {
         state.validate(self.config.hidden_size)?;
         state.validate_range(range.clone(), self.layers.len())?;
-        ensure_model_device(
+        ensure_same_device(
             "qwen.execution.hidden",
             &state.hidden.device(),
             &self.embed_tokens.weight.lazy_device(),
+            PARAMETERS,
         )?;
         ensure_model_dtype(
             "qwen.execution.hidden",
@@ -432,15 +474,30 @@ impl<B: Backend> Qwen3_5TextModel<B> {
             ));
         }
         let [batch, sequence, _] = state.hidden.dims();
-        validate_mask(state.context.token_mask.as_ref(), batch, sequence)?;
-        decode::validate_position_range(
-            state.context.positions.clone(),
+        // One readback covers the mask rows and both position bounds.
+        let mut checks = DeferredChecks::new();
+        check_nonempty_mask(
+            &mut checks,
+            state.context.token_mask.as_ref(),
+            batch,
+            sequence,
+            INPUT_NAMES.token_mask,
+        )?;
+        let positions = &state.context.positions;
+        let names = INPUT_NAMES.position_ids;
+        checks.values_below(
+            positions,
             self.config.max_position_embeddings,
-        )?;
-        decode::validate_position_range(
-            state.context.positions.clone(),
+            names,
+            "position",
+        );
+        checks.values_below(
+            positions,
             state.context.evaluated_context,
-        )?;
+            names,
+            "position",
+        );
+        checks.run("qwen.execution")?;
         if self.layer_rope.len() != self.layers.len() {
             return Err(Error::configuration(
                 "qwen.layer_rope",
@@ -512,10 +569,11 @@ impl<B: Backend> Qwen3_5TextModel<B> {
                 "expected an unnormalized state at a valid block boundary",
             ));
         }
-        ensure_model_device(
+        ensure_same_device(
             "qwen.execution.hidden",
             &state.hidden.device(),
             &self.norm.weight.lazy_device(),
+            PARAMETERS,
         )?;
         ensure_model_dtype(
             "qwen.execution.hidden",
@@ -552,10 +610,11 @@ impl<B: Backend> Qwen3_5TextModel<B> {
                 format!("{:?}", hidden.dims()),
             ));
         }
-        ensure_model_device(
+        ensure_same_device(
             "qwen.tied_vocabulary_projection",
             &hidden.device(),
             &self.embed_tokens.weight.lazy_device(),
+            PARAMETERS,
         )?;
         ensure_model_dtype(
             "qwen.tied_vocabulary_projection",
@@ -661,20 +720,9 @@ impl<B: Backend> Qwen3_5TextModel<B> {
         retain_hidden_states: bool,
         mut hooks: Option<&mut Hooks<'_, B>>,
     ) -> Result<(Tensor<B, 3>, Vec<Tensor<B, 3>>)> {
-        let [batch, sequence] = input.token_ids.dims();
-        if batch == 0 || sequence == 0 {
-            return Err(Error::shape(
-                "qwen.input_ids",
-                "non-empty [batch, sequence]",
-                format!("[{batch}, {sequence}]"),
-            ));
-        }
-        validate_input_devices(input, &self.embed_tokens.weight.lazy_device())?;
-        validate_token_ids(input.token_ids.clone(), self.config.vocab_size)?;
-        validate_mask(input.token_mask.as_ref(), batch, sequence)?;
-        let positions = resolve_positions(input, batch, sequence)?;
-        decode::validate_position_range(positions.clone(), self.config.max_position_embeddings)?;
-        let evaluated_context = decode::evaluated_context(positions.clone())?;
+        let validated = self.validate_public_input(input)?;
+        let positions = validated.require_positions(INPUT_NAMES.position_ids)?;
+        let evaluated_context = validated.evaluated_context;
         let mut hidden = self.embed_tokens.forward(input.token_ids.clone());
         if let Some(hooks) = hooks.as_deref_mut() {
             hidden = hooks.apply(Stack::Decoder.embedding(), hidden)?;
@@ -856,27 +904,41 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             ));
         }
         let model_device = self.model.embed_tokens.weight.lazy_device();
-        ensure_model_device(
+        ensure_same_device(
             "qwen.mtp.next_token_ids",
             &next_token_ids.device(),
             &model_device,
+            PARAMETERS,
         )?;
-        ensure_model_device(
+        ensure_same_device(
             "qwen.mtp.target_hidden_state",
             &target_hidden_state.device(),
             &model_device,
+            PARAMETERS,
         )?;
-        ensure_model_device(
+        ensure_same_device(
             "qwen.mtp.position_ids",
             &position_ids.device(),
             &model_device,
+            PARAMETERS,
         )?;
-        validate_token_ids(next_token_ids.clone(), self.config().vocab_size)?;
-        decode::validate_position_range(
-            position_ids.clone(),
+        // Token and position ranges share one readback; the context is `1 + max p`.
+        let mut checks = DeferredChecks::new();
+        checks.values_below(
+            &next_token_ids,
+            self.config().vocab_size,
+            INPUT_NAMES.token_ids,
+            "token",
+        );
+        let range = checks.values_below(
+            &position_ids,
             self.config().max_position_embeddings,
-        )?;
-        let context = decode::evaluated_context(position_ids.clone())?;
+            INPUT_NAMES.position_ids,
+            "position",
+        );
+        let context = checks
+            .run("qwen.mtp")?
+            .context(range, INPUT_NAMES.position_ids)?;
         let embedding = self.model.embed_tokens.forward(next_token_ids);
         let output = mtp.forward(
             embedding,
@@ -898,14 +960,20 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
         let hidden_device = hidden.device();
         match &self.lm_head {
             Some(head) => {
-                ensure_model_device("qwen.lm_head", &head.weight.lazy_device(), &hidden_device)?;
+                ensure_same_device(
+                    "qwen.lm_head",
+                    &head.weight.lazy_device(),
+                    &hidden_device,
+                    PARAMETERS,
+                )?;
                 operations::linear(hidden, head)
             }
             None => {
-                ensure_model_device(
+                ensure_same_device(
                     "qwen.model.embed_tokens",
                     &self.model.embed_tokens.weight.lazy_device(),
                     &hidden_device,
+                    PARAMETERS,
                 )?;
                 Ok(burn::tensor::module::linear(
                     hidden,
@@ -970,184 +1038,12 @@ pub(super) fn qwen_rope_config(config: &Qwen3_5TextConfig) -> Result<RopeConfig>
         .map_err(|error| Error::configuration("qwen3_5.rope", error.to_string()))
 }
 
-/// Rejects stateless input tensors that do not share the model parameter device.
-///
-/// This preflight precedes reductions, positional arithmetic, and embedding
-/// lookup so mixed-device user input remains a recoverable library error.
-fn validate_input_devices<B: Backend>(
-    input: &CausalLmInput<B>,
-    model_device: &B::Device,
-) -> Result<()> {
-    ensure_model_device("qwen.input_ids", &input.token_ids.device(), model_device)?;
-    if let Some(mask) = &input.token_mask {
-        ensure_model_device("qwen.token_mask", &mask.as_tensor().device(), model_device)?;
-    }
-    if let Some(positions) = &input.position_ids {
-        ensure_model_device("qwen.position_ids", &positions.device(), model_device)?;
-    }
-    Ok(())
-}
-
-/// Reports a stateless tensor/parameter device mismatch through the error taxonomy.
-fn ensure_model_device<D: PartialEq>(tensor: &str, actual: &D, expected: &D) -> Result<()> {
-    if actual != expected {
-        return Err(Error::BackendCapability(format!(
-            "{tensor} and Qwen3.5 model parameters are on different devices"
-        )));
-    }
-    Ok(())
-}
-
 /// Check public latent boundaries before mixed-dtype operations reach the backend.
 fn ensure_model_dtype(tensor: &str, actual: DType, expected: DType) -> Result<()> {
     if actual != expected {
         return Err(Error::BackendCapability(format!(
             "{tensor} dtype must match Qwen3.5 parameters: expected {expected:?}, found {actual:?}"
         )));
-    }
-    Ok(())
-}
-
-/// Validates token values before the embedding backend sees an index.
-fn validate_token_ids<B: Backend>(token_ids: Tensor<B, 2, Int>, vocabulary: usize) -> Result<()> {
-    let minimum = token_ids
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate token IDs: {error}"))
-        })?
-        .elem::<i64>();
-    let maximum = token_ids
-        .max()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate token IDs: {error}"))
-        })?
-        .elem::<i64>();
-    if minimum < 0 || maximum as usize >= vocabulary {
-        return Err(Error::shape(
-            "qwen.input_ids",
-            format!("token values in 0..{vocabulary}"),
-            format!("observed range {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Validates a semantic mask and rejects rows with no usable token.
-fn validate_mask<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-) -> Result<()> {
-    let Some(mask) = mask else {
-        return Ok(());
-    };
-    if mask.as_tensor().dims() != [batch, sequence] {
-        return Err(Error::shape(
-            "qwen.token_mask",
-            format!("[{batch}, {sequence}]"),
-            format!("{:?}", mask.as_tensor().dims()),
-        ));
-    }
-    let minimum_valid = mask
-        .as_tensor()
-        .clone()
-        .int()
-        .sum_dim(1)
-        .min()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("failed to validate mask: {error}")))?
-        .elem::<i64>();
-    if minimum_valid == 0 {
-        return Err(Error::shape(
-            "qwen.token_mask",
-            "at least one valid token in every batch row",
-            "a fully masked row",
-        ));
-    }
-    Ok(())
-}
-
-/// Resolves explicit positions or derives padding-independent text positions.
-fn resolve_positions<B: Backend>(
-    input: &CausalLmInput<B>,
-    batch: usize,
-    sequence: usize,
-) -> Result<Tensor<B, 2, Int>> {
-    if let Some(positions) = &input.position_ids {
-        if positions.dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "qwen.position_ids",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", positions.dims()),
-            ));
-        }
-        return Ok(positions.clone());
-    }
-    let device = input.token_ids.device();
-    match &input.token_mask {
-        Some(mask) => {
-            let valid = mask.as_tensor().clone();
-            Ok((valid.clone().int().cumsum(1) - 1).mask_fill(valid.bool_not(), 0))
-        }
-        None => Ok(Tensor::<B, 1, Int>::arange(0..sequence as i64, &device)
-            .reshape([1, sequence])
-            .expand([batch, sequence])),
-    }
-}
-
-/// Selects requested sequence positions before the expensive vocabulary map.
-fn select_hidden<B: Backend>(
-    hidden: Tensor<B, 3>,
-    mask: Option<&TokenMask<B>>,
-    selection: &LogitsSelection,
-) -> Result<Tensor<B, 3>> {
-    let [batch, sequence, width] = hidden.dims();
-    validate_logits_selection(selection, sequence)?;
-    match selection {
-        LogitsSelection::All => Ok(hidden),
-        LogitsSelection::Last => match mask {
-            None => Ok(hidden.narrow(1, sequence - 1, 1)),
-            Some(mask) => {
-                let device = hidden.device();
-                let positions = Tensor::<B, 1, Int>::arange(0..sequence as i64, &device)
-                    .reshape([1, sequence])
-                    .expand([batch, sequence]);
-                let last = positions
-                    .mask_fill(mask.as_tensor().clone().bool_not(), -1)
-                    .argmax(1)
-                    .unsqueeze_dim::<3>(2)
-                    .expand([batch, 1, width]);
-                Ok(hidden.gather(1, last))
-            }
-        },
-        LogitsSelection::Positions(positions) => {
-            let device = hidden.device();
-            let indices = positions
-                .iter()
-                .map(|position| *position as i64)
-                .collect::<Vec<_>>();
-            let count = indices.len();
-            Ok(hidden.select(
-                1,
-                Tensor::<B, 1, Int>::from_data(TensorData::new(indices, [count]), &device),
-            ))
-        }
-    }
-}
-
-/// Validates selective-logit indices before potentially stateful model work.
-fn validate_logits_selection(selection: &LogitsSelection, sequence: usize) -> Result<()> {
-    if let LogitsSelection::Positions(positions) = selection
-        && (positions.is_empty() || positions.iter().any(|position| *position >= sequence))
-    {
-        return Err(Error::shape(
-            "forward_options.logits.positions",
-            format!("a non-empty list of indices below {sequence}"),
-            format!("{positions:?}"),
-        ));
     }
     Ok(())
 }

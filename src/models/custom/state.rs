@@ -20,6 +20,8 @@ use crate::{
     moe::SparseMoeOutput,
 };
 
+use crate::models::shared::{CompactRow, HostInput, implicit_position_ids, plan, range_error};
+
 use super::{
     ModularCausalLm, ModularSeq2SeqLm,
     common::{
@@ -165,6 +167,11 @@ impl<B: Backend> ModularDecodeState<B> {
     }
 
     /// Builds a prospective compact history without mutating committed state.
+    ///
+    /// Shapes and devices are checked first; the mask, token IDs, and explicit
+    /// positions are then read back once and validated on the host. Every token
+    /// ID must lie in the vocabulary (padded IDs included), while positions are
+    /// checked per row over the valid columns that enter the history.
     fn prepare_append(
         &self,
         input: CausalLmInput<B>,
@@ -179,17 +186,11 @@ impl<B: Backend> ModularDecodeState<B> {
                 format!("[{batch}, {step}]"),
             ));
         }
-        validate_decode_token_ids(input.token_ids.clone(), vocabulary_size)?;
-        if input.token_ids.device() != self.device {
-            return Err(Error::Cache(
-                "custom decode input and state must reside on the same device".into(),
-            ));
-        }
-        let validity = read_validity(input.token_mask.as_ref(), batch, step)?;
-        let mut counts = vec![0usize; batch];
-        for (row, cells) in validity.chunks_exact(step).enumerate() {
-            counts[row] = cells.iter().filter(|&&valid| valid).count();
-        }
+        self.validate_append_layout(&input, batch, step)?;
+        let host = HostInput::read(&input, batch, step, "custom decode input")?;
+        validate_decode_token_ids(&host.tokens, vocabulary_size)?;
+        let valid_indices = host.valid_indices(batch, step);
+        let counts = valid_indices.iter().map(Vec::len).collect::<Vec<_>>();
         if require_each_row && counts.contains(&0) {
             return Err(Error::shape(
                 "custom.prefill.token_mask",
@@ -224,80 +225,93 @@ impl<B: Backend> ModularDecodeState<B> {
             ));
         }
 
-        let supplied_positions = match input.position_ids {
-            Some(positions) => {
-                if positions.dims() != [batch, step] {
-                    return Err(Error::shape(
-                        "custom.decode.position_ids",
-                        format!("[{batch}, {step}]"),
-                        format!("{:?}", positions.dims()),
-                    ));
-                }
-                if positions.device() != self.device {
-                    return Err(Error::Cache(
-                        "custom decode positions and state must reside on the same device".into(),
-                    ));
-                }
-                Some(positions)
-            }
-            None => None,
-        };
         let mut tokens = self.tokens.clone();
         let mut positions = self.positions.clone();
         let mut absolute_indices = vec![0i64; batch * step];
-        for row in 0..batch {
-            let valid_columns = validity[row * step..(row + 1) * step]
-                .iter()
-                .enumerate()
-                .filter_map(|(column, &valid)| valid.then_some(column as i64))
-                .collect::<Vec<_>>();
+        for (row, valid_columns) in valid_indices.iter().enumerate() {
             if valid_columns.is_empty() {
                 continue;
             }
-            let count = valid_columns.len();
+            let plan = CompactRow::<B>::new(row, valid_columns, step, &self.device)?;
             let start = old_lengths[row];
-            let end = start + count;
-            let selection = Tensor::<B, 1, Int>::from_data(
-                TensorData::new(valid_columns, [count]),
-                &self.device,
-            );
-            let row_tokens = input
-                .token_ids
-                .clone()
-                .slice([row..row + 1, 0..step])
-                .select(1, selection.clone());
-            tokens = tokens.slice_assign([row..row + 1, start..end], row_tokens);
-            let row_positions = match &supplied_positions {
-                Some(supplied) => supplied
-                    .clone()
-                    .slice([row..row + 1, 0..step])
-                    .select(1, selection),
-                None => Tensor::<B, 1, Int>::arange(start as i64..end as i64, &self.device)
-                    .reshape([1, count]),
-            };
+            let end = new_lengths[row];
+            let window = row * step..(row + 1) * step;
             validate_decode_positions(
-                row_positions.clone(),
+                host.positions.as_ref().map(|values| &values[window]),
+                valid_columns,
+                start..end,
                 self.model_spec.max_position_embeddings,
             )?;
+            tokens =
+                tokens.slice_assign([row..row + 1, start..end], plan.compact(&input.token_ids));
+            let row_positions = match &input.position_ids {
+                Some(supplied) => plan.compact(supplied),
+                None => implicit_position_ids(
+                    start,
+                    plan.count(),
+                    &self.device,
+                    "custom.decode.position_ids",
+                )?,
+            };
             positions = positions.slice_assign([row..row + 1, start..end], row_positions);
-
-            let mut ordinal = 0usize;
-            for column in 0..step {
-                if validity[row * step + column] {
-                    absolute_indices[row * step + column] = (start + ordinal) as i64;
-                    ordinal += 1;
-                }
+            // Valid column `c_k` reads compact history slot `start + k`.
+            for (ordinal, &column) in valid_columns.iter().enumerate() {
+                absolute_indices[row * step + column] = to_index(start + ordinal)?;
             }
         }
+        let input_validity = host.mask.unwrap_or_else(|| vec![true; batch * step]);
         Ok(PreparedAppend {
             tokens,
             positions,
             new_lengths,
             counts,
-            input_validity: validity,
+            input_validity,
             absolute_indices,
             step,
         })
+    }
+
+    /// Checks mask and position extents and that every input shares the state device.
+    fn validate_append_layout(
+        &self,
+        input: &CausalLmInput<B>,
+        batch: usize,
+        step: usize,
+    ) -> Result<()> {
+        if input.token_ids.device() != self.device {
+            return Err(Error::Cache(
+                "custom decode input and state must reside on the same device".into(),
+            ));
+        }
+        if let Some(mask) = &input.token_mask {
+            if mask.as_tensor().dims() != [batch, step] {
+                return Err(Error::shape(
+                    "custom.decode.token_mask",
+                    format!("[{batch}, {step}]"),
+                    format!("{:?}", mask.as_tensor().dims()),
+                ));
+            }
+            if mask.as_tensor().device() != self.device {
+                return Err(Error::Cache(
+                    "custom decode mask and state must reside on the same device".into(),
+                ));
+            }
+        }
+        if let Some(positions) = &input.position_ids {
+            if positions.dims() != [batch, step] {
+                return Err(Error::shape(
+                    "custom.decode.position_ids",
+                    format!("[{batch}, {step}]"),
+                    format!("{:?}", positions.dims()),
+                ));
+            }
+            if positions.device() != self.device {
+                return Err(Error::Cache(
+                    "custom decode positions and state must reside on the same device".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Publishes a fully evaluated append and advances checked logical metadata.
@@ -521,88 +535,65 @@ impl<B: Backend> PreparedAppend<B> {
     }
 }
 
-/// Reads a semantic input mask once for compact append planning.
-fn read_validity<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    step: usize,
-) -> Result<Vec<bool>> {
-    match mask {
-        Some(mask) => {
-            if mask.as_tensor().dims() != [batch, step] {
-                return Err(Error::shape(
-                    "custom.decode.token_mask",
-                    format!("[{batch}, {step}]"),
-                    format!("{:?}", mask.as_tensor().dims()),
-                ));
-            }
-            crate::architecture::tensor_bool_values(
-                mask.as_tensor().clone(),
-                "custom decode validity mask",
-            )
-        }
-        None => Ok(vec![true; batch * step]),
-    }
-}
-
 /// Rejects out-of-range decode IDs before they enter preallocated history.
-fn validate_decode_token_ids<B: Backend>(
-    token_ids: Tensor<B, 2, Int>,
-    vocabulary: usize,
-) -> Result<()> {
-    let data = token_ids
-        .try_into_data()
-        .map_err(|error| {
-            Error::BackendCapability(format!(
-                "failed to inspect custom decode IDs on the backend: {error}"
-            ))
-        })?
-        .convert::<i64>()
-        .into_vec::<i64>()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to inspect custom decode IDs: {error}"))
-        })?;
-    let minimum = data.iter().copied().min().unwrap_or(0);
-    let maximum = data.iter().copied().max().unwrap_or(0);
-    if minimum < 0 || maximum as usize >= vocabulary {
-        return Err(Error::shape(
+///
+/// Every supplied ID is checked, including padded columns, because the custom
+/// decoder's contract treats the whole token tensor as caller data.
+fn validate_decode_token_ids(tokens: &[i64], vocabulary: usize) -> Result<()> {
+    let (Some(&minimum), Some(&maximum)) = (tokens.iter().min(), tokens.iter().max()) else {
+        return Ok(());
+    };
+    if plan::range_within(minimum, maximum, vocabulary) {
+        Ok(())
+    } else {
+        Err(range_error(
             "custom.decode.token_ids",
-            format!("values in 0..{vocabulary}"),
-            format!("observed range {minimum}..={maximum}"),
-        ));
+            "token",
+            vocabulary,
+            minimum,
+            maximum,
+        ))
     }
-    Ok(())
 }
 
-/// Rejects explicit cached positions outside the model context.
-fn validate_decode_positions<B: Backend>(
-    positions: Tensor<B, 2, Int>,
+/// Rejects one row's cached positions outside the model context.
+///
+/// Explicit positions are checked over the row's valid columns; implicit
+/// positions are the appended slots `start..end`, so only their last value
+/// `end - 1` can exceed the context.
+fn validate_decode_positions(
+    explicit: Option<&[i64]>,
+    valid_columns: &[usize],
+    appended: core::ops::Range<usize>,
     capacity: usize,
 ) -> Result<()> {
-    let data = positions
-        .try_into_data()
-        .map_err(|error| {
-            Error::BackendCapability(format!(
-                "failed to inspect custom decode positions on the backend: {error}"
+    let observed = match explicit {
+        Some(values) => plan::value_range(values, valid_columns),
+        None if appended.is_empty() => None,
+        None => Some((to_index(appended.start)?, to_index(appended.end - 1)?)),
+    };
+    match observed {
+        Some((minimum, maximum)) if !plan::range_within(minimum, maximum, capacity) => {
+            Err(range_error(
+                "custom.decode.position_ids",
+                "position",
+                capacity,
+                minimum,
+                maximum,
             ))
-        })?
-        .convert::<i64>()
-        .into_vec::<i64>()
-        .map_err(|error| {
-            Error::BackendCapability(format!(
-                "failed to inspect custom decode positions: {error}"
-            ))
-        })?;
-    let minimum = data.iter().copied().min().unwrap_or(0);
-    let maximum = data.iter().copied().max().unwrap_or(0);
-    if minimum < 0 || maximum as usize >= capacity {
-        return Err(Error::shape(
-            "custom.decode.position_ids",
-            format!("values in 0..{capacity}"),
-            format!("observed range {minimum}..={maximum}"),
-        ));
+        }
+        _ => Ok(()),
     }
-    Ok(())
+}
+
+/// Converts a host index into Burn's signed `i64` index type.
+fn to_index(index: usize) -> Result<i64> {
+    i64::try_from(index).map_err(|_| {
+        Error::configuration(
+            "custom.decode",
+            "history index exceeds the signed tensor-index range",
+        )
+    })
 }
 
 #[cfg(test)]

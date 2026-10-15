@@ -19,14 +19,12 @@ use burn::{
     module::{Module, Param},
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
     tensor::{
-        Bool, DType, ElementConversion, IndexingUpdateOp, Int, Tensor, TensorData, activation,
-        backend::Backend,
+        Bool, DType, IndexingUpdateOp, Int, Tensor, TensorData, activation, backend::Backend,
     },
 };
 
 use crate::{
-    ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, LogitsSelection,
-    Result,
+    ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
     architecture::{Activation, RouterDiagnostics, TokenMask},
     attention::{GroupedQueryAttention, GroupedQueryAttentionConfig, padding_attention_mask},
     feed_forward::apply_activation,
@@ -36,6 +34,10 @@ use crate::{
 };
 
 use super::{NemotronHBlockType, NemotronHConfig};
+use crate::models::shared::{
+    ImplicitPositions, InputContract, InputNames, select_hidden, validate_input,
+    validate_token_values,
+};
 
 mod decode;
 pub mod mamba2;
@@ -48,6 +50,16 @@ pub use mtp::NemotronHMtpPrediction;
 pub use speculative::{
     NemotronHSpeculativeConfig, NemotronHSpeculativeDecoder, NemotronHSpeculativeOutput,
 };
+
+/// Tensor names reported by Nemotron-H input errors.
+const INPUT_NAMES: InputNames<'static> = InputNames {
+    token_ids: "nemotron_h.input_ids",
+    token_mask: "nemotron_h.token_mask",
+    position_ids: "nemotron_h.position_ids",
+};
+
+/// Owner named when a stateless tensor is on another device than the weights.
+const PARAMETERS: &str = "Nemotron-H model parameters";
 
 /// Ordinary two-projection MLP used by dense, routed, and shared blocks.
 #[derive(Module, Debug)]
@@ -586,13 +598,15 @@ impl<B: Backend> NemotronHModel<B> {
         input: &CausalLmInput<B>,
         options: &ForwardOptions,
     ) -> Result<NemotronHBackboneOutput<B>> {
-        let [batch, sequence] = input.token_ids.dims();
-        validate_input(input, batch, sequence, &self.config, false)?;
-        if self.embed_tokens.weight.val().device() != input.token_ids.device() {
-            return Err(Error::BackendCapability(
-                "Nemotron-H model parameters and inputs must share a device".into(),
-            ));
-        }
+        // Mamba and attention mixers are position-free; explicit positions
+        // are still range-checked so callers get the shared input contract.
+        validate_input(
+            input,
+            &self.embed_tokens.weight.lazy_device(),
+            &InputContract::new(INPUT_NAMES, PARAMETERS, self.config.vocab_size)
+                .with_position_limit(self.config.max_position_embeddings)
+                .with_implicit_positions(ImplicitPositions::Unused),
+        )?;
         let mut hidden = self.embed_tokens.forward(input.token_ids.clone());
         let mut hidden_states = Vec::with_capacity(if options.hidden_states {
             self.layers.len() + 2
@@ -884,7 +898,11 @@ impl<B: Backend> NemotronHForCausalLm<B> {
                 format!("{:?}", base_hidden.dims()),
             ));
         }
-        validate_token_ids(shifted_token_ids.clone(), self.config().vocab_size)?;
+        validate_token_values(
+            &shifted_token_ids,
+            self.config().vocab_size,
+            INPUT_NAMES.token_ids,
+        )?;
         let embedding = self.model.embed_tokens.forward(shifted_token_ids);
         let (hidden, _) = head.forward(embedding, base_hidden)?;
         Ok(self.project_logits(hidden)?.cast(DType::F32))
@@ -1028,163 +1046,6 @@ fn stateless_attention_mask<B: Backend>(
         Some(padding) => padding.bool_or(too_old),
         None => too_old,
     }))
-}
-
-/// Validates token, mask, and position tensors before backend indexing.
-fn validate_input<B: Backend>(
-    input: &CausalLmInput<B>,
-    batch: usize,
-    sequence: usize,
-    config: &NemotronHConfig,
-    permit_empty_rows: bool,
-) -> Result<()> {
-    if batch == 0 || sequence == 0 {
-        return Err(Error::shape(
-            "nemotron_h.input_ids",
-            "non-empty [batch, sequence]",
-            format!("[{batch}, {sequence}]"),
-        ));
-    }
-    validate_token_ids(input.token_ids.clone(), config.vocab_size)?;
-    if let Some(mask) = &input.token_mask {
-        if mask.as_tensor().device() != input.token_ids.device() {
-            return Err(Error::BackendCapability(
-                "Nemotron-H token IDs and token mask must share a device".into(),
-            ));
-        }
-        if mask.as_tensor().dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "nemotron_h.token_mask",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", mask.as_tensor().dims()),
-            ));
-        }
-        if !permit_empty_rows {
-            let minimum = mask
-                .as_tensor()
-                .clone()
-                .int()
-                .sum_dim(1)
-                .min()
-                .try_into_scalar()
-                .map_err(|error| {
-                    Error::BackendCapability(format!("failed to validate Nemotron mask: {error}"))
-                })?
-                .elem::<i64>();
-            if minimum == 0 {
-                return Err(Error::shape(
-                    "nemotron_h.token_mask",
-                    "at least one valid token in each row",
-                    "a fully masked row",
-                ));
-            }
-        }
-    }
-    if let Some(positions) = &input.position_ids {
-        if positions.device() != input.token_ids.device() {
-            return Err(Error::BackendCapability(
-                "Nemotron-H token IDs and position IDs must share a device".into(),
-            ));
-        }
-        if positions.dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "nemotron_h.position_ids",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", positions.dims()),
-            ));
-        }
-        let minimum = positions
-            .clone()
-            .min()
-            .try_into_scalar()
-            .map_err(|error| {
-                Error::BackendCapability(format!("position validation failed: {error}"))
-            })?
-            .elem::<i64>();
-        let maximum = positions
-            .clone()
-            .max()
-            .try_into_scalar()
-            .map_err(|error| {
-                Error::BackendCapability(format!("position validation failed: {error}"))
-            })?
-            .elem::<i64>();
-        if minimum < 0 || maximum as usize >= config.max_position_embeddings {
-            return Err(Error::shape(
-                "nemotron_h.position_ids",
-                format!("values in 0..{}", config.max_position_embeddings),
-                format!("observed {minimum}..={maximum}"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Rejects out-of-vocabulary indices before embedding lookup.
-fn validate_token_ids<B: Backend>(token_ids: Tensor<B, 2, Int>, vocabulary: usize) -> Result<()> {
-    let minimum = token_ids
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("token validation failed: {error}")))?
-        .elem::<i64>();
-    let maximum = token_ids
-        .max()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("token validation failed: {error}")))?
-        .elem::<i64>();
-    if minimum < 0 || maximum as usize >= vocabulary {
-        return Err(Error::shape(
-            "nemotron_h.input_ids",
-            format!("values in 0..{vocabulary}"),
-            format!("observed {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Applies the requested vocabulary-projection position policy.
-fn select_hidden<B: Backend>(
-    hidden: Tensor<B, 3>,
-    mask: Option<&TokenMask<B>>,
-    selection: &LogitsSelection,
-) -> Result<Tensor<B, 3>> {
-    let [batch, sequence, width] = hidden.dims();
-    match selection {
-        LogitsSelection::All => Ok(hidden),
-        LogitsSelection::Last => match mask {
-            None => Ok(hidden.narrow(1, sequence - 1, 1)),
-            Some(mask) => {
-                let positions = Tensor::<B, 1, Int>::arange(0..sequence as i64, &hidden.device())
-                    .reshape([1, sequence])
-                    .expand([batch, sequence]);
-                let last = positions
-                    .mask_fill(mask.as_tensor().clone().bool_not(), -1)
-                    .argmax(1)
-                    .unsqueeze_dim::<3>(2)
-                    .expand([batch, 1, width]);
-                Ok(hidden.gather(1, last))
-            }
-        },
-        LogitsSelection::Positions(positions) => {
-            if positions.is_empty() || positions.iter().any(|&position| position >= sequence) {
-                return Err(Error::shape(
-                    "nemotron_h.logits.positions",
-                    format!("non-empty values in 0..{sequence}"),
-                    format!("{positions:?}"),
-                ));
-            }
-            let values = positions
-                .iter()
-                .map(|&value| value as i64)
-                .collect::<Vec<_>>();
-            let selector = Tensor::<B, 1, Int>::from_data(
-                TensorData::new(values, [positions.len()]),
-                &hidden.device(),
-            );
-            Ok(hidden.select(1, selector))
-        }
-    }
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@ use std::ops::Range;
 use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
-    tensor::{ElementConversion, Tensor, backend::Backend},
+    tensor::{Tensor, backend::Backend},
 };
 
 use crate::{
@@ -20,16 +20,18 @@ use crate::{
     architecture::Seq2SeqSpec,
     attention::AttentionPrecisionMode,
     cache::CacheConfig,
-    experiment::{EncoderContext, ExecutionContext, HiddenState, HiddenTransform},
+    experiment::{EncoderContext, ExecutionContext, HiddenState},
     intervention::{Hooks, Layer, PointInfo, Stack},
 };
 
+use crate::models::shared::{check_nonempty_mask, ensure_grid, ensure_same_device};
+
 use super::{
     common::{
-        AttentionDirection, BackboneOutput, ModularLayer, ModularNorm, causal_output,
-        evaluated_context, has_moe, router_diagnostics, select_hidden, tied_projection,
-        validate_and_resolve_input, validate_decoder_execution, validate_forward_options,
-        validate_positions,
+        AttentionDirection, BackboneOutput, ModularLayer, ModularNorm, causal_output, has_moe,
+        router_diagnostics, select_hidden, tied_projection, validate_and_resolve_input,
+        validate_and_resolve_input_with, validate_decoder_execution, validate_forward_options,
+        validate_position_values,
     },
     state::{ModularDecodeState, StatePurpose},
 };
@@ -226,7 +228,7 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
                 Stack::Encoder => (&self.spec.encoder, &self.encoder_embed_tokens),
                 Stack::Decoder => (&self.spec.decoder, &self.decoder_embed_tokens),
             };
-            let positions = validate_and_resolve_input(
+            let (positions, _) = validate_and_resolve_input(
                 &input,
                 spec.vocabulary_size,
                 spec.max_position_embeddings,
@@ -305,17 +307,24 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
         hooks.run(points, |hooks| {
             self.validate_execution_state(&state, stack)?;
             state.validate_range(range.clone(), layers.len())?;
-            validate_positions(
-                state.context.positions.clone(),
+            validate_position_values(
+                &state.context.positions,
                 spec.max_position_embeddings,
-                "custom.seq2seq.run_layers.positions",
+                "custom.seq2seq.run_layers.positions.position_ids",
             )?;
+            // `validate_execution_state` already ran `ExecutionContext::validate`
+            // once for this range, and the context is immutable while the blocks
+            // run. Each block then re-checks only sync-free geometry, because hooks
+            // may replace the hidden states between blocks.
             for index in range.clone() {
-                layers[index].validate_context(&state.hidden, &state.context, address(index))?;
+                layers[index].validate_prevalidated(
+                    &state.hidden,
+                    &state.context,
+                    address(index),
+                )?;
             }
             for index in range.clone() {
-                state.hidden = HiddenTransform::forward(
-                    &layers[index],
+                state.hidden = layers[index].forward_prevalidated(
                     state.hidden,
                     &state.context,
                     address(index),
@@ -481,13 +490,12 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
                     .into(),
             ));
         }
-        let positions = validate_and_resolve_input(
+        let (positions, context) = validate_and_resolve_input(
             &source,
             self.spec.encoder.vocabulary_size,
             self.spec.encoder.max_position_embeddings,
             "custom.seq2seq.encoder",
         )?;
-        let context = evaluated_context(positions.clone())?;
         let hidden = self.encoder_embed_tokens.forward(source.token_ids.clone());
         let mut hidden = hooks.apply(Stack::Encoder.embedding(), hidden)?;
         let mut hidden_states = Vec::with_capacity(if options.hidden_states {
@@ -554,19 +562,29 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
         retain_hidden_states: bool,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<BackboneOutput<B>> {
-        validate_encoder_output(
+        validate_encoder_layout(
             encoder,
             decoder.token_ids.dims()[0],
             self.spec.encoder.hidden_size,
             &decoder.token_ids.device(),
         )?;
-        let positions = validate_and_resolve_input(
+        // The source mask's row counts share the decoder input's readback.
+        let (positions, context) = validate_and_resolve_input_with(
             decoder,
             self.spec.decoder.vocabulary_size,
             self.spec.decoder.max_position_embeddings,
             "custom.seq2seq.decoder",
+            |checks| {
+                let [batch, source_sequence, _] = encoder.hidden_state.dims();
+                check_nonempty_mask(
+                    checks,
+                    encoder.token_mask.as_ref(),
+                    batch,
+                    source_sequence,
+                    ENCODER_MASK,
+                )
+            },
         )?;
-        let context = evaluated_context(positions.clone())?;
         let hidden = self.decoder_embed_tokens.forward(decoder.token_ids.clone());
         let mut hidden = hooks.apply(Stack::Decoder.embedding(), hidden)?;
         let mut hidden_states = Vec::with_capacity(if retain_hidden_states {
@@ -796,8 +814,14 @@ fn validate_seq2seq_execution(spec: &Seq2SeqSpec) -> Result<()> {
     )
 }
 
-/// Checks externally supplied encoder states before cross-attention projection.
-fn validate_encoder_output<B: Backend>(
+/// Name of a supplied encoder result's source mask in errors.
+const ENCODER_MASK: &str = "custom.seq2seq.encoder_mask";
+
+/// Checks a supplied encoder result's extents and devices without reading values.
+///
+/// The caller defers the source mask's non-empty-row check into the decoder
+/// input's readback with [`check_nonempty_mask`].
+fn validate_encoder_layout<B: Backend>(
     encoder: &EncoderOutput<B>,
     decoder_batch: usize,
     hidden_size: usize,
@@ -811,44 +835,25 @@ fn validate_encoder_output<B: Backend>(
             format!("[{batch}, {source_sequence}, {width}]"),
         ));
     }
-    if encoder.hidden_state.device() != *decoder_device {
-        return Err(Error::BackendCapability(
-            "custom encoder output and decoder input must reside on the same device".into(),
-        ));
-    }
-    if let Some(mask) = &encoder.token_mask
-        && mask.as_tensor().dims() != [batch, source_sequence]
-    {
-        return Err(Error::shape(
-            "custom.seq2seq.encoder_mask",
-            format!("[{batch}, {source_sequence}]"),
-            format!("{:?}", mask.as_tensor().dims()),
-        ));
-    }
+    ensure_same_device(
+        "custom.seq2seq.encoder_output",
+        &encoder.hidden_state.device(),
+        decoder_device,
+        "the custom decoder input",
+    )?;
     if let Some(mask) = &encoder.token_mask {
-        if mask.as_tensor().device() != *decoder_device {
-            return Err(Error::BackendCapability(
-                "custom encoder mask and decoder input must reside on the same device".into(),
-            ));
-        }
-        let minimum = mask
-            .as_tensor()
-            .clone()
-            .int()
-            .sum_dim(1)
-            .min()
-            .try_into_scalar()
-            .map_err(|error| {
-                Error::BackendCapability(format!("failed to validate custom encoder mask: {error}"))
-            })?
-            .elem::<i64>();
-        if minimum == 0 {
-            return Err(Error::shape(
-                "custom.seq2seq.encoder_mask",
-                "at least one valid source token in every row",
-                "a fully masked row",
-            ));
-        }
+        ensure_same_device(
+            ENCODER_MASK,
+            &mask.as_tensor().device(),
+            decoder_device,
+            "the custom decoder input",
+        )?;
+        ensure_grid(
+            mask.as_tensor().dims(),
+            batch,
+            source_sequence,
+            ENCODER_MASK,
+        )?;
     }
     Ok(())
 }

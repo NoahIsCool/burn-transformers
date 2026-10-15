@@ -16,21 +16,27 @@
 
 use std::collections::BTreeSet;
 
-use burn::tensor::{Bool, DType, ElementConversion, Int, Tensor, TensorData, backend::Backend};
+use burn::tensor::{Bool, DType, Int, Tensor, backend::Backend};
 
 use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, Result,
-    architecture::{DecodeState as ArchitectureDecodeState, RouterDiagnostics, TokenMask},
+    architecture::{DecodeState as ArchitectureDecodeState, RouterDiagnostics},
     cache::CacheConfig,
+    models::shared::{
+        EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_same_device,
+        ensure_static_rotary_context, implicit_position_ids, index_tensor, prepare_stateful_rows,
+        select_hidden_with_last_columns, validate_logits_selection,
+    },
     moe::{SparseMoeOutput, load_balancing_loss},
-    position::{RopeScaling, derive_position_ids},
 };
 
 use super::{
-    DeepseekV2DecoderLayer, DeepseekV2ForCausalLm, DeepseekV2Model, select_hidden,
-    sequence_auxiliary_loss, validate_logits_selection, validate_position_range,
-    validate_token_ids,
+    DeepseekV2DecoderLayer, DeepseekV2ForCausalLm, DeepseekV2Model, INPUT_NAMES, ROUTER_DTYPE,
+    sequence_auxiliary_loss,
 };
+
+/// Owner named when an input tensor is on another device than the cache.
+const DECODE_STATE: &str = "DeepSeek decode state";
 
 /// MLA kernel selected by the most recent successful stateful operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,9 +57,12 @@ enum StatefulPhase {
 }
 
 impl StatefulPhase {
-    /// Returns whether fully masked rows are defined as exact no-ops.
-    const fn permits_inactive_rows(self) -> bool {
-        matches!(self, Self::Decode)
+    /// Returns the phase's policy for rows without a valid token.
+    const fn empty_rows(self) -> EmptyRows {
+        match self {
+            Self::Prefill => EmptyRows::Reject,
+            Self::Decode => EmptyRows::Permit,
+        }
     }
 
     /// Chooses absorbed math only for the latency-critical one-token decode case.
@@ -386,7 +395,8 @@ impl<B: Backend> ArchitectureDecodeState<B> for DeepseekV2DecodeState<B> {
                 self.batch_size, self.batch_size
             )));
         }
-        let selector = selection_tensor::<B>(indices, &self.device)?;
+        let selector =
+            index_tensor::<B>(indices, &self.device, "deepseek_v2.decode_state.reorder")?;
         let reordered_lengths = indices.iter().map(|&index| self.lengths[index]).collect();
         let reordered_layers = self
             .layers
@@ -541,18 +551,18 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
         };
 
         for row in 0..prepared.batch {
-            let valid = &prepared.valid_indices[row];
-            if valid.is_empty() {
+            let Some(plan) = prepared.compact_row::<B>(row, &device)? else {
                 let empty = empty_hidden_row(self, prepared.sequence, &device);
                 final_rows.push(empty.clone());
                 for destination in &mut hidden_rows {
                     destination.push(empty.clone());
                 }
                 for destination in &mut router_rows {
+                    // Router logits are FP32 regardless of the activation dtype (DSV-1).
                     destination.push(RowRouter {
                         logits: Tensor::zeros(
                             [1, prepared.sequence, self.config().n_routed_experts],
-                            (&device, self.model.embed_tokens.weight.val().dtype()),
+                            (&device, ROUTER_DTYPE),
                         ),
                         selected: Tensor::zeros(
                             [1, prepared.sequence, self.config().num_experts_per_tok],
@@ -561,20 +571,17 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
                     });
                 }
                 continue;
-            }
-            let selector = selection_tensor::<B>(valid, &device)?;
-            let tokens = input
-                .token_ids
-                .clone()
-                .slice([row..row + 1, 0..prepared.sequence])
-                .select(1, selector.clone());
+            };
+            let tokens = plan.compact(&input.token_ids);
             let baseline = state.lengths[row];
             let positions = match &input.position_ids {
-                Some(position_ids) => position_ids
-                    .clone()
-                    .slice([row..row + 1, 0..prepared.sequence])
-                    .select(1, selector),
-                None => implicit_positions::<B>(baseline, valid.len(), &device)?,
+                Some(position_ids) => plan.compact(position_ids),
+                None => implicit_position_ids(
+                    baseline,
+                    plan.count(),
+                    &device,
+                    INPUT_NAMES.position_ids,
+                )?,
             };
             let compact = self.model.forward_compact_row(
                 tokens,
@@ -588,31 +595,33 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
                 retain_routers,
                 &mut pending,
             )?;
-            final_rows.push(scatter_compact(compact.hidden, prepared.sequence, valid)?);
+            final_rows.push(plan.scatter(compact.hidden)?);
             for (destination, hidden) in hidden_rows.iter_mut().zip(compact.hidden_states) {
-                destination.push(scatter_compact(hidden, prepared.sequence, valid)?);
+                destination.push(plan.scatter(hidden)?);
             }
             for (destination, routed) in router_rows.iter_mut().zip(compact.routers) {
                 destination.push(RowRouter {
-                    logits: scatter_compact(routed.router_logits, prepared.sequence, valid)?,
-                    selected: scatter_compact_int(
-                        routed.selected_experts,
-                        prepared.sequence,
-                        valid,
-                    )?,
+                    logits: plan.scatter(routed.router_logits)?,
+                    selected: plan.scatter(routed.selected_experts)?,
                 });
             }
         }
-        let hidden = Tensor::cat(final_rows, 0);
+        let hidden = concat_rows(final_rows, "deepseek_v2.hidden")?;
         let hidden_states = hidden_rows
             .into_iter()
-            .map(|rows| Tensor::cat(rows, 0))
-            .collect();
+            .map(|rows| concat_rows(rows, "deepseek_v2.hidden_states"))
+            .collect::<Result<Vec<_>>>()?;
         let routers = router_rows
             .into_iter()
             .map(|rows| {
-                let logits = Tensor::cat(rows.iter().map(|row| row.logits.clone()).collect(), 0);
-                let selected = Tensor::cat(rows.into_iter().map(|row| row.selected).collect(), 0);
+                let logits = concat_rows(
+                    rows.iter().map(|row| row.logits.clone()).collect(),
+                    "deepseek_v2.router_logits",
+                )?;
+                let selected = concat_rows(
+                    rows.into_iter().map(|row| row.selected).collect(),
+                    "deepseek_v2.selected_experts",
+                )?;
                 let auxiliary = if options.auxiliary_losses {
                     let loss = if self.config().seq_aux {
                         sequence_auxiliary_loss(
@@ -638,7 +647,11 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
+        let selected = select_hidden_with_last_columns(
+            hidden.clone(),
+            prepared.last_columns(),
+            &options.logits,
+        )?;
         let logits = self.project_logits(selected)?;
         state.commit(pending, &prepared.token_counts, path)?;
         Ok(CausalLmOutput {
@@ -812,231 +825,43 @@ struct RowRouter<B: Backend> {
     selected: Tensor<B, 3, Int>,
 }
 
-/// Validated host metadata for a stateful input.
-struct PreparedStatefulInput {
-    /// Validated rectangular row count.
-    batch: usize,
-    /// Validated rectangular token width.
-    sequence: usize,
-    /// Semantic token columns for each row in original order.
-    valid_indices: Vec<Vec<usize>>,
-    /// Number of cache-appending tokens for each row.
-    token_counts: Vec<usize>,
-    /// Largest rotary table extent required for each compact row.
-    evaluated_contexts: Vec<usize>,
-}
-
 /// Validates devices, shapes, masks, positions, and capacity before model work.
+///
+/// The shared preparation reads the mask, token IDs, and explicit positions in
+/// one transfer; this wrapper adds the dynamic-NTK guard, which DeepSeek applies
+/// only once rotated keys are already cached.
 fn prepare_stateful_input<B: Backend>(
     model: &DeepseekV2ForCausalLm<B>,
     input: &CausalLmInput<B>,
     state: &DeepseekV2DecodeState<B>,
     phase: StatefulPhase,
-) -> Result<PreparedStatefulInput> {
-    let [batch, sequence] = input.token_ids.dims();
-    if batch == 0 || sequence == 0 {
-        return Err(Error::shape(
-            "deepseek_v2.input_ids",
-            "non-empty [batch, sequence]",
-            format!("[{batch}, {sequence}]"),
-        ));
-    }
-    if batch != state.batch_size {
-        return Err(Error::Cache(format!(
-            "DeepSeek decode state batch {} differs from input batch {batch}",
-            state.batch_size
-        )));
-    }
-    ensure_device(
-        "deepseek_v2.input_ids",
-        &input.token_ids.device(),
+) -> Result<StatefulRows> {
+    ensure_same_device(
+        "deepseek_v2.model",
+        &model.model.embed_tokens.weight.lazy_device(),
         &state.device,
+        DECODE_STATE,
     )?;
-    if let Some(mask) = &input.token_mask {
-        ensure_device(
-            "deepseek_v2.token_mask",
-            &mask.as_tensor().device(),
-            &state.device,
-        )?;
-        if mask.as_tensor().dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "deepseek_v2.token_mask",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", mask.as_tensor().dims()),
-            ));
+    let rows = prepare_stateful_rows(
+        input,
+        &state.device,
+        &state.lengths,
+        state.config.capacity(),
+        &StatefulContract {
+            names: INPUT_NAMES,
+            owner: DECODE_STATE,
+            vocabulary: model.config().vocab_size,
+            position_limit: Some(model.config().max_position_embeddings),
+            empty_rows: phase.empty_rows(),
+        },
+    )?;
+    // A fresh prefill has no rotated keys to invalidate yet.
+    for (row, context) in rows.active_contexts() {
+        if state.lengths[row] > 0 {
+            ensure_static_rotary_context(model.model.rope.scaling(), context, "DeepSeek")?;
         }
     }
-    if let Some(positions) = &input.position_ids {
-        ensure_device(
-            "deepseek_v2.position_ids",
-            &positions.device(),
-            &state.device,
-        )?;
-        if positions.dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "deepseek_v2.position_ids",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", positions.dims()),
-            ));
-        }
-    }
-    let valid_indices = semantic_indices(input.token_mask.as_ref(), batch, sequence)?;
-    if !phase.permits_inactive_rows() && valid_indices.iter().any(Vec::is_empty) {
-        return Err(Error::shape(
-            "deepseek_v2.token_mask",
-            "at least one valid token in every prefill row",
-            "a fully masked prompt row",
-        ));
-    }
-    let token_counts = valid_indices.iter().map(Vec::len).collect::<Vec<_>>();
-    let mut implicit_contexts = Vec::with_capacity(batch);
-    for (row, (&baseline, &additional)) in state.lengths.iter().zip(&token_counts).enumerate() {
-        let requested = baseline.checked_add(additional).ok_or_else(|| {
-            Error::Cache(format!(
-                "DeepSeek row {row} length addition overflows usize"
-            ))
-        })?;
-        if requested > state.config.capacity() {
-            return Err(Error::Cache(format!(
-                "DeepSeek row {row} requests length {requested} beyond capacity {}",
-                state.config.capacity()
-            )));
-        }
-        implicit_contexts.push(requested);
-    }
-    let mut evaluated_contexts = Vec::with_capacity(batch);
-    for (row, valid) in valid_indices.iter().enumerate() {
-        if valid.is_empty() {
-            evaluated_contexts.push(implicit_contexts[row]);
-            continue;
-        }
-        let selector = selection_tensor::<B>(valid, &state.device)?;
-        let tokens = input
-            .token_ids
-            .clone()
-            .slice([row..row + 1, 0..sequence])
-            .select(1, selector.clone());
-        validate_token_ids(tokens, model.config().vocab_size)?;
-        let context = match &input.position_ids {
-            Some(positions) => {
-                let compact = positions
-                    .clone()
-                    .slice([row..row + 1, 0..sequence])
-                    .select(1, selector);
-                validate_position_range(compact.clone(), model.config().max_position_embeddings)?;
-                inspected_context(compact)?
-            }
-            None => implicit_contexts[row],
-        };
-        validate_cached_rope_context(model.model.rope.scaling(), state.lengths[row], context)?;
-        evaluated_contexts.push(context);
-    }
-    Ok(PreparedStatefulInput {
-        batch,
-        sequence,
-        valid_indices,
-        token_counts,
-        evaluated_contexts,
-    })
-}
-
-/// Reads a semantic mask into stable source-column indices.
-fn semantic_indices<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-) -> Result<Vec<Vec<usize>>> {
-    let Some(mask) = mask else {
-        let dense = (0..sequence).collect::<Vec<_>>();
-        return Ok((0..batch).map(|_| dense.clone()).collect());
-    };
-    let values =
-        crate::architecture::tensor_bool_values(mask.as_tensor().clone(), "DeepSeek token mask")?;
-    Ok(values
-        .chunks_exact(sequence)
-        .map(|row| {
-            row.iter()
-                .enumerate()
-                .filter_map(|(index, &valid)| valid.then_some(index))
-                .collect()
-        })
-        .collect())
-}
-
-/// Builds a checked integer selector.
-fn selection_tensor<B: Backend>(
-    indices: &[usize],
-    device: &B::Device,
-) -> Result<Tensor<B, 1, Int>> {
-    let values = indices
-        .iter()
-        .map(|&index| {
-            i64::try_from(index).map_err(|_| {
-                Error::configuration(
-                    "deepseek_v2.indices",
-                    format!("index {index} exceeds signed tensor-index range"),
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Tensor::from_data(
-        TensorData::new(values, [indices.len()]),
-        device,
-    ))
-}
-
-/// Creates implicit positions `baseline .. baseline + tokens`.
-fn implicit_positions<B: Backend>(
-    baseline: usize,
-    tokens: usize,
-    device: &B::Device,
-) -> Result<Tensor<B, 2, Int>> {
-    let positions = derive_position_ids(&vec![true; tokens], baseline, 0)
-        .map_err(|error| Error::configuration("deepseek_v2.position_ids", error.to_string()))?
-        .into_iter()
-        .map(|position| {
-            i64::try_from(position).map_err(|_| {
-                Error::configuration("deepseek_v2.position_ids", "implicit position exceeds i64")
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Tensor::from_data(
-        TensorData::new(positions, [1, tokens]),
-        device,
-    ))
-}
-
-/// Returns one plus the largest explicit compact-row position.
-fn inspected_context<B: Backend>(positions: Tensor<B, 2, Int>) -> Result<usize> {
-    let maximum = positions
-        .max()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("failed to inspect positions: {error}")))?
-        .elem::<i64>();
-    usize::try_from(maximum)
-        .map_err(|_| {
-            Error::configuration("deepseek_v2.position_ids", "positions must be non-negative")
-        })?
-        .checked_add(1)
-        .ok_or_else(|| Error::configuration("deepseek_v2.position_ids", "context overflows usize"))
-}
-
-/// Rejects dynamic-NTK transitions that would invalidate rotated cache keys.
-fn validate_cached_rope_context(
-    scaling: RopeScaling,
-    cached_length: usize,
-    context: usize,
-) -> Result<()> {
-    if let RopeScaling::DynamicNtk(dynamic) = scaling
-        && cached_length > 0
-        && context > dynamic.original_max_position_embeddings()
-    {
-        return Err(Error::BackendCapability(
-            "dynamic-NTK decode beyond the original context requires re-rotating cached keys"
-                .into(),
-        ));
-    }
-    Ok(())
+    Ok(rows)
 }
 
 /// Builds `excluded(q,k) = k > baseline + q` for one compact row.
@@ -1072,87 +897,6 @@ fn empty_hidden_row<B: Backend>(
         [1, sequence, model.config().hidden_size],
         (device, model.model.embed_tokens.weight.val().dtype()),
     )
-}
-
-/// Scatters compact floating states back to rectangular columns.
-fn scatter_compact<B: Backend>(
-    compact: Tensor<B, 3>,
-    sequence: usize,
-    indices: &[usize],
-) -> Result<Tensor<B, 3>> {
-    let [batch, compact_sequence, width] = compact.dims();
-    if batch != 1
-        || compact_sequence != indices.len()
-        || indices.windows(2).any(|pair| pair[0] >= pair[1])
-        || indices.last().is_some_and(|&index| index >= sequence)
-    {
-        return Err(Error::shape(
-            "deepseek_v2.compact_hidden",
-            "[1, valid_columns, width] with sorted unique indices",
-            format!("shape={:?}, indices={indices:?}", compact.dims()),
-        ));
-    }
-    let device = compact.device();
-    let dtype = compact.dtype();
-    let mut segments = Vec::with_capacity(indices.len() * 2 + 1);
-    let mut cursor = 0;
-    for (compact_index, &output_index) in indices.iter().enumerate() {
-        if output_index > cursor {
-            segments.push(Tensor::zeros(
-                [1, output_index - cursor, width],
-                (&device, dtype),
-            ));
-        }
-        segments.push(compact.clone().narrow(1, compact_index, 1));
-        cursor = output_index + 1;
-    }
-    if cursor < sequence {
-        segments.push(Tensor::zeros(
-            [1, sequence - cursor, width],
-            (&device, dtype),
-        ));
-    }
-    Ok(Tensor::cat(segments, 1))
-}
-
-/// Scatters compact integer expert IDs back to rectangular columns.
-fn scatter_compact_int<B: Backend>(
-    compact: Tensor<B, 3, Int>,
-    sequence: usize,
-    indices: &[usize],
-) -> Result<Tensor<B, 3, Int>> {
-    let [batch, compact_sequence, width] = compact.dims();
-    if batch != 1 || compact_sequence != indices.len() {
-        return Err(Error::shape(
-            "deepseek_v2.compact_router",
-            "[1, valid_columns, top_k]",
-            format!("{:?}", compact.dims()),
-        ));
-    }
-    let device = compact.device();
-    let mut segments = Vec::with_capacity(indices.len() * 2 + 1);
-    let mut cursor = 0;
-    for (compact_index, &output_index) in indices.iter().enumerate() {
-        if output_index > cursor {
-            segments.push(Tensor::zeros([1, output_index - cursor, width], &device));
-        }
-        segments.push(compact.clone().narrow(1, compact_index, 1));
-        cursor = output_index + 1;
-    }
-    if cursor < sequence {
-        segments.push(Tensor::zeros([1, sequence - cursor, width], &device));
-    }
-    Ok(Tensor::cat(segments, 1))
-}
-
-/// Reports a device-affinity mismatch before mixed-device operations.
-fn ensure_device<D: PartialEq>(tensor: &'static str, actual: &D, expected: &D) -> Result<()> {
-    if actual != expected {
-        return Err(Error::BackendCapability(format!(
-            "{tensor} and DeepSeek decode state are on different devices"
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -14,26 +14,31 @@
 
 use std::collections::BTreeSet;
 
-use burn::tensor::{Bool, ElementConversion, Int, Tensor, TensorData, backend::Backend};
+use burn::tensor::{Bool, Int, Tensor, backend::Backend};
 
 use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, Result,
-    architecture::{DecodeState as ArchitectureDecodeState, RouterDiagnostics, TokenMask},
-    cache::{
-        CacheConfig, DecodeStateError, KvCacheStorage, NativeKvCacheSpec, TensorCacheError,
-        TensorDecodeState,
+    architecture::{DecodeState as ArchitectureDecodeState, RouterDiagnostics},
+    cache::{CacheConfig, KvCacheStorage, NativeKvCacheSpec, TensorCacheError, TensorDecodeState},
+    models::shared::{
+        EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_same_device,
+        ensure_static_rotary_context, implicit_position_ids, prepare_stateful_rows,
+        select_hidden_with_last_columns, validate_logits_selection,
     },
     moe::SparseMoeOutput,
-    position::{RopeScaling, RotaryAngles, apply_rotary, derive_position_ids, rotary_angles},
+    position::{RotaryAngles, apply_rotary, rotary_angles},
 };
 
 use super::{
-    Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm, Qwen3MoeModel, qwen3_moe_load_balancing_loss,
-    select_hidden, validate_logits_selection, validate_position_range, validate_token_ids,
+    INPUT_NAMES, Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm, Qwen3MoeModel,
+    qwen3_moe_load_balancing_loss,
 };
 
 /// Single homogeneous native-KV cache group used by all decoder layers.
 const NATIVE_KV_GROUP: usize = 0;
+
+/// Owner named when an input tensor is on another device than the cache.
+const DECODE_STATE: &str = "Qwen3 MoE decode state";
 
 /// Stateful operation whose fully masked-row policy differs intentionally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,9 +50,12 @@ enum StatefulPhase {
 }
 
 impl StatefulPhase {
-    /// Returns whether fully masked rows are defined as no-ops.
-    const fn permits_inactive_rows(self) -> bool {
-        matches!(self, Self::Decode)
+    /// Returns the phase's policy for rows without a valid token.
+    const fn empty_rows(self) -> EmptyRows {
+        match self {
+            Self::Prefill => EmptyRows::Reject,
+            Self::Decode => EmptyRows::Permit,
+        }
     }
 }
 
@@ -265,8 +273,7 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
         };
 
         for row in 0..prepared.batch {
-            let valid = &prepared.valid_indices[row];
-            if valid.is_empty() {
+            let Some(plan) = prepared.compact_row::<B>(row, &device)? else {
                 let empty = empty_hidden_row(self, prepared.sequence, &device);
                 final_rows.push(empty.clone());
                 if options.hidden_states {
@@ -285,20 +292,17 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
                     }
                 }
                 continue;
-            }
-            let selector = selection_tensor::<B>(valid, &device)?;
-            let tokens = input
-                .token_ids
-                .clone()
-                .slice([row..row + 1, 0..prepared.sequence])
-                .select(1, selector.clone());
+            };
+            let tokens = plan.compact(&input.token_ids);
             let baseline = state.tensors.lengths()[row];
             let positions = match &input.position_ids {
-                Some(position_ids) => position_ids
-                    .clone()
-                    .slice([row..row + 1, 0..prepared.sequence])
-                    .select(1, selector),
-                None => implicit_positions::<B>(baseline, valid.len(), &device)?,
+                Some(position_ids) => plan.compact(position_ids),
+                None => implicit_position_ids(
+                    baseline,
+                    plan.count(),
+                    &device,
+                    INPUT_NAMES.position_ids,
+                )?,
             };
             let compact = self.model.forward_compact_row(
                 tokens,
@@ -311,7 +315,7 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
                 options.hidden_states,
                 retain_routers,
             )?;
-            final_rows.push(scatter_compact(compact.hidden, prepared.sequence, valid)?);
+            final_rows.push(plan.scatter(compact.hidden)?);
             if options.hidden_states {
                 if compact.hidden_states.len() != diagnostic_count {
                     return Err(Error::Cache(format!(
@@ -320,7 +324,7 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
                     )));
                 }
                 for (destination, state) in hidden_rows.iter_mut().zip(compact.hidden_states) {
-                    destination.push(scatter_compact(state, prepared.sequence, valid)?);
+                    destination.push(plan.scatter(state)?);
                 }
             }
             if retain_routers {
@@ -332,17 +336,17 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
                 }
                 for (destination, routed) in router_rows.iter_mut().zip(compact.routers) {
                     destination.push(RowRouter {
-                        logits: scatter_compact(routed.router_logits, prepared.sequence, valid)?,
+                        logits: plan.scatter(routed.router_logits)?,
                     });
                 }
             }
         }
 
-        let hidden = Tensor::cat(final_rows, 0);
+        let hidden = concat_rows(final_rows, "qwen3_moe.hidden")?;
         let hidden_states = hidden_rows
             .into_iter()
-            .map(|rows| Tensor::cat(rows, 0))
-            .collect();
+            .map(|rows| concat_rows(rows, "qwen3_moe.hidden_states"))
+            .collect::<Result<Vec<_>>>()?;
         let mut routers = Vec::with_capacity(if retain_router_logits {
             sparse_count
         } else {
@@ -354,7 +358,10 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
             0
         });
         for rows in router_rows {
-            let logits = Tensor::cat(rows.into_iter().map(|row| row.logits).collect(), 0);
+            let logits = concat_rows(
+                rows.into_iter().map(|row| row.logits).collect(),
+                "qwen3_moe.router_logits",
+            )?;
             if options.auxiliary_losses {
                 auxiliary_router_logits.push(logits.clone());
             }
@@ -376,7 +383,11 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
                 )
             })
             .transpose()?;
-        let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
+        let selected = select_hidden_with_last_columns(
+            hidden.clone(),
+            prepared.last_columns(),
+            &options.logits,
+        )?;
         let logits = self.project_logits(selected)?;
         pending.commit(
             &mut state.tensors,
@@ -639,246 +650,39 @@ struct RowRouter<B: Backend> {
     logits: Tensor<B, 3>,
 }
 
-/// Validated host metadata for a stateful input.
-struct PreparedStatefulInput {
-    /// Number of independent rows in the rectangular input.
-    batch: usize,
-    /// Input column count, including padding that will not enter the cache.
-    sequence: usize,
-    /// Original column indices of semantic tokens in each row.
-    valid_indices: Vec<Vec<usize>>,
-    /// Number of tokens to append to each row; zero denotes an inactive row.
-    token_counts: Vec<usize>,
-    /// Per-row RoPE context extent including explicit absolute positions.
-    evaluated_contexts: Vec<usize>,
-}
-
 /// Validates devices, shapes, semantic rows, positions, and capacity transitions.
+///
+/// The shared preparation reads the mask, token IDs, and explicit positions in
+/// one transfer; this wrapper adds the model-device and dynamic-NTK guards.
 fn prepare_stateful_input<B: Backend>(
     model: &Qwen3MoeForCausalLm<B>,
     input: &CausalLmInput<B>,
     state: &Qwen3MoeDecodeState<B>,
     phase: StatefulPhase,
-) -> Result<PreparedStatefulInput> {
-    let [batch, sequence] = input.token_ids.dims();
-    if batch == 0 || sequence == 0 {
-        return Err(Error::shape(
-            "qwen3_moe.input_ids",
-            "non-empty [batch, sequence]",
-            format!("[{batch}, {sequence}]"),
-        ));
-    }
-    if batch != state.tensors.batch_size() {
-        return Err(TensorCacheError::BatchSizeMismatch {
-            configured: state.tensors.batch_size(),
-            requested: batch,
-        }
-        .into());
-    }
-    ensure_device(
-        "qwen3_moe.input_ids",
-        &input.token_ids.device(),
-        state.tensors.device(),
-    )?;
-    ensure_device(
+) -> Result<StatefulRows> {
+    ensure_same_device(
         "qwen3_moe.model",
-        &model.model.embed_tokens.weight.val().device(),
+        &model.model.embed_tokens.weight.lazy_device(),
         state.tensors.device(),
+        DECODE_STATE,
     )?;
-    if let Some(mask) = &input.token_mask {
-        ensure_device(
-            "qwen3_moe.token_mask",
-            &mask.as_tensor().device(),
-            state.tensors.device(),
-        )?;
-        if mask.as_tensor().dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "qwen3_moe.token_mask",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", mask.as_tensor().dims()),
-            ));
-        }
+    let rows = prepare_stateful_rows(
+        input,
+        state.tensors.device(),
+        state.tensors.lengths(),
+        state.tensors.capacity(),
+        &StatefulContract {
+            names: INPUT_NAMES,
+            owner: DECODE_STATE,
+            vocabulary: model.config().vocab_size,
+            position_limit: Some(model.config().max_position_embeddings),
+            empty_rows: phase.empty_rows(),
+        },
+    )?;
+    for (_, context) in rows.active_contexts() {
+        ensure_static_rotary_context(model.model.rope.scaling(), context, "Qwen3 MoE")?;
     }
-    if let Some(positions) = &input.position_ids {
-        ensure_device(
-            "qwen3_moe.position_ids",
-            &positions.device(),
-            state.tensors.device(),
-        )?;
-        if positions.dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "qwen3_moe.position_ids",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", positions.dims()),
-            ));
-        }
-    }
-    let valid_indices = semantic_indices(input.token_mask.as_ref(), batch, sequence)?;
-    if !phase.permits_inactive_rows() && valid_indices.iter().any(Vec::is_empty) {
-        return Err(Error::shape(
-            "qwen3_moe.token_mask",
-            "at least one valid token in every prefill row",
-            "a fully masked prompt row",
-        ));
-    }
-    let token_counts = valid_indices.iter().map(Vec::len).collect::<Vec<_>>();
-    let mut implicit_contexts = Vec::with_capacity(batch);
-    for (row, (&baseline, &additional)) in state
-        .tensors
-        .lengths()
-        .iter()
-        .zip(&token_counts)
-        .enumerate()
-    {
-        let requested = baseline.checked_add(additional).ok_or({
-            TensorCacheError::Metadata(DecodeStateError::LengthOverflow {
-                sequence: row,
-                length: baseline,
-                additional,
-            })
-        })?;
-        if requested > state.tensors.capacity() {
-            return Err(
-                TensorCacheError::Metadata(DecodeStateError::CapacityExceeded {
-                    sequence: row,
-                    requested,
-                    capacity: state.tensors.capacity(),
-                })
-                .into(),
-            );
-        }
-        implicit_contexts.push(requested);
-    }
-    let mut evaluated_contexts = Vec::with_capacity(batch);
-    for (row, valid) in valid_indices.iter().enumerate() {
-        if valid.is_empty() {
-            evaluated_contexts.push(implicit_contexts[row]);
-            continue;
-        }
-        let selector = selection_tensor::<B>(valid, state.tensors.device())?;
-        let tokens = input
-            .token_ids
-            .clone()
-            .slice([row..row + 1, 0..sequence])
-            .select(1, selector.clone());
-        validate_token_ids(tokens, model.config().vocab_size)?;
-        let context = match &input.position_ids {
-            Some(positions) => {
-                let compact = positions
-                    .clone()
-                    .slice([row..row + 1, 0..sequence])
-                    .select(1, selector);
-                validate_position_range(compact.clone(), model.config().max_position_embeddings)?;
-                evaluated_context(compact)?
-            }
-            None => implicit_contexts[row],
-        };
-        validate_cached_rope_context(model.model.rope.scaling(), context)?;
-        evaluated_contexts.push(context);
-    }
-    Ok(PreparedStatefulInput {
-        batch,
-        sequence,
-        valid_indices,
-        token_counts,
-        evaluated_contexts,
-    })
-}
-
-/// Reads a semantic mask into stable per-row source-column indices.
-fn semantic_indices<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-) -> Result<Vec<Vec<usize>>> {
-    let Some(mask) = mask else {
-        let dense = (0..sequence).collect::<Vec<_>>();
-        return Ok((0..batch).map(|_| dense.clone()).collect());
-    };
-    let values =
-        crate::architecture::tensor_bool_values(mask.as_tensor().clone(), "Qwen3 MoE token mask")?;
-    Ok(values
-        .chunks_exact(sequence)
-        .map(|row| {
-            row.iter()
-                .enumerate()
-                .filter_map(|(index, &valid)| valid.then_some(index))
-                .collect()
-        })
-        .collect())
-}
-
-/// Builds a checked tensor selector from host semantic indices.
-fn selection_tensor<B: Backend>(
-    indices: &[usize],
-    device: &B::Device,
-) -> Result<Tensor<B, 1, Int>> {
-    let values = indices
-        .iter()
-        .map(|&index| {
-            i64::try_from(index).map_err(|_| {
-                Error::configuration(
-                    "qwen3_moe.token_mask",
-                    format!("column index {index} exceeds signed tensor-index range"),
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Tensor::from_data(
-        TensorData::new(values, [indices.len()]),
-        device,
-    ))
-}
-
-/// Creates compact implicit positions `baseline .. baseline + tokens`.
-fn implicit_positions<B: Backend>(
-    baseline: usize,
-    tokens: usize,
-    device: &B::Device,
-) -> Result<Tensor<B, 2, Int>> {
-    let positions = derive_position_ids(&vec![true; tokens], baseline, 0)
-        .map_err(|error| Error::configuration("qwen3_moe.position_ids", error.to_string()))?
-        .into_iter()
-        .map(|position| {
-            i64::try_from(position).map_err(|_| {
-                Error::configuration("qwen3_moe.position_ids", "implicit position exceeds i64")
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Tensor::from_data(
-        TensorData::new(positions, [1, tokens]),
-        device,
-    ))
-}
-
-/// Returns one plus the largest explicit position in a compact row.
-fn evaluated_context<B: Backend>(positions: Tensor<B, 2, Int>) -> Result<usize> {
-    let maximum = positions
-        .max()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to inspect Qwen3 MoE positions: {error}"))
-        })?
-        .elem::<i64>();
-    usize::try_from(maximum)
-        .map_err(|_| {
-            Error::configuration("qwen3_moe.position_ids", "positions must be non-negative")
-        })?
-        .checked_add(1)
-        .ok_or_else(|| Error::configuration("qwen3_moe.position_ids", "context overflows usize"))
-}
-
-/// Rejects dynamic-NTK transitions that would invalidate cached rotated keys.
-fn validate_cached_rope_context(scaling: RopeScaling, context: usize) -> Result<()> {
-    if let RopeScaling::DynamicNtk(dynamic) = scaling
-        && context > dynamic.original_max_position_embeddings()
-    {
-        return Err(Error::BackendCapability(
-            "dynamic-NTK decode beyond the original context requires re-rotating cached keys"
-                .into(),
-        ));
-    }
-    Ok(())
+    Ok(rows)
 }
 
 /// Builds `excluded(q,k) = k > q || (window && k + window <= q)`.
@@ -921,47 +725,6 @@ fn empty_hidden_row<B: Backend>(
     )
 }
 
-/// Scatters compact floating-point states back to rectangular columns.
-fn scatter_compact<B: Backend>(
-    compact: Tensor<B, 3>,
-    sequence: usize,
-    indices: &[usize],
-) -> Result<Tensor<B, 3>> {
-    let [batch, compact_sequence, width] = compact.dims();
-    if batch != 1
-        || compact_sequence != indices.len()
-        || indices.windows(2).any(|pair| pair[0] >= pair[1])
-        || indices.last().is_some_and(|&index| index >= sequence)
-    {
-        return Err(Error::shape(
-            "qwen3_moe.compact_hidden",
-            "[1, valid_columns, width] with sorted unique indices",
-            format!("shape={:?}, indices={indices:?}", compact.dims()),
-        ));
-    }
-    let device = compact.device();
-    let dtype = compact.dtype();
-    let mut segments = Vec::with_capacity(indices.len().saturating_mul(2).saturating_add(1));
-    let mut cursor = 0;
-    for (compact_index, &output_index) in indices.iter().enumerate() {
-        if output_index > cursor {
-            segments.push(Tensor::zeros(
-                [1, output_index - cursor, width],
-                (&device, dtype),
-            ));
-        }
-        segments.push(compact.clone().narrow(1, compact_index, 1));
-        cursor = output_index + 1;
-    }
-    if cursor < sequence {
-        segments.push(Tensor::zeros(
-            [1, sequence - cursor, width],
-            (&device, dtype),
-        ));
-    }
-    Ok(Tensor::cat(segments, 1))
-}
-
 /// Derives the homogeneous native-KV cache specification from model weights.
 fn cache_spec<B: Backend>(model: &Qwen3MoeForCausalLm<B>) -> Result<NativeKvCacheSpec> {
     NativeKvCacheSpec::new(
@@ -972,14 +735,4 @@ fn cache_spec<B: Backend>(model: &Qwen3MoeForCausalLm<B>) -> Result<NativeKvCach
         model.model.embed_tokens.weight.val().dtype(),
     )
     .map_err(Into::into)
-}
-
-/// Reports a device-affinity mismatch before mixed-device tensor operations.
-fn ensure_device<D: PartialEq>(tensor: &'static str, actual: &D, expected: &D) -> Result<()> {
-    if actual != expected {
-        return Err(Error::BackendCapability(format!(
-            "{tensor} and Qwen3 MoE decode state are on different devices"
-        )));
-    }
-    Ok(())
 }

@@ -2,7 +2,7 @@
 
 use super::{GptNeoXConfig, GptNeoXModel};
 use crate::{
-    CausalLmInput, ForwardOptions, LogitsSelection,
+    CausalLmInput, Error, ForwardOptions, LogitsSelection,
     architecture::TokenMask,
     intervention::{Hooks, Layer, Stack},
 };
@@ -293,6 +293,95 @@ fn invalid_inputs_and_unsupported_choices_return_contextual_errors() {
         }
         .validate()
         .is_err()
+    );
+}
+
+/// Input-value, mask, and selection violations are `Error::Shape` naming the shared tensors.
+///
+/// Pins the public error contract adopted with the shared family glue:
+/// these violations were `Error::Configuration` before, and invalid logits
+/// positions were named `gpt_neox.logits.positions`.
+#[test]
+fn input_value_errors_are_shape_errors_with_shared_tensor_names() {
+    let model = model();
+    let shape_parts = |input: CausalLmInput<B>, options: &ForwardOptions| match model
+        .forward(input, options)
+        .unwrap_err()
+    {
+        Error::Shape {
+            tensor,
+            expected,
+            actual,
+        } => (tensor, expected, actual),
+        other => panic!("expected Error::Shape, found {other:?}"),
+    };
+
+    let bad_ids = CausalLmInput {
+        token_ids: Tensor::from_data([[1, -1, 2]], &Default::default()),
+        ..input()
+    };
+    assert_eq!(
+        shape_parts(bad_ids, &options()),
+        (
+            "gpt_neox.token_ids".into(),
+            "token values in 0..13".into(),
+            "observed range -1..=2".into()
+        )
+    );
+
+    let bad_position = CausalLmInput {
+        position_ids: Some(Tensor::from_data([[0, 2, 16]], &Default::default())),
+        ..input()
+    };
+    assert_eq!(
+        shape_parts(bad_position, &options()),
+        (
+            "gpt_neox.position_ids".into(),
+            "position values in 0..16".into(),
+            "observed range 0..=16".into()
+        )
+    );
+
+    let empty_mask = CausalLmInput {
+        token_mask: Some(TokenMask::new(Tensor::from_data(
+            [[false, false, false]],
+            &Default::default(),
+        ))),
+        ..input()
+    };
+    assert_eq!(
+        shape_parts(empty_mask, &options()),
+        (
+            "gpt_neox.token_mask".into(),
+            "at least one valid token in every row".into(),
+            "a fully masked row".into()
+        )
+    );
+
+    let misshapen_mask = CausalLmInput {
+        token_mask: Some(TokenMask::new(Tensor::from_data(
+            [[true, true]],
+            &Default::default(),
+        ))),
+        ..input()
+    };
+    assert_eq!(
+        shape_parts(misshapen_mask, &options()),
+        (
+            "gpt_neox.token_mask".into(),
+            "[1, 3]".into(),
+            "[1, 2]".into()
+        )
+    );
+
+    let selection = ForwardOptions {
+        logits: LogitsSelection::Positions(vec![3]),
+        ..Default::default()
+    };
+    let (tensor, _, actual) = shape_parts(input(), &selection);
+    assert_eq!(
+        (tensor.as_str(), actual.as_str()),
+        ("forward_options.logits.positions", "[3]")
     );
 }
 

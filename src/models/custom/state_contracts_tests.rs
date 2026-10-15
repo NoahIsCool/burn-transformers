@@ -323,7 +323,7 @@ fn late_row_position_validation_preserves_committed_history() {
         assert_shape_error(
             error,
             "custom.decode.position_ids",
-            "values in 0..32",
+            "position values in 0..32",
             &format!("observed range {invalid_position}..={invalid_position}"),
         );
         assert_eq!(state.lengths(), &[2, 2]);
@@ -551,6 +551,58 @@ fn equal_decoder_topologies_do_not_allow_cross_role_state_reuse() {
     );
     assert_eq!(causal_state.lengths(), &[3]);
     assert_eq!(seq2seq_state.lengths(), &[3]);
+}
+
+/// A supplied source mask is checked in the decoder input's single readback.
+///
+/// The cached seq2seq decoder accepts an arbitrary encoder result: a source
+/// mask with the wrong grid or a fully masked row is rejected with the
+/// encoder-mask name and no target token is committed.
+#[test]
+fn seq2seq_supplied_source_mask_is_validated_without_commit() {
+    let device = Default::default();
+    let model = ModularSeq2SeqLm::<TestBackend>::init(seq2seq_spec(), &device).unwrap();
+    let options = ForwardOptions::default();
+    let source = CausalLmInput {
+        token_ids: Tensor::from_ints([[4, 5], [6, 7]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let encoder = model.encode(source, &options).unwrap();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+        .unwrap();
+    let target = || CausalLmInput {
+        token_ids: Tensor::from_ints([[1], [2]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+
+    let mut empty_row = encoder.clone();
+    empty_row.token_mask = Some(mask([[true, true], [false, false]], &device));
+    let error = model
+        .prefill_decoder(&empty_row, target(), &mut state, &options)
+        .unwrap_err();
+    assert_shape_error(
+        error,
+        "custom.seq2seq.encoder_mask",
+        "at least one valid token in every row",
+        "a fully masked row",
+    );
+    assert_eq!(state.lengths(), &[0, 0]);
+
+    let mut misshapen = encoder.clone();
+    misshapen.token_mask = Some(mask([[true, true, true], [true, true, true]], &device));
+    let error = model
+        .prefill_decoder(&misshapen, target(), &mut state, &options)
+        .unwrap_err();
+    assert_shape_error(error, "custom.seq2seq.encoder_mask", "[2, 2]", "[2, 3]");
+    assert_eq!(state.lengths(), &[0, 0]);
+
+    model
+        .prefill_decoder(&encoder, target(), &mut state, &options)
+        .unwrap();
+    assert_eq!(state.lengths(), &[1, 1]);
 }
 
 /// Invalid seq2seq output selection leaves the target prefix available for a correct retry.

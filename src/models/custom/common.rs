@@ -8,13 +8,11 @@
 use burn::{
     module::Module,
     nn::{LayerNorm, LayerNormConfig},
-    tensor::{
-        Bool, ElementConversion, Int, Tensor, TensorData, backend::Backend, module::embedding,
-    },
+    tensor::{Bool, Int, Tensor, TensorData, backend::Backend, module::embedding},
 };
 
 use crate::{
-    CausalLmInput, CausalLmOutput, Error, ForwardOptions, LogitsSelection, Result,
+    CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
     architecture::{
         AttentionSpec, DecoderLayerSpec, DecoderSpec, FeedForwardSpec, MixerSpec, MlaSpec,
         NormPlacement, NormalizationSpec, PositionEncodingSpec, ResidualTopology,
@@ -36,6 +34,11 @@ use crate::{
         apply_rotary, rotary_angles,
     },
 };
+
+use crate::models::shared::{
+    DeferredChecks, InputContract, InputNames, PaddedPositions, defer_input,
+};
+pub(super) use crate::models::shared::{select_hidden, validate_position_values};
 
 /// Whether a modular stack applies causal or bidirectional self-attention.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -832,13 +835,59 @@ impl<B: Backend> ModularLayer<B> {
     }
 
     /// Validates a staged call before any callback or parameter operation executes.
+    ///
+    /// This is the complete check used by the public [`HiddenTransform`] entry
+    /// point: block geometry, the context's position values (a device-to-host
+    /// read inside [`ExecutionContext::validate`]), and every attention policy.
     pub(super) fn validate_context(
         &self,
         hidden: &Tensor<B, 3>,
         context: &ExecutionContext<B>,
         layer: Layer,
     ) -> Result<()> {
-        let [batch, tokens, width] = hidden.dims();
+        let [batch, tokens, _] = hidden.dims();
+        self.validate_hidden(hidden)?;
+        context.validate([batch, tokens], &hidden.device())?;
+        self.validate_policies(hidden, context, layer)
+    }
+
+    /// Validates a block inside a range whose context values were checked once.
+    ///
+    /// Range runners call [`ExecutionContext::validate`] once for the whole
+    /// range, because the context is borrowed immutably and its position values
+    /// cannot change between blocks. Hooks may still replace the hidden states,
+    /// so this re-checks everything that depends on them without reading
+    /// tensor values back to the host.
+    pub(super) fn validate_prevalidated(
+        &self,
+        hidden: &Tensor<B, 3>,
+        context: &ExecutionContext<B>,
+        layer: Layer,
+    ) -> Result<()> {
+        let [batch, tokens, _] = hidden.dims();
+        self.validate_hidden(hidden)?;
+        validate_context_layout(context, [batch, tokens], &hidden.device())?;
+        self.validate_policies(hidden, context, layer)
+    }
+
+    /// Runs this block inside a range runner after [`ExecutionContext::validate`].
+    ///
+    /// Numerically identical to [`HiddenTransform::forward`]; only the
+    /// per-block device-to-host reads of the shared context are skipped.
+    pub(super) fn forward_prevalidated(
+        &self,
+        hidden: Tensor<B, 3>,
+        context: &ExecutionContext<B>,
+        layer: Layer,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<Tensor<B, 3>> {
+        self.validate_prevalidated(&hidden, context, layer)?;
+        self.forward_with_context(hidden, context, layer, hooks)
+    }
+
+    /// Checks the residual width and the activation dtype/device against this block.
+    fn validate_hidden(&self, hidden: &Tensor<B, 3>) -> Result<()> {
+        let width = hidden.dims()[2];
         if width != self.hidden_size {
             return Err(Error::shape(
                 "custom.layer.hidden",
@@ -861,7 +910,17 @@ impl<B: Backend> ModularLayer<B> {
                 "hidden states must share this block's device and floating projection dtype; packed weights accept floating activations",
             ));
         }
-        context.validate([batch, tokens], &hidden.device())?;
+        Ok(())
+    }
+
+    /// Checks mixer, self-attention, and cross-attention policies against `hidden`.
+    fn validate_policies(
+        &self,
+        hidden: &Tensor<B, 3>,
+        context: &ExecutionContext<B>,
+        layer: Layer,
+    ) -> Result<()> {
+        let [batch, tokens, _] = hidden.dims();
         if matches!(&self.mixer, ModularMixer::DeltaNet(_)) {
             let policy = context.attention_for(layer, layer.stack() == Stack::Decoder);
             if !policy.causal || policy.allowed.is_some() || policy.bias.is_some() {
@@ -1060,6 +1119,22 @@ impl<B: Backend> HiddenTransform<B> for ModularLayer<B> {
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Tensor<B, 3>> {
         self.validate_context(&hidden, context, layer)?;
+        self.forward_with_context(hidden, context, layer, hooks)
+    }
+}
+
+impl<B: Backend> ModularLayer<B> {
+    /// Applies an already validated block using the context's positions and policies.
+    ///
+    /// Encoder blocks default to bidirectional attention and decoder blocks to
+    /// causal attention; explicit policies replace those defaults.
+    fn forward_with_context(
+        &self,
+        hidden: Tensor<B, 3>,
+        context: &ExecutionContext<B>,
+        layer: Layer,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<Tensor<B, 3>> {
         let direction = match layer.stack() {
             Stack::Encoder => AttentionDirection::Bidirectional,
             Stack::Decoder => AttentionDirection::Causal,
@@ -1089,6 +1164,61 @@ impl<B: Backend> HiddenTransform<B> for ModularLayer<B> {
             )?
             .0)
     }
+}
+
+/// Sync-free mirror of the layout half of [`ExecutionContext::validate`].
+///
+/// Checks that positions and padding match the `[batch, token]` target grid and
+/// device, and that any encoder source shares the batch and device. Position
+/// values are not read; range runners validate them once per range.
+fn validate_context_layout<B: Backend>(
+    context: &ExecutionContext<B>,
+    shape: [usize; 2],
+    device: &B::Device,
+) -> Result<()> {
+    if shape.contains(&0) || context.positions.dims() != shape {
+        return Err(Error::shape(
+            "execution.positions",
+            format!("nonempty {shape:?}"),
+            format!("{:?}", context.positions.dims()),
+        ));
+    }
+    if context.positions.device() != *device {
+        return Err(Error::configuration(
+            "execution.positions",
+            "positions and hidden states must share a device",
+        ));
+    }
+    if let Some(mask) = &context.token_mask {
+        if mask.as_tensor().dims() != shape {
+            return Err(Error::shape(
+                "execution.token_mask",
+                format!("{shape:?}"),
+                format!("{:?}", mask.as_tensor().dims()),
+            ));
+        }
+        if mask.as_tensor().device() != *device {
+            return Err(Error::configuration(
+                "execution.token_mask",
+                "padding and hidden states must share a device",
+            ));
+        }
+    }
+    if let Some(encoder) = &context.encoder {
+        if encoder.hidden.dims()[0] != shape[0] {
+            return Err(Error::configuration(
+                "execution.encoder",
+                "source hidden states and positions must have matching nonempty batch/token axes",
+            ));
+        }
+        if encoder.hidden.device() != *device {
+            return Err(Error::configuration(
+                "execution.encoder",
+                "source context must share the target device",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Resolves only intentional overrides, preserving structural sliding-window defaults otherwise.
@@ -1181,111 +1311,57 @@ pub(super) fn validate_decoder_execution(
     Ok(())
 }
 
-/// Creates a position tensor and validates all public causal input invariants.
+/// Validates a public causal input and resolves its positions and rotary extent.
+///
+/// Omitted positions are valid-token ordinals, so left padding does not shift
+/// them; explicit positions at padded columns are replaced by zero, so padding
+/// sentinels are inert. Token, mask, and position values share one
+/// device-to-host readback, which also yields the context `1 + max p`. Mask
+/// and positions must share the token IDs' device. Errors name `{field}.*`.
 pub(super) fn validate_and_resolve_input<B: Backend>(
     input: &CausalLmInput<B>,
     vocabulary_size: usize,
     max_positions: usize,
     field: &str,
-) -> Result<Tensor<B, 2, Int>> {
-    let [batch, sequence] = input.token_ids.dims();
-    if batch == 0 || sequence == 0 {
-        return Err(Error::shape(
-            format!("{field}.token_ids"),
-            "non-empty [batch, sequence]",
-            format!("[{batch}, {sequence}]"),
-        ));
-    }
-    validate_token_ids(input.token_ids.clone(), vocabulary_size, field)?;
-    let device = input.token_ids.device();
-    validate_mask(input.token_mask.as_ref(), batch, sequence, &device, field)?;
-    let positions = match &input.position_ids {
-        Some(positions) => {
-            if positions.dims() != [batch, sequence] {
-                return Err(Error::shape(
-                    format!("{field}.position_ids"),
-                    format!("[{batch}, {sequence}]"),
-                    format!("{:?}", positions.dims()),
-                ));
-            }
-            if positions.device() != device {
-                return Err(Error::BackendCapability(format!(
-                    "{field} token and position tensors must reside on the same device"
-                )));
-            }
-            match &input.token_mask {
-                Some(mask) => positions
-                    .clone()
-                    .mask_fill(mask.as_tensor().clone().bool_not(), 0),
-                None => positions.clone(),
-            }
-        }
-        None => match &input.token_mask {
-            Some(mask) => {
-                let valid = mask.as_tensor().clone();
-                (valid.clone().int().cumsum(1) - 1).mask_fill(valid.bool_not(), 0)
-            }
-            None => Tensor::<B, 1, Int>::arange(0..sequence as i64, &input.token_ids.device())
-                .reshape([1, sequence])
-                .expand([batch, sequence]),
-        },
+) -> Result<(Tensor<B, 2, Int>, usize)> {
+    validate_and_resolve_input_with(input, vocabulary_size, max_positions, field, |_| Ok(()))
+}
+
+/// [`validate_and_resolve_input`] plus caller checks that share its readback.
+///
+/// `extra` registers further deferred checks (for example a source mask's
+/// row counts) after the input's own, so their errors follow the input's
+/// value errors and every value still costs a single device-to-host read.
+pub(super) fn validate_and_resolve_input_with<B: Backend>(
+    input: &CausalLmInput<B>,
+    vocabulary_size: usize,
+    max_positions: usize,
+    field: &str,
+    extra: impl FnOnce(&mut DeferredChecks<'_, B>) -> Result<()>,
+) -> Result<(Tensor<B, 2, Int>, usize)> {
+    let token_ids = format!("{field}.token_ids");
+    let token_mask = format!("{field}.token_mask");
+    let position_ids = format!("{field}.position_ids");
+    let names = InputNames {
+        token_ids: &token_ids,
+        token_mask: &token_mask,
+        position_ids: &position_ids,
     };
-    validate_positions(positions.clone(), max_positions, field)?;
-    Ok(positions)
-}
-
-/// Returns one plus the largest valid logical position.
-pub(super) fn evaluated_context<B: Backend>(positions: Tensor<B, 2, Int>) -> Result<usize> {
-    let maximum = positions
-        .max()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to inspect custom position IDs: {error}"))
-        })?
-        .elem::<i64>();
-    usize::try_from(maximum)
-        .map_err(|_| Error::configuration("custom.position_ids", "must be non-negative"))?
-        .checked_add(1)
-        .ok_or_else(|| Error::configuration("custom.position_ids", "context overflows usize"))
-}
-
-/// Selects hidden positions before the expensive vocabulary projection.
-pub(super) fn select_hidden<B: Backend>(
-    hidden: Tensor<B, 3>,
-    mask: Option<&TokenMask<B>>,
-    selection: &LogitsSelection,
-) -> Result<Tensor<B, 3>> {
-    let [batch, sequence, width] = hidden.dims();
-    validate_logits_selection(selection, sequence)?;
-    match selection {
-        LogitsSelection::All => Ok(hidden),
-        LogitsSelection::Last => match mask {
-            None => Ok(hidden.narrow(1, sequence - 1, 1)),
-            Some(mask) => {
-                let positions = Tensor::<B, 1, Int>::arange(0..sequence as i64, &hidden.device())
-                    .reshape([1, sequence])
-                    .expand([batch, sequence]);
-                let last = positions
-                    .mask_fill(mask.as_tensor().clone().bool_not(), -1)
-                    .argmax(1)
-                    .unsqueeze_dim::<3>(2)
-                    .expand([batch, 1, width]);
-                Ok(hidden.gather(1, last))
-            }
-        },
-        LogitsSelection::Positions(positions) => {
-            let count = positions.len();
-            let indices = positions
-                .iter()
-                .map(|&value| value as i64)
-                .collect::<Vec<_>>();
-            let device = hidden.device();
-            Ok(hidden.select(
-                1,
-                Tensor::<B, 1, Int>::from_data(TensorData::new(indices, [count]), &device),
-            ))
-        }
-    }
+    let mut checks = DeferredChecks::new();
+    let pending = defer_input(
+        input,
+        &input.token_ids.device(),
+        &InputContract::new(names, &token_ids, vocabulary_size)
+            .with_position_limit(max_positions)
+            .with_padded_positions(PaddedPositions::ZeroFill),
+        &mut checks,
+    )?;
+    extra(&mut checks)?;
+    let validated = pending.finish(&checks.run(&token_ids)?)?;
+    Ok((
+        validated.require_positions(&position_ids)?,
+        validated.evaluated_context,
+    ))
 }
 
 /// Converts sparse outputs into opt-in public router diagnostics.
@@ -1526,126 +1602,6 @@ pub(super) fn relative_bias_from_positions<B: Backend>(
     Ok(embedding(weight, indices)
         .reshape([batch, sequence, sequence, heads])
         .permute([0, 3, 1, 2]))
-}
-
-/// Checks token values before the backend embedding kernel receives indices.
-fn validate_token_ids<B: Backend>(
-    token_ids: Tensor<B, 2, Int>,
-    vocabulary: usize,
-    field: &str,
-) -> Result<()> {
-    let minimum = token_ids
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate custom token IDs: {error}"))
-        })?
-        .elem::<i64>();
-    let maximum = token_ids
-        .max()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate custom token IDs: {error}"))
-        })?
-        .elem::<i64>();
-    if minimum < 0 || maximum as usize >= vocabulary {
-        return Err(Error::shape(
-            format!("{field}.token_ids"),
-            format!("values in 0..{vocabulary}"),
-            format!("observed range {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Checks a token-valid mask and rejects rows whose attention softmax would have no valid key.
-fn validate_mask<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-    token_device: &B::Device,
-    field: &str,
-) -> Result<()> {
-    let Some(mask) = mask else {
-        return Ok(());
-    };
-    if mask.as_tensor().dims() != [batch, sequence] {
-        return Err(Error::shape(
-            format!("{field}.token_mask"),
-            format!("[{batch}, {sequence}]"),
-            format!("{:?}", mask.as_tensor().dims()),
-        ));
-    }
-    if mask.as_tensor().device() != *token_device {
-        return Err(Error::BackendCapability(format!(
-            "{field} token and mask tensors must reside on the same device"
-        )));
-    }
-    let minimum = mask
-        .as_tensor()
-        .clone()
-        .int()
-        .sum_dim(1)
-        .min()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate custom token mask: {error}"))
-        })?
-        .elem::<i64>();
-    if minimum == 0 {
-        return Err(Error::shape(
-            format!("{field}.token_mask"),
-            "at least one valid token in every row",
-            "a fully masked row",
-        ));
-    }
-    Ok(())
-}
-
-/// Checks that absolute positions fit the model's declared context.
-pub(super) fn validate_positions<B: Backend>(
-    positions: Tensor<B, 2, Int>,
-    capacity: usize,
-    field: &str,
-) -> Result<()> {
-    let minimum = positions
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate custom positions: {error}"))
-        })?
-        .elem::<i64>();
-    let maximum = positions
-        .max()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate custom positions: {error}"))
-        })?
-        .elem::<i64>();
-    if minimum < 0 || maximum as usize >= capacity {
-        return Err(Error::shape(
-            format!("{field}.position_ids"),
-            format!("values in 0..{capacity}"),
-            format!("observed range {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Validates explicit selective-logit indices.
-fn validate_logits_selection(selection: &LogitsSelection, sequence: usize) -> Result<()> {
-    if let LogitsSelection::Positions(positions) = selection
-        && (positions.is_empty() || positions.iter().any(|&position| position >= sequence))
-    {
-        return Err(Error::shape(
-            "forward_options.logits.positions",
-            format!("a non-empty list of indices below {sequence}"),
-            format!("{positions:?}"),
-        ));
-    }
-    Ok(())
 }
 
 /// Recomputes auxiliary loss from gathered cached-step router tensors.

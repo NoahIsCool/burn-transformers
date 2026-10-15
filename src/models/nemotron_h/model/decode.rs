@@ -15,22 +15,29 @@
 
 use std::collections::BTreeSet;
 
-use burn::tensor::{Bool, ElementConversion, Int, Tensor, TensorData, backend::Backend};
+use burn::tensor::{Bool, Int, Tensor, backend::Backend};
 
 use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, Result,
-    architecture::{DecodeState as ArchitectureDecodeState, RouterDiagnostics, TokenMask},
+    architecture::{DecodeState as ArchitectureDecodeState, RouterDiagnostics},
     cache::{
         CacheConfig, DecodeStateError, KvCacheStorage, NativeKvCacheSpec, RecurrentStateSpec,
         TensorCacheError, TensorCacheMark, TensorDecodeState,
+    },
+    models::shared::{
+        EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_same_device,
+        prepare_stateful_rows, select_hidden_with_last_columns, validate_logits_selection,
     },
 };
 
 use super::mamba2::NemotronMamba2State;
 use super::{
-    NemotronHBlockType, NemotronHForCausalLm, NemotronHMoeOutput, NemotronMamba2Mode,
-    nemotron_load_balancing_loss, select_hidden, validate_token_ids,
+    INPUT_NAMES, NemotronHBlockType, NemotronHForCausalLm, NemotronHMoeOutput, NemotronMamba2Mode,
+    nemotron_load_balancing_loss,
 };
+
+/// Owner named when an input tensor is on another device than the cache.
+const DECODE_STATE: &str = "Nemotron-H decode state";
 
 /// Native-KV group index within either the target bank or the independent MTP bank.
 pub(super) const KV_GROUP: usize = 0;
@@ -47,9 +54,12 @@ enum StatefulPhase {
 }
 
 impl StatefulPhase {
-    /// Returns whether completely inactive rows are legal.
-    const fn permits_inactive_rows(self) -> bool {
-        matches!(self, Self::Decode)
+    /// Returns the phase's policy for rows without a valid token.
+    const fn empty_rows(self) -> EmptyRows {
+        match self {
+            Self::Prefill => EmptyRows::Reject,
+            Self::Decode => EmptyRows::Permit,
+        }
     }
 }
 
@@ -358,6 +368,7 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         }
         state.validate_for_model(self)?;
         let prepared = prepare_stateful_input(self, &input, state, phase)?;
+        validate_logits_selection(&options.logits, prepared.sequence)?;
         if state.tensors.has_active_transaction()
             && (prepared.batch != 1 || prepared.token_counts != [1])
         {
@@ -374,6 +385,7 @@ impl<B: Backend> NemotronHForCausalLm<B> {
             .filter(|layer| layer.block_type == NemotronHBlockType::Moe)
             .count();
         let retain_routers = options.router_logits || options.auxiliary_losses;
+        let device = input.token_ids.device();
         let mut pending = PendingHybridWrites::default();
         let mut final_rows = Vec::with_capacity(prepared.batch);
         let mut hidden_rows: Vec<Vec<Tensor<B, 3>>> = if options.hidden_states {
@@ -392,14 +404,10 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         };
 
         for row in 0..prepared.batch {
-            let valid = &prepared.valid_indices[row];
-            if valid.is_empty() {
+            let Some(plan) = prepared.compact_row::<B>(row, &device)? else {
                 let empty = Tensor::zeros(
                     [1, prepared.sequence, self.config().hidden_size],
-                    (
-                        &input.token_ids.device(),
-                        self.model.embed_tokens.weight.val().dtype(),
-                    ),
+                    (&device, self.model.embed_tokens.weight.val().dtype()),
                 );
                 final_rows.push(empty.clone());
                 for destination in &mut hidden_rows {
@@ -409,23 +417,17 @@ impl<B: Backend> NemotronHForCausalLm<B> {
                     destination.push(RowRouter {
                         logits: Tensor::zeros(
                             [1, prepared.sequence, self.config().n_routed_experts],
-                            (&input.token_ids.device(), burn::tensor::DType::F32),
+                            (&device, burn::tensor::DType::F32),
                         ),
                         selected: Tensor::zeros(
                             [1, prepared.sequence, self.config().num_experts_per_tok],
-                            &input.token_ids.device(),
+                            &device,
                         ),
                     });
                 }
                 continue;
-            }
-            let selector = selection_tensor::<B>(valid, state.tensors.device())?;
-            let tokens = input
-                .token_ids
-                .clone()
-                .slice([row..row + 1, 0..prepared.sequence])
-                .select(1, selector);
-            validate_token_ids(tokens.clone(), self.config().vocab_size)?;
+            };
+            let tokens = plan.compact(&input.token_ids);
             let committed_baseline = state.tensors.lengths()[row];
             let baseline = state.tensors.working_lengths()[row];
             let compact = self.forward_compact_row(
@@ -438,32 +440,34 @@ impl<B: Backend> NemotronHForCausalLm<B> {
                 options.hidden_states,
                 retain_routers,
             )?;
-            final_rows.push(scatter_compact(compact.hidden, prepared.sequence, valid)?);
+            final_rows.push(plan.scatter(compact.hidden)?);
             for (destination, hidden) in hidden_rows.iter_mut().zip(compact.hidden_states) {
-                destination.push(scatter_compact(hidden, prepared.sequence, valid)?);
+                destination.push(plan.scatter(hidden)?);
             }
             for (destination, router) in router_rows.iter_mut().zip(compact.routers) {
                 destination.push(RowRouter {
-                    logits: scatter_compact(router.router_logits, prepared.sequence, valid)?,
-                    selected: scatter_compact_int(
-                        router.selected_experts,
-                        prepared.sequence,
-                        valid,
-                    )?,
+                    logits: plan.scatter(router.router_logits)?,
+                    selected: plan.scatter(router.selected_experts)?,
                 });
             }
         }
 
-        let hidden = Tensor::cat(final_rows, 0);
+        let hidden = concat_rows(final_rows, "nemotron_h.hidden")?;
         let hidden_states = hidden_rows
             .into_iter()
-            .map(|rows| Tensor::cat(rows, 0))
-            .collect();
+            .map(|rows| concat_rows(rows, "nemotron_h.hidden_states"))
+            .collect::<Result<Vec<_>>>()?;
         let routers = router_rows
             .into_iter()
             .map(|rows| {
-                let logits = Tensor::cat(rows.iter().map(|row| row.logits.clone()).collect(), 0);
-                let selected = Tensor::cat(rows.into_iter().map(|row| row.selected).collect(), 0);
+                let logits = concat_rows(
+                    rows.iter().map(|row| row.logits.clone()).collect(),
+                    "nemotron_h.router_logits",
+                )?;
+                let selected = concat_rows(
+                    rows.into_iter().map(|row| row.selected).collect(),
+                    "nemotron_h.selected_experts",
+                )?;
                 Ok(RouterDiagnostics {
                     logits: options.router_logits.then(|| logits.clone()),
                     load_balancing_loss: options
@@ -480,7 +484,11 @@ impl<B: Backend> NemotronHForCausalLm<B> {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
+        let selected = select_hidden_with_last_columns(
+            hidden.clone(),
+            prepared.last_columns(),
+            &options.logits,
+        )?;
         let logits = self
             .project_logits(selected)?
             .cast(burn::tensor::DType::F32);
@@ -851,181 +859,51 @@ struct RowRouter<B: Backend> {
     selected: Tensor<B, 3, Int>,
 }
 
-/// Validated host-side state transition metadata.
-struct PreparedStatefulInput {
-    /// Number of rows in the original rectangular token input.
-    batch: usize,
-    /// Physical token columns per row, including masked positions.
-    sequence: usize,
-    /// Ordered physical indices of semantic tokens for each batch row.
-    valid_indices: Vec<Vec<usize>>,
-    /// Number of semantic tokens to append to each row's logical cursor.
-    token_counts: Vec<usize>,
-}
-
 /// Validates devices, shapes, semantic tokens, and capacity before model work.
+///
+/// The shared preparation reads the mask, token IDs, and explicit positions in
+/// one transfer against the working cursors (speculative transactions append
+/// beyond committed lengths); this wrapper adds the model-device check and
+/// Nemotron-H's bound of every appended length by `max_position_embeddings`.
 fn prepare_stateful_input<B: Backend>(
     model: &NemotronHForCausalLm<B>,
     input: &CausalLmInput<B>,
     state: &NemotronHDecodeState<B>,
     phase: StatefulPhase,
-) -> Result<PreparedStatefulInput> {
-    let [batch, sequence] = input.token_ids.dims();
-    if batch == 0 || sequence == 0 {
-        return Err(Error::shape(
-            "nemotron_h.input_ids",
-            "non-empty [batch, sequence]",
-            format!("[{batch}, {sequence}]"),
-        ));
-    }
-    if batch != state.tensors.batch_size() {
-        return Err(TensorCacheError::BatchSizeMismatch {
-            configured: state.tensors.batch_size(),
-            requested: batch,
-        }
-        .into());
-    }
-    ensure_device(&input.token_ids.device(), state.tensors.device())?;
-    ensure_device(
-        &model.model.embed_tokens.weight.val().device(),
+) -> Result<StatefulRows> {
+    ensure_same_device(
+        "nemotron_h.model",
+        &model.model.embed_tokens.weight.lazy_device(),
         state.tensors.device(),
+        DECODE_STATE,
     )?;
-    if let Some(mask) = &input.token_mask {
-        ensure_device(&mask.as_tensor().device(), state.tensors.device())?;
-        if mask.as_tensor().dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "nemotron_h.token_mask",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", mask.as_tensor().dims()),
-            ));
-        }
-    }
-    if let Some(positions) = &input.position_ids {
-        ensure_device(&positions.device(), state.tensors.device())?;
-        if positions.dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "nemotron_h.position_ids",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", positions.dims()),
-            ));
-        }
-    }
-    let valid_indices = semantic_indices(input.token_mask.as_ref(), batch, sequence)?;
-    if !phase.permits_inactive_rows() && valid_indices.iter().any(Vec::is_empty) {
-        return Err(Error::shape(
-            "nemotron_h.token_mask",
-            "at least one valid token in each prefill row",
-            "a fully masked row",
-        ));
-    }
-    let token_counts = valid_indices.iter().map(Vec::len).collect::<Vec<_>>();
-    for (row, (&baseline, &additional)) in state
+    let rows = prepare_stateful_rows(
+        input,
+        state.tensors.device(),
+        state.tensors.working_lengths(),
+        state.tensors.capacity(),
+        &StatefulContract {
+            names: INPUT_NAMES,
+            owner: DECODE_STATE,
+            vocabulary: model.config().vocab_size,
+            position_limit: Some(model.config().max_position_embeddings),
+            empty_rows: phase.empty_rows(),
+        },
+    )?;
+    // The append plan already proved `length + count` representable.
+    let exceeds_context = state
         .tensors
         .working_lengths()
         .iter()
-        .zip(&token_counts)
-        .enumerate()
-    {
-        let requested = baseline.checked_add(additional).ok_or({
-            TensorCacheError::Metadata(DecodeStateError::LengthOverflow {
-                sequence: row,
-                length: baseline,
-                additional,
-            })
-        })?;
-        if requested > state.tensors.capacity() {
-            return Err(
-                TensorCacheError::Metadata(DecodeStateError::CapacityExceeded {
-                    sequence: row,
-                    requested,
-                    capacity: state.tensors.capacity(),
-                })
-                .into(),
-            );
-        }
-        if requested > model.config().max_position_embeddings {
-            return Err(Error::configuration(
-                "nemotron_h.position",
-                "cached length exceeds max_position_embeddings",
-            ));
-        }
+        .zip(&rows.token_counts)
+        .any(|(&length, &count)| length + count > model.config().max_position_embeddings);
+    if exceeds_context {
+        return Err(Error::configuration(
+            "nemotron_h.position",
+            "cached length exceeds max_position_embeddings",
+        ));
     }
-    if let Some(positions) = &input.position_ids {
-        for (row, valid) in valid_indices.iter().enumerate() {
-            if valid.is_empty() {
-                continue;
-            }
-            let selector = selection_tensor::<B>(valid, state.tensors.device())?;
-            let compact = positions
-                .clone()
-                .slice([row..row + 1, 0..sequence])
-                .select(1, selector);
-            let minimum = compact
-                .clone()
-                .min()
-                .try_into_scalar()
-                .map_err(|error| Error::BackendCapability(error.to_string()))?
-                .elem::<i64>();
-            let maximum = compact
-                .max()
-                .try_into_scalar()
-                .map_err(|error| Error::BackendCapability(error.to_string()))?
-                .elem::<i64>();
-            if minimum < 0 || maximum as usize >= model.config().max_position_embeddings {
-                return Err(Error::shape(
-                    "nemotron_h.position_ids",
-                    format!("values in 0..{}", model.config().max_position_embeddings),
-                    format!("observed {minimum}..={maximum}"),
-                ));
-            }
-        }
-    }
-    Ok(PreparedStatefulInput {
-        batch,
-        sequence,
-        valid_indices,
-        token_counts,
-    })
-}
-
-/// Reads a true-valid mask into stable semantic source-column indices.
-fn semantic_indices<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-) -> Result<Vec<Vec<usize>>> {
-    let Some(mask) = mask else {
-        let dense = (0..sequence).collect::<Vec<_>>();
-        return Ok((0..batch).map(|_| dense.clone()).collect());
-    };
-    let values =
-        crate::architecture::tensor_bool_values(mask.as_tensor().clone(), "Nemotron-H token mask")?;
-    Ok(values
-        .chunks_exact(sequence)
-        .map(|row| {
-            row.iter()
-                .enumerate()
-                .filter_map(|(column, &valid)| valid.then_some(column))
-                .collect()
-        })
-        .collect())
-}
-
-/// Converts semantic source columns into a Burn selector.
-fn selection_tensor<B: Backend>(
-    indices: &[usize],
-    device: &B::Device,
-) -> Result<Tensor<B, 1, Int>> {
-    let indices = indices
-        .iter()
-        .map(|&index| {
-            i64::try_from(index).map_err(|_| {
-                Error::configuration("nemotron_h.token_mask", "column index exceeds i64")
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let count = indices.len();
-    Ok(Tensor::from_data(TensorData::new(indices, [count]), device))
+    Ok(rows)
 }
 
 /// Builds `excluded(q,k) = k > q || k + window <= q` for cached attention.
@@ -1062,77 +940,6 @@ pub(super) fn cached_attention_mask<B: Backend>(
         }
         None => causal,
     })
-}
-
-/// Scatters compact floating rows back to rectangular input columns.
-fn scatter_compact<B: Backend>(
-    compact: Tensor<B, 3>,
-    sequence: usize,
-    indices: &[usize],
-) -> Result<Tensor<B, 3>> {
-    let [batch, compact_sequence, width] = compact.dims();
-    if batch != 1
-        || compact_sequence != indices.len()
-        || indices.windows(2).any(|pair| pair[0] >= pair[1])
-        || indices.last().is_some_and(|&index| index >= sequence)
-    {
-        return Err(Error::shape(
-            "nemotron_h.compact_hidden",
-            "[1, valid_columns, width] with sorted unique indices",
-            format!("shape={:?}, indices={indices:?}", compact.dims()),
-        ));
-    }
-    let device = compact.device();
-    let dtype = compact.dtype();
-    let mut segments = Vec::new();
-    let mut cursor = 0;
-    for (compact_index, &output_index) in indices.iter().enumerate() {
-        if output_index > cursor {
-            segments.push(Tensor::zeros(
-                [1, output_index - cursor, width],
-                (&device, dtype),
-            ));
-        }
-        segments.push(compact.clone().narrow(1, compact_index, 1));
-        cursor = output_index + 1;
-    }
-    if cursor < sequence {
-        segments.push(Tensor::zeros(
-            [1, sequence - cursor, width],
-            (&device, dtype),
-        ));
-    }
-    Ok(Tensor::cat(segments, 1))
-}
-
-/// Scatters compact discrete router assignments to rectangular columns.
-fn scatter_compact_int<B: Backend>(
-    compact: Tensor<B, 3, Int>,
-    sequence: usize,
-    indices: &[usize],
-) -> Result<Tensor<B, 3, Int>> {
-    let [batch, compact_sequence, width] = compact.dims();
-    if batch != 1 || compact_sequence != indices.len() {
-        return Err(Error::shape(
-            "nemotron_h.compact_router",
-            "[1, valid_columns, top_k]",
-            format!("{:?}", compact.dims()),
-        ));
-    }
-    let device = compact.device();
-    let mut segments = Vec::new();
-    let mut cursor = 0;
-    for (compact_index, &output_index) in indices.iter().enumerate() {
-        if output_index > cursor {
-            segments.push(Tensor::zeros([1, output_index - cursor, width], &device));
-        }
-        segments.push(compact.clone().narrow(1, compact_index, 1));
-        cursor = output_index + 1;
-    }
-    if cursor < sequence {
-        segments.push(Tensor::zeros([1, sequence - cursor, width], &device));
-    }
-    Ok(Tensor::cat(segments, 1))
 }
 
 /// Derives compact cache geometry from model weights and schedule counts.
@@ -1231,16 +1038,6 @@ fn mamba_state_dtype(name: &str) -> Result<burn::tensor::DType> {
             format!("unsupported recurrent cache dtype {name:?}"),
         )),
     }
-}
-
-/// Rejects mixed-device model/input/cache combinations before dispatch.
-fn ensure_device<D: PartialEq>(actual: &D, expected: &D) -> Result<()> {
-    if actual != expected {
-        return Err(Error::BackendCapability(
-            "Nemotron-H model, input, and decode state must share a device".into(),
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

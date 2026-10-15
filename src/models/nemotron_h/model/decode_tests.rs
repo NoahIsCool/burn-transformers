@@ -139,11 +139,11 @@ fn experimental_contract_public_rejections_preserve_nemotron_history() {
                 ));
                 (
                     "nemotron_h.position_ids",
-                    "values in 0..32",
+                    "position values in 0..32",
                     if case == 2 {
-                        "observed -1..=-1"
+                        "observed range -1..=-1"
                     } else {
-                        "observed 32..=32"
+                        "observed range 32..=32"
                     },
                 )
             }
@@ -151,8 +151,8 @@ fn experimental_contract_public_rejections_preserve_nemotron_history() {
                 options.logits =
                     crate::LogitsSelection::Positions(if case == 4 { vec![] } else { vec![1] });
                 (
-                    "nemotron_h.logits.positions",
-                    "non-empty values in 0..1",
+                    "forward_options.logits.positions",
+                    "a non-empty list of indices below 1",
                     if case == 4 { "[]" } else { "[1]" },
                 )
             }
@@ -161,8 +161,8 @@ fn experimental_contract_public_rejections_preserve_nemotron_history() {
                     Some(TokenMask::new(Tensor::from_bool([[false]].into(), &device)));
                 (
                     "nemotron_h.token_mask",
-                    "at least one valid token in each prefill row",
-                    "a fully masked row",
+                    "at least one valid token in every prefill row",
+                    "a fully masked prompt row",
                 )
             }
         };

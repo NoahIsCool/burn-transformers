@@ -19,11 +19,11 @@ use burn::{
     nn::{
         Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, LinearLayout,
     },
-    tensor::{DType, ElementConversion, Int, Tensor, TensorData, backend::Backend},
+    tensor::{DType, Int, Tensor, backend::Backend},
 };
 
 use crate::{
-    CausalLmInput, CausalLmOutput, Error, ForwardOptions, LogitsSelection, Result,
+    CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
     architecture::{Activation, TokenMask},
     attention::{
         AttentionOutputGate, AttentionPrecisionMode, GroupedQueryAttention,
@@ -36,6 +36,19 @@ use crate::{
 };
 
 use super::GptNeoXConfig;
+use crate::models::shared::{
+    ImplicitPositions, InputContract, InputNames, select_hidden, validate_input,
+};
+
+/// Tensor names reported by GPT-NeoX input errors.
+const INPUT_NAMES: InputNames<'static> = InputNames {
+    token_ids: "gpt_neox.token_ids",
+    token_mask: "gpt_neox.token_mask",
+    position_ids: "gpt_neox.position_ids",
+};
+
+/// Owner named when an input tensor is on another device than the weights.
+const PARAMETERS: &str = "GPT-NeoX model parameters";
 
 // Editable transformer blocks and model composition.
 
@@ -407,7 +420,8 @@ impl<B: Backend> GptNeoXModel<B> {
         hooks: &mut Hooks<'_, B>,
     ) -> Result<(Tensor<B, 3>, Vec<Tensor<B, 3>>)> {
         self.validate_parameters()?;
-        let positions = validate_input(input, &self.config, &self.embed_in.weight.device())?;
+        let positions =
+            validate_public_input(input, &self.config, &self.embed_in.weight.lazy_device())?;
         let mut hidden = hooks.apply(
             Stack::Decoder.embedding(),
             self.embed_in.forward(input.token_ids.clone()),
@@ -677,8 +691,10 @@ fn normal_linear<B: Backend>(
 
 /// Validates token and position ranges, padding rows, sequence capacity, and device agreement.
 ///
-/// Absent position IDs use physical `0..sequence` positions, including padded slots.
-fn validate_input<B: Backend>(
+/// Absent position IDs use physical `0..sequence` positions, including padded
+/// slots, as the reference GPT-NeoX forward does. Token, mask, and position
+/// values share one device-to-host readback.
+fn validate_public_input<B: Backend>(
     input: &CausalLmInput<B>,
     config: &GptNeoXConfig,
     device: &B::Device,
@@ -686,7 +702,7 @@ fn validate_input<B: Backend>(
     let [batch, sequence] = input.token_ids.dims();
     if batch == 0 || sequence == 0 || sequence > config.max_position_embeddings {
         return Err(Error::shape(
-            "gpt_neox.token_ids",
+            INPUT_NAMES.token_ids,
             format!(
                 "nonempty [batch, sequence<={}]",
                 config.max_position_embeddings
@@ -694,134 +710,14 @@ fn validate_input<B: Backend>(
             format!("[{batch}, {sequence}]"),
         ));
     }
-    if input.token_ids.device() != *device {
-        return Err(Error::configuration(
-            "gpt_neox.token_ids",
-            "input and model devices differ",
-        ));
-    }
-    validate_indices(
-        input.token_ids.clone(),
-        config.vocab_size,
-        "gpt_neox.token_ids",
-    )?;
-    if let Some(mask) = &input.token_mask {
-        if mask.as_tensor().dims() != [batch, sequence] || mask.as_tensor().device() != *device {
-            return Err(Error::configuration(
-                "gpt_neox.token_mask",
-                "shape and device must match token_ids",
-            ));
-        }
-        let least = mask
-            .as_tensor()
-            .clone()
-            .int()
-            .sum_dim(1)
-            .min()
-            .try_into_scalar()
-            .map_err(|error| {
-                Error::BackendCapability(format!("cannot inspect token mask: {error}"))
-            })?
-            .elem::<i64>();
-        if least == 0 {
-            return Err(Error::configuration(
-                "gpt_neox.token_mask",
-                "every sequence must contain a valid token",
-            ));
-        }
-    }
-    let positions = match &input.position_ids {
-        Some(positions) => {
-            if positions.dims() != [batch, sequence] || positions.device() != *device {
-                return Err(Error::configuration(
-                    "gpt_neox.position_ids",
-                    "shape and device must match token_ids",
-                ));
-            }
-            positions.clone()
-        }
-        // GPT-NeoX forward uses absolute physical positions even with padding.
-        None => Tensor::<B, 1, Int>::arange(0..sequence as i64, device)
-            .reshape([1, sequence])
-            .expand([batch, sequence]),
-    };
-    validate_indices(
-        positions.clone(),
-        config.max_position_embeddings,
-        "gpt_neox.position_ids",
-    )?;
-    Ok(positions)
-}
-
-/// Reads extrema and rejects indices outside `0..limit` before embedding or rotary lookup.
-fn validate_indices<B: Backend>(
-    indices: Tensor<B, 2, Int>,
-    limit: usize,
-    name: &str,
-) -> Result<()> {
-    let minimum = indices
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(error.to_string()))?
-        .elem::<i64>();
-    let maximum = indices
-        .max()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(error.to_string()))?
-        .elem::<i64>();
-    if minimum < 0 || maximum >= limit as i64 {
-        return Err(Error::configuration(
-            name,
-            format!("indices must be in 0..{limit}; observed {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Selects all, explicit, or per-row last valid states without changing the residual width.
-///
-/// The mask-aware last-token path gathers the greatest visible physical position on device.
-fn select_hidden<B: Backend>(
-    hidden: Tensor<B, 3>,
-    mask: Option<&TokenMask<B>>,
-    selection: &LogitsSelection,
-) -> Result<Tensor<B, 3>> {
-    let [batch, sequence, width] = hidden.dims();
-    match selection {
-        LogitsSelection::All => Ok(hidden),
-        LogitsSelection::Last => match mask {
-            None => Ok(hidden.narrow(1, sequence - 1, 1)),
-            Some(mask) => {
-                let positions = Tensor::<B, 1, Int>::arange(0..sequence as i64, &hidden.device())
-                    .reshape([1, sequence])
-                    .expand([batch, sequence]);
-                let last = positions
-                    .mask_fill(mask.as_tensor().clone().bool_not(), -1)
-                    .argmax(1)
-                    .unsqueeze_dim::<3>(2)
-                    .expand([batch, 1, width]);
-                Ok(hidden.gather(1, last))
-            }
-        },
-        LogitsSelection::Positions(positions) => {
-            if positions.is_empty() || positions.iter().any(|&position| position >= sequence) {
-                return Err(Error::configuration(
-                    "gpt_neox.logits.positions",
-                    "positions must be nonempty and within the sequence",
-                ));
-            }
-            let data = TensorData::new(
-                positions
-                    .iter()
-                    .map(|&position| position as i64)
-                    .collect::<Vec<_>>(),
-                [positions.len()],
-            );
-            let indices = Tensor::<B, 1, Int>::from_data(data, &hidden.device());
-            Ok(hidden.select(1, indices))
-        }
-    }
+    validate_input(
+        input,
+        device,
+        &InputContract::new(INPUT_NAMES, PARAMETERS, config.vocab_size)
+            .with_position_limit(config.max_position_embeddings)
+            .with_implicit_positions(ImplicitPositions::PhysicalColumns),
+    )?
+    .require_positions(INPUT_NAMES.position_ids)
 }
 
 #[cfg(test)]

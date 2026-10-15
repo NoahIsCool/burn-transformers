@@ -30,7 +30,7 @@ use std::collections::BTreeSet;
 
 use burn::{
     nn::Linear,
-    tensor::{Bool, Int, Tensor, TensorData, backend::Backend},
+    tensor::{Bool, Int, Tensor, backend::Backend},
 };
 
 use crate::{
@@ -41,21 +41,26 @@ use crate::{
         TokenMask,
     },
     attention::{AttentionProjection, padding_attention_mask},
-    cache::{
-        CacheConfig, DecodeStateError, KvCacheStorage, NativeKvCacheSpec, TensorCacheError,
-        TensorDecodeState,
-    },
+    cache::{CacheConfig, KvCacheStorage, NativeKvCacheSpec, TensorCacheError, TensorDecodeState},
     operations,
 };
 
 use super::{
-    T5Block, T5ForConditionalGeneration, T5Stack, diagnostic_buffer, select_hidden,
-    validate_encoder_output, validate_options,
+    DECODER_INPUT, T5Block, T5ForConditionalGeneration, T5Stack, diagnostic_buffer, select_hidden,
+    validate_encoder_layout, validate_encoder_output, validate_options,
+};
+use crate::models::shared::{
+    CompactRow, EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_grid,
+    ensure_same_device, index_tensor, prepare_stateful_rows, select_hidden_with_last_columns,
+    validate_logits_selection,
 };
 use crate::models::t5::T5Config;
 
 /// Index of T5's sole homogeneous decoder self-attention cache group.
 const SELF_KV_GROUP: usize = 0;
+
+/// Owner named when an input tensor is on another device than the cache.
+const DECODE_STATE: &str = "T5 decode state";
 
 /// Stateful operation whose empty-row policy differs by lifecycle phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,9 +72,12 @@ enum StatefulPhase {
 }
 
 impl StatefulPhase {
-    /// Returns whether a fully masked input row is a valid no-op.
-    const fn permits_inactive_rows(self) -> bool {
-        matches!(self, Self::Decode)
+    /// Returns the phase's policy for rows without a valid token.
+    const fn empty_rows(self) -> EmptyRows {
+        match self {
+            Self::Prefill => EmptyRows::Reject,
+            Self::Decode => EmptyRows::Permit,
+        }
     }
 }
 
@@ -91,9 +99,13 @@ struct T5CrossAttentionCache<B: Backend> {
 
 impl<B: Backend> T5CrossAttentionCache<B> {
     /// Builds all decoder-layer cross projections without mutating decode state.
+    ///
+    /// The caller has already validated `encoder` (including its source-mask
+    /// rows) in [`prepare_stateful_input`]; the sync-free layout check here
+    /// only guards the projection reshapes.
     fn project(model: &T5ForConditionalGeneration<B>, encoder: &EncoderOutput<B>) -> Result<Self> {
         let [batch, source_sequence, _] = encoder.hidden_state.dims();
-        validate_encoder_output(
+        validate_encoder_layout(
             encoder,
             batch,
             model.config.d_model,
@@ -186,19 +198,16 @@ impl<B: Backend> T5CrossAttentionCache<B> {
 
     /// Returns one row of the source-validity mask, preserving gapped padding.
     fn mask_row(&self, sequence: usize) -> Option<TokenMask<B>> {
-        self.encoder.token_mask.as_ref().map(|mask| {
-            let width = mask.as_tensor().dims()[1];
-            TokenMask::new(
-                mask.as_tensor()
-                    .clone()
-                    .slice([sequence..sequence + 1, 0..width]),
-            )
-        })
+        encoder_mask_row(&self.encoder, sequence)
     }
 
     /// Produces a reordered cache without mutating the current binding.
     fn reordered(&self, indices: &[usize]) -> Result<Self> {
-        let selector = batch_selector::<B>(indices, &self.encoder.hidden_state.device())?;
+        let selector = index_tensor::<B>(
+            indices,
+            &self.encoder.hidden_state.device(),
+            "t5.decode_state.reorder",
+        )?;
         let encoder = EncoderOutput {
             hidden_state: self
                 .encoder
@@ -368,10 +377,11 @@ impl<B: Backend> T5DecodeState<B> {
                 encoder.hidden_state.dtype(),
             )));
         }
-        ensure_device(
+        ensure_same_device(
             "t5.encoder_output.hidden_state",
             &encoder.hidden_state.device(),
             self.tensors.device(),
+            DECODE_STATE,
         )?;
         let expected_mask = cross
             .encoder
@@ -390,10 +400,11 @@ impl<B: Backend> T5DecodeState<B> {
             ));
         }
         if let Some(mask) = &encoder.token_mask {
-            ensure_device(
+            ensure_same_device(
                 "t5.encoder_output.token_mask",
                 &mask.as_tensor().device(),
                 self.tensors.device(),
+                DECODE_STATE,
             )?;
         }
         Ok(())
@@ -522,14 +533,19 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
     /// scattered back into the original rectangle. This matches stateful
     /// prefill for left, right, and gapped masks while preserving a fully
     /// differentiable tensor graph for all parameterized operations.
+    ///
+    /// `valid_indices[b]` lists row `b`'s valid columns, read back together
+    /// with the input validation; every row has at least one.
     pub(super) fn decode_stateless_masked(
         &self,
         encoder: &EncoderOutput<B>,
         decoder: CausalLmInput<B>,
         options: &ForwardOptions,
+        valid_indices: &[Vec<usize>],
     ) -> Result<CausalLmOutput<B>> {
         let [batch, sequence] = decoder.token_ids.dims();
-        let valid_indices = semantic_indices(decoder.token_mask.as_ref(), batch, sequence)?;
+        debug_assert_eq!(valid_indices.len(), batch, "one column list per target row");
+        let device = decoder.token_ids.device();
         let diagnostic_count = self.decoder.block.len() + 2;
         let mut final_rows = Vec::with_capacity(batch);
         let mut diagnostic_rows: Vec<Vec<Tensor<B, 3>>> = if options.hidden_states {
@@ -540,20 +556,10 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
             Vec::new()
         };
         for (row, valid) in valid_indices.iter().enumerate() {
-            if valid.is_empty() {
-                return Err(Error::shape(
-                    "t5.decoder.token_mask",
-                    "at least one valid token in every stateless row",
-                    "a fully masked row",
-                ));
-            }
-            let selector = sequence_selector::<B>(valid, &decoder.token_ids.device())?;
-            let tokens = decoder
-                .token_ids
-                .clone()
-                .slice([row..row + 1, 0..sequence])
-                .select(1, selector);
-            let hidden = self.shared.forward(tokens);
+            // An empty row cannot reach this point (validation rejects fully
+            // masked rows); `CompactRow::new` still reports one contextually.
+            let plan = CompactRow::<B>::new(row, valid, sequence, &device)?;
+            let hidden = self.shared.forward(plan.compact(&decoder.token_ids));
             let source = encoder.hidden_state.clone().slice([
                 row..row + 1,
                 0..encoder.hidden_state.dims()[1],
@@ -567,7 +573,7 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
                 source_mask.as_ref(),
                 options.hidden_states,
             )?;
-            final_rows.push(scatter_compact(output.hidden, sequence, valid)?);
+            final_rows.push(plan.scatter(output.hidden)?);
             if options.hidden_states {
                 if output.hidden_states.len() != diagnostic_count {
                     return Err(Error::Cache(format!(
@@ -576,19 +582,19 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
                     )));
                 }
                 for (destination, compact) in diagnostic_rows.iter_mut().zip(output.hidden_states) {
-                    destination.push(scatter_compact(compact, sequence, valid)?);
+                    destination.push(plan.scatter(compact)?);
                 }
             }
         }
-        let hidden = Tensor::cat(final_rows, 0);
+        let hidden = concat_rows(final_rows, "t5.decoder.hidden")?;
         let selected = select_hidden(hidden.clone(), decoder.token_mask.as_ref(), &options.logits)?;
         Ok(CausalLmOutput {
             logits: self.project_logits(selected)?,
             final_hidden_state: options.hidden_states.then_some(hidden),
             hidden_states: diagnostic_rows
                 .into_iter()
-                .map(|rows| Tensor::cat(rows, 0))
-                .collect(),
+                .map(|rows| concat_rows(rows, "t5.decoder.hidden_states"))
+                .collect::<Result<Vec<_>>>()?,
             attentions: Vec::new(),
             routers: Vec::new(),
             load_balancing_loss: None,
@@ -643,8 +649,7 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
         };
 
         for sequence_index in 0..prepared.batch {
-            let valid = &prepared.valid_indices[sequence_index];
-            if valid.is_empty() {
+            let Some(plan) = prepared.compact_row::<B>(sequence_index, &device)? else {
                 let empty = empty_hidden_row(self, prepared.sequence, &device);
                 final_rows.push(empty.clone());
                 if options.hidden_states {
@@ -653,13 +658,8 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
                     }
                 }
                 continue;
-            }
-            let selector = sequence_selector::<B>(valid, &device)?;
-            let tokens = decoder
-                .token_ids
-                .clone()
-                .slice([sequence_index..sequence_index + 1, 0..prepared.sequence])
-                .select(1, selector);
+            };
+            let tokens = plan.compact(&decoder.token_ids);
             let baseline = state.tensors.lengths()[sequence_index];
             let (compact, diagnostics) = self.decoder.forward_cached_row(
                 self,
@@ -671,7 +671,7 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
                 &mut pending_self,
                 options.hidden_states,
             )?;
-            final_rows.push(scatter_compact(compact, prepared.sequence, valid)?);
+            final_rows.push(plan.scatter(compact)?);
             if options.hidden_states {
                 if diagnostics.len() != diagnostic_count {
                     return Err(Error::Cache(format!(
@@ -680,17 +680,21 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
                     )));
                 }
                 for (destination, compact_state) in diagnostic_rows.iter_mut().zip(diagnostics) {
-                    destination.push(scatter_compact(compact_state, prepared.sequence, valid)?);
+                    destination.push(plan.scatter(compact_state)?);
                 }
             }
         }
 
-        let hidden = Tensor::cat(final_rows, 0);
+        let hidden = concat_rows(final_rows, "t5.decoder.hidden")?;
         let hidden_states = diagnostic_rows
             .into_iter()
-            .map(|rows| Tensor::cat(rows, 0))
-            .collect();
-        let selected = select_hidden(hidden.clone(), decoder.token_mask.as_ref(), &options.logits)?;
+            .map(|rows| concat_rows(rows, "t5.decoder.hidden_states"))
+            .collect::<Result<Vec<_>>>()?;
+        let selected = select_hidden_with_last_columns(
+            hidden.clone(),
+            prepared.last_columns(),
+            &options.logits,
+        )?;
         let logits = self.project_logits(selected)?;
         let bound_encoder = cross.encoder.clone();
         pending_self.commit(
@@ -1002,51 +1006,27 @@ impl<B: Backend> PendingT5SelfWrites<B> {
     }
 }
 
-/// Validated rectangular metadata for a stateful target operation.
-struct PreparedStatefulInput {
-    /// Number of decoder input rows, matching the decode state batch size.
-    batch: usize,
-    /// Rectangular decoder input width before invalid tokens are compacted.
-    sequence: usize,
-    /// Original valid token positions, ordered within each batch row.
-    valid_indices: Vec<Vec<usize>>,
-    /// Number of appended tokens per row; zero marks an inactive decode row.
-    token_counts: Vec<usize>,
-}
-
 /// Validates state, encoder, tokens, masks, devices, and capacity before math.
+///
+/// The encoder binding is checked first (or validated for a fresh state);
+/// explicit decoder positions are rejected because T5 uses relative buckets.
+/// The shared preparation then reads the decoder mask and token IDs in one
+/// transfer and plans every row's compaction and cache append.
 fn prepare_stateful_input<B: Backend>(
     model: &T5ForConditionalGeneration<B>,
     encoder: &EncoderOutput<B>,
     decoder: &CausalLmInput<B>,
     state: &T5DecodeState<B>,
     phase: StatefulPhase,
-) -> Result<PreparedStatefulInput> {
-    let [batch, sequence] = decoder.token_ids.dims();
-    if batch == 0 || sequence == 0 {
-        return Err(Error::shape(
-            "t5.decoder.input_ids",
-            "non-empty [batch, sequence]",
-            format!("[{batch}, {sequence}]"),
-        ));
-    }
-    if batch != state.tensors.batch_size() {
-        return Err(TensorCacheError::BatchSizeMismatch {
-            configured: state.tensors.batch_size(),
-            requested: batch,
-        }
-        .into());
-    }
-    ensure_device(
-        "t5.decoder.input_ids",
-        &decoder.token_ids.device(),
-        state.tensors.device(),
-    )?;
-    ensure_device(
+) -> Result<StatefulRows> {
+    let device = state.tensors.device();
+    ensure_same_device(
         "t5.model",
-        &model.shared.weight.val().device(),
-        state.tensors.device(),
+        &model.shared.weight.lazy_device(),
+        device,
+        DECODE_STATE,
     )?;
+    let [batch, sequence] = decoder.token_ids.dims();
     if state.cross.is_some() {
         state.validate_encoder_binding(encoder)?;
     } else {
@@ -1056,139 +1036,51 @@ fn prepare_stateful_input<B: Backend>(
             model.config.d_model,
             model.shared.weight.val().dtype(),
         )?;
-        ensure_device(
+        ensure_same_device(
             "t5.encoder_output.hidden_state",
             &encoder.hidden_state.device(),
-            state.tensors.device(),
+            device,
+            DECODE_STATE,
         )?;
         if let Some(mask) = &encoder.token_mask {
-            ensure_device(
+            ensure_same_device(
                 "t5.encoder_output.token_mask",
                 &mask.as_tensor().device(),
-                state.tensors.device(),
+                device,
+                DECODE_STATE,
             )?;
         }
     }
-    if let Some(mask) = &decoder.token_mask {
-        ensure_device(
-            "t5.decoder.token_mask",
-            &mask.as_tensor().device(),
-            state.tensors.device(),
-        )?;
-        if mask.as_tensor().dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "t5.decoder.token_mask",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", mask.as_tensor().dims()),
-            ));
-        }
-    }
     if let Some(positions) = &decoder.position_ids {
-        ensure_device(
-            "t5.decoder.position_ids",
+        ensure_same_device(
+            DECODER_INPUT.position_ids,
             &positions.device(),
-            state.tensors.device(),
+            device,
+            DECODE_STATE,
         )?;
-        if positions.dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "t5.decoder.position_ids",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", positions.dims()),
-            ));
-        }
+        ensure_grid(
+            positions.dims(),
+            batch,
+            sequence,
+            DECODER_INPUT.position_ids,
+        )?;
         return Err(Error::BackendCapability(
             "T5 decoder uses relative positions and does not accept explicit position IDs".into(),
         ));
     }
-    let valid_indices = semantic_indices(decoder.token_mask.as_ref(), batch, sequence)?;
-    if !phase.permits_inactive_rows() && valid_indices.iter().any(Vec::is_empty) {
-        return Err(Error::shape(
-            "t5.decoder.token_mask",
-            "at least one valid token in every prefill row",
-            "a fully masked prompt row",
-        ));
-    }
-    let token_counts = valid_indices.iter().map(Vec::len).collect::<Vec<_>>();
-    for (row, (&baseline, &additional)) in state
-        .tensors
-        .lengths()
-        .iter()
-        .zip(&token_counts)
-        .enumerate()
-    {
-        let requested = baseline.checked_add(additional).ok_or({
-            TensorCacheError::Metadata(DecodeStateError::LengthOverflow {
-                sequence: row,
-                length: baseline,
-                additional,
-            })
-        })?;
-        if requested > state.tensors.capacity() {
-            return Err(
-                TensorCacheError::Metadata(DecodeStateError::CapacityExceeded {
-                    sequence: row,
-                    requested,
-                    capacity: state.tensors.capacity(),
-                })
-                .into(),
-            );
-        }
-    }
-    for (row, valid) in valid_indices.iter().enumerate() {
-        if valid.is_empty() {
-            continue;
-        }
-        let selector = sequence_selector::<B>(valid, state.tensors.device())?;
-        let tokens = decoder
-            .token_ids
-            .clone()
-            .slice([row..row + 1, 0..sequence])
-            .select(1, selector);
-        validate_active_token_ids(tokens, model.config.vocab_size)?;
-    }
-    Ok(PreparedStatefulInput {
-        batch,
-        sequence,
-        valid_indices,
-        token_counts,
-    })
-}
-
-/// Validates selective-logit indices before any cache mutation.
-fn validate_logits_selection(selection: &crate::LogitsSelection, sequence: usize) -> Result<()> {
-    if let crate::LogitsSelection::Positions(positions) = selection
-        && (positions.is_empty() || positions.iter().any(|position| *position >= sequence))
-    {
-        return Err(Error::shape(
-            "forward_options.logits.positions",
-            format!("a non-empty list of indices below {sequence}"),
-            format!("{positions:?}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Reads a semantic mask into stable per-row valid-column indices.
-fn semantic_indices<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-) -> Result<Vec<Vec<usize>>> {
-    let Some(mask) = mask else {
-        let dense = (0..sequence).collect::<Vec<_>>();
-        return Ok((0..batch).map(|_| dense.clone()).collect());
-    };
-    let values =
-        crate::architecture::tensor_bool_values(mask.as_tensor().clone(), "T5 decoder token mask")?;
-    Ok(values
-        .chunks_exact(sequence)
-        .map(|row| {
-            row.iter()
-                .enumerate()
-                .filter_map(|(column, &valid)| valid.then_some(column))
-                .collect()
-        })
-        .collect())
+    prepare_stateful_rows(
+        decoder,
+        device,
+        state.tensors.lengths(),
+        state.tensors.capacity(),
+        &StatefulContract {
+            names: DECODER_INPUT,
+            owner: DECODE_STATE,
+            vocabulary: model.config.vocab_size,
+            position_limit: None,
+            empty_rows: phase.empty_rows(),
+        },
+    )
 }
 
 /// Returns one encoder mask row without changing `true == valid` semantics.
@@ -1204,79 +1096,6 @@ fn encoder_mask_row<B: Backend>(
                 .slice([sequence..sequence + 1, 0..source]),
         )
     })
-}
-
-/// Validates only active token IDs so masked sentinels remain inert.
-fn validate_active_token_ids<B: Backend>(
-    token_ids: Tensor<B, 2, Int>,
-    vocabulary: usize,
-) -> Result<()> {
-    use burn::tensor::ElementConversion;
-
-    let minimum = token_ids
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate T5 token IDs: {error}"))
-        })?
-        .elem::<i64>();
-    let maximum = token_ids
-        .max()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate T5 token IDs: {error}"))
-        })?
-        .elem::<i64>();
-    if minimum < 0 || maximum as usize >= vocabulary {
-        return Err(Error::shape(
-            "t5.decoder.input_ids",
-            format!("active token values in 0..{vocabulary}"),
-            format!("observed range {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Creates a checked selector for target sequence columns.
-fn sequence_selector<B: Backend>(
-    indices: &[usize],
-    device: &B::Device,
-) -> Result<Tensor<B, 1, Int>> {
-    let values = indices
-        .iter()
-        .map(|&index| {
-            i64::try_from(index).map_err(|_| {
-                Error::configuration(
-                    "t5.decoder.token_mask",
-                    format!("column index {index} exceeds signed tensor-index range"),
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Tensor::from_data(
-        TensorData::new(values, [indices.len()]),
-        device,
-    ))
-}
-
-/// Creates a checked selector for cache batch reordering.
-fn batch_selector<B: Backend>(indices: &[usize], device: &B::Device) -> Result<Tensor<B, 1, Int>> {
-    let values = indices
-        .iter()
-        .map(|&index| {
-            i64::try_from(index).map_err(|_| {
-                Error::configuration(
-                    "t5.decode_state.reorder",
-                    format!("batch index {index} exceeds signed tensor-index range"),
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Tensor::from_data(
-        TensorData::new(values, [indices.len()]),
-        device,
-    ))
 }
 
 /// Validates a fixed-size batch permutation or duplication vector.
@@ -1329,66 +1148,6 @@ fn empty_hidden_row<B: Backend>(
         [1, sequence, model.config.d_model],
         (device, model.shared.weight.val().dtype()),
     )
-}
-
-/// Scatters compact active states into a zero-filled rectangular row.
-fn scatter_compact<B: Backend>(
-    compact: Tensor<B, 3>,
-    sequence: usize,
-    indices: &[usize],
-) -> Result<Tensor<B, 3>> {
-    if compact.dims()[1] != indices.len()
-        || indices.windows(2).any(|pair| pair[0] >= pair[1])
-        || indices.last().is_some_and(|&index| index >= sequence)
-    {
-        return Err(Error::shape(
-            "t5.decoder.compact_hidden",
-            "compact width matching sorted, unique in-range output indices",
-            format!("compact={:?}, indices={indices:?}", compact.dims()),
-        ));
-    }
-    let width = compact.dims()[2];
-    let device = compact.device();
-    let dtype = compact.dtype();
-    let mut segments = Vec::with_capacity(indices.len().saturating_mul(2).saturating_add(1));
-    let mut cursor = 0usize;
-    for (compact_index, &output_index) in indices.iter().enumerate() {
-        if output_index > cursor {
-            segments.push(Tensor::zeros(
-                [1, output_index - cursor, width],
-                (&device, dtype),
-            ));
-        }
-        segments.push(compact.clone().narrow(1, compact_index, 1));
-        cursor = output_index + 1;
-    }
-    if cursor < sequence {
-        segments.push(Tensor::zeros(
-            [1, sequence - cursor, width],
-            (&device, dtype),
-        ));
-    }
-    if segments.is_empty() {
-        return Err(Error::shape(
-            "t5.decoder.compact_hidden",
-            "at least one active output position",
-            "an empty compact tensor",
-        ));
-    }
-    Ok(Tensor::cat(segments, 1))
-}
-
-/// Checks that two backend-generic device values identify the same device.
-fn ensure_device<D: PartialEq>(name: &str, actual: &D, expected: &D) -> Result<()> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(Error::shape(
-            name,
-            "the decode-state device",
-            "another device",
-        ))
-    }
 }
 
 #[cfg(test)]

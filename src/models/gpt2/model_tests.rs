@@ -7,6 +7,7 @@ use burn::{
 use serde::Deserialize;
 
 use super::*;
+use crate::LogitsSelection;
 use crate::checkpoint::LoadOptions;
 use crate::models::gpt2::{Gpt2Activation, Gpt2Config};
 
@@ -383,6 +384,98 @@ fn invalid_input_unknown_points_and_readout_failures_are_recoverable_and_clear_c
         model
             .readout(Tensor::zeros([1, 2, 13], &Default::default()))
             .is_err()
+    );
+}
+
+/// Splits a contextual shape error into `(tensor, expected, actual)`.
+///
+/// Panics on any other variant, so callers pin both the variant and its names.
+fn shape_parts(error: Error) -> (String, String, String) {
+    match error {
+        Error::Shape {
+            tensor,
+            expected,
+            actual,
+        } => (tensor, expected, actual),
+        other => panic!("expected Error::Shape, found {other:?}"),
+    }
+}
+
+/// Input-value and selection violations are `Error::Shape` naming the shared tensors.
+///
+/// Pins the public error contract adopted with the shared family glue:
+/// out-of-range token and position IDs, fully masked rows, and invalid
+/// explicit logits positions were `Error::Configuration` before.
+#[test]
+fn input_value_errors_are_shape_errors_with_shared_tensor_names() {
+    let fixture = fixture();
+    let model = loaded(fixture.config.clone());
+    let options = ForwardOptions::default();
+
+    let mut invalid = input(&fixture);
+    invalid.token_ids =
+        Tensor::<B, 2, Int>::from_ints([[19, 1, 2, 3], [1, 2, 3, 4]], &Default::default());
+    assert_eq!(
+        shape_parts(model.forward(invalid, &options).unwrap_err()),
+        (
+            "gpt2.token_ids".into(),
+            "token values in 0..19".into(),
+            "observed range 1..=19".into()
+        )
+    );
+
+    let mut invalid = input(&fixture);
+    invalid.position_ids = Some(Tensor::<B, 2, Int>::from_ints(
+        [[0, 1, 2, 16], [0, 1, 2, 3]],
+        &Default::default(),
+    ));
+    assert_eq!(
+        shape_parts(model.forward(invalid, &options).unwrap_err()),
+        (
+            "gpt2.position_ids".into(),
+            "position values in 0..16".into(),
+            "observed range 0..=16".into()
+        )
+    );
+
+    let mut invalid = input(&fixture);
+    invalid.token_mask = Some(TokenMask::new(Tensor::from_bool(
+        [[true, true, true, true], [false, false, false, false]].into(),
+        &Default::default(),
+    )));
+    assert_eq!(
+        shape_parts(model.forward(invalid, &options).unwrap_err()),
+        (
+            "gpt2.token_mask".into(),
+            "at least one valid token in every row".into(),
+            "a fully masked row".into()
+        )
+    );
+
+    let selection = ForwardOptions {
+        logits: LogitsSelection::Positions(vec![99]),
+        ..Default::default()
+    };
+    let (tensor, _, actual) = shape_parts(model.forward(input(&fixture), &selection).unwrap_err());
+    assert_eq!(
+        (tensor.as_str(), actual.as_str()),
+        ("forward_options.logits.positions", "[99]")
+    );
+
+    // A public block applies the same mask contract to its own input.
+    let hidden = Tensor::<B, 3>::zeros([1, 2, 12], &Default::default());
+    let empty = TokenMask::new(Tensor::from_bool(
+        [[false, false]].into(),
+        &Default::default(),
+    ));
+    assert_eq!(
+        shape_parts(
+            model.model.layers[0]
+                .forward(hidden, Some(&empty))
+                .unwrap_err()
+        )
+        .0,
+        "gpt2.token_mask"
     );
 }
 

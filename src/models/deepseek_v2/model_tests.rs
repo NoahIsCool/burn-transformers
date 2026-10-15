@@ -3,11 +3,11 @@
 use burn::{
     backend::Flex,
     module::Param,
-    tensor::{Bool, Int, Tensor, Tolerance, backend::BackendTypes},
+    tensor::{Bool, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 
 use super::*;
-use crate::architecture::TokenMask;
+use crate::{LogitsSelection, architecture::TokenMask, models::shared::ensure_same_device};
 
 /// CPU backend with F32 tensor values and I32 token indices for deterministic fixtures.
 type TestBackend = Flex<f32, i32>;
@@ -276,13 +276,13 @@ fn semantic_padding_and_invalid_rows_are_validated() {
 /// Stateless device preflight names every independently supplied tensor.
 #[test]
 fn stateless_device_affinity_errors_are_contextual() {
-    assert!(ensure_model_device("deepseek_v2.input_ids", &0_u8, &0_u8).is_ok());
+    assert!(ensure_same_device("deepseek_v2.input_ids", &0_u8, &0_u8, PARAMETERS).is_ok());
     for tensor in [
         "deepseek_v2.input_ids",
         "deepseek_v2.token_mask",
         "deepseek_v2.position_ids",
     ] {
-        let error = ensure_model_device(tensor, &1_u8, &0_u8)
+        let error = ensure_same_device(tensor, &1_u8, &0_u8, PARAMETERS)
             .expect_err("different device identities must fail preflight");
         assert!(error.to_string().contains(tensor));
         assert!(error.to_string().contains("model parameters"));

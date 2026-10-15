@@ -7,7 +7,7 @@ use burn::{
 
 use super::*;
 use crate::{
-    DecodeState, LogitsSelection,
+    DecodeState, LogitsSelection, TokenMask,
     models::deepseek_v2::model::tests_support::{initialized_model, tiny_config},
 };
 
@@ -766,4 +766,85 @@ fn decode_state_model_mismatch_is_atomic() {
     );
     assert_eq!(state.lengths(), &[0]);
     assert_eq!(state.layer_storage(0).unwrap().into_data(), before);
+}
+
+/// Casts every floating parameter to F16, emulating a reduced-precision checkpoint.
+struct HalfPrecision;
+
+impl burn::module::ModuleMapper<TestBackend> for HalfPrecision {
+    /// Rounds one floating parameter to F16 while preserving its shape and device.
+    fn map_float<const D: usize>(
+        &mut self,
+        param: burn::module::Param<Tensor<TestBackend, D>>,
+    ) -> burn::module::Param<Tensor<TestBackend, D>> {
+        param.map(|tensor| tensor.cast(burn::tensor::DType::F16))
+    }
+}
+
+/// An F16 model's inactive decode rows use the router's F32 dtype for placeholders.
+///
+/// Regression for DSV-1: the zero router logits of a finished row were created
+/// in the embedding dtype, while active rows carry F32 router logits, so the
+/// batch concatenation panicked for F16/BF16 models whenever router logits or
+/// auxiliary losses were requested.
+#[test]
+fn reduced_precision_inactive_rows_keep_f32_router_logits() {
+    use burn::module::Module;
+
+    let (model, device) = tiny_model();
+    let model = model.map(&mut HalfPrecision);
+    for options in [
+        ForwardOptions {
+            router_logits: true,
+            ..Default::default()
+        },
+        ForwardOptions {
+            auxiliary_losses: true,
+            ..Default::default()
+        },
+    ] {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+            .unwrap();
+        model
+            .prefill(
+                input(Tensor::from_ints([[1, 2], [3, 4]], &device)),
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        let output = model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[5], [0]], &device),
+                    token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                        [[true], [false]].into(),
+                        &device,
+                    ))),
+                    position_ids: None,
+                },
+                &mut state,
+                &options,
+            )
+            .expect("an inactive row must not break reduced-precision router assembly");
+        assert_eq!(state.lengths(), &[3, 2]);
+        assert!(!output.routers.is_empty());
+        for router in &output.routers {
+            if let Some(logits) = &router.logits {
+                assert_eq!(logits.dtype(), burn::tensor::DType::F32);
+                assert!(
+                    logits
+                        .clone()
+                        .slice([1..2, 0..1, 0..logits.dims()[2]])
+                        .into_data()
+                        .iter::<f32>()
+                        .all(|value| value == 0.0)
+                );
+            }
+            assert_eq!(
+                router.load_balancing_loss.is_some(),
+                options.auxiliary_losses
+            );
+        }
+    }
 }

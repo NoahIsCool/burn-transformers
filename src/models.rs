@@ -15,6 +15,7 @@ pub mod muse_glimmer;
 pub mod nemotron_h;
 pub mod qwen3_5;
 pub mod qwen3_moe;
+mod shared;
 pub mod t5;
 
 pub use auto::{

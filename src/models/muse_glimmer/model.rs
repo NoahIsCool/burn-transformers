@@ -32,14 +32,13 @@ use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
     tensor::{
-        Bool, DType, ElementConversion, Int, Tensor, TensorData, activation::sigmoid,
-        backend::Backend, module::linear as tensor_linear, ops::AttentionModuleOptions,
+        Bool, DType, Int, Tensor, activation::sigmoid, backend::Backend,
+        module::linear as tensor_linear, ops::AttentionModuleOptions,
     },
 };
 
 use crate::{
-    ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, LogitsSelection,
-    Result,
+    ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
     architecture::TokenMask,
     attention::{
         AttentionExecutionPlan, AttentionExecutionPolicy, AttentionPrecisionMode,
@@ -55,11 +54,27 @@ use crate::{
 };
 
 use super::{MuseGlimmerLayerType, MuseGlimmerTextConfig};
-use crate::models::config::RopeType;
+use crate::models::{
+    config::RopeType,
+    shared::{
+        InputContract, InputNames, ValidatedInput, ensure_same_device, select_hidden,
+        validate_input,
+    },
+};
 
 mod decode;
 
 pub use decode::{MuseGlimmerDecodeState, MuseGlimmerLayerCache};
+
+/// Tensor names reported by Muse-Glimmer input errors.
+const INPUT_NAMES: InputNames<'static> = InputNames {
+    token_ids: "muse_glimmer.input_ids",
+    token_mask: "muse_glimmer.token_mask",
+    position_ids: "muse_glimmer.position_ids",
+};
+
+/// Owner named when a stateless tensor is on another device than the weights.
+const PARAMETERS: &str = "Muse-Glimmer model parameters";
 
 /// Projected Q/K/V and the independent Muse output gate.
 #[derive(Clone, Debug)]
@@ -845,6 +860,20 @@ pub struct MuseGlimmerModel<B: Backend> {
 }
 
 impl<B: Backend> MuseGlimmerModel<B> {
+    /// Validates a public input and resolves Muse's valid-token-ordinal positions.
+    ///
+    /// Token IDs, the mask, and positions are checked against the vocabulary
+    /// and the declared context with a single device-to-host readback, which
+    /// also reports whether the batch contains any padding.
+    fn validate_public_input(&self, input: &CausalLmInput<B>) -> Result<ValidatedInput<B>> {
+        validate_input(
+            input,
+            &self.embed_tokens.weight.lazy_device(),
+            &InputContract::new(INPUT_NAMES, PARAMETERS, self.config.vocab_size)
+                .with_position_limit(self.config.max_position_embeddings),
+        )
+    }
+
     /// Initializes the exact dense text topology without allocating cache state.
     pub fn init(config: MuseGlimmerTextConfig, device: &B::Device) -> Result<Self> {
         ArchitectureConfig::validate(&config)?;
@@ -879,14 +908,11 @@ impl<B: Backend> MuseGlimmerModel<B> {
         input: &CausalLmInput<B>,
         retain_hidden_states: bool,
     ) -> Result<(Tensor<B, 3>, Vec<Tensor<B, 3>>)> {
+        let validated = self.validate_public_input(input)?;
         let [batch, sequence] = input.token_ids.dims();
-        validate_nonempty_input(batch, sequence)?;
-        validate_input_devices(input, &self.embed_tokens.weight.lazy_device())?;
-        validate_token_ids(input.token_ids.clone(), self.config.vocab_size)?;
-        let mask_is_all_valid = validate_mask(input.token_mask.as_ref(), batch, sequence, false)?;
-        let positions = resolve_positions(input, batch, sequence)?;
-        validate_position_range(positions.clone(), self.config.max_position_embeddings)?;
-        let evaluated_context = evaluated_context(positions.clone())?;
+        let mask_is_all_valid = validated.fully_valid;
+        let positions = validated.require_positions(INPUT_NAMES.position_ids)?;
+        let evaluated_context = validated.evaluated_context;
         let mut hidden = scale_free_rms_norm(
             self.embed_tokens.forward(input.token_ids.clone()),
             self.config.rms_norm_eps,
@@ -1033,18 +1059,20 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
         let hidden_device = hidden.device();
         let raw = match &self.lm_head {
             Some(head) => {
-                ensure_model_device(
+                ensure_same_device(
                     "muse_glimmer.lm_head",
                     &head.weight.lazy_device(),
                     &hidden_device,
+                    PARAMETERS,
                 )?;
                 linear(hidden, head)?
             }
             None => {
-                ensure_model_device(
+                ensure_same_device(
                     "muse_glimmer.model.embed_tokens",
                     &self.model.embed_tokens.weight.lazy_device(),
                     &hidden_device,
+                    PARAMETERS,
                 )?;
                 tied_projection(hidden, self.model.embed_tokens.weight.val())?
             }
@@ -1267,245 +1295,6 @@ fn muse_rope_config(config: &MuseGlimmerTextConfig, theta: f64) -> Result<RopeCo
     };
     RopeConfig::new(config.head_dim, config.head_dim, theta, scaling)
         .map_err(|error| Error::configuration("muse_glimmer.rope", error.to_string()))
-}
-
-/// Rejects empty tensor extents before embedding or reduction kernels execute.
-fn validate_nonempty_input(batch: usize, sequence: usize) -> Result<()> {
-    if batch == 0 || sequence == 0 {
-        return Err(Error::shape(
-            "muse_glimmer.input_ids",
-            "non-empty [batch, sequence]",
-            format!("[{batch}, {sequence}]"),
-        ));
-    }
-    Ok(())
-}
-
-/// Rejects stateless input tensors that do not share the model parameter device.
-///
-/// Device identity is checked before any synchronizing reduction, positional
-/// arithmetic, or embedding lookup so callers receive a contextual error
-/// rather than a backend-specific mixed-device failure.
-fn validate_input_devices<B: Backend>(
-    input: &CausalLmInput<B>,
-    model_device: &B::Device,
-) -> Result<()> {
-    ensure_model_device(
-        "muse_glimmer.input_ids",
-        &input.token_ids.device(),
-        model_device,
-    )?;
-    if let Some(mask) = &input.token_mask {
-        ensure_model_device(
-            "muse_glimmer.token_mask",
-            &mask.as_tensor().device(),
-            model_device,
-        )?;
-    }
-    if let Some(positions) = &input.position_ids {
-        ensure_model_device(
-            "muse_glimmer.position_ids",
-            &positions.device(),
-            model_device,
-        )?;
-    }
-    Ok(())
-}
-
-/// Reports one stateless tensor/parameter device mismatch contextually.
-fn ensure_model_device<D: PartialEq>(tensor: &str, actual: &D, expected: &D) -> Result<()> {
-    if actual != expected {
-        return Err(Error::BackendCapability(format!(
-            "{tensor} and Muse-Glimmer model parameters are on different devices"
-        )));
-    }
-    Ok(())
-}
-
-/// Validates token values before the embedding backend receives indices.
-fn validate_token_ids<B: Backend>(token_ids: Tensor<B, 2, Int>, vocabulary: usize) -> Result<()> {
-    let minimum = token_ids
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("failed to inspect token IDs: {error}")))?
-        .elem::<i64>();
-    let maximum = token_ids
-        .max()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("failed to inspect token IDs: {error}")))?
-        .elem::<i64>();
-    if minimum < 0 || maximum as usize >= vocabulary {
-        return Err(Error::shape(
-            "muse_glimmer.input_ids",
-            format!("values in 0..{vocabulary}"),
-            format!("observed range {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Validates a semantic token mask and reports whether every entry is valid.
-fn validate_mask<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-    permit_empty_rows: bool,
-) -> Result<bool> {
-    let Some(mask) = mask else {
-        return Ok(true);
-    };
-    if mask.as_tensor().dims() != [batch, sequence] {
-        return Err(Error::shape(
-            "muse_glimmer.token_mask",
-            format!("[{batch}, {sequence}]"),
-            format!("{:?}", mask.as_tensor().dims()),
-        ));
-    }
-    let minimum = mask
-        .as_tensor()
-        .clone()
-        .int()
-        .sum_dim(1)
-        .min()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("failed to inspect mask: {error}")))?
-        .elem::<i64>();
-    if !permit_empty_rows && minimum == 0 {
-        return Err(Error::shape(
-            "muse_glimmer.token_mask",
-            "at least one valid token in every prompt row",
-            "a fully masked row",
-        ));
-    }
-    let sequence = i64::try_from(sequence).map_err(|_| {
-        Error::configuration(
-            "muse_glimmer.token_mask",
-            "sequence length exceeds signed mask arithmetic",
-        )
-    })?;
-    Ok(minimum == sequence)
-}
-
-/// Resolves explicit positions or padding-independent cumulative token ordinals.
-fn resolve_positions<B: Backend>(
-    input: &CausalLmInput<B>,
-    batch: usize,
-    sequence: usize,
-) -> Result<Tensor<B, 2, Int>> {
-    if let Some(positions) = &input.position_ids {
-        if positions.dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "muse_glimmer.position_ids",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", positions.dims()),
-            ));
-        }
-        return Ok(positions.clone());
-    }
-    let device = input.token_ids.device();
-    match &input.token_mask {
-        Some(mask) => {
-            let valid = mask.as_tensor().clone();
-            Ok((valid.clone().int().cumsum(1) - 1).mask_fill(valid.bool_not(), 0))
-        }
-        None => Ok(Tensor::<B, 1, Int>::arange(0..sequence as i64, &device)
-            .reshape([1, sequence])
-            .expand([batch, sequence])),
-    }
-}
-
-/// Validates absolute position IDs against the configured context bound.
-fn validate_position_range<B: Backend>(
-    positions: Tensor<B, 2, Int>,
-    capacity: usize,
-) -> Result<()> {
-    let minimum = positions
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("failed to inspect positions: {error}")))?
-        .elem::<i64>();
-    let maximum = positions
-        .max()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("failed to inspect positions: {error}")))?
-        .elem::<i64>();
-    if minimum < 0 || maximum as usize >= capacity {
-        return Err(Error::shape(
-            "muse_glimmer.position_ids",
-            format!("values in 0..{capacity}"),
-            format!("observed range {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Returns one plus the largest position in a nonempty tensor.
-fn evaluated_context<B: Backend>(positions: Tensor<B, 2, Int>) -> Result<usize> {
-    let maximum = positions
-        .max()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("failed to inspect positions: {error}")))?
-        .elem::<i64>();
-    usize::try_from(maximum)
-        .map_err(|_| Error::configuration("muse_glimmer.position_ids", "must be non-negative"))?
-        .checked_add(1)
-        .ok_or_else(|| Error::configuration("muse_glimmer.position_ids", "context overflows usize"))
-}
-
-/// Selects hidden positions before the expensive vocabulary projection.
-fn select_hidden<B: Backend>(
-    hidden: Tensor<B, 3>,
-    mask: Option<&TokenMask<B>>,
-    selection: &LogitsSelection,
-) -> Result<Tensor<B, 3>> {
-    let [batch, sequence, width] = hidden.dims();
-    validate_logits_selection(selection, sequence)?;
-    match selection {
-        LogitsSelection::All => Ok(hidden),
-        LogitsSelection::Last => match mask {
-            None => Ok(hidden.narrow(1, sequence - 1, 1)),
-            Some(mask) => {
-                let device = hidden.device();
-                let positions = Tensor::<B, 1, Int>::arange(0..sequence as i64, &device)
-                    .reshape([1, sequence])
-                    .expand([batch, sequence]);
-                let last = positions
-                    .mask_fill(mask.as_tensor().clone().bool_not(), -1)
-                    .argmax(1)
-                    .unsqueeze_dim::<3>(2)
-                    .expand([batch, 1, width]);
-                Ok(hidden.gather(1, last))
-            }
-        },
-        LogitsSelection::Positions(positions) => {
-            let indices = positions
-                .iter()
-                .map(|&value| value as i64)
-                .collect::<Vec<_>>();
-            let count = indices.len();
-            let device = hidden.device();
-            Ok(hidden.select(
-                1,
-                Tensor::<B, 1, Int>::from_data(TensorData::new(indices, [count]), &device),
-            ))
-        }
-    }
-}
-
-/// Validates explicit selective-logit indices.
-fn validate_logits_selection(selection: &LogitsSelection, sequence: usize) -> Result<()> {
-    if let LogitsSelection::Positions(positions) = selection
-        && (positions.is_empty() || positions.iter().any(|&position| position >= sequence))
-    {
-        return Err(Error::shape(
-            "forward_options.logits.positions",
-            format!("a non-empty list of indices below {sequence}"),
-            format!("{positions:?}"),
-        ));
-    }
-    Ok(())
 }
 
 /// Multiplies two shape terms without integer wraparound.

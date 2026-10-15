@@ -140,6 +140,12 @@ fn attention_validity<B: Backend>(
 // Semantic positions ignore padding while preserving rectangular hook coordinates.
 
 /// Valid target tokens advance relative positions; padding never consumes one.
+///
+/// Position `p[b, t] = Σ_{u < t} m[b, u]` counts the valid tokens strictly
+/// before column `t` (an exclusive prefix sum), so a padded column shares the
+/// position of the next valid token. It is computed on device as
+/// `cumsum(m) - m` in the backend's integer dtype, which is exact and needs
+/// no host readback.
 pub(super) fn logical_decoder_positions<B: Backend>(
     mask: &TokenMask<B>,
 ) -> Result<Tensor<B, 2, Int>> {
@@ -150,28 +156,6 @@ pub(super) fn logical_decoder_positions<B: Backend>(
             "mask must be nonempty",
         ));
     }
-    let valid = mask
-        .as_tensor()
-        .clone()
-        .into_data()
-        .to_vec::<bool>()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to inspect T5 decoder padding: {error}"))
-        })?;
-    let mut positions = Vec::with_capacity(valid.len());
-    for row in valid.chunks_exact(sequence) {
-        let mut next = 0_i64;
-        for &is_valid in row {
-            positions.push(next);
-            if is_valid {
-                next = next.checked_add(1).ok_or_else(|| {
-                    Error::configuration("t5.decoder.positions", "logical position overflows i64")
-                })?;
-            }
-        }
-    }
-    Ok(Tensor::<B, 2, Int>::from_data(
-        TensorData::new(positions, [batch, sequence]),
-        &mask.as_tensor().device(),
-    ))
+    let valid = mask.as_tensor().clone().int();
+    Ok(valid.clone().cumsum(1) - valid)
 }

@@ -18,16 +18,15 @@ use crate::{
     architecture::DecoderSpec,
     attention::AttentionPrecisionMode,
     cache::CacheConfig,
-    experiment::{AttentionPolicy, ExecutionContext, HiddenState, HiddenTransform},
+    experiment::{AttentionPolicy, ExecutionContext, HiddenState},
     intervention::{Hooks, Layer, PointInfo, Stack},
 };
 
 use super::{
     common::{
         AttentionDirection, BackboneOutput, ModularLayer, ModularNorm, causal_output,
-        evaluated_context, router_diagnostics, select_hidden, tied_projection,
-        validate_and_resolve_input, validate_decoder_execution, validate_forward_options,
-        validate_positions,
+        router_diagnostics, select_hidden, tied_projection, validate_and_resolve_input,
+        validate_decoder_execution, validate_forward_options, validate_position_values,
     },
     state::{ModularDecodeState, StatePurpose},
 };
@@ -136,7 +135,7 @@ impl<B: Backend> ModularCausalLm<B> {
         hooks: &mut Hooks<'_, B>,
     ) -> Result<HiddenState<B>> {
         hooks.run(vec![Stack::Decoder.embedding().info()], |hooks| {
-            let positions = validate_and_resolve_input(
+            let (positions, _) = validate_and_resolve_input(
                 &input,
                 self.spec.vocabulary_size,
                 self.spec.max_position_embeddings,
@@ -177,21 +176,24 @@ impl<B: Backend> ModularCausalLm<B> {
         hooks.run(points, |hooks| {
             self.validate_execution_state(&state)?;
             state.validate_range(range.clone(), self.layers.len())?;
-            validate_positions(
-                state.context.positions.clone(),
+            validate_position_values(
+                &state.context.positions,
                 self.spec.max_position_embeddings,
-                "custom.run_layers.positions",
+                "custom.run_layers.positions.position_ids",
             )?;
+            // `validate_execution_state` already ran `ExecutionContext::validate`
+            // once for this range, and the context is immutable while the blocks
+            // run. Each block then re-checks only sync-free geometry, because hooks
+            // may replace the hidden states between blocks.
             for index in range.clone() {
-                self.layers[index].validate_context(
+                self.layers[index].validate_prevalidated(
                     &state.hidden,
                     &state.context,
                     Layer::decoder(index),
                 )?;
             }
             for index in range.clone() {
-                state.hidden = HiddenTransform::forward(
-                    &self.layers[index],
+                state.hidden = self.layers[index].forward_prevalidated(
                     state.hidden,
                     &state.context,
                     Layer::decoder(index),
@@ -298,13 +300,12 @@ impl<B: Backend> ModularCausalLm<B> {
         direction: AttentionDirection,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<BackboneOutput<B>> {
-        let positions = validate_and_resolve_input(
+        let (positions, context) = validate_and_resolve_input(
             input,
             self.spec.vocabulary_size,
             self.spec.max_position_embeddings,
             "custom.causal",
         )?;
-        let context = evaluated_context(positions.clone())?;
         let hidden = self.embed_tokens.forward(input.token_ids.clone());
         let mut hidden = hooks.apply(Stack::Decoder.embedding(), hidden)?;
         let mut hidden_states = Vec::with_capacity(if retain_hidden_states {
