@@ -138,8 +138,10 @@ impl TensorDType {
 
     /// Computes the exact byte length of a tensor with the given dimensions.
     ///
-    /// This composes the checked shape product with [`Self::storage_bytes`]; a
-    /// rank-zero shape is one scalar and any zero dimension gives zero bytes.
+    /// This composes the checked left-to-right shape product with
+    /// [`Self::storage_bytes`]; a rank-zero shape is one scalar, and a shape
+    /// whose running product overflows fails even if a later dimension is zero,
+    /// as in the pinned SafeTensors validator.
     pub fn tensor_storage_bytes(self, shape: &[u64]) -> Result<u64> {
         let elements =
             super::layout::element_count(shape).ok_or(CheckpointError::ArithmeticOverflow {

@@ -2,8 +2,9 @@
 //!
 //! Verifies, in place, the specifications attached to `src/checkpoint/layout.rs`:
 //!
-//! - `element_count` returns the exact mathematical shape product, or `None`
-//!   exactly when that product exceeds `u64::MAX` (a zero dimension yields zero);
+//! - `element_count` returns the exact mathematical shape product when every
+//!   left-to-right prefix product fits in `u64`, and `None` exactly when some
+//!   prefix overflows, matching the pinned SafeTensors validator;
 //! - `storage_bytes` returns `n` with `8 * n == elements * bits`, and rejects
 //!   overflow and trailing partial bytes precisely;
 //! - `validate_contiguous_tiling` accepts sorted SafeTensors byte intervals only

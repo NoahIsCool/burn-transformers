@@ -1476,6 +1476,35 @@ fn all_header_count_rank_name_and_arithmetic_bounds_are_enforced() {
             && matches!(**source, CheckpointError::ArithmeticOverflow { .. })
     ));
     assert!(error.to_string().contains("`huge` in `model.safetensors`"));
+
+    // A trailing zero does not excuse an overflowing prefix: the pinned
+    // SafeTensors validator multiplies left to right and rejects this header.
+    let temp = TempDir::new().unwrap();
+    write_raw_shard(
+        temp.path(),
+        "model.safetensors",
+        br#"{"empty":{"dtype":"F32","shape":[18446744073709551615,2,0],"data_offsets":[0,0]}}"#,
+        0,
+    );
+    let error = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap_err();
+    assert!(matches!(
+        &error,
+        CheckpointError::InvalidTensorHeader { shard, tensor, source }
+        if shard == "model.safetensors" && tensor == "empty"
+            && matches!(**source, CheckpointError::ArithmeticOverflow { .. })
+    ));
+
+    // A zero before any large dimension keeps every prefix at zero; the
+    // reference accepts it as an empty tensor, and so does discovery.
+    let temp = TempDir::new().unwrap();
+    write_raw_shard(
+        temp.path(),
+        "model.safetensors",
+        br#"{"empty":{"dtype":"F32","shape":[0,18446744073709551615,2],"data_offsets":[0,0]}}"#,
+        0,
+    );
+    let inventory = discover_checkpoint(temp.path(), &LoadOptions::default()).unwrap();
+    assert_eq!(inventory.tensor("empty").unwrap().byte_len, 0);
 }
 
 /// A malformed header, its data size, and a predicate on the wrapped inner error.

@@ -38,43 +38,6 @@ pub open spec fn shape_product(shape: Seq<u64>, len: int) -> int
     }
 }
 
-/// Every prefix product of nonnegative dimensions is nonnegative.
-proof fn lemma_shape_product_nonnegative(shape: Seq<u64>, len: int)
-    requires
-        0 <= len <= shape.len(),
-    ensures
-        shape_product(shape, len) >= 0,
-    decreases len,
-{
-    if len > 0 {
-        lemma_shape_product_nonnegative(shape, len - 1);
-        assert(shape_product(shape, len - 1) * shape[len - 1] as int >= 0) by (nonlinear_arith)
-            requires
-                shape_product(shape, len - 1) >= 0,
-        ;
-    }
-}
-
-/// A product that exceeds a bound stays above it after multiplying by a positive factor.
-proof fn lemma_product_overflow_persists(shape: Seq<u64>, from: int, to: int)
-    requires
-        0 <= from <= to <= shape.len(),
-        shape_product(shape, from) > u64::MAX,
-        forall|k: int| from <= k < to ==> shape[k] > 0,
-    ensures
-        shape_product(shape, to) > u64::MAX,
-    decreases to - from,
-{
-    if to > from {
-        lemma_product_overflow_persists(shape, from, to - 1);
-        assert(shape_product(shape, to - 1) * shape[to - 1] as int > u64::MAX) by (nonlinear_arith)
-            requires
-                shape_product(shape, to - 1) > u64::MAX,
-                shape[to - 1] > 0,
-        ;
-    }
-}
-
 /// Total bytes accounted for by the first `count` intervals: `sum(end - begin)`.
 pub open spec fn covered_bytes(intervals: Seq<(u64, u64)>, count: int) -> int
     decreases count,
@@ -86,83 +49,46 @@ pub open spec fn covered_bytes(intervals: Seq<(u64, u64)>, count: int) -> int
     }
 }
 
-/// A zero dimension makes every longer prefix product zero.
-proof fn lemma_product_zero_persists(shape: Seq<u64>, from: int, to: int)
-    requires
-        0 <= from <= to <= shape.len(),
-        shape_product(shape, from) == 0,
-    ensures
-        shape_product(shape, to) == 0,
-    decreases to - from,
-{
-    if to > from {
-        lemma_product_zero_persists(shape, from, to - 1);
-    }
-}
-
 } // verus!
 
-/// Computes the scalar count of a shape, or `None` when it exceeds `u64`.
+/// Computes the scalar count of a shape, or `None` when a running product overflows.
 ///
-/// Rank zero is one scalar. A zero dimension yields zero even when the other
-/// dimensions alone would overflow, matching SafeTensors' empty tensors.
+/// Rank zero is one scalar. The product accumulates left to right with checked
+/// multiplication, exactly as the pinned SafeTensors 0.7.0 validator
+/// (`try_fold(1, checked_mul)`) and Burn's `Shape::num_elements` do, so a shape
+/// is accepted only when every prefix product fits in `u64`. `[u64::MAX, 2, 0]`
+/// is therefore rejected although its mathematical product is zero: accepting it
+/// would admit headers the reference rejects and shapes whose element count
+/// overflows inside Burn.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(count =>
     ensures
         match count {
-            Some(n) => n as int == shape_product(shape@, shape@.len() as int),
-            None => shape_product(shape@, shape@.len() as int) > u64::MAX,
+            Some(n) => n as int == shape_product(shape@, shape@.len() as int)
+                && forall|k: int| 0 <= k <= shape@.len()
+                    ==> #[trigger] shape_product(shape@, k) <= u64::MAX,
+            None => exists|k: int| 0 <= k <= shape@.len()
+                && #[trigger] shape_product(shape@, k) > u64::MAX,
         }
 ))]
 pub(crate) fn element_count(shape: &[u64]) -> Option<u64> {
-    // A zero dimension anywhere makes the product zero, so check it first:
-    // the running product below then only ever grows.
-    let mut index = 0;
-    #[cfg_attr(verus_keep_ghost, verus_spec(
-        invariant
-            index <= shape@.len(),
-            forall|k: int| 0 <= k < index ==> shape@[k] > 0,
-        decreases shape@.len() - index,
-    ))]
-    while index < shape.len() {
-        if shape[index] == 0 {
-            #[cfg(verus_keep_ghost)]
-            proof! {
-                lemma_shape_product_nonnegative(shape@, index as int);
-                assert(shape_product(shape@, index as int + 1) == 0) by (nonlinear_arith)
-                    requires
-                        shape_product(shape@, index as int + 1)
-                            == shape_product(shape@, index as int) * shape@[index as int] as int,
-                        shape@[index as int] == 0,
-                ;
-                lemma_product_zero_persists(shape@, index as int + 1, shape@.len() as int);
-            }
-            return Some(0);
-        }
-        index += 1;
-    }
-
     let mut product: u64 = 1;
     let mut index = 0;
     #[cfg_attr(verus_keep_ghost, verus_spec(
         invariant
             index <= shape@.len(),
-            forall|k: int| 0 <= k < shape@.len() ==> shape@[k] > 0,
             product as int == shape_product(shape@, index as int),
+            forall|k: int| 0 <= k <= index ==> #[trigger] shape_product(shape@, k) <= u64::MAX,
         decreases shape@.len() - index,
     ))]
     while index < shape.len() {
-        let dimension = shape[index];
-        match product.checked_mul(dimension) {
+        match product.checked_mul(shape[index]) {
             Some(next) => product = next,
             None => {
+                // The prefix through `index` is the overflow witness.
                 #[cfg(verus_keep_ghost)]
                 proof! {
-                    lemma_product_overflow_persists(
-                        shape@,
-                        index as int + 1,
-                        shape@.len() as int,
-                    );
+                    assert(shape_product(shape@, index as int + 1) > u64::MAX);
                 }
                 return None;
             }

@@ -4,7 +4,7 @@ use proptest::prelude::*;
 
 use super::*;
 
-/// Element counts follow the exact mathematical product, including zeros and rank zero.
+/// Element counts are exact products whose every left-to-right prefix fits in `u64`.
 #[test]
 fn element_count_is_the_exact_product() {
     assert_eq!(element_count(&[]), Some(1));
@@ -13,9 +13,20 @@ fn element_count_is_the_exact_product() {
     assert_eq!(element_count(&[u64::MAX]), Some(u64::MAX));
     assert_eq!(element_count(&[u64::MAX, 2]), None);
     assert_eq!(element_count(&[1 << 32, 1 << 32]), None);
-    // A zero dimension makes the product zero even after an overflowing prefix.
-    assert_eq!(element_count(&[u64::MAX, u64::MAX, 0]), Some(0));
+    // An overflowing prefix is rejected even when a later zero would make the
+    // mathematical product zero, as the pinned SafeTensors validator does.
+    assert_eq!(element_count(&[u64::MAX, u64::MAX, 0]), None);
+    assert_eq!(element_count(&[u64::MAX, 2, 0]), None);
+    // A zero before any overflow keeps every later prefix at zero.
     assert_eq!(element_count(&[0, u64::MAX]), Some(0));
+    assert_eq!(element_count(&[u64::MAX, 0, u64::MAX]), Some(0));
+}
+
+/// The pinned SafeTensors 0.7.0 validator's element count, `try_fold(1, checked_mul)`.
+fn reference_element_count(shape: &[u64]) -> Option<u64> {
+    shape
+        .iter()
+        .try_fold(1_u64, |product, &dimension| product.checked_mul(dimension))
 }
 
 /// Storage sizes reject overflow and trailing partial bytes.
@@ -114,18 +125,30 @@ fn slice_blocks_match_hand_derived_offsets() {
 }
 
 proptest! {
-    /// Element counts agree with a widened `u128` product.
+    /// Element counts agree with a widened `u128` product when no prefix overflows.
     #[test]
     fn element_count_matches_wide_product(shape in proptest::collection::vec(any::<u64>().prop_map(|value| value % 70_000), 0..6)) {
-        let wide = shape.iter().try_fold(1_u128, |product, &dimension| {
-            product.checked_mul(u128::from(dimension))
+        let prefixes_fit = (0..=shape.len()).all(|end| {
+            shape[..end]
+                .iter()
+                .try_fold(1_u128, |product, &dimension| product.checked_mul(u128::from(dimension)))
+                .is_some_and(|product| product <= u128::from(u64::MAX))
         });
-        let expected = match wide {
-            Some(product) => u64::try_from(product).ok(),
-            None => None,
-        };
-        let expected = if shape.contains(&0) { Some(0) } else { expected };
+        let wide = shape.iter().map(|&dimension| u128::from(dimension)).product::<u128>();
+        let expected = prefixes_fit.then(|| u64::try_from(wide).unwrap());
         prop_assert_eq!(element_count(&shape), expected);
+    }
+
+    /// Element counts match the pinned SafeTensors validator, including zeros
+    /// placed after overflowing prefixes.
+    #[test]
+    fn element_count_matches_the_safetensors_reference(
+        shape in proptest::collection::vec(
+            prop_oneof![Just(0_u64), 1_u64..5, any::<u64>()],
+            0..6,
+        )
+    ) {
+        prop_assert_eq!(element_count(&shape), reference_element_count(&shape));
     }
 
     /// Successful storage sizes satisfy `8 * bytes == elements * bits` exactly.
