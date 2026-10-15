@@ -1497,3 +1497,77 @@ fn muse_batched_decode_benchmark() {
         );
     }
 }
+
+/// Measures a long cached prefill over a full ring under the default bounded policy.
+///
+/// Run with `cargo test --release --lib muse_cached_ring_prefill_benchmark -- --ignored --nocapture`.
+/// A 64-token prompt fills the 64-slot rings of three sliding layers, then
+/// one 4096-token cached call runs on top (the global fourth layer is
+/// unchanged by ring slicing). Five samples; minimum and median wall times
+/// are reported. Comparing ring slicing against all-key slicing requires
+/// rebuilding with `MuseKeySlicing::PrefixLimits` for sliding slots.
+#[test]
+#[ignore = "release-mode timing benchmark"]
+fn muse_cached_ring_prefill_benchmark() {
+    use std::time::Instant;
+
+    let device = Default::default();
+    let config = MuseGlimmerTextConfig {
+        vocab_size: 64,
+        hidden_size: 256,
+        intermediate_size: 512,
+        num_hidden_layers: 4,
+        num_attention_heads: 8,
+        num_key_value_heads: 2,
+        head_dim: 32,
+        max_position_embeddings: 8192,
+        sliding_window: Some(64),
+        ..tiny_config()
+    };
+    let model = initialized_model::<TestBackend>(config, &device);
+    let (prompt, suffix) = (64, 4096);
+    let tokens = |first: usize, count: usize| {
+        let values = (first..first + count)
+            .map(|index| ((index * 7) % 61) as i64)
+            .collect::<Vec<_>>();
+        Tensor::<TestBackend, 2, Int>::from_data(TensorData::new(values, [1, count]), &device)
+    };
+    let run = || {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, prompt + suffix).unwrap(), 1, &device)
+            .unwrap();
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids: tokens(0, prompt),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        let started = Instant::now();
+        let _ = model
+            .decode(
+                DecodeInput {
+                    token_ids: tokens(prompt, suffix),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        started.elapsed().as_secs_f64()
+    };
+    let _ = run();
+    let mut samples = (0..5).map(|_| run()).collect::<Vec<_>>();
+    samples.sort_by(f64::total_cmp);
+    println!(
+        "cached ring prefill of {suffix} tokens: min {:.4} s median {:.4} s",
+        samples[0], samples[2]
+    );
+}
