@@ -158,8 +158,8 @@ impl QuantizedWeight {
 
     /// Writes the canonical tensor payload: packed bytes, then `f32` LE scales.
     ///
-    /// Packed codes go out in one write. Scales are encoded through a bounded
-    /// [`SCALE_CHUNK_BYTES`] buffer, one write per chunk, so the payload is never
+    /// Packed codes go out in one write. Scales are encoded through one bounded
+    /// 64 KiB buffer, one write per chunk, so the payload is never
     /// assembled as a second combined copy and an unbuffered file sees a handful
     /// of large writes rather than one syscall per scale. The caller owns framing
     /// and tensor offsets in the outer Burnpack.
@@ -432,6 +432,7 @@ pub(super) fn for_each_scale_chunk<E>(
     scales: &[f32],
     mut sink: impl FnMut(&[u8]) -> std::result::Result<(), E>,
 ) -> std::result::Result<(), E> {
+    /// Scales encoded per chunk: 16,384 four-byte scales fill 64 KiB.
     const SCALES_PER_CHUNK: usize = SCALE_CHUNK_BYTES / core::mem::size_of::<f32>();
     let mut buffer = Vec::with_capacity(scales.len().min(SCALES_PER_CHUNK) * 4);
     for chunk in scales.chunks(SCALES_PER_CHUNK) {

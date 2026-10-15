@@ -505,6 +505,7 @@ fn previous_tiled_transpose<const WIDTH: usize>(
     rows: usize,
     columns: usize,
 ) {
+    /// Tile edge of the previous implementation, in scalars.
     const TILE_EDGE: usize = 32;
     let source_row_bytes = columns * WIDTH;
     let target_row_bytes = rows * WIDTH;
@@ -594,6 +595,7 @@ fn equal_dtype_transpose_throughput_against_previous_tiled_path() {
 fn conversion_throughput_against_previous_scalar_path() {
     use std::time::Instant;
 
+    /// Scalars converted per benchmark case (16M).
     const ELEMENTS: usize = 1 << 24;
     for (source_dtype, target_dtype) in [
         (TensorDType::BF16, TensorDType::F32),

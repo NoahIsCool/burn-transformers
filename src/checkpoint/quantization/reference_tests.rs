@@ -30,7 +30,9 @@ fn weights(elements: usize) -> Vec<f32> {
 fn reference_quantizer_throughput() {
     use std::time::Instant;
 
+    /// Output rows of the benchmark matrix.
     const ROWS: usize = 4096;
+    /// Input columns of the benchmark matrix.
     const COLUMNS: usize = 4096;
     let values = weights(ROWS * COLUMNS);
     let f32_source = TensorData::new(values.clone(), [ROWS, COLUMNS]);

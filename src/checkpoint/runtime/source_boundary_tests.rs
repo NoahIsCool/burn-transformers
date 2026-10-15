@@ -331,6 +331,7 @@ fn payload_reads_are_bounded_to_their_interval_and_counted_once() {
 fn payload_read_throughput_against_zero_filled_reads() {
     use std::time::Instant;
 
+    /// Payload size read per timed run (256 MiB).
     const BYTES: usize = 256 << 20;
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("payload.bin");

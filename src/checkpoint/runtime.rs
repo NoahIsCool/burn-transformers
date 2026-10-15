@@ -218,6 +218,11 @@ impl Error for ParameterInstallError {}
 /// The temporary parameter clone shares the incoming backend allocation; it is
 /// used solely to move the existing parameter out of `&mut` safely and is
 /// released after the mapped parameter is installed.
+///
+/// Packed data passes through the parameter's mapper unchanged, so on a backend
+/// whose quantized transpose requantizes (Burn Flex 0.21) a column-layout weight
+/// no longer equals the artifact. [`install_packed_parameter`] detects that case
+/// and can install the exact dequantized values instead.
 pub fn install_float_parameter<B: Backend, const D: usize>(
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,

@@ -174,6 +174,7 @@ fn probe_quantized_transpose<B: Backend>(device: &B::Device) -> bool {
 /// tensor with distinct dimensions `2, 3, 5, ...`; any axis permutation changes
 /// its shape. No host readback occurs.
 fn load_mapper_changes_layout<B: Backend, const D: usize>(parameter: &Param<Tensor<B, D>>) -> bool {
+    /// Pairwise-distinct probe dimensions, so any axis permutation changes the shape.
     const DISTINCT: [usize; 8] = [2, 3, 5, 7, 11, 13, 17, 19];
     let device = parameter.lazy_device();
     let dims: [usize; D] =
