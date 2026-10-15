@@ -58,7 +58,7 @@ fn flex_quantized_transpose_is_reported_inexact() {
     assert!(!packed_layout_is_exact::<Flex>(&Default::default()));
 }
 
-/// Dequantizing first installs exactly the artifact's values in a column-layout weight.
+/// Dequantizing first installs exactly the artifact's values, contiguously, in a column-layout weight.
 #[test]
 fn dequantize_policy_installs_the_exact_artifact_values() {
     for scheme in [SymmetricQuantization::Q8, SymmetricQuantization::Q4] {
@@ -77,6 +77,15 @@ fn dequantize_policy_installs_the_exact_artifact_values() {
         .unwrap();
         assert_eq!(outcome, PackedInstall::Dequantized);
         assert_eq!(linear.weight.val().dims(), [64, 3]);
+        assert!(
+            linear
+                .weight
+                .val()
+                .into_primitive()
+                .tensor()
+                .is_contiguous(),
+            "Flex receives contiguous [in, out] storage"
+        );
         let installed = linear.weight.val().into_data().to_vec::<f32>().unwrap();
         assert_eq!(installed, expected, "{scheme:?}");
     }

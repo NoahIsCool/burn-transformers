@@ -26,7 +26,9 @@
 //! kind on any backend, is inexact; then the [`PackedLayoutPolicy`] decides.
 //! Dequantizing first installs exactly `mapper(W_hat)` in float storage (one
 //! `q * s` product per element, then the mapper's float arithmetic), at the cost
-//! of the packed memory savings for that parameter.
+//! of the packed memory savings for that parameter. On Burn Flex that float
+//! matrix also gets the contiguous storage order described in the
+//! `storage_order` module.
 //!
 //! Every ordinary install precondition is checked before either probe runs, so a
 //! rejected tensor never reaches a backend constructor. That ordering matters on
@@ -49,7 +51,7 @@ use burn::{
 
 use super::{
     ParameterInstallError, install_float_parameter, install_validated_parameter,
-    load_parameter_tensor, validate_parameter_install,
+    load_parameter_tensor, storage_order, validate_parameter_install,
 };
 use crate::checkpoint::quantization::{
     QuantizationGroupSize, SymmetricQuantization, WeightQuantizationConfig, quantize_tensor_data,
@@ -162,9 +164,17 @@ pub fn install_packed_parameter<B: Backend, const D: usize>(
             // `q * s` per element in the checkpoint layout, on the device; the
             // mapper then runs float arithmetic, which a transpose keeps exact.
             // The shape was validated above and the dequantized tensor uses the
-            // backend's own float dtype, so no host round trip is needed.
+            // backend's own float dtype, so no host round trip is needed except
+            // on a backend that wants contiguous matrices: its device memory is
+            // host memory, and reading the values back lets the storage-order
+            // policy hand the mapper a view of contiguous storage.
             let dequantized = Tensor::<B, D>::from_data(data, &device).dequantize();
-            load_parameter_tensor(parameter, dequantized);
+            let tensor = if storage_order::prefers_contiguous_matrices::<B>(&device) {
+                storage_order::stored_for_mapper(parameter, dequantized.into_data(), &device)
+            } else {
+                dequantized
+            };
+            load_parameter_tensor(parameter, tensor);
             Ok(PackedInstall::Dequantized)
         }
     }
