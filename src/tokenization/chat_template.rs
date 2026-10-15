@@ -63,6 +63,12 @@
 //!   `escape`, `pprint`, and the `startingwith`/`endingwith` tests).
 //! - **Panics.** A panic inside MiniJinja is caught and reported as a
 //!   rendering error; it never unwinds into the caller.
+//! - **Cycles.** Namespaces are MiniJinja's only mutable values, so a
+//!   template can make one reference itself (`{% set ns.me = ns %}`), and the
+//!   cycle would outlive the render and leak everything it reaches. Every
+//!   namespace a render creates is recorded, and its attributes are cleared
+//!   when the render ends (even by a panic), as MiniJinja already does for
+//!   macro closures.
 //!
 //! What remains unbounded, because MiniJinja exposes no hook for it:
 //!
@@ -97,7 +103,7 @@ mod guard;
 mod limits;
 pub(crate) mod sandbox;
 
-use sandbox::{BoundedOutput, RenderBudget, RenderLimits};
+use sandbox::{BoundedOutput, CycleBreaker, NamespaceRegistry, RenderBudget, RenderLimits};
 
 /// Instruction budget limiting each chat-template evaluation.
 const CHAT_TEMPLATE_FUEL: u64 = 250_000;
@@ -168,6 +174,10 @@ fn render_bounded(
         .map_err(|error| Error::new(ErrorKind::InvalidOperation, error.to_string()))?
         .into_owned();
     let budget = Arc::new(RenderBudget::new(limits));
+    let registry = Arc::new(NamespaceRegistry::default());
+    // Declared before the environment and template so it drops after them,
+    // once nothing but cycles can still hold the namespaces.
+    let _cycles = CycleBreaker(Arc::clone(&registry));
     let mut environment = Environment::new();
     environment.set_undefined_behavior(UndefinedBehavior::Lenient);
     environment.set_trim_blocks(true);
@@ -176,6 +186,7 @@ fn render_bounded(
     environment.set_fuel(Some(CHAT_TEMPLATE_FUEL));
     pycompat::install(&mut environment, &budget);
     sandbox::install(&mut environment, &budget);
+    sandbox::install_namespace_registry(&mut environment, &registry);
     environment.add_function("raise_exception", raise_exception);
     environment.add_function("strftime_now", move |format: &str| {
         strftime_now(format, fixed_time)

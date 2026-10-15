@@ -32,15 +32,16 @@
 use core::fmt;
 use std::{
     borrow::Cow,
+    collections::BTreeSet,
     io,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
 };
 
 use minijinja::{
-    Environment, Error, ErrorKind, State, Value, filters, tests as builtin_tests,
+    Environment, Error, ErrorKind, State, Value, filters, functions, tests as builtin_tests,
     value::{Kwargs, Rest, ValueKind},
 };
 
@@ -761,6 +762,111 @@ fn check_format_widths(budget: &RenderBudget, format: &str) -> Result<(), Error>
         }
     }
     Ok(())
+}
+
+// Reference cycles through namespaces.
+
+/// Every namespace a render creates, so their attributes can be cleared when it ends.
+///
+/// Namespaces are MiniJinja's only mutable values, so they are the only way a
+/// template can build a reference cycle (`{% set ns.me = ns %}`, or two
+/// namespaces that hold each other). Values are reference counted, so a cycle
+/// outlives the render and leaks everything it reaches, at most one render
+/// budget per render, but without bound across renders. MiniJinja clears
+/// macro closures itself; this registry does the same for namespaces.
+#[derive(Debug, Default)]
+pub(crate) struct NamespaceRegistry {
+    /// Namespaces created by the render's `namespace()` calls, in order.
+    namespaces: Mutex<Vec<Value>>,
+}
+
+impl NamespaceRegistry {
+    /// Records a namespace created by the render.
+    fn record(&self, namespace: Value) {
+        if let Ok(mut namespaces) = self.namespaces.lock() {
+            namespaces.push(namespace);
+        }
+    }
+
+    /// Sets every attribute of every recorded namespace to `none`, breaking any cycle.
+    ///
+    /// A cycle through a namespace needs an attribute assigned after the
+    /// namespace existed, and `{% set ns.name = value %}` only assigns
+    /// identifier names, so clearing the identifier-named attributes breaks
+    /// every cycle. Templates cannot assign attributes any other way, so the
+    /// clearing runs as a generated template,
+    /// `{% for n in namespaces %}{% set n.name = none %}...{% endfor %}`, over
+    /// the union of attribute names. Failures are ignored: this runs from a
+    /// destructor, possibly while a panic unwinds.
+    pub(crate) fn break_cycles(&self) {
+        let namespaces = match self.namespaces.lock() {
+            Ok(mut namespaces) => std::mem::take(&mut *namespaces),
+            Err(_) => return,
+        };
+        if namespaces.is_empty() {
+            return;
+        }
+        let mut names = BTreeSet::new();
+        for namespace in &namespaces {
+            if let Ok(keys) = namespace.try_iter() {
+                names.extend(
+                    keys.filter_map(|key| key.as_str().map(str::to_owned))
+                        .filter(|name| is_identifier(name)),
+                );
+            }
+        }
+        if names.is_empty() {
+            return;
+        }
+        let mut source = String::from("{% for n in namespaces %}");
+        for name in &names {
+            source.push_str("{% set n.");
+            source.push_str(name);
+            source.push_str(" = none %}");
+        }
+        source.push_str("{% endfor %}");
+        let environment = Environment::new();
+        let _ = environment.render_str(
+            &source,
+            minijinja::context! { namespaces => Value::from(namespaces) },
+        );
+    }
+}
+
+/// Whether `name` is an ASCII identifier MiniJinja's lexer reads as one name.
+fn is_identifier(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| first == b'_' || first.is_ascii_alphabetic())
+        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+}
+
+/// Clears a render's namespaces when dropped, including while a panic unwinds.
+#[derive(Debug)]
+pub(crate) struct CycleBreaker(pub(crate) Arc<NamespaceRegistry>);
+
+impl Drop for CycleBreaker {
+    /// Breaks every namespace cycle the render built.
+    fn drop(&mut self) {
+        self.0.break_cycles();
+    }
+}
+
+/// Replaces `namespace()` with MiniJinja's own function plus registration in `registry`.
+pub(crate) fn install_namespace_registry(
+    environment: &mut Environment<'_>,
+    registry: &Arc<NamespaceRegistry>,
+) {
+    let shared = Arc::clone(registry);
+    environment.add_function(
+        "namespace",
+        move |defaults: Option<Value>| -> Result<Value, Error> {
+            let namespace = functions::namespace(defaults)?;
+            shared.record(namespace.clone());
+            Ok(namespace)
+        },
+    );
 }
 
 // Bounded rendered output.

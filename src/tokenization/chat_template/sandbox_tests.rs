@@ -1,6 +1,6 @@
 //! Sandbox tests: limit arithmetic, bounded operators and builtins, output bounds, and panics.
 
-use std::io::Write as _;
+use std::{io::Write as _, sync::atomic::AtomicUsize};
 
 use serde_json::json;
 
@@ -397,5 +397,89 @@ fn format_widths_follow_printf() {
     assert_eq!(
         render_with("{{ '%(a)3s|%%' | format({'a': 'x'}) }}", SMALL).unwrap(),
         "  x|%"
+    );
+}
+
+/// Counts dropped [`Probe`] objects, to observe whether a render leaked them.
+static DROPPED_PROBES: AtomicUsize = AtomicUsize::new(0);
+
+/// A template value that records its own destruction.
+#[derive(Debug)]
+struct Probe;
+
+impl minijinja::value::Object for Probe {}
+
+impl Drop for Probe {
+    /// Counts the drop.
+    fn drop(&mut self) {
+        DROPPED_PROBES.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Reference cycles through namespaces are broken when the render ends.
+///
+/// Without the registry, `{% set ns.me = ns %}` (or two namespaces holding
+/// each other) kept the namespace, and everything it reaches, alive forever:
+/// each render of such a template leaked its values.
+#[test]
+fn namespace_cycles_do_not_outlive_the_render() {
+    let cases = [
+        (
+            "{% set ns = namespace(p=probe()) %}{% set ns.me = ns %}ok",
+            true,
+        ),
+        (
+            "{% set a = namespace(p=probe()) %}{% set b = namespace(a=a) %}{% set a.b = b %}ok",
+            true,
+        ),
+        // An error, and a guard refusal before rendering, also release them.
+        (
+            "{% set ns = namespace(p=probe()) %}{% set ns.me = ns %}{{ 1 // 0 }}",
+            false,
+        ),
+        (
+            "{% set ns = namespace(p=probe()) %}{% set ns.l = [ns] %}{{ explode() }}",
+            false,
+        ),
+    ];
+    for (source, succeeds) in cases {
+        let before = DROPPED_PROBES.load(Ordering::SeqCst);
+        let result = render_template_with(
+            source,
+            &json!({}),
+            Some(0),
+            RenderLimits::for_context_bytes(0),
+            |environment| {
+                environment.add_function("probe", || Value::from_object(Probe));
+                environment.add_function("explode", || -> Result<Value, Error> {
+                    panic!("unwinding through the render");
+                });
+            },
+        );
+        assert_eq!(result.is_ok(), succeeds, "{source}: {result:?}");
+        assert_eq!(
+            DROPPED_PROBES.load(Ordering::SeqCst),
+            before + 1,
+            "{source}: the probe leaked"
+        );
+    }
+}
+
+/// The registry clears only identifier-named attributes, and an empty registry is a no-op.
+#[test]
+fn namespace_registry_clears_identifier_attributes() {
+    // An empty registry has nothing to clear.
+    NamespaceRegistry::default().break_cycles();
+    let mut environment = Environment::new();
+    install_namespace_registry(&mut environment, &Arc::new(NamespaceRegistry::default()));
+    assert_eq!(
+        environment
+            .render_str("{% set ns = namespace({'a b': 1}, ) %}{{ ns['a b'] }}", ())
+            .unwrap(),
+        "1"
+    );
+    assert!(is_identifier("_a1") && is_identifier("loop"));
+    assert!(
+        !is_identifier("") && !is_identifier("1a") && !is_identifier("a b") && !is_identifier("é")
     );
 }
