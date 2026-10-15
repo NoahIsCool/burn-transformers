@@ -33,9 +33,16 @@
 //!   beam search leave T5's encoder binding and cross-attention keys in place;
 //!   `first_out_of_range` returns the first reorder index outside the batch.
 //!
+//! It also verifies `src/models/t5/buckets.rs`: the configuration's
+//! relative-bucket geometry check accepts exactly layouts with an even count
+//! of at least four buckets whose exact-distance region (`B / 4` for the
+//! encoder, `B / 2` for a causal decoder) lies below `max_distance`, naming
+//! each rejection's cause, and the explicit-position bias table has radius
+//! `min(bound, max_distance)` with every clamped displacement inside it.
+//!
 //! See `verus/README.md` for the method, toolchain, and command.
 //!
-//! The planning file is dependency-free, so it is included as a single module.
+//! The planning files are dependency-free, so each is included as a single module.
 //! The Burn tensor programs driven by these plans (token packing, state
 //! unpacking, write-ahead cache appends, masks, and the relative bias) remain
 //! covered by the Rust tests in `src/models/t5/model/*_tests.rs`, including
@@ -48,3 +55,6 @@
 
 #[path = "../src/models/t5/model/packing.rs"]
 pub mod packing;
+
+#[path = "../src/models/t5/buckets.rs"]
+pub mod buckets;

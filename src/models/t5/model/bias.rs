@@ -33,7 +33,9 @@
 //! T5 mapping saturates (`log(d / E') / log(M / E')` reaches one at `d = M`,
 //! so every farther past key shares the final past bucket and every farther
 //! future key the final future bucket; causal future keys are bucket zero).
-//! A unit test checks the saturation against the pairwise mapping.
+//! A unit test checks the saturation against the pairwise mapping, and
+//! `src/models/t5/buckets.rs` verifies the table radius and that every
+//! clamped displacement indexes the table.
 //!
 //! # Precision and gradients
 //!
@@ -44,7 +46,9 @@
 
 use burn::tensor::{Int, Tensor, TensorData, backend::Backend, module::embedding};
 
-use crate::{Error, Result, position::T5RelativePositionBias};
+use crate::{
+    Error, Result, models::t5::buckets::displacement_table, position::T5RelativePositionBias,
+};
 
 /// Builds the `[1, heads, query_length, key_length]` bias for contiguous positions.
 ///
@@ -92,13 +96,13 @@ pub(super) fn positional_bias<B: Backend>(
             ),
         ));
     }
-    let radius = displacement_bound.min(table.buckets().max_distance());
-    let width = radius.checked_add(1).ok_or_else(|| {
-        Error::configuration(
-            "t5.relative_positions",
-            "displacement bound overflows usize",
-        )
-    })?;
+    let (radius, width) = displacement_table(displacement_bound, table.buckets().max_distance())
+        .ok_or_else(|| {
+            Error::configuration(
+                "t5.relative_positions",
+                "displacement bound overflows usize",
+            )
+        })?;
     // Entry t of a (r + 1) x (r + 1) table anchored at query position r holds
     // the bucket of displacement t - r, so it spans exactly -r..=r.
     let host = table.bucket_table(width, width, 0)?;
