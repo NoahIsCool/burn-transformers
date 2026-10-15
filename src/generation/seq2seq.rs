@@ -113,9 +113,12 @@ impl Default for BeamSearchConfig {
 
 /// When beam search stops a source row, mirroring Transformers' `early_stopping`.
 ///
-/// All three rules wait for a full finished pool of `num_beams` hypotheses;
-/// they differ in how they decide that no live beam can still improve it (see
-/// the [module documentation](self) for the bounds). Serializes exactly like
+/// All three rules wait for a full finished pool of `num_beams` hypotheses
+/// and differ in how they decide that no live beam can still improve it. With
+/// `c` the best live beam's cumulative log probability, `lp` the length
+/// penalty, `w` the worst finished score, and `n` the live beam's generated
+/// length, the heuristic stops once `c / n^lp <= w`, while "never" stops only
+/// once `c / L^lp < w` for every reachable length `L`. Serializes exactly like
 /// Transformers' `GenerationConfig.early_stopping`: [`Self::Eager`] as `true`,
 /// [`Self::Heuristic`] as `false`, and [`Self::Never`] as `"never"`.
 ///

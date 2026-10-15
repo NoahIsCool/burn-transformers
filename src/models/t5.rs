@@ -183,8 +183,9 @@ impl Validate for T5Config {
     /// Checks both stack depths, independent attention width, buckets, FFN, and IDs.
     ///
     /// The relative-bias geometry must suit both stacks: the bidirectional
-    /// encoder table and the causal decoder table (see
-    /// [`Self::validate_stacks`]).
+    /// encoder table needs `relative_attention_max_distance` above
+    /// `relative_attention_num_buckets / 4`, and the causal decoder table
+    /// needs it above `relative_attention_num_buckets / 2`.
     fn validate(&self) -> Result<(), ConfigError> {
         self.validate_stacks(T5Stacks::EncoderDecoder)
     }
