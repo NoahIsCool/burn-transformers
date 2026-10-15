@@ -156,7 +156,7 @@ impl<'a, B: Backend> DeferredChecks<'a, B> {
         }
     }
 
-    /// Reads every recorded reduction once and evaluates the predicates in order.
+    /// Reads every registered tensor in one transfer and evaluates the predicates in order.
     ///
     /// # Errors
     ///
