@@ -80,7 +80,6 @@ description below.
 | **FLAN-UL2** | [google/flan-ul2 @ `452d74…`](https://huggingface.co/google/flan-ul2/blob/452d74ce28ac4a7f211d6ba3ef0717027f7a8074/config.json) | [Pinned T5 reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/t5/modeling_t5.py), [UL2 paper](https://arxiv.org/abs/2205.05131) | [`t5`](src/models/t5/model.rs) |
 | **Nem-3.5** | [NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 @ `a9904d…`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/blob/a9904d24bcc1d289a1950fa9d2b978c47cf903b9/config.json) | [NVIDIA architecture/recipe](https://docs.nvidia.com/nemotron/nightly/nemotron/lightning35/pretrain.html), [Nemotron-H base reference @ `cfa309…`](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/nemotron_h/modeling_nemotron_h.py), [vLLM MTP graph @ `6e448d…`](https://github.com/vllm-project/vllm/blob/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/vllm/model_executor/models/nemotron_h_mtp.py) | [`nemotron_h`](src/models/nemotron_h/model.rs) |
 | **Nem-Nano** | [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 @ `bf77c3…`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/bf77c3174f68ad409e1c2aa60daeb46e32d1c606/config.json) | [Pinned NVIDIA reference](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/bf77c3174f68ad409e1c2aa60daeb46e32d1c606/modeling_nemotron_h.py), [technical report](https://research.nvidia.com/labs/nemotron/files/NVIDIA-Nemotron-3-Nano-Technical-Report.pdf) | [`nemotron_h`](src/models/nemotron_h/model.rs) |
-
 | **SmolLM-135** | [HuggingFaceTB/SmolLM-135M @ `1d4617…`](https://huggingface.co/HuggingFaceTB/SmolLM-135M/blob/1d461723eec654e65efdc40cf49301c89c0c92f4/config.json) | [Llama reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/llama/modeling_llama.py) | [`llama`](src/models/llama/model.rs) |
 | **Q3-4** | [Qwen/Qwen3-4B @ `531c80…`](https://huggingface.co/Qwen/Qwen3-4B/blob/531c80e289d6cff3a7cd8c0db8110231d23a6f7a/config.json) | [Qwen3 reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/qwen3/modeling_qwen3.py) | [`llama`](src/models/llama/model.rs) |
 | **SmolLM3-3** | [HuggingFaceTB/SmolLM3-3B @ `1fa6fa…`](https://huggingface.co/HuggingFaceTB/SmolLM3-3B/blob/1fa6fa281b5c635c89171a2b53769609cc1199c6/config.json) | [SmolLM3 reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/smollm3/modeling_smollm3.py) | [`llama`](src/models/llama/model.rs) |
@@ -730,10 +729,12 @@ claim.
 
 gpt-oss uses factor 32 from 4,096 original positions with `truncate: false`,
 which keeps the fractional correction range instead of flooring and ceiling
-it. The correction range is clamped to $[0, d/2-1]$ as in the reference.
+it. As in the reference, the correction range is clamped to $[0, d-1]$, where
+$d$ is the full rotary width rather than the pair count.
 
-**Implementation:** [`YarnConfig`](src/position/rope.rs) and tensor frequencies
-in [`position/tensor.rs`](src/position/tensor.rs). **Reference:**
+**Implementation:** [`YarnConfig`](src/position/rope.rs), the correction range
+in [`position/frequencies.rs`](src/position/frequencies.rs), and tensor
+angles in [`position/tensor.rs`](src/position/tensor.rs). **Reference:**
 [YaRN](https://arxiv.org/abs/2309.00071), the pinned DeepSeek config, and the
 pinned gpt-oss config.
 
