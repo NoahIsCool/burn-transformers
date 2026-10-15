@@ -48,6 +48,11 @@ use super::{
 };
 
 /// Reserved Burnpack U8 tensor containing the quantization manifest JSON.
+///
+/// The `_v1` suffix versions this container slot, not the manifest format:
+/// both v1 and v2 manifests are stored here, and the JSON's own
+/// `format_version` field selects the schema. Renaming the slot would make
+/// every existing sidecar unreadable.
 pub const BURNPACK_MANIFEST_TENSOR: &str = "__transformers_quantization_manifest_v1__";
 
 /// Burn Store's maximum tensor count, including the reserved manifest tensor.
