@@ -2,7 +2,8 @@
 //!
 //! Generation mixes backend tensor math with small host-side decisions: which
 //! stop sequence a row just completed, which prompt columns a prefill chunk
-//! covers, and which expanded batch row holds beam `k` of source `s`. Those decisions are pure integer
+//! covers, which expanded batch row holds beam `k` of source `s`, and how many
+//! speculative tokens a cache may publish. Those decisions are pure integer
 //! logic, so they live here, free of Burn, floating point, and crate errors.
 //! Callers wrap them with contextual [`crate::Error`] values.
 //!
@@ -22,8 +23,12 @@
 //!   stays inside `0..batch * sequence`;
 //! - beam row `source * beams + slot` always belongs to group `source`, so a
 //!   reorder built from these rows never moves a hypothesis to another source;
-//!   the initial expansion maps row `i` to source `i / beams`.
-
+//!   the initial expansion maps row `i` to source `i / beams`;
+//! - a speculative cycle publishes exactly one more emitted token than target
+//!   cache entries and keeps the draft cache aligned with the target cache;
+//! - prompt-lookup drafting returns the continuation of the earliest earlier
+//!   occurrence of the trailing n-gram, inside the history and within the
+//!   draft budget.
 //!
 //! The proofs do not cover tensor kernels or the coordinators that call these
 //! functions; the Rust test suite covers those.
@@ -60,6 +65,11 @@ pub open spec fn is_longest_stop(
         ==> stops[i]@.len() <= length
     &&& forall|i: int| 0 <= i < index && is_suffix(generated, #[trigger] stops[i]@)
         ==> stops[i]@.len() < length
+}
+
+/// The `n` tokens starting at `a` equal the `n` tokens starting at `b`.
+pub open spec fn windows_match(history: Seq<u32>, a: int, b: int, n: int) -> bool {
+    forall|k: int| 0 <= k < n ==> #[trigger] history[a + k] == history[b + k]
 }
 
 } // verus!
@@ -435,6 +445,233 @@ pub(crate) fn next_position_after(last: i64, max_new_tokens: usize) -> Result<i6
         return Err(PositionError::ExceedsSignedIndex);
     }
     Ok(last + 1)
+}
+
+// ---------------------------------------------------------------------------
+// Speculative decoding
+// ---------------------------------------------------------------------------
+
+/// Returns whether `history[a..a + n]` equals `history[b..b + n]`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(matched =>
+    requires
+        a + n <= history.len(),
+        b + n <= history.len(),
+    ensures
+        matched == windows_match(history@, a as int, b as int, n as int),
+))]
+fn windows_equal(history: &[u32], a: usize, b: usize, n: usize) -> bool {
+    let mut offset = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            a + n <= history.len(),
+            b + n <= history.len(),
+            offset <= n,
+            forall|k: int| 0 <= k < offset ==> #[trigger] history@[a + k] == history@[b + k],
+        decreases n - offset,
+    ))]
+    while offset < n {
+        if history[a + offset] != history[b + offset] {
+            return false;
+        }
+        offset += 1;
+    }
+    true
+}
+
+/// Draft span proposed by prompt lookup for one n-gram size.
+///
+/// Prompt-lookup ("n-gram") drafting predicts that text repeats: when the last
+/// `ngram` tokens of `history` occurred earlier, the tokens that followed that
+/// earlier occurrence are proposed as drafts. Like Hugging Face's
+/// `PromptLookupCandidateGenerator`, the earliest occurrence with a nonempty
+/// continuation wins. Returns `[start, end)` into `history`, at most
+/// `max_tokens` long, or `None` without a usable match.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(found =>
+    ensures
+        match found {
+            Some((start, end)) => {
+                &&& ngram > 0
+                &&& ngram <= start
+                &&& start < end
+                &&& end <= history.len()
+                &&& end - start <= max_tokens
+                &&& (end == history.len() || end - start == max_tokens)
+                &&& windows_match(
+                    history@,
+                    start - ngram,
+                    history.len() - ngram,
+                    ngram as int,
+                )
+                &&& forall|candidate: int| 0 <= candidate < start - ngram ==> !#[trigger] windows_match(
+                    history@,
+                    candidate,
+                    history.len() - ngram,
+                    ngram as int,
+                )
+            },
+            None => ngram == 0 || max_tokens == 0 || history.len() <= ngram || forall|candidate: int|
+                0 <= candidate < history.len() - ngram ==> !#[trigger] windows_match(
+                    history@,
+                    candidate,
+                    history.len() - ngram,
+                    ngram as int,
+                ),
+        },
+))]
+pub(crate) fn prompt_lookup_span(
+    history: &[u32],
+    ngram: usize,
+    max_tokens: usize,
+) -> Option<(usize, usize)> {
+    let length = history.len();
+    if ngram == 0 || max_tokens == 0 || length <= ngram {
+        return None;
+    }
+    // The trailing n-gram starts at `suffix`; a match at `candidate < suffix`
+    // has at least one following token, at `candidate + ngram < length`.
+    let suffix = length - ngram;
+    let mut candidate = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            0 < ngram < length,
+            max_tokens > 0,
+            suffix == length - ngram,
+            length == history.len(),
+            candidate <= suffix,
+            forall|earlier: int| 0 <= earlier < candidate ==> !#[trigger] windows_match(
+                history@,
+                earlier,
+                suffix as int,
+                ngram as int,
+            ),
+        decreases suffix - candidate,
+    ))]
+    while candidate < suffix {
+        if windows_equal(history, candidate, suffix, ngram) {
+            let start = candidate + ngram;
+            let end = if max_tokens >= length - start {
+                length
+            } else {
+                start + max_tokens
+            };
+            return Some((start, end));
+        }
+        candidate += 1;
+    }
+    None
+}
+
+/// How target verification ended one speculative cycle.
+///
+/// A cycle starts from a target-selected lead token and `drafted` proposals.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeculativeOutcome {
+    /// Proposal `accepted` (zero-based) was rejected and replaced by a target correction.
+    Rejected {
+        /// Proposals accepted before the rejection.
+        accepted: usize,
+    },
+    /// The `accepted`-th accepted proposal was an end-of-sequence token.
+    AcceptedEndOfSequence {
+        /// Proposals accepted, including the terminal EOS proposal.
+        accepted: usize,
+    },
+    /// Every proposal was accepted and the target emitted one bonus token.
+    AllAccepted,
+}
+
+/// Token counts a speculative cycle publishes relative to its transaction mark.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeculativeCommit {
+    /// Tokens returned to the caller, starting with the lead token.
+    pub emitted_tokens: usize,
+    /// Target-cache entries to keep: the lead plus every accepted non-EOS proposal.
+    pub target_cache_tokens: usize,
+    /// Draft-cache entries to keep, equal to the target count so a shifted
+    /// MTP cache stays exactly one position behind the target.
+    pub draft_cache_tokens: usize,
+}
+
+/// Computes the accepted prefix a speculative cycle may publish.
+///
+/// With `a` accepted proposals out of `d`:
+///
+/// | outcome | emitted | target cache | draft cache |
+/// | --- | --- | --- | --- |
+/// | rejected at `a < d` | `a + 2` (lead, `a` drafts, correction) | `a + 1` | `a + 1` |
+/// | EOS accepted, `1 <= a <= d` | `a + 1` | `a` | `a` |
+/// | all accepted, `d >= 1` | `d + 2` (lead, `d` drafts, bonus) | `d + 1` | `d + 1` |
+///
+/// The last emitted token is never in the target cache: the next cycle (or
+/// nothing, after EOS) consumes it. `None` reports an outcome inconsistent
+/// with `drafted`, or arithmetic overflow.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(commit =>
+    ensures
+        match commit {
+            Some(commit) => {
+                &&& commit.draft_cache_tokens == commit.target_cache_tokens
+                &&& commit.emitted_tokens == commit.target_cache_tokens + 1
+                &&& 1 <= commit.target_cache_tokens <= drafted + 1
+                &&& match outcome {
+                    SpeculativeOutcome::Rejected { accepted } => {
+                        &&& accepted < drafted
+                        &&& commit.target_cache_tokens == accepted + 1
+                    },
+                    SpeculativeOutcome::AcceptedEndOfSequence { accepted } => {
+                        &&& 1 <= accepted <= drafted
+                        &&& commit.target_cache_tokens == accepted
+                    },
+                    SpeculativeOutcome::AllAccepted => {
+                        &&& drafted >= 1
+                        &&& commit.target_cache_tokens == drafted + 1
+                    },
+                }
+            },
+            None => match outcome {
+                SpeculativeOutcome::Rejected { accepted } =>
+                    accepted >= drafted || accepted + 2 > usize::MAX,
+                SpeculativeOutcome::AcceptedEndOfSequence { accepted } =>
+                    accepted == 0 || accepted > drafted || accepted + 1 > usize::MAX,
+                SpeculativeOutcome::AllAccepted => drafted == 0 || drafted + 2 > usize::MAX,
+            },
+        },
+))]
+pub fn speculative_commit(
+    drafted: usize,
+    outcome: SpeculativeOutcome,
+) -> Option<SpeculativeCommit> {
+    let target_cache_tokens = match outcome {
+        SpeculativeOutcome::Rejected { accepted } => {
+            if accepted >= drafted {
+                return None;
+            }
+            // accepted < drafted <= usize::MAX, so this cannot overflow.
+            accepted + 1
+        }
+        SpeculativeOutcome::AcceptedEndOfSequence { accepted } => {
+            if accepted == 0 || accepted > drafted {
+                return None;
+            }
+            accepted
+        }
+        SpeculativeOutcome::AllAccepted => {
+            if drafted == 0 {
+                return None;
+            }
+            drafted.checked_add(1)?
+        }
+    };
+    let emitted_tokens = target_cache_tokens.checked_add(1)?;
+    Some(SpeculativeCommit {
+        emitted_tokens,
+        target_cache_tokens,
+        draft_cache_tokens: target_cache_tokens,
+    })
 }
 
 #[cfg(test)]

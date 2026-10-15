@@ -7,8 +7,9 @@
 use proptest::prelude::*;
 
 use super::{
-    PositionError, StopDecision, beam_row, ends_with_stop, fill_beam_expansion, frontier_capacity,
-    longest_stop_suffix, next_position_after, prefill_chunk_end, row_span, stop_decision,
+    PositionError, SpeculativeCommit, SpeculativeOutcome, StopDecision, beam_row, ends_with_stop,
+    fill_beam_expansion, frontier_capacity, longest_stop_suffix, next_position_after,
+    prefill_chunk_end, prompt_lookup_span, row_span, speculative_commit, stop_decision,
 };
 
 /// Naive longest-suffix search: maximum length, then smallest index.
@@ -62,6 +63,58 @@ fn stop_decisions_follow_documented_precedence() {
     );
 }
 
+/// Speculative commits follow the documented table and reject inconsistent outcomes.
+#[test]
+fn speculative_commit_table() {
+    let commit = |target| SpeculativeCommit {
+        emitted_tokens: target + 1,
+        target_cache_tokens: target,
+        draft_cache_tokens: target,
+    };
+    assert_eq!(
+        speculative_commit(3, SpeculativeOutcome::Rejected { accepted: 0 }),
+        Some(commit(1))
+    );
+    assert_eq!(
+        speculative_commit(3, SpeculativeOutcome::Rejected { accepted: 2 }),
+        Some(commit(3))
+    );
+    assert_eq!(
+        speculative_commit(3, SpeculativeOutcome::Rejected { accepted: 3 }),
+        None
+    );
+    assert_eq!(
+        speculative_commit(3, SpeculativeOutcome::AcceptedEndOfSequence { accepted: 1 }),
+        Some(commit(1))
+    );
+    assert_eq!(
+        speculative_commit(3, SpeculativeOutcome::AcceptedEndOfSequence { accepted: 0 }),
+        None
+    );
+    assert_eq!(
+        speculative_commit(3, SpeculativeOutcome::AcceptedEndOfSequence { accepted: 4 }),
+        None
+    );
+    assert_eq!(
+        speculative_commit(3, SpeculativeOutcome::AllAccepted),
+        Some(commit(4))
+    );
+    assert_eq!(speculative_commit(0, SpeculativeOutcome::AllAccepted), None);
+    assert_eq!(
+        speculative_commit(usize::MAX, SpeculativeOutcome::AllAccepted),
+        None
+    );
+    assert_eq!(
+        speculative_commit(
+            usize::MAX,
+            SpeculativeOutcome::AcceptedEndOfSequence {
+                accepted: usize::MAX
+            }
+        ),
+        None
+    );
+}
+
 /// Explicit positions accept exactly the range that fits `i32` after feedback.
 #[test]
 fn next_position_boundaries() {
@@ -82,6 +135,20 @@ fn next_position_boundaries() {
         next_position_after(0, usize::MAX),
         Err(PositionError::ExceedsSignedIndex)
     );
+}
+
+/// Prompt lookup proposes the continuation of the earliest earlier occurrence.
+#[test]
+fn prompt_lookup_examples() {
+    let history = [7, 1, 2, 3, 4, 1, 2, 5, 1, 2];
+    // "1 2" first occurs at 1, followed by 3 4 1 ...
+    assert_eq!(prompt_lookup_span(&history, 2, 3), Some((3, 6)));
+    assert_eq!(prompt_lookup_span(&history, 3, 3), None);
+    assert_eq!(prompt_lookup_span(&history, 0, 3), None);
+    assert_eq!(prompt_lookup_span(&history, 2, 0), None);
+    // A match whose continuation reaches the end is truncated there.
+    assert_eq!(prompt_lookup_span(&[1, 1], 1, 5), Some((1, 2)));
+    assert_eq!(prompt_lookup_span(&[1], 1, 5), None);
 }
 
 proptest! {
@@ -148,6 +215,27 @@ proptest! {
     #[test]
     fn frontier_capacity_matches_formula(beams in 0_usize..1 << 20, eos in 0_usize..64) {
         prop_assert_eq!(frontier_capacity(beams, eos), Some(beams * (eos + 1).max(2)));
+    }
+
+    /// Prompt lookup agrees with a naive earliest-match scan.
+    #[test]
+    fn prompt_lookup_matches_reference(
+        history in proptest::collection::vec(0_u32..3, 0..12),
+        ngram in 1_usize..4,
+        budget in 1_usize..5,
+    ) {
+        let length = history.len();
+        let expected = (length > ngram)
+            .then(|| {
+                let suffix = &history[length - ngram..];
+                (0..length - ngram).find(|&candidate| &history[candidate..candidate + ngram] == suffix)
+            })
+            .flatten()
+            .map(|candidate| {
+                let start = candidate + ngram;
+                (start, (start + budget).min(length))
+            });
+        prop_assert_eq!(prompt_lookup_span(&history, ngram, budget), expected);
     }
 }
 

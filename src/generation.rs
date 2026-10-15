@@ -12,7 +12,8 @@
 //! - [`GenerationTracker`] keeps emitted IDs on the host, where stop-suffix
 //!   matching and finish reasons are cheap and deterministic.
 //! - The coordinators [`generate_causal`] and [`generate_seq2seq_beam_search`]
-//!   drive models and caches.
+//!   drive models and caches; [`speculative`] holds the family-independent
+//!   acceptance rule of speculative decoding.
 //!
 //! # Processing order
 //!
@@ -58,6 +59,7 @@ mod history;
 mod metadata;
 mod random;
 mod seq2seq;
+pub mod speculative;
 
 pub use causal::{
     CausalGenerationOutput, CausalGenerationRequest, GeneratedSequence, GenerationToken,
