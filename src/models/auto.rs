@@ -26,6 +26,24 @@
 //! Adding a dense Llama-style decoder, for example, is one registry entry plus
 //! one `CausalFamily` implementation in `auto/family.rs` describing how its
 //! checkpoint is planned.
+//!
+//! # Experiments through the automatic enums
+//!
+//! Activation hooks and staged execution dispatch through the family-generic
+//! [`HookedModel`] and [`StagedModel`] traits, so a loaded checkpoint is
+//! inspected exactly as its concrete family would be:
+//!
+//! - [`AutoCausalLm`] implements both traits. Each registry entry declares
+//!   `experiments: supported` (the family implements both traits and every
+//!   call delegates to them) or `experiments: pending` (the family has no hook
+//!   implementation yet; every experiment call fails with
+//!   [`Error::BackendCapability`] naming its `model_type`, before any
+//!   callback runs).
+//! - [`AutoSeq2SeqLm`] implements [`HookedModel`] over the complete
+//!   encoder-decoder pass.
+//!
+//! The dispatch adds no computation: a hooked pass through the enum is the
+//! family's own hooked pass, and its catalog is the family's own catalog.
 
 // Dispatch enums hold whole parameter graphs inline (Burn cannot traverse a
 // boxed `Module`), so their variants differ in size by design. The allowance is
@@ -33,7 +51,7 @@
 // the registry macro, where an item-level attribute cannot reach it.
 #![allow(clippy::large_enum_variant)]
 
-use std::path::Path;
+use std::{ops::Range, path::Path};
 
 use burn::{module::Module, tensor::backend::Backend};
 
@@ -41,8 +59,10 @@ use crate::{
     ArchitectureConfig, CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput,
     DecodeState, EncoderOutput, Error, ForwardOptions, LoadedModel, Result, Seq2SeqInput,
     Seq2SeqLanguageModel, Seq2SeqOutput,
+    architecture::{HookedModel, StagedModel},
     cache::CacheConfig,
-    intervention::{Hooks, PointInfo},
+    experiment::HiddenState,
+    intervention::{Hooks, PointInfo, Stack},
 };
 
 use super::{
@@ -67,14 +87,29 @@ pub use load::AutoLoadOptions;
 
 // The causal registry.
 
+/// Selects one of two expansions by a registry entry's `experiments` capability.
+///
+/// `supported` keeps the first block and `pending` the second, so a generated
+/// `match` arm either delegates to the family's [`HookedModel`] or
+/// [`StagedModel`] implementation or reports the capability gap. The kept
+/// tokens expand as one block expression. Any other word is a compile-time
+/// error, which keeps the registry's vocabulary closed.
+macro_rules! by_experiments {
+    (supported { $($supported:tt)* } else { $($pending:tt)* }) => {{ $($supported)* }};
+    (pending { $($supported:tt)* } else { $($pending:tt)* }) => {{ $($pending)* }};
+}
+
 /// Defines the causal registry from one list of executable families.
 ///
 /// Each entry gives the enum variant, its documentation, the checkpoint
 /// `model_type`, optional `aliases` (further `model_type` values executed by
-/// the same family, such as `mistral` for the Llama family), and the family's
-/// model, configuration, and decode-state types. The expansion defines [`AutoCausalConfig`], [`AutoCausalConfigRef`],
+/// the same family, such as `mistral` for the Llama family), the family's
+/// model, configuration, and decode-state types, and its `experiments`
+/// capability (`supported` or `pending`, see the module documentation). The
+/// expansion defines [`AutoCausalConfig`], [`AutoCausalConfigRef`],
 /// [`AutoCausalDecodeState`], and [`AutoCausalLm`] with one variant per entry,
-/// together with every method whose body is a per-family `match`.
+/// together with every method whose body is a per-family `match`, including
+/// the [`HookedModel`] and [`StagedModel`] dispatch.
 macro_rules! causal_registry {
     ($(
         $(#[$family_doc:meta])*
@@ -83,7 +118,8 @@ macro_rules! causal_registry {
             $(aliases: [$($alias:literal),+ $(,)?],)?
             model: $model:ident,
             config: $config:ident,
-            state: $state:ident $(,)?
+            state: $state:ident,
+            experiments: $experiments:ident $(,)?
         }
     ),+ $(,)?) => {
         /// Registry-level configuration associated with [`CausalLanguageModel`].
@@ -118,6 +154,17 @@ macro_rules! causal_registry {
                 match model_type {
                     $($model_type $($(| $alias)+)? => Some(Self::$variant),)+
                     _ => None,
+                }
+            }
+
+            /// Whether the family's activation hooks and staged execution are available
+            /// through [`AutoCausalLm`] ([`HookedModel`] and [`StagedModel`]).
+            ///
+            /// Families without them fail every experiment call with
+            /// [`Error::BackendCapability`]; ordinary inference is unaffected.
+            pub const fn supports_experiments(self) -> bool {
+                match self {
+                    $(Self::$variant => by_experiments!($experiments { true } else { false }),)+
                 }
             }
         }
@@ -371,6 +418,124 @@ macro_rules! causal_registry {
                     model_type => Err(unsupported_causal_model_type(model_type)),
                 }
             }
+
+            /// Lists the selected model's stateless activation points, in emission order.
+            ///
+            /// This is the family's own [`HookedModel`] catalog. A family whose
+            /// registry entry is `experiments: pending` returns
+            /// [`Error::BackendCapability`] naming its `model_type` rather than an
+            /// empty, misleading catalog (see
+            /// [`AutoCausalConfig::supports_experiments`]). Loaded checkpoints
+            /// expose this method through `loaded.model()`.
+            pub fn activation_points(&self) -> Result<Vec<PointInfo>> {
+                match self {
+                    $(Self::$variant(model) => by_experiments!($experiments {
+                        HookedModel::<B>::activation_points(model)
+                    } else {
+                        let _ = model;
+                        Err(self.experiments_unavailable())
+                    }),)+
+                }
+            }
+
+            /// Observes or changes activations during the selected model's stateless forward.
+            ///
+            /// Delegates to the family's [`HookedModel::forward_with_hooks`], so
+            /// its catalog, edit constraints, and numerics apply unchanged. A
+            /// family without hook support fails before any callback or model
+            /// computation, even for an empty collection. Use [`Self::forward`]
+            /// for ordinary execution. Failed calls invalidate captures left from
+            /// earlier runs of these hooks.
+            pub fn forward_with_hooks(
+                &self,
+                input: CausalLmInput<B>,
+                options: &ForwardOptions,
+                hooks: &mut Hooks<'_, B>,
+            ) -> Result<CausalLmOutput<B>> {
+                match self {
+                    $(Self::$variant(model) => by_experiments!($experiments {
+                        HookedModel::<B>::forward_with_hooks(model, input, options, hooks)
+                    } else {
+                        let _ = model;
+                        reject_hooks(hooks, self.experiments_unavailable())
+                    }),)+
+                }
+            }
+        }
+
+        impl<B: Backend> StagedModel<B> for AutoCausalLm<B> {
+            /// Number of blocks the selected family can stage; zero without staged support.
+            fn num_layers(&self) -> usize {
+                match self {
+                    $(Self::$variant(model) => by_experiments!($experiments {
+                        StagedModel::<B>::num_layers(model)
+                    } else {
+                        let _ = model;
+                        0
+                    }),)+
+                }
+            }
+
+            /// The family's staged stack; every registered causal family is a decoder.
+            fn stack(&self) -> Stack {
+                match self {
+                    $(Self::$variant(model) => by_experiments!($experiments {
+                        StagedModel::<B>::stack(model)
+                    } else {
+                        let _ = model;
+                        Stack::Decoder
+                    }),)+
+                }
+            }
+
+            /// Delegates to the family's [`StagedModel::embed_with_hooks`].
+            fn embed_with_hooks(
+                &self,
+                input: CausalLmInput<B>,
+                hooks: &mut Hooks<'_, B>,
+            ) -> Result<HiddenState<B>> {
+                match self {
+                    $(Self::$variant(model) => by_experiments!($experiments {
+                        StagedModel::<B>::embed_with_hooks(model, input, hooks)
+                    } else {
+                        let _ = model;
+                        reject_hooks(hooks, self.experiments_unavailable())
+                    }),)+
+                }
+            }
+
+            /// Delegates to the family's [`StagedModel::run_layers_with_hooks`].
+            fn run_layers_with_hooks(
+                &self,
+                state: HiddenState<B>,
+                range: Range<usize>,
+                hooks: &mut Hooks<'_, B>,
+            ) -> Result<HiddenState<B>> {
+                match self {
+                    $(Self::$variant(model) => by_experiments!($experiments {
+                        StagedModel::<B>::run_layers_with_hooks(model, state, range, hooks)
+                    } else {
+                        let _ = model;
+                        reject_hooks(hooks, self.experiments_unavailable())
+                    }),)+
+                }
+            }
+
+            /// Delegates to the family's [`StagedModel::normalize_with_hooks`].
+            fn normalize_with_hooks(
+                &self,
+                state: HiddenState<B>,
+                hooks: &mut Hooks<'_, B>,
+            ) -> Result<HiddenState<B>> {
+                match self {
+                    $(Self::$variant(model) => by_experiments!($experiments {
+                        StagedModel::<B>::normalize_with_hooks(model, state, hooks)
+                    } else {
+                        let _ = model;
+                        reject_hooks(hooks, self.experiments_unavailable())
+                    }),)+
+                }
+            }
         }
 
         $(
@@ -384,6 +549,9 @@ macro_rules! causal_registry {
     };
 }
 
+// `experiments: pending` marks a family whose `HookedModel`/`StagedModel`
+// implementation has not landed on this branch; switching it to `supported`
+// is the whole integration step once it has.
 causal_registry! {
     /// DeepSeek-V2 decoder with multi-head latent attention and sparse experts.
     DeepseekV2 {
@@ -391,6 +559,7 @@ causal_registry! {
         model: DeepseekV2ForCausalLm,
         config: DeepseekV2Config,
         state: DeepseekV2DecodeState,
+        experiments: pending,
     },
     /// Muse Glimmer dense decoder with sliding/full hybrid attention.
     MuseGlimmer {
@@ -398,6 +567,7 @@ causal_registry! {
         model: MuseGlimmerForCausalLm,
         config: MuseGlimmerTextConfig,
         state: MuseGlimmerDecodeState,
+        experiments: pending,
     },
     /// NVIDIA Nemotron-H decoder with interleaved Mamba2, attention, dense, and MoE blocks.
     NemotronH {
@@ -405,6 +575,7 @@ causal_registry! {
         model: NemotronHForCausalLm,
         config: NemotronHConfig,
         state: NemotronHDecodeState,
+        experiments: supported,
     },
     /// Qwen3.5/Qwen3.8 gated-DeltaNet and full-attention hybrid decoder.
     Qwen3_5 {
@@ -412,6 +583,7 @@ causal_registry! {
         model: Qwen3_5ForCausalLm,
         config: Qwen3_5TextConfig,
         state: Qwen3_5DecodeState,
+        experiments: supported,
     },
     /// Qwen3 decoder with token-routed sparse SwiGLU experts.
     Qwen3Moe {
@@ -419,6 +591,7 @@ causal_registry! {
         model: Qwen3MoeForCausalLm,
         config: Qwen3MoeConfig,
         state: Qwen3MoeDecodeState,
+        experiments: supported,
     },
     /// Llama-family dense decoder: Llama 2/3.x, Mistral, Qwen2/2.5, Qwen3, SmolLM3, and OLMo 2.
     Llama {
@@ -427,6 +600,7 @@ causal_registry! {
         model: LlamaForCausalLm,
         config: LlamaFamilyConfig,
         state: LlamaDecodeState,
+        experiments: supported,
     },
 }
 
@@ -449,48 +623,59 @@ fn foreign_causal_state_error() -> Error {
 }
 
 impl<B: Backend> AutoCausalLm<B> {
-    /// Lists the stateless activation points supported by the selected model.
-    ///
-    /// Qwen3.5/Qwen3.8 and the Llama family currently support interventions.
-    /// Other registered causal families return a capability error rather than
-    /// an empty, misleading catalog.
-    /// Loaded checkpoints expose this method through `loaded.model()`.
-    pub fn activation_points(&self) -> Result<Vec<PointInfo>> {
-        match self {
-            Self::Qwen3_5(model) => Ok(model.activation_points()),
-            Self::Llama(model) => Ok(model.activation_points()),
-            _ => Err(self.unsupported_hooks_error()),
-        }
+    /// Names the selected family when its hooks and staged execution are unavailable.
+    #[allow(
+        dead_code,
+        reason = "called only from `experiments: pending` registry entries, which may be none"
+    )]
+    fn experiments_unavailable(&self) -> Error {
+        let supported = AutoCausalConfig::ALL
+            .iter()
+            .filter(|family| family.supports_experiments())
+            .map(|family| family.model_type())
+            .collect::<Vec<_>>();
+        Error::BackendCapability(format!(
+            "activation hooks and staged execution are not implemented for model_type `{}`; automatic causal families with experiment support: {}",
+            self.config().model_type(),
+            supported.join(", ")
+        ))
+    }
+}
+
+/// Fails a hook-scoped call for a family without experiment support.
+///
+/// An empty scope runs first so captures left in `hooks` by earlier runs are
+/// cleared, exactly as any failed hooked pass clears them; its own result (a
+/// preflight rejection when actions are registered) is superseded by `error`,
+/// which names the family. No callback or model computation runs.
+#[allow(
+    dead_code,
+    reason = "called only from `experiments: pending` registry entries, which may be none"
+)]
+fn reject_hooks<B: Backend, T>(hooks: &mut Hooks<'_, B>, error: Error) -> Result<T> {
+    let _cleared = hooks.run(Vec::new(), |_| Ok(()));
+    Err(error)
+}
+
+impl<B: Backend> HookedModel<B> for AutoCausalLm<B> {
+    /// Token IDs, optional padding mask, and optional positions.
+    type Input = CausalLmInput<B>;
+    /// Selected logits and requested diagnostics.
+    type Output = CausalLmOutput<B>;
+
+    /// Runs [`AutoCausalLm::activation_points`].
+    fn activation_points(&self) -> Result<Vec<PointInfo>> {
+        AutoCausalLm::activation_points(self)
     }
 
-    /// Observes or changes activations during the selected model's stateless forward.
-    ///
-    /// Qwen3.5/Qwen3.8 and the Llama family delegate to their concrete
-    /// intervention implementations. Other families fail before callbacks or model computation, including when
-    /// the collection is empty. Use [`Self::forward`] for ordinary execution.
-    /// Failed calls invalidate captures left from earlier runs of these hooks.
-    pub fn forward_with_hooks(
+    /// Runs [`AutoCausalLm::forward_with_hooks`].
+    fn forward_with_hooks(
         &self,
         input: CausalLmInput<B>,
         options: &ForwardOptions,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<CausalLmOutput<B>> {
-        match self {
-            Self::Qwen3_5(model) => model.forward_with_hooks(input, options, hooks),
-            Self::Llama(model) => model.forward_with_hooks(input, options, hooks),
-            _ => hooks
-                .run(Vec::new(), |_| Err(self.unsupported_hooks_error()))
-                // Add family context even when preflight rejects a named point.
-                .map_err(|_| self.unsupported_hooks_error()),
-        }
-    }
-
-    /// Names the selected family when its stateless intervention capability is unavailable.
-    fn unsupported_hooks_error(&self) -> Error {
-        Error::BackendCapability(format!(
-            "activation interventions are not implemented for model_type `{}`; the automatic causal registry currently supports Qwen3.5/Qwen3.8 and the Llama family",
-            self.config().model_type()
-        ))
+        AutoCausalLm::forward_with_hooks(self, input, options, hooks)
     }
 }
 
@@ -712,18 +897,22 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
         }
     }
 
-    /// Lists the selected model's encoder and decoder activation points.
-    /// Loaded checkpoints expose this method through `loaded.model()`.
+    /// Lists the selected model's encoder and decoder activation points, in emission order.
+    ///
+    /// This is the family's own [`HookedModel`] catalog: every encoder point,
+    /// then every decoder point. Loaded checkpoints expose this method through
+    /// `loaded.model()`.
     pub fn activation_points(&self) -> Result<Vec<PointInfo>> {
         match self {
-            Self::T5(model) => Ok(model.activation_points()),
+            Self::T5(model) => HookedModel::<B>::activation_points(model),
         }
     }
 
     /// Observes or changes tensors during the complete stateless encoder-decoder graph.
     ///
-    /// Delegates to T5's public intervention path, including its documented mask
-    /// and cache restrictions; see [`T5ForConditionalGeneration::forward_with_hooks`].
+    /// Delegates to the family's [`HookedModel::forward_with_hooks`], including
+    /// its documented mask and cache restrictions; see
+    /// [`T5ForConditionalGeneration::forward_with_hooks`].
     pub fn forward_with_hooks(
         &self,
         input: Seq2SeqInput<B>,
@@ -731,7 +920,7 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Seq2SeqOutput<B>> {
         match self {
-            Self::T5(model) => model.forward_with_hooks(input, options, hooks),
+            Self::T5(model) => HookedModel::<B>::forward_with_hooks(model, input, options, hooks),
         }
     }
 
@@ -835,6 +1024,28 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for AutoSeq2SeqLm<B> {
         options: &ForwardOptions,
     ) -> Result<Seq2SeqOutput<B>> {
         AutoSeq2SeqLm::decode(self, encoder, input, state, options)
+    }
+}
+
+impl<B: Backend> HookedModel<B> for AutoSeq2SeqLm<B> {
+    /// Source and target tokens of one complete pass.
+    type Input = Seq2SeqInput<B>;
+    /// Encoder states and decoder logits.
+    type Output = Seq2SeqOutput<B>;
+
+    /// Runs [`AutoSeq2SeqLm::activation_points`].
+    fn activation_points(&self) -> Result<Vec<PointInfo>> {
+        AutoSeq2SeqLm::activation_points(self)
+    }
+
+    /// Runs [`AutoSeq2SeqLm::forward_with_hooks`].
+    fn forward_with_hooks(
+        &self,
+        input: Seq2SeqInput<B>,
+        options: &ForwardOptions,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<Seq2SeqOutput<B>> {
+        AutoSeq2SeqLm::forward_with_hooks(self, input, options, hooks)
     }
 }
 
