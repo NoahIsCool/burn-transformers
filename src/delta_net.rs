@@ -30,6 +30,8 @@
 //! state nor occupy convolution taps or history, so a padded row produces the
 //! same valid outputs and state as its compacted, unpadded form.
 
+use core::ops::Range;
+
 use burn::{
     module::{Initializer, Module, Param},
     nn::{
@@ -47,12 +49,12 @@ use crate::{Error, Result, architecture::TokenMask, normalization::RmsNormConfig
 
 /// Number of prefill chunks whose intra-chunk algebra is batched together.
 ///
-/// Larger blocks issue fewer kernels but hold `[batch, heads, block, C, C]`
+/// Larger blocks issue fewer kernels but hold `[block, batch, heads, C, C]`
 /// F32 matrices; 16 chunks of 64 tokens keep that at 256 KiB per head and
-/// batch row while cutting the triangular-solve launches sixteenfold. The
-/// launch savings target GPU backends; on the scalar Flex CPU backend the
-/// arithmetic is unchanged and the ignored `prefill_timing` benchmark measures
-/// batching as roughly neutral for 128-wide heads and faster for narrow ones.
+/// batch row while cutting the triangular-inverse launches sixteenfold. The
+/// ignored `prefill_timing` benchmark measures the batched algorithm against
+/// the per-chunk one on Flex (SIMD and rayon): 2.2x faster for 1024 tokens
+/// with 16 heads of width 128, and 2.7x for narrow heads.
 pub const CHUNKS_PER_BLOCK: usize = 16;
 
 /// Default stabilizer of the query/key L2 normalization (Qwen and FLA reference).
@@ -315,8 +317,43 @@ impl GatedDeltaNetConfig {
 pub enum DeltaNetMode {
     /// Token-by-token recurrence, intended for decode and golden checks.
     Recurrent,
-    /// Blockwise-parallel prompt processing.
+    /// Prompt processing with the faster of the two exact algorithms.
+    ///
+    /// This is the blockwise-parallel [`chunked_gated_delta_rule`] except for
+    /// a single token, and for segments so short and states so small that the
+    /// recurrence costs less (for example a dozen tokens of a `2 x 4 x 3`
+    /// state; never for Qwen3.5-sized states beyond one token). Both compute
+    /// the same function up to floating-point reassociation.
     ChunkedPrefill,
+}
+
+/// Recurrence cost of one token beyond its state work, in state-element units.
+///
+/// Calibrated on the Flex CPU backend: a recurrent token issues about eight
+/// small kernels (~4.5 µs), and a state element costs ~0.4 ns more in the
+/// recurrence than in the batched chunk algebra, so one token's fixed cost is
+/// worth about 6 000 state elements.
+const RECURRENCE_TOKEN_OVERHEAD: usize = 6_144;
+
+/// Fixed cost of a chunked prefill call in the same units (~30 µs of kernels).
+const CHUNKED_FIXED_OVERHEAD: usize = 12 * RECURRENCE_TOKEN_OVERHEAD;
+
+/// Returns whether the recurrence is expected to beat the chunked algorithm.
+///
+/// A single token always takes the recurrence, which is then one exact step.
+/// Otherwise the recurrence is modelled as `L * (token overhead + state)` and
+/// the chunked algorithm as a fixed launch overhead plus cheaper batched
+/// per-token work, with `state_elements = heads * key_width * value_width`.
+/// With Qwen3.5's `16 * 128 * 128` states the chunked algorithm wins from two
+/// tokens on; tiny experimental states (for example `2 * 4 * 3`) use the
+/// recurrence up to about a dozen tokens, where the chunked algorithm's ~100
+/// kernel launches dominate.
+#[must_use]
+fn prefers_recurrence(sequence: usize, state_elements: usize) -> bool {
+    sequence == 1
+        || sequence
+            .checked_mul(RECURRENCE_TOKEN_OVERHEAD.saturating_add(state_elements))
+            .is_some_and(|cost| cost <= CHUNKED_FIXED_OVERHEAD)
 }
 
 /// External convolution and matrix state for one Gated DeltaNet layer.
@@ -520,9 +557,14 @@ impl<B: Backend> GatedDeltaNet<B> {
             initial_state: Some(state.recurrent.clone()),
             token_mask: token_mask.map(|mask| mask.as_tensor().clone()),
         };
+        let state_elements = self.value_heads * self.key_head_dim * self.value_head_dim;
         let rule_output = match mode {
-            DeltaNetMode::Recurrent => recurrent_gated_delta_rule(rule_input, self.rule_config)?,
-            DeltaNetMode::ChunkedPrefill => chunked_gated_delta_rule(rule_input, self.rule_config)?,
+            DeltaNetMode::ChunkedPrefill if !prefers_recurrence(sequence, state_elements) => {
+                chunked_gated_delta_rule(rule_input, self.rule_config)?
+            }
+            DeltaNetMode::Recurrent | DeltaNetMode::ChunkedPrefill => {
+                recurrent_gated_delta_rule(rule_input, self.rule_config)?
+            }
         };
         let gated = gated_delta_norm(rule_output.values, z, &self.norm);
         state.convolution = convolution_state;
@@ -803,55 +845,56 @@ pub fn recurrent_gated_delta_rule<B: Backend>(
 ) -> Result<DeltaRuleOutput<B>> {
     config.validate()?;
     let prepared = PreparedDeltaRule::new(input, config.normalization_epsilon)?;
-    let [batch, heads, sequence, key_width] = prepared.query.dims();
-    let value_width = prepared.value.dims()[3];
-    let mut state = prepared.initial_state.unwrap_or_else(|| {
-        Tensor::<B, 4>::zeros(
-            [batch, heads, key_width, value_width],
-            (&prepared.device, DType::F32),
-        )
-    });
-    let mut outputs = Vec::with_capacity(sequence);
-
-    for index in 0..sequence {
-        let query = prepared.query.clone().narrow(2, index, 1);
-        let key = prepared.key.clone().narrow(2, index, 1);
-        let value = prepared.value.clone().narrow(2, index, 1);
-        let beta = prepared
-            .beta
-            .clone()
-            .narrow(2, index, 1)
-            .unsqueeze_dim::<4>(3);
-        let decay = prepared
-            .log_decay
-            .clone()
-            .narrow(2, index, 1)
-            .exp()
-            .unsqueeze_dim::<4>(3);
-
-        state = state * decay;
-        let retrieved = key.clone().matmul(state.clone());
-        let delta = (value - retrieved) * beta;
-        state = state + key.swap_dims(2, 3).matmul(delta);
-        outputs.push(query.matmul(state.clone()));
-    }
-
-    let values = Tensor::cat(outputs, 2)
-        .swap_dims(1, 2)
-        .cast(prepared.output_dtype);
+    let (values, final_state, _) = prepared.recurrence(false);
     Ok(DeltaRuleOutput {
         values,
-        final_state: state,
+        final_state,
     })
+}
+
+/// Per-token recurrent states of one [`recurrent_gated_delta_rule_with_snapshots`] call.
+#[derive(Clone, Debug)]
+pub struct DeltaRuleSnapshots<B: Backend> {
+    /// Mixed values shaped `[batch, sequence, heads, value_width]`.
+    pub values: Tensor<B, 4>,
+    /// FP32 state after every token, `[batch, sequence, heads, key_width, value_width]`.
+    ///
+    /// Entry `t` is `S_t`, the state after token `t`; the last entry equals the
+    /// final state. A masked token leaves the state unchanged, so its entry
+    /// repeats the previous one (or the initial state).
+    pub states: Tensor<B, 5>,
+}
+
+/// Evaluates the sequential recurrence and also returns the state after every token.
+///
+/// Speculative decoding verifies `n` proposed tokens in one call but may keep
+/// only an accepted prefix of `a <= n` tokens. A recurrence cannot be rewound,
+/// so the cache must retain `S_1, ..., S_n` and later select `S_a`. The values
+/// and states are exactly those of [`recurrent_gated_delta_rule`]; the extra
+/// cost is one `[batch, heads, key_width, value_width]` FP32 tensor per token.
+///
+/// # Errors
+///
+/// Returns the errors of [`recurrent_gated_delta_rule`].
+pub fn recurrent_gated_delta_rule_with_snapshots<B: Backend>(
+    input: DeltaRuleInput<B>,
+    config: DeltaRuleConfig,
+) -> Result<DeltaRuleSnapshots<B>> {
+    config.validate()?;
+    let prepared = PreparedDeltaRule::new(input, config.normalization_epsilon)?;
+    let (values, _, states) = prepared.recurrence(true);
+    // `recurrence(true)` returns one state per token in token order.
+    let states = Tensor::stack::<5>(states, 1);
+    Ok(DeltaRuleSnapshots { values, states })
 }
 
 /// Evaluates a blockwise-parallel formulation for prompt prefill.
 ///
-/// Tokens are split into chunks of `C = chunk_size`. Inside a chunk with
-/// cumulative log decays `G_i`, decay matrix `D_ij = exp(G_i - G_j)` (`i >= j`),
-/// and `L = strict_lower((beta k) k^T * D)`, all delta writes are resolved at
-/// once by `T = (I + L)^-1`, computed by forward substitution. With the
-/// incoming state `S`, a chunk then emits
+/// Tokens are split into chunks of `C = min(chunk_size, L)`. Inside a chunk
+/// with cumulative log decays `G_i`, decay matrix `D_ij = exp(G_i - G_j)`
+/// (`i >= j`), and `L = strict_lower((beta k) k^T * D)`, all delta writes are
+/// resolved at once by `T = (I + L)^-1`, computed by forward substitution.
+/// With the incoming state `S`, a chunk then emits
 ///
 /// ```text
 /// U   = T (beta v) - T (beta k * exp(G)) S        corrected values
@@ -861,13 +904,25 @@ pub fn recurrent_gated_delta_rule<B: Backend>(
 ///
 /// Everything except the last three lines is independent of `S`, so it runs
 /// batched over blocks of up to [`CHUNKS_PER_BLOCK`] chunks: one
-/// `C - 1`-step substitution per block instead of per chunk. Inside a
-/// multi-chunk block a trailing partial chunk is zero-padded, which is exact
-/// because padded tokens have `k = v = beta = 0` and `log_decay = 0`, so they
-/// neither change `S` nor the valid rows of `T`. A block that fits in one
-/// chunk is never padded: it runs at its own width, so a prompt of `L < C`
-/// tokens costs an `L - 1`-step substitution on `L x L` tiles. The sequential
+/// `C - 1`-step substitution per block instead of per chunk. The sequential
 /// dependency is `ceil(L / C)` short state updates.
+///
+/// # Layout
+///
+/// The operands are rearranged once into dense chunk-major tensors
+/// `[chunks, batch, C, heads, ·]` (see [`ChunkOperands`]). Every block is then
+/// a zero-copy narrow of the outermost axis, every elementwise product runs
+/// on dense memory (vectorized CPU kernels need dense operands; strided views
+/// fall back to scalar index walks), and chunk `i` of the scan is again a
+/// dense slice. The intra-chunk inverse uses recursive block doubling
+/// ([`unit_lower_inverse`]), `log2 C` batched levels instead of `C - 1` row
+/// updates. A trailing partial chunk is zero-padded once, which is
+/// exact because padded tokens have `k = v = beta = 0` and `log_decay = 0`,
+/// so they neither change `S` nor the valid rows of `T`. A prompt of
+/// `L < chunk_size` tokens is one unpadded chunk of width `L`, costing an
+/// `L - 1`-step substitution on `L x L` tiles. Blocks are balanced
+/// ([`block_chunk_ranges`]) so a lone partial tail never needs a block, and
+/// thus a full substitution, of its own.
 ///
 /// # Errors
 ///
@@ -878,40 +933,136 @@ pub fn chunked_gated_delta_rule<B: Backend>(
 ) -> Result<DeltaRuleOutput<B>> {
     config.validate()?;
     let prepared = PreparedDeltaRule::new(input, config.normalization_epsilon)?;
-    let [batch, heads, sequence, key_width] = prepared.query.dims();
+    let [batch, sequence, heads, _] = prepared.query.dims();
     let value_width = prepared.value.dims()[3];
-    let mut state = prepared.initial_state.clone().unwrap_or_else(|| {
-        Tensor::<B, 4>::zeros(
-            [batch, heads, key_width, value_width],
-            (&prepared.device, DType::F32),
-        )
-    });
-    let chunk = config.chunk_size;
-    let block_tokens = chunk.saturating_mul(CHUNKS_PER_BLOCK);
-    // One `[batch, heads, <= C, value]` output per chunk, concatenated once.
-    let mut outputs = Vec::with_capacity(sequence.div_ceil(chunk));
-    let mut start = 0;
-    while start < sequence {
-        let width = block_tokens.min(sequence - start);
-        let block = ChunkBlock::new(&prepared, start, width, chunk);
-        state = block.scan(state, &mut outputs);
-        start += width;
+    let operands = ChunkOperands::new(&prepared, config.chunk_size);
+    // The scan keeps a leading unit chunk axis so every product stays rank 5
+    // and no per-chunk reshape (a copy for offset views) is needed.
+    let mut state = prepared.initial_state_or_zeros().unsqueeze_dim::<5>(0);
+    let ranges = block_chunk_ranges(operands.chunks, CHUNKS_PER_BLOCK);
+    let mut outputs = Vec::with_capacity(operands.chunks);
+    for chunks in ranges {
+        state = ChunkBlock::new(&operands, chunks).scan(state, &mut outputs);
     }
-
-    let values = Tensor::cat(outputs, 2)
-        .swap_dims(1, 2)
+    let [_, _, _, key_width, _] = state.dims();
+    let padded = operands.chunks * operands.chunk;
+    // [chunks, batch, heads, C, value] -> [batch, chunks * C, heads, value].
+    let values = Tensor::cat(outputs, 0)
+        .permute([1, 0, 3, 2, 4])
+        .reshape([batch, padded, heads, value_width])
+        .narrow(1, 0, sequence)
         .cast(prepared.output_dtype);
     Ok(DeltaRuleOutput {
         values,
-        final_state: state,
+        final_state: state.reshape([batch, heads, key_width, value_width]),
     })
 }
 
-/// State-independent terms of up to [`CHUNKS_PER_BLOCK`] consecutive chunks.
+/// Splits `chunks` chunks into balanced consecutive blocks of at most `limit` chunks.
 ///
-/// Every tensor is laid out `[batch, heads, chunks, C, ·]`. In a multi-chunk
-/// block the trailing chunk is zero-padded to `C` tokens; a single-chunk block
-/// uses `C = width` and has no padding.
+/// Uses `ceil(chunks / limit)` blocks whose sizes differ by at most one, the
+/// larger blocks first. Compared with greedy blocks of exactly `limit`, this
+/// never leaves a short final block: its substitution would cost as many
+/// sequential steps as a full one while batching less work. `limit` must be
+/// non-zero; zero chunks produce no block.
+fn block_chunk_ranges(chunks: usize, limit: usize) -> Vec<Range<usize>> {
+    let limit = limit.max(1);
+    let blocks = chunks.div_ceil(limit);
+    let mut ranges = Vec::with_capacity(blocks);
+    let mut start = 0;
+    for index in 0..blocks {
+        // The first `chunks % blocks` blocks hold one extra chunk.
+        let size = chunks / blocks + usize::from(index < chunks % blocks);
+        ranges.push(start..start + size);
+        start += size;
+    }
+    ranges
+}
+
+/// Chunk-major FP32 operands of one prefill call.
+///
+/// Each tensor is a dense `[chunks, batch, C, heads, ·]` arrangement of the
+/// token-major `[batch, sequence, heads, ·]` input, zero-padded to
+/// `chunks * C` tokens. Within a chunk the token-major order is kept, so for
+/// one batch row the arrangement is a free reshape and for several rows a
+/// plain 2-D transpose of `[batch, chunks]`. Blocks and single chunks are then
+/// zero-copy narrows of the leading axis, elementwise products run on dense
+/// memory (vectorized CPU kernels need dense operands; strided views fall back
+/// to scalar index walks), and per-head matrix products read the
+/// `[.., heads, C, ·]` view of [`heads_major`], which GEMM accepts as strided
+/// input without a copy.
+struct ChunkOperands<B: Backend> {
+    /// L2-normalized, scaled queries `[chunks, batch, C, heads, key_width]`.
+    query: Tensor<B, 5>,
+    /// L2-normalized keys `[chunks, batch, C, heads, key_width]`.
+    key: Tensor<B, 5>,
+    /// Values `[chunks, batch, C, heads, value_width]`.
+    value: Tensor<B, 5>,
+    /// Masked update strengths `[chunks, batch, C, heads, 1]`.
+    beta: Tensor<B, 5>,
+    /// Masked log decays `[chunks, batch, C, heads, 1]`.
+    log_decay: Tensor<B, 5>,
+    /// Chunk width `C = min(chunk_size, sequence)`.
+    chunk: usize,
+    /// Number of chunks `ceil(sequence / C)`.
+    chunks: usize,
+}
+
+impl<B: Backend> ChunkOperands<B> {
+    /// Rearranges prepared token-major operands into chunk-major blocks of width `chunk_size`.
+    fn new(prepared: &PreparedDeltaRule<B>, chunk_size: usize) -> Self {
+        let sequence = prepared.query.dims()[1];
+        let chunk = chunk_size.min(sequence);
+        let chunks = sequence.div_ceil(chunk);
+        let arrange = |tensor: Tensor<B, 4>| chunk_major(tensor, chunk, chunks);
+        Self {
+            query: arrange(prepared.query.clone()),
+            key: arrange(prepared.key.clone()),
+            value: arrange(prepared.value.clone()),
+            beta: arrange(prepared.beta.clone().unsqueeze_dim(3)),
+            log_decay: arrange(prepared.log_decay.clone().unsqueeze_dim(3)),
+            chunk,
+            chunks,
+        }
+    }
+}
+
+/// Converts token-major `[batch, sequence, heads, d]` into dense `[chunks, batch, C, heads, d]`.
+///
+/// The token axis is zero-padded to `chunks * C` and split into
+/// `[chunks, C]`, a view of dense storage. Moving `chunks` in front of
+/// `batch` is the identity for one row; otherwise the final reshape, which
+/// merges the swapped axes and therefore cannot be a view, materializes it as
+/// one 2-D transpose of `[batch, chunks]` blocks.
+fn chunk_major<B: Backend>(tokens: Tensor<B, 4>, chunk: usize, chunks: usize) -> Tensor<B, 5> {
+    let [batch, sequence, heads, depth] = tokens.dims();
+    let padded = chunk * chunks;
+    let tokens = if padded == sequence {
+        tokens
+    } else {
+        let padding = Tensor::zeros(
+            [batch, padded - sequence, heads, depth],
+            (&tokens.device(), tokens.dtype()),
+        );
+        Tensor::cat(vec![tokens, padding], 1)
+    };
+    let width = chunk * heads * depth;
+    tokens
+        .reshape([batch, chunks, width])
+        .swap_dims(0, 1)
+        .reshape([chunks * batch, width])
+        .reshape([chunks, batch, chunk, heads, depth])
+}
+
+/// Views `[chunks, batch, C, heads, d]` as `[chunks, batch, heads, C, d]` for per-head products.
+fn heads_major<B: Backend>(tensor: Tensor<B, 5>) -> Tensor<B, 5> {
+    tensor.swap_dims(2, 3)
+}
+
+/// State-independent terms of one block of consecutive chunks.
+///
+/// Per-head matrices are `[chunks, batch, heads, C, ·]`; chunk `i` of the scan
+/// is the zero-copy slice `narrow(0, i, 1)`.
 struct ChunkBlock<B: Backend> {
     /// `T (beta v)`: values with all intra-chunk delta writes resolved.
     transformed_value: Tensor<B, 5>,
@@ -923,162 +1074,218 @@ struct ChunkBlock<B: Backend> {
     attention: Tensor<B, 5>,
     /// `k * exp(G_last - G)`: keys decayed to the chunk end for the state write.
     decayed_key: Tensor<B, 5>,
-    /// `exp(G_last)` shaped `[batch, heads, chunks, 1]`: state decay across a chunk.
-    chunk_decay: Tensor<B, 4>,
-    /// Number of real (unpadded) tokens in the block.
-    width: usize,
+    /// `exp(G_last)` shaped `[chunks, batch, heads, 1, 1]`: state decay across a chunk.
+    chunk_decay: Tensor<B, 5>,
 }
 
 impl<B: Backend> ChunkBlock<B> {
-    /// Pads, reshapes, and computes every state-independent term for one block.
+    /// Computes every state-independent term for chunks `chunks` of `operands`.
     ///
-    /// A block of at most one chunk (a short prompt, a decode-sized segment, or
-    /// the tail of a long prompt) uses its own width as `C`. Padding it to the
-    /// configured chunk would run a `C - 1`-step substitution on `C x C` tiles
-    /// for a handful of tokens; only multi-chunk blocks share one padded `C`.
-    fn new(prepared: &PreparedDeltaRule<B>, start: usize, width: usize, chunk: usize) -> Self {
-        let chunk = chunk.min(width);
-        let chunks = width.div_ceil(chunk);
-        let padded = chunks * chunk;
-        let split = |tensor: &Tensor<B, 4>| split_chunks(tensor, start, width, padded, chunk);
-        let query = split(&prepared.query);
-        let key = split(&prepared.key);
-        let value = split(&prepared.value);
-        let beta = split(&prepared.beta.clone().unsqueeze_dim::<4>(3));
-        let log_decay = split(&prepared.log_decay.clone().unsqueeze_dim::<4>(3));
-        // Cumulative log decay G within each chunk, [b, h, n, C, 1].
-        let cumulative = log_decay.cumsum(3);
+    /// Elementwise products run in the dense token-minor layout; only matrix
+    /// products read the strided per-head views.
+    fn new(operands: &ChunkOperands<B>, chunks: Range<usize>) -> Self {
+        let block = |tensor: &Tensor<B, 5>| tensor.clone().narrow(0, chunks.start, chunks.len());
+        let query = block(&operands.query);
+        let key = block(&operands.key);
+        let value = block(&operands.value);
+        let beta = block(&operands.beta);
+        // Cumulative log decay G within each chunk, [n, b, C, h, 1].
+        let cumulative = block(&operands.log_decay).cumsum(2);
         let decay_to_start = cumulative.clone().exp();
-        let final_decay = cumulative.clone().narrow(3, chunk - 1, 1);
+        let final_decay = cumulative.clone().narrow(2, operands.chunk - 1, 1);
+        let decay_to_end = (final_decay.clone() - cumulative.clone()).exp();
+        let decay_matrix = causal_decay_matrix(heads_major(cumulative));
 
-        let row_decay = cumulative.clone();
-        let column_decay = cumulative.clone().swap_dims(3, 4);
-        let decay_matrix = (row_decay - column_decay).tril(0).exp().tril(0);
         let key_beta = key.clone() * beta.clone();
-        let strict =
-            (key_beta.clone().matmul(key.clone().swap_dims(3, 4)) * decay_matrix.clone()).tril(-1);
+        let key_columns = heads_major(key.clone()).swap_dims(3, 4);
+        let strict = (heads_major(key_beta.clone()).matmul(key_columns.clone())
+            * decay_matrix.clone())
+        .tril(-1);
         let transform = unit_lower_inverse(strict);
-        let attention = (query.clone().matmul(key.clone().swap_dims(3, 4)) * decay_matrix).tril(0);
-        let decayed_key = key * (final_decay.clone() - cumulative).exp();
-        let [batch, heads, _, _, _] = final_decay.dims();
+        let attention = (heads_major(query.clone()).matmul(key_columns) * decay_matrix).tril(0);
         Self {
-            transformed_value: transform.clone().matmul(value * beta),
-            cumulative_key: transform.matmul(key_beta * decay_to_start.clone()),
-            decayed_query: query * decay_to_start,
+            transformed_value: transform.clone().matmul(heads_major(value * beta)),
+            cumulative_key: transform.matmul(heads_major(key_beta * decay_to_start.clone())),
+            decayed_query: heads_major(query * decay_to_start),
             attention,
-            decayed_key,
-            chunk_decay: final_decay.exp().reshape([batch, heads, chunks, 1]),
-            width,
+            decayed_key: heads_major(key * decay_to_end),
+            chunk_decay: heads_major(final_decay).exp(),
         }
     }
 
-    /// Carries the recurrent state across the block's chunks in order.
+    /// Carries the rank-5 `[1, batch, heads, key, value]` state across the block's chunks.
     ///
-    /// Appends one `[batch, heads, tokens, value_width]` output per chunk to
-    /// `outputs` (the padded tail of a trailing chunk is dropped) and returns
-    /// the outgoing FP32 state. Collecting chunks across blocks lets the
-    /// caller concatenate the whole sequence with a single copy.
-    fn scan(self, mut state: Tensor<B, 4>, outputs: &mut Vec<Tensor<B, 4>>) -> Tensor<B, 4> {
-        let [_, _, chunks, chunk, _] = self.attention.dims();
-        let take = |tensor: &Tensor<B, 5>, index: usize| {
-            tensor.clone().narrow(2, index, 1).squeeze_dim::<4>(2)
-        };
+    /// Appends one `[1, batch, heads, C, value_width]` output per chunk to
+    /// `outputs` (padded rows included; the caller trims them once) and
+    /// returns the outgoing FP32 state.
+    fn scan(self, mut state: Tensor<B, 5>, outputs: &mut Vec<Tensor<B, 5>>) -> Tensor<B, 5> {
+        let chunks = self.attention.dims()[0];
+        let take = |tensor: &Tensor<B, 5>, index: usize| tensor.clone().narrow(0, index, 1);
         for index in 0..chunks {
             let corrected = take(&self.transformed_value, index)
                 - take(&self.cumulative_key, index).matmul(state.clone());
-            let output = take(&self.decayed_query, index).matmul(state.clone())
-                + take(&self.attention, index).matmul(corrected.clone());
-            let real_tokens = chunk.min(self.width - index * chunk);
-            outputs.push(if real_tokens == chunk {
-                output
-            } else {
-                output.narrow(2, 0, real_tokens)
-            });
-            // `[batch, heads, 1, 1]` broadcasts over the `[key, value]` state.
-            let decay = self.chunk_decay.clone().narrow(2, index, 1);
-            state = state * decay
+            outputs.push(
+                take(&self.decayed_query, index).matmul(state.clone())
+                    + take(&self.attention, index).matmul(corrected.clone()),
+            );
+            // `[1, batch, heads, 1, 1]` broadcasts over the `[key, value]` state.
+            state = state * take(&self.chunk_decay, index)
                 + take(&self.decayed_key, index)
-                    .swap_dims(2, 3)
+                    .swap_dims(3, 4)
                     .matmul(corrected);
         }
         state
     }
 }
 
-/// Narrows `[batch, heads, sequence, d]` to a block, zero-pads it, and splits it into chunks.
+/// Builds `D[i, j] = exp(G_i - G_j)` for `i >= j` and zero above the diagonal.
 ///
-/// Returns `[batch, heads, padded / chunk, chunk, d]`. The prepared tensors
-/// are head-major views of sequence-major `[batch, sequence, heads, d]`
-/// storage, so the split happens in that storage order and the result is a
-/// permuted view: for an unmasked block starting at token zero no element is
-/// copied. Other blocks (an offset narrow, padding, or masked inputs) cost
-/// the one contiguous copy that any reshape of a strided tensor needs.
-fn split_chunks<B: Backend>(
-    tensor: &Tensor<B, 4>,
-    start: usize,
-    width: usize,
-    padded: usize,
-    chunk: usize,
-) -> Tensor<B, 5> {
-    let [batch, heads, _, depth] = tensor.dims();
-    let block = tensor.clone().swap_dims(1, 2).narrow(1, start, width);
-    let block = if padded == width {
-        block
-    } else {
-        let padding = Tensor::zeros(
-            [batch, padded - width, heads, depth],
-            (&block.device(), block.dtype()),
-        );
-        Tensor::cat(vec![block, padding], 1)
-    };
-    block
-        .reshape([batch, padded / chunk, chunk, heads, depth])
-        .permute([0, 3, 1, 2, 4])
+/// `cumulative` holds `G` as `[.., C, 1]`. The differences `G_i - G_j` are the
+/// rank-2 product `[G_i, 1] · [1, -G_j]`, evaluated by one dense matrix
+/// product instead of a doubly broadcast subtraction (which Flex can only walk
+/// element by element). It is exactly the subtraction: both products are
+/// exact, so the accumulated sum is the single correctly rounded `G_i - G_j`
+/// in any summation order. Filling the future with `-inf` before `exp` both
+/// zeroes it and keeps its positive differences from overflowing.
+fn causal_decay_matrix<B: Backend>(cumulative: Tensor<B, 5>) -> Tensor<B, 5> {
+    let [chunks, batch, heads, width, _] = cumulative.dims();
+    let device = cumulative.device();
+    let ones = Tensor::<B, 5>::ones([chunks, batch, heads, width, 1], (&device, DType::F32));
+    let rows = Tensor::cat(vec![cumulative.clone(), ones.clone()], 4);
+    let columns = Tensor::cat(vec![ones, cumulative.neg()], 4).swap_dims(3, 4);
+    let future = Tensor::<B, 2, Bool>::tril_mask([width, width], 0, &device)
+        .reshape([1, 1, 1, width, width]);
+    rows.matmul(columns)
+        .mask_fill(future, f32::NEG_INFINITY)
+        .exp()
 }
 
 /// Returns `(I + L)^-1` for strictly lower-triangular `L` over the last two axes.
 ///
-/// Forward substitution builds `M = (I + L)^-1 - I` row by row:
-/// `M[i, :i] = -L[i, :i] - L[i, :i] M[:i, :i]`, written in place as
-/// `R[i, :i] += R[i, :i] R[:i, :i]` on `R = -L`. Each step is batched over
-/// every leading axis, so all chunks of a block share one `C - 1`-step loop.
-/// Repeated squaring of the Neumann series is avoided on purpose: its
+/// # Algorithm
+///
+/// Recursive doubling over diagonal blocks. A unit lower-triangular matrix
+/// split into halves inverts blockwise as
+///
+/// ```text
+/// [ A  0 ]^-1   [  A^-1           0    ]
+/// [ Q  D ]    = [ -D^-1 Q A^-1    D^-1 ]
+/// ```
+///
+/// Starting from the unit `1 x 1` diagonal, level `s` combines every pair of
+/// adjacent `s x s` inverses into one `2s x 2s` inverse with two batched
+/// matrix products, so `C` (padded to a power of two `P`) needs `log2 P`
+/// levels. Every operand of a level is one batched tensor; no step writes
+/// into a slice of a larger tensor.
+///
+/// Row-by-row forward substitution needs `C - 1` sequential steps, each of
+/// which assigns one row into the whole matrix; on Flex every such assignment
+/// copies the complete destination, which made substitution cost `O(C^3)`
+/// memory traffic per matrix. The Neumann series is avoided on purpose: its
 /// intermediate powers of `L` grow binomially for repeated keys and cancel
-/// catastrophically in F32, while substitution never forms them.
+/// catastrophically in F32. The blocked products only ever form entries of
+/// the inverse itself, which is the stability property that makes blocked
+/// triangular inversion as accurate as substitution (Du Croz and Higham,
+/// 1992).
+///
+/// Padding `L` with zero rows and columns to `P` is exact: `[[L, 0], [0, 0]]`
+/// inverts to `[[T, 0], [0, I]]`, and the padding is narrowed away.
 fn unit_lower_inverse<B: Backend>(strict_lower: Tensor<B, 5>) -> Tensor<B, 5> {
-    let [batch, heads, chunks, width, _] = strict_lower.dims();
-    let mut inverse = -strict_lower;
-    for row in 1..width {
-        let row_values =
-            inverse
-                .clone()
-                .slice([0..batch, 0..heads, 0..chunks, row..row + 1, 0..row]);
-        let solved_prefix = inverse
-            .clone()
-            .slice([0..batch, 0..heads, 0..chunks, 0..row, 0..row]);
-        let solved_row = row_values.clone() + row_values.matmul(solved_prefix);
-        inverse = inverse.slice_assign(
-            [0..batch, 0..heads, 0..chunks, row..row + 1, 0..row],
-            solved_row,
-        );
+    let [chunks, batch, heads, width, _] = strict_lower.dims();
+    let device = strict_lower.device();
+    if width == 1 {
+        // A 1 x 1 strictly lower matrix is zero, so `I + L` is the identity.
+        return Tensor::ones([chunks, batch, heads, 1, 1], (&device, DType::F32));
     }
-    let identity = Tensor::<B, 2>::eye(width, &inverse.device())
-        .cast(DType::F32)
-        .reshape([1, 1, 1, width, width]);
-    inverse + identity
+    let items = chunks * batch * heads;
+    let size = width.next_power_of_two();
+    let mut lower = strict_lower.reshape([items, 1, width, width]);
+    if size != width {
+        let pad = size - width;
+        let zeros = |shape: [usize; 4]| Tensor::<B, 4>::zeros(shape, (&device, DType::F32));
+        lower = Tensor::cat(vec![lower, zeros([items, 1, width, pad])], 3);
+        lower = Tensor::cat(vec![lower, zeros([items, 1, pad, size])], 2);
+    }
+    // Diagonal blocks of L by size: `diagonal[k]` holds the blocks of size
+    // `size >> k` as `[items, 2^k, size >> k, size >> k]`, finest last.
+    let mut diagonal = vec![lower];
+    let mut block = size;
+    while block > 2 {
+        let half = block / 2;
+        let parent = diagonal.last().expect("starts non-empty").clone();
+        let count = size / block;
+        // Rows 0..half of the concatenation are the upper-left quadrant and
+        // rows half..block the lower-right one: reshaping interleaves them as
+        // children 2j and 2j + 1 of parent j.
+        let children = Tensor::cat(
+            vec![
+                parent.clone().narrow(2, 0, half).narrow(3, 0, half),
+                parent.narrow(2, half, half).narrow(3, half, half),
+            ],
+            2,
+        );
+        diagonal.push(children.reshape([items, count * 2, half, half]));
+        block = half;
+    }
+    // `inverse` holds the inverted diagonal blocks of size `half`.
+    let mut inverse: Option<Tensor<B, 4>> = None;
+    for parent in diagonal.into_iter().rev() {
+        let [_, count, block, _] = parent.dims();
+        let half = block / 2;
+        // Q: the lower-left quadrant of every parent block.
+        let quadrant = parent.narrow(2, half, half).narrow(3, 0, half);
+        let (upper, lower_right, corner) = match inverse {
+            // Unit 1 x 1 blocks invert to one: the corner is -Q.
+            None => {
+                let ones = Tensor::<B, 4>::ones([items, count, 1, 1], (&device, DType::F32));
+                (ones.clone(), ones, quadrant.neg())
+            }
+            Some(children) => {
+                // Children 2j (rows 0..half) and 2j + 1 (rows half..block).
+                let pairs = children.reshape([items, count, block, half]);
+                let upper = pairs.clone().narrow(2, 0, half);
+                let lower_right = pairs.narrow(2, half, half);
+                let corner = lower_right
+                    .clone()
+                    .matmul(quadrant)
+                    .matmul(upper.clone())
+                    .neg();
+                (upper, lower_right, corner)
+            }
+        };
+        let zeros = Tensor::<B, 4>::zeros([items, count, half, half], (&device, DType::F32));
+        inverse = Some(Tensor::cat(
+            vec![
+                Tensor::cat(vec![upper, zeros], 3),
+                Tensor::cat(vec![corner, lower_right], 3),
+            ],
+            2,
+        ));
+    }
+    let inverse = inverse.expect("a power-of-two size of at least two has one level");
+    let inverse = if size == width {
+        inverse
+    } else {
+        inverse.narrow(2, 0, width).narrow(3, 0, width)
+    };
+    inverse.reshape([chunks, batch, heads, width, width])
 }
 
-/// Validated FP32 tensors in head-major layout used by both algorithms.
+/// Validated FP32 operands in token-major layout used by both algorithms.
+///
+/// Token-major storage is what the projections produce, so preparation never
+/// transposes: the recurrence slices one token at a time, and the chunked
+/// path rearranges everything once into chunk-major blocks.
 struct PreparedDeltaRule<B: Backend> {
-    /// L2-normalized queries scaled by `key_width^-1/2`, in `[batch, heads, sequence, key_width]` order.
+    /// L2-normalized queries scaled by `key_width^-1/2`, `[batch, sequence, heads, key_width]`.
     query: Tensor<B, 4>,
-    /// Normalized keys with the same head-major layout as queries.
+    /// Normalized keys with the same token-major layout as queries.
     key: Tensor<B, 4>,
-    /// Values in `[batch, heads, sequence, value_width]` order.
+    /// Values `[batch, sequence, heads, value_width]`.
     value: Tensor<B, 4>,
-    /// Per-head logarithmic state decay in `[batch, heads, sequence]` order.
+    /// Per-head logarithmic state decay `[batch, sequence, heads]`, zero at padding.
     log_decay: Tensor<B, 3>,
-    /// Per-head update strengths multiplied by the token validity indicator.
+    /// Per-head update strengths `[batch, sequence, heads]`, zero at padding.
     beta: Tensor<B, 3>,
     /// Optional incoming FP32 state `[batch, heads, key_width, value_width]`.
     initial_state: Option<Tensor<B, 4>>,
@@ -1156,24 +1363,17 @@ impl<B: Backend> PreparedDeltaRule<B> {
         let mut beta = input.beta.cast(DType::F32);
 
         if let Some(mask) = input.token_mask {
-            let head_mask = mask.clone().unsqueeze_dim::<3>(2).swap_dims(1, 2);
+            // `[batch, sequence, 1]` validity broadcasts over heads.
+            let head_mask = mask.unsqueeze_dim::<3>(2);
             // Explicit F32 indicators: a reduced-precision device default must
             // not create a mixed-dtype product with the F32 operands.
             let head_indicator = head_mask.clone().cast(FloatDType::F32);
-            let value_mask = head_indicator.clone().unsqueeze_dim::<4>(3);
-            query = query.swap_dims(1, 2) * value_mask.clone();
-            key = key.swap_dims(1, 2) * value_mask.clone();
-            value = value.swap_dims(1, 2) * value_mask;
-            beta = beta.swap_dims(1, 2) * head_indicator;
-            log_decay = log_decay
-                .swap_dims(1, 2)
-                .mask_fill(head_mask.bool_not(), 0.0);
-        } else {
-            query = query.swap_dims(1, 2);
-            key = key.swap_dims(1, 2);
-            value = value.swap_dims(1, 2);
-            beta = beta.swap_dims(1, 2);
-            log_decay = log_decay.swap_dims(1, 2);
+            let feature_indicator = head_indicator.clone().unsqueeze_dim::<4>(3);
+            query = query * feature_indicator.clone();
+            key = key * feature_indicator.clone();
+            value = value * feature_indicator;
+            beta = beta * head_indicator;
+            log_decay = log_decay.mask_fill(head_mask.bool_not(), 0.0);
         }
 
         Ok(Self {
@@ -1186,6 +1386,62 @@ impl<B: Backend> PreparedDeltaRule<B> {
             output_dtype,
             device,
         })
+    }
+
+    /// Returns the incoming FP32 state, or zeros `[batch, heads, key_width, value_width]`.
+    fn initial_state_or_zeros(&self) -> Tensor<B, 4> {
+        self.initial_state.clone().unwrap_or_else(|| {
+            let [batch, _, heads, key_width] = self.query.dims();
+            let value_width = self.value.dims()[3];
+            Tensor::<B, 4>::zeros(
+                [batch, heads, key_width, value_width],
+                (&self.device, DType::F32),
+            )
+        })
+    }
+
+    /// Runs the exact token-by-token recurrence of the module documentation.
+    ///
+    /// Returns token-major values `[batch, sequence, heads, value_width]` in
+    /// the input dtype, the final FP32 state, and, when `keep_states` is set,
+    /// the `[batch, heads, key_width, value_width]` state after every token.
+    fn recurrence(&self, keep_states: bool) -> (Tensor<B, 4>, Tensor<B, 4>, Vec<Tensor<B, 4>>) {
+        let sequence = self.query.dims()[1];
+        let mut state = self.initial_state_or_zeros();
+        let mut outputs = Vec::with_capacity(sequence);
+        let mut states = Vec::with_capacity(if keep_states { sequence } else { 0 });
+        // One token as `[batch, heads, 1, width]`: a view of token-major storage.
+        let token = |tensor: &Tensor<B, 4>, index: usize| {
+            tensor.clone().narrow(1, index, 1).swap_dims(1, 2)
+        };
+        // One per-head scalar as `[batch, heads, 1, 1]`.
+        let scalar = |tensor: &Tensor<B, 3>, index: usize| {
+            tensor
+                .clone()
+                .narrow(1, index, 1)
+                .swap_dims(1, 2)
+                .unsqueeze_dim::<4>(3)
+        };
+        for index in 0..sequence {
+            let query = token(&self.query, index);
+            let key = token(&self.key, index);
+            let value = token(&self.value, index);
+            let beta = scalar(&self.beta, index);
+            let decay = scalar(&self.log_decay, index).exp();
+
+            state = state * decay;
+            let retrieved = key.clone().matmul(state.clone());
+            let delta = (value - retrieved) * beta;
+            state = state + key.swap_dims(2, 3).matmul(delta);
+            outputs.push(query.matmul(state.clone()));
+            if keep_states {
+                states.push(state.clone());
+            }
+        }
+        let values = Tensor::cat(outputs, 2)
+            .swap_dims(1, 2)
+            .cast(self.output_dtype);
+        (values, state, states)
     }
 }
 
