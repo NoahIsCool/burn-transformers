@@ -35,6 +35,16 @@
 //! Generic tools can turn a discovered [`PointInfo`] back into a typed point
 //! with `Point::<D>::try_from(info)`, or capture any point regardless of rank
 //! with [`Hooks::capture_dynamic`].
+//!
+//! # Derived points
+//!
+//! Attention with learned sinks drops its sink column after the softmax, so
+//! an emitted pattern row sums to `1 - p_sink`. The derived, read-only point
+//! [`AttentionPoints::sink_probability`] exposes that mass,
+//! `p_sink[b, h, q] = 1 - sum_k pattern[b, h, q, k]`, through
+//! [`Hooks::apply_sink_probability`]; it is computed only when requested, and
+//! edits are rejected because changing it would not change the computation
+//! (edit the pattern instead).
 //! Closures may borrow ordinary Burn modules; their owner must register trainable
 //! parameters in its `Module` tree. Hooks themselves are temporary execution state.
 //! Custom models declare [`Point::custom`] and emit tensors with [`Hooks::apply`]
@@ -459,6 +469,24 @@ impl AttentionPoints {
     pub fn pattern(self) -> Point<4> {
         self.point("pattern", [Axis::Batch, Axis::Head, Axis::Query, Axis::Key])
     }
+    /// Probability mass each query row assigns to a learned attention sink, `[batch, head, query]`.
+    ///
+    /// Attention with sinks normalizes each row over the keys plus one sink
+    /// column and then drops that column, so `p_sink = 1 - sum_k pattern`:
+    /// zero when no mass reaches the sink and one for a row whose keys are
+    /// all excluded. The point is derived and read-only; implementations emit
+    /// it with [`Hooks::apply_sink_probability`] only where sinks exist and
+    /// list it in their catalogs only then.
+    pub fn sink_probability(self) -> Point<3> {
+        Point::custom(
+            format!(
+                "{}.sink_probability",
+                self.query().info().name.trim_end_matches(".query")
+            ),
+            [Axis::Batch, Axis::Head, Axis::Query],
+        )
+    }
+
     /// Per-query-head context before output gating and output projection.
     pub fn head_context(self) -> Point<4> {
         self.point(
@@ -467,6 +495,9 @@ impl AttentionPoints {
         )
     }
     /// Catalog the six attention points, without claiming a model supports them.
+    ///
+    /// The derived [`Self::sink_probability`] point is not included; models
+    /// with attention sinks list it separately.
     pub fn all(self) -> Vec<PointInfo> {
         vec![
             self.query().info(),
@@ -1031,6 +1062,63 @@ impl<'a, B: Backend> Hooks<'a, B> {
             entry.visits += 1;
         }
         Ok(tensor)
+    }
+}
+
+impl<B: Backend> Hooks<'_, B> {
+    /// Emits the derived sink-probability point of an attention pattern that has just been emitted.
+    ///
+    /// `pattern` is the effective `[batch, head, query, key]` attention
+    /// pattern after any edits (the value [`Hooks::apply_constrained`]
+    /// returned for [`AttentionPoints::pattern`]), and `points` addresses the
+    /// same attention operation. When the sink point is requested, this
+    /// computes `p_sink = 1 - sum_k pattern` in F32 (the subtraction cancels
+    /// almost all of the sum, which half precision would lose) and emits it as
+    /// `[batch, head, query]`; otherwise it does no work. Captures and
+    /// observers see the value; edits fail with [`Error::Intervention`],
+    /// because the sink mass is derived and changing it would not change the
+    /// attention output. Call it only for attention with learned sinks, inside
+    /// the same hook scope as the pattern.
+    ///
+    /// ```
+    /// use burn::{backend::Flex, tensor::Tensor};
+    /// use transformers::intervention::{Hooks, Layer};
+    ///
+    /// let points = Layer::decoder(0).self_attention();
+    /// let mut hooks = Hooks::<Flex>::new();
+    /// let sink = hooks.capture(points.sink_probability());
+    /// let pattern = Tensor::<Flex, 4>::from_floats([[[[0.5, 0.25], [0.0, 0.0]]]], &Default::default());
+    /// hooks.run(vec![points.pattern().info(), points.sink_probability().info()], |hooks| {
+    ///     let pattern = hooks.apply(points.pattern(), pattern)?;
+    ///     hooks.apply_sink_probability(points, &pattern)
+    /// })?;
+    /// assert_eq!(hooks.get(&sink)?.into_data().to_vec::<f32>().unwrap(), [0.25, 1.0]);
+    /// # Ok::<(), transformers::Error>(())
+    /// ```
+    pub fn apply_sink_probability(
+        &mut self,
+        points: AttentionPoints,
+        pattern: &Tensor<B, 4>,
+    ) -> Result<()> {
+        let point = points.sink_probability();
+        if !self.needs_point(point.info()) {
+            return Ok(());
+        }
+        let [batch, heads, queries, _] = pattern.dims();
+        let mass = pattern
+            .clone()
+            .cast(burn::tensor::DType::F32)
+            .sum_dim(3)
+            .reshape([batch, heads, queries]);
+        let sink = mass.neg().add_scalar(1.0);
+        let name = point.info().name;
+        self.apply_constrained(point, sink, |_| {
+            Err(Error::intervention(
+                &name,
+                "the sink probability is derived from the attention pattern and read-only; edit the pattern or the sink logits instead",
+            ))
+        })
+        .map(|_| ())
     }
 }
 
