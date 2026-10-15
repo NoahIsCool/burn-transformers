@@ -2,12 +2,16 @@
 //!
 //! Verifies, in place, the specifications attached to:
 //!
-//! - `src/intervention/selection.rs`: semantic selection ranges. Length-one
-//!   selections never overflow; accepted selections name distinct, singly
-//!   declared axes with nonempty ranges; and each expanded per-dimension range
-//!   is exactly the requested one (or the whole extent when unselected) and
-//!   lies inside the emitted tensor's extents, so slicing cannot go out of
-//!   bounds or silently select the wrong elements.
+//! - `src/intervention/selection.rs`: semantic selection ranges. A requested
+//!   axis resolves to its first declaring dimension with an exact declaration
+//!   count, so a singly declared axis resolves to its unique dimension.
+//!   Length-one selections never overflow; accepted selections name distinct,
+//!   singly declared axes with nonempty ranges; and each expanded
+//!   per-dimension range is exactly the requested one (or the whole extent
+//!   when unselected) and lies inside the emitted tensor's extents, so slicing
+//!   cannot go out of bounds or silently select the wrong elements. In an
+//!   accepted selection each requested range is the only one naming its
+//!   dimension.
 //! - `src/experiment/bounds.rs`: positional extents (`max + 1` without
 //!   overflow), position/label range checks, broadcast compatibility of masks
 //!   and attention planes, and staged block cursors, whose consecutively

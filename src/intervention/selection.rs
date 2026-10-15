@@ -10,6 +10,9 @@
 //!
 //! # Verified properties
 //!
+//! - [`resolve_slice`] resolves an axis to its first declaring dimension and
+//!   counts its declarations; exactly one declaration means the resolved
+//!   dimension is the unique dimension declaring the axis.
 //! - [`unit_range`] selects exactly `index..index + 1`, or an empty range at
 //!   `usize::MAX` that every later check rejects, without overflow.
 //! - [`first_ill_formed_slice`] returns `None` exactly when every slice names an
@@ -18,7 +21,9 @@
 //! - [`selection_ranges`] returns, for every dimension `d`, exactly the range
 //!   of the last slice naming `d` (nonempty, with `end <= extents[d]`), or the
 //!   whole `0..extents[d]` when no slice names `d`; otherwise it names the
-//!   first slice outside its extent.
+//!   first slice outside its extent. For a selection that
+//!   [`first_ill_formed_slice`] accepted, `lemma_well_formed_slice_is_selected`
+//!   shows every requested range lands exactly on its own dimension.
 
 use core::ops::Range;
 
@@ -35,6 +40,70 @@ pub(crate) struct ResolvedSlice {
     pub(crate) occurrences: usize,
     /// Requested half-open range along that dimension.
     pub(crate) range: Range<usize>,
+}
+
+/// Resolves one requested semantic axis against a point's declared axes.
+///
+/// `matches[d]` says whether tensor dimension `d` declares the requested axis.
+/// The result names the first matching dimension (or `matches.len()` when none
+/// matches), counts every matching dimension, and keeps `range` unchanged.
+/// When exactly one dimension matches, the resolved dimension is that unique
+/// match; any other count is rejected by [`first_ill_formed_slice`], so the
+/// placeholder dimension of an absent axis is never used.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(slice =>
+    ensures
+        is_first_match(matches@, slice.dimension as int),
+        slice.occurrences == count_matches(matches@, matches.len() as int),
+        slice.range == range,
+        slice.occurrences == 1 ==> {
+            &&& slice.dimension < matches.len()
+            &&& forall|d: int| 0 <= d < matches.len() ==> (matches@[d] <==> d == slice.dimension)
+        },
+        slice.occurrences == 0 <==> slice.dimension == matches.len(),
+))]
+pub(crate) fn resolve_slice(matches: &[bool], range: Range<usize>) -> ResolvedSlice {
+    let mut dimension = matches.len();
+    let mut occurrences: usize = 0;
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            0 <= index <= matches.len(),
+            occurrences == count_matches(matches@, index as int),
+            occurrences <= index,
+            dimension < index && is_first_match(matches@, dimension as int)
+                || dimension == matches.len() && forall|d: int| 0 <= d < index ==> !matches@[d],
+        decreases matches.len() - index,
+    ))]
+    while index < matches.len() {
+        if matches[index] {
+            if dimension == matches.len() {
+                dimension = index;
+            }
+            occurrences += 1;
+        }
+        index += 1;
+    }
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        if dimension < matches.len() {
+            lemma_count_includes(matches@, dimension as int, matches.len() as int);
+            lemma_count_monotone(matches@, 0, dimension as int);
+            assert forall|d: int| 0 <= d < matches.len() && occurrences == 1
+                implies (matches@[d] <==> d == dimension) by {
+                if matches@[d] && d != dimension {
+                    lemma_two_matches_count(matches@, dimension as int, d, matches.len() as int);
+                }
+            }
+        } else {
+            lemma_no_matches_count(matches@, matches.len() as int);
+        }
+    }
+    ResolvedSlice {
+        dimension,
+        occurrences,
+        range,
+    }
 }
 
 /// Selects the length-one range `index..index + 1` without overflowing.
@@ -206,6 +275,79 @@ pub(crate) fn selection_ranges(
 #[cfg(verus_keep_ghost)]
 verus! {
 
+/// Whether `dimension` is the first index of `matches` holding `true`, or `matches.len()` if none does.
+pub(crate) open spec fn is_first_match(matches: Seq<bool>, dimension: int) -> bool {
+    ||| 0 <= dimension < matches.len() && matches[dimension]
+        && forall|d: int| 0 <= d < dimension ==> !matches[d]
+    ||| dimension == matches.len() && forall|d: int| 0 <= d < matches.len() ==> !matches[d]
+}
+
+/// Number of `true` entries among the first `count` entries of `matches`.
+pub(crate) open spec fn count_matches(matches: Seq<bool>, count: int) -> int
+    decreases count,
+{
+    if count <= 0 {
+        0
+    } else {
+        count_matches(matches, count - 1) + if matches[count - 1] { 1int } else { 0int }
+    }
+}
+
+/// Counting a longer prefix never decreases the count.
+pub(crate) proof fn lemma_count_monotone(matches: Seq<bool>, shorter: int, longer: int)
+    requires
+        0 <= shorter <= longer,
+    ensures
+        count_matches(matches, shorter) <= count_matches(matches, longer),
+    decreases longer - shorter,
+{
+    if shorter < longer {
+        lemma_count_monotone(matches, shorter, longer - 1);
+    }
+}
+
+/// A `true` entry at `index` adds one to every count that includes it.
+pub(crate) proof fn lemma_count_includes(matches: Seq<bool>, index: int, count: int)
+    requires
+        0 <= index < count <= matches.len(),
+        matches[index],
+    ensures
+        count_matches(matches, count) >= count_matches(matches, index) + 1,
+{
+    lemma_count_monotone(matches, index + 1, count);
+}
+
+/// Two distinct `true` entries make the count at least two.
+pub(crate) proof fn lemma_two_matches_count(matches: Seq<bool>, first: int, second: int, count: int)
+    requires
+        0 <= first < count <= matches.len(),
+        0 <= second < count,
+        first != second,
+        matches[first],
+        matches[second],
+    ensures
+        count_matches(matches, count) >= 2,
+{
+    let (low, high) = if first < second { (first, second) } else { (second, first) };
+    lemma_count_includes(matches, high, count);
+    lemma_count_includes(matches, low, high);
+    lemma_count_monotone(matches, 0, low);
+}
+
+/// A prefix without `true` entries counts zero.
+pub(crate) proof fn lemma_no_matches_count(matches: Seq<bool>, count: int)
+    requires
+        0 <= count <= matches.len(),
+        forall|d: int| 0 <= d < count ==> !matches[d],
+    ensures
+        count_matches(matches, count) == 0,
+    decreases count,
+{
+    if count > 0 {
+        lemma_no_matches_count(matches, count - 1);
+    }
+}
+
 /// Whether one resolved slice names a dimension of `extents` and a nonempty range inside it.
 pub(crate) open spec fn slice_fits(extents: Seq<usize>, slice: ResolvedSlice) -> bool {
     &&& slice.dimension < extents.len()
@@ -256,6 +398,33 @@ pub(crate) open spec fn slice_well_formed(slices: Seq<ResolvedSlice>, i: int) ->
     &&& slices[i].occurrences == 1
     &&& slices[i].range.start < slices[i].range.end
     &&& forall|j: int| 0 <= j < i ==> slices[j].dimension != slices[i].dimension
+}
+
+/// In a well-formed selection, slice `index` is the last (indeed the only) slice naming its dimension.
+///
+/// Combined with [`selection_ranges`]'s postcondition, this shows that after
+/// [`first_ill_formed_slice`] accepts a selection, every requested range is
+/// applied exactly to its own dimension and no other slice can replace it.
+pub(crate) proof fn lemma_well_formed_slice_is_selected(
+    slices: Seq<ResolvedSlice>,
+    index: int,
+    count: int,
+)
+    requires
+        forall|i: int| 0 <= i < slices.len() ==> slice_well_formed(slices, i),
+        0 <= index < count <= slices.len(),
+    ensures
+        last_naming(slices, slices[index].dimension as int, count) == index,
+        forall|extent: usize, range: Range<usize>|
+            range_selected(extent, slices, slices[index].dimension as int, count, range)
+                ==> range.start == slices[index].range.start && range.end == slices[index].range.end,
+    decreases count - index,
+{
+    if count > index + 1 {
+        assert(slice_well_formed(slices, count - 1));
+        assert(slices[index].dimension != slices[count - 1].dimension);
+        lemma_well_formed_slice_is_selected(slices, index, count - 1);
+    }
 }
 
 /// Whether every resolved slice fits the emitted tensor's extents.
