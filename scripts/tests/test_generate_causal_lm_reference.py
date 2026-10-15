@@ -96,6 +96,18 @@ class ReferenceGeneratorTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             REFERENCE.parse_arguments(["--model-dir", "m", "--output", "o", "--greedy-tokens", "0"])
 
+    def test_dtype_defaults_to_float32_and_accepts_bfloat16(self) -> None:
+        """The evaluation dtype is F32 unless BF16 is requested; others are refused."""
+
+        base = ["--model-dir", "m", "--output", "o"]
+        self.assertEqual(REFERENCE.parse_arguments(base).dtype, "float32")
+        self.assertEqual(REFERENCE.parse_arguments(base + ["--dtype", "bfloat16"]).dtype, "bfloat16")
+        self.assertEqual(REFERENCE.DTYPES, ("float32", "bfloat16"))
+        with self.assertRaises(SystemExit):
+            REFERENCE.parse_arguments(base + ["--dtype", "float16"])
+        with self.assertRaises(ValueError):
+            REFERENCE.load_model(Path("m"), "float16")
+
     def test_publication_never_replaces_a_bundle(self) -> None:
         """A finished staging directory is renamed once; an existing bundle is kept."""
 

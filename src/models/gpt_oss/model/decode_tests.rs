@@ -647,30 +647,39 @@ fn incompatible_states_and_requests_are_refused() {
     let _: Option<TokenMask<B>> = None;
 }
 
-/// Measures batched against row-by-row decoding on Flex (`--ignored --nocapture`).
+/// Measures batched against row-by-row decoding on Flex (`--release --ignored --nocapture`).
 ///
-/// A 4-layer, width-256 model with 8 experts (2 selected) decodes 8 rows for
-/// 32 steps after a 16-token prefill, once as one batched pass per step and
-/// once row by row. Both paths are checked to agree before timing.
+/// Two 4-layer models with 8 experts (2 selected), of width 256 and 1024,
+/// decode 8 rows for 32 steps after a 16-token prefill, once as one batched
+/// pass per step and once row by row. Both paths are checked to agree
+/// before the timings are printed.
 #[test]
 #[ignore = "timing measurement; run with --release --ignored --nocapture"]
 fn batched_decoding_outpaces_row_by_row_decoding() {
-    let config = GptOssConfig {
-        vocab_size: 512,
-        hidden_size: 256,
-        intermediate_size: 256,
-        num_hidden_layers: 4,
-        num_attention_heads: 8,
-        num_key_value_heads: 2,
-        head_dim: 32,
-        num_local_experts: 8,
-        num_experts_per_tok: 2,
-        sliding_window: Some(16),
-        layer_types: GptOssConfig::default_layer_types(4),
-        max_position_embeddings: 128,
-        ..tiny_config()
-    };
-    let model = model_from(config, 31);
+    for width in [256, 1024] {
+        let config = GptOssConfig {
+            vocab_size: 512,
+            hidden_size: width,
+            intermediate_size: width,
+            num_hidden_layers: 4,
+            num_attention_heads: 8,
+            num_key_value_heads: 2,
+            head_dim: width / 8,
+            num_local_experts: 8,
+            num_experts_per_tok: 2,
+            sliding_window: Some(16),
+            layer_types: GptOssConfig::default_layer_types(4),
+            max_position_embeddings: 128,
+            ..tiny_config()
+        };
+        // Burn's fan-in-scaled initialization keeps wide activations realistic.
+        let model = GptOssForCausalLm::<B>::init(config, &Default::default()).unwrap();
+        time_decoding(&model, width);
+    }
+}
+
+/// Times batched and row-by-row decoding of one model; see the caller.
+fn time_decoding(model: &GptOssForCausalLm<B>, width: usize) {
     let (rows, prompt, steps) = (8, 16, 32);
     let token = |row: usize, column: usize| ((row * 131 + column * 17) % 509) as i64 + 1;
     let prompts: Vec<Vec<i64>> = (0..rows)
@@ -679,33 +688,25 @@ fn batched_decoding_outpaces_row_by_row_decoding() {
     let continuation: Vec<Vec<i64>> = (0..rows)
         .map(|r| (prompt..prompt + steps).map(|c| token(r, c)).collect())
         .collect();
+    let device = Default::default();
 
     let started = std::time::Instant::now();
     let mut cache = model
-        .new_decode_state(
-            CacheConfig::new(rows, 64).unwrap(),
-            rows,
-            &Default::default(),
-        )
+        .new_decode_state(CacheConfig::new(rows, 64).unwrap(), rows, &device)
         .unwrap();
-    let flat: Vec<i64> = prompts.concat();
     let tokens =
-        Tensor::<B, 2, Int>::from_data(TensorData::new(flat, [rows, prompt]), &Default::default());
+        Tensor::<B, 2, Int>::from_data(TensorData::new(prompts.concat(), [rows, prompt]), &device);
+    let options = ForwardOptions::default();
     let mut batched = vec![host(
         model
-            .prefill(
-                input(tokens, None, None),
-                &mut cache,
-                &ForwardOptions::default(),
-            )
+            .prefill(input(tokens, None, None), &mut cache, &options)
             .unwrap()
             .logits,
     )];
     for step in 0..steps {
         let column: Vec<i64> = continuation.iter().map(|row| row[step]).collect();
-        let tokens =
-            Tensor::<B, 2, Int>::from_data(TensorData::new(column, [rows, 1]), &Default::default());
-        batched.push(host(decode_step(&model, &mut cache, tokens)));
+        let tokens = Tensor::<B, 2, Int>::from_data(TensorData::new(column, [rows, 1]), &device);
+        batched.push(host(decode_step(model, &mut cache, tokens)));
     }
     let batched_time = started.elapsed();
 
@@ -715,38 +716,39 @@ fn batched_decoding_outpaces_row_by_row_decoding() {
         .zip(&continuation)
         .map(|(prompt, continuation)| {
             let mut cache = model
-                .new_decode_state(CacheConfig::new(1, 64).unwrap(), 1, &Default::default())
+                .new_decode_state(CacheConfig::new(1, 64).unwrap(), 1, &device)
                 .unwrap();
             let mut logits = vec![host(
                 model
-                    .prefill(
-                        input(row(prompt), None, None),
-                        &mut cache,
-                        &ForwardOptions::default(),
-                    )
+                    .prefill(input(row(prompt), None, None), &mut cache, &options)
                     .unwrap()
                     .logits,
             )];
             for &token in continuation {
-                logits.push(host(decode_step(&model, &mut cache, row(&[token]))));
+                logits.push(host(decode_step(model, &mut cache, row(&[token]))));
             }
             logits
         })
         .collect::<Vec<_>>();
     let row_time = started.elapsed();
 
+    // Relative to the logit scale; a flipped expert choice moves logits by O(scale).
     let vocabulary = 512;
     for (step, logits) in batched.iter().enumerate() {
         for (index, rows) in reference.iter().enumerate() {
+            let scale = rows[step].iter().fold(1.0_f32, |m, v| m.max(v.abs()));
             let gap = max_gap(
                 &logits[index * vocabulary..(index + 1) * vocabulary],
                 &rows[step],
             );
-            assert!(gap <= 1e-3, "step {step}, row {index}: {gap:e}");
+            assert!(
+                gap <= 1e-5 * scale,
+                "width {width}, step {step}, row {index}: {gap:e} at scale {scale:e}"
+            );
         }
     }
     eprintln!(
-        "gpt-oss Flex decode, {rows} rows x {steps} steps: batched {batched_time:?}, row by row {row_time:?} ({:.2}x)",
+        "gpt-oss Flex decode, width {width}, {rows} rows x {steps} steps: batched {batched_time:?}, row by row {row_time:?} ({:.2}x)",
         row_time.as_secs_f64() / batched_time.as_secs_f64()
     );
 }

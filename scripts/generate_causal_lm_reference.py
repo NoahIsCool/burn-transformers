@@ -6,7 +6,8 @@ implementation computes for a local checkpoint, so the Rust crate can be
 compared against it without Python at test time. It
 
 * loads ``AutoModelForCausalLM`` from a local directory only (no Hub access),
-  in F32 on the CPU with eager attention and deterministic kernels;
+  in F32 (or, with ``--dtype bfloat16``, BF16) on the CPU with eager
+  attention and deterministic kernels;
 * tokenizes a few fixed prompts with the checkpoint's own tokenizer and
   records their token IDs, so consumers need no tokenizer;
 * writes every prompt position's full-vocabulary logits as raw little-endian
@@ -27,6 +28,12 @@ Usage::
     python3 scripts/generate_causal_lm_reference.py \\
         --model-dir /path/to/checkpoint --output /path/to/references/name \\
         --repository HuggingFaceTB/SmolLM-135M --revision <commit>
+
+Checkpoints too large to evaluate in F32 can be evaluated in BF16 with
+``--dtype bfloat16``; logits are still written as F32. gpt-oss is the
+motivating case: without CUDA kernels Transformers decodes its MXFP4
+experts to BF16, and the F32 model (about 78 GiB for gpt-oss-20b) does not
+fit a 96 GiB host, while the BF16 one needs about 55 GiB while loading.
 """
 
 from __future__ import annotations
@@ -65,6 +72,8 @@ DEFAULT_PROMPTS = (
 DEFAULT_GREEDY_TOKENS = 32
 #: Name of the bundle's manifest.
 MANIFEST = "reference.json"
+#: Evaluation dtypes accepted by ``--dtype``; logits are always written as F32.
+DTYPES = ("float32", "bfloat16")
 
 
 def sha256_file(path: Path) -> str:
@@ -138,15 +147,17 @@ def provenance(model_dir: Path, arguments: argparse.Namespace) -> dict[str, Any]
         "model_dir": str(model_dir),
         "config_sha256": sha256_file(model_dir / "config.json"),
         "weights_sha256": {path.name: sha256_file(path) for path in weight_files(model_dir)},
-        "dtype": "float32",
+        "dtype": arguments.dtype,
         "device": "cpu",
         "attention_implementation": "eager",
     }
 
 
-def load_model(model_dir: Path) -> tuple[Any, Any]:
-    """Loads the tokenizer and the F32 eager model from local files only."""
+def load_model(model_dir: Path, dtype: str = "float32") -> tuple[Any, Any]:
+    """Loads the tokenizer and the eager model, in `dtype` (one of `DTYPES`), from local files only."""
 
+    if dtype not in DTYPES:
+        raise ValueError(f"dtype must be one of {DTYPES}, not {dtype!r}")
     import torch
     import transformers
 
@@ -157,7 +168,7 @@ def load_model(model_dir: Path) -> tuple[Any, Any]:
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_dir,
         local_files_only=True,
-        dtype=torch.float32,
+        dtype=getattr(torch, dtype),
         attn_implementation="eager",
     )
     model.eval()
@@ -203,7 +214,7 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
     """Evaluates the prompts and writes the logits files into `staging`."""
 
     model_dir = arguments.model_dir.resolve(strict=True)
-    tokenizer, model = load_model(model_dir)
+    tokenizer, model = load_model(model_dir, arguments.dtype)
     prompts = []
     for index, text in enumerate(arguments.prompts):
         token_ids = tokenizer(text, add_special_tokens=arguments.add_special_tokens)["input_ids"]
@@ -249,6 +260,12 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="prompt text (repeatable); defaults to three fixed prompts",
     )
     parser.add_argument("--greedy-tokens", type=int, default=DEFAULT_GREEDY_TOKENS)
+    parser.add_argument(
+        "--dtype",
+        choices=DTYPES,
+        default="float32",
+        help="evaluation dtype; logits are written as F32 either way",
+    )
     parser.add_argument(
         "--no-special-tokens",
         dest="add_special_tokens",
