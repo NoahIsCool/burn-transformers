@@ -32,7 +32,9 @@
 //! Every function here is checked in place by Verus through
 //! `verus/attention.rs` (see `verus/README.md`). For every input, the proofs
 //! establish that no machine arithmetic overflows; that a successful plan has
-//! `1 <= c <= Q`, respects both configured limits, reports the exact peak
+//! `1 <= c <= Q`, respects both configured limits, takes the largest chunk
+//! they admit (`c = min(Q, max_query_tokens, max_score_elements / row)`),
+//! reports the exact peak
 //! `batch * heads * key_bound * c`, and uses `n` chunks with
 //! `(n - 1) * c < Q <= n * c`; that each error variant states exactly why
 //! planning failed; that chunk ranges are consecutive and partition `[0, Q)`;
@@ -53,6 +55,12 @@ pub open spec fn chunks_cover(size: int, count: int, rows: int) -> bool {
     &&& count >= 1
     &&& (count - 1) * size < rows
     &&& rows <= count * size
+}
+
+/// The largest admissible chunk: no more than the rows, the token limit, or the rows the score limit admits.
+pub open spec fn largest_chunk(rows: int, max_tokens: int, admitted_rows: int) -> int {
+    let by_tokens = if rows <= max_tokens { rows } else { max_tokens };
+    if by_tokens <= admitted_rows { by_tokens } else { admitted_rows }
 }
 
 /// Products of positive factors are positive and dominate each factor.
@@ -291,6 +299,11 @@ pub enum ChunkPlanError {
                     Some(limits) => {
                         &&& plan.query_chunk_size <= limits.max_query_tokens
                         &&& plan.peak_score_elements <= limits.max_score_elements
+                        &&& plan.query_chunk_size == largest_chunk(
+                            query_sequence as int,
+                            limits.max_query_tokens as int,
+                            limits.max_score_elements as int / (batch * heads * key_bound),
+                        )
                     },
                     None => plan.query_chunk_size == query_sequence && plan.chunk_count == 1,
                 }
