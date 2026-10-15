@@ -14,7 +14,7 @@
 //! | feed-forward | `feed_forward` | gated, ungated, clamped SwiGLU, routed experts |
 //! | [`NormLayout`] | `norm` | identity, pre, post, or sandwich normalization per branch |
 //! | stack pass | `pass` | positions, padding, overrides, and tables shared by all blocks |
-//! | planning | `plan` | Verus-verified index plans for relative-position tables |
+//! | planning | `plan` | Verus-verified index plans (relative-position tables, history appends) |
 //! | [`ModularDecodeState`] | `state` | fixed-capacity token history for reference decoding |
 //!
 //! Every block is built from the shared kernels through the specification's own

@@ -190,3 +190,143 @@ fn histories_use_native_integer_dtype_and_zero_initialization() {
         vec![0; 6]
     );
 }
+
+/// One host-side step of the history reference: token, optional position, and validity per cell.
+#[derive(Clone, Debug)]
+struct ReferenceStep {
+    /// Row-major `[batch, step]` token IDs.
+    tokens: Vec<i32>,
+    /// Row-major explicit positions, or `None` for implicit slot positions.
+    positions: Option<Vec<i32>>,
+    /// Row-major validity flags.
+    validity: Vec<bool>,
+}
+
+/// Rows of committed `(token, position)` pairs, the model of the device histories.
+type ReferenceHistory = Vec<Vec<(i32, i32)>>;
+
+/// Applies one append to the reference: valid cells append in order, implicitly at their slot.
+fn reference_append(history: &mut ReferenceHistory, step: &ReferenceStep, width: usize) {
+    for (row, entries) in history.iter_mut().enumerate() {
+        for column in 0..width {
+            let cell = row * width + column;
+            if step.validity[cell] {
+                let position = match &step.positions {
+                    Some(positions) => positions[cell],
+                    None => entries.len() as i32,
+                };
+                entries.push((step.tokens[cell], position));
+            }
+        }
+    }
+}
+
+/// Reads the committed prefix of every device history row.
+fn device_history(state: &ModularDecodeState<B>) -> ReferenceHistory {
+    let capacity = state.capacity();
+    let tokens = state.tokens.to_data().to_vec::<i32>().unwrap();
+    let positions = state.positions.to_data().to_vec::<i32>().unwrap();
+    state
+        .lengths()
+        .iter()
+        .enumerate()
+        .map(|(row, &length)| {
+            (0..length)
+                .map(|slot| {
+                    (
+                        tokens[row * capacity + slot],
+                        positions[row * capacity + slot],
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Builds the input tensors of one reference step.
+fn step_input(step: &ReferenceStep, batch: usize, width: usize) -> CausalLmInput<B> {
+    let device = Default::default();
+    CausalLmInput {
+        token_ids: Tensor::from_data(
+            TensorData::new(step.tokens.clone(), [batch, width]),
+            &device,
+        ),
+        token_mask: Some(crate::TokenMask::new(Tensor::from_bool(
+            TensorData::new(step.validity.clone(), [batch, width]),
+            &device,
+        ))),
+        position_ids: step.positions.clone().map(|positions| {
+            Tensor::from_data(TensorData::new(positions, [batch, width]), &device)
+        }),
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+    /// Batched window writes reproduce a per-row host history across appends, truncation, and reorder.
+    ///
+    /// Each step's history is written by one gather/select per tensor; the
+    /// committed prefixes must equal the reference that appends valid cells
+    /// row by row, including ragged, left-, right-, and interior-padded rows,
+    /// explicit positions, and slots previously exposed by truncation.
+    #[test]
+    fn batched_appends_match_a_per_row_history_reference(
+        widths in proptest::collection::vec(1usize..4, 4),
+        cells in proptest::collection::vec(proptest::bool::ANY, 48),
+        values in proptest::collection::vec(0i32..64, 48),
+        explicit in proptest::collection::vec(proptest::bool::ANY, 4),
+        cuts in proptest::collection::vec(0usize..3, 3),
+        permutation in proptest::collection::vec(0usize..3, 3),
+    ) {
+        const BATCH: usize = 3;
+        const CAPACITY: usize = 14;
+        let mut model_spec = spec();
+        model_spec.vocabulary_size = 64;
+        model_spec.max_position_embeddings = 64;
+        let mut state = ModularDecodeState::<B>::new(
+            CacheConfig::new(BATCH, CAPACITY).unwrap(),
+            BATCH,
+            model_spec,
+            StatePurpose::Causal,
+            &Default::default(),
+        )
+        .unwrap();
+        let mut reference: ReferenceHistory = vec![Vec::new(); BATCH];
+        let mut offset = 0;
+        for (index, &width) in widths.iter().enumerate() {
+            let count = BATCH * width;
+            // The first step is a prompt in which every row needs a token.
+            let validity = (0..count)
+                .map(|cell| cells[offset + cell] || (index == 0 && cell % width == 0))
+                .collect::<Vec<_>>();
+            let step = ReferenceStep {
+                tokens: values[offset..offset + count].to_vec(),
+                positions: explicit[index]
+                    .then(|| values[offset..offset + count].iter().map(|value| value % 40).collect()),
+                validity,
+            };
+            offset += count;
+            // A rejected plan (for example an empty decode step) must change nothing.
+            if let Ok(append) = state.prepare_append(step_input(&step, BATCH, width), 64, index == 0) {
+                state.commit(append).unwrap();
+                reference_append(&mut reference, &step, width);
+            }
+            proptest::prop_assert_eq!(device_history(&state), reference.clone());
+            if index == 1 {
+                let lengths = reference
+                    .iter()
+                    .zip(&cuts)
+                    .map(|(row, cut)| row.len().saturating_sub(*cut))
+                    .collect::<Vec<_>>();
+                state.truncate(&lengths).unwrap();
+                for (row, length) in reference.iter_mut().zip(lengths) {
+                    row.truncate(length);
+                }
+                state.reorder(&permutation).unwrap();
+                reference = permutation.iter().map(|&row| reference[row].clone()).collect();
+                proptest::prop_assert_eq!(device_history(&state), reference.clone());
+            }
+        }
+    }
+}
