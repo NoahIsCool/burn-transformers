@@ -14,7 +14,7 @@
 //!   zero slot `width`;
 //! * the MTP cursor after a target truncation, which never grows and restores
 //!   `target = MTP + 1` whenever the caches were aligned;
-//! * the Qwen3-MoE sparse-layer predicate and sliding-window boundary.
+//! * the Qwen3-MoE sparse-layer predicate.
 //!
 //! Both planning files are dependency-free, so they are included as plain
 //! modules. Burn tensor programs driven by these plans (gathers, cache

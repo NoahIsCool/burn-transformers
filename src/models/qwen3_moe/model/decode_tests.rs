@@ -192,7 +192,7 @@ fn cached_attention_mask<B: Backend>(
     }
 }
 
-/// Builds a three-layer model: dense, sparse, and sparse with a sliding window.
+/// Builds a three-layer model (dense, sparse, sparse) whose every block uses a sliding window.
 fn windowed_model(
     device: &<TestBackend as BackendTypes>::Device,
 ) -> Qwen3MoeForCausalLm<TestBackend> {
@@ -208,7 +208,6 @@ fn windowed_model(
         rope_theta: Some(10_000.0),
         use_sliding_window: true,
         sliding_window: Some(3),
-        max_window_layers: 2,
         decoder_sparse_step: 1,
         mlp_only_layers: vec![0],
         moe_intermediate_size: 6,

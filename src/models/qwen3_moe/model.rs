@@ -1113,20 +1113,19 @@ impl<B: Backend> StagedModel<B> for Qwen3MoeForCausalLm<B> {
 }
 
 impl Qwen3MoeConfig {
-    /// Returns the local-attention window for a layer, when enabled.
+    /// Returns the local-attention window of block `layer_index`, when enabled.
     ///
-    /// Transformers 4.51's Qwen3-MoE implementation leaves the prefix
-    /// `0..max_window_layers` on full attention and applies the finite window
-    /// starting exactly at `max_window_layers`. Released Qwen3-30B-A3B disables
-    /// the feature, so every layer in that checkpoint returns `None`.
+    /// The pinned Transformers 5.2 reference stores
+    /// `sliding_window if use_sliding_window else None`, passes that window to
+    /// every `Qwen3MoeAttention`, and builds one sliding-window causal mask for
+    /// the whole stack, so the window is the same for every block and
+    /// `max_window_layers` has no effect. (Transformers 4.51 instead kept
+    /// blocks `0..max_window_layers` on full attention; 5.2 dropped that rule
+    /// for this family.) Released Qwen3-30B-A3B disables the feature, so every
+    /// block of that checkpoint returns `None`.
     #[must_use]
-    pub fn layer_sliding_window(&self, layer_index: usize) -> Option<usize> {
-        super::plan::layer_window(
-            layer_index,
-            self.use_sliding_window,
-            self.max_window_layers,
-            self.sliding_window,
-        )
+    pub fn layer_sliding_window(&self, _layer_index: usize) -> Option<usize> {
+        self.sliding_window.filter(|_| self.use_sliding_window)
     }
 }
 
@@ -1260,3 +1259,7 @@ fn router_diagnostics<B: Backend>(logits: Tensor<B, 3>) -> RouterDiagnostics<B> 
 #[cfg(test)]
 #[path = "model_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "reference_tests.rs"]
+mod reference_tests;

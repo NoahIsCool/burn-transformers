@@ -2,7 +2,7 @@
 
 use proptest::prelude::*;
 
-use super::{layer_window, sparse_layer};
+use super::sparse_layer;
 
 /// The reference predicate as Transformers writes it, in wide arithmetic.
 fn reference_sparse(index: usize, step: usize, experts: usize, dense: bool) -> bool {
@@ -27,15 +27,6 @@ fn sparse_schedule_matches_the_reference_exhaustively() {
     }
     // The overflow-free form also covers the largest index.
     assert!(sparse_layer(usize::MAX, 1, 4, false));
-}
-
-/// Windows start exactly at `max_window_layers` and need enablement and a width.
-#[test]
-fn windows_follow_the_boundary_and_both_guards() {
-    assert_eq!(layer_window(3, true, 3, Some(8)), Some(8));
-    assert_eq!(layer_window(2, true, 3, Some(8)), None);
-    assert_eq!(layer_window(5, false, 3, Some(8)), None);
-    assert_eq!(layer_window(5, true, 3, None), None);
 }
 
 proptest! {

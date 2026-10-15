@@ -152,21 +152,27 @@ fn rms_norm_f16_matches_upstream_cast_before_scale_order() {
     assert_ne!(actual.to_data(), late_round.to_data());
 }
 
-/// The v4.51 boundary is a full-attention prefix length, not a windowed prefix.
+/// An enabled window covers every block; `max_window_layers` is inert, as in Transformers 5.2.
+///
+/// Transformers 4.51 kept blocks `0..max_window_layers` on full attention;
+/// the pinned 5.2 reference windows the whole stack (see `reference_tests`
+/// for the logit-level golden).
 #[test]
-fn sliding_window_schedule_matches_every_valid_boundary() {
+fn sliding_window_covers_every_block_whatever_max_window_layers() {
     let mut config = tiny_config();
     config.num_hidden_layers = 8;
     config.use_sliding_window = true;
     config.sliding_window = Some(3);
 
-    for boundary in 0..=config.num_hidden_layers {
+    for boundary in [0, 1, 4, 8, 9, usize::MAX] {
         config.max_window_layers = boundary;
+        config
+            .validate()
+            .unwrap_or_else(|error| panic!("boundary={boundary}: {error}"));
         for layer_index in 0..config.num_hidden_layers {
-            let expected = (layer_index >= boundary).then_some(3);
             assert_eq!(
                 config.layer_sliding_window(layer_index),
-                expected,
+                Some(3),
                 "boundary={boundary}, layer={layer_index}"
             );
         }
@@ -1144,7 +1150,7 @@ fn autodiff_smoke_reaches_embedding_weights() {
     assert!(model.model.embed_tokens.weight.grad(&gradients).is_some());
 }
 
-/// Builds a three-layer windowed model: dense layer 0, sparse layers 1 and 2, windows from layer 2.
+/// Builds a three-layer windowed model: dense layer 0 and sparse layers 1 and 2, all windowed.
 fn experiment_model() -> (
     Qwen3MoeForCausalLm<TestBackend>,
     <TestBackend as BackendTypes>::Device,
@@ -1155,7 +1161,6 @@ fn experiment_model() -> (
     config.mlp_only_layers = vec![0];
     config.use_sliding_window = true;
     config.sliding_window = Some(2);
-    config.max_window_layers = 2;
     (initialized_model(config, &device), device)
 }
 

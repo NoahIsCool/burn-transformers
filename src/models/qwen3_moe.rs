@@ -85,7 +85,10 @@ pub struct Qwen3MoeConfig {
     pub use_sliding_window: bool,
     /// Number of preceding tokens visible under sliding attention.
     pub sliding_window: Option<usize>,
-    /// Legacy limit on layers eligible for a sliding window.
+    /// Legacy per-layer window boundary, retained for configuration round trips.
+    ///
+    /// Ignored: the pinned Transformers 5.2 Qwen3-MoE applies an enabled
+    /// window to every block (see [`Qwen3MoeConfig::layer_sliding_window`]).
     pub max_window_layers: usize,
     /// Period between MoE feed-forward blocks.
     pub decoder_sparse_step: usize,
@@ -257,13 +260,6 @@ impl Validate for Qwen3MoeConfig {
                     FAMILY,
                     "sliding_window",
                     "cannot exceed max_position_embeddings",
-                ));
-            }
-            if self.max_window_layers > self.num_hidden_layers {
-                return Err(ConfigError::new(
-                    FAMILY,
-                    "max_window_layers",
-                    "cannot exceed num_hidden_layers",
                 ));
             }
         }
