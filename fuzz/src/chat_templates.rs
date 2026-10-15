@@ -11,16 +11,23 @@
 //!    template loads, embedded in `tokenizer_config.json` as a string, a named
 //!    list, or a map, or as a separate `chat_template.jinja` file.
 //! 2. **Rendering never panics** and fails only with [`Error::Tokenizer`]. The
-//!    documented argument checks fail exactly when expected: no messages, both
+//!    documented argument checks fail whenever they apply: no messages, both
 //!    `continue_final_message` and `add_generation_prompt`, an unknown template
-//!    name, a non-list or non-object `documents`, a reserved `extra_context`
-//!    name, and an extra message key that shadows a named field.
+//!    name, a non-list or non-object `documents`, an `extra_context` name from
+//!    the full reserved list ([`RESERVED_VARIABLES`]), and an extra message key
+//!    that shadows any named field ([`MESSAGE_FIELDS`]).
 //! 3. **Determinism.** With `strftime_now` pinned (`current_time_unix_seconds`,
 //!    including `i64::MIN` and `i64::MAX`), rendering twice gives the same result.
-//! 4. **Tokenization.** [`LocalTokenizer::encode_chat`] equals encoding the
+//! 4. **Selection.** Without a template name, rendering equals rendering with
+//!    the name Hugging Face 5.2's `get_chat_template` picks: `tool_use` when
+//!    `tools` is set and the checkpoint has a named `tool_use` template, else
+//!    `default`. The library picks `default` in the first case (open finding
+//!    CHAT-4), which the harness tolerates until it is fixed. Templates carry
+//!    distinguishing `D:`/`T:` prefixes when flag bit 7 is set.
+//! 5. **Tokenization.** [`LocalTokenizer::encode_chat`] equals encoding the
 //!    rendered prompt without added special tokens (both fail for a prompt that
 //!    encodes to no tokens) and fails whenever rendering fails.
-//! 5. **Resources.** Rendering finishes within [`RENDER_TIME_LIMIT`] and its
+//! 6. **Resources.** Rendering finishes within [`RENDER_TIME_LIMIT`] and its
 //!    output stays below [`OUTPUT_BYTE_LIMIT`]; fuel bounds instructions, but
 //!    nothing else bounds the work or memory one instruction performs.
 //!
@@ -148,6 +155,80 @@ const FRAGMENTS: &[&str] = &[
     "é漢🙂",
 ];
 
+/// Named message fields an extra key must not shadow.
+///
+/// Restates `CHAT_MESSAGE_FIELDS` in `src/tokenization.rs` (private there) as
+/// an independent oracle: a library that forgot one of them would accept a
+/// message the harness expects it to reject.
+const MESSAGE_FIELDS: [&str; 6] = [
+    "role",
+    "content",
+    "reasoning_content",
+    "tool_calls",
+    "name",
+    "tool_call_id",
+];
+
+/// Template variables `extra_context` must not replace.
+///
+/// Restates `RESERVED_CHAT_VARIABLES` in `src/tokenization.rs`: the variables
+/// `render_chat` itself defines, including every special-token name.
+const RESERVED_VARIABLES: [&str; 15] = [
+    "messages",
+    "tools",
+    "documents",
+    "add_generation_prompt",
+    "add_vision_id",
+    "enable_thinking",
+    "bos_token",
+    "eos_token",
+    "unk_token",
+    "sep_token",
+    "pad_token",
+    "cls_token",
+    "mask_token",
+    "raise_exception",
+    "strftime_now",
+];
+
+/// Extra message keys: every shadowing name plus two keys that must be accepted.
+const EXTRA_MESSAGE_KEYS: [&str; 8] = [
+    "custom",
+    "thinking",
+    MESSAGE_FIELDS[0],
+    MESSAGE_FIELDS[1],
+    MESSAGE_FIELDS[2],
+    MESSAGE_FIELDS[3],
+    MESSAGE_FIELDS[4],
+    MESSAGE_FIELDS[5],
+];
+
+/// `extra_context` names: every reserved variable plus two that must be accepted.
+const EXTRA_CONTEXT_KEYS: [&str; 17] = [
+    "custom",
+    "date_string",
+    RESERVED_VARIABLES[0],
+    RESERVED_VARIABLES[1],
+    RESERVED_VARIABLES[2],
+    RESERVED_VARIABLES[3],
+    RESERVED_VARIABLES[4],
+    RESERVED_VARIABLES[5],
+    RESERVED_VARIABLES[6],
+    RESERVED_VARIABLES[7],
+    RESERVED_VARIABLES[8],
+    RESERVED_VARIABLES[9],
+    RESERVED_VARIABLES[10],
+    RESERVED_VARIABLES[11],
+    RESERVED_VARIABLES[12],
+    RESERVED_VARIABLES[13],
+    RESERVED_VARIABLES[14],
+];
+
+/// Prefix of the `default` template when flag bit 7 asks for distinguishable templates.
+const DEFAULT_MARKER: &str = "D:";
+/// Prefix of the `tool_use` template when flag bit 7 asks for distinguishable templates.
+const TOOL_MARKER: &str = "T:";
+
 /// Message text fragments; some look like Jinja or contain the continuation marker.
 const TEXTS: &[&str] = &[
     "hello world",
@@ -214,8 +295,8 @@ fn message(bytes: &mut Bytes<'_>) -> ChatMessage {
         message = message.with_tool_call_id("call-1");
     }
     if fields & 16 != 0 {
-        // `role` shadows a named field and must be rejected; `custom` must not.
-        let key = bytes.pick(&["custom", "role", "content", "thinking"]);
+        // A named field's key must be rejected; `custom` and `thinking` must not.
+        let key = bytes.pick(&EXTRA_MESSAGE_KEYS);
         message = message.with_field(key, content(bytes));
     }
     message
@@ -258,13 +339,17 @@ fn decode(bytes: &mut Bytes<'_>) -> Problem {
     ]);
     let flags = bytes.byte();
     let default_count = bytes.below(24);
-    let default_template = template(bytes, default_count);
+    let mut default_template = template(bytes, default_count);
     let tool_count = bytes.below(8) + 1;
-    let tool_template = template(bytes, tool_count);
+    let mut tool_template = template(bytes, tool_count);
+    if flags & 128 != 0 {
+        default_template.insert_str(0, DEFAULT_MARKER);
+        tool_template.insert_str(0, TOOL_MARKER);
+    }
     let messages = (0..bytes.below(4)).map(|_| message(bytes)).collect();
     let mut extra_context = BTreeMap::new();
     if flags & 64 != 0 {
-        let key = bytes.pick(&["date_string", "custom", "messages", "strftime_now"]);
+        let key = bytes.pick(&EXTRA_CONTEXT_KEYS);
         extra_context.insert(key.to_owned(), json!("26 Jul 2024"));
     }
     let options = ChatTemplateOptions {
@@ -357,12 +442,12 @@ fn violates_preconditions(problem: &Problem) -> bool {
     let reserved = options
         .extra_context
         .keys()
-        .any(|key| key == "messages" || key == "strftime_now");
+        .any(|key| RESERVED_VARIABLES.contains(&key.as_str()));
     let shadowed = problem.messages.iter().any(|message| {
         message
             .extra
             .keys()
-            .any(|key| key == "role" || key == "content")
+            .any(|key| MESSAGE_FIELDS.contains(&key.as_str()))
     });
     let has_tool_template = matches!(problem.storage, Storage::NamedList | Storage::Map);
     let missing_template = match options.template_name.as_deref() {
@@ -381,6 +466,56 @@ fn violates_preconditions(problem: &Problem) -> bool {
         || shadowed
         || reserved
         || bad_documents
+}
+
+/// The template name Hugging Face 5.2 selects when no name is given.
+///
+/// `get_chat_template` returns `template_dict["tool_use"]` when `tools is not
+/// None` and the checkpoint stores named templates including `tool_use`, else
+/// `default` (a single unnamed template is the `default` here).
+fn hugging_face_selection(problem: &Problem) -> &'static str {
+    let named = matches!(problem.storage, Storage::NamedList | Storage::Map);
+    if named && problem.options.tools.is_some() {
+        "tool_use"
+    } else {
+        "default"
+    }
+}
+
+/// Whether two render results agree: equal prompts, or errors with equal messages.
+fn same_render(left: &transformers::Result<String>, right: &transformers::Result<String>) -> bool {
+    match (left, right) {
+        (Ok(left), Ok(right)) => left == right,
+        (Err(left), Err(right)) => left.to_string() == right.to_string(),
+        _ => false,
+    }
+}
+
+/// Checks that an unnamed render selects the template Hugging Face selects.
+///
+/// Open finding CHAT-4: with `tools` and a named `tool_use` template the
+/// library selects `default` (see `select_template` in `src/tokenization.rs`);
+/// until that is fixed the oracle also accepts `default` there, and the
+/// ignored test `tools_select_the_tool_use_template` pins the reference.
+fn check_selection(
+    tokenizer: &LocalTokenizer,
+    problem: &Problem,
+    rendered: &transformers::Result<String>,
+) {
+    if problem.options.template_name.is_some() {
+        return;
+    }
+    let named = |name: &str| {
+        let options = ChatTemplateOptions {
+            template_name: Some(name.to_owned()),
+            ..problem.options.clone()
+        };
+        tokenizer.render_chat(&problem.messages, &options)
+    };
+    let expected = hugging_face_selection(problem);
+    let agrees = same_render(rendered, &named(expected))
+        || (expected == "tool_use" && same_render(rendered, &named("default")));
+    assert!(agrees, "an unnamed render did not select `{expected}`");
 }
 
 /// Whether the template selected by the options is empty after trimming.
@@ -415,11 +550,11 @@ fn check(problem: &Problem) {
         Err(error) => assert!(matches!(error, Error::Tokenizer(_)), "{error:?}"),
     }
     let again = tokenizer.render_chat(&problem.messages, &problem.options);
-    match (&rendered, &again) {
-        (Ok(first), Ok(second)) => assert_eq!(first, second),
-        (Err(first), Err(second)) => assert_eq!(first.to_string(), second.to_string()),
-        _ => panic!("rendering is not deterministic"),
-    }
+    assert!(
+        same_render(&rendered, &again),
+        "rendering is not deterministic: {rendered:?} then {again:?}"
+    );
+    check_selection(&tokenizer, problem, &rendered);
     let encoded = tokenizer.encode_chat(
         &problem.messages,
         &problem.options,
@@ -450,7 +585,8 @@ fn check(problem: &Problem) {
 ///
 /// Byte layout: template storage, a flag byte (bit 0 generation prompt, 1
 /// continue final message, 2 tools, 3 documents, 4 vision IDs, 5 thinking
-/// switch, 6 extra context), the default template's fragment count (0..=23)
+/// switch, 6 extra context, 7 `D:`/`T:` template prefixes), the default
+/// template's fragment count (0..=23)
 /// and fragments, the tool template's count (1..=8) and fragments, up to three
 /// messages, then the template name, documents, thinking value, and pinned time.
 /// A fragment selector of at least 224 copies the next `selector - 223` raw

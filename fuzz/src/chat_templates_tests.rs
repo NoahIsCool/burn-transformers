@@ -90,6 +90,116 @@ fn documented_preconditions_are_rejected() {
     assert_eq!(render(&base).unwrap(), "1");
 }
 
+/// Every named message field and every reserved variable is refused; others are not.
+///
+/// The library's lists are private, so the harness restates them; this test
+/// fails if either restatement drifts from the library (a missing entry would
+/// render, an extra one would be refused below).
+#[test]
+fn every_shadowed_field_and_reserved_variable_is_rejected() {
+    for key in MESSAGE_FIELDS {
+        let mut shadowed = problem("x");
+        shadowed.messages[0] = shadowed.messages[0].clone().with_field(key, "shadow");
+        assert!(violates_preconditions(&shadowed), "{key}");
+        assert!(
+            render(&shadowed).is_err(),
+            "extra message key {key} rendered"
+        );
+    }
+    for key in RESERVED_VARIABLES {
+        let mut reserved = problem("x");
+        reserved
+            .options
+            .extra_context
+            .insert(key.to_owned(), json!("value"));
+        assert!(violates_preconditions(&reserved), "{key}");
+        assert!(
+            render(&reserved).is_err(),
+            "reserved variable {key} rendered"
+        );
+    }
+    let mut accepted = problem("{{ messages[0].thinking }}|{{ custom }}|{{ date_string }}");
+    accepted.messages[0] = accepted.messages[0]
+        .clone()
+        .with_field("thinking", "t")
+        .with_field("custom", "c");
+    for key in ["custom", "date_string"] {
+        accepted
+            .options
+            .extra_context
+            .insert(key.to_owned(), json!(key));
+    }
+    assert!(!violates_preconditions(&accepted));
+    assert_eq!(render(&accepted).unwrap(), "t|custom|date_string");
+}
+
+/// Hugging Face picks `tool_use` only for named templates with `tools` set.
+#[test]
+fn hugging_face_selection_follows_get_chat_template() {
+    let mut selection = problem("D");
+    selection.tool_template = "T".to_owned();
+    for storage in [
+        Storage::String,
+        Storage::NamedList,
+        Storage::Map,
+        Storage::JinjaFile,
+    ] {
+        selection.storage = storage;
+        selection.options.tools = None;
+        assert_eq!(hugging_face_selection(&selection), "default");
+        assert_eq!(render(&selection).unwrap(), "D");
+        selection.options.tools = Some(json!([]));
+        let named = matches!(storage, Storage::NamedList | Storage::Map);
+        let expected = if named { "tool_use" } else { "default" };
+        assert_eq!(hugging_face_selection(&selection), expected);
+        // `render` runs the tolerant selection oracle (CHAT-4 is still open).
+        render(&selection).unwrap();
+    }
+}
+
+/// Seed-style inputs with distinguishable `D:`/`T:` templates select consistently.
+#[test]
+fn marked_templates_are_selected_by_name() {
+    let mut marked = problem("D:{{ messages | length }}");
+    marked.storage = Storage::Map;
+    marked.tool_template = "T:{{ tools | length }}".to_owned();
+    marked.options.template_name = Some("tool_use".to_owned());
+    marked.options.tools = Some(json!([{"name": "f"}]));
+    assert_eq!(render(&marked).unwrap(), "T:1");
+    marked.options.template_name = Some("default".to_owned());
+    assert_eq!(render(&marked).unwrap(), "D:1");
+    // Flag bit 7 adds the markers to decoded templates.
+    let mut bytes = Bytes::new(&[2, 0x80, 0, 0, 0]);
+    let decoded = decode(&mut bytes);
+    assert_eq!(decoded.default_template, DEFAULT_MARKER);
+    assert!(decoded.tool_template.starts_with(TOOL_MARKER));
+}
+
+/// CHAT-4: with `tools` and a named `tool_use` template, Hugging Face selects `tool_use`.
+///
+/// Hugging Face 5.2 `get_chat_template` (`tokenization_utils_base.py`) returns
+/// `template_dict["tool_use"]` when no template name is given, `tools is not
+/// None`, and the checkpoint stores a `tool_use` template; `select_template`
+/// in `src/tokenization.rs` always returns `default`, so tool-use checkpoints
+/// with named templates (Command-R, Hermes-2-Pro) render a different prompt.
+/// Fix: select `tool_use` when `options.tools.is_some()` and no name is given
+/// (explicit name, then `tool_use` with tools, then `default`).
+#[test]
+#[ignore = "CHAT-4: open follow-up in src/tokenization.rs (select_template ignores tools)"]
+fn tools_select_the_tool_use_template() {
+    for storage in [Storage::NamedList, Storage::Map] {
+        let mut tools = problem("D");
+        tools.storage = storage;
+        tools.tool_template = "T".to_owned();
+        tools.options.tools = Some(json!([]));
+        let directory = write_fixture(&tools);
+        let rendered = LocalTokenizer::from_directory(directory.path())
+            .expect("fixture loads")
+            .render_chat(&tools.messages, &tools.options);
+        assert_eq!(rendered.unwrap(), "T", "{storage:?}");
+    }
+}
+
 /// Loaders, unbounded recursion, and fuel exhaustion fail contextually.
 #[test]
 fn sandbox_limits_fail_contextually() {
