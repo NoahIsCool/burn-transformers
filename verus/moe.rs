@@ -6,6 +6,9 @@
 //! reporting of an out-of-range expert ID, and, for a successful plan,
 //! offsets that partition all assignments by per-expert counts with every
 //! range holding only that expert's assignments in strictly increasing order.
+//! It also verifies the memory-bounding block planner: every dispatch block
+//! is a non-empty run of whole experts whose assignment count fits the row
+//! budget (or a single expert that alone exceeds it), and is maximal.
 //!
 //! Not proved here: the device gathers, expert evaluation, and scatter-add
 //! that consume the plan, or the router kernels that produce expert IDs; the

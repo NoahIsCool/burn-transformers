@@ -9,15 +9,19 @@
 //! the defaults reproduce Qwen/Mixtral softmax top-k routing.
 //!
 //! Dispatch reads the compact `[tokens, K]` expert IDs to the host once (one
-//! synchronization, which also carries a per-token NaN flag), groups the
-//! flattened `(token, slot)` assignments by expert with a verified stable
-//! counting sort, and uploads that permutation once. It then gathers every
-//! routed input row and weight in a single `select`, evaluates each active
-//! expert on a contiguous slice, and accumulates all weighted contributions
-//! with one `select_assign`. The permutation is expert-major and token-major
-//! within an expert, so each token's contributions are summed in the same
-//! order as a per-expert loop and results are bit-identical to it. Unselected
-//! experts are never evaluated. Expert inputs and mixture weights remain
+//! synchronization, which also carries a per-token non-finite flag), groups
+//! the flattened `(token, slot)` assignments by expert with a verified stable
+//! counting sort, and uploads that permutation once. Experts are then taken
+//! in blocks of whole experts holding at most `max(tokens, 16384)` routed rows:
+//! each block gathers its input rows and weights with one `select`, evaluates
+//! each active expert on a contiguous slice, and accumulates its weighted
+//! contributions with one `select_assign`. Decode and short prompts fit one
+//! block; a long prefill takes about `K` blocks, so the gathered buffers stay
+//! near the residual input's size instead of `K` times larger. The
+//! permutation is expert-major and token-major within an expert, so each
+//! token's contributions are summed in the same order as a per-expert loop
+//! and results are bit-identical to it for any block size. Unselected experts
+//! are never evaluated. Expert inputs and mixture weights remain
 //! differentiable tensors; only the discrete IDs leave the device.
 
 use burn::{
@@ -432,15 +436,28 @@ fn read_assignment_plan<B: Backend>(
     )
 }
 
-/// Evaluates selected experts with one ID transfer, one gather, and one scatter-add.
+/// Fewest routed rows that sparse dispatch gathers at once.
+///
+/// Dispatch materializes the gathered inputs and weighted outputs of a block
+/// of experts together. Blocks hold up to `max(tokens, this)` assignments, so
+/// those buffers stay about as large as the residual input itself (or a few
+/// MiB for short inputs) instead of `top_k` times larger, while still taking
+/// only about `top_k` gather/scatter rounds for a long prefill and a single
+/// round for decode-sized inputs.
+pub(crate) const MIN_DISPATCH_BLOCK_ASSIGNMENTS: usize = 16_384;
+
+/// Evaluates selected experts with one ID transfer and a few gathers and scatter-adds.
 ///
 /// `flat_input` is `[tokens, width]`, `flat_weights` and `selected_experts`
 /// are `[tokens, K]`, and `run_expert(e, rows)` evaluates expert `e` on its
 /// gathered `[assignments_e, width]` rows, returning `[assignments_e, out]`.
 /// Contributions `run_expert(e, x) * w` are formed with `precision` and
 /// accumulated in expert-major, token-major order, which matches a per-expert
-/// loop of `select_assign` calls bit for bit. A `[tokens]` NaN flag tensor can
-/// ride along with the ID transfer; any flagged token is a contextual error.
+/// loop of `select_assign` calls bit for bit. Experts are processed in blocks
+/// of at most `max(tokens, MIN_DISPATCH_BLOCK_ASSIGNMENTS)` routed rows (an
+/// expert is never split), which bounds peak memory without changing that
+/// order. A `[tokens]` non-finite flag tensor can ride along with the ID
+/// transfer; any flagged token is a contextual error.
 pub(crate) fn dispatch_routed_experts<B, F>(
     flat_input: Tensor<B, 2>,
     flat_weights: Tensor<B, 2>,
@@ -448,6 +465,43 @@ pub(crate) fn dispatch_routed_experts<B, F>(
     non_finite_tokens: Option<Tensor<B, 1, Bool>>,
     routed_experts: usize,
     precision: RoutedExpertPrecision,
+    run_expert: F,
+) -> Result<RoutedExpertDispatch<B>>
+where
+    B: Backend,
+    F: FnMut(usize, Tensor<B, 2>) -> Result<Tensor<B, 2>>,
+{
+    let budget = flat_input.dims()[0].max(MIN_DISPATCH_BLOCK_ASSIGNMENTS);
+    dispatch_routed_experts_in_blocks(
+        flat_input,
+        flat_weights,
+        selected_experts,
+        non_finite_tokens,
+        routed_experts,
+        precision,
+        budget,
+        run_expert,
+    )
+}
+
+/// [`dispatch_routed_experts`] with an explicit routed-row budget per block.
+///
+/// The plan is uploaded once as an expert-major permutation of flattened
+/// assignments; token rows follow on the device as `assignment / K`. Each
+/// block of whole experts (see [`assignment::next_dispatch_block`]) narrows
+/// that permutation, gathers its input rows and weights, evaluates its
+/// experts on contiguous slices, and scatter-adds the concatenated
+/// contributions. Blocks run in expert order, so every token still receives
+/// its contributions in the per-expert loop's order for any budget.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_routed_experts_in_blocks<B, F>(
+    flat_input: Tensor<B, 2>,
+    flat_weights: Tensor<B, 2>,
+    selected_experts: Tensor<B, 2, Int>,
+    non_finite_tokens: Option<Tensor<B, 1, Bool>>,
+    routed_experts: usize,
+    precision: RoutedExpertPrecision,
+    budget: usize,
     mut run_expert: F,
 ) -> Result<RoutedExpertDispatch<B>>
 where
@@ -460,8 +514,6 @@ where
     let device = flat_input.device();
     let plan = read_assignment_plan(selected_experts, non_finite_tokens, routed_experts)?;
     let assignments = plan.order.len();
-    // One upload: the expert-major permutation of flattened assignments. Token
-    // rows follow on the device as `assignment / K`.
     let order = Tensor::<B, 1, Int>::from_data(
         TensorData::new(
             plan.order
@@ -472,32 +524,62 @@ where
         ),
         &device,
     );
-    let token_rows = order.clone().div_scalar(slots as i64);
-    let routed_inputs = flat_input.select(0, token_rows.clone());
-    let routed_weights = flat_weights
-        .reshape([assignments])
-        .select(0, order)
-        .unsqueeze_dim::<2>(1);
+    let flat_weights = flat_weights.reshape([assignments]);
+    let expert_token_counts = plan
+        .offsets
+        .windows(2)
+        .map(|range| range[1] - range[0])
+        .collect::<Vec<_>>();
 
-    let mut expert_token_counts = Vec::with_capacity(routed_experts);
-    let mut contributions = Vec::new();
-    for expert in 0..routed_experts {
-        let start = plan.offsets[expert];
-        let count = plan.offsets[expert + 1] - start;
-        expert_token_counts.push(count);
-        if count == 0 {
+    let mut hidden_state: Option<Tensor<B, 2>> = None;
+    let mut evaluated_experts = 0;
+    let mut first = 0;
+    while first < routed_experts {
+        let end = assignment::next_dispatch_block(&plan.offsets, first, budget);
+        let (block_start, block_rows) =
+            (plan.offsets[first], plan.offsets[end] - plan.offsets[first]);
+        let experts = first..end;
+        first = end;
+        if block_rows == 0 {
             continue;
         }
-        let output = run_expert(expert, routed_inputs.clone().narrow(0, start, count))?;
-        let weights = routed_weights.clone().narrow(0, start, count);
-        contributions.push(weighted_expert_contribution(output, weights, precision));
+        let block_order = order.clone().narrow(0, block_start, block_rows);
+        let token_rows = block_order.clone().div_scalar(slots as i64);
+        let inputs = flat_input.clone().select(0, token_rows.clone());
+        let weights = flat_weights
+            .clone()
+            .select(0, block_order)
+            .unsqueeze_dim::<2>(1);
+        let mut contributions = Vec::with_capacity(experts.len());
+        for expert in experts {
+            let count = expert_token_counts[expert];
+            if count == 0 {
+                continue;
+            }
+            let local = plan.offsets[expert] - block_start;
+            let output = run_expert(expert, inputs.clone().narrow(0, local, count))?;
+            let weights = weights.clone().narrow(0, local, count);
+            contributions.push(weighted_expert_contribution(output, weights, precision));
+        }
+        evaluated_experts += contributions.len();
+        let contributions = Tensor::cat(contributions, 0);
+        let accumulator = hidden_state.unwrap_or_else(|| {
+            Tensor::zeros(
+                [tokens, contributions.dims()[1]],
+                (&device, precision.accumulation_dtype),
+            )
+        });
+        hidden_state =
+            Some(accumulator.select_assign(0, token_rows, contributions, IndexingUpdateOp::Add));
     }
-    let evaluated_experts = contributions.len();
-    let contributions = Tensor::cat(contributions, 0);
-    let width = contributions.dims()[1];
-    let hidden_state =
-        Tensor::<B, 2>::zeros([tokens, width], (&device, precision.accumulation_dtype))
-            .select_assign(0, token_rows, contributions, IndexingUpdateOp::Add);
+    // `read_assignment_plan` rejects empty routing, so some block had rows.
+    let hidden_state = hidden_state.ok_or_else(|| {
+        Error::shape(
+            "moe.selected_experts",
+            "at least one routed assignment",
+            "no assignments",
+        )
+    })?;
     Ok(RoutedExpertDispatch {
         hidden_state,
         expert_token_counts,

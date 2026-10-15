@@ -9,7 +9,8 @@ use burn::{
 use super::{
     ExpertSelection, GroupLimitedSelection, GroupScore, PrunedExpertScore, RoutedExpertPrecision,
     RoutedWeightingPrecision, RouterScoring, ScoringOrder, SparseMoe, SparseMoeConfig,
-    group_selected_experts, load_balancing_loss, weighted_expert_contribution,
+    dispatch_routed_experts_in_blocks, group_selected_experts, load_balancing_loss,
+    weighted_expert_contribution,
 };
 
 /// Installs zero parameters without advancing Burn's process-wide test RNG.
@@ -797,11 +798,34 @@ fn batched_dispatch_is_bit_identical_to_the_per_expert_loop() {
             selected.clone(),
             precision,
         );
+        let legacy = legacy.into_data();
         assert_eq!(
             batched.hidden_state.into_data(),
-            legacy.into_data(),
+            legacy.clone(),
             "{precision:?}"
         );
+        // Memory-bounded blocks keep the summation order for every budget:
+        // one expert per block (0, 1), several (5, 9), and one block (MAX).
+        for budget in [0, 1, 5, 9, usize::MAX] {
+            let blocked = dispatch_routed_experts_in_blocks(
+                flat_input.clone(),
+                weights.clone(),
+                selected.clone(),
+                None,
+                module.routed.len(),
+                precision,
+                budget,
+                |expert, rows| module.routed[expert].forward(rows),
+            )
+            .unwrap();
+            assert_eq!(blocked.expert_token_counts, [4, 4, 5, 3, 0, 3, 2, 0]);
+            assert_eq!(blocked.evaluated_experts, 6);
+            assert_eq!(
+                blocked.hidden_state.into_data(),
+                legacy.clone(),
+                "{precision:?}, budget {budget}"
+            );
+        }
     }
 }
 
@@ -1005,17 +1029,22 @@ fn half_precision_default_child() {
     assert!(loss.into_scalar().is_finite());
 }
 
-/// Measures batched versus per-expert dispatch on prefill-sized routing problems.
+/// Measures blocked versus per-expert dispatch on prefill-sized routing problems.
 ///
-/// Run with `cargo test --release --lib moe::tests::dispatch_timing -- --ignored --nocapture`.
+/// The 4096-token case holds 32,768 assignments and so spans several
+/// memory-bounded blocks; the others fit one block. The two dispatchers
+/// alternate to cancel drift and each reports the median of seven runs. Run
+/// with `cargo test --release --lib moe::tests::dispatch_timing -- --ignored --nocapture`.
 #[test]
 #[ignore = "timing measurement; run explicitly in release mode"]
 fn dispatch_timing() {
     let device = Default::default();
     // (tokens, experts, top_k, hidden, intermediate): expert-bound and dispatch-bound shapes.
-    for (tokens, experts, top_k, hidden, intermediate) in
-        [(1024, 64, 8, 64, 32), (2048, 128, 8, 16, 4)]
-    {
+    for (tokens, experts, top_k, hidden, intermediate) in [
+        (1024, 64, 8, 64, 32),
+        (2048, 128, 8, 16, 4),
+        (4096, 64, 8, 64, 32),
+    ] {
         let module = patterned_module(
             SparseMoeConfig::new(hidden, intermediate, experts, top_k),
             &device,
@@ -1040,14 +1069,11 @@ fn dispatch_timing() {
             Tensor::<Flex, 2>::ones([tokens, top_k], &device).mul_scalar(1.0 / top_k as f32);
         let precision = RoutedExpertPrecision::uniform(DType::F32);
         let time = |run: &dyn Fn() -> Tensor<Flex, 2>| {
-            let _warm = run().into_data();
             let start = std::time::Instant::now();
-            for _ in 0..5 {
-                let _ = run().into_data();
-            }
-            start.elapsed() / 5
+            let _ = run().into_data();
+            start.elapsed()
         };
-        let batched = time(&|| {
+        let blocked_run = || {
             module
                 .dispatch_selected_experts_with_precision(
                     flat_input.clone(),
@@ -1058,8 +1084,8 @@ fn dispatch_timing() {
                 )
                 .unwrap()
                 .hidden_state
-        });
-        let legacy = time(&|| {
+        };
+        let legacy_run = || {
             legacy_dispatch(
                 &module,
                 flat_input.clone(),
@@ -1067,11 +1093,62 @@ fn dispatch_timing() {
                 selected.clone(),
                 precision,
             )
-        });
+        };
+        let (_, _) = (time(&blocked_run), time(&legacy_run));
+        let (mut blocked, mut legacy) = (Vec::new(), Vec::new());
+        for _ in 0..7 {
+            blocked.push(time(&blocked_run));
+            legacy.push(time(&legacy_run));
+        }
+        blocked.sort();
+        legacy.sort();
+        let (blocked, legacy) = (blocked[3], legacy[3]);
         println!(
             "tokens={tokens} experts={experts} top_k={top_k} hidden={hidden} intermediate={intermediate}: \
-             batched {batched:?}, per-expert {legacy:?}, speedup {:.2}x",
-            legacy.as_secs_f64() / batched.as_secs_f64()
+             blocked {blocked:?}, per-expert {legacy:?}, speedup {:.2}x",
+            legacy.as_secs_f64() / blocked.as_secs_f64()
         );
     }
+}
+
+/// Peak-memory probe: one long-prefill dispatch with blocked or single-block routing.
+///
+/// Routes 8192 tokens to 8 of 64 experts with a 1024-wide residual stream, so
+/// all 65,536 routed rows occupy 256 MiB per F32 buffer. Set
+/// `TRANSFORMERS_MOE_DISPATCH_BUDGET=all` to gather every row at once (the
+/// unbounded single-block layout) or leave it unset for the default budget,
+/// then compare the "maximum resident set size" of fresh processes, e.g.
+/// `/usr/bin/time -l <lib test binary> --exact moe::tests::dispatch_peak_memory --ignored`.
+#[test]
+#[ignore = "memory measurement; run explicitly in a fresh process"]
+fn dispatch_peak_memory() {
+    let device = Default::default();
+    let (tokens, experts, top_k, hidden) = (8192, 64, 8, 1024);
+    let module = deterministic_module(SparseMoeConfig::new(hidden, 16, experts, top_k), &device);
+    let flat_input = Tensor::<Flex, 2>::ones([tokens, hidden], &device);
+    let ids = (0..tokens)
+        .flat_map(|token| (0..top_k).map(move |slot| ((token + slot * 8) % experts) as i32))
+        .collect::<Vec<_>>();
+    let selected = Tensor::<Flex, 2, Int>::from_data(
+        burn::tensor::TensorData::new(ids, [tokens, top_k]),
+        &device,
+    );
+    let weights = Tensor::<Flex, 2>::ones([tokens, top_k], &device);
+    let budget = match std::env::var("TRANSFORMERS_MOE_DISPATCH_BUDGET").as_deref() {
+        Ok("all") => usize::MAX,
+        _ => tokens.max(super::MIN_DISPATCH_BLOCK_ASSIGNMENTS),
+    };
+    let dispatch = dispatch_routed_experts_in_blocks(
+        flat_input,
+        weights,
+        selected,
+        None,
+        experts,
+        RoutedExpertPrecision::uniform(DType::F32),
+        budget,
+        |expert, rows| module.routed[expert].forward(rows),
+    )
+    .unwrap();
+    let sum = dispatch.hidden_state.sum().into_scalar();
+    println!("budget={budget} checksum={sum}");
 }

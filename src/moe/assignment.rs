@@ -25,6 +25,12 @@
 //! assignment routed to that expert, and entries increase strictly within a
 //! range. Together these imply that each range is exactly the expert's
 //! assignment set in ascending order.
+//!
+//! [`next_dispatch_block`] then groups consecutive experts into blocks whose
+//! assignment count stays within a row budget, so dispatch can bound the
+//! routed rows it materializes at once; its proof shows each block is a
+//! non-empty run of whole experts within the budget (or one oversized
+//! expert) and is maximal.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -392,6 +398,47 @@ pub(crate) fn plan_expert_assignments(
     }
 
     Ok(ExpertAssignmentPlan { order, offsets })
+}
+
+/// Returns the exclusive end of the next dispatch block of whole experts starting at `first`.
+///
+/// `offsets` are a plan's `experts + 1` nondecreasing range offsets. Experts
+/// `first..end` own `offsets[end] - offsets[first]` assignments, the number of
+/// routed rows that dispatch gathers and evaluates at once. That count is at
+/// most `budget` unless the block is a single expert that alone exceeds it;
+/// experts are never split, so each still runs on one contiguous batch. The
+/// block is maximal: either no expert remains or adding expert `end` would
+/// exceed the budget. Successive calls starting at the previous `end`
+/// therefore partition `0..experts` into contiguous, non-empty blocks.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(end =>
+    requires
+        first + 1 < offsets.len(),
+        forall|low: int, high: int| 0 <= low <= high < offsets.len() ==>
+            #[trigger] offsets[low] <= #[trigger] offsets[high],
+    ensures
+        first < end,
+        end + 1 <= offsets.len(),
+        end == first + 1 || offsets[end as int] - offsets[first as int] <= budget,
+        end + 1 == offsets.len() || offsets[end + 1] - offsets[first as int] > budget,
+))]
+pub(crate) fn next_dispatch_block(offsets: &[usize], first: usize, budget: usize) -> usize {
+    let last = offsets.len() - 1;
+    let mut end = first + 1;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            first < end <= last,
+            last + 1 == offsets.len(),
+            forall|low: int, high: int| 0 <= low <= high < offsets.len() ==>
+                #[trigger] offsets[low] <= #[trigger] offsets[high],
+            end == first + 1 || offsets[end as int] - offsets[first as int] <= budget,
+        decreases last - end,
+    ))]
+    // Offsets are nondecreasing, so `offsets[end + 1] - offsets[first]` cannot underflow.
+    while end < last && offsets[end + 1] - offsets[first] <= budget {
+        end += 1;
+    }
+    end
 }
 
 /// Overwrites one in-bounds entry; isolating the write keeps the planner's proof small.
