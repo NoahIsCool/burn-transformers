@@ -24,10 +24,11 @@ use crate::{
     cache::CacheConfig,
     models::shared::{
         EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_same_device,
-        ensure_static_rotary_context, implicit_position_ids, index_tensor, prepare_stateful_rows,
+        implicit_position_ids, index_tensor, prepare_stateful_rows,
         select_hidden_with_last_columns, validate_logits_selection,
     },
     moe::SparseMoeOutput,
+    position::RopeScaling,
 };
 
 use super::{
@@ -842,10 +843,31 @@ fn prepare_stateful_input<B: Backend>(
     // A fresh prefill has no rotated keys to invalidate yet.
     for (row, context) in rows.active_contexts() {
         if state.lengths[row] > 0 {
-            ensure_static_rotary_context(model.model.rope.scaling(), context, "DeepSeek")?;
+            ensure_cached_rotary_context(model.model.rope.scaling(), context)?;
         }
     }
     Ok(rows)
+}
+
+/// Rejects a rotary context that would invalidate keys already in the cache.
+///
+/// Cached rotary keys were rotated with the frequencies of the context at
+/// the time they were written. Context-dependent scalings (dynamic NTK, and
+/// LongRoPE's short/long factor switch) change those frequencies beyond
+/// [`RopeScaling::cached_context_limit`], so extending a non-empty cache past
+/// it would mix incompatible rotations; static scalings never invalidate keys.
+///
+/// # Errors
+///
+/// Returns [`Error::BackendCapability`] for a context beyond the limit.
+fn ensure_cached_rotary_context(scaling: RopeScaling, context: usize) -> Result<()> {
+    match scaling.cached_context_limit() {
+        Some(limit) if context > limit => Err(Error::BackendCapability(format!(
+            "DeepSeek cached decoding at context {context} exceeds the {limit}-token limit of its \
+             context-dependent rotary scaling, which would require re-rotating cached keys"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// Builds `excluded(q,k) = k > baseline + q` for one compact row.

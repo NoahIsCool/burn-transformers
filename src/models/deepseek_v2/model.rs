@@ -6,6 +6,18 @@
 //! SwiGLU block followed by 26 blocks that add a top-6 routed mixture to one
 //! always-active SwiGLU whose intermediate width is exactly twice an expert's
 //! width (see [`DeepseekV2Moe`] for the routing policies and balance losses).
+//!
+//! # Positions and attention scale
+//!
+//! Rotary metadata goes through the shared translator
+//! ([`RopeParameters::to_rope_config`](crate::models::config::RopeParameters::to_rope_config))
+//! with DeepSeek's reference conventions: the YaRN amplitude is
+//! `m(f, mscale) / m(f, mscale_all_dim)` whenever either key is present, and
+//! every scaled `rope_type` multiplies the softmax scale
+//! `1 / sqrt(qk_nope + qk_rope)` by `m(f, mscale_all_dim)^2`, where
+//! `m(s, k) = 1 + 0.1 k ln s`. Only the `qk_rope_head_dim` sub-head rotates
+//! and it always rotates completely, so a `partial_rotary_factor` other than
+//! one is rejected rather than silently ignored.
 
 use burn::{
     module::Module,
@@ -21,7 +33,7 @@ use crate::{
     moe::SparseMoeOutput,
     normalization::{RmsNorm, RmsNormConfig},
     operations,
-    position::{DynamicNtkScaling, LinearRopeScaling, RopeConfig, RopeScaling, YarnConfig},
+    position::RopeConfig,
 };
 
 use super::{
@@ -29,7 +41,7 @@ use super::{
     mla::{MlaMixOutput, MultiLatentAttention, MultiLatentAttentionConfig},
 };
 use crate::models::{
-    config::RopeType,
+    config::{PartialRotary, RopeContext, SoftmaxMscale, YarnMscaleConvention},
     shared::{InputContract, InputNames, select_hidden, validate_input},
 };
 
@@ -53,6 +65,41 @@ const INPUT_NAMES: InputNames<'static> = InputNames {
 /// Owner named when a stateless tensor is on another device than the weights.
 const PARAMETERS: &str = "DeepSeek model parameters";
 
+/// Builds the rotary-translation context with DeepSeek's reference conventions.
+///
+/// The rotary sub-head is `qk_rope_head_dim` wide and always fully rotated;
+/// the YaRN amplitude and the softmax correction follow DeepSeek's
+/// `modeling_deepseek.py` (module documentation).
+fn rope_context(config: &DeepseekV2Config) -> RopeContext {
+    RopeContext::new(
+        "deepseek_v2",
+        config.qk_rope_head_dim,
+        config.max_position_embeddings,
+    )
+    .with_rope_theta(Some(config.rope_theta))
+    .with_partial_rotary(PartialRotary::FullHeadOnly)
+    .with_yarn_mscale_convention(YarnMscaleConvention::DeepSeekReference)
+    .with_softmax_mscale(SoftmaxMscale::MscaleAllDimSquared)
+}
+
+/// Translates the configuration's rotary metadata and attention score scale.
+///
+/// Returns the executable [`RopeConfig`] and the softmax scale
+/// `m(f, mscale_all_dim)^2 / sqrt(qk_nope_head_dim + qk_rope_head_dim)`.
+///
+/// # Errors
+///
+/// Returns the translator's contextual configuration errors at
+/// `deepseek_v2.rope.<field>`.
+pub(crate) fn rope_and_softmax_scale(config: &DeepseekV2Config) -> Result<(RopeConfig, f64)> {
+    let context = rope_context(config);
+    let parameters = config.rope_scaling.clone().unwrap_or_default();
+    let rope = parameters.to_rope_config(&context)?;
+    let scale = (config.qk_head_dim() as f64).sqrt().recip()
+        * parameters.softmax_scale_multiplier(&context)?;
+    Ok((rope, scale))
+}
+
 /// One DeepSeek-V2 decoder layer.
 #[derive(Module, Debug)]
 pub struct DeepseekV2DecoderLayer<B: Backend> {
@@ -70,7 +117,15 @@ pub struct DeepseekV2DecoderLayer<B: Backend> {
 
 impl<B: Backend> DeepseekV2DecoderLayer<B> {
     /// Allocates one validated layer at its exact dense/MoE schedule position.
-    fn init(config: &DeepseekV2Config, layer_index: usize, device: &B::Device) -> Result<Self> {
+    ///
+    /// `softmax_scale` is the translated attention score scale shared by
+    /// every layer (see [`rope_and_softmax_scale`]).
+    fn init(
+        config: &DeepseekV2Config,
+        layer_index: usize,
+        softmax_scale: f64,
+        device: &B::Device,
+    ) -> Result<Self> {
         let mut attention = MultiLatentAttentionConfig::new(
             config.hidden_size,
             config.num_attention_heads,
@@ -82,7 +137,7 @@ impl<B: Backend> DeepseekV2DecoderLayer<B> {
         );
         attention.rms_norm_epsilon = config.rms_norm_eps;
         attention.bias = config.attention_bias;
-        attention.softmax_scale = deepseek_attention_scale(config)?;
+        attention.softmax_scale = softmax_scale;
         let norm = || {
             RmsNormConfig::new(config.hidden_size)
                 .with_epsilon(config.rms_norm_eps)
@@ -209,9 +264,9 @@ impl<B: Backend> DeepseekV2Model<B> {
                 "DeepSeek-V2 inference requires the released zero attention dropout".into(),
             ));
         }
-        let rope = deepseek_rope_config(&config)?;
+        let (rope, softmax_scale) = rope_and_softmax_scale(&config)?;
         let layers = (0..config.num_hidden_layers)
-            .map(|index| DeepseekV2DecoderLayer::init(&config, index, device))
+            .map(|index| DeepseekV2DecoderLayer::init(&config, index, softmax_scale, device))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             embed_tokens: EmbeddingConfig::new(config.vocab_size, config.hidden_size).init(device),
@@ -381,92 +436,6 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
             .cast(DType::F32)),
         }
     }
-}
-
-/// Converts serialized rotary metadata into the shared YaRN implementation.
-fn deepseek_rope_config(config: &DeepseekV2Config) -> Result<RopeConfig> {
-    let parameters = config.rope_scaling.clone().unwrap_or_default();
-    let theta = parameters.rope_theta.unwrap_or(config.rope_theta);
-    let scaling = match parameters.rope_type {
-        RopeType::Default => RopeScaling::None,
-        RopeType::Linear => LinearRopeScaling::new(parameters.factor.unwrap_or(1.0))
-            .map(RopeScaling::from)
-            .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))?,
-        RopeType::Dynamic => DynamicNtkScaling::new(
-            parameters.factor.unwrap_or(1.0),
-            parameters
-                .original_max_position_embeddings
-                .unwrap_or(config.max_position_embeddings),
-        )
-        .map(RopeScaling::from)
-        .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))?,
-        RopeType::Yarn => {
-            let factor = parameters.factor.unwrap_or(1.0);
-            let mut yarn = YarnConfig::new(
-                factor,
-                parameters
-                    .original_max_position_embeddings
-                    .unwrap_or(config.max_position_embeddings),
-            )
-            .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))?;
-            let amplitude = if parameters.mscale.is_some() || parameters.mscale_all_dim.is_some() {
-                yarn_mscale(factor, parameters.mscale.unwrap_or(1.0))
-                    / yarn_mscale(factor, parameters.mscale_all_dim.unwrap_or(0.0))
-            } else {
-                parameters
-                    .attention_factor
-                    .unwrap_or_else(|| yarn.attention_factor())
-            };
-            yarn = yarn
-                .with_attention_factor(amplitude)
-                .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))?;
-            // Hugging Face resolves each optional bound independently. Using
-            // the shared YaRN defaults for only the missing side preserves
-            // one-sided custom checkpoint configurations.
-            yarn = yarn
-                .with_beta_overrides(parameters.beta_fast, parameters.beta_slow)
-                .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))?;
-            RopeScaling::Yarn(yarn)
-        }
-        unsupported => {
-            return Err(Error::configuration(
-                "deepseek_v2.rope_type",
-                format!("{unsupported:?} is not implemented for DeepSeek-V2"),
-            ));
-        }
-    };
-    RopeConfig::new(
-        config.qk_rope_head_dim,
-        config.qk_rope_head_dim,
-        theta,
-        scaling,
-    )
-    .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))
-}
-
-/// Returns DeepSeek's logarithmic YaRN magnitude correction.
-fn yarn_mscale(factor: f64, multiplier: f64) -> f64 {
-    if factor <= 1.0 {
-        1.0
-    } else {
-        1.0 + 0.1 * multiplier * factor.ln()
-    }
-}
-
-/// Computes the checkpoint's scale for the sum of content and rotary logits.
-fn deepseek_attention_scale(config: &DeepseekV2Config) -> Result<f64> {
-    let mut scale = (config.qk_head_dim() as f64).sqrt().recip();
-    if let Some(parameters) = &config.rope_scaling
-        && parameters.rope_type == RopeType::Yarn
-        && let Some(multiplier) = parameters.mscale_all_dim
-        && multiplier != 0.0
-    {
-        let factor = parameters.factor.ok_or_else(|| {
-            Error::configuration("deepseek_v2.rope.factor", "is required for YaRN")
-        })?;
-        scale *= yarn_mscale(factor, multiplier).powi(2);
-    }
-    Ok(scale)
 }
 
 /// Builds `excluded(q,k) = k > q` and combines semantic padding exclusions.

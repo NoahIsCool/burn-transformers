@@ -44,7 +44,9 @@ use crate::{
     intervention::{AttentionPoints, Hooks, PointInfo},
     normalization::{RmsNorm, RmsNormConfig},
     operations,
-    position::{RopeConfig, RotaryAngles, apply_rotary, rotary_angles},
+    position::{
+        RopeConfig, apply_rotary, apply_rotary_to, interleaved_to_split_half, rotary_angles,
+    },
 };
 
 /// Shape-bearing configuration for one multi-head latent-attention layer.
@@ -312,8 +314,8 @@ impl<B: Backend> MlaProjection<B> {
     ) -> Result<Self> {
         let query_angles = rotary_angles(rope, query_positions, evaluated_context)?;
         let key_angles = rotary_angles(rope, key_positions, evaluated_context)?;
-        self.query_rotary = rotate(self.query_rotary, &query_angles)?;
-        self.rotated_key = rotate(self.rotated_key, &key_angles)?;
+        self.query_rotary = apply_rotary_to(self.query_rotary, &query_angles)?;
+        self.rotated_key = apply_rotary_to(self.rotated_key, &key_angles)?;
         Ok(self)
     }
 }
@@ -439,24 +441,22 @@ impl<B: Backend> MultiLatentAttention<B> {
             ])
             .swap_dims(1, 2);
         let query_content = query.clone().narrow(3, 0, self.config.qk_nope_head_dim);
-        let query_rotary = interleaved_to_split(
-            query.narrow(
-                3,
-                self.config.qk_nope_head_dim,
-                self.config.qk_rope_head_dim,
-            ),
-            "mla.query_rotary",
-        )?;
+        // Checkpoints interleave each rotary pair's real and imaginary parts;
+        // the shared split-half rotation needs them in two contiguous halves.
+        let query_rotary = interleaved_to_split_half(query.narrow(
+            3,
+            self.config.qk_nope_head_dim,
+            self.config.qk_rope_head_dim,
+        ))?;
         let compressed = operations::linear(key_value_hidden, &self.kv_a_proj_with_mqa)?;
         let normalized_latent =
             self.kv_a_layernorm
                 .forward(compressed.clone().narrow(2, 0, self.config.kv_lora_rank));
-        let rotated_key = interleaved_to_split(
+        let rotated_key = interleaved_to_split_half(
             compressed
                 .narrow(2, self.config.kv_lora_rank, self.config.qk_rope_head_dim)
                 .reshape([batch, key_sequence, 1, self.config.qk_rope_head_dim])
                 .swap_dims(1, 2),
-            "mla.rotary_key",
         )?;
         Ok(MlaProjection {
             query_content,
@@ -684,7 +684,7 @@ impl<B: Backend> MultiLatentAttention<B> {
     pub(crate) fn project_rotary(
         &self,
         hidden: Tensor<B, 3>,
-        positions: burn::tensor::Tensor<B, 2, burn::tensor::Int>,
+        positions: Tensor<B, 2, Int>,
         rope: RopeConfig,
         evaluated_context: usize,
     ) -> Result<MlaProjection<B>> {
@@ -885,36 +885,6 @@ impl<B: Backend> MultiLatentAttention<B> {
             expanded.narrow(3, self.config.qk_nope_head_dim, self.config.value_head_dim),
         ))
     }
-}
-
-/// Rotates one split-half tensor `[batch, heads, sequence, rotary]` by `angles`.
-///
-/// The shared [`apply_rotary`] rotates an equal-length query/key pair. Its
-/// companion here is a one-head slice of the same tensor whose rotation is
-/// discarded, so the redundant work is at most one head instead of a second
-/// full rotation.
-fn rotate<B: Backend>(tensor: Tensor<B, 4>, angles: &RotaryAngles<B>) -> Result<Tensor<B, 4>> {
-    let companion = tensor.clone().narrow(1, 0, 1);
-    Ok(apply_rotary(tensor, companion, angles)?.0)
-}
-
-/// Converts `[real_0, imag_0, real_1, imag_1, ...]` to split-half layout.
-fn interleaved_to_split<B: Backend>(
-    input: Tensor<B, 4>,
-    name: &'static str,
-) -> Result<Tensor<B, 4>> {
-    let [batch, heads, sequence, width] = input.dims();
-    if width == 0 || !width.is_multiple_of(2) {
-        return Err(Error::shape(
-            name,
-            "a non-zero even final dimension",
-            format!("{:?}", input.dims()),
-        ));
-    }
-    Ok(input
-        .reshape([batch, heads, sequence, width / 2, 2])
-        .swap_dims(3, 4)
-        .reshape([batch, heads, sequence, width]))
 }
 
 /// Applies a `true == excluded` mask and the shared FP32 softmax.

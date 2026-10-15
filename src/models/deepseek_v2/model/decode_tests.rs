@@ -848,3 +848,18 @@ fn reduced_precision_inactive_rows_keep_f32_router_logits() {
         }
     }
 }
+
+/// Context-dependent rotary scalings refuse to extend a non-empty cache past their limit.
+#[test]
+fn context_dependent_rotary_scaling_guards_cached_keys() {
+    let dynamic = crate::position::RopeScaling::from(
+        crate::position::DynamicNtkScaling::new(2.0, 16).unwrap(),
+    );
+    assert!(ensure_cached_rotary_context(dynamic, 16).is_ok());
+    let error = ensure_cached_rotary_context(dynamic, 17).unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(message) if message.contains("16-token limit")),
+        "{error}"
+    );
+    assert!(ensure_cached_rotary_context(crate::position::RopeScaling::None, usize::MAX).is_ok());
+}

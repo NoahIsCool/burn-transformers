@@ -7,7 +7,15 @@ use burn::{
 };
 
 use super::*;
-use crate::{LogitsSelection, architecture::TokenMask, models::shared::ensure_same_device};
+use crate::{
+    LogitsSelection,
+    architecture::TokenMask,
+    models::{
+        config::{RopeType, yarn_mscale},
+        shared::ensure_same_device,
+    },
+    position::RopeScaling,
+};
 
 /// CPU backend with F32 tensor values and I32 token indices for deterministic fixtures.
 type TestBackend = Flex<f32, i32>;
@@ -293,13 +301,13 @@ fn stateless_device_affinity_errors_are_contextual() {
 #[test]
 fn pinned_yarn_scaling_matches_closed_form() {
     let config = DeepseekV2Config::default();
-    let rope = deepseek_rope_config(&config).unwrap();
+    let (rope, scale) = rope_and_softmax_scale(&config).unwrap();
     let RopeScaling::Yarn(yarn) = rope.scaling() else {
         panic!("pinned config must use YaRN")
     };
     assert!((yarn.attention_factor() - 1.0).abs() < 1e-12);
     let expected = (192.0_f64).sqrt().recip() * yarn_mscale(40.0, 0.707).powi(2);
-    assert!((deepseek_attention_scale(&config).unwrap() - expected).abs() < 1e-12);
+    assert!((scale - expected).abs() < 1e-12);
 }
 
 /// One-sided YaRN beta overrides retain the official default for the other bound.
@@ -313,19 +321,62 @@ fn yarn_beta_overrides_are_resolved_independently() {
         beta_fast: Some(24.0),
         ..Default::default()
     });
-    let RopeScaling::Yarn(fast_only) = deepseek_rope_config(&config).unwrap().scaling() else {
-        panic!("expected YaRN")
+    let yarn = |config: &DeepseekV2Config| {
+        let RopeScaling::Yarn(yarn) = rope_and_softmax_scale(config).unwrap().0.scaling() else {
+            panic!("expected YaRN")
+        };
+        yarn
     };
+    let fast_only = yarn(&config);
     assert_eq!(fast_only.beta_fast(), 24.0);
     assert_eq!(fast_only.beta_slow(), 1.0);
 
     config.rope_scaling.as_mut().unwrap().beta_fast = None;
     config.rope_scaling.as_mut().unwrap().beta_slow = Some(2.0);
-    let RopeScaling::Yarn(slow_only) = deepseek_rope_config(&config).unwrap().scaling() else {
-        panic!("expected YaRN")
-    };
+    let slow_only = yarn(&config);
     assert_eq!(slow_only.beta_fast(), 32.0);
     assert_eq!(slow_only.beta_slow(), 2.0);
+}
+
+/// The rotary sub-head always rotates completely (API-2): a partial factor is an error.
+#[test]
+fn partial_rotary_factors_are_rejected_instead_of_ignored() {
+    let mut config = tests_support::tiny_config();
+    // Four rotary channels keep the factor itself valid (two rotated channels).
+    config.qk_rope_head_dim = 4;
+    config.rope_scaling = Some(crate::models::config::RopeParameters {
+        partial_rotary_factor: Some(0.5),
+        ..Default::default()
+    });
+    let error = DeepseekV2ForCausalLm::<TestBackend>::init(config.clone(), &Default::default())
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("deepseek_v2.rope.partial_rotary_factor"),
+        "{error}"
+    );
+    config.rope_scaling.as_mut().unwrap().partial_rotary_factor = Some(1.0);
+    assert!(DeepseekV2ForCausalLm::<TestBackend>::init(config, &Default::default()).is_ok());
+}
+
+/// The softmax correction follows the reference for every scaled `rope_type`.
+///
+/// DeepSeek's reference multiplies the softmax scale by `m(f, mscale_all_dim)^2`
+/// whenever `rope_scaling` is set, not only for YaRN; default RoPE has none.
+#[test]
+fn softmax_correction_applies_to_every_scaled_rope_type() {
+    let mut config = tests_support::tiny_config();
+    let base = (5.0_f64).sqrt().recip();
+    assert!((rope_and_softmax_scale(&config).unwrap().1 - base).abs() < 1e-15);
+    config.rope_scaling = Some(crate::models::config::RopeParameters {
+        rope_type: RopeType::Linear,
+        factor: Some(4.0),
+        mscale_all_dim: Some(1.0),
+        ..Default::default()
+    });
+    let scale = rope_and_softmax_scale(&config).unwrap().1;
+    assert!((scale - base * yarn_mscale(4.0, 1.0).powi(2)).abs() < 1e-15);
 }
 
 /// DeepSeek returns vocabulary logits in FP32 even for reduced-precision modules.

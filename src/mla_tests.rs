@@ -75,7 +75,7 @@ fn interleaved_rotary_channels_are_permuted_to_split_halves() {
         [[[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]]],
         &device,
     );
-    let actual = interleaved_to_split(input, "test").unwrap().into_data();
+    let actual = interleaved_to_split_half(input).unwrap().into_data();
     actual.assert_approx_eq::<f32>(
         &TensorData::from([[[[1.0, 3.0, 2.0, 4.0], [5.0, 7.0, 6.0, 8.0]]]]),
         Tolerance::absolute(0.0),
@@ -708,12 +708,10 @@ fn latent_and_rotary_helpers_reject_invalid_channel_widths() {
         .unwrap_err();
     assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.latents"));
     for width in [0, 1, 3] {
-        let error = interleaved_to_split(
-            Tensor::<TestBackend, 4>::zeros([1, 1, 2, width], &device),
-            "odd_rotary",
-        )
-        .unwrap_err();
-        assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "odd_rotary"));
+        let error =
+            interleaved_to_split_half(Tensor::<TestBackend, 4>::zeros([1, 1, 2, width], &device))
+                .unwrap_err();
+        assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "rope.interleaved_input"));
     }
     let error = attention_probabilities(
         Tensor::<TestBackend, 4>::zeros([1, 2, 1, 3], &device),
