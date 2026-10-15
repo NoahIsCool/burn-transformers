@@ -39,7 +39,10 @@
 //! `RepetitionPenalty`) and vLLM apply it in that order.
 //!
 //! Temperature sampling draws from `p(i) = exp(z_i / T) / sum_j exp(z_j / T)`.
-//! Top-k keeps exactly the `k` greatest scores. Nucleus (top-p) keeps the
+//! Top-k keeps every token whose score is at least the `k`-th greatest score
+//! `z_(k)`: `z_i >= z_(k)`. Tokens tied with the boundary score all survive, so
+//! more than `k` may remain, exactly as Hugging Face's `TopKLogitsWarper`
+//! (`scores < topk(scores, k)[..., -1]` is removed). Nucleus (top-p) keeps the
 //! shortest sorted prefix whose probability mass reaches `p`; equivalently, a
 //! sorted item survives when the mass *before* it is below `p`. Min-p keeps
 //! `p_i >= min_p * max_j p_j`, evaluated as `z_i >= max_j z_j + ln(min_p)`
@@ -151,7 +154,11 @@ pub struct GenerationConfig {
     pub strategy: SamplingStrategy,
     /// Positive softmax temperature used for stochastic sampling.
     pub temperature: f64,
-    /// Optional exact count of greatest logits retained before sampling.
+    /// Optional top-k cutoff applied when sampling.
+    ///
+    /// Keeps every token scoring at least the `k`-th greatest logit, so tokens
+    /// tied with that boundary score all survive (Hugging Face
+    /// `TopKLogitsWarper` semantics). Must lie in `1..=vocabulary_size`.
     pub top_k: Option<usize>,
     /// Optional nucleus probability in the interval `(0, 1]`.
     pub top_p: Option<f64>,
@@ -845,13 +852,24 @@ fn sample_with_uniforms<B: Backend>(logits: Tensor<B, 2>, uniforms: Vec<f32>) ->
         .squeeze_dim::<1>(1)
 }
 
-/// Keeps exactly the requested greatest values in every batch row.
+/// Keeps every score at least the `k`-th greatest of its row, ties included.
+///
+/// With row scores sorted descending `z_(1) >= ... >= z_(V)`, a token survives
+/// when `z_i >= z_(k)`; every other score becomes `-inf`. This is Hugging
+/// Face's `TopKLogitsWarper` rule, so tokens tied with the boundary score are
+/// never dropped by sort order. One value sort and one comparison per row: no
+/// index sort or scatter is needed, and the comparison runs in the logits
+/// dtype, so the boundary token itself always survives. Requires
+/// `1 <= top_k <= vocabulary`.
 fn filter_top_k<B: Backend>(logits: Tensor<B, 2>, top_k: usize) -> Tensor<B, 2> {
     let [batch, vocabulary] = logits.dims();
-    let (_, indices) = logits.clone().sort_descending_with_indices(1);
-    let indices = indices.narrow(1, 0, top_k);
-    let keep = scatter_selection_mask(indices, batch, vocabulary);
-    logits.mask_fill(keep.bool_not(), f64::NEG_INFINITY)
+    let boundary = logits
+        .clone()
+        .sort_descending(1)
+        .narrow(1, top_k - 1, 1)
+        .expand([batch, vocabulary]);
+    let below = logits.clone().lower(boundary);
+    logits.mask_fill(below, f64::NEG_INFINITY)
 }
 
 /// Keeps the minimal descending-probability prefix whose mass reaches `top_p`.
@@ -887,18 +905,6 @@ fn filter_min_p<B: Backend>(logits: Tensor<B, 2>, min_p: f64) -> Tensor<B, 2> {
         .add_scalar(min_p.ln())
         .expand([batch, vocabulary]);
     logits.mask_fill(scores.lower(threshold), f64::NEG_INFINITY)
-}
-
-/// Converts per-row selected vocabulary indices into a dense Boolean mask.
-fn scatter_selection_mask<B: Backend>(
-    indices: Tensor<B, 2, Int>,
-    batch: usize,
-    vocabulary: usize,
-) -> Tensor<B, 2, Bool> {
-    let width = indices.dims()[1];
-    let device = indices.device();
-    let selected = Tensor::<B, 2, Bool>::ones([batch, width], &device);
-    scatter_mask(indices, selected, batch, vocabulary)
 }
 
 /// Scatters a sorted Boolean selection back to original vocabulary order.
