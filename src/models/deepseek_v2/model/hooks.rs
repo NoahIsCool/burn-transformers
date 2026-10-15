@@ -47,7 +47,7 @@ use crate::{
 
 use super::{
     AttentionInputs, CustomConnectivity, DeepseekV2ForCausalLm, DeepseekV2Model, INPUT_NAMES,
-    MlaVisibility, PARAMETERS,
+    PARAMETERS, PositionalVisibility,
 };
 
 impl<B: Backend> DeepseekV2ForCausalLm<B> {
@@ -257,7 +257,7 @@ impl<B: Backend> DeepseekV2Model<B> {
             })
             .collect::<Result<Vec<_>>>()?;
         let angles = self.rotary_tables(context.positions.clone(), context.evaluated_context)?;
-        let visibility = MlaVisibility::causal_columns(
+        let visibility = PositionalVisibility::causal_columns(
             sequence,
             context
                 .token_mask

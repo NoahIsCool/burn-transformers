@@ -688,7 +688,7 @@ fn stress_muse_32k_attention_envelope_on_metal() {
     .to_vec::<i32>()
     .expect("read 32K position edges");
     assert_eq!(position_edges, [0, 32_767]);
-    let angles = rotary_angles(
+    let angles = crate::position::rotary_angles(
         muse_rope_config(&config, 500_000.0).expect("synthetic Muse RoPE"),
         positions,
         MUSE_32K_STRESS_SEQUENCE,
@@ -1315,13 +1315,25 @@ fn official_32k_chunk_schedules_bound_every_realized_plane() {
     assert_eq!(global.len(), 512);
     assert_eq!(global.first().unwrap().query_range, 0..64);
     assert_eq!(global.last().unwrap().query_range, 32_704..32_768);
-    assert!(global.iter().all(|chunk| chunk.key_range == (0..SEQUENCE)));
+    // Causal trimming: a chunk ending at row `end` scores only keys `0..end`.
     assert!(
         global
             .iter()
-            .all(|chunk| chunk.plane_shape == [1, HEADS, 64, SEQUENCE])
+            .all(|chunk| chunk.key_range == (0..chunk.query_range.end))
     );
-    assert!(global.iter().all(|chunk| chunk.plane_elements == LIMIT));
+    assert!(
+        global
+            .iter()
+            .all(|chunk| chunk.plane_shape == [1, HEADS, 64, chunk.query_range.end])
+    );
+    assert!(global.iter().all(|chunk| chunk.plane_elements <= LIMIT));
+    assert_eq!(global.last().unwrap().plane_elements, LIMIT);
+    // Half the untrimmed score work: sum_i 64 (i + 1) over 512 chunks of 64 rows.
+    let scored = global
+        .iter()
+        .map(|chunk| chunk.plane_elements)
+        .sum::<usize>();
+    assert_eq!(scored, HEADS * 64 * 64 * (512 * 513 / 2));
     assert_contiguous_query_coverage(&global, SEQUENCE);
 
     let local_key_bound = WINDOW + policy.maximum_query_tokens(SEQUENCE) - 1;
@@ -1376,9 +1388,13 @@ fn chunk_schedule_fails_closed_on_plan_drift_and_key_underestimates() {
     );
 
     let plane_drift =
-        plan_muse_attention_chunks(AttentionExecutionPolicy::Unbounded, plan, 1, 3, 8, 4, None)
+        plan_muse_attention_chunks(AttentionExecutionPolicy::Unbounded, plan, 1, 3, 8, 8, None)
             .expect_err("a looser runtime policy cannot widen an immutable plan");
     assert!(plane_drift.to_string().contains("immutable execution plan"));
+
+    let misaligned = plan_muse_attention_chunks(policy, plan, 1, 2, 8, 4, None)
+        .expect_err("causal queries are the suffix of their keys");
+    assert!(misaligned.to_string().contains("at least as long"));
 
     let empty_keys = plan_muse_attention_chunks(policy, plan, 1, 2, 8, 0, None)
         .expect_err("empty key storage must fail before slicing");
@@ -1528,7 +1544,8 @@ fn scale_free_norm_matches_pinned_f16_power_oracle() {
     let device = Default::default();
     let input = Tensor::<TestBackend, 2>::from_floats([[0.096_557_62, 2.664_062_5]], &device)
         .cast(DType::F16);
-    let actual = scale_free_rms_norm(input.clone(), 1e-5)
+    let actual = scale_free_rms_norm(input.clone(), 1e-5, RmsNormRootMode::MultiplyByPower)
+        .unwrap()
         .into_data()
         .to_vec::<f16>()
         .unwrap()
@@ -1551,6 +1568,9 @@ fn scale_free_norm_matches_pinned_f16_power_oracle() {
 }
 
 /// Sliding masks measure an interior hole in semantic rather than physical time.
+///
+/// Visibility is causal in valid-token ordinals: the hole at column 2
+/// consumes no window capacity, so query 3 (ordinal 2) still sees column 0.
 #[test]
 fn sliding_mask_uses_valid_token_ordinals() {
     let device = Default::default();
@@ -1558,9 +1578,10 @@ fn sliding_mask_uses_valid_token_ordinals() {
         [[true, true, false, true, true]].into(),
         &device,
     ));
-    let excluded = stateless_attention_mask(Some(&valid), 1, 1, 5, Some(3), &device)
+    let excluded = PositionalVisibility::causal_ordinals(5, Some(&valid), &device)
         .unwrap()
-        .unwrap()
+        .with_window(Some(3))
+        .exclusion(1, 1, 0..5, 0..5)
         .reshape([5, 5])
         .into_data()
         .to_vec::<bool>()
@@ -1569,13 +1590,35 @@ fn sliding_mask_uses_valid_token_ordinals() {
     assert_eq!(
         excluded,
         [
-            false, false, true, false, false, // semantic query 0
-            false, false, true, false, false, // semantic query 1
+            false, true, true, true, true, // semantic query 0
+            false, false, true, true, true, // semantic query 1
             true, true, true, true, true, // invalid query column
-            false, false, true, false, false, // semantic query 2
+            false, false, true, false, true, // semantic query 2
             true, false, true, false, false, // semantic query 3
         ]
     );
+}
+
+/// Runs one decoder layer statelessly at explicit positions (test convenience).
+fn layer_forward(
+    model: &MuseGlimmerForCausalLm<TestBackend>,
+    index: usize,
+    hidden: Tensor<TestBackend, 3>,
+    positions: Tensor<TestBackend, 2, Int>,
+    evaluated_context: usize,
+) -> Tensor<TestBackend, 3> {
+    let tables = model
+        .model
+        .rotary_tables(positions, evaluated_context)
+        .unwrap();
+    let inputs = LayerInputs {
+        tables: &tables,
+        token_mask: None,
+        sliding_window: model.config().resolved_sliding_window(),
+    };
+    model.model.layers[index]
+        .forward(hidden, &inputs, None)
+        .unwrap()
 }
 
 /// Stateless inference emits exact requested shapes and dense diagnostics.
@@ -1616,18 +1659,14 @@ fn nope_layer_does_not_consume_positions() {
         [[[0.1, -0.2, 0.3, 0.4, -0.5, 0.6, 0.7, -0.8]]],
         &device,
     );
-    let first = layer
-        .forward(
-            hidden.clone(),
-            Tensor::from_ints([[0]], &device),
-            None,
-            1,
-            None,
-        )
-        .unwrap();
-    let later = layer
-        .forward(hidden, Tensor::from_ints([[17]], &device), None, 18, None)
-        .unwrap();
+    let first = layer_forward(
+        &model,
+        3,
+        hidden.clone(),
+        Tensor::from_ints([[0]], &device),
+        1,
+    );
+    let later = layer_forward(&model, 3, hidden, Tensor::from_ints([[17]], &device), 18);
     first
         .into_data()
         .assert_approx_eq::<f32>(&later.into_data(), Tolerance::absolute(1e-6));
@@ -1712,7 +1751,7 @@ fn decoder_layer_matches_explicit_sandwich_equation() {
         )
         .expect("validated feed-forward projection");
     let expected = after_attention + layer.post_feedforward_layernorm.forward(fed);
-    let actual = layer.forward(hidden, position, None, 1, Some(3)).unwrap();
+    let actual = layer_forward(&model, 3, hidden, position, 1);
     actual
         .into_data()
         .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(1e-6));
@@ -1814,66 +1853,187 @@ fn autodiff_smoke_reaches_embedding_weights() {
     assert!(model.model.embed_tokens.weight.grad(&gradients).is_some());
 }
 
-/// Multi-chunk autodiff fails closed because its tape is not memory-bounded.
+/// Bounded policies stay trainable: autodiff evaluates one call (API-1 regression).
+///
+/// The default policy chunks prompts longer than 512 tokens. An autodiff tape
+/// retains every chunk anyway, so chunking bounds nothing; training used to
+/// fail with a capability error for any long sequence. Autodiff now evaluates
+/// one call with values equal to the unbounded policy.
 #[cfg(feature = "autodiff")]
 #[test]
-fn bounded_multichunk_autodiff_is_not_mislabeled_as_memory_bounded() {
+fn bounded_policies_train_under_autodiff_with_one_call() {
     use burn::backend::Autodiff;
 
     /// Reverse-mode backend for checking gradient propagation through Muse attention.
     type AdBackend = Autodiff<TestBackend>;
     let device = Default::default();
-    let model = MuseGlimmerForCausalLm::<AdBackend>::init(tiny_config(), &device)
-        .unwrap()
+    let base = initialized_model::<AdBackend>(tiny_config(), &device);
+    let input = || CausalLmInput {
+        token_ids: Tensor::<AdBackend, 2, Int>::from_ints([[1, 2, 3, 4, 5]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..Default::default()
+    };
+    let chunked = base
+        .clone()
         .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(1, 64))
         .unwrap();
-    let error = model
-        .forward(
-            CausalLmInput {
-                token_ids: Tensor::<AdBackend, 2, Int>::from_ints([[1, 2]], &device),
-                token_mask: None,
-                position_ids: None,
-            },
-            &ForwardOptions::default(),
-        )
-        .expect_err("autodiff retains all chunk intermediates");
-    assert!(error.to_string().contains("inference-only"));
-    assert!(error.to_string().contains("autodiff tape"));
+    let logits = chunked.forward(input(), &options).unwrap().logits;
+    let expected = base
+        .with_attention_execution_policy(AttentionExecutionPolicy::Unbounded)
+        .unwrap()
+        .forward(input(), &options)
+        .unwrap()
+        .logits;
+    logits
+        .clone()
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(1e-6));
+    let gradients = logits.sum().backward();
+    assert!(chunked.model.embed_tokens.weight.grad(&gradients).is_some());
 }
 
 impl<B: Backend> MuseGlimmerAttention<B> {
-    /// Evaluates already positioned attention and gates its result before `o_proj`.
+    /// Evaluates already positioned attention in one call and gates its result.
     ///
-    /// `mask` follows Burn's kernel convention: `true` excludes a query/key pair.
-    /// This entry point can slice score computation but cannot undo an already
-    /// materialized quadratic mask. Stateless and cached model paths use the
-    /// lazy-mask entry points below for long contexts.
-    #[cfg(test)]
+    /// `mask` follows Burn's kernel convention: `true` excludes a query/key
+    /// pair; `causal` adds bottom-right causality. Model paths use the bounded
+    /// chunked entry points instead.
     fn attend(
         &self,
         projection: MuseAttentionProjection<B>,
         mask: Option<Tensor<B, 4, Bool>>,
         causal: bool,
     ) -> Result<Tensor<B, 3>> {
-        let [batch, query_sequence, key_sequence] = self.validate_projection(&projection)?;
-        validate_materialized_mask(
-            mask.as_ref(),
-            batch,
-            self.query_heads,
-            query_sequence,
-            key_sequence,
-        )?;
-        let plan =
-            self.execution_policy
-                .plan(batch, self.query_heads, query_sequence, key_sequence)?;
-        if plan.chunk_count() == 1 {
-            return self.attend_unbounded(projection, mask, causal);
-        }
-        self.attend_chunked(projection, plan, causal, None, |query_range, key_range| {
-            Ok(mask.as_ref().map(|mask| {
-                mask.clone()
-                    .slice([0..batch, 0..self.query_heads, query_range, key_range])
-            }))
-        })
+        let context = self.attend_unbounded(&projection, mask, causal)?;
+        self.gated_output(context, projection.gate, None)
     }
+}
+
+/// A cached local decode never scores the evicted ring column (VER-2 regression).
+///
+/// After wraparound a local layer reads `W` ring slots plus the new token,
+/// `K = W + 1` keys, of which the oldest left the window. The planner used
+/// the bound `W` but the single-chunk path materialized all `K` columns,
+/// exceeding the policy's score bound by one column per head. The chunk now
+/// slices exactly the window, and a policy sized for `W` keys succeeds with
+/// unbounded-equal values.
+#[test]
+fn single_chunk_local_attention_respects_the_score_bound() {
+    const WINDOW: usize = 3;
+    let device = Default::default();
+    let (model, _) = tiny_model();
+    let heads = model.config().num_attention_heads;
+    let policy = AttentionExecutionPolicy::query_chunked(512, heads * WINDOW);
+    let plan = policy.plan(1, heads, 1, WINDOW).unwrap();
+    let chunks =
+        plan_muse_attention_chunks(policy, plan, 1, heads, 1, WINDOW + 1, Some(WINDOW)).unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].key_range, 1..WINDOW + 1);
+    assert_eq!(chunks[0].plane_elements, heads * WINDOW);
+
+    let attention = &model.model.layers[0].self_attn;
+    let hidden = Tensor::<TestBackend, 3>::from_floats(
+        [[
+            [0.1, -0.2, 0.3, 0.4, -0.5, 0.6, 0.7, -0.8],
+            [0.2, 0.1, -0.3, 0.5, 0.4, -0.6, 0.1, 0.8],
+            [-0.4, 0.3, 0.2, -0.1, 0.6, 0.5, -0.7, 0.2],
+            [0.3, -0.5, 0.1, 0.2, -0.2, 0.4, 0.6, -0.1],
+        ]],
+        &device,
+    );
+    let full = attention.project_self(hidden).unwrap();
+    let projection = MuseAttentionProjection {
+        query: full.query.clone().narrow(2, WINDOW, 1),
+        key: full.key.clone(),
+        value: full.value.clone(),
+        gate: full.gate.clone().narrow(1, WINDOW, 1),
+    };
+    let mut bounded = attention.clone();
+    bounded.execution_policy = policy;
+    let mut unbounded = attention.clone();
+    unbounded.execution_policy = AttentionExecutionPolicy::Unbounded;
+    let expected = unbounded
+        .attend_cached(projection.clone(), Some(WINDOW))
+        .unwrap();
+    bounded
+        .attend_cached(projection, Some(WINDOW))
+        .unwrap()
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(1e-6));
+}
+
+/// Native-head attention equals attention over explicitly repeated K/V (PERF-2).
+#[test]
+fn native_head_attention_matches_repeated_heads() {
+    let device = Default::default();
+    let (model, _) = tiny_model();
+    let attention = &model.model.layers[3].self_attn;
+    let hidden = Tensor::<TestBackend, 3>::from_floats(
+        [[
+            [0.1, -0.2, 0.3, 0.4, -0.5, 0.6, 0.7, -0.8],
+            [0.2, 0.1, -0.3, 0.5, 0.4, -0.6, 0.1, 0.8],
+            [-0.4, 0.3, 0.2, -0.1, 0.6, 0.5, -0.7, 0.2],
+        ]],
+        &device,
+    );
+    let projection = attention.project_self(hidden).unwrap();
+    let native = attention.attend_aligned(&projection, None, None).unwrap();
+    let repeated = MuseAttentionProjection {
+        key: crate::attention::repeat_key_value(projection.key.clone(), 2).unwrap(),
+        value: crate::attention::repeat_key_value(projection.value.clone(), 2).unwrap(),
+        ..projection
+    };
+    let mut wide = attention.clone();
+    wide.key_value_heads = 2;
+    let reference = wide.attend_unbounded(&repeated, None, true).unwrap();
+    native
+        .into_data()
+        .assert_approx_eq::<f32>(&reference.into_data(), Tolerance::absolute(1e-6));
+}
+
+/// Whole heads rotate: a partial rotary factor is rejected instead of ignored (API-2).
+#[test]
+fn partial_rotary_factors_are_rejected_instead_of_ignored() {
+    let config = MuseGlimmerTextConfig {
+        rope_parameters: Some(crate::models::config::RopeParameters {
+            rope_theta: Some(500_000.0),
+            partial_rotary_factor: Some(0.5),
+            ..Default::default()
+        }),
+        ..tiny_config()
+    };
+    let error =
+        MuseGlimmerForCausalLm::<TestBackend>::init(config, &Default::default()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("muse_glimmer.rope.partial_rotary_factor"),
+        "{error}"
+    );
+}
+
+/// One theta resolver serves validation, the default schedule, and translation (MUSE-1).
+#[test]
+fn global_rope_theta_has_one_resolver() {
+    let unset = MuseGlimmerTextConfig {
+        rope_parameters: Some(crate::models::config::RopeParameters::default()),
+        ..tiny_config()
+    };
+    assert_eq!(unset.global_rope_theta(), 10_000.0);
+    let model = MuseGlimmerForCausalLm::<TestBackend>::init(unset, &Default::default()).unwrap();
+    let rope = model.model.layers[0].rope.unwrap();
+    assert_eq!(rope.theta(), 10_000.0);
+    assert!(model.model.layers[3].rope.is_none());
+    let released = tiny_config();
+    assert_eq!(released.global_rope_theta(), 500_000.0);
+    assert!(
+        released
+            .resolved_layer_rope_theta()
+            .iter()
+            .all(|&theta| theta == 0.0 || theta == 500_000.0)
+    );
 }

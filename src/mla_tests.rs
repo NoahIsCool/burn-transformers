@@ -1170,7 +1170,7 @@ fn bounded_reference_attention_matches_the_full_plane() {
         )),
     ];
     for mask in masks {
-        let visibility = MlaVisibility::causal_columns(sequence, mask, &device).unwrap();
+        let visibility = PositionalVisibility::causal_columns(sequence, mask, &device).unwrap();
         let reference = mla
             .mix_unabsorbed(
                 &projection,
@@ -1216,7 +1216,7 @@ fn cached_visibility_matches_a_bottom_right_causal_suffix() {
         normalized_latent: projection.normalized_latent.clone(),
         rotated_key: projection.rotated_key.clone(),
     };
-    let visibility = MlaVisibility::cached(
+    let visibility = PositionalVisibility::cached(
         Tensor::<TestBackend, 1, Int>::arange(3..6, &device).reshape([1, 3]),
         None,
         Tensor::<TestBackend, 1, Int>::arange(0..6, &device).reshape([1, 6]),
@@ -1257,29 +1257,29 @@ fn visibility_metadata_is_validated_before_attention() {
     let positions = |len: i64| {
         Tensor::<TestBackend, 1, Int>::arange(0..len, &device).reshape([1, len as usize])
     };
-    let valid = MlaVisibility::cached(positions(2), None, positions(3), None, vec![2, 3]);
+    let valid = PositionalVisibility::cached(positions(2), None, positions(3), None, vec![2, 3]);
     assert!(
         valid.validate(4, 2, 3).is_ok(),
         "rows of extent one broadcast"
     );
     for visibility in [
         // Too few limits, a decreasing limit, a zero limit, and a limit past the keys.
-        MlaVisibility::cached(positions(2), None, positions(3), None, vec![3]),
-        MlaVisibility::cached(positions(2), None, positions(3), None, vec![3, 2]),
-        MlaVisibility::cached(positions(2), None, positions(3), None, vec![0, 3]),
-        MlaVisibility::cached(positions(2), None, positions(3), None, vec![2, 4]),
+        PositionalVisibility::cached(positions(2), None, positions(3), None, vec![3]),
+        PositionalVisibility::cached(positions(2), None, positions(3), None, vec![3, 2]),
+        PositionalVisibility::cached(positions(2), None, positions(3), None, vec![0, 3]),
+        PositionalVisibility::cached(positions(2), None, positions(3), None, vec![2, 4]),
         // Position extents that disagree with the query and key axes.
-        MlaVisibility::cached(positions(3), None, positions(3), None, vec![2, 3]),
-        MlaVisibility::cached(positions(2), None, positions(4), None, vec![2, 3]),
+        PositionalVisibility::cached(positions(3), None, positions(3), None, vec![2, 3]),
+        PositionalVisibility::cached(positions(2), None, positions(4), None, vec![2, 3]),
         // Validity tensors whose batch or token extent is wrong.
-        MlaVisibility::cached(
+        PositionalVisibility::cached(
             positions(2),
             Some(validity(&[true; 2], [1, 2])),
             positions(3),
             None,
             vec![2, 3],
         ),
-        MlaVisibility::cached(
+        PositionalVisibility::cached(
             positions(2),
             None,
             positions(3),
@@ -1297,7 +1297,7 @@ fn visibility_metadata_is_validated_before_attention() {
             &projection,
             projection.normalized_latent.clone(),
             projection.rotated_key.clone(),
-            &MlaVisibility::cached(positions(3), None, positions(3), None, vec![1, 2]),
+            &PositionalVisibility::cached(positions(3), None, positions(3), None, vec![1, 2]),
             AttentionExecutionPolicy::default(),
         )
         .unwrap_err();
@@ -1326,7 +1326,7 @@ fn bounded_reference_attention_is_differentiable_under_any_policy() {
             4,
         )
         .unwrap();
-    let visibility = MlaVisibility::causal_columns(4, None, &device).unwrap();
+    let visibility = PositionalVisibility::causal_columns(4, None, &device).unwrap();
     let output = mla
         .mix_unabsorbed_bounded(
             &projection,
@@ -1338,4 +1338,46 @@ fn bounded_reference_attention_is_differentiable_under_any_policy() {
         .unwrap();
     let gradients = output.sum().backward();
     assert!(hidden.grad(&gradients).is_some());
+}
+
+/// Windowed suffix visibility equals the shared scalar connectivity rule.
+///
+/// Every `(queries, keys, window)` geometry up to six keys is checked against
+/// [`crate::attention::AttentionConnectivity::excludes`] with bottom-right
+/// aligned query positions, including windows wider than the keys.
+#[test]
+fn windowed_suffix_visibility_matches_the_scalar_rule() {
+    use crate::attention::AttentionConnectivity;
+
+    let device = Default::default();
+    for keys in 1..=6_usize {
+        for queries in 1..=keys {
+            for window in 1..=keys + 1 {
+                let excluded = PositionalVisibility::<TestBackend>::suffix(queries, keys, &device)
+                    .unwrap()
+                    .with_window(Some(window))
+                    .exclusion(1, 1, 0..queries, 0..keys)
+                    .into_data()
+                    .to_vec::<bool>()
+                    .unwrap();
+                let rule = AttentionConnectivity::SlidingWindow { window };
+                for query in 0..queries {
+                    for key in 0..keys {
+                        assert_eq!(
+                            excluded[query * keys + key],
+                            rule.excludes(true, keys - queries + query, key),
+                            "Q={queries} K={keys} W={window} q={query} k={key}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let error = PositionalVisibility::<TestBackend>::suffix(1, 2, &device)
+        .unwrap()
+        .with_window(Some(0))
+        .validate(1, 1, 2)
+        .unwrap_err();
+    assert!(matches!(error, Error::Configuration { .. }));
+    assert!(PositionalVisibility::<TestBackend>::suffix(3, 2, &device).is_err());
 }

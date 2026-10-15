@@ -1,0 +1,185 @@
+//! Device-side packing of ragged stateful rows into one `[B, T]` block.
+//!
+//! The host plan comes from the Verus-verified `batch` module (see its
+//! documentation for the equations); this module uploads it once per call and
+//! applies it to tensors: [`BlockLayout::compact`] gathers each row's valid
+//! tokens to the left of the block, [`BlockLayout::scatter`] restores
+//! `[B, S, X]` results with exact zeros at padding (one gather from the block
+//! with an appended zero row), and [`BlockLayout::visibility`] describes the
+//! block's queries against one batched cache read. Fully valid calls (every
+//! row has all `S` columns) upload no maps and run no gather or scatter.
+//!
+//! The layout is family-independent: every cached family with ragged rows
+//! (DeepSeek-V2 MLA and Muse-Glimmer grouped-query attention) uses it.
+
+use burn::tensor::{BasicOps, Bool, Int, Tensor, TensorData, TensorKind, backend::Backend};
+
+use crate::{
+    Error, Result, cache::KvBatchSegment, mla::PositionalVisibility, models::shared::StatefulRows,
+};
+
+use super::batch::{RowMaps, batch_extents, key_limits, query_slots, row_maps};
+
+/// Device-side packing of one call's rows into a `[B, T]` block.
+///
+/// `None` from [`BlockLayout::new`] means every row is inactive.
+pub(crate) struct BlockLayout<B: Backend> {
+    /// Rectangular width `S`.
+    sequence: usize,
+    /// Packed width `T = max_b n_b`.
+    block: usize,
+    /// `[B, T]` source columns, or `None` when packing is the identity.
+    gather: Option<Tensor<B, 2, Int>>,
+    /// `[B, S]` block entries (`T` = zero row), or `None` for the identity.
+    scatter: Option<Tensor<B, 2, Int>>,
+    /// Implicit positions `[B, T]`: `L_b + k` for valid entries, zero for padding.
+    implicit_positions: Tensor<B, 2, Int>,
+    /// Query cache slots `[B, T]` (`L_b + k`, or `L_b` for padding).
+    query_slots: Tensor<B, 2, Int>,
+    /// Query validity `[B, T]` (`k < n_b`), or `None` when every entry is valid.
+    query_valid: Option<Tensor<B, 2, Bool>>,
+    /// Key-prefix limits of the block's query rows over position-ordered keys.
+    key_limits: Vec<usize>,
+}
+
+impl<B: Backend> BlockLayout<B> {
+    /// Plans the block for validated rows appended at `baselines` (per-row cache lengths).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Configuration`] when a cursor or index overflows.
+    pub(crate) fn new(
+        prepared: &StatefulRows,
+        baselines: &[usize],
+        device: &B::Device,
+    ) -> Result<Option<Self>> {
+        let counts = &prepared.token_counts;
+        let (block, extent) = batch_extents(baselines, counts).ok_or_else(|| {
+            Error::configuration("stateful.batch", "cache cursors overflow usize")
+        })?;
+        if block == 0 {
+            return Ok(None);
+        }
+        let (batch, sequence) = (prepared.batch, prepared.sequence);
+        let identity = block == sequence && counts.iter().all(|&count| count == sequence);
+        let upload = |values: Vec<usize>, shape: [usize; 2]| -> Result<Tensor<B, 2, Int>> {
+            let signed = values
+                .into_iter()
+                .map(|value| {
+                    i64::try_from(value)
+                        .map_err(|_| Error::configuration("stateful.batch", "index exceeds i64"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Tensor::from_data(TensorData::new(signed, shape), device))
+        };
+        let (gather, scatter) = if identity {
+            (None, None)
+        } else {
+            let maps = prepared
+                .valid_indices
+                .iter()
+                .map(|columns| row_maps(columns, sequence, block))
+                .collect::<Vec<RowMaps>>();
+            (
+                Some(upload(
+                    maps.iter().flat_map(|row| row.gather.clone()).collect(),
+                    [batch, block],
+                )?),
+                Some(upload(
+                    maps.iter().flat_map(|row| row.scatter.clone()).collect(),
+                    [batch, sequence],
+                )?),
+            )
+        };
+        let slots = query_slots(baselines, counts, block, extent).concat();
+        let valid = |entry: usize| entry % block < counts[entry / block];
+        let implicit = slots
+            .iter()
+            .enumerate()
+            .map(|(entry, &slot)| if valid(entry) { slot } else { 0 })
+            .collect();
+        let query_valid = counts.iter().any(|&count| count != block).then(|| {
+            let flags = (0..batch * block).map(valid).collect::<Vec<_>>();
+            Tensor::from_data(TensorData::new(flags, [batch, block]), device)
+        });
+        Ok(Some(Self {
+            sequence,
+            block,
+            gather,
+            scatter,
+            implicit_positions: upload(implicit, [batch, block])?,
+            query_slots: upload(slots, [batch, block])?,
+            query_valid,
+            key_limits: key_limits(baselines, counts, block, extent),
+        }))
+    }
+
+    /// Returns the packed width `T`.
+    pub(crate) const fn block(&self) -> usize {
+        self.block
+    }
+
+    /// Returns implicit positions `[B, T]` (`L_b + k`, zero at padding).
+    pub(crate) fn implicit_positions(&self) -> Tensor<B, 2, Int> {
+        self.implicit_positions.clone()
+    }
+
+    /// Packs a rectangular `[B, S]` tensor into the `[B, T]` block.
+    pub(crate) fn compact<K>(&self, rectangular: Tensor<B, 2, K>) -> Tensor<B, 2, K>
+    where
+        K: TensorKind<B> + BasicOps<B>,
+    {
+        match &self.gather {
+            Some(gather) => rectangular.gather(1, gather.clone()),
+            None => rectangular,
+        }
+    }
+
+    /// Restores block results `[B, T, X]` to `[B, S, X]` with exact zeros at padding.
+    pub(crate) fn scatter<K>(&self, block: Tensor<B, 3, K>) -> Tensor<B, 3, K>
+    where
+        K: TensorKind<B> + BasicOps<B>,
+    {
+        let Some(scatter) = &self.scatter else {
+            return block;
+        };
+        let [batch, _, width] = block.dims();
+        let zero = Tensor::<B, 3, K>::zeros([batch, 1, width], (&block.device(), block.dtype()));
+        let padded = Tensor::cat(vec![block, zero], 1);
+        let index = scatter.clone().reshape([batch, self.sequence, 1]).expand([
+            batch,
+            self.sequence,
+            width,
+        ]);
+        padded.gather(1, index)
+    }
+
+    /// Describes this block's queries against one batched cache read.
+    ///
+    /// Query `k` of row `b` sits at slot `L_b + k`; padded queries are
+    /// invalid. When the read's keys are in position order (full storage,
+    /// `positional`), the verified key limits bound each query chunk's key
+    /// prefix; otherwise (ring slot order) every chunk reads all keys.
+    pub(crate) fn visibility(
+        &self,
+        segment: &KvBatchSegment<B>,
+        positional: bool,
+    ) -> PositionalVisibility<B> {
+        let keys = segment.key_positions().dims()[1];
+        let limits = if positional {
+            self.key_limits
+                .iter()
+                .map(|&limit| limit.min(keys))
+                .collect()
+        } else {
+            vec![keys; self.block]
+        };
+        PositionalVisibility::cached(
+            self.query_slots.clone(),
+            self.query_valid.clone(),
+            segment.key_positions().clone(),
+            segment.key_valid().cloned(),
+            limits,
+        )
+    }
+}

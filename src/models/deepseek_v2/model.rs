@@ -52,8 +52,8 @@ use crate::{
 use super::{
     DeepseekV2Config,
     mla::{
-        MlaMixOutput, MlaProjection, MlaVisibility, MultiLatentAttention,
-        MultiLatentAttentionConfig,
+        MlaMixOutput, MlaProjection, MultiLatentAttention, MultiLatentAttentionConfig,
+        PositionalVisibility,
     },
 };
 use crate::models::{
@@ -63,6 +63,8 @@ use crate::models::{
 
 /// Dependency-free host planning of batched stateful blocks (Verus-verified).
 pub(crate) mod batch;
+/// Device-side packing of ragged stateful rows, shared with Muse-Glimmer.
+pub(crate) mod block;
 /// External compressed MLA caches and batched transactional prefill/decode execution.
 mod decode;
 /// Activation hooks and staged execution (`HookedModel`, `StagedModel`).
@@ -125,7 +127,7 @@ struct AttentionInputs<'a, B: Backend> {
     /// Cosine/sine tables `[batch, 1, sequence, rotary]`, in the activation dtype.
     angles: &'a RotaryAngles<B>,
     /// Causal and padding visibility shared by every layer.
-    visibility: &'a MlaVisibility<B>,
+    visibility: &'a PositionalVisibility<B>,
     /// Peak score-plane policy for the reference path.
     policy: AttentionExecutionPolicy,
     /// Whether to return full attention probabilities (forces one full plane).
@@ -385,7 +387,7 @@ impl<B: Backend> DeepseekV2DecoderLayer<B> {
 /// Materializes the complete `[batch, head, query, key]` exclusion of one projection.
 fn full_exclusion<B: Backend>(
     projection: &MlaProjection<B>,
-    visibility: &MlaVisibility<B>,
+    visibility: &PositionalVisibility<B>,
 ) -> Tensor<B, 4, Bool> {
     let [batch, heads, queries, _] = projection.query_content.dims();
     let keys = projection.normalized_latent.dims()[1];
@@ -499,7 +501,7 @@ impl<B: Backend> DeepseekV2Model<B> {
     ) -> Result<BackboneOutput<B>> {
         let (positions, context) = self.validate_public_input(input)?;
         let angles = self.rotary_tables(positions, context)?;
-        let visibility = MlaVisibility::causal_columns(
+        let visibility = PositionalVisibility::causal_columns(
             input.token_ids.dims()[1],
             input
                 .token_mask

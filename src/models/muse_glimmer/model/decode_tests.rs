@@ -952,21 +952,362 @@ fn cached_attention_mask<B: Backend>(
             format!("end {key_end}"),
         ));
     }
-    super::super::aligned_attention_mask(
-        1,
-        heads,
-        query_sequence,
-        key_sequence,
-        0..query_sequence,
-        0..key_sequence,
-        true,
-        window,
-        device,
-    )?
-    .ok_or_else(|| {
-        Error::configuration(
-            "muse_glimmer.attention_mask",
-            "cached attention must produce a causal exclusion",
+    let positions = |start: usize, end: usize| {
+        Tensor::<B, 1, Int>::arange(start as i64..end as i64, device).reshape([1, end - start])
+    };
+    Ok(crate::mla::PositionalVisibility::cached(
+        positions(baseline, query_end),
+        None,
+        positions(key_start, key_end),
+        None,
+        vec![key_sequence; query_sequence],
+    )
+    .with_window(window)
+    .exclusion(1, heads, 0..query_sequence, 0..key_sequence))
+}
+
+/// Installs the tiny weights scaled by `scale`, so logits are large enough to compare.
+fn scaled_model(scale: f32) -> MuseGlimmerForCausalLm<TestBackend> {
+    use burn::module::{Module, ModuleMapper, Param};
+
+    /// Multiplies every floating parameter by a constant.
+    struct Scale(f32);
+
+    impl ModuleMapper<TestBackend> for Scale {
+        /// Scales one parameter, leaving norms (whose scale is `1 + w`) near one.
+        fn map_float<const D: usize>(
+            &mut self,
+            param: Param<Tensor<TestBackend, D>>,
+        ) -> Param<Tensor<TestBackend, D>> {
+            let factor = self.0;
+            param.map(|tensor| tensor * factor)
+        }
+    }
+    let (model, _) = tiny_model();
+    model.map(&mut Scale(scale))
+}
+
+/// One stateful call: rectangular tokens and validity per row.
+struct Step {
+    /// Token IDs `[B][S]`.
+    tokens: Vec<Vec<i64>>,
+    /// Validity `[B][S]`, or `None` when every token is valid.
+    mask: Option<Vec<Vec<bool>>>,
+}
+
+/// Requests every logit and every hidden state.
+fn all_outputs() -> ForwardOptions {
+    ForwardOptions {
+        logits: crate::LogitsSelection::All,
+        hidden_states: true,
+        ..Default::default()
+    }
+}
+
+/// Runs one step on `state`, as prefill when the state is empty.
+fn run_step(
+    model: &MuseGlimmerForCausalLm<TestBackend>,
+    state: &mut MuseGlimmerDecodeState<TestBackend>,
+    tokens: Vec<i64>,
+    mask: Option<Vec<bool>>,
+    shape: [usize; 2],
+) -> CausalLmOutput<TestBackend> {
+    let device = Default::default();
+    let token_ids = Tensor::from_data(TensorData::new(tokens, shape), &device);
+    let token_mask = mask.map(|mask| {
+        TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_data(
+            TensorData::new(mask, shape),
+            &device,
+        ))
+    });
+    if state.lengths().iter().all(|&length| length == 0) {
+        model.prefill(
+            CausalLmInput {
+                token_ids,
+                token_mask,
+                position_ids: None,
+            },
+            state,
+            &all_outputs(),
         )
-    })
+    } else {
+        model.decode(
+            DecodeInput {
+                token_ids,
+                token_mask,
+                position_ids: None,
+            },
+            state,
+            &all_outputs(),
+        )
+    }
+    .unwrap()
+}
+
+/// Ragged batched execution equals independent batch-one rows, across ring wraparound.
+///
+/// The window is 3 and rows grow to 10, 5, and 7 tokens, so every local
+/// layer's ring wraps while rows keep different lengths; the scenario covers
+/// left padding, an interior hole, unequal multi-token steps, and a finished
+/// row. Padding and finished rows must be exact zeros.
+#[test]
+fn batched_rows_match_independent_rows_across_ring_wraparound() {
+    let model = scaled_model(20.0);
+    let device = Default::default();
+    let steps = [
+        Step {
+            tokens: vec![vec![0, 3, 17, 5], vec![9, 30, 0, 0], vec![7, 0, 1, 22]],
+            mask: Some(vec![
+                vec![false, true, true, true],
+                vec![true, true, false, false],
+                vec![true, false, true, true],
+            ]),
+        },
+        Step {
+            tokens: vec![vec![4, 4, 2], vec![19, 0, 0], vec![0, 6, 0]],
+            mask: Some(vec![
+                vec![true, true, true],
+                vec![true, false, false],
+                vec![false, true, false],
+            ]),
+        },
+        Step {
+            tokens: vec![vec![11], vec![12], vec![13]],
+            mask: None,
+        },
+        Step {
+            tokens: vec![vec![14, 8], vec![0, 0], vec![15, 16]],
+            mask: Some(vec![vec![true, true], vec![false, false], vec![true, true]]),
+        },
+        Step {
+            tokens: vec![vec![21], vec![23], vec![0]],
+            mask: Some(vec![vec![true], vec![true], vec![false]]),
+        },
+    ];
+    let mut batched = model
+        .new_decode_state(CacheConfig::new(3, 16).unwrap(), 3, &device)
+        .unwrap();
+    let mut rows = (0..3)
+        .map(|_| {
+            model
+                .new_decode_state(CacheConfig::new(1, 16).unwrap(), 1, &device)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for (index, step) in steps.iter().enumerate() {
+        let sequence = step.tokens[0].len();
+        let output = run_step(
+            &model,
+            &mut batched,
+            step.tokens.concat(),
+            step.mask.as_ref().map(|mask| mask.concat()),
+            [3, sequence],
+        );
+        let logits = output.logits.into_data().to_vec::<f32>().unwrap();
+        let hidden = output
+            .final_hidden_state
+            .unwrap()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        for (row, state) in rows.iter_mut().enumerate() {
+            let valid = (0..sequence)
+                .filter(|&column| step.mask.as_ref().is_none_or(|mask| mask[row][column]))
+                .collect::<Vec<_>>();
+            let at = |values: &[f32], column: usize, width: usize| {
+                values[(row * sequence + column) * width..(row * sequence + column + 1) * width]
+                    .to_vec()
+            };
+            if valid.is_empty() {
+                for column in 0..sequence {
+                    assert!(at(&logits, column, 32).iter().all(|&value| value == 0.0));
+                }
+                continue;
+            }
+            let tokens = valid
+                .iter()
+                .map(|&column| step.tokens[row][column])
+                .collect::<Vec<_>>();
+            let count = tokens.len();
+            let oracle = run_step(&model, state, tokens, None, [1, count]);
+            let oracle_logits = oracle.logits.into_data().to_vec::<f32>().unwrap();
+            let oracle_hidden = oracle
+                .final_hidden_state
+                .unwrap()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap();
+            for column in 0..sequence {
+                match valid.iter().position(|&c| c == column) {
+                    Some(k) => {
+                        for (width, actual, expected) in
+                            [(32, &logits, &oracle_logits), (8, &hidden, &oracle_hidden)]
+                        {
+                            let actual = at(actual, column, width);
+                            let expected = &expected[k * width..(k + 1) * width];
+                            for (left, right) in actual.iter().zip(expected) {
+                                assert!(
+                                    (left - right).abs() <= 2e-5,
+                                    "step {index} row {row} column {column}: {left} vs {right}"
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        assert!(at(&logits, column, 32).iter().all(|&value| value == 0.0));
+                        assert!(at(&hidden, column, 8).iter().all(|&value| value == 0.0));
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(batched.lengths(), &[10, 5, 7]);
+    for (row, state) in rows.iter().enumerate() {
+        assert_eq!(state.lengths()[0], batched.lengths()[row]);
+    }
+}
+
+/// Cached decoding after ring wraparound matches the stateless forward of each row.
+#[test]
+fn batched_cached_logits_match_stateless_rows_after_wraparound() {
+    let model = scaled_model(20.0);
+    let device = Default::default();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 16).unwrap(), 2, &device)
+        .unwrap();
+    let prompt = [[3_i64, 17, 5, 9, 30, 12], [0, 0, 7, 1, 22, 4]];
+    run_step(
+        &model,
+        &mut state,
+        prompt.concat(),
+        Some([[true; 6], [false, false, true, true, true, true]].concat()),
+        [2, 6],
+    );
+    let decoded = run_step(&model, &mut state, vec![2, 19], None, [2, 1]).logits;
+    for (row, tokens) in [vec![3, 17, 5, 9, 30, 12, 2], vec![7, 1, 22, 4, 19]]
+        .into_iter()
+        .enumerate()
+    {
+        let width = tokens.len();
+        let expected = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_data(TensorData::new(tokens, [1, width]), &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+        decoded
+            .clone()
+            .narrow(0, row, 1)
+            .into_data()
+            .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(2e-5));
+    }
+}
+
+/// Measures batched decode against one batch-one call per row (the previous algorithm).
+///
+/// Run with `cargo test --release --lib muse_batched_decode_benchmark -- --ignored --nocapture`.
+/// Five alternating samples per variant; minimum and median wall times of a
+/// 128-token prefill and 16 one-token decode steps at batch 8 are reported.
+#[test]
+#[ignore = "release-mode timing benchmark"]
+fn muse_batched_decode_benchmark() {
+    use std::time::Instant;
+
+    let device = Default::default();
+    let config = MuseGlimmerTextConfig {
+        vocab_size: 64,
+        hidden_size: 256,
+        intermediate_size: 512,
+        num_hidden_layers: 4,
+        num_attention_heads: 8,
+        num_key_value_heads: 2,
+        head_dim: 32,
+        max_position_embeddings: 1024,
+        sliding_window: Some(64),
+        ..tiny_config()
+    };
+    let model = initialized_model::<TestBackend>(config, &device);
+    let (batch, prompt, steps) = (8, 128, 16);
+    let prompts = (0..batch * prompt)
+        .map(|index| ((index * 7) % 61) as i64)
+        .collect::<Vec<_>>();
+    let run = |first: usize, rows: usize| {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(rows, 512).unwrap(), rows, &device)
+            .unwrap();
+        let tokens = prompts[first * prompt..(first + rows) * prompt].to_vec();
+        let started = Instant::now();
+        let _ = model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::from_data(TensorData::new(tokens, [rows, prompt]), &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        let prefill = started.elapsed().as_secs_f64();
+        let started = Instant::now();
+        for step in 0..steps {
+            let _ = model
+                .decode(
+                    DecodeInput {
+                        token_ids: Tensor::from_data(
+                            TensorData::new(vec![(step % 61) as i64; rows], [rows, 1]),
+                            &device,
+                        ),
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                    &mut state,
+                    &ForwardOptions::default(),
+                )
+                .unwrap()
+                .logits
+                .into_data();
+        }
+        (prefill, started.elapsed().as_secs_f64())
+    };
+    let per_row = || {
+        (0..batch)
+            .map(|row| run(row, 1))
+            .fold((0.0, 0.0), |sum, time| (sum.0 + time.0, sum.1 + time.1))
+    };
+    let _ = run(0, batch);
+    let (mut batched, mut separate) = (Vec::new(), Vec::new());
+    for _ in 0..5 {
+        batched.push(run(0, batch));
+        separate.push(per_row());
+    }
+    let summary = |samples: &[(f64, f64)], pick: fn(&(f64, f64)) -> f64| {
+        let mut values = samples.iter().map(pick).collect::<Vec<_>>();
+        values.sort_by(f64::total_cmp);
+        (values[0], values[values.len() / 2])
+    };
+    for (label, pick) in [
+        (
+            "prefill",
+            (|time: &(f64, f64)| time.0) as fn(&(f64, f64)) -> f64,
+        ),
+        ("decode x16", |time: &(f64, f64)| time.1),
+    ] {
+        let (batched_min, batched_median) = summary(&batched, pick);
+        let (separate_min, separate_median) = summary(&separate, pick);
+        println!(
+            "{label}: per-row min {separate_min:.4} s median {separate_median:.4} s; \
+             batched min {batched_min:.4} s median {batched_median:.4} s; \
+             speedup min {:.2}x median {:.2}x",
+            separate_min / batched_min,
+            separate_median / batched_median
+        );
+    }
 }

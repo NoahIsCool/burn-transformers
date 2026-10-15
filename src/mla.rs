@@ -35,7 +35,7 @@
 //! # Bounded reference attention
 //!
 //! The reference path materializes one `[batch, head, query, key]` score plane,
-//! so a single long prefill grows quadratically. [`MlaVisibility`] describes
+//! so a single long prefill grows quadratically. [`PositionalVisibility`] describes
 //! causal and padding visibility from token positions instead of a materialized
 //! mask, which lets the reference path evaluate synchronized query chunks under
 //! an [`AttentionExecutionPolicy`]: every chunk still sees its complete causal
@@ -834,7 +834,7 @@ impl<B: Backend> MultiLatentAttention<B> {
     /// Runs the reference path in synchronized query chunks bounded by `policy`.
     ///
     /// Mathematically identical to [`Self::mix_unabsorbed`] with the full mask
-    /// of [`MlaVisibility::exclusion`]: the expanded keys `[batch, head, key,
+    /// of [`PositionalVisibility::exclusion`]: the expanded keys `[batch, head, key,
     /// qk]` and values are formed once, then query rows `rows` attend only to
     /// the key prefix `0..visibility.key_end(rows)` (keys beyond it are
     /// causally invisible to every row of the chunk), so each score, mask, and
@@ -858,7 +858,7 @@ impl<B: Backend> MultiLatentAttention<B> {
         projection: &MlaProjection<B>,
         all_latents: Tensor<B, 3>,
         all_rotary_keys: Tensor<B, 4>,
-        visibility: &MlaVisibility<B>,
+        visibility: &PositionalVisibility<B>,
         policy: AttentionExecutionPolicy,
     ) -> Result<Tensor<B, 3>> {
         let [batch, heads, query_sequence, _] = projection.query_content.dims();
@@ -1049,28 +1049,33 @@ impl<B: Backend> MultiLatentAttention<B> {
     }
 }
 
-/// Causal and padding visibility of MLA keys, described by token positions.
+/// Causal, sliding-window, and padding visibility of keys, described by token positions.
 ///
 /// Query `i` of row `b` may attend to key `j` exactly when
 ///
 /// * `key_positions[b, j] <= query_positions[b, i]` (causality),
+/// * with a window `W`, `query_positions[b, i] - key_positions[b, j] < W`
+///   (the `W` newest positions, Hugging Face's `sliding_window` convention),
 /// * key `j` is valid (`key_valid[b, j]`, or always when absent), and
 /// * query `i` is valid (`query_valid[b, i]`, or always when absent);
 ///
 /// an invalid query row sees nothing and yields a zero context. Positions are
-/// indices on one shared token timeline: input columns for stateless
-/// self-attention, cache slots for cached attention. Position tensors may have
-/// a leading extent of one, which broadcasts over the batch. Building masks
-/// from `[batch, tokens]` integer vectors means a chunk materializes only its
-/// own `[batch, 1, rows, keys]` Boolean plane, expanded (not copied) over heads.
+/// indices on one shared token timeline: input columns or valid-token
+/// ordinals for stateless self-attention, cache slots for cached attention.
+/// Position tensors may have a leading extent of one, which broadcasts over
+/// the batch. Building masks from `[batch, tokens]` integer vectors means a
+/// chunk materializes only its own `[batch, 1, rows, keys]` Boolean plane,
+/// expanded (not copied) over heads. The type is attention-generic: MLA and
+/// grouped-query families share it.
 ///
 /// `key_limits[i]` is the number of leading keys that queries `0..=i` may
 /// need: every key at index `>= key_limits[i]` is causally invisible to all of
-/// them. It requires key `j` to sit at position `j` (column order, or slot
-/// order of full-history storage), is nondecreasing, and lets
-/// [`MultiLatentAttention::mix_unabsorbed_bounded`] skip keys a chunk cannot see.
+/// them. It holds whenever keys are ordered by position (column order,
+/// ordinal order, or slot order of full-history storage), is nondecreasing,
+/// and lets bounded attention skip keys a query chunk cannot see. Storage
+/// that is not position-ordered (a ring) uses the full key count.
 #[derive(Clone, Debug)]
-pub(crate) struct MlaVisibility<B: Backend> {
+pub(crate) struct PositionalVisibility<B: Backend> {
     /// Query positions `[batch or 1, query]`.
     query_positions: Tensor<B, 2, Int>,
     /// Key positions `[batch or 1, key]`.
@@ -1081,9 +1086,11 @@ pub(crate) struct MlaVisibility<B: Backend> {
     key_valid: Option<Tensor<B, 2, Bool>>,
     /// Host prefix bounds: queries `0..=i` see only keys `0..key_limits[i]`.
     key_limits: Vec<usize>,
+    /// Optional sliding window `W > 0` in positions.
+    window: Option<usize>,
 }
 
-impl<B: Backend> MlaVisibility<B> {
+impl<B: Backend> PositionalVisibility<B> {
     /// Describes causal self-attention over `sequence` columns with optional padding.
     ///
     /// Query and key `t` both sit at column `t`, and `mask` (`true` = valid)
@@ -1107,7 +1114,76 @@ impl<B: Backend> MlaVisibility<B> {
             query_valid: mask.clone(),
             key_valid: mask,
             key_limits: (1..=sequence).collect(),
+            window: None,
         })
+    }
+
+    /// Describes causal self-attention whose positions are valid-token ordinals.
+    ///
+    /// With a `mask` (`true` = valid), query and key positions are each row's
+    /// valid-token ordinals `cumsum(valid) - 1`, so padding holes consume no
+    /// sliding-window capacity (exactly as a cache that compacts each row);
+    /// without one they are columns, as in [`Self::causal_columns`]. Column
+    /// order still bounds the causal key prefix, because a later valid column
+    /// has a larger ordinal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Configuration`] when `sequence` exceeds `i64`.
+    pub(crate) fn causal_ordinals(
+        sequence: usize,
+        mask: Option<&crate::architecture::TokenMask<B>>,
+        device: &B::Device,
+    ) -> Result<Self> {
+        let mut visibility =
+            Self::causal_columns(sequence, mask.map(|mask| mask.as_tensor().clone()), device)?;
+        if let Some(mask) = mask {
+            let ordinals = crate::attention::valid_token_ordinals(mask);
+            visibility.query_positions = ordinals.clone();
+            visibility.key_positions = ordinals;
+        }
+        Ok(visibility)
+    }
+
+    /// Describes `queries` bottom-right-aligned to the end of `keys` unpadded columns.
+    ///
+    /// Query `i` sits at position `keys - queries + i`, so a cached suffix sees
+    /// its complete history; `queries <= keys` is required.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Shape`] for `queries > keys` and
+    /// [`Error::Configuration`] for lengths beyond `i64`.
+    pub(crate) fn suffix(queries: usize, keys: usize, device: &B::Device) -> Result<Self> {
+        let offset = keys.checked_sub(queries).ok_or_else(|| {
+            Error::shape(
+                "attention.visibility",
+                "key sequence at least as long as query sequence",
+                format!("query={queries}, key={keys}"),
+            )
+        })?;
+        let end = i64::try_from(keys)
+            .map_err(|_| Error::configuration("attention.visibility", "keys exceed i64"))?;
+        let start = i64::try_from(offset)
+            .map_err(|_| Error::configuration("attention.visibility", "keys exceed i64"))?;
+        Ok(Self {
+            query_positions: Tensor::<B, 1, Int>::arange(start..end, device).reshape([1, queries]),
+            key_positions: Tensor::<B, 1, Int>::arange(0..end, device).reshape([1, keys]),
+            query_valid: None,
+            key_valid: None,
+            key_limits: (offset + 1..=keys).collect(),
+            window: None,
+        })
+    }
+
+    /// Restricts every query to the `window` newest positions up to itself.
+    ///
+    /// `None` (or no call) keeps unrestricted causal attention; `Some(0)` is
+    /// rejected by [`Self::validate`].
+    #[must_use]
+    pub(crate) const fn with_window(mut self, window: Option<usize>) -> Self {
+        self.window = window;
+        self
     }
 
     /// Describes queries at explicit cache slots attending to slot-ordered keys.
@@ -1115,7 +1191,7 @@ impl<B: Backend> MlaVisibility<B> {
     /// `query_positions` is `[batch, query]` with optional `query_valid`; keys
     /// are `[batch or 1, key]` slots whose validity is `key_valid`, as returned
     /// by a batched cache read. `key_limits` must satisfy the type's prefix
-    /// contract; [`MlaVisibility::validate`] checks its shape and monotonicity.
+    /// contract; [`PositionalVisibility::validate`] checks its shape and monotonicity.
     pub(crate) const fn cached(
         query_positions: Tensor<B, 2, Int>,
         query_valid: Option<Tensor<B, 2, Bool>>,
@@ -1129,6 +1205,7 @@ impl<B: Backend> MlaVisibility<B> {
             query_valid,
             key_valid,
             key_limits,
+            window: None,
         }
     }
 
@@ -1152,6 +1229,12 @@ impl<B: Backend> MlaVisibility<B> {
                 .key_limits
                 .iter()
                 .all(|&limit| limit > 0 && limit <= keys);
+        if self.window == Some(0) {
+            return Err(Error::configuration(
+                "attention.visibility.window",
+                "must be greater than zero",
+            ));
+        }
         if !rows_match(query_rows)
             || !rows_match(key_rows)
             || query_columns != queries
@@ -1178,7 +1261,7 @@ impl<B: Backend> MlaVisibility<B> {
     }
 
     /// Returns the key prefix length that query rows `rows` (non-empty) may need.
-    fn key_end(&self, rows: &Range<usize>) -> usize {
+    pub(crate) fn key_end(&self, rows: &Range<usize>) -> usize {
         self.key_limits[rows.end - 1]
     }
 
@@ -1203,7 +1286,12 @@ impl<B: Backend> MlaVisibility<B> {
         let key = self.key_positions.clone().narrow(1, keys.start, keys.len());
         let key_rows = key.dims()[0];
         let key = key.reshape([key_rows, 1, 1, keys.len()]).expand(plane);
-        let mut excluded = key.greater(query);
+        let mut excluded = key.clone().greater(query.clone());
+        if let Some(window) = self.window {
+            // `key + W <= query`: only the `W` newest positions remain visible.
+            let width = i64::try_from(window).unwrap_or(i64::MAX);
+            excluded = excluded.bool_or(key.add_scalar(width).lower_equal(query));
+        }
         if let Some(valid) = &self.key_valid {
             excluded = excluded.bool_or(
                 valid

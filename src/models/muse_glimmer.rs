@@ -174,16 +174,32 @@ impl MuseGlimmerTextConfig {
             .collect()
     }
 
+    /// Returns the global RoPE base: `rope_parameters.rope_theta`, else Transformers' default.
+    ///
+    /// The reference (`MuseGlimmerTextConfig.__post_init__` and its rotary
+    /// embedding) reads `rope_parameters["rope_theta"]`, which Transformers'
+    /// `RotaryEmbeddingConfigMixin` fills with its `default_theta` of
+    /// `10_000` when absent. Validation, the default per-layer schedule, and
+    /// the rotary translator all use this one resolver.
+    #[must_use]
+    pub fn global_rope_theta(&self) -> f64 {
+        self.rope_parameters
+            .as_ref()
+            .and_then(|rope| rope.rope_theta)
+            .unwrap_or(super::config::DEFAULT_ROPE_THETA)
+    }
+
     /// Produces per-layer theta, setting NoPE full-attention layers to zero.
+    ///
+    /// The reference uses each entry only as a RoPE/NoPE switch and rotates
+    /// every RoPE layer with [`Self::global_rope_theta`]; the derived default
+    /// schedule therefore repeats the global theta. Explicit nonzero entries
+    /// that differ from it are honored as an experiment extension.
     pub fn resolved_layer_rope_theta(&self) -> Vec<f64> {
         if !self.layer_rope_theta.is_empty() {
             return self.layer_rope_theta.clone();
         }
-        let global_theta = self
-            .rope_parameters
-            .as_ref()
-            .and_then(|rope| rope.rope_theta)
-            .unwrap_or(10_000.0);
+        let global_theta = self.global_rope_theta();
         self.resolved_layer_types()
             .iter()
             .map(|kind| match kind {
@@ -301,7 +317,7 @@ impl Validate for MuseGlimmerTextConfig {
                 FAMILY,
                 self.head_dim,
                 self.max_position_embeddings,
-                Some(500_000.0),
+                Some(self.global_rope_theta()),
             )?;
         token_ids(
             FAMILY,

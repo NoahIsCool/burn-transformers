@@ -34,14 +34,14 @@
 //! only slots beyond a row's length may hold the abandoned latents, which no
 //! read can reach and the next write overwrites (logical atomicity).
 
-use burn::tensor::{BasicOps, Bool, Int, Tensor, TensorData, TensorKind, backend::Backend};
+use burn::tensor::{Int, Tensor, backend::Backend};
 
 use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, Result,
     architecture::DecodeState as ArchitectureDecodeState,
     cache::{
-        CacheConfig, KvBatchSegment, KvCacheStorage, NativeKvCacheSpec, TensorCacheError,
-        TensorCacheMark, TensorDecodeState, TransactionalCache,
+        CacheConfig, KvCacheStorage, NativeKvCacheSpec, TensorCacheError, TensorCacheMark,
+        TensorDecodeState, TransactionalCache,
     },
     intervention::Layer,
     models::shared::{
@@ -52,9 +52,7 @@ use crate::{
 };
 
 use super::{
-    DeepseekV2ForCausalLm, INPUT_NAMES, MlaVisibility, ROUTER_DTYPE,
-    batch::{RowMaps, batch_extents, key_limits, query_slots, row_maps},
-    router_diagnostics,
+    DeepseekV2ForCausalLm, INPUT_NAMES, ROUTER_DTYPE, block::BlockLayout, router_diagnostics,
 };
 
 /// Owner named when an input tensor is on another device than the cache.
@@ -426,7 +424,7 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
         let tokens = layout.compact(input.token_ids.clone());
         let positions = match &input.position_ids {
             Some(position_ids) => layout.compact(position_ids.clone()),
-            None => layout.implicit_positions.clone(),
+            None => layout.implicit_positions(),
         };
         let angles = self.cached_rotary_tables(positions, &prepared)?;
         let mut step = state.tensors.step(&prepared.token_counts)?;
@@ -463,7 +461,7 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
                 .ok_or_else(|| Error::Cache("DeepSeek step read no cached keys".into()))?;
             let visibility = match &visibility {
                 Some(visibility) => visibility,
-                None => visibility.insert(layout.visibility(&segment)),
+                None => visibility.insert(layout.visibility(&segment, true)),
             };
             // Invalid slots may hold stale bytes; zero them so `0 * NaN` cannot occur.
             let history = segment.masked_values();
@@ -633,147 +631,6 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
             sine: Tensor::cat(sine, 0),
             rotary_dimension,
         })
-    }
-}
-
-/// Device-side packing of one call's rows into a `[B, T]` block.
-///
-/// Built from the host plan of the `batch` module; see its documentation for
-/// the equations. `None` from [`BlockLayout::new`] means every row is
-/// inactive.
-struct BlockLayout<B: Backend> {
-    /// Rectangular width `S`.
-    sequence: usize,
-    /// Packed width `T = max_b n_b`.
-    block: usize,
-    /// `[B, T]` source columns, or `None` when packing is the identity.
-    gather: Option<Tensor<B, 2, Int>>,
-    /// `[B, S]` block entries (`T` = zero row), or `None` for the identity.
-    scatter: Option<Tensor<B, 2, Int>>,
-    /// Implicit positions `[B, T]`: `L_b + k` for valid entries, zero for padding.
-    implicit_positions: Tensor<B, 2, Int>,
-    /// Query cache slots `[B, T]` (`L_b + k`, or `L_b` for padding).
-    query_slots: Tensor<B, 2, Int>,
-    /// Query validity `[B, T]` (`k < n_b`), or `None` when every entry is valid.
-    query_valid: Option<Tensor<B, 2, Bool>>,
-    /// Key-prefix limits of the block's query rows.
-    key_limits: Vec<usize>,
-}
-
-impl<B: Backend> BlockLayout<B> {
-    /// Plans the block for validated rows appended at the working `baselines`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Configuration`] when a cursor or index overflows.
-    fn new(
-        prepared: &StatefulRows,
-        baselines: &[usize],
-        device: &B::Device,
-    ) -> Result<Option<Self>> {
-        let counts = &prepared.token_counts;
-        let (block, extent) = batch_extents(baselines, counts).ok_or_else(|| {
-            Error::configuration("deepseek_v2.batch", "cache cursors overflow usize")
-        })?;
-        if block == 0 {
-            return Ok(None);
-        }
-        let (batch, sequence) = (prepared.batch, prepared.sequence);
-        let identity = block == sequence && counts.iter().all(|&count| count == sequence);
-        let maps = prepared
-            .valid_indices
-            .iter()
-            .map(|columns| row_maps(columns, sequence, block))
-            .collect::<Vec<RowMaps>>();
-        let upload = |values: Vec<usize>, shape: [usize; 2]| -> Result<Tensor<B, 2, Int>> {
-            let signed = values
-                .into_iter()
-                .map(|value| {
-                    i64::try_from(value)
-                        .map_err(|_| Error::configuration("deepseek_v2.batch", "index exceeds i64"))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Ok(Tensor::from_data(TensorData::new(signed, shape), device))
-        };
-        let (gather, scatter) = if identity {
-            (None, None)
-        } else {
-            (
-                Some(upload(
-                    maps.iter().flat_map(|row| row.gather.clone()).collect(),
-                    [batch, block],
-                )?),
-                Some(upload(
-                    maps.iter().flat_map(|row| row.scatter.clone()).collect(),
-                    [batch, sequence],
-                )?),
-            )
-        };
-        let slots = query_slots(baselines, counts, block, extent).concat();
-        let valid = |entry: usize| entry % block < counts[entry / block];
-        let implicit = slots
-            .iter()
-            .enumerate()
-            .map(|(entry, &slot)| if valid(entry) { slot } else { 0 })
-            .collect();
-        let query_valid = counts.iter().any(|&count| count != block).then(|| {
-            let flags = (0..batch * block).map(valid).collect::<Vec<_>>();
-            Tensor::from_data(TensorData::new(flags, [batch, block]), device)
-        });
-        Ok(Some(Self {
-            sequence,
-            block,
-            gather,
-            scatter,
-            implicit_positions: upload(implicit, [batch, block])?,
-            query_slots: upload(slots, [batch, block])?,
-            query_valid,
-            key_limits: key_limits(baselines, counts, block, extent),
-        }))
-    }
-
-    /// Packs a rectangular `[B, S]` tensor into the `[B, T]` block.
-    fn compact<K>(&self, rectangular: Tensor<B, 2, K>) -> Tensor<B, 2, K>
-    where
-        K: TensorKind<B> + BasicOps<B>,
-    {
-        match &self.gather {
-            Some(gather) => rectangular.gather(1, gather.clone()),
-            None => rectangular,
-        }
-    }
-
-    /// Restores block results `[B, T, X]` to `[B, S, X]` with exact zeros at padding.
-    fn scatter<K>(&self, block: Tensor<B, 3, K>) -> Tensor<B, 3, K>
-    where
-        K: TensorKind<B> + BasicOps<B>,
-    {
-        let Some(scatter) = &self.scatter else {
-            return block;
-        };
-        let [batch, _, width] = block.dims();
-        let zero = Tensor::<B, 3, K>::zeros([batch, 1, width], (&block.device(), block.dtype()));
-        let padded = Tensor::cat(vec![block, zero], 1);
-        let index = scatter.clone().reshape([batch, self.sequence, 1]).expand([
-            batch,
-            self.sequence,
-            width,
-        ]);
-        padded.gather(1, index)
-    }
-
-    /// Describes this block's queries against one slot-ordered key read.
-    ///
-    /// The read covers `E` slots, which every key limit already respects.
-    fn visibility(&self, segment: &KvBatchSegment<B>) -> MlaVisibility<B> {
-        debug_assert_eq!(self.key_limits.len(), self.block);
-        MlaVisibility::cached(
-            self.query_slots.clone(),
-            self.query_valid.clone(),
-            segment.key_positions().clone(),
-            segment.key_valid().cloned(),
-            self.key_limits.clone(),
-        )
     }
 }
 
