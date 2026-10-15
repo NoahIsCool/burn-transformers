@@ -4,7 +4,9 @@ This preserves the v0.2 scope. The subsequent [v0.3 training contract](TRAINING.
 and [training examples](examples/README.md) now extend these interfaces through
 native Burn optimization, freezing, and checkpoints. The generic
 `architecture::HookedModel` and `StagedModel` traits later made the hook and
-staged interfaces below uniform across every model family; see
+staged interfaces below uniform: every family implements `HookedModel`, every
+causal family implements `StagedModel`, and T5 and modular encoder-decoder
+models stage through their encoder and decoder views; see
 [EXPERIMENTS.md](EXPERIMENTS.md#one-experiment-any-model).
 
 ## Consumer workflow
