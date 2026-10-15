@@ -15,6 +15,7 @@
 
 pub mod artifacts;
 pub mod cache;
+pub mod chat_templates;
 pub mod configuration;
 pub mod experiment_interfaces;
 pub mod generation;
@@ -98,6 +99,14 @@ impl<'a> Bytes<'a> {
         } else {
             self.float()
         }
+    }
+
+    /// Returns up to `limit` raw bytes (fewer when the input ends).
+    pub(crate) fn take(&mut self, limit: usize) -> &'a [u8] {
+        let length = limit.min(self.remaining.len());
+        let (taken, rest) = self.remaining.split_at(length);
+        self.remaining = rest;
+        taken
     }
 }
 

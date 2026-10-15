@@ -10,7 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "=0.4.12"
-transformers = { path = "..", default-features = false, features = ["std", "flex"] }
+transformers = { path = "..", default-features = false, features = ["std", "flex", "chat-templates"] }
 burn = { version = "=0.21.0", default-features = false, features = ["std", "flex"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -61,6 +61,13 @@ bench = false
 [[bin]]
 name = "logits_processing"
 path = "fuzz_targets/logits_processing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chat_templates"
+path = "fuzz_targets/chat_templates.rs"
 test = false
 doc = false
 bench = false

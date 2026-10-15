@@ -3237,6 +3237,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "memo-map"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5449c8c750f1a07ea702bbd212bd999fceece9b3d1508b17023b3e174583124b"
+
+[[package]]
+name = "minijinja"
+version = "2.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "805bfd7352166bae857ee569628b52bcd85a1cecf7810861ebceb1686b72b75d"
+dependencies = [
+ "memo-map",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5271,11 +5288,13 @@ dependencies = [
  "burn",
  "burn-flex",
  "burn-store",
+ "minijinja",
  "safetensors 0.7.0",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.20",
+ "tokenizers",
 ]
 
 [[package]]
