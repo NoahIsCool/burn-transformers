@@ -4,7 +4,8 @@
 //! The modular Mamba-2 block must be exactly the shared [`crate::mamba2`] mixer
 //! wired into a residual block: the same weights give the same output, padded
 //! rows equal their unpadded scans, cached decoding equals the stateless
-//! forward, and every non-causal execution request is rejected.
+//! forward (in causal stacks and in seq2seq decoders with cross-attention),
+//! and every non-causal execution request is rejected.
 
 use burn::{
     module::Module,
@@ -13,7 +14,8 @@ use burn::{
 
 use super::*;
 use crate::{
-    CausalLanguageModel, CausalLmInput, DecodeInput, DecodeState, ForwardOptions, LogitsSelection,
+    CausalLanguageModel, CausalLmInput, DecodeInput, DecodeState, EncoderOutput, ForwardOptions,
+    LogitsSelection, Seq2SeqInput, Seq2SeqLanguageModel,
     architecture::{
         DecoderSpec, FeedForwardSpec, Mamba2Spec, PositionEncodingSpec, RopeScaling, Seq2SeqSpec,
     },
@@ -285,6 +287,191 @@ fn mamba2_cached_decoding_matches_the_stateless_forward() {
     state.reorder(&[1, 0]).unwrap();
     let swapped = step(&mut state, [[14], [15]]);
     assert_rows(swapped, [&[6, 7, 13, 14], &[3, 4, 5, 8, 12, 15]]);
+}
+
+/// A seq2seq model whose decoder runs RoPE attention, then Mamba-2, each followed by cross-attention.
+///
+/// The encoder is the fixture's single bidirectional attention block, so the
+/// decoder's Mamba-2 state is the only recurrent state in the graph.
+fn hybrid_seq2seq(device: &Device) -> ModularSeq2SeqLm<TestBackend> {
+    ModularSeq2SeqLm::<TestBackend>::init(
+        Seq2SeqSpec {
+            decoder: hybrid_spec(),
+            ..seq2seq_spec()
+        },
+        device,
+    )
+    .unwrap()
+    .map(&mut DeterministicParameters::default())
+}
+
+/// One unpadded row of token IDs, of any length.
+fn row(ids: &[i32], device: &Device) -> CausalLmInput<TestBackend> {
+    CausalLmInput {
+        token_ids: Tensor::from_data(TensorData::new(ids.to_vec(), [1, ids.len()]), device),
+        token_mask: None,
+        position_ids: None,
+    }
+}
+
+/// Three ragged source rows: full, right-padded to `[7, 8]`, and full.
+fn ragged_sources(device: &Device) -> CausalLmInput<TestBackend> {
+    tokens(
+        [[4, 5, 6], [7, 8, 0], [4, 8, 6]],
+        Some([[true; 3], [true, true, false], [true; 3]]),
+        device,
+    )
+}
+
+/// The unpadded source of each row of [`ragged_sources`].
+const SOURCES: [&[i32]; 3] = [&[4, 5, 6], &[7, 8], &[4, 8, 6]];
+
+/// Decoder padding around a Mamba-2 block is semantic under cross-attention too.
+///
+/// Each row of a ragged batch (left-padded target, right-padded target and
+/// source, fully valid) must equal the unpadded forward of that row alone.
+#[test]
+fn mamba2_seq2seq_decoder_padding_matches_unpadded_rows() {
+    let device = Default::default();
+    let model = hybrid_seq2seq(&device);
+    let batched = model
+        .forward(
+            Seq2SeqInput {
+                encoder: ragged_sources(&device),
+                decoder: tokens(
+                    [[0, 0, 1, 2, 3], [1, 2, 3, 0, 0], [1, 2, 3, 4, 5]],
+                    Some([
+                        [false, false, true, true, true],
+                        [true, true, true, false, false],
+                        [true; 5],
+                    ]),
+                    &device,
+                ),
+            },
+            &all_logits(),
+        )
+        .unwrap()
+        .decoder
+        .logits;
+    let alone = |source: &[i32], target: &[i32]| {
+        model
+            .forward(
+                Seq2SeqInput {
+                    encoder: row(source, &device),
+                    decoder: row(target, &device),
+                },
+                &all_logits(),
+            )
+            .unwrap()
+            .decoder
+            .logits
+            .into_data()
+    };
+    for (batch_row, valid, target) in [
+        (0, 2..5, &[1, 2, 3][..]),
+        (1, 0..3, &[1, 2, 3][..]),
+        (2, 0..5, &[1, 2, 3, 4, 5][..]),
+    ] {
+        batched
+            .clone()
+            .slice([batch_row..batch_row + 1, valid])
+            .into_data()
+            .assert_approx_eq::<f32>(&alone(SOURCES[batch_row], target), scan_tolerance());
+    }
+}
+
+/// Ragged cached seq2seq decoding through Mamba-2 and cross-attention matches the stateless forward.
+///
+/// Prefill a left-padded target batch, decode two steps, roll one row back,
+/// and reorder the rows (re-encoding the sources in the new order, since the
+/// caller owns the encoder output). Every step's logits must equal the last
+/// position of a fresh stateless forward over that row's source and history.
+#[test]
+fn mamba2_seq2seq_cached_decoding_matches_the_stateless_forward() {
+    let device = Default::default();
+    let model = hybrid_seq2seq(&device);
+    let options = ForwardOptions::default();
+    let sources = |order: [usize; 2]| {
+        let ids = order.map(|source| {
+            let mut ids = [0; 3];
+            ids[..SOURCES[source].len()].copy_from_slice(SOURCES[source]);
+            ids
+        });
+        let valid = order.map(|source| [0, 1, 2].map(|column| column < SOURCES[source].len()));
+        model
+            .encode(tokens(ids, Some(valid), &device), &options)
+            .unwrap()
+    };
+    let mut encoder = sources([0, 1]);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+        .unwrap();
+    // Row 0 prefills [0, 1, 2]; row 1 is left-padded and prefills [0, 3].
+    model
+        .prefill_decoder(
+            &encoder,
+            tokens(
+                [[0, 1, 2], [0, 0, 3]],
+                Some([[true; 3], [false, true, true]]),
+                &device,
+            ),
+            &mut state,
+            &options,
+        )
+        .unwrap();
+    assert_eq!(state.lengths(), [3, 2]);
+    let step = |encoder: &EncoderOutput<TestBackend>,
+                state: &mut ModularDecodeState<TestBackend>,
+                ids: [[i32; 1]; 2]| {
+        model
+            .decode(
+                encoder,
+                DecodeInput {
+                    token_ids: Tensor::from_ints(ids, &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                state,
+                &options,
+            )
+            .unwrap()
+            .decoder
+            .logits
+    };
+    let assert_rows = |cached: Tensor<TestBackend, 3>, rows: [(usize, &[i32]); 2]| {
+        for (batch_row, (source, history)) in rows.into_iter().enumerate() {
+            let expected = model
+                .forward(
+                    Seq2SeqInput {
+                        encoder: row(SOURCES[source], &device),
+                        decoder: row(history, &device),
+                    },
+                    &options,
+                )
+                .unwrap()
+                .decoder
+                .logits;
+            cached
+                .clone()
+                .narrow(0, batch_row, 1)
+                .into_data()
+                .assert_approx_eq::<f32>(&expected.into_data(), scan_tolerance());
+        }
+    };
+    let first = step(&encoder, &mut state, [[4], [5]]);
+    assert_rows(first, [(0, &[0, 1, 2, 4]), (1, &[0, 3, 5])]);
+    let second = step(&encoder, &mut state, [[6], [7]]);
+    assert_rows(second, [(0, &[0, 1, 2, 4, 6]), (1, &[0, 3, 5, 7])]);
+
+    // Rolling back recomputes the recurrence from the retained prefix.
+    state.truncate(&[4, 2]).unwrap();
+    let rewound = step(&encoder, &mut state, [[8], [9]]);
+    assert_rows(rewound, [(0, &[0, 1, 2, 4, 8]), (1, &[0, 3, 9])]);
+    // Reordering moves each row's recurrent history; the caller reorders the sources.
+    state.reorder(&[1, 0]).unwrap();
+    encoder = sources([1, 0]);
+    let swapped = step(&encoder, &mut state, [[10], [11]]);
+    assert_rows(swapped, [(1, &[0, 3, 9, 10]), (0, &[0, 1, 2, 4, 8, 11])]);
 }
 
 /// Mamba-2 is a causal scan: bidirectional, encoder, and non-causal policies are rejected.
