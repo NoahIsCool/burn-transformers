@@ -1,6 +1,6 @@
 //! Deterministic GPT-NeoX graph and public activation-interface regressions.
 
-use super::{GptNeoXConfig, GptNeoXModel};
+use super::{GptNeoXConfig, GptNeoXForCausalLm};
 use crate::{
     CausalLmInput, Error, ForwardOptions, LogitsSelection,
     architecture::TokenMask,
@@ -57,8 +57,8 @@ fn norm(module: &mut LayerNorm<B>, offset: f64) {
 }
 
 /// Materializes all model parameters to match the retained PyTorch oracle fixture.
-fn model() -> GptNeoXModel<B> {
-    let mut model = GptNeoXModel::init(config(), &Default::default()).unwrap();
+fn model() -> GptNeoXForCausalLm<B> {
+    let mut model = GptNeoXForCausalLm::init(config(), &Default::default()).unwrap();
     model.embed_in.weight = Param::from_tensor(tensor([13, 8], 0.1, 0.15));
     for (i, layer) in model.layers.iter_mut().enumerate() {
         let offset = 1.0 + i as f64 * 10.0;
@@ -117,6 +117,11 @@ fn assert_fixture(actual: Tensor<B, 3>, key: &str) {
 }
 
 /// Partial RoPE, parallel residuals, and hidden-state lens boundaries match the PyTorch oracle.
+///
+/// Hidden states follow the crate convention, `L + 2` tensors: the embedding,
+/// every block output, and the final normalized state. Hugging Face's `L + 1`
+/// tensors are crate indices `0..L` plus crate index `L + 1`; crate index `L`
+/// (the last block's raw output) has no Hugging Face counterpart.
 #[test]
 fn matches_pytorch_partial_rope_parallel_residual_and_lens_boundaries() {
     let model = model();
@@ -130,19 +135,27 @@ fn matches_pytorch_partial_rope_parallel_residual_and_lens_boundaries() {
     assert_fixture(output.logits.clone(), "logits");
     assert_fixture(hooks.get(&first_block).unwrap(), "block0");
     assert_fixture(output.final_hidden_state.clone().unwrap(), "final");
-    assert_eq!(output.hidden_states.len(), 3);
+    assert_eq!(output.hidden_states.len(), 4);
     assert!(
         difference(
             output.hidden_states[0].clone(),
             hooks.get(&embedding).unwrap()
         ) < 1e-7
     );
+    assert_fixture(output.hidden_states[1].clone(), "block0");
     assert!(
         difference(
             output.hidden_states[1].clone(),
             hooks.get(&first_block).unwrap()
         ) < 1e-7
     );
+    assert!(
+        difference(
+            output.hidden_states[2].clone(),
+            hooks.get(&last_block).unwrap()
+        ) < 1e-7
+    );
+    assert_fixture(output.hidden_states[3].clone(), "final");
     assert!(
         difference(
             output.logits,

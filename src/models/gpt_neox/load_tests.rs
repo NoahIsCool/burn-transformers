@@ -91,7 +91,7 @@ fn saved<const D: usize>(parameter: &Param<Tensor<TestBackend, D>>) -> Vec<f32> 
 fn local_import_reorders_qkv_heads_and_preserves_projection_layout() {
     let directory = TempDir::new().unwrap();
     write_checkpoint(directory.path(), |_| {});
-    let mut model = GptNeoXModel::<TestBackend>::init(tiny(), &Default::default()).unwrap();
+    let mut model = GptNeoXForCausalLm::<TestBackend>::init(tiny(), &Default::default()).unwrap();
     let outcome = model
         .load_checkpoint(directory.path(), &LoadOptions::default())
         .unwrap();
@@ -182,7 +182,8 @@ fn missing_wrong_shape_and_unknown_tensors_fail_before_parameter_writes() {
             }
             _ => tensors.push(("gpt_neox.layers.0.attention.unexpected".into(), vec![1])),
         });
-        let mut model = GptNeoXModel::<TestBackend>::init(tiny(), &Default::default()).unwrap();
+        let mut model =
+            GptNeoXForCausalLm::<TestBackend>::init(tiny(), &Default::default()).unwrap();
         let original = saved(&model.embed_in.weight);
         let error = model
             .load_checkpoint(directory.path(), &LoadOptions::default())
@@ -205,7 +206,7 @@ fn exact_legacy_buffer_exceptions_are_reported() {
             tensors.push((format!("gpt_neox.layers.0.attention.{suffix}"), shape));
         }
     });
-    let mut model = GptNeoXModel::<TestBackend>::init(tiny(), &Default::default()).unwrap();
+    let mut model = GptNeoXForCausalLm::<TestBackend>::init(tiny(), &Default::default()).unwrap();
     let outcome = model
         .load_checkpoint(directory.path(), &LoadOptions::default())
         .unwrap();
@@ -216,7 +217,7 @@ fn exact_legacy_buffer_exceptions_are_reported() {
 /// A missing value bias rejects the whole packed-bias write while preserving query/key biases.
 #[test]
 fn packed_component_failure_is_atomic_and_retains_context() {
-    let mut model = GptNeoXModel::<TestBackend>::init(tiny(), &Default::default()).unwrap();
+    let mut model = GptNeoXForCausalLm::<TestBackend>::init(tiny(), &Default::default()).unwrap();
     model.layers[0].attention.v_proj.bias = None;
     let original_query = saved(model.layers[0].attention.q_proj.bias.as_ref().unwrap());
     let original_key = saved(model.layers[0].attention.k_proj.bias.as_ref().unwrap());
@@ -242,7 +243,7 @@ fn packed_component_failure_is_atomic_and_retains_context() {
 /// Bad payloads, target syntax, aliases, and mutated head geometry return recoverable errors.
 #[test]
 fn malformed_packed_payload_and_indices_return_errors() {
-    let mut model = GptNeoXModel::<TestBackend>::init(tiny(), &Default::default()).unwrap();
+    let mut model = GptNeoXForCausalLm::<TestBackend>::init(tiny(), &Default::default()).unwrap();
     for data in [
         TensorData::new(vec![0.0_f32; 11], [11]),
         TensorData::from_bytes_vec(vec![0; 4], [12], DType::F32),

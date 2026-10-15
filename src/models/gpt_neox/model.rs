@@ -7,12 +7,32 @@
 //! order; sequential mode feeds the attention-updated residual into `LN_m`.
 //!
 //! RoPE rotates an even prefix of each actual head width using physical positions.
+//! The cosine and sine tables are built once per forward for every distinct
+//! head width (one table for an unedited model) and shared by its layers.
 //! Padding removes keys but retains query computations; empty-valid-token rows are
 //! rejected. Causal and bidirectional entry points share this padding contract.
-//! Eager attention requests F32 softmax; parameter and residual dtype/device must
-//! agree. Source dropout and decode caches are absent from this explicit graph.
-//! The untied vocabulary projection follows final normalization and can be called
-//! independently for logit-lens or trainable tuned-lens experiments.
+//! Parameter and residual dtype/device must agree. Source dropout and decode
+//! caches are absent from this explicit graph. The untied vocabulary projection
+//! follows final normalization and can be called independently for logit-lens or
+//! trainable tuned-lens experiments.
+//!
+//! # Attention precision
+//!
+//! Attention defaults to [`AttentionPrecisionMode::EagerFp32Softmax`]: the
+//! score plane is materialized, softmax runs in F32, and `scores`/`pattern`
+//! hook points exist. [`GptNeoXForCausalLm::set_attention_precision`] selects
+//! [`AttentionPrecisionMode::BackendDefault`], the backend's fused kernel,
+//! which is faster but has no score or pattern points.
+//!
+//! # Hidden states
+//!
+//! [`ForwardOptions::hidden_states`] returns the crate-wide `L + 2` tensors:
+//! the embedding, every block's output, and the final normalized state.
+//! Hugging Face returns `L + 1` (the embedding, the outputs of blocks
+//! `0..L-1`, and the final normalized state), so crate index `i` equals HF
+//! index `i` for `i < L`, crate index `L` is block `L - 1`'s raw output (the
+//! residual a final-layer lens needs), and crate index `L + 1` equals HF
+//! index `L`.
 
 use burn::{
     module::{Initializer, Module},
@@ -35,9 +55,12 @@ use crate::{
     position::{RopeConfig, RopeScaling, RotaryAngles, apply_rotary, rotary_angles},
 };
 
+mod experiment;
+
 use super::GptNeoXConfig;
 use crate::models::shared::{
-    ImplicitPositions, InputContract, InputNames, select_hidden, validate_input,
+    ImplicitPositions, InputContract, InputNames, ValidatedInput, select_hidden, validate_input,
+    validate_nonempty_mask,
 };
 
 /// Tensor names reported by GPT-NeoX input errors.
@@ -123,6 +146,35 @@ impl<B: Backend> GptNeoXLayer<B> {
         })
     }
 
+    /// Lists the points layer `index` emits, in emission order.
+    ///
+    /// Query and key points follow RoPE. Scores and patterns appear only in
+    /// the eager attention precision mode.
+    fn activation_points(&self, index: usize) -> Vec<PointInfo> {
+        let layer = Layer::decoder(index);
+        let attention = layer.self_attention();
+        let mut points = vec![
+            layer.residual_pre().info(),
+            layer.attention_input().info(),
+            attention.query().info(),
+            attention.key().info(),
+            attention.value().info(),
+        ];
+        if self.attention.precision_mode == AttentionPrecisionMode::EagerFp32Softmax {
+            points.extend([attention.scores().info(), attention.pattern().info()]);
+        }
+        points.extend([
+            attention.head_context().info(),
+            layer.attention_output().info(),
+            layer.mlp_input().info(),
+            layer.mlp_pre_activation().info(),
+            layer.mlp_activation().info(),
+            layer.mlp_output().info(),
+            layer.residual_post().info(),
+        ]);
+        points
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Runs one block with post-RoPE Q/K hooks and explicit causal or bidirectional visibility.
     ///
@@ -197,12 +249,15 @@ impl<B: Backend> GptNeoXLayer<B> {
 
 /// A GPT-NeoX backbone and vocabulary head with stateless, differentiable execution.
 ///
+/// This is Hugging Face's `GPTNeoXForCausalLM`: [`Self::forward`] returns
+/// vocabulary logits, like [`crate::models::gpt2::Gpt2ForCausalLm`].
 /// Use [`Self::forward_hidden_with_hooks`] for task heads, and [`Self::project_hidden`]
 /// to decode a raw intermediate residual state through the final normalization.
-/// Parameter initialization is random; [`Self::load_checkpoint`] initializes from
-/// explicitly supplied local SafeTensors artifacts.
+/// Parameter initialization is random ([`GptNeoXConfig::init_policy`]);
+/// [`Self::load_checkpoint`] initializes from explicitly supplied local
+/// SafeTensors artifacts.
 #[derive(Module, Debug)]
-pub struct GptNeoXModel<B: Backend> {
+pub struct GptNeoXForCausalLm<B: Backend> {
     /// Input token embeddings, independent of the output projection.
     pub embed_in: Embedding<B>,
     /// Ordered decoder blocks.
@@ -216,7 +271,14 @@ pub struct GptNeoXModel<B: Backend> {
     pub(super) config: GptNeoXConfig,
 }
 
-impl<B: Backend> GptNeoXModel<B> {
+/// Former name of [`GptNeoXForCausalLm`], kept so existing code compiles unchanged.
+///
+/// The model owns its vocabulary head, so the `ForCausalLm` name matches
+/// Hugging Face and [`crate::models::gpt2::Gpt2ForCausalLm`]; prefer it in new
+/// code.
+pub type GptNeoXModel<B> = GptNeoXForCausalLm<B>;
+
+impl<B: Backend> GptNeoXForCausalLm<B> {
     /// Validates the recipe before allocating randomly initialized modules.
     pub fn init(config: GptNeoXConfig, device: &B::Device) -> Result<Self> {
         config.validate()?;
@@ -253,34 +315,33 @@ impl<B: Backend> GptNeoXModel<B> {
         &self.config
     }
 
-    /// Lists semantic activation points with their axes. Q/K points follow RoPE;
-    /// MLP activation is exact GELU before the output projection.
+    /// Sets every layer's attention precision mode.
+    ///
+    /// [`AttentionPrecisionMode::EagerFp32Softmax`] (the default) exposes
+    /// score and pattern hook points; [`AttentionPrecisionMode::BackendDefault`]
+    /// runs the backend's fused attention kernel without them. The catalog of
+    /// [`Self::activation_points`] follows each layer's mode.
+    pub fn set_attention_precision(&mut self, mode: AttentionPrecisionMode) {
+        for layer in &mut self.layers {
+            layer.attention.precision_mode = mode;
+        }
+    }
+
+    /// Returns the model with every layer's attention precision mode set to `mode`.
+    #[must_use]
+    pub fn with_attention_precision(mut self, mode: AttentionPrecisionMode) -> Self {
+        self.set_attention_precision(mode);
+        self
+    }
+
+    /// Lists semantic activation points with their axes, in emission order.
+    ///
+    /// Q/K points follow RoPE; MLP activation is exact GELU before the output
+    /// projection.
     pub fn activation_points(&self) -> Vec<PointInfo> {
         let mut points = vec![Stack::Decoder.embedding().info()];
-        for index in 0..self.layers.len() {
-            let layer = Layer::decoder(index);
-            points.extend([
-                layer.residual_pre().info(),
-                layer.attention_input().info(),
-                layer.attention_output().info(),
-                layer.mlp_input().info(),
-                layer.mlp_pre_activation().info(),
-                layer.mlp_activation().info(),
-                layer.mlp_output().info(),
-                layer.residual_post().info(),
-            ]);
-            let attention = layer.self_attention();
-            points.extend([
-                attention.query().info(),
-                attention.key().info(),
-                attention.value().info(),
-                attention.head_context().info(),
-            ]);
-            if self.layers[index].attention.precision_mode
-                == AttentionPrecisionMode::EagerFp32Softmax
-            {
-                points.extend([attention.scores().info(), attention.pattern().info()]);
-            }
+        for (index, layer) in self.layers.iter().enumerate() {
+            points.extend(layer.activation_points(index));
         }
         points.push(Stack::Decoder.final_norm().info());
         points
@@ -296,8 +357,10 @@ impl<B: Backend> GptNeoXModel<B> {
     }
 
     /// Runs a causal sequence with selected activation capture and modifications.
-    /// Hidden-state diagnostics follow Hugging Face: embedding, outputs of all
-    /// blocks except the last, and the final normalized state.
+    ///
+    /// Hidden-state diagnostics are the embedding, every block's output, and
+    /// the final normalized state (`L + 2` tensors; see the module docs for the
+    /// mapping to Hugging Face's `L + 1`).
     pub fn forward_with_hooks(
         &self,
         input: CausalLmInput<B>,
@@ -392,12 +455,14 @@ impl<B: Backend> GptNeoXModel<B> {
             ));
         }
         let parameter = self.final_layer_norm.gamma.val();
-        validate_norm(
+        Expected::<B> {
+            device: &parameter.device(),
+            dtype: parameter.dtype(),
+        }
+        .norm(
             &self.final_layer_norm,
             self.config.hidden_size,
-            &parameter.device(),
-            parameter.dtype(),
-            "gpt_neox.final_layer_norm",
+            Label::Model("final_layer_norm"),
         )?;
         if hidden.device() != parameter.device() || hidden.dtype() != parameter.dtype() {
             return Err(Error::configuration(
@@ -410,8 +475,8 @@ impl<B: Backend> GptNeoXModel<B> {
 
     /// Embeds validated tokens, runs editable layers with their actual rotary widths, and normalizes.
     ///
-    /// Each layer derives RoPE from its current head width; retained states follow the source
-    /// convention of pre-block residuals followed by the final normalized output.
+    /// Retained states are the embedding, every block's output, and the final
+    /// normalized state (`L + 2` tensors).
     fn backbone(
         &self,
         input: &CausalLmInput<B>,
@@ -421,44 +486,93 @@ impl<B: Backend> GptNeoXModel<B> {
     ) -> Result<(Tensor<B, 3>, Vec<Tensor<B, 3>>)> {
         self.validate_parameters()?;
         let positions =
-            validate_public_input(input, &self.config, &self.embed_in.weight.lazy_device())?;
+            validate_public_input(input, &self.config, &self.embed_in.weight.lazy_device())?
+                .require_positions(INPUT_NAMES.position_ids)?;
         let mut hidden = hooks.apply(
             Stack::Decoder.embedding(),
             self.embed_in.forward(input.token_ids.clone()),
         )?;
-        let mut states = Vec::new();
-        for (index, layer) in self.layers.iter().enumerate() {
-            if retain {
-                states.push(hidden.clone());
-            }
-            // Publicly replacing a layer's attention can change its head width.
-            // Keep the configured rotary fraction relative to that actual width.
-            let rope = RopeConfig::from_partial_factor(
-                layer.attention.head_dim,
-                self.config.rotary_pct,
-                self.config.rotary_emb_base,
-                RopeScaling::None,
-            )
-            .map_err(|error| {
-                Error::configuration(format!("gpt_neox.layers.{index}.rotary"), error.to_string())
-            })?;
-            let angles =
-                rotary_angles(rope, positions.clone(), self.config.max_position_embeddings)?;
-            hidden = layer.forward_scoped(
-                hidden,
-                &angles,
-                input.token_mask.as_ref(),
-                self.config.use_parallel_residual,
-                causal,
-                Layer::decoder(index),
-                hooks,
-            )?;
+        let mut states = Vec::with_capacity(if retain { self.layers.len() + 2 } else { 0 });
+        if retain {
+            states.push(hidden.clone());
         }
+        hidden = self.run_blocks(
+            hidden,
+            &positions,
+            input.token_mask.as_ref(),
+            0..self.layers.len(),
+            causal,
+            hooks,
+            retain.then_some(&mut states),
+        )?;
         hidden = hooks.apply(Stack::Decoder.final_norm(), self.normalize_hidden(hidden)?)?;
         if retain {
             states.push(hidden.clone());
         }
         Ok((hidden, states))
+    }
+
+    /// Runs layers `range` on validated positions, sharing RoPE tables across layers.
+    ///
+    /// Publicly replacing a layer's attention can change its head width, and
+    /// the configured rotary fraction applies to each layer's actual width, so
+    /// tables are keyed by head width: an unedited model builds one table pair
+    /// per call instead of one per layer. Tables are cast once to the residual
+    /// dtype. Each block output is appended to `retained` when given.
+    #[allow(clippy::too_many_arguments)]
+    fn run_blocks(
+        &self,
+        mut hidden: Tensor<B, 3>,
+        positions: &Tensor<B, 2, Int>,
+        token_mask: Option<&TokenMask<B>>,
+        range: std::ops::Range<usize>,
+        causal: bool,
+        hooks: &mut Hooks<'_, B>,
+        mut retained: Option<&mut Vec<Tensor<B, 3>>>,
+    ) -> Result<Tensor<B, 3>> {
+        let mut tables: Vec<(usize, RotaryAngles<B>)> = Vec::with_capacity(1);
+        for index in range {
+            let layer = &self.layers[index];
+            let width = layer.attention.head_dim;
+            let slot = match tables.iter().position(|(cached, _)| *cached == width) {
+                Some(slot) => slot,
+                None => {
+                    let rope = RopeConfig::from_partial_factor(
+                        width,
+                        self.config.rotary_pct,
+                        self.config.rotary_emb_base,
+                        RopeScaling::None,
+                    )
+                    .map_err(|error| {
+                        Error::configuration(
+                            format!("gpt_neox.layers.{index}.rotary"),
+                            error.to_string(),
+                        )
+                    })?;
+                    let angles = rotary_angles(
+                        rope,
+                        positions.clone(),
+                        self.config.max_position_embeddings,
+                    )?
+                    .to_dtype(hidden.dtype());
+                    tables.push((width, angles));
+                    tables.len() - 1
+                }
+            };
+            hidden = layer.forward_scoped(
+                hidden,
+                &tables[slot].1,
+                token_mask,
+                self.config.use_parallel_residual,
+                causal,
+                Layer::decoder(index),
+                hooks,
+            )?;
+            if let Some(retained) = retained.as_deref_mut() {
+                retained.push(hidden.clone());
+            }
+        }
+        Ok(hidden)
     }
 
     /// Checks edited public modules before unchecked backend reshapes or residual additions.
@@ -467,43 +581,33 @@ impl<B: Backend> GptNeoXModel<B> {
         let device = embedding.device();
         let dtype = embedding.dtype();
         let width = self.config.hidden_size;
-        validate_tensor(
+        let expect = Expected {
+            device: &device,
+            dtype,
+        };
+        expect.tensor(
             &embedding,
             [self.config.vocab_size, width],
-            &device,
-            dtype,
-            "gpt_neox.embed_in.weight",
+            Label::Model("embed_in.weight"),
         )?;
-        validate_norm(
+        expect.norm(
             &self.final_layer_norm,
             width,
-            &device,
-            dtype,
-            "gpt_neox.final_layer_norm",
+            Label::Model("final_layer_norm"),
         )?;
-        validate_linear(
+        expect.linear(
             &self.embed_out,
             width,
             self.config.vocab_size,
-            &device,
-            dtype,
-            "gpt_neox.embed_out",
+            Label::Model("embed_out"),
         )?;
         for (index, layer) in self.layers.iter().enumerate() {
-            let label = format!("gpt_neox.layers.{index}");
-            validate_norm(
-                &layer.input_layernorm,
-                width,
-                &device,
-                dtype,
-                &format!("{label}.input_layernorm"),
-            )?;
-            validate_norm(
+            let label = |component| Label::Layer(index, component);
+            expect.norm(&layer.input_layernorm, width, label("input_layernorm"))?;
+            expect.norm(
                 &layer.post_attention_layernorm,
                 width,
-                &device,
-                dtype,
-                &format!("{label}.post_attention_layernorm"),
+                label("post_attention_layernorm"),
             )?;
             let attention = &layer.attention;
             if attention.hidden_size != width
@@ -515,7 +619,7 @@ impl<B: Backend> GptNeoXModel<B> {
                     .is_multiple_of(attention.key_value_heads)
             {
                 return Err(Error::configuration(
-                    format!("{label}.attention"),
+                    label("attention").render(),
                     "head dimensions must be nonzero, compatible, and preserve residual width",
                 ));
             }
@@ -525,7 +629,7 @@ impl<B: Backend> GptNeoXModel<B> {
                 .zip(attention.key_value_heads.checked_mul(attention.head_dim))
                 .ok_or_else(|| {
                     Error::configuration(
-                        format!("{label}.attention"),
+                        label("attention").render(),
                         "attention projection widths overflow usize",
                     )
                 })?;
@@ -535,73 +639,64 @@ impl<B: Backend> GptNeoXModel<B> {
                 } else {
                     2
                 })
-                .ok_or_else(|| Error::configuration(&label, "gated query width overflows usize"))?;
-            validate_linear(
+                .ok_or_else(|| {
+                    Error::configuration(
+                        Label::Layer(index, "").render(),
+                        "gated query width overflows usize",
+                    )
+                })?;
+            expect.linear(
                 &attention.q_proj,
                 width,
                 q_projection_width,
-                &device,
-                dtype,
-                &format!("{label}.attention.q_proj"),
+                label("attention.q_proj"),
             )?;
-            validate_linear(
+            expect.linear(
                 &attention.k_proj,
                 width,
                 key_width,
-                &device,
-                dtype,
-                &format!("{label}.attention.k_proj"),
+                label("attention.k_proj"),
             )?;
-            validate_linear(
+            expect.linear(
                 &attention.v_proj,
                 width,
                 key_width,
-                &device,
-                dtype,
-                &format!("{label}.attention.v_proj"),
+                label("attention.v_proj"),
             )?;
-            validate_linear(
+            expect.linear(
                 &attention.o_proj,
                 query_width,
                 width,
-                &device,
-                dtype,
-                &format!("{label}.attention.o_proj"),
+                label("attention.o_proj"),
             )?;
             for norm in [&attention.query_norm, &attention.key_norm]
                 .into_iter()
                 .flatten()
             {
-                validate_tensor(
+                expect.tensor(
                     &norm.weight.val(),
                     [attention.head_dim],
-                    &device,
-                    dtype,
-                    &format!("{label}.attention.query_key_norm"),
+                    label("attention.query_key_norm"),
                 )?;
             }
             let intermediate = layer.mlp.up_proj.weight.val().dims()[1];
             if intermediate == 0 {
                 return Err(Error::configuration(
-                    format!("{label}.mlp"),
+                    label("mlp").render(),
                     "intermediate width must be nonzero",
                 ));
             }
-            validate_linear(
+            expect.linear(
                 &layer.mlp.up_proj,
                 width,
                 intermediate,
-                &device,
-                dtype,
-                &format!("{label}.mlp.up_proj"),
+                label("mlp.up_proj"),
             )?;
-            validate_linear(
+            expect.linear(
                 &layer.mlp.down_proj,
                 intermediate,
                 width,
-                &device,
-                dtype,
-                &format!("{label}.mlp.down_proj"),
+                label("mlp.down_proj"),
             )?;
         }
         Ok(())
@@ -610,59 +705,79 @@ impl<B: Backend> GptNeoXModel<B> {
 
 // Public-edit safety checks, initialization, and input/output boundaries.
 
-/// Checks an exact parameter shape and common dtype/device before backend arithmetic.
-fn validate_tensor<B: Backend, const D: usize>(
-    tensor: &Tensor<B, D>,
-    shape: [usize; D],
-    device: &B::Device,
-    dtype: DType,
-    label: &str,
-) -> Result<()> {
-    if tensor.dims() != shape {
-        return Err(Error::shape(
-            label,
-            format!("{shape:?}"),
-            format!("{:?}", tensor.dims()),
-        ));
-    }
-    if tensor.device() != *device || tensor.dtype() != dtype {
-        return Err(Error::configuration(
-            label,
-            "parameters must share device and dtype",
-        ));
-    }
-    Ok(())
+/// Names a parameter in validation errors; the name is formatted only on failure.
+///
+/// Validation runs on every forward, so labels stay `(index, &'static str)`
+/// pairs instead of allocating formatted strings for parameters that pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Label {
+    /// A model-level parameter, `gpt_neox.<name>`.
+    Model(&'static str),
+    /// A layer parameter, `gpt_neox.layers.<index>.<name>` (or the layer itself for `""`).
+    Layer(usize, &'static str),
 }
 
-/// Checks channelwise affine LayerNorm parameters against the residual width and storage.
-fn validate_norm<B: Backend>(
-    norm: &LayerNorm<B>,
-    width: usize,
-    device: &B::Device,
-    dtype: DType,
-    label: &str,
-) -> Result<()> {
-    validate_tensor(&norm.gamma.val(), [width], device, dtype, label)?;
-    if let Some(beta) = &norm.beta {
-        validate_tensor(&beta.val(), [width], device, dtype, label)?;
+impl Label {
+    /// Formats the dotted parameter path reported in errors.
+    fn render(self) -> String {
+        match self {
+            Self::Model(name) => format!("gpt_neox.{name}"),
+            Self::Layer(index, "") => format!("gpt_neox.layers.{index}"),
+            Self::Layer(index, name) => format!("gpt_neox.layers.{index}.{name}"),
+        }
     }
-    Ok(())
 }
 
-/// Checks runtime `[input, output]` weights and optional `[output]` bias storage.
-fn validate_linear<B: Backend>(
-    linear: &Linear<B>,
-    input: usize,
-    output: usize,
-    device: &B::Device,
+/// The device and dtype every parameter must share with the token embedding.
+#[derive(Debug, Clone, Copy)]
+struct Expected<'a, B: Backend> {
+    /// Device of the token embedding.
+    device: &'a B::Device,
+    /// Floating dtype of the token embedding.
     dtype: DType,
-    label: &str,
-) -> Result<()> {
-    validate_tensor(&linear.weight.val(), [input, output], device, dtype, label)?;
-    if let Some(bias) = &linear.bias {
-        validate_tensor(&bias.val(), [output], device, dtype, label)?;
+}
+
+impl<B: Backend> Expected<'_, B> {
+    /// Checks an exact parameter shape and the common dtype/device before backend arithmetic.
+    fn tensor<const D: usize>(
+        &self,
+        tensor: &Tensor<B, D>,
+        shape: [usize; D],
+        label: Label,
+    ) -> Result<()> {
+        if tensor.dims() != shape {
+            return Err(Error::shape(
+                label.render(),
+                format!("{shape:?}"),
+                format!("{:?}", tensor.dims()),
+            ));
+        }
+        if tensor.device() != *self.device || tensor.dtype() != self.dtype {
+            return Err(Error::configuration(
+                label.render(),
+                "parameters must share device and dtype",
+            ));
+        }
+        Ok(())
     }
-    Ok(())
+
+    /// Checks channelwise affine LayerNorm parameters against the residual width and storage.
+    fn norm(&self, norm: &LayerNorm<B>, width: usize, label: Label) -> Result<()> {
+        self.tensor(&norm.gamma.val(), [width], label)?;
+        if let Some(beta) = &norm.beta {
+            self.tensor(&beta.val(), [width], label)?;
+        }
+        Ok(())
+    }
+
+    /// Checks runtime `[input, output]` weights and optional `[output]` bias storage.
+    fn linear(&self, linear: &Linear<B>, input: usize, output: usize, label: Label) -> Result<()> {
+        self.tensor(&linear.weight.val(), [input, output], label)?;
+        if let Some(bias) = &linear.bias {
+            self.tensor(&bias.val(), [output], label)?;
+        }
+        Ok(())
+    }
 }
 
 /// Initializes Gaussian weights and zero bias with checkpoint-facing Col record layout.
@@ -693,12 +808,13 @@ fn normal_linear<B: Backend>(
 ///
 /// Absent position IDs use physical `0..sequence` positions, including padded
 /// slots, as the reference GPT-NeoX forward does. Token, mask, and position
-/// values share one device-to-host readback.
+/// values share one device-to-host readback; implicit positions are built on
+/// the device and need no read.
 fn validate_public_input<B: Backend>(
     input: &CausalLmInput<B>,
     config: &GptNeoXConfig,
     device: &B::Device,
-) -> Result<Tensor<B, 2, Int>> {
+) -> Result<ValidatedInput<B>> {
     let [batch, sequence] = input.token_ids.dims();
     if batch == 0 || sequence == 0 || sequence > config.max_position_embeddings {
         return Err(Error::shape(
@@ -716,8 +832,7 @@ fn validate_public_input<B: Backend>(
         &InputContract::new(INPUT_NAMES, PARAMETERS, config.vocab_size)
             .with_position_limit(config.max_position_embeddings)
             .with_implicit_positions(ImplicitPositions::PhysicalColumns),
-    )?
-    .require_positions(INPUT_NAMES.position_ids)
+    )
 }
 
 #[cfg(test)]
