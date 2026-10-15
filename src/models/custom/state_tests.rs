@@ -6,9 +6,9 @@ use super::*;
 use crate::{
     CausalLanguageModel, Seq2SeqLanguageModel,
     architecture::{
-        Activation, AttentionSpec, DecoderLayerSpec, DenseFeedForwardSpec, FeedForwardSpec,
-        MixerSpec, NormPlacement, NormalizationSpec, PositionEncodingSpec, ResidualTopology,
-        Seq2SeqSpec,
+        Activation, AttentionOptions, AttentionSpec, DecoderLayerSpec, DenseFeedForwardSpec,
+        FeedForwardSpec, MixerSpec, NormPlacement, NormalizationSpec, PositionEncodingSpec,
+        ResidualTopology, Seq2SeqSpec,
     },
 };
 
@@ -60,6 +60,7 @@ fn oversized_history_geometry_fails_for_causal_and_seq2seq_models() {
             decoder: spec(),
             cross_attention_heads: 1,
             cross_attention_head_dim: 2,
+            cross_attention_options: AttentionOptions::default(),
         },
         &device,
     )

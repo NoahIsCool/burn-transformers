@@ -1,8 +1,10 @@
 //! Decoder-only modular language model assembly.
 //!
 //! The model owns only trainable parameters and immutable topology. Autoregressive session
-//! history remains in [`ModularDecodeState`], preserving a clean
-//! stateless graph for autodiff and model surgery.
+//! history remains in [`ModularDecodeState`], preserving a clean stateless graph for autodiff
+//! and model surgery. Every execution mode (full forward, bidirectional forward, staged
+//! ranges, cached decode) runs the blocks through the same [`ModularLayer`] path over one
+//! [`StackPass`], so positions, masks, and position tables are built once per pass.
 
 use std::ops::Range;
 
@@ -15,21 +17,35 @@ use burn::{
 use crate::{
     ArchitectureConfig, CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error,
     ForwardOptions, Result,
-    architecture::DecoderSpec,
+    architecture::{DecoderSpec, HookedModel, StagedModel},
     attention::AttentionPrecisionMode,
     cache::CacheConfig,
-    experiment::{AttentionPolicy, ExecutionContext, HiddenState},
+    experiment::{AttentionPolicy, HiddenState},
+    initialization::InitPolicy,
     intervention::{Hooks, Layer, PointInfo, Stack},
 };
 
 use super::{
     common::{
-        AttentionDirection, BackboneOutput, ModularLayer, ModularNorm, causal_output,
-        router_diagnostics, select_hidden, tied_projection, validate_and_resolve_input,
-        validate_decoder_execution, validate_forward_options, validate_position_values,
+        BackboneOutput, causal_output, embedded_state, router_diagnostics, select_hidden,
+        tied_projection, validate_and_resolve_input, validate_forward_options,
+        validate_stack_execution, validate_staged_positions,
     },
+    init::scaled_init_policy,
+    layer::ModularLayer,
+    norm::ModularNorm,
+    pass::StackPass,
     state::{ModularDecodeState, StatePurpose},
 };
+
+/// Whether a full-sequence causal-model pass keeps its causal structure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Direction {
+    /// Structural defaults: causal attention and each block's connectivity.
+    Causal,
+    /// Every attention block sees all valid tokens; recurrent mixers are rejected.
+    Bidirectional,
+}
 
 /// A heterogeneous decoder-only transformer assembled from [`DecoderSpec`].
 #[derive(Module, Debug)]
@@ -53,12 +69,17 @@ impl<B: Backend> ModularCausalLm<B> {
     /// Unsupported but well-formed features return a capability error before the embedding or
     /// any layer parameter is initialized. This makes failed experiment construction cheap and
     /// prevents an unavailable mixer from being approximated silently.
+    ///
+    /// Parameters use Burn's default initializers: `N(0, 1)` embeddings and Kaiming-uniform
+    /// projections. With tied embeddings that makes initial logits scale like
+    /// `sqrt(hidden_size)`; train from [`Self::init_with`] and [`Self::scaled_init_policy`]
+    /// instead (see [`crate::initialization`]).
     pub fn init(spec: DecoderSpec, device: &B::Device) -> Result<Self> {
-        validate_decoder_execution(&spec, AttentionDirection::Causal, "custom.causal")?;
+        validate_stack_execution(&spec, Stack::Decoder, "custom.causal")?;
         let layers = spec
             .layers
             .iter()
-            .map(|layer| ModularLayer::init(layer, spec.hidden_size, None, device))
+            .map(|layer| ModularLayer::build(layer, spec.hidden_size, None, device))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             embed_tokens: EmbeddingConfig::new(spec.vocabulary_size, spec.hidden_size).init(device),
@@ -74,6 +95,26 @@ impl<B: Backend> ModularCausalLm<B> {
             }),
             spec,
         })
+    }
+
+    /// Builds the graph and initializes its parameters with an explicit policy.
+    ///
+    /// The policy is checked against the model's parameter names before any value changes;
+    /// call `B::seed` first for reproducible draws.
+    pub fn init_with(spec: DecoderSpec, policy: &InitPolicy, device: &B::Device) -> Result<Self> {
+        Ok(policy.apply(Self::init(spec, device)?)?.0)
+    }
+
+    /// The recommended random-initialization policy for this topology.
+    ///
+    /// Embeddings and projections draw from `N(0, std^2)` with zero biases (Hugging Face's
+    /// `initializer_range`, typically `0.02`), and projections that write into the residual
+    /// stream (`o_proj`, `down_proj`, DeltaNet `out_proj`, present in this spec) are scaled
+    /// by `1/sqrt(2 * layers)` as in GPT-2. Normalization scales, T5 biases, DeltaNet decay
+    /// parameters, and other non-projection parameters keep their constructed values.
+    #[must_use]
+    pub fn scaled_init_policy(spec: &DecoderSpec, std: f64) -> InitPolicy {
+        scaled_init_policy([spec], spec.layers.len(), false, std)
     }
 
     /// Selects the numerical execution path for conventional projected self-attention layers.
@@ -101,10 +142,10 @@ impl<B: Backend> ModularCausalLm<B> {
     /// Lists the exact activations that this model can observe or replace.
     ///
     /// Residual points have shape `[batch, token, hidden]`. Dense feed-forward
-    /// pre/activation points expose the gate projection before/after its nonlinearity,
-    /// before multiplication by the content projection. MoE layers expose only MLP
-    /// input/output. Attention input/output surround the configured mixer, including
-    /// DeltaNet when that layer uses a recurrent mixer.
+    /// pre/activation points expose the gate (or up) projection before/after its nonlinearity.
+    /// MoE layers expose only MLP input/output, and attention-only blocks no MLP point.
+    /// Attention input/output surround the configured mixer, including DeltaNet when that
+    /// layer uses a recurrent mixer.
     pub fn activation_points(&self) -> Vec<PointInfo> {
         let mut points = vec![Stack::Decoder.embedding().info()];
         for (index, layer) in self.layers.iter().enumerate() {
@@ -129,24 +170,25 @@ impl<B: Backend> ModularCausalLm<B> {
     }
 
     /// Embeds tokens with a scope containing only the embedding point.
+    ///
+    /// Token, mask, and position values are validated with one device read.
     pub fn embed_with_hooks(
         &self,
         input: CausalLmInput<B>,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<HiddenState<B>> {
         hooks.run(vec![Stack::Decoder.embedding().info()], |hooks| {
-            let (positions, _) = validate_and_resolve_input(
+            let (positions, evaluated_context) = validate_and_resolve_input(
                 &input,
                 self.spec.vocabulary_size,
                 self.spec.max_position_embeddings,
                 "custom.embed",
             )?;
-            let context = ExecutionContext::new(positions, input.token_mask)?;
             let hidden = hooks.apply(
                 Stack::Decoder.embedding(),
                 self.embed_tokens.forward(input.token_ids),
             )?;
-            HiddenState::new(hidden, context)
+            embedded_state(hidden, positions, input.token_mask, evaluated_context, None)
         })
     }
 
@@ -159,7 +201,8 @@ impl<B: Backend> ModularCausalLm<B> {
     ///
     /// Ranges must begin at `state.next_layer`. Every policy in the requested range
     /// is validated before callbacks run, including unsupported recurrent policies.
-    /// Use separate hook collections when retaining captures across separate stages.
+    /// Position values are read once per call. Use separate hook collections when
+    /// retaining captures across separate stages.
     pub fn run_layers_with_hooks(
         &self,
         mut state: HiddenState<B>,
@@ -176,15 +219,11 @@ impl<B: Backend> ModularCausalLm<B> {
         hooks.run(points, |hooks| {
             self.validate_execution_state(&state)?;
             state.validate_range(range.clone(), self.layers.len())?;
-            validate_position_values(
-                &state.context.positions,
+            validate_staged_positions(
+                &state.context,
                 self.spec.max_position_embeddings,
-                "custom.run_layers.positions.position_ids",
+                "custom.run_layers.positions",
             )?;
-            // `validate_execution_state` already ran `ExecutionContext::validate`
-            // once for this range, and the context is immutable while the blocks
-            // run. Each block then re-checks only sync-free geometry, because hooks
-            // may replace the hidden states between blocks.
             for index in range.clone() {
                 self.layers[index].validate_prevalidated(
                     &state.hidden,
@@ -192,13 +231,15 @@ impl<B: Backend> ModularCausalLm<B> {
                     Layer::decoder(index),
                 )?;
             }
+            let pass =
+                StackPass::from_context(&state.context, Stack::Decoder, state.hidden.dtype());
             for index in range.clone() {
-                state.hidden = self.layers[index].forward_prevalidated(
-                    state.hidden,
-                    &state.context,
-                    Layer::decoder(index),
-                    hooks,
-                )?;
+                let layer = Layer::decoder(index);
+                // Hooks may replace hidden states between blocks; re-check them sync-free.
+                self.layers[index].validate_prevalidated(&state.hidden, &state.context, layer)?;
+                state.hidden = self.layers[index]
+                    .forward(state.hidden, &pass, layer, hooks)?
+                    .0;
             }
             state.next_layer = range.end;
             Ok(state)
@@ -207,10 +248,21 @@ impl<B: Backend> ModularCausalLm<B> {
 
     /// Checks `[batch, token, hidden]` state compatibility before staged execution.
     ///
-    /// Dtype/device must match embeddings, the cursor must fit the block list,
-    /// and attention overrides must address this decoder without cross-attention.
+    /// Width, dtype, and device must match embeddings, the context layout must match the
+    /// hidden grid, the cursor must fit the block list, and attention overrides must address
+    /// this decoder without cross-attention. No device value is read.
     fn validate_execution_state(&self, state: &HiddenState<B>) -> Result<()> {
-        state.validate(self.spec.hidden_size)?;
+        let [batch, tokens, width] = state.hidden.dims();
+        if width != self.spec.hidden_size || batch == 0 || tokens == 0 {
+            return Err(Error::shape(
+                "execution.hidden",
+                format!("nonempty [batch, token, {}]", self.spec.hidden_size),
+                format!("{:?}", state.hidden.dims()),
+            ));
+        }
+        state
+            .context
+            .validate_layout([batch, tokens], &state.hidden.device())?;
         let embedding = self.embed_tokens.weight.val();
         if state.hidden.dtype() != embedding.dtype() || state.hidden.device() != embedding.device()
         {
@@ -287,7 +339,7 @@ impl<B: Backend> ModularCausalLm<B> {
         self.forward_backbone_with_hooks(
             input,
             retain_hidden_states,
-            AttentionDirection::Causal,
+            Direction::Causal,
             &mut Hooks::new(),
         )
     }
@@ -297,16 +349,27 @@ impl<B: Backend> ModularCausalLm<B> {
         &self,
         input: &CausalLmInput<B>,
         retain_hidden_states: bool,
-        direction: AttentionDirection,
+        direction: Direction,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<BackboneOutput<B>> {
-        let (positions, context) = validate_and_resolve_input(
+        let (positions, evaluated_context) = validate_and_resolve_input(
             input,
             self.spec.vocabulary_size,
             self.spec.max_position_embeddings,
             "custom.causal",
         )?;
         let hidden = self.embed_tokens.forward(input.token_ids.clone());
+        let mut pass = StackPass::new(
+            positions,
+            input.token_mask.as_ref(),
+            evaluated_context,
+            Stack::Decoder,
+            hidden.dtype(),
+        )
+        .with_row_invariant_positions(input.position_ids.is_none() && input.token_mask.is_none());
+        if direction == Direction::Bidirectional {
+            pass = pass.with_self_attention_policy(AttentionPolicy::bidirectional());
+        }
         let mut hidden = hooks.apply(Stack::Decoder.embedding(), hidden)?;
         let mut hidden_states = Vec::with_capacity(if retain_hidden_states {
             self.layers.len() + 2
@@ -317,25 +380,10 @@ impl<B: Backend> ModularCausalLm<B> {
         if retain_hidden_states {
             hidden_states.push(hidden.clone());
         }
-        let policy =
-            (direction == AttentionDirection::Bidirectional).then(AttentionPolicy::bidirectional);
         for (index, layer) in self.layers.iter().enumerate() {
-            let (next, router) = layer.forward(
-                hidden,
-                positions.clone(),
-                input.token_mask.as_ref(),
-                direction,
-                context,
-                None,
-                Layer::decoder(index),
-                hooks,
-                policy.as_ref(),
-                None,
-            )?;
+            let (next, router) = layer.forward(hidden, &pass, Layer::decoder(index), hooks)?;
             hidden = next;
-            if let Some(router) = router {
-                routers.push(router);
-            }
+            routers.extend(router);
             if retain_hidden_states {
                 hidden_states.push(hidden.clone());
             }
@@ -378,14 +426,15 @@ impl<B: Backend> ModularCausalLm<B> {
         options: &ForwardOptions,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<CausalLmOutput<B>> {
-        self.forward_direction_with_hooks(input, options, AttentionDirection::Causal, hooks)
+        self.forward_direction_with_hooks(input, options, Direction::Causal, hooks)
     }
 
     /// Evaluates full-sequence attention with future tokens visible.
     ///
-    /// Padding is still excluded, and a configured trailing window is replaced by
-    /// full bidirectional visibility. DeltaNet returns a capability error. Positional
-    /// encoding parameters are retained, including any directional relative bias.
+    /// Padding is still excluded, and every block's structural connectivity (trailing
+    /// windows, local chunks) is replaced by full bidirectional visibility. DeltaNet
+    /// returns a capability error. Positional encoding parameters are retained,
+    /// including any directional relative bias.
     pub fn forward_bidirectional(
         &self,
         input: CausalLmInput<B>,
@@ -403,7 +452,7 @@ impl<B: Backend> ModularCausalLm<B> {
         options: &ForwardOptions,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<CausalLmOutput<B>> {
-        self.forward_direction_with_hooks(input, options, AttentionDirection::Bidirectional, hooks)
+        self.forward_direction_with_hooks(input, options, Direction::Bidirectional, hooks)
     }
 
     /// Returns final normalized `[batch, token, hidden]` states without vocabulary logits.
@@ -419,12 +468,12 @@ impl<B: Backend> ModularCausalLm<B> {
         input: CausalLmInput<B>,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Tensor<B, 3>> {
-        self.forward_hidden_direction_with_hooks(input, AttentionDirection::Causal, hooks)
+        self.forward_hidden_direction_with_hooks(input, Direction::Causal, hooks)
     }
 
     /// Returns bidirectional final normalized states without evaluating a vocabulary head.
     ///
-    /// Padding remains excluded and trailing windows are replaced. Intrinsically
+    /// Padding remains excluded and structural connectivity is replaced. Intrinsically
     /// causal DeltaNet is rejected, as in [`Self::forward_bidirectional`].
     pub fn forward_hidden_bidirectional(&self, input: CausalLmInput<B>) -> Result<Tensor<B, 3>> {
         self.forward_hidden_bidirectional_with_hooks(input, &mut Hooks::new())
@@ -436,7 +485,7 @@ impl<B: Backend> ModularCausalLm<B> {
         input: CausalLmInput<B>,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Tensor<B, 3>> {
-        self.forward_hidden_direction_with_hooks(input, AttentionDirection::Bidirectional, hooks)
+        self.forward_hidden_direction_with_hooks(input, Direction::Bidirectional, hooks)
     }
 
     /// Runs the selected connectivity policy and returns normalized token representations.
@@ -446,7 +495,7 @@ impl<B: Backend> ModularCausalLm<B> {
     fn forward_hidden_direction_with_hooks(
         &self,
         input: CausalLmInput<B>,
-        direction: AttentionDirection,
+        direction: Direction,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Tensor<B, 3>> {
         hooks.run(self.activation_points(), |hooks| {
@@ -457,14 +506,14 @@ impl<B: Backend> ModularCausalLm<B> {
         })
     }
 
-    /// Rejects bidirectional execution when any block contains causal DeltaNet state.
-    fn validate_direction(&self, direction: AttentionDirection) -> Result<()> {
-        if direction == AttentionDirection::Bidirectional
+    /// Rejects bidirectional execution when any block contains a causal recurrent mixer.
+    fn validate_direction(&self, direction: Direction) -> Result<()> {
+        if direction == Direction::Bidirectional
             && self
                 .spec
                 .layers
                 .iter()
-                .any(|layer| matches!(layer.mixer, crate::architecture::MixerSpec::DeltaNet { .. }))
+                .any(|layer| layer.mixer.is_recurrent())
         {
             return Err(Error::BackendCapability(
                 "DeltaNet is a causal recurrent mixer and cannot execute a bidirectional policy"
@@ -479,7 +528,7 @@ impl<B: Backend> ModularCausalLm<B> {
         &self,
         input: CausalLmInput<B>,
         options: &ForwardOptions,
-        direction: AttentionDirection,
+        direction: Direction,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<CausalLmOutput<B>> {
         hooks.run(self.activation_points(), |hooks| {
@@ -520,7 +569,7 @@ impl ArchitectureConfig for DecoderSpec {
 
     /// Validates the decoder topology and its executable causal mixer capabilities.
     fn validate(&self) -> Result<()> {
-        validate_decoder_execution(self, AttentionDirection::Causal, "custom.causal")
+        validate_stack_execution(self, Stack::Decoder, "custom.causal")
     }
 }
 
@@ -595,6 +644,68 @@ impl<B: Backend> CausalLanguageModel<B> for ModularCausalLm<B> {
             options,
             false,
         )
+    }
+}
+
+impl<B: Backend> HookedModel<B> for ModularCausalLm<B> {
+    /// Complete causal-model input.
+    type Input = CausalLmInput<B>;
+    /// Complete causal-model output.
+    type Output = CausalLmOutput<B>;
+
+    /// Every point of the causal forward pass, in emission order.
+    fn activation_points(&self) -> Result<Vec<PointInfo>> {
+        Ok(ModularCausalLm::activation_points(self))
+    }
+
+    /// Runs [`ModularCausalLm::forward_with_hooks`].
+    fn forward_with_hooks(
+        &self,
+        input: CausalLmInput<B>,
+        options: &ForwardOptions,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<CausalLmOutput<B>> {
+        ModularCausalLm::forward_with_hooks(self, input, options, hooks)
+    }
+}
+
+impl<B: Backend> StagedModel<B> for ModularCausalLm<B> {
+    /// Number of decoder blocks.
+    fn num_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// The decoder stack.
+    fn stack(&self) -> Stack {
+        Stack::Decoder
+    }
+
+    /// Runs [`ModularCausalLm::embed_with_hooks`].
+    fn embed_with_hooks(
+        &self,
+        input: CausalLmInput<B>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        ModularCausalLm::embed_with_hooks(self, input, hooks)
+    }
+
+    /// Runs [`ModularCausalLm::run_layers_with_hooks`].
+    fn run_layers_with_hooks(
+        &self,
+        state: HiddenState<B>,
+        range: Range<usize>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        ModularCausalLm::run_layers_with_hooks(self, state, range, hooks)
+    }
+
+    /// Runs [`ModularCausalLm::normalize_with_hooks`].
+    fn normalize_with_hooks(
+        &self,
+        state: HiddenState<B>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<HiddenState<B>> {
+        ModularCausalLm::normalize_with_hooks(self, state, hooks)
     }
 }
 

@@ -13,9 +13,10 @@ mod traits;
 mod types;
 
 pub use spec::{
-    Activation, AttentionSpec, DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec,
-    FeedForwardSpec, Mamba2Spec, MixerSpec, MixtureOfExpertsSpec, MlaSpec, NormPlacement,
-    NormalizationSpec, PositionEncodingSpec, ResidualTopology, RopeScaling, Seq2SeqSpec,
+    Activation, AttentionOptions, AttentionSpec, ClampedSwiGluSpec, CrossAttentionSpec,
+    DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec, FeedForwardSpec, Mamba2Spec, MixerSpec,
+    MixtureOfExpertsSpec, MlaSpec, NormPlacement, NormalizationSpec, OutputGateActivation,
+    PositionEncodingSpec, ResidualTopology, RopeScaling, ScoreScale, Seq2SeqSpec,
     SlidingWindowSpec,
 };
 pub use traits::{

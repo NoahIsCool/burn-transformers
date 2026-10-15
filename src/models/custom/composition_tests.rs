@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::{
-    attention::AttentionPrecisionMode,
+    architecture::ScoreScale,
+    attention::{AttentionConnectivity, AttentionPrecisionMode},
     experiment::{
         AttentionPolicy, EncoderContext, ExecutionContext, HiddenTransform, ResidualBlock,
         WidthAdapter,
@@ -235,6 +236,8 @@ fn shared_mla_runs_in_encoder_decoder_and_exposes_compressed_activations() {
         key_value_lora_rank: 4,
         query_lora_rank: Some(3),
         position: PositionEncodingSpec::None,
+        score_scale: ScoreScale::Auto,
+        connectivity: AttentionConnectivity::Global,
     });
     let model = ModularSeq2SeqLm::<B>::init(
         Seq2SeqSpec {
@@ -242,6 +245,7 @@ fn shared_mla_runs_in_encoder_decoder_and_exposes_compressed_activations() {
             decoder: spec(NormPlacement::Pre),
             cross_attention_heads: 2,
             cross_attention_head_dim: 4,
+            cross_attention_options: AttentionOptions::default(),
         },
         &Default::default(),
     )
@@ -573,6 +577,7 @@ proptest::proptest! {
             decoder: stack,
             cross_attention_heads: 2,
             cross_attention_head_dim: 4,
+            cross_attention_options: AttentionOptions::default(),
         }, &Default::default()).unwrap().map(&mut FixedParameters::default());
         let source_tokens = input([[first_token, 2, 3]]);
         let target_tokens = input([[4, 5, 6]]);
@@ -605,12 +610,12 @@ proptest::proptest! {
     }
 }
 
-/// Range runners read context values once; prevalidated blocks stay exact and still reject bad grids.
+/// Range runners read context values once; their blocks stay exact and still reject bad grids.
 ///
-/// `forward_prevalidated` must reproduce the checked `HiddenTransform::forward`
-/// bit for bit, and its sync-free context check must report the same errors as
-/// the full check for position and padding tensors that do not match the
-/// hidden grid (CUS-3).
+/// The range runner's pass-based block execution must reproduce the checked
+/// `HiddenTransform::forward` bit for bit, and its sync-free context check
+/// must report the same errors as the full check for position and padding
+/// tensors that do not match the hidden grid (CUS-3).
 #[test]
 fn prevalidated_blocks_match_checked_blocks_and_reject_mismatched_contexts() {
     let device = Default::default();
@@ -628,14 +633,15 @@ fn prevalidated_blocks_match_checked_blocks_and_reject_mismatched_contexts() {
         &mut Hooks::new(),
     )
     .unwrap();
+    let pass = crate::models::custom::pass::StackPass::from_context(
+        &state.context,
+        Stack::Decoder,
+        state.hidden.dtype(),
+    );
     let prevalidated = layer
-        .forward_prevalidated(
-            state.hidden.clone(),
-            &state.context,
-            address,
-            &mut Hooks::new(),
-        )
-        .unwrap();
+        .forward(state.hidden.clone(), &pass, address, &mut Hooks::new())
+        .unwrap()
+        .0;
     assert_eq!(checked.into_data(), prevalidated.into_data());
 
     let mut short_positions = state.context.clone();
@@ -650,9 +656,14 @@ fn prevalidated_blocks_match_checked_blocks_and_reject_mismatched_contexts() {
         &device,
     )));
     for context in [short_positions, short_mask] {
-        let full = layer
-            .validate_context(&state.hidden, &context, address)
-            .unwrap_err();
+        let full = HiddenTransform::forward(
+            layer,
+            state.hidden.clone(),
+            &context,
+            address,
+            &mut Hooks::new(),
+        )
+        .unwrap_err();
         let sync_free = layer
             .validate_prevalidated(&state.hidden, &context, address)
             .unwrap_err();

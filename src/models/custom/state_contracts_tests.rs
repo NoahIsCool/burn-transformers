@@ -14,6 +14,9 @@ fn sparse_model(device: &<TestBackend as BackendTypes>::Device) -> ModularCausal
         activation: Activation::Silu,
         renormalize_selected: true,
         routed_scale: 0.75,
+        routing: RoutingPolicy::default(),
+        shared_expert_gate: false,
+        expert_bias: false,
     });
     ModularCausalLm::init(decoder(vec![block.clone(), block]), device)
         .unwrap()
