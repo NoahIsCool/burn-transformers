@@ -30,8 +30,9 @@
 //!   of a full batch reads only in-bounds rows.
 //!
 //! See `verus/README.md` for the method, toolchain, and command. Tensor slicing,
-//! edits, device readbacks, the conversion from semantic axes to dimensions,
-//! and floating-point reduction accuracy remain covered by the Rust test suite.
+//! edits, device readbacks, the comparison of semantic axes (which produces the
+//! match flags the resolution consumes), error formatting, and floating-point
+//! reduction accuracy remain covered by the Rust test suite.
 
 // Loop invariants are attributes on `while` expressions, which needs this
 // feature under Verus only; ordinary builds never compile this harness.

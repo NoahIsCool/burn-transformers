@@ -12,9 +12,9 @@
 //!
 //! - [`attention_heads`] and [`delta_net_heads`] classify a head layout as
 //!   having a zero dimension, indivisible groups, or valid groups, in that
-//!   precedence. A valid layout has groups of exactly `heads / groups` heads,
-//!   and every head `h` maps to group `h / group_size`, which is in range: the
-//!   head-to-group map is onto and each group receives the same number of heads.
+//!   precedence. A valid layout has groups of exactly `heads / groups` heads:
+//!   head `h` maps to the in-range group `h / group_size`, and each group is
+//!   the contiguous block of `group_size` heads it starts.
 //! - [`mamba2_dimensions`] accepts exactly nonzero dimensions whose group size
 //!   divides the head count.
 //! - [`expert_counts`] accepts exactly a nonzero expert count and width with
@@ -416,13 +416,19 @@ verus! {
 
 /// `heads` split into `groups` equal groups: head `h` belongs to group `h / (heads / groups)`.
 ///
-/// The group size is positive and exact, and every head maps to a valid group.
+/// The group size is positive and exact, every head maps to a valid group,
+/// and group `g` is exactly the contiguous block of heads
+/// `g * size..(g + 1) * size`, so every group has exactly `size` members.
 pub(crate) open spec fn heads_grouped(heads: int, groups: int) -> bool {
+    let size = heads / groups;
     &&& heads > 0
     &&& groups > 0
-    &&& heads / groups >= 1
-    &&& (heads / groups) * groups == heads
-    &&& forall|head: int| 0 <= head < heads ==> 0 <= #[trigger] (head / (heads / groups)) < groups
+    &&& size >= 1
+    &&& size * groups == heads
+    &&& forall|head: int| 0 <= head < heads ==> {
+        &&& 0 <= #[trigger] (head / size) < groups
+        &&& (head / size) * size <= head < (head / size) * size + size
+    }
 }
 
 /// Divisible positive head counts form equal groups that every head maps into.
@@ -440,10 +446,14 @@ pub(crate) proof fn lemma_heads_grouped(heads: int, groups: int)
         requires heads == groups * size + 0;
     assert(size >= 1) by (nonlinear_arith)
         requires size * groups == heads, heads > 0, groups > 0;
-    assert forall|head: int| 0 <= head < heads implies 0 <= #[trigger] (head / size) < groups by {
+    assert forall|head: int| 0 <= head < heads implies {
+        &&& 0 <= #[trigger] (head / size) < groups
+        &&& (head / size) * size <= head < (head / size) * size + size
+    } by {
         vstd::arithmetic::div_mod::lemma_fundamental_div_mod(head, size);
         vstd::arithmetic::div_mod::lemma_mod_pos_bound(head, size);
         let quotient = head / size;
+        assert(quotient * size == size * quotient) by (nonlinear_arith);
         assert(quotient >= 0) by (nonlinear_arith)
             requires head == size * quotient + head % size, 0 <= head % size < size, head >= 0, size >= 1;
         assert(quotient < groups) by (nonlinear_arith)
