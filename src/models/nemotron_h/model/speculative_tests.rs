@@ -10,7 +10,8 @@ use crate::{
     cache::CacheConfig,
     checkpoint::TensorSink,
     models::nemotron_h::{
-        NemotronHBlockType, NemotronHCheckpointOptions, NemotronHConfig, model::tests::tiny_config,
+        NemotronHBlockType, NemotronHCheckpointOptions, NemotronHConfig,
+        model::tests::{assert_relative_close, tiny_config, with_dt_bias},
     },
 };
 
@@ -650,13 +651,33 @@ fn plain_greedy_with(
     new_tokens: usize,
     capacity: usize,
 ) -> Vec<u32> {
-    let device = Default::default();
-    let processor = LogitsProcessor::new(
-        GenerationConfig::default(),
-        model.config().vocab_size,
-        &device,
+    plain_greedy_configured(
+        model,
+        prompt,
+        new_tokens,
+        capacity,
+        &GenerationConfig::default(),
+        prompt.len(),
     )
-    .unwrap();
+}
+
+/// Greedy decoding exactly as `generate_causal` processes logits, one target pass per token.
+///
+/// Logits go through `generation`'s processors with the first
+/// `prompt_length` history tokens treated as the prompt (tests pass a wrong
+/// length to prove that the comparison is sensitive to it). Decoding stops
+/// after `new_tokens` tokens or right after an EOS token.
+fn plain_greedy_configured(
+    model: &NemotronHForCausalLm<TestBackend>,
+    prompt: &[u32],
+    new_tokens: usize,
+    capacity: usize,
+    generation: &GenerationConfig,
+    prompt_length: usize,
+) -> Vec<u32> {
+    let device = Default::default();
+    let processor =
+        LogitsProcessor::new(generation.clone(), model.config().vocab_size, &device).unwrap();
     let mut state = model
         .new_decode_state(CacheConfig::new(1, capacity).unwrap(), 1, &device)
         .unwrap();
@@ -677,11 +698,14 @@ fn plain_greedy_with(
     let mut generated = Vec::with_capacity(new_tokens);
     while generated.len() < new_tokens {
         let processed = processor
-            .process_with_prompt_lengths(logits, &[history.as_slice()], &[prompt.len()])
+            .process_with_prompt_lengths(logits, &[history.as_slice()], &[prompt_length])
             .unwrap();
         let token = first_token(processor.select(processed).unwrap()).unwrap();
         generated.push(token);
         history.push(token);
+        if generation.eos_token_ids.contains(&token) || generated.len() == new_tokens {
+            break;
+        }
         logits = model
             .decode(
                 crate::DecodeInput {
@@ -729,11 +753,30 @@ fn speculative_greedy_with(
     max_draft_tokens: usize,
     capacity: usize,
 ) -> SpeculativeRun {
+    speculative_greedy_configured(
+        model,
+        prompt,
+        new_tokens,
+        max_draft_tokens,
+        capacity,
+        GenerationConfig::default(),
+    )
+}
+
+/// [`speculative_greedy`] with explicit logit processing; stops at an emitted EOS.
+fn speculative_greedy_configured(
+    model: &NemotronHForCausalLm<TestBackend>,
+    prompt: &[u32],
+    new_tokens: usize,
+    max_draft_tokens: usize,
+    capacity: usize,
+    generation: GenerationConfig,
+) -> SpeculativeRun {
     let device = Default::default();
     let mut decoder = NemotronHSpeculativeDecoder::new(
         NemotronHSpeculativeConfig {
             max_draft_tokens,
-            ..Default::default()
+            generation,
         },
         model.config().vocab_size,
         &device,
@@ -757,7 +800,9 @@ fn speculative_greedy_with(
     let mut history = prompt.to_vec();
     let mut generated = vec![lead];
     let mut cycles = Vec::new();
-    while generated.len() < new_tokens {
+    let eos = decoder.config().generation.eos_token_ids.clone();
+    let mut terminated = eos.contains(&lead);
+    while generated.len() < new_tokens && !terminated {
         let passes = super::super::decode::CACHED_PASSES.with(std::cell::Cell::get);
         let output = decoder
             .speculate(model, lead, hidden, &history, prompt.len(), &mut state)
@@ -769,7 +814,15 @@ fn speculative_greedy_with(
         history.extend_from_slice(&emitted[..emitted.len() - 1]);
         generated.extend_from_slice(&emitted[1..]);
         lead = *emitted.last().unwrap();
-        hidden = output.continuation_hidden_state.unwrap();
+        terminated = output.terminated;
+        assert_eq!(terminated, eos.contains(&lead));
+        match output.continuation_hidden_state {
+            Some(continuation) => hidden = continuation,
+            None => {
+                assert!(terminated, "only EOS ends the continuation");
+                break;
+            }
+        }
         assert_eq!(state.tensor_state().lengths(), &[history.len()]);
         assert_eq!(
             state.tensor_state().mtp_lengths(),
@@ -785,13 +838,110 @@ fn speculative_greedy_with(
     }
 }
 
+/// Requires a speculative run's committed cache to equal token-by-token decoding of its history.
+///
+/// The reference prefills the prompt and decodes every later history token
+/// in its own call, which is exactly the cache that plain greedy decoding
+/// builds. Attention keys and values must agree within F32 rounding, and
+/// every Mamba-2 state relatively (see `assert_relative_close`), so on a
+/// clamped-`dt` model a verification pass that ran the chunk scan instead of
+/// per-token single-step updates fails here even when greedy tokens agree.
+fn assert_cache_matches_token_by_token(
+    model: &NemotronHForCausalLm<TestBackend>,
+    prompt: &[u32],
+    run: &SpeculativeRun,
+) {
+    let device = Default::default();
+    let mut reference = model
+        .new_decode_state(CacheConfig::new(1, 32).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: token_row(prompt),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut reference,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    for &token in &run.history[prompt.len()..] {
+        model
+            .decode(
+                crate::DecodeInput {
+                    token_ids: token_row(&[token]),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut reference,
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+    }
+    let length = run.history.len();
+    assert_eq!(reference.tensor_state().lengths(), &[length]);
+    let (actual, expected) = (
+        run.state.tensor_state().main(),
+        reference.tensor_state().main(),
+    );
+    for group in 0..expected.native_kv_count() {
+        let (actual, expected) = (
+            actual.native_kv(group).unwrap(),
+            expected.native_kv(group).unwrap(),
+        );
+        for layer in 0..expected.spec().layers() {
+            for (actual, expected) in [
+                (actual.keys(layer).unwrap(), expected.keys(layer).unwrap()),
+                (
+                    actual.values(layer).unwrap(),
+                    expected.values(layer).unwrap(),
+                ),
+            ] {
+                actual
+                    .clone()
+                    .narrow(2, 0, length)
+                    .into_data()
+                    .assert_approx_eq::<f32>(
+                        &expected.clone().narrow(2, 0, length).into_data(),
+                        burn::tensor::Tolerance::absolute(1e-4),
+                    );
+            }
+        }
+    }
+    for group in 0..expected.recurrent_count() {
+        let (actual, expected) = (
+            actual.recurrent(group).unwrap(),
+            expected.recurrent(group).unwrap(),
+        );
+        for layer in 0..expected.spec().layers() {
+            assert_relative_close(
+                actual.matrix(layer).unwrap().clone().into_data(),
+                expected.matrix(layer).unwrap().clone().into_data(),
+                1e-4,
+                &format!("Mamba-2 layer {layer} matrix state"),
+            );
+            assert_relative_close(
+                actual.convolution(layer).unwrap().clone().into_data(),
+                expected.convolution(layer).unwrap().clone().into_data(),
+                1e-4,
+                &format!("Mamba-2 layer {layer} convolution state"),
+            );
+        }
+    }
+}
+
 /// Greedy speculation emits exactly the plain greedy sequence (NEM-1 losslessness).
 ///
 /// The graphs cover the acceptance space: deterministic sinusoidal weights
 /// (a non-degenerate hybrid whose drafts are rejected), the hybrid transition
 /// fixture (full, partial, and zero acceptance through Mamba-2 snapshots and
 /// attention), a tied-logit graph whose drafts are always accepted, and a
-/// scripted graph that alternates. Every cycle costs exactly one target pass.
+/// scripted graph that alternates. Every cycle costs exactly one target pass,
+/// and the committed cache equals token-by-token decoding. The clamped-`dt`
+/// variants (review NEMR-1) make the chunk scan and the single-step update
+/// leave different Mamba-2 states, so the cache comparison would catch a
+/// verification pass that ran the wrong path.
 #[test]
 fn greedy_speculation_matches_plain_greedy_decoding() {
     let device = Default::default();
@@ -803,10 +953,21 @@ fn greedy_speculation_matches_plain_greedy_decoding() {
         (transition_model(&device), [6, 3, 1, 4], 4),
         (zero_model(&device), [5, 9, 2, 7], 2),
         (scripted_rejection_model(&device), [5, 9, 2, 7], 3),
+        (
+            with_dt_bias(sinusoidal_model(&device), -12.0),
+            [5, 9, 2, 7],
+            3,
+        ),
+        (
+            with_dt_bias(transition_model(&device), -12.0),
+            [6, 3, 1, 4],
+            3,
+        ),
     ] {
         let expected = plain_greedy(&model, &prompt, 14);
         let run = speculative_greedy(&model, &prompt, 14, draft);
         assert_eq!(run.generated, expected);
+        assert_cache_matches_token_by_token(&model, &prompt, &run);
         for &(accepted, drafted) in &run.cycles {
             match accepted {
                 0 => rejected += 1,
@@ -818,6 +979,116 @@ fn greedy_speculation_matches_plain_greedy_decoding() {
     assert!(
         rejected > 0 && partial > 0 && fully_accepted > 0,
         "rejected={rejected}, partial={partial}, full={fully_accepted}"
+    );
+}
+
+/// Greedy speculation with logit processing matches plain greedy decoding (review NEMR-2).
+///
+/// The verifier processes verification row `i` with its own history
+/// `sequence[..base + i + 1]` and the prompt length, and each draft with the
+/// tokens drafted so far. Repetition, presence, and frequency penalties
+/// (generated-only scope), an n-gram block, and EOS with `min_new_tokens`
+/// all read that history, so an off-by-one or a wrong prompt length in the
+/// target processing changes the emitted tokens. The test also proves it is
+/// not vacuous: processing changes every plain greedy output, treating the
+/// prompt as generated changes at least one output per configuration, and
+/// the delayed EOS both suppresses an early EOS and terminates a run (once
+/// through an accepted EOS draft, once through an EOS bonus).
+///
+/// Greedy speculation is lossless whatever the drafts are, so the draft
+/// processor is checked through acceptance instead: the transition
+/// fixture's MTP stage mirrors the target's transition, so with
+/// generated-only presence penalties every cycle after the first (whose lead
+/// is the one token MTP mispredicts) accepts all drafts only if drafts are
+/// processed with the same history and prompt boundary as the target.
+#[test]
+fn processed_greedy_speculation_matches_plain_greedy_decoding() {
+    let device = Default::default();
+    let penalties = GenerationConfig {
+        repetition_penalty: 1.5,
+        presence_penalty: 0.6,
+        frequency_penalty: 0.3,
+        no_repeat_ngram_size: 2,
+        ..Default::default()
+    };
+    let generated_only = GenerationConfig {
+        presence_penalty: 3.0,
+        ..Default::default()
+    };
+    let delayed_eos = GenerationConfig {
+        eos_token_ids: vec![1, 7],
+        min_new_tokens: 6,
+        max_new_tokens: 64,
+        ..Default::default()
+    };
+    let new_tokens = 16;
+    let mut terminated = 0;
+    // Final cycles of terminated runs: (accepted, drafted, K).
+    let mut terminal_cycles = Vec::new();
+    for generation in [penalties, generated_only.clone(), delayed_eos] {
+        let mut prompt_sensitive = false;
+        for (transition, model, prompt) in [
+            (false, sinusoidal_model(&device), [5, 9, 2, 7]),
+            (true, transition_model(&device), [6, 3, 1, 4]),
+        ] {
+            let expected =
+                plain_greedy_configured(&model, &prompt, new_tokens, 32, &generation, prompt.len());
+            let unprocessed = plain_greedy(&model, &prompt, new_tokens);
+            assert_ne!(
+                expected[..],
+                unprocessed[..expected.len()],
+                "{generation:?}"
+            );
+            prompt_sensitive |= expected
+                != plain_greedy_configured(&model, &prompt, new_tokens, 32, &generation, 0);
+            if expected.len() < new_tokens {
+                terminated += 1;
+                assert!(expected.len() > generation.min_new_tokens);
+                assert!(generation.eos_token_ids.contains(expected.last().unwrap()));
+            }
+            for draft in [2, 3] {
+                let run = speculative_greedy_configured(
+                    &model,
+                    &prompt,
+                    new_tokens,
+                    draft,
+                    32,
+                    generation.clone(),
+                );
+                assert_eq!(run.generated, expected, "{generation:?}, K = {draft}");
+                assert_cache_matches_token_by_token(&model, &prompt, &run);
+                if expected.len() < new_tokens {
+                    let &(accepted, drafted) = run.cycles.last().unwrap();
+                    terminal_cycles.push((accepted, drafted, draft));
+                }
+                if transition && generation == generated_only {
+                    assert!(
+                        run.cycles[1..]
+                            .iter()
+                            .all(|&(accepted, drafted)| accepted == drafted),
+                        "draft processing diverged from target processing: {:?}",
+                        run.cycles
+                    );
+                }
+            }
+        }
+        assert!(
+            prompt_sensitive,
+            "{generation:?} ignores the prompt boundary"
+        );
+    }
+    assert_eq!(terminated, 1);
+    // One run ends on an accepted EOS draft (drafting stopped early), the
+    // other on an EOS bonus after accepting all K drafts.
+    assert!(
+        terminal_cycles
+            .iter()
+            .any(|&(accepted, drafted, k)| accepted == drafted && drafted < k)
+    );
+    assert!(
+        terminal_cycles
+            .iter()
+            .any(|&(accepted, drafted, k)| accepted == drafted && drafted == k)
     );
 }
 
