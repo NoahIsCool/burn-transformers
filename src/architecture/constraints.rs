@@ -497,7 +497,6 @@ pub(crate) proof fn lemma_same_group_in_bounds(source: int, row: int, size: int,
     assert(source < batch) by (nonlinear_arith)
         requires
             source == size * group + source % size,
-            source % size < size,
             group < groups,
             batch == size * groups,
             size > 0;
