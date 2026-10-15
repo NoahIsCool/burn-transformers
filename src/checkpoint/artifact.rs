@@ -238,18 +238,29 @@ fn discover_checkpoint_with_policy(
 
 /// Prefers standard artifact names, then accepts only an unambiguous fallback.
 ///
-/// The selected artifact still passes the same containment and metadata checks as
-/// an explicitly named file; directory enumeration does not authorize its paths.
+/// A directory holding both `model.safetensors` and
+/// `model.safetensors.index.json` is ambiguous: Hugging Face would load the
+/// single file, while a stale or divergent index could describe different
+/// weights. Rather than silently pick one, discovery fails closed and the caller
+/// selects an artifact explicitly. The selected artifact still passes the same
+/// containment and metadata checks as an explicitly named file; directory
+/// enumeration does not authorize its paths.
 fn discover_auto(
     root: PathBuf,
     options: &LoadOptions,
     policy: Option<&PinnedIndexTotalSizePolicy>,
 ) -> Result<CheckpointManifest> {
-    if root.join(STANDARD_INDEX).is_file() {
-        return discover_index(root, STANDARD_INDEX, options, policy);
-    }
-    if root.join(STANDARD_SINGLE).is_file() {
-        return discover_single(root, STANDARD_SINGLE, options);
+    let has_index = root.join(STANDARD_INDEX).is_file();
+    let has_single = root.join(STANDARD_SINGLE).is_file();
+    match (has_index, has_single) {
+        (true, true) => {
+            return Err(CheckpointError::AmbiguousArtifacts {
+                candidates: vec![STANDARD_SINGLE.to_owned(), STANDARD_INDEX.to_owned()],
+            });
+        }
+        (true, false) => return discover_index(root, STANDARD_INDEX, options, policy),
+        (false, true) => return discover_single(root, STANDARD_SINGLE, options),
+        (false, false) => {}
     }
 
     let mut indexes = Vec::new();
@@ -329,6 +340,12 @@ fn discover_single(
 /// Physical tensor names must be unique and assigned to their declared shards.
 /// Missing aliases and byte-total exceptions require the caller's explicit policy;
 /// no tensor payload is materialized during this pass.
+///
+/// Shard names in `weight_map` are relative to the index's own directory, as in
+/// Hugging Face's loader, so an index selected below the root (for example
+/// `text_encoder/model.safetensors.index.json`) finds its co-located shards.
+/// Each name is validated as a portable relative path before it is joined, and
+/// the joined root-relative path identifies the shard everywhere downstream.
 fn discover_index(
     root: PathBuf,
     relative_path: &str,
@@ -356,6 +373,10 @@ fn discover_index(
     let mut artifact_bytes = 0_u64;
     let mut tensor_bytes = 0_u64;
 
+    let index_directory = relative_path
+        .rsplit_once('/')
+        .map(|(directory, _)| directory);
+    let mut shard_paths = BTreeMap::new();
     for shard_name in shard_names {
         if !shard_name.ends_with(".safetensors") {
             return Err(CheckpointError::UnsafeRelativePath {
@@ -363,8 +384,13 @@ fn discover_index(
                 reason: "tensor shard must end in .safetensors",
             });
         }
-        let shard_path = resolve_local_file(&root, &shard_name, "checkpoint shard")?;
-        let shard = inspect_shard(&shard_name, shard_path, options)?;
+        validate_relative_path(&shard_name)?;
+        let shard_relative = match index_directory {
+            Some(directory) => format!("{directory}/{shard_name}"),
+            None => shard_name.clone(),
+        };
+        let shard_path = resolve_local_file(&root, &shard_relative, "checkpoint shard")?;
+        let shard = inspect_shard(&shard_relative, shard_path, options)?;
         artifact_bytes = artifact_bytes.checked_add(shard.file_bytes).ok_or(
             CheckpointError::ArithmeticOverflow {
                 context: "summing checkpoint artifact bytes",
@@ -375,7 +401,7 @@ fn discover_index(
                 return Err(CheckpointError::DuplicateTensor {
                     tensor: name.clone(),
                     first_shard: previous.shard.clone(),
-                    second_shard: shard_name.clone(),
+                    second_shard: shard_relative.clone(),
                 });
             }
             match index.weight_map.get(name) {
@@ -403,6 +429,7 @@ fn discover_index(
             )?;
         }
         shards.push(shard);
+        shard_paths.insert(shard_name, shard_relative);
     }
 
     let mut resolved_aliases = Vec::new();
@@ -436,11 +463,14 @@ fn discover_index(
                     ),
                 });
             };
-            if storage.shard != *declared_shard {
+            let declared_relative = shard_paths
+                .get(declared_shard)
+                .map_or(declared_shard.as_str(), String::as_str);
+            if storage.shard != declared_relative {
                 return Err(CheckpointError::InvalidIndexAlias {
                     alias: tensor.clone(),
                     reason: format!(
-                        "validated storage key `{storage_key}` belongs to `{}`, not `{declared_shard}`",
+                        "validated storage key `{storage_key}` belongs to `{}`, not `{declared_relative}`",
                         storage.shard
                     ),
                 });
@@ -448,7 +478,7 @@ fn discover_index(
             resolved_aliases.push(ResolvedIndexTensorAlias::new(
                 tensor,
                 storage_key,
-                declared_shard,
+                declared_relative,
             ));
         }
     }
@@ -822,8 +852,10 @@ fn inspect_shard(
     let mut ranges = Vec::with_capacity(raw.tensors.len());
     for (name, tensor) in raw.tensors {
         if name.is_empty() || name == "__metadata__" {
-            return Err(CheckpointError::InvalidMapping {
-                message: "tensor names must be nonempty and cannot be `__metadata__`".to_owned(),
+            return Err(CheckpointError::InvalidTensorName {
+                shard: relative_path.to_owned(),
+                tensor: name,
+                reason: "tensor names must be nonempty and cannot be `__metadata__`",
             });
         }
         if tensor.shape.len() > options.limits.max_rank {
@@ -833,9 +865,8 @@ fn inspect_shard(
                 options.limits.max_rank,
             ));
         }
-        let dtype: TensorDType = tensor.dtype.parse()?;
-        let elements = checked_elements(&tensor.shape)?;
-        let byte_len = dtype.storage_bytes(elements)?;
+        let (dtype, byte_len) = describe_header_entry(&tensor)
+            .map_err(|error| invalid_header_entry(relative_path, &name, error))?;
         let [start, end] = tensor.data_offsets;
         let actual = end
             .checked_sub(start)
@@ -845,11 +876,12 @@ fn inspect_shard(
                 reason: format!("end {end} precedes start {start}"),
             })?;
         if actual != byte_len {
-            return Err(CheckpointError::TensorByteLengthMismatch {
-                tensor: name,
+            let mismatch = CheckpointError::TensorByteLengthMismatch {
+                tensor: name.clone(),
                 expected: byte_len,
                 actual,
-            });
+            };
+            return Err(invalid_header_entry(relative_path, &name, mismatch));
         }
         if end > data_bytes {
             return Err(CheckpointError::InvalidDataOffsets {
@@ -936,6 +968,24 @@ fn inspect_shard(
         metadata: raw.metadata,
         tensors,
     })
+}
+
+/// Parses one header entry's dtype and derives its exact byte length.
+///
+/// The length is `product(shape) * bits / 8`; overflow and partial bytes fail.
+fn describe_header_entry(tensor: &RawTensor) -> Result<(TensorDType, u64)> {
+    let dtype: TensorDType = tensor.dtype.parse()?;
+    let byte_len = dtype.storage_bytes(checked_elements(&tensor.shape)?)?;
+    Ok((dtype, byte_len))
+}
+
+/// Attaches shard and tensor context to one header-entry validation failure.
+fn invalid_header_entry(shard: &str, tensor: &str, error: CheckpointError) -> CheckpointError {
+    CheckpointError::InvalidTensorHeader {
+        shard: shard.to_owned(),
+        tensor: tensor.to_owned(),
+        source: Box::new(error),
+    }
 }
 
 /// Multiplies dimensions with checked arithmetic; a rank-zero tensor has one scalar.

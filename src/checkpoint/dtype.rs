@@ -105,6 +105,20 @@ impl TensorDType {
         matches!(self, Self::F16 | Self::BF16 | Self::F32 | Self::F64)
     }
 
+    /// Returns whether loading `self` as `target` can overwrite the source buffer.
+    ///
+    /// Equal dtypes need at most an endianness swap, and BF16 <-> F16 casts keep
+    /// the 16-bit scalar width, so each slot can be converted where it is read.
+    /// The loader then stages only the source payload for such an operation.
+    #[must_use]
+    pub const fn converts_in_place_to(self, target: Self) -> bool {
+        // Discriminant comparison: derived `==` is not callable in a `const fn`.
+        self as u8 == target as u8
+            || (self.bits() == target.bits()
+                && self.is_castable_float()
+                && target.is_castable_float())
+    }
+
     /// Computes the exact byte length of a tensor with `elements` scalars.
     ///
     /// SafeTensors does not permit a trailing partial byte. For example, a tensor

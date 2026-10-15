@@ -345,25 +345,11 @@ fn validate_concatenation(tensor: &PlannedTensor, axis: usize) -> Result<()> {
 }
 
 /// Ensures loader staging for one operation fits the pass-one conservative bound.
+///
+/// The requirement is [`PlannedTensor::staging_bytes`], the same formula the
+/// planner exposes through [`LoadPlan::required_host_staging_bytes`].
 fn validate_memory_bound(tensor: &PlannedTensor, planned: u64) -> Result<()> {
-    let output = byte_len(&tensor.shape, tensor.dtype, &tensor.target)?;
-    let largest_source = tensor.sources.iter().try_fold(0_u64, |largest, source| {
-        byte_len(&source.shape, source.dtype, &source.name).map(|bytes| largest.max(bytes))
-    })?;
-    let required = if matches!(tensor.transform, PlannedTransform::Identity)
-        && tensor
-            .sources
-            .first()
-            .is_some_and(|source| identity_reuses_source_buffer(source.dtype, tensor.dtype))
-    {
-        largest_source
-    } else {
-        largest_source
-            .checked_add(output)
-            .ok_or(CheckpointError::ArithmeticOverflow {
-                context: "computing runtime staging bound",
-            })?
-    };
+    let required = tensor.staging_bytes()?;
     if required > planned {
         return Err(CheckpointError::MemoryEstimateExceeded {
             tensor: tensor.target.clone(),
@@ -387,7 +373,9 @@ fn materialize_identity<S: TensorSource>(
     let planned = exactly_one_source(tensor)?;
     let payload = read_verified(source, planned, stats)?;
     let (_, shape, source_dtype, mut bytes) = payload.into_parts();
-    if identity_reuses_source_buffer(source_dtype, tensor.dtype) {
+    // Equal dtypes and BF16 <-> F16 keep the scalar width, including the
+    // BF16 -> F16 conversion that dominates F16 Metal model loading.
+    if source_dtype.converts_in_place_to(tensor.dtype) {
         observe_peak(stats, bytes.len(), 0, &tensor.target)?;
         convert_in_place(&tensor.target, &mut bytes, source_dtype, tensor.dtype)?;
         return make_tensor_data(&tensor.target, tensor.dtype, &shape, bytes);
@@ -407,20 +395,6 @@ fn materialize_identity<S: TensorSource>(
         },
     )??;
     make_tensor_data(&tensor.target, tensor.dtype, &tensor.shape, output)
-}
-
-/// Returns whether one identity operation can reuse its source allocation.
-///
-/// A conversion that keeps the scalar width can overwrite each slot after reading
-/// it: equal dtypes (an endianness normalization) and the BF16 <-> F16 casts,
-/// including the BF16 -> F16 conversion that dominates F16 Metal model loading.
-/// The executor's staging bound for such an operation is the source alone.
-fn identity_reuses_source_buffer(source: TensorDType, target: TensorDType) -> bool {
-    source == target
-        || matches!(
-            (source, target),
-            (TensorDType::BF16, TensorDType::F16) | (TensorDType::F16, TensorDType::BF16)
-        )
 }
 
 /// Converts equal-width scalars in place; a no-op for equal dtypes on little-endian hosts.

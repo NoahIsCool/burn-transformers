@@ -146,6 +146,32 @@ pub enum CheckpointError {
         /// Described byte length.
         actual: u64,
     },
+    /// One SafeTensors header entry failed validation; `source` holds the violated rule.
+    ///
+    /// Header entries are validated independently, so this wrapper names the
+    /// shard and tensor that a dtype, element-count, storage-size, or byte-length
+    /// failure belongs to. In a many-shard checkpoint, the bare inner error alone
+    /// would not identify the offending entry.
+    #[error("invalid SafeTensors header entry `{tensor}` in `{shard}`: {source}")]
+    InvalidTensorHeader {
+        /// Root-relative shard containing the entry.
+        shard: String,
+        /// Tensor name as written in the header.
+        tensor: String,
+        /// Underlying dtype, arithmetic, storage, or byte-length violation.
+        #[source]
+        source: Box<CheckpointError>,
+    },
+    /// A SafeTensors header used a reserved or empty tensor name.
+    #[error("invalid SafeTensors tensor name `{tensor}` in `{shard}`: {reason}")]
+    InvalidTensorName {
+        /// Root-relative shard containing the name.
+        shard: String,
+        /// Rejected name.
+        tensor: String,
+        /// Naming rule that rejected it.
+        reason: &'static str,
+    },
     /// A tensor key occurred in more than one shard.
     #[error("tensor `{tensor}` appears in both `{first_shard}` and `{second_shard}`")]
     DuplicateTensor {

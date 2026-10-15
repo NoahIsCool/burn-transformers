@@ -458,7 +458,7 @@ pub(super) fn execute_load_plan_with_overrides<S, K, H, R>(
     source: &mut S,
     sink: &mut K,
     has_override: H,
-    mut read_override: R,
+    read_override: R,
 ) -> ExecutionResult<ExecutionOutcome, K::Error>
 where
     S: TensorSource,
@@ -472,33 +472,130 @@ where
     report.equivalence_verified.clear();
     let mut stats = ExecutionStats::default();
 
-    if let Err(error) = transform::validate_plan(plan) {
+    // Phase 1: preflight, equivalence checks, and every storage-owning write.
+    // Any failure releases the source exactly once, here.
+    let primary = install_primary_tensors(
+        plan,
+        source,
+        sink,
+        has_override,
+        read_override,
+        &mut report,
+        &mut stats,
+    );
+    if let Err((failed_target, cause)) = primary {
         let _ = source.close();
-        return Err(checkpoint_failure(None, error, report, stats, source));
+        return Err(execution_failure(
+            failed_target,
+            cause,
+            report,
+            stats,
+            source,
+        ));
     }
-
-    if let Err((failed_alias, error)) =
-        verify_checkpoint_equivalences(plan, source, &mut report, &mut stats)
-    {
-        let _ = source.close();
-        return Err(checkpoint_failure(
-            Some(failed_alias),
-            error,
+    // Phase 2: release source resources before any alias references an owner.
+    if let Err(error) = source.close() {
+        let cause = ExecutionFailureCause::Checkpoint(error);
+        return Err(execution_failure(None, cause, report, stats, source));
+    }
+    // Phase 3: tie aliases to their now-installed storage owners.
+    if let Err((failed_target, cause)) = install_aliases(plan, sink, &mut report, &mut stats) {
+        return Err(execution_failure(
+            failed_target,
+            cause,
             report,
             stats,
             source,
         ));
     }
 
-    // Freeze ownership before any source or sink mutation. Besides making the
-    // scheduling decision deterministic, this prevents a stateful predicate
-    // from selecting a target during group preflight and changing its answer at
-    // installation time.
+    report.finalize();
+    stats.source = source.stats();
+    Ok(ExecutionOutcome { report, stats })
+}
+
+/// A failed execution step: the target being processed, if any, and its cause.
+type StepFailure<E> = (Option<String>, ExecutionFailureCause<E>);
+
+/// Returns a mapper that attributes a checkpoint error to `target`.
+fn checkpoint_step<E>(target: &str) -> impl FnOnce(CheckpointError) -> StepFailure<E> + '_ {
+    move |error| {
+        (
+            Some(target.to_owned()),
+            ExecutionFailureCause::Checkpoint(error),
+        )
+    }
+}
+
+/// Validates the plan, verifies equivalences, and installs every primary target.
+///
+/// Override ownership is frozen before any source or sink mutation, so a stateful
+/// predicate cannot select a target during group preflight and change its answer
+/// at installation time. Groups run in physical source order.
+#[allow(clippy::too_many_arguments)]
+fn install_primary_tensors<S, K, H, R>(
+    plan: &LoadPlan,
+    source: &mut S,
+    sink: &mut K,
+    has_override: H,
+    mut read_override: R,
+    report: &mut LoadReport,
+    stats: &mut ExecutionStats,
+) -> Result<(), StepFailure<K::Error>>
+where
+    S: TensorSource,
+    K: TensorSink,
+    H: Fn(&K, &PlannedTensor) -> bool,
+    R: FnMut(&mut K, &PlannedTensor) -> Result<Option<TensorData>, K::Error>,
+{
+    transform::validate_plan(plan)
+        .map_err(|error| (None, ExecutionFailureCause::Checkpoint(error)))?;
+    verify_checkpoint_equivalences(plan, source, report, stats)
+        .map_err(|(alias, error)| (Some(alias), ExecutionFailureCause::Checkpoint(error)))?;
+
     let overridden = plan
         .tensors
         .iter()
         .map(|tensor| has_override(sink, tensor))
         .collect::<Vec<_>>();
+    let can_skip_source = certified_source_bypasses(plan, source, &overridden)?;
+    let targets = TargetDisposition {
+        overridden: &overridden,
+        can_skip_source: &can_skip_source,
+    };
+    for group in execution_groups(&plan.tensors) {
+        install_group(
+            plan,
+            &group,
+            source,
+            sink,
+            &mut read_override,
+            &targets,
+            report,
+            stats,
+        )?;
+    }
+    Ok(())
+}
+
+/// Per-target override decisions frozen before the first sink mutation.
+struct TargetDisposition<'a> {
+    /// Whether the sink supplies the target's final data itself.
+    overridden: &'a [bool],
+    /// Whether the source certified every descriptor, so its payload is never read.
+    can_skip_source: &'a [bool],
+}
+
+/// Decides, per target, whether an override may bypass its source payload.
+///
+/// Only overridden targets whose every source descriptor the source certifies
+/// (see [`TensorSource::validate_tensor_descriptor`]) skip their reads; all
+/// others take the strict read-validate-discard fallback.
+fn certified_source_bypasses<S: TensorSource, E>(
+    plan: &LoadPlan,
+    source: &S,
+    overridden: &[bool],
+) -> Result<Vec<bool>, StepFailure<E>> {
     let mut can_skip_source = vec![false; plan.tensors.len()];
     for (index, tensor) in plan.tensors.iter().enumerate() {
         if !overridden[index] {
@@ -506,226 +603,180 @@ where
         }
         let mut descriptors_certified = true;
         for planned_source in &tensor.sources {
-            match source.validate_tensor_descriptor(planned_source) {
-                Ok(certified) => descriptors_certified &= certified,
-                Err(error) => {
-                    let _ = source.close();
-                    return Err(checkpoint_failure(
-                        Some(tensor.target.clone()),
-                        error,
-                        report,
-                        stats,
-                        source,
-                    ));
-                }
-            }
+            let certified = source
+                .validate_tensor_descriptor(planned_source)
+                .map_err(checkpoint_step(&tensor.target))?;
+            descriptors_certified &= certified;
         }
         can_skip_source[index] = descriptors_certified;
     }
+    Ok(can_skip_source)
+}
 
-    for group in execution_groups(&plan.tensors) {
-        let source_target_index = group.iter().copied().find(|&index| !can_skip_source[index]);
-        let shared_payload =
-            if let (true, Some(source_target_index)) = (group.len() > 1, source_target_index) {
-                let tensor = &plan.tensors[source_target_index];
-                let Some(planned_source) = tensor.sources.first() else {
-                    let _ = source.close();
-                    return Err(checkpoint_failure(
-                        Some(tensor.target.clone()),
-                        CheckpointError::InvalidMapping {
-                            message: format!(
-                                "fused-split target `{}` has no source descriptor",
-                                tensor.target
-                            ),
-                        },
-                        report,
-                        stats,
-                        source,
-                    ));
-                };
-                match transform::read_verified(source, planned_source, &mut stats) {
-                    Ok(payload) => Some(payload),
-                    Err(error) => {
-                        let _ = source.close();
-                        return Err(checkpoint_failure(
-                            Some(tensor.target.clone()),
-                            error,
-                            report,
-                            stats,
-                            source,
-                        ));
-                    }
-                }
-            } else {
-                None
-            };
-
-        for index in group {
+/// Materializes and installs one indivisible execution group.
+///
+/// A multi-target group shares one fused source payload, read once by its
+/// first target that still needs the source and held while every output is
+/// materialized and handed off.
+#[allow(clippy::too_many_arguments)]
+fn install_group<S, K, R>(
+    plan: &LoadPlan,
+    group: &[usize],
+    source: &mut S,
+    sink: &mut K,
+    read_override: &mut R,
+    targets: &TargetDisposition<'_>,
+    report: &mut LoadReport,
+    stats: &mut ExecutionStats,
+) -> Result<(), StepFailure<K::Error>>
+where
+    S: TensorSource,
+    K: TensorSink,
+    R: FnMut(&mut K, &PlannedTensor) -> Result<Option<TensorData>, K::Error>,
+{
+    let reader = group
+        .iter()
+        .copied()
+        .find(|&index| !targets.can_skip_source[index]);
+    let shared_payload = match (group.len() > 1, reader) {
+        (true, Some(index)) => {
             let tensor = &plan.tensors[index];
-            let source_data = if can_skip_source[index] {
-                None
-            } else {
-                let materialized = match &shared_payload {
-                    Some(payload) => {
-                        transform::materialize_shared_slice(tensor, payload, &mut stats)
-                    }
-                    None => transform::materialize(tensor, source, &mut stats),
-                };
-                match materialized {
-                    Ok(data) => Some(data),
-                    Err(error) => {
-                        let _ = source.close();
-                        return Err(checkpoint_failure(
-                            Some(tensor.target.clone()),
-                            error,
-                            report,
-                            stats,
-                            source,
-                        ));
-                    }
-                }
-            };
-            let data = if overridden[index] {
-                // A non-certifying source reaches this branch only after its
-                // ordinary materialized value has been fully validated. Drop it
-                // before decoding the override so the fallback does not retain
-                // two output buffers at once.
-                drop(source_data);
-                let override_data = match read_override(sink, tensor) {
-                    Ok(Some(data)) => data,
-                    Ok(None) => {
-                        let _ = source.close();
-                        return Err(checkpoint_failure(
-                            Some(tensor.target.clone()),
-                            CheckpointError::InvalidMapping {
-                                message: format!(
-                                    "override predicate selected `{}` but its materializer returned no tensor",
-                                    tensor.target
-                                ),
-                            },
-                            report,
-                            stats,
-                            source,
-                        ));
-                    }
-                    Err(error) => {
-                        let _ = source.close();
-                        return Err(sink_failure(
-                            Some(tensor.target.clone()),
-                            error,
-                            report,
-                            stats,
-                            source,
-                        ));
-                    }
-                };
-                if let Err(error) = observe_override_peak(
-                    tensor,
-                    &override_data,
-                    shared_payload.as_ref(),
-                    plan.memory.peak_host_staging_bytes,
-                    &mut stats,
-                ) {
-                    let _ = source.close();
-                    return Err(checkpoint_failure(
-                        Some(tensor.target.clone()),
-                        error,
-                        report,
-                        stats,
-                        source,
-                    ));
-                }
-                override_data
-            } else {
-                let Some(data) = source_data else {
-                    let _ = source.close();
-                    return Err(checkpoint_failure(
-                        Some(tensor.target.clone()),
-                        CheckpointError::InvalidMapping {
-                            message: format!(
-                                "non-overridden target `{}` unexpectedly bypassed its source",
-                                tensor.target
-                            ),
-                        },
-                        report,
-                        stats,
-                        source,
-                    ));
-                };
-                data
-            };
-            match install_tensor(tensor, data, sink, &mut report, &mut stats) {
-                Ok(()) => {}
-                Err(InstallError::Checkpoint(error)) => {
-                    let _ = source.close();
-                    return Err(checkpoint_failure(
-                        Some(tensor.target.clone()),
-                        error,
-                        report,
-                        stats,
-                        source,
-                    ));
-                }
-                Err(InstallError::Sink(error)) => {
-                    let _ = source.close();
-                    return Err(sink_failure(
-                        Some(tensor.target.clone()),
-                        error,
-                        report,
-                        stats,
-                        source,
-                    ));
-                }
-            }
+            let planned_source = tensor.sources.first().ok_or_else(|| {
+                checkpoint_step(&tensor.target)(CheckpointError::InvalidMapping {
+                    message: format!(
+                        "fused-split target `{}` has no source descriptor",
+                        tensor.target
+                    ),
+                })
+            })?;
+            Some(
+                transform::read_verified(source, planned_source, stats)
+                    .map_err(checkpoint_step(&tensor.target))?,
+            )
         }
-    }
+        _ => None,
+    };
 
-    if let Err(error) = source.close() {
-        return Err(checkpoint_failure(None, error, report, stats, source));
+    for &index in group {
+        let tensor = &plan.tensors[index];
+        let source_data = if targets.can_skip_source[index] {
+            None
+        } else {
+            let materialized = match &shared_payload {
+                Some(payload) => transform::materialize_shared_slice(tensor, payload, stats),
+                None => transform::materialize(tensor, source, stats),
+            };
+            Some(materialized.map_err(checkpoint_step(&tensor.target))?)
+        };
+        let data = if targets.overridden[index] {
+            // A non-certifying source reaches this branch only after its
+            // ordinary materialized value has been fully validated. Drop it
+            // before decoding the override so the fallback does not retain
+            // two output buffers at once.
+            drop(source_data);
+            read_validated_override(
+                plan,
+                tensor,
+                sink,
+                read_override,
+                shared_payload.as_ref(),
+                stats,
+            )?
+        } else {
+            source_data.ok_or_else(|| {
+                checkpoint_step(&tensor.target)(CheckpointError::InvalidMapping {
+                    message: format!(
+                        "non-overridden target `{}` unexpectedly bypassed its source",
+                        tensor.target
+                    ),
+                })
+            })?
+        };
+        install_tensor(tensor, data, sink, report, stats).map_err(|error| {
+            let cause = match error {
+                InstallError::Checkpoint(error) => ExecutionFailureCause::Checkpoint(error),
+                InstallError::Sink(error) => ExecutionFailureCause::Sink(error),
+            };
+            (Some(tensor.target.clone()), cause)
+        })?;
     }
+    Ok(())
+}
 
+/// Obtains an override's data and checks it against the plan and staging bound.
+fn read_validated_override<K, R>(
+    plan: &LoadPlan,
+    tensor: &PlannedTensor,
+    sink: &mut K,
+    read_override: &mut R,
+    shared_payload: Option<&SourceTensor>,
+    stats: &mut ExecutionStats,
+) -> Result<TensorData, StepFailure<K::Error>>
+where
+    K: TensorSink,
+    R: FnMut(&mut K, &PlannedTensor) -> Result<Option<TensorData>, K::Error>,
+{
+    let data = match read_override(sink, tensor) {
+        Ok(Some(data)) => data,
+        Ok(None) => {
+            return Err(checkpoint_step(&tensor.target)(
+                CheckpointError::InvalidMapping {
+                    message: format!(
+                        "override predicate selected `{}` but its materializer returned no tensor",
+                        tensor.target
+                    ),
+                },
+            ));
+        }
+        Err(error) => {
+            return Err((
+                Some(tensor.target.clone()),
+                ExecutionFailureCause::Sink(error),
+            ));
+        }
+    };
+    observe_override_peak(
+        tensor,
+        &data,
+        shared_payload,
+        plan.memory.peak_host_staging_bytes,
+        stats,
+    )
+    .map_err(checkpoint_step(&tensor.target))?;
+    Ok(data)
+}
+
+/// Ties every alias to its installed storage owner after sources are closed.
+fn install_aliases<K: TensorSink>(
+    plan: &LoadPlan,
+    sink: &mut K,
+    report: &mut LoadReport,
+    stats: &mut ExecutionStats,
+) -> Result<(), StepFailure<K::Error>> {
     for alias in &plan.aliases {
-        let super::PlannedTransform::Alias { source_target } = &alias.transform else {
-            return Err(checkpoint_failure(
-                Some(alias.target.clone()),
+        let PlannedTransform::Alias { source_target } = &alias.transform else {
+            return Err(checkpoint_step(&alias.target)(
                 CheckpointError::InvalidMapping {
                     message: format!("entry `{}` in alias list is not an alias", alias.target),
                 },
-                report,
-                stats,
-                source,
             ));
         };
-        let aliases_applied = match stats.aliases_applied.checked_add(1) {
-            Some(count) => count,
-            None => {
-                return Err(checkpoint_failure(
+        let aliases_applied = stats.aliases_applied.checked_add(1).ok_or_else(|| {
+            checkpoint_step(&alias.target)(CheckpointError::ArithmeticOverflow {
+                context: "counting applied aliases",
+            })
+        })?;
+        sink.alias_tensor(&alias.target, source_target)
+            .map_err(|error| {
+                (
                     Some(alias.target.clone()),
-                    CheckpointError::ArithmeticOverflow {
-                        context: "counting applied aliases",
-                    },
-                    report,
-                    stats,
-                    source,
-                ));
-            }
-        };
-        if let Err(error) = sink.alias_tensor(&alias.target, source_target) {
-            return Err(sink_failure(
-                Some(alias.target.clone()),
-                error,
-                report,
-                stats,
-                source,
-            ));
-        }
+                    ExecutionFailureCause::Sink(error),
+                )
+            })?;
         stats.aliases_applied = aliases_applied;
         report.record_applied(alias.target.clone());
     }
-
-    report.finalize();
-    stats.source = source.stats();
-    Ok(ExecutionOutcome { report, stats })
+    Ok(())
 }
 
 /// Verifies every redundant physical checkpoint tensor before the first write.
@@ -1089,10 +1140,10 @@ pub fn execute_local_load_plan<K: TensorSink>(
     execute_load_plan(plan, &mut source, sink)
 }
 
-/// Builds a checkpoint-side failure with finalized partial diagnostics.
-fn checkpoint_failure<S, E>(
+/// Builds a failure with finalized partial diagnostics and source counters.
+fn execution_failure<S, E>(
     failed_target: Option<String>,
-    error: CheckpointError,
+    cause: ExecutionFailureCause<E>,
     mut report: LoadReport,
     mut stats: ExecutionStats,
     source: &S,
@@ -1104,28 +1155,7 @@ where
     stats.source = source.stats();
     Box::new(ExecutionFailure {
         failed_target,
-        cause: ExecutionFailureCause::Checkpoint(error),
-        report,
-        stats,
-    })
-}
-
-/// Builds a sink-side failure with finalized partial diagnostics.
-fn sink_failure<S, E>(
-    failed_target: Option<String>,
-    error: E,
-    mut report: LoadReport,
-    mut stats: ExecutionStats,
-    source: &S,
-) -> Box<ExecutionFailure<E>>
-where
-    S: TensorSource,
-{
-    report.finalize();
-    stats.source = source.stats();
-    Box::new(ExecutionFailure {
-        failed_target,
-        cause: ExecutionFailureCause::Sink(error),
+        cause,
         report,
         stats,
     })

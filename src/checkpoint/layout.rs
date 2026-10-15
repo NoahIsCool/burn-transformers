@@ -302,6 +302,117 @@ pub(crate) fn tensor_file_offset(header_bytes: u64, begin: u64) -> Option<u64> {
     }
 }
 
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Sum of the first `count` section lengths: the start of section `count`.
+pub open spec fn prefix_sum(lengths: Seq<u64>, count: int) -> int
+    decreases count,
+{
+    if count <= 0 {
+        0
+    } else {
+        prefix_sum(lengths, count - 1) + lengths[count - 1] as int
+    }
+}
+
+/// Prefix sums of unsigned lengths never decrease.
+proof fn lemma_prefix_sum_monotone(lengths: Seq<u64>, shorter: int, longer: int)
+    requires
+        0 <= shorter <= longer <= lengths.len(),
+    ensures
+        prefix_sum(lengths, shorter) <= prefix_sum(lengths, longer),
+    decreases longer - shorter,
+{
+    if longer > shorter {
+        lemma_prefix_sum_monotone(lengths, shorter, longer - 1);
+    }
+}
+
+} // verus!
+
+/// Why consecutive sections cannot partition an axis.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SectionError {
+    /// The section lengths sum past `u64::MAX`.
+    Overflow,
+    /// The section lengths sum to `total`, not the axis length.
+    LengthMismatch {
+        /// Exact sum of all section lengths.
+        total: u64,
+    },
+}
+
+/// Returns the start of each consecutive section of an axis of length `axis_len`.
+///
+/// Section `k` covers `[starts[k], starts[k] + lengths[k])` with
+/// `starts[k] = lengths[0] + ... + lengths[k - 1]`. Success requires the lengths
+/// to sum exactly to `axis_len`, so the sections partition the axis in order and
+/// none extends past it; zero-length sections are allowed.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        match result {
+            Ok(starts) => {
+                &&& starts@.len() == lengths@.len()
+                &&& prefix_sum(lengths@, lengths@.len() as int) == axis_len
+                &&& forall|k: int| 0 <= k < starts@.len() ==>
+                    #[trigger] starts@[k] == prefix_sum(lengths@, k)
+                &&& forall|k: int| 0 <= k < starts@.len() ==>
+                    #[trigger] starts@[k] + lengths@[k] <= axis_len
+            },
+            Err(SectionError::Overflow) => prefix_sum(lengths@, lengths@.len() as int) > u64::MAX,
+            Err(SectionError::LengthMismatch { total }) => {
+                &&& total == prefix_sum(lengths@, lengths@.len() as int)
+                &&& total != axis_len
+            },
+        }
+))]
+pub(crate) fn section_starts(lengths: &[u64], axis_len: u64) -> Result<Vec<u64>, SectionError> {
+    let mut starts = Vec::new();
+    let mut cursor: u64 = 0;
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= lengths@.len(),
+            cursor as int == prefix_sum(lengths@, index as int),
+            starts@.len() == index,
+            forall|k: int| 0 <= k < index ==> #[trigger] starts@[k] == prefix_sum(lengths@, k),
+        decreases lengths@.len() - index,
+    ))]
+    while index < lengths.len() {
+        starts.push(cursor);
+        match cursor.checked_add(lengths[index]) {
+            Some(next) => cursor = next,
+            None => {
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    lemma_prefix_sum_monotone(
+                        lengths@,
+                        index as int + 1,
+                        lengths@.len() as int,
+                    );
+                }
+                return Err(SectionError::Overflow);
+            }
+        }
+        index += 1;
+    }
+    if cursor != axis_len {
+        return Err(SectionError::LengthMismatch { total: cursor });
+    }
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert forall|k: int| 0 <= k < starts@.len() implies
+            #[trigger] starts@[k] + lengths@[k] <= axis_len
+        by {
+            lemma_prefix_sum_monotone(lengths@, k + 1, lengths@.len() as int);
+        }
+    }
+    Ok(starts)
+}
+
 /// Element intervals for one outer row of an axis slice.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, PartialEq, Eq)]
