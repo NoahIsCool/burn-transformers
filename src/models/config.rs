@@ -12,7 +12,7 @@
 //! the surrounding config fields ([`RopeContext`]) into the executable
 //! [`crate::position::RopeConfig`], so every family shares one precedence policy.
 
-mod rope;
+pub mod rope;
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};

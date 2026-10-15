@@ -20,23 +20,25 @@
 //! `theta`, pair `i in 0..d/2` has the base inverse frequency
 //! `omega_i = theta^(-2i/d)`. Each algorithm rewrites these frequencies and may
 //! scale the cosine/sine tables by an amplitude `a` (Transformers calls it
-//! `attention_scaling`); see the `crate::position` module for the evaluated
-//! tables. With `f` the `factor` and `L` the original training context:
+//! `attention_scaling`); see [`crate::position`] for the evaluated tables.
+//! With `f` the `factor` and `L` the original training context:
 //!
 //! | `rope_type` | frequencies | amplitude `a` | fields read |
 //! | --- | --- | --- | --- |
 //! | `default` | `omega_i` | 1 | — |
 //! | `linear` | `omega_i / f` | 1 | `factor` |
-//! | `dynamic` | base `theta (f c / L - (f - 1))^(d/(d-2))` once `c > L` | 1 | `factor` |
+//! | `dynamic` | base `theta (f c / L - (f - 1))^(d/(d-2))` once `c > L` | 1 | `factor`, `original_max_position_embeddings` (see [`DynamicNtkContext`]) |
 //! | `yarn` | ramp between `omega_i` and `omega_i / f` | see below | `factor`, `original_max_position_embeddings`, `attention_factor`, `beta_fast`, `beta_slow`, `mscale`, `mscale_all_dim`, `truncate` |
 //! | `longrope` | `omega_i / r_i`, short or long table by context | `sqrt(1 + ln f / ln L)` unless given | `short_factor`, `long_factor`, `factor`, `original_max_position_embeddings`, `attention_factor` |
 //! | `llama3` | wavelength-banded interpolation | 1 | `factor`, `low_freq_factor`, `high_freq_factor`, `original_max_position_embeddings` |
 //! | `proportional` | `omega_i / f` for `floor(p h / 2)` leading pairs, zero after | 1 | `factor` (default 1), `partial_rotary_factor` as `p` |
 //!
 //! `c` is the evaluated context (largest position plus one). Every algorithm
-//! also reads `rope_theta` and `partial_rotary_factor`; `mrope_section` and
-//! `mrope_interleaved` describe multimodal position axes that the caller owns
-//! (see [`MropeHandling`]).
+//! also reads `rope_theta` and `partial_rotary_factor`; except for
+//! proportional RoPE, `d = p h` must be an even integer (Transformers truncates
+//! `int(p h)`, which would silently change projection shapes). `mrope_section`
+//! and `mrope_interleaved` describe multimodal position axes that the caller
+//! owns (see [`MropeHandling`]).
 //!
 //! ## YaRN amplitude
 //!
@@ -75,8 +77,10 @@
 //! Transformers warns about and then ignores keys an algorithm does not read.
 //! By default this translator instead returns a contextual
 //! [`crate::Error::Configuration`] naming the field, so a parsed value never
-//! disappears silently. Unknown JSON keys are dropped earlier by the serde
-//! schema and are not visible here.
+//! disappears silently. Values Transformers coerces are rejected too: a zero
+//! YaRN `beta_fast`/`beta_slow` (read as its default through Python `or`) or a
+//! required `factor` that is absent. Unknown JSON keys are dropped earlier by
+//! the serde schema and are not visible here.
 //!
 //! All arithmetic is host `f64`; the position module rounds frequencies to
 //! `f32` once. Formulas follow Transformers 5.2.0 `modeling_rope_utils.py`
@@ -587,11 +591,11 @@ impl RopeParameters {
     /// Translates these parameters into a validated [`RopeConfig`].
     ///
     /// `context` supplies the surrounding config fields and family
-    /// conventions; see the module documentation for the per-algorithm
-    /// formulas, the precedence table, and the strictness policy. Families
-    /// whose config omits `rope_parameters` translate
-    /// `RopeParameters::default()`, which is default RoPE with theta from the
-    /// context.
+    /// conventions; the [`rope`](crate::models::config::rope) module
+    /// documentation gives the per-algorithm formulas, the precedence table,
+    /// and the strictness policy. Families whose config omits
+    /// `rope_parameters` translate `RopeParameters::default()`, which is
+    /// default RoPE with theta from the context.
     ///
     /// # Errors
     ///
