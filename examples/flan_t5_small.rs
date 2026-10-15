@@ -17,7 +17,7 @@
 //! reason, length-normalized score, and length to standard error. This
 //! inference-only path uses no autodiff optimizer or training dropout.
 
-use std::{error::Error as StdError, path::PathBuf};
+use std::{error::Error as StdError, ffi::OsString, path::PathBuf};
 
 use burn::backend::Flex;
 use transformers::{
@@ -28,18 +28,12 @@ use transformers::{
 /// CPU backend with F32 activations and I32 token IDs.
 type Cpu = Flex<f32, i32>;
 
+/// Source text used when no prompt is given.
+const DEFAULT_PROMPT: &str = "translate English to German: The house is wonderful.";
+
 /// Loads, tokenizes, generates, and decodes through the public release surface.
 fn main() -> Result<(), Box<dyn StdError>> {
-    let usage = "usage: flan_t5_small MODEL_DIR [PROMPT]";
-    let mut arguments = std::env::args().skip(1);
-    let root = arguments.next().map(PathBuf::from).ok_or(usage)?;
-    let prompt = arguments
-        .next()
-        .unwrap_or_else(|| "translate English to German: The house is wonderful.".into());
-    if arguments.next().is_some() {
-        return Err(usage.into());
-    }
-
+    let (root, prompt) = arguments(std::env::args_os().skip(1))?;
     let device = Default::default();
     let loaded = AutoSeq2SeqLm::<Cpu>::load_local(
         &root,
@@ -85,3 +79,28 @@ fn main() -> Result<(), Box<dyn StdError>> {
     );
     Ok(())
 }
+
+/// Splits `MODEL_DIR [PROMPT]` into the checkpoint directory and the source text.
+///
+/// The directory may be any operating-system path, including one that is not
+/// UTF-8. The prompt must be UTF-8 because it is tokenized as text.
+fn arguments(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<(PathBuf, String), Box<dyn StdError>> {
+    let usage = "usage: flan_t5_small MODEL_DIR [PROMPT]";
+    let root = arguments.next().map(PathBuf::from).ok_or(usage)?;
+    let prompt = match arguments.next() {
+        Some(prompt) => prompt
+            .into_string()
+            .map_err(|_| "PROMPT must be UTF-8 text")?,
+        None => DEFAULT_PROMPT.into(),
+    };
+    if arguments.next().is_some() {
+        return Err(usage.into());
+    }
+    Ok((root, prompt))
+}
+
+#[cfg(test)]
+#[path = "generation/flan_t5_small_tests.rs"]
+mod tests;

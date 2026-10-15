@@ -23,6 +23,7 @@
 use std::{
     env,
     error::Error as StdError,
+    ffi::OsString,
     io::{self, Write},
     path::PathBuf,
 };
@@ -42,9 +43,15 @@ const QWEN_REPOSITORY: &str = "Qwen/Qwen3.5-0.8B";
 /// Exact artifact revision covered by the committed acceptance evidence.
 const QWEN_REVISION: &str = "2fc06364715b967f1860aea9cf38778875588b17";
 
+/// User message sent when no prompt is given.
+const DEFAULT_PROMPT: &str = "Explain why a KV cache speeds up decoding in one sentence.";
+
+/// Token budget used when no `MAX_NEW_TOKENS` is given.
+const DEFAULT_MAX_NEW_TOKENS: usize = 64;
+
 /// Loads one pinned local checkpoint, renders a no-thinking chat, and streams the reply.
 fn main() -> Result<(), Box<dyn StdError>> {
-    let (root, prompt, max_new_tokens) = arguments()?;
+    let (root, prompt, max_new_tokens) = arguments(env::args_os().skip(1))?;
     let device = Default::default();
     let options = AutoLoadOptions {
         checkpoint: LoadOptions {
@@ -106,19 +113,41 @@ fn main() -> Result<(), Box<dyn StdError>> {
 }
 
 /// Parses `MODEL_DIR [PROMPT] [MAX_NEW_TOKENS]` without adding a CLI dependency.
-fn arguments() -> Result<(PathBuf, String, usize), Box<dyn StdError>> {
+///
+/// The directory may be any operating-system path, including one that is not
+/// UTF-8. The prompt and the token budget must be UTF-8 text, and the budget
+/// must be a positive integer because generation always emits one token.
+fn arguments(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<(PathBuf, String, usize), Box<dyn StdError>> {
     let usage = "usage: qwen35_chat MODEL_DIR [PROMPT] [MAX_NEW_TOKENS]";
-    let mut arguments = env::args().skip(1);
     let root = arguments.next().map(PathBuf::from).ok_or(usage)?;
-    let prompt = arguments
-        .next()
-        .unwrap_or_else(|| "Explain why a KV cache speeds up decoding in one sentence.".into());
-    let max_new_tokens = match arguments.next() {
-        Some(value) => value.parse::<usize>()?,
-        None => 64,
+    let prompt = match arguments.next() {
+        Some(prompt) => prompt
+            .into_string()
+            .map_err(|_| "PROMPT must be UTF-8 text")?,
+        None => DEFAULT_PROMPT.into(),
     };
-    if max_new_tokens == 0 || arguments.next().is_some() {
+    let max_new_tokens = match arguments.next() {
+        Some(value) => {
+            let value = value
+                .into_string()
+                .map_err(|_| "MAX_NEW_TOKENS must be UTF-8 text")?;
+            value
+                .parse::<usize>()
+                .map_err(|error| format!("invalid MAX_NEW_TOKENS {value:?}: {error}"))?
+        }
+        None => DEFAULT_MAX_NEW_TOKENS,
+    };
+    if max_new_tokens == 0 {
+        return Err("MAX_NEW_TOKENS must be greater than zero".into());
+    }
+    if arguments.next().is_some() {
         return Err(usage.into());
     }
     Ok((root, prompt, max_new_tokens))
 }
+
+#[cfg(test)]
+#[path = "generation/qwen35_chat_tests.rs"]
+mod tests;
