@@ -26,6 +26,13 @@
 //! RSS observations are explicitly boundary snapshots, never peaks. True process/unified
 //! high-water evidence must come from a separate supervisor such as `/usr/bin/time -l` applied
 //! to the already-built test executable (wrapping Cargo also includes the build).
+//!
+//! Two further opt-in series live in the `storage_order` module. The
+//! `linear_layout_*` micro-benchmarks time one projection with strided, contiguous
+//! and installed weights (see `support/linear_layout_benchmark.rs`), and
+//! `causal_lm_flex_decode_benchmark` times warm prefill and 128-step cached decode
+//! of any local `AutoCausalLm` checkpoint named by `TRANSFORMERS_CAUSAL_LM_BENCH_DIR`
+//! (see `support/causal_decode_benchmark.rs`).
 
 #[path = "support/benchmark_metrics.rs"]
 mod benchmark_metrics;
@@ -706,5 +713,76 @@ mod flan {
     #[ignore = "requires pinned local FLAN artifacts, reference bundle, reserved Metal device and --release"]
     fn flan_small_metal_benchmark() {
         run::<burn::backend::Metal>(&Default::default(), "Metal/F32");
+    }
+}
+
+#[cfg(any(
+    feature = "flex",
+    all(feature = "metal", target_os = "macos", not(feature = "rocm"))
+))]
+#[path = "support/linear_layout_benchmark.rs"]
+mod linear_layout_benchmark;
+
+#[cfg(feature = "flex")]
+#[path = "support/causal_decode_benchmark.rs"]
+mod causal_decode_benchmark;
+
+#[cfg(any(
+    feature = "flex",
+    all(feature = "metal", target_os = "macos", not(feature = "rocm"))
+))]
+mod storage_order {
+    //! Weight storage-order micro-benchmarks and a causal-LM decode benchmark.
+    //!
+    //! These print one `BENCHMARK_JSON=` line per report; see the two support
+    //! modules for the measured quantities and their timing boundaries.
+
+    /// Prints one report so separate backends never share a process or a series.
+    fn report(value: &serde_json::Value) {
+        println!(
+            "BENCHMARK_JSON={}",
+            serde_json::to_string(value).expect("serialize benchmark report")
+        );
+    }
+
+    /// Times strided, contiguous, installed and left-operand products on Flex in F32.
+    #[cfg(feature = "flex")]
+    #[test]
+    #[ignore = "timing micro-benchmark; run with --release"]
+    fn linear_layout_flex_benchmark() {
+        report(&super::linear_layout_benchmark::run::<burn::backend::Flex>(
+            &Default::default(),
+            burn::tensor::DType::F32,
+            "Flex/F32",
+            5,
+        ));
+    }
+
+    /// Times the same variants on Metal in F16 and F32 in one serialized session.
+    #[cfg(all(feature = "metal", target_os = "macos", not(feature = "rocm")))]
+    #[test]
+    #[ignore = "timing micro-benchmark; requires a reserved Metal device and --release"]
+    fn linear_layout_metal_benchmark() {
+        use burn::tensor::DType;
+
+        let device = Default::default();
+        for (dtype, profile) in [(DType::F16, "Metal/F16"), (DType::F32, "Metal/F32")] {
+            report(
+                &super::linear_layout_benchmark::run::<burn::backend::Metal>(
+                    &device, dtype, profile, 64,
+                ),
+            );
+        }
+    }
+
+    /// Times warm prefill and cached decode of `TRANSFORMERS_CAUSAL_LM_BENCH_DIR` on Flex/F32.
+    #[cfg(feature = "flex")]
+    #[test]
+    #[ignore = "requires a local causal LM checkpoint and --release"]
+    fn causal_lm_flex_decode_benchmark() {
+        report(&super::causal_decode_benchmark::run::<burn::backend::Flex>(
+            &Default::default(),
+            "Flex/F32",
+        ));
     }
 }
