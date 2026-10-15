@@ -798,6 +798,11 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             // Every row is finished: an exact no-op with zero outputs.
             return self.inactive_output(&rows, options, keep_final, state.tensors.device());
         }
+        ensure_staging_room(
+            &state.tensors,
+            &rows.token_counts,
+            state.layout.staging_capacity,
+        )?;
         let device = state.tensors.device().clone();
         let layout = CompactBatch::new(
             &rows.valid_indices,
@@ -1233,6 +1238,38 @@ fn cache_schedule(layer_types: &[Qwen3_5LayerType]) -> Vec<Qwen3_5LayerCache> {
             }
         })
         .collect()
+}
+
+/// Rejects a transactional call that would stage more tokens than a row can hold.
+///
+/// Inside a transaction row `b` already stages `W_b - C_b` proposal tokens
+/// and the call adds `n_b`. Publication would reject an overflow too, but only
+/// after every layer ran and, for DeltaNet, kept one state per token; checking
+/// here fails before any model work. Outside a transaction nothing is staged.
+fn ensure_staging_room<B: Backend>(
+    tensors: &TensorDecodeState<B>,
+    token_counts: &[usize],
+    staging_capacity: usize,
+) -> Result<()> {
+    if !tensors.has_active_transaction() {
+        return Ok(());
+    }
+    for ((&committed, &working), &count) in tensors
+        .lengths()
+        .iter()
+        .zip(tensors.working_lengths())
+        .zip(token_counts)
+    {
+        let requested = (working - committed).saturating_add(count);
+        if requested > staging_capacity {
+            return Err(TensorCacheError::StagingCapacityExceeded {
+                requested,
+                capacity: staging_capacity,
+            }
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Validates devices, shapes, positions, masks, and all capacity transitions.

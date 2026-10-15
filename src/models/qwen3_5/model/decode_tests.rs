@@ -1952,3 +1952,52 @@ fn host_token_mtp_calls_match_device_calls() {
         device_state.tensor_state().mtp_lengths()
     );
 }
+
+/// A transactional call larger than the staging capacity fails before any model work.
+#[test]
+fn oversized_transactional_decode_is_rejected_up_front() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 12).unwrap(), 1, 2, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let mark = state.mark().unwrap();
+    let decode = |state: &mut Qwen3_5DecodeState<TestBackend>, ids: [i32; 2]| {
+        model.decode(
+            DecodeInput {
+                token_ids: Tensor::<TestBackend, 2, Int>::from_ints([ids], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            state,
+            &ForwardOptions::default(),
+        )
+    };
+    // Staging capacity is max_draft_tokens + 1 = 3: two tokens fit, two more do not.
+    decode(&mut state, [3, 4]).unwrap();
+    let before = contract_snapshot(&state);
+    let error = decode(&mut state, [5, 6]).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::TensorCache(TensorCacheError::StagingCapacityExceeded {
+                requested: 4,
+                capacity: 3
+            })
+        ),
+        "{error}"
+    );
+    assert_eq!(contract_snapshot(&state), before);
+    state.rollback(mark).unwrap();
+}
