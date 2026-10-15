@@ -30,6 +30,9 @@
 
 mod dispatch;
 mod mask;
+mod plan;
+
+use core::ops::Range;
 
 use burn::{
     module::Module,
@@ -47,6 +50,8 @@ pub(crate) use dispatch::{dispatch_attention, eager_probabilities, zero_excluded
 pub use dispatch::{grouped_query_attention, repeat_key_value};
 use mask::padding_plane;
 pub(crate) use mask::{bottom_right_causal_mask, union_exclusions};
+
+use plan::{ChunkLimits, ChunkPlanError, plan_query_chunks, query_chunk_range};
 
 use crate::intervention::{AttentionPoints, Hooks};
 use crate::normalization::RmsNorm;
@@ -161,9 +166,10 @@ impl AttentionExecutionPolicy {
     /// Plans query chunks for a conservative upper bound on keys per chunk.
     ///
     /// `key_sequence_bound` may be smaller than the physical key tensor when a
-    /// caller can prove that each chunk slices a local window first. The caller
-    /// remains responsible for checking every concrete key slice against the
-    /// resulting score-element limit.
+    /// caller can prove that each chunk slices a local window first (see
+    /// [`sliding_window_key_range`]). The caller remains responsible for
+    /// checking every concrete key slice against the resulting score-element
+    /// limit. The integer planning is verified with Verus (`verus/attention.rs`).
     pub fn plan(
         self,
         batch: usize,
@@ -171,57 +177,25 @@ impl AttentionExecutionPolicy {
         query_sequence: usize,
         key_sequence_bound: usize,
     ) -> Result<AttentionExecutionPlan> {
-        self.validate()?;
-        if batch == 0 || heads == 0 || query_sequence == 0 || key_sequence_bound == 0 {
-            return Err(Error::configuration(
-                "attention.execution_shape",
-                "batch, heads, query sequence, and key bound must be non-zero",
-            ));
-        }
-        let elements_per_query = batch
-            .checked_mul(heads)
-            .and_then(|elements| elements.checked_mul(key_sequence_bound))
-            .ok_or_else(|| {
-                Error::configuration(
-                    "attention.execution_shape",
-                    "score-plane dimensions overflow usize",
-                )
-            })?;
-        let (query_chunk_size, score_element_limit) = match self {
-            Self::Unbounded => (query_sequence, None),
+        let limits = match self {
+            Self::Unbounded => None,
             Self::QueryChunked {
                 max_query_tokens,
                 max_score_elements,
-            } => {
-                if elements_per_query > max_score_elements {
-                    return Err(Error::BackendCapability(format!(
-                        "one attention query row requires {elements_per_query} score elements, exceeding the configured bound of {max_score_elements}"
-                    )));
-                }
-                (
-                    query_sequence
-                        .min(max_query_tokens)
-                        .min(max_score_elements / elements_per_query),
-                    Some(max_score_elements),
-                )
-            }
+            } => Some(ChunkLimits {
+                max_query_tokens,
+                max_score_elements,
+            }),
         };
-        let chunk_count = query_sequence.div_ceil(query_chunk_size);
-        let peak_score_elements = elements_per_query
-            .checked_mul(query_chunk_size.min(query_sequence))
-            .ok_or_else(|| {
-                Error::configuration(
-                    "attention.execution_shape",
-                    "planned score-plane size overflows usize",
-                )
-            })?;
+        let geometry = plan_query_chunks(batch, heads, query_sequence, key_sequence_bound, limits)
+            .map_err(chunk_plan_error)?;
         Ok(AttentionExecutionPlan {
             query_sequence,
             key_sequence_bound,
-            query_chunk_size,
-            chunk_count,
-            peak_score_elements,
-            score_element_limit,
+            query_chunk_size: geometry.query_chunk_size,
+            chunk_count: geometry.chunk_count,
+            peak_score_elements: geometry.peak_score_elements,
+            score_element_limit: limits.map(|limits| limits.max_score_elements),
         })
     }
 
@@ -312,6 +286,84 @@ impl AttentionExecutionPlan {
     #[must_use]
     pub const fn score_element_limit(self) -> Option<usize> {
         self.score_element_limit
+    }
+
+    /// Returns the query rows of chunk `index`, or `None` past the last chunk.
+    ///
+    /// Chunk `i` covers `[i * c, min((i + 1) * c, Q))`; consecutive chunks
+    /// share their boundary and together partition `0..Q` (verified with Verus).
+    #[must_use]
+    pub fn query_range(self, index: usize) -> Option<Range<usize>> {
+        query_chunk_range(
+            self.query_chunk_size,
+            self.chunk_count,
+            self.query_sequence,
+            index,
+        )
+        .map(|(start, end)| start..end)
+    }
+
+    /// Iterates every chunk's query rows in order.
+    pub fn query_ranges(self) -> impl Iterator<Item = Range<usize>> {
+        (0..self.chunk_count).filter_map(move |index| self.query_range(index))
+    }
+}
+
+/// Returns the keys visible to aligned query rows under a causal sliding window.
+///
+/// Queries are the bottom-right suffix of the keys (`query_sequence <=
+/// key_sequence`), so row `t` sits at key position `t + K - Q` and sees keys
+/// `(t + K - Q - window, t + K - Q]`. The result is the exact union over
+/// `query_rows`, `[max(0, start + K - Q + 1 - window), end + K - Q)`, whose
+/// width is at most `query_rows.len() + window - 1`. Returns `None` for an
+/// empty or out-of-bounds row range, `query_sequence > key_sequence`, or a
+/// zero window. Containment of every visible key is verified with Verus.
+#[must_use]
+pub fn sliding_window_key_range(
+    query_sequence: usize,
+    key_sequence: usize,
+    query_rows: Range<usize>,
+    window: usize,
+) -> Option<Range<usize>> {
+    plan::sliding_window_key_range(
+        query_sequence,
+        key_sequence,
+        query_rows.start,
+        query_rows.end,
+        window,
+    )
+    .map(|(start, end)| start..end)
+}
+
+/// Maps a verified planning failure to the crate's contextual error.
+fn chunk_plan_error(error: ChunkPlanError) -> Error {
+    match error {
+        ChunkPlanError::ZeroMaxQueryTokens => Error::configuration(
+            "attention.execution.max_query_tokens",
+            "must be greater than zero",
+        ),
+        ChunkPlanError::ZeroMaxScoreElements => Error::configuration(
+            "attention.execution.max_score_elements",
+            "must be greater than zero",
+        ),
+        ChunkPlanError::EmptyAxis => Error::configuration(
+            "attention.execution_shape",
+            "batch, heads, query sequence, and key bound must be non-zero",
+        ),
+        ChunkPlanError::RowOverflow => Error::configuration(
+            "attention.execution_shape",
+            "score-plane dimensions overflow usize",
+        ),
+        ChunkPlanError::RowExceedsLimit {
+            row_elements,
+            max_score_elements,
+        } => Error::BackendCapability(format!(
+            "one attention query row requires {row_elements} score elements, exceeding the configured bound of {max_score_elements}"
+        )),
+        ChunkPlanError::PeakOverflow => Error::configuration(
+            "attention.execution_shape",
+            "planned score-plane size overflows usize",
+        ),
     }
 }
 

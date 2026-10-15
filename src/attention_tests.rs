@@ -705,3 +705,31 @@ fn cached_suffix_gqa_output_agrees_between_native_and_eager_graphs() {
         .into_data()
         .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::rel_abs(1e-5, 1e-5));
 }
+
+/// Planned query ranges partition the rows and stop after the final chunk.
+#[test]
+fn execution_plan_ranges_partition_queries() {
+    let plan = AttentionExecutionPolicy::query_chunked(4, 30)
+        .plan(1, 2, 7, 5)
+        .unwrap();
+    assert_eq!(plan.query_ranges().collect::<Vec<_>>(), [0..3, 3..6, 6..7]);
+    assert_eq!(plan.query_range(2), Some(6..7));
+    assert_eq!(plan.query_range(3), None);
+    let unbounded = AttentionExecutionPolicy::Unbounded
+        .plan(1, 1, 5, 5)
+        .unwrap();
+    let ranges = unbounded.query_ranges().collect::<Vec<_>>();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0], 0..5);
+}
+
+/// Public sliding-window key ranges follow bottom-right alignment and reject invalid input.
+#[test]
+fn sliding_window_key_ranges_cover_each_chunk() {
+    use super::sliding_window_key_range;
+    // Rows 2..4 of 4 sit at positions 6 and 7 of 8 keys; window 3 sees 4..8.
+    assert_eq!(sliding_window_key_range(4, 8, 2..4, 3), Some(4..8));
+    assert_eq!(sliding_window_key_range(4, 4, 0..2, 8), Some(0..2));
+    assert_eq!(sliding_window_key_range(4, 3, 0..2, 2), None);
+    assert_eq!(sliding_window_key_range(4, 8, 2..2, 2), None);
+}
