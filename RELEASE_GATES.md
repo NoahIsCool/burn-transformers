@@ -106,7 +106,7 @@ Each test verifies the checkpoint/bundle pairing through the bundle's
 
 | Gate | Command (after `cargo test --release`) | Environment | Default tolerances |
 | --- | --- | --- | --- |
-| Llama family | `--test llama_family_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_LLAMA_FAMILY_DIR`, `TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR`; optional `_TOLERANCE`, `_MIN_GREEDY` | `1e-3` absolute logits (F32 drift measured at `9.1e-5` to `3.8e-4`); at least 2 decisive greedy tokens |
+| Llama family | `--test llama_family_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_LLAMA_FAMILY_DIR`, `TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR`; optional `_TOLERANCE`, `_MIN_GREEDY` | `1e-3` absolute logits (F32 drift `9.1e-5` to `3.8e-4` on SmolLM-135M, Qwen3-4B, and SmolLM3-3B; Qwen2-7B reaches `1.80e-3` on one prompt and **fails** this default, an open item: investigate it or raise the tolerance with a rationale); at least 2 decisive greedy tokens |
 | Gemma | `--test gemma_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GEMMA_DIR`, `TRANSFORMERS_GEMMA_REFERENCE_DIR`, `TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR`; optional `_TOLERANCE`, `_LONG_TOLERANCE`, `_MIN_GREEDY` | `1e-3`; `5e-3` across the sliding window, where Transformers' own eager and SDPA graphs differ by `3.2e-3` |
 | gpt-oss | `--test gpt_oss_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GPT_OSS_DIR`, `TRANSFORMERS_GPT_OSS_REFERENCE_DIR`; optional `_DTYPE` (defaults to the bundle's dtype), `_TOLERANCE`, `_MEAN_TOLERANCE`, `_MIN_GREEDY` | F32 run and bundle: `1e-3` max, `1e-4` mean; any half-precision side: `2.5` max, `0.15` mean (provisional, calibrated on four blocks) |
 

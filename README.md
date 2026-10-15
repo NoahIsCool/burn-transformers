@@ -245,8 +245,8 @@ acceptance record for an exact checkpoint, backend, and dtype
 
 | Family | `model_type` | Validation status |
 | --- | --- | --- |
-| Qwen3.5 / Qwen3.8 hybrid | `qwen3_5_text` | **Supported:** Qwen3.5-0.8B, Metal/F16, base text. Qwen3.8-27B matches official logits on Metal/F16 (experimental). |
-| T5 / FLAN / UL2 | `t5` | **Supported:** FLAN-T5-small, Flex/F32 and Metal/F32. FLAN-T5-XXL matches official references on Metal (experimental); UL2 pending. |
+| Qwen3.5 / Qwen3.8 hybrid | `qwen3_5_text` | **Supported (v0.1.0 source):** Qwen3.5-0.8B, Metal/F16, base text; Metal replay on the current source pending. Qwen3.8-27B matches official logits on Metal/F16 (experimental). |
+| T5 / FLAN / UL2 | `t5` | **Supported (v0.1.0 source):** FLAN-T5-small, Flex/F32 (re-run on later source) and Metal/F32 (replay pending). FLAN-T5-XXL matches official references on Metal (experimental); UL2 pending. |
 | Muse Glimmer | `muse_glimmer_text` | Experimental: official-reference parity on Metal/F16. |
 | Llama family | `llama`, `mistral`, `qwen2`, `qwen3`, `smollm3`, `olmo2` | Experimental: tiny Transformers goldens for all six; real-weight Flex/F32 parity for SmolLM-135M, Qwen3-4B, and SmolLM3-3B. |
 | Gemma 2 / Gemma 3 text | `gemma2`, `gemma3_text` (and `gemma3`'s text tower) | Experimental: tiny goldens; gemma-3-4b-it Flex/F32 parity across its sliding window. |
@@ -256,6 +256,12 @@ acceptance record for an exact checkpoint, backend, and dtype
 | Nemotron-H | `nemotron_h` | Experimental: strict real-weight loading and an internal Metal smoke. |
 | GPT-2, GPT-NeoX / Pythia | concrete types only | Experimental stateless modules for interpretability studies. |
 | Custom modular models | `DecoderSpec`, `Seq2SeqSpec` | For experiments, not checkpoint compatibility. |
+
+The two supported profiles were qualified on the v0.1.0 source. Later work
+changed their execution paths, so their Metal gates must be replayed on the
+current source before the next release; see
+[v0.1 release qualification](ARCHITECTURE_COMPATIBILITY.md#v01-release-qualification)
+and [the required replays](RELEASE_GATES.md#replays-required-after-the-polish-cycle).
 
 ### Shared mechanisms
 
