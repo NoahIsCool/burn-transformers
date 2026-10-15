@@ -9,21 +9,23 @@
 //! invalidated by an interfering lifecycle operation), speculative
 //! transactions with ragged acceptance, reorder, truncate, and reset. An
 //! optional multi-token-prediction (MTP) bank with its own cursor receives
-//! MTP-bank steps, joins every transaction with an independent accepted
-//! prefix, follows reorder and reset, and rewinds through `truncate_mtp`. The
-//! oracle keeps each row's token history (one per bank) as a `Vec<f32>` of
-//! unique values and compares every visible entry of every layer after every
-//! operation, through both the checked per-row read and the batched slot-order
-//! read; rejected operations must change nothing.
+//! MTP-bank steps, joins every transaction with an accepted prefix drawn
+//! independently of the main prefix (from its own selector bits), follows
+//! reorder and reset, and rewinds through `truncate_mtp`. The oracle keeps each
+//! row's token history (one per bank) as a `Vec<f32>` of unique values and
+//! compares every visible key and value of every layer after every operation,
+//! through both the checked per-row read and the batched slot-order read;
+//! rejected operations must change nothing.
 
 use std::num::NonZeroUsize;
 
 use burn::backend::Flex;
 use burn::tensor::{DType, Tensor, TensorData};
 use transformers::cache::{
-    CacheConfig, CacheMark, KvBatchRead, KvCacheStorage, NativeKvCacheSpec, RecurrentStateSpec,
-    SequenceLengths, StepBank, TensorCacheError, TensorCacheMark, TensorDecodeState,
-    TensorStepWrites, TransactionalCache, plan_ring_write, plan_staged_ring_transaction,
+    CacheConfig, CacheMark, KvBatchRead, KvCacheRead, KvCacheStorage, NativeKvCacheSpec,
+    RecurrentStateSpec, SequenceLengths, StepBank, TensorCacheError, TensorCacheMark,
+    TensorDecodeState, TensorStepWrites, TransactionalCache, plan_ring_write,
+    plan_staged_ring_transaction,
 };
 
 /// Host backend used by the tensor-state harness.
@@ -342,6 +344,14 @@ struct TensorHarness {
 
 /// Runs at most 64 tensor-state operations decoded from `input`.
 ///
+/// Byte layout: an eight-byte header (rows, capacity, two windows, staging, a
+/// bank byte whose bit 0 clear adds the recurrent group and bit 1 the MTP
+/// bank, layers, width), then per operation `[operation % 9, one count per
+/// row, selector]`. The selector's bit 0 picks batched or per-row writes (or,
+/// for a commit, whether an MTP prefix is passed); for a commit its bits
+/// 1..=7 encode the MTP prefix (see [`TensorHarness::mtp_prefix`]); for
+/// write-ahead and operation 8 its low two bits pick the ending or MTP action.
+///
 /// # Panics
 ///
 /// Panics when the tensor state disagrees with the oracle, which is a bug.
@@ -471,7 +481,13 @@ impl TensorHarness {
         match operation {
             0 => self.publish(counts, flag),
             1 => self.begin(),
-            2 => self.commit(counts, flag),
+            2 => {
+                // Selector 254 also passes a prefix without an MTP bank, which
+                // must be refused; otherwise only an MTP bank gets one.
+                let with_prefix = flag && (self.mtp.is_some() || selector == 254);
+                let mtp_accepted = with_prefix.then(|| self.mtp_prefix(selector));
+                self.commit(counts, mtp_accepted.as_deref())
+            }
             3 => self.rollback(),
             4 => {
                 let indices: Vec<usize> = counts.iter().map(|&index| index % (rows + 1)).collect();
@@ -736,25 +752,55 @@ impl TensorHarness {
         }
     }
 
+    /// Decodes an MTP accepted prefix independent of the main prefix.
+    ///
+    /// Bits `1 + 2 * row` and `2 + 2 * row` of `selector` give row `row`'s
+    /// count in `0..=3` (rows are at most three, so bits 1..=6 suffice; bit 0
+    /// already chose whether a prefix is passed). With bit 7 set, each count
+    /// is clamped to the row's staged MTP length so that most such commits
+    /// are valid; with it clear, counts beyond the proposals test rejection.
+    fn mtp_prefix(&self, selector: u8) -> Vec<usize> {
+        let staged = self
+            .mtp
+            .as_ref()
+            .and_then(|mtp| mtp.proposals.as_ref())
+            .map_or_else(
+                || vec![0; self.geometry.rows],
+                |rows| rows.iter().map(Vec::len).collect(),
+            );
+        staged
+            .iter()
+            .enumerate()
+            .map(|(row, &length)| {
+                let raw = usize::from((selector >> (1 + 2 * row)) & 3);
+                if selector & 0x80 == 0 {
+                    raw
+                } else {
+                    raw.min(length)
+                }
+            })
+            .collect()
+    }
+
     /// Commits per-row accepted prefixes when they fit the proposals.
     ///
-    /// With an MTP bank, `with_mtp_prefix` passes the reversed main prefix as
-    /// the independent MTP prefix; without it, the MTP proposals must be empty.
-    fn commit(&mut self, accepted: &[usize], with_mtp_prefix: bool) -> bool {
+    /// With an MTP bank, `mtp_accepted` is the bank's own accepted prefix
+    /// (see [`Self::mtp_prefix`]); without one (`None`), the MTP proposals
+    /// must be empty for the commit to succeed.
+    fn commit(&mut self, accepted: &[usize], mtp_accepted: Option<&[usize]>) -> bool {
         let Some(active) = self.mark.clone() else {
             return false;
         };
         let fits = |history: &History, accepted: &[usize]| {
             let proposals = history.proposals.clone().unwrap_or_default();
-            accepted
-                .iter()
-                .zip(&proposals)
-                .all(|(&count, row)| count <= row.len())
+            accepted.len() == proposals.len()
+                && accepted
+                    .iter()
+                    .zip(&proposals)
+                    .all(|(&count, row)| count <= row.len())
         };
-        let mtp_accepted: Option<Vec<usize>> = (self.mtp.is_some() && with_mtp_prefix)
-            .then(|| accepted.iter().rev().copied().collect());
-        let mtp_valid = match (&self.mtp, &mtp_accepted) {
-            (None, _) => true,
+        let mtp_valid = match (&self.mtp, mtp_accepted) {
+            (None, prefix) => prefix.is_none(),
             (Some(mtp), Some(prefix)) => fits(mtp, prefix),
             (Some(mtp), None) => mtp
                 .proposals
@@ -762,18 +808,20 @@ impl TensorHarness {
                 .is_none_or(|proposals| proposals.iter().all(Vec::is_empty)),
         };
         let valid = fits(&self.history, accepted) && mtp_valid;
-        let result = if self.mtp.is_some() {
-            self.state
-                .commit_prefixes(active, accepted, mtp_accepted.as_deref())
-        } else {
-            self.state.commit_prefix(active, accepted)
+        let result = match mtp_accepted {
+            None => self.state.commit_prefix(active, accepted),
+            Some(_) => self.state.commit_prefixes(active, accepted, mtp_accepted),
         };
-        assert_eq!(result.is_ok(), valid, "commit {accepted:?}: {result:?}");
+        assert_eq!(
+            result.is_ok(),
+            valid,
+            "commit {accepted:?} with MTP {mtp_accepted:?}: {result:?}"
+        );
         if valid {
             Self::accept(&mut self.history, accepted);
             if let Some(mtp) = &mut self.mtp {
                 let zeros = vec![0; accepted.len()];
-                Self::accept(mtp, mtp_accepted.as_deref().unwrap_or(&zeros));
+                Self::accept(mtp, mtp_accepted.unwrap_or(&zeros));
             }
             self.mark = None;
         }
@@ -961,13 +1009,8 @@ impl TensorHarness {
                         .state
                         .read_kv(StepBank::Main, group, layer, row)
                         .expect("checked read");
-                    assert_eq!(read.retained_positions(), first..tokens.len());
-                    let keys = read.materialize().map_or_else(Vec::new, |(keys, _)| {
-                        keys.into_data().to_vec::<f32>().expect("F32")
-                    });
-                    let expected =
-                        plane_data(&[visible.to_vec()], visible.len(), shape, layer, 1.0);
-                    assert_eq!(keys, expected, "group {group} layer {layer} row {row}");
+                    let label = format!("main row {row}");
+                    check_row_read(&read, visible, first, shape, layer, group, &label);
                 }
             }
         }
@@ -1020,9 +1063,52 @@ impl TensorHarness {
                 .state
                 .read_kv(StepBank::Mtp, 0, 0, row)
                 .expect("checked MTP read");
-            assert_eq!(read.retained_positions(), 0..tokens.len());
+            check_row_read(&read, &tokens, 0, (1, 1), 0, 0, &format!("MTP row {row}"));
         }
     }
+}
+
+/// Checks one row's checked per-row read against the oracle's visible tokens.
+///
+/// The read must cover positions `first..first + visible.len()`, and its
+/// materialized keys and values must be exactly the tokens' codes in
+/// chronological order: keys positive, values negated for key/value groups
+/// and identical to the keys for the latent group (one shared plane). The MTP
+/// bank's only group has index 0, a key/value group. `row_label` names the
+/// bank and row in failure messages.
+fn check_row_read(
+    read: &KvCacheRead<Backend>,
+    visible: &[f32],
+    first: usize,
+    shape: (usize, usize),
+    layer: usize,
+    group: usize,
+    row_label: &str,
+) {
+    let label = format!("{row_label} group {group} layer {layer}");
+    assert_eq!(
+        read.retained_positions(),
+        first..first + visible.len(),
+        "{label} positions"
+    );
+    let host =
+        |tensor: Tensor<Backend, 4>| -> Vec<f32> { tensor.into_data().to_vec().expect("F32") };
+    let (keys, values) = read.materialize().map_or_else(
+        || (Vec::new(), Vec::new()),
+        |(keys, values)| (host(keys), host(values)),
+    );
+    let rows = [visible.to_vec()];
+    assert_eq!(
+        keys,
+        plane_data(&rows, visible.len(), shape, layer, 1.0),
+        "{label} keys"
+    );
+    let value_sign = if group == LATENT_GROUP { 1.0 } else { -1.0 };
+    assert_eq!(
+        values,
+        plane_data(&rows, visible.len(), shape, layer, value_sign),
+        "{label} values"
+    );
 }
 
 /// Checks one row of a batched slot-order read against the oracle's visible tokens.

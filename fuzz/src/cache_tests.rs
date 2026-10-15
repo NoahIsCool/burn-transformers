@@ -93,10 +93,13 @@ fn mtp_bank_follows_steps_commits_reorder_truncate_and_reset() {
     assert!(harness.publish_mtp(&[1, 2], false));
     assert!(harness.publish(&[2, 1], true));
     harness.check();
-    // Staged MTP tokens need their own accepted prefix.
-    assert!(!harness.commit(&[1, 1], false));
+    // Staged MTP tokens need their own accepted prefix, which must fit the
+    // MTP proposals `[1, 2]` independently of the main proposals `[2, 1]`.
+    assert!(!harness.commit(&[1, 1], None));
+    assert!(!harness.commit(&[1, 1], Some(&[2, 0])));
+    assert!(!harness.commit(&[2, 2], Some(&[0, 2])));
     harness.check();
-    assert!(harness.commit(&[1, 1], true));
+    assert!(harness.commit(&[1, 1], Some(&[0, 2])));
     harness.check();
     assert!(harness.reorder(&[1, 0]));
     harness.check();
@@ -116,6 +119,91 @@ fn mtp_bank_follows_steps_commits_reorder_truncate_and_reset() {
     });
     assert!(!plain.publish_mtp(&[1, 1], true));
     assert!(!plain.truncate_mtp(&[0, 0]));
+    // An MTP prefix without an MTP bank is refused; the plain commit succeeds.
+    assert!(plain.begin());
+    assert!(!plain.commit(&[0, 0], Some(&[0, 0])));
+    assert!(plain.commit(&[0, 0], None));
     plain.check();
     exercise_tensor_state(include_bytes!("../seeds/cache_transactions/tensor_mtp"));
+}
+
+/// Geometry of the single-row MTP scripts: capacity 10, staging 3, no recurrent group.
+const SINGLE_ROW_MTP: Geometry = Geometry {
+    rows: 1,
+    capacity: 10,
+    windows: [2, 4],
+    staging: 3,
+    recurrent: false,
+    mtp: true,
+    layers: 1,
+    width: 1,
+};
+
+/// A single row commits different main and MTP prefixes and each bank keeps its own.
+///
+/// With one row, reversing the main prefix (the harness's earlier MTP prefix)
+/// reproduces it, so a library that applied the main prefix to the MTP bank
+/// went undetected; the independent prefix tells the two apart.
+#[test]
+fn single_row_commits_independent_main_and_mtp_prefixes() {
+    let mut harness = TensorHarness::new(SINGLE_ROW_MTP);
+    assert!(harness.publish(&[2], true));
+    assert!(harness.publish_mtp(&[1], false));
+    assert!(harness.begin());
+    assert!(harness.publish(&[2], false));
+    assert!(harness.publish_mtp(&[3], true));
+    harness.check();
+    assert!(harness.commit(&[2], Some(&[1])));
+    harness.check();
+    assert_eq!(harness.state.lengths(), [4]);
+    assert_eq!(harness.state.mtp_lengths(), Some(&[2][..]));
+    assert!(harness.begin());
+    assert!(harness.publish(&[1], true));
+    assert!(harness.publish_mtp(&[2], false));
+    assert!(harness.commit(&[0], Some(&[2])));
+    harness.check();
+    assert_eq!(harness.state.lengths(), [4]);
+    assert_eq!(harness.state.mtp_lengths(), Some(&[4][..]));
+}
+
+/// The MTP prefix comes from selector bits 1..=6, clamped to the staged length by bit 7.
+#[test]
+fn mtp_prefixes_decode_from_their_own_selector_bits() {
+    let mut harness = TensorHarness::new(Geometry {
+        rows: 3,
+        ..SINGLE_ROW_MTP
+    });
+    assert_eq!(harness.mtp_prefix(0b0100_0110), [3, 0, 2]);
+    // Outside a transaction nothing is staged, so clamping gives zeros.
+    assert_eq!(harness.mtp_prefix(0b1100_0110), [0, 0, 0]);
+    assert!(harness.begin());
+    assert!(harness.publish_mtp(&[1, 3, 0], true));
+    let clamped = harness.mtp_prefix(0b1111_1110);
+    assert_eq!(clamped, [1, 3, 0]);
+    assert!(!harness.commit(&[0, 0, 0], Some(&harness.mtp_prefix(0b0111_1110))));
+    assert!(harness.commit(&[0, 0, 0], Some(&clamped)));
+    harness.check();
+}
+
+/// The per-row MTP read is compared by value, not only by its positions.
+///
+/// Replacing the oracle's MTP tokens with different values of the same length
+/// keeps every position range intact, so only a value comparison fails.
+#[test]
+#[should_panic(expected = "MTP row 0 group 0 layer 0 keys")]
+fn mtp_reads_are_compared_by_value() {
+    let mut harness = TensorHarness::new(SINGLE_ROW_MTP);
+    assert!(harness.publish_mtp(&[2], true));
+    harness.check();
+    let mtp = harness.mtp.as_mut().expect("MTP bank");
+    for value in &mut mtp.committed[0] {
+        *value += 1000.0;
+    }
+    // The batched read would also catch it; check the per-row read alone.
+    let read = harness
+        .state
+        .read_kv(StepBank::Mtp, 0, 0, 0)
+        .expect("checked MTP read");
+    let tokens = harness.mtp.as_ref().expect("MTP bank").working(0);
+    check_row_read(&read, &tokens, 0, (1, 1), 0, 0, "MTP row 0");
 }
