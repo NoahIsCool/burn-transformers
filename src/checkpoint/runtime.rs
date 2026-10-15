@@ -18,6 +18,7 @@ mod convert;
 mod packed_install;
 mod rounding;
 mod source;
+mod storage_order;
 mod transform;
 
 use std::{
@@ -226,6 +227,20 @@ impl Error for ParameterInstallError {}
 /// whose quantized transpose requantizes (Burn Flex 0.21) a column-layout weight
 /// no longer equals the artifact. [`install_packed_parameter`] detects that case
 /// and can install the exact dequantized values instead.
+///
+/// # Storage order
+///
+/// The installed *values* always equal `mapper(data)`. Their *memory layout* is
+/// chosen for the backend's matrix products: on Burn Flex without autodiff, a
+/// dense rank-2 float matrix whose load mapper transposes (a column-layout
+/// projection weight) is transposed once on the host so the parameter ends up
+/// contiguous `[in, out]` instead of a strided view of the `[out, in]` buffer.
+/// Flex's GEMM ran single-row (decode) projections about twice as fast from
+/// contiguous storage; other backends keep the zero-copy view, which measured as
+/// fast or faster there. Detecting a transposing mapper loads a `[2, 3]` probe
+/// into a clone of the parameter; a mapper that panics on that shape is treated
+/// as non-transposing (the default panic hook still prints its message). The
+/// host transpose briefly holds a second host copy of this one tensor.
 pub fn install_float_parameter<B: Backend, const D: usize>(
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
@@ -291,14 +306,14 @@ fn validate_parameter_install<B: Backend, const D: usize>(
 ///
 /// The tensor is built at its checkpoint dtype on the parameter's device and loaded
 /// through Burn's record path, so the parameter's mapper, device, and gradient
-/// policy apply exactly as for any other record.
+/// policy apply exactly as for any other record. Its physical storage order is
+/// chosen by [`storage_order::stored_for_mapper`], which never changes values.
 fn install_validated_parameter<B: Backend, const D: usize>(
     parameter: &mut Param<Tensor<B, D>>,
     data: TensorData,
 ) {
     let device = parameter.lazy_device();
-    let dtype = data.dtype;
-    let tensor = Tensor::<B, D>::from_data(data, (&device, dtype));
+    let tensor = storage_order::stored_for_mapper(parameter, data, &device);
     load_parameter_tensor(parameter, tensor);
 }
 
