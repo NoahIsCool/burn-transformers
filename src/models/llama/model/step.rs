@@ -146,6 +146,11 @@ impl StepLayout {
         Ok(())
     }
 
+    /// Returns whether every block slot holds a new token (no padding slot).
+    pub(super) fn is_dense(&self) -> bool {
+        self.valid.iter().all(|&valid| valid)
+    }
+
     /// Returns each row's first block slot `c_b`.
     pub(super) fn columns(&self) -> &[usize] {
         &self.columns
@@ -195,6 +200,28 @@ impl StepLayout {
         bool_tensor_from_values(self.valid.clone(), [self.batch, self.block], device)
     }
 
+    /// Cuts the `[batch, Q]` token block, with token 0 in every padding slot.
+    ///
+    /// Stateful calls validate token IDs only at valid columns, so padding
+    /// columns may hold arbitrary sentinels (`-1`, out-of-vocabulary IDs);
+    /// they must never reach the embedding lookup. Padding outputs are
+    /// discarded, so any in-vocabulary ID serves; 0 always is one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::cut`].
+    pub(super) fn tokens<B: Backend>(
+        &self,
+        token_ids: &Tensor<B, 2, Int>,
+    ) -> Result<Tensor<B, 2, Int>> {
+        let tokens = self.cut(token_ids)?;
+        if self.is_dense() {
+            return Ok(tokens);
+        }
+        let padding = self.slot_validity::<B>(&tokens.device()).bool_not();
+        Ok(tokens.mask_fill(padding, 0))
+    }
+
     /// Returns rotary positions: explicit positions on new tokens, slot positions elsewhere.
     ///
     /// Explicit positions at padded columns may be arbitrary sentinels, so
@@ -212,7 +239,7 @@ impl StepLayout {
             return Ok(slot_positions.clone());
         };
         let explicit = self.cut(explicit)?;
-        if self.valid.iter().all(|&valid| valid) {
+        if self.is_dense() {
             return Ok(explicit);
         }
         let padding = self.slot_validity::<B>(&explicit.device()).bool_not();

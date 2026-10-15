@@ -515,7 +515,7 @@ impl<B: Backend> LlamaForCausalLm<B> {
         let rotary_positions =
             layout.rotary_positions(input.position_ids.as_ref(), &query_positions)?;
         let angles = self.model.rotary_tables(rotary_positions, context)?;
-        let tokens = layout.cut(&input.token_ids)?;
+        let tokens = layout.tokens(&input.token_ids)?;
         let heads = self.architecture().query_heads;
         let mut keys = CachedKeys::new(state, &layout, angles, query_positions, heads)?;
         let mut hidden = self.model.embed_tokens.forward(tokens);

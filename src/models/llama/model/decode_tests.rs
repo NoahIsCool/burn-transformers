@@ -314,6 +314,41 @@ fn explicit_positions_equal_implicit_ordinals_and_ignore_padded_sentinels() {
     );
 }
 
+/// Padding sentinels outside the vocabulary never reach the embedding lookup.
+#[test]
+fn padding_sentinels_outside_the_vocabulary_are_inert() {
+    let model = tiny_model(LlamaVariant::Llama, 6);
+    let valid = [[false, false, true, true], [true, true, true, false]];
+    let run = |tokens: [[i64; 4]; 2]| {
+        let mut cache = state(&model, 2, 8);
+        let prefill = model
+            .prefill(
+                input(ints(tokens), Some(mask(valid)), None),
+                &mut cache,
+                &all_logits(),
+            )
+            .unwrap()
+            .logits;
+        let step = model
+            .decode(
+                DecodeInput {
+                    token_ids: ints([[9], [-1]]),
+                    position_ids: None,
+                    token_mask: Some(mask([[true], [false]])),
+                },
+                &mut cache,
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+        (prefill, step)
+    };
+    let (clean_prefill, clean_step) = run([[0, 0, 4, 5], [6, 7, 8, 0]]);
+    let (sentinel_prefill, sentinel_step) = run([[-1, 999, 4, 5], [6, 7, 8, i64::from(i32::MAX)]]);
+    assert_close(sentinel_prefill, clean_prefill, 0.0, "prefill");
+    assert_close(sentinel_step, clean_step, 0.0, "decode");
+}
+
 /// Reordering rows permutes later outputs; truncation replays like the original step.
 #[test]
 fn reorder_truncate_and_reset_follow_the_rows() {
