@@ -28,8 +28,10 @@
 //!    rendered prompt without added special tokens (both fail for a prompt that
 //!    encodes to no tokens) and fails whenever rendering fails.
 //! 6. **Resources.** Rendering finishes within [`RENDER_TIME_LIMIT`] and its
-//!    output stays below [`OUTPUT_BYTE_LIMIT`]; fuel bounds instructions, but
-//!    nothing else bounds the work or memory one instruction performs.
+//!    output stays below [`OUTPUT_BYTE_LIMIT`]. Besides fuel, the renderer
+//!    bounds the rendered prompt and every value built by `+`, `~`, `*`,
+//!    printing, and the size-controlled builtins (findings CHAT-1..3, fixed),
+//!    so the growth fragments below use large counts.
 //!
 //! Hangs and memory blow-ups beyond these limits surface as libFuzzer timeouts
 //! or RSS-limit failures.
@@ -65,10 +67,11 @@ const TOKENIZER_JSON: &str = r#"{"version":"1.0","truncation":null,"padding":nul
 /// (`generation` blocks, conditional keyword arguments, Python string and dict
 /// methods, `tojson`, `raise_exception`, `strftime_now`, loop controls) and the
 /// features the sandbox must refuse or bound (loaders, deep recursion, large
-/// loops, string growth). Growth fragments use small counts on purpose: the
-/// open findings CHAT-1..3 (see the sibling tests) make large counts crash or
-/// hang, and a table entry that does so would stop every campaign at once;
-/// raw-byte fragments can still reach them.
+/// loops, string and sequence growth, huge repetition and padding counts).
+/// Growth fragments use counts that exceed the renderer's limits: findings
+/// CHAT-1..3 (see the sibling tests) are fixed, so they must fail contextually
+/// and quickly. Shared-structure comparisons, which the renderer documents as
+/// unbounded, are deliberately absent.
 const FRAGMENTS: &[&str] = &[
     "{{ ",
     " }}",
@@ -100,7 +103,7 @@ const FRAGMENTS: &[&str] = &[
     "{{ tools | tojson }}",
     "{{ messages | tojson(indent=2) }}",
     "{{ documents }}",
-    "{% set ns = namespace(text='a', count=0) %}",
+    "{% set ns = namespace(text='a', count=0, l=[1]) %}",
     "{% set ns.text = ns.text ~ ns.text %}",
     "{% set ns.count = ns.count + 1 %}",
     "{{ ns.text | length }}",
@@ -127,7 +130,14 @@ const FRAGMENTS: &[&str] = &[
     "{{ 'ab' * 3 }}",
     "{{ range(5) | list }}",
     "{% for i in range(100) %}{% for j in range(100) %}{{ i * j }}{% endfor %}{% endfor %}",
-    "{% for i in range(8) %}{% set ns.text = ns.text ~ ns.text %}{% endfor %}",
+    "{% for i in range(40) %}{% set ns.text = ns.text ~ ns.text %}{% endfor %}",
+    "{% for i in range(40) %}{% set ns.l = ns.l + ns.l %}{% endfor %}{{ ns.l | length }}",
+    "{{ 'ab' * 4611686018427387904 }}",
+    "{{ ns.text * 100000000 }}",
+    "{{ ns.l * 100000000 }}",
+    "{{ ns.text | indent(100000000) }}",
+    "{{ ns.text | replace('', ns.text * 1000) }}",
+    "{{ '%999999999s' | format(ns.text) }}",
     "{% macro m(x) %}{{ m(x) }}{% endmacro %}{{ m(1) }}",
     "{% macro m(x) %}<{{ x }}>{% endmacro %}{{ m(key=1 if true else 2) }}",
     "{{ f(key=a if c else b) }}",

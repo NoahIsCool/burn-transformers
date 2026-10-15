@@ -7,6 +7,7 @@ use proptest::prelude::*;
 use serde_json::json;
 
 use super::*;
+use sandbox::{RenderBudget, RenderLimits};
 
 /// 2024-07-26T13:05:09Z, a Friday and the 208th day of a leap year.
 const FRIDAY_AFTERNOON: i64 = 1_721_999_109;
@@ -364,5 +365,187 @@ proptest! {
             wrapped.matches('(').count() - source.matches('(').count(),
             wrapped.matches(')').count() - source.matches(')').count()
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox regressions and differential checks against plain MiniJinja.
+// ---------------------------------------------------------------------------
+
+/// CHAT-1: string repetition by a count past `isize::MAX` fails contextually.
+///
+/// MiniJinja folded `'ab' * 4611686018427387904` while *compiling* and its
+/// `str::repeat` panicked with "capacity overflow". The guard turns `*` into a
+/// filter call, which is never folded, and the bounded filter checks the
+/// product first.
+#[test]
+fn huge_string_repetition_fails_contextually() {
+    for source in [
+        "{{ 'ab' * 4611686018427387904 }}",
+        "{{ 4611686018427387904 * 'ab' }}",
+        "{% set x = 'ab' * (2 ** 62) %}",
+        "{{ ('ab' * 1000000) * 1000000 }}",
+    ] {
+        let error = render_template(source, &json!({}), None).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("resource limit"),
+            "{source}: {error:#}"
+        );
+    }
+}
+
+/// CHAT-2: one expression can no longer render (or build) a prompt of hundreds of megabytes.
+#[test]
+fn oversized_values_and_prompts_fail_contextually() {
+    for source in [
+        "{{ 'ab' * 100000000 }}",
+        "{% set ns = namespace(s='ab') %}{% for i in range(30) %}{% set ns.s = ns.s ~ ns.s %}{% endfor %}",
+        "{% set ns = namespace(s='ab') %}{% for i in range(30) %}{% set ns.s = ns.s + ns.s %}{% endfor %}",
+        "{% for i in range(60) %}{{ 'x' * 1000000 }}{% endfor %}",
+    ] {
+        let started = std::time::Instant::now();
+        let error = render_template(source, &json!({}), None).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("resource limit"),
+            "{source}: {error:#}"
+        );
+        assert!(started.elapsed().as_secs_f64() < 5.0, "{source}");
+    }
+}
+
+/// CHAT-3: doubling a list materializes it within the item limit instead of chaining lazily.
+///
+/// MiniJinja's `seq + seq` is a lazy chain: 24 doublings cost about 100 units
+/// of fuel, but `| length` then walks 2^24 items through 24 nested iterators.
+/// The bounded `+` builds a list and stops at 2^20 items.
+#[test]
+fn doubled_sequences_finish_quickly() {
+    let started = std::time::Instant::now();
+    let error = render_template(
+        "{% set ns = namespace(l=[1]) %}{% for i in range(24) %}{% set ns.l = ns.l + ns.l %}{% endfor %}{{ ns.l | length }}",
+        &json!({}),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("1048576-item limit"),
+        "{error:#}"
+    );
+    assert!(started.elapsed().as_secs_f64() < 2.0);
+    // Within the limit the doubled list is exact.
+    assert_eq!(
+        rendered(
+            "{% set ns = namespace(l=[1]) %}{% for i in range(10) %}{% set ns.l = ns.l + ns.l %}{% endfor %}{{ ns.l | length }}",
+            json!({}),
+        ),
+        "1024"
+    );
+}
+
+/// A guard refusal surfaces as a rendering error naming the tag.
+#[test]
+fn guard_refusals_are_rendering_errors() {
+    let error = render_template("ok {{ a + }}", &json!({}), None).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("cannot be bounded"), "{message}");
+    assert!(message.contains("at byte 3"), "{message}");
+}
+
+/// Renders `source` with MiniJinja's own operators: every rewrite except the operator guard.
+fn render_unguarded(source: &str, context: &serde_json::Value) -> Result<String, Error> {
+    let source =
+        parenthesize_conditional_keyword_arguments(&rewrite_generation_blocks(source)).into_owned();
+    let mut environment = Environment::new();
+    environment.set_undefined_behavior(UndefinedBehavior::Lenient);
+    environment.set_trim_blocks(true);
+    environment.set_lstrip_blocks(true);
+    let budget = Arc::new(RenderBudget::new(RenderLimits::for_context_bytes(0)));
+    pycompat::install(&mut environment, &budget);
+    environment.render_str(&source, Value::from_serialize(context))
+}
+
+/// Strategy for scalar expressions over numbers, strings, and context names.
+fn scalar_expression() -> impl Strategy<Value = String> {
+    let leaf = prop_oneof![
+        (0_i64..6).prop_map(|value| value.to_string()),
+        Just("2.5".to_owned()),
+        Just("-1".to_owned()),
+        Just("'ab'".to_owned()),
+        Just("''".to_owned()),
+        Just("true".to_owned()),
+        Just("none".to_owned()),
+        Just("x".to_owned()),
+        Just("s".to_owned()),
+        Just("missing".to_owned()),
+    ];
+    leaf.prop_recursive(4, 32, 2, |inner| {
+        let binary = prop::sample::select(vec![
+            "+", "-", "*", "~", "/", "//", "%", "**", "==", "<", "and", "or", "in",
+        ]);
+        prop_oneof![
+            (inner.clone(), binary, inner.clone())
+                .prop_map(|(left, operator, right)| format!("{left} {operator} {right}")),
+            inner.clone().prop_map(|operand| format!("({operand})")),
+            inner.clone().prop_map(|operand| format!("-{operand}")),
+            inner.clone().prop_map(|operand| format!("not {operand}")),
+            inner
+                .clone()
+                .prop_map(|operand| format!("{operand} | string")),
+            inner.clone().prop_map(|operand| format!("{operand} | abs")),
+            (inner.clone(), inner.clone(), inner)
+                .prop_map(|(yes, test, no)| format!("{yes} if {test} else {no}")),
+        ]
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(768))]
+
+    /// Guarded expressions render exactly as MiniJinja's own operators do.
+    ///
+    /// For scalar operands (where the bounded operators delegate to, or
+    /// replicate, the engine) results and failures must agree: the rewrite
+    /// preserves precedence, associativity, and evaluation order.
+    #[test]
+    fn guarded_expressions_match_minijinja(expression in scalar_expression()) {
+        let source = format!("{{{{ {expression} }}}}|{{% set y = {expression} %}}{{{{ y }}}}");
+        let context = json!({"x": 3, "s": "q"});
+        let guarded = render_template(&source, &context, Some(0));
+        let plain = render_unguarded(&source, &context);
+        match (&guarded, &plain) {
+            (Ok(guarded), Ok(plain)) => prop_assert_eq!(guarded, plain, "{}", source),
+            (Err(_), Err(_)) => {}
+            _ => prop_assert!(false, "{source}: guarded {guarded:?}, plain {plain:?}"),
+        }
+    }
+}
+
+/// Representative template idioms render identically with and without the guard.
+#[test]
+fn official_template_idioms_render_like_minijinja() {
+    let context = json!({
+        "messages": [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello", "tool_calls": [{"function": {"name": "f", "arguments": {"a": 1}}}]},
+        ],
+        "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+        "bos_token": "<s>",
+        "add_generation_prompt": true,
+    });
+    for source in [
+        "{{ bos_token }}{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}",
+        "{%- set ns = namespace(system='', index=0) -%}{%- for m in messages -%}{%- if m.role == 'system' -%}{%- set ns.system = ns.system ~ m.content ~ '\\n\\n' -%}{%- endif -%}{%- set ns.index = ns.index + 1 -%}{%- endfor -%}[{{ ns.system | trim }}|{{ ns.index }}]",
+        "{%- for m in messages[1:] -%}{{ (loop.index0 * 2 + 1) ~ ':' ~ m.content | upper }}{%- if not loop.last %}, {% endif -%}{%- endfor -%}",
+        "{%- for tool in tools %}{{ '- ' + tool.function.name + ': ' + (tool.function.parameters | tojson) + '\\n' }}{% endfor -%}",
+        "{%- for m in messages if m.tool_calls is defined -%}{%- for call in m.tool_calls -%}{{ '<tool_call>' ~ {'name': call.function.name, 'arguments': call.function.arguments} | tojson ~ '</tool_call>' }}{%- endfor -%}{%- endfor -%}",
+        "{%- set content = messages[-1].content -%}{{ '-' * 3 }}{{ content[:2] ~ ('…' if content | length > 2 else '') }}{{ '=' * (messages | length) }}",
+        "{%- macro render(m, sep='\\n') -%}{{ m.role | capitalize ~ ': ' ~ m.content ~ sep }}{%- endmacro -%}{%- for m in messages %}{{ render(m, sep=' | ' if loop.last else '\\n') }}{% endfor %}",
+    ] {
+        let guarded = render_template(source, &context, Some(0))
+            .unwrap_or_else(|error| panic!("{source}: {error:#}"));
+        let plain = render_unguarded(source, &context)
+            .unwrap_or_else(|error| panic!("{source}: {error:#}"));
+        assert_eq!(guarded, plain, "{source}");
     }
 }

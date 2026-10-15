@@ -43,12 +43,21 @@
 //!   Python prints `True`/`None`. Official templates convert values with
 //!   `| string` first, which matches Python exactly.
 //! - **`'%s' % value` string formatting is unsupported** and fails rendering.
+//! - **Resource limits.** A template that builds a value or prompt beyond the
+//!   sandbox's limits (below) fails where Python might still render. The
+//!   limits scale with the conversation, so only adversarial templates reach
+//!   them; no published template does.
 //!
 //! Chat templates are data supplied by a checkpoint and therefore are treated
 //! as untrusted programs. The MiniJinja environment has no filesystem loader,
-//! limits recursion, bounds printed nesting, and meters execution with fuel.
-//! These constraints do not prove a template benign, but they bound the
-//! resources and capabilities available to ordinary model templates.
+//! meters execution with fuel, caps recursion and nesting, bounds the rendered
+//! prompt (16 MiB plus four times the serialized context), checks every value
+//! built by `+`, `~`, `*`, printing, and the size-controlled filters before it
+//! is allocated, and turns engine panics into errors. Two costs remain
+//! unbounded because MiniJinja offers no hook for them: comparing containers
+//! that share one value many times (time), and literal template text replayed
+//! into `{% set %}` blocks or macro results (memory, at most fuel times the
+//! template size). The private `chat_template` module documents each bound.
 
 use std::{
     collections::BTreeMap,
@@ -832,6 +841,14 @@ impl LocalTokenizer {
     /// tokenize=False)` except for the differences listed in the
     /// [module documentation](self); most importantly, dictionary keys reach
     /// the template sorted rather than in insertion order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Tokenizer`] for invalid arguments, a template that
+    /// fails to compile or render (including `raise_exception`), and a
+    /// template that exceeds a resource limit of the sandboxed renderer (see
+    /// the module documentation); a panic inside the template engine is
+    /// reported the same way instead of unwinding.
     #[cfg(feature = "chat-templates")]
     pub fn render_chat(
         &self,

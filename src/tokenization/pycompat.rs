@@ -47,14 +47,20 @@
 //!
 //! Recursive printing and serialization stop at [`MAX_NESTING`] levels:
 //! templates are untrusted programs and could otherwise build a structure deep
-//! enough to exhaust the native stack.
+//! enough to exhaust the native stack. Every text this module produces is
+//! also bounded by the render's [`RenderBudget`] while it is built: printing
+//! stops at the first item past the allowance, and `str.replace` and
+//! `str.join` check their result size before allocating.
 
 use core::fmt::Write as _;
+use std::sync::Arc;
 
 use minijinja::{
     Environment, Error, ErrorKind, Output, State, Value,
     value::{Kwargs, ValueKind},
 };
+
+use super::chat_template::sandbox::{self, LimitedText, RenderBudget};
 
 /// Deepest container nesting printed or serialized before failing.
 pub(crate) const MAX_NESTING: usize = 256;
@@ -64,14 +70,37 @@ pub(crate) const MAX_NESTING: usize = 256;
 /// This is the single list of MiniJinja behaviors this module replaces: value
 /// printing, `str`/`dict` methods, the `tojson`, `string`, `safe`, `trim`,
 /// `join`, and `round` filters, and the `iterable` and `sequence` tests.
-pub(crate) fn install(environment: &mut Environment<'_>) {
-    environment.set_formatter(python_formatter);
-    environment.set_unknown_method_callback(python_method);
-    environment.add_filter("tojson", tojson);
-    environment.add_filter("string", string);
-    environment.add_filter("safe", safe);
-    environment.add_filter("trim", trim);
-    environment.add_filter("join", join);
+/// Every callback that builds text charges `budget`.
+pub(crate) fn install(environment: &mut Environment<'_>, budget: &Arc<RenderBudget>) {
+    let shared = Arc::clone(budget);
+    environment
+        .set_formatter(move |out, state, value| python_formatter(out, state, value, &shared));
+    let shared = Arc::clone(budget);
+    environment.set_unknown_method_callback(move |state, value, method, arguments| {
+        python_method(state, value, method, arguments, &shared)
+    });
+    let shared = Arc::clone(budget);
+    environment.add_filter(
+        "tojson",
+        move |value: &Value, ensure_ascii: Option<Value>, indent: Option<Value>, kwargs: Kwargs| {
+            tojson(value, ensure_ascii, indent, kwargs, &shared)
+        },
+    );
+    let shared = Arc::clone(budget);
+    environment.add_filter("string", move |value: &Value| string(value, &shared));
+    let shared = Arc::clone(budget);
+    environment.add_filter("safe", move |value: &Value| safe(value, &shared));
+    let shared = Arc::clone(budget);
+    environment.add_filter("trim", move |value: &Value, characters: Option<Value>| {
+        trim(value, characters, &shared)
+    });
+    let shared = Arc::clone(budget);
+    environment.add_filter(
+        "join",
+        move |value: &Value, separator: Option<Value>, attribute: Option<Value>, kwargs: Kwargs| {
+            join(value, separator, attribute, kwargs, &shared)
+        },
+    );
     environment.add_filter("round", round);
     environment.add_test("iterable", is_iterable);
     environment.add_test("sequence", is_sequence);
@@ -98,51 +127,116 @@ fn check_depth(depth: usize) -> Result<(), Error> {
 // Python `str()` / `repr()` printing.
 
 /// Writes `{{ value }}` exactly as Python's `str(value)` would; see [`python_str`].
+///
+/// Every print, including prints into `{% set %}` blocks, macro results, and
+/// `caller()`, is charged to `budget`. Strings are written without a copy.
 pub(crate) fn python_formatter(
     out: &mut Output<'_>,
     _state: &State<'_, '_>,
     value: &Value,
+    budget: &RenderBudget,
 ) -> Result<(), Error> {
-    out.write_str(&python_str(value)?).map_err(Error::from)
+    if value.kind() == ValueKind::String {
+        let text = value.as_str().unwrap_or_default();
+        budget.reserve_text(text.len(), "printing a value")?;
+        return out.write_str(text).map_err(Error::from);
+    }
+    out.write_str(&python_str(value, budget, "printing a value")?)
+        .map_err(Error::from)
 }
 
-/// Converts a value to text exactly as Python's `str(value)` would.
+/// Converts a value to text exactly as Python's `str(value)` would, within `budget`.
 ///
 /// Strings are returned raw, undefined values are empty (Jinja2's lenient
 /// `Undefined.__str__`), and every other primitive or container uses Python
 /// `repr`: `True`, `None`, `1.0`, `['a', 1]`, `{'k': None}`. Values with no
-/// Python counterpart, such as macros, keep MiniJinja's spelling.
-pub(crate) fn python_str(value: &Value) -> Result<String, Error> {
-    match value.kind() {
-        ValueKind::Undefined => Ok(String::new()),
-        ValueKind::String => Ok(value.as_str().unwrap_or_default().to_owned()),
+/// Python counterpart, such as macros, keep MiniJinja's spelling. Printing
+/// stops with a resource-limit error as soon as the text would exceed the
+/// render's allowance; the result is charged to `budget` as `operation`.
+pub(crate) fn python_str(
+    value: &Value,
+    budget: &RenderBudget,
+    operation: &str,
+) -> Result<String, Error> {
+    let limit = budget.text_allowance();
+    let text = match value.kind() {
+        ValueKind::Undefined => String::new(),
+        ValueKind::String => value.as_str().unwrap_or_default().to_owned(),
         ValueKind::None | ValueKind::Bool | ValueKind::Number | ValueKind::Seq | ValueKind::Map => {
             let mut text = String::new();
-            python_repr(value, &mut text, 0)?;
-            Ok(text)
+            python_repr(value, &mut text, 0, limit)?;
+            text
         }
-        _ => Ok(value.to_string()),
+        _ => {
+            let mut text = String::new();
+            display_into(value, &mut text, limit)?;
+            text
+        }
+    };
+    budget.reserve_text(text.len(), operation)?;
+    Ok(text)
+}
+
+/// Fails once `out` holds more than `limit` bytes.
+///
+/// Printing checks after every leaf and container item, so a value whose
+/// text is enormous (a container that holds one value many times) costs at
+/// most the limit plus one leaf before it is refused.
+fn check_printed(out: &str, limit: usize) -> Result<(), Error> {
+    if out.len() > limit {
+        Err(invalid(format!(
+            "chat template resource limit: printing a value would exceed the {limit} bytes this render may still produce"
+        )))
+    } else {
+        Ok(())
     }
 }
 
+/// Appends MiniJinja's `Display` text of `value` to `out` without passing `limit` bytes.
+fn display_into(value: &Value, out: &mut String, limit: usize) -> Result<(), Error> {
+    let mut text = LimitedText::new(limit.saturating_sub(out.len()));
+    if write!(text, "{value}").is_err() {
+        return check_printed(out, limit).and_then(|()| {
+            Err(invalid(format!(
+                "chat template resource limit: printing a value would exceed the {limit} bytes this render may still produce"
+            )))
+        });
+    }
+    out.push_str(&text.into_string());
+    Ok(())
+}
+
 /// Appends Python's `repr(value)`; nested strings are quoted, as in a list's repr.
-pub(crate) fn python_repr(value: &Value, out: &mut String, depth: usize) -> Result<(), Error> {
+///
+/// Fails with a resource-limit error once `out` would pass `limit` bytes.
+pub(crate) fn python_repr(
+    value: &Value,
+    out: &mut String,
+    depth: usize,
+    limit: usize,
+) -> Result<(), Error> {
     check_depth(depth)?;
+    check_printed(out, limit)?;
     match value.kind() {
         ValueKind::Undefined => out.push_str("Undefined"),
         ValueKind::None => out.push_str("None"),
         ValueKind::Bool => out.push_str(if value.is_true() { "True" } else { "False" }),
         ValueKind::Number => out.push_str(&python_number(value, "inf", "nan")?),
-        ValueKind::String => python_string_repr(value.as_str().unwrap_or_default(), out),
+        ValueKind::String => {
+            let text = value.as_str().unwrap_or_default();
+            // A repr is at least as long as its text plus two quotes.
+            check_printed(out, limit.saturating_sub(text.len().saturating_add(2)))?;
+            python_string_repr(text, out);
+        }
         ValueKind::Map => {
             out.push('{');
             for (index, key) in value.try_iter()?.enumerate() {
                 if index > 0 {
                     out.push_str(", ");
                 }
-                python_repr(&key, out, depth + 1)?;
+                python_repr(&key, out, depth + 1, limit)?;
                 out.push_str(": ");
-                python_repr(&value.get_item(&key)?, out, depth + 1)?;
+                python_repr(&value.get_item(&key)?, out, depth + 1, limit)?;
             }
             out.push('}');
         }
@@ -152,15 +246,13 @@ pub(crate) fn python_repr(value: &Value, out: &mut String, depth: usize) -> Resu
                 if index > 0 {
                     out.push_str(", ");
                 }
-                python_repr(&item, out, depth + 1)?;
+                python_repr(&item, out, depth + 1, limit)?;
             }
             out.push(']');
         }
-        _ => {
-            let _ = write!(out, "{value}");
-        }
+        _ => display_into(value, out, limit)?,
     }
-    Ok(())
+    check_printed(out, limit)
 }
 
 /// Appends Python's `repr` of a string, choosing quotes the way CPython does.
@@ -275,6 +367,8 @@ struct JsonOptions {
     key_separator: String,
     /// Emit object members ordered by key rather than in map order.
     sort_keys: bool,
+    /// Most bytes the serialization may reach (the render's text allowance).
+    limit: usize,
 }
 
 /// The `tojson` filter Hugging Face installs: `json.dumps` with its defaults.
@@ -289,6 +383,7 @@ pub(crate) fn tojson(
     ensure_ascii: Option<Value>,
     indent: Option<Value>,
     kwargs: Kwargs,
+    budget: &RenderBudget,
 ) -> Result<Value, Error> {
     let ensure_ascii = match ensure_ascii {
         Some(value) => Some(value),
@@ -320,9 +415,11 @@ pub(crate) fn tojson(
         item_separator,
         key_separator,
         sort_keys,
+        limit: budget.text_allowance(),
     };
     let mut out = String::new();
     write_json(value, &options, 0, &mut out)?;
+    budget.reserve_text(out.len(), "tojson")?;
     // Templates concatenate this text into prompts; it must not be HTML-escaped.
     Ok(Value::from_safe_string(out))
 }
@@ -370,16 +467,19 @@ fn write_json(
     out: &mut String,
 ) -> Result<(), Error> {
     check_depth(depth)?;
+    check_printed(out, options.limit)?;
     match value.kind() {
         ValueKind::None => out.push_str("null"),
         ValueKind::Bool => out.push_str(if value.is_true() { "true" } else { "false" }),
         ValueKind::Number => out.push_str(&python_number(value, "Infinity", "NaN")?),
         ValueKind::String => {
-            write_json_string(
-                value.as_str().unwrap_or_default(),
-                options.ensure_ascii,
+            let text = value.as_str().unwrap_or_default();
+            // JSON text is at least as long as the string plus two quotes.
+            check_printed(
                 out,
-            );
+                options.limit.saturating_sub(text.len().saturating_add(2)),
+            )?;
+            write_json_string(text, options.ensure_ascii, out);
         }
         ValueKind::Seq | ValueKind::Iterable => {
             let items = value.try_iter()?.collect::<Vec<_>>();
@@ -416,7 +516,7 @@ fn write_json(
             )));
         }
     }
-    Ok(())
+    check_printed(out, options.limit)
 }
 
 /// Writes `open`, the separated items, and `close`, with optional indentation.
@@ -507,23 +607,27 @@ fn write_json_string(text: &str, ensure_ascii: bool, out: &mut String) {
 ///
 /// Strings, including safe strings, pass through unchanged; every other value
 /// becomes [`python_str`] text, so `true | string` is `True`.
-pub(crate) fn string(value: &Value) -> Result<Value, Error> {
+pub(crate) fn string(value: &Value, budget: &RenderBudget) -> Result<Value, Error> {
     if value.kind() == ValueKind::String {
         return Ok(value.clone());
     }
-    python_str(value).map(Value::from)
+    python_str(value, budget, "string").map(Value::from)
 }
 
 /// Jinja2's `safe` filter: `Markup(value)`, Python `str()` text marked safe.
-pub(crate) fn safe(value: &Value) -> Result<Value, Error> {
-    python_str(value).map(Value::from_safe_string)
+pub(crate) fn safe(value: &Value, budget: &RenderBudget) -> Result<Value, Error> {
+    python_str(value, budget, "safe").map(Value::from_safe_string)
 }
 
 /// Jinja2's `trim(value, chars=None)`: `str(value).strip(chars)`.
 ///
 /// Without `chars`, Python's whitespace set is stripped (see
 /// [`is_python_whitespace`]).
-pub(crate) fn trim(value: &Value, characters: Option<Value>) -> Result<Value, Error> {
+pub(crate) fn trim(
+    value: &Value,
+    characters: Option<Value>,
+    budget: &RenderBudget,
+) -> Result<Value, Error> {
     let characters = match &characters {
         Some(set) if !set.is_none() => Some(
             set.as_str()
@@ -531,7 +635,7 @@ pub(crate) fn trim(value: &Value, characters: Option<Value>) -> Result<Value, Er
         ),
         _ => None,
     };
-    let text = python_str(value)?;
+    let text = python_str(value, budget, "trim")?;
     Ok(Value::from(strip(&text, "strip", characters)))
 }
 
@@ -546,6 +650,7 @@ pub(crate) fn join(
     separator: Option<Value>,
     attribute: Option<Value>,
     kwargs: Kwargs,
+    budget: &RenderBudget,
 ) -> Result<Value, Error> {
     let separator = match separator {
         Some(separator) => Some(separator),
@@ -557,7 +662,7 @@ pub(crate) fn join(
     };
     kwargs.assert_all_used()?;
     let separator = match separator {
-        Some(separator) => python_str(&separator)?,
+        Some(separator) => python_str(&separator, budget, "join")?,
         None => String::new(),
     };
     if value.is_undefined() {
@@ -572,17 +677,21 @@ pub(crate) fn join(
             value.kind()
         ))
     })?;
+    let limit = budget.text_allowance();
     let mut joined = String::new();
     for (index, item) in items.enumerate() {
         if index > 0 {
+            check_printed(&joined, limit.saturating_sub(separator.len()))?;
             joined.push_str(&separator);
         }
         let item = match &attribute {
             Some(path) if !path.is_none() => attribute_path(&item, path)?,
             _ => item,
         };
-        joined.push_str(&python_str(&item)?);
+        joined.push_str(&python_str(&item, budget, "join")?);
+        check_printed(&joined, limit)?;
     }
+    budget.reserve_text(joined.len(), "join")?;
     Ok(Value::from(joined))
 }
 
@@ -881,9 +990,15 @@ pub(crate) fn python_method(
     value: &Value,
     method: &str,
     arguments: &[Value],
+    budget: &RenderBudget,
 ) -> Result<Value, Error> {
     match value.kind() {
-        ValueKind::String => string_method(value.as_str().unwrap_or_default(), method, arguments),
+        ValueKind::String => string_method(
+            value.as_str().unwrap_or_default(),
+            method,
+            arguments,
+            budget,
+        ),
         ValueKind::Map => map_method(value, method, arguments),
         _ => Err(Error::from(ErrorKind::UnknownMethod)),
     }
@@ -972,8 +1087,13 @@ impl<'a> Arguments<'a> {
     }
 }
 
-/// Dispatches one Python `str` method.
-fn string_method(text: &str, method: &str, values: &[Value]) -> Result<Value, Error> {
+/// Dispatches one Python `str` method; methods that can grow text check `budget` first.
+fn string_method(
+    text: &str,
+    method: &str,
+    values: &[Value],
+    budget: &RenderBudget,
+) -> Result<Value, Error> {
     let arguments = Arguments::new("str", method, values);
     let strings =
         |parts: Vec<&str>| Value::from(parts.into_iter().map(Value::from).collect::<Vec<_>>());
@@ -1009,7 +1129,12 @@ fn string_method(text: &str, method: &str, values: &[Value]) -> Result<Value, Er
         "replace" => {
             arguments.arity(2, 3)?;
             let (old, new) = (arguments.str(0)?, arguments.str(1)?);
-            Ok(Value::from(match arguments.limit(2)? {
+            let limit = arguments.limit(2)?;
+            budget.reserve_text(
+                sandbox::replaced_length(text, old, new, limit),
+                "str.replace",
+            )?;
+            Ok(Value::from(match limit {
                 Some(count) => text.replacen(old, new, count),
                 None => text.replace(old, new),
             }))
@@ -1026,6 +1151,8 @@ fn string_method(text: &str, method: &str, values: &[Value]) -> Result<Value, Er
         }
         "lower" | "upper" | "title" | "capitalize" | "swapcase" => {
             arguments.arity(0, 0)?;
+            // Unicode case mapping lengthens text by at most 3x (`ß` -> `SS`).
+            budget.reserve_text(text.len().saturating_mul(3), &arguments.method)?;
             Ok(Value::from(change_case(text, method)))
         }
         "count" => {
@@ -1067,6 +1194,12 @@ fn string_method(text: &str, method: &str, values: &[Value]) -> Result<Value, Er
                         .ok_or_else(|| invalid("str.join() expects every item to be a str"))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
+            let separators = text.len().saturating_mul(parts.len().saturating_sub(1));
+            let bytes = parts
+                .iter()
+                .map(String::len)
+                .fold(separators, usize::saturating_add);
+            budget.reserve_text(bytes, "str.join")?;
             Ok(Value::from(parts.join(text)))
         }
         "isdigit" | "isdecimal" | "isnumeric" | "isalpha" | "isalnum" | "isspace" | "islower"

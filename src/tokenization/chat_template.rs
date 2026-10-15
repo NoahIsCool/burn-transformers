@@ -27,19 +27,76 @@
 //! The unmatched rows, and smaller Unicode-class approximations, are
 //! described in the `pycompat` module documentation. Official templates
 //! convert values with `| string` before `~`, which is matched exactly.
+//! Sequence `+` and `*` produce lists, as in Python (MiniJinja alone builds
+//! lazy iterables, which print with JSON-style quotes and cannot be indexed).
 //!
-//! Templates are untrusted programs. The environment has no loader, so
-//! templates cannot include files; execution is metered by fuel, recursion is
-//! capped, and printed or serialized values have a bounded nesting depth.
+//! # Sandbox
+//!
+//! Templates are untrusted programs: a checkpoint can ship any template. Each
+//! render is bounded as follows.
+//!
+//! - **Capabilities.** The environment has no loader, so `include`,
+//!   `import`, and `extends` fail; the only globals are `raise_exception`,
+//!   `strftime_now`, and MiniJinja's `range`, `dict`, and `namespace`.
+//! - **Instructions.** At most 250 000 units of fuel (one per VM
+//!   instruction); macro and call recursion at most 64 levels; `range` at most
+//!   100 000 items (MiniJinja's own limit).
+//! - **Parsing.** The `guard` module refuses expressions nested deeper than
+//!   200 levels or chaining more than 1 024 operators, which would otherwise
+//!   overflow MiniJinja's recursive parser, code generator, or syntax-tree
+//!   destructor (a native stack overflow aborts the process).
+//! - **Output.** The rendered prompt streams into a buffer of at most
+//!   `16 MiB + 4c` bytes, where `c` is the size of the template context
+//!   (`messages`, `tools`, ...) serialized as JSON; the write that crosses it
+//!   fails the render.
+//! - **Values.** Every value the following produce is checked *before* it is
+//!   built against the same per-value limit (and a sequence against 2^20
+//!   items), and charged to a cumulative budget of 16 times the output limit:
+//!   the binary operators `+`, `~`, and `*` (rewritten into bounded filters
+//!   by the `guard` module, so constant operands are not folded at compile
+//!   time either); every `{{ }}` print, including prints into `{% set %}`
+//!   blocks, macros, and `caller()`; the Python-compatible filters and
+//!   methods (`string`, `join`, `trim`, `safe`, `tojson`, `str.replace`,
+//!   `str.join`, case changes); and the builtins whose size an argument
+//!   controls or that print arbitrary values (`indent`, `replace`, `format`,
+//!   `batch`, `slice`, `chain`, `upper`, `lower`, `title`, `capitalize`,
+//!   `escape`, `pprint`, and the `startingwith`/`endingwith` tests).
+//! - **Panics.** A panic inside MiniJinja is caught and reported as a
+//!   rendering error; it never unwinds into the caller.
+//!
+//! What remains unbounded, because MiniJinja exposes no hook for it:
+//!
+//! - **Shared structure in comparisons.** Containers can hold one value many
+//!   times (`{% set ns.x = [ns.x, ns.x] %}` doubles the printed size per
+//!   iteration while allocating a constant). Printing such a value is bounded
+//!   as above, but `==`, `<`, `in`, `sort`, `unique`, `min`, `max`, and
+//!   `dictsort` compare element by element and can take time exponential in
+//!   the number of instructions.
+//! - **Literal text replayed into captures.** Template text inside a loop is
+//!   appended to a `{% set %}` block, macro result, or `caller()` without a
+//!   print, so a capture can grow by the template's size per instruction (at
+//!   most fuel times template size); only the rendered prompt itself is
+//!   bounded.
+//! - **Allocation failure.** An allocation MiniJinja cannot satisfy aborts
+//!   the process (Rust's allocation-failure behavior), rather than panicking;
+//!   the bounds above keep every allocation they cover below the limits.
 
 use std::{
     borrow::Cow,
+    convert::Infallible,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use minijinja::{Environment, Error, ErrorKind, UndefinedBehavior, Value};
 
 use super::{calendar, pycompat};
+
+mod guard;
+pub(crate) mod sandbox;
+
+use sandbox::{BoundedOutput, RenderBudget, RenderLimits};
 
 /// Instruction budget limiting each chat-template evaluation.
 const CHAT_TEMPLATE_FUEL: u64 = 250_000;
@@ -50,26 +107,95 @@ const CHAT_TEMPLATE_RECURSION_LIMIT: usize = 64;
 ///
 /// `context` holds the template variables (`messages`, `tools`, special
 /// tokens, ...). `fixed_time` pins the instant `strftime_now` formats, in Unix
-/// seconds; `None` reads the host clock.
+/// seconds; `None` reads the host clock. Resource limits follow from the
+/// context's size; see the module documentation.
+///
+/// # Errors
+///
+/// Returns MiniJinja's error for a template that fails to compile or render,
+/// exceeds a resource limit, or panics inside the engine.
 pub(crate) fn render_template(
     source: &str,
     context: &serde_json::Value,
     fixed_time: Option<i64>,
 ) -> Result<String, Error> {
-    let source =
+    let limits = RenderLimits::for_context(context);
+    render_template_with(source, context, fixed_time, limits, |_| {})
+}
+
+/// [`render_template`] with explicit limits and an environment extension.
+///
+/// Tests use the limits to exercise each bound cheaply and the extension to
+/// register extra callbacks; production passes [`RenderLimits::for_context`]
+/// and no extension. Every source rewrite, the compilation, and the render
+/// run inside `catch_unwind`: a panic in MiniJinja (or in a callback) becomes
+/// an error instead of unwinding into the caller.
+pub(crate) fn render_template_with(
+    source: &str,
+    context: &serde_json::Value,
+    fixed_time: Option<i64>,
+    limits: RenderLimits,
+    extend: impl FnOnce(&mut Environment<'_>),
+) -> Result<String, Error> {
+    catch_unwind(AssertUnwindSafe(|| {
+        render_bounded(source, context, fixed_time, limits, extend)
+    }))
+    .unwrap_or_else(|payload| {
+        let detail = payload
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a non-text panic payload".to_owned());
+        Err(Error::new(
+            ErrorKind::InvalidOperation,
+            format!("the template engine panicked ({detail}); the template was rejected"),
+        ))
+    })
+}
+
+/// Rewrites, compiles, and renders one template under `limits`.
+fn render_bounded(
+    source: &str,
+    context: &serde_json::Value,
+    fixed_time: Option<i64>,
+    limits: RenderLimits,
+    extend: impl FnOnce(&mut Environment<'_>),
+) -> Result<String, Error> {
+    let rewritten =
         parenthesize_conditional_keyword_arguments(&rewrite_generation_blocks(source)).into_owned();
+    let source = guard::guard_operators(&rewritten)
+        .map_err(|error| Error::new(ErrorKind::InvalidOperation, error.to_string()))?
+        .into_owned();
+    let budget = Arc::new(RenderBudget::new(limits));
     let mut environment = Environment::new();
     environment.set_undefined_behavior(UndefinedBehavior::Lenient);
     environment.set_trim_blocks(true);
     environment.set_lstrip_blocks(true);
     environment.set_recursion_limit(CHAT_TEMPLATE_RECURSION_LIMIT);
     environment.set_fuel(Some(CHAT_TEMPLATE_FUEL));
-    pycompat::install(&mut environment);
+    pycompat::install(&mut environment, &budget);
+    sandbox::install(&mut environment, &budget);
     environment.add_function("raise_exception", raise_exception);
     environment.add_function("strftime_now", move |format: &str| {
         strftime_now(format, fixed_time)
     });
-    environment.render_str(&source, Value::from_serialize(context))
+    extend(&mut environment);
+    let template = environment.template_from_str(&source)?;
+    let mut output = BoundedOutput::new(limits.output_bytes);
+    let rendered = template
+        .render_captured_to(Value::from_serialize(context), &mut output)
+        .map(drop);
+    if output.exceeded() {
+        return Err(Error::new(
+            ErrorKind::InvalidOperation,
+            format!(
+                "chat template resource limit: the rendered prompt would exceed {} bytes",
+                limits.output_bytes
+            ),
+        ));
+    }
+    rendered?;
+    output.into_string()
 }
 
 /// Implements Hugging Face's `raise_exception(message)` template global.
@@ -107,6 +233,21 @@ fn rewrite_tags(
     source: &str,
     mut rewrite: impl FnMut(TagKind, &str) -> Option<String>,
 ) -> Cow<'_, str> {
+    match try_rewrite_tags(source, |kind, _, tag| {
+        Ok::<_, Infallible>(rewrite(kind, tag))
+    }) {
+        Ok(rewritten) => rewritten,
+        Err(never) => match never {},
+    }
+}
+
+/// [`rewrite_tags`] with a fallible rewrite that also receives each tag's byte offset.
+///
+/// The first error stops the scan and is returned.
+fn try_rewrite_tags<E>(
+    source: &str,
+    mut rewrite: impl FnMut(TagKind, usize, &str) -> Result<Option<String>, E>,
+) -> Result<Cow<'_, str>, E> {
     let mut rewritten = String::new();
     // Bytes of `source` already copied into `rewritten`; zero until the first change.
     let mut copied = 0;
@@ -139,19 +280,19 @@ fn rewrite_tags(
             break;
         };
         let end = body_start + length + closing.len();
-        if let Some(replacement) = rewrite(kind, &source[start..end]) {
+        if let Some(replacement) = rewrite(kind, start, &source[start..end])? {
             rewritten.push_str(&source[copied..start]);
             rewritten.push_str(&replacement);
             copied = end;
         }
         position = end;
     }
-    if copied == 0 {
+    Ok(if copied == 0 {
         Cow::Borrowed(source)
     } else {
         rewritten.push_str(&source[copied..]);
         Cow::Owned(rewritten)
-    }
+    })
 }
 
 /// Returns the byte offset and delimiter of the first `{{`, `{%`, or `{#` at or after `from`.

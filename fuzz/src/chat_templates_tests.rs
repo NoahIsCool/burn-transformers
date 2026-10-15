@@ -285,49 +285,68 @@ fn render_unchecked(template: &str) -> (transformers::Result<String>, Duration) 
     (rendered, started.elapsed())
 }
 
-/// CHAT-1: string repetition by a huge count panics inside the renderer.
+/// CHAT-1 (fixed): string repetition by a huge count panicked inside the renderer.
 ///
-/// MiniJinja evaluates `'ab' * n` as `str::repeat(n)`; a byte length beyond
-/// `isize::MAX` panics with "capacity overflow" through `render_chat`, and a
-/// smaller but unsatisfiable one aborts the process. One instruction costs one
-/// unit of fuel, so the fuel budget does not stop it. Fix in
-/// `src/tokenization/chat_template.rs`: reject such templates before
-/// rendering, or render under `catch_unwind` and map the panic to
-/// `Error::Tokenizer` (aborts additionally need an upstream MiniJinja limit).
+/// MiniJinja evaluated `'ab' * n` as `str::repeat(n)` (folding it while
+/// compiling when both operands are constants); a byte length beyond
+/// `isize::MAX` panicked with "capacity overflow" through `render_chat`, and a
+/// smaller but unsatisfiable one could abort the process. The renderer now
+/// rewrites `*` into a bounded filter that checks the product before
+/// allocating, and renders under `catch_unwind`, so the result is a
+/// contextual `Error::Tokenizer`.
 #[test]
-#[ignore = "CHAT-1: open follow-up in src/tokenization/chat_template.rs (panic on huge repetition)"]
 fn huge_string_repetition_fails_contextually() {
-    let (rendered, _) = render_unchecked("{{ 'ab' * 4611686018427387904 }}");
-    assert!(matches!(rendered, Err(Error::Tokenizer(_))));
+    for template in [
+        "{{ 'ab' * 4611686018427387904 }}",
+        "{{ ('ab' * 1000000) * 1000000 }}",
+    ] {
+        let (rendered, _) = render_unchecked(template);
+        assert!(
+            matches!(&rendered, Err(Error::Tokenizer(message)) if message.contains("resource limit")),
+            "{template}: {rendered:?}"
+        );
+    }
 }
 
-/// CHAT-2: one cheap expression renders an arbitrarily large prompt.
+/// CHAT-2 (fixed): one cheap expression rendered an arbitrarily large prompt.
 ///
-/// `{{ 'ab' * 100000000 }}` builds a 200 MB prompt in a few hundred
-/// milliseconds; string doubling in a loop grows memory exponentially per unit
-/// of fuel. The module documentation says the sandbox bounds the resources of
-/// untrusted templates, which holds for instructions and recursion only. Fix:
-/// render through a size-limited writer and bound repetition and
-/// concatenation results (or document the gap and cap the prompt size).
+/// `{{ 'ab' * 100000000 }}` built a 200 MB prompt in a few hundred
+/// milliseconds, and string doubling in a loop grew memory exponentially per
+/// unit of fuel. Every `+`, `~`, `*`, and print is now checked against a
+/// per-value limit (and a cumulative budget) before it allocates, and the
+/// prompt streams into a writer bounded by `16 MiB + 4x` the context size.
 #[test]
-#[ignore = "CHAT-2: open follow-up in src/tokenization/chat_template.rs (unbounded output)"]
 fn rendered_prompts_are_bounded() {
-    let (rendered, _) = render_unchecked("{{ 'ab' * 100000000 }}");
-    assert!(rendered.is_err() || rendered.unwrap().len() <= OUTPUT_BYTE_LIMIT);
+    for template in [
+        "{{ 'ab' * 100000000 }}",
+        "{% set ns = namespace(text='ab') %}{% for i in range(40) %}{% set ns.text = ns.text ~ ns.text %}{% endfor %}{{ ns.text }}",
+        "{% for i in range(100) %}{{ 'x' * 1000000 }}{% endfor %}",
+    ] {
+        let (rendered, elapsed) = render_unchecked(template);
+        assert!(
+            matches!(&rendered, Err(Error::Tokenizer(message)) if message.contains("resource limit")),
+            "{template}: {:?}",
+            rendered.map(|prompt| prompt.len())
+        );
+        assert!(elapsed <= RENDER_TIME_LIMIT, "{template}: {elapsed:?}");
+    }
 }
 
-/// CHAT-3: lazily concatenated sequences make one instruction arbitrarily slow.
+/// CHAT-3 (fixed): lazily concatenated sequences made one instruction arbitrarily slow.
 ///
-/// `seq + seq` builds a lazy chained iterable, so doubling a list 30 times
-/// costs about 100 instructions of fuel, but `| length` then walks 2^30
-/// elements through 30 chained iterators (about ten minutes on Apple
-/// Silicon). Doubling 24 times already takes several seconds. Fix: bound sequence
-/// sizes in the renderer or upstream, or meter iteration with fuel.
+/// `seq + seq` built a lazy chained iterable, so doubling a list 30 times cost
+/// about 100 instructions of fuel, but `| length` then walked 2^30 elements
+/// through 30 chained iterators (about ten minutes on Apple Silicon). The
+/// bounded `+` now materializes a list of at most 2^20 items, so doubling
+/// fails contextually after twenty steps, well within the time limit.
 #[test]
-#[ignore = "CHAT-3: open follow-up in src/tokenization/chat_template.rs (fuel does not bound time)"]
 fn concatenated_sequences_finish_quickly() {
-    let (_, elapsed) = render_unchecked(
+    let (rendered, elapsed) = render_unchecked(
         "{% set ns = namespace(l=[1]) %}{% for i in range(24) %}{% set ns.l = ns.l + ns.l %}{% endfor %}{{ ns.l | length }}",
     );
     assert!(elapsed <= RENDER_TIME_LIMIT, "rendering took {elapsed:?}");
+    assert!(
+        matches!(&rendered, Err(Error::Tokenizer(message)) if message.contains("resource limit")),
+        "{rendered:?}"
+    );
 }
