@@ -73,7 +73,6 @@
 //! stateless pass within [`SELF_CONSISTENCY_TOLERANCE`] for the dtype. Greedy
 //! tokens are compared while the reference's top-2 margin exceeds twice the
 //! tolerance, and at least [`DEFAULT_MIN_GREEDY`] tokens must be compared.
-
 //!
 //! # Measured
 //!
