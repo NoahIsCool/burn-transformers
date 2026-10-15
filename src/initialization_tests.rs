@@ -470,13 +470,299 @@ fn validate_for_leaves_lazy_parameters_untouched() {
     assert!(!linear.weight.is_initialized());
 }
 
+/// Ones and constants fill exactly, reset scale vectors, and are never depth-scaled.
+#[test]
+fn ones_and_constants_fill_exactly_and_are_never_rescaled() {
+    let device = Default::default();
+    let policy = InitPolicy::keep()
+        .with_override("blocks.0.scale", ParameterInit::Constant { value: 0.25 })
+        .with_override("blocks.1.scale", ParameterInit::Ones)
+        .with_override(
+            "blocks.1.o_proj.bias",
+            ParameterInit::Constant { value: -2.0 },
+        );
+    let mut original = model::<B>(&device);
+    original.blocks[1].scale = Param::from_tensor(Tensor::zeros([WIDTH], &device));
+    let (initialized, report) = policy.apply(original).unwrap();
+    assert_eq!(values(initialized.blocks[0].scale.val()), vec![0.25; WIDTH]);
+    assert_eq!(values(initialized.blocks[1].scale.val()), vec![1.0; WIDTH]);
+    assert_eq!(
+        values(initialized.blocks[1].o_proj.bias.as_ref().unwrap().val()),
+        vec![-2.0; WIDTH]
+    );
+    let scale = report
+        .parameters
+        .iter()
+        .find(|parameter| parameter.path == "blocks.0.scale")
+        .unwrap();
+    assert_eq!(scale.role, ParameterRole::Other);
+    assert_eq!(scale.init, ParameterInit::Constant { value: 0.25 });
+
+    // Depth scaling shrinks random draws only.
+    let scaled = InitPolicy {
+        projection: ParameterInit::Constant { value: 0.5 },
+        ..InitPolicy::keep()
+    }
+    .with_depth_scaling(8, ["o_proj"]);
+    for init in [
+        ParameterInit::Constant { value: 0.5 },
+        ParameterInit::Ones,
+        ParameterInit::Zeros,
+    ] {
+        let policy = InitPolicy {
+            projection: init,
+            ..scaled.clone()
+        };
+        assert_eq!(
+            policy.resolve("blocks.0.o_proj.weight", ParameterRole::ResidualProjection),
+            init
+        );
+    }
+}
+
+/// Non-finite constants are rejected with the policy field that holds them.
+#[test]
+fn non_finite_constants_are_rejected() {
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let error = InitPolicy {
+            other: ParameterInit::Constant { value },
+            ..InitPolicy::keep()
+        }
+        .validate()
+        .unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, .. } if field == "init.other"),
+            "{error:?}"
+        );
+        let error = InitPolicy::keep()
+            .with_override("scale", ParameterInit::Constant { value })
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, .. } if field == "init.overrides[0].init"),
+            "{error:?}"
+        );
+    }
+}
+
+/// Builds the fixture lazily, exactly as Burn constructs it: no parameter is materialized.
+fn lazy_model<B: Backend>(device: &B::Device) -> Model<B> {
+    let block = || Block {
+        up: LinearConfig::new(WIDTH, 4 * WIDTH).init(device),
+        o_proj: LinearConfig::new(4 * WIDTH, WIDTH).init(device),
+        scale: burn::nn::Initializer::Ones.init([WIDTH], device),
+    };
+    Model {
+        embed: EmbeddingConfig::new(VOCABULARY, WIDTH).init(device),
+        blocks: vec![block(), block()],
+        head: crate::operations::init_linear(
+            &LinearConfig::new(WIDTH, VOCABULARY)
+                .with_bias(false)
+                .with_layout(LinearLayout::Col),
+            device,
+        ),
+    }
+}
+
+/// Counts parameters whose value has been materialized.
+struct CountInitialized {
+    /// Materialized parameters seen.
+    initialized: usize,
+    /// Parameters seen.
+    total: usize,
+}
+
+impl<B: Backend> burn::module::ModuleVisitor<B> for CountInitialized {
+    /// Records whether the parameter is materialized, without materializing it.
+    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
+        self.total += 1;
+        self.initialized += usize::from(param.is_initialized());
+    }
+}
+
+/// Returns `(materialized, total)` parameter counts of `module`.
+fn materialized<M: Module<B>>(module: &M) -> (usize, usize) {
+    let mut count = CountInitialized {
+        initialized: 0,
+        total: 0,
+    };
+    module.visit(&mut count);
+    (count.initialized, count.total)
+}
+
+/// Lazy application keeps lazy parameters unmaterialized and draws the policy's values on first read.
+#[test]
+fn lazy_application_defers_draws_until_first_read() {
+    let device = Default::default();
+    let policy = InitPolicy::normal(0.02)
+        .with_depth_scaling(2, ["o_proj"])
+        .with_override("blocks.0.scale", ParameterInit::Constant { value: 0.5 });
+    let constructed = lazy_model::<B>(&device);
+    assert_eq!(materialized(&constructed).0, 0);
+    let (lazy, lazy_report) = policy.apply_lazy(constructed).unwrap();
+    let (initialized, total) = materialized(&lazy);
+    assert_eq!(
+        (initialized, total),
+        (0, 12),
+        "nothing is drawn at application"
+    );
+
+    // The report is exactly the eager one.
+    let (_, eager_report) = policy.apply(lazy_model::<B>(&device)).unwrap();
+    assert_eq!(lazy_report, eager_report);
+
+    // First reads draw the policy's distributions, once.
+    assert_normal(lazy.embed.weight.val(), 0.02, "embedding");
+    assert_normal(lazy.blocks[1].up.weight.val(), 0.02, "projection");
+    assert_normal(
+        lazy.blocks[0].o_proj.weight.val(),
+        0.01,
+        "residual projection",
+    );
+    assert_normal(lazy.head.weight.val(), 0.02, "column-layout head");
+    assert_eq!(
+        values(lazy.blocks[0].up.bias.as_ref().unwrap().val()),
+        vec![0.0; 4 * WIDTH]
+    );
+    assert_eq!(values(lazy.blocks[0].scale.val()), vec![0.5; WIDTH]);
+    assert_eq!(values(lazy.blocks[1].scale.val()), vec![1.0; WIDTH]);
+    let first = values(lazy.blocks[0].o_proj.weight.val());
+    assert_eq!(values(lazy.blocks[0].o_proj.weight.val()), first);
+    assert_eq!(materialized(&lazy).0, 7);
+}
+
+/// Lazy replacements keep identities, layouts, and records.
+#[test]
+fn lazy_application_preserves_identities_and_records() {
+    let device = Default::default();
+    let source = model::<B>(&device);
+    let ids = (source.head.weight.id, source.blocks[1].up.weight.id);
+    let (lazy, _) = InitPolicy::normal(0.5).apply_lazy(source).unwrap();
+    assert_eq!((lazy.head.weight.id, lazy.blocks[1].up.weight.id), ids);
+
+    // A column-layout weight drawn lazily saves and reloads through its mapper.
+    // The record is taken from the model itself: a clone of a lazy parameter
+    // would draw independently.
+    let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+    let fresh = InitPolicy::normal(0.5)
+        .apply_lazy(lazy_model::<B>(&device))
+        .unwrap()
+        .0;
+    let drawn = values(fresh.head.weight.val());
+    let bytes = recorder.record(fresh.into_record(), ()).unwrap();
+    let reloaded = lazy_model::<B>(&device).load_record(recorder.load(bytes, &device).unwrap());
+    assert_eq!(values(reloaded.head.weight.val()), drawn);
+}
+
+/// A deferred parameter runs its constructed initializer once, at first read, or never.
+///
+/// The constructed initializer counts its calls. After lazy application it
+/// has not run; the first read runs it exactly once (its output is replaced
+/// by the policy's value); and a parameter overwritten by a loaded record
+/// before any read never runs it.
+#[test]
+fn deferred_parameters_draw_once_at_first_read_or_never() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Calls of the counting constructed initializer.
+    static CONSTRUCTIONS: AtomicUsize = AtomicUsize::new(0);
+    /// One lazily constructed parameter.
+    #[derive(Module, Debug)]
+    struct Holder<B: Backend> {
+        /// Parameter whose constructed initializer counts its calls.
+        weight: Param<Tensor<B, 2>>,
+    }
+    /// Builds a holder whose initializer increments [`CONSTRUCTIONS`].
+    fn holder(device: &<B as burn::tensor::backend::BackendTypes>::Device) -> Holder<B> {
+        Holder {
+            weight: Param::uninitialized(
+                burn::module::ParamId::new(),
+                |device, require_grad| {
+                    CONSTRUCTIONS.fetch_add(1, Ordering::SeqCst);
+                    Tensor::<B, 2>::full([3, 4], 9.0, device).set_require_grad(require_grad)
+                },
+                *device,
+                true,
+                [3, 4].into(),
+            ),
+        }
+    }
+    let device = Default::default();
+    let policy = InitPolicy::keep().with_override("weight", ParameterInit::Constant { value: 1.5 });
+
+    let (read, _) = policy.apply_lazy(holder(&device)).unwrap();
+    assert_eq!(CONSTRUCTIONS.load(Ordering::SeqCst), 0);
+    assert_eq!(values(read.weight.val()), vec![1.5; 12]);
+    assert_eq!(values(read.weight.val()), vec![1.5; 12]);
+    assert_eq!(CONSTRUCTIONS.load(Ordering::SeqCst), 1);
+
+    let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+    let bytes = recorder.record(read.into_record(), ()).unwrap();
+    let (overwritten, _) = policy.apply_lazy(holder(&device)).unwrap();
+    let overwritten = overwritten.load_record(recorder.load(bytes, &device).unwrap());
+    assert_eq!(values(overwritten.weight.val()), vec![1.5; 12]);
+    assert_eq!(
+        CONSTRUCTIONS.load(Ordering::SeqCst),
+        1,
+        "a loaded record skips the draw"
+    );
+
+    // Eager application materializes the constructed value once, immediately.
+    let (eager, _) = policy.apply(holder(&device)).unwrap();
+    assert_eq!(CONSTRUCTIONS.load(Ordering::SeqCst), 2);
+    assert!(eager.weight.is_initialized());
+    assert_eq!(values(eager.weight.val()), vec![1.5; 12]);
+}
+
+/// Tied lazy identities are drawn at application, so every alias holds one tensor.
+#[test]
+fn lazy_application_draws_tied_identities_immediately() {
+    /// Two fields holding one lazy parameter identity.
+    #[derive(Module, Debug)]
+    struct Tied<B: Backend> {
+        /// First registered owner.
+        first: Param<Tensor<B, 2>>,
+        /// Alias of `first`.
+        second: Param<Tensor<B, 2>>,
+        /// An untied lazy neighbour.
+        alone: Param<Tensor<B, 1>>,
+    }
+    let device = Default::default();
+    let shared = burn::nn::Initializer::Zeros.init([8, 8], &device);
+    let tied = Tied::<B> {
+        first: shared.clone(),
+        second: shared,
+        alone: burn::nn::Initializer::Zeros.init([4], &device),
+    };
+    let policy = InitPolicy {
+        other: ParameterInit::Normal { std: 1.0 },
+        ..InitPolicy::keep()
+    };
+    let (tied, _) = policy.apply_lazy(tied).unwrap();
+    assert!(tied.first.is_initialized() && tied.second.is_initialized());
+    assert!(!tied.alone.is_initialized());
+    assert_eq!(tied.first.id, tied.second.id);
+    assert_eq!(values(tied.first.val()), values(tied.second.val()));
+    assert!(values(tied.first.val()).iter().any(|value| *value != 0.0));
+}
+
 /// Policies and reports round-trip through JSON with readable tags.
 #[test]
 fn policies_and_reports_round_trip_through_json() {
     let policy = InitPolicy::normal(0.02)
         .with_depth_scaling(12, ["o_proj", "down_proj"])
-        .with_override("lm_head.weight", ParameterInit::Zeros);
+        .with_override("lm_head.weight", ParameterInit::Zeros)
+        .with_override("final_norm", ParameterInit::Ones)
+        .with_override("gate", ParameterInit::Constant { value: -3.0 });
     let json = serde_json::to_value(&policy).unwrap();
+    assert_eq!(
+        json["overrides"][1]["init"],
+        serde_json::json!({"kind": "ones"})
+    );
+    assert_eq!(
+        json["overrides"][2]["init"],
+        serde_json::json!({"kind": "constant", "value": -3.0})
+    );
     assert_eq!(json["embedding"]["kind"], "normal");
     assert_eq!(json["residual_scaling"]["kind"], "depth_scaled");
     assert_eq!(serde_json::from_value::<InitPolicy>(json).unwrap(), policy);
@@ -641,17 +927,51 @@ fn initialized_parameters_receive_gradients() {
     }
 }
 
+/// Lazily initialized parameters are trainable leaves once drawn on an autodiff backend.
+#[cfg(feature = "autodiff")]
+#[test]
+fn lazily_initialized_parameters_receive_gradients() {
+    use burn::backend::Autodiff;
+    /// Differentiable CPU backend.
+    type Ad = Autodiff<B>;
+    let device = Default::default();
+    let (model, _) = InitPolicy::normal(0.02)
+        .with_override("blocks.0.scale", ParameterInit::Ones)
+        .apply_lazy(lazy_model::<Ad>(&device))
+        .unwrap();
+    assert!(!model.head.weight.is_initialized());
+    let tokens = Tensor::<Ad, 2, Int>::from_ints([[1, 2, 3]], &device);
+    let mut hidden = model.embed.forward(tokens);
+    for block in &model.blocks {
+        let expanded = block.up.forward(hidden.clone());
+        hidden = hidden + block.o_proj.forward(expanded) * block.scale.val().reshape([1, 1, WIDTH]);
+    }
+    let gradients = model.head.forward(hidden).powi_scalar(2).mean().backward();
+    assert!(model.embed.weight.val().grad(&gradients).is_some());
+    assert!(model.head.weight.val().grad(&gradients).is_some());
+    for block in &model.blocks {
+        assert!(block.up.weight.val().grad(&gradients).is_some());
+        assert!(block.scale.val().grad(&gradients).is_some());
+    }
+}
+
 proptest::proptest! {
     /// Resolution equals the last matching override (else the role rule), times residual scaling.
     #[test]
     fn resolution_matches_override_precedence_and_scaling(
-        overrides in proptest::collection::vec((0usize..4, 0usize..3), 0..5),
+        overrides in proptest::collection::vec((0usize..4, 0usize..5), 0..5),
         path_choice in 0usize..4,
         role_choice in 0usize..5,
         layers in 1usize..9,
     ) {
         let paths = ["a", "a.b", "a.b.weight", "ab.weight"];
-        let inits = [ParameterInit::Keep, ParameterInit::Zeros, ParameterInit::Normal { std: 0.5 }];
+        let inits = [
+            ParameterInit::Keep,
+            ParameterInit::Zeros,
+            ParameterInit::Normal { std: 0.5 },
+            ParameterInit::Ones,
+            ParameterInit::Constant { value: -0.75 },
+        ];
         let roles = [
             ParameterRole::Embedding,
             ParameterRole::Projection,

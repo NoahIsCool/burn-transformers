@@ -54,6 +54,11 @@
 //! precedence, the last match winning. [`ParameterInit::Keep`] leaves a
 //! parameter exactly as constructed (still lazy, if it was).
 //!
+//! Besides `N(0, std^2)` and zeros, a parameter can be set to ones or to any
+//! finite constant ([`ParameterInit::Ones`], [`ParameterInit::Constant`]), so
+//! a policy can also reset normalization scales, for example
+//! `.with_override("final_norm", ParameterInit::Ones)`.
+//!
 //! Names are checked against the module before anything changes: every
 //! override must match at least one floating parameter, and every listed
 //! residual projection must name at least one `Linear` field. A misspelled
@@ -68,13 +73,31 @@
 //! is a fresh autodiff leaf. Fields that share one identity receive one shared tensor.
 //! Packed quantized parameters are always kept. Sampling uses the backend's
 //! random generator: call `B::seed(&device, seed)` first for reproducible
-//! draws. A replaced parameter is materialized once with its constructed value
-//! before it is overwritten, so peak memory exceeds the model by at most one
-//! parameter.
+//! draws.
+//!
+//! # Eager and deferred application
+//!
+//! [`InitPolicy::apply`] replaces every selected parameter immediately. A
+//! freshly constructed Burn parameter is lazy, so `apply` first materializes
+//! its constructed value, releases it, and then draws the replacement: the
+//! module is fully materialized afterwards and peak memory stays at one copy
+//! of each parameter.
+//!
+//! [`InitPolicy::apply_lazy`] instead keeps such parameters lazy and replaces
+//! their deferred initializer, so a parameter is first allocated when it is
+//! first read, already holding the policy's value; one that is never read (for
+//! example because a checkpoint overwrites it) is never drawn at all. Burn
+//! offers no public way to swap a lazy initializer while keeping the
+//! parameter's save/load mapper, so the deferred draw runs Burn's constructed
+//! initializer and immediately releases its output; only the policy's value
+//! survives. The tradeoffs are Burn's own lazy-initialization semantics: draws
+//! happen in first-use order, and clones taken before the first read draw
+//! independently. Tied identities are therefore always drawn at application
+//! time, so every alias holds the same tensor.
 
 use std::{
     any::Any,
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
 };
 
 use burn::{
@@ -98,10 +121,17 @@ pub enum ParameterInit {
     },
     /// All zeros, for example for biases or zero-initialized output projections.
     Zeros,
+    /// All ones, for example to reset normalization scales.
+    Ones,
+    /// Every entry equal to one finite value.
+    Constant {
+        /// Finite fill value.
+        value: f64,
+    },
 }
 
 impl ParameterInit {
-    /// Checks that a normal standard deviation is positive and finite.
+    /// Checks that a normal standard deviation is positive and finite and a constant is finite.
     fn validate(self, field: &str) -> Result<()> {
         match self {
             Self::Normal { std } if !(std.is_finite() && std > 0.0) => Err(Error::configuration(
@@ -110,11 +140,40 @@ impl ParameterInit {
                     "normal std must be finite and greater than zero, got {std}; use Zeros for a zero tensor"
                 ),
             )),
+            Self::Constant { value } if !value.is_finite() => Err(Error::configuration(
+                field,
+                format!("constant fill value must be finite, got {value}"),
+            )),
             _ => Ok(()),
         }
     }
 
+    /// Draws or fills a replacement with the shape, dtype, device, and trainability of `like`.
+    ///
+    /// `like` is released before the replacement is allocated, so replacing a
+    /// parameter never holds two copies of it. `Keep` is resolved by callers
+    /// and never reaches this function; it is treated as zeros only to keep
+    /// the match total.
+    fn draw<B: Backend, const D: usize>(self, like: Tensor<B, D>) -> Tensor<B, D> {
+        let shape = like.shape();
+        let device = like.device();
+        let dtype = like.dtype();
+        let trainable = like.is_require_grad();
+        drop(like);
+        let options = (&device, dtype);
+        match self {
+            Self::Normal { std } => Tensor::random(shape, Distribution::Normal(0.0, std), options),
+            Self::Ones => Tensor::ones(shape, options),
+            Self::Constant { value } => Tensor::full(shape, value, options),
+            Self::Zeros | Self::Keep => Tensor::zeros(shape, options),
+        }
+        .set_require_grad(trainable)
+    }
+
     /// Multiplies a normal standard deviation by `factor`; other variants are unchanged.
+    ///
+    /// Depth scaling shrinks the spread of a random draw; a deterministic fill
+    /// (zeros, ones, or a constant) is never rescaled.
     fn scaled(self, factor: f64) -> Self {
         match self {
             Self::Normal { std } => Self::Normal { std: std * factor },
@@ -338,6 +397,14 @@ impl InitPolicy {
     /// module is left untouched, which makes it a cheap dry run before
     /// [`apply`](Self::apply) consumes the module.
     pub fn validate_for<B: Backend, M: Module<B>>(&self, module: &M) -> Result<()> {
+        self.survey(module).map(|_| ())
+    }
+
+    /// Validates the policy against `module` and returns the parameter survey.
+    ///
+    /// This is the body of [`validate_for`](Self::validate_for); application
+    /// reuses the survey's identity counts to recognize tied parameters.
+    fn survey<B: Backend, M: Module<B>>(&self, module: &M) -> Result<Survey> {
         self.validate()?;
         let mut survey = Survey::default();
         module.visit(&mut survey);
@@ -375,21 +442,70 @@ impl InitPolicy {
                 ),
             ));
         }
-        Ok(())
+        Ok(survey)
     }
 
     /// Checks the policy against `module`, then returns it with every parameter initialized.
     ///
     /// Errors from [`validate_for`](Self::validate_for) are raised before any
     /// parameter changes. The report lists every floating parameter with its
-    /// role and the initializer actually used, sorted by path.
+    /// role and the initializer actually used, sorted by path. Every replaced
+    /// parameter is materialized on return (see the module documentation).
     pub fn apply<B: Backend, M: Module<B>>(&self, module: M) -> Result<(M, InitReport)> {
-        self.validate_for(&module)?;
+        self.initialize(module, false)
+    }
+
+    /// Like [`apply`](Self::apply), but parameters that are still lazy stay lazy.
+    ///
+    /// Use it to build a randomly initialized model without materializing
+    /// Burn's default values first, for example
+    /// `policy.apply_lazy(ModularCausalLm::init(spec, &device)?)`. A lazy
+    /// parameter's deferred initializer is replaced, so its first read
+    /// allocates it once, holding the policy's value, and a parameter that is
+    /// overwritten (by a checkpoint record, say) before it is read is never
+    /// drawn. Already materialized parameters and tied identities are replaced
+    /// immediately, exactly as by `apply`, and the report is the same.
+    ///
+    /// Draws happen in first-read order and clones taken before the first
+    /// read draw independently, as with Burn's own lazy initialization; use
+    /// [`apply`](Self::apply) when clones must be identical before first use.
+    ///
+    /// ```
+    /// use burn::{backend::Flex, nn::LinearConfig};
+    /// use transformers::initialization::{InitPolicy, ParameterInit};
+    ///
+    /// let device = Default::default();
+    /// let linear = LinearConfig::new(4, 2).init::<Flex>(&device);
+    /// let policy = InitPolicy::keep().with_override("weight", ParameterInit::Constant { value: 0.5 });
+    /// let (linear, _) = policy.apply_lazy(linear)?;
+    /// assert!(!linear.weight.is_initialized());
+    /// assert_eq!(linear.weight.val().into_data().to_vec::<f32>().unwrap(), [0.5; 8]);
+    /// # Ok::<(), transformers::Error>(())
+    /// ```
+    pub fn apply_lazy<B: Backend, M: Module<B>>(&self, module: M) -> Result<(M, InitReport)> {
+        self.initialize(module, true)
+    }
+
+    /// Shared body of [`apply`](Self::apply) and [`apply_lazy`](Self::apply_lazy).
+    ///
+    /// With `defer_lazy`, untied parameters that are still lazy receive a
+    /// replaced deferred initializer instead of an immediate draw.
+    fn initialize<B: Backend, M: Module<B>>(
+        &self,
+        module: M,
+        defer_lazy: bool,
+    ) -> Result<(M, InitReport)> {
+        let survey = self.survey(&module)?;
         let mut mapper = Initializer {
             policy: self,
             location: ModulePath::default(),
             shared: HashMap::new(),
             report: InitReport::default(),
+            deferrable: if defer_lazy {
+                survey.untied_identities()
+            } else {
+                HashSet::new()
+            },
         };
         let module = module.map(&mut mapper);
         let mut report = mapper.report;
@@ -519,6 +635,19 @@ struct Survey {
     paths: Vec<String>,
     /// Field names of the `Linear` modules that own a weight, sorted for messages.
     linear_fields: BTreeSet<String>,
+    /// Number of fields holding each parameter identity; more than one means tied.
+    identities: HashMap<ParamId, usize>,
+}
+
+impl Survey {
+    /// Identities held by exactly one field, whose replacement may be deferred.
+    fn untied_identities(&self) -> HashSet<ParamId> {
+        self.identities
+            .iter()
+            .filter(|&(_, &fields)| fields == 1)
+            .map(|(&id, _)| id)
+            .collect()
+    }
 }
 
 impl<B: Backend> ModuleVisitor<B> for Survey {
@@ -532,11 +661,12 @@ impl<B: Backend> ModuleVisitor<B> for Survey {
         self.location.exit();
     }
 
-    /// Records the parameter's path and, for a `Linear` weight, its owner's field name.
+    /// Records the parameter's path, identity, and, for a `Linear` weight, its owner's field name.
     ///
-    /// Only names are read, so a lazy parameter is not materialized.
-    fn visit_float<const D: usize>(&mut self, _: &Param<Tensor<B, D>>) {
+    /// Only names and identities are read, so a lazy parameter is not materialized.
+    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
         self.paths.push(self.location.joined());
+        *self.identities.entry(param.id).or_default() += 1;
         if let Some(field) = self.location.linear_weight_owner() {
             self.linear_fields.insert(field.to_owned());
         }
@@ -553,6 +683,9 @@ struct Initializer<'p> {
     shared: HashMap<ParamId, SharedChoice>,
     /// Parameters visited so far.
     report: InitReport,
+    /// Untied identities whose still-lazy parameters keep deferred initialization;
+    /// empty for eager application.
+    deferrable: HashSet<ParamId>,
 }
 
 impl<B: Backend> ModuleMapper<B> for Initializer<'_> {
@@ -589,7 +722,12 @@ impl<B: Backend> ModuleMapper<B> for Initializer<'_> {
             };
         }
         let mut init = self.policy.resolve(&path, role);
-        if init != ParameterInit::Keep && matches!(param.val().dtype(), DType::QFloat(_)) {
+        // Packed weights are always kept. A lazy parameter has not been
+        // quantized (packing materializes it), so its dtype is not read.
+        if init != ParameterInit::Keep
+            && param.is_initialized()
+            && matches!(param.val().dtype(), DType::QFloat(_))
+        {
             init = ParameterInit::Keep;
         }
         self.report
@@ -600,14 +738,14 @@ impl<B: Backend> ModuleMapper<B> for Initializer<'_> {
                 .insert(param.id, SharedChoice { init, tensor: None });
             return param;
         }
-        let (id, value, mapper) = param.consume();
-        let trainable = value.is_require_grad();
-        let sampled = match init {
-            ParameterInit::Normal { std } => value.random_like(Distribution::Normal(0.0, std)),
-            ParameterInit::Zeros | ParameterInit::Keep => value.zeros_like(),
+        if !param.is_initialized() && self.deferrable.contains(&param.id) {
+            // The constructed initializer still runs on first read, but its
+            // output is released before the policy's value is drawn.
+            return param.init_mapper(move |constructed| init.draw(constructed));
         }
-        .detach()
-        .set_require_grad(trainable);
+        let (id, value, mapper) = param.consume();
+        // The draw is a fresh leaf with the constructed value's trainability.
+        let sampled = init.draw(value);
         self.shared.insert(
             id,
             SharedChoice {
