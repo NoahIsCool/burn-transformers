@@ -53,8 +53,8 @@ use burn::{
 use crate::{
     Error, Result,
     attention::{
-        AttentionExecutionPolicy, bottom_right_causal_mask, eager_probabilities, union_exclusions,
-        zero_excluded,
+        AttentionExecutionPolicy, bottom_right_causal_mask, causal_mask_needed,
+        eager_probabilities, union_exclusions, zero_excluded,
     },
     intervention::{AttentionPoints, Hooks, PointInfo},
     normalization::{RmsNorm, RmsNormConfig},
@@ -579,7 +579,8 @@ impl<B: Backend> MultiLatentAttention<B> {
         let scores = hooks.apply(points.scores(), scores)?;
         // One query row aligned with the final key sees every key, so causality
         // is a no-op there and needs no mask.
-        let causal_mask = if causal && query_sequence > 1 {
+        // Verified (`causal_mask_needed`): `query_sequence >= 1` here, so this is `Q > 1`.
+        let causal_mask = if causal_mask_needed(causal, query_sequence) {
             Some(bottom_right_causal_mask(
                 batch,
                 heads,

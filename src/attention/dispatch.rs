@@ -80,8 +80,11 @@ use burn::tensor::{
     ops::AttentionModuleOptions,
 };
 
+pub(crate) use super::geometry::HeadGeometry;
 use super::{
-    AttentionPrecisionMode, grouping,
+    AttentionPrecisionMode,
+    geometry::{NativeRoute, OperandFault, causal_mask_needed, native_route, operand_geometry},
+    grouping,
     mask::{bottom_right_causal_mask, union_exclusions},
 };
 use crate::{Error, Result};
@@ -102,55 +105,27 @@ pub(crate) struct Operands<B: Backend> {
     pub(crate) sinks: Option<Tensor<B, 1>>,
 }
 
-/// Validated extents of one grouped attention call.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct HeadGeometry {
-    /// Batch rows.
-    pub(crate) batch: usize,
-    /// Query heads.
-    pub(crate) query_heads: usize,
-    /// Native key/value heads; divides `query_heads`.
-    pub(crate) key_value_heads: usize,
-    /// Query tokens.
-    pub(crate) query_sequence: usize,
-    /// Key/value tokens.
-    pub(crate) key_sequence: usize,
-    /// Query/key channels per head.
-    pub(crate) head_dim: usize,
-}
-
-impl HeadGeometry {
-    /// Query heads that share one key/value head.
-    pub(crate) const fn groups(self) -> usize {
-        self.query_heads / self.key_value_heads
-    }
-
-    /// Score-plane extents `[batch, query_head, query, key]`.
-    pub(crate) const fn score_shape(self) -> [usize; 4] {
-        [
-            self.batch,
-            self.query_heads,
-            self.query_sequence,
-            self.key_sequence,
-        ]
-    }
-}
-
 impl<B: Backend> Operands<B> {
     /// Checks every operand against one grouped geometry before backend dispatch.
+    ///
+    /// The shape checks are the verified [`operand_geometry`]: it accepts
+    /// exactly consistent grouped shapes and reports the first failed check.
     pub(crate) fn geometry(&self) -> Result<HeadGeometry> {
+        let fault = match operand_geometry(
+            self.query.dims(),
+            self.key.dims(),
+            self.value.dims(),
+            self.mask.as_ref().map(Tensor::dims),
+            self.bias.as_ref().map(Tensor::dims),
+            self.sinks.as_ref().map(|sinks| sinks.dims()[0]),
+        ) {
+            Ok(geometry) => return Ok(geometry),
+            Err(fault) => fault,
+        };
         let [batch, query_heads, query_sequence, head_dim] = self.query.dims();
-        let [key_batch, key_value_heads, key_sequence, key_dim] = self.key.dims();
-        let [value_batch, value_heads, value_sequence, value_dim] = self.value.dims();
-        if batch == 0
-            || query_heads == 0
-            || query_sequence == 0
-            || head_dim == 0
-            || key_value_heads == 0
-            || key_sequence == 0
-            || value_dim == 0
-        {
-            return Err(Error::shape(
+        let [_, key_value_heads, key_sequence, _] = self.key.dims();
+        Err(match fault {
+            OperandFault::EmptyAxis => Error::shape(
                 "attention.operands",
                 "non-empty query, key, and value axes",
                 format!(
@@ -159,69 +134,47 @@ impl<B: Backend> Operands<B> {
                     self.key.dims(),
                     self.value.dims()
                 ),
-            ));
-        }
-        if !query_heads.is_multiple_of(key_value_heads) {
-            return Err(Error::configuration(
+            ),
+            OperandFault::UngroupedHeads => Error::configuration(
                 "attention.head_grouping",
                 format!(
                     "query_heads ({query_heads}) must be non-zero and divisible by key_value_heads ({key_value_heads})"
                 ),
-            ));
-        }
-        if [key_batch, key_dim] != [batch, head_dim]
-            || [value_batch, value_heads, value_sequence] != [batch, key_value_heads, key_sequence]
-        {
-            return Err(Error::shape(
+            ),
+            OperandFault::KeyValueShape => Error::shape(
                 "attention.operands",
                 format!(
                     "key [{batch}, kv_heads, key, {head_dim}] and value [{batch}, kv_heads, key, value_dim]"
                 ),
                 format!("key={:?}, value={:?}", self.key.dims(), self.value.dims()),
-            ));
-        }
-        let geometry = HeadGeometry {
-            batch,
-            query_heads,
-            key_value_heads,
-            query_sequence,
-            key_sequence,
-            head_dim,
-        };
-        let score_shape = geometry.score_shape();
-        if let Some(mask) = &self.mask
-            && mask.dims() != score_shape
-        {
-            return Err(Error::shape(
+            ),
+            OperandFault::MaskShape => Error::shape(
                 "attention.mask",
-                format!("{score_shape:?}"),
-                format!("{:?}", mask.dims()),
-            ));
-        }
-        if let Some(bias) = &self.bias {
-            let [bias_batch, bias_heads, bias_query, bias_key] = bias.dims();
-            if ![1, batch].contains(&bias_batch)
-                || [bias_heads, bias_query, bias_key] != [query_heads, query_sequence, key_sequence]
-            {
-                return Err(Error::shape(
-                    "attention.bias",
-                    format!(
-                        "[batch in {{1, {batch}}}, {query_heads}, {query_sequence}, {key_sequence}]"
-                    ),
-                    format!("{:?}", bias.dims()),
-                ));
-            }
-        }
-        if let Some(sinks) = &self.sinks
-            && sinks.dims() != [query_heads]
-        {
-            return Err(Error::shape(
+                format!("{:?}", [batch, query_heads, query_sequence, key_sequence]),
+                format!(
+                    "{:?}",
+                    self.mask.as_ref().map(Tensor::dims).unwrap_or_default()
+                ),
+            ),
+            OperandFault::BiasShape => Error::shape(
+                "attention.bias",
+                format!(
+                    "[batch in {{1, {batch}}}, {query_heads}, {query_sequence}, {key_sequence}]"
+                ),
+                format!(
+                    "{:?}",
+                    self.bias.as_ref().map(Tensor::dims).unwrap_or_default()
+                ),
+            ),
+            OperandFault::SinkShape => Error::shape(
                 "attention.sinks",
                 format!("[{query_heads}]"),
-                format!("{:?}", sinks.dims()),
-            ));
-        }
-        Ok(geometry)
+                format!(
+                    "{:?}",
+                    self.sinks.as_ref().map(Tensor::dims).unwrap_or_default()
+                ),
+            ),
+        })
     }
 }
 
@@ -383,7 +336,8 @@ pub(crate) fn causal_exclusion<B: Backend>(
     geometry: HeadGeometry,
     device: &B::Device,
 ) -> Result<Option<Tensor<B, 4, Bool>>> {
-    if !causal || geometry.query_sequence == 1 {
+    // Verified: a skipped mask (one query row) excludes no link.
+    if !causal_mask_needed(causal, geometry.query_sequence) {
         return Ok(None);
     }
     bottom_right_causal_mask(
@@ -485,12 +439,19 @@ fn native<B: Backend>(
     options: AttentionModuleOptions,
     geometry: HeadGeometry,
 ) -> Result<Tensor<B, 4>> {
-    let causal = options.is_causal && geometry.query_sequence > 1;
+    // Verified routing: the backend's causal flag only on square planes,
+    // where top-left and bottom-right alignment exclude the same links.
+    let route = native_route(
+        options.is_causal,
+        operands.sinks.is_some(),
+        geometry.query_sequence,
+        geometry.key_sequence,
+    );
     let explicit_options = AttentionModuleOptions {
         is_causal: false,
         ..options
     };
-    if operands.sinks.is_some() {
+    if let NativeRoute::Sinks { causal } = route {
         return native_with_sinks(operands, explicit_options, causal, geometry);
     }
     let Operands {
@@ -501,13 +462,16 @@ fn native<B: Backend>(
         bias,
         ..
     } = operands;
-    if causal && geometry.query_sequence == geometry.key_sequence {
-        // Square planes are the one case where every backend's `is_causal`
-        // alignment agrees; fused kernels then skip masked tiles entirely.
-        let key = repeat_key_value(key, geometry.query_heads)?;
-        let value = repeat_key_value(value, geometry.query_heads)?;
-        return Ok(attention(query, key, value, mask, bias, options));
-    }
+    let causal = match route {
+        NativeRoute::Folded { causal } | NativeRoute::Sinks { causal } => causal,
+        NativeRoute::SquareCausal => {
+            // Square planes are the one case where every backend's `is_causal`
+            // alignment agrees; fused kernels then skip masked tiles entirely.
+            let key = repeat_key_value(key, geometry.query_heads)?;
+            let value = repeat_key_value(value, geometry.query_heads)?;
+            return Ok(attention(query, key, value, mask, bias, options));
+        }
+    };
     let exclusion = union_exclusions(mask, causal_exclusion(causal, geometry, &query.device())?);
     let kv_heads = geometry.key_value_heads;
     let context = attention(
