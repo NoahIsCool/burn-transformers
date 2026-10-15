@@ -1,4 +1,6 @@
-# Bounded sanitizer campaign evidence
+# Bounded fuzz campaign evidence
+
+Entries are append-only and name their source, toolchain, sanitizer, and limits.
 
 ## 2026-09-09: initial v0.1 harnesses
 
@@ -92,3 +94,90 @@ diagnostics. Six ordinary fuzz-oracle tests and all-target warning-denied fuzz
 Clippy also passed. The record retains source, binary, seed, command, and storage
 identities. This new-target campaign does not refresh the five historical
 campaigns above or establish exhaustive branch coverage.
+
+## 2026-10-15: wave-1 cache fix-phase campaigns (as reported)
+
+The cache work package extended `cache_transactions` to the tensor decode state
+(1–2 layers and heads, full/ring/mirrored/latent/recurrent groups, write-ahead
+endings, per-row and batched read oracles; eight-byte header, operations
+`op % 8`) and reported two campaigns at library source `2452075`, run with
+`cargo-fuzz 0.13.2` and `-s none` because the nightly ASan runtime deadlocks on
+macOS 27: 109,228 inputs in 181 s with default length control (inputs reached
+153 bytes; cov 3035, ft 18237, corpus 1054), and 50,782 inputs in 151 s with
+`-len_control=0 -max_len=4096` (cov 3035, ft 19718, corpus 1015), both without
+failures. They are recorded here from that report and were not re-run; round 2
+below refreshes the target, now with an MTP bank, at `00697a4`.
+
+## 2026-10-15: wave-3 targets, findings, and an all-target refresh
+
+Seven targets were added or extended for the polish pass (`logits_processing`,
+`chat_templates`, `rope_parameters`, `safetensors_headers`,
+`attention_connectivity`, `modular_specs`, and the `generation` and
+`cache_transactions` harnesses). The runtime source was unchanged throughout:
+`src/` tree `fa40ba91781e6c7b39554385e598d90c5eaa4d9b`, as at integration commit
+`8720be1`. Campaigns used `cargo-fuzz 0.13.2`, `rustc 1.94.0-nightly (4f14395c3
+2025-12-22)`, macOS 27.0.1 on Apple Silicon (14 cores), and **no sanitizer**
+(`-s none`): the nightly AddressSanitizer runtime deadlocks at startup on this
+host. Builds kept debug assertions and overflow checks (the cargo-fuzz default).
+Every campaign ran the built executable directly with `RAYON_NUM_THREADS=1`, a
+fresh writable corpus on the external build volume plus the committed seeds,
+and `-max_len=4096 -timeout=10 -rss_limit_mb=2048 -print_final_stats=1`; the
+targets of a round ran side by side, so the rates below are concurrent rates,
+not benchmarks. Generated corpora, logs, and artifacts stay on the build volume
+(`cargo-targets/tfm-polish-w3-fuzz/campaigns/`) and are not committed.
+
+### Round 1: harness development (uncommitted harnesses, 300 s per target)
+
+Four campaigns stopped on a failure. Each crash was minimized with
+`-minimize_crash=1` and kept as a unit test.
+
+| Target | Executed inputs | Outcome | Classification |
+| --- | ---: | --- | --- |
+| `logits_processing` | 53,095 | `crash-cfb301be` (32 bytes minimized) | Oracle too strict: top-p ranks rounded `f32` probabilities, so logits one ulp apart (0.8 and 0.79999995) can split; the top-set check now allows near-ties. Regression `campaign_top_p_near_ties_may_split`. |
+| `chat_templates` | 4,847 | `crash-86c5a5ad` | Oracle too strict: an empty rendered prompt encodes to no tokens, which `encode_chat` reports. Regression `empty_prompts_fail_to_encode_contextually`. |
+| `rope_parameters` | 258,317 | `crash-3a306a4f` (19 bytes) | **Library finding ROPE-SOFTMAX-1**: translation validates the correction `m = 1 + 0.1 * mscale_all_dim * ln(factor)` but the softmax multiplier is `m^2`, which overflows to `inf` (e.g. `mscale_all_dim = 1e300`). Ignored reproducer `translated_softmax_corrections_are_finite`; the harness asserts finiteness only for `abs(mscale_all_dim) <= 1e100`. |
+| `generation` | 162,032 | `crash-8872c8a0` (18 bytes) | Oracle too strict: `serde_json` (without `float_roundtrip`) read `3.7997969716361836e-262` back four ulps away; round trips now compare to a relative `1e-14`. Regression `campaign_float_round_trip_is_approximate`. |
+| `safetensors_headers` | 441,423 | Passed; cov 2889, ft 7556, corpus 567 | |
+| `attention_connectivity` | 1,407,002 | Passed; cov 2004, ft 5894, corpus 439 | |
+| `modular_specs` | 773,524 | Passed; cov 9113, ft 32129, corpus 2024 | |
+| `chat_templates` (rerun after the fix) | 262,981 | Passed; cov 7539, ft 22145, corpus 1795 | |
+
+Targeted probing while writing the harnesses (not campaign output) found the
+remaining open findings: `GenerationConfig::validate` accepts penalties, biases,
+and temperatures that are zero or infinite in `f32` and then yield NaN logits
+(GEN-F32-1..4); `render_chat` panics on `'ab' * 4611686018427387904` (CHAT-1),
+renders a 200 MB prompt from `{{ 'ab' * 100000000 }}` (CHAT-2), and spends
+about ten minutes on a 30-step lazily concatenated list that costs about 100
+units of fuel (CHAT-3); a base `theta < 1` or a LongRoPE factor of `1e-45`
+overflows `f32` frequencies (ROPE-F32-1/2); and a JSON array parses as
+positional RoPE parameters (ROPE-PARSE-1). Each has an `#[ignore]`d reproducer
+that fails today (see [README.md](README.md#open-findings)).
+
+### Round 2: committed harnesses at `00697a4`
+
+All twelve targets were rebuilt from commit `00697a4` (fuzz package tree
+`9d76aa6f0a1a3a8991cee520d070d311a6d6d2d4`, lockfile SHA-256
+`f974aac22ee2e71f3115ff6b2e29cc914f1ec5bc17019f47c06743687d6a3637`). Every
+campaign exited with status 0, without crash, timeout, or out-of-memory
+artifacts.
+
+| Target | Seconds | Executed inputs | exec/s | cov | ft | Corpus | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `logits_processing` | 300 | 815,906 | 2,710 | 2686 | 7547 | 509 | 48 MiB |
+| `chat_templates` | 300 | 176,175 | 585 | 7575 | 21426 | 1579 | 203 MiB |
+| `rope_parameters` | 300 | 1,122,463 | 3,729 | 2030 | 6696 | 1715 | 47 MiB |
+| `safetensors_headers` | 300 | 307,236 | 1,020 | 2889 | 7554 | 580 | 47 MiB |
+| `attention_connectivity` | 300 | 889,579 | 2,955 | 2004 | 5900 | 453 | 46 MiB |
+| `modular_specs` | 300 | 361,150 | 1,199 | 9085 | 31846 | 1820 | 64 MiB |
+| `generation` | 300 | 983,877 | 3,268 | 1903 | 4871 | 1580 | 45 MiB |
+| `cache_transactions` (with the MTP bank) | 300 | 103,053 | 342 | 3579 | 21279 | 1193 | 58 MiB |
+| `configuration` | 120 | 404,729 | 3,344 | 4071 | 8446 | 1041 | 48 MiB |
+| `index_artifacts` | 120 | 117,298 | 969 | 1721 | 2805 | 666 | 44 MiB |
+| `masks_positions` | 120 | 322,289 | 2,663 | 523 | 1010 | 110 | 43 MiB |
+| `experiment_interfaces` | 120 | 392,433 | 3,243 | 2710 | 6880 | 239 | 47 MiB |
+
+`cache_transactions` reached coverage 3579, up from 3035 in the wave-1 fix-phase
+campaign, mostly from the MTP bank. These are finite smoke campaigns without a
+sanitizer: they show that the executed inputs satisfied every oracle, not that
+every reachable branch was covered, and they do not replace the ASan evidence
+above for the memory safety of the dependency graph.
