@@ -1897,3 +1897,58 @@ fn release_contract_capacity_rejects_unrepresentable_indices_before_allocation()
             .contains("portable signed position-index range")
     );
 }
+
+/// Host-token MTP calls equal device-token calls and reject out-of-vocabulary IDs atomically.
+#[test]
+fn host_token_mtp_calls_match_device_calls() {
+    let device = Default::default();
+    let model = contract_mtp_model(&device);
+    let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 3]], &device);
+    let prepared = || {
+        let mut state = model
+            .new_speculative_decode_state(CacheConfig::new(1, 12).unwrap(), 1, 2, &device)
+            .unwrap();
+        let hidden = model
+            .prefill(
+                CausalLmInput {
+                    token_ids: prompt.clone(),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &diagnostic_options(),
+            )
+            .unwrap()
+            .final_hidden_state
+            .unwrap();
+        model
+            .prefill_mtp_cache(prompt.clone(), hidden.clone(), &mut state)
+            .unwrap();
+        (state, hidden.narrow(1, 1, 2))
+    };
+    let (mut device_state, hidden) = prepared();
+    let (mut host_state, _) = prepared();
+    let device_call = model
+        .forward_mtp_cached(
+            Tensor::<TestBackend, 2, Int>::from_ints([[4, 5]], &device),
+            hidden.clone(),
+            None,
+            0,
+            &mut device_state,
+        )
+        .unwrap();
+    let before = contract_snapshot(&host_state);
+    let error = model
+        .forward_mtp_host_tokens(&[4, 32], hidden.clone(), 0, &mut host_state)
+        .unwrap_err();
+    assert!(matches!(error, Error::Shape { .. }));
+    assert_eq!(contract_snapshot(&host_state), before);
+    let host_call = model
+        .forward_mtp_host_tokens(&[4, 5], hidden, 0, &mut host_state)
+        .unwrap();
+    assert_eq!(device_call.logits.to_data(), host_call.logits.to_data());
+    assert_eq!(
+        host_state.tensor_state().mtp_lengths(),
+        device_state.tensor_state().mtp_lengths()
+    );
+}

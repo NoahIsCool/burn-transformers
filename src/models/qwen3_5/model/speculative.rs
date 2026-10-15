@@ -331,7 +331,6 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
         cycle: &Cycle<'_, B>,
         state: &mut Qwen3_5DecodeState<B>,
     ) -> Result<Drafts> {
-        let device = cycle.target_hidden_before_lead.device();
         let mut history = cycle.history_before_lead.to_vec();
         history.push(cycle.lead_token);
         let mut drafts = Drafts {
@@ -341,13 +340,7 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
         let mut hidden = cycle.target_hidden_before_lead.clone();
         let mut input = cycle.lead_token;
         for step in 0..self.config.max_draft_tokens {
-            let output = model.forward_mtp_cached(
-                token_tensor(&[input], &device),
-                hidden,
-                None,
-                step,
-                state,
-            )?;
+            let output = model.forward_mtp_host_tokens(&[input], hidden, step, state)?;
             hidden = output.hidden_state;
             let processed = self.draft.process_with_prompt_lengths(
                 output.logits.squeeze_dim::<2>(1),
@@ -497,13 +490,7 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
                 1,
             )
         };
-        model.forward_mtp_cached(
-            token_tensor(&verified[..accepted_pairs], &device),
-            pair_hidden,
-            None,
-            0,
-            state,
-        )?;
+        model.forward_mtp_host_tokens(&verified[..accepted_pairs], pair_hidden, 0, state)?;
         let terminated = emitted.last().is_some_and(|&token| self.is_eos(token));
         let accepted_draft_tokens = match outcome {
             SpeculativeOutcome::Rejected { accepted }

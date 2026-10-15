@@ -519,6 +519,57 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
         step: usize,
         state: &mut Qwen3_5DecodeState<B>,
     ) -> Result<Qwen3_5MtpPrediction<B>> {
+        self.forward_mtp_cached_inner(
+            next_token_ids,
+            target_or_mtp_hidden,
+            position_ids,
+            step,
+            state,
+            false,
+        )
+    }
+
+    /// Runs [`Self::forward_mtp_cached`] on host token IDs with implicit positions.
+    ///
+    /// The speculative decoder already holds its tokens on the host, so they
+    /// are range-checked there and the call needs no device-to-host readback
+    /// at all (the public entry point must read device token IDs back once).
+    pub(super) fn forward_mtp_host_tokens(
+        &self,
+        tokens: &[u32],
+        target_or_mtp_hidden: Tensor<B, 3>,
+        step: usize,
+        state: &mut Qwen3_5DecodeState<B>,
+    ) -> Result<Qwen3_5MtpPrediction<B>> {
+        let vocabulary = self.config().vocab_size;
+        if let Some(&token) = tokens.iter().find(|&&token| token as usize >= vocabulary) {
+            return Err(Error::shape(
+                INPUT_NAMES.token_ids,
+                format!("token values in 0..{vocabulary}"),
+                token.to_string(),
+            ));
+        }
+        let values = tokens.iter().copied().map(i64::from).collect::<Vec<_>>();
+        let ids = Tensor::from_data(
+            burn::tensor::TensorData::new(values, [1, tokens.len()]),
+            state.tensors.device(),
+        );
+        self.forward_mtp_cached_inner(ids, target_or_mtp_hidden, None, step, state, true)
+    }
+
+    /// Shared body of the cached MTP entry points.
+    ///
+    /// `host_validated` skips the device range check of token IDs that the
+    /// caller already checked on the host.
+    fn forward_mtp_cached_inner(
+        &self,
+        next_token_ids: Tensor<B, 2, Int>,
+        target_or_mtp_hidden: Tensor<B, 3>,
+        position_ids: Option<Tensor<B, 2, Int>>,
+        step: usize,
+        state: &mut Qwen3_5DecodeState<B>,
+        host_validated: bool,
+    ) -> Result<Qwen3_5MtpPrediction<B>> {
         state.validate_for_model(self)?;
         let mtp = self.mtp.as_ref().ok_or_else(|| {
             Error::Generation("Qwen model has no configured MTP prediction layer".into())
@@ -563,14 +614,17 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             );
         }
         // Tokens and explicit positions share one readback; implicit positions
-        // `baseline..end` need none because their extent is known on the host.
+        // `baseline..end` need none because their extent is known on the host,
+        // and host-validated tokens none at all.
         let mut checks = DeferredChecks::new();
-        checks.values_below(
-            &next_token_ids,
-            self.config().vocab_size,
-            INPUT_NAMES.token_ids,
-            "token",
-        );
+        if !host_validated {
+            checks.values_below(
+                &next_token_ids,
+                self.config().vocab_size,
+                INPUT_NAMES.token_ids,
+                "token",
+            );
+        }
         let (positions, explicit_range) = match position_ids {
             Some(positions) => {
                 if positions.dims() != [1, sequence] {
