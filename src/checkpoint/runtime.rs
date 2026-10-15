@@ -15,6 +15,7 @@
 //! partially initialized model and no model alias can reference a missing owner.
 
 mod convert;
+mod packed_install;
 mod rounding;
 mod source;
 mod transform;
@@ -34,6 +35,9 @@ use burn::{
     },
 };
 
+pub use packed_install::{
+    PackedInstall, PackedLayoutPolicy, install_packed_parameter, packed_layout_is_exact,
+};
 pub use source::{LocalShardSource, SourceStats, SourceTensor, TensorSource};
 
 use super::{
@@ -105,6 +109,13 @@ pub enum ParameterInstallError {
     InitializedQuantized,
     /// The shape and ordinary float dtype cannot describe a host-sized payload.
     PayloadSizeOverflow,
+    /// Packed data would be requantized by this backend's layout mapper.
+    ///
+    /// Returned by [`install_packed_parameter`] under
+    /// [`PackedLayoutPolicy::RequireExact`]: the parameter's load mapper
+    /// permutes axes and [`packed_layout_is_exact`] reports that the backend
+    /// re-derives block scales after such a permutation.
+    InexactPackedLayout,
     /// Ordinary float bytes disagree with the declared shape and dtype.
     PayloadLength {
         /// Required bytes, computed without allocating or initializing the parameter.
@@ -147,6 +158,10 @@ impl fmt::Display for ParameterInstallError {
             Self::PayloadSizeOverflow => {
                 write!(formatter, "checkpoint float payload size overflows usize")
             }
+            Self::InexactPackedLayout => write!(
+                formatter,
+                "this backend would requantize the packed weight while applying the parameter's layout mapper; install dequantized values or use a backend with exact packed layout operations"
+            ),
             Self::PayloadLength { expected, actual } => {
                 write!(
                     formatter,
