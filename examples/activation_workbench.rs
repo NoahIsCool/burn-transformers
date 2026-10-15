@@ -86,9 +86,9 @@ mod experiment {
         };
 
         // The spec-derived policy draws N(0, 0.02^2) projections, depth-scales the
-        // residual writers, and leaves normalization at one. `apply_lazy` keeps
-        // every parameter unmaterialized until its first use, when it is
-        // allocated once, already holding the policy's value.
+        // residual writers, and leaves normalization at one. `apply_lazy` defers
+        // every draw to the parameter's first use; only the policy's value is
+        // kept, and a parameter overwritten by a loaded record is never drawn.
         let spec = tiny_architecture();
         let policy = ModularCausalLm::<B>::scaled_init_policy(&spec, 0.02);
         let (model, _report) = policy.apply_lazy(ModularCausalLm::init(spec, &device)?)?;

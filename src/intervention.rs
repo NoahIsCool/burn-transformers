@@ -44,7 +44,10 @@
 //! `p_sink[b, h, q] = 1 - sum_k pattern[b, h, q, k]`, through
 //! [`Hooks::apply_sink_probability`]; it is computed only when requested, and
 //! edits are rejected because changing it would not change the computation
-//! (edit the pattern instead).
+//! (edit the pattern instead). Built-in attention does not emit this point
+//! yet, so requesting it from a built-in model fails preflight as an unknown
+//! point; custom attention emits it by calling
+//! [`Hooks::apply_sink_probability`] right after emitting its pattern.
 //! Closures may borrow ordinary Burn modules; their owner must register trainable
 //! parameters in its `Module` tree. Hooks themselves are temporary execution state.
 //! Custom models declare [`Point::custom`] and emit tensors with [`Hooks::apply`]
@@ -476,7 +479,9 @@ impl AttentionPoints {
     /// zero when no mass reaches the sink and one for a row whose keys are
     /// all excluded. The point is derived and read-only; implementations emit
     /// it with [`Hooks::apply_sink_probability`] only where sinks exist and
-    /// list it in their catalogs only then.
+    /// list it in their catalogs only then. Built-in attention (including
+    /// modular specifications with `attention_sinks`) does not emit it yet, so
+    /// only custom attention that calls `apply_sink_probability` provides it.
     pub fn sink_probability(self) -> Point<3> {
         Point::custom(
             format!(

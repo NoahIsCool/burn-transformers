@@ -79,19 +79,22 @@
 //!
 //! [`InitPolicy::apply`] replaces every selected parameter immediately. A
 //! freshly constructed Burn parameter is lazy, so `apply` first materializes
-//! its constructed value, releases it, and then draws the replacement: the
-//! module is fully materialized afterwards and peak memory stays at one copy
-//! of each parameter.
+//! its constructed value, releases it, and then draws the replacement: every
+//! replaced parameter is materialized afterwards (a [`ParameterInit::Keep`]
+//! parameter stays lazy), and peak memory stays at one copy of each parameter.
 //!
 //! [`InitPolicy::apply_lazy`] instead keeps such parameters lazy and replaces
-//! their deferred initializer, so a parameter is first allocated when it is
-//! first read, already holding the policy's value; one that is never read (for
-//! example because a checkpoint overwrites it) is never drawn at all. Burn
+//! their deferred initializer, so nothing is computed at application time. A
+//! parameter that is overwritten before its first read (for example by a
+//! checkpoint record) is never drawn at all. At the first read, the deferred
+//! initializer still runs Burn's constructed initializer first, because Burn
 //! offers no public way to swap a lazy initializer while keeping the
-//! parameter's save/load mapper, so the deferred draw runs Burn's constructed
-//! initializer and immediately releases its output; only the policy's value
-//! survives. The tradeoffs are Burn's own lazy-initialization semantics: draws
-//! happen in first-use order, and clones taken before the first read draw
+//! parameter's save/load mapper: that draws and allocates Burn's default
+//! value (consuming random numbers if the default is random), releases it,
+//! and then draws the policy's value. Only the policy's value survives and
+//! peak memory stays at one copy, but the default is still computed once. The
+//! remaining tradeoffs are Burn's own lazy-initialization semantics: draws
+//! happen in first-read order, and clones taken before the first read draw
 //! independently. Tied identities are therefore always drawn at application
 //! time, so every alias holds the same tensor.
 
@@ -457,14 +460,16 @@ impl InitPolicy {
 
     /// Like [`apply`](Self::apply), but parameters that are still lazy stay lazy.
     ///
-    /// Use it to build a randomly initialized model without materializing
-    /// Burn's default values first, for example
-    /// `policy.apply_lazy(ModularCausalLm::init(spec, &device)?)`. A lazy
-    /// parameter's deferred initializer is replaced, so its first read
-    /// allocates it once, holding the policy's value, and a parameter that is
-    /// overwritten (by a checkpoint record, say) before it is read is never
-    /// drawn. Already materialized parameters and tied identities are replaced
-    /// immediately, exactly as by `apply`, and the report is the same.
+    /// Use it to defer initialization to first use, for example
+    /// `policy.apply_lazy(ModularCausalLm::init(spec, &device)?)` before
+    /// loading a record. A lazy parameter's deferred initializer is replaced:
+    /// a parameter that is overwritten (by a checkpoint record, say) before it
+    /// is read is never drawn, and its first read computes Burn's constructed
+    /// value, releases it, and draws the policy's value, so only the policy's
+    /// value survives and peak memory is one copy of the parameter (see the
+    /// module documentation). Already materialized parameters and tied
+    /// identities are replaced immediately, exactly as by `apply`, and the
+    /// report is the same.
     ///
     /// Draws happen in first-read order and clones taken before the first
     /// read draw independently, as with Burn's own lazy initialization; use

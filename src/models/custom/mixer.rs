@@ -33,7 +33,15 @@
 //! chunked scan (a no-op bound, since `softplus >= 0`), no input/output
 //! projection bias (`use_bias = False`), a convolution bias
 //! (`use_conv_bias = True`), `n_groups = heads / group_size`, and the block's
-//! mixer-normalization epsilon for the gated group RMS norm.
+//! mixer-normalization epsilon for the gated RMS norm.
+//!
+//! The gated RMS norm follows the shared kernel, not Hugging Face's
+//! `Mamba2Mixer`: it normalizes each of the `n_groups` channel groups
+//! separately, as the reference `mamba_ssm` implementation (`RMSNormGated`
+//! with `group_size = d_ssm / ngroups`), Nemotron-H, and Zamba2 do, whereas
+//! Hugging Face's `MambaRMSNormGated(intermediate_size)` normalizes the full
+//! width. The two agree exactly when `group_size == heads` (one group) and
+//! differ otherwise, so a multi-group modular block is `mamba_ssm` numerics.
 
 use burn::{
     module::Module,
@@ -66,8 +74,10 @@ const MAMBA2_CHUNK_SIZE: usize = 256;
 /// `hidden_size` is the residual width and `norm_epsilon` the block's mixer
 /// normalization epsilon, reused by the gated group RMS norm (as DeltaNet
 /// reuses it). Settings the spec does not carry take the Hugging Face
-/// `Mamba2Config` defaults listed in the module documentation. The result is
-/// not validated here; [`Mamba2Config::validate`] rejects, for example, a
+/// `Mamba2Config` defaults listed in the module documentation; the norm is
+/// group-wise over the `B/C` groups (the `mamba_ssm` convention), which
+/// matches Hugging Face's full-width norm only for a single group. The result
+/// is not validated here; [`Mamba2Config::validate`] rejects, for example, a
 /// convolution kernel below two, which the spec alone accepts.
 pub(super) fn mamba2_config(
     spec: &Mamba2Spec,
