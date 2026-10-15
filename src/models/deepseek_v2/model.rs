@@ -40,6 +40,13 @@ mod decode;
 
 pub use decode::{DeepseekV2DecodeState, MlaExecutionPath};
 
+/// Dtype of every router projection, probability, and diagnostic logit.
+///
+/// The reference router casts both operands to FP32 before the projection, so
+/// router logits are FP32 even in F16/BF16 checkpoints. Placeholders for
+/// inactive decode rows must use the same dtype to be concatenated with them.
+const ROUTER_DTYPE: DType = DType::F32;
+
 /// Routed expert output together with the always-active shared contribution.
 #[derive(Clone, Debug)]
 struct DeepseekMoeOutput<B: Backend> {
@@ -141,8 +148,8 @@ impl<B: Backend> DeepseekV2Moe<B> {
         // not merely before softmax. This avoids an F16 rounding event changing
         // the selected expert and therefore an entire nonlinear subgraph.
         let router_logits = burn::tensor::module::linear(
-            input.clone().cast(DType::F32),
-            self.routed.router.weight.val().cast(DType::F32),
+            input.clone().cast(ROUTER_DTYPE),
+            self.routed.router.weight.val().cast(ROUTER_DTYPE),
             None,
         );
         let probabilities = softmax(router_logits.clone(), 2);

@@ -27,7 +27,7 @@ use crate::{
 };
 
 use super::{
-    DeepseekV2DecoderLayer, DeepseekV2ForCausalLm, DeepseekV2Model, select_hidden,
+    DeepseekV2DecoderLayer, DeepseekV2ForCausalLm, DeepseekV2Model, ROUTER_DTYPE, select_hidden,
     sequence_auxiliary_loss, validate_logits_selection, validate_position_range,
     validate_token_ids,
 };
@@ -549,10 +549,11 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
                     destination.push(empty.clone());
                 }
                 for destination in &mut router_rows {
+                    // Router logits are FP32 regardless of the activation dtype (DSV-1).
                     destination.push(RowRouter {
                         logits: Tensor::zeros(
                             [1, prepared.sequence, self.config().n_routed_experts],
-                            (&device, self.model.embed_tokens.weight.val().dtype()),
+                            (&device, ROUTER_DTYPE),
                         ),
                         selected: Tensor::zeros(
                             [1, prepared.sequence, self.config().num_experts_per_tok],
