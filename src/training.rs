@@ -57,7 +57,7 @@ use burn::{
 use crate::{
     Error, Result,
     experiment::{
-        bounds::{fold_level, range_within},
+        bounds::{fold_level, range_within, reduction_rows},
         read_int_scalars,
     },
 };
@@ -293,12 +293,14 @@ fn validate_logits<B: Backend, const D: usize>(logits: &Tensor<B, D>, field: &st
 /// Reduces one axis with a balanced tree while retaining its length-one dimension.
 ///
 /// Moves `dim` last, flattens the other axes into independent rows, and sums
-/// each row with [`pairwise_row_sums`]. The caller supplies a nonempty valid axis.
+/// each row with [`pairwise_row_sums`]. The caller supplies a nonempty valid
+/// axis of a tensor without zero extents; the verified [`reduction_rows`]
+/// then proves `rows * width` is exactly the element count.
 fn sum_dim<B: Backend, const D: usize>(input: Tensor<B, D>, dim: usize) -> Tensor<B, D> {
     let mut shape = input.dims();
+    let rows = reduction_rows(&shape, dim);
     shape.swap(dim, D - 1);
     let width = shape[D - 1];
-    let rows = shape[..D - 1].iter().product::<usize>();
     let sums = pairwise_row_sums(input.swap_dims(dim, D - 1).reshape([rows, width]));
     shape[D - 1] = 1;
     sums.reshape(shape).swap_dims(dim, D - 1)

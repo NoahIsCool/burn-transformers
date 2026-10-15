@@ -15,6 +15,8 @@
 //!   stay within the stack; `lemma_accepted_run_tiles` proves that ranges
 //!   accepted consecutively from cursor zero run every block below the final
 //!   cursor exactly once and never run a block at or past it.
+//! - [`reduction_rows`] multiplies every extent except the reduced axis, so
+//!   rows times the reduced width is exactly the element count.
 //! - [`fold_level`] partitions a row into the added left and right blocks and
 //!   the carried odd middle column, so every column is read exactly once; the
 //!   width strictly shrinks to `ceil(w/2)`, and `lemma_fold_depth` proves the
@@ -103,6 +105,59 @@ pub(crate) fn follows_cursor(cursor: usize, start: usize, end: usize, total: usi
     start == cursor && start <= end && end <= total
 }
 
+/// Number of independent rows when axis `dim` of `shape` is reduced.
+///
+/// A reduction moves `dim` last and flattens the other axes into rows, so the
+/// result is the product of every extent except `shape[dim]`. Multiplying it
+/// by `shape[dim]` gives exactly the element count, so the `[rows, width]`
+/// reshape is valid. Callers pass a validated nonempty tensor shape, whose
+/// element count fits in `usize`; under that precondition no partial product
+/// overflows.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(rows =>
+    requires
+        dim < shape.len(),
+        forall|axis: int| 0 <= axis < shape.len() ==> shape@[axis] > 0,
+        shape_product(shape@) <= usize::MAX,
+    ensures
+        rows == product_except(shape@, dim as int),
+        rows * shape@[dim as int] == shape_product(shape@),
+        rows >= 1,
+))]
+pub(crate) fn reduction_rows(shape: &[usize], dim: usize) -> usize {
+    let mut rows: usize = 1;
+    let mut axis = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            dim < shape.len(),
+            0 <= axis <= shape.len(),
+            forall|other: int| 0 <= other < shape.len() ==> shape@[other] > 0,
+            shape_product(shape@) <= usize::MAX,
+            rows == product_except(shape@.subrange(0, axis as int), dim as int),
+            rows >= 1,
+        decreases shape.len() - axis,
+    ))]
+    while axis < shape.len() {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            let next = shape@.subrange(0, axis as int + 1);
+            assert(next.drop_last() == shape@.subrange(0, axis as int));
+            lemma_product_except_at_most_product(next, dim as int);
+            lemma_prefix_product_at_most(shape@, axis as int + 1);
+        }
+        if axis != dim {
+            rows *= shape[axis];
+        }
+        axis += 1;
+    }
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert(shape@.subrange(0, shape.len() as int) == shape@);
+        lemma_product_except_times_extent(shape@, dim as int);
+    }
+    rows
+}
+
 /// One level of a pairwise row reduction: which columns are added and the next width.
 ///
 /// The level adds column `j` to its partner `partner_start + j` for every
@@ -153,6 +208,125 @@ pub(crate) fn fold_level(width: usize) -> FoldLevel {
 
 #[cfg(verus_keep_ghost)]
 verus! {
+
+/// Product of every extent in `shape`.
+pub(crate) open spec fn shape_product(shape: Seq<usize>) -> int
+    decreases shape.len(),
+{
+    if shape.len() == 0 {
+        1
+    } else {
+        shape_product(shape.drop_last()) * shape.last()
+    }
+}
+
+/// Product of every extent in `shape` except the one at axis `dim`.
+pub(crate) open spec fn product_except(shape: Seq<usize>, dim: int) -> int
+    decreases shape.len(),
+{
+    if shape.len() == 0 {
+        1
+    } else {
+        product_except(shape.drop_last(), dim) * if shape.len() - 1 == dim {
+            1int
+        } else {
+            shape.last() as int
+        }
+    }
+}
+
+/// The product of the other extents times the reduced extent is the element count.
+pub(crate) proof fn lemma_product_except_times_extent(shape: Seq<usize>, dim: int)
+    requires
+        0 <= dim < shape.len(),
+    ensures
+        product_except(shape, dim) * shape[dim] == shape_product(shape),
+    decreases shape.len(),
+{
+    let prefix = shape.drop_last();
+    if shape.len() - 1 == dim {
+        lemma_product_except_skips_absent_axis(prefix, dim);
+    } else {
+        lemma_product_except_times_extent(prefix, dim);
+        assert(prefix[dim] == shape[dim]);
+        let others = product_except(prefix, dim);
+        let all = shape_product(prefix);
+        assert(others * shape.last() * shape[dim] == others * shape[dim] * shape.last())
+            by (nonlinear_arith);
+    }
+}
+
+/// Excluding an axis past the end of `shape` excludes nothing.
+pub(crate) proof fn lemma_product_except_skips_absent_axis(shape: Seq<usize>, dim: int)
+    requires
+        dim >= shape.len(),
+    ensures
+        product_except(shape, dim) == shape_product(shape),
+    decreases shape.len(),
+{
+    if shape.len() > 0 {
+        lemma_product_except_skips_absent_axis(shape.drop_last(), dim);
+    }
+}
+
+/// With positive extents, leaving an axis out never increases the product.
+pub(crate) proof fn lemma_product_except_at_most_product(shape: Seq<usize>, dim: int)
+    requires
+        forall|axis: int| 0 <= axis < shape.len() ==> shape[axis] > 0,
+    ensures
+        1 <= product_except(shape, dim) <= shape_product(shape),
+    decreases shape.len(),
+{
+    if shape.len() > 0 {
+        let prefix = shape.drop_last();
+        assert forall|axis: int| 0 <= axis < prefix.len() implies prefix[axis] > 0 by {
+            assert(prefix[axis] == shape[axis]);
+        }
+        lemma_product_except_at_most_product(prefix, dim);
+        let others = product_except(prefix, dim);
+        let all = shape_product(prefix);
+        let last = shape.last() as int;
+        assert(last >= 1);
+        if shape.len() - 1 == dim {
+            assert(others * 1 <= all * last) by (nonlinear_arith)
+                requires 1 <= others <= all, last >= 1;
+        } else {
+            assert(others * last <= all * last) by (nonlinear_arith)
+                requires 1 <= others <= all, last >= 1;
+            assert(others * last >= 1) by (nonlinear_arith)
+                requires others >= 1, last >= 1;
+        }
+    }
+}
+
+/// With positive extents, the product of a prefix never exceeds the whole product.
+pub(crate) proof fn lemma_prefix_product_at_most(shape: Seq<usize>, length: int)
+    requires
+        0 <= length <= shape.len(),
+        forall|axis: int| 0 <= axis < shape.len() ==> shape[axis] > 0,
+    ensures
+        1 <= shape_product(shape.subrange(0, length)) <= shape_product(shape),
+    decreases shape.len() - length,
+{
+    if length == shape.len() {
+        assert(shape.subrange(0, length) == shape);
+        lemma_product_except_at_most_product(shape, shape.len() as int);
+        lemma_product_except_skips_absent_axis(shape, shape.len() as int);
+    } else {
+        lemma_prefix_product_at_most(shape, length + 1);
+        let longer = shape.subrange(0, length + 1);
+        assert(longer.drop_last() == shape.subrange(0, length));
+        let partial = shape_product(shape.subrange(0, length));
+        let extent = shape[length] as int;
+        assert(longer.last() == shape[length]);
+        assert(partial >= 1) by {
+            lemma_product_except_at_most_product(shape.subrange(0, length), length);
+            lemma_product_except_skips_absent_axis(shape.subrange(0, length), length);
+        }
+        assert(partial <= partial * extent) by (nonlinear_arith)
+            requires partial >= 1, extent >= 1;
+    }
+}
 
 /// Which block of a folding level reads `column`: 0 left, 1 right, 2 carried middle, 3 none.
 ///

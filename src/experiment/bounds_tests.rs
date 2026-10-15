@@ -44,6 +44,16 @@ fn staged_ranges_resume_at_the_cursor() {
     assert_eq!(cursor, 4);
 }
 
+/// Reduction rows multiply every extent except the reduced axis.
+#[test]
+fn reduction_rows_exclude_the_reduced_axis() {
+    assert_eq!(reduction_rows(&[7], 0), 1);
+    assert_eq!(reduction_rows(&[2, 3, 5], 0), 15);
+    assert_eq!(reduction_rows(&[2, 3, 5], 1), 10);
+    assert_eq!(reduction_rows(&[2, 3, 5], 2), 6);
+    assert_eq!(reduction_rows(&[usize::MAX, 1], 1), usize::MAX);
+}
+
 /// Fold levels halve, carry exactly the odd middle column, and strictly shrink.
 #[test]
 fn fold_levels_halve_and_carry_odd_columns() {
@@ -96,6 +106,21 @@ proptest::proptest! {
     ) {
         let reference = actual.iter().zip(expected).all(|(a, e)| *a == 1 || *a == e);
         proptest::prop_assert_eq!(broadcasts_to(&actual, &expected), reference);
+    }
+
+    /// Reduction rows agree with the swapped-prefix product and tile the element count.
+    #[test]
+    fn reduction_rows_match_the_swapped_prefix_product(
+        shape in proptest::collection::vec(1usize..6, 1..5),
+        dim_seed in proptest::num::usize::ANY,
+    ) {
+        let dim = dim_seed % shape.len();
+        let mut swapped = shape.clone();
+        let last = swapped.len() - 1;
+        swapped.swap(dim, last);
+        let rows = reduction_rows(&shape, dim);
+        proptest::prop_assert_eq!(rows, swapped[..last].iter().product::<usize>());
+        proptest::prop_assert_eq!(rows * shape[dim], shape.iter().product::<usize>());
     }
 
     /// Every column of a folding level is read by exactly one block, and the depth is ceil(log2 w).

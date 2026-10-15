@@ -16,7 +16,9 @@
 //!   overflow), position/label range checks, broadcast compatibility of masks
 //!   and attention planes, and staged block cursors, whose consecutively
 //!   accepted ranges run every block below the cursor exactly once and in
-//!   order. Each pairwise-reduction level partitions the row into added left
+//!   order. A loss reduction's row count is the product of every other
+//!   extent, so `rows * width` is exactly the element count and no partial
+//!   product overflows. Each pairwise-reduction level partitions the row into added left
 //!   and right blocks plus the carried odd middle column (every column is read
 //!   exactly once), and the whole reduction takes exactly `ceil(log2 w)` levels.
 //! - `src/experiment/precedence.rs`: ordered overrides (per-layer attention
