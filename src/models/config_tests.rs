@@ -183,3 +183,166 @@ fn token_lists_must_be_nonempty_and_inside_the_vocabulary() {
     assert!(token_ids("test", "eos", Some(&TokenIds::Many(vec![1, 4])), 4).is_err());
     token_ids("test", "eos", Some(&TokenIds::Many(vec![1, 3])), 4).unwrap();
 }
+
+// Current and legacy RoPE type keys.
+
+/// Parses a `rope_scaling`-style object into the shared RoPE parameter schema.
+fn rope_from(json: &str) -> Result<RopeParameters, serde_json::Error> {
+    serde_json::from_str(json)
+}
+
+/// Either key alone, both equal keys, or neither key select the expected algorithm.
+#[test]
+fn rope_type_accepts_current_legacy_or_both_agreeing_keys() {
+    let cases = [
+        (r#"{"type": "yarn", "factor": 4.0}"#, RopeType::Yarn),
+        (r#"{"rope_type": "yarn", "factor": 4.0}"#, RopeType::Yarn),
+        (
+            r#"{"type": "yarn", "rope_type": "yarn", "factor": 4.0}"#,
+            RopeType::Yarn,
+        ),
+        (
+            r#"{"rope_type": "linear", "type": "linear", "factor": 2.0}"#,
+            RopeType::Linear,
+        ),
+        (r#"{"factor": 4.0}"#, RopeType::Default),
+    ];
+    for (json, expected) in cases {
+        let rope = rope_from(json).unwrap_or_else(|error| panic!("{json}: {error}"));
+        assert_eq!(rope.rope_type, expected, "{json}");
+        assert_eq!(
+            rope.factor,
+            Some(if expected == RopeType::Linear {
+                2.0
+            } else {
+                4.0
+            })
+        );
+    }
+}
+
+/// Disagreeing keys are rejected with both serialized names in the message.
+#[test]
+fn conflicting_rope_type_keys_are_rejected_with_both_values() {
+    let error = rope_from(r#"{"type": "linear", "rope_type": "yarn", "factor": 2.0}"#)
+        .expect_err("ambiguous algorithms must not be resolved silently");
+    let message = error.to_string();
+    assert!(message.contains(r#"rope_type "yarn""#), "{message}");
+    assert!(message.contains(r#"legacy type "linear""#), "{message}");
+}
+
+/// Serialization emits only the current key and round-trips every algorithm.
+#[test]
+fn rope_parameters_serialize_only_the_current_type_key() {
+    for rope_type in [
+        RopeType::Default,
+        RopeType::Linear,
+        RopeType::Dynamic,
+        RopeType::Yarn,
+        RopeType::LongRope,
+        RopeType::Llama3,
+        RopeType::Proportional,
+    ] {
+        assert_eq!(
+            serde_json::to_string(&rope_type).unwrap(),
+            format!("\"{}\"", rope_type.as_str())
+        );
+        let rope = RopeParameters {
+            rope_type,
+            factor: Some(3.0),
+            mrope_section: Some(vec![1, 2, 3]),
+            ..RopeParameters::default()
+        };
+        let value = serde_json::to_value(&rope).unwrap();
+        assert!(value.get("type").is_none());
+        assert_eq!(value["rope_type"], rope_type.as_str());
+        assert_eq!(
+            serde_json::from_value::<RopeParameters>(value).unwrap(),
+            rope
+        );
+    }
+}
+
+/// A DeepSeek-V2 config re-saved by Hugging Face, carrying both keys, still loads.
+#[test]
+fn resaved_deepseek_config_with_both_rope_keys_loads() {
+    use crate::models::deepseek_v2::DeepseekV2Config;
+    let mut value: serde_json::Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/deepseek_v2_lite.json")).unwrap();
+    let legacy = value["rope_scaling"]["type"].clone();
+    assert_eq!(legacy, "yarn");
+    value["rope_scaling"]["rope_type"] = legacy;
+    let resaved = DeepseekV2Config::from_json_str(&value.to_string())
+        .expect("transformers save_pretrained output must parse");
+    let original =
+        DeepseekV2Config::from_json_str(include_str!("../../tests/fixtures/deepseek_v2_lite.json"))
+            .unwrap();
+    assert_eq!(
+        resaved.rope_scaling.as_ref().unwrap().rope_type,
+        RopeType::Yarn
+    );
+    assert_eq!(resaved.rope_scaling, original.rope_scaling);
+
+    value["rope_scaling"]["rope_type"] = "linear".into();
+    let error = DeepseekV2Config::from_json_str(&value.to_string()).unwrap_err();
+    assert!(error.to_string().contains("conflicts"), "{error}");
+}
+
+// Conversion into the crate error type.
+
+/// Loader failures convert into crate errors that keep their field path or parser location.
+#[test]
+fn configuration_load_errors_convert_with_field_paths_and_parser_locations() {
+    let validation: crate::Error =
+        ConfigLoadError::from(ConfigError::new("tiny", "width", "must be nonzero")).into();
+    assert!(matches!(
+        &validation,
+        crate::Error::Configuration { field, reason }
+            if field == "tiny.width" && reason == "must be nonzero"
+    ));
+
+    let parse = parse_text_config::<TinyConfig>("{\n  \"width\": }").unwrap_err();
+    let converted: crate::Error = parse.into();
+    match converted {
+        crate::Error::Configuration { field, reason } => {
+            assert_eq!(field, "config");
+            assert!(reason.starts_with("invalid model config JSON"), "{reason}");
+            assert!(reason.contains("line 2"), "{reason}");
+        }
+        other => panic!("unexpected error {other:?}"),
+    }
+
+    let loaded = (|| -> crate::Result<TinyConfig> { Ok(parse_text_config(r#"{"width": 0}"#)?) })();
+    assert!(loaded.unwrap_err().to_string().contains("tiny.width"));
+}
+
+/// Exhaustively checks key reconciliation over every pair of present or absent algorithms.
+#[test]
+fn rope_type_resolution_is_exhaustively_consistent() {
+    let algorithms = [
+        RopeType::Default,
+        RopeType::Linear,
+        RopeType::Dynamic,
+        RopeType::Yarn,
+        RopeType::LongRope,
+        RopeType::Llama3,
+        RopeType::Proportional,
+    ];
+    let options = std::iter::once(None)
+        .chain(algorithms.into_iter().map(Some))
+        .collect::<Vec<_>>();
+    for &current in &options {
+        for &legacy in &options {
+            let resolved = resolve_rope_type(current, legacy);
+            match (current, legacy) {
+                (Some(current), Some(legacy)) if current != legacy => {
+                    assert!(resolved.is_err(), "{current:?}/{legacy:?}")
+                }
+                _ => assert_eq!(
+                    resolved.unwrap(),
+                    current.or(legacy).unwrap_or(RopeType::Default)
+                ),
+            }
+        }
+    }
+}
