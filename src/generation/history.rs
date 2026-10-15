@@ -4,8 +4,10 @@
 //! seen:
 //!
 //! - repetition, presence, and frequency penalties need per-token occurrence
-//!   counts `c[b, v]`, which live on the device as two `[batch, vocabulary]`
-//!   integer tensors (all observed tokens, and generated tokens only);
+//!   counts `c[b, v]`, which live on the device as `[batch, vocabulary]`
+//!   integer tensors: one counting every observed token (prompt and output)
+//!   and one counting generated tokens only. Each tensor exists only when a
+//!   configured penalty reads it (see [`CountView`]);
 //! - `no_repeat_ngram_size` needs the token sequence itself, kept on the host
 //!   with an index from each `(n - 1)`-gram to the tokens that followed it;
 //! - `min_new_tokens` needs each row's generated length, also on the host.
@@ -14,12 +16,21 @@
 //! `[batch, history, vocabulary]` one-hot (gigabytes for a 4k-token prompt and
 //! a 250k vocabulary) plus host synchronizations. [`TokenHistory`] instead
 //! scatter-adds the prompt once, `O(batch * prompt)`, and then one token per
-//! row per step, `O(batch)`, uploading only the new IDs. A coordinator that
+//! row per step, uploading only the new `[batch, 1]` IDs. A coordinator that
 //! already reads selected IDs back to the host therefore adds no extra
 //! synchronization.
 //!
-//! Only state that the configuration actually uses is kept: without penalties
-//! there are no count tensors, and without an n-gram constraint no host index.
+//! # Update cost
+//!
+//! [`TokenHistory::record`] moves each count tensor out of the history before
+//! scattering into it, so the tensor is uniquely owned during the update.
+//! Backends with in-place scatter (CubeCL, used by Metal, CUDA, and ROCm)
+//! then add `batch` increments without touching the rest of the
+//! `[batch, vocabulary]` buffer. Burn 0.21's Flex CPU scatter always writes a
+//! fresh output, so there each update is one `[batch, vocabulary]` copy per
+//! tracked view; tracking only the views a configuration reads keeps that to
+//! at most two. A cloned history shares its buffers until the next update,
+//! which then copies (copy-on-write), so clones never observe each other.
 
 use std::collections::HashMap;
 
@@ -29,13 +40,73 @@ use crate::{Error, Result, TokenMask, architecture::tensor_bool_values};
 
 use super::{GenerationConfig, metadata};
 
-/// Device-resident occurrence counts used by the token penalties.
+/// Which occurrence counts a penalty reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CountView {
+    /// Every observed token, prompt and generated (repetition penalty, and
+    /// additive penalties scoped to [`super::PenaltyScope::PromptAndGenerated`]).
+    All,
+    /// Generated tokens only (additive penalties with the default
+    /// [`super::PenaltyScope::Generated`] scope).
+    Generated,
+}
+
+impl CountView {
+    /// Human-readable name used in compatibility errors.
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "prompt-and-generated",
+            Self::Generated => "generated-only",
+        }
+    }
+}
+
+/// Device-resident occurrence counts; each view exists only when a penalty reads it.
 #[derive(Debug, Clone)]
-pub(super) struct TokenCounts<B: Backend> {
+struct TokenCounts<B: Backend> {
     /// `[batch, vocabulary]` counts of every observed token, prompt and generated.
-    pub(super) all: Tensor<B, 2, Int>,
+    all: Option<Tensor<B, 2, Int>>,
     /// `[batch, vocabulary]` counts of generated tokens only.
-    pub(super) generated: Tensor<B, 2, Int>,
+    generated: Option<Tensor<B, 2, Int>>,
+}
+
+impl<B: Backend> TokenCounts<B> {
+    /// Allocates separate zero tensors for the views `config` reads.
+    ///
+    /// Separate buffers (rather than one shared zero tensor) keep each view
+    /// uniquely owned, so the first [`TokenHistory::record`] needs no copy.
+    fn zeros(
+        config: &GenerationConfig,
+        batch: usize,
+        vocabulary_size: usize,
+        device: &B::Device,
+    ) -> Self {
+        let zeros = || Tensor::<B, 2, Int>::zeros([batch, vocabulary_size], device);
+        Self {
+            all: config.reads_count_view(CountView::All).then(zeros),
+            generated: config.reads_count_view(CountView::Generated).then(zeros),
+        }
+    }
+
+    /// Whether any view is tracked.
+    fn is_tracking(&self) -> bool {
+        self.all.is_some() || self.generated.is_some()
+    }
+
+    /// Adds `increments` at `[batch, width]` token `ids` to every tracked view.
+    ///
+    /// `Option::take` moves each tensor out before the scatter so it is
+    /// uniquely owned; see the module documentation for the cost model.
+    fn add(&mut self, ids: Tensor<B, 2, Int>, increments: Tensor<B, 2, Int>) {
+        self.all = self
+            .all
+            .take()
+            .map(|counts| scatter_add(counts, ids.clone(), increments.clone()));
+        self.generated = self
+            .generated
+            .take()
+            .map(|counts| scatter_add(counts, ids, increments));
+    }
 }
 
 /// Host n-gram index of one row for the no-repeat constraint.
@@ -87,8 +158,8 @@ impl NgramIndex {
 pub struct TokenHistory<B: Backend> {
     /// Exclusive upper bound of every recorded token ID.
     vocabulary_size: usize,
-    /// Occurrence counts, present only when a count-based penalty is enabled.
-    counts: Option<TokenCounts<B>>,
+    /// Occurrence counts for the views the configured penalties read.
+    counts: TokenCounts<B>,
     /// Number of tokens recorded as generated for each row.
     generated_lengths: Vec<usize>,
     /// N-gram size of the no-repeat constraint; zero disables the index.
@@ -181,6 +252,31 @@ impl<B: Backend> TokenHistory<B> {
         Self::build(config, vocabulary_size, history, mask, None, true)
     }
 
+    /// Returns history with no observed tokens and no count tensors yet.
+    fn new_unfilled(
+        config: &GenerationConfig,
+        vocabulary_size: usize,
+        batch: usize,
+        device: &B::Device,
+    ) -> Self {
+        let ngram_size = config.no_repeat_ngram_size;
+        Self {
+            vocabulary_size,
+            counts: TokenCounts {
+                all: None,
+                generated: None,
+            },
+            generated_lengths: vec![0; batch],
+            ngram_size,
+            ngrams: if ngram_size > 0 {
+                vec![NgramIndex::default(); batch]
+            } else {
+                Vec::new()
+            },
+            device: device.clone(),
+        }
+    }
+
     /// Builds the state the configuration needs from observed `[batch, width]` tokens.
     ///
     /// `host_valid` avoids re-reading a mask the caller already holds. When
@@ -211,26 +307,13 @@ impl<B: Backend> TokenHistory<B> {
             ));
         }
         let device = tokens.device();
-        let needs_counts = config.uses_token_counts();
-        let ngram_size = config.no_repeat_ngram_size;
+        let mut history = Self::new_unfilled(config, vocabulary_size, batch, &device);
+        let needs_counts = config.reads_count_view(CountView::All)
+            || config.reads_count_view(CountView::Generated);
+        let ngram_size = history.ngram_size;
         let needs_lengths = as_generated && config.min_new_tokens > 0;
-        let mut history = Self {
-            vocabulary_size,
-            counts: None,
-            generated_lengths: vec![0; batch],
-            ngram_size,
-            ngrams: if ngram_size > 0 {
-                vec![NgramIndex::default(); batch]
-            } else {
-                Vec::new()
-            },
-            device: device.clone(),
-        };
-        if width == 0 {
-            history.counts = needs_counts.then(|| zero_counts(batch, vocabulary_size, &device));
-            return Ok(history);
-        }
-        if !(needs_counts || ngram_size > 0 || needs_lengths) {
+        if width == 0 || !(needs_counts || ngram_size > 0 || needs_lengths) {
+            history.counts = TokenCounts::zeros(config, batch, vocabulary_size, &device);
             return Ok(history);
         }
 
@@ -271,23 +354,16 @@ impl<B: Backend> TokenHistory<B> {
                 }
             }
         }
-        if needs_counts {
-            history.counts = Some(observed_counts(
-                tokens,
-                mask,
-                vocabulary_size,
-                as_generated,
-                &device,
-            ));
-        }
+        history.counts = observed_counts(config, tokens, mask, vocabulary_size, as_generated);
         Ok(history)
     }
 
     /// Records the token each active row emitted in the latest step.
     ///
     /// `tokens` and `active` have one entry per row; inactive rows (finished
-    /// or padded) are ignored. Count tensors receive one scatter-add of the
-    /// `[batch, 1]` new IDs; no data is read back from the device.
+    /// or padded) are ignored. Each tracked count tensor receives one
+    /// scatter-add of the `[batch, 1]` new IDs; no data is read back from the
+    /// device. See the module documentation for the per-backend cost.
     pub fn record(&mut self, tokens: &[u32], active: &[bool]) -> Result<()> {
         let batch = self.batch_size();
         if tokens.len() != batch || active.len() != batch {
@@ -308,7 +384,7 @@ impl<B: Backend> TokenHistory<B> {
         if !active.iter().any(|&is_active| is_active) {
             return Ok(());
         }
-        if let Some(counts) = &mut self.counts {
+        if self.counts.is_tracking() {
             // Inactive rows scatter a zero increment at token zero.
             let ids = tokens
                 .iter()
@@ -325,17 +401,7 @@ impl<B: Backend> TokenHistory<B> {
                 TensorData::new(increments, [batch, 1]),
                 &self.device,
             );
-            counts.all = counts.all.clone().scatter(
-                1,
-                ids.clone(),
-                increments.clone(),
-                IndexingUpdateOp::Add,
-            );
-            counts.generated =
-                counts
-                    .generated
-                    .clone()
-                    .scatter(1, ids, increments, IndexingUpdateOp::Add);
+            self.counts.add(ids, increments);
         }
         for (row, (&token, &is_active)) in tokens.iter().zip(active).enumerate() {
             if is_active {
@@ -360,16 +426,28 @@ impl<B: Backend> TokenHistory<B> {
 
     /// Returns each row's generated length as far as the configuration tracks it.
     ///
-    /// Histories built from a prompt or by [`Self::record`] always count
-    /// exactly; the stateless `history` tensor path counts only when
-    /// `min_new_tokens` needs it.
+    /// Histories built from a prompt or by [`Self::record`]
+    /// always count exactly; the stateless `history` tensor path counts only
+    /// when `min_new_tokens` needs it.
     pub(super) fn generated_lengths(&self) -> &[usize] {
         &self.generated_lengths
     }
 
-    /// Returns the device-resident occurrence counts, when penalties need them.
-    pub(super) fn counts(&self) -> Option<&TokenCounts<B>> {
-        self.counts.as_ref()
+    /// Returns the `[batch, vocabulary]` counts of `view`.
+    ///
+    /// Fails contextually when the history was built for a configuration
+    /// whose penalties do not read that view.
+    pub(super) fn counts(&self, view: CountView) -> Result<&Tensor<B, 2, Int>> {
+        let counts = match view {
+            CountView::All => self.counts.all.as_ref(),
+            CountView::Generated => self.counts.generated.as_ref(),
+        };
+        counts.ok_or_else(|| {
+            Error::Generation(format!(
+                "token history tracks no {} token counts, but the processor's penalties read them; build the history from the processor's GenerationConfig",
+                view.label()
+            ))
+        })
     }
 
     /// Returns the tokens the n-gram constraint forbids for `row` next.
@@ -398,10 +476,10 @@ impl<B: Backend> TokenHistory<B> {
                 ),
             ));
         }
-        if config.uses_token_counts() && self.counts.is_none() {
-            return Err(Error::Generation(
-                "token history tracks no counts, but the processor applies penalties; build the history from the processor's GenerationConfig".into(),
-            ));
+        for view in [CountView::All, CountView::Generated] {
+            if config.reads_count_view(view) {
+                self.counts(view)?;
+            }
         }
         if config.no_repeat_ngram_size != self.ngram_size {
             return Err(Error::Generation(format!(
@@ -413,53 +491,51 @@ impl<B: Backend> TokenHistory<B> {
     }
 }
 
-/// Returns zero-initialized count tensors for `batch` rows.
-fn zero_counts<B: Backend>(
-    batch: usize,
-    vocabulary_size: usize,
-    device: &B::Device,
-) -> TokenCounts<B> {
-    let zeros = Tensor::<B, 2, Int>::zeros([batch, vocabulary_size], device);
-    TokenCounts {
-        all: zeros.clone(),
-        generated: zeros,
-    }
+/// Adds `increments` to `counts` at token `ids` along the vocabulary axis.
+fn scatter_add<B: Backend>(
+    counts: Tensor<B, 2, Int>,
+    ids: Tensor<B, 2, Int>,
+    increments: Tensor<B, 2, Int>,
+) -> Tensor<B, 2, Int> {
+    counts.scatter(1, ids, increments, IndexingUpdateOp::Add)
 }
 
 /// Counts validated observed tokens with one `[batch, width]` scatter-add.
 ///
 /// Masked slots are redirected to token zero with a zero increment, so their
-/// sentinel values are never used as indices.
+/// sentinel values are never used as indices. The generated view of a prompt
+/// (`as_generated == false`) starts at zero.
 fn observed_counts<B: Backend>(
+    config: &GenerationConfig,
     tokens: Tensor<B, 2, Int>,
     mask: Option<Tensor<B, 2, Bool>>,
     vocabulary_size: usize,
     as_generated: bool,
-    device: &B::Device,
 ) -> TokenCounts<B> {
     let [batch, _] = tokens.dims();
+    let device = tokens.device();
+    let mut counts = TokenCounts::zeros(config, batch, vocabulary_size, &device);
+    if counts.all.is_none() && !(as_generated && counts.generated.is_some()) {
+        return counts;
+    }
     let (indices, increments) = match mask {
         Some(mask) => (tokens.mask_fill(mask.clone().bool_not(), 0), mask.int()),
         None => {
-            let increments = Tensor::<B, 2, Int>::ones(tokens.dims(), device);
+            let increments = Tensor::<B, 2, Int>::ones(tokens.dims(), &device);
             (tokens, increments)
         }
     };
-    let observed = Tensor::<B, 2, Int>::zeros([batch, vocabulary_size], device).scatter(
-        1,
-        indices,
-        increments,
-        IndexingUpdateOp::Add,
-    );
-    let generated = if as_generated {
-        observed.clone()
-    } else {
-        Tensor::<B, 2, Int>::zeros([batch, vocabulary_size], device)
-    };
-    TokenCounts {
-        all: observed,
-        generated,
+    counts.all = counts
+        .all
+        .take()
+        .map(|zeros| scatter_add(zeros, indices.clone(), increments.clone()));
+    if as_generated {
+        counts.generated = counts
+            .generated
+            .take()
+            .map(|zeros| scatter_add(zeros, indices, increments));
     }
+    counts
 }
 
 /// Converts one valid history value to a token ID inside the vocabulary.

@@ -5,25 +5,28 @@ use burn::{
     tensor::{Bool, Int, Tensor, TensorData},
 };
 
-use super::{NgramIndex, TokenHistory};
-use crate::{GenerationConfig, TokenMask};
+use super::{CountView, NgramIndex, TokenHistory};
+use crate::{GenerationConfig, TokenMask, generation::PenaltyScope};
 
 /// Deterministic F32 CPU backend.
 type TestBackend = Flex<f32, i32>;
 
-/// Reads a `[batch, vocabulary]` count tensor to host integers.
-fn counts(tensor: &Tensor<TestBackend, 2, Int>) -> Vec<i32> {
-    tensor
+/// Reads one `[batch, vocabulary]` count view to host integers.
+fn counts(history: &TokenHistory<TestBackend>, view: CountView) -> Vec<i32> {
+    history
+        .counts(view)
+        .expect("tracked count view")
         .clone()
         .into_data()
         .to_vec::<i32>()
         .expect("integer counts")
 }
 
-/// Configuration that enables count tensors.
+/// Configuration whose penalties read both count views.
 fn penalized() -> GenerationConfig {
     GenerationConfig {
         repetition_penalty: 1.2,
+        presence_penalty: 0.5,
         ..Default::default()
     }
 }
@@ -38,9 +41,8 @@ fn prompt_counts_skip_masked_sentinels() {
         &device,
     ));
     let history = TokenHistory::from_prompt(&penalized(), 4, prompt, Some(mask)).unwrap();
-    let state = history.counts().expect("penalties need counts");
-    assert_eq!(counts(&state.all), [0, 2, 0, 0, 0, 0, 1, 1]);
-    assert_eq!(counts(&state.generated), [0; 8]);
+    assert_eq!(counts(&history, CountView::All), [0, 2, 0, 0, 0, 0, 1, 1]);
+    assert_eq!(counts(&history, CountView::Generated), [0; 8]);
     assert_eq!(history.generated_lengths(), [0, 0]);
     assert_eq!(history.batch_size(), 2);
     assert_eq!(history.vocabulary_size(), 4);
@@ -54,9 +56,8 @@ fn record_updates_active_rows_only() {
     history.record(&[2, 1], &[true, false]).unwrap();
     history.record(&[2, 0], &[true, true]).unwrap();
     history.record(&[0, 0], &[false, false]).unwrap();
-    let state = history.counts().unwrap();
-    assert_eq!(counts(&state.all), [0, 0, 2, 1, 0, 0]);
-    assert_eq!(counts(&state.generated), [0, 0, 2, 1, 0, 0]);
+    assert_eq!(counts(&history, CountView::All), [0, 0, 2, 1, 0, 0]);
+    assert_eq!(counts(&history, CountView::Generated), [0, 0, 2, 1, 0, 0]);
     assert_eq!(history.generated_lengths(), [2, 1]);
     assert!(history.record(&[3, 0], &[true, false]).is_err());
     assert!(history.record(&[0], &[true]).is_err());
@@ -70,7 +71,10 @@ fn unused_controls_keep_no_state() {
     let device = Default::default();
     let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[-5, 99]], &device);
     let history = TokenHistory::from_prompt(&GenerationConfig::default(), 4, prompt, None).unwrap();
-    assert!(history.counts().is_none());
+    for view in [CountView::All, CountView::Generated] {
+        let error = history.counts(view).unwrap_err();
+        assert!(error.to_string().contains("tracks no"), "{error}");
+    }
     assert!(history.banned_tokens(0).is_empty());
 }
 
@@ -104,10 +108,19 @@ fn generated_tensor_history_counts_as_output() {
     let history = Tensor::<TestBackend, 2, Int>::from_ints([[1, 1, 7]], &device);
     let mask = TokenMask::new(Tensor::from_bool([[true, true, false]].into(), &device));
     let history = TokenHistory::from_generated_tensor(&config, 3, 1, history, Some(mask)).unwrap();
-    let state = history.counts().unwrap();
-    assert_eq!(counts(&state.generated), [0, 2, 0]);
-    assert_eq!(counts(&state.all), [0, 2, 0]);
+    assert_eq!(counts(&history, CountView::Generated), [0, 2, 0]);
+    // Frequency with the default scope reads only the generated view.
+    assert!(history.counts(CountView::All).is_err());
     assert_eq!(history.generated_lengths(), [2]);
+
+    let both = GenerationConfig {
+        repetition_penalty: 1.1,
+        ..config
+    };
+    let history = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2, 1]], &device);
+    let history = TokenHistory::from_generated_tensor(&both, 3, 1, history, None).unwrap();
+    assert_eq!(counts(&history, CountView::All), [0, 2, 1]);
+    assert_eq!(counts(&history, CountView::Generated), [0, 2, 1]);
 }
 
 /// The n-gram index follows Hugging Face's lookup rule for every size.
@@ -148,8 +161,148 @@ fn incremental_and_bulk_counts_agree() {
         None,
     )
     .unwrap();
-    assert_eq!(
-        counts(&incremental.counts().unwrap().generated),
-        counts(&bulk.counts().unwrap().generated)
+    for view in [CountView::All, CountView::Generated] {
+        assert_eq!(counts(&incremental, view), counts(&bulk, view));
+    }
+}
+
+/// Only the count views a configuration's penalties read are allocated.
+#[test]
+fn histories_track_only_the_count_views_their_penalties_read() {
+    let device = Default::default();
+    let cases = [
+        (GenerationConfig::default(), [false, false]),
+        (
+            GenerationConfig {
+                repetition_penalty: 1.3,
+                ..Default::default()
+            },
+            [true, false],
+        ),
+        (
+            GenerationConfig {
+                presence_penalty: 0.2,
+                ..Default::default()
+            },
+            [false, true],
+        ),
+        (
+            GenerationConfig {
+                frequency_penalty: 0.2,
+                additive_penalty_scope: PenaltyScope::PromptAndGenerated,
+                ..Default::default()
+            },
+            [true, false],
+        ),
+        (
+            GenerationConfig {
+                repetition_penalty: 0.8,
+                frequency_penalty: -0.4,
+                ..Default::default()
+            },
+            [true, true],
+        ),
+    ];
+    for (config, [all, generated]) in cases {
+        let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device);
+        let mut history = TokenHistory::from_prompt(&config, 3, prompt, None).unwrap();
+        history.record(&[2], &[true]).unwrap();
+        assert_eq!(history.counts(CountView::All).is_ok(), all, "{config:?}");
+        assert_eq!(
+            history.counts(CountView::Generated).is_ok(),
+            generated,
+            "{config:?}"
+        );
+        if all {
+            assert_eq!(counts(&history, CountView::All), [0, 1, 2]);
+        }
+        if generated {
+            assert_eq!(counts(&history, CountView::Generated), [0, 0, 1]);
+        }
+        let empty = TokenHistory::<TestBackend>::empty(&config, 3, 1, &device).unwrap();
+        assert_eq!(empty.counts(CountView::All).is_ok(), all);
+        assert_eq!(empty.counts(CountView::Generated).is_ok(), generated);
+    }
+}
+
+/// Recording into one clone never changes another (copy-on-write count buffers).
+#[test]
+fn cloned_histories_update_independently() {
+    let device = Default::default();
+    let mut original = TokenHistory::<TestBackend>::empty(&penalized(), 3, 1, &device).unwrap();
+    original.record(&[1], &[true]).unwrap();
+    let mut branch = original.clone();
+    branch.record(&[2], &[true]).unwrap();
+    original.record(&[0], &[true]).unwrap();
+    for view in [CountView::All, CountView::Generated] {
+        assert_eq!(counts(&original, view), [1, 1, 0]);
+        assert_eq!(counts(&branch, view), [0, 1, 1]);
+    }
+    assert_eq!(original.generated_lengths(), [2]);
+    assert_eq!(branch.generated_lengths(), [2]);
+}
+
+/// Times per-step count updates against the previous clone-and-scatter of both views.
+///
+/// The previous update scattered into `counts.clone()` for both views, which
+/// keeps a second reference alive and forces a full-buffer copy on backends
+/// with in-place scatter. On Flex every scatter copies regardless, so this
+/// measures only the saved view; CubeCL additionally avoids the copy.
+///
+/// Run with `cargo test --release --lib history_record_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing benchmark; run in release mode with --ignored --nocapture"]
+fn history_record_timing() {
+    use burn::tensor::IndexingUpdateOp;
+    use std::time::Instant;
+
+    let device = Default::default();
+    let (batch, vocabulary, steps) = (8, 256_000, 64);
+    let config = GenerationConfig {
+        repetition_penalty: 1.1,
+        ..Default::default()
+    };
+    let tokens = |step: usize| {
+        (0..batch)
+            .map(|row| ((step * 7_919 + row * 104_729) % vocabulary) as u32)
+            .collect::<Vec<_>>()
+    };
+    let active = vec![true; batch];
+
+    let started = Instant::now();
+    let mut previous_all = Tensor::<TestBackend, 2, Int>::zeros([batch, vocabulary], &device);
+    let mut previous_generated = previous_all.clone();
+    for step in 0..steps {
+        let ids = tokens(step).into_iter().map(i64::from).collect::<Vec<_>>();
+        let ids =
+            Tensor::<TestBackend, 2, Int>::from_data(TensorData::new(ids, [batch, 1]), &device);
+        let ones = Tensor::<TestBackend, 2, Int>::ones([batch, 1], &device);
+        previous_all =
+            previous_all
+                .clone()
+                .scatter(1, ids.clone(), ones.clone(), IndexingUpdateOp::Add);
+        previous_generated =
+            previous_generated
+                .clone()
+                .scatter(1, ids, ones, IndexingUpdateOp::Add);
+    }
+    let previous_counts = previous_all.into_data().to_vec::<i32>().unwrap();
+    let previous = started.elapsed();
+
+    let started = Instant::now();
+    let mut history =
+        TokenHistory::<TestBackend>::empty(&config, vocabulary, batch, &device).unwrap();
+    for step in 0..steps {
+        history.record(&tokens(step), &active).unwrap();
+    }
+    let current_counts = counts(&history, CountView::All);
+    let current = started.elapsed();
+
+    assert_eq!(previous_counts, current_counts);
+    println!(
+        "count updates, batch {batch}, vocabulary {vocabulary}, {steps} steps: previous {:.3} ms/step, current {:.3} ms/step ({:.1}x)",
+        previous.as_secs_f64() * 1e3 / steps as f64,
+        current.as_secs_f64() * 1e3 / steps as f64,
+        previous.as_secs_f64() / current.as_secs_f64()
     );
 }

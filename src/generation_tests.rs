@@ -996,7 +996,7 @@ fn processors_reject_incompatible_token_histories() {
     };
     let logits = || Tensor::<TestBackend, 2>::zeros([1, 4], &device);
     let plain_history = super::TokenHistory::empty(&plain, 4, 1, &device).unwrap();
-    for config in [penalized, ngram] {
+    for config in [penalized.clone(), ngram] {
         let processor = LogitsProcessor::<TestBackend>::new(config, 4, &device).unwrap();
         assert!(
             processor
@@ -1004,6 +1004,20 @@ fn processors_reject_incompatible_token_histories() {
                 .is_err()
         );
     }
+    // A generated-only history cannot serve prompt-scoped additive penalties.
+    let generated_scope = super::TokenHistory::empty(&penalized, 4, 1, &device).unwrap();
+    let prompt_scoped = GenerationConfig {
+        additive_penalty_scope: PenaltyScope::PromptAndGenerated,
+        ..penalized.clone()
+    };
+    let processor = LogitsProcessor::<TestBackend>::new(prompt_scoped, 4, &device).unwrap();
+    let error = processor
+        .process_with_history(logits(), &generated_scope)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("prompt-and-generated"),
+        "{error}"
+    );
     let processor = LogitsProcessor::<TestBackend>::new(plain.clone(), 4, &device).unwrap();
     let wide = super::TokenHistory::empty(&plain, 4, 2, &device).unwrap();
     assert!(processor.process_with_history(logits(), &wide).is_err());

@@ -86,6 +86,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Error, Result, TokenMask};
 
 use bookkeeping::{StopDecision, stop_decision};
+use history::CountView;
 
 /// Selects deterministic greedy decoding or stochastic categorical sampling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -302,11 +303,24 @@ impl GenerationConfig {
         Ok(())
     }
 
-    /// Whether any count-based penalty is active.
-    pub(crate) fn uses_token_counts(&self) -> bool {
-        self.repetition_penalty != 1.0
-            || self.presence_penalty != 0.0
-            || self.frequency_penalty != 0.0
+    /// Which occurrence counts the additive presence and frequency penalties read.
+    ///
+    /// `None` when both are zero, so no generated-only counts are tracked.
+    fn additive_count_view(&self) -> Option<CountView> {
+        let active = self.presence_penalty != 0.0 || self.frequency_penalty != 0.0;
+        active.then_some(match self.additive_penalty_scope {
+            PenaltyScope::Generated => CountView::Generated,
+            PenaltyScope::PromptAndGenerated => CountView::All,
+        })
+    }
+
+    /// Whether any configured penalty reads the occurrence counts of `view`.
+    ///
+    /// The repetition penalty reads [`CountView::All`]; the additive penalties
+    /// read the view their [`PenaltyScope`] selects.
+    fn reads_count_view(&self, view: CountView) -> bool {
+        (view == CountView::All && self.repetition_penalty != 1.0)
+            || self.additive_count_view() == Some(view)
     }
 
     /// Whether the sampling warpers include a vocabulary sort.
@@ -451,7 +465,7 @@ impl<B: Backend> LogitsProcessor<B> {
             ));
         }
         let logits = self.apply_sparse_adjustments(logits, history)?;
-        let logits = self.apply_token_penalties(logits, history);
+        let logits = self.apply_token_penalties(logits, history)?;
         Ok(self.apply_sampling_warpers(logits))
     }
 
@@ -621,14 +635,11 @@ impl<B: Backend> LogitsProcessor<B> {
         &self,
         logits: Tensor<B, 2>,
         history: &TokenHistory<B>,
-    ) -> Tensor<B, 2> {
-        let Some(counts) = history.counts() else {
-            return logits;
-        };
+    ) -> Result<Tensor<B, 2>> {
         let dtype = logits.dtype();
         let mut logits = logits;
         if self.config.repetition_penalty != 1.0 {
-            let seen = counts.all.clone().greater_elem(0);
+            let seen = history.counts(CountView::All)?.clone().greater_elem(0);
             let penalized = logits
                 .clone()
                 .div_scalar(self.config.repetition_penalty)
@@ -638,10 +649,10 @@ impl<B: Backend> LogitsProcessor<B> {
                 );
             logits = logits.mask_where(seen, penalized);
         }
-        let additive = match self.config.additive_penalty_scope {
-            PenaltyScope::Generated => &counts.generated,
-            PenaltyScope::PromptAndGenerated => &counts.all,
+        let Some(view) = self.config.additive_count_view() else {
+            return Ok(logits);
         };
+        let additive = history.counts(view)?;
         if self.config.frequency_penalty != 0.0 {
             let frequency = additive
                 .clone()
@@ -659,7 +670,7 @@ impl<B: Backend> LogitsProcessor<B> {
                 .mul_scalar(self.config.presence_penalty);
             logits = logits - presence;
         }
-        logits
+        Ok(logits)
     }
 
     /// Applies temperature, top-k, top-p, and min-p when sampling.
