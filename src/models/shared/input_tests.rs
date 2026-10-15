@@ -268,6 +268,77 @@ fn geometric_violations_are_shape_errors() {
     );
 }
 
+/// Deferred validation with extra checks matches `validate_input` and shares its readback.
+#[test]
+fn deferred_input_shares_one_readback_with_extra_checks() {
+    let source = mask([[true, false, true], [false, true, true]]);
+    let target = input(
+        ints([[0, 4, 5], [1, 2, 3]]),
+        Some(mask([[false, true, true], [true, true, true]])),
+        None,
+    );
+    let mut checks = DeferredChecks::new();
+    let pending = defer_input(&target, &Default::default(), &contract(), &mut checks).unwrap();
+    checks.row_counts(&source, "t.source_mask");
+    let columns = target
+        .token_mask
+        .as_ref()
+        .map(|target_mask| checks.mask_columns(target_mask))
+        .unwrap();
+    let readout = checks.run("test").unwrap();
+    let deferred = pending.finish(&readout).unwrap();
+    let direct = validate(&target, &contract()).unwrap();
+    assert_eq!(
+        int_values(deferred.positions.clone().unwrap()),
+        int_values(direct.positions.unwrap())
+    );
+    assert_eq!(deferred.evaluated_context, direct.evaluated_context);
+    assert_eq!(deferred.fully_valid, direct.fully_valid);
+    assert_eq!(
+        readout.valid_columns(columns),
+        vec![vec![1, 2], vec![0, 1, 2]]
+    );
+}
+
+/// Extra checks registered after `defer_input` fail only after the input's own value checks.
+#[test]
+fn deferred_input_errors_precede_extra_checks() {
+    let empty_source = mask([[false, false]]);
+    let bad_tokens = input(ints([[11, 0]]), None, None);
+    let mut checks = DeferredChecks::new();
+    defer_input(&bad_tokens, &Default::default(), &contract(), &mut checks).unwrap();
+    checks.row_counts(&empty_source, "t.source_mask");
+    assert_same_error(
+        checks.run("test").unwrap_err(),
+        Error::shape(
+            "t.input_ids",
+            "token values in 0..10",
+            "observed range 0..=11",
+        ),
+    );
+
+    let good_tokens = input(ints([[1, 0]]), None, None);
+    let mut checks = DeferredChecks::new();
+    defer_input(&good_tokens, &Default::default(), &contract(), &mut checks).unwrap();
+    checks.row_counts(&empty_source, "t.source_mask");
+    assert_same_error(
+        checks.run("test").unwrap_err(),
+        Error::shape(
+            "t.source_mask",
+            "at least one valid token in every row",
+            "a fully masked row",
+        ),
+    );
+
+    // Layout errors surface from `defer_input` itself, before any readback.
+    let mut checks = DeferredChecks::<TestBackend>::new();
+    let misshapen = input(ints([[1, 0]]), Some(mask([[true]])), None);
+    assert!(matches!(
+        defer_input(&misshapen, &Default::default(), &contract(), &mut checks),
+        Err(Error::Shape { .. })
+    ));
+}
+
 /// Value checks run tokens, then mask rows, then positions; extents come first.
 #[test]
 fn value_errors_follow_documented_precedence() {

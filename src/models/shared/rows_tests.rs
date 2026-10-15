@@ -362,29 +362,6 @@ fn implicit_position_ids_continue_from_cursor() {
     ));
 }
 
-/// Mask reads list valid columns per row and treat an absent mask as dense.
-#[test]
-fn read_valid_columns_matches_mask_rows() {
-    assert_eq!(
-        read_valid_columns::<TestBackend>(None, 2, 3, "m").unwrap(),
-        vec![vec![0, 1, 2], vec![0, 1, 2]]
-    );
-    assert_eq!(
-        read_valid_columns(
-            Some(&mask([[false, true, true], [true, false, true]])),
-            2,
-            3,
-            "m"
-        )
-        .unwrap(),
-        vec![vec![1, 2], vec![0, 2]]
-    );
-    assert!(matches!(
-        read_valid_columns(Some(&mask([[true, false]])), 2, 1, "m"),
-        Err(Error::Shape { .. })
-    ));
-}
-
 /// Active contexts skip inactive rows and keep row indices.
 #[test]
 fn active_contexts_skip_inactive_rows() {

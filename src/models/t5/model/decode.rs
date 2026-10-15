@@ -47,12 +47,12 @@ use crate::{
 
 use super::{
     DECODER_INPUT, T5Block, T5ForConditionalGeneration, T5Stack, diagnostic_buffer, select_hidden,
-    validate_encoder_output, validate_options,
+    validate_encoder_layout, validate_encoder_output, validate_options,
 };
 use crate::models::shared::{
     CompactRow, EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_grid,
-    ensure_same_device, index_tensor, prepare_stateful_rows, read_valid_columns,
-    select_hidden_with_last_columns, validate_logits_selection,
+    ensure_same_device, index_tensor, prepare_stateful_rows, select_hidden_with_last_columns,
+    validate_logits_selection,
 };
 use crate::models::t5::T5Config;
 
@@ -99,9 +99,13 @@ struct T5CrossAttentionCache<B: Backend> {
 
 impl<B: Backend> T5CrossAttentionCache<B> {
     /// Builds all decoder-layer cross projections without mutating decode state.
+    ///
+    /// The caller has already validated `encoder` (including its source-mask
+    /// rows) in [`prepare_stateful_input`]; the sync-free layout check here
+    /// only guards the projection reshapes.
     fn project(model: &T5ForConditionalGeneration<B>, encoder: &EncoderOutput<B>) -> Result<Self> {
         let [batch, source_sequence, _] = encoder.hidden_state.dims();
-        validate_encoder_output(
+        validate_encoder_layout(
             encoder,
             batch,
             model.config.d_model,
@@ -529,20 +533,19 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
     /// scattered back into the original rectangle. This matches stateful
     /// prefill for left, right, and gapped masks while preserving a fully
     /// differentiable tensor graph for all parameterized operations.
+    ///
+    /// `valid_indices[b]` lists row `b`'s valid columns, read back together
+    /// with the input validation; every row has at least one.
     pub(super) fn decode_stateless_masked(
         &self,
         encoder: &EncoderOutput<B>,
         decoder: CausalLmInput<B>,
         options: &ForwardOptions,
+        valid_indices: &[Vec<usize>],
     ) -> Result<CausalLmOutput<B>> {
         let [batch, sequence] = decoder.token_ids.dims();
+        debug_assert_eq!(valid_indices.len(), batch, "one column list per target row");
         let device = decoder.token_ids.device();
-        let valid_indices = read_valid_columns(
-            decoder.token_mask.as_ref(),
-            batch,
-            sequence,
-            DECODER_INPUT.token_mask,
-        )?;
         let diagnostic_count = self.decoder.block.len() + 2;
         let mut final_rows = Vec::with_capacity(batch);
         let mut diagnostic_rows: Vec<Vec<Tensor<B, 3>>> = if options.hidden_states {
@@ -553,13 +556,8 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
             Vec::new()
         };
         for (row, valid) in valid_indices.iter().enumerate() {
-            if valid.is_empty() {
-                return Err(Error::shape(
-                    "t5.decoder.token_mask",
-                    "at least one valid token in every stateless row",
-                    "a fully masked row",
-                ));
-            }
+            // An empty row cannot reach this point (validation rejects fully
+            // masked rows); `CompactRow::new` still reports one contextually.
             let plan = CompactRow::<B>::new(row, valid, sequence, &device)?;
             let hidden = self.shared.forward(plan.compact(&decoder.token_ids));
             let source = encoder.hidden_state.clone().slice([

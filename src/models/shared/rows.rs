@@ -23,7 +23,6 @@ use burn::tensor::{BasicOps, Int, Tensor, TensorData, TensorKind, backend::Backe
 
 use crate::{
     CausalLmInput, Error, Result,
-    architecture::TokenMask,
     cache::{DecodeStateError, TensorCacheError},
     position::RopeScaling,
 };
@@ -326,35 +325,6 @@ fn valid_rows(mask: Option<&[bool]>, batch: usize, sequence: usize) -> Vec<Vec<u
             .collect(),
         None => vec![(0..sequence).collect::<Vec<_>>(); batch],
     }
-}
-
-/// Reads a validity mask once and lists each row's valid columns.
-///
-/// An absent mask means every column is valid and performs no backend work.
-/// Used by stateless paths that compact rows the same way stateful prefill
-/// does, so masked and cached execution share one token numbering.
-///
-/// # Errors
-///
-/// Returns [`Error::Shape`] for a mask whose extent differs from
-/// `[batch, sequence]` and [`Error::BackendCapability`] when the backend
-/// cannot read the mask.
-pub(crate) fn read_valid_columns<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-    name: &str,
-) -> Result<Vec<Vec<usize>>> {
-    let Some(mask) = mask else {
-        return Ok(valid_rows(None, batch, sequence));
-    };
-    ensure_grid(mask.as_tensor().dims(), batch, sequence, name)?;
-    let flat = mask.as_tensor().clone().int().reshape([batch * sequence]);
-    let flags = read_int_tensors(vec![flat], name)?
-        .into_iter()
-        .map(|value| value != 0)
-        .collect::<Vec<_>>();
-    Ok(valid_rows(Some(&flags), batch, sequence))
 }
 
 /// Converts a planning failure into the shared cache-metadata error.

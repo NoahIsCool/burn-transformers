@@ -1,9 +1,12 @@
 //! Tests for fused validation readback, check precedence, and device/extent errors.
 
 use burn::tensor::{DType, Int, Tensor};
+use proptest::prelude::*;
 
 use super::*;
-use crate::models::shared::test_support::{TestBackend, assert_same_error, ints, mask};
+use crate::models::shared::test_support::{
+    TestBackend, assert_same_error, ints, mask, mask_from_rows,
+};
 
 /// A satisfied check list returns exact ranges, counts, and the context extent.
 #[test]
@@ -129,4 +132,70 @@ fn layout_helpers_report_contextual_errors() {
         ensure_grid([3, 2], 2, 3, "m").unwrap_err(),
         Error::shape("m", "[2, 3]", "[3, 2]"),
     );
+}
+
+/// A whole mask shares the readback, and later reductions keep their own slots.
+#[test]
+fn mask_columns_share_the_readback_with_reductions() {
+    let tokens = ints([[3, 1, 2], [0, 2, 1]]);
+    let positions = ints([[0, 4, 1], [2, 5, 3]]);
+    let padded = mask([[false, true, true], [true, false, true]]);
+    let mut checks = DeferredChecks::new();
+    let token_range = checks.values_below(&tokens, 4, "t.input_ids", "token");
+    let columns = checks.mask_columns(&padded);
+    let counts = checks.row_counts(&padded, "t.mask");
+    let position_range = checks.values_below(&positions, 8, "t.position_ids", "position");
+    let readout = checks.run("test").expect("valid values");
+    assert_eq!(readout.range(token_range), (0, 3));
+    assert_eq!(readout.valid_columns(columns), vec![vec![1, 2], vec![0, 2]]);
+    assert_eq!(readout.min_row_count(counts), 2);
+    assert_eq!(readout.range(position_range), (0, 5));
+}
+
+/// Registering a mask adds no predicate: fully masked rows need `row_counts`.
+#[test]
+fn mask_columns_alone_accept_empty_rows() {
+    let mut checks = DeferredChecks::<TestBackend>::new();
+    let columns = checks.mask_columns(&mask([[false, false], [true, false]]));
+    let readout = checks.run("test").expect("no predicate registered");
+    assert_eq!(readout.valid_columns(columns), vec![vec![], vec![0]]);
+}
+
+/// A zero-width mask handle yields one empty column list per row.
+#[test]
+fn zero_width_mask_has_empty_rows() {
+    let readout = Readout { values: Vec::new() };
+    let id = MaskId {
+        slot: 0,
+        batch: 2,
+        sequence: 0,
+    };
+    assert_eq!(readout.valid_columns(id), vec![Vec::<usize>::new(); 2]);
+}
+
+proptest! {
+    /// Columns read with the checks equal a host filter, and reductions
+    /// registered around the mask keep their exact values.
+    #[test]
+    fn mask_columns_match_host_reference(
+        rows in (1usize..5, 1usize..9).prop_flat_map(|(batch, sequence)| {
+            prop::collection::vec(prop::collection::vec(any::<bool>(), sequence), batch)
+        }),
+        low in 0i64..100,
+        span in 0i64..100,
+    ) {
+        let values = Tensor::<TestBackend, 1, Int>::from_data([low, low + span], &Default::default());
+        let mut checks = DeferredChecks::new();
+        let before = checks.values_below(&values, usize::MAX, "t.before", "value");
+        let columns = checks.mask_columns(&mask_from_rows(&rows));
+        let after = checks.values_below(&values, usize::MAX, "t.after", "value");
+        let readout = checks.run("test").expect("values are in range");
+        let expected = rows
+            .iter()
+            .map(|row| (0..row.len()).filter(|&column| row[column]).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        prop_assert_eq!(readout.valid_columns(columns), expected);
+        prop_assert_eq!(readout.range(before), (low, low + span));
+        prop_assert_eq!(readout.range(after), (low, low + span));
+    }
 }

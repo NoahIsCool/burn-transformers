@@ -35,7 +35,9 @@ use crate::{
     },
 };
 
-use crate::models::shared::{InputContract, InputNames, PaddedPositions, validate_input};
+use crate::models::shared::{
+    DeferredChecks, InputContract, InputNames, PaddedPositions, defer_input,
+};
 pub(super) use crate::models::shared::{select_hidden, validate_position_values};
 
 /// Whether a modular stack applies causal or bidirectional self-attention.
@@ -1322,6 +1324,21 @@ pub(super) fn validate_and_resolve_input<B: Backend>(
     max_positions: usize,
     field: &str,
 ) -> Result<(Tensor<B, 2, Int>, usize)> {
+    validate_and_resolve_input_with(input, vocabulary_size, max_positions, field, |_| Ok(()))
+}
+
+/// [`validate_and_resolve_input`] plus caller checks that share its readback.
+///
+/// `extra` registers further deferred checks (for example a source mask's
+/// row counts) after the input's own, so their errors follow the input's
+/// value errors and every value still costs a single device-to-host read.
+pub(super) fn validate_and_resolve_input_with<B: Backend>(
+    input: &CausalLmInput<B>,
+    vocabulary_size: usize,
+    max_positions: usize,
+    field: &str,
+    extra: impl FnOnce(&mut DeferredChecks<'_, B>) -> Result<()>,
+) -> Result<(Tensor<B, 2, Int>, usize)> {
     let token_ids = format!("{field}.token_ids");
     let token_mask = format!("{field}.token_mask");
     let position_ids = format!("{field}.position_ids");
@@ -1330,13 +1347,17 @@ pub(super) fn validate_and_resolve_input<B: Backend>(
         token_mask: &token_mask,
         position_ids: &position_ids,
     };
-    let validated = validate_input(
+    let mut checks = DeferredChecks::new();
+    let pending = defer_input(
         input,
         &input.token_ids.device(),
         &InputContract::new(names, &token_ids, vocabulary_size)
             .with_position_limit(max_positions)
             .with_padded_positions(PaddedPositions::ZeroFill),
+        &mut checks,
     )?;
+    extra(&mut checks)?;
+    let validated = pending.finish(&checks.run(&token_ids)?)?;
     Ok((
         validated.require_positions(&position_ids)?,
         validated.evaluated_context,

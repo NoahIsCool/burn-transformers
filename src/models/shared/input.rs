@@ -14,7 +14,9 @@
 //! with all value checks sharing one device-to-host readback (see
 //! [`DeferredChecks`]). Size and device errors are reported before value
 //! errors; among value errors tokens precede the mask, which precedes
-//! positions.
+//! positions. [`defer_input`] registers the same checks on a caller's list
+//! instead, so an encoder-decoder pass can validate its source, its target,
+//! and a supplied encoder mask with one readback.
 //!
 //! # Implicit positions
 //!
@@ -37,7 +39,9 @@ use burn::tensor::{Int, Tensor, backend::Backend};
 
 use crate::{CausalLmInput, Error, Result, architecture::TokenMask};
 
-use super::checks::{DeferredChecks, ensure_grid, ensure_nonempty, ensure_same_device};
+use super::checks::{
+    DeferredChecks, RangeId, Readout, RowCountId, ensure_grid, ensure_nonempty, ensure_same_device,
+};
 
 /// Logical tensor names that appear in a family's input errors.
 ///
@@ -154,6 +158,7 @@ impl<B: Backend> ValidatedInput<B> {
 ///
 /// `device` is the device every input tensor must share, normally the model
 /// parameters' device. Exactly one blocking device-to-host read is performed.
+/// Use [`defer_input`] instead to share that read with further checks.
 ///
 /// # Errors
 ///
@@ -165,6 +170,76 @@ pub(crate) fn validate_input<B: Backend>(
     device: &B::Device,
     contract: &InputContract<'_>,
 ) -> Result<ValidatedInput<B>> {
+    let mut checks = DeferredChecks::new();
+    let pending = defer_input(input, device, contract, &mut checks)?;
+    let readout = checks.run(contract.names.token_ids)?;
+    pending.finish(&readout)
+}
+
+/// A stateless input whose layout is valid and whose value checks are registered.
+///
+/// Produced by [`defer_input`]; [`Self::finish`] completes validation once the
+/// shared [`DeferredChecks`] have been read back.
+#[derive(Debug)]
+pub(crate) struct DeferredInput<'a, B: Backend> {
+    /// Resolved positions, as [`ValidatedInput::positions`].
+    positions: Option<Tensor<B, 2, Int>>,
+    /// Width `S` of the token grid.
+    sequence: usize,
+    /// Smallest per-row valid count, registered when a mask is present.
+    row_counts: Option<RowCountId>,
+    /// Observed position range, registered when positions are bounded.
+    position_range: Option<RangeId>,
+    /// Name reported for an unrepresentable rotary context.
+    position_name: &'a str,
+}
+
+impl<B: Backend> DeferredInput<'_, B> {
+    /// Derives the rotary context and padding summary from the shared readback.
+    ///
+    /// `readout` must come from the [`DeferredChecks`] passed to [`defer_input`];
+    /// its predicates (token range, non-empty rows, position range) have
+    /// already been enforced by [`DeferredChecks::run`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Configuration`] for a maximum position without a
+    /// representable context extent.
+    pub(crate) fn finish(self, readout: &Readout) -> Result<ValidatedInput<B>> {
+        let evaluated_context = self
+            .position_range
+            .map(|range| readout.context(range, self.position_name))
+            .transpose()?
+            .unwrap_or(0);
+        // A row is padding-free exactly when its valid count equals the width S.
+        let fully_valid = self.row_counts.is_none_or(|counts| {
+            usize::try_from(readout.min_row_count(counts)).is_ok_and(|count| count == self.sequence)
+        });
+        Ok(ValidatedInput {
+            positions: self.positions,
+            evaluated_context,
+            fully_valid,
+        })
+    }
+}
+
+/// Checks an input's layout and registers its value checks on a shared list.
+///
+/// Size and device errors are returned immediately. Token range, non-empty
+/// rows, and bounded positions are registered on `checks` in that order, so a
+/// caller can append further checks (for example an encoder mask) and still
+/// pay a single readback. Call [`DeferredInput::finish`] with the readout.
+///
+/// # Errors
+///
+/// Returns [`Error::Shape`] for empty or mismatched extents and
+/// [`Error::BackendCapability`] for device mismatches.
+pub(crate) fn defer_input<'a, B: Backend>(
+    input: &CausalLmInput<B>,
+    device: &B::Device,
+    contract: &InputContract<'a>,
+    checks: &mut DeferredChecks<'a, B>,
+) -> Result<DeferredInput<'a, B>> {
     let names = contract.names;
     let [batch, sequence] = input.token_ids.dims();
     ensure_nonempty(batch, sequence, names.token_ids)?;
@@ -177,7 +252,6 @@ pub(crate) fn validate_input<B: Backend>(
         contract.padded_positions,
     )?;
 
-    let mut checks = DeferredChecks::new();
     checks.values_below(
         &input.token_ids,
         contract.vocabulary,
@@ -195,20 +269,12 @@ pub(crate) fn validate_input<B: Backend>(
             .map(|(positions, limit)| {
                 checks.values_below(positions, limit, names.position_ids, "position")
             });
-    let readout = checks.run(names.token_ids)?;
-
-    let evaluated_context = position_range
-        .map(|range| readout.context(range, names.position_ids))
-        .transpose()?
-        .unwrap_or(0);
-    // A row is padding-free exactly when its valid count equals the width S.
-    let fully_valid = row_counts.is_none_or(|counts| {
-        usize::try_from(readout.min_row_count(counts)).is_ok_and(|count| count == sequence)
-    });
-    Ok(ValidatedInput {
+    Ok(DeferredInput {
         positions,
-        evaluated_context,
-        fully_valid,
+        sequence,
+        row_counts,
+        position_range,
+        position_name: names.position_ids,
     })
 }
 

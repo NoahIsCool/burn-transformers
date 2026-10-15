@@ -7,9 +7,13 @@ use burn::{
 };
 use proptest::prelude::*;
 
+use super::super::{
+    PARAMETERS, TargetColumns, ValidatedTarget, defer_encoder_output, defer_token_input,
+};
 use super::*;
 use crate::{
     DecodeState, LogitsSelection,
+    models::shared::DeferredChecks,
     models::t5::{T5FeedForwardProjection, T5LayerCrossAttention},
 };
 
@@ -25,6 +29,58 @@ type ContractFixture = (
     EncoderOutput<TestBackend>,
     T5DecodeState<TestBackend>,
 );
+
+/// Stateless decoding against an arbitrary encoder result: the cached-parity oracle.
+///
+/// Production `forward` validates source and target together and produces the
+/// encoder result itself. These tests instead pair one target with supplied,
+/// possibly invalid, encoder results, so the oracle validates both with one
+/// readback (target layout, encoder devices/extents/dtype, then target tokens,
+/// target mask, and encoder mask values) and runs the production decoder path.
+impl<B: Backend> T5ForConditionalGeneration<B> {
+    /// Runs the decoder without persistent KV or cross-attention state.
+    fn decode_stateless(
+        &self,
+        encoder: &EncoderOutput<B>,
+        decoder: CausalLmInput<B>,
+        options: &ForwardOptions,
+    ) -> Result<CausalLmOutput<B>> {
+        validate_options(options)?;
+        let model_device = self.shared.weight.lazy_device();
+        let mut checks = DeferredChecks::new();
+        let target = defer_token_input(
+            &decoder,
+            self.config.vocab_size,
+            &model_device,
+            DECODER_INPUT,
+            "decoder",
+            &mut checks,
+        )?;
+        ensure_same_device(
+            "t5.encoder_output.hidden_state",
+            &encoder.hidden_state.device(),
+            &model_device,
+            PARAMETERS,
+        )?;
+        if let Some(mask) = &encoder.token_mask {
+            ensure_same_device(
+                "t5.encoder_output.token_mask",
+                &mask.as_tensor().device(),
+                &model_device,
+                PARAMETERS,
+            )?;
+        }
+        defer_encoder_output(
+            &mut checks,
+            encoder,
+            decoder.token_ids.dims()[0],
+            self.config.d_model,
+            self.shared.weight.val().dtype(),
+        )?;
+        let target = ValidatedTarget::read(checks, &decoder, target, None, TargetColumns::Read)?;
+        self.decode_validated(encoder, decoder, options, target.columns)
+    }
+}
 
 /// Builds a small topology with configurable FFN and vocabulary-head layouts.
 fn tiny_config(projection: T5FeedForwardProjection, tied: bool, layers: usize) -> T5Config {
@@ -2009,5 +2065,222 @@ fn stateless_encoder_decoder_graph_has_parameter_gradients() {
         gradients
             .get::<TestBackend, 2>(model.shared.weight.id)
             .is_some()
+    );
+}
+
+/// Builds a `[rows, columns]` validity mask (`true == valid`) on `device`.
+fn validity<const R: usize, const C: usize>(
+    values: [[bool; C]; R],
+    device: &TestDevice,
+) -> TokenMask<TestBackend> {
+    TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        values.into(),
+        device,
+    ))
+}
+
+/// Builds a target or source input from `[rows, columns]` IDs and an optional mask.
+fn padded_input<const R: usize, const C: usize>(
+    ids: [[i32; C]; R],
+    mask: Option<[[bool; C]; R]>,
+    device: &TestDevice,
+) -> CausalLmInput<TestBackend> {
+    CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints(ids, device),
+        token_mask: mask.map(|mask| validity(mask, device)),
+        position_ids: None,
+    }
+}
+
+/// Reads a float tensor into exact row-major host values.
+fn exact<const D: usize>(tensor: Tensor<TestBackend, D>) -> Vec<f32> {
+    tensor.into_data().to_vec::<f32>().expect("f32 tensor data")
+}
+
+/// The fused single-readback `forward` reproduces separately validated stages bit for bit.
+///
+/// Source and target use left, interior, and right padding, so the masked
+/// compaction path consumes the valid columns read with the validation.
+#[test]
+fn fused_forward_matches_separately_validated_encode_and_decode() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::GatedGelu, false, 2),
+        &device,
+    )
+    .unwrap();
+    let source = padded_input(
+        [[8, 9, 10, 0], [8, 0, 9, 10]],
+        Some([[true, true, true, false], [true, false, true, true]]),
+        &device,
+    );
+    let target = padded_input(
+        [[0, 3, 0, 4], [0, 0, 5, 6]],
+        Some([[true, true, false, true], [false, false, true, true]]),
+        &device,
+    );
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        hidden_states: true,
+        ..ForwardOptions::default()
+    };
+    let fused = model
+        .forward(
+            Seq2SeqInput {
+                encoder: source.clone(),
+                decoder: target.clone(),
+            },
+            &options,
+        )
+        .unwrap();
+    let encoder = model.encode(source, &options).unwrap();
+    let staged = model.decode_stateless(&encoder, target, &options).unwrap();
+    assert_eq!(
+        exact(fused.encoder.hidden_state),
+        exact(encoder.hidden_state)
+    );
+    assert_eq!(exact(fused.decoder.logits), exact(staged.logits));
+    assert_eq!(
+        fused.decoder.hidden_states.len(),
+        staged.hidden_states.len()
+    );
+    for (fused, staged) in fused
+        .decoder
+        .hidden_states
+        .into_iter()
+        .zip(staged.hidden_states)
+    {
+        assert_eq!(exact(fused), exact(staged));
+    }
+}
+
+/// Complete passes validate both inputs before encoding: layout errors first,
+/// then source values, then target values, with and without hooks.
+#[test]
+fn complete_pass_validation_reports_layout_then_source_then_target_errors() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let run = |input: Seq2SeqInput<TestBackend>, hooked: bool| {
+        if hooked {
+            let mut hooks = crate::intervention::Hooks::new();
+            hooks.edit(
+                crate::intervention::Layer::decoder(0).cross_attention_output(),
+                |activation| activation,
+            );
+            model.forward_with_hooks(input, &ForwardOptions::default(), &mut hooks)
+        } else {
+            model.forward(input, &ForwardOptions::default())
+        }
+    };
+    let shape = |error: Error| match error {
+        Error::Shape { tensor, actual, .. } => (tensor, actual),
+        other => panic!("expected a shape error, found {other:?}"),
+    };
+    for hooked in [false, true] {
+        // Source token values precede target token values.
+        let error = run(
+            Seq2SeqInput {
+                encoder: padded_input([[99, 1]], None, &device),
+                decoder: padded_input([[0, 99]], None, &device),
+            },
+            hooked,
+        )
+        .unwrap_err();
+        assert_eq!(
+            shape(error),
+            (
+                "t5.encoder.input_ids".into(),
+                "observed range 1..=99".into()
+            )
+        );
+
+        // A target layout error precedes any value error.
+        let mut decoder = padded_input([[0, 1]], None, &device);
+        decoder.token_mask = Some(validity([[true, true, true]], &device));
+        let error = run(
+            Seq2SeqInput {
+                encoder: padded_input([[99, 1]], None, &device),
+                decoder,
+            },
+            hooked,
+        )
+        .unwrap_err();
+        assert_eq!(shape(error).0, "t5.decoder.token_mask");
+
+        // A fully masked target row is rejected after valid source values.
+        let error = run(
+            Seq2SeqInput {
+                encoder: padded_input([[4, 1], [2, 3]], None, &device),
+                decoder: padded_input(
+                    [[0, 1], [0, 2]],
+                    Some([[true, true], [false, false]]),
+                    &device,
+                ),
+            },
+            hooked,
+        )
+        .unwrap_err();
+        assert_eq!(
+            shape(error),
+            ("t5.decoder.token_mask".into(), "a fully masked row".into())
+        );
+
+        // A fully masked source row is named after the source input.
+        let error = run(
+            Seq2SeqInput {
+                encoder: padded_input([[4, 1]], Some([[false, false]]), &device),
+                decoder: padded_input([[0, 1]], None, &device),
+            },
+            hooked,
+        )
+        .unwrap_err();
+        assert_eq!(
+            shape(error),
+            ("t5.encoder.token_mask".into(), "a fully masked row".into())
+        );
+
+        // Mismatched source and target batches are still rejected after encoding.
+        let error = run(
+            Seq2SeqInput {
+                encoder: padded_input([[4, 1], [2, 3]], None, &device),
+                decoder: padded_input([[0, 1]], None, &device),
+            },
+            hooked,
+        )
+        .unwrap_err();
+        assert_eq!(shape(error).0, "t5.encoder_output.hidden_state");
+    }
+}
+
+/// The test oracle reports a supplied fully masked source row after target values.
+#[test]
+fn supplied_source_mask_is_checked_after_target_values() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let mut encoder = encoded_source(&model, &device);
+    encoder.token_mask = Some(validity([[false, false, false]], &device));
+    let options = ForwardOptions::default();
+    let error = model
+        .decode_stateless(&encoder, target(&[0, 99], &device), &options)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("t5.decoder.input_ids"),
+        "{error}"
+    );
+    let error = model
+        .decode_stateless(&encoder, target(&[0, 1], &device), &options)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, actual, .. }
+            if tensor == "t5.encoder_output.token_mask" && actual == "a fully masked row"),
+        "{error}"
     );
 }

@@ -13,6 +13,11 @@
 //! which a family lists its checks. Reductions run in each tensor's integer
 //! dtype; the only conversion is a lossless widening to `i64` when the
 //! participating tensors use different integer dtypes.
+//!
+//! A path that compacts padded rows on the host also needs the whole `[B, S]`
+//! mask. [`DeferredChecks::mask_columns`] appends the flattened mask to the
+//! same transfer, so validation and row planning still cost one
+//! synchronization; the copy moves `B·S` integers instead of a few scalars.
 
 use burn::tensor::{DType, Int, Tensor, backend::Backend};
 
@@ -33,6 +38,17 @@ pub(crate) struct RowCountId(
     /// Readback slot of the smallest per-row count.
     usize,
 );
+
+/// Handle to a whole `[batch, sequence]` mask recorded by [`DeferredChecks::mask_columns`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MaskId {
+    /// Readback slot of the first flag; the mask occupies `batch * sequence` slots.
+    slot: usize,
+    /// Number of mask rows `B`.
+    batch: usize,
+    /// Number of mask columns `S`.
+    sequence: usize,
+}
 
 /// One host predicate evaluated after the fused readback.
 #[derive(Debug)]
@@ -60,12 +76,15 @@ enum Check<'a> {
 /// Range and occupancy checks resolved by a single device-to-host readback.
 ///
 /// Register checks in the order their errors should take precedence, then
-/// call [`DeferredChecks::run`]. Without registered reductions `run` performs
+/// call [`DeferredChecks::run`]. Without registered tensors `run` performs
 /// no backend work at all.
 pub(crate) struct DeferredChecks<'a, B: Backend> {
-    /// Scalar reductions shaped `[1]`, read together by [`Self::run`].
-    reductions: Vec<Tensor<B, 1, Int>>,
-    /// Host predicates over `reductions`, in error-precedence order.
+    /// Flattened integer tensors (scalar reductions and whole masks) read
+    /// together by [`Self::run`], in registration order.
+    tensors: Vec<Tensor<B, 1, Int>>,
+    /// Total element count of `tensors`, which is also the next free slot.
+    slots: usize,
+    /// Host predicates over the readback, in error-precedence order.
     checks: Vec<Check<'a>>,
 }
 
@@ -73,9 +92,18 @@ impl<'a, B: Backend> DeferredChecks<'a, B> {
     /// Creates an empty check list.
     pub(crate) const fn new() -> Self {
         Self {
-            reductions: Vec::new(),
+            tensors: Vec::new(),
+            slots: 0,
             checks: Vec::new(),
         }
+    }
+
+    /// Appends a flattened tensor to the readback and returns its first slot.
+    fn push(&mut self, tensor: Tensor<B, 1, Int>) -> usize {
+        let slot = self.slots;
+        self.slots += tensor.dims()[0];
+        self.tensors.push(tensor);
+        slot
     }
 
     /// Requires every value to lie in `0..limit` and records the observed range.
@@ -90,10 +118,9 @@ impl<'a, B: Backend> DeferredChecks<'a, B> {
         name: &'a str,
         quantity: &'static str,
     ) -> RangeId {
-        let slot = self.reductions.len();
         // `Tensor::min`/`max` reduce every axis to a `[1]` tensor without a host read.
-        self.reductions.push(values.clone().min());
-        self.reductions.push(values.clone().max());
+        let slot = self.push(values.clone().min());
+        self.push(values.clone().max());
         self.checks.push(Check::Range {
             name,
             quantity,
@@ -108,12 +135,25 @@ impl<'a, B: Backend> DeferredChecks<'a, B> {
     /// A fully masked row fails with `Shape { tensor: name, expected: "at least
     /// one valid token in every row", actual: "a fully masked row" }`.
     pub(crate) fn row_counts(&mut self, mask: &TokenMask<B>, name: &'a str) -> RowCountId {
-        let slot = self.reductions.len();
         // Σ_t m[b, t] is row b's valid-token count; its minimum detects empty rows.
-        self.reductions
-            .push(mask.as_tensor().clone().int().sum_dim(1).min());
+        let slot = self.push(mask.as_tensor().clone().int().sum_dim(1).min());
         self.checks.push(Check::NonEmptyRows { name, slot });
         RowCountId(slot)
+    }
+
+    /// Reads the whole mask back with the checks, so the caller can plan rows on the host.
+    ///
+    /// Registers no predicate; pair it with [`Self::row_counts`] when empty
+    /// rows must be rejected. [`Readout::valid_columns`] then lists every
+    /// row's valid columns.
+    pub(crate) fn mask_columns(&mut self, mask: &TokenMask<B>) -> MaskId {
+        let [batch, sequence] = mask.as_tensor().dims();
+        let flags = mask.as_tensor().clone().int().reshape([batch * sequence]);
+        MaskId {
+            slot: self.push(flags),
+            batch,
+            sequence,
+        }
     }
 
     /// Reads every recorded reduction once and evaluates the predicates in order.
@@ -124,7 +164,7 @@ impl<'a, B: Backend> DeferredChecks<'a, B> {
     /// [`Error::BackendCapability`] when the backend cannot read the values.
     pub(crate) fn run(self, label: &str) -> Result<Readout> {
         let readout = Readout {
-            values: read_int_tensors(self.reductions, label)?,
+            values: read_int_tensors(self.tensors, label)?,
         };
         for check in &self.checks {
             readout.evaluate(check)?;
@@ -133,13 +173,13 @@ impl<'a, B: Backend> DeferredChecks<'a, B> {
     }
 }
 
-/// Host copy of the reductions registered on a [`DeferredChecks`].
+/// Host copy of the tensors registered on a [`DeferredChecks`].
 ///
-/// Its length equals the number of registered reductions, so every handle
-/// issued by the same check list addresses a present value.
+/// Its length equals the number of registered elements, so every handle
+/// issued by the same check list addresses present values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Readout {
-    /// Reduction results in registration order.
+    /// Registered values, flattened in registration order.
     values: Vec<i64>,
 }
 
@@ -152,6 +192,23 @@ impl Readout {
     /// Returns the smallest per-row valid-token count recorded under `id`.
     pub(crate) fn min_row_count(&self, id: RowCountId) -> i64 {
         self.values[id.0]
+    }
+
+    /// Lists each row's valid columns `c_0 < … < c_{n-1}` of the mask recorded under `id`.
+    ///
+    /// A zero-width mask yields `B` empty rows.
+    pub(crate) fn valid_columns(&self, id: MaskId) -> Vec<Vec<usize>> {
+        if id.sequence == 0 {
+            return vec![Vec::new(); id.batch];
+        }
+        let flags = self.values[id.slot..id.slot + id.batch * id.sequence]
+            .iter()
+            .map(|&flag| flag != 0)
+            .collect::<Vec<_>>();
+        flags
+            .chunks_exact(id.sequence)
+            .map(plan::valid_columns)
+            .collect()
     }
 
     /// Converts the maximum recorded under `id` into the context extent `max + 1`.

@@ -24,13 +24,14 @@ use crate::{
     intervention::{Hooks, Layer, PointInfo, Stack},
 };
 
-use crate::models::shared::{ensure_same_device, validate_nonempty_mask};
+use crate::models::shared::{check_nonempty_mask, ensure_grid, ensure_same_device};
 
 use super::{
     common::{
         AttentionDirection, BackboneOutput, ModularLayer, ModularNorm, causal_output, has_moe,
         router_diagnostics, select_hidden, tied_projection, validate_and_resolve_input,
-        validate_decoder_execution, validate_forward_options, validate_position_values,
+        validate_and_resolve_input_with, validate_decoder_execution, validate_forward_options,
+        validate_position_values,
     },
     state::{ModularDecodeState, StatePurpose},
 };
@@ -561,17 +562,28 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
         retain_hidden_states: bool,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<BackboneOutput<B>> {
-        validate_encoder_output(
+        validate_encoder_layout(
             encoder,
             decoder.token_ids.dims()[0],
             self.spec.encoder.hidden_size,
             &decoder.token_ids.device(),
         )?;
-        let (positions, context) = validate_and_resolve_input(
+        // The source mask's row counts share the decoder input's readback.
+        let (positions, context) = validate_and_resolve_input_with(
             decoder,
             self.spec.decoder.vocabulary_size,
             self.spec.decoder.max_position_embeddings,
             "custom.seq2seq.decoder",
+            |checks| {
+                let [batch, source_sequence, _] = encoder.hidden_state.dims();
+                check_nonempty_mask(
+                    checks,
+                    encoder.token_mask.as_ref(),
+                    batch,
+                    source_sequence,
+                    ENCODER_MASK,
+                )
+            },
         )?;
         let hidden = self.decoder_embed_tokens.forward(decoder.token_ids.clone());
         let mut hidden = hooks.apply(Stack::Decoder.embedding(), hidden)?;
@@ -805,8 +817,11 @@ fn validate_seq2seq_execution(spec: &Seq2SeqSpec) -> Result<()> {
 /// Name of a supplied encoder result's source mask in errors.
 const ENCODER_MASK: &str = "custom.seq2seq.encoder_mask";
 
-/// Checks externally supplied encoder states before cross-attention projection.
-fn validate_encoder_output<B: Backend>(
+/// Checks a supplied encoder result's extents and devices without reading values.
+///
+/// The caller defers the source mask's non-empty-row check into the decoder
+/// input's readback with [`check_nonempty_mask`].
+fn validate_encoder_layout<B: Backend>(
     encoder: &EncoderOutput<B>,
     decoder_batch: usize,
     hidden_size: usize,
@@ -833,12 +848,12 @@ fn validate_encoder_output<B: Backend>(
             decoder_device,
             "the custom decoder input",
         )?;
+        ensure_grid(
+            mask.as_tensor().dims(),
+            batch,
+            source_sequence,
+            ENCODER_MASK,
+        )?;
     }
-    validate_nonempty_mask(
-        encoder.token_mask.as_ref(),
-        batch,
-        source_sequence,
-        ENCODER_MASK,
-    )?;
     Ok(())
 }

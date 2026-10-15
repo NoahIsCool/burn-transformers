@@ -41,8 +41,9 @@ use crate::{
 
 use super::{T5Config, T5FeedForwardProjection};
 use crate::models::shared::{
-    ImplicitPositions, InputContract, InputNames, ValidatedInput, ensure_grid, ensure_nonempty,
-    ensure_same_device, select_hidden, validate_input, validate_nonempty_mask,
+    DeferredChecks, DeferredInput, ImplicitPositions, InputContract, InputNames, ValidatedInput,
+    check_nonempty_mask, defer_input, ensure_grid, ensure_nonempty, ensure_same_device,
+    select_hidden, validate_input,
 };
 
 mod decode;
@@ -1076,6 +1077,15 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
             ENCODER_INPUT,
             "encoder",
         )?;
+        self.encode_validated(source, options)
+    }
+
+    /// Runs the encoder stack on a source that already passed [`validate_token_input`].
+    fn encode_validated(
+        &self,
+        source: CausalLmInput<B>,
+        options: &ForwardOptions,
+    ) -> Result<EncoderOutput<B>> {
         let [batch, sequence] = source.token_ids.dims();
         let hidden = self.shared.forward(source.token_ids.clone());
         debug_assert_eq!(hidden.dims(), [batch, sequence, self.config.d_model]);
@@ -1093,13 +1103,26 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
     }
 
     /// Evaluates the complete stateless encoder-decoder graph.
+    ///
+    /// Source and target are validated together with one device-to-host
+    /// readback before the encoder runs. The resulting encoder mask is the
+    /// validated source mask, so the decoder re-checks only the sync-free
+    /// encoder layout (for example a source/target batch mismatch).
     pub fn forward(
         &self,
         input: Seq2SeqInput<B>,
         options: &ForwardOptions,
     ) -> Result<Seq2SeqOutput<B>> {
-        let encoder = self.encode(input.encoder, options)?;
-        let decoder = self.decode_stateless(&encoder, input.decoder, options)?;
+        validate_options(options)?;
+        let target = self.validate_seq2seq_input(&input, TargetColumns::Read)?;
+        let encoder = self.encode_validated(input.encoder, options)?;
+        validate_encoder_layout(
+            &encoder,
+            input.decoder.token_ids.dims()[0],
+            self.config.d_model,
+            self.shared.weight.val().dtype(),
+        )?;
+        let decoder = self.decode_validated(&encoder, input.decoder, options, target.columns)?;
         Ok(Seq2SeqOutput {
             decoder,
             encoder,
@@ -1173,8 +1196,16 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
             Err(error) => return hooks.run(self.activation_points(), |_| Err(error)),
         };
         hooks.run_with_validity(self.activation_points(), validity, |hooks| {
-            let decoder_input = self.prepare_hooked_decoder_input(input.decoder)?;
-            let encoder = self.encode_hooked(input.encoder, options, hooks)?;
+            validate_options(options)?;
+            let target = self.validate_seq2seq_input(&input, TargetColumns::Skip)?;
+            let mut decoder_input = input.decoder;
+            // Tokenizers commonly emit an all-valid mask for an unpadded batch. The
+            // validation readback already established whether any padding exists,
+            // so normalizing it away needs no further synchronization.
+            if target.fully_valid {
+                decoder_input.token_mask = None;
+            }
+            let encoder = self.encode_hooked_validated(input.encoder, options, hooks)?;
             let decoder = self.decode_stateless_hooked(&encoder, decoder_input, options, hooks)?;
             Ok(Seq2SeqOutput {
                 decoder,
@@ -1184,7 +1215,7 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
         })
     }
 
-    /// Implements encoder execution inside an already validated hook session.
+    /// Validates the source, then runs the encoder inside an encoder-only hook session.
     fn encode_hooked(
         &self,
         source: CausalLmInput<B>,
@@ -1200,6 +1231,16 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
             ENCODER_INPUT,
             "encoder",
         )?;
+        self.encode_hooked_validated(source, options, hooks)
+    }
+
+    /// Runs the encoder with hooks on a source that already passed validation.
+    fn encode_hooked_validated(
+        &self,
+        source: CausalLmInput<B>,
+        options: &ForwardOptions,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<EncoderOutput<B>> {
         let hidden = self.shared.forward(source.token_ids.clone());
         let output = self.encoder.forward_with_hooks(
             hidden,
@@ -1216,29 +1257,45 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
         })
     }
 
-    /// Validates target inputs before any user callback can execute.
-    fn prepare_hooked_decoder_input(
+    /// Validates source and target of a complete pass with one readback.
+    ///
+    /// Runs before the encoder and before any user callback. Layout and device
+    /// errors of both inputs are reported first; value errors follow in the
+    /// order source tokens, source mask, target tokens, target mask. With
+    /// [`TargetColumns::Read`] the target mask rides along in the same
+    /// transfer, so masked decoding needs no further synchronization.
+    fn validate_seq2seq_input(
         &self,
-        mut decoder: CausalLmInput<B>,
-    ) -> Result<CausalLmInput<B>> {
+        input: &Seq2SeqInput<B>,
+        columns: TargetColumns,
+    ) -> Result<ValidatedTarget> {
         let model_device = self.shared.weight.lazy_device();
-        let validated = validate_token_input(
-            &decoder,
-            self.config.vocab_size,
+        let vocabulary = self.config.vocab_size;
+        let mut checks = DeferredChecks::new();
+        let source = defer_token_input(
+            &input.encoder,
+            vocabulary,
+            &model_device,
+            ENCODER_INPUT,
+            "encoder",
+            &mut checks,
+        )?;
+        let target = defer_token_input(
+            &input.decoder,
+            vocabulary,
             &model_device,
             DECODER_INPUT,
             "decoder",
+            &mut checks,
         )?;
-        // Tokenizers commonly emit an all-valid mask for an unpadded batch. The
-        // validation readback already established whether any padding exists,
-        // so normalizing it away needs no further synchronization.
-        if validated.fully_valid {
-            decoder.token_mask = None;
-        }
-        Ok(decoder)
+        ValidatedTarget::read(checks, &input.decoder, target, Some(source), columns)
     }
 
     /// Implements rectangular decoder execution inside the same hook session.
+    ///
+    /// The caller validated both inputs with [`Self::validate_seq2seq_input`]
+    /// and produced `encoder` from the validated source, so only the sync-free
+    /// encoder layout is re-checked here.
     fn decode_stateless_hooked(
         &self,
         encoder: &EncoderOutput<B>,
@@ -1246,11 +1303,8 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
         options: &ForwardOptions,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<CausalLmOutput<B>> {
-        validate_options(options)?;
-        let model_device = self.shared.weight.lazy_device();
-        validate_encoder_devices(encoder, &model_device)?;
         let batch = decoder.token_ids.dims()[0];
-        validate_encoder_output(
+        validate_encoder_layout(
             encoder,
             batch,
             self.config.d_model,
@@ -1279,33 +1333,21 @@ impl<B: Backend> T5ForConditionalGeneration<B> {
         })
     }
 
-    /// Runs the decoder without persistent KV or cross-attention state.
-    fn decode_stateless(
+    /// Runs a validated target: masked rows are compacted, unmasked ones run as a batch.
+    ///
+    /// `columns` holds each row's valid columns exactly when `decoder` has a
+    /// mask; every row has at least one valid column.
+    fn decode_validated(
         &self,
         encoder: &EncoderOutput<B>,
         decoder: CausalLmInput<B>,
         options: &ForwardOptions,
+        columns: Option<Vec<Vec<usize>>>,
     ) -> Result<CausalLmOutput<B>> {
-        validate_options(options)?;
-        let model_device = self.shared.weight.lazy_device();
-        validate_token_input(
-            &decoder,
-            self.config.vocab_size,
-            &model_device,
-            DECODER_INPUT,
-            "decoder",
-        )?;
-        validate_encoder_devices(encoder, &model_device)?;
-        let [batch, sequence] = decoder.token_ids.dims();
-        validate_encoder_output(
-            encoder,
-            batch,
-            self.config.d_model,
-            self.shared.weight.val().dtype(),
-        )?;
-        if decoder.token_mask.is_some() {
-            return self.decode_stateless_masked(encoder, decoder, options);
+        if let Some(columns) = columns {
+            return self.decode_stateless_masked(encoder, decoder, options, &columns);
         }
+        let [batch, sequence] = decoder.token_ids.dims();
         let hidden = self.shared.forward(decoder.token_ids.clone());
         debug_assert_eq!(hidden.dims(), [batch, sequence, self.config.d_model]);
         let output = self.decoder.forward_decoder(
@@ -1411,34 +1453,10 @@ fn validate_options(options: &ForwardOptions) -> Result<()> {
     Ok(())
 }
 
-/// Validates the cross-attention tensors of an externally supplied encoder result.
-fn validate_encoder_devices<B: Backend>(
-    encoder: &EncoderOutput<B>,
-    model_device: &B::Device,
-) -> Result<()> {
-    ensure_same_device(
-        "t5.encoder_output.hidden_state",
-        &encoder.hidden_state.device(),
-        model_device,
-        PARAMETERS,
-    )?;
-    if let Some(mask) = &encoder.token_mask {
-        ensure_same_device(
-            "t5.encoder_output.token_mask",
-            &mask.as_tensor().device(),
-            model_device,
-            PARAMETERS,
-        )?;
-    }
-    Ok(())
-}
-
 /// Validates T5 token input: grid, devices, vocabulary range, and mask rows.
 ///
-/// T5 encodes positions with relative buckets, so explicit `position_ids` are
-/// rejected once their extent and device are known. Token and mask values
-/// share one device-to-host readback; the result also reports whether the
-/// mask contains any padding.
+/// Token and mask values share one device-to-host readback; the result also
+/// reports whether the mask contains any padding.
 fn validate_token_input<B: Backend>(
     input: &CausalLmInput<B>,
     vocabulary: usize,
@@ -1446,6 +1464,25 @@ fn validate_token_input<B: Backend>(
     names: InputNames<'static>,
     stack: &str,
 ) -> Result<ValidatedInput<B>> {
+    let mut checks = DeferredChecks::new();
+    let pending = defer_token_input(input, vocabulary, device, names, stack, &mut checks)?;
+    pending.finish(&checks.run(names.token_ids)?)
+}
+
+/// Checks a T5 input's layout and registers its token and mask value checks.
+///
+/// T5 encodes positions with relative buckets, so explicit `position_ids` are
+/// rejected once their extent and device are known. The token range and the
+/// non-empty-row check are deferred to `checks`, so several inputs can share
+/// one readback.
+fn defer_token_input<'a, B: Backend>(
+    input: &CausalLmInput<B>,
+    vocabulary: usize,
+    device: &B::Device,
+    names: InputNames<'static>,
+    stack: &str,
+    checks: &mut DeferredChecks<'a, B>,
+) -> Result<DeferredInput<'a, B>> {
     let [batch, sequence] = input.token_ids.dims();
     ensure_nonempty(batch, sequence, names.token_ids)?;
     if let Some(positions) = &input.position_ids {
@@ -1455,16 +1492,102 @@ fn validate_token_input<B: Backend>(
             "T5 {stack} uses relative positions and does not accept explicit position IDs"
         )));
     }
-    validate_input(
+    defer_input(
         input,
         device,
         &InputContract::new(names, PARAMETERS, vocabulary)
             .with_implicit_positions(ImplicitPositions::Unused),
+        checks,
     )
 }
 
+/// Whether a fused T5 validation also reads the target mask for row compaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetColumns {
+    /// Read the target mask with the checks (masked stateless decoding).
+    Read,
+    /// Skip it (hooked decoding keeps the rectangular grid).
+    Skip,
+}
+
+/// Target summary produced by one fused T5 validation readback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidatedTarget {
+    /// Whether the target has no padding (no mask, or an all-true mask).
+    fully_valid: bool,
+    /// Each target row's valid columns, when requested and a mask is present.
+    columns: Option<Vec<Vec<usize>>>,
+}
+
+impl ValidatedTarget {
+    /// Runs the registered checks once and summarizes the target.
+    ///
+    /// `source`, when given, was registered on the same `checks` and is
+    /// finished from the same readout.
+    fn read<B: Backend>(
+        mut checks: DeferredChecks<'_, B>,
+        decoder: &CausalLmInput<B>,
+        target: DeferredInput<'_, B>,
+        source: Option<DeferredInput<'_, B>>,
+        columns: TargetColumns,
+    ) -> Result<Self> {
+        let mask = decoder
+            .token_mask
+            .as_ref()
+            .filter(|_| columns == TargetColumns::Read)
+            .map(|mask| checks.mask_columns(mask));
+        let readout = checks.run("T5 input statistics")?;
+        if let Some(source) = source {
+            source.finish(&readout)?;
+        }
+        Ok(Self {
+            fully_valid: target.finish(&readout)?.fully_valid,
+            columns: mask.map(|mask| readout.valid_columns(mask)),
+        })
+    }
+}
+
 /// Validates externally supplied encoder states before cross-attention projection.
+///
+/// Checks the layout and dtype, then reads the source mask's row counts.
 fn validate_encoder_output<B: Backend>(
+    encoder: &EncoderOutput<B>,
+    decoder_batch: usize,
+    hidden_size: usize,
+    decoder_dtype: DType,
+) -> Result<()> {
+    let mut checks = DeferredChecks::new();
+    defer_encoder_output(
+        &mut checks,
+        encoder,
+        decoder_batch,
+        hidden_size,
+        decoder_dtype,
+    )?;
+    checks.run(ENCODER_OUTPUT_MASK).map(|_| ())
+}
+
+/// Checks the encoder layout now and defers its non-empty source-mask check.
+fn defer_encoder_output<B: Backend>(
+    checks: &mut DeferredChecks<'_, B>,
+    encoder: &EncoderOutput<B>,
+    decoder_batch: usize,
+    hidden_size: usize,
+    decoder_dtype: DType,
+) -> Result<()> {
+    validate_encoder_layout(encoder, decoder_batch, hidden_size, decoder_dtype)?;
+    let [batch, sequence, _] = encoder.hidden_state.dims();
+    check_nonempty_mask(
+        checks,
+        encoder.token_mask.as_ref(),
+        batch,
+        sequence,
+        ENCODER_OUTPUT_MASK,
+    )
+}
+
+/// Checks encoder extents, dtype, and source-mask grid without reading values.
+fn validate_encoder_layout<B: Backend>(
     encoder: &EncoderOutput<B>,
     decoder_batch: usize,
     hidden_size: usize,
@@ -1488,12 +1611,15 @@ fn validate_encoder_output<B: Backend>(
             encoder.hidden_state.dtype(),
         )));
     }
-    validate_nonempty_mask(
-        encoder.token_mask.as_ref(),
-        batch,
-        sequence,
-        ENCODER_OUTPUT_MASK,
-    )
+    if let Some(mask) = &encoder.token_mask {
+        ensure_grid(
+            mask.as_tensor().dims(),
+            batch,
+            sequence,
+            ENCODER_OUTPUT_MASK,
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
