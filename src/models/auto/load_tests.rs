@@ -27,9 +27,20 @@ use crate::{
         },
     },
     models::{
-        deepseek_v2::model::tests_support::tiny_config as tiny_deepseek_config,
-        muse_glimmer::MuseGlimmerLayerType, nemotron_h::NemotronHBlockType,
-        qwen3_5::Qwen3_5LayerType, t5::T5FeedForwardProjection,
+        AutoCausalConfig,
+        deepseek_v2::{
+            DeepseekV2CheckpointOptions, model::tests_support::tiny_config as tiny_deepseek_config,
+        },
+        muse_glimmer::{
+            MuseGlimmerCheckpointOptions, MuseGlimmerCheckpointSource, MuseGlimmerLayerType,
+            MuseGlimmerTextConfig,
+        },
+        nemotron_h::{NemotronHBlockType, NemotronHCheckpointOptions, NemotronHConfig},
+        qwen3_5::{
+            Qwen3_5CheckpointOptions, Qwen3_5CheckpointSource, Qwen3_5LayerType, Qwen3_5TextConfig,
+        },
+        qwen3_moe::{Qwen3MoeCheckpointOptions, Qwen3MoeConfig},
+        t5::T5FeedForwardProjection,
     },
 };
 
@@ -691,48 +702,38 @@ fn generation_defaults_reject_invalid_artifacts_and_tokens() {
     );
 }
 
-/// Qwen namespace detection accepts exactly one official layout.
+/// Every registered causal family reaches its own strict loader, never the fallback.
 #[test]
-fn qwen_namespace_detection_is_unambiguous() {
-    assert_eq!(
-        classify_qwen_names(["model.language_model.embed_tokens.weight"])
-            .expect("wrapped namespace"),
-        Qwen3_5CheckpointSource::Multimodal
-    );
-    assert_eq!(
-        classify_qwen_names(["model.embed_tokens.weight"]).expect("text namespace"),
-        Qwen3_5CheckpointSource::TextOnly
-    );
-    assert!(
-        classify_qwen_names([
-            "model.language_model.embed_tokens.weight",
-            "model.embed_tokens.weight"
-        ])
-        .is_err()
-    );
-    assert!(classify_qwen_names(["foreign.weight"]).is_err());
+fn every_registered_family_reaches_its_strict_loader() {
+    for family in AutoCausalConfig::ALL {
+        let root = tempfile::tempdir().expect("temporary model root");
+        std::fs::write(
+            root.path().join("config.json"),
+            json!({"model_type": family.model_type(), "vocab_size": "not an integer"}).to_string(),
+        )
+        .unwrap();
+        let error = AutoCausalLm::<TestBackend>::load_local(
+            root.path(),
+            &fixture_options("fixture/registry", "registry"),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, .. } if field == "auto_causal.config"),
+            "{family:?}: {error}"
+        );
+    }
 }
 
-/// Muse namespace detection accepts exactly one language-tower layout.
+/// Packed-sidecar certification names only registered causal families.
 #[test]
-fn muse_namespace_detection_is_unambiguous() {
-    assert_eq!(
-        classify_muse_names(["model.language_model.embed_tokens.weight"])
-            .expect("wrapped namespace"),
-        MuseGlimmerCheckpointSource::Multimodal
-    );
-    assert_eq!(
-        classify_muse_names(["model.embed_tokens.weight"]).expect("text namespace"),
-        MuseGlimmerCheckpointSource::TextOnly
-    );
-    assert!(
-        classify_muse_names([
-            "model.language_model.embed_tokens.weight",
-            "model.embed_tokens.weight"
-        ])
-        .is_err()
-    );
-    assert!(classify_muse_names(["foreign.weight"]).is_err());
+fn packed_certification_names_registered_families() {
+    for model_type in PACKED_CAUSAL_MODEL_TYPES {
+        assert!(
+            AutoCausalConfig::from_model_type(model_type).is_some(),
+            "{model_type}"
+        );
+    }
 }
 
 /// Required config reading rejects missing files and non-directory roots.
@@ -998,8 +999,8 @@ fn local_generation_defaults_validate_active_fields() {
             "temperature must be finite and greater than zero",
         ),
         (
-            json!({"do_sample": true, "top_k": 9}),
-            "top_k must be in 1..=8, found 9",
+            json!({"do_sample": true, "top_p": 0.0}),
+            "top_p must be finite and in (0, 1], found 0",
         ),
         (
             json!({"max_new_tokens": 0}),
@@ -1720,11 +1721,9 @@ fn automatic_muse_glimmer_rejects_unaligned_reference_only_burnpack() {
     );
 }
 
-/// The Nemotron branch loads a complete heterogeneous hybrid schedule.
-#[test]
-fn automatic_nemotron_h_loads_complete_strict_fixture() {
-    let root = tempfile::tempdir().expect("temporary model root");
-    let config = NemotronHConfig {
+/// Builds the tiny Nemotron-H schedule used by the automatic-load fixtures.
+fn loadable_nemotron_config() -> NemotronHConfig {
+    NemotronHConfig {
         vocab_size: 16,
         hidden_size: 8,
         layers_block_type: vec![
@@ -1758,7 +1757,14 @@ fn automatic_nemotron_h_loads_complete_strict_fixture() {
         eos_token_id: Some(TokenIds::Many(vec![7, 6, 7])),
         pad_token_id: Some(TokenIds::One(0)),
         ..NemotronHConfig::default()
-    };
+    }
+}
+
+/// The Nemotron branch loads a complete heterogeneous hybrid schedule.
+#[test]
+fn automatic_nemotron_h_loads_complete_strict_fixture() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let config = loadable_nemotron_config();
     let contract = config
         .checkpoint_contract(NemotronHCheckpointOptions::default())
         .expect("valid Nemotron-H contract");
@@ -1906,4 +1912,226 @@ fn automatic_flan_load_bundles_and_executes_real_weights() {
             .iter()
             .all(|value| value.is_finite())
     );
+}
+
+/// NVIDIA's legacy bare `Infinity` literal loads through the automatic registry (AUTO-1).
+#[test]
+fn automatic_nemotron_h_accepts_legacy_infinity_literal() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let config = loadable_nemotron_config();
+    let contract = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .expect("valid Nemotron-H contract");
+    write_auto_metadata(root.path(), &config);
+    write_contract_checkpoint(
+        root.path(),
+        contract.expected_tensors(),
+        contract.mappings(),
+    );
+    let config_path = root.path().join("config.json");
+    let json = std::fs::read_to_string(&config_path).unwrap();
+    let legacy = json.replace(
+        "\"time_step_limit\":[0.0,null]",
+        "\"time_step_limit\":[0.0,Infinity]",
+    );
+    assert_ne!(legacy, json, "fixture must contain the unbounded limit");
+    std::fs::write(&config_path, legacy).unwrap();
+
+    let loaded = AutoCausalLm::<TestBackend>::load_local(
+        root.path(),
+        &fixture_options("nvidia/tiny-nemotron-h-fixture", "legacy-literal"),
+        &Default::default(),
+    )
+    .expect("legacy Nemotron-H config must load like its family parser accepts it");
+    assert!(matches!(loaded.model(), AutoCausalLm::NemotronH(_)));
+    let crate::models::AutoCausalConfigRef::NemotronH(parsed) = loaded.model().config() else {
+        panic!("Nemotron-H model must expose its configuration");
+    };
+    assert_eq!(parsed.time_step_limit, [Some(0.0), None]);
+}
+
+/// Sampling defaults follow the pinned Hugging Face `GenerationConfig` semantics (AUTO-2).
+#[test]
+fn sampling_defaults_follow_hugging_face_generation() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let path = root.path().join("generation_config.json");
+    for (json, vocabulary_size, top_k, top_p) in [
+        // Unset top_k means Hugging Face's default of 50.
+        (
+            json!({"do_sample": true, "temperature": 0.3, "top_p": 0.95}),
+            64,
+            Some(50),
+            Some(0.95),
+        ),
+        // The default and explicit values are clamped to the vocabulary.
+        (json!({"do_sample": true}), 16, Some(16), None),
+        (json!({"do_sample": true, "top_k": 9}), 8, Some(8), None),
+        // Zero disables top-k; top_p >= 1 disables nucleus filtering.
+        (
+            json!({"do_sample": true, "top_k": 0, "top_p": 1.0}),
+            64,
+            None,
+            None,
+        ),
+        (
+            json!({"do_sample": true, "top_k": null, "top_p": 1.5}),
+            64,
+            Some(50),
+            None,
+        ),
+        // Greedy decoding ignores every warper.
+        (
+            json!({"do_sample": false, "top_k": 5, "top_p": 0.5}),
+            64,
+            None,
+            None,
+        ),
+        (json!({}), 64, None, None),
+    ] {
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let config = normalize_generation_defaults(root.path(), None, None, vocabulary_size, None)
+            .unwrap_or_else(|error| panic!("{json}: {error}"));
+        assert_eq!((config.top_k, config.top_p), (top_k, top_p), "{json}");
+    }
+    // Python's `json` writes NaN as a bare literal, which is not JSON: the file
+    // fails to parse before any sampling setting is interpreted.
+    std::fs::write(&path, br#"{"do_sample": true, "top_p": NaN}"#).unwrap();
+    let error = normalize_generation_defaults(root.path(), None, None, 8, None).unwrap_err();
+    assert!(matches!(error, Error::Json { .. }), "{error}");
+}
+
+/// A NaN `top_p` is kept so validation rejects it, rather than silently disabling nucleus sampling.
+///
+/// JSON cannot spell NaN, so the parsed configuration is built directly; this
+/// exercises the `top_p < 1` filter in `apply_local_generation_config`.
+#[test]
+fn nan_top_p_is_rejected_instead_of_disabling_nucleus_sampling() {
+    let applied = |top_p: f64| {
+        let local = LocalGenerationConfig {
+            do_sample: Some(true),
+            top_p: Some(top_p),
+            ..LocalGenerationConfig::default()
+        };
+        let mut config = GenerationConfig::default();
+        apply_local_generation_config(&mut config, &local, 64).unwrap();
+        config
+    };
+    let config = applied(f64::NAN);
+    assert!(config.top_p.is_some_and(f64::is_nan));
+    let error = config.validate(64).unwrap_err();
+    assert!(
+        error.to_string().contains("top_p must be finite"),
+        "{error}"
+    );
+    // Values at or above one disable nucleus filtering, as Hugging Face's
+    // warper condition `top_p < 1.0` does.
+    for top_p in [1.0, 1.5, f64::INFINITY] {
+        let config = applied(top_p);
+        assert_eq!(config.top_p, None, "{top_p}");
+        config.validate(64).unwrap();
+    }
+    // Non-positive values are kept so validation rejects them, as Hugging Face's warper does.
+    for top_p in [0.0, -0.5, f64::NEG_INFINITY] {
+        let config = applied(top_p);
+        assert_eq!(config.top_p, Some(top_p));
+        assert!(config.validate(64).is_err(), "{top_p}");
+    }
+}
+
+/// Behavior-changing settings without an equivalent are reported, neutral ones are not.
+#[test]
+fn unsupported_generation_settings_are_reported_not_dropped() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let path = root.path().join("generation_config.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "do_sample": false,
+            "num_beams": 4,
+            "max_length": 512,
+            "no_repeat_ngram_size": 3,
+            "min_p": 0.1,
+            "typical_p": 0.5,
+            "length_penalty": 1,
+            "bad_words_ids": [],
+            "suppress_tokens": null,
+            "renormalize_logits": false,
+            "num_return_sequences": 1,
+            "unknown_future_field": true
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let resolved = resolve_generation_defaults(root.path(), None, None, 64, None).unwrap();
+    assert_eq!(
+        resolved.unsupported,
+        BTreeMap::from([
+            ("max_length".to_owned(), json!(512)),
+            ("no_repeat_ngram_size".to_owned(), json!(3)),
+            ("num_beams".to_owned(), json!(4)),
+        ])
+    );
+    // Sampling-only warpers matter once sampling is enabled.
+    std::fs::write(
+        &path,
+        br#"{"do_sample": true, "min_p": 0.1, "typical_p": 1.0, "epsilon_cutoff": 0.0003}"#,
+    )
+    .unwrap();
+    let resolved = resolve_generation_defaults(root.path(), None, None, 64, None).unwrap();
+    assert_eq!(
+        resolved.unsupported.keys().collect::<Vec<_>>(),
+        ["epsilon_cutoff", "min_p"]
+    );
+    // Explicit defaults bypass the file and report nothing.
+    let explicit = GenerationConfig::default();
+    let resolved =
+        resolve_generation_defaults(root.path(), None, None, 64, Some(&explicit)).unwrap();
+    assert!(resolved.unsupported.is_empty());
+}
+
+/// Automatic loads attach the unsupported-settings report to the bundle.
+#[test]
+fn automatic_loads_attach_unsupported_generation_settings() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let config = loadable_nemotron_config();
+    let contract = config
+        .checkpoint_contract(NemotronHCheckpointOptions::default())
+        .expect("valid Nemotron-H contract");
+    write_auto_metadata(root.path(), &config);
+    write_contract_checkpoint(
+        root.path(),
+        contract.expected_tensors(),
+        contract.mappings(),
+    );
+    std::fs::write(
+        root.path().join("generation_config.json"),
+        br#"{"max_new_tokens":5,"num_beams":2}"#,
+    )
+    .unwrap();
+    let loaded = AutoCausalLm::<TestBackend>::load_local(
+        root.path(),
+        &fixture_options("nvidia/tiny-nemotron-h-fixture", "beams"),
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        loaded.unsupported_generation_settings(),
+        &BTreeMap::from([("num_beams".to_owned(), json!(2))])
+    );
+}
+
+proptest::proptest! {
+    /// The sampling top-k is disabled exactly by zero and otherwise lies in `1..=vocabulary`.
+    #[test]
+    fn sampling_top_k_is_disabled_by_zero_and_clamped_otherwise(
+        top_k in proptest::option::of(0_usize..200),
+        vocabulary_size in 1_usize..100,
+    ) {
+        let resolved = sampling_top_k(top_k, vocabulary_size);
+        proptest::prop_assert_eq!(resolved.is_none(), top_k == Some(0));
+        if let Some(resolved) = resolved {
+            proptest::prop_assert!((1..=vocabulary_size).contains(&resolved));
+            proptest::prop_assert_eq!(resolved, top_k.unwrap_or(50).min(vocabulary_size));
+        }
+    }
 }
