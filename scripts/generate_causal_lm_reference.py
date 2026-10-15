@@ -19,7 +19,8 @@ compared against it without Python at test time. It
   weight file, this script, and every output file.
 
 The bundle is assembled in a hidden sibling directory and published by one
-rename that refuses to replace an existing bundle.
+rename that refuses to replace an existing bundle; a failed or interrupted
+run removes its staging directory, so partial bundles never accumulate.
 
 Usage::
 
@@ -36,6 +37,7 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import struct
 import sys
 import tempfile
@@ -262,7 +264,12 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Builds the bundle in a hidden staging directory and publishes it."""
+    """Builds the bundle in a hidden staging directory and publishes it.
+
+    Any failure before publication (an exception, an out-of-memory error
+    surfacing as one, or ``KeyboardInterrupt``) removes the staging directory
+    and re-raises, leaving the references volume as it was.
+    """
 
     arguments = parse_arguments(argv)
     destination = arguments.output.resolve()
@@ -270,9 +277,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise FileExistsError(f"refusing to replace existing bundle {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
-    manifest = build_bundle(arguments, staging)
-    (staging / MANIFEST).write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
-    publish(staging, destination)
+    try:
+        manifest = build_bundle(arguments, staging)
+        (staging / MANIFEST).write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
+        publish(staging, destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     print(json.dumps({"bundle": str(destination), "prompts": len(manifest["prompts"])}))
     return 0
 

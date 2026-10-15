@@ -114,6 +114,24 @@ class ReferenceGeneratorTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 REFERENCE.main(["--model-dir", str(root), "--output", str(destination)])
 
+    def test_failed_generation_removes_its_staging_directory(self) -> None:
+        """A failure before publication leaves no hidden staging directory behind."""
+
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            destination = root / "bundle"
+
+            def fail(arguments, staging):
+                (staging / "logits-0.f32le").write_bytes(b"partial")
+                raise MemoryError("simulated out-of-memory")
+
+            with mock.patch.object(REFERENCE, "build_bundle", side_effect=fail):
+                with self.assertRaises(MemoryError):
+                    REFERENCE.main(["--model-dir", str(root), "--output", str(destination)])
+            self.assertEqual(list(root.iterdir()), [])
+
     def test_weight_files_are_listed_or_reported_missing(self) -> None:
         """Weight discovery is sorted and refuses an empty checkpoint."""
 
