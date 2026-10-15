@@ -1447,16 +1447,75 @@ fn attention_options_report_each_invalid_field() {
         },
         "mixer.attention.options.output_gate_activation",
     );
-    // Backend-default kernels cannot cap a sink logit.
-    check(
-        &attention,
-        AttentionOptions {
-            attention_sinks: true,
-            logit_softcap: Some(30.0),
-            ..AttentionOptions::default()
-        },
-        "mixer.attention.attention.attention_sinks",
+}
+
+/// Sinks with a soft cap fail at the options field with a spec-level reason (review API-1).
+///
+/// The shared kernel accepts the pair only under `EagerFp32Softmax`, which a
+/// spec cannot select, so the error must name `options.attention_sinks` (not
+/// the derived projection config's field) and must not suggest that
+/// unreachable remedy. Grouped-query self-attention, standalone
+/// cross-attention, and a sequence-to-sequence spec's sibling options field
+/// all report it.
+#[test]
+fn sinks_with_a_soft_cap_are_rejected_at_the_options_field() {
+    let attention = match dense_layer().mixer {
+        MixerSpec::Attention(attention) => attention,
+        _ => unreachable!(),
+    };
+    let options = AttentionOptions {
+        attention_sinks: true,
+        logit_softcap: Some(30.0),
+        ..AttentionOptions::default()
+    };
+    let assert_spec_level = |result: Result<()>, expected: &str| match result
+        .expect_err("sinks with a soft cap must be rejected")
+    {
+        Error::Configuration { field, reason } => {
+            assert_eq!(field, expected);
+            assert!(reason.contains("soft cap"), "{reason}");
+            assert!(!reason.contains("EagerFp32Softmax"), "{reason}");
+        }
+        error => panic!("expected a configuration error at {expected}, got {error}"),
+    };
+    assert_spec_level(
+        MixerSpec::AttentionWithOptions { attention, options }.validate("mixer"),
+        "mixer.attention.options.attention_sinks",
     );
+    assert_spec_level(
+        CrossAttentionSpec {
+            options,
+            ..CrossAttentionSpec::new(4, 8)
+        }
+        .validate("cross_attention", 32),
+        "cross_attention.options.attention_sinks",
+    );
+    assert_spec_level(
+        Seq2SeqSpec {
+            encoder: decoder(),
+            decoder: decoder(),
+            cross_attention_heads: 4,
+            cross_attention_head_dim: 8,
+            cross_attention_options: options,
+        }
+        .validate(),
+        "cross_attention_options.attention_sinks",
+    );
+    for (sinks, softcap) in [(true, None), (false, Some(30.0))] {
+        MixerSpec::AttentionWithOptions {
+            attention: match dense_layer().mixer {
+                MixerSpec::Attention(attention) => attention,
+                _ => unreachable!(),
+            },
+            options: AttentionOptions {
+                attention_sinks: sinks,
+                logit_softcap: softcap,
+                ..AttentionOptions::default()
+            },
+        }
+        .validate("mixer")
+        .expect("sinks alone and a soft cap alone stay valid");
+    }
 }
 
 /// Feed-forward variants validate their own widths and clamp parameters.

@@ -544,7 +544,10 @@ pub struct AttentionOptions {
     pub logit_softcap: Option<f64>,
     /// Whether every query head learns a sink logit that absorbs softmax mass (gpt-oss).
     ///
-    /// Backend-default attention cannot combine sinks with a soft cap.
+    /// Cannot be combined with [`Self::logit_softcap`]. Modular models build
+    /// backend-default attention, whose kernels would also cap the sink logit,
+    /// and a serializable spec does not choose the attention precision, so the
+    /// combination is rejected during validation.
     pub attention_sinks: bool,
     /// Which of the query, key, value, and output projections carry biases.
     pub projection_bias: ProjectionBias,
@@ -574,6 +577,9 @@ impl AttentionOptions {
     ///
     /// A full-width Q/K-norm scope without `query_key_norm`, or a SiLU gate
     /// without `output_gate`, would be silently ignored, so both are errors.
+    /// Learned sinks with a soft cap are rejected here, at the spec level:
+    /// the shared kernel accepts that pair only under an eager precision mode
+    /// that modular construction never selects.
     fn validate_against(&self, attention: &AttentionSpec, field: &str) -> Result<()> {
         self.connectivity.validate().map_err(|error| {
             Error::configuration(format!("{field}.connectivity"), reason_of(error))
@@ -586,6 +592,12 @@ impl AttentionOptions {
             return Err(Error::configuration(
                 format!("{field}.logit_softcap"),
                 "must be finite and greater than zero when present",
+            ));
+        }
+        if self.attention_sinks && self.logit_softcap.is_some() {
+            return Err(Error::configuration(
+                format!("{field}.attention_sinks"),
+                "modular attention cannot combine learned sinks with a logit soft cap: its backend-default kernels would also cap the sink logit",
             ));
         }
         if self.query_key_norm_scope == QueryKeyNormScope::FullWidth && !attention.query_key_norm {
