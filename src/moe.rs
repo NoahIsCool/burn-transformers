@@ -41,9 +41,11 @@ use crate::{
 };
 
 mod assignment;
+mod geometry;
 pub mod router;
 
-use assignment::{ExpertAssignmentPlan, InvalidExpertId, plan_expert_assignments};
+use assignment::{ExpertAssignmentPlan, InvalidExpertId, RoutedIdsError, plan_expert_assignments};
+use geometry::{ExpertBankViolation, check_expert_bank, expert_ids_within};
 pub(crate) use router::deterministic_top_k;
 pub use router::{
     ExpertSelection, GroupLimitedSelection, GroupScore, PrunedExpertScore,
@@ -137,30 +139,33 @@ impl SparseMoeConfig {
 
     /// Validates sparse cardinalities and expert numerical parameters.
     pub fn validate(&self) -> Result<()> {
-        if self.hidden_size == 0 || self.intermediate_size == 0 || self.routed_experts == 0 {
-            return Err(Error::configuration(
-                "moe",
-                "hidden_size, intermediate_size, and routed_experts must be non-zero",
-            ));
-        }
-        // Burn parameters are lazy, so initialization alone cannot reject a
-        // matrix whose logical element count will overflow at first use.
-        for (width, projection) in [
-            (self.intermediate_size, "expert"),
-            (self.routed_experts, "router"),
-        ] {
-            if self.hidden_size.checked_mul(width).is_none() {
+        let overflow = |projection: &str| {
+            Error::configuration(
+                "moe.projection_shape",
+                format!("{projection} matrix element count overflows usize"),
+            )
+        };
+        match check_expert_bank(
+            self.hidden_size,
+            self.intermediate_size,
+            self.routed_experts,
+            self.experts_per_token,
+        ) {
+            Ok(()) => {}
+            Err(ExpertBankViolation::ZeroWidth) => {
                 return Err(Error::configuration(
-                    "moe.projection_shape",
-                    format!("{projection} matrix element count overflows usize"),
+                    "moe",
+                    "hidden_size, intermediate_size, and routed_experts must be non-zero",
                 ));
             }
-        }
-        if self.experts_per_token == 0 || self.experts_per_token > self.routed_experts {
-            return Err(Error::configuration(
-                "moe.experts_per_token",
-                "must be in 1..=routed_experts",
-            ));
+            Err(ExpertBankViolation::ExpertMatrixOverflow) => return Err(overflow("expert")),
+            Err(ExpertBankViolation::RouterMatrixOverflow) => return Err(overflow("router")),
+            Err(ExpertBankViolation::ExpertsPerToken) => {
+                return Err(Error::configuration(
+                    "moe.experts_per_token",
+                    "must be in 1..=routed_experts",
+                ));
+            }
         }
         if !self.routed_scale.is_finite() || self.routed_scale <= 0.0 {
             return Err(Error::configuration(
@@ -379,18 +384,14 @@ fn read_assignment_plan<B: Backend>(
             format!("shape=[{tokens}, {slots}], routed_experts={routed_experts}"),
         ));
     }
-    let assignments = tokens
-        .checked_mul(slots)
-        .filter(|&count| i64::try_from(count).is_ok())
-        .ok_or_else(|| {
-            Error::shape(
-                "moe.selected_experts",
-                "a tokens * top_k product representable by the i64 index type",
-                format!("{tokens} * {slots}"),
-            )
-        })?;
+    let assignments = assignment::routed_assignment_count(tokens, slots).ok_or_else(|| {
+        Error::shape(
+            "moe.selected_experts",
+            "a tokens * top_k product representable by the i64 index type",
+            format!("{tokens} * {slots}"),
+        )
+    })?;
     let flagged = non_finite_tokens.is_some();
-    let columns = slots + usize::from(flagged);
     let host = match non_finite_tokens {
         Some(flags) => Tensor::cat(vec![selected_experts, flags.int().reshape([tokens, 1])], 1),
         None => selected_experts,
@@ -407,25 +408,24 @@ fn read_assignment_plan<B: Backend>(
             Error::BackendCapability(format!(
                 "failed to decode selected expert IDs from backend: {error}"
             ))
-        })?;
-    if values.len() != tokens * columns {
-        return Err(Error::shape(
-            "moe.selected_experts",
-            format!("{assignments} integer routing IDs"),
-            format!("{} values", values.len()),
-        ));
-    }
-    let mut ids = Vec::with_capacity(assignments);
-    for (token, row) in values.chunks_exact(columns).enumerate() {
-        if flagged && row[slots].elem::<i64>() != 0 {
-            return Err(Error::shape(
+        })?
+        .into_iter()
+        .map(|value| value.elem::<i64>())
+        .collect::<Vec<_>>();
+    // `slots > 0`, and `tokens * slots <= i64::MAX` with `tokens > 0` keeps `slots + 1` in range.
+    let ids =
+        assignment::routed_ids(&values, tokens, slots, flagged).map_err(|error| match error {
+            RoutedIdsError::Length { found } => Error::shape(
+                "moe.selected_experts",
+                format!("{assignments} integer routing IDs"),
+                format!("{found} values"),
+            ),
+            RoutedIdsError::NonFinite { token } => Error::shape(
                 "moe.router_scores",
                 "finite router scores and weights for every token",
                 format!("non-finite router score or weight for flattened token {token}"),
-            ));
-        }
-        ids.extend(row[..slots].iter().map(|value| value.elem::<i64>()));
-    }
+            ),
+        })?;
     plan_expert_assignments(&ids, routed_experts).map_err(
         |InvalidExpertId { assignment, expert }| {
             Error::shape(
@@ -489,7 +489,7 @@ where
 ///
 /// The plan is uploaded once as an expert-major permutation of flattened
 /// assignments; token rows follow on the device as `assignment / K`. Each
-/// block of whole experts (see [`assignment::next_dispatch_block`]) narrows
+/// block of whole experts (see [`assignment::dispatch_blocks`]) narrows
 /// that permutation, gathers its input rows and weights, evaluates its
 /// experts on contiguous slices, and scatter-adds the concatenated
 /// contributions. Blocks run in expert order, so every token still receives
@@ -526,21 +526,17 @@ where
         &device,
     );
     let flat_weights = flat_weights.reshape([assignments]);
-    let expert_token_counts = plan
-        .offsets
-        .windows(2)
-        .map(|range| range[1] - range[0])
-        .collect::<Vec<_>>();
+    let expert_token_counts = assignment::range_lengths(&plan.offsets);
+    // The plan has `routed_experts + 1` nondecreasing offsets, so the blocks
+    // partition `0..routed_experts` into runs of whole experts.
+    let blocks = assignment::dispatch_blocks(&plan.offsets, budget);
 
     let mut hidden_state: Option<Tensor<B, 2>> = None;
     let mut evaluated_experts = 0;
-    let mut first = 0;
-    while first < routed_experts {
-        let end = assignment::next_dispatch_block(&plan.offsets, first, budget);
+    for bounds in blocks.windows(2) {
+        let (first, end) = (bounds[0], bounds[1]);
         let (block_start, block_rows) =
             (plan.offsets[first], plan.offsets[end] - plan.offsets[first]);
-        let experts = first..end;
-        first = end;
         if block_rows == 0 {
             continue;
         }
@@ -551,13 +547,13 @@ where
             .clone()
             .select(0, block_order)
             .unsqueeze_dim::<2>(1);
-        let mut contributions = Vec::with_capacity(experts.len());
-        for expert in experts {
-            let count = expert_token_counts[expert];
+        let mut contributions = Vec::with_capacity(end - first);
+        for expert in first..end {
+            // Rows `local..local + count` of the gathered block, never past its end.
+            let (local, count) = assignment::block_expert_rows(&plan.offsets, first, expert);
             if count == 0 {
                 continue;
             }
-            let local = plan.offsets[expert] - block_start;
             let output = run_expert(expert, inputs.clone().narrow(0, local, count))?;
             let weights = weights.clone().narrow(0, local, count);
             contributions.push(weighted_expert_contribution(output, weights, precision));
@@ -645,7 +641,7 @@ pub fn load_balancing_loss<B: Backend>(
         ));
     }
     let (minimum, maximum) = expert_id_range(selected_experts.clone())?;
-    if minimum < 0 || maximum as usize >= experts {
+    if !expert_ids_within(minimum, maximum, experts) {
         return Err(Error::shape(
             "moe.selected_experts",
             format!("expert IDs in 0..{experts}"),

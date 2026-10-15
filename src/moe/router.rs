@@ -32,6 +32,10 @@ use burn::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::geometry::{
+    GroupGeometryViolation, RouterCardinalityViolation, check_group_geometry,
+    check_router_cardinality,
+};
 use crate::{Error, Result};
 
 /// Function that converts router logits into nonnegative expert scores.
@@ -231,20 +235,23 @@ impl RouterConfig {
     /// experts, and a correction bias or group pruning combined with
     /// top-k-then-score order.
     pub fn validate(&self) -> Result<()> {
-        if self.experts == 0 {
-            return Err(Error::configuration(
-                "moe.router.experts",
-                "must be non-zero",
-            ));
-        }
-        if self.experts_per_token == 0 || self.experts_per_token > self.experts {
-            return Err(Error::configuration(
-                "moe.router.experts_per_token",
-                format!(
-                    "must be in 1..={}, got {}",
-                    self.experts, self.experts_per_token
-                ),
-            ));
+        match check_router_cardinality(self.experts, self.experts_per_token) {
+            Ok(()) => {}
+            Err(RouterCardinalityViolation::NoExperts) => {
+                return Err(Error::configuration(
+                    "moe.router.experts",
+                    "must be non-zero",
+                ));
+            }
+            Err(RouterCardinalityViolation::ExpertsPerToken) => {
+                return Err(Error::configuration(
+                    "moe.router.experts_per_token",
+                    format!(
+                        "must be in 1..={}, got {}",
+                        self.experts, self.experts_per_token
+                    ),
+                ));
+            }
         }
         if !self.routed_scale.is_finite() || self.routed_scale <= 0.0 {
             return Err(Error::configuration(
@@ -277,36 +284,39 @@ impl RouterConfig {
     }
 
     /// Checks that groups partition the experts and leave at least `K` eligible.
+    ///
+    /// The integer conditions are decided by the verified
+    /// [`check_group_geometry`]; this wrapper only words the rejection.
     fn validate_groups(&self, selection: GroupLimitedSelection) -> Result<()> {
-        if selection.groups == 0 || !self.experts.is_multiple_of(selection.groups) {
-            return Err(Error::configuration(
+        match check_group_geometry(
+            self.experts,
+            self.experts_per_token,
+            selection.groups,
+            selection.top_groups,
+        ) {
+            Ok(_) => Ok(()),
+            Err(GroupGeometryViolation::Groups) => Err(Error::configuration(
                 "moe.router.groups",
                 format!(
                     "must be a non-zero divisor of {} experts, got {}",
                     self.experts, selection.groups
                 ),
-            ));
-        }
-        if selection.top_groups == 0 || selection.top_groups > selection.groups {
-            return Err(Error::configuration(
+            )),
+            Err(GroupGeometryViolation::TopGroups) => Err(Error::configuration(
                 "moe.router.top_groups",
                 format!(
                     "must be in 1..={}, got {}",
                     selection.groups, selection.top_groups
                 ),
-            ));
-        }
-        let eligible = selection.top_groups * (self.experts / selection.groups);
-        if eligible < self.experts_per_token {
-            return Err(Error::configuration(
+            )),
+            Err(GroupGeometryViolation::TooFewEligible { eligible }) => Err(Error::configuration(
                 "moe.router.top_groups",
                 format!(
                     "retained groups hold {eligible} experts, fewer than the {} selected per token",
                     self.experts_per_token
                 ),
-            ));
+            )),
         }
-        Ok(())
     }
 
     /// Routes `[tokens, E]` logits to `K` experts per token.

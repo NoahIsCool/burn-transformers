@@ -1,4 +1,5 @@
-//! Counting-sort dispatch plans and dispatch blocks: worked examples, invalid IDs, and properties.
+//! Counting-sort dispatch plans, dispatch blocks, and routed-ID flattening: worked examples,
+//! invalid inputs, and properties.
 
 use super::*;
 
@@ -70,8 +71,135 @@ fn dispatch_blocks_respect_the_budget_without_splitting_experts() {
     assert_eq!(next_dispatch_block(&[0, 9], 0, 1), 1);
 }
 
+/// Block boundaries partition the experts exactly as repeated `next_dispatch_block` calls do.
+#[test]
+fn dispatch_block_boundaries_partition_the_experts() {
+    let offsets = [0, 3, 3, 7, 8, 14, 14];
+    assert_eq!(dispatch_blocks(&offsets, 4), [0, 2, 3, 4, 5, 6]);
+    assert_eq!(dispatch_blocks(&offsets, 7), [0, 3, 6]);
+    assert_eq!(dispatch_blocks(&offsets, usize::MAX), [0, 6]);
+    assert_eq!(dispatch_blocks(&offsets, 0), [0, 1, 2, 3, 4, 5, 6]);
+    // Without experts there are no blocks.
+    assert_eq!(dispatch_blocks(&[0], 5), [0]);
+}
+
+/// Range lengths are the per-expert counts; degenerate offset lists have none.
+#[test]
+fn range_lengths_are_per_expert_counts() {
+    assert_eq!(range_lengths(&[0, 3, 3, 7, 8]), [3, 0, 4, 1]);
+    assert!(range_lengths(&[5]).is_empty());
+    assert!(range_lengths(&[]).is_empty());
+}
+
+/// An expert's rows inside a block are its offset relative to the block start.
+#[test]
+fn block_expert_rows_locate_each_expert_inside_its_block() {
+    let offsets = [0, 3, 3, 7, 8];
+    assert_eq!(block_expert_rows(&offsets, 0, 0), (0, 3));
+    assert_eq!(block_expert_rows(&offsets, 0, 1), (3, 0));
+    assert_eq!(block_expert_rows(&offsets, 0, 2), (3, 4));
+    assert_eq!(block_expert_rows(&offsets, 2, 3), (4, 1));
+    assert_eq!(block_expert_rows(&offsets, 3, 3), (0, 1));
+}
+
+/// Assignment counts must be addressable by `i64` indices.
+#[test]
+fn routed_assignment_count_is_exact_or_rejected() {
+    assert_eq!(routed_assignment_count(5, 3), Some(15));
+    assert_eq!(routed_assignment_count(0, 3), Some(0));
+    assert_eq!(
+        routed_assignment_count(i64::MAX as usize, 1),
+        Some(i64::MAX as usize)
+    );
+    assert_eq!(routed_assignment_count(i64::MAX as usize, 2), None);
+    assert_eq!(routed_assignment_count(usize::MAX, 2), None);
+}
+
+/// Host IDs flatten token-major; flags are dropped, checked, and reported in order.
+#[test]
+fn routed_ids_flatten_and_check_flags() {
+    // Two tokens, two slots, and a flag column of zeros.
+    assert_eq!(
+        routed_ids(&[3, 1, 0, 2, 0, 0], 2, 2, true),
+        Ok(vec![3, 1, 2, 0])
+    );
+    assert_eq!(routed_ids(&[3, 1, 2, 0], 2, 2, false), Ok(vec![3, 1, 2, 0]));
+    // The first flagged token is reported even when a later one is flagged too.
+    assert_eq!(
+        routed_ids(&[3, 1, 0, 2, 0, 1, 4, 4, 1], 3, 2, true),
+        Err(RoutedIdsError::NonFinite { token: 1 })
+    );
+    for (values, flagged) in [(&[1, 2, 3][..], false), (&[1, 2, 0, 3][..], true)] {
+        assert_eq!(
+            routed_ids(values, 2, 2, flagged),
+            Err(RoutedIdsError::Length {
+                found: values.len()
+            })
+        );
+    }
+    assert_eq!(
+        routed_ids(&[], 1, 1, false),
+        Err(RoutedIdsError::Length { found: 0 })
+    );
+    assert_eq!(routed_ids(&[], 0, 4, true), Ok(vec![]));
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(96))]
+
+    /// Every assignment sits at its expert's offset plus its earlier same-expert assignments.
+    #[test]
+    fn plan_places_each_assignment_at_its_slot(
+        experts in 1usize..10,
+        seeds in proptest::collection::vec(0usize..1000, 0..60),
+    ) {
+        let ids = seeds.iter().map(|&seed| (seed % experts) as i64).collect::<Vec<_>>();
+        let plan = plan_expert_assignments(&ids, experts).expect("in-range IDs");
+        for (assignment, &id) in ids.iter().enumerate() {
+            let earlier = ids[..assignment].iter().filter(|&&other| other == id).count();
+            proptest::prop_assert_eq!(
+                plan.order[plan.offsets[id as usize] + earlier],
+                assignment
+            );
+        }
+    }
+
+    /// Block boundaries agree with the iterated single-block planner.
+    #[test]
+    fn dispatch_blocks_match_iterated_planner(
+        counts in proptest::collection::vec(0usize..20, 0..12),
+        budget in 0usize..60,
+    ) {
+        let mut offsets = vec![0];
+        for count in &counts {
+            offsets.push(offsets.last().unwrap() + count);
+        }
+        let mut expected = vec![0];
+        while *expected.last().unwrap() < counts.len() {
+            expected.push(next_dispatch_block(&offsets, *expected.last().unwrap(), budget));
+        }
+        proptest::prop_assert_eq!(dispatch_blocks(&offsets, budget), expected);
+        proptest::prop_assert_eq!(range_lengths(&offsets), counts);
+    }
+
+    /// Flattening drops the flag column and keeps every ID in row-major order.
+    #[test]
+    fn routed_ids_match_row_major_columns(
+        rows in proptest::collection::vec(proptest::collection::vec(-3i64..9, 1..5), 1..6),
+        flagged in proptest::bool::ANY,
+    ) {
+        let slots = rows[0].len();
+        let rows = rows.into_iter().map(|mut row| { row.resize(slots, 0); row }).collect::<Vec<_>>();
+        let mut values = Vec::new();
+        for row in &rows {
+            values.extend_from_slice(row);
+            if flagged {
+                values.push(0);
+            }
+        }
+        let expected = rows.concat();
+        proptest::prop_assert_eq!(routed_ids(&values, rows.len(), slots, flagged), Ok(expected));
+    }
 
     /// Blocks partition the experts into maximal runs that fit the budget.
     #[test]
