@@ -534,6 +534,37 @@ pub(crate) fn first_index_out_of_range(indices: &[usize], bound: usize) -> Optio
     None
 }
 
+/// Returns the first position whose value exceeds `bound`.
+///
+/// Proved: `None` exactly when every value is at most `bound`; otherwise the
+/// lowest offending position.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(first =>
+    ensures
+        first is None <==> forall|i: int| 0 <= i < values.len() ==> #[trigger] values[i] <= bound,
+        first matches Some(position) ==> {
+            &&& position < values.len()
+            &&& values[position as int] > bound
+            &&& forall|i: int| 0 <= i < position ==> #[trigger] values[i] <= bound
+        },
+))]
+pub(crate) fn first_index_above(values: &[usize], bound: usize) -> Option<usize> {
+    let mut position = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            position <= values.len(),
+            forall|i: int| 0 <= i < position ==> #[trigger] values[i] <= bound,
+        decreases values.len() - position,
+    ))]
+    while position < values.len() {
+        if values[position] > bound {
+            return Some(position);
+        }
+        position += 1;
+    }
+    None
+}
+
 /// Converts host indices or positions to Burn's portable `i32` index type.
 ///
 /// Proved: the conversion succeeds exactly when every value is at most

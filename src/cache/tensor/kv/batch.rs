@@ -65,8 +65,9 @@ use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 use crate::attention::position_limit;
 use crate::cache::DecodeStateError;
 use crate::cache::identity::IdentityToken;
-use crate::cache::retention::{WorkingWindow, ring_slot_position};
+use crate::cache::retention::WorkingWindow;
 use crate::cache::rows::{RowRun, row_runs};
+use crate::cache::tensor::plan::{first_index_above, portable_indices};
 
 use super::plan::{committed_read_rows, working_read_rows};
 use super::{
@@ -75,12 +76,17 @@ use super::{
 };
 
 mod layout;
+mod slots;
 
 use layout::{
     AppendViolation, StageViolation, append_ends, linear_stage_runs, plan_stage_updates,
     validate_append_layout,
 };
 pub(crate) use layout::{left_padded_columns, token_segment_table};
+use slots::{
+    first_unequal_vector, full_slot_mask, full_slots_all_valid, max_value, ring_slot_table,
+    staged_slot_mask, staged_slot_positions, staged_slots_all_valid,
+};
 
 // Write layouts.
 
@@ -1099,11 +1105,7 @@ impl<B: Backend> NativeKvCache<B> {
             self.validate_baseline(sequence, length)?;
         }
         let staged = self.staged_lengths[0].clone();
-        if let Some(layer) = self
-            .staged_lengths
-            .iter()
-            .position(|lengths| *lengths != staged)
-        {
+        if let Some(layer) = first_unequal_vector(&self.staged_lengths, &staged) {
             return Err(TensorCacheError::BatchPlanMismatch {
                 layer,
                 reason: "staged lengths differ between layers of the group",
@@ -1236,12 +1238,9 @@ impl<B: Backend> NativeKvCache<B> {
             }
             .into());
         }
-        match lengths
-            .iter()
-            .find(|&&length| length > self.config.capacity())
-        {
-            Some(&length) => Err(TensorCacheError::ReadExceedsCapacity {
-                length,
+        match first_index_above(lengths, self.config.capacity()) {
+            Some(row) => Err(TensorCacheError::ReadExceedsCapacity {
+                length: lengths[row],
                 capacity: self.config.capacity(),
             }),
             None => Ok(()),
@@ -1257,22 +1256,20 @@ impl<B: Backend> NativeKvCache<B> {
         let rows = lengths.len();
         match self.window {
             None => {
-                // Slot j holds position j; row b sees positions [L_b - keep_b, L_b).
-                let slots = lengths.iter().copied().max().unwrap_or(0);
+                // Slot j holds position j; row b sees positions [L_b - keep_b, L_b)
+                // (the verified full-storage validity table).
+                let slots = max_value(lengths);
                 if slots == 0 {
                     return Ok(None);
                 }
                 let positions = Tensor::<B, 1, Int>::arange(0..to_i64(slots)?, &self.device)
                     .reshape([1, slots])
                     .expand([rows, slots]);
-                let all_valid = lengths
-                    .iter()
-                    .zip(keep)
-                    .all(|(&length, &keep)| length == slots && keep == length);
-                let valid = (!all_valid).then(|| {
-                    host_mask(rows, slots, &self.device, |row, slot| {
-                        slot < lengths[row] && slot >= lengths[row] - keep[row]
-                    })
+                let valid = (!full_slots_all_valid(lengths, keep, slots)).then(|| {
+                    Tensor::from_bool(
+                        TensorData::new(full_slot_mask(lengths, keep, slots), [rows, slots]),
+                        &self.device,
+                    )
                 });
                 Ok(Some(PlannedSegment {
                     source: SegmentSource::Committed,
@@ -1283,20 +1280,14 @@ impl<B: Backend> NativeKvCache<B> {
             }
             Some(window) => {
                 let width = window.get();
-                let slots = lengths.iter().copied().max().unwrap_or(0).min(width);
+                let slots = max_value(lengths).min(width);
                 if slots == 0 {
                     return Ok(None);
                 }
-                let mut positions = Vec::with_capacity(rows * slots);
-                let mut valid = Vec::with_capacity(rows * slots);
-                for (&length, &keep) in lengths.iter().zip(keep) {
-                    for slot in 0..slots {
-                        let position = ring_slot_position(length, slot, width);
-                        let visible = position.is_some_and(|position| position + keep >= length);
-                        positions.push(to_i32(position.unwrap_or(0))?);
-                        valid.push(visible);
-                    }
-                }
+                // The verified table gives every slot's newest position and
+                // whether it lies in the row's visible window.
+                let (positions, valid) = ring_slot_table(lengths, keep, width, slots);
+                let positions = key_positions(&positions)?;
                 let all_valid = valid.iter().all(|&visible| visible);
                 Ok(Some(PlannedSegment {
                     source: SegmentSource::Committed,
@@ -1321,24 +1312,18 @@ impl<B: Backend> NativeKvCache<B> {
         windows: &[WorkingWindow],
     ) -> TensorCacheResult<Option<PlannedSegment<B>>> {
         let rows = committed.len();
-        let slots = staged.iter().copied().max().unwrap_or(0);
+        let slots = max_value(staged);
         if slots == 0 {
             return Ok(None);
         }
-        let mut positions = Vec::with_capacity(rows * slots);
-        for &length in committed {
-            for slot in 0..slots {
-                positions.push(to_i32(length + slot)?);
-            }
-        }
-        let all_valid = staged
-            .iter()
-            .zip(windows)
-            .all(|(&proposed, window)| proposed == slots && window.staged_skip == 0);
-        let valid = (!all_valid).then(|| {
-            host_mask(rows, slots, &self.device, |row, slot| {
-                slot >= windows[row].staged_skip && slot < staged[row]
-            })
+        // Proposal `j` of row `b` is position `C_b + j`, valid from the row's
+        // skipped proposals up to its staged length (verified tables).
+        let positions = key_positions(&staged_slot_positions(committed, slots))?;
+        let valid = (!staged_slots_all_valid(staged, windows, slots)).then(|| {
+            Tensor::from_bool(
+                TensorData::new(staged_slot_mask(staged, windows, slots), [rows, slots]),
+                &self.device,
+            )
         });
         Ok(Some(PlannedSegment {
             source: SegmentSource::Staged,
@@ -1349,25 +1334,11 @@ impl<B: Backend> NativeKvCache<B> {
     }
 }
 
-/// Uploads a `[rows, slots]` Bool mask computed on the host.
-fn host_mask<B: Backend>(
-    rows: usize,
-    slots: usize,
-    device: &B::Device,
-    valid: impl Fn(usize, usize) -> bool,
-) -> Tensor<B, 2, Bool> {
-    let mask = (0..rows)
-        .flat_map(|row| (0..slots).map(move |slot| (row, slot)))
-        .map(|(row, slot)| valid(row, slot))
-        .collect::<Vec<_>>();
-    Tensor::from_bool(TensorData::new(mask, [rows, slots]), device)
-}
-
-/// Converts a position to Burn's portable `i32` index type.
-fn to_i32(value: usize) -> TensorCacheResult<i32> {
-    i32::try_from(value).map_err(|_| TensorCacheError::TensorIndexOverflow {
+/// Converts key positions to Burn's portable `i32` index type (the verified `portable_indices`).
+fn key_positions(positions: &[usize]) -> TensorCacheResult<Vec<i32>> {
+    portable_indices(positions).map_err(|index| TensorCacheError::TensorIndexOverflow {
         axis: "key position",
-        index: value,
+        index: positions[index],
     })
 }
 

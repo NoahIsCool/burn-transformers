@@ -147,6 +147,14 @@ fn index_scans_report_first_out_of_range_position() {
     assert_eq!(first_index_out_of_range(&[0], 0), Some(0));
 }
 
+/// Bound scans report the lowest value above the bound.
+#[test]
+fn first_index_above_reports_lowest_position() {
+    assert_eq!(first_index_above(&[3, 4, 5], 5), None);
+    assert_eq!(first_index_above(&[3, 6, 7], 5), Some(1));
+    assert_eq!(first_index_above(&[usize::MAX], usize::MAX), None);
+}
+
 /// Portable conversion keeps values and names the first value beyond `i32::MAX`.
 #[test]
 fn portable_indices_preserve_values_and_report_overflow() {

@@ -29,7 +29,8 @@
 //!   staged-commit scan
 //!   accepts exactly fully staged, in-proposal prefixes and names the first
 //!   failure; truncation clears exactly the rows reset from history; beam
-//!   sources and host index vectors are checked and converted exactly;
+//!   sources, read lengths, and host index vectors are checked and converted
+//!   exactly;
 //!   staging lengths stay within the staging capacity.
 //! * `src/cache/tensor/recurrent/plan.rs`: recurrent snapshot indexing. The
 //!   working and committed snapshot of `n` tokens is `n - 1`, a uniform batch
@@ -50,6 +51,13 @@
 //!   staging runs partition the active rows and address each row's own
 //!   columns and proposal offsets; a step's token table marks exactly each
 //!   row's columns with their absolute positions.
+//! * `src/cache/tensor/kv/batch/slots.rs`: batched read slot tables. Full
+//!   storage marks exactly each row's visible window; each written ring slot
+//!   reports the newest position with its residue and is valid exactly when
+//!   that position is visible (unwritten slots are invalid); staged slots
+//!   report `C_b + s` and are valid exactly between the skipped and staged
+//!   proposals; all-valid shortcuts and the per-layer staging comparison are
+//!   exact.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 
@@ -72,6 +80,8 @@ pub mod recurrent_plan;
 pub mod kv_plan;
 #[path = "../src/cache/tensor/kv/batch/layout.rs"]
 pub mod kv_batch_layout;
+#[path = "../src/cache/tensor/kv/batch/slots.rs"]
+pub mod kv_batch_slots;
 
 /// Mirrors the crate paths `crate::cache::*` used by the tensor-cache planners.
 pub mod cache {
