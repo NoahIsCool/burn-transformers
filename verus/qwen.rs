@@ -4,7 +4,9 @@
 //! `src/models/qwen3_5/plan.rs` and `src/models/qwen3_moe/plan.rs`:
 //!
 //! * the derived hybrid schedule rule (full attention exactly when
-//!   `i mod interval = interval - 1`, every layer for intervals zero and one);
+//!   `i mod interval = interval - 1`, every layer for intervals zero and one)
+//!   and the whole derived schedule, which holds exactly
+//!   `floor(L / interval)` full-attention layers;
 //! * dense per-family cache slots: the slot of layer `i` is exactly the number
 //!   of earlier layers of its family, the family sizes are exactly the two
 //!   counts, and slots strictly increase within a family;
@@ -20,7 +22,8 @@
 //!   `min(mtp, target - 1)` per row (restoring `target = MTP + 1`), the
 //!   staging preflight reports the first row whose saturating request
 //!   `(W_b - C_b) + n_b` exceeds the capacity, a cycle needs exactly `K + 1`
-//!   staging slots, and a cycle starts only from batch one with
+//!   staging slots, an MTP append ends exactly at `baseline + n` within the
+//!   capacity, and a cycle starts only from batch one with
 //!   `target = MTP + 1`, a matching history, and a suffix that fits, each
 //!   failure naming its first violated condition;
 //! * the call rotary context (the maximum active context, or one), the first

@@ -161,13 +161,18 @@ impl Default for MuseGlimmerTextConfig {
 
 impl MuseGlimmerTextConfig {
     /// Produces the documented backward-counted three-sliding/one-full schedule.
+    ///
+    /// The derived schedule ([`schedule::derived_global_layers`], verified in
+    /// `verus/deepseek_muse.rs`) makes layer `i` global exactly when
+    /// `(n - 1 - i) mod 4 = 0`, `ceil(n / 4)` of the `n` layers.
     pub fn resolved_layer_types(&self) -> Vec<MuseGlimmerLayerType> {
         if !self.layer_types.is_empty() {
             return self.layer_types.clone();
         }
-        (0..self.num_hidden_layers)
-            .map(|index| {
-                if schedule::is_global_layer(self.num_hidden_layers, index) {
+        schedule::derived_global_layers(self.num_hidden_layers)
+            .into_iter()
+            .map(|global| {
+                if global {
                     MuseGlimmerLayerType::FullAttention
                 } else {
                     MuseGlimmerLayerType::SlidingAttention

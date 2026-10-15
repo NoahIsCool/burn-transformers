@@ -44,6 +44,8 @@
 //!
 //! * `is_global_layer` is the backward-counted `(n - 1 - i) mod 4 = 0` rule
 //!   without underflow, and the last layer is always global;
+//!   `derived_global_layers` builds the whole schedule, which holds exactly
+//!   `ceil(n / 4)` global layers;
 //! * `group_slots` gives every layer the number of earlier layers of its kind,
 //!   so each cache group's slots are dense and strictly increasing in layer
 //!   order (an injective schedule);

@@ -7,6 +7,8 @@
 //!
 //! * [`default_full_attention`] — the legacy hybrid schedule: layer `i` is
 //!   full attention exactly when `(i + 1)` is a multiple of the interval;
+//! * [`derived_full_attention`] — the whole derived schedule, which holds
+//!   exactly `floor(L / interval)` full-attention layers;
 //! * [`cache_slots`] — the dense slot of every layer inside its cache family:
 //!   the number of earlier layers of the same family.
 //!
@@ -31,6 +33,7 @@
 //! * [`shifted_mtp_length`] and [`shifted_mtp_lengths`] — the MTP cursor
 //!   after a target truncation, which keeps the invariant `target = MTP + 1`;
 //! * [`first_staging_overflow`] — the transactional staging preflight;
+//! * [`append_end`] — the cache end of an MTP append and its capacity check;
 //! * [`staging_requirement`] and [`speculative_cycle_plan`] — the staging
 //!   capacity and cache-alignment preflights of a speculative cycle;
 //! * [`call_rotary_context`] and [`first_token_at_or_above`] — the rotary
@@ -73,6 +76,53 @@ pub proof fn lemma_count_extend(kinds: Seq<bool>, end: int, kind: bool)
             + if kinds[end] == kind { 1nat } else { 0nat },
 {
     assert(kinds.subrange(0, end + 1).drop_last() =~= kinds.subrange(0, end));
+}
+
+/// Appending an entry adds one to its kind's count.
+pub proof fn lemma_count_push(kinds: Seq<bool>, entry: bool, kind: bool)
+    ensures
+        count_kind(kinds.push(entry), kind) == count_kind(kinds, kind)
+            + if entry == kind { 1nat } else { 0nat },
+{
+    assert(kinds.push(entry).drop_last() =~= kinds);
+}
+
+/// One more layer adds one multiple of `interval` exactly when it closes a period.
+///
+/// `(i + 1) / m = i / m + [i mod m = m - 1]` for `m >= 2`.
+pub proof fn lemma_period_step(index: int, interval: int)
+    requires
+        interval >= 2,
+        index >= 0,
+    ensures
+        (index + 1) / interval == index / interval
+            + if index % interval == interval - 1 { 1int } else { 0int },
+{
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(index, interval);
+    let quotient = index / interval;
+    let remainder = index % interval;
+    if remainder == interval - 1 {
+        assert(index + 1 == (quotient + 1) * interval + 0) by (nonlinear_arith)
+            requires
+                index == interval * quotient + remainder,
+                remainder == interval - 1;
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(
+            index + 1,
+            interval,
+            quotient + 1,
+            0,
+        );
+    } else {
+        assert(index + 1 == quotient * interval + (remainder + 1)) by (nonlinear_arith)
+            requires
+                index == interval * quotient + remainder;
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(
+            index + 1,
+            interval,
+            quotient,
+            remainder + 1,
+        );
+    }
 }
 
 /// Every column of every row lies below `sequence`.
@@ -132,6 +182,48 @@ pub open spec fn min_int(a: int, b: int) -> int {
 ))]
 pub(crate) fn default_full_attention(index: usize, interval: usize) -> bool {
     interval <= 1 || index % interval == interval - 1
+}
+
+/// Returns the derived hybrid schedule of `layers` layers (`true` = full attention).
+///
+/// Entry `i` is [`default_full_attention`]`(i, interval)`. Proved: every
+/// entry is exactly that rule, and the schedule holds exactly
+/// `floor(layers / interval)` full-attention layers (every layer for an
+/// interval of zero or one): one full-attention layer closes each complete
+/// period of `interval` layers.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(schedule =>
+    ensures
+        schedule.len() == layers,
+        forall|i: int| 0 <= i < layers
+            ==> #[trigger] schedule[i] == (interval <= 1 || i % (interval as int) == interval - 1),
+        count_kind(schedule@, true) == if interval <= 1 { layers as int } else { (layers as int) / (interval as int) },
+))]
+pub(crate) fn derived_full_attention(layers: usize, interval: usize) -> Vec<bool> {
+    let mut schedule: Vec<bool> = Vec::with_capacity(layers);
+    let mut index: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= layers,
+            schedule.len() == index,
+            forall|i: int| 0 <= i < index
+                ==> #[trigger] schedule[i] == (interval <= 1 || i % (interval as int) == interval - 1),
+            count_kind(schedule@, true) == if interval <= 1 { index as int } else { (index as int) / (interval as int) },
+        decreases layers - index,
+    ))]
+    while index < layers {
+        let full = default_full_attention(index, interval);
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_count_push(schedule@, full, true);
+            if interval > 1 {
+                lemma_period_step(index as int, interval as int);
+            }
+        }
+        schedule.push(full);
+        index += 1;
+    }
+    schedule
 }
 
 /// Dense per-family cache slots of a hybrid schedule.
@@ -793,6 +885,48 @@ pub(crate) fn first_staging_overflow(
         row += 1;
     }
     None
+}
+
+/// Why `count` tokens cannot be appended after `baseline` cached tokens.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppendFault {
+    /// `baseline + count` overflows `usize`.
+    Overflow,
+    /// The cache end `baseline + count` exceeds the capacity.
+    ExceedsCapacity {
+        /// The cache end the append would reach.
+        requested: usize,
+    },
+}
+
+/// Returns the cache end `baseline + count` of an append that fits within `capacity`.
+///
+/// Proved: `Ok(end)` exactly when the sum is representable and at most
+/// the capacity, with `end = baseline + count`; each error names its reason.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(end =>
+    ensures
+        match end {
+            Ok(end) => end == baseline + count && end <= capacity,
+            Err(AppendFault::Overflow) => baseline + count > usize::MAX,
+            Err(AppendFault::ExceedsCapacity { requested }) =>
+                requested == baseline + count && requested > capacity,
+        },
+))]
+pub(crate) fn append_end(
+    baseline: usize,
+    count: usize,
+    capacity: usize,
+) -> Result<usize, AppendFault> {
+    let end = match baseline.checked_add(count) {
+        Some(end) => end,
+        None => return Err(AppendFault::Overflow),
+    };
+    if end > capacity {
+        return Err(AppendFault::ExceedsCapacity { requested: end });
+    }
+    Ok(end)
 }
 
 /// Why a speculative proposal suffix cannot be staged.

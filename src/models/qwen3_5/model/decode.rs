@@ -62,8 +62,8 @@ use super::{
 use crate::models::qwen3_5::{
     Qwen3_5LayerType, Qwen3_5TextConfig,
     plan::{
-        self, StagingFault, call_rotary_context, first_staging_overflow, first_token_at_or_above,
-        shifted_mtp_lengths, staging_requirement,
+        self, AppendFault, StagingFault, append_end, call_rotary_context, first_staging_overflow,
+        first_token_at_or_above, shifted_mtp_lengths, staging_requirement,
     },
 };
 
@@ -606,19 +606,25 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             .mtp_working_lengths()
             .and_then(|lengths| lengths.first().copied())
             .ok_or_else(|| Error::Cache("Qwen MTP working metadata is not enabled".into()))?;
-        let end = baseline
-            .checked_add(sequence)
-            .ok_or_else(|| Error::Generation("Qwen MTP logical position overflows usize".into()))?;
-        if end > state.tensors.capacity() {
-            return Err(
-                TensorCacheError::Metadata(DecodeStateError::CapacityExceeded {
-                    sequence: 0,
-                    requested: end,
-                    capacity: state.tensors.capacity(),
-                })
-                .into(),
-            );
-        }
+        // Verified: the MTP cache end `baseline + sequence`, within capacity.
+        let end = match append_end(baseline, sequence, state.tensors.capacity()) {
+            Ok(end) => end,
+            Err(AppendFault::Overflow) => {
+                return Err(Error::Generation(
+                    "Qwen MTP logical position overflows usize".into(),
+                ));
+            }
+            Err(AppendFault::ExceedsCapacity { requested }) => {
+                return Err(
+                    TensorCacheError::Metadata(DecodeStateError::CapacityExceeded {
+                        sequence: 0,
+                        requested,
+                        capacity: state.tensors.capacity(),
+                    })
+                    .into(),
+                );
+            }
+        };
         // Tokens and explicit positions share one readback; implicit positions
         // `baseline..end` need none because their extent is known on the host,
         // and host-validated tokens none at all.

@@ -7,6 +7,10 @@
 //! `(n - 1 - i) mod 4 = 0`, so the final layer is always global and three
 //! local (sliding, RoPE) layers precede each global one.
 //!
+//! [`derived_global_layers`](crate::models::muse_glimmer::schedule::derived_global_layers)
+//! builds the whole derived schedule, which holds exactly `ceil(n / 4)`
+//! global layers.
+//!
 //! Decode caches store each kind in one homogeneous group, so every layer
 //! needs its dense *slot* inside its group: the number of earlier layers of
 //! the same kind. [`group_slots`](crate::models::muse_glimmer::schedule::group_slots) computes that map; its proof establishes
@@ -80,6 +84,40 @@ pub proof fn lemma_count_extend(kinds: Seq<bool>, end: int, kind: bool)
             + if kinds[end] == kind { 1nat } else { 0nat },
 {
     assert(kinds.subrange(0, end + 1).drop_last() =~= kinds.subrange(0, end));
+}
+
+/// Appending an entry adds one to its kind's count.
+pub proof fn lemma_count_push(kinds: Seq<bool>, entry: bool, kind: bool)
+    ensures
+        count_kind(kinds.push(entry), kind) == count_kind(kinds, kind)
+            + if entry == kind { 1nat } else { 0nat },
+{
+    assert(kinds.push(entry).drop_last() =~= kinds);
+}
+
+/// Multiples of four below `m` gain one exactly when `m - 1` is one.
+///
+/// With `ceil(m / 4) = (m + 3) / 4`: `(m + 3) / 4 = (m + 2) / 4 + [(m - 1) mod 4 = 0]`.
+pub proof fn lemma_quarter_step(m: int)
+    requires
+        m >= 1,
+    ensures
+        (m + 3) / 4 == (m + 2) / 4 + if (m - 1) % 4 == 0 { 1int } else { 0int },
+{
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(m - 1, 4);
+    let quotient = (m - 1) / 4;
+    let remainder = (m - 1) % 4;
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(m + 3, 4, quotient + 1, remainder);
+    if remainder == 0 {
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(m + 2, 4, quotient, 3);
+    } else {
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(
+            m + 2,
+            4,
+            quotient + 1,
+            remainder - 1,
+        );
+    }
 }
 
 /// A sequence containing an entry of some kind counts at least one entry of that kind.
@@ -186,6 +224,43 @@ pub open spec fn min_int(a: int, b: int) -> int {
 )]
 pub(crate) fn is_global_layer(layers: usize, index: usize) -> bool {
     (layers - 1 - index) % 4 == 0
+}
+
+/// Returns the derived backward-counted schedule of `layers` layers (`true` = global).
+///
+/// Entry `i` is [`is_global_layer`]`(layers, i)`. Proved: every entry is
+/// exactly that rule, and the schedule holds exactly `ceil(layers / 4)`
+/// global layers — one closing each group of four counted back from the
+/// last layer (13 of the released 52).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(global =>
+    ensures
+        global.len() == layers,
+        forall|i: int| 0 <= i < layers ==> #[trigger] global@[i] == ((layers - 1 - i) % 4 == 0),
+        count_kind(global@, true) == (layers + 3) / 4,
+))]
+pub(crate) fn derived_global_layers(layers: usize) -> Vec<bool> {
+    let mut global: Vec<bool> = Vec::with_capacity(layers);
+    let mut index: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= layers,
+            global.len() == index,
+            forall|i: int| 0 <= i < index ==> #[trigger] global@[i] == ((layers - 1 - i) % 4 == 0),
+            count_kind(global@, true) == (layers + 3) / 4 - ((layers - index) as int + 3) / 4,
+        decreases layers - index,
+    ))]
+    while index < layers {
+        let kind = is_global_layer(layers, index);
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_count_push(global@, kind, true);
+            lemma_quarter_step((layers - index) as int);
+        }
+        global.push(kind);
+        index += 1;
+    }
+    global
 }
 
 /// Returns each layer's dense slot within its kind's cache group.

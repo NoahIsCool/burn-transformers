@@ -17,6 +17,24 @@ fn released_schedule_counts_backward_from_the_last_layer() {
     assert!(is_global_layer(1, 0));
 }
 
+/// The derived schedule equals the per-layer rule and holds `ceil(n / 4)` global layers.
+#[test]
+fn derived_schedule_has_one_global_layer_per_four() {
+    assert_eq!(derived_global_layers(5), [true, false, false, false, true]);
+    assert!(derived_global_layers(0).is_empty());
+    for layers in 0..60 {
+        let global = derived_global_layers(layers);
+        let reference = (0..layers)
+            .map(|index| is_global_layer(layers, index))
+            .collect::<Vec<_>>();
+        assert_eq!(global, reference);
+        assert_eq!(
+            global.iter().filter(|&&global| global).count(),
+            layers.div_ceil(4)
+        );
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 

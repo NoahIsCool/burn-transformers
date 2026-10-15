@@ -3,11 +3,11 @@
 use proptest::prelude::*;
 
 use super::{
-    CycleFault, StagingFault, all_equal, cache_slots, call_rotary_context, columns_below,
-    compact_row_plan, default_full_attention, first_staging_overflow, first_token_at_or_above,
-    gated_query_width, prefix_rows, row_counts, shifted_mtp_length, shifted_mtp_lengths,
-    signed_index, slot_positions, slot_validity, speculative_cycle_plan, staging_requirement,
-    strictly_increasing, widest,
+    AppendFault, CycleFault, StagingFault, all_equal, append_end, cache_slots, call_rotary_context,
+    columns_below, compact_row_plan, default_full_attention, derived_full_attention,
+    first_staging_overflow, first_token_at_or_above, gated_query_width, prefix_rows, row_counts,
+    shifted_mtp_length, shifted_mtp_lengths, signed_index, slot_positions, slot_validity,
+    speculative_cycle_plan, staging_requirement, strictly_increasing, widest,
 };
 
 /// The overflow-free schedule rule equals `(i + 1) mod interval = 0` (interval zero acts as one).
@@ -27,6 +27,47 @@ fn default_schedule_matches_the_reference_rule() {
     assert_eq!(
         schedule,
         [false, false, false, true, false, false, false, true]
+    );
+}
+
+/// The derived schedule equals the per-layer rule and counts `floor(L / interval)` full layers.
+#[test]
+fn derived_schedule_counts_one_full_layer_per_period() {
+    assert_eq!(
+        derived_full_attention(8, 4),
+        [false, false, false, true, false, false, false, true]
+    );
+    for interval in 0..7 {
+        for layers in 0..40 {
+            let schedule = derived_full_attention(layers, interval);
+            let reference = (0..layers)
+                .map(|index| default_full_attention(index, interval))
+                .collect::<Vec<_>>();
+            assert_eq!(schedule, reference);
+            let full = schedule.iter().filter(|&&full| full).count();
+            assert_eq!(
+                full,
+                if interval <= 1 {
+                    layers
+                } else {
+                    layers / interval
+                }
+            );
+        }
+    }
+}
+
+/// Appends report the cache end or the precise failure.
+#[test]
+fn append_end_checks_overflow_and_capacity() {
+    assert_eq!(append_end(3, 2, 5), Ok(5));
+    assert_eq!(
+        append_end(3, 3, 5),
+        Err(AppendFault::ExceedsCapacity { requested: 6 })
+    );
+    assert_eq!(
+        append_end(usize::MAX, 1, usize::MAX),
+        Err(AppendFault::Overflow)
     );
 }
 

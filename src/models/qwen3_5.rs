@@ -201,13 +201,18 @@ impl Default for Qwen3_5TextConfig {
 impl Qwen3_5TextConfig {
     /// Returns an explicit schedule, deriving it from `full_attention_interval`
     /// when an older config omitted `layer_types`.
+    ///
+    /// The derived schedule ([`plan::derived_full_attention`], verified in
+    /// `verus/qwen.rs`) places full attention exactly at layers `i` with
+    /// `(i + 1) mod interval = 0`, `floor(num_hidden_layers / interval)` of them.
     pub fn resolved_layer_types(&self) -> Vec<Qwen3_5LayerType> {
         if !self.layer_types.is_empty() {
             return self.layer_types.clone();
         }
-        (0..self.num_hidden_layers)
-            .map(|index| {
-                if plan::default_full_attention(index, self.full_attention_interval) {
+        plan::derived_full_attention(self.num_hidden_layers, self.full_attention_interval)
+            .into_iter()
+            .map(|full| {
+                if full {
                     Qwen3_5LayerType::FullAttention
                 } else {
                     Qwen3_5LayerType::LinearAttention
