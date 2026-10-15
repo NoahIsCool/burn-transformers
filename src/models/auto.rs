@@ -560,7 +560,7 @@ causal_registry! {
         model: DeepseekV2ForCausalLm,
         config: DeepseekV2Config,
         state: DeepseekV2DecodeState,
-        experiments: pending,
+        experiments: supported,
     },
     /// Muse Glimmer dense decoder with sliding/full hybrid attention.
     MuseGlimmer {
@@ -568,7 +568,7 @@ causal_registry! {
         model: MuseGlimmerForCausalLm,
         config: MuseGlimmerTextConfig,
         state: MuseGlimmerDecodeState,
-        experiments: pending,
+        experiments: supported,
     },
     /// NVIDIA Nemotron-H decoder with interleaved Mamba2, attention, dense, and MoE blocks.
     NemotronH {
