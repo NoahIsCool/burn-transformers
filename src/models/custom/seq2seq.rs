@@ -311,12 +311,10 @@ impl<B: Backend> ModularSeq2SeqLm<B> {
                 spec.max_position_embeddings,
                 "custom.seq2seq.run_layers.positions.position_ids",
             )?;
-            // The context is immutable for the whole range, so its position values
-            // are read back once; each block re-checks only sync-free geometry.
-            let [batch, tokens, _] = state.hidden.dims();
-            state
-                .context
-                .validate([batch, tokens], &state.hidden.device())?;
+            // `validate_execution_state` already ran `ExecutionContext::validate`
+            // once for this range, and the context is immutable while the blocks
+            // run. Each block then re-checks only sync-free geometry, because hooks
+            // may replace the hidden states between blocks.
             for index in range.clone() {
                 layers[index].validate_prevalidated(
                     &state.hidden,
