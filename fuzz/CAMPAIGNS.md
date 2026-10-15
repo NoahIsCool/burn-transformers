@@ -237,3 +237,83 @@ cause was not profiled), below the 2048 MiB limit. The other
 seven targets were not rerun: `logits_processing` changed only in comments and
 tests, and the rest did not change. Round 3 is still sanitizer-free smoke
 evidence with the limitations stated for round 2.
+
+## 2026-10-15: wave-3 robustness fixes (GEN-F32-1..4, CHAT-1..3, ROPE-*)
+
+The robustness package fixed the eleven open library findings recorded above
+(see [README.md](README.md#fixed-findings)) in four library commits plus a
+follow-up guard fix and a Verus-checked refactor, un-ignored their reproducers,
+and removed the harness tolerances the fixes made unnecessary: the
+`within_f32_envelope` and `within_frequency_envelope` checks, the
+`|mscale_all_dim| <= 1e100` bound, the small chat-template growth counts (the
+fragment table now repeats strings `2^62` times, doubles strings and lists 40
+times, and pads, replaces, and formats with widths far past the renderer's
+limits), and the relative `1e-14` float round-trip tolerance (the runtime crate
+now enables `serde_json`'s `float_roundtrip`, which this package inherits).
+The generation oracle restates the new F32 validation rules.
+
+Two harness unit tests already failed on the integration base `614cbf5`,
+independently of this package: `logits_processing`'s top-set oracle counted
+exactly `k` top-k survivors, but the library (like Hugging Face) keeps every
+value tied with the `k`-th, so all-equal rows failed. The oracle now counts
+ties, which fixed `campaign_top_p_near_ties_may_split` and
+`pseudo_random_inputs_agree_with_the_oracles`. Two `modular_specs` tests
+(`capability_gaps_are_reported_at_construction`,
+`pseudo_random_specs_validate_construct_and_run`) also fail on the base,
+because construction now succeeds for a combination the harness still lists as
+a capability gap; that harness is outside this package, so `modular_specs` was
+not fuzzed here.
+
+Campaigns used `cargo-fuzz 0.13.2`, `rustc 1.94.0-nightly (4f14395c3
+2025-12-22)`, macOS 27 on Apple Silicon, **no sanitizer** (`-s none`, as above),
+the cargo-fuzz release profile with debug assertions and overflow checks, and
+the unchanged fuzz lockfile (SHA-256
+`f974aac22ee2e71f3115ff6b2e29cc914f1ec5bc17019f47c06743687d6a3637`). Each target
+ran its built executable directly with `RAYON_NUM_THREADS=1`, a fresh writable
+corpus on the external build volume, the committed seeds, and
+`-max_len=4096 -timeout=10 -rss_limit_mb=2048 -print_final_stats=1`;
+`chat_templates` also used `-len_control=0`. All five targets of a round ran
+side by side, so rates are concurrent rates. Every campaign exited with status
+0 and wrote no crash, timeout, or out-of-memory artifact.
+
+### Round 1: commit `68085fb` (all four library fixes)
+
+Fuzz package tree `fcd1538a91f715cf001be671ffe1459d6b590a0f`, `src/` tree
+`b6f54d6d7872fe0f20c5498054cf4927a0ff74b8`.
+
+| Target | Seconds | Executed inputs | exec/s | cov | ft | Corpus | `lim` | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `logits_processing` | 300 | 957,601 | 3,181 | 2817 | 7720 | 506 | 4096 | 49 MiB |
+| `generation` | 300 | 1,143,313 | 3,798 | 2225 | 5574 | 1781 | 995 | 46 MiB |
+| `rope_parameters` | 300 | 1,306,002 | 4,338 | 2268 | 7311 | 1853 | 1501 | 48 MiB |
+| `chat_templates` | 300 | 184,783 | 613 | 8353 | 32522 | 1956 | 4096 | 75 MiB |
+| `configuration` | 120 | 501,339 | 4,143 | 4279 | 9171 | 1204 | 1307 | 48 MiB |
+
+### Round 2: commit `9b028bd` (final source of the package)
+
+Same fuzz package tree; `src/` tree `a3fe014876ad936078317cb363284ce939801753`
+(adds the refusal of guarded operands named `not`, found by the crate's
+differential proptest rather than by a campaign, and the Verus-checked size
+arithmetic). Each target also read its round-1 corpus as a second, read-only
+corpus.
+
+| Target | Seconds | Executed inputs | exec/s | cov | ft | Corpus | `lim` | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `logits_processing` | 300 | 1,108,870 | 3,683 | 2817 | 7672 | 418 | 4096 | 52 MiB |
+| `generation` | 300 | 1,328,077 | 4,412 | 2280 | 5980 | 1803 | 4096 | 47 MiB |
+| `rope_parameters` | 300 | 1,532,083 | 5,089 | 2312 | 7692 | 1733 | 4096 | 51 MiB |
+| `chat_templates` | 300 | 178,682 | 593 | 8523 | 34216 | 1847 | 4096 | 968 MiB |
+| `configuration` | 120 | 611,458 | 5,053 | 4415 | 9866 | 1242 | 2409 | 47 MiB |
+
+`chat_templates` reached a process peak of 968 MiB in round 2 (below the
+2048 MiB limit). Re-running its whole retained corpus once with
+`-malloc_limit_mb=200` peaked at 199 MiB without a single allocation above
+200 MiB, so the peak came from a mutated input that was not retained, plus
+allocator retention across 178,682 renders. For comparison, the worst-case
+template that keeps every value it builds alive (`ns.l + ['x' * 16000000]` in
+a loop) stops at the renderer's 256 MiB production budget with a peak of
+264 MiB in a fresh process. These are finite smoke campaigns without a
+sanitizer and with the limitations stated for the earlier rounds; in
+particular the documented residual gaps of the renderer (comparisons of
+containers that share a value, template text replayed into captures) are not
+exercised by the fragment table.
