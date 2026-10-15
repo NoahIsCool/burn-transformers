@@ -4,12 +4,22 @@ use std::{collections::HashMap, fs};
 
 use burn::backend::Flex;
 use tempfile::TempDir;
-use tokenizers::{Tokenizer, models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace};
+use tokenizers::{
+    PaddingParams, PaddingStrategy, Tokenizer, TruncationParams, models::wordlevel::WordLevel,
+    pre_tokenizers::whitespace::Whitespace, processors::template::TemplateProcessing,
+};
 
 use super::*;
 
 /// Writes a deterministic local tokenizer without downloading fixtures.
 fn fixture(config: Value) -> TempDir {
+    fixture_with(config, |_| {})
+}
+
+/// Writes the word-level fixture after letting a test adjust the tokenizer pipeline.
+///
+/// Vocabulary: `<unk>`=0, `<pad>`=1, `<bos>`=2, `<eos>`=3, `hello`=4, `world`=5.
+fn fixture_with(config: Value, configure: impl FnOnce(&mut Tokenizer)) -> TempDir {
     let directory = TempDir::new().expect("temporary tokenizer directory");
     let vocabulary = HashMap::from([
         ("<unk>".to_owned(), 0),
@@ -28,6 +38,7 @@ fn fixture(config: Value) -> TempDir {
         .expect("word-level fixture model");
     let mut tokenizer = Tokenizer::new(model);
     tokenizer.with_pre_tokenizer(Some(Whitespace {}));
+    configure(&mut tokenizer);
     tokenizer
         .save(directory.path().join("tokenizer.json"), false)
         .expect("save tokenizer fixture");
@@ -895,4 +906,218 @@ fn renders_chat_and_propagates_template_failures() {
         )
         .expect_err("raise_exception must propagate");
     assert!(error.to_string().contains("stop"));
+}
+
+/// Installs a single-sequence post-processor template such as `<bos> $A <eos>`.
+fn with_template(tokenizer: &mut Tokenizer, template: &str) {
+    let processor = TemplateProcessing::builder()
+        .try_single(template)
+        .expect("valid fixture template")
+        .special_tokens(vec![("<bos>", 2), ("<eos>", 3)])
+        .build()
+        .expect("fixture post-processor");
+    tokenizer.with_post_processor(Some(processor));
+}
+
+/// Encodes one string with explicit special-token and truncation controls.
+fn encode_ids(
+    tokenizer: &LocalTokenizer,
+    text: &str,
+    add_special_tokens: bool,
+    max_length: Option<usize>,
+    side: TruncationSide,
+) -> Result<Vec<u32>> {
+    tokenizer
+        .encode(
+            text,
+            &EncodeOptions {
+                add_special_tokens,
+                max_length,
+                truncation_side: Some(side),
+                ..EncodeOptions::default()
+            },
+        )
+        .map(|encoding| encoding.token_ids()[0].clone())
+}
+
+/// Truncation cuts content, never the BOS/EOS template, on either side (TOK-1).
+#[test]
+fn truncation_preserves_post_processor_special_tokens() {
+    let directory = fixture_with(base_config(), |tokenizer| {
+        with_template(tokenizer, "<bos> $A <eos>");
+    });
+    let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+    assert_eq!(tokenizer.num_special_tokens_to_add(), 2);
+    // Content IDs are 4 5 5 4; the template adds 2 before and 3 after.
+    let text = "hello world world hello";
+    let encode = |max_length, side| encode_ids(&tokenizer, text, true, max_length, side);
+    assert_eq!(
+        encode(None, TruncationSide::Right).unwrap(),
+        [2, 4, 5, 5, 4, 3]
+    );
+    assert_eq!(
+        encode(Some(4), TruncationSide::Right).unwrap(),
+        [2, 4, 5, 3]
+    );
+    assert_eq!(encode(Some(4), TruncationSide::Left).unwrap(), [2, 5, 4, 3]);
+    // A limit equal to the template keeps only the template, as Hugging Face does.
+    assert_eq!(encode(Some(2), TruncationSide::Right).unwrap(), [2, 3]);
+    // Limits at or above the encoded width leave the row unchanged.
+    for max_length in [6, 7] {
+        assert_eq!(
+            encode(Some(max_length), TruncationSide::Left).unwrap(),
+            [2, 4, 5, 5, 4, 3]
+        );
+    }
+    let error = encode(Some(1), TruncationSide::Right).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("max_length 1 cannot hold the 2 special tokens"),
+        "{error}"
+    );
+    // Without special tokens the full limit is available to content.
+    assert_eq!(
+        encode_ids(&tokenizer, text, false, Some(2), TruncationSide::Left).unwrap(),
+        [5, 4]
+    );
+    assert_eq!(
+        encode_ids(&tokenizer, text, false, Some(1), TruncationSide::Right).unwrap(),
+        [4]
+    );
+}
+
+/// A T5-style `$A </s>` template keeps its trailing EOS under right truncation.
+#[test]
+fn t5_style_truncation_ends_with_eos() {
+    let directory = fixture_with(base_config(), |tokenizer| {
+        with_template(tokenizer, "$A <eos>");
+    });
+    let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+    assert_eq!(tokenizer.num_special_tokens_to_add(), 1);
+    let encoded = tokenizer
+        .encode_batch(
+            &["hello world hello world", "world"],
+            &EncodeOptions {
+                max_length: Some(3),
+                padding: Padding::Longest,
+                padding_side: Some(PaddingSide::Right),
+                ..EncodeOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(encoded.token_ids(), &[vec![4, 5, 3], vec![5, 3, 1]]);
+    assert_eq!(
+        encoded.valid_tokens(),
+        &[vec![true, true, true], vec![true, true, false]]
+    );
+    // Only the template survives a limit equal to its width.
+    assert_eq!(
+        encode_ids(&tokenizer, "hello", true, Some(1), TruncationSide::Right).unwrap(),
+        [3]
+    );
+}
+
+/// Truncation and padding serialized in `tokenizer.json` never apply implicitly.
+#[test]
+fn serialized_truncation_and_padding_are_cleared_at_load() {
+    let directory = fixture_with(base_config(), |tokenizer| {
+        tokenizer
+            .with_truncation(Some(TruncationParams {
+                max_length: 1,
+                ..TruncationParams::default()
+            }))
+            .expect("fixture truncation");
+        tokenizer.with_padding(Some(PaddingParams {
+            strategy: PaddingStrategy::Fixed(8),
+            pad_id: 1,
+            pad_token: "<pad>".into(),
+            ..PaddingParams::default()
+        }));
+    });
+    let raw = Tokenizer::from_file(directory.path().join("tokenizer.json")).unwrap();
+    assert!(raw.get_truncation().is_some() && raw.get_padding().is_some());
+    let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+    let encoded = tokenizer
+        .encode("hello world hello", &EncodeOptions::default())
+        .unwrap();
+    assert_eq!(encoded.token_ids(), &[vec![4, 5, 4]]);
+    assert_eq!(encoded.valid_tokens(), &[vec![true; 3]]);
+}
+
+proptest::proptest! {
+    /// For any content and limit, the template survives and the content is the reference window.
+    #[test]
+    fn truncation_matches_reference_content_window(
+        words in proptest::collection::vec(proptest::bool::ANY, 0..12),
+        max_length in 2_usize..16,
+        left in proptest::bool::ANY,
+    ) {
+        let directory = fixture_with(base_config(), |tokenizer| {
+            with_template(tokenizer, "<bos> $A <eos>");
+        });
+        let tokenizer = LocalTokenizer::from_directory(directory.path()).unwrap();
+        let content = words.iter().map(|word| if *word { 4 } else { 5 }).collect::<Vec<u32>>();
+        let text = words
+            .iter()
+            .map(|word| if *word { "hello" } else { "world" })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let side = if left { TruncationSide::Left } else { TruncationSide::Right };
+        let ids = encode_ids(&tokenizer, &text, true, Some(max_length), side).unwrap();
+
+        let budget = max_length - 2;
+        let kept = content.len().min(budget);
+        let window = if left { &content[content.len() - kept..] } else { &content[..kept] };
+        let mut expected = vec![2];
+        expected.extend_from_slice(window);
+        expected.push(3);
+        proptest::prop_assert_eq!(ids, expected);
+    }
+}
+
+/// Golden IDs from Hugging Face `transformers` 5.2.0 / `tokenizers` 0.22.2 for FLAN-T5.
+///
+/// Generated with `AutoTokenizer.from_pretrained(<pinned flan-t5-small>)` and
+/// `tokenizer(text, truncation=True, max_length=m)` for each truncation side.
+#[test]
+#[ignore = "requires TRANSFORMERS_FLAN_T5_SMALL_DIR with the pinned FLAN-T5-small tokenizer"]
+fn flan_t5_truncation_matches_hugging_face_golden_ids() {
+    let root = std::env::var_os("TRANSFORMERS_FLAN_T5_SMALL_DIR")
+        .expect("TRANSFORMERS_FLAN_T5_SMALL_DIR must name the pinned FLAN-T5-small snapshot");
+    let tokenizer = LocalTokenizer::from_directory(root).unwrap();
+    let text = "translate English to German: the quick brown fox jumps over the lazy dog";
+    let full = [
+        13959, 1566, 12, 2968, 10, 8, 1704, 4216, 3, 20400, 4418, 7, 147, 8, 19743, 1782, 1,
+    ];
+    assert_eq!(
+        encode_ids(&tokenizer, text, true, None, TruncationSide::Right).unwrap(),
+        full
+    );
+    for (max_length, side, expected) in [
+        (
+            8,
+            TruncationSide::Right,
+            vec![13959, 1566, 12, 2968, 10, 8, 1704, 1],
+        ),
+        (
+            8,
+            TruncationSide::Left,
+            vec![20400, 4418, 7, 147, 8, 19743, 1782, 1],
+        ),
+        (2, TruncationSide::Right, vec![13959, 1]),
+        (2, TruncationSide::Left, vec![1782, 1]),
+        (1, TruncationSide::Right, vec![1]),
+        (1, TruncationSide::Left, vec![1]),
+    ] {
+        assert_eq!(
+            encode_ids(&tokenizer, text, true, Some(max_length), side).unwrap(),
+            expected,
+            "max_length={max_length} side={side:?}"
+        );
+    }
+    assert_eq!(
+        encode_ids(&tokenizer, text, false, Some(4), TruncationSide::Right).unwrap(),
+        [13959, 1566, 12, 2968]
+    );
 }

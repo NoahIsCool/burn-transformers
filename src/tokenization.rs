@@ -6,6 +6,17 @@
 //! valid token`; conversion to a backend tensor happens only after rectangular
 //! padding has been validated.
 //!
+//! # Truncation and special tokens
+//!
+//! Encoding follows Hugging Face `transformers` semantics. A row is encoded as
+//! content first; when [`EncodeOptions::max_length`] is set, the content is cut
+//! to `max_length - r` IDs, where `r` is the number of template tokens the
+//! checkpoint's post-processor adds (`</s>` for T5, `<s>` for Llama-style
+//! tokenizers). Only then does the post-processor insert those tokens, so a
+//! truncated row still begins and ends exactly as the model was trained to see.
+//! Truncation and padding blocks serialized inside `tokenizer.json` are cleared
+//! at load time: like `transformers`, this crate applies them only on request.
+//!
 //! Chat templates are data supplied by a checkpoint and therefore are treated
 //! as untrusted programs. The optional MiniJinja environment has no filesystem
 //! loader, rejects undefined values, limits recursion, and meters execution
@@ -23,12 +34,17 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "chat-templates")]
 use serde_json::Map;
 use serde_json::Value;
-use tokenizers::Tokenizer;
+use tokenizers::{PostProcessor, Tokenizer, TruncationDirection};
 
 use crate::{
     CausalLmInput, Error, Result,
     architecture::{TokenMask, bool_tensor_from_values},
 };
+
+/// Dependency-free truncation-budget and padding arithmetic, verified by Verus.
+mod layout;
+
+use layout::{content_token_budget, pad_token_row, padding_split, validity_mask};
 
 /// Maximum accepted tokenizer JSON size in bytes before parsing.
 const MAX_TOKENIZER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -82,7 +98,12 @@ pub enum Padding {
 pub struct EncodeOptions {
     /// Whether the tokenizer's post-processor may insert model special tokens.
     pub add_special_tokens: bool,
-    /// Optional maximum length applied after special-token insertion.
+    /// Optional limit on each complete row, special tokens included.
+    ///
+    /// Content is truncated on [`Self::truncation_side`] *before* the
+    /// post-processor adds its template, exactly as Hugging Face does, so
+    /// BOS/EOS and similar template tokens are never cut off. A limit smaller
+    /// than the template itself is rejected.
     pub max_length: Option<usize>,
     /// Batch padding policy.
     pub padding: Padding,
@@ -326,12 +347,13 @@ impl LocalTokenizer {
                 path: root.join("tokenizer.json"),
                 reason: "required tokenizer artifact is missing".into(),
             })?;
-        let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|error| {
+        let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|error| {
             Error::Tokenizer(format!(
                 "failed to decode {}: {error}",
                 tokenizer_path.display()
             ))
         })?;
+        clear_serialized_batch_policy(&mut tokenizer)?;
         let tokenizer_config = read_optional_json(&root, "tokenizer_config.json")?;
         let special_map = read_optional_json(&root, "special_tokens_map.json")?;
         let metadata = normalize_metadata(
@@ -390,7 +412,24 @@ impl LocalTokenizer {
         self.encode_batch(&[text], options)
     }
 
+    /// Returns how many template tokens the post-processor adds to one sequence.
+    ///
+    /// This mirrors Hugging Face's `num_special_tokens_to_add(pair=False)`: T5
+    /// adds one (`</s>`), BERT adds two (`[CLS]`, `[SEP]`), and byte-level
+    /// tokenizers such as GPT-2 and Qwen add none.
+    pub fn num_special_tokens_to_add(&self) -> usize {
+        self.tokenizer
+            .get_post_processor()
+            .map_or(0, |processor| processor.added_tokens(false))
+    }
+
     /// Encodes, truncates, and optionally pads text entirely from local state.
+    ///
+    /// Each row is tokenized as content, truncated to the content budget left
+    /// by [`EncodeOptions::max_length`], and then passed through the
+    /// checkpoint post-processor, which adds BOS/EOS-style template tokens
+    /// when [`EncodeOptions::add_special_tokens`] is set. Padding is applied
+    /// last and never truncates: a row wider than a fixed padding width fails.
     pub fn encode_batch<S: AsRef<str>>(
         &self,
         texts: &[S],
@@ -402,87 +441,123 @@ impl LocalTokenizer {
                 "encode_batch requires at least one input string".into(),
             ));
         }
-        let truncation_side = options
+        let content_budget = self.content_budget(options)?;
+        let direction = match options
             .truncation_side
-            .unwrap_or(self.metadata.truncation_side);
-        let mut rows = texts
+            .unwrap_or(self.metadata.truncation_side)
+        {
+            TruncationSide::Left => TruncationDirection::Left,
+            TruncationSide::Right => TruncationDirection::Right,
+        };
+        let rows = texts
             .iter()
             .enumerate()
             .map(|(index, text)| {
-                let encoding = self
-                    .tokenizer
-                    .encode(text.as_ref(), options.add_special_tokens)
-                    .map_err(|error| {
-                        Error::Tokenizer(format!("failed to encode batch row {index}: {error}"))
-                    })?;
-                let mut ids = encoding.get_ids().to_vec();
-                if let Some(maximum) = options.max_length
-                    && ids.len() > maximum
-                {
-                    match truncation_side {
-                        TruncationSide::Left => ids = ids.split_off(ids.len() - maximum),
-                        TruncationSide::Right => ids.truncate(maximum),
-                    }
-                }
-                if ids.is_empty() {
-                    return Err(Error::Tokenizer(format!(
-                        "batch row {index} encoded to no tokens"
-                    )));
-                }
-                Ok(ids)
+                self.encode_row(
+                    index,
+                    text.as_ref(),
+                    options.add_special_tokens,
+                    content_budget,
+                    direction,
+                )
             })
             .collect::<Result<Vec<_>>>()?;
+        self.pad_rows(rows, options)
+    }
 
+    /// Returns the per-row content budget implied by `max_length`, if any.
+    fn content_budget(&self, options: &EncodeOptions) -> Result<Option<usize>> {
+        let Some(max_length) = options.max_length else {
+            return Ok(None);
+        };
+        let reserved = if options.add_special_tokens {
+            self.num_special_tokens_to_add()
+        } else {
+            0
+        };
+        content_token_budget(max_length, reserved)
+            .map(Some)
+            .ok_or_else(|| {
+                Error::Tokenizer(format!(
+                    "max_length {max_length} cannot hold the {reserved} special tokens added by the tokenizer post-processor"
+                ))
+            })
+    }
+
+    /// Encodes one row: content, then optional truncation, then the special-token template.
+    fn encode_row(
+        &self,
+        index: usize,
+        text: &str,
+        add_special_tokens: bool,
+        content_budget: Option<usize>,
+        direction: TruncationDirection,
+    ) -> Result<Vec<u32>> {
+        let row_error = |error: tokenizers::Error| {
+            Error::Tokenizer(format!("failed to encode batch row {index}: {error}"))
+        };
+        let mut content = self.tokenizer.encode(text, false).map_err(row_error)?;
+        if let Some(budget) = content_budget
+            && content.len() > budget
+        {
+            content.truncate(budget, 0, direction);
+            // The discarded windows are never returned; dropping them here
+            // keeps the post-processor from templating each one.
+            drop(content.take_overflowing());
+        }
+        let encoding = self
+            .tokenizer
+            .post_process(content, None, add_special_tokens)
+            .map_err(row_error)?;
+        if encoding.is_empty() {
+            return Err(Error::Tokenizer(format!(
+                "batch row {index} encoded to no tokens"
+            )));
+        }
+        Ok(encoding.get_ids().to_vec())
+    }
+
+    /// Pads encoded rows to a rectangle and builds their `true == valid` masks.
+    fn pad_rows(&self, rows: Vec<Vec<u32>>, options: &EncodeOptions) -> Result<BatchEncoding> {
         let target = match options.padding {
             Padding::None => None,
             Padding::Longest => rows.iter().map(Vec::len).max(),
             Padding::Fixed(width) => Some(width),
         };
-        let mut masks = rows
-            .iter()
-            .map(|row| vec![true; row.len()])
-            .collect::<Vec<_>>();
-        if let Some(target) = target {
-            let pad_id = self
-                .metadata
-                .special_tokens
-                .pad
-                .as_ref()
-                .ok_or_else(|| {
-                    Error::Tokenizer("padding requested but no pad token is declared".into())
-                })?
-                .id;
-            let padding_side = options.padding_side.unwrap_or(self.metadata.padding_side);
-            for (index, (row, mask)) in rows.iter_mut().zip(&mut masks).enumerate() {
-                if row.len() > target {
-                    return Err(Error::Tokenizer(format!(
-                        "encoded row {index} has length {}, exceeding padding width {target}; set max_length to request truncation",
-                        row.len()
-                    )));
-                }
-                let amount = target - row.len();
-                if amount == 0 {
-                    continue;
-                }
-                match padding_side {
-                    PaddingSide::Left => {
-                        let mut padded = vec![pad_id; amount];
-                        padded.append(row);
-                        *row = padded;
-                        let mut padded_mask = vec![false; amount];
-                        padded_mask.append(mask);
-                        *mask = padded_mask;
-                    }
-                    PaddingSide::Right => {
-                        row.resize(target, pad_id);
-                        mask.resize(target, false);
-                    }
-                }
+        let Some(target) = target else {
+            let valid_tokens = rows.iter().map(|row| vec![true; row.len()]).collect();
+            return Ok(BatchEncoding {
+                token_ids: rows,
+                valid_tokens,
+            });
+        };
+        let pad_id = self
+            .metadata
+            .special_tokens
+            .pad
+            .as_ref()
+            .ok_or_else(|| {
+                Error::Tokenizer("padding requested but no pad token is declared".into())
+            })?
+            .id;
+        let pad_left =
+            options.padding_side.unwrap_or(self.metadata.padding_side) == PaddingSide::Left;
+        let mut token_ids = Vec::with_capacity(rows.len());
+        let mut valid_tokens = Vec::with_capacity(rows.len());
+        for (index, row) in rows.iter().enumerate() {
+            if row.len() > target {
+                return Err(Error::Tokenizer(format!(
+                    "encoded row {index} has length {}, exceeding padding width {target}; set max_length to request truncation",
+                    row.len()
+                )));
             }
+            let split = padding_split(row.len(), target, pad_left);
+            token_ids.push(pad_token_row(row, pad_id, split));
+            valid_tokens.push(validity_mask(row.len(), split));
         }
         Ok(BatchEncoding {
-            token_ids: rows,
-            valid_tokens: masks,
+            token_ids,
+            valid_tokens,
         })
     }
 
@@ -574,6 +649,21 @@ impl LocalTokenizer {
         encode_options.add_special_tokens = false;
         self.encode(&prompt, &encode_options)
     }
+}
+
+/// Clears truncation and padding serialized inside `tokenizer.json`.
+///
+/// Hugging Face `transformers` resets backend truncation and padding on every
+/// call that does not request them, so a serialized `"truncation"` or
+/// `"padding"` block never applies implicitly there. Leaving them active here
+/// would truncate rows silently and append pad IDs that [`BatchEncoding`]
+/// masks would report as real tokens.
+fn clear_serialized_batch_policy(tokenizer: &mut Tokenizer) -> Result<()> {
+    tokenizer.with_truncation(None).map_err(|error| {
+        Error::Tokenizer(format!("failed to clear serialized truncation: {error}"))
+    })?;
+    tokenizer.with_padding(None);
+    Ok(())
 }
 
 /// Resolves a fixed artifact name and ensures symlinks cannot escape the root.
