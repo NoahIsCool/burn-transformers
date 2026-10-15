@@ -60,7 +60,7 @@ use crate::{
 
 use super::{
     AutoCausalConfig, AutoCausalLm, AutoSeq2SeqLm,
-    defaults::sampling_top_k,
+    defaults::{TokenIdError, canonical_token_ids, clamped_min_new_tokens, sampling_top_k},
     detect_model_type,
     family::{CausalFamily, PlannedCheckpoint},
 };
@@ -488,7 +488,7 @@ fn apply_local_generation_config(
         // Hugging Face only warns about an unreachable minimum and suppresses
         // EOS for the whole run, which the clamped value does too.
         // `unsupported_settings` reports the declared value when this clamps.
-        config.min_new_tokens = min_new_tokens.min(config.max_new_tokens);
+        config.min_new_tokens = clamped_min_new_tokens(min_new_tokens, config.max_new_tokens);
     }
     if let Some(size) = local.no_repeat_ngram_size.filter(|_| constraints) {
         config.no_repeat_ngram_size = size;
@@ -748,28 +748,24 @@ fn contained_regular_file(
 }
 
 /// Converts and canonicalizes a scalar-or-vector token field.
+///
+/// The verified [`canonical_token_ids`] checks IDs in order and returns the
+/// sorted, deduplicated `u32` set.
 fn normalize_token_list(
     ids: Option<&TokenIds>,
     vocabulary_size: usize,
     field: &str,
 ) -> Result<Vec<u32>> {
-    let mut normalized = Vec::new();
-    if let Some(ids) = ids {
-        for id in ids.iter() {
-            if id >= vocabulary_size {
-                return Err(Error::configuration(
-                    field,
-                    format!("token {id} is outside vocabulary size {vocabulary_size}"),
-                ));
-            }
-            normalized.push(u32::try_from(id).map_err(|_| {
-                Error::configuration(field, format!("token {id} does not fit the u32 runtime"))
-            })?);
+    let ids = ids.map_or_else(Vec::new, |ids| ids.iter().collect::<Vec<_>>());
+    canonical_token_ids(&ids, vocabulary_size).map_err(|error| match error {
+        TokenIdError::OutsideVocabulary { id } => Error::configuration(
+            field,
+            format!("token {id} is outside vocabulary size {vocabulary_size}"),
+        ),
+        TokenIdError::ExceedsU32 { id } => {
+            Error::configuration(field, format!("token {id} does not fit the u32 runtime"))
         }
-    }
-    normalized.sort_unstable();
-    normalized.dedup();
-    Ok(normalized)
+    })
 }
 
 /// Normalizes the model-level padding token.

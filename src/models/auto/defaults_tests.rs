@@ -1,6 +1,9 @@
-//! Hugging Face generation-default arithmetic: the top-k resolution rule.
+//! Hugging Face generation-default arithmetic: top-k, minimum length, and token lists.
 
-use super::{HUGGING_FACE_DEFAULT_TOP_K, sampling_top_k};
+use super::{
+    HUGGING_FACE_DEFAULT_TOP_K, TokenIdError, canonical_token_ids, clamped_min_new_tokens,
+    sampling_top_k,
+};
 
 /// Zero disables top-k, an unset value means 50, and every value is clamped to the vocabulary.
 #[test]
@@ -14,7 +17,55 @@ fn sampling_top_k_follows_hugging_face() {
     assert_eq!(sampling_top_k(Some(4), 0), Some(0));
 }
 
+/// The minimum length is clamped to the length bound and lowered only when it exceeds it.
+#[test]
+fn min_new_tokens_are_clamped_to_the_length_bound() {
+    assert_eq!(clamped_min_new_tokens(3, 8), 3);
+    assert_eq!(clamped_min_new_tokens(8, 8), 8);
+    assert_eq!(clamped_min_new_tokens(9, 8), 8);
+    assert_eq!(clamped_min_new_tokens(0, 0), 0);
+}
+
+/// Token lists are checked in order and canonicalized to sorted distinct `u32` IDs.
+#[test]
+fn token_lists_are_checked_in_order_and_canonicalized() {
+    assert_eq!(canonical_token_ids(&[], 8), Ok(Vec::new()));
+    assert_eq!(canonical_token_ids(&[7, 2, 7, 0], 8), Ok(vec![0, 2, 7]));
+    assert_eq!(
+        canonical_token_ids(&[1, 9, 10], 9),
+        Err(TokenIdError::OutsideVocabulary { id: 9 })
+    );
+    let oversized = usize::try_from(u32::MAX).expect("64-bit usize") + 1;
+    assert_eq!(
+        canonical_token_ids(&[1, oversized, usize::MAX], usize::MAX),
+        Err(TokenIdError::ExceedsU32 { id: oversized })
+    );
+    // The vocabulary check precedes the `u32` check for the same ID.
+    assert_eq!(
+        canonical_token_ids(&[oversized], oversized),
+        Err(TokenIdError::OutsideVocabulary { id: oversized })
+    );
+}
+
 proptest::proptest! {
+    /// Canonical lists equal the former sort-and-deduplicate normalization.
+    #[test]
+    fn canonical_token_ids_match_sort_and_dedup(
+        ids in proptest::collection::vec(0_usize..40, 0..12),
+        vocabulary_size in 1_usize..40,
+    ) {
+        let expected = match ids.iter().find(|&&id| id >= vocabulary_size) {
+            Some(&id) => Err(TokenIdError::OutsideVocabulary { id }),
+            None => {
+                let mut tokens = ids.iter().map(|&id| id as u32).collect::<Vec<_>>();
+                tokens.sort_unstable();
+                tokens.dedup();
+                Ok(tokens)
+            }
+        };
+        proptest::prop_assert_eq!(canonical_token_ids(&ids, vocabulary_size), expected);
+    }
+
     /// The sampling top-k is disabled exactly by zero and otherwise lies in `1..=vocabulary`.
     #[test]
     fn sampling_top_k_is_disabled_by_zero_and_clamped_otherwise(
