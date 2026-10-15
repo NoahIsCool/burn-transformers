@@ -312,6 +312,15 @@ pub enum TensorCacheError {
         requested: usize,
     },
 
+    /// A cache group was added after the owning state committed tokens.
+    #[error(
+        "cannot {operation} after tokens were committed: a new group would expose zero-filled history; reset the state first"
+    )]
+    TopologyAfterHistory {
+        /// Name of the rejected topology change.
+        operation: &'static str,
+    },
+
     /// An attached bank has incompatible config or device affinity.
     #[error("cannot attach {bank} bank: {reason}")]
     IncompatibleBank {

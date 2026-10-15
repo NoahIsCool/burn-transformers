@@ -113,3 +113,64 @@ fn metadata_view_reports_the_tensor_transaction() {
     assert!(!state.metadata().has_active_transaction());
     assert_eq!(state.working_lengths(), &[3, 1]);
 }
+
+/// Groups cannot be added once lengths are non-zero, so they never expose zero "history".
+#[test]
+fn groups_are_refused_after_tokens_are_committed() {
+    let config = CacheConfig::new(2, 8).expect("valid config");
+    let mut state = TensorDecodeState::<TestBackend>::with_config(config, &Default::default());
+    let kv = NativeKvCacheSpec::new(1, 1, 1, KvCacheStorage::Full, DType::F32).expect("geometry");
+    let recurrent =
+        crate::cache::RecurrentStateSpec::new(1, 1, 1, 1, 1, 1, DType::F32).expect("geometry");
+    state
+        .main_mut()
+        .add_native_kv(kv)
+        .expect("empty state accepts groups");
+    state.advance(&[0, 2]).expect("prefill one row");
+    assert!(matches!(
+        state.main_mut().add_native_kv(kv),
+        Err(TensorCacheError::TopologyAfterHistory { .. })
+    ));
+    assert!(matches!(
+        state.main_mut().add_recurrent(recurrent),
+        Err(TensorCacheError::TopologyAfterHistory { .. })
+    ));
+    assert!(
+        TensorCacheError::TopologyAfterHistory {
+            operation: "add native KV cache"
+        }
+        .to_string()
+        .contains("zero-filled history")
+    );
+
+    // The auxiliary bank has its own, still empty, cursor.
+    state
+        .enable_mtp()
+        .expect("MTP bank")
+        .add_native_kv(kv)
+        .expect("MTP cursor is empty");
+    state.advance_mtp(&[1, 0]).expect("MTP prefill");
+    assert!(matches!(
+        state.mtp_mut().expect("MTP bank").add_native_kv(kv),
+        Err(TensorCacheError::TopologyAfterHistory { .. })
+    ));
+
+    // Duplicating the empty row empties the main bank; reset empties both.
+    state.reorder(&[0, 0]).expect("beam reorder");
+    assert_eq!(state.lengths(), &[0, 0]);
+    state
+        .main_mut()
+        .add_recurrent(recurrent)
+        .expect("main is empty again");
+    state.advance(&[1, 1]).expect("prefill");
+    state.reset().expect("reset");
+    state
+        .main_mut()
+        .add_native_kv(kv)
+        .expect("reset unlocks topology");
+    state
+        .mtp_mut()
+        .expect("MTP bank")
+        .add_native_kv(kv)
+        .expect("reset unlocks the auxiliary bank");
+}

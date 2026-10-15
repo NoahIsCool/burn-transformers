@@ -9,7 +9,7 @@
 
 use core::num::NonZeroUsize;
 
-use burn::tensor::{DType, Int, Tensor, TensorData, backend::Backend};
+use burn::tensor::{Bool, DType, Int, Tensor, TensorData, backend::Backend};
 
 use crate::cache::retention::first_inexact_recurrent_rewind;
 use crate::cache::{CacheConfig, DecodeStateError};
@@ -649,11 +649,20 @@ impl<B: Backend> RecurrentStateCache<B> {
 
     /// Reads the latest working recurrent state for the entire batch.
     ///
-    /// A synthetic snapshot axis concatenates committed state at index zero
-    /// with proposal snapshots at indices `1..`. A single device-side
-    /// [`Tensor::gather_nd`] then selects `(batch_row, staged_length)` for every
-    /// row, supporting ragged proposals without host-side tensor slicing.
-    /// Outside staging this only clones the committed tensor handles.
+    /// Row `b` with `s_b` staged snapshots reads snapshot `s_b - 1`, or its
+    /// committed state when `s_b == 0`. Three cases avoid touching more state
+    /// than they return:
+    ///
+    /// * no row staged (or no transaction): the committed handles are cloned;
+    /// * every row staged the same `s > 0`: one slice of snapshot `s - 1` over
+    ///   the whole batch;
+    /// * ragged: the contiguous `[batch, proposal, ...]` staging tensor is
+    ///   viewed as `[batch * proposal, ...]` and one `select` gathers flat row
+    ///   `b * proposal + max(s_b, 1) - 1`; rows with `s_b == 0` then take their
+    ///   committed state through one `mask_where`.
+    ///
+    /// Each case copies at most twice the returned state and never
+    /// concatenates committed state onto the staging buffer.
     ///
     /// # Errors
     ///
@@ -665,11 +674,12 @@ impl<B: Backend> RecurrentStateCache<B> {
     ) -> TensorCacheResult<RecurrentBatchStateRead<B>> {
         let state = self.layer(layer)?;
         let staged_lengths = &self.staged_lengths[layer];
-        if !self.staging_active || staged_lengths.iter().all(|&length| length == 0) {
+        let staged_rows: Vec<bool> = staged_lengths.iter().map(|&length| length > 0).collect();
+        if !self.staging_active || !staged_rows.contains(&true) {
             return Ok(RecurrentBatchStateRead {
                 matrix: state.matrix.clone(),
                 convolution: state.convolution.clone(),
-                staged_rows: vec![false; self.config.sequence_count()],
+                staged_rows,
             });
         }
         let staged_matrix = state
@@ -680,43 +690,76 @@ impl<B: Backend> RecurrentStateCache<B> {
             .staged_convolution
             .as_ref()
             .ok_or(TensorCacheError::StagingDisabled)?;
-        let mut coordinates = Vec::with_capacity(self.config.sequence_count() * 2);
-        for (sequence, &staged_length) in staged_lengths.iter().enumerate() {
-            coordinates.push(i32::try_from(sequence).map_err(|_| {
-                TensorCacheError::TensorIndexOverflow {
-                    axis: "batch",
-                    index: sequence,
-                }
-            })?);
-            coordinates.push(i32::try_from(staged_length).map_err(|_| {
-                TensorCacheError::TensorIndexOverflow {
-                    axis: "proposal",
-                    index: staged_length,
-                }
-            })?);
+        let batch_size = self.config.sequence_count();
+        let spec = self.spec;
+        if let Some(snapshot) = uniform_snapshot(staged_lengths) {
+            return Ok(RecurrentBatchStateRead {
+                matrix: staged_matrix
+                    .clone()
+                    .slice([
+                        0..batch_size,
+                        snapshot..snapshot + 1,
+                        0..spec.state_heads(),
+                        0..spec.state_rows(),
+                        0..spec.state_columns(),
+                    ])
+                    .reshape(spec.matrix_shape(batch_size)),
+                convolution: staged_convolution
+                    .clone()
+                    .slice([
+                        0..batch_size,
+                        snapshot..snapshot + 1,
+                        0..spec.convolution_channels(),
+                        0..spec.convolution_width(),
+                    ])
+                    .reshape(spec.convolution_shape(batch_size)),
+                staged_rows,
+            });
         }
-        let indices = Tensor::<B, 2, Int>::from_ints(
-            TensorData::new(coordinates, [self.config.sequence_count(), 2]),
-            &self.device,
-        );
-        let matrix_source = Tensor::cat(
-            vec![
-                state.matrix.clone().unsqueeze_dim::<5>(1),
-                staged_matrix.clone(),
-            ],
-            1,
-        );
-        let convolution_source = Tensor::cat(
-            vec![
-                state.convolution.clone().unsqueeze_dim::<4>(1),
-                staged_convolution.clone(),
-            ],
-            1,
-        );
+
+        let flat_rows = flat_snapshot_rows(staged_lengths, spec.staging_capacity())?;
+        let selector =
+            Tensor::<B, 1, Int>::from_ints(TensorData::new(flat_rows, [batch_size]), &self.device);
+        let flat = batch_size * spec.staging_capacity();
+        let mut matrix = staged_matrix
+            .clone()
+            .reshape([
+                flat,
+                spec.state_heads(),
+                spec.state_rows(),
+                spec.state_columns(),
+            ])
+            .select(0, selector.clone());
+        let mut convolution = staged_convolution
+            .clone()
+            .reshape([flat, spec.convolution_channels(), spec.convolution_width()])
+            .select(0, selector);
+        if staged_rows.contains(&false) {
+            // `true` marks rows without a proposal, which keep committed state.
+            let committed_rows = Tensor::<B, 1, Bool>::from_data(
+                TensorData::new(
+                    staged_rows
+                        .iter()
+                        .map(|&staged| !staged)
+                        .collect::<Vec<_>>(),
+                    [batch_size],
+                ),
+                &self.device,
+            );
+            let matrix_mask = committed_rows
+                .clone()
+                .reshape([batch_size, 1, 1, 1])
+                .expand(spec.matrix_shape(batch_size));
+            let convolution_mask = committed_rows
+                .reshape([batch_size, 1, 1])
+                .expand(spec.convolution_shape(batch_size));
+            matrix = matrix.mask_where(matrix_mask, state.matrix.clone());
+            convolution = convolution.mask_where(convolution_mask, state.convolution.clone());
+        }
         Ok(RecurrentBatchStateRead {
-            matrix: matrix_source.gather_nd::<2, 4>(indices.clone()),
-            convolution: convolution_source.gather_nd::<2, 3>(indices),
-            staged_rows: staged_lengths.iter().map(|&length| length > 0).collect(),
+            matrix,
+            convolution,
+            staged_rows,
         })
     }
 
@@ -1345,6 +1388,31 @@ fn validate_sequence(sequence: usize, batch_size: usize) -> TensorCacheResult<()
             batch_size,
         })
     }
+}
+
+/// Returns the shared snapshot index `s - 1` when every row staged the same `s > 0`.
+fn uniform_snapshot(staged_lengths: &[usize]) -> Option<usize> {
+    let (&first, rest) = staged_lengths.split_first()?;
+    (first > 0 && rest.iter().all(|&length| length == first)).then(|| first - 1)
+}
+
+/// Computes each row's flat index `row * capacity + max(staged, 1) - 1` into
+/// the `[batch * capacity, ...]` view of a staging tensor.
+///
+/// Rows without a proposal point at their first (unused) snapshot slot; the
+/// caller replaces them with committed state.
+fn flat_snapshot_rows(staged_lengths: &[usize], capacity: usize) -> TensorCacheResult<Vec<i32>> {
+    staged_lengths
+        .iter()
+        .enumerate()
+        .map(|(row, &staged)| {
+            let flat = row * capacity + staged.max(1) - 1;
+            i32::try_from(flat).map_err(|_| TensorCacheError::TensorIndexOverflow {
+                axis: "batch * proposal",
+                index: flat,
+            })
+        })
+        .collect()
 }
 
 /// Validates proposal and acceptance vector sizes before direct indexing.

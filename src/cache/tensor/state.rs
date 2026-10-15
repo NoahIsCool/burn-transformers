@@ -48,6 +48,12 @@ pub struct TensorCacheBank<B: Backend> {
     recurrent: Vec<RecurrentStateCache<B>>,
     /// Topology lock while the bank participates in a transaction.
     staging_active: bool,
+    /// Whether the owning decode state has committed tokens for this bank.
+    ///
+    /// A group added afterwards would start from zero tensors while the
+    /// logical lengths claim real history, so topology changes are refused
+    /// until the state is reset.
+    holds_history: bool,
 }
 
 impl<B: Backend> TensorCacheBank<B> {
@@ -70,6 +76,7 @@ impl<B: Backend> TensorCacheBank<B> {
             native_kv: Vec::new(),
             recurrent: Vec::new(),
             staging_active: false,
+            holds_history: false,
         })
     }
 
@@ -83,6 +90,7 @@ impl<B: Backend> TensorCacheBank<B> {
             native_kv: Vec::new(),
             recurrent: Vec::new(),
             staging_active: false,
+            holds_history: false,
         }
     }
 
@@ -106,10 +114,15 @@ impl<B: Backend> TensorCacheBank<B> {
 
     /// Allocates and appends one homogeneous native-KV cache group.
     ///
+    /// Groups can only be added while the owning decode state holds no
+    /// tokens: a new group starts from zero tensors and would otherwise
+    /// silently expose zero-filled "history" to attention.
+    ///
     /// # Errors
     ///
-    /// Returns an error if a transaction is active or allocation geometry is
-    /// incompatible with this bank's config, backend, or device.
+    /// Returns an error if a transaction is active, the owning state already
+    /// holds tokens, or allocation geometry is incompatible with this bank's
+    /// config, backend, or device.
     pub fn add_native_kv(&mut self, spec: NativeKvCacheSpec) -> TensorCacheResult<usize> {
         self.ensure_topology_mutation_allowed("add native KV cache")?;
         let cache = NativeKvCache::new(self.config, self.batch_size, spec, &self.device)?;
@@ -120,10 +133,15 @@ impl<B: Backend> TensorCacheBank<B> {
 
     /// Allocates and appends one homogeneous recurrent-state cache group.
     ///
+    /// Like [`add_native_kv`](Self::add_native_kv), this is refused once the
+    /// owning state holds tokens, because a new recurrent group would silently
+    /// restart from the zero state.
+    ///
     /// # Errors
     ///
-    /// Returns an error if a transaction is active or allocation geometry is
-    /// incompatible with this bank's backend or device.
+    /// Returns an error if a transaction is active, the owning state already
+    /// holds tokens, or allocation geometry is incompatible with this bank's
+    /// backend or device.
     pub fn add_recurrent(&mut self, spec: RecurrentStateSpec) -> TensorCacheResult<usize> {
         self.ensure_topology_mutation_allowed("add recurrent cache")?;
         let cache = RecurrentStateCache::new(self.config, self.batch_size, spec, &self.device)?;
@@ -388,10 +406,12 @@ impl<B: Backend> TensorCacheBank<B> {
         }
     }
 
-    /// Prevents bank topology changes while any group is staging.
+    /// Prevents bank topology changes while staging or after tokens were committed.
     fn ensure_topology_mutation_allowed(&self, operation: &'static str) -> TensorCacheResult<()> {
         if self.has_active_staging() {
             Err(TensorCacheError::TransactionActive { operation })
+        } else if self.holds_history {
+            Err(TensorCacheError::TopologyAfterHistory { operation })
         } else {
             Ok(())
         }
@@ -652,6 +672,7 @@ impl<B: Backend> TensorDecodeState<B> {
     /// Returns metadata errors for count, integer, or capacity overflow.
     pub fn advance(&mut self, token_counts: &[usize]) -> TensorCacheResult<()> {
         self.metadata.advance_all(token_counts)?;
+        self.sync_history_locks();
         Ok(())
     }
 
@@ -669,6 +690,7 @@ impl<B: Backend> TensorDecodeState<B> {
             .as_mut()
             .ok_or(TensorCacheError::MtpNotEnabled)?
             .advance_all(token_counts)?;
+        self.sync_history_locks();
         Ok(())
     }
 
@@ -787,6 +809,7 @@ impl<B: Backend> TensorDecodeState<B> {
         if let (Some(metadata), Some(next)) = (&mut self.mtp_metadata, mtp_next) {
             metadata.finish_transaction(next);
         }
+        self.sync_history_locks();
         Ok(())
     }
 
@@ -873,6 +896,7 @@ impl<B: Backend> TensorDecodeState<B> {
         if let (Some(metadata), Some(next)) = (&mut self.mtp_metadata, mtp_next) {
             metadata.publish(next);
         }
+        self.sync_history_locks();
         Ok(())
     }
 
@@ -903,6 +927,7 @@ impl<B: Backend> TensorDecodeState<B> {
         if let (Some(metadata), Some(next)) = (&mut self.mtp_metadata, mtp_next) {
             metadata.publish(next);
         }
+        self.sync_history_locks();
         Ok(())
     }
 
@@ -926,6 +951,7 @@ impl<B: Backend> TensorDecodeState<B> {
         self.main.validate_truncate(&current, lengths)?;
         self.main.apply_truncate(&current, lengths);
         self.metadata.publish(next);
+        self.sync_history_locks();
         Ok(())
     }
 
@@ -949,6 +975,7 @@ impl<B: Backend> TensorDecodeState<B> {
         bank.validate_truncate(&current, lengths)?;
         bank.apply_truncate(&current, lengths);
         metadata.publish(next);
+        self.sync_history_locks();
         Ok(())
     }
 
@@ -991,6 +1018,7 @@ impl<B: Backend> TensorDecodeState<B> {
         mtp_bank.apply_truncate(&mtp_current, mtp_lengths);
         self.metadata.publish(main_next);
         mtp_metadata.publish(mtp_next);
+        self.sync_history_locks();
         Ok(())
     }
 
@@ -1004,6 +1032,17 @@ impl<B: Backend> TensorDecodeState<B> {
     #[must_use]
     pub const fn device(&self) -> &B::Device {
         &self.device
+    }
+
+    /// Records in each bank whether its committed lengths hold any token.
+    ///
+    /// Called after every successful length change so a bank can refuse new
+    /// groups exactly while their zero tensors would contradict the lengths.
+    fn sync_history_locks(&mut self) {
+        self.main.holds_history = self.metadata.lengths().iter().any(|&length| length > 0);
+        if let (Some(bank), Some(metadata)) = (&mut self.mtp, &self.mtp_metadata) {
+            bank.holds_history = metadata.lengths().iter().any(|&length| length > 0);
+        }
     }
 
     /// Validates that a mark names the active transaction of both banks.
@@ -1126,3 +1165,7 @@ fn commit_error(violation: LengthViolation) -> TensorCacheError {
 #[cfg(test)]
 #[path = "state_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "state_model_tests.rs"]
+mod model_tests;
