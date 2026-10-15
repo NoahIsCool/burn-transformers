@@ -13,7 +13,8 @@
 //! The planning file is dependency-free, so it is included as a single
 //! module. The tensor code driven by these plans (the per-layer-type rotary
 //! tables and sliding masks) remains covered by
-//! `src/models/gemma/{architecture,model}_tests.rs`.
+//! `src/models/gemma/{architecture,model}_tests.rs` and the tiny goldens in
+//! `tests/tiny_goldens_gemma.rs`.
 
 #![allow(unused)]
 // Loop invariants are attributes on `while` statements, which Verus parses as

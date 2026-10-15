@@ -28,6 +28,7 @@ use crate::{
     models::{
         config::{ConfigError, ModelConfig, TokenIds},
         deepseek_v2::{DeepseekV2CheckpointOptions, DeepseekV2Config, DeepseekV2ForCausalLm},
+        gemma::{GemmaCheckpointOptions, GemmaCheckpointSource, GemmaConfig, GemmaForCausalLm},
         llama::{LlamaCheckpointOptions, LlamaFamilyConfig, LlamaForCausalLm},
         muse_glimmer::{
             MuseGlimmerCheckpointOptions, MuseGlimmerCheckpointSource, MuseGlimmerForCausalLm,
@@ -414,6 +415,50 @@ impl<B: Backend> CausalFamily<B> for LlamaForCausalLm<B> {
     /// Initializes the graph from the unchanged configuration.
     fn init_for_load(
         config: LlamaFamilyConfig,
+        _options: &AutoLoadOptions,
+        device: &B::Device,
+    ) -> Result<Self> {
+        Self::init(config, device)
+    }
+}
+
+impl<B: Backend> CausalFamily<B> for GemmaForCausalLm<B> {
+    /// One schema for `gemma2` and `gemma3_text` (also read from a Gemma 3 `text_config`).
+    type Config = GemmaConfig;
+
+    /// Reads the Gemma family's vocabulary and token fields.
+    fn token_metadata(config: &GemmaConfig) -> TokenMetadata<'_> {
+        TokenMetadata::of(
+            config.vocab_size,
+            &config.eos_token_id,
+            &config.pad_token_id,
+        )
+    }
+
+    /// Plans the text-only, multimodal, or original-release namespace present in the checkpoint.
+    ///
+    /// A multimodal checkpoint's vision tower is exempted by the contract
+    /// and reported as intentionally ignored.
+    fn plan_checkpoint(
+        config: &GemmaConfig,
+        root: &Path,
+        options: &AutoLoadOptions,
+    ) -> Result<PlannedCheckpoint> {
+        let manifest = discover(root, options)?;
+        let source = GemmaCheckpointSource::detect(manifest.tensors.keys().map(String::as_str))
+            .map_err(Error::Checkpoint)?;
+        let contract = config
+            .checkpoint_contract(GemmaCheckpointOptions { source })
+            .map_err(contract_error)?;
+        let plan = contract
+            .build_load_plan(&manifest, &options.checkpoint)
+            .map_err(checkpoint_error)?;
+        Ok(PlannedCheckpoint { manifest, plan })
+    }
+
+    /// Initializes the graph from the unchanged configuration.
+    fn init_for_load(
+        config: GemmaConfig,
         _options: &AutoLoadOptions,
         device: &B::Device,
     ) -> Result<Self> {

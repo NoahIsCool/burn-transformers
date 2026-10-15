@@ -1228,6 +1228,7 @@ fn automatic_config_discriminators_validate_and_match_runtime_registries() {
             AutoCausalConfig::Qwen3_5,
             AutoCausalConfig::Qwen3Moe,
             AutoCausalConfig::Llama,
+            AutoCausalConfig::Gemma,
         ]
     );
     for config in AutoCausalConfig::ALL {
@@ -1251,7 +1252,16 @@ fn automatic_config_discriminators_validate_and_match_runtime_registries() {
             Some(AutoCausalConfig::Llama)
         );
     }
-    assert_eq!(AutoCausalConfig::from_model_type("gemma2"), None);
+    for model_type in ["gemma2", "gemma3_text"] {
+        assert_eq!(
+            AutoCausalConfig::from_model_type(model_type),
+            Some(AutoCausalConfig::Gemma)
+        );
+    }
+    // Multimodal wrappers are routed by their text_config, never by their own type.
+    for unregistered in ["gemma3", "gemma3n_text"] {
+        assert_eq!(AutoCausalConfig::from_model_type(unregistered), None);
+    }
     let mut unique = AutoCausalConfig::MODEL_TYPES.to_vec();
     unique.sort_unstable();
     unique.dedup();
@@ -1393,6 +1403,10 @@ fn registry_entries_agree_with_family_schemas_and_views() {
         (
             AutoCausalConfig::Llama,
             <crate::models::llama::LlamaFamilyConfig as ModelConfig>::MODEL_TYPES,
+        ),
+        (
+            AutoCausalConfig::Gemma,
+            <crate::models::gemma::GemmaConfig as ModelConfig>::MODEL_TYPES,
         ),
     ];
     assert_eq!(entries.len(), AutoCausalConfig::ALL.len());

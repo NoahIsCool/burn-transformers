@@ -47,6 +47,7 @@ use crate::{
 
 use super::{
     deepseek_v2::{DeepseekV2Config, DeepseekV2DecodeState, DeepseekV2ForCausalLm},
+    gemma::{GemmaConfig, GemmaDecodeState, GemmaForCausalLm},
     llama::{LlamaDecodeState, LlamaFamilyConfig, LlamaForCausalLm},
     muse_glimmer::{MuseGlimmerDecodeState, MuseGlimmerForCausalLm, MuseGlimmerTextConfig},
     nemotron_h::{NemotronHConfig, NemotronHDecodeState, NemotronHForCausalLm},
@@ -428,6 +429,14 @@ causal_registry! {
         config: LlamaFamilyConfig,
         state: LlamaDecodeState,
     },
+    /// Gemma 2 and Gemma 3 text decoders, including the text tower of multimodal Gemma 3.
+    Gemma {
+        model_type: "gemma2",
+        aliases: ["gemma3_text"],
+        model: GemmaForCausalLm,
+        config: GemmaConfig,
+        state: GemmaDecodeState,
+    },
 }
 
 /// Parses one family's configuration, keeping the registry's error context.
@@ -451,21 +460,22 @@ fn foreign_causal_state_error() -> Error {
 impl<B: Backend> AutoCausalLm<B> {
     /// Lists the stateless activation points supported by the selected model.
     ///
-    /// Qwen3.5/Qwen3.8 and the Llama family currently support interventions.
-    /// Other registered causal families return a capability error rather than
-    /// an empty, misleading catalog.
+    /// Qwen3.5/Qwen3.8, the Llama family, and the Gemma family currently
+    /// support interventions. Other registered causal families return a
+    /// capability error rather than an empty, misleading catalog.
     /// Loaded checkpoints expose this method through `loaded.model()`.
     pub fn activation_points(&self) -> Result<Vec<PointInfo>> {
         match self {
             Self::Qwen3_5(model) => Ok(model.activation_points()),
             Self::Llama(model) => Ok(model.activation_points()),
+            Self::Gemma(model) => Ok(model.activation_points()),
             _ => Err(self.unsupported_hooks_error()),
         }
     }
 
     /// Observes or changes activations during the selected model's stateless forward.
     ///
-    /// Qwen3.5/Qwen3.8 and the Llama family delegate to their concrete
+    /// Qwen3.5/Qwen3.8, the Llama family, and the Gemma family delegate to their concrete
     /// intervention implementations. Other families fail before callbacks or model computation, including when
     /// the collection is empty. Use [`Self::forward`] for ordinary execution.
     /// Failed calls invalidate captures left from earlier runs of these hooks.
@@ -478,6 +488,7 @@ impl<B: Backend> AutoCausalLm<B> {
         match self {
             Self::Qwen3_5(model) => model.forward_with_hooks(input, options, hooks),
             Self::Llama(model) => model.forward_with_hooks(input, options, hooks),
+            Self::Gemma(model) => model.forward_with_hooks(input, options, hooks),
             _ => hooks
                 .run(Vec::new(), |_| Err(self.unsupported_hooks_error()))
                 // Add family context even when preflight rejects a named point.
@@ -488,7 +499,7 @@ impl<B: Backend> AutoCausalLm<B> {
     /// Names the selected family when its stateless intervention capability is unavailable.
     fn unsupported_hooks_error(&self) -> Error {
         Error::BackendCapability(format!(
-            "activation interventions are not implemented for model_type `{}`; the automatic causal registry currently supports Qwen3.5/Qwen3.8 and the Llama family",
+            "activation interventions are not implemented for model_type `{}`; the automatic causal registry currently supports Qwen3.5/Qwen3.8, the Llama family, and the Gemma family",
             self.config().model_type()
         ))
     }

@@ -53,11 +53,12 @@
 //!
 //! # Support status
 //!
-//! Implemented and unit-tested on seeded tiny models of both types
-//! (stateless, hooked, staged, and batched cached passes; ragged batches,
-//! ring wraparound, both RoPE sets) and on the committed tiny checkpoints'
-//! strict loading from every published namespace. Parity with the pinned
-//! reference and real-checkpoint acceptance are separate gates.
+//! Implemented and validated against the pinned reference on tiny
+//! random-weight checkpoints of both types (`tests/tiny_goldens_gemma.rs`:
+//! full-vocabulary logits at every valid position of an unpadded and a
+//! left-padded row, per-layer hidden states, cached/uncached and
+//! batched-ragged agreement, greedy continuations; largest logit gap
+//! `1.5e-6`). Real-checkpoint acceptance is a separate gate.
 
 mod architecture;
 mod checkpoint;
