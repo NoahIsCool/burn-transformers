@@ -1,24 +1,61 @@
 //! Batch-one lossless speculative decoding with Qwen's MTP head.
 //!
-//! A cycle starts with a target-selected lead token `y_0` and the target hidden
-//! state immediately before it. The MTP graph proposes `K` further tokens from
-//! distributions `q_i`. The target consumes `y_0`, verifies each proposal under
-//! `p_i`, and either emits a correction or (when all proposals are accepted) one
-//! bonus target token. Greedy acceptance is exact equality with `argmax p_i`.
-//! Stochastic acceptance uses
-//! `a_i = min(1, p_i(y_i) / q_i(y_i))`; rejection samples from the normalized
-//! residual `(p_i - q_i)_+`. This is the standard lossless rejection rule, so
-//! marginal output remains exactly the target distribution.
+//! # One cycle
+//!
+//! A cycle starts at target length `L` with a target-selected lead token
+//! `y_0 = x_L` and the target hidden state `h_(L-1)` that produced it. Then:
+//!
+//! 1. **Draft.** The MTP head proposes `d_1..d_K` autoregressively: step 0
+//!    reads `(y_0, h_(L-1))`, step `j` reads `(d_j, m_(j-1))` with its own
+//!    previous output `m`, as the released runtime does. These MTP cache
+//!    entries live in a scratch transaction that is rolled back afterwards.
+//! 2. **Verify.** One target pass over `[y_0, d_1, ..., d_K]` yields every
+//!    verification distribution `p_0..p_K` and hidden state `h_L..h_(L+K)` at
+//!    once, staging all `K + 1` tokens. Greedy acceptance is equality with
+//!    the target's choice; stochastic acceptance applies
+//!    `a_i = min(1, p_i(y_i) / q_i(y_i))` and samples a rejection's correction
+//!    from the normalized residual `(p_i - q_i)_+`
+//!    ([`SpeculativeVerifier`]), so the output distribution is exactly the
+//!    target's. If every draft is accepted, `p_K` yields one bonus token.
+//! 3. **Commit.** [`speculative_commit`] gives the accepted target prefix `c`.
+//!    The MTP layer is re-run over the `c` committed pairs
+//!    `(x_(L+j), h_(L-1+j))`, `j < c`, all built from *target* hidden states,
+//!    and both prefixes are committed atomically, keeping the invariant
+//!    `target length = MTP length + 1`.
+//!
+//! Step 3 follows the pinned vLLM speculator, whose drafter is always
+//! prefilled over verified tokens with the target's hidden states; the MTP
+//! history of accepted drafts therefore never contains the approximations
+//! `m_j` the head was not trained on. Any error restores both caches and every
+//! random stream.
+//!
+//! # Logits processing
+//!
+//! Target and draft logits are processed exactly as
+//! [`generate_causal`](crate::generate_causal) processes them, through
+//! [`LogitsProcessor::process_with_prompt_lengths`]: the caller supplies the
+//! prompt length, so presence and frequency penalties and `min_new_tokens`
+//! count generated tokens only, and half-precision logits are promoted to
+//! F32. Stochastic drafts are sampled on the host from the same F64 vector
+//! `q` that verification uses, so the proposal is drawn from exactly the
+//! distribution the acceptance rule assumes.
 
-use burn::tensor::{Int, Tensor, TensorData, activation::softmax, backend::Backend};
+use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CausalLanguageModel, DecodeInput, Error, ForwardOptions, GenerationConfig, LogitsProcessor,
-    LogitsSelection, Result, SamplingStrategy,
+    CausalLmInput, Error, ForwardOptions, GenerationConfig, LogitsProcessor, LogitsSelection,
+    Result, SamplingStrategy,
+    generation::{
+        SplitMix64,
+        speculative::{
+            SpeculativeOutcome, SpeculativeVerifier, Verdict, normalized_probabilities,
+            sample_weights, speculative_commit,
+        },
+    },
 };
 
-use super::{Qwen3_5DecodeState, Qwen3_5ForCausalLm};
+use super::{Qwen3_5DecodeState, Qwen3_5ForCausalLm, decode::StatefulPhase};
 
 /// XOR domain separating the draft sampling stream from target token sampling.
 const DRAFT_SEED_DOMAIN: u64 = 0x4452_4146_545f_5157;
@@ -63,7 +100,12 @@ impl Qwen3_5SpeculativeConfig {
 /// Observable result of one atomic speculative cycle.
 #[derive(Debug)]
 pub struct Qwen3_5SpeculativeOutput<B: Backend> {
-    /// Tokens to emit, beginning with the guaranteed target lead token.
+    /// Tokens of the cycle, beginning with the guaranteed target lead token.
+    ///
+    /// The last token is the next cycle's lead. A caller that streams every
+    /// cycle's tokens therefore emits `token_ids[0]` only for the first cycle
+    /// (whose lead came from [`Qwen3_5SpeculativeDecoder::select_lead`]) and
+    /// skips it afterwards, because the previous cycle already emitted it.
     pub token_ids: Vec<u32>,
     /// Number of MTP candidates generated before target verification stopped.
     pub drafted_tokens: usize,
@@ -82,21 +124,25 @@ pub struct Qwen3_5SpeculativeOutput<B: Backend> {
 
 /// Stateful Qwen MTP proposer and exact target verifier.
 ///
-/// Each logits processor owns an independent deterministic random stream. A
-/// third SplitMix64 stream drives accept/reject uniforms and residual sampling;
-/// unrelated model instances therefore cannot perturb reproducibility.
+/// Randomness comes from independent deterministic streams: the target
+/// processor's (lead and bonus tokens), the host draft stream (stochastic
+/// proposals), and the verifier's (acceptance and residual draws). Unrelated
+/// model instances therefore cannot perturb reproducibility, and a failed
+/// cycle restores all three.
 #[derive(Debug)]
 pub struct Qwen3_5SpeculativeDecoder<B: Backend> {
     /// Validated proposal-count and ordinary generation controls.
     config: Qwen3_5SpeculativeConfig,
     /// Expected probability-vector width and exclusive token-ID bound.
     vocabulary_size: usize,
-    /// Target penalties, truncation, and independent lead/bonus sampling stream.
+    /// Target penalties, truncation, and the lead/bonus sampling stream.
     target: LogitsProcessor<B>,
-    /// Draft penalties, truncation, and independently seeded proposal stream.
+    /// Draft penalties and truncation; greedy drafts select through it.
     draft: LogitsProcessor<B>,
-    /// Independent uniforms used for acceptance and positive-residual sampling.
-    verifier: SplitMix64,
+    /// Host uniforms for stochastic proposals drawn from the draft distribution.
+    draft_stream: SplitMix64,
+    /// Acceptance tests and residual sampling.
+    verifier: SpeculativeVerifier,
 }
 
 impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
@@ -111,13 +157,17 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
         let mut draft_config = config.generation.clone();
         draft_config.seed ^= DRAFT_SEED_DOMAIN;
         let draft = LogitsProcessor::new(draft_config, vocabulary_size, device)?;
-        let verifier = SplitMix64::new(config.generation.seed ^ VERIFY_SEED_DOMAIN);
+        let seed = config.generation.seed;
         Ok(Self {
+            draft_stream: SplitMix64::new(seed ^ DRAFT_SEED_DOMAIN),
+            verifier: SpeculativeVerifier::new(
+                config.generation.strategy,
+                seed ^ VERIFY_SEED_DOMAIN,
+            ),
             config,
             vocabulary_size,
             target,
             draft,
-            verifier,
         })
     }
 
@@ -127,41 +177,41 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
         &self.config
     }
 
-    /// Selects the guaranteed lead token from target logits.
+    /// Selects the guaranteed lead token from `[1, vocabulary]` target logits.
     ///
-    /// This convenience method uses the same target processor stream later used
-    /// for all-accepted bonus tokens. The returned token is the `lead_token`
-    /// argument for [`speculate`](Self::speculate).
-    pub fn select_lead(&self, target_logits: Tensor<B, 2>, history: &[u32]) -> Result<u32> {
-        let history = history_tensor(history, &target_logits.device())?;
-        let token = self
-            .target
-            .process_and_select(target_logits, history)?
-            .try_into_data()
-            .map_err(|error| {
-                Error::BackendCapability(format!(
-                    "failed to read lead token from the backend: {error}"
-                ))
-            })?
-            .convert::<i64>()
-            .into_vec::<i64>()
-            .map_err(|error| {
-                Error::BackendCapability(format!("failed to read lead token: {error}"))
-            })?
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::Generation("target processor returned no lead token".into()))?;
-        u32::try_from(token)
-            .map_err(|_| Error::Generation(format!("selected invalid lead token {token}")))
+    /// `history` is the prompt followed by every generated token and
+    /// `prompt_length` marks where the prompt ends, as for
+    /// [`Self::speculate`]. The token comes from the target processor's
+    /// stream, the one that later samples all-accepted bonus tokens.
+    pub fn select_lead(
+        &self,
+        target_logits: Tensor<B, 2>,
+        history: &[u32],
+        prompt_length: usize,
+    ) -> Result<u32> {
+        check_prompt_length(history, prompt_length)?;
+        let processed =
+            self.target
+                .process_with_prompt_lengths(target_logits, &[history], &[prompt_length])?;
+        let tokens = read_tokens(self.target.select(processed)?)?;
+        tokens
+            .first()
+            .copied()
+            .ok_or_else(|| Error::Generation("target processor returned no lead token".into()))
     }
 
     /// Runs one active speculative cycle.
+    ///
+    /// `history_before_lead` is the prompt followed by every token generated
+    /// before `lead_token`; its length must equal the committed target length.
+    /// The first `prompt_length` of those tokens are the prompt.
     pub fn speculate(
         &mut self,
         model: &Qwen3_5ForCausalLm<B>,
         lead_token: u32,
         target_hidden_before_lead: Tensor<B, 3>,
         history_before_lead: &[u32],
+        prompt_length: usize,
         state: &mut Qwen3_5DecodeState<B>,
     ) -> Result<Qwen3_5SpeculativeOutput<B>> {
         self.speculate_if_active(
@@ -169,6 +219,7 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
             lead_token,
             target_hidden_before_lead,
             history_before_lead,
+            prompt_length,
             true,
             state,
         )
@@ -177,7 +228,7 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
     /// Runs a cycle only when a scheduler row remains active.
     ///
     /// `active = false` is a strict no-op: it draws no randomness, performs no
-    /// model computation, and leaves both caches byte-for-byte unchanged.
+    /// model computation, and leaves both caches unchanged.
     #[allow(clippy::too_many_arguments)]
     pub fn speculate_if_active(
         &mut self,
@@ -185,6 +236,7 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
         lead_token: u32,
         target_hidden_before_lead: Tensor<B, 3>,
         history_before_lead: &[u32],
+        prompt_length: usize,
         active: bool,
         state: &mut Qwen3_5DecodeState<B>,
     ) -> Result<Qwen3_5SpeculativeOutput<B>> {
@@ -203,6 +255,7 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
             lead_token,
             &target_hidden_before_lead,
             history_before_lead,
+            prompt_length,
             state,
         )?;
         if self.is_eos(lead_token) {
@@ -215,49 +268,49 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
                 continuation_hidden_state: None,
             });
         }
-
-        let mark = state.mark()?;
-        let recovery_mark = mark.clone();
-        let target_snapshot = self.target.clone();
-        let draft_snapshot = self.draft.clone();
-        let verifier_snapshot = self.verifier;
-        match self.run_transaction(
-            model,
+        let snapshot = (
+            self.target.clone(),
+            self.draft.clone(),
+            self.draft_stream,
+            self.verifier,
+        );
+        let cycle = Cycle {
             lead_token,
             target_hidden_before_lead,
             history_before_lead,
-            state,
-        ) {
-            Ok(pending) => {
-                let result = Qwen3_5SpeculativeOutput {
-                    token_ids: pending.token_ids,
-                    drafted_tokens: pending.drafted_tokens,
-                    accepted_draft_tokens: pending.accepted_draft_tokens,
-                    all_drafts_accepted: pending.all_drafts_accepted,
-                    terminated: pending.terminated,
-                    continuation_hidden_state: pending.continuation_hidden_state,
-                };
-                if let Err(error) = state.commit_prefixes(
+            prompt_length,
+        };
+        let result = self.run_cycle(model, &cycle, state);
+        if result.is_err() {
+            (self.target, self.draft, self.draft_stream, self.verifier) = snapshot;
+        }
+        result
+    }
+
+    /// Drafts, verifies, and commits one cycle; every exit leaves no open transaction.
+    fn run_cycle(
+        &mut self,
+        model: &Qwen3_5ForCausalLm<B>,
+        cycle: &Cycle<'_, B>,
+        state: &mut Qwen3_5DecodeState<B>,
+    ) -> Result<Qwen3_5SpeculativeOutput<B>> {
+        let mark = state.mark()?;
+        let drafts = self.draft(model, cycle, state);
+        // Draft KV entries are scratch: committed MTP history is rebuilt
+        // from target states below, so the drafting suffix is always dropped.
+        state.rollback(mark)?;
+        let drafts = drafts?;
+        let mark = state.mark()?;
+        match self.verify_and_stage(model, cycle, &drafts, state) {
+            Ok((output, commit)) => {
+                state.commit_prefixes(
                     mark,
-                    pending.target_cache_tokens,
-                    pending.mtp_cache_tokens,
-                ) {
-                    self.target = target_snapshot;
-                    self.draft = draft_snapshot;
-                    self.verifier = verifier_snapshot;
-                    state.rollback(recovery_mark).map_err(|rollback| {
-                        Error::Cache(format!(
-                            "Qwen speculative commit failed ({error}); rollback also failed ({rollback})"
-                        ))
-                    })?;
-                    return Err(error);
-                }
-                Ok(result)
+                    commit.target_cache_tokens,
+                    commit.draft_cache_tokens,
+                )?;
+                Ok(output)
             }
             Err(error) => {
-                self.target = target_snapshot;
-                self.draft = draft_snapshot;
-                self.verifier = verifier_snapshot;
                 state.rollback(mark).map_err(|rollback| {
                     Error::Cache(format!(
                         "Qwen speculative step failed ({error}); rollback also failed ({rollback})"
@@ -268,150 +321,216 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
         }
     }
 
-    /// Executes model work inside an already-open transaction.
-    fn run_transaction(
+    /// Proposes up to `K` tokens with the MTP head, stopping after an EOS proposal.
+    ///
+    /// Returns the proposals and, for stochastic decoding, the host draft
+    /// distribution `q_i` each was sampled from.
+    fn draft(
         &mut self,
         model: &Qwen3_5ForCausalLm<B>,
-        lead_token: u32,
-        target_hidden_before_lead: Tensor<B, 3>,
-        history_before_lead: &[u32],
+        cycle: &Cycle<'_, B>,
         state: &mut Qwen3_5DecodeState<B>,
-    ) -> Result<PendingCycle<B>> {
-        let device = target_hidden_before_lead.device();
-        let mut generated_history = history_before_lead.to_vec();
-        generated_history.push(lead_token);
-        let mut proposals = Vec::with_capacity(self.config.max_draft_tokens);
-        let mut draft_probabilities = Vec::with_capacity(self.config.max_draft_tokens);
-        let mut draft_hidden = target_hidden_before_lead;
-        let mut draft_input = lead_token;
-
+    ) -> Result<Drafts> {
+        let device = cycle.target_hidden_before_lead.device();
+        let mut history = cycle.history_before_lead.to_vec();
+        history.push(cycle.lead_token);
+        let mut drafts = Drafts {
+            tokens: Vec::with_capacity(self.config.max_draft_tokens),
+            distributions: Vec::with_capacity(self.config.max_draft_tokens),
+        };
+        let mut hidden = cycle.target_hidden_before_lead.clone();
+        let mut input = cycle.lead_token;
         for step in 0..self.config.max_draft_tokens {
             let output = model.forward_mtp_cached(
-                token_tensor::<B>(draft_input, &device),
-                draft_hidden,
+                token_tensor(&[input], &device),
+                hidden,
                 None,
                 step,
                 state,
             )?;
-            draft_hidden = output.hidden_state;
-            let processed = self.draft.process(
+            hidden = output.hidden_state;
+            let processed = self.draft.process_with_prompt_lengths(
                 output.logits.squeeze_dim::<2>(1),
-                history_tensor(&generated_history, &device)?,
+                &[&history],
+                &[cycle.prompt_length],
             )?;
-            let probabilities = (self.config.generation.strategy == SamplingStrategy::Sample)
-                .then(|| normalized_probabilities(processed.clone()))
-                .transpose()?;
-            let proposal = selected_token(self.draft.select(processed)?)?;
-            proposals.push(proposal);
-            draft_probabilities.push(probabilities);
-            generated_history.push(proposal);
-            draft_input = proposal;
+            let proposal = match self.config.generation.strategy {
+                SamplingStrategy::Greedy => single_token(self.draft.select(processed)?)?,
+                SamplingStrategy::Sample => {
+                    let distribution = normalized_probabilities(processed)?;
+                    let proposal =
+                        sample_weights(&distribution, self.draft_stream.next_unit_f64())?;
+                    drafts.distributions.push(distribution);
+                    proposal
+                }
+            };
+            drafts.tokens.push(proposal);
+            history.push(proposal);
+            input = proposal;
             if self.is_eos(proposal) {
                 break;
             }
         }
+        Ok(drafts)
+    }
 
-        let drafted_tokens = proposals.len();
-        let mut emitted = vec![lead_token];
-        let mut target_history = history_before_lead.to_vec();
-        target_history.push(lead_token);
-        let mut target_output = decode_one(model, lead_token, state, &device)?;
-        let mut target_cache_tokens = 1usize;
-        let mut accepted = 0usize;
+    /// Verifies every draft with one target pass and stages the committed MTP pairs.
+    ///
+    /// Must run inside a fresh transaction; returns the cycle output and the
+    /// prefix lengths to commit.
+    fn verify_and_stage(
+        &mut self,
+        model: &Qwen3_5ForCausalLm<B>,
+        cycle: &Cycle<'_, B>,
+        drafts: &Drafts,
+        state: &mut Qwen3_5DecodeState<B>,
+    ) -> Result<(
+        Qwen3_5SpeculativeOutput<B>,
+        crate::generation::speculative::SpeculativeCommit,
+    )> {
+        let device = cycle.target_hidden_before_lead.device();
+        let drafted = drafts.tokens.len();
+        if drafted == 0 {
+            return Err(Error::Generation("MTP produced no proposal".into()));
+        }
+        // [y_0, d_1, ..., d_K]: position i verifies d_(i+1) or yields the bonus.
+        let mut verified = Vec::with_capacity(drafted + 1);
+        verified.push(cycle.lead_token);
+        verified.extend(&drafts.tokens);
+        let target = model.cached_forward(
+            CausalLmInput {
+                token_ids: token_tensor(&verified, &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            state,
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..Default::default()
+            },
+            StatefulPhase::Decode,
+            true,
+        )?;
+        let target_hidden = target.final_hidden_state.ok_or_else(|| {
+            Error::Generation("target verification omitted its final hidden states".into())
+        })?;
+        // Row i is processed with the history up to and including verified[i].
+        let mut histories = Vec::with_capacity(drafted + 1);
+        let mut history = cycle.history_before_lead.to_vec();
+        for &token in &verified {
+            history.push(token);
+            histories.push(history.clone());
+        }
+        let history_rows = histories.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let processed = self.target.process_with_prompt_lengths(
+            target.logits.squeeze_dim::<2>(0),
+            &history_rows,
+            &vec![cycle.prompt_length; drafted + 1],
+        )?;
+        // Greedy choices for every position come back in one readback.
+        let greedy_choices = match self.config.generation.strategy {
+            SamplingStrategy::Greedy => Some(read_tokens(self.target.select(processed.clone())?)?),
+            SamplingStrategy::Sample => None,
+        };
+        let row = |index: usize| processed.clone().narrow(0, index, 1);
 
-        for (proposal, q) in proposals.iter().copied().zip(&draft_probabilities) {
-            let processed = self
-                .target
-                .process(target_output.0, history_tensor(&target_history, &device)?)?;
-            let correction = match self.config.generation.strategy {
-                SamplingStrategy::Greedy => {
-                    let target = selected_token(self.target.select(processed)?)?;
-                    (target != proposal).then_some(target)
-                }
-                SamplingStrategy::Sample => {
-                    let p = normalized_probabilities(processed)?;
-                    let q = q.as_deref().ok_or_else(|| {
+        let mut emitted = vec![cycle.lead_token];
+        let mut outcome = SpeculativeOutcome::AllAccepted;
+        for (index, &proposal) in drafts.tokens.iter().enumerate() {
+            let verdict = match &greedy_choices {
+                Some(choices) => Verdict::greedy(proposal, choices[index]),
+                None => {
+                    let target = normalized_probabilities(row(index))?;
+                    let draft = drafts.distributions.get(index).ok_or_else(|| {
                         Error::Generation(
                             "Qwen stochastic verification lost its draft distribution".into(),
                         )
                     })?;
-                    (!self.accept(proposal, &p, q)?)
-                        .then(|| self.sample_residual(&p, q))
-                        .transpose()?
+                    self.verifier.verify(proposal, &target, draft)?
                 }
             };
-            if let Some(correction) = correction {
-                emitted.push(correction);
-                let terminated = self.is_eos(correction);
-                return Ok(PendingCycle {
-                    token_ids: emitted,
-                    drafted_tokens,
-                    accepted_draft_tokens: accepted,
-                    all_drafts_accepted: false,
-                    terminated,
-                    continuation_hidden_state: (!terminated).then_some(target_output.1),
-                    target_cache_tokens,
-                    mtp_cache_tokens: (accepted + 1).min(drafted_tokens),
-                });
+            match verdict {
+                Verdict::Accepted => {
+                    emitted.push(proposal);
+                    if self.is_eos(proposal) {
+                        outcome = SpeculativeOutcome::AcceptedEndOfSequence {
+                            accepted: index + 1,
+                        };
+                        break;
+                    }
+                }
+                Verdict::Rejected { correction } => {
+                    emitted.push(correction);
+                    outcome = SpeculativeOutcome::Rejected { accepted: index };
+                    break;
+                }
             }
-
-            emitted.push(proposal);
-            accepted += 1;
-            if self.is_eos(proposal) {
-                return Ok(PendingCycle {
-                    token_ids: emitted,
-                    drafted_tokens,
-                    accepted_draft_tokens: accepted,
-                    all_drafts_accepted: false,
-                    terminated: true,
-                    continuation_hidden_state: None,
-                    target_cache_tokens,
-                    mtp_cache_tokens: accepted.min(drafted_tokens),
-                });
-            }
-            target_history.push(proposal);
-            target_output = decode_one(model, proposal, state, &device)?;
-            target_cache_tokens += 1;
         }
-
-        // Every draft was accepted. Consume the last accepted token once more
-        // in the shifted MTP stream so its cache remains exactly one position
-        // behind the target at the next cycle boundary. Its logits are unused.
-        let last = *proposals
-            .last()
-            .ok_or_else(|| Error::Generation("MTP produced no proposal".into()))?;
+        if outcome == SpeculativeOutcome::AllAccepted {
+            let bonus = match &greedy_choices {
+                Some(choices) => choices[drafted],
+                None => single_token(self.target.select(row(drafted))?)?,
+            };
+            emitted.push(bonus);
+        }
+        let commit = speculative_commit(drafted, outcome).ok_or_else(|| {
+            Error::Generation("speculative outcome is inconsistent with the drafts".into())
+        })?;
+        if emitted.len() != commit.emitted_tokens {
+            return Err(Error::Generation(format!(
+                "speculative cycle emitted {} tokens, expected {}",
+                emitted.len(),
+                commit.emitted_tokens
+            )));
+        }
+        // Re-run the MTP layer over the committed pairs (x_(L+j), h_(L-1+j)),
+        // whose hidden states all come from the target.
+        let accepted_pairs = commit.draft_cache_tokens;
+        let pair_hidden = if accepted_pairs == 1 {
+            cycle.target_hidden_before_lead.clone()
+        } else {
+            Tensor::cat(
+                vec![
+                    cycle.target_hidden_before_lead.clone(),
+                    target_hidden.clone().narrow(1, 0, accepted_pairs - 1),
+                ],
+                1,
+            )
+        };
         model.forward_mtp_cached(
-            token_tensor::<B>(last, &device),
-            draft_hidden,
+            token_tensor(&verified[..accepted_pairs], &device),
+            pair_hidden,
             None,
-            drafted_tokens,
+            0,
             state,
         )?;
-        let processed = self
-            .target
-            .process(target_output.0, history_tensor(&target_history, &device)?)?;
-        let bonus = selected_token(self.target.select(processed)?)?;
-        emitted.push(bonus);
-        let terminated = self.is_eos(bonus);
-        Ok(PendingCycle {
+        let terminated = emitted.last().is_some_and(|&token| self.is_eos(token));
+        let accepted_draft_tokens = match outcome {
+            SpeculativeOutcome::Rejected { accepted }
+            | SpeculativeOutcome::AcceptedEndOfSequence { accepted } => accepted,
+            SpeculativeOutcome::AllAccepted => drafted,
+        };
+        let output = Qwen3_5SpeculativeOutput {
             token_ids: emitted,
-            drafted_tokens,
-            accepted_draft_tokens: accepted,
-            all_drafts_accepted: true,
+            drafted_tokens: drafted,
+            accepted_draft_tokens,
+            all_drafts_accepted: outcome == SpeculativeOutcome::AllAccepted,
             terminated,
-            continuation_hidden_state: (!terminated).then_some(target_output.1),
-            target_cache_tokens,
-            mtp_cache_tokens: drafted_tokens + 1,
-        })
+            // The last committed target position precedes the last emitted token.
+            continuation_hidden_state: (!terminated)
+                .then(|| target_hidden.narrow(1, commit.target_cache_tokens - 1, 1)),
+        };
+        Ok((output, commit))
     }
 
-    /// Checks batch, cache alignment, shape, vocabulary, and remaining capacity.
+    /// Checks batch, cache alignment, shape, vocabulary, history, and remaining capacity.
     fn validate_cycle(
         &self,
         model: &Qwen3_5ForCausalLm<B>,
         lead_token: u32,
         hidden: &Tensor<B, 3>,
         history_before_lead: &[u32],
+        prompt_length: usize,
         state: &Qwen3_5DecodeState<B>,
     ) -> Result<()> {
         state.validate_for_model(model)?;
@@ -430,6 +549,7 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
                 "Qwen speculative hidden state must use the decode-state device".into(),
             ));
         }
+        check_prompt_length(history_before_lead, prompt_length)?;
         if history_before_lead
             .iter()
             .any(|&token| token as usize >= model.config().vocab_size)
@@ -492,271 +612,81 @@ impl<B: Backend> Qwen3_5SpeculativeDecoder<B> {
         Ok(())
     }
 
-    /// Applies exact greedy or stochastic acceptance to one proposal.
-    fn accept(&mut self, proposal: u32, p: &[f64], q: &[f64]) -> Result<bool> {
-        let index = proposal as usize;
-        if index >= p.len() || p.len() != q.len() {
-            return Err(Error::Generation(
-                "proposal probability vectors have incompatible vocabulary shapes".into(),
-            ));
-        }
-        if self.config.generation.strategy == SamplingStrategy::Greedy {
-            return Ok(argmax(p)? == proposal);
-        }
-        let q_value = q[index];
-        if !(q_value.is_finite() && q_value > 0.0) {
-            return Err(Error::Generation(
-                "draft selected a token with zero or invalid probability".into(),
-            ));
-        }
-        Ok(self.verifier.next_unit() < (p[index] / q_value).min(1.0))
-    }
-
-    /// Samples the normalized positive residual `(p-q)_+` after rejection.
-    fn sample_residual(&mut self, p: &[f64], q: &[f64]) -> Result<u32> {
-        if p.len() != q.len() {
-            return Err(Error::Generation(
-                "target and draft distributions have different vocabularies".into(),
-            ));
-        }
-        let residual = p
-            .iter()
-            .zip(q)
-            .map(|(&target, &draft)| (target - draft).max(0.0))
-            .collect::<Vec<_>>();
-        sample_weights(&residual, self.verifier.next_unit())
-    }
-
     /// Returns whether a token terminates ordinary generation.
     fn is_eos(&self, token: u32) -> bool {
         self.config.generation.eos_token_ids.contains(&token)
     }
 }
 
-/// Target tensors and cache-prefix lengths awaiting atomic publication.
-struct PendingCycle<B: Backend> {
-    /// Suffix awaiting emission, including the guaranteed target lead token.
-    token_ids: Vec<u32>,
-    /// Number of MTP proposals produced before verification.
-    drafted_tokens: usize,
-    /// Number of proposals accepted by the target, including an accepted EOS.
-    accepted_draft_tokens: usize,
-    /// Whether verification accepted every proposal and selected a bonus token.
-    all_drafts_accepted: bool,
-    /// Whether the emitted suffix ends in a configured EOS token.
-    terminated: bool,
-    /// Target state immediately before the last emitted token, absent after EOS.
-    continuation_hidden_state: Option<Tensor<B, 3>>,
-    /// Number of staged target tokens to retain relative to the transaction mark.
-    target_cache_tokens: usize,
-    /// Number of staged MTP tokens to retain relative to the transaction mark.
-    mtp_cache_tokens: usize,
+/// Inputs shared by the drafting and verification phases of one cycle.
+struct Cycle<'a, B: Backend> {
+    /// Target-selected first token of the cycle, `y_0 = x_L`.
+    lead_token: u32,
+    /// Target hidden state `h_(L-1)` that selected the lead, `[1, 1, hidden]`.
+    target_hidden_before_lead: Tensor<B, 3>,
+    /// Prompt plus generated tokens before the lead (`L` tokens).
+    history_before_lead: &'a [u32],
+    /// Number of leading history tokens that are the prompt.
+    prompt_length: usize,
 }
 
-/// Runs one target token and returns `[1,V]` logits plus its normalized hidden state.
-fn decode_one<B: Backend>(
-    model: &Qwen3_5ForCausalLm<B>,
-    token: u32,
-    state: &mut Qwen3_5DecodeState<B>,
-    device: &B::Device,
-) -> Result<(Tensor<B, 2>, Tensor<B, 3>)> {
-    let output = model.decode(
-        DecodeInput {
-            token_ids: token_tensor(token, device),
-            token_mask: None,
-            position_ids: None,
-        },
-        state,
-        &ForwardOptions {
-            logits: LogitsSelection::Last,
-            hidden_states: true,
-            ..Default::default()
-        },
-    )?;
-    let hidden = output.final_hidden_state.ok_or_else(|| {
-        Error::Generation("target decode omitted requested final hidden state".into())
-    })?;
-    Ok((output.logits.squeeze_dim::<2>(1), hidden))
+/// Proposals of one drafting phase.
+struct Drafts {
+    /// Proposed tokens `d_1..d_K'`, `K' <= K` (an EOS proposal ends drafting).
+    tokens: Vec<u32>,
+    /// Host draft distributions `q_i` (stochastic decoding only, else empty).
+    distributions: Vec<Vec<f64>>,
 }
 
-/// Creates one batch-one token tensor after portable integer conversion.
-fn token_tensor<B: Backend>(token: u32, device: &B::Device) -> Tensor<B, 2, Int> {
-    Tensor::from_data(TensorData::new(vec![i64::from(token)], [1, 1]), device)
-}
-
-/// Creates optional batch-one history used by public logits processing.
-fn history_tensor<B: Backend>(
-    history: &[u32],
-    device: &B::Device,
-) -> Result<Option<Tensor<B, 2, Int>>> {
-    if history.is_empty() {
-        return Ok(None);
+/// Rejects a prompt length beyond the supplied history.
+fn check_prompt_length(history: &[u32], prompt_length: usize) -> Result<()> {
+    if prompt_length > history.len() {
+        return Err(Error::shape(
+            "qwen.speculative.prompt_length",
+            format!("at most the {} history tokens", history.len()),
+            prompt_length.to_string(),
+        ));
     }
-    let values = history.iter().copied().map(i64::from).collect::<Vec<_>>();
-    Ok(Some(Tensor::from_data(
-        TensorData::new(values, [1, history.len()]),
-        device,
-    )))
+    Ok(())
 }
 
-/// Reads one selected backend token with checked unsigned conversion.
-fn selected_token<B: Backend>(token: Tensor<B, 1, Int>) -> Result<u32> {
-    let values = token
+/// Creates a `[1, n]` token tensor after portable integer conversion.
+fn token_tensor<B: Backend>(tokens: &[u32], device: &B::Device) -> Tensor<B, 2, Int> {
+    let values = tokens.iter().copied().map(i64::from).collect::<Vec<_>>();
+    Tensor::from_data(TensorData::new(values, [1, tokens.len()]), device)
+}
+
+/// Reads selected backend tokens with checked unsigned conversion.
+fn read_tokens<B: Backend>(tokens: Tensor<B, 1, Int>) -> Result<Vec<u32>> {
+    tokens
         .try_into_data()
         .map_err(|error| {
             Error::BackendCapability(format!(
-                "failed to read selected token from the backend: {error}"
+                "failed to read selected tokens from the backend: {error}"
             ))
         })?
         .convert::<i64>()
         .into_vec::<i64>()
         .map_err(|error| {
-            Error::BackendCapability(format!("failed to read selected token: {error}"))
-        })?;
-    let value = *values
-        .first()
-        .ok_or_else(|| Error::Generation("token selector returned an empty batch".into()))?;
-    u32::try_from(value)
-        .map_err(|_| Error::Generation(format!("token selector returned invalid ID {value}")))
-}
-
-/// Converts processed logits to the same backend-softmax probabilities sampled
-/// by [`LogitsProcessor`], then copies one batch-one vocabulary row to the host.
-fn normalized_probabilities<B: Backend>(logits: Tensor<B, 2>) -> Result<Vec<f64>> {
-    let [batch, vocabulary] = logits.dims();
-    if batch != 1 || vocabulary == 0 {
-        return Err(Error::shape(
-            "qwen.speculative.logits",
-            "[1, nonzero_vocabulary]",
-            format!("[{batch}, {vocabulary}]"),
-        ));
-    }
-    let values = logits
-        .clone()
-        .try_into_data()
-        .map_err(|error| {
-            Error::BackendCapability(format!(
-                "failed to read processed logits from the backend: {error}"
-            ))
+            Error::BackendCapability(format!("failed to read selected tokens: {error}"))
         })?
-        .convert::<f32>()
-        .into_vec::<f32>()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to read processed logits: {error}"))
-        })?;
-    if values.iter().any(|value| value.is_nan()) {
-        return Err(Error::Generation("processed logits contain NaN".into()));
-    }
-    if values
-        .iter()
-        .any(|value| value.is_infinite() && value.is_sign_positive())
-    {
-        return Err(Error::Generation(
-            "processed logits contain positive infinity".into(),
-        ));
-    }
-    let maximum = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    if !maximum.is_finite() {
-        return Err(Error::Generation(
-            "processed logits assign zero mass to every token".into(),
-        ));
-    }
-    let probabilities = softmax(logits, 1)
-        .try_into_data()
-        .map_err(|error| {
-            Error::BackendCapability(format!(
-                "failed to read processed probabilities from the backend: {error}"
-            ))
-        })?
-        .convert::<f32>()
-        .into_vec::<f32>()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to read processed probabilities: {error}"))
-        })?;
-    if probabilities
-        .iter()
-        .any(|value| !value.is_finite() || *value < 0.0)
-    {
-        return Err(Error::Generation(
-            "processed logits produced invalid softmax probabilities".into(),
-        ));
-    }
-    let mut probabilities = probabilities.into_iter().map(f64::from).collect::<Vec<_>>();
-    let total = probabilities.iter().sum::<f64>();
-    if !(total.is_finite() && total > 0.0) {
-        return Err(Error::Generation(
-            "processed logits cannot be normalized".into(),
-        ));
-    }
-    probabilities.iter_mut().for_each(|value| *value /= total);
-    Ok(probabilities)
-}
-
-/// Returns the first greatest-probability token, matching tensor argmax ties.
-fn argmax(probabilities: &[f64]) -> Result<u32> {
-    let (index, _) = probabilities
-        .iter()
-        .copied()
-        .enumerate()
-        .max_by(|(left_index, left), (right_index, right)| {
-            left.total_cmp(right)
-                .then_with(|| right_index.cmp(left_index))
+        .into_iter()
+        .map(|value| {
+            u32::try_from(value).map_err(|_| {
+                Error::Generation(format!("token selector returned invalid ID {value}"))
+            })
         })
-        .ok_or_else(|| Error::Generation("cannot select from an empty distribution".into()))?;
-    u32::try_from(index).map_err(|_| Error::Generation("selected token does not fit u32".into()))
+        .collect()
 }
 
-/// Samples non-negative weights by inverse CDF with deterministic tie behavior.
-fn sample_weights(weights: &[f64], uniform: f64) -> Result<u32> {
-    let total = weights.iter().sum::<f64>();
-    if !(total.is_finite() && total > 0.0) {
-        return Err(Error::Generation(
-            "rejection residual has no positive probability mass".into(),
-        ));
-    }
-    let threshold = uniform * total;
-    let mut cumulative = 0.0;
-    for (index, &weight) in weights.iter().enumerate() {
-        if !(weight.is_finite() && weight >= 0.0) {
-            return Err(Error::Generation(
-                "rejection residual contains an invalid weight".into(),
-            ));
-        }
-        cumulative += weight;
-        if threshold < cumulative {
-            return u32::try_from(index)
-                .map_err(|_| Error::Generation("sampled token does not fit u32".into()));
-        }
-    }
-    u32::try_from(weights.len() - 1)
-        .map_err(|_| Error::Generation("sampled token does not fit u32".into()))
-}
-
-/// Small deterministic stream dedicated to verification decisions.
-#[derive(Debug, Clone, Copy)]
-struct SplitMix64 {
-    /// Wrapping 64-bit counter mixed to produce the next verification uniform.
-    state: u64,
-}
-
-impl SplitMix64 {
-    /// Initializes the independent deterministic stream used for verification decisions.
-    const fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    /// Returns a deterministic uniform variate in `[0, 1)` from the upper 53 mixed bits.
-    ///
-    /// The conversion fits the F64 mantissa exactly and excludes one, preventing
-    /// out-of-range inverse-CDF selections at the top of the sampling interval.
-    fn next_unit(&mut self) -> f64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut value = self.state;
-        value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        value ^= value >> 31;
-        // The greatest 53-bit value remains strictly below one.
-        ((value >> 11) as f64) * (1.0 / ((1_u64 << 53) as f64))
+/// Reads exactly one selected backend token.
+fn single_token<B: Backend>(token: Tensor<B, 1, Int>) -> Result<u32> {
+    match read_tokens(token)?.as_slice() {
+        [token] => Ok(*token),
+        tokens => Err(Error::Generation(format!(
+            "token selector returned {} tokens for one row",
+            tokens.len()
+        ))),
     }
 }
 

@@ -2,12 +2,15 @@
 
 use burn::{
     backend::Flex,
-    tensor::{Int, Tensor, TensorData, backend::BackendTypes},
+    tensor::{
+        Int, Tensor, TensorData, Tolerance,
+        backend::{Backend, BackendTypes},
+    },
 };
 
 use super::*;
 use crate::{
-    CausalLmInput,
+    CausalLanguageModel, CausalLmInput,
     cache::CacheConfig,
     checkpoint::TensorSink,
     models::qwen3_5::{
@@ -194,35 +197,6 @@ fn probability_normalization_matches_backend_softmax_and_rejects_non_finite_logi
     assert!(empty_mass.is_err());
 }
 
-/// Greedy verification accepts exactly the matching zero-, one-, or two-token proposal prefix.
-#[test]
-fn greedy_acceptance_covers_every_prefix_length() {
-    for accepted_prefix in 0..=2 {
-        let device = Default::default();
-        let mut verifier = Qwen3_5SpeculativeDecoder::<TestBackend>::new(
-            Qwen3_5SpeculativeConfig::default(),
-            3,
-            &device,
-        )
-        .unwrap();
-        for index in 0..2 {
-            let proposal = 1;
-            let p = if index < accepted_prefix {
-                [0.1, 0.8, 0.1]
-            } else {
-                [0.8, 0.1, 0.1]
-            };
-            assert_eq!(
-                verifier.accept(proposal, &p, &p).unwrap(),
-                index < accepted_prefix
-            );
-            if index == accepted_prefix {
-                break;
-            }
-        }
-    }
-}
-
 /// Inverse-CDF samples stay on positive weights, and an all-zero residual is rejected.
 #[test]
 fn residual_sampling_never_returns_non_positive_support() {
@@ -231,18 +205,6 @@ fn residual_sampling_never_returns_non_positive_support() {
         assert!(token == 1 || token == 3);
     }
     assert!(sample_weights(&[0.0, 0.0], 0.5).is_err());
-}
-
-/// Equal SplitMix seeds yield equal draws in the half-open unit interval.
-#[test]
-fn splitmix_stream_is_reproducible_and_strictly_unit_interval() {
-    let mut left = SplitMix64::new(19);
-    let mut right = SplitMix64::new(19);
-    for _ in 0..128 {
-        let lhs = left.next_unit();
-        assert_eq!(lhs, right.next_unit());
-        assert!((0.0..1.0).contains(&lhs));
-    }
 }
 
 /// Accepting both drafts emits a bonus and leaves target and MTP cursors one token apart.
@@ -258,7 +220,7 @@ fn all_accepted_cycle_commits_catch_up_and_preserves_shift() {
     )
     .unwrap();
     let output = decoder
-        .speculate(&model, 1, hidden, &[2, 3], &mut state)
+        .speculate(&model, 1, hidden, &[2, 3], 2, &mut state)
         .unwrap();
     assert_eq!(output.token_ids, vec![1, 0, 0, 0]);
     assert_eq!(output.drafted_tokens, 2);
@@ -284,7 +246,7 @@ fn complete_cycles_commit_every_acceptance_prefix() {
         )
         .unwrap();
         let output = decoder
-            .speculate(&model, lead, hidden, &[2, 3], &mut state)
+            .speculate(&model, lead, hidden, &[2, 3], 2, &mut state)
             .unwrap();
         assert_eq!(output.token_ids, emitted);
         assert_eq!(output.accepted_draft_tokens, accepted);
@@ -313,7 +275,7 @@ fn eos_lead_and_eos_draft_stop_without_cache_drift() {
     let mut decoder =
         Qwen3_5SpeculativeDecoder::new(config, model.config().vocab_size, &device).unwrap();
     let lead = decoder
-        .speculate(&model, 1, hidden.clone(), &[2, 3], &mut state)
+        .speculate(&model, 1, hidden.clone(), &[2, 3], 2, &mut state)
         .unwrap();
     assert_eq!(lead.token_ids, vec![1]);
     assert!(lead.terminated);
@@ -330,7 +292,7 @@ fn eos_lead_and_eos_draft_stop_without_cache_drift() {
     let mut decoder =
         Qwen3_5SpeculativeDecoder::new(config, model.config().vocab_size, &device).unwrap();
     let draft = decoder
-        .speculate(&model, 1, hidden, &[2, 3], &mut state)
+        .speculate(&model, 1, hidden, &[2, 3], 2, &mut state)
         .unwrap();
     assert_eq!(draft.token_ids, vec![1, 0]);
     assert_eq!(draft.accepted_draft_tokens, 1);
@@ -338,11 +300,14 @@ fn eos_lead_and_eos_draft_stop_without_cache_drift() {
     assert_eq!(state.tensor_state().lengths(), &[3]);
     assert_eq!(state.tensor_state().mtp_lengths(), Some([2].as_slice()));
 
+    // Presence penalties count generated tokens only: after the lead 1 and
+    // draft 0 are penalized, the zero logits pick 2, not a prompt token's
+    // successor. (Counting the prompt [2, 3] as well would pick 4.)
     let (mut state, hidden) = aligned_state(&model, &device);
     let config = Qwen3_5SpeculativeConfig {
         generation: GenerationConfig {
             presence_penalty: 1.0,
-            eos_token_ids: vec![4],
+            eos_token_ids: vec![2],
             ..Default::default()
         },
         ..Default::default()
@@ -350,9 +315,9 @@ fn eos_lead_and_eos_draft_stop_without_cache_drift() {
     let mut decoder =
         Qwen3_5SpeculativeDecoder::new(config, model.config().vocab_size, &device).unwrap();
     let second_draft = decoder
-        .speculate(&model, 1, hidden, &[2, 3], &mut state)
+        .speculate(&model, 1, hidden, &[2, 3], 2, &mut state)
         .unwrap();
-    assert_eq!(second_draft.token_ids, vec![1, 0, 4]);
+    assert_eq!(second_draft.token_ids, vec![1, 0, 2]);
     assert_eq!(second_draft.accepted_draft_tokens, 2);
     assert!(second_draft.terminated);
     assert_eq!(state.tensor_state().lengths(), &[4]);
@@ -379,7 +344,7 @@ fn eos_lead_rejects_a_caller_owned_active_transaction() {
     )
     .unwrap();
     assert!(matches!(
-        decoder.speculate(&model, 1, hidden, &[2, 3], &mut state),
+        decoder.speculate(&model, 1, hidden, &[2, 3], 2, &mut state),
         Err(Error::TensorCache(
             crate::cache::TensorCacheError::TransactionAlreadyActive
         ))
@@ -401,7 +366,7 @@ fn inactive_and_recoverable_failure_leave_both_cursors_unchanged() {
     )
     .unwrap();
     let inactive = decoder
-        .speculate_if_active(&model, 1, hidden.clone(), &[2, 3], false, &mut state)
+        .speculate_if_active(&model, 1, hidden.clone(), &[2, 3], 2, false, &mut state)
         .unwrap();
     assert!(inactive.token_ids.is_empty());
     assert_eq!(state.tensor_state().lengths(), &[2]);
@@ -424,13 +389,13 @@ fn inactive_and_recoverable_failure_leave_both_cursors_unchanged() {
     )
     .unwrap();
     let first = wrong
-        .speculate(&model, 1, hidden.clone(), &[2, 3], &mut state)
+        .speculate(&model, 1, hidden.clone(), &[2, 3], 2, &mut state)
         .unwrap_err();
     assert!(matches!(first, Error::Shape { .. }));
     assert_eq!(state.tensor_state().lengths(), &[2]);
     assert_eq!(state.tensor_state().mtp_lengths(), Some([1].as_slice()));
     let second = wrong
-        .speculate(&model, 1, hidden, &[2, 3], &mut state)
+        .speculate(&model, 1, hidden, &[2, 3], 2, &mut state)
         .unwrap_err();
     assert_eq!(first.to_string(), second.to_string());
 }
@@ -473,7 +438,7 @@ fn cycle_preflight_rejects_vocabulary_history_token_and_hidden_mismatches() {
     .unwrap();
     assert!(
         wrong_vocabulary
-            .speculate(&model, 1, hidden.clone(), &[2, 3], &mut state)
+            .speculate(&model, 1, hidden.clone(), &[2, 3], 2, &mut state)
             .is_err()
     );
 
@@ -485,7 +450,7 @@ fn cycle_preflight_rejects_vocabulary_history_token_and_hidden_mismatches() {
     .unwrap();
     assert!(
         decoder
-            .speculate(&model, 1, hidden.clone(), &[2], &mut state)
+            .speculate(&model, 1, hidden.clone(), &[2], 1, &mut state)
             .is_err()
     );
     assert!(
@@ -495,6 +460,7 @@ fn cycle_preflight_rejects_vocabulary_history_token_and_hidden_mismatches() {
                 model.config().vocab_size as u32,
                 hidden.clone(),
                 &[2, 3],
+                2,
                 &mut state,
             )
             .is_err()
@@ -506,6 +472,7 @@ fn cycle_preflight_rejects_vocabulary_history_token_and_hidden_mismatches() {
                 1,
                 Tensor::zeros([1, 2, model.config().hidden_size], &device),
                 &[2, 3],
+                2,
                 &mut state,
             )
             .is_err()
@@ -561,9 +528,9 @@ fn stochastic_rejection_rule_recovers_target_marginal() {
     let mut counts = [0usize; 3];
     let trials = 100_000usize;
     for _ in 0..trials {
-        let proposal = sample_weights(&q, proposal_rng.next_unit()).unwrap();
+        let proposal = sample_weights(&q, proposal_rng.next_unit_f64()).unwrap();
         let ratio = (p[proposal as usize] / q[proposal as usize]).min(1.0);
-        let token = if verifier_rng.next_unit() < ratio {
+        let token = if verifier_rng.next_unit_f64() < ratio {
             proposal
         } else {
             let residual = p
@@ -571,7 +538,7 @@ fn stochastic_rejection_rule_recovers_target_marginal() {
                 .zip(q)
                 .map(|(&target, draft)| (target - draft).max(0.0))
                 .collect::<Vec<_>>();
-            sample_weights(&residual, verifier_rng.next_unit()).unwrap()
+            sample_weights(&residual, verifier_rng.next_unit_f64()).unwrap()
         };
         counts[token as usize] += 1;
     }
@@ -604,10 +571,10 @@ fn stochastic_cycles_with_equal_seeds_are_reproducible() {
     let mut second =
         Qwen3_5SpeculativeDecoder::new(config, model.config().vocab_size, &device).unwrap();
     let first = first
-        .speculate(&model, 1, first_hidden, &[2, 3], &mut first_state)
+        .speculate(&model, 1, first_hidden, &[2, 3], 2, &mut first_state)
         .unwrap();
     let second = second
-        .speculate(&model, 1, second_hidden, &[2, 3], &mut second_state)
+        .speculate(&model, 1, second_hidden, &[2, 3], 2, &mut second_state)
         .unwrap();
     assert_eq!(first.token_ids, second.token_ids);
     assert_eq!(first.accepted_draft_tokens, 2);
@@ -618,5 +585,401 @@ fn stochastic_cycles_with_equal_seeds_are_reproducible() {
     assert_eq!(
         first_state.tensor_state().mtp_lengths(),
         second_state.tensor_state().mtp_lengths()
+    );
+}
+
+/// Builds a randomly initialized hybrid model with MTP and a tiny vocabulary.
+///
+/// Six tokens make the random MTP head agree with the target often enough
+/// that cycles exercise rejections, partial acceptance, and full acceptance.
+fn random_hybrid_model(
+    seed: u64,
+    device: &<TestBackend as BackendTypes>::Device,
+) -> Qwen3_5ForCausalLm<TestBackend> {
+    TestBackend::seed(device, seed);
+    Qwen3_5ForCausalLm::init(
+        Qwen3_5TextConfig {
+            vocab_size: 6,
+            hidden_size: 16,
+            intermediate_size: 24,
+            num_hidden_layers: 4,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 8,
+            max_position_embeddings: 96,
+            layer_types: vec![
+                Qwen3_5LayerType::LinearAttention,
+                Qwen3_5LayerType::FullAttention,
+                Qwen3_5LayerType::LinearAttention,
+                Qwen3_5LayerType::FullAttention,
+            ],
+            linear_key_head_dim: 4,
+            linear_value_head_dim: 4,
+            linear_num_key_heads: 1,
+            linear_num_value_heads: 2,
+            linear_conv_kernel_dim: 3,
+            partial_rotary_factor: Some(0.5),
+            rope_theta: Some(10_000.0),
+            mtp_num_hidden_layers: 1,
+            ..Default::default()
+        },
+        device,
+    )
+    .unwrap()
+}
+
+/// Returns the first greatest logit of a `[1, 1, V]` tensor.
+fn argmax_token(logits: Tensor<TestBackend, 3>) -> u32 {
+    let values = logits.into_data().to_vec::<f32>().unwrap();
+    let mut best = 0;
+    for (index, &value) in values.iter().enumerate() {
+        if value > values[best] {
+            best = index;
+        }
+    }
+    best as u32
+}
+
+/// Plain greedy decoding: prefill, then one cached decode call per token.
+fn plain_greedy(model: &Qwen3_5ForCausalLm<TestBackend>, prompt: &[u32], count: usize) -> Vec<u32> {
+    let device = Default::default();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 64).unwrap(), 1, &device)
+        .unwrap();
+    let mut logits = model
+        .prefill(
+            CausalLmInput {
+                token_ids: token_tensor(prompt, &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap()
+        .logits;
+    let mut tokens = Vec::with_capacity(count);
+    while tokens.len() < count {
+        let token = argmax_token(logits);
+        tokens.push(token);
+        logits = model
+            .decode(
+                crate::DecodeInput {
+                    token_ids: token_tensor(&[token], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+    }
+    tokens
+}
+
+/// Result of a speculative generation run.
+struct SpeculativeRun {
+    /// Emitted tokens, each emitted once.
+    tokens: Vec<u32>,
+    /// Drafts accepted across all cycles.
+    accepted: usize,
+    /// Drafts proposed across all cycles.
+    drafted: usize,
+}
+
+/// Prefills, then runs greedy speculative cycles until `count` tokens are emitted.
+fn speculative_greedy(
+    model: &Qwen3_5ForCausalLm<TestBackend>,
+    prompt: &[u32],
+    count: usize,
+    config: Qwen3_5SpeculativeConfig,
+    state: &mut Qwen3_5DecodeState<TestBackend>,
+) -> SpeculativeRun {
+    let device = Default::default();
+    let prefill = model
+        .prefill(
+            CausalLmInput {
+                token_ids: token_tensor(prompt, &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            state,
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                hidden_states: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let hidden = prefill.final_hidden_state.unwrap();
+    model
+        .prefill_mtp_cache(token_tensor(prompt, &device), hidden.clone(), state)
+        .unwrap();
+    let mut decoder =
+        Qwen3_5SpeculativeDecoder::new(config, model.config().vocab_size, &device).unwrap();
+    let length = prompt.len();
+    let mut lead = decoder
+        .select_lead(
+            prefill.logits.narrow(1, length - 1, 1).squeeze_dim::<2>(1),
+            prompt,
+            length,
+        )
+        .unwrap();
+    let mut hidden = hidden.narrow(1, length - 1, 1);
+    let mut history = prompt.to_vec();
+    let mut run = SpeculativeRun {
+        tokens: vec![lead],
+        accepted: 0,
+        drafted: 0,
+    };
+    while run.tokens.len() < count {
+        let output = decoder
+            .speculate(model, lead, hidden, &history, length, state)
+            .unwrap();
+        assert_eq!(output.token_ids[0], lead);
+        assert!(!output.terminated);
+        run.accepted += output.accepted_draft_tokens;
+        run.drafted += output.drafted_tokens;
+        // The committed prefix is everything but the next lead.
+        history.extend(&output.token_ids[..output.token_ids.len() - 1]);
+        run.tokens.extend(&output.token_ids[1..]);
+        lead = *output.token_ids.last().unwrap();
+        hidden = output.continuation_hidden_state.unwrap();
+        let lengths = state.tensor_state();
+        assert_eq!(lengths.lengths(), &[history.len()]);
+        assert_eq!(lengths.mtp_lengths(), Some([history.len() - 1].as_slice()));
+    }
+    run
+}
+
+/// QW-11: greedy speculation emits exactly the plain greedy sequence on random hybrid models.
+///
+/// Across seeds and draft lengths the cycles see rejections and acceptances;
+/// truncating both caches to zero and repeating reproduces the same tokens.
+#[test]
+fn greedy_speculation_reproduces_plain_greedy_decoding() {
+    let device = Default::default();
+    let prompt = [1, 4, 2, 5, 3];
+    let count = 20;
+    let (mut accepted, mut drafted) = (0, 0);
+    for seed in [3, 17, 29, 41] {
+        let model = random_hybrid_model(seed, &device);
+        let reference = plain_greedy(&model, &prompt, count);
+        for max_draft_tokens in [1, 3] {
+            let config = Qwen3_5SpeculativeConfig {
+                max_draft_tokens,
+                ..Default::default()
+            };
+            let mut state = model
+                .new_speculative_decode_state(
+                    CacheConfig::new(1, 64).unwrap(),
+                    1,
+                    max_draft_tokens,
+                    &device,
+                )
+                .unwrap();
+            let run = speculative_greedy(&model, &prompt, count, config.clone(), &mut state);
+            assert_eq!(&run.tokens[..count], reference.as_slice(), "seed {seed}");
+            accepted += run.accepted;
+            drafted += run.drafted;
+
+            crate::architecture::DecodeState::<TestBackend>::truncate(&mut state, &[0]).unwrap();
+            let repeated = speculative_greedy(&model, &prompt, count, config, &mut state);
+            assert_eq!(repeated.tokens, run.tokens, "seed {seed} after truncation");
+        }
+    }
+    assert!(accepted > 0, "no draft was ever accepted");
+    assert!(accepted < drafted, "no draft was ever rejected");
+}
+
+/// QW-5: committed MTP history is built from target hidden states, as in the reference drafter.
+///
+/// After speculative cycles, every readable MTP cache entry equals the one a
+/// fresh MTP prefill writes from the target's hidden states over the same
+/// committed tokens.
+#[test]
+fn committed_mtp_history_comes_from_target_hidden_states() {
+    let device = Default::default();
+    let prompt = [2, 0, 3, 1];
+    let model = random_hybrid_model(29, &device);
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 64).unwrap(), 1, 3, &device)
+        .unwrap();
+    let config = Qwen3_5SpeculativeConfig {
+        max_draft_tokens: 3,
+        ..Default::default()
+    };
+    let run = speculative_greedy(&model, &prompt, 12, config, &mut state);
+    assert!(run.accepted > 0, "the comparison needs accepted drafts");
+    let committed = state.tensor_state().lengths()[0];
+    let mut sequence = prompt.to_vec();
+    sequence.extend(&run.tokens[..committed - prompt.len()]);
+
+    let mut fresh = model
+        .new_speculative_decode_state(CacheConfig::new(1, 64).unwrap(), 1, 3, &device)
+        .unwrap();
+    let hidden = model
+        .prefill(
+            CausalLmInput {
+                token_ids: token_tensor(&sequence, &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut fresh,
+            &ForwardOptions {
+                hidden_states: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .final_hidden_state
+        .unwrap();
+    model
+        .prefill_mtp_cache(token_tensor(&sequence, &device), hidden, &mut fresh)
+        .unwrap();
+    let mtp_length = committed - 1;
+    assert_eq!(
+        fresh.tensor_state().mtp_lengths(),
+        Some([mtp_length].as_slice())
+    );
+    let readable = |state: &Qwen3_5DecodeState<TestBackend>| {
+        let cache = state.tensor_state().mtp().unwrap().native_kv(0).unwrap();
+        [cache.keys(0).unwrap(), cache.values(0).unwrap()].map(|plane| {
+            let [_, heads, _, width] = plane.dims();
+            plane
+                .clone()
+                .slice([0..1, 0..heads, 0..mtp_length, 0..width])
+                .into_data()
+        })
+    };
+    for (speculative, reference) in readable(&state).into_iter().zip(readable(&fresh)) {
+        speculative.assert_approx_eq::<f32>(&reference, Tolerance::rel_abs(2e-4, 2e-5));
+    }
+}
+
+/// Seeded stochastic cycles on a random model are reproducible and keep both caches aligned.
+#[test]
+fn stochastic_cycles_on_a_random_model_are_reproducible_and_aligned() {
+    let device = Default::default();
+    let prompt = [3, 1, 4];
+    let model = random_hybrid_model(41, &device);
+    let config = Qwen3_5SpeculativeConfig {
+        max_draft_tokens: 2,
+        generation: GenerationConfig {
+            strategy: SamplingStrategy::Sample,
+            temperature: 0.8,
+            top_k: Some(4),
+            seed: 0x51de,
+            ..Default::default()
+        },
+    };
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let mut state = model
+            .new_speculative_decode_state(CacheConfig::new(1, 64).unwrap(), 1, 2, &device)
+            .unwrap();
+        runs.push(speculative_greedy(&model, &prompt, 16, config.clone(), &mut state).tokens);
+    }
+    assert_eq!(runs[0], runs[1]);
+    assert!(runs[0].iter().all(|&token| token < 6));
+}
+
+/// Measures verifying `K + 1 = 4` tokens in one target pass against four sequential passes.
+///
+/// The former verifier decoded the lead and every accepted draft separately;
+/// the batched verifier stages all of them in one call. Both run inside a
+/// transaction that is rolled back, on a small hybrid model after a 32-token
+/// prompt, and report the median of nine runs. Run with
+/// `cargo test --release --lib qwen3_5::model::speculative::tests::verification_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing measurement; run explicitly in release mode"]
+fn verification_timing() {
+    let device = Default::default();
+    TestBackend::seed(&device, 9);
+    let model = Qwen3_5ForCausalLm::<TestBackend>::init(
+        Qwen3_5TextConfig {
+            vocab_size: 1024,
+            hidden_size: 256,
+            intermediate_size: 512,
+            num_hidden_layers: 4,
+            num_attention_heads: 4,
+            num_key_value_heads: 2,
+            head_dim: 64,
+            max_position_embeddings: 128,
+            layer_types: vec![
+                Qwen3_5LayerType::LinearAttention,
+                Qwen3_5LayerType::LinearAttention,
+                Qwen3_5LayerType::LinearAttention,
+                Qwen3_5LayerType::FullAttention,
+            ],
+            linear_key_head_dim: 64,
+            linear_value_head_dim: 64,
+            linear_num_key_heads: 2,
+            linear_num_value_heads: 4,
+            linear_conv_kernel_dim: 4,
+            mtp_num_hidden_layers: 1,
+            ..Default::default()
+        },
+        &device,
+    )
+    .unwrap();
+    let mut state = model
+        .new_speculative_decode_state(CacheConfig::new(1, 64).unwrap(), 1, 3, &device)
+        .unwrap();
+    let prompt = (0..32).map(|token| token * 7 % 1024).collect::<Vec<u32>>();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: token_tensor(&prompt, &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let tokens = [5, 9, 13, 17];
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..Default::default()
+    };
+    let decode = |state: &mut Qwen3_5DecodeState<TestBackend>, ids: &[u32]| {
+        model
+            .decode(
+                crate::DecodeInput {
+                    token_ids: token_tensor(ids, &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                state,
+                &options,
+            )
+            .unwrap()
+            .logits
+            .into_data()
+    };
+    let (mut sequential, mut batched) = (Vec::new(), Vec::new());
+    for _ in 0..9 {
+        let mark = state.mark().unwrap();
+        let start = std::time::Instant::now();
+        for token in tokens {
+            decode(&mut state, &[token]);
+        }
+        sequential.push(start.elapsed());
+        state.rollback(mark).unwrap();
+        let mark = state.mark().unwrap();
+        let start = std::time::Instant::now();
+        decode(&mut state, &tokens);
+        batched.push(start.elapsed());
+        state.rollback(mark).unwrap();
+    }
+    sequential.sort();
+    batched.sort();
+    println!(
+        "verify 4 tokens: one pass {:?}, four passes {:?} ({:.2}x)",
+        batched[4],
+        sequential[4],
+        sequential[4].as_secs_f64() / batched[4].as_secs_f64()
     );
 }
