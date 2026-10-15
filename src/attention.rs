@@ -22,6 +22,9 @@
 //! executes a plan in synchronized query chunks (Muse-Glimmer still runs its
 //! own equivalent loop).
 //!
+//! [`DifferentialAttention`] subtracts two softmax maps (DIFF Transformer)
+//! while reusing the same grouped dispatch over native KV heads.
+//!
 //! [`AttentionConnectivity`] builds padding-aware causal, sliding-window, and
 //! chunked-local exclusion masks for per-layer local/global schedules, and
 //! [`sliding_window_key_range`] gives the matching key slice of a query chunk.
@@ -34,6 +37,7 @@
 //! softmax defines fully excluded rows as zero probabilities.
 
 mod connectivity;
+mod differential;
 mod dispatch;
 mod execution;
 mod mask;
@@ -53,6 +57,7 @@ use burn::{
 
 use connectivity::ExclusionPlan;
 pub use connectivity::{AttentionConnectivity, MaskGeometry, valid_token_ordinals};
+pub use differential::{DifferentialAttention, DifferentialAttentionConfig, depth_lambda_init};
 use dispatch::{Operands, causal_exclusion, default_scale, grouped_mix, scaled_scores};
 pub(crate) use dispatch::{dispatch_attention, eager_probabilities, zero_excluded};
 pub use dispatch::{grouped_query_attention, repeat_key_value};
