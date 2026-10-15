@@ -114,10 +114,12 @@ fn write_per_row(
 /// Every committed and staged tensor of layer zero.
 fn snapshot(cache: &NativeKvCache<TestBackend>) -> Vec<Vec<f32>> {
     let layer = &cache.layers[0];
-    let mut tensors = vec![host(&layer.keys), host(&layer.values)];
-    tensors.extend(layer.staged_keys.as_ref().map(host));
-    tensors.extend(layer.staged_values.as_ref().map(host));
-    tensors
+    layer
+        .planes
+        .iter()
+        .chain(layer.staged.iter().flatten())
+        .map(host)
+        .collect()
 }
 
 /// Reconstructs one row's `(position, key)` pairs in chronological order from a batched read.
@@ -228,13 +230,13 @@ fn uniform_batches_write_with_one_assignment_per_segment() {
     let cache = cache(4, 16, KvCacheStorage::Full, 1, 0, false);
     let uniform = KvBatchAppend::right_padded(&[5; 4], &[2; 4], 2).expect("layout");
     let write = cache
-        .prepare_batch_write(0, &uniform, block(4, 2, 1.0), block(4, 2, 2.0))
+        .prepare_batch_write(0, &uniform, vec![block(4, 2, 1.0), block(4, 2, 2.0)])
         .expect("valid write");
     assert_eq!(write.runs.len(), 1);
     assert_eq!(write.runs[0].rows, 0..4);
     let ragged = KvBatchAppend::right_padded(&[5, 5, 6, 0], &[2, 2, 1, 0], 2).expect("layout");
     let write = cache
-        .prepare_batch_write(0, &ragged, block(4, 2, 1.0), block(4, 2, 2.0))
+        .prepare_batch_write(0, &ragged, vec![block(4, 2, 1.0), block(4, 2, 2.0)])
         .expect("valid write");
     assert_eq!(
         write
@@ -388,7 +390,7 @@ fn batched_staging_and_commit_match_per_row_staging() {
 #[test]
 fn in_place_staging_reads_one_contiguous_view_and_commits_by_metadata() {
     let mut cache = cache(2, 8, KvCacheStorage::Full, 1, 2, true);
-    assert!(cache.layers[0].staged_keys.is_none());
+    assert!(cache.layers[0].staged.is_none());
     let prefill = KvBatchAppend::right_padded(&[0, 0], &[3, 1], 3).expect("layout");
     cache
         .write_batch(0, &prefill, block(2, 3, 1.0), block(2, 3, 2.0))

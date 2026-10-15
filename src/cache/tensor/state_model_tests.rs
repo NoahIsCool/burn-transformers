@@ -1,10 +1,11 @@
 //! Model-based property test of the tensor decode-state lifecycle.
 //!
-//! Random sequences of append, begin, stage, commit, rollback, reorder,
-//! truncate, and reset drive a real [`TensorDecodeState`] holding full,
-//! standard-ring, and mirrored-ring KV groups plus an optional recurrent
-//! group. A straightforward oracle keeps each row's token history as a
-//! `Vec<f32>`; every token carries a unique value, so a stale, misplaced, or
+//! Random sequences of append, step publication, begin, stage, commit,
+//! rollback, reorder, truncate, and reset drive a real [`TensorDecodeState`]
+//! holding full, standard-ring, and mirrored-ring KV groups, a full latent
+//! group with in-place staging, and an optional recurrent group. A
+//! straightforward oracle keeps each row's token history as a `Vec<f32>`;
+//! every token carries a unique value, so a stale, misplaced, or
 //! lost cache slot is detected exactly (F32 equality, no tolerance). After
 //! every operation the test compares committed and working lengths, the
 //! retained window and contents of every KV group, and the recurrent terminal
@@ -28,6 +29,8 @@ const FULL: usize = 0;
 const RING: usize = 1;
 /// Index of the mirrored sliding-ring KV group.
 const MIRRORED: usize = 2;
+/// Index of the full-storage latent group with in-place staging.
+const LATENT: usize = 3;
 /// Width of the recurrent group's convolution history.
 const CONVOLUTION_WIDTH: usize = 2;
 
@@ -130,6 +133,14 @@ impl Harness {
             }
             state.main_mut().add_native_kv(spec).expect("KV group");
         }
+        let latent = NativeKvCacheSpec::latent(1, 1, KvCacheStorage::Full, DType::F32)
+            .expect("geometry")
+            .with_staging_capacity(setup.staging)
+            .with_in_place_staging();
+        state
+            .main_mut()
+            .add_native_kv(latent)
+            .expect("latent group");
         if setup.recurrent {
             let spec = RecurrentStateSpec::new(1, 1, 1, 1, 1, CONVOLUTION_WIDTH, DType::F32)
                 .expect("geometry")
@@ -227,6 +238,23 @@ impl Harness {
                     .expect("ordinary writes"),
             );
         }
+        let cache = bank.native_kv(LATENT).expect("latent group");
+        let writes = (0..rows)
+            .filter(|&row| counts[row] > 0)
+            .map(|row| {
+                let planes = cache
+                    .latent_planes(latent_tokens(&tokens[row]))
+                    .expect("latent group");
+                let start = self.oracle.committed[row].len();
+                cache
+                    .prepare_planes_write(0, row, start, planes)
+                    .expect("valid write")
+            })
+            .collect();
+        prepared.push(
+            bank.prepare_direct_writes(Some((LATENT, writes)), None)
+                .expect("ordinary writes"),
+        );
         self.state.advance(counts).expect("validated advance");
         for writes in prepared {
             self.state.main_mut().apply_prepared_direct_writes(writes);
@@ -279,6 +307,12 @@ impl Harness {
                     .stage_sequence(0, row, keys, values)
                     .expect("valid staging");
             }
+            self.state
+                .main_mut()
+                .native_kv_mut(LATENT)
+                .expect("latent group")
+                .stage_latent_sequence(0, row, latent_tokens(&tokens[row]))
+                .expect("valid latent staging");
             if self.setup.recurrent {
                 let (matrices, convolutions) = recurrent_snapshots(&tokens[row]);
                 self.state
@@ -327,6 +361,15 @@ impl Harness {
                     let (keys, values) = kv_tokens(&tokens[row]);
                     step.push_kv_row(group, 0, row, keys, values);
                 }
+            }
+        }
+        if batched {
+            let (keys, _) = padded_kv(&tokens, block);
+            let [batch, _, columns, _] = keys.dims();
+            step.push_latent_batch(LATENT, 0, keys.reshape([batch, columns, 1]));
+        } else {
+            for row in (0..rows).filter(|&row| counts[row] > 0) {
+                step.push_latent_row(LATENT, 0, row, latent_tokens(&tokens[row]));
             }
         }
         if self.setup.recurrent {
@@ -514,6 +557,14 @@ impl Harness {
                 let negated: Vec<f32> = visible.iter().map(|value| -value).collect();
                 assert_eq!(values, negated, "group {group}, row {row} values");
             }
+            let latent = bank
+                .native_kv(LATENT)
+                .expect("latent group")
+                .read_working_sequence(0, row, committed)
+                .expect("latent read")
+                .materialize_latent()
+                .map_or_else(Vec::new, host);
+            assert_eq!(latent, tokens, "latent row {row}");
             if self.setup.recurrent {
                 let read = bank
                     .recurrent(0)
@@ -541,6 +592,14 @@ fn kv_tokens(tokens: &[f32]) -> (Tensor<TestBackend, 4>, Tensor<TestBackend, 4>)
         &Default::default(),
     );
     (keys, values)
+}
+
+/// Builds a one-row latent `[1, tokens, 1]` holding the token values.
+fn latent_tokens(tokens: &[f32]) -> Tensor<TestBackend, 3> {
+    Tensor::from_data(
+        TensorData::new(tokens.to_vec(), [1, tokens.len(), 1]),
+        &Default::default(),
+    )
 }
 
 /// Builds right-padded `[rows, 1, block, 1]` keys and negated values; padding holds sentinels.

@@ -140,6 +140,13 @@ pub enum TensorCacheError {
         reason: &'static str,
     },
 
+    /// Key/value inputs were given to a latent group, or a latent to a key/value group.
+    #[error("this cache group stores {expected}")]
+    PlaneKindMismatch {
+        /// What the group stores.
+        expected: &'static str,
+    },
+
     /// Doubling a mirrored ring width overflowed `usize`.
     #[error("mirrored ring width 2 * {window} overflows usize")]
     MirroredCapacityOverflow {

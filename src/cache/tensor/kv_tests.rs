@@ -31,29 +31,21 @@ fn values(tensor: &Tensor<TestBackend, 4>) -> Vec<f32> {
         .expect("F32 test tensor")
 }
 
-/// A missing member of an internal staging pair cannot partially change its surviving tensor.
+/// A missing staging plane cannot partially change the surviving plane.
 #[test]
 fn incomplete_staging_allocation_rejects_writes_before_mutation() {
     for remove_keys in [false, true] {
         let mut cache = cache();
         cache.begin_staging().expect("begin staging");
-        // Public constructors always allocate both members; deliberately break
+        // Public constructors always allocate every plane; deliberately break
         // the private invariant to exercise the recoverable defensive path.
-        if remove_keys {
-            cache.layers[0].staged_keys = None;
-        } else {
-            cache.layers[0].staged_values = None;
-        }
+        let planes = cache.layers[0].staged.as_mut().expect("staging planes");
+        planes.remove(usize::from(!remove_keys));
         assert!(matches!(
             cache.stage_sequence(0, 0, token(7.0), token(9.0)),
             Err(TensorCacheError::StagingDisabled)
         ));
-        let surviving = if remove_keys {
-            cache.layers[0].staged_values.as_ref()
-        } else {
-            cache.layers[0].staged_keys.as_ref()
-        }
-        .expect("one staging member remains");
+        let surviving = &cache.layers[0].staged.as_ref().expect("one plane remains")[0];
         assert_eq!(values(surviving), [0.0, 0.0]);
         assert_eq!(cache.staged_length(0, 0).expect("valid row"), 0);
     }
@@ -70,11 +62,8 @@ fn incomplete_staging_allocation_rejects_commit_before_publication() {
                 .stage_sequence(layer, 0, token(7.0), token(9.0))
                 .expect("stage layer");
         }
-        if remove_keys {
-            cache.layers[1].staged_keys = None;
-        } else {
-            cache.layers[1].staged_values = None;
-        }
+        let planes = cache.layers[1].staged.as_mut().expect("staging planes");
+        planes.remove(usize::from(!remove_keys));
         assert!(matches!(
             cache.prepare_staging_commit(&[0], &[1], &[1]),
             Err(TensorCacheError::StagingDisabled)
@@ -250,4 +239,170 @@ fn spec_reports_exact_committed_slots_per_storage_mode() {
         Some(3)
     );
     assert_eq!(mirrored.committed_time_slots(config).ok(), Some(6));
+}
+
+/// Allocates a two-row latent group of the given storage, window, and staging policy.
+fn latent_cache(
+    storage: KvCacheStorage,
+    staging: usize,
+    in_place: bool,
+) -> NativeKvCache<TestBackend> {
+    let config = CacheConfig::new(2, 8).expect("valid config");
+    let mut spec = NativeKvCacheSpec::latent(1, 3, storage, DType::F32)
+        .expect("latent geometry")
+        .with_staging_capacity(staging);
+    if storage != KvCacheStorage::Full {
+        spec = spec.with_sliding_window(NonZeroUsize::new(2).expect("window"));
+    }
+    if in_place {
+        spec = spec.with_in_place_staging();
+    }
+    NativeKvCache::new(config, 2, spec, &Default::default()).expect("latent allocation")
+}
+
+/// Builds a `[rows, tokens, 3]` latent whose entries encode their position.
+fn latent(rows: usize, tokens: usize, tag: f32) -> Tensor<TestBackend, 3> {
+    let data = (0..rows * tokens * 3)
+        .map(|index| tag + index as f32)
+        .collect::<Vec<_>>();
+    Tensor::from_data(
+        burn::tensor::TensorData::new(data, [rows, tokens, 3]),
+        &Default::default(),
+    )
+}
+
+/// A latent group stores one `[batch, 1, time, width]` plane and rejects key/value inputs.
+#[test]
+fn latent_groups_store_one_plane_and_reject_pairs() {
+    let spec = NativeKvCacheSpec::latent(2, 5, KvCacheStorage::Full, DType::F32).expect("spec");
+    assert!(spec.is_latent());
+    assert_eq!(spec.plane_count(), 1);
+    assert_eq!((spec.key_value_heads(), spec.head_dimension()), (1, 5));
+    assert!(
+        !NativeKvCacheSpec::new(1, 1, 1, KvCacheStorage::Full, DType::F32)
+            .expect("spec")
+            .is_latent()
+    );
+    assert!(matches!(
+        NativeKvCacheSpec::latent(1, 0, KvCacheStorage::Full, DType::F32),
+        Err(TensorCacheError::ZeroDimension { .. })
+    ));
+
+    let mut cache = latent_cache(KvCacheStorage::Full, 0, false);
+    assert_eq!(cache.layers[0].planes.len(), 1);
+    assert_eq!(cache.keys(0).expect("plane").dims(), [2, 1, 8, 3]);
+    assert!(matches!(
+        cache.write_sequence(0, 0, 0, token(1.0), token(1.0)),
+        Err(TensorCacheError::PlaneKindMismatch { expected }) if expected.contains("latent")
+    ));
+    let mut pair = cache_kv();
+    assert!(matches!(
+        pair.write_latent_sequence(0, 0, 0, latent(1, 1, 0.0)),
+        Err(TensorCacheError::PlaneKindMismatch { expected }) if expected.contains("key/value")
+    ));
+
+    cache
+        .write_latent_sequence(0, 1, 2, latent(1, 3, 10.0))
+        .expect("latent write");
+    let read = cache.read_sequence(0, 1, 5).expect("read");
+    let (history_keys, history_values) = read.materialize().expect("history");
+    assert_eq!(values(&history_keys), values(&history_values));
+    let committed = read.materialize_latent().expect("latent history");
+    assert_eq!(committed.dims(), [1, 5, 3]);
+    let tail: Vec<f32> = values(&committed.unsqueeze_dim::<4>(1))[6..].to_vec();
+    assert_eq!(tail, values(&latent(1, 3, 10.0).unsqueeze_dim::<4>(1)));
+    assert!(
+        cache
+            .read_sequence(0, 0, 0)
+            .expect("empty")
+            .materialize_latent()
+            .is_none()
+    );
+}
+
+/// Latent rings, batched writes, and staging behave exactly like their KV counterparts.
+#[test]
+fn latent_groups_share_ring_batch_and_staging_paths() {
+    for (storage, in_place) in [
+        (KvCacheStorage::Full, false),
+        (KvCacheStorage::Full, true),
+        (KvCacheStorage::SlidingRing, false),
+        (KvCacheStorage::MirroredSlidingRing, false),
+    ] {
+        let mut batched = latent_cache(storage, 2, in_place);
+        let mut per_row = latent_cache(storage, 2, in_place);
+        let append = KvBatchAppend::right_padded(&[0, 0], &[3, 1], 3).expect("layout");
+        batched
+            .write_latent_batch(0, &append, latent(2, 3, 1.0))
+            .expect("batched latent write");
+        per_row
+            .write_latent_sequence(0, 0, 0, latent(2, 3, 1.0).slice([0..1, 0..3, 0..3]))
+            .expect("row 0");
+        per_row
+            .write_latent_sequence(0, 1, 0, latent(2, 3, 1.0).slice([1..2, 0..1, 0..3]))
+            .expect("row 1");
+        for cache in [&mut batched, &mut per_row] {
+            cache.begin_staging_from(&[3, 1]).expect("staging");
+        }
+        let proposal = KvBatchAppend::right_padded(&[3, 1], &[1, 2], 2).expect("layout");
+        batched
+            .stage_latent_batch(0, &proposal, latent(2, 2, 50.0))
+            .expect("batched latent stage");
+        per_row
+            .stage_latent_sequence(0, 0, latent(2, 2, 50.0).slice([0..1, 0..1, 0..3]))
+            .expect("row 0 stage");
+        per_row
+            .stage_latent_sequence(0, 1, latent(2, 2, 50.0).slice([1..2, 0..2, 0..3]))
+            .expect("row 1 stage");
+        for row in 0..2 {
+            let committed = [3, 1][row];
+            let read = |cache: &NativeKvCache<TestBackend>| {
+                cache
+                    .read_working_sequence(0, row, committed)
+                    .expect("working read")
+                    .materialize_latent()
+                    .map(|tensor| values(&tensor.unsqueeze_dim::<4>(1)))
+            };
+            assert_eq!(
+                read(&batched),
+                read(&per_row),
+                "{storage:?} {in_place} row {row}"
+            );
+        }
+        for cache in [&mut batched, &mut per_row] {
+            let plan = cache
+                .prepare_staging_commit(&[3, 1], &[1, 2], &[1, 1])
+                .expect("commit");
+            cache.apply_staging_commit(plan);
+        }
+        for row in 0..2 {
+            let length = [4, 2][row];
+            let read = |cache: &NativeKvCache<TestBackend>| {
+                let read = cache.read_sequence(0, row, length).expect("read");
+                (
+                    read.retained_positions(),
+                    read.materialize_latent()
+                        .map(|tensor| values(&tensor.unsqueeze_dim::<4>(1))),
+                )
+            };
+            assert_eq!(
+                read(&batched),
+                read(&per_row),
+                "{storage:?} {in_place} row {row}"
+            );
+        }
+        let plan = batched.plan_batch_read(&[4, 2]).expect("plan");
+        let segment = batched
+            .read_batch(0, &plan)
+            .expect("read")
+            .materialize()
+            .expect("keys");
+        assert_eq!(segment.latent().dims()[2], 3);
+        assert_eq!(values(segment.keys()), values(segment.values()));
+    }
+}
+
+/// A two-row key/value cache used to check plane-kind errors.
+fn cache_kv() -> NativeKvCache<TestBackend> {
+    cache()
 }

@@ -73,7 +73,7 @@ pub enum TokenAlignment {
 /// One recorded KV update.
 #[derive(Debug)]
 enum KvEntry<B: Backend> {
-    /// One row's `[1, kv_heads, n_b, head_dim]` keys and values.
+    /// One row's planes `[1, heads, n_b, dim]` (keys and values, or one latent).
     Row {
         /// Cache group.
         group: usize,
@@ -81,21 +81,17 @@ enum KvEntry<B: Backend> {
         layer: usize,
         /// Batch row.
         row: usize,
-        /// New keys.
-        keys: Tensor<B, 4>,
-        /// New values.
-        values: Tensor<B, 4>,
+        /// New planes in storage order.
+        planes: Vec<Tensor<B, 4>>,
     },
-    /// Every row's `[batch, kv_heads, block, head_dim]` keys and values.
+    /// Every row's planes `[batch, heads, block, dim]`.
     Batch {
         /// Cache group.
         group: usize,
         /// Layer within the group.
         layer: usize,
-        /// New keys.
-        keys: Tensor<B, 4>,
-        /// New values.
-        values: Tensor<B, 4>,
+        /// New planes in storage order.
+        planes: Vec<Tensor<B, 4>>,
     },
     /// A layer already written ahead at the recorded starts.
     WrittenAhead {
@@ -204,8 +200,23 @@ impl<B: Backend> TensorStepWrites<B> {
             group,
             layer,
             row,
-            keys,
-            values,
+            planes: vec![keys, values],
+        });
+    }
+
+    /// Records one row's new latents `[1, n_b, width]` for a latent group.
+    pub fn push_latent_row(
+        &mut self,
+        group: usize,
+        layer: usize,
+        row: usize,
+        latent: Tensor<B, 3>,
+    ) {
+        self.kv.push(KvEntry::Row {
+            group,
+            layer,
+            row,
+            planes: vec![latent.unsqueeze_dim(1)],
         });
     }
 
@@ -222,8 +233,18 @@ impl<B: Backend> TensorStepWrites<B> {
         self.kv.push(KvEntry::Batch {
             group,
             layer,
-            keys,
-            values,
+            planes: vec![keys, values],
+        });
+    }
+
+    /// Records every row's new latents `[batch, block, width]` for a latent group.
+    ///
+    /// Row `b`'s tokens are located by the step's [`TokenAlignment`].
+    pub fn push_latent_batch(&mut self, group: usize, layer: usize, latent: Tensor<B, 3>) {
+        self.kv.push(KvEntry::Batch {
+            group,
+            layer,
+            planes: vec![latent.unsqueeze_dim(1)],
         });
     }
 
@@ -591,6 +612,35 @@ impl<B: Backend> TensorDecodeState<B> {
         keys: Tensor<B, 4>,
         values: Tensor<B, 4>,
     ) -> TensorCacheResult<()> {
+        self.write_planes_ahead(step, group, layer, vec![keys, values])
+    }
+
+    /// Writes one layer's new latents `[batch, block, width]` ahead of attention.
+    ///
+    /// The latent counterpart of [`write_kv_ahead`](Self::write_kv_ahead).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`write_kv_ahead`](Self::write_kv_ahead), or an
+    /// error for a key/value group.
+    pub fn write_latent_ahead(
+        &mut self,
+        step: &mut TensorStepWrites<B>,
+        group: usize,
+        layer: usize,
+        latent: Tensor<B, 3>,
+    ) -> TensorCacheResult<()> {
+        self.write_planes_ahead(step, group, layer, vec![latent.unsqueeze_dim(1)])
+    }
+
+    /// Plane-generic core of the write-ahead methods.
+    fn write_planes_ahead(
+        &mut self,
+        step: &mut TensorStepWrites<B>,
+        group: usize,
+        layer: usize,
+        planes: Vec<Tensor<B, 4>>,
+    ) -> TensorCacheResult<()> {
         let (bank, lengths) = self.step_target(step.bank)?;
         let starts = lengths.working_lengths().to_vec();
         let staging = lengths.has_active_transaction();
@@ -600,11 +650,11 @@ impl<B: Backend> TensorDecodeState<B> {
             cache.spec().in_place_staging(),
             staging,
         )?;
-        let append = step.append(&starts, keys.dims()[2])?;
+        let append = step.append(&starts, planes[0].dims()[2])?;
         let write = if staging {
-            cache.prepare_batch_stage(layer, &append, keys, values)?
+            cache.prepare_batch_stage(layer, &append, planes)?
         } else {
-            cache.prepare_batch_write(layer, &append, keys, values)?
+            cache.prepare_batch_write(layer, &append, planes)?
         };
         let bank = match step.bank {
             StepBank::Main => &mut self.main,
@@ -697,6 +747,23 @@ impl<B: Backend> TensorDecodeState<B> {
         ))
     }
 
+    /// Describes a step's batched new latents `[batch, block, width]` as a read segment.
+    ///
+    /// The latent counterpart of [`step_token_segment`](Self::step_token_segment);
+    /// the segment's keys and values are both the latent.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`step_token_segment`](Self::step_token_segment).
+    pub fn step_latent_segment(
+        &self,
+        step: &TensorStepWrites<B>,
+        latent: Tensor<B, 3>,
+    ) -> TensorCacheResult<KvBatchSegment<B>> {
+        let latent = latent.unsqueeze_dim::<4>(1);
+        self.step_token_segment(step, latent.clone(), latent)
+    }
+
     /// Validates a complete step and publishes it atomically.
     ///
     /// Outside a transaction the tokens are committed; inside one they are
@@ -779,9 +846,11 @@ fn validate_coverage<B: Backend>(
             }
         };
         kv.mark(group, layer, row, &step.counts)?;
-        if let KvEntry::Row { keys, .. } = entry
+        if let KvEntry::Row { planes, .. } = entry
             && let Some(row) = row
-            && keys.dims()[2] != step.counts[row]
+            && planes
+                .first()
+                .is_some_and(|plane| plane.dims()[2] != step.counts[row])
         {
             return Err(coverage_error(
                 "native KV",
@@ -927,43 +996,36 @@ fn prepare_kv<B: Backend>(
             group,
             layer,
             row,
-            keys,
-            values,
+            planes,
         } => {
             let cache = bank.native_kv(*group)?;
             Ok(if staging {
                 cache.check_proposal_start(*layer, *row, starts[*row])?;
                 PreparedKv::Batch(
                     *group,
-                    cache.prepare_row_stage(*layer, *row, keys.clone(), values.clone())?,
+                    cache.prepare_row_stage(*layer, *row, planes.clone())?,
                 )
             } else {
                 PreparedKv::Row(
                     *group,
-                    cache.prepare_sequence_write(
-                        *layer,
-                        *row,
-                        starts[*row],
-                        keys.clone(),
-                        values.clone(),
-                    )?,
+                    cache.prepare_planes_write(*layer, *row, starts[*row], planes.clone())?,
                 )
             })
         }
         KvEntry::Batch {
             group,
             layer,
-            keys,
-            values,
+            planes,
         } => {
             let cache = bank.native_kv(*group)?;
-            let append = step.append(starts, keys.dims()[2])?;
+            let block = planes.first().map_or(0, |plane| plane.dims()[2]);
+            let append = step.append(starts, block)?;
             Ok(PreparedKv::Batch(
                 *group,
                 if staging {
-                    cache.prepare_batch_stage(*layer, &append, keys.clone(), values.clone())?
+                    cache.prepare_batch_stage(*layer, &append, planes.clone())?
                 } else {
-                    cache.prepare_batch_write(*layer, &append, keys.clone(), values.clone())?
+                    cache.prepare_batch_write(*layer, &append, planes.clone())?
                 },
             ))
         }

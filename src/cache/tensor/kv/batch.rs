@@ -53,7 +53,8 @@ use crate::cache::rows::{RowRun, row_runs};
 
 use super::{
     KvCacheStorage, NativeKvCache, NativeKvCacheSpec, PreparedDirectSegment, TensorCacheError,
-    TensorCacheResult, validate_sequence, validate_tensor, validate_write_end,
+    TensorCacheResult, validate_plane_count, validate_sequence, validate_tensor,
+    validate_write_end,
 };
 
 // Write layouts.
@@ -248,13 +249,11 @@ impl StagePlan {
     fn into_write<B: Backend>(
         self,
         layer: usize,
-        keys: Tensor<B, 4>,
-        values: Tensor<B, 4>,
+        planes: Vec<Tensor<B, 4>>,
     ) -> PreparedNativeKvBatchWrite<B> {
         PreparedNativeKvBatchWrite {
             layer,
-            keys,
-            values,
+            planes,
             target: self.target,
             runs: self.runs,
             staged_updates: self.staged_updates,
@@ -270,10 +269,8 @@ impl StagePlan {
 pub(crate) struct PreparedNativeKvBatchWrite<B: Backend> {
     /// Destination layer.
     layer: usize,
-    /// Input keys `[batch, kv_heads, block, head_dim]`.
-    keys: Tensor<B, 4>,
-    /// Input values with the same geometry.
-    values: Tensor<B, 4>,
+    /// Input planes `[rows, heads, block, dim]`, one per stored plane.
+    planes: Vec<Tensor<B, 4>>,
     /// Allocation receiving the tokens.
     target: BatchTarget,
     /// Row runs with their physical segments.
@@ -302,7 +299,28 @@ impl<B: Backend> NativeKvCache<B> {
         keys: Tensor<B, 4>,
         values: Tensor<B, 4>,
     ) -> TensorCacheResult<()> {
-        let write = self.prepare_batch_write(layer, append, keys, values)?;
+        let planes = self.pair_planes(keys, values)?;
+        let write = self.prepare_batch_write(layer, append, planes)?;
+        self.apply_batch_writes(vec![write]);
+        Ok(())
+    }
+
+    /// Writes one layer's committed latents `[batch, block, width]` for every row.
+    ///
+    /// The latent counterpart of [`write_batch`](Self::write_batch).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a key/value group or the errors of
+    /// [`write_batch`](Self::write_batch).
+    pub fn write_latent_batch(
+        &mut self,
+        layer: usize,
+        append: &KvBatchAppend,
+        latent: Tensor<B, 3>,
+    ) -> TensorCacheResult<()> {
+        let planes = self.latent_planes(latent)?;
+        let write = self.prepare_batch_write(layer, append, planes)?;
         self.apply_batch_writes(vec![write]);
         Ok(())
     }
@@ -325,7 +343,28 @@ impl<B: Backend> NativeKvCache<B> {
         keys: Tensor<B, 4>,
         values: Tensor<B, 4>,
     ) -> TensorCacheResult<()> {
-        let write = self.prepare_batch_stage(layer, append, keys, values)?;
+        let planes = self.pair_planes(keys, values)?;
+        let write = self.prepare_batch_stage(layer, append, planes)?;
+        self.apply_batch_writes(vec![write]);
+        Ok(())
+    }
+
+    /// Stages one layer's proposal latents `[batch, block, width]` for every row.
+    ///
+    /// The latent counterpart of [`stage_batch`](Self::stage_batch).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a key/value group or the errors of
+    /// [`stage_batch`](Self::stage_batch).
+    pub fn stage_latent_batch(
+        &mut self,
+        layer: usize,
+        append: &KvBatchAppend,
+        latent: Tensor<B, 3>,
+    ) -> TensorCacheResult<()> {
+        let planes = self.latent_planes(latent)?;
+        let write = self.prepare_batch_stage(layer, append, planes)?;
         self.apply_batch_writes(vec![write]);
         Ok(())
     }
@@ -335,15 +374,14 @@ impl<B: Backend> NativeKvCache<B> {
         &self,
         layer: usize,
         append: &KvBatchAppend,
-        keys: Tensor<B, 4>,
-        values: Tensor<B, 4>,
+        planes: Vec<Tensor<B, 4>>,
     ) -> TensorCacheResult<PreparedNativeKvBatchWrite<B>> {
         if self.staging_active {
             return Err(TensorCacheError::TransactionActive {
                 operation: "write committed KV",
             });
         }
-        self.validate_batch_pair(layer, append, &keys, &values)?;
+        self.validate_batch_planes(layer, append, &planes)?;
         for (&start, &count) in append.starts.iter().zip(&append.counts) {
             validate_write_end(start, count, self.config.capacity())?;
         }
@@ -353,8 +391,7 @@ impl<B: Backend> NativeKvCache<B> {
             .collect::<TensorCacheResult<_>>()?;
         Ok(PreparedNativeKvBatchWrite {
             layer,
-            keys,
-            values,
+            planes,
             target: BatchTarget::Committed,
             runs,
             staged_updates: Vec::new(),
@@ -366,15 +403,14 @@ impl<B: Backend> NativeKvCache<B> {
         &self,
         layer: usize,
         append: &KvBatchAppend,
-        keys: Tensor<B, 4>,
-        values: Tensor<B, 4>,
+        planes: Vec<Tensor<B, 4>>,
     ) -> TensorCacheResult<PreparedNativeKvBatchWrite<B>> {
         if !self.staging_active {
             return Err(TensorCacheError::TransactionNotActive);
         }
-        self.validate_batch_pair(layer, append, &keys, &values)?;
+        self.validate_batch_planes(layer, append, &planes)?;
         let plan = self.plan_stage(layer, &append.starts, &append.columns, &append.counts, 0)?;
-        Ok(plan.into_write(layer, keys, values))
+        Ok(plan.into_write(layer, planes))
     }
 
     /// Validates and plans staging one row's `[1, kv_heads, tokens, head_dim]` proposal.
@@ -386,13 +422,12 @@ impl<B: Backend> NativeKvCache<B> {
         &self,
         layer: usize,
         sequence: usize,
-        keys: Tensor<B, 4>,
-        values: Tensor<B, 4>,
+        planes: Vec<Tensor<B, 4>>,
     ) -> TensorCacheResult<PreparedNativeKvBatchWrite<B>> {
         if !self.staging_active {
             return Err(TensorCacheError::TransactionNotActive);
         }
-        let count = self.validate_pair(layer, sequence, &keys, &values)?;
+        let count = self.validate_planes(layer, sequence, &planes)?;
         let rows = self.config.sequence_count();
         let mut counts = vec![0; rows];
         counts[sequence] = count;
@@ -404,7 +439,7 @@ impl<B: Backend> NativeKvCache<B> {
             })
             .collect();
         let plan = self.plan_stage(layer, &starts, &vec![0; rows], &counts, sequence)?;
-        Ok(plan.into_write(layer, keys, values))
+        Ok(plan.into_write(layer, planes))
     }
 
     /// Checks cursors and capacities, then plans the runs of a staging write.
@@ -462,10 +497,7 @@ impl<B: Backend> NativeKvCache<B> {
                 staged_updates,
             });
         }
-        let layer_storage = self.layer(layer)?;
-        if layer_storage.staged_keys.is_none() || layer_storage.staged_values.is_none() {
-            return Err(TensorCacheError::StagingDisabled);
-        }
+        self.staged_planes(self.layer(layer)?)?;
         // Separate staging is linear: proposal offset `staged_b + j`.
         let runs = row_runs(staged, columns, counts)
             .into_iter()
@@ -505,20 +537,18 @@ impl<B: Backend> NativeKvCache<B> {
     ) -> Vec<(usize, usize)> {
         let spec = self.spec;
         let layer = &mut self.layers[write.layer];
-        let (keys, values) = match write.target {
-            BatchTarget::Committed => (&mut layer.keys, &mut layer.values),
-            BatchTarget::Staging => match (&mut layer.staged_keys, &mut layer.staged_values) {
-                (Some(keys), Some(values)) => (keys, values),
-                // Preparation proved both staging tensors exist.
-                _ => return write.staged_updates,
+        let targets = match write.target {
+            BatchTarget::Committed => &mut layer.planes,
+            BatchTarget::Staging => match &mut layer.staged {
+                Some(planes) => planes,
+                // Preparation proved the staging planes exist.
+                None => return write.staged_updates,
             },
         };
         for run in &write.runs {
             for segment in &run.segments {
                 for destination in &segment.destinations {
-                    for (target, source) in
-                        [(&mut *keys, &write.keys), (&mut *values, &write.values)]
-                    {
+                    for (target, source) in targets.iter_mut().zip(&write.planes) {
                         assign_rows(
                             target,
                             source,
@@ -603,13 +633,12 @@ impl<B: Backend> NativeKvCache<B> {
         })
     }
 
-    /// Validates a batched key/value pair against the layer and the append layout.
-    fn validate_batch_pair(
+    /// Validates batched input planes `[rows, heads, block, dim]` against the layer and layout.
+    fn validate_batch_planes(
         &self,
         layer: usize,
         append: &KvBatchAppend,
-        keys: &Tensor<B, 4>,
-        values: &Tensor<B, 4>,
+        planes: &[Tensor<B, 4>],
     ) -> TensorCacheResult<()> {
         self.layer(layer)?;
         let rows = self.config.sequence_count();
@@ -619,26 +648,17 @@ impl<B: Backend> NativeKvCache<B> {
                 requested: append.rows(),
             });
         }
+        validate_plane_count(self.spec, planes.len())?;
         let expected = [
             rows,
             self.spec.key_value_heads(),
             append.block(),
             self.spec.head_dimension(),
         ];
-        validate_tensor(
-            keys,
-            "batched keys",
-            expected,
-            self.spec.dtype(),
-            &self.device,
-        )?;
-        validate_tensor(
-            values,
-            "batched values",
-            expected,
-            self.spec.dtype(),
-            &self.device,
-        )
+        for (plane, name) in planes.iter().zip(["batched keys", "batched values"]) {
+            validate_tensor(plane, name, expected, self.spec.dtype(), &self.device)?;
+        }
+        Ok(())
     }
 }
 
@@ -819,6 +839,13 @@ impl<B: Backend> KvBatchSegment<B> {
     #[must_use]
     pub const fn values(&self) -> &Tensor<B, 4> {
         &self.values
+    }
+
+    /// Returns a latent group's keys as `[batch, keys, width]` (a free reshape).
+    #[must_use]
+    pub fn latent(&self) -> Tensor<B, 3> {
+        let [batch, _, keys, width] = self.keys.dims();
+        self.keys.clone().reshape([batch, keys, width])
     }
 
     /// Borrows absolute key positions `[batch, keys]`; entries of invalid keys are arbitrary.
@@ -1091,18 +1118,9 @@ impl<B: Backend> NativeKvCache<B> {
             .segments
             .iter()
             .map(|segment| {
-                let (keys, values) = match segment.source {
-                    SegmentSource::Committed => (&cache_layer.keys, &cache_layer.values),
-                    SegmentSource::Staged => (
-                        cache_layer
-                            .staged_keys
-                            .as_ref()
-                            .ok_or(TensorCacheError::StagingDisabled)?,
-                        cache_layer
-                            .staged_values
-                            .as_ref()
-                            .ok_or(TensorCacheError::StagingDisabled)?,
-                    ),
+                let planes = match segment.source {
+                    SegmentSource::Committed => cache_layer.planes.as_slice(),
+                    SegmentSource::Staged => self.staged_planes(cache_layer)?,
                 };
                 let slices = [
                     rows.clone(),
@@ -1110,9 +1128,14 @@ impl<B: Backend> NativeKvCache<B> {
                     segment.slots.clone(),
                     channels.clone(),
                 ];
+                let keys = planes[0].clone().slice(slices.clone());
+                // A latent group's single plane serves as both keys and values.
+                let values = planes
+                    .get(1)
+                    .map_or_else(|| keys.clone(), |plane| plane.clone().slice(slices));
                 Ok(KvBatchSegment {
-                    keys: keys.clone().slice(slices.clone()),
-                    values: values.clone().slice(slices),
+                    keys,
+                    values,
                     positions: segment.positions.clone(),
                     valid: segment.valid.clone(),
                 })

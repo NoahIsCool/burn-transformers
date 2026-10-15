@@ -668,3 +668,76 @@ fn steps_reject_layers_staged_outside_the_step() {
         state.rollback(mark).expect("rollback");
     }
 }
+
+/// Latent groups join steps, write-ahead, and token segments like KV groups.
+#[test]
+fn latent_groups_publish_through_steps() {
+    let config = CacheConfig::new(2, 8).expect("config");
+    let latent_spec = NativeKvCacheSpec::latent(2, 4, KvCacheStorage::Full, DType::F32)
+        .expect("geometry")
+        .with_staging_capacity(2)
+        .with_in_place_staging();
+    let latent = |rows: usize, tokens: usize, tag: f32| {
+        let data = (0..rows * tokens * 4)
+            .map(|index| tag + index as f32)
+            .collect::<Vec<_>>();
+        Tensor::<TestBackend, 3>::from_data(TensorData::new(data, [rows, tokens, 4]), &device())
+    };
+    let mut batched = TensorDecodeState::<TestBackend>::with_config(config, &device());
+    let mut per_row = TensorDecodeState::<TestBackend>::with_config(config, &device());
+    for state in [&mut batched, &mut per_row] {
+        state
+            .main_mut()
+            .add_native_kv(latent_spec)
+            .expect("latent group");
+    }
+
+    let mut step = batched.step(&[2, 1]).expect("step");
+    let plan = batched.kv_read_plan_through(&step, 0).expect("plan");
+    for layer in 0..2 {
+        batched
+            .write_latent_ahead(&mut step, 0, layer, latent(2, 2, layer as f32))
+            .expect("write ahead");
+        let read = batched
+            .read_kv_through(&step, 0, layer, &plan)
+            .expect("read");
+        assert_eq!(read.materialize().expect("keys").latent().dims(), [2, 2, 4]);
+    }
+    assert!(matches!(
+        batched.write_kv_ahead(&mut step, 0, 0, kv_block(2, 2, 0.0), kv_block(2, 2, 0.0)),
+        Err(TensorCacheError::PlaneKindMismatch { .. })
+    ));
+    batched.publish_step(step).expect("publish");
+
+    let mut reference = per_row.step(&[2, 1]).expect("step");
+    for layer in 0..2 {
+        let block = latent(2, 2, layer as f32);
+        reference.push_latent_row(0, layer, 0, block.clone().slice([0..1, 0..2, 0..4]));
+        reference.push_latent_row(0, layer, 1, block.slice([1..2, 0..1, 0..4]));
+    }
+    per_row.publish_step(reference).expect("publish");
+    assert_eq!(snapshot(&batched), snapshot(&per_row));
+
+    // A speculative latent step stages in place and joins a token segment.
+    let mark = batched.begin_transaction().expect("transaction");
+    let mut proposal = batched.step(&[1, 1]).expect("step");
+    let segment = batched
+        .step_latent_segment(&proposal, latent(2, 1, 9.0))
+        .expect("segment");
+    assert!(segment.key_valid().is_none());
+    for layer in 0..2 {
+        proposal.push_latent_batch(0, layer, latent(2, 1, 9.0));
+    }
+    let mut wrong = batched.step(&[1, 1]).expect("step");
+    for layer in 0..2 {
+        wrong.push_kv_batch(0, layer, kv_block(2, 1, 0.0), kv_block(2, 1, 0.0));
+    }
+    assert!(matches!(
+        batched.publish_step(wrong),
+        Err(TensorCacheError::PlaneKindMismatch { .. })
+    ));
+    batched.publish_step(proposal).expect("stage");
+    assert_eq!(batched.working_lengths(), &[3, 2]);
+    batched.commit_prefix(mark, &[1, 0]).expect("commit");
+    assert_eq!(batched.lengths(), &[3, 1]);
+}
