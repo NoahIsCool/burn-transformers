@@ -14,15 +14,14 @@
 //! 2. **Validity.** A translated configuration spans the context's head width,
 //!    rotates a positive even prefix of it, and evaluates (at contexts `1`,
 //!    `max_position_embeddings`, one past it, and twice it) to `rotary / 2`
-//!    non-negative inverse frequencies with a finite positive amplitude. The
-//!    frequencies are also finite whenever `theta >= 1` and every LongRoPE factor
-//!    is at least `2^-64`; beyond that envelope `f32` overflow is a known open
-//!    finding (see the ignored tests in the sibling test module).
+//!    finite, non-negative inverse frequencies with an amplitude that is a
+//!    normal positive `f32`. (Findings ROPE-F32-1/2, fixed: a base below one or
+//!    a subnormal LongRoPE factor used to translate and overflow `f32`.)
 //! 3. **Policy monotonicity.** Whatever [`UnusedRopeFields::Reject`] accepts,
 //!    [`UnusedRopeFields::Ignore`] accepts with the identical configuration.
 //!    For every translated entry, flat or per layer type, the softmax
-//!    correction is positive, and finite unless `|mscale_all_dim| > 1e100`
-//!    (open finding ROPE-SOFTMAX-1).
+//!    multiplier is a normal positive `f32` (finding ROPE-SOFTMAX-1, fixed:
+//!    translation once validated `m` but not `m^2`).
 //! 4. **Round trip.** A parsed set serializes and parses back to the same JSON:
 //!    integers exactly, floats within a relative `1e-14` (see
 //!    `crate::floats_round_trip`; `serde_json` parses floats approximately).
@@ -203,24 +202,11 @@ fn context(bytes: &mut Bytes<'_>) -> RopeContext {
     context
 }
 
-/// Smallest LongRoPE factor inside the finite-frequency envelope (`2^-64`).
-const MIN_ENVELOPE_FACTOR: f32 = 5.421_011e-20;
-
-/// Whether frequencies of `config` stay inside the `f32` envelope this harness asserts.
-///
-/// Inverse frequencies are `theta^(-2i/d)` divided by a scaling factor. All
-/// scaling divisors except LongRoPE's are at least one; a base below one or a
-/// LongRoPE factor near zero can overflow `f32` (findings ROPE-F32-1/2).
-fn within_frequency_envelope(config: &transformers::position::RopeConfig) -> bool {
-    let factors_bounded = match config.scaling() {
-        RopeScaling::LongRope(long) => long
-            .short_factors()
-            .iter()
-            .chain(long.long_factors())
-            .all(|&factor| factor >= MIN_ENVELOPE_FACTOR),
-        _ => true,
-    };
-    config.theta() >= 1.0 && factors_bounded
+/// Whether `value` rounds to a normal positive `f32`, the documented range of
+/// RoPE amplitudes and of the softmax multiplier.
+fn normal_positive_f32(value: f64) -> bool {
+    let rounded = value as f32;
+    rounded.is_finite() && rounded >= f32::MIN_POSITIVE
 }
 
 /// Checks one successful translation.
@@ -243,18 +229,22 @@ fn check_config(config: transformers::position::RopeConfig, context: &RopeContex
         assert_eq!(frequencies.inverse().len(), rotary / 2);
         assert_eq!(frequencies.rotary_dimension(), rotary);
         let amplitude = frequencies.amplitude();
-        assert!(
-            amplitude.is_finite() && amplitude > 0.0,
-            "amplitude {amplitude}"
-        );
+        assert!(normal_positive_f32(amplitude), "amplitude {amplitude}");
+        assert!(config.theta() >= 1.0, "accepted base {}", config.theta());
+        if let RopeScaling::LongRope(long) = config.scaling() {
+            assert!(
+                long.short_factors()
+                    .iter()
+                    .chain(long.long_factors())
+                    .all(|factor| factor.is_normal() && *factor > 0.0),
+                "{config:?}"
+            );
+        }
         for &omega in frequencies.inverse() {
-            assert!(omega >= 0.0, "inverse frequency {omega} for {config:?}");
-            if within_frequency_envelope(&config) {
-                assert!(
-                    omega.is_finite(),
-                    "inverse frequency {omega} for {config:?}"
-                );
-            }
+            assert!(
+                omega.is_finite() && omega >= 0.0,
+                "inverse frequency {omega} for {config:?}"
+            );
         }
     }
 }
@@ -275,21 +265,18 @@ fn check_error(error: &Error, policy: &str) {
 
 /// Checks the softmax multiplier of an entry whose translation succeeded.
 ///
-/// Translation validates the correction for flat and per-layer-type entries
+/// Translation validates the multiplier for flat and per-layer-type entries
 /// alike, so [`RopeParameters::softmax_scale_multiplier`] must then succeed
-/// with a positive value, finite unless `|mscale_all_dim| > 1e100` (open
-/// finding ROPE-SOFTMAX-1: the square of a validated correction can overflow).
+/// with a normal positive `f32` value (finding ROPE-SOFTMAX-1, fixed: the
+/// square of a validated correction used to overflow).
 fn check_softmax_multiplier(parameters: &RopeParameters, context: &RopeContext) {
     let multiplier = parameters
         .softmax_scale_multiplier(context)
         .expect("translation validated the softmax correction");
-    assert!(multiplier > 0.0, "softmax multiplier {multiplier}");
-    if parameters
-        .mscale_all_dim
-        .is_none_or(|value| value.abs() <= 1e100)
-    {
-        assert!(multiplier.is_finite(), "softmax multiplier {multiplier}");
-    }
+    assert!(
+        normal_positive_f32(multiplier),
+        "softmax multiplier {multiplier}"
+    );
 }
 
 /// Translates one layer type and checks every property of a result.

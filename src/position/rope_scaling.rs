@@ -30,7 +30,9 @@
 
 use core::fmt;
 
-use super::rope::{RopeConfigError, validate_original_context, validate_scaling_factor};
+use super::rope::{
+    RopeConfigError, is_normal_positive_f32, validate_original_context, validate_scaling_factor,
+};
 
 /// Largest number of complex frequency pairs a [`LongRopeScaling`] table can hold.
 ///
@@ -175,8 +177,11 @@ impl LongRopeScaling {
     ///
     /// Returns an error when the tables are empty, longer than
     /// [`MAX_LONG_ROPE_FREQUENCIES`], of unequal length, or contain a value that
-    /// is not finite and positive after rounding to `f32`; when `factor` is not
-    /// finite and at least one; or when the original context is zero.
+    /// does not round to a normal positive `f32` (at least
+    /// [`f32::MIN_POSITIVE`], at most [`f32::MAX`]); when `factor` is not
+    /// finite and at least one; or when the original context is zero. The
+    /// normal range keeps every scaled frequency `omega_i / r_i` finite in
+    /// `f32` for bases `theta >= 1` (see [`super::RopeConfig::new`]).
     pub fn new(
         short_factor: &[f64],
         long_factor: &[f64],
@@ -216,9 +221,10 @@ impl LongRopeScaling {
     /// # Errors
     ///
     /// Returns [`RopeConfigError::InvalidLongRopeAttentionFactor`] unless the
-    /// value is finite and strictly positive.
+    /// value rounds to a normal positive `f32` (from [`f32::MIN_POSITIVE`] to
+    /// [`f32::MAX`]), the precision of the cosine/sine tables it scales.
     pub fn with_attention_factor(mut self, attention_factor: f64) -> Result<Self, RopeConfigError> {
-        if !(attention_factor.is_finite() && attention_factor > 0.0) {
+        if !is_normal_positive_f32(attention_factor) {
             return Err(RopeConfigError::InvalidLongRopeAttentionFactor { attention_factor });
         }
         self.attention_factor = attention_factor;
@@ -294,24 +300,25 @@ impl fmt::Debug for LongRopeScaling {
 
 /// Copies a checked factor list into fixed-capacity `f32` storage.
 ///
-/// Each value is rounded to `f32` first and must remain finite and positive,
-/// so a huge `f64` cannot overflow to infinity and a tiny one cannot flush to
-/// a zero divisor.
+/// Each value is rounded to `f32` first and must be a normal positive `f32`
+/// ([`is_normal_positive_f32`]): a huge `f64` cannot overflow to infinity,
+/// and a tiny one can neither flush to a zero divisor nor, as a subnormal
+/// such as `1e-45`, divide a base frequency of one into `7e44`, which is
+/// infinite in `f32`.
 fn factor_table(
     table: &'static str,
     values: &[f64],
 ) -> Result<[f32; MAX_LONG_ROPE_FREQUENCIES], RopeConfigError> {
     let mut stored = [1.0_f32; MAX_LONG_ROPE_FREQUENCIES];
     for (index, (&value, slot)) in values.iter().zip(stored.iter_mut()).enumerate() {
-        let rounded = value as f32;
-        if !(rounded.is_finite() && rounded > 0.0) {
+        if !is_normal_positive_f32(value) {
             return Err(RopeConfigError::InvalidLongRopeFactor {
                 table,
                 index,
                 value,
             });
         }
-        *slot = rounded;
+        *slot = value as f32;
     }
     Ok(stored)
 }

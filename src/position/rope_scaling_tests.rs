@@ -123,8 +123,19 @@ fn long_rope_rejects_invalid_tables() {
     );
     let full = vec![1.0; MAX_LONG_ROPE_FREQUENCIES];
     assert!(LongRopeScaling::new(&full, &full, 4096, 2.0).is_ok());
-    // 1e40 overflows f32 and 1e-50 flushes to zero after rounding.
-    for value in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e40, 1e-50] {
+    // 1e40 overflows f32, 1e-50 flushes to zero after rounding, and 1e-45 is
+    // subnormal (ROPE-F32-2: dividing by it overflows the frequency table).
+    let subnormal = f64::from(f32::MIN_POSITIVE) / 2.0;
+    for value in [
+        0.0,
+        -1.0,
+        f64::NAN,
+        f64::INFINITY,
+        1e40,
+        1e-50,
+        1e-45,
+        subnormal,
+    ] {
         let error = LongRopeScaling::new(&[1.0, 1.0], &[1.0, value], 4096, 2.0)
             .expect_err("invalid long factor");
         assert!(matches!(
@@ -157,6 +168,72 @@ fn long_rope_rejects_invalid_tables() {
             ..
         })
     ));
+}
+
+/// LongRoPE accepts exactly the factors that round to normal positive `f32` values.
+///
+/// Regression for fuzz finding ROPE-F32-2: the smallest subnormal `1e-45` was
+/// accepted and divided a base frequency of one into `7e44`, which is `inf` in
+/// `f32`. The boundaries `f32::MIN_POSITIVE` and `f32::MAX` (and an `f64` just
+/// above it that rounds down to it) are accepted and keep every frequency finite.
+#[test]
+fn long_rope_factors_must_be_normal_f32_values() {
+    let largest = f64::from(f32::MAX);
+    let rounds_to_largest = largest * (1.0 + f64::EPSILON);
+    assert_eq!(rounds_to_largest as f32, f32::MAX);
+    for factor in [f64::from(f32::MIN_POSITIVE), largest, rounds_to_largest] {
+        let long = LongRopeScaling::new(&[factor, 1.0], &[1.0, factor], 8, 2.0)
+            .expect("normal f32 factors are accepted");
+        // A base of one is the extreme: every unscaled frequency is one.
+        for theta in [1.0, 10_000.0] {
+            for context in [1, 8, 9] {
+                let frequencies = crate::position::inverse_frequencies(
+                    RopeConfig::new(4, 4, theta, long.into()).expect("valid"),
+                    context,
+                )
+                .expect("frequencies");
+                assert!(
+                    frequencies
+                        .iter()
+                        .all(|omega| omega.is_finite() && *omega >= 0.0),
+                    "factor {factor}, theta {theta}, context {context}: {frequencies:?}"
+                );
+            }
+        }
+    }
+    for factor in [1e-45, f64::from(f32::MIN_POSITIVE) * 0.999] {
+        assert!(matches!(
+            LongRopeScaling::new(&[factor, 1.0], &[1.0, 1.0], 8, 2.0),
+            Err(RopeConfigError::InvalidLongRopeFactor {
+                table: "short_factor",
+                index: 0,
+                ..
+            })
+        ));
+    }
+}
+
+/// LongRoPE amplitudes must round to normal positive `f32` values.
+///
+/// The amplitude multiplies `f32` cosine/sine tables, so `1e39` would turn
+/// `sin(0) = 0` at position zero into `0 * inf = NaN`.
+#[test]
+fn long_rope_amplitudes_must_be_normal_f32_values() {
+    let long = LongRopeScaling::new(&[1.0], &[1.0], 8, 2.0).expect("valid");
+    for amplitude in [f64::from(f32::MIN_POSITIVE), 1.0, f64::from(f32::MAX)] {
+        assert_eq!(
+            long.with_attention_factor(amplitude)
+                .expect("normal amplitude")
+                .attention_factor(),
+            amplitude
+        );
+    }
+    for amplitude in [0.0, -1.0, 1e-46, 1e39, f64::INFINITY, f64::NAN] {
+        assert!(matches!(
+            long.with_attention_factor(amplitude),
+            Err(RopeConfigError::InvalidLongRopeAttentionFactor { .. })
+        ));
+    }
 }
 
 /// The rotary configuration requires exactly one LongRoPE factor per complex pair.
@@ -299,7 +376,7 @@ fn new_errors_have_actionable_messages() {
                 index: 3,
                 value: -1.0,
             },
-            "long_factor[3] must be finite and positive in f32, got -1",
+            "long_factor[3] must be a normal positive f32 value (1.1754944e-38..=3.4028235e38), got -1",
         ),
         (
             RopeConfigError::LongRopeFactorCount {
@@ -312,7 +389,7 @@ fn new_errors_have_actionable_messages() {
             RopeConfigError::InvalidLongRopeAttentionFactor {
                 attention_factor: 0.0,
             },
-            "LongRoPE attention factor must be finite and positive, got 0",
+            "LongRoPE attention factor must be a normal positive f32 value (1.1754944e-38..=3.4028235e38), got 0",
         ),
         (
             RopeConfigError::InvalidProportionalFraction { fraction: 2.0 },

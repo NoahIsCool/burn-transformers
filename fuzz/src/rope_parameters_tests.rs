@@ -148,60 +148,81 @@ fn pseudo_random_inputs_translate_or_fail_contextually() {
     }
 }
 
-/// ROPE-F32-1: a positive base below one overflows `f32` inverse frequencies.
+/// ROPE-F32-1 (fixed): a positive base below one overflowed `f32` inverse frequencies.
 ///
-/// `RopeConfig::new` accepts any finite positive theta, but pair `i` has
-/// frequency `theta^(-2i/d)`; `theta = 1e-300` gives `1e150` for `i = 1` of a
-/// four-wide head, which rounds to `inf` in `f32`. Position zero then has the
-/// angle `0 * inf = NaN`. Fix in `src/position/rope.rs`: require every
-/// inverse frequency to be finite in `f32` (equivalently bound `theta` below),
-/// or reject `theta < 1`, which no checkpoint uses.
+/// Pair `i` has frequency `theta^(-2i/d)`; `theta = 1e-300` gave `1e150` for
+/// `i = 1` of a four-wide head, which rounds to `inf` in `f32`, and position
+/// zero then had the angle `0 * inf = NaN`. `RopeConfig::new` now requires
+/// `theta >= 1` (no checkpoint uses less), which keeps every base frequency in
+/// `(0, 1]`; translation reports the base contextually, and a base of exactly
+/// one still has finite frequencies.
 #[test]
-#[ignore = "ROPE-F32-1: open follow-up in src/position/rope.rs (f32 overflow for theta < 1)"]
 fn accepted_bases_have_finite_frequencies() {
+    let context = RopeContext::new(ARCHITECTURE, 4, 16);
+    for theta in [1e-300, 0.5] {
+        let set: RopeParameterSet =
+            serde_json::from_value(json!({"rope_type": "default", "rope_theta": theta})).unwrap();
+        let error = set.to_rope_config("full_attention", &context).unwrap_err();
+        assert!(
+            matches!(&error, Error::Configuration { field, .. } if field == "fuzz.rope.rope_theta"),
+            "{error}"
+        );
+    }
     let set: RopeParameterSet =
-        serde_json::from_value(json!({"rope_type": "default", "rope_theta": 1e-300})).unwrap();
-    let context = RopeContext::new(ARCHITECTURE, 4, 16);
-    if let Ok(config) = set.to_rope_config("full_attention", &context) {
-        let frequencies = RotaryFrequencies::new(config, 16).unwrap();
-        assert!(frequencies.inverse().iter().all(|omega| omega.is_finite()));
-    }
+        serde_json::from_value(json!({"rope_type": "default", "rope_theta": 1.0})).unwrap();
+    let config = set.to_rope_config("full_attention", &context).unwrap();
+    let frequencies = RotaryFrequencies::new(config, 16).unwrap();
+    assert!(frequencies.inverse().iter().all(|omega| omega.is_finite()));
 }
 
-/// ROPE-F32-2: a tiny positive LongRoPE factor overflows `f32` inverse frequencies.
+/// ROPE-F32-2 (fixed): a tiny positive LongRoPE factor overflowed `f32` inverse frequencies.
 ///
-/// Factors only need to be finite and positive after rounding to `f32`, so the
-/// smallest subnormal `1e-45` passes and divides `omega_0 = 1` into `7e44`,
-/// which is `inf` in `f32`. Fix in `src/position/rope_scaling.rs`: require
-/// `omega / factor` to stay finite, e.g. factors of at least `f32::MIN_POSITIVE`.
+/// Factors only had to be finite and positive after rounding to `f32`, so the
+/// smallest subnormal `1e-45` passed and divided `omega_0 = 1` into `7e44`,
+/// which is `inf` in `f32`. Factors must now be normal `f32` values (at least
+/// `f32::MIN_POSITIVE`, so `omega / factor <= 8.5e37`); the boundary itself
+/// translates with finite frequencies.
 #[test]
-#[ignore = "ROPE-F32-2: open follow-up in src/position/rope_scaling.rs (tiny LongRoPE factors)"]
 fn accepted_long_rope_factors_have_finite_frequencies() {
-    let set: RopeParameterSet = serde_json::from_value(json!({
-        "rope_type": "longrope", "short_factor": [1e-45, 1.0], "long_factor": [1.0, 1.0],
-        "original_max_position_embeddings": 8
-    }))
-    .unwrap();
     let context = RopeContext::new(ARCHITECTURE, 4, 16);
-    if let Ok(config) = set.to_rope_config("full_attention", &context) {
-        let frequencies = RotaryFrequencies::new(config, 4).unwrap();
+    let long_rope = |factor: f64| -> RopeParameterSet {
+        serde_json::from_value(json!({
+            "rope_type": "longrope", "short_factor": [factor, 1.0], "long_factor": [1.0, 1.0],
+            "original_max_position_embeddings": 8
+        }))
+        .unwrap()
+    };
+    let error = long_rope(1e-45)
+        .to_rope_config("full_attention", &context)
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field == "fuzz.rope.short_factor"),
+        "{error}"
+    );
+    let config = long_rope(f64::from(f32::MIN_POSITIVE))
+        .to_rope_config("full_attention", &context)
+        .unwrap();
+    for evaluated in [4, 16] {
+        let frequencies = RotaryFrequencies::new(config, evaluated).unwrap();
         assert!(frequencies.inverse().iter().all(|omega| omega.is_finite()));
     }
 }
 
-/// ROPE-PARSE-1: a JSON array parses as a positional `RopeParameters` struct.
+/// ROPE-PARSE-1 (fixed): a JSON array parsed as a positional `RopeParameters` struct.
 ///
-/// Serde's derived struct deserializer also accepts sequences, and
-/// `RopeParameterSet` passes every non-object value to it, so `[]` becomes
-/// default RoPE and `["yarn"]` sets `rope_type` positionally. Transformers
-/// only accepts a mapping. Fix in `src/models/config/rope.rs`
-/// (`RopeParameterSet::from_json_value`): reject values that are not objects.
+/// Serde's derived struct deserializer also accepts sequences, so `[]` became
+/// default RoPE and `["yarn"]` set `rope_type` positionally. Transformers only
+/// accepts a mapping; `RopeParameters` now requests a map, so every
+/// non-object value is a type error for both the flat type and the set.
 #[test]
-#[ignore = "ROPE-PARSE-1: open follow-up in src/models/config/rope.rs (arrays parse positionally)"]
 fn arrays_are_not_rope_parameters() {
-    for text in ["[]", r#"["yarn"]"#] {
+    for text in ["[]", r#"["yarn"]"#, r#""yarn""#, "2.0"] {
         assert!(
             serde_json::from_str::<RopeParameterSet>(text).is_err(),
+            "{text}"
+        );
+        assert!(
+            serde_json::from_str::<RopeParameters>(text).is_err(),
             "{text}"
         );
     }
@@ -256,35 +277,37 @@ fn uncontextual_errors_are_rejected() {
 }
 
 /// Campaign regression `crash-3a306a4f` (minimized): a huge `mscale_all_dim`
-/// translates, and the harness tolerates the open overflow below.
+/// used to translate with an infinite softmax multiplier (ROPE-SOFTMAX-1); it
+/// is now rejected contextually, which the harness checks.
 #[test]
-fn campaign_huge_mscale_all_dim_is_tolerated() {
+fn campaign_huge_mscale_all_dim_is_rejected() {
     exercise(&[
         0x08, 0x35, 0x35, 0x35, 0x35, 0x35, 0x35, 0x35, 0x35, 0x35, 0x35, 0x35, 0x35, 0x35, 0x36,
         0x35, 0x5d, 0xff, 0x0d,
     ]);
 }
 
-/// ROPE-SOFTMAX-1: a translated softmax correction overflows when squared.
+/// ROPE-SOFTMAX-1 (fixed): a translated softmax correction overflowed when squared.
 ///
-/// Translation checks that `m = 1 + 0.1 * mscale_all_dim * ln(factor)` is
+/// Translation checked that `m = 1 + 0.1 * mscale_all_dim * ln(factor)` is
 /// finite and positive, but the multiplier is `m^2`, which is `inf` once
-/// `m > 1.3e154` (here `mscale_all_dim = 1e300`). A family applying it would
-/// scale its softmax by infinity. Fix in `src/models/config/rope.rs`
-/// (`softmax_scale_multiplier`): validate `m.powi(2)` instead of `m`.
+/// `m > 1.3e154` (here `mscale_all_dim = 1e300`). `softmax_scale_multiplier`
+/// now validates `m^2` itself (as a normal positive `f32`), so translation
+/// fails contextually at `mscale_all_dim`.
 #[test]
-#[ignore = "ROPE-SOFTMAX-1: open follow-up in src/models/config/rope.rs (squared correction overflows)"]
 fn translated_softmax_corrections_are_finite() {
     let set: RopeParameterSet = serde_json::from_value(json!({
         "rope_type": "linear", "factor": 2.0, "mscale_all_dim": 1e300
     }))
     .unwrap();
     let context = default_context().with_softmax_mscale(SoftmaxMscale::MscaleAllDimSquared);
-    if set.to_rope_config("full_attention", &context).is_ok() {
-        let RopeParameterSet::Uniform(parameters) = set else {
-            unreachable!("flat mapping")
-        };
-        let multiplier = parameters.softmax_scale_multiplier(&context).unwrap();
-        assert!(multiplier.is_finite(), "multiplier {multiplier}");
-    }
+    let error = set.to_rope_config("full_attention", &context).unwrap_err();
+    assert!(
+        matches!(&error, Error::Configuration { field, .. } if field.ends_with("rope.mscale_all_dim")),
+        "{error}"
+    );
+    let RopeParameterSet::Uniform(parameters) = set else {
+        unreachable!("flat mapping")
+    };
+    assert!(parameters.softmax_scale_multiplier(&context).is_err());
 }

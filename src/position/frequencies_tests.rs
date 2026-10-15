@@ -371,6 +371,69 @@ proptest::proptest! {
         }
     }
 
+    /// Every configuration the validators accept has finite `f32` frequencies and amplitude.
+    ///
+    /// Bases span `10^-320..10^308` and LongRoPE factors and amplitudes
+    /// `10^-50..10^40`, so the search crosses every `f32` and `f64` boundary
+    /// (findings ROPE-F32-1/2). Rejection is exact: a base is refused iff it is
+    /// below one, and a factor or amplitude iff it does not round to a normal
+    /// positive `f32`.
+    #[test]
+    fn accepted_configurations_have_finite_tables(
+        pairs in 1usize..=8,
+        theta_exponent in -320.0f64..308.0,
+        factor_exponents in proptest::collection::vec(-50.0f64..40.0, 2),
+        amplitude_exponent in -50.0f64..40.0,
+        context in 1usize..32,
+    ) {
+        let dimension = 2 * pairs;
+        let theta = 10f64.powf(theta_exponent);
+        let normal = |value: f64| {
+            let rounded = value as f32;
+            rounded.is_finite() && rounded >= f32::MIN_POSITIVE
+        };
+        let short: Vec<f64> = (0..pairs)
+            .map(|index| 10f64.powf(factor_exponents[index % 2]))
+            .collect();
+        let long = vec![1.0; pairs];
+        let amplitude = 10f64.powf(amplitude_exponent);
+        let long_rope = LongRopeScaling::new(&short, &long, 16, 2.0)
+            .and_then(|scaling| scaling.with_attention_factor(amplitude));
+        proptest::prop_assert_eq!(
+            long_rope.is_ok(),
+            short.iter().all(|&factor| normal(factor)) && normal(amplitude)
+        );
+        let yarn = YarnConfig::new(4.0, 16).and_then(|yarn| yarn.with_attention_factor(amplitude));
+        proptest::prop_assert_eq!(yarn.is_ok(), normal(amplitude));
+        let mut policies = vec![
+            RopeScaling::None,
+            LinearRopeScaling::new(4.0).expect("linear").into(),
+            DynamicNtkScaling::new(4.0, 8).expect("dynamic").into(),
+            Llama3RopeScaling::new(4.0, 1.0, 4.0, 16).expect("llama3").into(),
+            ProportionalRopeScaling::new(0.5, 2.0).expect("proportional").into(),
+        ];
+        policies.extend(long_rope.ok().map(RopeScaling::from));
+        policies.extend(yarn.ok().map(RopeScaling::from));
+        for scaling in policies {
+            let accepted = RopeConfig::new(dimension, dimension, theta, scaling);
+            // YaRN needs `ln(theta) > 0` and dynamic NTK a rotary width above two.
+            let structural = match scaling {
+                RopeScaling::Yarn(_) => theta > 1.0,
+                RopeScaling::DynamicNtk(_) => dimension > 2,
+                _ => true,
+            };
+            proptest::prop_assert_eq!(accepted.is_ok(), theta >= 1.0 && structural);
+            let Ok(config) = accepted else { continue };
+            for evaluated in [1, context, 16, 17, 64] {
+                let frequencies = RotaryFrequencies::new(config, evaluated).expect("context");
+                for omega in frequencies.inverse() {
+                    proptest::prop_assert!(omega.is_finite() && *omega >= 0.0, "{config:?}: {omega}");
+                }
+                proptest::prop_assert!(normal(frequencies.amplitude()), "{config:?}");
+            }
+        }
+    }
+
     /// Extension policies never raise a frequency and keep every value finite.
     #[test]
     fn extension_policies_only_slow_rotation(

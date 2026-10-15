@@ -171,9 +171,56 @@ fn longrope_factor_vectors_match_complex_frequency_count() {
     };
     valid.validate_for("test", 8, 128, None).unwrap();
 
-    let mut invalid = valid;
+    let mut invalid = valid.clone();
     invalid.long_factor = Some(vec![2.0; 3]);
     assert!(invalid.validate_for("test", 8, 128, None).is_err());
+
+    // Factors divide `f32` frequencies: a subnormal or overflowing value is
+    // rejected (ROPE-F32-2), the smallest normal one is accepted.
+    for factor in [1e-45, 1e-39, 1e39, 0.0, f64::NAN] {
+        let mut tiny = valid.clone();
+        tiny.short_factor = Some(vec![factor, 1.0, 1.0, 1.0]);
+        let error = tiny.validate_for("test", 8, 128, None).unwrap_err();
+        assert_eq!(error.field, "short_factor", "{factor}");
+        assert!(error.reason.contains("normal positive f32"), "{error}");
+    }
+    let mut smallest = valid;
+    smallest.short_factor = Some(vec![f64::from(f32::MIN_POSITIVE), 1.0, 1.0, 1.0]);
+    smallest.validate_for("test", 8, 128, None).unwrap();
+}
+
+/// Bases below one are rejected wherever the base comes from (ROPE-F32-1).
+///
+/// `theta^(-2i/d)` grows with `i` for a base below one and can overflow the
+/// `f32` frequency table; the shared translator rejects the same bases.
+#[test]
+fn rope_bases_below_one_are_rejected() {
+    let nested = |theta: f64| RopeParameters {
+        rope_theta: Some(theta),
+        ..RopeParameters::default()
+    };
+    for theta in [
+        1e-300,
+        0.5,
+        1.0 - f64::EPSILON,
+        0.0,
+        -1.0,
+        f64::INFINITY,
+        f64::NAN,
+    ] {
+        let error = nested(theta)
+            .validate_for("test", 8, 128, None)
+            .unwrap_err();
+        assert_eq!(error.field, "rope_theta", "{theta}");
+        assert!(error.reason.contains("at least one"), "{error}");
+        let fallback = RopeParameters::default()
+            .validate_for("test", 8, 128, Some(theta))
+            .unwrap_err();
+        assert_eq!(fallback.field, "rope_theta", "{theta}");
+    }
+    for theta in [1.0, 10_000.0, f64::MAX] {
+        nested(theta).validate_for("test", 8, 128, None).unwrap();
+    }
 }
 
 /// Token lists reject emptiness and out-of-vocabulary IDs while accepting valid IDs.
