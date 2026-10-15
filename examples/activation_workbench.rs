@@ -40,8 +40,8 @@ mod experiment {
         CausalLmInput, ForwardOptions, LogitsSelection,
         architecture::{
             Activation, AttentionSpec, DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec,
-            FeedForwardSpec, MixerSpec, NormPlacement, NormalizationSpec, PositionEncodingSpec,
-            ResidualTopology,
+            FeedForwardSpec, HookedModel, MixerSpec, NormPlacement, NormalizationSpec,
+            PositionEncodingSpec, ResidualTopology,
         },
         intervention::{Hooks, Layer},
         models::custom::ModularCausalLm,
@@ -142,6 +142,22 @@ mod experiment {
             "the inserted module should affect logits"
         );
         println!("Inserted module: maximum logit change = {adapter_change:.6}");
+
+        // Every family that implements `HookedModel` supports the same
+        // TransformerLens-style activation cache: capture each advertised point.
+        let mut cache = Hooks::new();
+        let handles = HookedModel::activation_points(model)?
+            .into_iter()
+            .map(|point| cache.capture_dynamic(point))
+            .collect::<Vec<_>>();
+        HookedModel::forward_with_hooks(model, input.clone(), &options, &mut cache)?;
+        let first = cache.get_dynamic(&handles[0])?;
+        println!(
+            "Activation cache: {} points; the first, {}, has shape {:?}",
+            handles.len(),
+            handles[0].point().name,
+            first.shape
+        );
 
         // Fundamental attention changes are explicit, too: allow future tokens
         // in this stateless pass. The first token can now use the whole sequence.

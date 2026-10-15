@@ -6,10 +6,11 @@ use super::*;
 use crate::{
     CausalLanguageModel, Seq2SeqLanguageModel,
     architecture::{
-        Activation, AttentionSpec, DecoderLayerSpec, DenseFeedForwardSpec, FeedForwardSpec,
-        MixerSpec, NormPlacement, NormalizationSpec, PositionEncodingSpec, ResidualTopology,
-        Seq2SeqSpec,
+        Activation, AttentionOptions, AttentionSpec, DecoderLayerSpec, DenseFeedForwardSpec,
+        FeedForwardSpec, MixerSpec, NormPlacement, NormalizationSpec, PositionEncodingSpec,
+        ResidualTopology, Seq2SeqSpec,
     },
+    models::shared::{CompactRow, implicit_position_ids},
 };
 
 /// CPU integer backend used to ensure invalid requests fail before tensor allocation.
@@ -60,6 +61,7 @@ fn oversized_history_geometry_fails_for_causal_and_seq2seq_models() {
             decoder: spec(),
             cross_attention_heads: 1,
             cross_attention_head_dim: 2,
+            cross_attention_options: AttentionOptions::default(),
         },
         &device,
     )
@@ -187,5 +189,247 @@ fn histories_use_native_integer_dtype_and_zero_initialization() {
             .to_vec::<i32>()
             .expect("I32 positions"),
         vec![0; 6]
+    );
+}
+
+/// One host-side step of the history reference: token, optional position, and validity per cell.
+#[derive(Clone, Debug)]
+struct ReferenceStep {
+    /// Row-major `[batch, step]` token IDs.
+    tokens: Vec<i32>,
+    /// Row-major explicit positions, or `None` for implicit slot positions.
+    positions: Option<Vec<i32>>,
+    /// Row-major validity flags.
+    validity: Vec<bool>,
+}
+
+/// Rows of committed `(token, position)` pairs, the model of the device histories.
+type ReferenceHistory = Vec<Vec<(i32, i32)>>;
+
+/// Applies one append to the reference: valid cells append in order, implicitly at their slot.
+fn reference_append(history: &mut ReferenceHistory, step: &ReferenceStep, width: usize) {
+    for (row, entries) in history.iter_mut().enumerate() {
+        for column in 0..width {
+            let cell = row * width + column;
+            if step.validity[cell] {
+                let position = match &step.positions {
+                    Some(positions) => positions[cell],
+                    None => entries.len() as i32,
+                };
+                entries.push((step.tokens[cell], position));
+            }
+        }
+    }
+}
+
+/// Reads the committed prefix of every device history row.
+fn device_history(state: &ModularDecodeState<B>) -> ReferenceHistory {
+    let capacity = state.capacity();
+    let tokens = state.tokens.to_data().to_vec::<i32>().unwrap();
+    let positions = state.positions.to_data().to_vec::<i32>().unwrap();
+    state
+        .lengths()
+        .iter()
+        .enumerate()
+        .map(|(row, &length)| {
+            (0..length)
+                .map(|slot| {
+                    (
+                        tokens[row * capacity + slot],
+                        positions[row * capacity + slot],
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Builds the input tensors of one reference step.
+fn step_input(step: &ReferenceStep, batch: usize, width: usize) -> CausalLmInput<B> {
+    let device = Default::default();
+    CausalLmInput {
+        token_ids: Tensor::from_data(
+            TensorData::new(step.tokens.clone(), [batch, width]),
+            &device,
+        ),
+        token_mask: Some(crate::TokenMask::new(Tensor::from_bool(
+            TensorData::new(step.validity.clone(), [batch, width]),
+            &device,
+        ))),
+        position_ids: step.positions.clone().map(|positions| {
+            Tensor::from_data(TensorData::new(positions, [batch, width]), &device)
+        }),
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+    /// Batched window writes reproduce a per-row host history across appends, truncation, and reorder.
+    ///
+    /// Each step's history is written by one gather/select per tensor; the
+    /// committed prefixes must equal the reference that appends valid cells
+    /// row by row, including ragged, left-, right-, and interior-padded rows,
+    /// explicit positions, and slots previously exposed by truncation.
+    #[test]
+    fn batched_appends_match_a_per_row_history_reference(
+        widths in proptest::collection::vec(1usize..4, 4),
+        cells in proptest::collection::vec(proptest::bool::ANY, 48),
+        values in proptest::collection::vec(0i32..64, 48),
+        explicit in proptest::collection::vec(proptest::bool::ANY, 4),
+        cuts in proptest::collection::vec(0usize..3, 3),
+        permutation in proptest::collection::vec(0usize..3, 3),
+    ) {
+        /// Number of independent history rows in the generated scenario.
+        const BATCH: usize = 3;
+        /// Per-row history capacity; small enough that some appends overflow.
+        const CAPACITY: usize = 14;
+        let mut model_spec = spec();
+        model_spec.vocabulary_size = 64;
+        model_spec.max_position_embeddings = 64;
+        let mut state = ModularDecodeState::<B>::new(
+            CacheConfig::new(BATCH, CAPACITY).unwrap(),
+            BATCH,
+            model_spec,
+            StatePurpose::Causal,
+            &Default::default(),
+        )
+        .unwrap();
+        let mut reference: ReferenceHistory = vec![Vec::new(); BATCH];
+        let mut offset = 0;
+        for (index, &width) in widths.iter().enumerate() {
+            let count = BATCH * width;
+            // The first step is a prompt in which every row needs a token.
+            let validity = (0..count)
+                .map(|cell| cells[offset + cell] || (index == 0 && cell % width == 0))
+                .collect::<Vec<_>>();
+            let step = ReferenceStep {
+                tokens: values[offset..offset + count].to_vec(),
+                positions: explicit[index]
+                    .then(|| values[offset..offset + count].iter().map(|value| value % 40).collect()),
+                validity,
+            };
+            offset += count;
+            // A rejected plan (for example an empty decode step) must change nothing.
+            if let Ok(append) = state.prepare_append(step_input(&step, BATCH, width), 64, index == 0) {
+                state.commit(append).unwrap();
+                reference_append(&mut reference, &step, width);
+            }
+            proptest::prop_assert_eq!(device_history(&state), reference.clone());
+            if index == 1 {
+                let lengths = reference
+                    .iter()
+                    .zip(&cuts)
+                    .map(|(row, cut)| row.len().saturating_sub(*cut))
+                    .collect::<Vec<_>>();
+                state.truncate(&lengths).unwrap();
+                for (row, length) in reference.iter_mut().zip(lengths) {
+                    row.truncate(length);
+                }
+                state.reorder(&permutation).unwrap();
+                reference = permutation.iter().map(|&row| reference[row].clone()).collect();
+                proptest::prop_assert_eq!(device_history(&state), reference.clone());
+            }
+        }
+    }
+}
+
+/// Median wall-clock milliseconds of `repetitions` runs of `run`, after one warm-up.
+fn median_ms(repetitions: usize, mut run: impl FnMut()) -> f64 {
+    run();
+    let mut samples = (0..repetitions)
+        .map(|_| {
+            let start = std::time::Instant::now();
+            run();
+            start.elapsed().as_secs_f64() * 1e3
+        })
+        .collect::<Vec<_>>();
+    samples.sort_by(f64::total_cmp);
+    samples[samples.len() / 2]
+}
+
+/// Former per-row append: one selection upload, compaction, readback, and two slice assignments per row.
+fn per_row_append(
+    state: &ModularDecodeState<B>,
+    input: &CausalLmInput<B>,
+) -> (Tensor<B, 2, Int>, Tensor<B, 2, Int>) {
+    let [batch, step] = input.token_ids.dims();
+    let device = input.token_ids.device();
+    let host = HostInput::read(input, batch, step, "benchmark").unwrap();
+    let valid = host.valid_indices(batch, step);
+    let mut tokens = state.tokens.clone();
+    let mut positions = state.positions.clone();
+    for (row, columns) in valid.iter().enumerate() {
+        if columns.is_empty() {
+            continue;
+        }
+        let plan = CompactRow::<B>::new(row, columns, step, &device).unwrap();
+        let start = state.lengths()[row];
+        let end = start + plan.count();
+        // The former path validated each row's positions with a readback.
+        implicit_position_ids::<B>(start, plan.count(), &device, "benchmark")
+            .unwrap()
+            .into_data();
+        tokens = tokens.slice_assign([row..row + 1, start..end], plan.compact(&input.token_ids));
+        positions = positions.slice_assign(
+            [row..row + 1, start..end],
+            implicit_position_ids(start, plan.count(), &device, "benchmark").unwrap(),
+        );
+    }
+    (tokens, positions)
+}
+
+/// One decode step's history write for a 32-row batch: per-row loop versus one batched window.
+#[test]
+#[ignore = "timing measurement; run in release with --ignored --nocapture"]
+fn batched_history_writes_versus_per_row_appends() {
+    let device = Default::default();
+    let (batch, capacity) = (32, 512);
+    let mut model_spec = spec();
+    model_spec.vocabulary_size = 32;
+    model_spec.max_position_embeddings = capacity;
+    let mut state = ModularDecodeState::<B>::new(
+        crate::cache::CacheConfig::new(batch, capacity).unwrap(),
+        batch,
+        model_spec,
+        StatePurpose::Causal,
+        &device,
+    )
+    .unwrap();
+    // Ragged committed lengths, as in beam search with finished rows.
+    for row in 0..batch {
+        state.metadata.advance(row, 100 + row % 7).unwrap();
+    }
+    let input = CausalLmInput {
+        token_ids: Tensor::from_data(
+            TensorData::new((0..batch as i32).map(|row| row % 32).collect(), [batch, 1]),
+            &device,
+        ),
+        token_mask: None,
+        position_ids: None,
+    };
+    let old = median_ms(20, || {
+        let (tokens, positions) = per_row_append(&state, &input);
+        tokens.into_data();
+        positions.into_data();
+    });
+    let new = median_ms(20, || {
+        let append = state.prepare_append(input.clone(), 32, false).unwrap();
+        append.tokens.into_data();
+        append.positions.into_data();
+    });
+    let append = state.prepare_append(input.clone(), 32, false).unwrap();
+    let (tokens, positions) = per_row_append(&state, &input);
+    append
+        .tokens
+        .into_data()
+        .assert_eq(&tokens.into_data(), true);
+    append
+        .positions
+        .into_data()
+        .assert_eq(&positions.into_data(), true);
+    println!(
+        "history write, batch {batch}, capacity {capacity}, one token per row: per-row {old:.3} ms, batched {new:.3} ms ({:.1}x)",
+        old / new
     );
 }

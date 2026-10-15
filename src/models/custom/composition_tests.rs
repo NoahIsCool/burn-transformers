@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::{
-    attention::AttentionPrecisionMode,
+    architecture::ScoreScale,
+    attention::{AttentionConnectivity, AttentionPrecisionMode},
     experiment::{
         AttentionPolicy, EncoderContext, ExecutionContext, HiddenTransform, ResidualBlock,
         WidthAdapter,
@@ -235,6 +236,8 @@ fn shared_mla_runs_in_encoder_decoder_and_exposes_compressed_activations() {
         key_value_lora_rank: 4,
         query_lora_rank: Some(3),
         position: PositionEncodingSpec::None,
+        score_scale: ScoreScale::Auto,
+        connectivity: AttentionConnectivity::Global,
     });
     let model = ModularSeq2SeqLm::<B>::init(
         Seq2SeqSpec {
@@ -242,6 +245,7 @@ fn shared_mla_runs_in_encoder_decoder_and_exposes_compressed_activations() {
             decoder: spec(NormPlacement::Pre),
             cross_attention_heads: 2,
             cross_attention_head_dim: 4,
+            cross_attention_options: AttentionOptions::default(),
         },
         &Default::default(),
     )
@@ -573,6 +577,7 @@ proptest::proptest! {
             decoder: stack,
             cross_attention_heads: 2,
             cross_attention_head_dim: 4,
+            cross_attention_options: AttentionOptions::default(),
         }, &Default::default()).unwrap().map(&mut FixedParameters::default());
         let source_tokens = input([[first_token, 2, 3]]);
         let target_tokens = input([[4, 5, 6]]);
@@ -605,12 +610,12 @@ proptest::proptest! {
     }
 }
 
-/// Range runners read context values once; prevalidated blocks stay exact and still reject bad grids.
+/// Range runners read context values once; their blocks stay exact and still reject bad grids.
 ///
-/// `forward_prevalidated` must reproduce the checked `HiddenTransform::forward`
-/// bit for bit, and its sync-free context check must report the same errors as
-/// the full check for position and padding tensors that do not match the
-/// hidden grid (CUS-3).
+/// The range runner's pass-based block execution must reproduce the checked
+/// `HiddenTransform::forward` bit for bit, and its sync-free context check
+/// must report the same errors as the full check for position and padding
+/// tensors that do not match the hidden grid (CUS-3).
 #[test]
 fn prevalidated_blocks_match_checked_blocks_and_reject_mismatched_contexts() {
     let device = Default::default();
@@ -628,14 +633,15 @@ fn prevalidated_blocks_match_checked_blocks_and_reject_mismatched_contexts() {
         &mut Hooks::new(),
     )
     .unwrap();
+    let pass = crate::models::custom::pass::StackPass::from_context(
+        &state.context,
+        Stack::Decoder,
+        state.hidden.dtype(),
+    );
     let prevalidated = layer
-        .forward_prevalidated(
-            state.hidden.clone(),
-            &state.context,
-            address,
-            &mut Hooks::new(),
-        )
-        .unwrap();
+        .forward(state.hidden.clone(), &pass, address, &mut Hooks::new())
+        .unwrap()
+        .0;
     assert_eq!(checked.into_data(), prevalidated.into_data());
 
     let mut short_positions = state.context.clone();
@@ -650,12 +656,113 @@ fn prevalidated_blocks_match_checked_blocks_and_reject_mismatched_contexts() {
         &device,
     )));
     for context in [short_positions, short_mask] {
-        let full = layer
-            .validate_context(&state.hidden, &context, address)
-            .unwrap_err();
+        let full = HiddenTransform::forward(
+            layer,
+            state.hidden.clone(),
+            &context,
+            address,
+            &mut Hooks::new(),
+        )
+        .unwrap_err();
         let sync_free = layer
             .validate_prevalidated(&state.hidden, &context, address)
             .unwrap_err();
         assert_eq!(full.to_string(), sync_free.to_string());
     }
+}
+
+/// Captures every activation of a model through the family-generic hook trait.
+fn cached_points<M: crate::architecture::HookedModel<B>>(
+    model: &M,
+    input: M::Input,
+) -> (M::Output, usize) {
+    let mut hooks = Hooks::new();
+    let handles = model
+        .activation_points()
+        .unwrap()
+        .into_iter()
+        .map(|point| hooks.capture_dynamic(point))
+        .collect::<Vec<_>>();
+    let output = model
+        .forward_with_hooks(input, &ForwardOptions::default(), &mut hooks)
+        .unwrap();
+    for handle in &handles {
+        hooks.get_dynamic(handle).unwrap();
+    }
+    (output, handles.len())
+}
+
+/// Runs a whole stack through the family-generic staged trait.
+fn staged_hidden<M: crate::architecture::StagedModel<B>>(
+    model: &M,
+    input: CausalLmInput<B>,
+) -> Tensor<B, 3> {
+    let state = model.embed(input).unwrap();
+    let split = model.num_layers() / 2;
+    let state = model.run_layers(state, 0..split).unwrap();
+    assert_eq!(state.next_layer, split);
+    let state = model.run_layers(state, split..model.num_layers()).unwrap();
+    model.normalize(state).unwrap().hidden
+}
+
+/// Both modular models implement the generic hook and staged traits exactly like their inherent API.
+#[test]
+fn hooked_and_staged_traits_match_the_inherent_api() {
+    let mut config = spec(NormPlacement::Sandwich);
+    config.layers.push(config.layers[0].clone());
+    let model = ModularCausalLm::<B>::init(config, &Default::default())
+        .unwrap()
+        .map(&mut FixedParameters::default());
+    let (output, captured) = cached_points(&model, input([[1, 2, 3]]));
+    assert_eq!(captured, model.activation_points().len());
+    assert_close(
+        output.logits,
+        model
+            .forward(input([[1, 2, 3]]), &ForwardOptions::default())
+            .unwrap()
+            .logits,
+    );
+    assert_eq!(
+        crate::architecture::StagedModel::stack(&model),
+        Stack::Decoder
+    );
+    assert_close(
+        staged_hidden(&model, input([[1, 2, 3]])),
+        model.forward_hidden(input([[1, 2, 3]])).unwrap(),
+    );
+
+    let model = seq2seq();
+    let (output, captured) = cached_points(&model, seq_input());
+    assert_eq!(captured, model.activation_points().len());
+    let expected = model
+        .forward(
+            seq_input(),
+            &ForwardOptions {
+                hidden_states: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_close(output.decoder.logits, expected.decoder.logits);
+    let encoder = model.encoder_stages();
+    assert_eq!(
+        crate::architecture::StagedModel::stack(&encoder),
+        Stack::Encoder
+    );
+    let source = staged_hidden(&encoder, input([[1, 2, 3]]));
+    assert_close(source.clone(), expected.encoder.hidden_state.clone());
+    let context = EncoderContext {
+        hidden: source,
+        positions: Tensor::<B, 2, Int>::from_ints([[0, 1, 2]], &Default::default()),
+        token_mask: None,
+    };
+    let decoder = model.decoder_stages(context);
+    assert_eq!(
+        crate::architecture::StagedModel::layer(&decoder, 0),
+        Layer::decoder(0)
+    );
+    assert_close(
+        staged_hidden(&decoder, input([[4, 5, 6]])),
+        expected.decoder.final_hidden_state.unwrap(),
+    );
 }

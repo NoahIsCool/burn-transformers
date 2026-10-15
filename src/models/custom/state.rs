@@ -6,6 +6,22 @@
 //! concatenates growing tensors, and it exercises exactly the same model function used for
 //! training. The path is intentionally a correctness oracle, not an advertised low-latency KV
 //! cache; concrete family runtimes provide optimized cache layouts.
+//!
+//! # One batched pass per step
+//!
+//! Every step is executed for the whole batch at once, whatever the rows' raggedness:
+//!
+//! 1. one device read validates the step's mask, token IDs, and explicit positions;
+//! 2. the host plans the append ([`plan_history_append`], verified per row by Verus): row `r`
+//!    appends its `n_r` valid tokens at slots `L_r..L_r + n_r` in input order;
+//! 3. one rectangular window `[min L_r, max(L_r + n_r))` of the token and position histories is
+//!    rewritten with a gather and a masked select ([`plan_history_writes`]), so the number of
+//!    kernels is independent of the batch size and of each row's padding layout;
+//! 4. the model evaluates the shortest rectangular history prefix in one stateless pass, with
+//!    each row's committed length as its validity mask;
+//! 5. one gather returns the appended slots in the caller's `[batch, step]` layout.
+//!
+//! Nothing is committed until the outputs exist, so a failing step leaves the state unchanged.
 
 use burn::tensor::{Element, Int, Tensor, TensorData, backend::Backend};
 
@@ -14,13 +30,13 @@ use crate::{
     Result,
     architecture::{DecoderSpec, EncoderOutput, RouterDiagnostics, Seq2SeqOutput, TokenMask},
     cache::{
-        CacheConfig, DecodeState as DecodeMetadata,
+        CacheConfig, SequenceLengths,
         tensor::{validate_repeated_allocation, validate_tensor_shape},
     },
     moe::SparseMoeOutput,
 };
 
-use crate::models::shared::{CompactRow, HostInput, implicit_position_ids, plan, range_error};
+use crate::models::shared::{HostInput, plan, range_error};
 
 use super::{
     ModularCausalLm, ModularSeq2SeqLm,
@@ -28,6 +44,7 @@ use super::{
         BackboneOutput, causal_output, gathered_router_diagnostics, mask_hidden, select_hidden,
         token_mask_from_values, validate_forward_options,
     },
+    plan::{HistoryAppendError, plan_history_append, plan_history_writes},
 };
 
 /// Model role encoded into state so equal-looking causal and seq2seq specs cannot be mixed.
@@ -46,7 +63,7 @@ pub(super) enum StatePurpose {
 #[derive(Debug)]
 pub struct ModularDecodeState<B: Backend> {
     /// Checked per-row committed lengths and immutable batch/capacity geometry.
-    metadata: DecodeMetadata,
+    metadata: SequenceLengths,
     /// Compacted token IDs in preallocated `[batch, capacity]` device storage.
     tokens: Tensor<B, 2, Int>,
     /// Position IDs aligned with compacted tokens in `[batch, capacity]` device storage.
@@ -95,7 +112,7 @@ impl<B: Backend> ModularDecodeState<B> {
         )
         .map_err(|error| Error::Cache(error.to_string()))?;
         Ok(Self {
-            metadata: DecodeMetadata::new(config),
+            metadata: SequenceLengths::new(config),
             tokens: Tensor::zeros([batch_size, config.capacity()], device),
             positions: Tensor::zeros([batch_size, config.capacity()], device),
             allocated_integer_elements,
@@ -170,8 +187,9 @@ impl<B: Backend> ModularDecodeState<B> {
     ///
     /// Shapes and devices are checked first; the mask, token IDs, and explicit
     /// positions are then read back once and validated on the host. Every token
-    /// ID must lie in the vocabulary (padded IDs included), while positions are
-    /// checked per row over the valid columns that enter the history.
+    /// ID must lie in the vocabulary (padded IDs included), while explicit
+    /// positions are checked over the valid columns that enter the history.
+    /// The whole batch is then written with one gather/select per history.
     fn prepare_append(
         &self,
         input: CausalLmInput<B>,
@@ -189,86 +207,93 @@ impl<B: Backend> ModularDecodeState<B> {
         self.validate_append_layout(&input, batch, step)?;
         let host = HostInput::read(&input, batch, step, "custom decode input")?;
         validate_decode_token_ids(&host.tokens, vocabulary_size)?;
-        let valid_indices = host.valid_indices(batch, step);
-        let counts = valid_indices.iter().map(Vec::len).collect::<Vec<_>>();
-        if require_each_row && counts.contains(&0) {
-            return Err(Error::shape(
-                "custom.prefill.token_mask",
-                "at least one valid token in every prompt row",
-                "a fully masked row",
-            ));
-        }
-        if counts.iter().all(|&count| count == 0) {
-            return Err(Error::shape(
-                "custom.decode.token_mask",
-                "at least one active token across the batch",
-                "an entirely inactive decode step",
-            ));
-        }
-        let old_lengths = self.metadata.lengths().to_vec();
-        let mut new_lengths = Vec::with_capacity(batch);
-        for (row, (&old, &count)) in old_lengths.iter().zip(&counts).enumerate() {
-            let new = old.checked_add(count).ok_or_else(|| {
-                Error::Cache(format!("custom sequence {row} length overflows usize"))
-            })?;
-            if new > self.capacity() {
-                return Err(Error::Cache(format!(
-                    "custom sequence {row} requested length {new} exceeds capacity {}",
-                    self.capacity()
-                )));
-            }
-            new_lengths.push(new);
-        }
-        if new_lengths.contains(&0) {
-            return Err(Error::BackendCapability(
-                "reference batched decoding cannot evaluate a never-started inactive row".into(),
-            ));
-        }
-
-        let mut tokens = self.tokens.clone();
-        let mut positions = self.positions.clone();
-        let mut absolute_indices = vec![0i64; batch * step];
-        for (row, valid_columns) in valid_indices.iter().enumerate() {
-            if valid_columns.is_empty() {
-                continue;
-            }
-            let plan = CompactRow::<B>::new(row, valid_columns, step, &self.device)?;
-            let start = old_lengths[row];
-            let end = new_lengths[row];
-            let window = row * step..(row + 1) * step;
-            validate_decode_positions(
-                host.positions.as_ref().map(|values| &values[window]),
-                valid_columns,
-                start..end,
+        let validity = host.mask.unwrap_or_else(|| vec![true; batch * step]);
+        let plan = plan_history_append(
+            &validity,
+            step,
+            self.metadata.lengths(),
+            self.capacity(),
+            require_each_row,
+        )
+        .map_err(|error| self.append_error(error))?;
+        if let Some(positions) = &host.positions {
+            validate_explicit_positions(
+                positions,
+                &validity,
+                step,
                 self.model_spec.max_position_embeddings,
             )?;
-            tokens =
-                tokens.slice_assign([row..row + 1, start..end], plan.compact(&input.token_ids));
-            let row_positions = match &input.position_ids {
-                Some(supplied) => plan.compact(supplied),
-                None => implicit_position_ids(
-                    start,
-                    plan.count(),
-                    &self.device,
-                    "custom.decode.position_ids",
-                )?,
-            };
-            positions = positions.slice_assign([row..row + 1, start..end], row_positions);
-            // Valid column `c_k` reads compact history slot `start + k`.
-            for (ordinal, &column) in valid_columns.iter().enumerate() {
-                absolute_indices[row * step + column] = to_index(start + ordinal)?;
-            }
         }
-        let input_validity = host.mask.unwrap_or_else(|| vec![true; batch * step]);
+        let writes = plan_history_writes(&plan, &validity, step);
+        let window = writes.start..writes.end;
+        let width = window.len();
+        let sources = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(to_indices(&writes.sources)?, [batch, width]),
+            &self.device,
+        );
+        let written = crate::architecture::bool_tensor_from_values::<B, 2>(
+            writes.written,
+            [batch, width],
+            &self.device,
+        );
+        let write_window = |history: &Tensor<B, 2, Int>, appended: Tensor<B, 2, Int>| {
+            let current = history.clone().slice([0..batch, window.clone()]);
+            history.clone().slice_assign(
+                [0..batch, window.clone()],
+                current.mask_where(written.clone(), appended),
+            )
+        };
+        let tokens = write_window(&self.tokens, input.token_ids.gather(1, sources.clone()));
+        let appended_positions = match input.position_ids {
+            Some(supplied) => supplied.gather(1, sources),
+            // Implicit positions are the slot indices themselves.
+            None => Tensor::<B, 1, Int>::arange(
+                to_index(window.start)?..to_index(window.end)?,
+                &self.device,
+            )
+            .reshape([1, width])
+            .expand([batch, width]),
+        };
+        let positions = write_window(&self.positions, appended_positions);
         Ok(PreparedAppend {
             tokens,
             positions,
-            new_lengths,
-            counts,
-            input_validity,
-            absolute_indices,
+            absolute_indices: to_indices(&plan.slots)?,
+            new_lengths: plan.lengths,
+            counts: plan.counts,
+            input_validity: validity,
             step,
         })
+    }
+
+    /// Converts a planning failure into this state's contextual error.
+    fn append_error(&self, error: HistoryAppendError) -> Error {
+        match error {
+            HistoryAppendError::EmptyRow { .. } => Error::shape(
+                "custom.prefill.token_mask",
+                "at least one valid token in every prompt row",
+                "a fully masked row",
+            ),
+            HistoryAppendError::EmptyStep => Error::shape(
+                "custom.decode.token_mask",
+                "at least one active token across the batch",
+                "an entirely inactive decode step",
+            ),
+            HistoryAppendError::Capacity {
+                row,
+                requested: None,
+            } => Error::Cache(format!("custom sequence {row} length overflows usize")),
+            HistoryAppendError::Capacity {
+                row,
+                requested: Some(requested),
+            } => Error::Cache(format!(
+                "custom sequence {row} requested length {requested} exceeds capacity {}",
+                self.capacity()
+            )),
+            HistoryAppendError::NeverStarted { .. } => Error::BackendCapability(
+                "reference batched decoding cannot evaluate a never-started inactive row".into(),
+            ),
+        }
     }
 
     /// Checks mask and position extents and that every input shares the state device.
@@ -556,34 +581,40 @@ fn validate_decode_token_ids(tokens: &[i64], vocabulary: usize) -> Result<()> {
     }
 }
 
-/// Rejects one row's cached positions outside the model context.
+/// Rejects explicit positions of valid cells outside the model context.
 ///
-/// Explicit positions are checked over the row's valid columns; implicit
-/// positions are the appended slots `start..end`, so only their last value
-/// `end - 1` can exceed the context.
-fn validate_decode_positions(
-    explicit: Option<&[i64]>,
-    valid_columns: &[usize],
-    appended: core::ops::Range<usize>,
-    capacity: usize,
+/// Positions supplied at padded cells never enter the history and are not
+/// checked. Implicit positions are history slots below the capacity, which
+/// the model already bounds by its position range, so they need no check.
+fn validate_explicit_positions(
+    positions: &[i64],
+    validity: &[bool],
+    step: usize,
+    limit: usize,
 ) -> Result<()> {
-    let observed = match explicit {
-        Some(values) => plan::value_range(values, valid_columns),
-        None if appended.is_empty() => None,
-        None => Some((to_index(appended.start)?, to_index(appended.end - 1)?)),
-    };
-    match observed {
-        Some((minimum, maximum)) if !plan::range_within(minimum, maximum, capacity) => {
-            Err(range_error(
+    for (values, valid) in positions
+        .chunks_exact(step)
+        .zip(validity.chunks_exact(step))
+    {
+        let columns = plan::valid_columns(valid);
+        if let Some((minimum, maximum)) = plan::value_range(values, &columns)
+            && !plan::range_within(minimum, maximum, limit)
+        {
+            return Err(range_error(
                 "custom.decode.position_ids",
                 "position",
-                capacity,
+                limit,
                 minimum,
                 maximum,
-            ))
+            ));
         }
-        _ => Ok(()),
     }
+    Ok(())
+}
+
+/// Converts host indices into Burn's signed `i64` index type.
+fn to_indices(indices: &[usize]) -> Result<Vec<i64>> {
+    indices.iter().map(|&index| to_index(index)).collect()
 }
 
 /// Converts a host index into Burn's signed `i64` index type.
@@ -598,4 +629,5 @@ fn to_index(index: usize) -> Result<i64> {
 
 #[cfg(test)]
 #[path = "state_tests.rs"]
+/// History allocation, accounting, and batched-append regressions.
 mod tests;

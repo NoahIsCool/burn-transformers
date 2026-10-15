@@ -7,13 +7,19 @@
 //! `cargo run --release --features autodiff --example custom_composition -- --train`
 //! Read training/custom_composition.rs for the differentiable capture and learning loop.
 //!
-//! The first residual block uses bidirectional grouped-query attention. The next
+//! The first residual block uses bidirectional, position-free (NoPE) grouped-query
+//! attention, matching the permutation-invariant task. The next
 //! mixer broadcasts `W(mean_tokens(h))`, with no softmax or causal mask. Learned
 //! projections explicitly change residual width `8 -> 12 -> 6`; mean pooling
 //! produces `[batch, 6]` features and a `[batch, 2]` task readout. Every token is
 //! valid, so neither mixer nor pooling applies a padding mask. There is no dropout
 //! or decode cache. Training uses F32 Flex autodiff and registered Burn parameters;
 //! the training module owns loss construction, optimization, and record checks.
+//!
+//! The demonstration also assembles a Llama-style block from the same parts:
+//! RMS pre-normalization, rotary grouped-query attention (`RotaryAttention`), and
+//! a SwiGLU feed-forward layer. Rotary scores depend only on relative positions,
+//! so shifting every position by a constant leaves the block's output unchanged.
 
 #[cfg(not(feature = "flex"))]
 /// Report the missing Flex backend required by the local composition example.
@@ -53,11 +59,15 @@ mod experiment {
         architecture::{NormPlacement, NormalizationSpec},
         attention::{GroupedQueryAttention, GroupedQueryAttentionConfig},
         experiment::{
-            AttentionPolicy, ExecutionContext, HiddenTransform, ResidualBlock, WidthAdapter,
+            AttentionPolicy, ExecutionContext, HiddenTransform, ResidualBlock, RotaryAttention,
+            WidthAdapter,
         },
-        feed_forward::{DenseFeedForward, DenseFeedForwardConfig},
+        feed_forward::{
+            DenseFeedForward, DenseFeedForwardConfig, GatedFeedForward, GatedFeedForwardConfig,
+        },
         intervention::{Hooks, Layer, PointInfo, Stack},
         operations,
+        position::{RopeConfig, RopeScaling},
     };
 
     // This custom mixer has no attention scores or softmax. It projects the sequence
@@ -84,8 +94,10 @@ mod experiment {
         }
     }
 
-    /// Residual block pairing grouped-query attention with a dense feed-forward layer.
+    /// Residual block pairing position-free grouped-query attention with a dense feed-forward layer.
     type AttentionBlock<B> = ResidualBlock<B, GroupedQueryAttention<B>, DenseFeedForward<B>>;
+    /// Llama-style block: rotary grouped-query attention and a SwiGLU feed-forward layer.
+    type LlamaBlock<B> = ResidualBlock<B, RotaryAttention<B>, GatedFeedForward<B>>;
     /// Mean-mixing residual block wrapped by explicit input/output width adapters.
     type ChangedBlock<B> = WidthAdapter<B, ResidualBlock<B, MeanMixer<B>, DenseFeedForward<B>>>;
 
@@ -169,17 +181,15 @@ mod experiment {
         }
 
         /// Run bidirectional attention and the custom mixer, then mean-pool into `[batch, 2]` logits.
-        /// Token positions accompany the context; all input positions are treated as valid.
+        /// Positions `0..sequence` accompany the context; all input positions are treated as valid.
         pub(super) fn forward(
             &self,
             tokens: Tensor<B, 2, Int>,
             hooks: &mut Hooks<'_, B>,
         ) -> Result<Tensor<B, 2>> {
             let [batch, sequence] = tokens.dims();
-            let positions = Tensor::<B, 1, Int>::arange(0..sequence as i64, &tokens.device())
-                .reshape([1, sequence])
-                .expand([batch, sequence]);
-            let context = ExecutionContext::new(positions, None)?
+            // Contiguous positions are known on the host, so building them reads nothing back.
+            let context = ExecutionContext::contiguous(batch, sequence, &tokens.device())?
                 .with_attention(AttentionPolicy::bidirectional());
             hooks.run(self.activation_points(), |hooks| {
                 let hidden =
@@ -194,6 +204,50 @@ mod experiment {
                 operations::linear(pooled, &self.head)
             })
         }
+    }
+
+    /// Build a width-eight Llama-style block: RMS pre-norm, rotary GQA, and SwiGLU.
+    fn llama_block<B: Backend>(device: &B::Device) -> Result<LlamaBlock<B>> {
+        // Two query heads share one key/value head; RoPE rotates all four channels of each head.
+        let rope = RopeConfig::new(4, 4, 10_000.0, RopeScaling::None)
+            .map_err(|error| transformers::Error::configuration("rope", error.to_string()))?;
+        ResidualBlock::new(
+            8,
+            RotaryAttention::init(&GroupedQueryAttentionConfig::new(8, 2, 1, 4), rope, device)?,
+            GatedFeedForwardConfig::new(8, 16).init(device)?,
+            NormalizationSpec::Rms {
+                epsilon: 1e-6,
+                zero_centered: false,
+            },
+            NormPlacement::Pre,
+            device,
+        )
+    }
+
+    /// Show that a causal Llama-style block depends only on relative positions.
+    ///
+    /// Rotations satisfy `<R(m) q, R(n) k> = <q, R(n - m) k>`, so shifting every
+    /// position by the same offset leaves attention scores, and therefore the block
+    /// output, unchanged up to F32 rounding of the larger rotation angles.
+    fn demonstrate_rotary_block() -> Result<f32> {
+        /// CPU backend for the rotary demonstration.
+        type B = Flex<f32, i32>;
+        let device = Default::default();
+        let block = llama_block::<B>(&device)?;
+        let hidden = Tensor::<B, 3>::random(
+            [1, 4, 8],
+            burn::tensor::Distribution::Normal(0.0, 1.0),
+            &device,
+        );
+        let layer = Layer::decoder(0);
+        let at_zero = ExecutionContext::contiguous(1, 4, &device)?;
+        let shifted = ExecutionContext::new(
+            Tensor::<B, 2, Int>::from_ints([[7, 8, 9, 10]], &device),
+            None,
+        )?;
+        let reference = block.run(hidden.clone(), &at_zero, layer)?;
+        let moved = block.run(hidden, &shifted, layer)?;
+        Ok((moved - reference).abs().max().into_scalar())
     }
 
     /// Verify that a selected custom-block activation can be ablated and restored without editing weights.
@@ -226,6 +280,11 @@ mod experiment {
         println!(
             "Registered parameters: {}. Add --features autodiff and -- --train to learn the synthetic task.",
             model.num_params()
+        );
+        let shift_error = demonstrate_rotary_block()?;
+        assert!(shift_error < 1e-4);
+        println!(
+            "Llama-style rotary block: shifting every position by 7 changes outputs by {shift_error:.2e}."
         );
         Ok(())
     }

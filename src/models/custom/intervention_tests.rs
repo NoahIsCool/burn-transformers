@@ -9,12 +9,13 @@ use burn::{
 use crate::{
     CausalLmInput, ForwardOptions, LogitsSelection, Seq2SeqInput, TokenMask,
     architecture::{
-        Activation, AttentionSpec, DecoderLayerSpec, DecoderSpec, DenseFeedForwardSpec,
-        FeedForwardSpec, MixerSpec, MixtureOfExpertsSpec, NormPlacement, NormalizationSpec,
-        PositionEncodingSpec, ResidualTopology, Seq2SeqSpec,
+        Activation, AttentionOptions, AttentionSpec, DecoderLayerSpec, DecoderSpec,
+        DenseFeedForwardSpec, FeedForwardSpec, MixerSpec, MixtureOfExpertsSpec, NormPlacement,
+        NormalizationSpec, PositionEncodingSpec, ResidualTopology, Seq2SeqSpec,
     },
     intervention::{Hooks, Layer, Stack},
     models::custom::{ModularCausalLm, ModularSeq2SeqLm},
+    moe::RoutingPolicy,
 };
 
 /// CPU backend with F32 tensor values and I32 indices for deterministic intervention fixtures.
@@ -113,6 +114,7 @@ fn seq2seq() -> ModularSeq2SeqLm<B> {
             decoder: spec(NormPlacement::Pre),
             cross_attention_heads: 2,
             cross_attention_head_dim: 4,
+            cross_attention_options: AttentionOptions::default(),
         },
         &Default::default(),
     )
@@ -378,6 +380,9 @@ fn recurrent_and_moe_layers_advertise_only_executable_points() {
         activation: Activation::Silu,
         renormalize_selected: true,
         routed_scale: 1.0,
+        routing: RoutingPolicy::default(),
+        shared_expert_gate: false,
+        expert_bias: false,
     });
     let model = ModularCausalLm::<B>::init(config, &Default::default())
         .unwrap()
