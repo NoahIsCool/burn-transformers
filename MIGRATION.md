@@ -1,4 +1,60 @@
-# Standalone repository migration
+# Migration
+
+This page has two parts: [upgrading code from 0.1.0](#upgrading-from-010) to
+the current source, and the [standalone repository
+migration](#standalone-repository-migration-september-2026) that extracted the
+crate from its original monorepo.
+
+## Upgrading from 0.1.0
+
+The unreleased changes are listed in [CHANGELOG.md](CHANGELOG.md). Most are
+additive; the items below can break compilation or change results.
+
+### Compilation
+
+| If your code | Change it to |
+| --- | --- |
+| Assigns a `bool` to `BeamSearchConfig::early_stopping` | Use `EarlyStopping::Never` to keep the old `false` results, `EarlyStopping::Eager` for `true`, or `.into()` for Transformers' meaning of the boolean (`false` is its heuristic default). |
+| Calls `Qwen3_5SpeculativeDecoder` or the Nemotron-H speculative decoder (`select_lead`, `speculate`, `speculate_if_active`) | Pass the new `prompt_length` argument; `0` reproduces the old penalty semantics. |
+| Matches `ParameterInit` exhaustively | Add arms for `Ones` and `Constant { value }`. |
+| Copies `architecture::RopeScaling` or builds `RopeScaling::Yarn` literally | Clone it; add `truncate: true` (the reference default) to YaRN literals. |
+| Calls `ModularLayer::init(…, Some((heads, head_dim)), …)` | Pass `Some(&CrossAttentionSpec::new(heads, head_dim))`. |
+| Reads `time_step_min`/`time_step_max` of `NemotronMamba2Config` | Use `time_step_clamp: TimeStepClamp`. |
+| Reads fields of `NemotronHDense` | It is now an alias of `feed_forward::DenseFeedForward`; read the projection shapes. |
+| Builds public configuration structs with exhaustive literals (`GenerationConfig`, `SparseMoeConfig`, `GroupedQueryAttentionConfig`, `MaskGeometry`, `ChatMessage`, `ChatTemplateOptions`, `SpecialTokens`, `GatedDeltaNetConfig`, `MlaSpec`, `MixtureOfExpertsSpec`, `Seq2SeqSpec`, `Gpt2Config`, `QuantizedCheckpointOptions`, `BurnpackArtifactSummary`) | Add `..Default::default()` (or the constructor) so new fields take their defaults. |
+| Uses `LoadedModel::into_parts` or its variants | Use `into_named_parts()` (`LoadedModelParts`); the old accessors are deprecated. |
+| Uses `CacheConfig::physical_capacity` | Use `NativeKvCacheSpec::committed_time_slots`. |
+| Calls trait methods on a `LoadedModel` | Import `architecture::HookedModel` / `StagedModel`; inherent methods of the same name still take precedence on concrete types. |
+
+### Results and errors
+
+| What changed | What to do |
+| --- | --- |
+| Presence and frequency penalties count only generated tokens | Set `additive_penalty_scope: PenaltyScope::PromptAndGenerated` to keep counting the prompt. |
+| Greedy decoding ignores temperature, top-k, top-p, and min-p; its log probabilities come from the untruncated distribution | Compare greedy log probabilities against Transformers' `normalize_logits=True`. |
+| F16/BF16 logits are processed in F32 and selected log probabilities are F32 | Expect `DType::F32` log probabilities from half-precision models. |
+| Top-k keeps every token tied with the k-th score | Seeded samples can differ only where boundary logits tie. |
+| `generation_config.json` sampling defaults, `min_p`, `no_repeat_ngram_size`, and `min_new_tokens` are applied | Inspect `loaded.generation_defaults()` and `loaded.unsupported_generation_settings()`, or pass `AutoLoadOptions::generation` explicitly. |
+| Beam search needs capacity `prompt + max_new_tokens - 1` | Larger caches still work. |
+| GPT-NeoX `hidden_states` holds `L + 2` entries | Crate index `L + 1` is Transformers' index `L`. |
+| Runtime hook failures are `Error::Intervention` | Match `Error::Intervention { point, reason, cause }`; registration mistakes remain `Error::Configuration`. |
+| GPT-2/NeoX token, position, mask, and logits-selection errors are `Error::Shape`; device mismatches there and in T5 decoding are `Error::BackendCapability`; DeepSeek stateful errors are `Error::TensorCache`; modular staged position errors are `Error::Shape` | Update matches; when several errors exist, layout and device errors are reported before value errors, and a T5 source error before a target error. |
+| Error texts are unified (`token values in 0..V`, `position values in 0..N`, `{tensor} and {owner} are on different devices`; automatic config errors name the family's field) | Update assertions on message text. |
+| `EncodeOptions::max_length` truncates content before special tokens, and serialized truncation/padding are ignored | Request truncation and padding explicitly. |
+| Auto discovery with both `model.safetensors` and an index that does not name exactly that file reports ambiguity | Select `ArtifactSelection::Index` or `Single`. |
+| Qwen3-MoE sliding windows cover every block | Only configs with `use_sliding_window: true` are affected; released Qwen3-30B-A3B is not. |
+| DeepSeek and Muse reject `partial_rotary_factor` other than one | Such configs were silently computed incorrectly before. |
+| DeepSeek's `seq_aux = false` balance loss is `1/top_k` of its old value; Nemotron-H's balance loss is Megatron's normalized form | Retune loss coefficients that were tuned against the old values. |
+| T5 configs with `relative_attention_max_distance <= buckets / 2` fail validation | Full models need a larger maximum distance (encoder-only recipes still accept `(n/4, n/2]`). |
+| Spec validation delegates to the shared components | Now accepted: bidirectional T5 `max_distance > buckets / 4`, YaRN factor 1, any nonzero cross-attention width. Now rejected: odd or small bidirectional T5 bucket counts, MLA `rotary_dim > rotary_head_dim` or an odd rotary sub-head, YaRN `theta <= 1`, projection-width overflow, sinks combined with a soft cap, and sliding windows in encoder stacks. |
+| GPT-2 random initialization matches GPT-2; modular T5 biases start from `N(0, 1/hidden_size)` | Seeded random models differ from earlier versions; loaded checkpoints are unaffected. |
+| `init_policy()` keeps LayerNorm parameters | Add `ParameterInit::Ones`/`Zeros` overrides to reset them. |
+| Fan-out transfer copies are independent parameters | Tie them explicitly in one owner if they must stay shared. |
+| `AutoCausalConfig::model_type()` returns the primary type of an alias family (`llama` for `qwen3`) | Read `LoadedModel::source().model_type()` for the checkpoint's own type. |
+| A failed cached call leaves lengths and readable slots unchanged but may write bytes beyond the lengths | Compare readable prefixes, not raw cache buffers. |
+| Cache steps and read plans are bound to the state and lifecycle version that created them | Create a step after any reset, reorder, truncate, or transaction call, and build one read plan per group per step. |
+
+## Standalone repository migration (September 2026)
 
 On September 10, 2026, `crates/transformers` was extracted from the local
 `hmm_compression` repository into `/Users/nover/repos/transformers`. The parent
@@ -6,7 +62,7 @@ checkout removes the crate entirely: no submodule, path dependency, or
 compatibility symlink remains. The integration branch stays `codex/transformers`.
 No remote, registry publication, or release tag is created by this migration.
 
-## Preserved history and artifacts
+### Preserved history and artifacts
 
 The extraction filters every original local branch to `crates/transformers/`
 and moves that subtree to the new repository root. Commit IDs necessarily
@@ -39,7 +95,7 @@ copied or removed. Its ignored `target/` build tree and external cache links
 are retained. Cargo may rebuild path-sensitive artifacts at the new location.
 Unrelated HMM edits remain in the original checkout.
 
-## Current development commands
+### Current development commands
 
 From the standalone repository root:
 
@@ -54,7 +110,7 @@ package are already standalone. Consumer path dependencies must point at this
 checkout, for example `../transformers` from a sibling project. HMM itself has
 no dependency on this crate.
 
-## Historical reproduction
+### Historical reproduction
 
 Acceptance JSON, producer hashes, embedded reference fixtures, and previously
 qualified example sources remain byte-identical. Old absolute paths and commit
