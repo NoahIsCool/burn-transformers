@@ -250,7 +250,8 @@ fn positive_temperature_never_produces_nan() {
 }
 
 /// Campaign regression `crash-cfb301be` (minimized): top-p may split logits one
-/// `f32` ulp apart because their rounded probabilities tie.
+/// `f32` ulp apart because their rounded probabilities tie (open finding
+/// TOPP-TIE-1; the harness tolerates it until fixed).
 #[test]
 fn campaign_top_p_near_ties_may_split() {
     exercise(&[
@@ -258,4 +259,39 @@ fn campaign_top_p_near_ties_may_split() {
         0x00, 0x00, 0x00, 0x03, 0x03, 0x03, 0xb6, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16,
         0xd8, 0xd8,
     ]);
+}
+
+/// TOPP-TIE-1: top-p must never drop a larger logit while keeping a smaller one.
+///
+/// Hugging Face 5.2 `TopPLogitsWarper` sorts the *logits* (`torch.sort(scores)`)
+/// and only then takes the softmax and cumulative sum of the sorted values,
+/// so a strictly larger logit always ranks ahead of a smaller one. The
+/// library's `filter_top_p` (`src/generation.rs`) sorts rounded `f32`
+/// *probabilities*: logits one ulp apart, such as `0.1` and `0.10000001`,
+/// get the same probability, the sort keeps their original order, and the
+/// larger logit is dropped (campaign crash `crash-cfb301be`). Fix: sort the
+/// logits descending and compute softmax and cumulative mass over the sorted
+/// logits, as Hugging Face does; then remove the near-tie slack in
+/// `check_warpers` and the property suite.
+#[test]
+#[ignore = "TOPP-TIE-1: open follow-up in src/generation.rs (top-p ranks rounded probabilities)"]
+fn top_p_ranks_by_logit_like_hugging_face() {
+    for (smaller, larger) in [(0.1_f32, 0.100_000_01_f32), (-0.166_666_67, -0.166_666_66)] {
+        assert!(smaller < larger);
+        for top_p in [0.3, 0.5] {
+            let config = GenerationConfig {
+                strategy: SamplingStrategy::Sample,
+                top_p: Some(top_p),
+                ..GenerationConfig::default()
+            };
+            let row: &[u32] = &[];
+            let mut tie = case(config, 2, &[row], &[0]);
+            tie.logits = vec![smaller, larger];
+            let values = processed(&tie);
+            assert!(
+                values[1].is_finite(),
+                "top_p {top_p} dropped {larger} but kept {smaller}: {values:?}"
+            );
+        }
+    }
 }
