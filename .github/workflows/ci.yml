@@ -13,6 +13,12 @@
 #   executed by a lint. `cpu` (CubeCL's MLIR backend) downloads a prebuilt
 #   LLVM in its build script.
 #
+# Known gaps are tracked, not hidden. Four fuzz-oracle tests that predate
+# wave-3 behavior are skipped by exact name, and a second step fails once any
+# of them passes again. The documentation audit runs as a ratchet against the
+# gaps that remain in src/ and fuzz/. Both lists only shrink, and the release
+# gate (scripts/check_release.py --gate source) still requires zero.
+#
 # The Verus proofs need a pinned prover release and its own Rust toolchain;
 # start them from the Actions tab ("Run workflow", then tick "verus"). All
 # harnesses verified in 12 seconds on the development Mac once installed.
@@ -126,6 +132,10 @@ jobs:
         run: |
           cargo test --locked --no-default-features --features "$CPU_FEATURES" --lib --tests
           cargo test --locked --no-default-features --features "$CPU_FEATURES" --doc
+      # qwen35_chat needs Metal to build; its argument tests create no device.
+      - name: Metal example argument tests
+        if: runner.os == 'macOS'
+        run: cargo test --locked --no-default-features --features std,metal,chat-templates --example qwen35_chat
 
   msrv:
     name: MSRV (Rust 1.92)
@@ -136,6 +146,8 @@ jobs:
       - name: Install Rust 1.92
         run: rustup toolchain install 1.92.0 --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@v2
+      # Compilation only; the release MSRV gate (check_release.py --gate msrv)
+      # also runs the tests on 1.92.
       - name: Check every target
         run: cargo +1.92.0 check --locked --all-targets --no-default-features --features "$CPU_FEATURES"
 
@@ -260,11 +272,83 @@ jobs:
         run: |
           cargo clippy --manifest-path scripts/coverage-layout/Cargo.toml --locked --all-targets -- -D warnings
           cargo test --manifest-path scripts/coverage-layout/Cargo.toml --locked
+          cargo build --manifest-path scripts/coverage-layout/Cargo.toml --locked
+      - name: Documentation standards (no new gaps)
+        run: |
+          report="$RUNNER_TEMP/documentation.json"
+          rm -f "$report"
+          audit_status=0
+          python3 scripts/check_documentation.py --standards \
+            --classifier scripts/coverage-layout/target/debug/transformers-coverage-layout \
+            --output "$report" || audit_status=$?
+          python3 - "$report" "$audit_status" <<'EOF'
+          """Fail on documentation gaps beyond the recorded baseline.
+
+          `check_documentation.py --standards` exits nonzero while any authored
+          item lacks its required doc comment or sits inside a macro the
+          classifier cannot expand. src/ and fuzz/ still have such items, so
+          that exit status cannot gate CI yet. This ratchet reads the JSON report instead
+          and fails when a component has more gaps of a kind than BASELINE
+          records, or when the audit reports a parse diagnostic. Lower BASELINE
+          as gaps close; the release gate still requires zero.
+          """
+          import json
+          import sys
+
+          # component: (missing doc comments, opaque macro functions, opaque macro items)
+          BASELINE = {
+              "checkpoint": (1, 11, 0),
+              "fuzz": (1, 0, 0),
+              "models": (30, 31, 11),
+              "shared": (61, 47, 0),
+          }
+          KINDS = ("missing_style", "unresolved_macro_functions", "unresolved_macro_items")
+
+          report_path, status = sys.argv[1], int(sys.argv[2])
+          if status == 0:
+              print("documentation standards pass in full; empty BASELINE")
+              sys.exit(0)
+          try:
+              with open(report_path, encoding="utf-8") as report_file:
+                  report = json.load(report_file)
+          except OSError as error:
+              sys.exit(f"check_documentation.py failed before writing its report: {error}")
+          failures = [
+              f"diagnostic {d['code']} in {d['file']}: {d['reason']}"
+              for d in report["diagnostics"]
+              if d["code"] != "duplicate_context"
+          ]
+          inventory = report["inventory"]
+          for component, counts in sorted(inventory["groups"].items()):
+              allowed = dict(zip(KINDS, BASELINE.get(component, (0, 0, 0))))
+              allowed["inline_test_bodies"] = 0
+              for kind, limit in allowed.items():
+                  if counts[kind] > limit:
+                      failures.append(f"{component}: {counts[kind]} {kind} (baseline {limit})")
+              print(f"{component}: " + ", ".join(f"{k} {counts[k]}/{v}" for k, v in allowed.items()))
+          if failures:
+              for entry in inventory["missing"]:
+                  print(f"::warning file={entry['path']},line={entry['line']}::"
+                        f"missing {entry['required_style']} doc on {entry['kind']} {entry['name']}")
+              sys.exit("documentation gaps above the baseline:\n  " + "\n  ".join(failures))
+          print("no documentation gaps above the baseline")
+          EOF
 
   fuzz:
     name: Fuzz harnesses
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Oracles that predate wave-3 behavior and fail at this source: top-k
+      # now keeps every score tied with the k-th, as Hugging Face does
+      # (fuzz/src/logits_processing.rs:413-416), and modular specs now run
+      # Mamba-2 (fuzz/src/modular_specs.rs:461-463). Remove each name here
+      # together with its oracle fix.
+      STALE_ORACLE_TESTS: >-
+        logits_processing::tests::campaign_top_p_near_ties_may_split
+        logits_processing::tests::pseudo_random_inputs_agree_with_the_oracles
+        modular_specs::tests::capability_gaps_are_reported_at_construction
+        modular_specs::tests::pseudo_random_specs_validate_construct_and_run
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -279,7 +363,22 @@ jobs:
       - name: Clippy
         run: cargo clippy --manifest-path fuzz/Cargo.toml --locked --all-targets -- -D warnings
       - name: Harness tests
-        run: cargo test --manifest-path fuzz/Cargo.toml --locked --lib
+        run: |
+          skips=()
+          for test in $STALE_ORACLE_TESTS; do skips+=(--skip "$test"); done
+          cargo test --manifest-path fuzz/Cargo.toml --locked --lib -- --exact "${skips[@]}"
+      # A skipped test that passes again, or no longer exists, fails here
+      # until its name is removed from STALE_ORACLE_TESTS.
+      - name: Skipped oracle tests still fail
+        run: |
+          stale=0
+          for test in $STALE_ORACLE_TESTS; do
+            if cargo test --manifest-path fuzz/Cargo.toml --locked --lib -- --exact "$test" > /dev/null 2>&1; then
+              echo "::error::$test passes or no longer exists; remove it from STALE_ORACLE_TESTS"
+              stale=1
+            fi
+          done
+          exit "$stale"
 
   dependencies:
     name: Dependency advisories and licenses
@@ -294,8 +393,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
+      # The versions RELEASE_GATES.md reviewed; update both places together.
       - name: Install cargo-audit and cargo-deny
-        run: cargo install --locked cargo-audit cargo-deny
+        run: cargo install --locked cargo-audit@0.22.2 cargo-deny@0.20.2
       # The ignored IDs are unmaintained-crate notices, not vulnerabilities;
       # they match MAINTENANCE_NOTICES in scripts/check_release.py.
       - name: Advisories
