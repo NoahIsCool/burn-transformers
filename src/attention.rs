@@ -21,6 +21,10 @@
 //! itself always evaluates complete planes; the Muse-Glimmer family currently
 //! executes such plans with its synchronized chunk loop.
 //!
+//! [`AttentionConnectivity`] builds padding-aware causal, sliding-window, and
+//! chunked-local exclusion masks for per-layer local/global schedules, and
+//! [`sliding_window_key_range`] gives the matching key slice of a query chunk.
+//!
 //! Queries use `[batch, query_head, query_token, head_dim]`; keys and values
 //! retain native KV heads until dispatch. Score masks use `true == excluded`,
 //! whereas incoming token-validity masks use `true == valid`. Causal alignment is
@@ -28,6 +32,7 @@
 //! keys `j <= i + K - Q`. Exclusions are restored after interventions, and eager
 //! softmax defines fully excluded rows as zero probabilities.
 
+mod connectivity;
 mod dispatch;
 mod mask;
 mod plan;
@@ -45,6 +50,7 @@ use burn::{
     },
 };
 
+pub use connectivity::{AttentionConnectivity, MaskGeometry, valid_token_ordinals};
 use dispatch::{Operands, causal_exclusion, default_scale, grouped_mix, scaled_scores};
 pub(crate) use dispatch::{dispatch_attention, eager_probabilities, zero_excluded};
 pub use dispatch::{grouped_query_attention, repeat_key_value};
