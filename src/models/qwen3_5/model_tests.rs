@@ -454,3 +454,51 @@ fn qwen_implements_hooked_and_staged_model_traits() {
     assert_eq!(StagedModel::num_layers(&model), 4);
     assert_eq!(StagedModel::stack(&model), Stack::Decoder);
 }
+
+/// Linear-attention-only calls build no padding plane; full-attention calls share one.
+///
+/// Gated DeltaNet reads the token mask directly, so a range without a
+/// full-attention block must not pay for the `[batch, 1, S, S]` plane.
+#[test]
+fn position_tables_build_the_padding_plane_only_for_full_attention() {
+    let device = Default::default();
+    let config = tiny_config();
+    let rope = config.rope_config().unwrap();
+    let positions = Tensor::<TestBackend, 2, Int>::from_ints([[0, 1, 2], [0, 0, 1]], &device);
+    let mask = TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+        [[true, true, true], [false, true, true]].into(),
+        &device,
+    ));
+
+    let linear_only =
+        PositionTables::new(None, &positions, Some(&mask), 3, burn::tensor::DType::F32).unwrap();
+    assert!(linear_only.rotary.is_empty());
+    assert!(linear_only.padding.is_none());
+
+    let hybrid = PositionTables::new(
+        [rope, rope],
+        &positions,
+        Some(&mask),
+        3,
+        burn::tensor::DType::F32,
+    )
+    .unwrap();
+    assert_eq!(
+        hybrid.rotary.len(),
+        1,
+        "one table per distinct configuration"
+    );
+    let plane = hybrid
+        .padding
+        .expect("masked full attention needs the plane");
+    assert_eq!(plane.dims(), [2, 1, 3, 3]);
+    assert_eq!(
+        plane.into_data().to_vec::<bool>().unwrap()[9..12],
+        [true, true, true],
+        "the padded query row of the second sequence excludes every key"
+    );
+
+    let unmasked =
+        PositionTables::new([rope], &positions, None, 3, burn::tensor::DType::F32).unwrap();
+    assert!(unmasked.padding.is_none());
+}

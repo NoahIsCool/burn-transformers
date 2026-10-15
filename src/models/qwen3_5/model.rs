@@ -997,10 +997,15 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
 /// the activation dtype, and one `[batch, 1, sequence, sequence]` padding
 /// exclusion plane that each block expands to its head count without a copy.
 /// The values equal what each block computed for itself before.
+///
+/// Gated DeltaNet blocks read only the token mask, so a call (or staged
+/// range) without a full-attention block builds neither rotary tables nor
+/// the `O(batch * sequence^2)` plane.
 struct PositionTables<B: Backend> {
     /// Rotary tables `[batch, 1, sequence, rotary]` per distinct configuration.
     rotary: Vec<(RopeConfig, RotaryAngles<B>)>,
-    /// Padding exclusion plane (`true` = excluded), or `None` without a mask.
+    /// Padding exclusion plane (`true` = excluded); `None` without a mask or
+    /// without a full-attention block to read it.
     padding: Option<Tensor<B, 4, Bool>>,
 }
 
@@ -1022,8 +1027,14 @@ impl<B: Backend> PositionTables<B> {
             let angles = rotary_angles_from_frequencies(&frequencies, positions.clone())?;
             rotary.push((rope, angles.to_dtype(dtype)));
         }
-        let [batch, sequence] = positions.dims();
-        let padding = padding_attention_mask(token_mask, token_mask, batch, 1, sequence, sequence)?;
+        // `rotary` is non-empty exactly when a full-attention block will run,
+        // and only those blocks read the padding plane.
+        let padding = if rotary.is_empty() {
+            None
+        } else {
+            let [batch, sequence] = positions.dims();
+            padding_attention_mask(token_mask, token_mask, batch, 1, sequence, sequence)?
+        };
         Ok(Self { rotary, padding })
     }
 
