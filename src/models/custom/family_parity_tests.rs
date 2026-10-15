@@ -28,6 +28,7 @@ use crate::{
         AttentionOptions, CrossAttentionSpec, DecoderLayerSpec, DenseFeedForwardSpec, Seq2SeqSpec,
     },
     models::{
+        config::{RopeParameters, RopeType},
         deepseek_v2::{
             DeepseekScoringFunction, DeepseekTopKMethod, DeepseekV2Config, DeepseekV2ForCausalLm,
         },
@@ -205,9 +206,11 @@ fn pre_norm_block(
     }
 }
 
-/// Qwen3-MoE: per-head Q/K RMS norms, full-head RoPE, and renormalized top-k experts.
-#[test]
-fn qwen3_moe_block_matches_the_family() {
+/// Builds a one-block Qwen3-MoE model and its modular twin with the given RoPE scaling.
+///
+/// `rope` is the family's serialized RoPE metadata and `scaling` the spec
+/// policy that should translate to the same runtime frequencies.
+fn assert_qwen3_moe_parity(rope: Option<RopeParameters>, scaling: RopeScaling) {
     let device = Default::default();
     let config = Qwen3MoeConfig {
         vocab_size: 32,
@@ -225,6 +228,7 @@ fn qwen3_moe_block_matches_the_family() {
         num_experts: 4,
         num_experts_per_tok: 2,
         norm_topk_prob: true,
+        rope_parameters: rope,
         ..Default::default()
     };
     let norm = rms_with(config.rms_norm_eps);
@@ -244,7 +248,7 @@ fn qwen3_moe_block_matches_the_family() {
                 position: PositionEncodingSpec::Rope {
                     theta: 1_000_000.0,
                     rotary_dim: 4,
-                    scaling: RopeScaling::None,
+                    scaling,
                 },
             }),
             FeedForwardSpec::MixtureOfExperts(MixtureOfExpertsSpec {
@@ -291,6 +295,51 @@ fn qwen3_moe_block_matches_the_family() {
         ]),
     );
     assert_causal_parity(&family, &custom, &device);
+}
+
+/// Qwen3-MoE: per-head Q/K RMS norms, full-head RoPE, and renormalized top-k experts.
+#[test]
+fn qwen3_moe_block_matches_the_family() {
+    assert_qwen3_moe_parity(None, RopeScaling::None);
+}
+
+/// Linear, dynamic-NTK, and YaRN scaling translate to the family's RoPE frequencies.
+///
+/// The explicit-position inputs reach position 9, beyond the original context
+/// of 8, so the context-dependent dynamic-NTK base grows in both graphs.
+#[test]
+fn qwen3_moe_rope_scaling_matches_the_family() {
+    let parameters = |rope_type| RopeParameters {
+        rope_type,
+        factor: Some(2.0),
+        original_max_position_embeddings: Some(8),
+        attention_factor: (rope_type == RopeType::Yarn).then_some(1.25),
+        beta_fast: (rope_type == RopeType::Yarn).then_some(4.0),
+        beta_slow: (rope_type == RopeType::Yarn).then_some(1.0),
+        ..Default::default()
+    };
+    assert_qwen3_moe_parity(
+        Some(parameters(RopeType::Linear)),
+        RopeScaling::Linear { factor: 2.0 },
+    );
+    assert_qwen3_moe_parity(
+        Some(parameters(RopeType::Dynamic)),
+        RopeScaling::DynamicNtk {
+            factor: 2.0,
+            original_max_positions: 8,
+        },
+    );
+    assert_qwen3_moe_parity(
+        Some(parameters(RopeType::Yarn)),
+        RopeScaling::Yarn {
+            factor: 2.0,
+            original_max_positions: 8,
+            attention_factor: Some(1.25),
+            beta_slow: 1.0,
+            beta_fast: 4.0,
+            truncate: true,
+        },
+    );
 }
 
 /// DeepSeek-V2: latent attention with a decoupled rotary sub-head, then dense and expert MLPs.

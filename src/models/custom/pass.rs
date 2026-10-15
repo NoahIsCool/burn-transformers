@@ -257,7 +257,7 @@ impl<'a, B: Backend> StackPass<'a, B> {
     }
 
     /// Returns the explicit self-attention policy of `layer`, if any.
-    pub(super) fn self_policy(&self, layer: Layer) -> Option<AttentionPolicy<B>> {
+    fn self_policy(&self, layer: Layer) -> Option<AttentionPolicy<B>> {
         match &self.overrides {
             Overrides::Structural => None,
             Overrides::SelfAttention(policy) => Some(policy.clone()),

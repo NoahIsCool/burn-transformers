@@ -20,9 +20,11 @@
 //! # Activation points
 //!
 //! A block emits, in order: `residual_pre`, `attention_input`, the mixer's
-//! attention points, `attention_output`, the cross-attention input, points,
-//! and output (decoders), `mlp_input`, the dense MLP points, `mlp_output`, and
-//! `residual_post`. Attention-only blocks omit every MLP point.
+//! attention points, `attention_output`; for seq2seq decoders
+//! `cross_attention_input`, the cross-attention points, and
+//! `cross_attention_output`; then `mlp_input`, the dense MLP points,
+//! `mlp_output`, and `residual_post`. Attention-only blocks omit every MLP
+//! point.
 
 use burn::{
     module::Module,
