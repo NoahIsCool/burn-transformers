@@ -102,6 +102,75 @@ fn automatic_llama_exposes_points_and_preserves_identity_outputs() {
     assert_eq!(hooks.get(&captured).unwrap().dims(), [2, 1, 24]);
 }
 
+/// gpt-oss registry hooks expose the router points, preserve identity outputs, and apply real edits.
+///
+/// Zeroing one layer's router weights removes that block's routed experts
+/// from the residual stream, so the logits must move: the edit reaches the
+/// family's hooked pass rather than an unsupported or ordinary forward.
+#[test]
+fn automatic_gpt_oss_exposes_router_points_and_applies_edits() {
+    use crate::models::{
+        config::RopeParameters,
+        gpt_oss::{GptOssConfig, GptOssForCausalLm},
+        qwen3_moe::{router_logits_point, router_weights_point},
+    };
+    let device = Default::default();
+    let config = GptOssConfig {
+        vocab_size: 32,
+        hidden_size: 16,
+        intermediate_size: 12,
+        num_hidden_layers: 2,
+        num_attention_heads: 4,
+        num_key_value_heads: 2,
+        head_dim: 4,
+        num_local_experts: 4,
+        num_experts_per_tok: 2,
+        sliding_window: Some(2),
+        layer_types: GptOssConfig::default_layer_types(2),
+        max_position_embeddings: 32,
+        rope_parameters: RopeParameters {
+            factor: Some(4.0),
+            original_max_position_embeddings: Some(8),
+            ..GptOssConfig::default_rope_parameters()
+        },
+        ..GptOssConfig::default()
+    };
+    let model =
+        AutoCausalLm::from(GptOssForCausalLm::<TestBackend>::init(config, &device).unwrap());
+    let layer = Layer::decoder(1);
+    let points = model.activation_points().unwrap();
+    for point in [
+        router_logits_point(layer).info(),
+        router_weights_point(layer).info(),
+        layer.mlp_output().info(),
+    ] {
+        assert!(points.contains(&point), "missing {}", point.name);
+    }
+    let input = registry_tokens([[1, 2, 3], [4, 5, 6]], &device);
+    let options = ForwardOptions::default();
+    let expected = model.forward(input.clone(), &options).unwrap();
+
+    let mut hooks = Hooks::new();
+    let logits = hooks.capture(router_logits_point(layer));
+    hooks.edit(router_weights_point(layer), |tensor| tensor);
+    let identity = model
+        .forward_with_hooks(input.clone(), &options, &mut hooks)
+        .unwrap();
+    assert_registry_logits(identity.logits, expected.logits.clone());
+    assert_eq!(hooks.get(&logits).unwrap().dims(), [2, 3, 4]);
+
+    let mut hooks = Hooks::new();
+    hooks.edit(router_weights_point(layer), |tensor| tensor.zeros_like());
+    let edited = model
+        .forward_with_hooks(input, &options, &mut hooks)
+        .unwrap();
+    let moved = (edited.logits - expected.logits).abs().max().into_scalar();
+    assert!(
+        moved > 1e-4,
+        "zeroed router weights left the logits unchanged"
+    );
+}
+
 /// Unsupported MoE hooks return family-specific capability errors and clear captures before any callback.
 #[test]
 fn unsupported_automatic_hooks_fail_before_callbacks_and_clear_stale_captures() {
