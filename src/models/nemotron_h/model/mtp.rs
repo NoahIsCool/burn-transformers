@@ -47,6 +47,7 @@ use super::{
     INPUT_NAMES, NemotronHDecodeState, NemotronHForCausalLm, NemotronHNextTokenHead,
     batch::CompactBatch,
     decode::{KV_GROUP, Retain, StatefulPhase, prepare_stateful_input},
+    plan::active_window,
 };
 use crate::models::shared::validate_token_values;
 
@@ -528,10 +529,7 @@ fn mtp_attention<B: Backend>(
     projection.key = segment.keys().clone();
     projection.value = segment.masked_values();
     // A window wider than the whole history can exclude nothing.
-    let window = head
-        .sliding_window
-        .filter(|&window| window < end)
-        .and_then(NonZeroUsize::new);
+    let window = active_window(head.sliding_window, end).and_then(NonZeroUsize::new);
     let Some(window) = window else {
         return head.attention.attend(projection, None, None, true);
     };

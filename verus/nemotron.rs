@@ -10,7 +10,12 @@
 //! compact slot (padded slots repeat a row's last readable position, so no
 //! query of a row with history loses every key), the reference Mamba-2 path
 //! choice, the transactional recurrent-staging policy, the shifted MTP cursor
-//! after a truncation, and the one-pass verification length. The planning
+//! after a truncation (per row and for a whole batch), the one-pass
+//! verification length, the hybrid schedule's cache slots (each kind's
+//! blocks are numbered exactly `0..count` in schedule order, so attention
+//! and Mamba-2 blocks address distinct allocated layers of their own caches),
+//! the sliding-window activity test, uniform-history detection, the
+//! context-limit check, and the Mamba-2 convolution width. The planning
 //! file reuses the shared strictly-increasing check, so the shared planning
 //! module is included at its crate path. See `verus/README.md` for the
 //! method, toolchain, and command.

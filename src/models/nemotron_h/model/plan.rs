@@ -42,6 +42,18 @@
 //! keeps the shifted MTP cursor at most one position behind the target, and
 //! [`verification_tokens`] sizes the one-pass target verification of a draft.
 //!
+//! # Hybrid caches and call bookkeeping
+//!
+//! Attention and Mamba-2 blocks occupy separate compact caches although the
+//! schedule interleaves them: [`plan_cache_slots`] numbers each kind's blocks
+//! `0, 1, …` in schedule order, and the same plan sizes both caches.
+//! [`longest_end`] and [`active_window`] decide whether a sliding window can
+//! exclude any key of a call, [`all_equal`] detects rows of equal history
+//! (which need no position mask), [`exceeds_limit`] bounds every appended
+//! length by the context, [`mtp_lengths_after_truncate`] maps a truncation to
+//! every row's MTP cursor, and [`convolution_channels`] sizes the recurrent
+//! convolution state.
+//!
 //! # Verified planning
 //!
 //! Every function here is dependency-free integer logic, checked in place by
@@ -54,8 +66,11 @@
 //! padded slots. A plan is refused exactly for malformed columns or
 //! unrepresentable extents. They also prove every slot's query position (a
 //! query never lies beyond its row's last readable key), the policies' exact
-//! decision rules, and the MTP cursor invariant. Tensor programs driven by
-//! the plans remain covered by Rust tests.
+//! decision rules, the MTP cursor invariant, that each cache kind's slots
+//! are exactly `0..count` in schedule order (every block addresses a
+//! distinct allocated layer and every layer is used), and the exact results
+//! of the call bookkeeping above. Tensor programs driven by the plans remain
+//! covered by Rust tests.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -181,6 +196,85 @@ pub open spec fn slot_position_spec(baseline: int, count: int, slot: int) -> int
         baseline + count - 1
     } else {
         0
+    }
+}
+
+/// Blocks of `kind` among the first `n` blocks of a schedule.
+pub(crate) open spec fn kind_count(kinds: Seq<CacheKind>, n: int, kind: CacheKind) -> int
+    decreases n,
+{
+    if n <= 0 {
+        0
+    } else {
+        kind_count(kinds, n - 1, kind) + if kinds[n - 1] == kind { 1int } else { 0int }
+    }
+}
+
+/// Counting one more block adds one exactly when it has the counted kind.
+proof fn lemma_kind_count_step(kinds: Seq<CacheKind>, n: int, kind: CacheKind)
+    requires
+        0 <= n,
+    ensures
+        kind_count(kinds, n + 1, kind)
+            == kind_count(kinds, n, kind) + if kinds[n] == kind { 1int } else { 0int },
+{
+}
+
+/// Kind counts never decrease along the schedule.
+proof fn lemma_kind_count_monotone(kinds: Seq<CacheKind>, n: int, more: int, kind: CacheKind)
+    requires
+        0 <= n <= more,
+    ensures
+        kind_count(kinds, n, kind) <= kind_count(kinds, more, kind),
+    decreases more - n,
+{
+    if n < more {
+        lemma_kind_count_monotone(kinds, n, more - 1, kind);
+    }
+}
+
+/// Every count below `kind_count(n)` is the count before some block of `kind`.
+proof fn lemma_kind_count_covers(kinds: Seq<CacheKind>, n: int, kind: CacheKind, s: int)
+    requires
+        0 <= s < kind_count(kinds, n, kind),
+    ensures
+        exists|i: int| 0 <= i < n && kinds[i] == kind
+            && #[trigger] kind_count(kinds, i, kind) == s,
+    decreases n,
+{
+    if n > 0 {
+        if s < kind_count(kinds, n - 1, kind) {
+            lemma_kind_count_covers(kinds, n - 1, kind, s);
+            let i = choose|i: int| 0 <= i < n - 1 && kinds[i] == kind
+                && #[trigger] kind_count(kinds, i, kind) == s;
+            assert(kind_count(kinds, i, kind) == s);
+        } else {
+            assert(kind_count(kinds, n - 1, kind) == s);
+        }
+    }
+}
+
+/// Some block of `kind` has slot `s`.
+pub(crate) open spec fn slot_used(kinds: Seq<CacheKind>, slots: Seq<usize>, kind: CacheKind, s: int) -> bool {
+    exists|i: int| 0 <= i < kinds.len() && kinds[i] == kind && #[trigger] slots[i] == s
+}
+
+/// `b + c`, saturated at `usize::MAX` as `usize::saturating_add` does.
+pub open spec fn saturated_end(baseline: int, count: int) -> int {
+    if baseline + count > usize::MAX {
+        usize::MAX as int
+    } else {
+        baseline + count
+    }
+}
+
+/// The shifted MTP cursor [`mtp_length_after_truncate`] keeps: `min(mtp, max(target, 1) - 1)`.
+pub open spec fn mtp_after_truncate(target: int, mtp: int) -> int {
+    let limit = if target > 0 { target - 1 } else { 0 };
+    if mtp < limit {
+        mtp
+    } else {
+        limit
     }
 }
 
@@ -939,6 +1033,338 @@ pub(crate) fn transactional_mamba(
     Ok(TransactionalMamba::Snapshots)
 }
 
+/// Which compact cache a block reads and writes.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CacheKind {
+    /// An attention block: one layer of the native KV cache.
+    Attention,
+    /// A Mamba-2 block: one layer of the recurrent and convolution cache.
+    Recurrent,
+    /// A dense or MoE block, which keeps no state.
+    Stateless,
+}
+
+/// Compact cache slot of every block of a hybrid schedule.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verifier::allow(autoderive_clone_without_spec))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CacheSlots {
+    /// Layer of block `i` inside its cache (zero for stateless blocks).
+    pub(crate) slots: Vec<usize>,
+    /// Attention blocks, the layer count of the KV cache.
+    pub(crate) attention: usize,
+    /// Mamba-2 blocks, the layer count of the recurrent cache.
+    pub(crate) recurrent: usize,
+}
+
+/// Numbers the attention and Mamba-2 blocks of an interleaved schedule separately.
+///
+/// Attention and Mamba-2 blocks occupy separate compact cache index spaces:
+/// block `i` of a stateful kind gets the number of earlier blocks of the
+/// same kind. The proof establishes that each kind's slots are exactly
+/// `0..count` in schedule order, so every block addresses a distinct
+/// allocated layer of its cache and every allocated layer is used.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(plan =>
+    ensures
+        plan.slots.len() == kinds.len(),
+        plan.attention == kind_count(kinds@, kinds.len() as int, CacheKind::Attention),
+        plan.recurrent == kind_count(kinds@, kinds.len() as int, CacheKind::Recurrent),
+        forall|i: int| 0 <= i < kinds.len() ==> #[trigger] plan.slots@[i] == (
+            if kinds@[i] == CacheKind::Stateless { 0 } else { kind_count(kinds@, i, kinds@[i]) }),
+        forall|i: int| 0 <= i < kinds.len() && kinds@[i] == CacheKind::Attention
+            ==> #[trigger] plan.slots@[i] < plan.attention,
+        forall|i: int| 0 <= i < kinds.len() && kinds@[i] == CacheKind::Recurrent
+            ==> #[trigger] plan.slots@[i] < plan.recurrent,
+        forall|i: int, j: int| 0 <= i < j < kinds.len() && kinds@[i] == kinds@[j]
+            && kinds@[i] != CacheKind::Stateless
+            ==> #[trigger] plan.slots@[i] < #[trigger] plan.slots@[j],
+        forall|s: int| 0 <= s < plan.attention
+            ==> #[trigger] slot_used(kinds@, plan.slots@, CacheKind::Attention, s),
+        forall|s: int| 0 <= s < plan.recurrent
+            ==> #[trigger] slot_used(kinds@, plan.slots@, CacheKind::Recurrent, s),
+))]
+pub(crate) fn plan_cache_slots(kinds: &[CacheKind]) -> CacheSlots {
+    let mut slots: Vec<usize> = Vec::with_capacity(kinds.len());
+    let mut attention: usize = 0;
+    let mut recurrent: usize = 0;
+    let mut block: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            block <= kinds.len(),
+            slots.len() == block,
+            attention == kind_count(kinds@, block as int, CacheKind::Attention),
+            recurrent == kind_count(kinds@, block as int, CacheKind::Recurrent),
+            attention + recurrent <= block,
+            forall|i: int| 0 <= i < block ==> #[trigger] slots@[i] == (
+                if kinds@[i] == CacheKind::Stateless { 0 } else { kind_count(kinds@, i, kinds@[i]) }),
+        decreases kinds.len() - block,
+    ))]
+    while block < kinds.len() {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_kind_count_step(kinds@, block as int, CacheKind::Attention);
+            lemma_kind_count_step(kinds@, block as int, CacheKind::Recurrent);
+        }
+        match kinds[block] {
+            CacheKind::Attention => {
+                slots.push(attention);
+                attention += 1;
+            }
+            CacheKind::Recurrent => {
+                slots.push(recurrent);
+                recurrent += 1;
+            }
+            CacheKind::Stateless => slots.push(0),
+        }
+        block += 1;
+    }
+    // Same-kind slots strictly increase, stay below the kind's count, and cover it.
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        let n = kinds.len() as int;
+        assert forall|i: int| 0 <= i < n && kinds@[i] != CacheKind::Stateless
+            implies #[trigger] slots@[i] < kind_count(kinds@, n, kinds@[i]) by {
+            lemma_kind_count_step(kinds@, i, kinds@[i]);
+            lemma_kind_count_monotone(kinds@, i + 1, n, kinds@[i]);
+        }
+        assert forall|i: int, j: int| 0 <= i < j < n && kinds@[i] == kinds@[j]
+            && kinds@[i] != CacheKind::Stateless
+            implies #[trigger] slots@[i] < #[trigger] slots@[j] by {
+            lemma_kind_count_step(kinds@, i, kinds@[i]);
+            lemma_kind_count_monotone(kinds@, i + 1, j, kinds@[i]);
+        }
+        assert forall|s: int| 0 <= s < attention
+            implies #[trigger] slot_used(kinds@, slots@, CacheKind::Attention, s) by {
+            lemma_kind_count_covers(kinds@, n, CacheKind::Attention, s);
+            let i = choose|i: int| 0 <= i < n && kinds@[i] == CacheKind::Attention
+                && #[trigger] kind_count(kinds@, i, CacheKind::Attention) == s;
+            assert(slots@[i] == s);
+        }
+        assert forall|s: int| 0 <= s < recurrent
+            implies #[trigger] slot_used(kinds@, slots@, CacheKind::Recurrent, s) by {
+            lemma_kind_count_covers(kinds@, n, CacheKind::Recurrent, s);
+            let i = choose|i: int| 0 <= i < n && kinds@[i] == CacheKind::Recurrent
+                && #[trigger] kind_count(kinds@, i, CacheKind::Recurrent) == s;
+            assert(slots@[i] == s);
+        }
+    }
+    CacheSlots {
+        slots,
+        attention,
+        recurrent,
+    }
+}
+
+/// Largest row end `W_b + n_b` of a call, or zero without rows.
+///
+/// Rows are paired as `baselines.iter().zip(counts)` pairs them. Callers have
+/// already proved every end representable; an unrepresentable end saturates
+/// at `usize::MAX`, which the proof covers but no caller reaches.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(longest =>
+    ensures
+        ({
+            let rows = if baselines.len() < counts.len() { baselines.len() as int } else { counts.len() as int };
+            &&& forall|b: int| 0 <= b < rows
+                ==> #[trigger] saturated_end(baselines@[b] as int, counts@[b] as int) <= longest
+            &&& rows > 0 ==> exists|b: int| 0 <= b < rows
+                && #[trigger] saturated_end(baselines@[b] as int, counts@[b] as int) == longest
+            &&& rows == 0 ==> longest == 0
+        }),
+))]
+pub(crate) fn longest_end(baselines: &[usize], counts: &[usize]) -> usize {
+    let rows = if baselines.len() < counts.len() {
+        baselines.len()
+    } else {
+        counts.len()
+    };
+    let mut longest: usize = 0;
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            rows <= baselines.len(),
+            rows <= counts.len(),
+            row <= rows,
+            forall|b: int| 0 <= b < row
+                ==> #[trigger] saturated_end(baselines@[b] as int, counts@[b] as int) <= longest,
+            row > 0 ==> exists|b: int| 0 <= b < row
+                && #[trigger] saturated_end(baselines@[b] as int, counts@[b] as int) == longest,
+            row == 0 ==> longest == 0,
+        decreases rows - row,
+    ))]
+    while row < rows {
+        let end = baselines[row].saturating_add(counts[row]);
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(end == saturated_end(baselines@[row as int] as int, counts@[row as int] as int));
+        }
+        if row == 0 || end > longest {
+            longest = end;
+        }
+        row += 1;
+    }
+    longest
+}
+
+/// The sliding window that can exclude a key when every history ends by `end`.
+///
+/// A window `w` excludes some key only when `w < end`; a wider window, a
+/// zero window, and no window exclude nothing, so the result is `None`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(active =>
+    ensures
+        match active {
+            Some(width) => window == Some(width) && 0 < width < end,
+            None => match window {
+                Some(width) => width == 0 || width >= end,
+                None => true,
+            },
+        },
+))]
+pub(crate) const fn active_window(window: Option<usize>, end: usize) -> Option<usize> {
+    match window {
+        Some(width) if width > 0 && width < end => Some(width),
+        _ => None,
+    }
+}
+
+/// Whether every entry of `values` is equal.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(equal =>
+    ensures
+        equal == forall|i: int, j: int| 0 <= i < values.len() && 0 <= j < values.len()
+            ==> #[trigger] values@[i] == #[trigger] values@[j],
+))]
+pub(crate) fn all_equal(values: &[usize]) -> bool {
+    let mut index: usize = 1;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            1 <= index,
+            values.len() > 0 ==> index <= values.len(),
+            values.len() > 0 ==> forall|i: int| 0 <= i < index ==> #[trigger] values@[i] == values@[0],
+        decreases values.len() - index,
+    ))]
+    while index < values.len() {
+        if values[index] != values[index - 1] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Whether some row's appended end `L_b + n_b` exceeds `limit`.
+///
+/// Rows are paired as `lengths.iter().zip(counts)` pairs them. The sum is
+/// compared without forming it, so the answer is exact even when it would
+/// not fit `usize`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(exceeds =>
+    ensures
+        ({
+            let rows = if lengths.len() < counts.len() { lengths.len() as int } else { counts.len() as int };
+            exceeds == exists|b: int| 0 <= b < rows && #[trigger] lengths@[b] + counts@[b] > limit
+        }),
+))]
+pub(crate) fn exceeds_limit(lengths: &[usize], counts: &[usize], limit: usize) -> bool {
+    let rows = if lengths.len() < counts.len() {
+        lengths.len()
+    } else {
+        counts.len()
+    };
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            rows <= lengths.len(),
+            rows <= counts.len(),
+            row <= rows,
+            forall|b: int| 0 <= b < row ==> #[trigger] lengths@[b] + counts@[b] <= limit,
+        decreases rows - row,
+    ))]
+    while row < rows {
+        if lengths[row] > limit || counts[row] > limit - lengths[row] {
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert(lengths@[row as int] + counts@[row as int] > limit);
+            }
+            return true;
+        }
+        row += 1;
+    }
+    false
+}
+
+/// Shifted MTP cursors after truncating every target row to `targets[b]`.
+///
+/// Rows are paired as `targets.iter().zip(current)` pairs them; row `b`
+/// becomes [`mtp_length_after_truncate`]`(targets[b], current[b])`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(lengths =>
+    ensures
+        ({
+            let rows = if targets.len() < current.len() { targets.len() as int } else { current.len() as int };
+            &&& lengths.len() == rows
+            &&& forall|b: int| 0 <= b < rows ==> #[trigger] lengths@[b]
+                == mtp_after_truncate(targets@[b] as int, current@[b] as int)
+        }),
+))]
+pub(crate) fn mtp_lengths_after_truncate(targets: &[usize], current: &[usize]) -> Vec<usize> {
+    let rows = if targets.len() < current.len() {
+        targets.len()
+    } else {
+        current.len()
+    };
+    let mut lengths: Vec<usize> = Vec::with_capacity(rows);
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            rows <= targets.len(),
+            rows <= current.len(),
+            row <= rows,
+            lengths.len() == row,
+            forall|b: int| 0 <= b < row ==> #[trigger] lengths@[b]
+                == mtp_after_truncate(targets@[b] as int, current@[b] as int),
+        decreases rows - row,
+    ))]
+    while row < rows {
+        lengths.push(mtp_length_after_truncate(targets[row], current[row]));
+        row += 1;
+    }
+    lengths
+}
+
+/// Convolution channels `H d + 2 G N` of a Mamba-2 block, or `None` when unrepresentable.
+///
+/// The causal convolution runs over the concatenated `x` (`H d` channels for
+/// `H` heads of width `d`) and the `B` and `C` projections (`G N` channels
+/// each for `G` groups of state size `N`).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(channels =>
+    ensures
+        match channels {
+            Some(channels) => channels == heads * head_dim + 2 * (groups * state),
+            None => heads * head_dim + 2 * (groups * state) > usize::MAX,
+        },
+))]
+pub(crate) fn convolution_channels(
+    heads: usize,
+    head_dim: usize,
+    groups: usize,
+    state: usize,
+) -> Option<usize> {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert(heads * head_dim >= 0) by (nonlinear_arith);
+        assert(groups * state >= 0) by (nonlinear_arith);
+    }
+    let intermediate = heads.checked_mul(head_dim)?;
+    let grouped = groups.checked_mul(state)?;
+    let projections = grouped.checked_mul(2)?;
+    intermediate.checked_add(projections)
+}
+
 /// Maps a target truncation to the shifted MTP cursor.
 ///
 /// MTP position `i` consumes `(x_{i+1}, h_i)`, so it can never be ahead of
@@ -947,6 +1373,7 @@ pub(crate) fn transactional_mamba(
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(length =>
     ensures
+        length == mtp_after_truncate(target as int, mtp as int),
         length <= mtp,
         length + 1 <= if target > 0 { target as int } else { 1 },
         length == mtp || length + 1 == target || (target == 0 && length == 0),

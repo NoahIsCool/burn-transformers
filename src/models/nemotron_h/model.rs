@@ -739,6 +739,18 @@ impl<B: Backend> NemotronHModel<B> {
         })
     }
 
+    /// Lists which compact cache every block uses, in schedule order.
+    pub(super) fn cache_kinds(&self) -> Vec<plan::CacheKind> {
+        self.layers
+            .iter()
+            .map(|layer| match layer.block_type {
+                NemotronHBlockType::FullAttention => plan::CacheKind::Attention,
+                NemotronHBlockType::LinearAttention => plan::CacheKind::Recurrent,
+                NemotronHBlockType::Mlp | NemotronHBlockType::Moe => plan::CacheKind::Stateless,
+            })
+            .collect()
+    }
+
     /// Counts blocks of one kind; cache groups index attention and Mamba blocks separately.
     pub(super) fn count_blocks(&self, kind: NemotronHBlockType) -> usize {
         self.layers

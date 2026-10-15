@@ -206,7 +206,143 @@ fn verification_skips_a_terminal_draft() {
     assert_eq!(verification_tokens(usize::MAX, false), None);
 }
 
+/// Attention and Mamba-2 blocks are numbered separately in schedule order.
+#[test]
+fn cache_slots_number_each_kind_separately() {
+    use CacheKind::{Attention, Recurrent, Stateless};
+    let plan = plan_cache_slots(&[
+        Recurrent, Stateless, Attention, Recurrent, Stateless, Attention, Recurrent,
+    ]);
+    assert_eq!(plan.slots, [0, 0, 0, 1, 0, 1, 2]);
+    assert_eq!(plan.attention, 2);
+    assert_eq!(plan.recurrent, 3);
+    let empty = plan_cache_slots(&[]);
+    assert!(empty.slots.is_empty());
+    assert_eq!((empty.attention, empty.recurrent), (0, 0));
+}
+
+/// A window applies only when it is nonzero and shorter than the longest history.
+#[test]
+fn active_window_needs_a_history_beyond_it() {
+    assert_eq!(longest_end(&[3, 7, 1], &[2, 0, 9]), 10);
+    assert_eq!(longest_end(&[3, 7, 1], &[2]), 5);
+    assert_eq!(longest_end(&[], &[4]), 0);
+    assert_eq!(longest_end(&[usize::MAX], &[1]), usize::MAX);
+    assert_eq!(active_window(Some(4), 5), Some(4));
+    assert_eq!(active_window(Some(5), 5), None);
+    assert_eq!(active_window(Some(0), 5), None);
+    assert_eq!(active_window(None, 5), None);
+}
+
+/// Uniform baselines, context limits, MTP cursors, and convolution widths.
+#[test]
+fn decode_bookkeeping_helpers() {
+    assert!(all_equal(&[]));
+    assert!(all_equal(&[4]));
+    assert!(all_equal(&[4, 4, 4]));
+    assert!(!all_equal(&[4, 4, 5]));
+    assert!(exceeds_limit(&[3, 9], &[1, 2], 10));
+    assert!(!exceeds_limit(&[3, 8], &[1, 2], 10));
+    assert!(!exceeds_limit(&[3, 9], &[1], 10));
+    assert!(exceeds_limit(&[usize::MAX], &[1], usize::MAX));
+    assert!(exceeds_limit(&[11], &[0], 10));
+    assert_eq!(
+        mtp_lengths_after_truncate(&[5, 3, 0], &[4, 4, 4]),
+        [4, 2, 0]
+    );
+    assert_eq!(mtp_lengths_after_truncate(&[5, 3], &[4]), [4]);
+    assert_eq!(
+        convolution_channels(64, 64, 8, 128),
+        Some(64 * 64 + 2 * 8 * 128)
+    );
+    assert_eq!(convolution_channels(usize::MAX, 2, 0, 0), None);
+    assert_eq!(convolution_channels(0, 0, usize::MAX, 2), None);
+    assert_eq!(convolution_channels(1, usize::MAX, 0, 0), Some(usize::MAX));
+    assert_eq!(convolution_channels(1, usize::MAX, 1, 1), None);
+}
+
 proptest! {
+    /// Cache slots equal the counters the cached pass used to keep.
+    #[test]
+    fn cache_slots_match_running_counters(kinds in proptest::collection::vec(0_u8..3, 0..12)) {
+        let kinds = kinds
+            .into_iter()
+            .map(|kind| match kind {
+                0 => CacheKind::Attention,
+                1 => CacheKind::Recurrent,
+                _ => CacheKind::Stateless,
+            })
+            .collect::<Vec<_>>();
+        let plan = plan_cache_slots(&kinds);
+        let (mut attention, mut recurrent) = (0, 0);
+        for (&kind, &slot) in kinds.iter().zip(&plan.slots) {
+            match kind {
+                CacheKind::Attention => {
+                    prop_assert_eq!(slot, attention);
+                    attention += 1;
+                }
+                CacheKind::Recurrent => {
+                    prop_assert_eq!(slot, recurrent);
+                    recurrent += 1;
+                }
+                CacheKind::Stateless => prop_assert_eq!(slot, 0),
+            }
+        }
+        prop_assert_eq!((plan.attention, plan.recurrent), (attention, recurrent));
+    }
+
+    /// The decode helpers equal the iterator code they replaced.
+    #[test]
+    fn decode_helpers_match_iterator_references(
+        baselines in proptest::collection::vec(0_usize..20, 0..5),
+        counts in proptest::collection::vec(0_usize..20, 0..5),
+        window in proptest::option::of(0_usize..40),
+        limit in 0_usize..40,
+    ) {
+        let longest = baselines
+            .iter()
+            .zip(&counts)
+            .map(|(&baseline, &count)| baseline + count)
+            .max()
+            .unwrap_or(0);
+        prop_assert_eq!(longest_end(&baselines, &counts), longest);
+        prop_assert_eq!(
+            active_window(window, longest),
+            window.filter(|&window| window < longest).filter(|&window| window > 0)
+        );
+        prop_assert_eq!(
+            all_equal(&baselines),
+            baselines.windows(2).all(|pair| pair[0] == pair[1])
+        );
+        prop_assert_eq!(
+            exceeds_limit(&baselines, &counts, limit),
+            baselines.iter().zip(&counts).any(|(&length, &count)| length + count > limit)
+        );
+        let expected = baselines
+            .iter()
+            .zip(&counts)
+            .map(|(&target, &mtp)| mtp_length_after_truncate(target, mtp))
+            .collect::<Vec<_>>();
+        prop_assert_eq!(mtp_lengths_after_truncate(&baselines, &counts), expected);
+    }
+
+    /// Convolution widths equal the former checked chain on arbitrary extents.
+    #[test]
+    fn convolution_channels_match_the_checked_chain(
+        heads in prop_oneof![0_usize..9, Just(usize::MAX / 2), Just(usize::MAX)],
+        head_dim in prop_oneof![0_usize..9, Just(usize::MAX / 3), Just(usize::MAX)],
+        groups in prop_oneof![0_usize..9, Just(usize::MAX / 4)],
+        state in prop_oneof![0_usize..9, Just(usize::MAX / 2)],
+    ) {
+        let expected = heads.checked_mul(head_dim).and_then(|intermediate| {
+            groups
+                .checked_mul(state)
+                .and_then(|state| state.checked_mul(2))
+                .and_then(|state| intermediate.checked_add(state))
+        });
+        prop_assert_eq!(convolution_channels(heads, head_dim, groups, state), expected);
+    }
+
     /// Every random mask produces maps satisfying their defining equations.
     #[test]
     fn random_masks_plan_consistently(

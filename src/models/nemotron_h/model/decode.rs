@@ -79,7 +79,8 @@ use crate::{
 use super::batch::CompactBatch;
 use super::mamba2::{NemotronMamba2, NemotronMamba2State};
 use super::plan::{
-    MambaStep, TransactionalMamba, mamba_step, mtp_length_after_truncate, transactional_mamba,
+    MambaStep, TransactionalMamba, active_window, all_equal, convolution_channels, exceeds_limit,
+    longest_end, mamba_step, mtp_lengths_after_truncate, plan_cache_slots, transactional_mamba,
 };
 use super::{
     BlockMixer, INPUT_NAMES, NemotronHBlockType, NemotronHFlatMoeOutput, NemotronHForCausalLm,
@@ -367,11 +368,7 @@ impl<B: Backend> ArchitectureDecodeState<B> for NemotronHDecodeState<B> {
                 .into(),
             );
         }
-        let mtp_lengths = lengths
-            .iter()
-            .zip(current_mtp)
-            .map(|(&target, &mtp)| mtp_length_after_truncate(target, mtp))
-            .collect::<Vec<_>>();
+        let mtp_lengths = mtp_lengths_after_truncate(lengths, current_mtp);
         self.tensors
             .truncate_prefixes(lengths, &mtp_lengths)
             .map_err(Into::into)
@@ -551,8 +548,12 @@ impl<B: Backend> NemotronHForCausalLm<B> {
                 ),
             ));
         }
-        let end = state.tensors.working_lengths()[0].checked_add(tokens.len());
-        if end.is_none_or(|end| end > self.config().max_position_embeddings) {
+        let start = state.tensors.working_lengths()[0];
+        if exceeds_limit(
+            &[start],
+            &[tokens.len()],
+            self.config().max_position_embeddings,
+        ) {
             return Err(Error::configuration(
                 "nemotron_h.position",
                 "cached length exceeds max_position_embeddings",
@@ -597,25 +598,19 @@ impl<B: Backend> NemotronHForCausalLm<B> {
             None
         };
         let mut step = state.tensors.step(&counts)?;
-        let has_attention = self.model.count_blocks(NemotronHBlockType::FullAttention) > 0;
+        // Attention and Mamba-2 blocks address separate compact caches.
+        let caches = plan_cache_slots(&self.model.cache_kinds());
+        let has_attention = caches.attention > 0;
         let kv_plan = has_attention
             .then(|| state.tensors.kv_read_plan_through(&step, KV_GROUP))
             .transpose()?;
-        let longest = baselines
-            .iter()
-            .zip(&counts)
-            .map(|(&baseline, &count)| baseline + count)
-            .max()
-            .unwrap_or(0);
         // A window wider than every row's history can exclude nothing.
-        let window = self
-            .config()
-            .sliding_window
-            .filter(|&window| window < longest)
-            .and_then(NonZeroUsize::new);
-        let uniform = batch.plan().is_dense()
-            && baselines.windows(2).all(|pair| pair[0] == pair[1])
-            && window.is_none();
+        let window = active_window(
+            self.config().sliding_window,
+            longest_end(&baselines, &counts),
+        )
+        .and_then(NonZeroUsize::new);
+        let uniform = batch.plan().is_dense() && all_equal(&baselines) && window.is_none();
         let query_positions = (has_attention && !uniform)
             .then(|| batch.query_positions(&baselines))
             .transpose()?;
@@ -649,29 +644,15 @@ impl<B: Backend> NemotronHForCausalLm<B> {
             hidden_states.push(hidden.clone());
         }
         let mut routers = Vec::new();
-        let mut attention_index = 0;
-        let mut mamba_index = 0;
-        for layer in &self.model.layers {
+        for (layer, &slot) in self.model.layers.iter().zip(&caches.slots) {
             let residual = hidden.clone();
             let normalized = layer.norm.forward(hidden);
             let mixed = match layer.mixer()? {
                 BlockMixer::Mamba2(mixer) => {
-                    let mixed =
-                        cached_mamba(mixer, normalized, mamba_index, state, &mut step, &context)?;
-                    mamba_index += 1;
-                    mixed
+                    cached_mamba(mixer, normalized, slot, state, &mut step, &context)?
                 }
                 BlockMixer::Attention(attention) => {
-                    let mixed = cached_attention(
-                        attention,
-                        normalized,
-                        attention_index,
-                        state,
-                        &mut step,
-                        &context,
-                    )?;
-                    attention_index += 1;
-                    mixed
+                    cached_attention(attention, normalized, slot, state, &mut step, &context)?
                 }
                 BlockMixer::Mlp(mlp) => mlp.forward(normalized)?,
                 BlockMixer::Moe(moe) => {
@@ -961,14 +942,11 @@ pub(super) fn prepare_stateful_input<B: Backend>(
             empty_rows: phase.empty_rows(),
         },
     )?;
-    // The append plan already proved `length + count` representable.
-    let exceeds_context = state
-        .tensors
-        .working_lengths()
-        .iter()
-        .zip(&rows.token_counts)
-        .any(|(&length, &count)| length + count > model.config().max_position_embeddings);
-    if exceeds_context {
+    if exceeds_limit(
+        state.tensors.working_lengths(),
+        &rows.token_counts,
+        model.config().max_position_embeddings,
+    ) {
         return Err(Error::configuration(
             "nemotron_h.position",
             "cached length exceeds max_position_embeddings",
@@ -990,10 +968,10 @@ fn cache_specs<B: Backend>(
     Option<RecurrentStateSpec>,
     Option<NativeKvCacheSpec>,
 )> {
-    let attention_layers = model.model.count_blocks(NemotronHBlockType::FullAttention);
-    let mamba_layers = model
-        .model
-        .count_blocks(NemotronHBlockType::LinearAttention);
+    // The same plan numbers the blocks inside each cache (see `cached_pass`).
+    let caches = plan_cache_slots(&model.model.cache_kinds());
+    let attention_layers = caches.attention;
+    let mamba_layers = caches.recurrent;
     let dtype = model.model.embed_tokens.weight.val().dtype();
     let staged = |spec: NativeKvCacheSpec| {
         let spec = spec.with_staging_capacity(staging_capacity);
@@ -1023,24 +1001,18 @@ fn cache_specs<B: Backend>(
                 model.config().mamba_num_heads,
                 model.config().mamba_head_dim,
                 model.config().ssm_state_size,
-                model
-                    .config()
-                    .mamba_num_heads
-                    .checked_mul(model.config().mamba_head_dim)
-                    .and_then(|intermediate| {
-                        model
-                            .config()
-                            .n_groups
-                            .checked_mul(model.config().ssm_state_size)
-                            .and_then(|state| state.checked_mul(2))
-                            .and_then(|state| intermediate.checked_add(state))
-                    })
-                    .ok_or_else(|| {
-                        Error::configuration(
-                            "nemotron_h.cache",
-                            "convolution channel count overflows usize",
-                        )
-                    })?,
+                convolution_channels(
+                    model.config().mamba_num_heads,
+                    model.config().mamba_head_dim,
+                    model.config().n_groups,
+                    model.config().ssm_state_size,
+                )
+                .ok_or_else(|| {
+                    Error::configuration(
+                        "nemotron_h.cache",
+                        "convolution channel count overflows usize",
+                    )
+                })?,
                 model.config().conv_kernel - 1,
                 state_dtype,
                 dtype,
