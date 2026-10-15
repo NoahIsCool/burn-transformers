@@ -15,6 +15,7 @@ use super::{
     BeamHypothesis, BeamSearchConfig, Seq2SeqBeamSearchRequest, completed_order,
     generate_seq2seq_beam_search,
 };
+use crate::generation::metadata;
 use crate::{
     ArchitectureConfig, CausalLmInput, CausalLmOutput, DecodeInput, DecodeState, EncoderOutput,
     Error, FinishReason, ForwardOptions, Result, Seq2SeqInput, Seq2SeqLanguageModel, Seq2SeqOutput,
@@ -231,6 +232,18 @@ struct ScriptedModel<B: Backend> {
     /// Optional hard vocabulary restriction, represented by valid negative-infinity logits.
     #[module(skip)]
     vocabulary_mask: Option<Vec<bool>>,
+    /// Optional Markov logits table replacing the scripted five-token rows.
+    #[module(skip)]
+    table: Option<MarkovTable>,
+}
+
+/// First-order Markov decoder: logits depend only on the previous token.
+#[derive(Clone, Debug)]
+struct MarkovTable {
+    /// Logits returned by decoder prefill for every row.
+    first: Vec<f32>,
+    /// Row `t` holds the logits returned after decoding token `t`.
+    next: Vec<Vec<f32>>,
 }
 
 impl<B: Backend> ScriptedModel<B> {
@@ -242,6 +255,7 @@ impl<B: Backend> ScriptedModel<B> {
             trace: Arc::new(Mutex::new(ScriptTrace::default())),
             fault: None,
             vocabulary_mask: None,
+            table: None,
         }
     }
 
@@ -292,6 +306,12 @@ impl<B: Backend> ScriptedModel<B> {
             .to_vec::<B::FloatElem>()
             .map_err(|error| Error::BackendCapability(error.to_string()))?;
         let mut logits = Vec::with_capacity(batch * self.config.vocabulary_size);
+        if let Some(table) = &self.table {
+            for _ in markers {
+                logits.extend(&table.first);
+            }
+            return Ok(logits);
+        }
         for marker in markers {
             if self.config.emit_nonfinite {
                 logits.extend([f32::NAN, 0.0, 0.0, 0.0, 0.0]);
@@ -309,6 +329,16 @@ impl<B: Backend> ScriptedModel<B> {
     /// Returns continuation logits keyed by each selected decoder token.
     fn decode_logits(&self, tokens: &[i64], valid: &[bool]) -> Vec<f32> {
         let mut logits = Vec::with_capacity(tokens.len() * self.config.vocabulary_size);
+        if let Some(table) = &self.table {
+            for (&token, &is_valid) in tokens.iter().zip(valid) {
+                if is_valid {
+                    logits.extend(&table.next[token as usize]);
+                } else {
+                    logits.extend(vec![0.0; self.config.vocabulary_size]);
+                }
+            }
+            return logits;
+        }
         for (&token, &is_valid) in tokens.iter().zip(valid) {
             if !is_valid {
                 logits.extend([0.0; 5]);
@@ -415,13 +445,14 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ScriptedModel<B> {
             return Err(Error::Checkpoint("scripted decoder prefill failed".into()));
         }
         let [batch, sequence] = decoder.token_ids.dims();
-        let valid = super::mask_values(
+        let valid = metadata::mask_values(
             decoder.token_mask.as_ref(),
             batch,
             sequence,
             "scripted prefill mask",
         )?;
-        state.lengths = super::nonempty_row_lengths(&valid, batch, sequence, "scripted prefill")?;
+        state.lengths =
+            metadata::nonempty_row_lengths(&valid, batch, sequence, "scripted prefill")?;
         let logits = self.prefill_logits(encoder)?;
         let device = decoder.token_ids.device();
         let mut output = self.output(logits, batch, encoder.clone(), &device);
@@ -458,8 +489,8 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ScriptedModel<B> {
         if sequence != 1 || batch != state.batch {
             return Err(Error::Cache("scripted decode shape mismatch".into()));
         }
-        let tokens = super::tensor_i64_values(input.token_ids.clone(), "scripted tokens")?;
-        let valid = super::mask_values(
+        let tokens = metadata::tensor_i64_values(input.token_ids.clone(), "scripted tokens")?;
+        let valid = metadata::mask_values(
             input.token_mask.as_ref(),
             batch,
             sequence,
@@ -472,7 +503,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ScriptedModel<B> {
         }
         let positions = input
             .position_ids
-            .map(|positions| super::tensor_i64_values(positions, "scripted positions"))
+            .map(|positions| metadata::tensor_i64_values(positions, "scripted positions"))
             .transpose()?;
         {
             let mut trace = self.trace.lock().expect("script trace mutex");
@@ -851,9 +882,21 @@ fn request_preflight_rejects_shape_mask_and_cache_errors() {
     wrong_cache_batch.cache = CacheConfig::new(1, 3).unwrap();
     assert!(generate_seq2seq_beam_search(&model, wrong_cache_batch).is_err());
 
+    // One prompt token plus two new tokens needs two slots: the final token
+    // is returned but never decoded. One slot is too few.
     let mut short_cache = request(&device, search(2, 2));
-    short_cache.cache = CacheConfig::new(2, 2).unwrap();
-    assert!(generate_seq2seq_beam_search(&model, short_cache).is_err());
+    short_cache.cache = CacheConfig::new(2, 1).unwrap();
+    let error = generate_seq2seq_beam_search(&model, short_cache).expect_err("one slot short");
+    assert!(error.to_string().contains("= 2"), "{error}");
+    let mut exact_cache = request(&device, search(2, 2));
+    exact_cache.cache = CacheConfig::new(2, 2).unwrap();
+    let output = generate_seq2seq_beam_search(&model, exact_cache)
+        .expect("an exactly sized cache holds every fed-back token");
+    assert!(
+        output.sequences[0]
+            .iter()
+            .all(|sequence| sequence.token_ids.len() == 2)
+    );
 }
 
 /// Gapped true-valid decoder masks report semantic rather than padded length.
@@ -1159,7 +1202,7 @@ fn beam_gathers_preserve_masks_positions_and_optional_diagnostics() {
         [4.0, 5.0, 6.0, 7.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
     );
     assert_eq!(
-        super::mask_values(gathered.token_mask.as_ref(), 3, 2, "gathered mask").unwrap(),
+        metadata::mask_values(gathered.token_mask.as_ref(), 3, 2, "gathered mask").unwrap(),
         [false, true, true, false, false, true]
     );
     let input = CausalLmInput {
@@ -1169,15 +1212,15 @@ fn beam_gathers_preserve_masks_positions_and_optional_diagnostics() {
     };
     let gathered = super::select_input(input, &[1, 0, 1]).expect("input gather");
     assert_eq!(
-        super::tensor_i64_values(gathered.token_ids, "tokens").unwrap(),
+        metadata::tensor_i64_values(gathered.token_ids, "tokens").unwrap(),
         [3, 4, 1, 2, 3, 4]
     );
     assert_eq!(
-        super::tensor_i64_values(gathered.position_ids.unwrap(), "positions").unwrap(),
+        metadata::tensor_i64_values(gathered.position_ids.unwrap(), "positions").unwrap(),
         [9, 10, 7, 8, 9, 10]
     );
     assert_eq!(
-        super::mask_values(gathered.token_mask.as_ref(), 3, 2, "mask").unwrap(),
+        metadata::mask_values(gathered.token_mask.as_ref(), 3, 2, "mask").unwrap(),
         [false, true, true, false, false, true]
     );
 }
@@ -1227,8 +1270,13 @@ fn encoder_and_logit_geometry_helpers_reject_ragged_outputs() {
     }
     for shape in [[1, 1, 5], [2, 2, 5], [2, 1, 4]] {
         assert!(
-            super::extract_last_logits(Tensor::<TestBackend, 3>::zeros(shape, &device), 2, 5)
-                .is_err()
+            metadata::extract_last_logits(
+                Tensor::<TestBackend, 3>::zeros(shape, &device),
+                2,
+                5,
+                "beam_search.model_logits"
+            )
+            .is_err()
         );
     }
     assert!(
@@ -1265,39 +1313,52 @@ fn position_mask_and_expansion_boundaries_are_checked() {
     #[cfg(target_pointer_width = "64")]
     let device = Default::default();
     assert_eq!(
-        super::next_positions(
+        metadata::next_positions(
             &[-99, 5, 9, 100, -9, 7],
             &[false, true, true, true, false, true],
             2,
             3,
-            2
+            2,
+            "decoder prompt"
         )
         .unwrap(),
         [10, 8]
     );
+    // Two new tokens feed back one: positions up to `i32::MAX - 1 + 1` fit.
     assert_eq!(
-        super::next_positions(&[i64::from(i32::MAX) - 2], &[true], 1, 1, 2).unwrap(),
-        [i64::from(i32::MAX) - 1]
+        metadata::next_positions(
+            &[i64::from(i32::MAX) - 1],
+            &[true],
+            1,
+            1,
+            2,
+            "decoder prompt"
+        )
+        .unwrap(),
+        [i64::from(i32::MAX)]
     );
-    for (positions, valid, batch, width, additional) in [
+    for (positions, valid, batch, width, maximum) in [
         (vec![0], vec![true, true], 1, 2, 1),
         (vec![0], vec![false], 1, 1, 1),
         (vec![-1], vec![true], 1, 1, 1),
         (vec![i64::MAX], vec![true], 1, 1, 1),
-        (vec![i64::from(i32::MAX)], vec![true], 1, 1, 1),
+        (vec![i64::from(i32::MAX)], vec![true], 1, 1, 2),
         (vec![], vec![], usize::MAX, 2, 1),
         (vec![0], vec![true], 1, 1, usize::MAX),
     ] {
-        assert!(super::next_positions(&positions, &valid, batch, width, additional).is_err());
+        assert!(
+            metadata::next_positions(&positions, &valid, batch, width, maximum, "decoder prompt")
+                .is_err()
+        );
     }
     assert_eq!(
-        super::nonempty_row_lengths(&[true, false, true, true], 2, 2, "mask").unwrap(),
+        metadata::nonempty_row_lengths(&[true, false, true, true], 2, 2, "mask").unwrap(),
         [1, 2]
     );
-    assert!(super::nonempty_row_lengths(&[true], 1, 2, "mask").is_err());
-    assert!(super::nonempty_row_lengths(&[true, false, false, false], 2, 2, "mask").is_err());
-    assert!(super::nonempty_row_lengths(&[], usize::MAX, 2, "mask").is_err());
-    assert!(super::mask_values::<TestBackend>(None, usize::MAX, 2, "mask").is_err());
+    assert!(metadata::nonempty_row_lengths(&[true], 1, 2, "mask").is_err());
+    assert!(metadata::nonempty_row_lengths(&[true, false, false, false], 2, 2, "mask").is_err());
+    assert!(metadata::nonempty_row_lengths(&[], usize::MAX, 2, "mask").is_err());
+    assert!(metadata::mask_values::<TestBackend>(None, usize::MAX, 2, "mask").is_err());
     assert_eq!(
         super::beam_expansion_indices(2, 3).unwrap(),
         [0, 0, 0, 1, 1, 1]
@@ -1394,6 +1455,7 @@ fn candidate_frontiers_validate_scores_geometry_and_stable_ties() {
         0,
         2,
         3,
+        8,
         &active,
         &[-0.2, -0.2, f64::NEG_INFINITY, -0.2, -0.1, -0.2],
     )
@@ -1405,36 +1467,48 @@ fn candidate_frontiers_validate_scores_geometry_and_stable_ties() {
             .collect::<Vec<_>>(),
         [(1, 1), (0, 0), (0, 1), (1, 0), (1, 2)]
     );
+    // A narrower frontier keeps exactly the best-ranked prefix.
+    let narrow = super::candidates_for_source(
+        0,
+        2,
+        3,
+        2,
+        &active,
+        &[-0.2, -0.2, f64::NEG_INFINITY, -0.2, -0.1, -0.2],
+    )
+    .unwrap();
+    assert_eq!(
+        narrow
+            .iter()
+            .map(|candidate| (candidate.parent_slot, candidate.token_id))
+            .collect::<Vec<_>>(),
+        [(1, 1), (0, 0)]
+    );
     assert!(
-        super::candidates_for_source(0, 1, 3, &[None], &[f64::NAN; 3])
+        super::candidates_for_source(0, 1, 3, 2, &[None], &[f64::NAN; 3])
             .unwrap()
             .is_empty()
     );
     assert!(
-        super::candidates_for_source(0, 1, 3, &active, &[f64::NEG_INFINITY; 3])
+        super::candidates_for_source(0, 1, 3, 2, &active, &[f64::NEG_INFINITY; 3])
             .unwrap()
             .is_empty()
     );
-    assert!(super::candidates_for_source(0, 1, 3, &active, &[0.0, 0.0]).is_err());
+    assert!(super::candidates_for_source(0, 1, 3, 2, &active, &[0.0, 0.0]).is_err());
     for invalid in [f64::NAN, f64::INFINITY] {
-        assert!(super::candidates_for_source(0, 1, 1, &active, &[invalid]).is_err());
+        assert!(super::candidates_for_source(0, 1, 1, 2, &active, &[invalid]).is_err());
     }
     parent.cumulative_log_probability = -f64::MAX;
     assert!(
-        super::candidates_for_source(0, 1, 1, &[Some(parent)], &[-f64::MAX])
+        super::candidates_for_source(0, 1, 1, 2, &[Some(parent)], &[-f64::MAX])
             .unwrap_err()
             .to_string()
             .contains("overflowed cumulative")
     );
-    assert!(super::candidates_for_source(usize::MAX, 2, 1, &active, &[]).is_err());
-    assert!(super::candidates_for_source(1, 1, usize::MAX, &active, &[]).is_err());
+    assert!(super::candidates_for_source(usize::MAX, 2, 1, 2, &active, &[]).is_err());
+    assert!(super::candidates_for_source(1, 1, usize::MAX, 2, &active, &[]).is_err());
     let three = [active[0].clone(), active[1].clone(), active[0].clone()];
-    assert!(super::candidates_for_source(2, 1, usize::MAX, &three, &[]).is_err());
-    assert_eq!(super::candidate_frontier_size(2, 0, 9).unwrap(), 4);
-    assert_eq!(super::candidate_frontier_size(2, 3, 9).unwrap(), 8);
-    assert_eq!(super::candidate_frontier_size(2, 3, 1).unwrap(), 1);
-    assert!(super::candidate_frontier_size(2, usize::MAX, 9).is_err());
-    assert!(super::candidate_frontier_size(usize::MAX, 0, 9).is_err());
+    assert!(super::candidates_for_source(2, 1, usize::MAX, 2, &three, &[]).is_err());
 }
 
 /// Candidate extension is independent of its parent and fails before changing history.
@@ -1597,4 +1671,296 @@ fn release_v2_restricted_vocabulary_reports_insufficient_return_hypotheses() {
     assert_eq!(trace.decode_tokens, [vec![3, 0, 0]]);
     assert_eq!(trace.decode_valid, [vec![true, false, false]]);
     assert_eq!(trace.decode_lengths, [vec![2, 1, 1]]);
+}
+
+/// Builds a Markov-table model and a matching one-source request.
+fn markov_fixture(
+    table: MarkovTable,
+    search: BeamSearchConfig,
+) -> (
+    ScriptedModel<TestBackend>,
+    Seq2SeqBeamSearchRequest<TestBackend>,
+) {
+    let device = Default::default();
+    let vocabulary_size = table.first.len();
+    let mut model = ScriptedModel::<TestBackend>::new(
+        ScriptedConfig {
+            vocabulary_size,
+            emit_nonfinite: false,
+        },
+        &device,
+    );
+    model.table = Some(table);
+    let mut request = request(&device, search);
+    request.vocabulary_size = vocabulary_size;
+    (model, request)
+}
+
+/// A settled finished pool stops the source without changing the result.
+#[test]
+fn settled_pools_stop_early_with_identical_results() {
+    // EOS (token 2) dominates the first step; any live extension already
+    // scores below it, so nothing can enter the one-beam pool afterwards.
+    let table = MarkovTable {
+        first: vec![0.0, 0.0, 5.0],
+        next: vec![vec![0.0, 0.0, 0.0]; 3],
+    };
+    let mut config = search(10, 1);
+    config.num_return_sequences = 1;
+    config.eos_token_ids = vec![2];
+    let (pruned_model, request) = markov_fixture(table.clone(), config.clone());
+    let pruned = super::run_beam_search(&pruned_model, request.clone(), true).unwrap();
+    let (exhaustive_model, request) = markov_fixture(table, config);
+    let exhaustive = super::run_beam_search(&exhaustive_model, request, false).unwrap();
+    assert_eq!(pruned, exhaustive);
+    assert_eq!(pruned.sequences[0][0].token_ids, [2]);
+    assert!(pruned_model.trace.lock().unwrap().decode_tokens.is_empty());
+    assert_eq!(
+        exhaustive_model.trace.lock().unwrap().decode_tokens.len(),
+        9
+    );
+}
+
+/// The pool-finality bound is exact at its endpoints for every penalty sign.
+#[test]
+fn finished_pool_finality_uses_the_length_endpoints() {
+    let pool = |score: f64, length: usize| {
+        vec![scored_hypothesis(
+            &vec![1; length],
+            score * length as f64,
+            0,
+        )]
+    };
+    // Positive penalty: c = -2 reaches at best -2 / 4 = -0.5 at the longest length.
+    assert!(!super::finished_pool_is_final(
+        &pool(-0.6, 1),
+        1,
+        -2.0,
+        2,
+        4,
+        1.0
+    ));
+    assert!(super::finished_pool_is_final(
+        &pool(-0.4, 1),
+        1,
+        -2.0,
+        2,
+        4,
+        1.0
+    ));
+    // Equal scores could still win a tie breaker, so they do not settle the pool.
+    assert!(!super::finished_pool_is_final(
+        &pool(-0.5, 1),
+        1,
+        -2.0,
+        2,
+        4,
+        1.0
+    ));
+    // Zero penalty compares raw cumulative scores.
+    assert!(super::finished_pool_is_final(
+        &[scored_hypothesis(&[1], -1.5, 0)],
+        1,
+        -2.0,
+        2,
+        4,
+        0.0
+    ));
+    // Negative penalty multiplies by the length, so the shortest length is best.
+    assert!(super::finished_pool_is_final(
+        &[scored_hypothesis(&[1], -3.5, 0)],
+        1,
+        -2.0,
+        2,
+        4,
+        -1.0
+    ));
+    assert!(!super::finished_pool_is_final(
+        &[scored_hypothesis(&[1], -4.5, 0)],
+        1,
+        -2.0,
+        2,
+        4,
+        -1.0
+    ));
+    // An incomplete pool or an exhausted length budget never settles early.
+    assert!(!super::finished_pool_is_final(
+        &pool(-0.4, 1),
+        2,
+        -2.0,
+        2,
+        4,
+        1.0
+    ));
+    assert!(!super::finished_pool_is_final(
+        &pool(-0.4, 1),
+        1,
+        -2.0,
+        5,
+        4,
+        1.0
+    ));
+}
+
+/// Destinations and parents built from beam rows never leave their source group.
+#[test]
+fn reorder_group_check_detects_cross_source_parents() {
+    assert!(super::reorder_preserves_groups(&[0, 0, 3, 2], 2));
+    assert!(!super::reorder_preserves_groups(&[0, 2, 2, 3], 2));
+}
+
+/// Every decode step receives the once-expanded encoder rows, unchanged.
+#[test]
+fn encoder_rows_are_expanded_once_and_never_regathered() {
+    let device = Default::default();
+    let model = ScriptedModel::<TestBackend>::new(
+        ScriptedConfig {
+            vocabulary_size: 5,
+            emit_nonfinite: false,
+        },
+        &device,
+    );
+    let mut config = search(3, 2);
+    config.num_return_sequences = 1;
+    let request = Seq2SeqBeamSearchRequest {
+        source: CausalLmInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[4, 0], [3, 1]], &device),
+            token_mask: None,
+            position_ids: None,
+        },
+        decoder_prompt: CausalLmInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[0], [0]], &device),
+            token_mask: None,
+            position_ids: None,
+        },
+        cache: CacheConfig::new(4, 3).unwrap(),
+        search: config,
+        vocabulary_size: 5,
+    };
+    let output = generate_seq2seq_beam_search(&model, request).expect("two-source search");
+    assert_eq!(output.sequences.len(), 2);
+    let trace = model.trace.lock().unwrap();
+    assert_eq!(trace.decode_tokens.len(), 2);
+    // Parent indices always stay inside their two-row source group.
+    for reorder in &trace.reorders {
+        assert!(super::reorder_preserves_groups(reorder, 2), "{reorder:?}");
+    }
+}
+
+/// Full stable sort followed by truncation: the reference the bounded heap must equal.
+fn reference_candidates(
+    source: usize,
+    beams: usize,
+    vocabulary: usize,
+    capacity: usize,
+    active: &[Option<BeamHypothesis>],
+    probabilities: &[f64],
+) -> Vec<(usize, u32)> {
+    let mut candidates = Vec::new();
+    for slot in 0..beams {
+        let row = source * beams + slot;
+        let Some(parent) = &active[row] else {
+            continue;
+        };
+        for (token, &value) in probabilities[row * vocabulary..(row + 1) * vocabulary]
+            .iter()
+            .enumerate()
+        {
+            if value.is_finite() {
+                candidates.push(super::Candidate {
+                    parent_global: row,
+                    parent_slot: slot,
+                    token_id: token as u32,
+                    log_probability: value,
+                    cumulative_log_probability: parent.cumulative_log_probability + value,
+                });
+            }
+        }
+    }
+    candidates.sort_by(super::candidate_order);
+    candidates.truncate(capacity);
+    candidates
+        .into_iter()
+        .map(|candidate| (candidate.parent_global, candidate.token_id))
+        .collect()
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+
+    /// The bounded heap returns exactly the prefix of a full stable sort, ties included.
+    #[test]
+    fn bounded_frontier_matches_full_sort_prefix(
+        beams in 1_usize..4,
+        vocabulary in 1_usize..8,
+        capacity in 1_usize..12,
+        parents in proptest::collection::vec((proptest::bool::ANY, 0_usize..3), 4),
+        values in proptest::collection::vec(0_usize..4, 32),
+    ) {
+        let levels = [-0.5, -1.0, -2.0, f64::NEG_INFINITY];
+        let active = (0..beams)
+            .map(|slot| {
+                let (present, score) = parents[slot];
+                present.then(|| {
+                    let mut parent = scored_hypothesis(&[1], -(score as f64), slot);
+                    parent.finish_reason = None;
+                    parent
+                })
+            })
+            .collect::<Vec<_>>();
+        let probabilities = (0..beams * vocabulary)
+            .map(|index| levels[values[index % values.len()]])
+            .collect::<Vec<_>>();
+        let actual = super::candidates_for_source(0, beams, vocabulary, capacity, &active, &probabilities)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| (candidate.parent_global, candidate.token_id))
+            .collect::<Vec<_>>();
+        proptest::prop_assert_eq!(
+            actual,
+            reference_candidates(0, beams, vocabulary, capacity, &active, &probabilities)
+        );
+    }
+
+    /// Pruning settled sources never changes beam-search output.
+    #[test]
+    fn pruned_search_equals_exhaustive_search(
+        vocabulary in 3_usize..6,
+        beams in 1_usize..4,
+        max_new_tokens in 1_usize..6,
+        eos_flags in proptest::collection::vec(proptest::bool::ANY, 6),
+        penalty in proptest::sample::select(vec![-1.0, 0.0, 0.5, 1.0, 2.0]),
+        logits in proptest::collection::vec(-3.0_f32..3.0, 42),
+    ) {
+        let beams = beams.min(vocabulary);
+        let row = |offset: usize| logits[offset..offset + vocabulary].to_vec();
+        let table = MarkovTable {
+            first: row(0),
+            next: (0..vocabulary).map(|token| row(6 * (token + 1))).collect(),
+        };
+        let mut config = search(max_new_tokens, beams);
+        config.num_return_sequences = 1;
+        config.length_penalty = penalty;
+        config.eos_token_ids = (0..vocabulary as u32)
+            .filter(|&token| eos_flags[token as usize])
+            .collect();
+        let (pruned_model, request) = markov_fixture(table.clone(), config.clone());
+        let pruned = super::run_beam_search(&pruned_model, request.clone(), true);
+        let (exhaustive_model, request) = markov_fixture(table, config);
+        let exhaustive = super::run_beam_search(&exhaustive_model, request, false);
+        match (pruned, exhaustive) {
+            (Ok(pruned), Ok(exhaustive)) => proptest::prop_assert_eq!(pruned, exhaustive),
+            (Err(pruned), Err(exhaustive)) => {
+                proptest::prop_assert_eq!(pruned.to_string(), exhaustive.to_string())
+            }
+            (pruned, exhaustive) => proptest::prop_assert!(
+                false,
+                "pruning changed the outcome: {pruned:?} vs {exhaustive:?}"
+            ),
+        }
+        proptest::prop_assert!(
+            pruned_model.trace.lock().unwrap().decode_tokens.len()
+                <= exhaustive_model.trace.lock().unwrap().decode_tokens.len()
+        );
+    }
 }

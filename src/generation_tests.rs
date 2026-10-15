@@ -1,11 +1,13 @@
 //! Generation-policy tests for deterministic sampling, penalties, stopping, and invalid requests.
 
+use std::collections::BTreeMap;
+
 use burn::backend::Flex;
 use burn::tensor::{DType, Int, Tensor, TensorData, Tolerance};
 
 use super::{
-    FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, SamplingStrategy,
-    splitmix64_uniform,
+    FinishReason, GenerationConfig, GenerationTracker, LogitsProcessor, PenaltyScope,
+    SamplingStrategy, splitmix64_uniform,
 };
 use crate::TokenMask;
 
@@ -282,7 +284,7 @@ fn runtime_dtypes_support_penalties_and_probability_filters() {
             .expect("masked mixed-dtype penalties");
         assert_eq!(penalized.dtype(), dtype);
         assert_eq!(
-            super::causal::host_float_data_f64(penalized.clone().into_data(), "penalties")
+            super::metadata::host_float_data_f64(penalized.clone().into_data(), "penalties")
                 .expect("floating output"),
             [1.5, -6.5, 2.0, 1.0, -1.0, 1.5, 2.0, 0.0],
             "runtime dtype {dtype:?}"
@@ -303,7 +305,7 @@ fn runtime_dtypes_support_penalties_and_probability_filters() {
             .process(penalized, None)
             .expect("runtime dtype filters");
         assert_eq!(processed.dtype(), dtype);
-        let values = super::causal::host_float_data_f64(
+        let values: Vec<f64> = super::metadata::host_float_data_f64(
             processed.clone().into_data(),
             "probability filters",
         )
@@ -325,55 +327,58 @@ fn runtime_dtypes_support_penalties_and_probability_filters() {
     );
 }
 
-/// Unsupported Flex32 filters fail before reaching Burn's panicking sort fallback.
+/// Builds one `[1, 4]` logits row tagged as Flex32 storage.
+fn flex32_logits(
+    device: &<TestBackend as burn::tensor::backend::BackendTypes>::Device,
+) -> Tensor<TestBackend, 2> {
+    let mut data = TensorData::from([[1.0_f32, 2.0, 3.0, 4.0]]);
+    data.dtype = DType::Flex32;
+    Tensor::from_data(data, (device, DType::Flex32))
+}
+
+/// Unsupported Flex32 sorts fail before Burn's panicking fallback; greedy never sorts.
 #[test]
 fn flex32_sort_filters_fail_closed_before_backend_operations() {
     let device = Default::default();
-    for strategy in [SamplingStrategy::Greedy, SamplingStrategy::Sample] {
-        for (top_k, top_p) in [
-            (Some(1), None),
-            (Some(4), None),
-            (None, Some(0.7)),
-            (Some(2), Some(1.0)),
-        ] {
-            let processor = LogitsProcessor::<TestBackend>::new(
-                GenerationConfig {
-                    strategy,
-                    top_k,
-                    top_p,
-                    ..Default::default()
-                },
-                4,
-                &device,
-            )
-            .expect("valid sampling configuration");
-            let mut data = TensorData::from([[1.0_f32, 2.0, 3.0, 4.0]]);
-            data.dtype = DType::Flex32;
-            let logits = Tensor::from_data(data, (&device, DType::Flex32));
+    let filters = [
+        (Some(1), None),
+        (Some(4), None),
+        (None, Some(0.7)),
+        (Some(2), Some(1.0)),
+    ];
+    for (top_k, top_p) in filters {
+        let config = GenerationConfig {
+            strategy: SamplingStrategy::Sample,
+            top_k,
+            top_p,
+            ..Default::default()
+        };
+        let processor =
+            LogitsProcessor::<TestBackend>::new(config.clone(), 4, &device).expect("valid config");
+        // Top-k equal to the vocabulary keeps every token and needs no sort.
+        if config.sorts_vocabulary(4) {
             let error = processor
-                .process(logits, None)
+                .process(flex32_logits(&device), None)
                 .expect_err("Flex32 sort must fail before unsupported CPU tensor math");
             assert!(matches!(error, crate::Error::BackendCapability(_)));
             assert!(error.to_string().contains("Flex32 top-k/top-p"));
+        } else {
+            assert_eq!((top_k, top_p), (Some(4), None));
         }
-    }
-    for top_p in [None, Some(1.0)] {
-        let processor = LogitsProcessor::<TestBackend>::new(
+        // Greedy decoding ignores truncation, so the same filters are inert.
+        let greedy = LogitsProcessor::<TestBackend>::new(
             GenerationConfig {
-                top_p,
-                ..Default::default()
+                strategy: SamplingStrategy::Greedy,
+                ..config
             },
             4,
             &device,
         )
-        .expect("unfiltered greedy configuration");
-        let mut data = TensorData::from([[1.0_f32, 2.0, 3.0, 4.0]]);
-        data.dtype = DType::Flex32;
-        let logits = Tensor::from_data(data, (&device, DType::Flex32));
+        .expect("valid greedy config");
         assert_eq!(
-            processor
-                .process(logits, None)
-                .expect("no sort requested")
+            greedy
+                .process(flex32_logits(&device), None)
+                .expect("greedy requests no sort")
                 .dtype(),
             DType::Flex32
         );
@@ -557,12 +562,18 @@ fn tracker_rejects_invalid_tokens_and_impossible_batch_capacity() {
 fn empty_tracker_batches_are_rejected_with_the_callers_exact_controls() {
     let config = GenerationConfig {
         max_new_tokens: 3,
+        min_new_tokens: 1,
         strategy: SamplingStrategy::Sample,
         temperature: 0.75,
         top_k: Some(2),
         top_p: Some(0.9),
+        min_p: Some(0.05),
         repetition_penalty: 1.1,
         presence_penalty: 0.2,
+        frequency_penalty: 0.1,
+        additive_penalty_scope: PenaltyScope::PromptAndGenerated,
+        no_repeat_ngram_size: 3,
+        logit_bias: BTreeMap::from([(1, 0.5)]),
         seed: 91,
         eos_token_ids: vec![3],
         pad_token_id: Some(0),
@@ -587,4 +598,711 @@ fn empty_tracker_batches_are_rejected_with_the_callers_exact_controls() {
     );
     assert_eq!(tracker.generated(0).unwrap(), &[1, 2]);
     assert_eq!(processor.config(), &config);
+}
+
+// ---------------------------------------------------------------------------
+// Sampler correctness (inverse CDF, greedy semantics, precision)
+// ---------------------------------------------------------------------------
+
+/// Deterministic pseudo-normal logits from a linear congruential generator.
+///
+/// Summing four uniforms on `[-1, 1)` approximates a normal shape; `scale`
+/// sets the spread. Fixtures stay reproducible without a random dependency.
+fn pseudo_normal_logits(count: usize, scale: f32, seed: u64) -> Vec<f32> {
+    let mut state = seed;
+    let mut uniform = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 40) as f32 / (1_u64 << 24) as f32) * 2.0 - 1.0
+    };
+    (0..count)
+        .map(|_| scale * (uniform() + uniform() + uniform() + uniform()))
+        .collect()
+}
+
+/// Reads every element of a float tensor as `f64`, whatever its runtime dtype.
+fn host_values<const D: usize>(tensor: Tensor<TestBackend, D>) -> Vec<f64> {
+    super::metadata::host_float_data_f64(tensor.into_data(), "test values").expect("float data")
+}
+
+/// A large vocabulary's F32 running sum ends below one, yet a masked last ID is never drawn.
+///
+/// With 152k realistic logits the backend's F32 softmax and sequential
+/// cumulative sum end measurably below one (about `7e-6` for this fixture;
+/// other seeds overshoot instead). The old unscaled rule counted every running
+/// sum as below a uniform above that total, reached `V`, and clamped to the
+/// last token, which is masked here and has zero probability.
+#[test]
+fn inverse_cdf_never_selects_a_zero_probability_tail_at_vocabulary_scale() {
+    let device = Default::default();
+    let vocabulary = 151_936;
+    let mut values = pseudo_normal_logits(vocabulary, 1.0, 0);
+    values[vocabulary - 1] = f32::NEG_INFINITY;
+    let logits = Tensor::<TestBackend, 2>::from_data(
+        TensorData::new(values.clone(), [1, vocabulary]),
+        &device,
+    );
+    let cumulative = burn::tensor::activation::softmax(logits.clone(), 1).cumsum(1);
+    let total = host_values(cumulative.clone().narrow(1, vocabulary - 1, 1))[0];
+    let largest_uniform = 1.0 - 2.0_f32.powi(-24);
+    assert!(
+        total < f64::from(largest_uniform),
+        "fixture must exhibit a cumulative deficit, total = {total}"
+    );
+    // The previous rule: every running sum is below u, so the count is V.
+    let unscaled = cumulative
+        .lower_elem(largest_uniform)
+        .int()
+        .sum()
+        .into_data()
+        .to_vec::<i32>()
+        .unwrap()[0];
+    assert_eq!(unscaled as usize, vocabulary);
+    for uniform in [largest_uniform, 0.999_999, 0.5, 2.0_f32.powi(-24)] {
+        let selected = super::sample_with_uniforms(logits.clone(), vec![uniform])
+            .into_data()
+            .to_vec::<i32>()
+            .expect("integer selection")[0] as usize;
+        assert!(
+            selected < vocabulary - 1,
+            "u = {uniform} selected {selected}"
+        );
+        assert!(values[selected].is_finite());
+    }
+}
+
+/// Uniform 4-way bins are unchanged by total scaling because their running sum is exact.
+#[test]
+fn inverse_cdf_keeps_exact_bins_for_exact_totals() {
+    let device = Default::default();
+    let logits = Tensor::<TestBackend, 2>::zeros([4, 4], &device);
+    let uniforms = vec![0.1, 0.3, 0.6, 0.9];
+    let selected = super::sample_with_uniforms(logits, uniforms)
+        .into_data()
+        .to_vec::<i32>()
+        .expect("integer selection");
+    assert_eq!(selected, [0, 1, 2, 3]);
+}
+
+/// Greedy decoding ignores temperature and every truncation warper, like Hugging Face.
+#[test]
+fn greedy_ignores_temperature_and_truncation_warpers() {
+    let device = Default::default();
+    let processor = LogitsProcessor::<TestBackend>::new(
+        GenerationConfig {
+            strategy: SamplingStrategy::Greedy,
+            temperature: 0.25,
+            top_k: Some(1),
+            top_p: Some(0.3),
+            min_p: Some(0.9),
+            ..Default::default()
+        },
+        4,
+        &device,
+    )
+    .expect("valid processor");
+    let logits = Tensor::<TestBackend, 2>::from_floats([[1.0, 3.0, 2.0, 0.5]], &device);
+    let processed = processor
+        .process(logits.clone(), None)
+        .expect("greedy processing");
+    assert_eq!(host_values(processed.clone()), host_values(logits.clone()));
+    let selection = processor
+        .select_with_log_probs(processed)
+        .expect("greedy selection");
+    assert_eq!(
+        selection.token_ids.into_data().to_vec::<i32>().unwrap(),
+        [1]
+    );
+    // The reported score is the untruncated model distribution, not log(1) = 0.
+    let exact = 3.0
+        - [1.0_f64, 3.0, 2.0, 0.5]
+            .map(f64::exp)
+            .iter()
+            .sum::<f64>()
+            .ln();
+    let reported = host_values(selection.log_probabilities)[0];
+    assert!((reported - exact).abs() < 1e-6, "{reported} vs {exact}");
+}
+
+/// Half-precision logits report F32 log probabilities with no F16 log-sum-exp error.
+#[test]
+fn half_precision_log_probabilities_are_computed_in_f32() {
+    let device = Default::default();
+    let processor = LogitsProcessor::<TestBackend>::new(GenerationConfig::default(), 5, &device)
+        .expect("valid processor");
+    let values = [7.3_f32, -2.1, 6.9, 0.25, 7.25];
+    for dtype in [DType::F16, DType::BF16] {
+        let logits =
+            Tensor::<TestBackend, 2>::from_data(TensorData::new(values.to_vec(), [1, 5]), &device)
+                .cast(dtype);
+        // Reference: exact F64 log-softmax of the already-rounded half values.
+        let rounded = host_values(logits.clone());
+        let maximum = rounded.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let normalizer = maximum
+            + rounded
+                .iter()
+                .map(|value| (value - maximum).exp())
+                .sum::<f64>()
+                .ln();
+        let selection = processor
+            .select_with_log_probs(logits)
+            .expect("half-precision selection");
+        assert_eq!(selection.log_probabilities.dtype(), DType::F32);
+        let token = selection.token_ids.into_data().to_vec::<i32>().unwrap()[0] as usize;
+        let reported = host_values(selection.log_probabilities)[0];
+        assert!(
+            (reported - (rounded[token] - normalizer)).abs() < 1e-6,
+            "{dtype:?}: {reported} vs {}",
+            rounded[token] - normalizer
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Token history, penalties, and the new controls
+// ---------------------------------------------------------------------------
+
+/// Builds a one-row prompt history with the given generated tokens recorded.
+fn history_after(
+    config: &GenerationConfig,
+    vocabulary: usize,
+    prompt: &[i32],
+    generated: &[u32],
+) -> super::TokenHistory<TestBackend> {
+    let device = Default::default();
+    let prompt = Tensor::<TestBackend, 2, Int>::from_data(
+        TensorData::new(prompt.to_vec(), [1, prompt.len()]),
+        &device,
+    );
+    let mut history = super::TokenHistory::from_prompt(config, vocabulary, prompt, None)
+        .expect("valid prompt history");
+    for &token in generated {
+        history.record(&[token], &[true]).expect("valid record");
+    }
+    history
+}
+
+/// Repetition counts the prompt; presence and frequency count generated tokens by default.
+#[test]
+fn additive_penalties_count_generated_tokens_unless_scoped_to_the_prompt() {
+    let device = Default::default();
+    let logits = [4.0_f32, -3.0, 2.0, 1.0, 1.0];
+    for (scope, expected) in [
+        // Prompt tokens 0 and 1 are only repetition-penalized; token 2 was
+        // generated twice: 2 / 2 - 0.25 * 2 - 0.5.
+        (PenaltyScope::Generated, [2.0, -6.0, 0.0, 1.0, 1.0]),
+        // Prompt tokens now also pay presence and frequency once.
+        (
+            PenaltyScope::PromptAndGenerated,
+            [1.25, -6.75, 0.0, 1.0, 1.0],
+        ),
+    ] {
+        let config = GenerationConfig {
+            repetition_penalty: 2.0,
+            presence_penalty: 0.5,
+            frequency_penalty: 0.25,
+            additive_penalty_scope: scope,
+            ..Default::default()
+        };
+        let processor =
+            LogitsProcessor::<TestBackend>::new(config.clone(), 5, &device).expect("processor");
+        let history = history_after(&config, 5, &[0, 1], &[2, 2]);
+        let processed = processor
+            .process_with_history(
+                Tensor::from_data(TensorData::new(logits.to_vec(), [1, 5]), &device),
+                &history,
+            )
+            .expect("penalized logits");
+        let actual = host_values(processed);
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "{scope:?}: {actual} vs {expected}"
+            );
+        }
+    }
+}
+
+/// Logit bias is added before the repetition penalty, matching vLLM and Hugging Face order.
+#[test]
+fn logit_bias_precedes_penalties_and_validates_tokens() {
+    let device = Default::default();
+    let config = GenerationConfig {
+        repetition_penalty: 2.0,
+        logit_bias: BTreeMap::from([(0, 2.0), (3, -1.0)]),
+        ..Default::default()
+    };
+    let processor = LogitsProcessor::<TestBackend>::new(config.clone(), 4, &device).unwrap();
+    for dtype in [DType::F16, DType::F32, DType::F64] {
+        let processed = processor
+            .process(
+                Tensor::<TestBackend, 2>::from_floats([[1.0, 1.0, 0.5, 0.5]], &device).cast(dtype),
+                Some(Tensor::from_ints([[0, 3]], &device)),
+            )
+            .expect("biased logits");
+        assert_eq!(processed.dtype(), dtype);
+        // Token 0: (1 + 2) / 2; token 3: (0.5 - 1) * 2.
+        assert_eq!(host_values(processed), [1.5, 1.0, 0.5, -1.0]);
+    }
+    for bias in [BTreeMap::from([(4, 1.0)]), BTreeMap::from([(1, f64::NAN)])] {
+        let invalid = GenerationConfig {
+            logit_bias: bias,
+            ..Default::default()
+        };
+        assert!(invalid.validate(4).is_err());
+    }
+}
+
+/// EOS is impossible below `min_new_tokens` and allowed once the minimum is reached.
+#[test]
+fn min_new_tokens_suppress_eos_only_until_the_minimum() {
+    let device = Default::default();
+    let config = GenerationConfig {
+        max_new_tokens: 4,
+        min_new_tokens: 2,
+        eos_token_ids: vec![3],
+        ..Default::default()
+    };
+    let processor = LogitsProcessor::<TestBackend>::new(config.clone(), 4, &device).unwrap();
+    let logits = || Tensor::<TestBackend, 2>::from_floats([[0.0, 1.0, 2.0, 9.0]], &device);
+    for (generated, eos_allowed) in [(&[][..], false), (&[1][..], false), (&[1, 2][..], true)] {
+        let history = history_after(&config, 4, &[0], generated);
+        let processed = host_values(processor.process_with_history(logits(), &history).unwrap());
+        assert_eq!(processed[3].is_finite(), eos_allowed, "after {generated:?}");
+        assert_eq!(processed[..3], [0.0, 1.0, 2.0]);
+    }
+    // The stateless path counts its whole history as generated.
+    let stateless = host_values(processor.process(logits(), None).unwrap());
+    assert_eq!(stateless[3], f64::NEG_INFINITY);
+    let stateless = host_values(
+        processor
+            .process(logits(), Some(Tensor::from_ints([[1, 2]], &device)))
+            .unwrap(),
+    );
+    assert_eq!(stateless[3], 9.0);
+    let invalid = GenerationConfig {
+        max_new_tokens: 1,
+        min_new_tokens: 2,
+        ..Default::default()
+    };
+    assert!(invalid.validate(4).is_err());
+}
+
+/// Stop sequences are ignored before `min_new_tokens`, and EOS still finishes a row.
+#[test]
+fn tracker_defers_stop_sequences_until_min_new_tokens() {
+    let config = GenerationConfig {
+        max_new_tokens: 5,
+        min_new_tokens: 3,
+        eos_token_ids: vec![7],
+        stop_sequences: vec![vec![1]],
+        ..Default::default()
+    };
+    let mut tracker = GenerationTracker::new(config, 8, 2).expect("tracker");
+    assert_eq!(tracker.push(0, 1).unwrap(), None);
+    assert_eq!(tracker.push(0, 1).unwrap(), None);
+    assert_eq!(
+        tracker.push(0, 1).unwrap(),
+        Some(&FinishReason::StopSequence {
+            index: 0,
+            length: 1
+        })
+    );
+    assert_eq!(
+        tracker.push(1, 7).unwrap(),
+        Some(&FinishReason::EndOfSequence { token_id: 7 })
+    );
+}
+
+/// Banned n-gram continuations follow Hugging Face `NoRepeatNGramLogitsProcessor`.
+#[test]
+fn no_repeat_ngram_bans_only_completions_of_seen_ngrams() {
+    let device = Default::default();
+    for (size, expected_banned) in [(1, vec![1, 2, 3]), (2, vec![3]), (3, vec![3]), (6, vec![])] {
+        let config = GenerationConfig {
+            no_repeat_ngram_size: size,
+            ..Default::default()
+        };
+        let processor = LogitsProcessor::<TestBackend>::new(config.clone(), 5, &device).unwrap();
+        // Prompt [1, 2, 3, 1] then generated [2]: the history ends in "1 2".
+        let history = history_after(&config, 5, &[1, 2, 3, 1], &[2]);
+        let processed = host_values(
+            processor
+                .process_with_history(Tensor::zeros([1, 5], &device), &history)
+                .unwrap(),
+        );
+        let banned = (0..5)
+            .filter(|&token| processed[token] == f64::NEG_INFINITY)
+            .collect::<Vec<_>>();
+        assert_eq!(banned, expected_banned, "n = {size}");
+    }
+}
+
+/// Min-p keeps tokens with at least `min_p` times the top probability, after temperature.
+#[test]
+fn min_p_keeps_tokens_relative_to_the_most_likely_one() {
+    let device = Default::default();
+    // With T = 0.5, p_i / p_max = exp(2 (z_i - z_max)) = 1, e^-1, e^-2, e^-4.
+    let logits = [3.0_f32, 2.5, 2.0, 1.0];
+    for (min_p, kept) in [(0.0, 4), (0.1, 3), (0.2, 2), (0.5, 1), (1.0, 1)] {
+        let processor = LogitsProcessor::<TestBackend>::new(
+            GenerationConfig {
+                strategy: SamplingStrategy::Sample,
+                temperature: 0.5,
+                min_p: Some(min_p),
+                ..Default::default()
+            },
+            4,
+            &device,
+        )
+        .unwrap();
+        let processed = host_values(
+            processor
+                .process(
+                    Tensor::from_data(TensorData::new(logits.to_vec(), [1, 4]), &device),
+                    None,
+                )
+                .unwrap(),
+        );
+        assert_eq!(
+            processed.iter().filter(|value| value.is_finite()).count(),
+            kept,
+            "min_p = {min_p}"
+        );
+        assert!(processed[0].is_finite());
+    }
+    for min_p in [-0.1, 1.1, f64::NAN] {
+        let invalid = GenerationConfig {
+            min_p: Some(min_p),
+            ..Default::default()
+        };
+        assert!(invalid.validate(4).is_err());
+    }
+}
+
+/// A history must come from a configuration with the processor's history-dependent controls.
+#[test]
+fn processors_reject_incompatible_token_histories() {
+    let device = Default::default();
+    let plain = GenerationConfig::default();
+    let penalized = GenerationConfig {
+        frequency_penalty: 0.5,
+        ..Default::default()
+    };
+    let ngram = GenerationConfig {
+        no_repeat_ngram_size: 2,
+        ..Default::default()
+    };
+    let logits = || Tensor::<TestBackend, 2>::zeros([1, 4], &device);
+    let plain_history = super::TokenHistory::empty(&plain, 4, 1, &device).unwrap();
+    for config in [penalized, ngram] {
+        let processor = LogitsProcessor::<TestBackend>::new(config, 4, &device).unwrap();
+        assert!(
+            processor
+                .process_with_history(logits(), &plain_history)
+                .is_err()
+        );
+    }
+    let processor = LogitsProcessor::<TestBackend>::new(plain.clone(), 4, &device).unwrap();
+    let wide = super::TokenHistory::empty(&plain, 4, 2, &device).unwrap();
+    assert!(processor.process_with_history(logits(), &wide).is_err());
+    let other_vocabulary = super::TokenHistory::empty(&plain, 5, 1, &device).unwrap();
+    assert!(
+        processor
+            .process_with_history(logits(), &other_vocabulary)
+            .is_err()
+    );
+}
+
+/// Older serialized configurations load with neutral defaults for the newer controls.
+#[test]
+fn configuration_serde_defaults_and_round_trips_new_controls() {
+    let legacy: GenerationConfig =
+        serde_json::from_str(r#"{"max_new_tokens": 9, "presence_penalty": 0.5}"#).unwrap();
+    assert_eq!(
+        legacy,
+        GenerationConfig {
+            max_new_tokens: 9,
+            presence_penalty: 0.5,
+            ..Default::default()
+        }
+    );
+    let full = GenerationConfig {
+        min_new_tokens: 2,
+        min_p: Some(0.05),
+        frequency_penalty: -0.5,
+        additive_penalty_scope: PenaltyScope::PromptAndGenerated,
+        no_repeat_ngram_size: 3,
+        logit_bias: BTreeMap::from([(1, -100.0), (7, 2.5)]),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&full).unwrap();
+    assert!(json.contains(r#""additive_penalty_scope":"prompt_and_generated""#));
+    assert_eq!(
+        serde_json::from_str::<GenerationConfig>(&json).unwrap(),
+        full
+    );
+    assert!(
+        GenerationConfig {
+            frequency_penalty: f64::INFINITY,
+            ..Default::default()
+        }
+        .validate(4)
+        .is_err()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Property tests against straightforward host references
+// ---------------------------------------------------------------------------
+
+/// Naive F64 reference for bias, constraints-free penalties of one row.
+///
+/// `all` counts every observed token; `additive` counts the tokens in the
+/// configured scope. Mirrors the documented equations directly.
+fn reference_penalties(
+    logits: &[f32],
+    all: &[usize],
+    additive: &[usize],
+    config: &GenerationConfig,
+) -> Vec<f64> {
+    logits
+        .iter()
+        .enumerate()
+        .map(|(token, &logit)| {
+            let mut value = f64::from(logit)
+                + config
+                    .logit_bias
+                    .get(&(token as u32))
+                    .copied()
+                    .unwrap_or(0.0);
+            if all[token] > 0 && config.repetition_penalty != 1.0 {
+                value = if value < 0.0 {
+                    value * config.repetition_penalty
+                } else {
+                    value / config.repetition_penalty
+                };
+            }
+            value -= config.frequency_penalty * additive[token] as f64;
+            if additive[token] > 0 {
+                value -= config.presence_penalty;
+            }
+            value
+        })
+        .collect()
+}
+
+/// Banned next tokens of one sequence, computed by scanning every n-gram.
+fn reference_banned(tokens: &[u32], size: usize) -> Vec<u32> {
+    let mut banned = Vec::new();
+    if size == 0 || tokens.len() + 1 < size {
+        return banned;
+    }
+    let prefix = &tokens[tokens.len() + 1 - size..];
+    for start in 0..tokens.len().saturating_sub(size - 1) {
+        if &tokens[start..start + size - 1] == prefix {
+            banned.push(tokens[start + size - 1]);
+        }
+    }
+    banned.sort_unstable();
+    banned.dedup();
+    banned
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(48))]
+
+    /// Incremental device counts reproduce the naive penalty equations for every row.
+    #[test]
+    fn incremental_penalties_match_naive_reference(
+        vocabulary in 2_usize..9,
+        prompt in proptest::collection::vec((0_u32..9, proptest::bool::ANY), 0..6),
+        generated in proptest::collection::vec(0_u32..9, 0..5),
+        repetition in proptest::sample::select(vec![1.0, 1.3, 0.7]),
+        presence in proptest::sample::select(vec![0.0, 0.4, -0.2]),
+        frequency in proptest::sample::select(vec![0.0, 0.3]),
+        prompt_scope in proptest::bool::ANY,
+        bias in proptest::sample::select(vec![0.0, 1.5]),
+    ) {
+        let device = Default::default();
+        let config = GenerationConfig {
+            repetition_penalty: repetition,
+            presence_penalty: presence,
+            frequency_penalty: frequency,
+            additive_penalty_scope: if prompt_scope {
+                PenaltyScope::PromptAndGenerated
+            } else {
+                PenaltyScope::Generated
+            },
+            logit_bias: if bias == 0.0 { BTreeMap::new() } else { BTreeMap::from([(1, bias)]) },
+            ..Default::default()
+        };
+        let processor = LogitsProcessor::<TestBackend>::new(config.clone(), vocabulary, &device).unwrap();
+        // Masked prompt entries hold an out-of-vocabulary sentinel.
+        let prompt_ids = prompt
+            .iter()
+            .map(|&(token, valid)| if valid { (token as usize % vocabulary) as i32 } else { 99 })
+            .collect::<Vec<_>>();
+        let prompt_valid = prompt.iter().map(|&(_, valid)| valid).collect::<Vec<_>>();
+        let prompt_tensor = Tensor::<TestBackend, 2, Int>::from_data(
+            TensorData::new(prompt_ids.clone(), [1, prompt_ids.len()]),
+            &device,
+        );
+        let mask = crate::TokenMask::new(Tensor::<TestBackend, 2, burn::tensor::Bool>::from_data(
+            TensorData::new(prompt_valid.clone(), [1, prompt_valid.len()]),
+            &device,
+        ));
+        let mut history = super::TokenHistory::from_prompt(&config, vocabulary, prompt_tensor, Some(mask)).unwrap();
+        let generated = generated
+            .iter()
+            .map(|&token| token % vocabulary as u32)
+            .collect::<Vec<_>>();
+        for &token in &generated {
+            history.record(&[token], &[true]).unwrap();
+        }
+        let mut prompt_counts = vec![0; vocabulary];
+        for (&token, &valid) in prompt_ids.iter().zip(&prompt_valid) {
+            if valid {
+                prompt_counts[token as usize] += 1;
+            }
+        }
+        let mut generated_counts = vec![0; vocabulary];
+        for &token in &generated {
+            generated_counts[token as usize] += 1;
+        }
+        let all = prompt_counts.iter().zip(&generated_counts).map(|(a, b)| a + b).collect::<Vec<_>>();
+        let additive = if prompt_scope { all.clone() } else { generated_counts.clone() };
+        let logits = pseudo_normal_logits(vocabulary, 2.0, vocabulary as u64 + generated.len() as u64);
+        let expected = reference_penalties(&logits, &all, &additive, &config);
+        let actual = host_values(
+            processor
+                .process_with_history(
+                    Tensor::from_data(TensorData::new(logits.clone(), [1, vocabulary]), &device),
+                    &history,
+                )
+                .unwrap(),
+        );
+        for (actual, expected) in actual.iter().zip(&expected) {
+            proptest::prop_assert!((actual - expected).abs() < 1e-4, "{actual} vs {expected}");
+        }
+
+        // The stateless history path counts every supplied token as generated.
+        let mut combined_ids = prompt_ids.clone();
+        let mut combined_valid = prompt_valid.clone();
+        combined_ids.extend(generated.iter().map(|&token| token as i32));
+        combined_valid.extend(generated.iter().map(|_| true));
+        let stateless = host_values(
+            processor
+                .process_with_mask(
+                    Tensor::from_data(TensorData::new(logits.clone(), [1, vocabulary]), &device),
+                    Some(Tensor::from_data(TensorData::new(combined_ids.clone(), [1, combined_ids.len()]), &device)),
+                    Some(crate::TokenMask::new(Tensor::from_data(
+                        TensorData::new(combined_valid.clone(), [1, combined_valid.len()]),
+                        &device,
+                    ))),
+                )
+                .unwrap(),
+        );
+        let expected = reference_penalties(&logits, &all, &all, &config);
+        for (actual, expected) in stateless.iter().zip(&expected) {
+            proptest::prop_assert!((actual - expected).abs() < 1e-4, "{actual} vs {expected}");
+        }
+    }
+
+    /// Inverse-CDF sampling returns a positive-probability token and matches a host reference.
+    #[test]
+    fn sampled_tokens_have_positive_probability_and_match_reference(
+        logits in proptest::collection::vec(-8.0_f32..8.0, 2..40),
+        masked in proptest::collection::vec(proptest::bool::ANY, 40),
+        bucket in 0_u64..(1 << 23),
+    ) {
+        let device = Default::default();
+        let mut logits = logits;
+        let vocabulary = logits.len();
+        for (logit, &is_masked) in logits.iter_mut().zip(&masked).skip(1) {
+            if is_masked {
+                *logit = f32::NEG_INFINITY;
+            }
+        }
+        let uniform = super::random::interior_unit_f32(bucket << 41);
+        let selected = super::sample_with_uniforms(
+            Tensor::<TestBackend, 2>::from_data(TensorData::new(logits.clone(), [1, vocabulary]), &device),
+            vec![uniform],
+        )
+        .into_data()
+        .to_vec::<i32>()
+        .unwrap()[0] as usize;
+        proptest::prop_assert!(selected < vocabulary);
+        proptest::prop_assert!(logits[selected].is_finite());
+        // Host reference in F64; skip draws within rounding of a bin edge.
+        let maximum = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let weights = logits.iter().map(|&z| f64::from(z - maximum).exp()).collect::<Vec<_>>();
+        let total = weights.iter().sum::<f64>();
+        let threshold = f64::from(uniform) * total;
+        let mut cumulative = 0.0;
+        let mut near_edge = false;
+        let mut expected = vocabulary - 1;
+        for (index, weight) in weights.iter().enumerate() {
+            cumulative += weight;
+            near_edge |= (cumulative - threshold).abs() < 1e-5 * total;
+            if threshold <= cumulative {
+                expected = index;
+                break;
+            }
+        }
+        if !near_edge {
+            proptest::prop_assert_eq!(selected, expected);
+        }
+    }
+
+    /// The n-gram index bans exactly the continuations a full scan finds.
+    #[test]
+    fn ngram_bans_match_full_scan(
+        prompt in proptest::collection::vec(0_u32..4, 0..8),
+        generated in proptest::collection::vec(0_u32..4, 0..8),
+        size in 1_usize..5,
+    ) {
+        let config = GenerationConfig { no_repeat_ngram_size: size, ..Default::default() };
+        let prompt_ids = prompt.iter().map(|&token| token as i32).collect::<Vec<_>>();
+        let history = history_after(&config, 4, &prompt_ids, &generated);
+        let mut tokens = prompt.clone();
+        tokens.extend(&generated);
+        proptest::prop_assert_eq!(history.banned_tokens(0).to_vec(), reference_banned(&tokens, size));
+    }
+
+    /// Min-p in log space keeps exactly the tokens with `p_i >= min_p * p_max`.
+    #[test]
+    fn min_p_matches_probability_space_reference(
+        logits in proptest::collection::vec(-6.0_f32..6.0, 2..24),
+        min_p in 0.001_f64..1.0,
+        temperature in 0.3_f64..2.0,
+    ) {
+        let device = Default::default();
+        let vocabulary = logits.len();
+        let processor = LogitsProcessor::<TestBackend>::new(
+            GenerationConfig {
+                strategy: SamplingStrategy::Sample,
+                temperature,
+                min_p: Some(min_p),
+                ..Default::default()
+            },
+            vocabulary,
+            &device,
+        )
+        .unwrap();
+        let processed = host_values(
+            processor
+                .process(Tensor::from_data(TensorData::new(logits.clone(), [1, vocabulary]), &device), None)
+                .unwrap(),
+        );
+        let scaled = logits.iter().map(|&z| f64::from(z) / temperature).collect::<Vec<_>>();
+        let maximum = scaled.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        for (index, &z) in scaled.iter().enumerate() {
+            let ratio = (z - maximum).exp();
+            if (ratio - min_p).abs() > 1e-5 * min_p.max(1e-3) {
+                proptest::prop_assert_eq!(processed[index].is_finite(), ratio >= min_p, "token {}", index);
+            }
+        }
+    }
 }
