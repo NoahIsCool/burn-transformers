@@ -471,3 +471,54 @@ fn autodiff_stateless_smoke_reaches_embedding() {
     let gradients = loss.backward();
     assert!(model.model.embed_tokens.weight.grad(&gradients).is_some());
 }
+
+/// Bounded chunking, one full plane, and the probability-retaining path agree.
+///
+/// One-token chunks exercise per-chunk key prefixes in every layer; the
+/// padded row checks that padding visibility survives chunking.
+#[test]
+fn bounded_stateless_prefill_matches_unbounded_execution() {
+    let (model, device) = tiny_model();
+    let input = || CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints(
+            [[1, 2, 3, 4, 5], [0, 0, 6, 7, 8]],
+            &device,
+        ),
+        token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [[true; 5], [false, false, true, true, true]].into(),
+            &device,
+        ))),
+        position_ids: None,
+    };
+    let logits = |model: &DeepseekV2ForCausalLm<TestBackend>, attentions: bool| {
+        model
+            .forward(
+                input(),
+                &ForwardOptions {
+                    logits: LogitsSelection::All,
+                    attentions,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .logits
+            .into_data()
+    };
+    let reference = logits(&model, true);
+    for policy in [
+        AttentionExecutionPolicy::Unbounded,
+        AttentionExecutionPolicy::query_chunked(1, 1 << 20),
+        AttentionExecutionPolicy::default(),
+    ] {
+        let model = model
+            .clone()
+            .with_attention_execution_policy(policy)
+            .unwrap();
+        assert_eq!(model.attention_execution_policy(), policy);
+        logits(&model, false).assert_approx_eq::<f32>(&reference, Tolerance::absolute(1e-6));
+    }
+    let error = model
+        .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(0, 1))
+        .unwrap_err();
+    assert!(error.to_string().contains("max_query_tokens"), "{error}");
+}

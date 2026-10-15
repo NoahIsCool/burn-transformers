@@ -31,6 +31,18 @@
 //! head. Expanded score/pattern hooks require the reference path; absorbed decode
 //! prioritizes compact cached storage. Projection components share dtype/device,
 //! with F32 softmax normalization and explicit exclusion masks for padded rows.
+//!
+//! # Bounded reference attention
+//!
+//! The reference path materializes one `[batch, head, query, key]` score plane,
+//! so a single long prefill grows quadratically. [`MlaVisibility`] describes
+//! causal and padding visibility from token positions instead of a materialized
+//! mask, which lets the reference path evaluate synchronized query chunks under
+//! an [`AttentionExecutionPolicy`]: every chunk still sees its complete causal
+//! key prefix (an exact storage bound, not an approximation), and keys past the
+//! chunk's last visible position are never scored.
+
+use core::ops::Range;
 
 use burn::{
     module::Module,
@@ -40,12 +52,16 @@ use burn::{
 
 use crate::{
     Error, Result,
-    attention::{bottom_right_causal_mask, eager_probabilities, union_exclusions, zero_excluded},
+    attention::{
+        AttentionExecutionPolicy, bottom_right_causal_mask, eager_probabilities, union_exclusions,
+        zero_excluded,
+    },
     intervention::{AttentionPoints, Hooks, PointInfo},
     normalization::{RmsNorm, RmsNormConfig},
     operations,
     position::{
-        RopeConfig, apply_rotary, apply_rotary_to, interleaved_to_split_half, rotary_angles,
+        RopeConfig, RotaryAngles, apply_rotary, apply_rotary_to, interleaved_to_split_half,
+        rotary_angles,
     },
 };
 
@@ -681,6 +697,9 @@ impl<B: Backend> MultiLatentAttention<B> {
     ///
     /// Equivalent to [`Self::project`] followed by [`MlaProjection::with_rotary`]
     /// with identical query and key positions, but rotates both in one pass.
+    /// Models build their tables once per forward and call
+    /// [`Self::project_with_angles`]; this test convenience builds them per call.
+    #[cfg(test)]
     pub(crate) fn project_rotary(
         &self,
         hidden: Tensor<B, 3>,
@@ -688,6 +707,47 @@ impl<B: Backend> MultiLatentAttention<B> {
         rope: RopeConfig,
         evaluated_context: usize,
     ) -> Result<MlaProjection<B>> {
+        self.validate_self_input(&hidden)?;
+        let [batch, sequence, _] = hidden.dims();
+        if positions.dims() != [batch, sequence] {
+            return Err(Error::shape(
+                "mla.position_ids",
+                format!("[{batch}, {sequence}]"),
+                format!("{:?}", positions.dims()),
+            ));
+        }
+        let angles = rotary_angles(rope, positions, evaluated_context)?;
+        self.project_with_angles(hidden, &angles)
+    }
+
+    /// Projects one self-attention segment and rotates it with precomputed tables.
+    ///
+    /// `angles` are `[batch, 1, sequence, rotary]` tables for the segment's
+    /// positions. Every layer of a model shares one table per forward pass, so
+    /// computing it once (and casting it once with [`RotaryAngles::to_dtype`])
+    /// removes a frequency evaluation, an upload, and an outer product from
+    /// each layer. The query rotary channels and the shared key rotate in one
+    /// joint pass.
+    pub(crate) fn project_with_angles(
+        &self,
+        hidden: Tensor<B, 3>,
+        angles: &RotaryAngles<B>,
+    ) -> Result<MlaProjection<B>> {
+        self.validate_self_input(&hidden)?;
+        // Self-attention projection shares `project`'s code; one joint rotation
+        // then applies the same positions to the queries and the shared key.
+        let projection = self.project(hidden.clone(), hidden)?;
+        let (query_rotary, rotated_key) =
+            apply_rotary(projection.query_rotary, projection.rotated_key, angles)?;
+        Ok(MlaProjection {
+            query_rotary,
+            rotated_key,
+            ..projection
+        })
+    }
+
+    /// Requires a non-empty `[batch, sequence, hidden_size]` self-attention input.
+    fn validate_self_input(&self, hidden: &Tensor<B, 3>) -> Result<()> {
         let [batch, sequence, hidden_width] = hidden.dims();
         if batch == 0 || sequence == 0 || hidden_width != self.config.hidden_size {
             return Err(Error::shape(
@@ -696,24 +756,7 @@ impl<B: Backend> MultiLatentAttention<B> {
                 format!("[{batch}, {sequence}, {hidden_width}]"),
             ));
         }
-        if positions.dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "mla.position_ids",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", positions.dims()),
-            ));
-        }
-        // Self-attention projection shares `project`'s code; one joint rotation
-        // then applies the same positions to the queries and the shared key.
-        let projection = self.project(hidden.clone(), hidden)?;
-        let angles = rotary_angles(rope, positions, evaluated_context)?;
-        let (query_rotary, rotated_key) =
-            apply_rotary(projection.query_rotary, projection.rotated_key, &angles)?;
-        Ok(MlaProjection {
-            query_rotary,
-            rotated_key,
-            ..projection
-        })
+        Ok(())
     }
 
     /// Runs the reference unabsorbed path, expanding all historical K/V heads.
@@ -766,6 +809,105 @@ impl<B: Backend> MultiLatentAttention<B> {
             hidden_state: operations::linear(mixed, &self.o_proj)?,
             probabilities: retain_probabilities.then_some(probabilities),
         })
+    }
+
+    /// Runs the reference path in synchronized query chunks bounded by `policy`.
+    ///
+    /// Mathematically identical to [`Self::mix_unabsorbed`] with the full mask
+    /// of [`MlaVisibility::exclusion`]: the expanded keys `[batch, head, key,
+    /// qk]` and values are formed once, then query rows `rows` attend only to
+    /// the key prefix `0..visibility.key_end(rows)` (keys beyond it are
+    /// causally invisible to every row of the chunk), so each score, mask, and
+    /// F32 softmax plane holds at most `batch * heads * rows * key_end`
+    /// elements. Multi-chunk execution synchronizes the backend between chunks
+    /// so dropped planes are reclaimed. On autodiff backends the tape retains
+    /// every chunk anyway, so one unbounded call is evaluated instead (same
+    /// values, no false bound); this keeps training on long sequences working
+    /// with the default policy.
+    ///
+    /// `all_latents` is `[batch, key, rank]` and `all_rotary_keys`
+    /// `[batch, 1, key, rotary]` (already rotated).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Shape`] for inconsistent history or visibility
+    /// extents, the policy's planning errors, and a backend error when a chunk
+    /// synchronization fails.
+    pub(crate) fn mix_unabsorbed_bounded(
+        &self,
+        projection: &MlaProjection<B>,
+        all_latents: Tensor<B, 3>,
+        all_rotary_keys: Tensor<B, 4>,
+        visibility: &MlaVisibility<B>,
+        policy: AttentionExecutionPolicy,
+    ) -> Result<Tensor<B, 3>> {
+        let [batch, heads, query_sequence, _] = projection.query_content.dims();
+        let [latent_batch, key_sequence, latent_width] = all_latents.dims();
+        if latent_batch != batch
+            || latent_width != self.config.kv_lora_rank
+            || all_rotary_keys.dims() != [batch, 1, key_sequence, self.config.qk_rope_head_dim]
+        {
+            return Err(Error::shape(
+                "mla.unabsorbed_history",
+                format!(
+                    "latents [{batch}, key_sequence, {}], rotary [{batch}, 1, key_sequence, {}]",
+                    self.config.kv_lora_rank, self.config.qk_rope_head_dim
+                ),
+                format!(
+                    "latents={:?}, rotary={:?}",
+                    all_latents.dims(),
+                    all_rotary_keys.dims()
+                ),
+            ));
+        }
+        visibility.validate(batch, query_sequence, key_sequence)?;
+        let (content_keys, values) = self.expand_latents(all_latents)?;
+        let rotary_keys =
+            all_rotary_keys.expand([batch, heads, key_sequence, self.config.qk_rope_head_dim]);
+        let query = Tensor::cat(
+            vec![
+                projection.query_content.clone(),
+                projection.query_rotary.clone(),
+            ],
+            3,
+        );
+        let keys = Tensor::cat(vec![content_keys, rotary_keys], 3);
+        let device = query.device();
+        // An autodiff tape keeps every chunk's planes alive until backward, so
+        // chunking would cost synchronizations without bounding memory.
+        let policy = if B::ad_enabled(&device) {
+            AttentionExecutionPolicy::Unbounded
+        } else {
+            policy
+        };
+        let plan = policy.plan(batch, heads, query_sequence, key_sequence)?;
+        let chunked = plan.chunk_count() > 1;
+        let mut contexts = Vec::with_capacity(plan.chunk_count());
+        for rows in plan.query_ranges() {
+            let key_end = visibility.key_end(&rows);
+            let exclusion = visibility.exclusion(batch, heads, rows.clone(), 0..key_end);
+            let scores = query
+                .clone()
+                .narrow(2, rows.start, rows.len())
+                .matmul(keys.clone().narrow(2, 0, key_end).swap_dims(2, 3))
+                * self.config.softmax_scale;
+            let probabilities = eager_probabilities(scores, Some(&exclusion), None, None);
+            contexts.push(probabilities.matmul(values.clone().narrow(2, 0, key_end)));
+            if chunked {
+                B::sync(&device).map_err(|error| {
+                    Error::BackendCapability(format!(
+                        "failed to synchronize a bounded MLA attention chunk: {error}"
+                    ))
+                })?;
+                B::memory_cleanup(&device);
+            }
+        }
+        let mixed = Tensor::cat(contexts, 2).swap_dims(1, 2).reshape([
+            batch,
+            query_sequence,
+            heads * self.config.value_head_dim,
+        ]);
+        operations::linear(mixed, &self.o_proj)
     }
 
     /// Runs the absorbed path over compressed history without expanded K/V tensors.
@@ -884,6 +1026,185 @@ impl<B: Backend> MultiLatentAttention<B> {
             expanded.clone().narrow(3, 0, self.config.qk_nope_head_dim),
             expanded.narrow(3, self.config.qk_nope_head_dim, self.config.value_head_dim),
         ))
+    }
+}
+
+/// Causal and padding visibility of MLA keys, described by token positions.
+///
+/// Query `i` of row `b` may attend to key `j` exactly when
+///
+/// * `key_positions[b, j] <= query_positions[b, i]` (causality),
+/// * key `j` is valid (`key_valid[b, j]`, or always when absent), and
+/// * query `i` is valid (`query_valid[b, i]`, or always when absent);
+///
+/// an invalid query row sees nothing and yields a zero context. Positions are
+/// indices on one shared token timeline: input columns for stateless
+/// self-attention, cache slots for cached attention. Position tensors may have
+/// a leading extent of one, which broadcasts over the batch. Building masks
+/// from `[batch, tokens]` integer vectors means a chunk materializes only its
+/// own `[batch, 1, rows, keys]` Boolean plane, expanded (not copied) over heads.
+///
+/// `key_limits[i]` is the number of leading keys that queries `0..=i` may
+/// need: every key at index `>= key_limits[i]` is causally invisible to all of
+/// them. It requires key `j` to sit at position `j` (column order, or slot
+/// order of full-history storage), is nondecreasing, and lets
+/// [`MultiLatentAttention::mix_unabsorbed_bounded`] skip keys a chunk cannot see.
+#[derive(Clone, Debug)]
+pub(crate) struct MlaVisibility<B: Backend> {
+    /// Query positions `[batch or 1, query]`.
+    query_positions: Tensor<B, 2, Int>,
+    /// Key positions `[batch or 1, key]`.
+    key_positions: Tensor<B, 2, Int>,
+    /// Optional query validity `[batch, query]` (`true` = valid).
+    query_valid: Option<Tensor<B, 2, Bool>>,
+    /// Optional key validity `[batch, key]` (`true` = valid).
+    key_valid: Option<Tensor<B, 2, Bool>>,
+    /// Host prefix bounds: queries `0..=i` see only keys `0..key_limits[i]`.
+    key_limits: Vec<usize>,
+}
+
+impl<B: Backend> MlaVisibility<B> {
+    /// Describes causal self-attention over `sequence` columns with optional padding.
+    ///
+    /// Query and key `t` both sit at column `t`, and `mask` (`true` = valid)
+    /// excludes padded queries and keys, exactly as a causal mask combined with
+    /// a two-sided padding mask.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Configuration`] when `sequence` exceeds `i64`.
+    pub(crate) fn causal_columns(
+        sequence: usize,
+        mask: Option<Tensor<B, 2, Bool>>,
+        device: &B::Device,
+    ) -> Result<Self> {
+        let end = i64::try_from(sequence)
+            .map_err(|_| Error::configuration("mla.visibility", "sequence exceeds i64"))?;
+        let positions = Tensor::<B, 1, Int>::arange(0..end, device).reshape([1, sequence]);
+        Ok(Self {
+            query_positions: positions.clone(),
+            key_positions: positions,
+            query_valid: mask.clone(),
+            key_valid: mask,
+            key_limits: (1..=sequence).collect(),
+        })
+    }
+
+    /// Describes queries at explicit cache slots attending to slot-ordered keys.
+    ///
+    /// `query_positions` is `[batch, query]` with optional `query_valid`; keys
+    /// are `[batch or 1, key]` slots whose validity is `key_valid`, as returned
+    /// by a batched cache read. `key_limits` must satisfy the type's prefix
+    /// contract; [`MlaVisibility::validate`] checks its shape and monotonicity.
+    pub(crate) const fn cached(
+        query_positions: Tensor<B, 2, Int>,
+        query_valid: Option<Tensor<B, 2, Bool>>,
+        key_positions: Tensor<B, 2, Int>,
+        key_valid: Option<Tensor<B, 2, Bool>>,
+        key_limits: Vec<usize>,
+    ) -> Self {
+        Self {
+            query_positions,
+            key_positions,
+            query_valid,
+            key_valid,
+            key_limits,
+        }
+    }
+
+    /// Checks every tensor and host bound against one `[batch, query, key]` geometry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Shape`] naming `mla.visibility` on any mismatch.
+    pub(crate) fn validate(&self, batch: usize, queries: usize, keys: usize) -> Result<()> {
+        let rows_match = |rows: usize| rows == batch || rows == 1;
+        let [query_rows, query_columns] = self.query_positions.dims();
+        let [key_rows, key_columns] = self.key_positions.dims();
+        let valid_ok = |valid: &Option<Tensor<B, 2, Bool>>, columns: usize| {
+            valid
+                .as_ref()
+                .is_none_or(|valid| valid.dims() == [batch, columns])
+        };
+        let limits_ok = self.key_limits.len() == queries
+            && self.key_limits.windows(2).all(|pair| pair[0] <= pair[1])
+            && self
+                .key_limits
+                .iter()
+                .all(|&limit| limit > 0 && limit <= keys);
+        if !rows_match(query_rows)
+            || !rows_match(key_rows)
+            || query_columns != queries
+            || key_columns != keys
+            || !valid_ok(&self.query_valid, queries)
+            || !valid_ok(&self.key_valid, keys)
+            || !limits_ok
+        {
+            return Err(Error::shape(
+                "mla.visibility",
+                format!(
+                    "positions [{batch} or 1, {queries}] and [{batch} or 1, {keys}], \
+                     validity [{batch}, tokens], and {queries} nondecreasing key limits in 1..={keys}"
+                ),
+                format!(
+                    "query positions {:?}, key positions {:?}, {} key limits",
+                    self.query_positions.dims(),
+                    self.key_positions.dims(),
+                    self.key_limits.len()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns the key prefix length that query rows `rows` (non-empty) may need.
+    fn key_end(&self, rows: &Range<usize>) -> usize {
+        self.key_limits[rows.end - 1]
+    }
+
+    /// Builds `[batch, heads, rows, keys]` exclusions (`true` = excluded) for one chunk.
+    ///
+    /// Ranges index the full query and key axes and must lie inside them; the
+    /// result is an expanded view of one `[batch, 1, rows, keys]` plane.
+    pub(crate) fn exclusion(
+        &self,
+        batch: usize,
+        heads: usize,
+        rows: Range<usize>,
+        keys: Range<usize>,
+    ) -> Tensor<B, 4, Bool> {
+        let plane = [batch, 1, rows.len(), keys.len()];
+        let query = self
+            .query_positions
+            .clone()
+            .narrow(1, rows.start, rows.len());
+        let query_rows = query.dims()[0];
+        let query = query.reshape([query_rows, 1, rows.len(), 1]).expand(plane);
+        let key = self.key_positions.clone().narrow(1, keys.start, keys.len());
+        let key_rows = key.dims()[0];
+        let key = key.reshape([key_rows, 1, 1, keys.len()]).expand(plane);
+        let mut excluded = key.greater(query);
+        if let Some(valid) = &self.key_valid {
+            excluded = excluded.bool_or(
+                valid
+                    .clone()
+                    .narrow(1, keys.start, keys.len())
+                    .bool_not()
+                    .reshape([batch, 1, 1, keys.len()])
+                    .expand(plane),
+            );
+        }
+        if let Some(valid) = &self.query_valid {
+            excluded = excluded.bool_or(
+                valid
+                    .clone()
+                    .narrow(1, rows.start, rows.len())
+                    .bool_not()
+                    .reshape([batch, 1, rows.len(), 1])
+                    .expand(plane),
+            );
+        }
+        excluded.expand([batch, heads, rows.len(), keys.len()])
     }
 }
 

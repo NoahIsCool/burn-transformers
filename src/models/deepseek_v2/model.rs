@@ -17,7 +17,19 @@
 //! `1 / sqrt(qk_nope + qk_rope)` by `m(f, mscale_all_dim)^2`, where
 //! `m(s, k) = 1 + 0.1 k ln s`. Only the `qk_rope_head_dim` sub-head rotates
 //! and it always rotates completely, so a `partial_rotary_factor` other than
-//! one is rejected rather than silently ignored.
+//! one is rejected rather than silently ignored. The cosine/sine tables are
+//! built once per forward pass (and cast once to the activation dtype) and
+//! shared by every layer.
+//!
+//! # Bounded prefill
+//!
+//! Reference (unabsorbed) MLA expands keys and values and forms one
+//! `[batch, head, query, key]` score plane per layer. The model's
+//! [`AttentionExecutionPolicy`] evaluates that plane in synchronized query
+//! chunks, each restricted to its causally visible key prefix, so a long
+//! prompt needs `O(chunk * key)` score workspace instead of `O(query * key)`.
+//! Requesting attention probabilities (`ForwardOptions::attentions`)
+//! materializes the full plane, which that output consists of.
 
 use burn::{
     module::Module,
@@ -27,18 +39,21 @@ use burn::{
 
 use crate::{
     ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
-    architecture::{RouterDiagnostics, TokenMask},
-    attention::padding_attention_mask,
+    architecture::RouterDiagnostics,
+    attention::AttentionExecutionPolicy,
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
     moe::SparseMoeOutput,
     normalization::{RmsNorm, RmsNormConfig},
     operations,
-    position::RopeConfig,
+    position::{RopeConfig, RotaryAngles, RotaryFrequencies, rotary_angles_from_frequencies},
 };
 
 use super::{
     DeepseekV2Config,
-    mla::{MlaMixOutput, MultiLatentAttention, MultiLatentAttentionConfig},
+    mla::{
+        MlaMixOutput, MlaProjection, MlaVisibility, MultiLatentAttention,
+        MultiLatentAttentionConfig,
+    },
 };
 use crate::models::{
     config::{PartialRotary, RopeContext, SoftmaxMscale, YarnMscaleConvention},
@@ -98,6 +113,18 @@ pub(crate) fn rope_and_softmax_scale(config: &DeepseekV2Config) -> Result<(RopeC
     let scale = (config.qk_head_dim() as f64).sqrt().recip()
         * parameters.softmax_scale_multiplier(&context)?;
     Ok((rope, scale))
+}
+
+/// Layer-invariant attention inputs computed once per stateless forward pass.
+struct AttentionInputs<'a, B: Backend> {
+    /// Cosine/sine tables `[batch, 1, sequence, rotary]`, in the activation dtype.
+    angles: &'a RotaryAngles<B>,
+    /// Causal and padding visibility shared by every layer.
+    visibility: &'a MlaVisibility<B>,
+    /// Peak score-plane policy for the reference path.
+    policy: AttentionExecutionPolicy,
+    /// Whether to return full attention probabilities (forces one full plane).
+    retain_attention: bool,
 }
 
 /// One DeepSeek-V2 decoder layer.
@@ -164,33 +191,40 @@ impl<B: Backend> DeepseekV2DecoderLayer<B> {
         })
     }
 
-    /// Evaluates one stateless layer with reference unabsorbed MLA prefill math.
+    /// Evaluates one stateless layer with the reference (unabsorbed) MLA equations.
+    ///
+    /// Attention runs in bounded query chunks unless probabilities are
+    /// requested, which materializes the full `[batch, head, query, key]` plane.
     fn forward(
         &self,
         hidden: Tensor<B, 3>,
-        positions: Tensor<B, 2, Int>,
-        token_mask: Option<&TokenMask<B>>,
-        rope: RopeConfig,
-        evaluated_context: usize,
-        retain_attention: bool,
+        inputs: &AttentionInputs<'_, B>,
     ) -> Result<LayerOutput<B>> {
         let residual = hidden.clone();
-        let projection = self.self_attn.project_rotary(
-            self.input_layernorm.forward(hidden),
-            positions,
-            rope,
-            evaluated_context,
-        )?;
-        let [batch, heads, sequence, _] = projection.query_content.dims();
-        let mask =
-            stateless_attention_mask(token_mask, batch, heads, sequence, &residual.device())?;
-        let mixed = self.self_attn.mix_unabsorbed(
-            &projection,
-            projection.normalized_latent.clone(),
-            projection.rotated_key.clone(),
-            Some(mask),
-            retain_attention,
-        )?;
+        let projection = self
+            .self_attn
+            .project_with_angles(self.input_layernorm.forward(hidden), inputs.angles)?;
+        let mixed = if inputs.retain_attention {
+            let exclusion = full_exclusion(&projection, inputs.visibility);
+            self.self_attn.mix_unabsorbed(
+                &projection,
+                projection.normalized_latent.clone(),
+                projection.rotated_key.clone(),
+                Some(exclusion),
+                true,
+            )?
+        } else {
+            MlaMixOutput {
+                hidden_state: self.self_attn.mix_unabsorbed_bounded(
+                    &projection,
+                    projection.normalized_latent.clone(),
+                    projection.rotated_key.clone(),
+                    inputs.visibility,
+                    inputs.policy,
+                )?,
+                probabilities: None,
+            }
+        };
         self.finish_block(residual + mixed.hidden_state.clone(), mixed)
     }
 
@@ -223,6 +257,16 @@ impl<B: Backend> DeepseekV2DecoderLayer<B> {
     }
 }
 
+/// Materializes the complete `[batch, head, query, key]` exclusion of one projection.
+fn full_exclusion<B: Backend>(
+    projection: &MlaProjection<B>,
+    visibility: &MlaVisibility<B>,
+) -> Tensor<B, 4, Bool> {
+    let [batch, heads, queries, _] = projection.query_content.dims();
+    let keys = projection.normalized_latent.dims()[1];
+    visibility.exclusion(batch, heads, 0..queries, 0..keys)
+}
+
 /// Private result of one decoder layer.
 struct LayerOutput<B: Backend> {
     /// Residual stream after attention and feed-forward updates.
@@ -248,6 +292,9 @@ pub struct DeepseekV2Model<B: Backend> {
     /// Validated rotary algorithm shared by every MLA layer.
     #[module(skip)]
     pub rope: RopeConfig,
+    /// Peak score-plane policy of the reference attention path.
+    #[module(skip)]
+    execution_policy: AttentionExecutionPolicy,
 }
 
 impl<B: Backend> DeepseekV2Model<B> {
@@ -277,7 +324,23 @@ impl<B: Backend> DeepseekV2Model<B> {
                 .init(device)?,
             config,
             rope,
+            execution_policy: AttentionExecutionPolicy::default(),
         })
+    }
+
+    /// Builds the per-forward cosine/sine tables in the activation dtype.
+    ///
+    /// Frequencies depend on `evaluated_context` only for context-dependent
+    /// scalings (dynamic NTK, LongRoPE); every other policy yields identical
+    /// tables for any non-zero context.
+    fn rotary_tables(
+        &self,
+        positions: Tensor<B, 2, Int>,
+        evaluated_context: usize,
+    ) -> Result<RotaryAngles<B>> {
+        let frequencies = RotaryFrequencies::new(self.rope, evaluated_context)?;
+        Ok(rotary_angles_from_frequencies(&frequencies, positions)?
+            .to_dtype(self.embed_tokens.weight.val().dtype()))
     }
 
     /// Evaluates the stateless backbone while retaining only requested diagnostics.
@@ -293,7 +356,21 @@ impl<B: Backend> DeepseekV2Model<B> {
                 .with_position_limit(self.config.max_position_embeddings),
         )?;
         let positions = validated.require_positions(INPUT_NAMES.position_ids)?;
-        let context = validated.evaluated_context;
+        let angles = self.rotary_tables(positions, validated.evaluated_context)?;
+        let visibility = MlaVisibility::causal_columns(
+            input.token_ids.dims()[1],
+            input
+                .token_mask
+                .as_ref()
+                .map(|mask| mask.as_tensor().clone()),
+            &input.token_ids.device(),
+        )?;
+        let inputs = AttentionInputs {
+            angles: &angles,
+            visibility: &visibility,
+            policy: self.execution_policy,
+            retain_attention: options.attentions,
+        };
         let mut hidden = self.embed_tokens.forward(input.token_ids.clone());
         let mut hidden_states = Vec::with_capacity(if options.hidden_states {
             self.layers.len() + 2
@@ -318,14 +395,7 @@ impl<B: Backend> DeepseekV2Model<B> {
             hidden_states.push(hidden.clone());
         }
         for layer in &self.layers {
-            let output = layer.forward(
-                hidden,
-                positions.clone(),
-                input.token_mask.as_ref(),
-                self.rope,
-                context,
-                options.attentions,
-            )?;
+            let output = layer.forward(hidden, &inputs)?;
             hidden = output.hidden;
             if options.hidden_states {
                 hidden_states.push(hidden.clone());
@@ -398,6 +468,32 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
         })
     }
 
+    /// Applies one validated reference-attention workspace policy.
+    ///
+    /// The default is synchronized query chunking, which bounds the
+    /// reference path's score planes for long prompts. Selecting
+    /// [`AttentionExecutionPolicy::Unbounded`] evaluates each layer in one
+    /// call. Autodiff backends always evaluate one call, because their tape
+    /// retains every chunk anyway.
+    ///
+    /// # Errors
+    ///
+    /// Returns the policy's validation error.
+    pub fn with_attention_execution_policy(
+        mut self,
+        policy: AttentionExecutionPolicy,
+    ) -> Result<Self> {
+        policy.validate()?;
+        self.model.execution_policy = policy;
+        Ok(self)
+    }
+
+    /// Returns the reference-attention workspace policy.
+    #[must_use]
+    pub const fn attention_execution_policy(&self) -> AttentionExecutionPolicy {
+        self.model.execution_policy
+    }
+
     /// Evaluates differentiable stateless inference or training math.
     pub fn forward(
         &self,
@@ -436,29 +532,6 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
             .cast(DType::F32)),
         }
     }
-}
-
-/// Builds `excluded(q,k) = k > q` and combines semantic padding exclusions.
-fn stateless_attention_mask<B: Backend>(
-    token_mask: Option<&TokenMask<B>>,
-    batch: usize,
-    heads: usize,
-    sequence: usize,
-    device: &B::Device,
-) -> Result<Tensor<B, 4, Bool>> {
-    let query = Tensor::<B, 1, Int>::arange(0..sequence as i64, device)
-        .reshape([1, 1, sequence, 1])
-        .expand([batch, heads, sequence, sequence]);
-    let key = Tensor::<B, 1, Int>::arange(0..sequence as i64, device)
-        .reshape([1, 1, 1, sequence])
-        .expand([batch, heads, sequence, sequence]);
-    let causal = key.greater(query);
-    Ok(
-        match padding_attention_mask(token_mask, token_mask, batch, heads, sequence, sequence)? {
-            Some(padding) => causal.bool_or(padding),
-            None => causal,
-        },
-    )
 }
 
 #[cfg(test)]

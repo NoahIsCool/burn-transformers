@@ -21,6 +21,7 @@ use burn::tensor::{Bool, DType, Int, Tensor, backend::Backend};
 use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, Result,
     architecture::DecodeState as ArchitectureDecodeState,
+    attention::AttentionExecutionPolicy,
     cache::CacheConfig,
     models::shared::{
         EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_same_device,
@@ -28,12 +29,12 @@ use crate::{
         select_hidden_with_last_columns, validate_logits_selection,
     },
     moe::SparseMoeOutput,
-    position::RopeScaling,
+    position::{RopeScaling, RotaryAngles},
 };
 
 use super::{
-    DeepseekV2DecoderLayer, DeepseekV2ForCausalLm, DeepseekV2Model, INPUT_NAMES, ROUTER_DTYPE,
-    router_diagnostics,
+    DeepseekV2DecoderLayer, DeepseekV2ForCausalLm, DeepseekV2Model, INPUT_NAMES, MlaMixOutput,
+    MlaVisibility, ROUTER_DTYPE, router_diagnostics,
 };
 
 /// Owner named when an input tensor is on another device than the cache.
@@ -676,12 +677,12 @@ impl<B: Backend> DeepseekV2Model<B> {
         if retain_hidden_states {
             hidden_states.push(hidden.clone());
         }
+        let angles = self.rotary_tables(positions, evaluated_context)?;
         for (layer_index, layer) in self.layers.iter().enumerate() {
             let output = layer.forward_cached(
                 hidden,
-                positions.clone(),
-                self.rope,
-                evaluated_context,
+                &angles,
+                self.execution_policy,
                 row,
                 baseline,
                 layer_index,
@@ -715,9 +716,8 @@ impl<B: Backend> DeepseekV2DecoderLayer<B> {
     fn forward_cached(
         &self,
         hidden: Tensor<B, 3>,
-        positions: Tensor<B, 2, Int>,
-        rope: crate::position::RopeConfig,
-        evaluated_context: usize,
+        angles: &RotaryAngles<B>,
+        policy: AttentionExecutionPolicy,
         row: usize,
         baseline: usize,
         layer_index: usize,
@@ -726,12 +726,9 @@ impl<B: Backend> DeepseekV2DecoderLayer<B> {
         pending: &mut Vec<PendingMlaWrite<B>>,
     ) -> Result<super::LayerOutput<B>> {
         let residual = hidden.clone();
-        let projection = self.self_attn.project_rotary(
-            self.input_layernorm.forward(hidden),
-            positions,
-            rope,
-            evaluated_context,
-        )?;
+        let projection = self
+            .self_attn
+            .project_with_angles(self.input_layernorm.forward(hidden), angles)?;
         let query_sequence = projection.normalized_latent.dims()[1];
         let (all_latents, all_rotary) = match state.read(layer_index, row, baseline)? {
             Some((past_latent, past_rotary)) => (
@@ -743,25 +740,31 @@ impl<B: Backend> DeepseekV2DecoderLayer<B> {
                 projection.rotated_key.clone(),
             ),
         };
-        let mask = cached_attention_mask::<B>(
-            baseline,
-            query_sequence,
-            self.self_attn.config.num_heads,
-            &projection.normalized_latent.device(),
-        )?;
+        let device = projection.normalized_latent.device();
         let mixed = match path {
-            MlaExecutionPath::ReferenceUnabsorbed => self.self_attn.mix_unabsorbed(
-                &projection,
-                all_latents,
-                all_rotary,
-                Some(mask),
-                false,
-            )?,
+            MlaExecutionPath::ReferenceUnabsorbed => {
+                let visibility = cached_visibility::<B>(baseline, query_sequence, &device)?;
+                MlaMixOutput {
+                    hidden_state: self.self_attn.mix_unabsorbed_bounded(
+                        &projection,
+                        all_latents,
+                        all_rotary,
+                        &visibility,
+                        policy,
+                    )?,
+                    probabilities: None,
+                }
+            }
             MlaExecutionPath::AbsorbedDecode => self.self_attn.mix_absorbed(
                 &projection,
                 all_latents,
                 all_rotary,
-                Some(mask),
+                Some(cached_attention_mask::<B>(
+                    baseline,
+                    query_sequence,
+                    self.self_attn.config.num_heads,
+                    &device,
+                )?),
                 false,
             )?,
         };
@@ -891,6 +894,31 @@ fn cached_attention_mask<B: Backend>(
         .reshape([1, 1, 1, key_sequence])
         .expand([1, heads, query_sequence, key_sequence]);
     Ok(key.greater(query))
+}
+
+/// Describes one compact row's queries at cache slots `baseline..baseline + q`.
+///
+/// Keys occupy slots `0..baseline + q` (history followed by the new tokens),
+/// so query `i` sees exactly the first `baseline + i + 1` keys.
+fn cached_visibility<B: Backend>(
+    baseline: usize,
+    query_sequence: usize,
+    device: &B::Device,
+) -> Result<MlaVisibility<B>> {
+    let keys = baseline.checked_add(query_sequence).ok_or_else(|| {
+        Error::configuration("deepseek_v2.attention_mask", "key length overflows usize")
+    })?;
+    let start = i64::try_from(baseline)
+        .map_err(|_| Error::configuration("deepseek_v2.attention_mask", "offset exceeds i64"))?;
+    let end = i64::try_from(keys)
+        .map_err(|_| Error::configuration("deepseek_v2.attention_mask", "length exceeds i64"))?;
+    Ok(MlaVisibility::cached(
+        Tensor::<B, 1, Int>::arange(start..end, device).reshape([1, query_sequence]),
+        None,
+        Tensor::<B, 1, Int>::arange(0..end, device).reshape([1, keys]),
+        None,
+        (baseline + 1..=keys).collect(),
+    ))
 }
 
 /// Returns exact-zero hidden states for an inactive decode row.

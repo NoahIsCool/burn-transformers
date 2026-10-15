@@ -3,7 +3,7 @@
 use burn::{
     backend::Flex,
     module::Param,
-    tensor::{DType, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
+    tensor::{Bool, DType, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 
 use super::*;
@@ -1113,4 +1113,229 @@ fn absorbed_decode_benchmark() {
         "absorbed MLA decode h={heads} r={rank} dr={rotary} k={keys}: folded {folded:.3} ms, per-head {per_head:.3} ms, speedup {:.2}x",
         per_head / folded
     );
+}
+
+/// Builds a `[batch, tokens]` validity mask from row-major flags.
+fn validity(values: &[bool], shape: [usize; 2]) -> Tensor<TestBackend, 2, Bool> {
+    Tensor::from_data(TensorData::new(values.to_vec(), shape), &Default::default())
+}
+
+/// Projects a deterministic `[batch, sequence, 8]` input with rotary positions `0..sequence`.
+fn rotated_projection(
+    mla: &MultiLatentAttention<TestBackend>,
+    batch: usize,
+    sequence: usize,
+) -> MlaProjection<TestBackend> {
+    let device = Default::default();
+    let hidden = Tensor::<TestBackend, 3>::from_data(
+        TensorData::new(
+            (0..batch * sequence * 8)
+                .map(|index| ((index * 13 % 29) as f32 - 14.0) * 0.07)
+                .collect(),
+            [batch, sequence, 8],
+        ),
+        &device,
+    );
+    let positions = Tensor::<TestBackend, 1, Int>::arange(0..sequence as i64, &device)
+        .reshape([1, sequence])
+        .expand([batch, sequence]);
+    let rope = RopeConfig::new(2, 2, 10_000.0, RopeScaling::None).unwrap();
+    mla.project_rotary(hidden, positions, rope, sequence)
+        .unwrap()
+}
+
+/// Every chunk schedule reproduces the full-plane reference, including padding holes.
+///
+/// One-row chunks exercise the per-chunk key prefix; the masks cover left
+/// padding, an interior hole, and a fully masked row (zero context).
+#[test]
+fn bounded_reference_attention_matches_the_full_plane() {
+    let (mla, device) = deterministic_mla(None);
+    let (batch, sequence) = (3, 5);
+    let projection = rotated_projection(&mla, batch, sequence);
+    let masks = [
+        None,
+        Some(validity(
+            &[
+                [true; 5],
+                [false, false, true, true, true],
+                [true, false, true, false, true],
+            ]
+            .concat(),
+            [batch, sequence],
+        )),
+        Some(validity(
+            &[[true; 5], [false; 5], [true; 5]].concat(),
+            [batch, sequence],
+        )),
+    ];
+    for mask in masks {
+        let visibility = MlaVisibility::causal_columns(sequence, mask, &device).unwrap();
+        let reference = mla
+            .mix_unabsorbed(
+                &projection,
+                projection.normalized_latent.clone(),
+                projection.rotated_key.clone(),
+                Some(visibility.exclusion(batch, 2, 0..sequence, 0..sequence)),
+                false,
+            )
+            .unwrap()
+            .hidden_state;
+        for policy in [
+            AttentionExecutionPolicy::Unbounded,
+            AttentionExecutionPolicy::query_chunked(1, 1 << 20),
+            AttentionExecutionPolicy::query_chunked(2, 1 << 20),
+            // A score budget of 2 heads * 3 rows * 5 keys forces 3-row chunks.
+            AttentionExecutionPolicy::query_chunked(64, 30),
+        ] {
+            let bounded = mla
+                .mix_unabsorbed_bounded(
+                    &projection,
+                    projection.normalized_latent.clone(),
+                    projection.rotated_key.clone(),
+                    &visibility,
+                    policy,
+                )
+                .unwrap();
+            bounded
+                .into_data()
+                .assert_approx_eq::<f32>(&reference.clone().into_data(), Tolerance::absolute(1e-6));
+        }
+    }
+}
+
+/// Cached visibility over slot positions equals the bottom-right cached mask.
+#[test]
+fn cached_visibility_matches_a_bottom_right_causal_suffix() {
+    let (mla, device) = deterministic_mla(None);
+    let projection = rotated_projection(&mla, 1, 6);
+    // Queries are the last three tokens at slots 3..6 over a six-slot history.
+    let query = MlaProjection {
+        query_content: projection.query_content.clone().narrow(2, 3, 3),
+        query_rotary: projection.query_rotary.clone().narrow(2, 3, 3),
+        normalized_latent: projection.normalized_latent.clone(),
+        rotated_key: projection.rotated_key.clone(),
+    };
+    let visibility = MlaVisibility::cached(
+        Tensor::<TestBackend, 1, Int>::arange(3..6, &device).reshape([1, 3]),
+        None,
+        Tensor::<TestBackend, 1, Int>::arange(0..6, &device).reshape([1, 6]),
+        None,
+        vec![4, 5, 6],
+    );
+    let expected = mla
+        .mix_unabsorbed(
+            &query,
+            projection.normalized_latent.clone(),
+            projection.rotated_key.clone(),
+            Some(bottom_right_causal_mask(1, 2, 3, 6, &device).unwrap()),
+            false,
+        )
+        .unwrap()
+        .hidden_state;
+    for policy in [
+        AttentionExecutionPolicy::Unbounded,
+        AttentionExecutionPolicy::query_chunked(1, 1 << 20),
+    ] {
+        mla.mix_unabsorbed_bounded(
+            &query,
+            projection.normalized_latent.clone(),
+            projection.rotated_key.clone(),
+            &visibility,
+            policy,
+        )
+        .unwrap()
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.clone().into_data(), Tolerance::absolute(1e-6));
+    }
+}
+
+/// Inconsistent visibility metadata is a shape error, never an out-of-range slice.
+#[test]
+fn visibility_metadata_is_validated_before_attention() {
+    let device = Default::default();
+    let positions = |len: i64| {
+        Tensor::<TestBackend, 1, Int>::arange(0..len, &device).reshape([1, len as usize])
+    };
+    let valid = MlaVisibility::cached(positions(2), None, positions(3), None, vec![2, 3]);
+    assert!(
+        valid.validate(4, 2, 3).is_ok(),
+        "rows of extent one broadcast"
+    );
+    for visibility in [
+        // Too few limits, a decreasing limit, a zero limit, and a limit past the keys.
+        MlaVisibility::cached(positions(2), None, positions(3), None, vec![3]),
+        MlaVisibility::cached(positions(2), None, positions(3), None, vec![3, 2]),
+        MlaVisibility::cached(positions(2), None, positions(3), None, vec![0, 3]),
+        MlaVisibility::cached(positions(2), None, positions(3), None, vec![2, 4]),
+        // Position extents that disagree with the query and key axes.
+        MlaVisibility::cached(positions(3), None, positions(3), None, vec![2, 3]),
+        MlaVisibility::cached(positions(2), None, positions(4), None, vec![2, 3]),
+        // Validity tensors whose batch or token extent is wrong.
+        MlaVisibility::cached(
+            positions(2),
+            Some(validity(&[true; 2], [1, 2])),
+            positions(3),
+            None,
+            vec![2, 3],
+        ),
+        MlaVisibility::cached(
+            positions(2),
+            None,
+            positions(3),
+            Some(validity(&[true; 8], [4, 2])),
+            vec![2, 3],
+        ),
+    ] {
+        let error = visibility.validate(4, 2, 3).unwrap_err();
+        assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.visibility"));
+    }
+    let (mla, _) = deterministic_mla(None);
+    let projection = rotated_projection(&mla, 1, 3);
+    let error = mla
+        .mix_unabsorbed_bounded(
+            &projection,
+            projection.normalized_latent.clone(),
+            projection.rotated_key.clone(),
+            &MlaVisibility::cached(positions(3), None, positions(3), None, vec![1, 2]),
+            AttentionExecutionPolicy::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Shape { tensor, .. } if tensor == "mla.visibility"));
+}
+
+/// Autodiff evaluates one call instead of rejecting a multi-chunk policy.
+#[cfg(feature = "autodiff")]
+#[test]
+fn bounded_reference_attention_is_differentiable_under_any_policy() {
+    use burn::backend::Autodiff;
+
+    /// Reverse-mode backend over the deterministic CPU backend.
+    type AdBackend = Autodiff<TestBackend>;
+    let device = Default::default();
+    let mla = MultiLatentAttentionConfig::new(8, 2, 3, 2, 4, 5, None)
+        .init::<AdBackend>(&device)
+        .unwrap();
+    let hidden = Tensor::<AdBackend, 3>::ones([1, 4, 8], &device).require_grad();
+    let rope = RopeConfig::new(2, 2, 10_000.0, RopeScaling::None).unwrap();
+    let projection = mla
+        .project_rotary(
+            hidden.clone(),
+            Tensor::<AdBackend, 1, Int>::arange(0..4, &device).reshape([1, 4]),
+            rope,
+            4,
+        )
+        .unwrap();
+    let visibility = MlaVisibility::causal_columns(4, None, &device).unwrap();
+    let output = mla
+        .mix_unabsorbed_bounded(
+            &projection,
+            projection.normalized_latent.clone(),
+            projection.rotated_key.clone(),
+            &visibility,
+            AttentionExecutionPolicy::query_chunked(1, 1 << 20),
+        )
+        .unwrap();
+    let gradients = output.sum().backward();
+    assert!(hidden.grad(&gradients).is_some());
 }
