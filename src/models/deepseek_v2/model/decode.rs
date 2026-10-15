@@ -23,6 +23,7 @@ use crate::{
     architecture::DecodeState as ArchitectureDecodeState,
     attention::AttentionExecutionPolicy,
     cache::CacheConfig,
+    intervention::Layer,
     models::shared::{
         EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_same_device,
         implicit_position_ids, index_tensor, prepare_stateful_rows,
@@ -779,7 +780,13 @@ impl<B: Backend> DeepseekV2DecoderLayer<B> {
             start: baseline,
             data: Tensor::cat(vec![projection.normalized_latent, packed_rotary], 2),
         });
-        self.finish_block(residual + mixed.hidden_state.clone(), mixed)
+        self.finish_block(
+            residual,
+            mixed.hidden_state,
+            None,
+            Layer::decoder(layer_index),
+            None,
+        )
     }
 }
 

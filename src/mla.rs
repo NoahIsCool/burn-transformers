@@ -733,10 +733,30 @@ impl<B: Backend> MultiLatentAttention<B> {
         hidden: Tensor<B, 3>,
         angles: &RotaryAngles<B>,
     ) -> Result<MlaProjection<B>> {
+        self.project_with_angles_and_hooks(
+            hidden,
+            angles,
+            crate::intervention::Layer::decoder(0).self_attention(),
+            &mut Hooks::new(),
+        )
+    }
+
+    /// [`Self::project_with_angles`] that also emits the optional query-latent point.
+    ///
+    /// Call inside the caller's [`Hooks::run`] scope, as for
+    /// [`Self::project_with_hooks`]; the query latent is emitted before the
+    /// query up-projection and the rotation.
+    pub(crate) fn project_with_angles_and_hooks(
+        &self,
+        hidden: Tensor<B, 3>,
+        angles: &RotaryAngles<B>,
+        points: AttentionPoints,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<MlaProjection<B>> {
         self.validate_self_input(&hidden)?;
         // Self-attention projection shares `project`'s code; one joint rotation
         // then applies the same positions to the queries and the shared key.
-        let projection = self.project(hidden.clone(), hidden)?;
+        let projection = self.project_with_hooks(hidden.clone(), hidden, points, hooks)?;
         let (query_rotary, rotated_key) =
             apply_rotary(projection.query_rotary, projection.rotated_key, angles)?;
         Ok(MlaProjection {

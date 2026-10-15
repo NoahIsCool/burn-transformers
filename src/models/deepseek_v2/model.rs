@@ -42,6 +42,7 @@ use crate::{
     architecture::RouterDiagnostics,
     attention::AttentionExecutionPolicy,
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
+    intervention::{Hooks, Layer, PointInfo, Stack},
     moe::SparseMoeOutput,
     normalization::{RmsNorm, RmsNormConfig},
     operations,
@@ -62,6 +63,8 @@ use crate::models::{
 
 /// External compressed MLA caches and transactional prefill/decode execution.
 mod decode;
+/// Activation hooks and staged execution (`HookedModel`, `StagedModel`).
+mod hooks;
 /// Routed-plus-shared expert block, router policies, and balance losses.
 mod moe;
 
@@ -125,6 +128,20 @@ struct AttentionInputs<'a, B: Backend> {
     policy: AttentionExecutionPolicy,
     /// Whether to return full attention probabilities (forces one full plane).
     retain_attention: bool,
+}
+
+/// An experiment-supplied attention policy for one staged layer.
+///
+/// Custom connectivity replaces the default causal visibility, so it always
+/// evaluates one full `[batch, head, query, key]` plane through the hookable
+/// reference graph.
+struct CustomConnectivity<B: Backend> {
+    /// Whether bottom-right causality applies in addition to `exclusion`.
+    causal: bool,
+    /// Padding and disallowed links, `[batch, head, query, key]`, `true` = excluded.
+    exclusion: Option<Tensor<B, 4, Bool>>,
+    /// Additive score bias broadcastable to `[batch, head, query, key]`.
+    bias: Option<Tensor<B, 4>>,
 }
 
 /// One DeepSeek-V2 decoder layer.
@@ -191,69 +208,175 @@ impl<B: Backend> DeepseekV2DecoderLayer<B> {
         })
     }
 
-    /// Evaluates one stateless layer with the reference (unabsorbed) MLA equations.
+    /// Evaluates one stateless layer, optionally emitting the points of `layer`.
     ///
-    /// Attention runs in bounded query chunks unless probabilities are
-    /// requested, which materializes the full `[batch, head, query, key]` plane.
+    /// Without custom connectivity or attention-internal hooks, attention runs
+    /// in bounded query chunks; probabilities, custom connectivity, and any
+    /// requested MLA point (latents, Q/K/V, scores, pattern, head context)
+    /// evaluate one full `[batch, head, query, key]` plane through the
+    /// reference graph instead.
     fn forward(
         &self,
         hidden: Tensor<B, 3>,
         inputs: &AttentionInputs<'_, B>,
+        custom: Option<&CustomConnectivity<B>>,
+        layer: Layer,
+        mut hooks: Option<&mut Hooks<'_, B>>,
     ) -> Result<LayerOutput<B>> {
+        let mut hidden = hidden;
+        if let Some(hooks) = hooks.as_deref_mut() {
+            hidden = hooks.apply(layer.residual_pre(), hidden)?;
+        }
         let residual = hidden.clone();
-        let projection = self
-            .self_attn
-            .project_with_angles(self.input_layernorm.forward(hidden), inputs.angles)?;
-        let mixed = if inputs.retain_attention {
-            let exclusion = full_exclusion(&projection, inputs.visibility);
-            self.self_attn.mix_unabsorbed(
-                &projection,
-                projection.normalized_latent.clone(),
-                projection.rotated_key.clone(),
-                Some(exclusion),
-                true,
-            )?
-        } else {
-            MlaMixOutput {
-                hidden_state: self.self_attn.mix_unabsorbed_bounded(
-                    &projection,
-                    projection.normalized_latent.clone(),
-                    projection.rotated_key.clone(),
-                    inputs.visibility,
-                    inputs.policy,
-                )?,
-                probabilities: None,
+        let mut normalized = self.input_layernorm.forward(hidden);
+        if let Some(hooks) = hooks.as_deref_mut() {
+            normalized = hooks.apply(layer.attention_input(), normalized)?;
+        }
+        let points = layer.self_attention();
+        let internal = hooks.as_deref().is_some_and(|hooks| {
+            self.self_attn
+                .activation_points(points)
+                .into_iter()
+                .any(|point| hooks.needs_point(point))
+        });
+        let (attended, probabilities) = match (hooks.as_deref_mut(), custom) {
+            (Some(hooks), custom) if internal || custom.is_some() => {
+                if inputs.retain_attention {
+                    return Err(Error::BackendCapability(
+                        "DeepSeek attention probabilities cannot be returned together with \
+                         attention-internal hooks; capture the pattern point instead"
+                            .into(),
+                    ));
+                }
+                let projection = self.self_attn.project_with_angles_and_hooks(
+                    normalized,
+                    inputs.angles,
+                    points,
+                    hooks,
+                )?;
+                let (exclusion, bias, causal) = match custom {
+                    Some(custom) => (custom.exclusion.clone(), custom.bias.clone(), custom.causal),
+                    None => (
+                        Some(full_exclusion(&projection, inputs.visibility)),
+                        None,
+                        false,
+                    ),
+                };
+                let attended = self
+                    .self_attn
+                    .attend_with_hooks(projection, exclusion, bias, causal, points, hooks)?;
+                (attended, None)
+            }
+            (None, Some(_)) => {
+                return Err(Error::configuration(
+                    "deepseek_v2.execution.attention",
+                    "custom connectivity is evaluated inside a hook scope",
+                ));
+            }
+            _ => {
+                let projection = self
+                    .self_attn
+                    .project_with_angles(normalized, inputs.angles)?;
+                if inputs.retain_attention {
+                    let exclusion = full_exclusion(&projection, inputs.visibility);
+                    let MlaMixOutput {
+                        hidden_state,
+                        probabilities,
+                    } = self.self_attn.mix_unabsorbed(
+                        &projection,
+                        projection.normalized_latent.clone(),
+                        projection.rotated_key.clone(),
+                        Some(exclusion),
+                        true,
+                    )?;
+                    (hidden_state, probabilities)
+                } else {
+                    let attended = self.self_attn.mix_unabsorbed_bounded(
+                        &projection,
+                        projection.normalized_latent.clone(),
+                        projection.rotated_key.clone(),
+                        inputs.visibility,
+                        inputs.policy,
+                    )?;
+                    (attended, None)
+                }
             }
         };
-        self.finish_block(residual + mixed.hidden_state.clone(), mixed)
+        self.finish_block(residual, attended, probabilities, layer, hooks)
     }
 
-    /// Applies the post-attention residual and exactly one feed-forward topology.
+    /// Adds the attention residual, then applies exactly one feed-forward topology.
+    ///
+    /// `residual` is the block input and `attended` the attention output
+    /// before its residual addition; `probabilities` are returned unchanged.
     fn finish_block(
         &self,
-        hidden: Tensor<B, 3>,
-        attention: MlaMixOutput<B>,
+        residual: Tensor<B, 3>,
+        attended: Tensor<B, 3>,
+        probabilities: Option<Tensor<B, 4>>,
+        layer: Layer,
+        mut hooks: Option<&mut Hooks<'_, B>>,
     ) -> Result<LayerOutput<B>> {
-        let residual = hidden.clone();
-        let normalized = self.post_attention_layernorm.forward(hidden);
-        match (&self.sparse_mlp, &self.dense_mlp) {
-            (Some(moe), None) => {
-                let output = moe.forward(normalized)?;
-                Ok(LayerOutput {
-                    hidden: residual + output.hidden_state,
-                    attention: attention.probabilities,
-                    routed: Some(output.routed),
-                })
-            }
-            (None, Some(mlp)) => Ok(LayerOutput {
-                hidden: residual + mlp.forward(normalized)?,
-                attention: attention.probabilities,
-                routed: None,
-            }),
-            _ => Err(Error::Checkpoint(
-                "DeepSeek-V2 layer has an invalid dense/MoE topology".into(),
-            )),
+        let mut attended = attended;
+        if let Some(hooks) = hooks.as_deref_mut() {
+            attended = hooks.apply(layer.attention_output(), attended)?;
         }
+        let hidden = residual + attended;
+        let residual = hidden.clone();
+        let mut normalized = self.post_attention_layernorm.forward(hidden);
+        if let Some(hooks) = hooks.as_deref_mut() {
+            normalized = hooks.apply(layer.mlp_input(), normalized)?;
+        }
+        let (mut fed, routed) = match (&self.sparse_mlp, &self.dense_mlp) {
+            (Some(moe), None) => {
+                let output = match hooks.as_deref_mut() {
+                    Some(hooks) => moe.forward_with_hooks(normalized, layer, hooks)?,
+                    None => moe.forward(normalized)?,
+                };
+                (output.hidden_state, Some(output.routed))
+            }
+            (None, Some(mlp)) => (
+                match hooks.as_deref_mut() {
+                    Some(hooks) => mlp.forward_with_hooks(normalized, layer, hooks)?,
+                    None => mlp.forward(normalized)?,
+                },
+                None,
+            ),
+            _ => {
+                return Err(Error::Checkpoint(
+                    "DeepSeek-V2 layer has an invalid dense/MoE topology".into(),
+                ));
+            }
+        };
+        if let Some(hooks) = hooks.as_deref_mut() {
+            fed = hooks.apply(layer.mlp_output(), fed)?;
+        }
+        let mut hidden = residual + fed;
+        if let Some(hooks) = hooks {
+            hidden = hooks.apply(layer.residual_post(), hidden)?;
+        }
+        Ok(LayerOutput {
+            hidden,
+            attention: probabilities,
+            routed,
+        })
+    }
+
+    /// Lists this layer's points in emission order (see [`DeepseekV2ForCausalLm::activation_points`]).
+    fn activation_points(&self, layer: Layer) -> Vec<PointInfo> {
+        let mut points = vec![layer.residual_pre().info(), layer.attention_input().info()];
+        points.extend(self.self_attn.activation_points(layer.self_attention()));
+        points.extend([layer.attention_output().info(), layer.mlp_input().info()]);
+        if self.sparse_mlp.is_some() {
+            points.extend(moe::activation_points(layer));
+        } else {
+            points.extend([
+                layer.mlp_pre_activation().info(),
+                layer.mlp_activation().info(),
+            ]);
+        }
+        points.extend([layer.mlp_output().info(), layer.residual_post().info()]);
+        points
     }
 }
 
@@ -343,20 +466,37 @@ impl<B: Backend> DeepseekV2Model<B> {
             .to_dtype(self.embed_tokens.weight.val().dtype()))
     }
 
-    /// Evaluates the stateless backbone while retaining only requested diagnostics.
-    fn forward(
+    /// Validates a public input once and resolves its positions and rotary extent.
+    ///
+    /// One device-to-host transfer covers token, mask, and position values.
+    fn validate_public_input(
         &self,
         input: &CausalLmInput<B>,
-        options: &ForwardOptions,
-    ) -> Result<BackboneOutput<B>> {
+    ) -> Result<(Tensor<B, 2, Int>, usize)> {
         let validated = validate_input(
             input,
             &self.embed_tokens.weight.lazy_device(),
             &InputContract::new(INPUT_NAMES, PARAMETERS, self.config.vocab_size)
                 .with_position_limit(self.config.max_position_embeddings),
         )?;
-        let positions = validated.require_positions(INPUT_NAMES.position_ids)?;
-        let angles = self.rotary_tables(positions, validated.evaluated_context)?;
+        Ok((
+            validated.require_positions(INPUT_NAMES.position_ids)?,
+            validated.evaluated_context,
+        ))
+    }
+
+    /// Evaluates the stateless backbone while retaining only requested diagnostics.
+    ///
+    /// With `hooks`, the embedding, every layer point, and the final norm are
+    /// emitted; the caller owns the surrounding [`Hooks::run`] scope.
+    fn forward(
+        &self,
+        input: &CausalLmInput<B>,
+        options: &ForwardOptions,
+        mut hooks: Option<&mut Hooks<'_, B>>,
+    ) -> Result<BackboneOutput<B>> {
+        let (positions, context) = self.validate_public_input(input)?;
+        let angles = self.rotary_tables(positions, context)?;
         let visibility = MlaVisibility::causal_columns(
             input.token_ids.dims()[1],
             input
@@ -372,6 +512,9 @@ impl<B: Backend> DeepseekV2Model<B> {
             retain_attention: options.attentions,
         };
         let mut hidden = self.embed_tokens.forward(input.token_ids.clone());
+        if let Some(hooks) = hooks.as_deref_mut() {
+            hidden = hooks.apply(Stack::Decoder.embedding(), hidden)?;
+        }
         let mut hidden_states = Vec::with_capacity(if options.hidden_states {
             self.layers.len() + 2
         } else {
@@ -382,29 +525,33 @@ impl<B: Backend> DeepseekV2Model<B> {
         } else {
             0
         });
-        let mut routers =
-            Vec::with_capacity(if options.router_logits || options.auxiliary_losses {
-                self.layers
-                    .iter()
-                    .filter(|layer| layer.sparse_mlp.is_some())
-                    .count()
-            } else {
-                0
-            });
+        let retain_routers = options.router_logits || options.auxiliary_losses;
+        let mut routers = Vec::with_capacity(if retain_routers {
+            self.layers
+                .iter()
+                .filter(|layer| layer.sparse_mlp.is_some())
+                .count()
+        } else {
+            0
+        });
         if options.hidden_states {
             hidden_states.push(hidden.clone());
         }
-        for layer in &self.layers {
-            let output = layer.forward(hidden, &inputs)?;
+        for (index, layer) in self.layers.iter().enumerate() {
+            let output = layer.forward(
+                hidden,
+                &inputs,
+                None,
+                Layer::decoder(index),
+                hooks.as_deref_mut(),
+            )?;
             hidden = output.hidden;
             if options.hidden_states {
                 hidden_states.push(hidden.clone());
             }
-            if let Some(attention) = output.attention {
-                attentions.push(attention);
-            }
+            attentions.extend(output.attention);
             if let Some(routed) = output.routed
-                && (options.router_logits || options.auxiliary_losses)
+                && retain_routers
             {
                 routers.push(router_diagnostics(
                     routed.router_logits,
@@ -416,6 +563,9 @@ impl<B: Backend> DeepseekV2Model<B> {
             }
         }
         hidden = self.norm.forward(hidden);
+        if let Some(hooks) = hooks {
+            hidden = hooks.apply(Stack::Decoder.final_norm(), hidden)?;
+        }
         if options.hidden_states {
             hidden_states.push(hidden.clone());
         }
@@ -500,7 +650,17 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
         input: CausalLmInput<B>,
         options: &ForwardOptions,
     ) -> Result<CausalLmOutput<B>> {
-        let backbone = self.model.forward(&input, options)?;
+        let backbone = self.model.forward(&input, options, None)?;
+        self.finish_forward(&input, options, backbone)
+    }
+
+    /// Selects the requested positions and projects them to F32 vocabulary logits.
+    fn finish_forward(
+        &self,
+        input: &CausalLmInput<B>,
+        options: &ForwardOptions,
+        backbone: BackboneOutput<B>,
+    ) -> Result<CausalLmOutput<B>> {
         let hidden = backbone.hidden;
         let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
         let logits = self.project_logits(selected)?;
