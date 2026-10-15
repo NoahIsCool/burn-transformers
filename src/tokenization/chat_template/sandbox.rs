@@ -14,7 +14,8 @@
 //!   never refused for being long.
 //! - [`RenderBudget`] is the per-render counter those operations charge. It
 //!   counts *production*, not live memory (MiniJinja does not report frees),
-//!   so it bounds peak memory from above.
+//!   so it bounds what they can keep alive; transient copies inside MiniJinja
+//!   and Rust's string growth add a small constant factor on top.
 //! - The `__bounded_*` filters implement `+`, `~`, and `*` with MiniJinja's
 //!   exact semantics plus those checks. The source rewrite in the `guard`
 //!   module routes every binary use of the operators to them. Sequences are
@@ -25,6 +26,9 @@
 //!   that print arbitrary values with MiniJinja's `Display` (`upper`, `lower`,
 //!   `title`, `capitalize`, `escape`, `pprint`, and the `startingwith` and
 //!   `endingwith` tests) with bounded versions.
+//! - [`NamespaceRegistry`] records every namespace a render creates and,
+//!   through [`CycleBreaker`], clears their attributes when the render ends,
+//!   so reference cycles (`{% set ns.me = ns %}`) cannot outlive it.
 //!
 //! Numbers keep MiniJinja's own arithmetic: the bounded operators delegate
 //! every operand pair they do not size-check to the engine's operator.

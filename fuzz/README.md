@@ -68,6 +68,8 @@ test, and a focused regression test in the owning library module.
 | ROPE-SOFTMAX-1 | `rope_parameters::tests::translated_softmax_corrections_are_finite` | The softmax multiplier `m^2`, not only `m`, must be a normal positive `f32` |
 | ROPE-F32-1/2 | `rope_parameters::tests::{accepted_bases_have_finite_frequencies, accepted_long_rope_factors_have_finite_frequencies}` | Bases must be at least one and LongRoPE factors (and RoPE amplitudes) normal positive `f32` values, which keeps every `f32` frequency finite |
 | ROPE-PARSE-1 | `rope_parameters::tests::arrays_are_not_rope_parameters` | `RopeParameters` deserializes only from a JSON object |
+| CHAT-5 | `namespace_cycles_do_not_outlive_the_render` (in the library's chat-template sandbox tests) | Found while investigating a campaign's peak RSS: a template could leak memory across renders through namespace reference cycles (`{% set ns.me = ns %}`); every namespace's attributes are now cleared when the render ends |
+| CHAT-6 | `limits_follow_the_context_size` (same module) | Also from that investigation: the 16 MiB prompt floor let a template make `encode_chat` use about 2 GB (the tokenizer keeps over 100 bytes of state per prompt byte); the floor is now 1 MiB plus four times the context |
 
 The fixes removed the corresponding tolerances: the `f32` and frequency
 envelopes, the `|mscale_all_dim| <= 1e100` bound, and the small growth counts of

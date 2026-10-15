@@ -308,12 +308,43 @@ corpus.
 `chat_templates` reached a process peak of 968 MiB in round 2 (below the
 2048 MiB limit). Re-running its whole retained corpus once with
 `-malloc_limit_mb=200` peaked at 199 MiB without a single allocation above
-200 MiB, so the peak came from a mutated input that was not retained, plus
-allocator retention across 178,682 renders. For comparison, the worst-case
-template that keeps every value it builds alive (`ns.l + ['x' * 16000000]` in
-a loop) stops at the renderer's 256 MiB production budget with a peak of
-264 MiB in a fresh process. These are finite smoke campaigns without a
-sanitizer and with the limitations stated for the earlier rounds; in
-particular the documented residual gaps of the renderer (comparisons of
-containers that share a value, template text replayed into captures) are not
-exercised by the fragment table.
+200 MiB, so the peak came from a mutated input that was not retained. The
+investigation (round 3 below) found two causes and fixed both.
+
+### Round 3: `chat_templates` follow-ups
+
+Each follow-up commit was followed by a 300 s `chat_templates` campaign that
+ran alone (not concurrently) with the round-2 settings, reading the corpora of
+the earlier runs as read-only corpora. All exited with status 0 and wrote no
+artifact.
+
+| After commit | Change | Executed inputs | exec/s | cov | ft | Corpus | Peak RSS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `0eff98f` | `format` reads `%%` and `%(key)` like MiniJinja; `*` picks its repeat candidate like MiniJinja | 194,445 | 645 | 8578 | 35052 | 1689 | 1087 MiB |
+| `ae85564` | namespace reference cycles are broken when a render ends | 155,972 | 518 | 8786 | 36286 | 1677 | 1228 MiB |
+| `90ea52c` | rendered-prompt floor 16 MiB → 4 MiB | 183,545 | 609 | 8848 | 36801 | 1767 | 1191 MiB |
+| `a89cb83` | rendered-prompt floor 4 MiB → 1 MiB (final source; `src/` tree `b98f73b6ce0fb62cf698e45ee55ff60f1c641fc5`, fuzz tree `24687d91e870333ce6b9fc41f452bd59280cdcb1`) | 190,037 | 631 | 8853 | 36970 | 1821 | 673 MiB |
+
+The two causes of the high peaks:
+
+- **Namespace reference cycles leaked across renders** (fixed in `ae85564`).
+  Namespaces are MiniJinja's only mutable values, so `{% set ns.me = ns %}`
+  kept a namespace and everything it reached alive after the render;
+  rendering such a template 20 times with a 10 MB value grew RSS by 200 MiB.
+  The renderer now records every namespace and clears its attributes when the
+  render ends, as MiniJinja already does for macro closures.
+- **Encoding a maximal prompt costs far more than rendering it** (bounded in
+  `90ea52c` and `a89cb83`). The harness encodes every rendered prompt, and the
+  Hugging Face tokenizer keeps per-token strings, offsets, and masks: a 16 MiB
+  prompt of `hello ` took 1.9 GB to encode, and a 4 MiB prompt of `a ` took
+  911 MiB while rendering it took 12 MiB. Lowering the floor of the prompt
+  limit to 1 MiB (the 4x-context term is unchanged) brought the campaign peak
+  to 673 MiB, of which the initial corpus replay accounted for 280 MiB.
+
+The worst-case template that keeps every value it builds alive
+(`ns.l + ['x' * 1000000]` in a loop) now stops at the 16 MiB production budget
+of an empty context. These are finite smoke campaigns without a sanitizer and
+with the limitations stated for the earlier rounds; in particular the
+documented residual gaps of the renderer (comparisons of containers that share
+a value, template text replayed into captures) are not exercised by the
+fragment table.
