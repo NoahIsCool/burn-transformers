@@ -565,6 +565,78 @@ fn full_storage_truncation_replays_exactly() {
     }
 }
 
+/// Two unpadded seven-token rows for the ring rollback test.
+const ROLLBACK: [[i64; 7]; 2] = [[3, 17, 8, 25, 11, 4, 29], [12, 5, 30, 9, 21, 14, 7]];
+
+/// Ring groups roll back within their window and replay exactly; duplicated rows decode alike.
+///
+/// With window [`WINDOW`] = 3, a ring has evicted nothing while its row
+/// holds at most three tokens, so truncation is permitted there (a
+/// speculative rollback before the ring wraps). Both rows prefill three
+/// tokens, roll back to different lengths (2 and 1), and replay four
+/// ragged steps that wrap the rings again; every step must equal the
+/// stateless logits at the row's own column. A duplicating reorder
+/// (`[0, 0]`, beam-search style) then copies row 0's full and ring history
+/// into both rows, which must decode its next token identically.
+#[test]
+fn unwrapped_ring_truncation_and_duplicating_reorder_replay_exactly() {
+    let model = tiny_model(29);
+    let stateless = model
+        .forward(input(ints(ROLLBACK), None, None), &all_logits())
+        .unwrap()
+        .logits;
+    let mut cache = state(&model, 2, 12);
+    assert_eq!(cache.ring_layers(), 2);
+    model
+        .prefill(
+            input(
+                ints(ROLLBACK.map(|row| [row[0], row[1], row[2]])),
+                None,
+                None,
+            ),
+            &mut cache,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    const { assert!(WINDOW == 3) };
+    cache.truncate(&[2, 1]).unwrap();
+    assert_eq!(cache.lengths(), [2, 1]);
+    for step in 0..4 {
+        let (column_0, column_1) = (2 + step, 1 + step);
+        let logits = decode_step(
+            &model,
+            &mut cache,
+            ints([[ROLLBACK[0][column_0]], [ROLLBACK[1][column_1]]]),
+        );
+        assert_close(
+            logits.clone().narrow(0, 0, 1),
+            stateless.clone().narrow(0, 0, 1).narrow(1, column_0, 1),
+            TOLERANCE,
+            &format!("replayed row 0, column {column_0}"),
+        );
+        assert_close(
+            logits.narrow(0, 1, 1),
+            stateless.clone().narrow(0, 1, 1).narrow(1, column_1, 1),
+            TOLERANCE,
+            &format!("replayed row 1, column {column_1}"),
+        );
+    }
+    assert_eq!(cache.lengths(), [6, 5]);
+    cache.reorder(&[0, 0]).unwrap();
+    assert_eq!(cache.lengths(), [6, 6]);
+    let next = ROLLBACK[0][6];
+    let logits = decode_step(&model, &mut cache, ints([[next], [next]]));
+    let expected = stateless.narrow(0, 0, 1).narrow(1, 6, 1);
+    for duplicate in 0..2 {
+        assert_close(
+            logits.clone().narrow(0, duplicate, 1),
+            expected.clone(),
+            TOLERANCE,
+            &format!("duplicated row {duplicate}"),
+        );
+    }
+}
+
 /// Returns the tiny model with every layer in full storage (window 40 > capacity).
 fn full_storage_model(seed: u64) -> GptOssForCausalLm<B> {
     model_from(
@@ -814,15 +886,18 @@ fn incompatible_states_and_requests_are_refused() {
     let _: Option<TokenMask<B>> = None;
 }
 
-/// Measures batched against row-by-row decoding on Flex (`--release --ignored --nocapture`).
+/// Checks that batched and row-by-row decoding agree, then prints both timings.
 ///
-/// Two 4-layer models with 8 experts (2 selected), of width 256 and 1024,
-/// decode 8 rows for 32 steps after a 16-token prefill, once as one batched
-/// pass per step and once row by row. Both paths are checked to agree
-/// before the timings are printed.
+/// Run with `--release --ignored --nocapture`. Two 4-layer models with 8
+/// experts (2 selected), of width 256 and 1024, decode 8 rows for 32 steps
+/// after a 16-token prefill, once as one batched pass per step and once row
+/// by row. Only agreement is asserted: the printed ratio (row-by-row time
+/// over batched time) is a measurement, not a guarantee. On Flex it has been
+/// 1.1–1.2x at width 256 but 0.83–0.85x at width 1024, where expert compute
+/// that grows with the token count dominates on a CPU.
 #[test]
 #[ignore = "timing measurement; run with --release --ignored --nocapture"]
-fn batched_decoding_outpaces_row_by_row_decoding() {
+fn batched_and_row_by_row_decoding_agree_and_are_timed() {
     for width in [256, 1024] {
         let config = GptOssConfig {
             vocab_size: 512,
