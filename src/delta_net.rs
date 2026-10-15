@@ -58,7 +58,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result, architecture::TokenMask, normalization::RmsNormConfig, operations};
 
-mod plan;
+pub(crate) mod plan;
 
 use plan::{
     ChunkPlan, DeltaGeometryViolation, block_chunk_ranges, check_delta_geometry, chunk_plan,

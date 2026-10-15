@@ -1029,7 +1029,7 @@ fn mixed_mode_rows_match_per_row_execution() {
         },
     ];
     assert_eq!(
-        mode_groups(&rows),
+        mode_groups(&rows).groups,
         vec![
             (Mamba2Mode::Recurrent, vec![0, 2]),
             (Mamba2Mode::ChunkedPrefill, vec![1]),
@@ -1084,7 +1084,7 @@ fn mixed_mode_rows_match_per_row_execution() {
         },
     ];
     assert_eq!(
-        mode_groups(&idle),
+        mode_groups(&idle).groups,
         vec![(Mamba2Mode::Recurrent, vec![0, 1])]
     );
 }

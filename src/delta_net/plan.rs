@@ -131,7 +131,7 @@ pub(super) fn prefers_recurrence(sequence: usize, state_elements: usize) -> bool
         quotient <= numerator,
         numerator > 0 ==> quotient >= 1,
 ))]
-fn ceiling_division(numerator: usize, denominator: usize) -> usize {
+pub(crate) fn ceiling_division(numerator: usize, denominator: usize) -> usize {
     #[cfg(verus_keep_ghost)]
     proof! {
         lemma_ceiling(numerator as int, denominator as int);
