@@ -48,7 +48,19 @@
 //! * `ring_chunk_keys` returns, for cached sliding attention over
 //!   `[ring history | fresh block]`, a key slice that contains every fresh key
 //!   visible to the chunk's rows, the whole ring while any row can still see
-//!   history, no history otherwise, and at most `H + W - 1 + rows` keys.
+//!   history, no history otherwise, and at most `H + W - 1 + rows` keys;
+//!   every fresh key it covers is visible to some row, so without history
+//!   it is exactly the rows' window union;
+//! * `planning_bound` is exactly the saturating per-rule formula clamped to
+//!   `K`, and no ring slice (or aligned window union of `rows + W - 1` keys)
+//!   of a chunk the policy admits exceeds it;
+//! * `prefix_chunk_limit` returns the chunk's last row limit exactly when
+//!   the limits cover every query row within `1..=K`; `plane_elements` is the
+//!   exact checked product of a score plane's extents;
+//! * `cache_groups` counts each layer kind exactly, allocates the ring
+//!   (group `0`) exactly with local layers and a non-zero window and the full
+//!   group after it exactly with global layers, and maps every layer to its
+//!   kind's existing group and dense slot.
 //!
 //! See `verus/README.md` for the method, toolchain, and command. Burn tensor
 //! programs driven by these plans (gathers, scatters, cache writes, and

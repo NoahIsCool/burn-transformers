@@ -66,7 +66,8 @@ use super::{
     plan_attention_chunks,
 };
 use crate::models::muse_glimmer::{
-    MuseGlimmerLayerType, MuseGlimmerTextConfig, schedule::group_slots,
+    MuseGlimmerLayerType, MuseGlimmerTextConfig,
+    schedule::{GroupFault, cache_groups},
 };
 
 /// Owner named when an input tensor is on another device than the cache.
@@ -654,22 +655,24 @@ fn cache_layout<B: Backend>(
     model: &MuseGlimmerForCausalLm<B>,
     window: Option<usize>,
 ) -> Result<MuseGlimmerCacheLayout> {
-    let schedule_types = model.config().resolved_layer_types();
-    let sliding_count = schedule_types
+    let global = model
+        .config()
+        .resolved_layer_types()
         .iter()
-        .filter(|&&kind| kind == MuseGlimmerLayerType::SlidingAttention)
-        .count();
-    let full_count = schedule_types.len() - sliding_count;
-    let window = match (sliding_count, window) {
-        (0, _) => None,
-        (_, Some(0)) => {
+        .map(|&kind| kind == MuseGlimmerLayerType::FullAttention)
+        .collect::<Vec<_>>();
+    // Verified: exact group sizes, a ring (group 0) exactly with local layers
+    // and a non-zero window, the full group after it exactly with global
+    // layers, and every layer's (existing) group and dense slot.
+    let plan = match cache_groups(&global, window) {
+        Ok(plan) => plan,
+        Err(GroupFault::ZeroWindow) => {
             return Err(Error::configuration(
                 "muse_glimmer.decode_state.window",
                 "must be non-zero",
             ));
         }
-        (_, Some(window)) => Some(window),
-        (_, None) => {
+        Err(GroupFault::MissingWindow) => {
             return Err(Error::configuration(
                 "muse_glimmer.decode_state.window",
                 "is required by the sliding cache group",
@@ -678,66 +681,42 @@ fn cache_layout<B: Backend>(
     };
     let dtype = model.model.embed_tokens.weight.val().dtype();
     let mut groups = Vec::with_capacity(2);
-    let sliding_group = match window.and_then(NonZeroUsize::new) {
-        Some(width) => {
-            groups.push(
-                NativeKvCacheSpec::new(
-                    sliding_count,
-                    model.config().num_key_value_heads,
-                    model.config().head_dim,
-                    KvCacheStorage::MirroredSlidingRing,
-                    dtype,
-                )?
-                .with_sliding_window(width),
-            );
-            Some(groups.len() - 1)
-        }
-        None => None,
-    };
-    let full_group = if full_count > 0 {
+    if let Some(width) = plan.window.and_then(NonZeroUsize::new) {
+        groups.push(
+            NativeKvCacheSpec::new(
+                plan.sliding_layers,
+                model.config().num_key_value_heads,
+                model.config().head_dim,
+                KvCacheStorage::MirroredSlidingRing,
+                dtype,
+            )?
+            .with_sliding_window(width),
+        );
+    }
+    if plan.full_group.is_some() {
         groups.push(NativeKvCacheSpec::new(
-            full_count,
+            plan.full_layers,
             model.config().num_key_value_heads,
             model.config().head_dim,
             KvCacheStorage::Full,
             dtype,
         )?);
-        Some(groups.len() - 1)
-    } else {
-        None
-    };
-    let global = schedule_types
-        .iter()
-        .map(|&kind| kind == MuseGlimmerLayerType::FullAttention)
-        .collect::<Vec<_>>();
-    // Verified dense slots: each group's layers occupy slots 0, 1, … in order.
-    let slots = group_slots(&global);
+    }
     let schedule = global
         .iter()
-        .zip(slots)
-        .map(|(&is_global, layer)| -> Result<MuseGlimmerLayerCache> {
+        .zip(plan.groups.iter().zip(&plan.slots))
+        .map(|(&is_global, (&group, &layer))| {
             if is_global {
-                let group = full_group.ok_or_else(|| {
-                    Error::Cache(
-                        "Muse schedule contains a full layer without a full cache group".into(),
-                    )
-                })?;
-                Ok(MuseGlimmerLayerCache::Full { group, layer })
+                MuseGlimmerLayerCache::Full { group, layer }
             } else {
-                let group = sliding_group.ok_or_else(|| {
-                    Error::Cache(
-                        "Muse schedule contains a sliding layer without a sliding cache group"
-                            .into(),
-                    )
-                })?;
-                Ok(MuseGlimmerLayerCache::Sliding { group, layer })
+                MuseGlimmerLayerCache::Sliding { group, layer }
             }
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
     Ok(MuseGlimmerCacheLayout {
         schedule,
         groups,
-        window,
+        window: plan.window,
     })
 }
 
