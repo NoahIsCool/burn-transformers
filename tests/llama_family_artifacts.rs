@@ -30,7 +30,10 @@
 //! drift for deeper checkpoints; set `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` to
 //! override it for other checkpoints or backends. Greedy tokens are compared
 //! while the reference's top-2 margin exceeds twice the tolerance; a closer
-//! race is an F32 tie.
+//! race is an F32 tie. At least [`DEFAULT_MIN_GREEDY`] = 2 tokens (the
+//! prefill's argmax and one cached decode step) must be compared, so a
+//! bundle whose continuation opens with a tie fails instead of passing
+//! vacuously; `TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY` overrides the minimum.
 
 #![cfg(feature = "flex")]
 
@@ -51,6 +54,9 @@ use transformers::{
 
 /// Default absolute logit tolerance; see the module documentation.
 const DEFAULT_TOLERANCE: f32 = 1e-3;
+
+/// Default minimum number of decisive greedy tokens that must be compared.
+const DEFAULT_MIN_GREEDY: usize = 2;
 
 /// One prompt of the reference bundle.
 struct Prompt {
@@ -144,6 +150,13 @@ fn environment() -> (PathBuf, PathBuf, f32) {
         variable("TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR"),
         tolerance,
     )
+}
+
+/// Returns how many decisive greedy tokens a run must compare.
+fn minimum_greedy() -> usize {
+    std::env::var("TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY")
+        .map(|value| value.parse().expect("minimum must be an integer"))
+        .unwrap_or(DEFAULT_MIN_GREEDY)
 }
 
 /// Loads the checkpoint with F32 casts after checking it matches the bundle.
@@ -271,6 +284,12 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
     eprintln!(
         "greedy: {compared} of {} tokens match",
         reference.greedy.len()
+    );
+    let minimum = minimum_greedy().min(reference.greedy.len());
+    assert!(
+        compared >= minimum,
+        "only {compared} decisive greedy tokens were compared (minimum {minimum}); \
+         regenerate the bundle with another first prompt or lower TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY"
     );
 }
 
