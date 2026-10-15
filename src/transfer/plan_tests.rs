@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Shorthands for rule classifications.
+/// A rule unrelated to the target.
 const U: RuleMatch = RuleMatch::Unrelated;
 /// An exact copy or transform.
 const E: RuleMatch = RuleMatch::Exact;
