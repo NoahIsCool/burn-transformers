@@ -163,7 +163,20 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
 ### Changed
 
 These change observable behavior; see [MIGRATION.md](MIGRATION.md#upgrading-from-010).
+Items about APIs added during this cycle (GPT-2, GPT-NeoX, hooks, staged
+execution, `ModularLayer`, `InitPolicy`, transfer, and cache steps) affect only
+code written against unreleased sources.
 
+- **Public API.** Exhaustive matches on `MixerSpec`, `FeedForwardSpec`, both
+  `RopeScaling` enums, `QuantizationExclusion`, and `RopeConfigError` need arms
+  for their new variants. `GenerationConfig`, `ChatMessage`,
+  `ChatTemplateOptions`, `SpecialTokens`, `SparseMoeConfig`,
+  `GroupedQueryAttentionConfig`, `GatedDeltaNetConfig`, `MlaSpec`,
+  `MixtureOfExpertsSpec`, `Seq2SeqSpec`, `RopeParameters`,
+  `QuantizedCheckpointOptions`, and `BurnpackArtifactSummary` gained public
+  fields, so exhaustive literals need them. The Burn records of
+  `DeepseekV2Moe` and of Nemotron-H's dense, Mamba-2, and gated-norm modules
+  are now the shared modules' record types.
 - **Generation.** Presence and frequency penalties count generated tokens only
   by default (`PenaltyScope::PromptAndGenerated` restores prompt counting);
   `LogitsProcessor::process` treats its whole history as generated. Greedy
