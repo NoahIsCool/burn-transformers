@@ -19,6 +19,9 @@
 //!   order. Each pairwise-reduction level partitions the row into added left
 //!   and right blocks plus the carried odd middle column (every column is read
 //!   exactly once), and the whole reduction takes exactly `ceil(log2 w)` levels.
+//! - `src/experiment/precedence.rs`: ordered overrides (per-layer attention
+//!   policies and initialization path overrides) resolve to exactly the last
+//!   matching entry.
 //! - `src/architecture/constraints.rs`: the integer rules of specification
 //!   validation. Head layouts are classified in precedence order (zero
 //!   dimension, then indivisible groups), and a valid layout maps every head
@@ -44,6 +47,9 @@ pub mod selection;
 
 #[path = "../src/experiment/bounds.rs"]
 pub mod bounds;
+
+#[path = "../src/experiment/precedence.rs"]
+pub mod precedence;
 
 #[path = "../src/architecture/constraints.rs"]
 pub mod constraints;

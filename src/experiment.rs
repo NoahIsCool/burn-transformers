@@ -26,6 +26,7 @@ use crate::{
 
 mod block;
 pub(crate) mod bounds;
+pub(crate) mod precedence;
 mod rotary;
 pub use block::{ResidualBlock, WidthAdapter};
 pub use rotary::RotaryAttention;
@@ -308,12 +309,11 @@ impl<B: Backend> ExecutionContext<B> {
     }
 
     /// Resolve one layer's policy while preserving its default when no override exists.
+    ///
+    /// The most recent override for `layer` wins (the Verus-verified
+    /// [`precedence::last_match`]), then the pass-wide override, then the default.
     pub fn attention_for(&self, layer: Layer, default_causal: bool) -> AttentionPolicy<B> {
-        self.layer_attention
-            .iter()
-            .rev()
-            .find(|(candidate, _)| *candidate == layer)
-            .map(|(_, policy)| policy.clone())
+        latest_override(&self.layer_attention, layer)
             .or_else(|| self.attention.clone())
             .unwrap_or_else(|| {
                 if default_causal {
@@ -339,12 +339,10 @@ impl<B: Backend> ExecutionContext<B> {
     }
 
     /// Resolve cross-attention connectivity; its default permits every valid source token.
+    ///
+    /// The most recent per-layer override wins, then the decoder-wide override.
     pub fn cross_attention_for(&self, layer: Layer) -> AttentionPolicy<B> {
-        self.layer_cross_attention
-            .iter()
-            .rev()
-            .find(|(candidate, _)| *candidate == layer)
-            .map(|(_, policy)| policy.clone())
+        latest_override(&self.layer_cross_attention, layer)
             .or_else(|| self.cross_attention.clone())
             .unwrap_or_else(AttentionPolicy::bidirectional)
     }
@@ -458,6 +456,18 @@ impl<B: Backend> ExecutionContext<B> {
         }
         Ok(())
     }
+}
+
+/// Returns the most recently registered policy for `layer`, if any.
+fn latest_override<B: Backend>(
+    overrides: &[(Layer, AttentionPolicy<B>)],
+    layer: Layer,
+) -> Option<AttentionPolicy<B>> {
+    let matches = overrides
+        .iter()
+        .map(|(candidate, _)| *candidate == layer)
+        .collect::<Vec<_>>();
+    precedence::last_match(&matches).map(|index| overrides[index].1.clone())
 }
 
 // Host readback of device-side integer extrema.

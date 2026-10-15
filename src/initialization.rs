@@ -366,13 +366,17 @@ impl InitPolicy {
     }
 
     /// The initializer for a parameter at `path` with `role`, after overrides and scaling.
+    ///
+    /// The last matching override wins (the Verus-verified
+    /// [`crate::experiment::precedence::last_match`]); without one, the role rule applies.
     pub fn resolve(&self, path: &str, role: ParameterRole) -> ParameterInit {
-        let base = self
+        let matches = self
             .overrides
             .iter()
-            .rev()
-            .find(|entry| under(path, &entry.path))
-            .map_or_else(|| self.role_init(role), |entry| entry.init);
+            .map(|entry| under(path, &entry.path))
+            .collect::<Vec<_>>();
+        let base = crate::experiment::precedence::last_match(&matches)
+            .map_or_else(|| self.role_init(role), |index| self.overrides[index].init);
         if role == ParameterRole::ResidualProjection {
             base.scaled(self.residual_scaling.factor())
         } else {
