@@ -15,6 +15,13 @@
 //! The comparison tolerance is `1e-5` absolute on logits of magnitude below
 //! about two: both graphs evaluate the same F32 operations, differing only in
 //! summation order (for example folded versus per-head attention matmuls).
+//!
+//! Fixtures are sized so the comparison can fail: every rotary sub-head has at
+//! least two pairs with base-dependent frequencies that turn measurably within
+//! the inputs' positions. Negative controls build deliberately wrong modular
+//! twins (wrong rotary base, unscaled or near-miss RoPE scaling, a missing
+//! score correction) and require them to differ from the family by at least
+//! one hundred times the tolerance.
 
 use burn::{
     module::Module,
@@ -106,7 +113,7 @@ fn causal_inputs(device: &Device) -> Vec<CausalLmInput<TestBackend>> {
         CausalLmInput {
             token_ids: tokens,
             token_mask: None,
-            position_ids: Some(grid([[0, 2, 5, 6, 9], [1, 2, 3, 7, 8]], device)),
+            position_ids: Some(grid([[0, 2, 5, 6, 19], [1, 2, 3, 7, 12]], device)),
         },
     ]
 }
@@ -182,6 +189,60 @@ fn assert_causal_parity<F: CausalLanguageModel<TestBackend>>(
     );
 }
 
+/// Largest absolute difference between two causal models' valid logits over [`causal_inputs`].
+///
+/// Negative controls use it to show that a deliberately wrong modular twin is
+/// separated from its family by far more than [`LOGIT_TOLERANCE`], so a parity
+/// test can actually detect that class of translation error.
+fn max_logit_gap<F: CausalLanguageModel<TestBackend>>(
+    family: &F,
+    custom: &ModularCausalLm<TestBackend>,
+    device: &Device,
+) -> f32 {
+    causal_inputs(device)
+        .into_iter()
+        .map(|input| {
+            let expected = valid_logits(
+                family.forward(input.clone(), &all_logits()).unwrap(),
+                &input,
+            )
+            .to_vec::<f32>()
+            .unwrap();
+            let actual = valid_logits(
+                custom.forward(input.clone(), &all_logits()).unwrap(),
+                &input,
+            )
+            .to_vec::<f32>()
+            .unwrap();
+            expected
+                .iter()
+                .zip(&actual)
+                .map(|(left, right)| (left - right).abs())
+                .fold(0.0, f32::max)
+        })
+        .fold(0.0, f32::max)
+}
+
+/// Smallest logit gap a negative control must produce: 100 times [`LOGIT_TOLERANCE`].
+///
+/// A mutation that moved logits by less would sit within two orders of
+/// magnitude of the pass/fail boundary, where a slightly different fixture
+/// could hide it behind summation-order noise.
+const DETECTABLE_GAP: f32 = 100.0 * LOGIT_TOLERANCE;
+
+/// Requires a deliberately wrong modular twin to differ from `family` by at least [`DETECTABLE_GAP`].
+fn assert_detectable<F: CausalLanguageModel<TestBackend>>(
+    family: &F,
+    custom: &ModularCausalLm<TestBackend>,
+    mutation: &str,
+) {
+    let gap = max_logit_gap(family, custom, &Default::default());
+    assert!(
+        gap >= DETECTABLE_GAP,
+        "{mutation}: logit gap {gap:e} is below {DETECTABLE_GAP:e}, so parity could not detect it"
+    );
+}
+
 /// RMS normalization with the given stabilizer and plain (not zero-centered) scales.
 fn rms_with(epsilon: f64) -> NormalizationSpec {
     NormalizationSpec::Rms {
@@ -206,11 +267,37 @@ fn pre_norm_block(
     }
 }
 
-/// Builds a one-block Qwen3-MoE model and its modular twin with the given RoPE scaling.
+/// Rotary base of the Qwen3-MoE fixtures.
 ///
-/// `rope` is the family's serialized RoPE metadata and `scaling` the spec
-/// policy that should translate to the same runtime frequencies.
-fn assert_qwen3_moe_parity(rope: Option<RopeParameters>, scaling: RopeScaling) {
+/// Smaller than the checkpoint's `1e6` so that every rotary pair turns
+/// measurably within the fixtures' ten positions: the four inverse
+/// frequencies are `1, 0.1, 0.01, 0.001`, and the scaled low-frequency pairs
+/// move logits by much more than [`DETECTABLE_GAP`] when mis-scaled.
+const QWEN3_MOE_THETA: f64 = 10_000.0;
+
+/// Query/key head width of the Qwen3-MoE fixtures: four rotary pairs with distinct frequencies.
+const QWEN3_MOE_HEAD_DIM: usize = 8;
+
+/// Context limit of the Qwen3-MoE fixtures.
+///
+/// Twice the YaRN case's original context, so a translator that derives the
+/// YaRN factor as `max_position_embeddings / original` (as recent Hugging Face
+/// releases do when the original context is serialized) agrees with the
+/// explicit factor of two.
+const QWEN3_MOE_MAX_POSITIONS: usize = 128;
+
+/// Builds a one-block Qwen3-MoE model and its modular twin with transferred weights.
+///
+/// `rope` is the family's serialized RoPE metadata and `scaling` the modular
+/// spec policy; the pair agrees exactly when `scaling` translates to the same
+/// runtime frequencies and amplitude.
+fn qwen3_moe_pair(
+    rope: Option<RopeParameters>,
+    scaling: RopeScaling,
+) -> (
+    Qwen3MoeForCausalLm<TestBackend>,
+    ModularCausalLm<TestBackend>,
+) {
     let device = Default::default();
     let config = Qwen3MoeConfig {
         vocab_size: 32,
@@ -219,9 +306,9 @@ fn assert_qwen3_moe_parity(rope: Option<RopeParameters>, scaling: RopeScaling) {
         num_hidden_layers: 1,
         num_attention_heads: 2,
         num_key_value_heads: 1,
-        head_dim: 4,
-        max_position_embeddings: 32,
-        rope_theta: Some(1_000_000.0),
+        head_dim: QWEN3_MOE_HEAD_DIM,
+        max_position_embeddings: QWEN3_MOE_MAX_POSITIONS,
+        rope_theta: Some(QWEN3_MOE_THETA),
         max_window_layers: 1,
         decoder_sparse_step: 1,
         moe_intermediate_size: 6,
@@ -242,12 +329,12 @@ fn assert_qwen3_moe_parity(rope: Option<RopeParameters>, scaling: RopeScaling) {
             MixerSpec::Attention(AttentionSpec {
                 query_heads: 2,
                 key_value_heads: 1,
-                head_dim: 4,
+                head_dim: QWEN3_MOE_HEAD_DIM,
                 query_key_norm: true,
                 output_gate: false,
                 position: PositionEncodingSpec::Rope {
-                    theta: 1_000_000.0,
-                    rotary_dim: 4,
+                    theta: QWEN3_MOE_THETA,
+                    rotary_dim: QWEN3_MOE_HEAD_DIM,
                     scaling,
                 },
             }),
@@ -267,7 +354,7 @@ fn assert_qwen3_moe_parity(rope: Option<RopeParameters>, scaling: RopeScaling) {
         )],
         final_norm: norm,
         tie_word_embeddings: false,
-        max_position_embeddings: 32,
+        max_position_embeddings: QWEN3_MOE_MAX_POSITIONS,
     };
     let custom = transferred(
         &family,
@@ -294,7 +381,64 @@ fn assert_qwen3_moe_parity(rope: Option<RopeParameters>, scaling: RopeScaling) {
             ),
         ]),
     );
-    assert_causal_parity(&family, &custom, &device);
+    (family, custom)
+}
+
+/// Builds the Qwen3-MoE pair for `rope`/`scaling` and requires full parity.
+fn assert_qwen3_moe_parity(rope: Option<RopeParameters>, scaling: RopeScaling) {
+    let (family, custom) = qwen3_moe_pair(rope, scaling);
+    assert_causal_parity(&family, &custom, &Default::default());
+}
+
+/// Serialized Hugging Face RoPE metadata of one scaled Qwen3-MoE fixture.
+///
+/// Every case doubles the context. Linear and dynamic NTK use an original
+/// context of 8, which the explicit-position inputs (reaching position 19)
+/// exceed, so the context-dependent dynamic-NTK base grows. YaRN is static
+/// and uses an original context of 64: its correction range is then the
+/// fractional pair interval `[0.41, 1.01]`, truncated to `[0, 2]`, so the ramp
+/// blends pair 1 halfway between extrapolated and interpolated frequencies.
+fn qwen3_moe_rope_parameters(rope_type: RopeType) -> RopeParameters {
+    let yarn = rope_type == RopeType::Yarn;
+    RopeParameters {
+        rope_type,
+        factor: Some(2.0),
+        original_max_position_embeddings: Some(if yarn { 64 } else { 8 }),
+        attention_factor: yarn.then_some(1.25),
+        beta_fast: yarn.then_some(4.0),
+        beta_slow: yarn.then_some(1.0),
+        ..Default::default()
+    }
+}
+
+/// A modular YaRN policy over the YaRN fixture's factor, original context, and betas.
+///
+/// `qwen3_moe_yarn(Some(1.25), true)` matches
+/// [`qwen3_moe_rope_parameters`]`(RopeType::Yarn)`; other arguments are near-misses.
+fn qwen3_moe_yarn(attention_factor: Option<f64>, truncate: bool) -> RopeScaling {
+    RopeScaling::Yarn {
+        factor: 2.0,
+        original_max_positions: 64,
+        attention_factor,
+        beta_slow: 1.0,
+        beta_fast: 4.0,
+        truncate,
+    }
+}
+
+/// Every scaled family case paired with the modular policy that reproduces it.
+fn qwen3_moe_scaled_cases() -> [(RopeType, RopeScaling); 3] {
+    [
+        (RopeType::Linear, RopeScaling::Linear { factor: 2.0 }),
+        (
+            RopeType::Dynamic,
+            RopeScaling::DynamicNtk {
+                factor: 2.0,
+                original_max_positions: 8,
+            },
+        ),
+        (RopeType::Yarn, qwen3_moe_yarn(Some(1.25), true)),
+    ]
 }
 
 /// Qwen3-MoE: per-head Q/K RMS norms, full-head RoPE, and renormalized top-k experts.
@@ -304,47 +448,119 @@ fn qwen3_moe_block_matches_the_family() {
 }
 
 /// Linear, dynamic-NTK, and YaRN scaling translate to the family's RoPE frequencies.
-///
-/// The explicit-position inputs reach position 9, beyond the original context
-/// of 8, so the context-dependent dynamic-NTK base grows in both graphs.
 #[test]
 fn qwen3_moe_rope_scaling_matches_the_family() {
-    let parameters = |rope_type| RopeParameters {
-        rope_type,
-        factor: Some(2.0),
-        original_max_position_embeddings: Some(8),
-        attention_factor: (rope_type == RopeType::Yarn).then_some(1.25),
-        beta_fast: (rope_type == RopeType::Yarn).then_some(4.0),
-        beta_slow: (rope_type == RopeType::Yarn).then_some(1.0),
-        ..Default::default()
-    };
-    assert_qwen3_moe_parity(
-        Some(parameters(RopeType::Linear)),
-        RopeScaling::Linear { factor: 2.0 },
-    );
-    assert_qwen3_moe_parity(
-        Some(parameters(RopeType::Dynamic)),
-        RopeScaling::DynamicNtk {
-            factor: 2.0,
-            original_max_positions: 8,
-        },
-    );
-    assert_qwen3_moe_parity(
-        Some(parameters(RopeType::Yarn)),
-        RopeScaling::Yarn {
-            factor: 2.0,
-            original_max_positions: 8,
-            attention_factor: Some(1.25),
-            beta_slow: 1.0,
-            beta_fast: 4.0,
-            truncate: true,
-        },
-    );
+    for (rope_type, scaling) in qwen3_moe_scaled_cases() {
+        assert_qwen3_moe_parity(Some(qwen3_moe_rope_parameters(rope_type)), scaling);
+    }
 }
 
-/// DeepSeek-V2: latent attention with a decoupled rotary sub-head, then dense and expert MLPs.
+/// Negative controls: unscaled or near-miss modular RoPE is far outside the parity tolerance.
+///
+/// Each scaled family is compared with an unscaled twin and with the
+/// near-misses a translation could plausibly make: a wrong linear factor, a
+/// dynamic-NTK original context too long to ever trigger within the inputs,
+/// untruncated YaRN correction bounds, and YaRN's default amplitude instead
+/// of the serialized one. Each must exceed [`DETECTABLE_GAP`], which proves
+/// [`qwen3_moe_rope_scaling_matches_the_family`] can detect it.
 #[test]
-fn deepseek_v2_latent_attention_blocks_match_the_family() {
+fn qwen3_moe_rope_parity_detects_wrong_scaling() {
+    for (rope_type, _) in qwen3_moe_scaled_cases() {
+        let (family, custom) = qwen3_moe_pair(
+            Some(qwen3_moe_rope_parameters(rope_type)),
+            RopeScaling::None,
+        );
+        assert_detectable(
+            &family,
+            &custom,
+            &format!("{rope_type:?} family against an unscaled twin"),
+        );
+    }
+    let near_misses = [
+        (
+            RopeType::Linear,
+            RopeScaling::Linear { factor: 1.5 },
+            "linear factor 1.5 instead of 2",
+        ),
+        (
+            RopeType::Dynamic,
+            RopeScaling::DynamicNtk {
+                factor: 2.0,
+                original_max_positions: 32,
+            },
+            "dynamic NTK original context 32 instead of 8",
+        ),
+        (
+            RopeType::Yarn,
+            qwen3_moe_yarn(Some(1.25), false),
+            "untruncated YaRN correction bounds",
+        ),
+        (
+            RopeType::Yarn,
+            qwen3_moe_yarn(None, true),
+            "default YaRN amplitude instead of 1.25",
+        ),
+    ];
+    for (rope_type, scaling, mutation) in near_misses {
+        let (family, custom) = qwen3_moe_pair(Some(qwen3_moe_rope_parameters(rope_type)), scaling);
+        assert_detectable(&family, &custom, mutation);
+    }
+}
+
+/// Rotary width of the DeepSeek-V2 fixtures' decoupled sub-head: two pairs.
+///
+/// A single pair would rotate at frequency `theta^0 = 1` for every base and
+/// width, so the second pair (frequency `theta^(-1/2)`) is what makes the
+/// fixtures sensitive to the rotary base and to the rotary-width plumbing.
+const DEEPSEEK_ROPE_HEAD_DIM: usize = 4;
+
+/// Content (non-rotary) query/key width of the DeepSeek-V2 fixtures.
+const DEEPSEEK_CONTENT_HEAD_DIM: usize = 3;
+
+/// The rotary policy of one DeepSeek-V2 fixture and its modular translation.
+struct LatentRope {
+    /// Family metadata (`config.rope_scaling`); `None` is unscaled RoPE.
+    family: Option<RopeParameters>,
+    /// Modular rotary base; the family always uses `10_000`.
+    theta: f64,
+    /// Modular frequency scaling.
+    scaling: RopeScaling,
+    /// Modular score multiplier for the summed content and rotary logits.
+    score_scale: ScoreScale,
+}
+
+impl LatentRope {
+    /// Unscaled RoPE with base `10_000` and the conventional `1/sqrt(d_qk)` scale.
+    fn unscaled() -> Self {
+        Self {
+            family: None,
+            theta: 10_000.0,
+            scaling: RopeScaling::None,
+            score_scale: ScoreScale::Auto,
+        }
+    }
+}
+
+/// DeepSeek's YaRN magnitude `1 + 0.1 m ln(factor)` (one for factors up to one).
+fn deepseek_yarn_magnitude(factor: f64, multiplier: f64) -> f64 {
+    if factor <= 1.0 {
+        1.0
+    } else {
+        1.0 + 0.1 * multiplier * factor.ln()
+    }
+}
+
+/// Builds a two-block DeepSeek-V2 model and its modular twin with transferred weights.
+///
+/// Block 0 is latent attention with a dense SwiGLU MLP; block 1 is latent
+/// attention with one shared and four routed experts. Both use the rotary
+/// policy `rope`.
+fn deepseek_v2_pair(
+    rope: LatentRope,
+) -> (
+    DeepseekV2ForCausalLm<TestBackend>,
+    ModularCausalLm<TestBackend>,
+) {
     let device = Default::default();
     let config = DeepseekV2Config {
         vocab_size: 32,
@@ -359,8 +575,8 @@ fn deepseek_v2_latent_attention_blocks_match_the_family() {
         routed_scaling_factor: 1.0,
         kv_lora_rank: 5,
         q_lora_rank: None,
-        qk_nope_head_dim: 3,
-        qk_rope_head_dim: 2,
+        qk_nope_head_dim: DEEPSEEK_CONTENT_HEAD_DIM,
+        qk_rope_head_dim: DEEPSEEK_ROPE_HEAD_DIM,
         v_head_dim: 4,
         topk_method: DeepseekTopKMethod::Greedy,
         n_group: 1,
@@ -375,7 +591,7 @@ fn deepseek_v2_latent_attention_blocks_match_the_family() {
         rms_norm_eps: 1e-6,
         tie_word_embeddings: false,
         rope_theta: 10_000.0,
-        rope_scaling: None,
+        rope_scaling: rope.family,
         pad_token_id: None,
         bos_token_id: None,
         eos_token_id: None,
@@ -386,17 +602,17 @@ fn deepseek_v2_latent_attention_blocks_match_the_family() {
         .map(&mut DeterministicParameters::default());
     let mla = MixerSpec::Mla(MlaSpec {
         query_heads: 2,
-        content_head_dim: 3,
-        rotary_head_dim: 2,
+        content_head_dim: DEEPSEEK_CONTENT_HEAD_DIM,
+        rotary_head_dim: DEEPSEEK_ROPE_HEAD_DIM,
         value_head_dim: 4,
         key_value_lora_rank: 5,
         query_lora_rank: None,
         position: PositionEncodingSpec::Rope {
-            theta: 10_000.0,
-            rotary_dim: 2,
-            scaling: RopeScaling::None,
+            theta: rope.theta,
+            rotary_dim: DEEPSEEK_ROPE_HEAD_DIM,
+            scaling: rope.scaling,
         },
-        score_scale: ScoreScale::Auto,
+        score_scale: rope.score_scale,
         connectivity: AttentionConnectivity::Global,
     });
     let norm = rms_with(1e-6);
@@ -474,7 +690,102 @@ fn deepseek_v2_latent_attention_blocks_match_the_family() {
             ),
         ]),
     );
-    assert_causal_parity(&family, &custom, &device);
+    (family, custom)
+}
+
+/// DeepSeek-V2: latent attention with a decoupled two-pair rotary sub-head, then dense and expert MLPs.
+#[test]
+fn deepseek_v2_latent_attention_blocks_match_the_family() {
+    let (family, custom) = deepseek_v2_pair(LatentRope::unscaled());
+    assert_causal_parity(&family, &custom, &Default::default());
+}
+
+/// DeepSeek-V2 YaRN: the serialized `mscale`/`mscale_all_dim` pair maps to explicit spec fields.
+///
+/// DeepSeek multiplies the rotary cosines and sines by
+/// `magnitude(factor, mscale) / magnitude(factor, mscale_all_dim)` and the
+/// summed content-plus-rotary logits by `magnitude(factor, mscale_all_dim)^2`
+/// on top of `1/sqrt(d_qk)`, where `magnitude(s, m) = 1 + 0.1 m ln s`. The
+/// modular spec states the first as the YaRN `attention_factor` and the
+/// second as a [`ScoreScale::Fixed`] multiplier. Distinct `mscale` and
+/// `mscale_all_dim` values keep both corrections away from one.
+#[test]
+fn deepseek_v2_yarn_latent_attention_matches_the_family() {
+    let (factor, mscale, mscale_all_dim) = (2.0, 1.0, 0.5);
+    let amplitude =
+        deepseek_yarn_magnitude(factor, mscale) / deepseek_yarn_magnitude(factor, mscale_all_dim);
+    let score = ((DEEPSEEK_CONTENT_HEAD_DIM + DEEPSEEK_ROPE_HEAD_DIM) as f64)
+        .sqrt()
+        .recip()
+        * deepseek_yarn_magnitude(factor, mscale_all_dim).powi(2);
+    let (family, custom) = deepseek_v2_pair(LatentRope {
+        family: Some(RopeParameters {
+            rope_type: RopeType::Yarn,
+            factor: Some(factor),
+            original_max_position_embeddings: Some(16),
+            beta_fast: Some(4.0),
+            beta_slow: Some(1.0),
+            mscale: Some(mscale),
+            mscale_all_dim: Some(mscale_all_dim),
+            ..Default::default()
+        }),
+        theta: 10_000.0,
+        scaling: RopeScaling::Yarn {
+            factor,
+            original_max_positions: 16,
+            attention_factor: Some(amplitude),
+            beta_slow: 1.0,
+            beta_fast: 4.0,
+            truncate: true,
+        },
+        score_scale: ScoreScale::Fixed { value: score },
+    });
+    assert_causal_parity(&family, &custom, &Default::default());
+}
+
+/// Negative controls: a wrong latent rotary base or a missing YaRN score correction is detectable.
+///
+/// With one rotary pair (the earlier fixture) a modular base of 10 instead of
+/// 10 000 was indistinguishable from the family; the two-pair sub-head must
+/// now separate it by at least [`DETECTABLE_GAP`].
+#[test]
+fn deepseek_v2_latent_parity_detects_wrong_rotary_policy() {
+    let (family, custom) = deepseek_v2_pair(LatentRope {
+        theta: 10.0,
+        ..LatentRope::unscaled()
+    });
+    assert_detectable(&family, &custom, "latent rotary base 10 instead of 10 000");
+    let factor = 2.0;
+    let yarn = |attention_factor| RopeScaling::Yarn {
+        factor,
+        original_max_positions: 16,
+        attention_factor,
+        beta_slow: 1.0,
+        beta_fast: 4.0,
+        truncate: true,
+    };
+    let family_yarn = RopeParameters {
+        rope_type: RopeType::Yarn,
+        factor: Some(factor),
+        original_max_position_embeddings: Some(16),
+        beta_fast: Some(4.0),
+        beta_slow: Some(1.0),
+        mscale: Some(1.0),
+        mscale_all_dim: Some(0.5),
+        ..Default::default()
+    };
+    let amplitude = deepseek_yarn_magnitude(factor, 1.0) / deepseek_yarn_magnitude(factor, 0.5);
+    let (family, custom) = deepseek_v2_pair(LatentRope {
+        family: Some(family_yarn),
+        theta: 10_000.0,
+        scaling: yarn(Some(amplitude)),
+        score_scale: ScoreScale::Auto,
+    });
+    assert_detectable(
+        &family,
+        &custom,
+        "YaRN without the mscale_all_dim score correction",
+    );
 }
 
 /// T5: unscaled attention with learned relative buckets, ReLU MLP, and unscaled cross-attention.
