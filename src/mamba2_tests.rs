@@ -702,3 +702,30 @@ fn discretization_softplus_matches_the_reference_graph() {
     .unwrap();
     assert_eq!(large, [100.0, 1.0e30]);
 }
+
+/// One token observes the prefill clamp only in chunked mode.
+///
+/// With `dt_bias = -12`, `softplus` gives about `6e-6`; chunked prefill raises
+/// it to `time_step_min = 1e-3`, the recurrent update keeps it, so the
+/// terminal states differ by roughly that ratio. Callers must therefore pick
+/// the chunk scan for a first prompt token, as the reference does.
+#[test]
+fn one_token_clamp_differs_between_modes() {
+    let device = Default::default();
+    let mut mixer = config().init::<TestBackend>(&device).unwrap();
+    mixer.dt_bias = mixer.dt_bias.clone().map(|bias| bias.ones_like() * -12.0);
+    let input = Tensor::<TestBackend, 3>::from_floats(
+        [[[0.1, 0.2, -0.3, 0.4, 0.5, -0.6, 0.7, 0.8]]],
+        &device,
+    );
+    let state = Mamba2State::zeros(&config(), 1, DType::F32, &device).unwrap();
+    let norm = |state: Mamba2State<TestBackend>| state.recurrent.abs().max().into_scalar();
+    let (_, chunked) = mixer
+        .forward_with_state(input.clone(), None, &state, Mamba2Mode::ChunkedPrefill)
+        .unwrap();
+    let (_, recurrent) = mixer
+        .forward_with_state(input, None, &state, Mamba2Mode::Recurrent)
+        .unwrap();
+    let ratio = norm(chunked) / norm(recurrent);
+    assert!(ratio > 100.0 && ratio < 200.0, "{ratio}");
+}

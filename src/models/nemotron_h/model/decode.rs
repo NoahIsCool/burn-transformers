@@ -546,7 +546,11 @@ impl<B: Backend> NemotronHForCausalLm<B> {
                         recurrent: cached.matrix().clone(),
                         convolution: cached.convolution().clone(),
                     };
-                    let mode = if normalized.dims()[1] == 1 {
+                    // The reference takes its single-step update only when the
+                    // layer already has state (`use_precomputed_states and
+                    // seq_len == 1`); a first prompt token uses the chunk scan,
+                    // with its dt clamp and F32 arithmetic.
+                    let mode = if normalized.dims()[1] == 1 && baseline > 0 {
                         NemotronMamba2Mode::Recurrent
                     } else {
                         NemotronMamba2Mode::ChunkedPrefill

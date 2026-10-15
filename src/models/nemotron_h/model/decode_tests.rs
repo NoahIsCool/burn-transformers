@@ -786,3 +786,163 @@ fn oversized_cached_attention_window_is_rejected() {
     let device = Default::default();
     assert!(cached_attention_mask::<TestBackend>(0, 1, 1, Some(usize::MAX), &device).is_err());
 }
+
+/// Casts every floating parameter to F16, emulating a reduced-precision checkpoint.
+struct HalfPrecision;
+
+impl burn::module::ModuleMapper<TestBackend> for HalfPrecision {
+    /// Rounds one floating parameter to F16 while preserving its shape and device.
+    fn map_float<const D: usize>(
+        &mut self,
+        param: burn::module::Param<Tensor<TestBackend, D>>,
+    ) -> burn::module::Param<Tensor<TestBackend, D>> {
+        param.map(|tensor| tensor.cast(burn::tensor::DType::F16))
+    }
+}
+
+/// A non-trivial model whose Mamba steps fall below `time_step_min`.
+///
+/// `softplus(dt + dt_bias)` with `dt_bias = -12` is about `6e-6`, far below
+/// the `1e-3` prefill clamp, so chunked prefill and the unclamped recurrent
+/// update observably disagree on the same token.
+fn clamped_dt_model(half: bool) -> NemotronHForCausalLm<TestBackend> {
+    use burn::module::Module;
+    let mut model = contract_model();
+    for layer in &mut model.model.layers {
+        if let Some(mamba) = &mut layer.mamba {
+            mamba.dt_bias = mamba.dt_bias.clone().map(|bias| bias.ones_like() * -12.0);
+        }
+    }
+    if half {
+        model.map(&mut HalfPrecision)
+    } else {
+        model
+    }
+}
+
+/// A one-token prompt uses the reference chunk scan, matching the stateless forward.
+///
+/// Regression for NEM-4: the compact row length alone selected the recurrent
+/// update, so a `[BOS]`-only prompt skipped the prefill dt clamp and the F32
+/// scan, and its logits and terminal state diverged from the stateless graph.
+#[test]
+fn one_token_prefill_uses_the_chunk_scan() {
+    let device = Default::default();
+    for half in [false, true] {
+        let model = clamped_dt_model(half);
+        let stateless = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[7]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+            .unwrap();
+        let cached = model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::from_ints([[7]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+        assert_eq!(
+            cached.into_data(),
+            stateless.into_data(),
+            "half precision: {half}"
+        );
+    }
+}
+
+/// A left-padded batch whose first row holds one token matches per-row stateless runs.
+#[test]
+fn left_padded_single_token_row_matches_stateless() {
+    let device = Default::default();
+    let model = clamped_dt_model(false);
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
+        .unwrap();
+    let cached = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[0, 0, 5], [1, 2, 3]], &device),
+                token_mask: Some(TokenMask::new(Tensor::from_bool(
+                    [[false, false, true], [true, true, true]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap()
+        .logits;
+    assert_eq!(state.lengths(), &[1, 3]);
+    for (row, tokens) in [(0usize, vec![5]), (1, vec![1, 2, 3])] {
+        let stateless = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_data(
+                        TensorData::new(tokens.clone(), [1, tokens.len()]),
+                        &device,
+                    ),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+        contract_close(cached.clone().narrow(0, row, 1), stateless);
+    }
+    // The tiny model's logits barely depend on one token's state, so compare
+    // the committed state of layer 0 (the first block, fed by the normalized
+    // embedding) with the reference chunk scan directly: the unclamped
+    // recurrent update leaves it about 160 times smaller.
+    let mixer = model.model.layers[0].mamba.as_ref().unwrap();
+    let normalized = model.model.layers[0].norm.forward(
+        model
+            .model
+            .embed_tokens
+            .forward(Tensor::from_ints([[5]], &device)),
+    );
+    let zero = NemotronMamba2State::zeros(&mixer.config(), 1, normalized.dtype(), &device).unwrap();
+    let (_, reference) = mixer
+        .forward_with_state(normalized, None, &zero, NemotronMamba2Mode::ChunkedPrefill)
+        .unwrap();
+    let matrix = |state: &NemotronHDecodeState<TestBackend>, row: usize| {
+        state
+            .tensors
+            .main()
+            .recurrent(RECURRENT_GROUP)
+            .unwrap()
+            .matrix(0)
+            .unwrap()
+            .clone()
+            .narrow(0, row, 1)
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+    };
+    let expected = reference.recurrent.into_data().to_vec::<f32>().unwrap();
+    let scale = expected
+        .iter()
+        .fold(0.0_f32, |max, value| max.max(value.abs()));
+    assert!(scale > 0.0);
+    for (actual, expected) in matrix(&state, 0).into_iter().zip(expected) {
+        assert!(
+            (actual - expected).abs() <= 1e-4 * scale,
+            "{actual} != {expected}"
+        );
+    }
+}
