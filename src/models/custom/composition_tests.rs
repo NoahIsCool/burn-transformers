@@ -670,3 +670,99 @@ fn prevalidated_blocks_match_checked_blocks_and_reject_mismatched_contexts() {
         assert_eq!(full.to_string(), sync_free.to_string());
     }
 }
+
+/// Captures every activation of a model through the family-generic hook trait.
+fn cached_points<M: crate::architecture::HookedModel<B>>(
+    model: &M,
+    input: M::Input,
+) -> (M::Output, usize) {
+    let mut hooks = Hooks::new();
+    let handles = model
+        .activation_points()
+        .unwrap()
+        .into_iter()
+        .map(|point| hooks.capture_dynamic(point))
+        .collect::<Vec<_>>();
+    let output = model
+        .forward_with_hooks(input, &ForwardOptions::default(), &mut hooks)
+        .unwrap();
+    for handle in &handles {
+        hooks.get_dynamic(handle).unwrap();
+    }
+    (output, handles.len())
+}
+
+/// Runs a whole stack through the family-generic staged trait.
+fn staged_hidden<M: crate::architecture::StagedModel<B>>(
+    model: &M,
+    input: CausalLmInput<B>,
+) -> Tensor<B, 3> {
+    let state = model.embed(input).unwrap();
+    let split = model.num_layers() / 2;
+    let state = model.run_layers(state, 0..split).unwrap();
+    assert_eq!(state.next_layer, split);
+    let state = model.run_layers(state, split..model.num_layers()).unwrap();
+    model.normalize(state).unwrap().hidden
+}
+
+/// Both modular models implement the generic hook and staged traits exactly like their inherent API.
+#[test]
+fn hooked_and_staged_traits_match_the_inherent_api() {
+    let mut config = spec(NormPlacement::Sandwich);
+    config.layers.push(config.layers[0].clone());
+    let model = ModularCausalLm::<B>::init(config, &Default::default())
+        .unwrap()
+        .map(&mut FixedParameters::default());
+    let (output, captured) = cached_points(&model, input([[1, 2, 3]]));
+    assert_eq!(captured, model.activation_points().len());
+    assert_close(
+        output.logits,
+        model
+            .forward(input([[1, 2, 3]]), &ForwardOptions::default())
+            .unwrap()
+            .logits,
+    );
+    assert_eq!(
+        crate::architecture::StagedModel::stack(&model),
+        Stack::Decoder
+    );
+    assert_close(
+        staged_hidden(&model, input([[1, 2, 3]])),
+        model.forward_hidden(input([[1, 2, 3]])).unwrap(),
+    );
+
+    let model = seq2seq();
+    let (output, captured) = cached_points(&model, seq_input());
+    assert_eq!(captured, model.activation_points().len());
+    let expected = model
+        .forward(
+            seq_input(),
+            &ForwardOptions {
+                hidden_states: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_close(output.decoder.logits, expected.decoder.logits);
+    let encoder = model.encoder_stages();
+    assert_eq!(
+        crate::architecture::StagedModel::stack(&encoder),
+        Stack::Encoder
+    );
+    let source = staged_hidden(&encoder, input([[1, 2, 3]]));
+    assert_close(source.clone(), expected.encoder.hidden_state.clone());
+    let context = EncoderContext {
+        hidden: source,
+        positions: Tensor::<B, 2, Int>::from_ints([[0, 1, 2]], &Default::default()),
+        token_mask: None,
+    };
+    let decoder = model.decoder_stages(context);
+    assert_eq!(
+        crate::architecture::StagedModel::layer(&decoder, 0),
+        Layer::decoder(0)
+    );
+    assert_close(
+        staged_hidden(&decoder, input([[4, 5, 6]])),
+        expected.decoder.final_hidden_state.unwrap(),
+    );
+}

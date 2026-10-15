@@ -30,6 +30,10 @@ mod state_contracts;
 /// Modular graphs configured like family blocks reproduce the family outputs.
 mod family_parity;
 
+#[path = "perf_tests.rs"]
+/// Ignored release-mode timings of the pass tables and batched history writes.
+mod perf;
+
 /// Builds a fully initialized single-layer full/sliding attention graph for parity tests.
 fn deterministic_attention_model(
     window: Option<usize>,
@@ -1333,6 +1337,144 @@ fn seq2seq_rejects_directionally_invalid_encoder_mixers() {
     let error = ModularSeq2SeqLm::<TestBackend>::init(spec, &device)
         .expect_err("trailing window is invalid in encoder");
     assert!(error.to_string().contains("symmetric bidirectional"));
+
+    // The explicit forms of a past-only window are rejected the same way (CUS-6).
+    let sliding = crate::architecture::AttentionOptions {
+        connectivity: AttentionConnectivity::SlidingWindow { window: 2 },
+        ..Default::default()
+    };
+    let mla = MlaSpec {
+        query_heads: 2,
+        content_head_dim: 4,
+        rotary_head_dim: 2,
+        value_head_dim: 4,
+        key_value_lora_rank: 4,
+        query_lora_rank: None,
+        position: PositionEncodingSpec::None,
+        score_scale: ScoreScale::Auto,
+        connectivity: AttentionConnectivity::SlidingWindow { window: 2 },
+    };
+    for mixer in [
+        MixerSpec::AttentionWithOptions {
+            attention: attention_spec(),
+            options: sliding,
+        },
+        MixerSpec::Mla(mla.clone()),
+    ] {
+        let mut spec = seq2seq_spec();
+        spec.encoder.layers[0].mixer = mixer;
+        let error = ModularSeq2SeqLm::<TestBackend>::init(spec, &device)
+            .expect_err("trailing window is invalid in encoder");
+        assert!(error.to_string().contains("past-only"), "{error}");
+    }
+    // Symmetric local chunks are valid encoder connectivity for both attention kinds.
+    for mixer in [
+        MixerSpec::AttentionWithOptions {
+            attention: attention_spec(),
+            options: crate::architecture::AttentionOptions {
+                connectivity: AttentionConnectivity::ChunkedLocal { chunk: 2 },
+                ..Default::default()
+            },
+        },
+        MixerSpec::Mla(MlaSpec {
+            connectivity: AttentionConnectivity::ChunkedLocal { chunk: 2 },
+            ..mla.clone()
+        }),
+    ] {
+        let mut spec = seq2seq_spec();
+        spec.encoder.layers[0].mixer = mixer;
+        ModularSeq2SeqLm::<TestBackend>::init(spec, &device).unwrap();
+    }
+}
+
+/// The grouped-query topology of the shared [`attention`] fixture.
+fn attention_spec() -> AttentionSpec {
+    match attention(PositionEncodingSpec::None) {
+        MixerSpec::Attention(attention) => attention,
+        _ => unreachable!("the fixture is compact attention"),
+    }
+}
+
+/// A last-token prediction depends only on the keys its connectivity allows.
+///
+/// For a one-layer causal graph, the last query's output is a function of the
+/// visible raw embeddings alone. Evaluating exactly those tokens (with the same
+/// explicit positions) is therefore an independent control for sliding MLA
+/// windows and chunked-local grouped-query attention; padding consumes neither.
+#[test]
+fn local_connectivity_limits_the_last_token_to_its_visible_keys() {
+    let device = Default::default();
+    let ids = [1, 2, 3, 4, 5];
+    let positions = [3, 4, 5, 6, 7];
+    let rope = PositionEncodingSpec::Rope {
+        theta: 10_000.0,
+        rotary_dim: 4,
+        scaling: RopeScaling::None,
+    };
+    let sliding_mla = MixerSpec::Mla(MlaSpec {
+        query_heads: 2,
+        content_head_dim: 4,
+        rotary_head_dim: 4,
+        value_head_dim: 4,
+        key_value_lora_rank: 4,
+        query_lora_rank: None,
+        position: rope.clone(),
+        score_scale: ScoreScale::Auto,
+        connectivity: AttentionConnectivity::SlidingWindow { window: 2 },
+    });
+    let chunked = MixerSpec::AttentionWithOptions {
+        attention: AttentionSpec {
+            position: rope,
+            ..attention_spec()
+        },
+        options: crate::architecture::AttentionOptions {
+            connectivity: AttentionConnectivity::ChunkedLocal { chunk: 3 },
+            ..Default::default()
+        },
+    };
+    // Sliding window 2 sees the last two tokens; chunks of 3 put tokens 3..5 together.
+    for (mixer, visible) in [(sliding_mla, 3..5), (chunked, 3..5)] {
+        let model = ModularCausalLm::<TestBackend>::init(decoder(vec![layer(mixer)]), &device)
+            .unwrap()
+            .map(&mut DeterministicParameters::default());
+        let options = ForwardOptions::default();
+        let control = model
+            .forward(
+                parity_input(
+                    &ids[visible.clone()],
+                    None,
+                    Some(&positions[visible]),
+                    &device,
+                ),
+                &options,
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        let full = model
+            .forward(
+                parity_input(&ids, None, Some(&positions), &device),
+                &options,
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        assert_finite_attention_parity(&full, &control);
+        let padded = model
+            .forward(
+                parity_input(
+                    &[0, 1, 2, 0, 3, 4, 0, 5],
+                    Some(&[false, true, true, false, true, true, false, true]),
+                    Some(&[0, 3, 4, 0, 5, 6, 0, 7]),
+                    &device,
+                ),
+                &options,
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        assert_finite_attention_parity(&padded, &control);
+    }
 }
 
 /// Encoder MoE math is allowed, but unavailable encoder router output is rejected explicitly.

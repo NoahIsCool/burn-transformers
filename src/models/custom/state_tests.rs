@@ -10,6 +10,7 @@ use crate::{
         FeedForwardSpec, MixerSpec, NormPlacement, NormalizationSpec, PositionEncodingSpec,
         ResidualTopology, Seq2SeqSpec,
     },
+    models::shared::{CompactRow, implicit_position_ids},
 };
 
 /// CPU integer backend used to ensure invalid requests fail before tensor allocation.
@@ -329,4 +330,104 @@ proptest::proptest! {
             }
         }
     }
+}
+
+/// Median wall-clock milliseconds of `repetitions` runs of `run`, after one warm-up.
+fn median_ms(repetitions: usize, mut run: impl FnMut()) -> f64 {
+    run();
+    let mut samples = (0..repetitions)
+        .map(|_| {
+            let start = std::time::Instant::now();
+            run();
+            start.elapsed().as_secs_f64() * 1e3
+        })
+        .collect::<Vec<_>>();
+    samples.sort_by(f64::total_cmp);
+    samples[samples.len() / 2]
+}
+
+/// Former per-row append: one selection upload, compaction, readback, and two slice assignments per row.
+fn per_row_append(
+    state: &ModularDecodeState<B>,
+    input: &CausalLmInput<B>,
+) -> (Tensor<B, 2, Int>, Tensor<B, 2, Int>) {
+    let [batch, step] = input.token_ids.dims();
+    let device = input.token_ids.device();
+    let host = HostInput::read(input, batch, step, "benchmark").unwrap();
+    let valid = host.valid_indices(batch, step);
+    let mut tokens = state.tokens.clone();
+    let mut positions = state.positions.clone();
+    for (row, columns) in valid.iter().enumerate() {
+        if columns.is_empty() {
+            continue;
+        }
+        let plan = CompactRow::<B>::new(row, columns, step, &device).unwrap();
+        let start = state.lengths()[row];
+        let end = start + plan.count();
+        // The former path validated each row's positions with a readback.
+        implicit_position_ids::<B>(start, plan.count(), &device, "benchmark")
+            .unwrap()
+            .into_data();
+        tokens = tokens.slice_assign([row..row + 1, start..end], plan.compact(&input.token_ids));
+        positions = positions.slice_assign(
+            [row..row + 1, start..end],
+            implicit_position_ids(start, plan.count(), &device, "benchmark").unwrap(),
+        );
+    }
+    (tokens, positions)
+}
+
+/// One decode step's history write for a 32-row batch: per-row loop versus one batched window.
+#[test]
+#[ignore = "timing measurement; run in release with --ignored --nocapture"]
+fn batched_history_writes_versus_per_row_appends() {
+    let device = Default::default();
+    let (batch, capacity) = (32, 512);
+    let mut model_spec = spec();
+    model_spec.vocabulary_size = 32;
+    model_spec.max_position_embeddings = capacity;
+    let mut state = ModularDecodeState::<B>::new(
+        crate::cache::CacheConfig::new(batch, capacity).unwrap(),
+        batch,
+        model_spec,
+        StatePurpose::Causal,
+        &device,
+    )
+    .unwrap();
+    // Ragged committed lengths, as in beam search with finished rows.
+    for row in 0..batch {
+        state.metadata.advance(row, 100 + row % 7).unwrap();
+    }
+    let input = CausalLmInput {
+        token_ids: Tensor::from_data(
+            TensorData::new((0..batch as i32).map(|row| row % 32).collect(), [batch, 1]),
+            &device,
+        ),
+        token_mask: None,
+        position_ids: None,
+    };
+    let old = median_ms(20, || {
+        let (tokens, positions) = per_row_append(&state, &input);
+        tokens.into_data();
+        positions.into_data();
+    });
+    let new = median_ms(20, || {
+        let append = state.prepare_append(input.clone(), 32, false).unwrap();
+        append.tokens.into_data();
+        append.positions.into_data();
+    });
+    let append = state.prepare_append(input.clone(), 32, false).unwrap();
+    let (tokens, positions) = per_row_append(&state, &input);
+    append
+        .tokens
+        .into_data()
+        .assert_eq(&tokens.into_data(), true);
+    append
+        .positions
+        .into_data()
+        .assert_eq(&positions.into_data(), true);
+    println!(
+        "history write, batch {batch}, capacity {capacity}, one token per row: per-row {old:.3} ms, batched {new:.3} ms ({:.1}x)",
+        old / new
+    );
 }
