@@ -158,6 +158,39 @@ struct RetainedLoadAudit {
     quantized: Option<QuantizedLoadAudit>,
 }
 
+/// Every component of a [`LoadedModel`], moved out by name.
+///
+/// Returned by [`LoadedModel::into_named_parts`]. Destructure only what you
+/// need, for example
+/// `let LoadedModelParts { model, tokenizer, .. } = loaded.into_named_parts();`.
+/// The struct is non-exhaustive so later audit domains can be added without
+/// breaking such patterns.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct LoadedModelParts<M> {
+    /// Strictly loaded executable model.
+    pub model: M,
+    /// Local tokenizer when the load attached one.
+    pub tokenizer: Option<ModelTokenizer>,
+    /// Validated generation defaults normalized for the model vocabulary.
+    pub generation_defaults: GenerationConfig,
+    /// Local artifact path and recorded upstream identity.
+    pub source: ModelSourceMetadata,
+    /// Finalized tensor-level load accounting.
+    pub load_report: LoadReport,
+    /// SafeTensors plan-execution counters, when the loader retained them.
+    pub execution_stats: Option<ExecutionStats>,
+    /// Burnpack preflight, decode, and provenance counters of a quantized load.
+    pub quantized_load_audit: Option<QuantizedLoadAudit>,
+}
+
+impl<M> From<LoadedModel<M>> for LoadedModelParts<M> {
+    /// Moves every component out of the bundle by name.
+    fn from(loaded: LoadedModel<M>) -> Self {
+        loaded.into_named_parts()
+    }
+}
+
 /// An executable model and all host-side state established by a strict load.
 #[derive(Debug)]
 pub struct LoadedModel<M> {
@@ -375,11 +408,23 @@ impl<M> LoadedModel<M> {
         self.model
     }
 
+    /// Consumes the bundle and returns every component in a named struct.
+    pub fn into_named_parts(self) -> LoadedModelParts<M> {
+        LoadedModelParts {
+            model: self.model,
+            tokenizer: self.tokenizer,
+            generation_defaults: self.generation_defaults,
+            source: self.source,
+            load_report: self.load_report,
+            execution_stats: self.execution_stats,
+            quantized_load_audit: self.quantized_load_audit,
+        }
+    }
+
     /// Consumes the bundle using the original five-component compatibility API.
     ///
     /// This method intentionally omits optional checkpoint execution counters.
-    /// Use [`Self::into_parts_with_execution_stats`] when retaining that audit
-    /// data matters.
+    #[deprecated(note = "use `into_named_parts`, which names every component")]
     pub fn into_parts(
         self,
     ) -> (
@@ -399,6 +444,7 @@ impl<M> LoadedModel<M> {
     }
 
     /// Consumes the bundle and returns every component, including load counters.
+    #[deprecated(note = "use `into_named_parts`, which names every component")]
     pub fn into_parts_with_execution_stats(
         self,
     ) -> (
@@ -421,9 +467,9 @@ impl<M> LoadedModel<M> {
 
     /// Consumes the bundle and additionally returns its quantized-load audit.
     ///
-    /// The first six elements intentionally match
-    /// [`Self::into_parts_with_execution_stats`]. Full-precision bundles return
-    /// `None` for the final element.
+    /// The first six elements match the execution-stats tuple. Full-precision
+    /// bundles return `None` for the final element.
+    #[deprecated(note = "use `into_named_parts`, which names every component")]
     pub fn into_parts_with_quantized_load_audit(
         self,
     ) -> (
