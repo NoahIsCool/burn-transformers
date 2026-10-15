@@ -407,7 +407,12 @@ reading any bundle because none of its independent anchors is populated.
 ## Remaining release gates
 
 This base oracle satisfies only the official-reference side of the numerical
-contract. Before this checkpoint can be advertised as supported:
+contract. The recorded Metal smoke also predates later runtime changes: the
+shared Mamba-2 mixer's vectorized chunk scan, PyTorch's thresholded `dt`
+softplus, batched cached execution with padded queries pinned to their row's
+last readable position, and one-pass MTP verification. Its stateless,
+cached-prefill, and one-token decode gates must therefore be replayed on the
+integrated source. Before this checkpoint can be advertised as supported:
 
 1. Execute the implemented ignored Metal gate and record Burn cached execution
    against the official cached rows and Burn stateless execution against the

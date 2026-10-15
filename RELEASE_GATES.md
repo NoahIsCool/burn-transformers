@@ -31,6 +31,115 @@ these results. This bounded line diagnostic does not claim macro closure,
 production-only coverage, or branch coverage. Earlier failures and unrun
 checkpoint/hardware checks remain explicit in the records.
 
+## Checks added since v0.1
+
+These commands cover the work recorded in the
+[changelog](CHANGELOG.md#unreleased). Unless stated, they run on Flex and need
+no downloads. Set `CARGO_TARGET_DIR` when the default target directory fails the
+storage preflight.
+
+```sh
+cargo fmt --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked                                   # unit, integration, tiny goldens, doctests
+cargo test --locked --features autodiff --lib         # gradient smoke tests
+cargo test --locked --test verus_harness              # proof-harness structure, no Verus needed
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
+python3 -m unittest discover -s scripts/tests -v
+```
+
+**Tiny reference goldens** run inside `cargo test`:
+`tiny_goldens_llama` (seven Llama-family cases), `tiny_goldens_gemma`, and
+`tiny_goldens_gpt_oss`, each against Transformers 5.2.0 / PyTorch 2.10.0 at an
+F32 tolerance of `1e-5`. Regenerate fixtures only deliberately, with those exact
+package versions:
+
+```sh
+python3 -I scripts/generate_tiny_goldens.py --output tests/fixtures/tiny_goldens [--case NAME ...]
+```
+
+**Property suites** honor `PROPTEST_CASES`; release qualification runs them
+with a larger budget:
+
+```sh
+PROPTEST_CASES=20000 cargo test --locked --release \
+  --test generation_properties --test rope_properties --test connectivity_properties
+```
+
+**Verus.** Every harness must verify with the pinned release (see
+[verus/README.md](verus/README.md)); 18 harnesses, 408 obligations, 0 errors at
+`33f620f`:
+
+```sh
+for harness in verus/*.rs; do
+  "$VERUS" --crate-type lib --no-cheating --triggers-mode silent "$harness" || exit 1
+done
+```
+
+**Fuzzing.** Run bounded campaigns for all twelve targets listed in
+[fuzz/README.md](fuzz/README.md): `configuration`, `index_artifacts`,
+`masks_positions`, `cache_transactions`, `generation`,
+`experiment_interfaces`, `logits_processing`, `chat_templates`,
+`rope_parameters`, `safetensors_headers`, `attention_connectivity`, and
+`modular_specs`. The campaigns recorded in [fuzz/CAMPAIGNS.md](fuzz/CAMPAIGNS.md)
+for the seven targets added or extended after v0.1 ran without a sanitizer,
+because the nightly AddressSanitizer runtime deadlocks on macOS 27; their
+sanitizer requirement stays open until they run on a host where it works.
+Open findings are kept as ignored reproducers
+(`cargo test --manifest-path fuzz/Cargo.toml --lib -- --ignored`).
+
+### Experimental real-checkpoint gates
+
+These ignored tests compare a local checkpoint with a reference bundle that
+[`scripts/generate_causal_lm_reference.py`](scripts/generate_causal_lm_reference.py)
+writes from Transformers on CPU with eager attention:
+
+```sh
+python3 -I scripts/generate_causal_lm_reference.py --model-dir MODEL_DIR \
+  --output BUNDLE_DIR --repository OWNER/NAME --revision COMMIT \
+  [--dtype {float32,bfloat16}] [--num-hidden-layers N] [--prompt TEXT ...] [--greedy-tokens N]
+```
+
+Each test verifies the checkpoint/bundle pairing through the bundle's
+`config.json` SHA-256, loads strictly, and runs on Flex; adding
+`--features metal` repeats the checks on Metal. Run them one at a time:
+
+| Gate | Command (after `cargo test --release`) | Environment | Default tolerances |
+| --- | --- | --- | --- |
+| Llama family | `--test llama_family_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_LLAMA_FAMILY_DIR`, `TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR`; optional `_TOLERANCE`, `_MIN_GREEDY` | `1e-3` absolute logits (F32 drift measured at `9.1e-5` to `3.8e-4`); at least 2 decisive greedy tokens |
+| Gemma | `--test gemma_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GEMMA_DIR`, `TRANSFORMERS_GEMMA_REFERENCE_DIR`, `TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR`; optional `_TOLERANCE`, `_LONG_TOLERANCE`, `_MIN_GREEDY` | `1e-3`; `5e-3` across the sliding window, where Transformers' own eager and SDPA graphs differ by `3.2e-3` |
+| gpt-oss | `--test gpt_oss_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GPT_OSS_DIR`, `TRANSFORMERS_GPT_OSS_REFERENCE_DIR`; optional `_DTYPE` (defaults to the bundle's dtype), `_TOLERANCE`, `_MEAN_TOLERANCE`, `_MIN_GREEDY` | F32 run and bundle: `1e-3` max, `1e-4` mean; any half-precision side: `2.5` max, `0.15` mean (provisional, calibrated on four blocks) |
+
+The Gemma long-context bundle and the gpt-oss truncated bundles are described
+in each test's module documentation, which also records the measured results.
+Qualify half-precision gpt-oss runs (including Metal F16, with
+`TRANSFORMERS_GPT_OSS_DTYPE=f16`) against a truncated F32 bundle; the full
+24-block BF16 bundle needs about 55 GiB of host memory to generate. These
+gates establish experimental validation only; none promotes a checkpoint.
+
+### Replays required after the polish cycle
+
+The batched-execution, attention, position, DeltaNet, Mamba-2, and loader
+changes touch real-checkpoint paths whose recorded evidence predates them.
+Before the next release, replay on the integrated source:
+
+- Qwen3.5-0.8B Metal/F16 official-reference parity (minimum cosine
+  `0.999996`, 32/32 decisions) and its public example; Qwen3.8 and Qwen3-MoE
+  Metal smokes, including packed Q4/Q8 (Qwen3.5 packed overrides now install
+  exactly).
+- FLAN-T5-small on Metal/F32 (its Flex/F32 gate was re-run with byte-identical
+  digests) and FLAN-T5-XXL.
+- Nemotron 3.5 Lightning Metal stateless, cached-prefill, one-token decode, and
+  official-reference gates (the Mamba-2 scan, `dt` softplus, and cached
+  attention changed); real-weight MTP parity remains open.
+- Muse Glimmer and DeepSeek-V2-Lite Metal gates (batched decoding, shared
+  router, bounded attention).
+- The Metal variants of the Llama-family, Gemma, and gpt-oss gates, the
+  remaining Llama-family checkpoints, and the full gpt-oss-20b BF16 reference.
+
+Record each replay as a new measurement with its exact source identity; do not
+overwrite the historical records below.
+
 ## v0.1 release qualification
 
 The [release record](acceptance/measurements/v0_1-release-20260910.json) promotes
@@ -618,8 +727,10 @@ it is useful locally but is not a substitute for that final connected audit.
 
 ## Gates that the source runner does not substitute for
 
-- Execute bounded sanitizer fuzz campaigns for configuration, shard indexes,
-  masks/positions, cache transactions, and generation. Preserve minimized bugs
+- Execute bounded sanitizer fuzz campaigns for every fuzz target: configuration,
+  shard indexes, masks/positions, cache transactions, generation, experiment
+  interfaces, logits processing, chat templates, RoPE parameters, SafeTensors
+  headers, attention connectivity, and modular specs. Preserve minimized bugs
   as ordinary regression tests; finite campaigns are not exhaustive proofs.
 - Replay authenticated Qwen and FLAN official full-vector references on their
   declared backend/precision, 32 exact stable greedy decisions, cached versus

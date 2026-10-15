@@ -51,25 +51,42 @@ fn split_ring_write(absolute_start: usize, count: usize, capacity: usize) -> Rin
 - Ghost snapshots of mutable state inside a body use `proof_decl!` under the
   same `cfg`; lemmas live in a `#[cfg(verus_keep_ghost)] verus! { … }` block
   next to the code they justify.
+- Quantifiers over one array at a time (`forall|i| … a[i] …`) verify more
+  reliably than quantifiers relating several arrays; state cross-array facts
+  through a spec function of one index.
 
 ## Harnesses
 
 Each `verus/*.rs` file other than this guide is an independent Verus crate root
 for one area. It includes the real source files with `#[path = "../src/…"]`
 attributes, mirroring their crate paths when they refer to one another. Areas
-therefore verify independently and can be extended in parallel.
+therefore verify independently and can be extended in parallel. Each
+harness's module documentation lists its verified functions, their
+postconditions, and what remains covered only by Rust tests.
 
-| Harness | Verified source | What the proofs establish |
-| --- | --- | --- |
-| `attention.rs` | `src/attention/plan.rs`, `src/attention/widths.rs` | Score-bounded query chunks are maximal, partition the queries, and respect both limits; sliding-window key ranges contain every visible key; chunk frames keep absolute chunk indices; grouped-query projection widths are exact and representable. |
-| `cache.rs` | `src/cache/{ring,lengths,retention,rows}.rs` | Ring writes and reads land in slot `p mod capacity`; the length ledger keeps `committed <= working <= capacity` across advance, begin, commit, rollback, truncate, reorder, and reset; rewind predicates are sound and complete; row plans stay in bounds. |
-| `checkpoint.rs` | `src/checkpoint/layout.rs`, `src/checkpoint/quantization/packing.rs` | Shape products and storage sizes are exact or rejected on overflow; accepted SafeTensors byte intervals tile the data section exactly; packed Q4/Q8 code reads decode the stored nibble or byte. |
-| `experiment.rs` | `src/intervention/selection.rs`, `src/experiment/bounds.rs` | Activation selections expand to exactly the requested in-bounds ranges; position, label, broadcast, and staged-block bounds are overflow-free; the pairwise loss reduction terminates. |
-| `generation.rs` | `src/generation/bookkeeping.rs` | Stop matching and finish precedence, prefill chunking, beam-row group preservation, the beam frontier, position preflights, speculative accepted-prefix arithmetic, and prompt-lookup drafting. |
-| `models.rs` | `src/models/shared/plan.rs` | Padded-row compaction and scatter plans restore the rectangular layout; logits selection, implicit cached positions, rotary extents, value ranges, and per-row cache appends are exact and bounded. |
-| `moe.rs` | `src/moe/assignment.rs` | The expert counting sort partitions every routed assignment by expert in stable order; memory-bounded dispatch blocks are maximal runs of whole experts. |
-| `position.rs` | `src/position/{index_plan,t5,ids}.rs` | MRoPE axis selection, T5 displacement tables and bucket indices, and batched position IDs are in bounds and exact. |
-| `tokenization.rs` | `src/tokenization/{layout,calendar}.rs` | Truncation budgets reserve exactly the template width; padding splits and masks are exact; calendar arithmetic for `strftime_now` is correct. |
+The counts are the verified obligations Verus reported for each harness at
+source `33f620f` with the release recorded below (408 in total, 0 errors).
+
+| Harness | Verified source | Verified | What the proofs establish |
+| --- | --- | ---: | --- |
+| `attention.rs` | `src/attention/{plan,widths}.rs` | 35 | Score-bounded query chunks are maximal, partition the queries, and respect both limits; sliding-window key ranges contain every visible key; chunk frames keep absolute chunk indices; grouped-query projection widths are exact and representable. |
+| `cache.rs` | `src/cache/{ring,lengths,retention,rows}.rs` | 56 | Ring writes and reads land in slot `p mod capacity`; the length ledger keeps `committed <= working <= capacity` across advance, begin, commit, rollback, truncate, reorder, and reset; rewind predicates are sound and complete; row runs are ordered, disjoint, and cover exactly the rows with new tokens. |
+| `checkpoint.rs` | `src/checkpoint/layout.rs`, `src/checkpoint/quantization/packing.rs` | 35 | Shape products and storage sizes are exact or rejected on overflow; accepted SafeTensors byte intervals tile the data section exactly; packed Q4/Q8 code reads decode the stored nibble or byte. |
+| `custom.rs` | `src/models/custom/plan.rs` | 9 | The clamped T5 displacement table has radius `min(max_distance, C - 1)`, its device index is in range and inverts slot to displacement; a row append fills slots `L..L + n` in order and reports overflow. |
+| `deepseek_muse.rs` | `src/models/deepseek_v2/model/batch.rs`, `src/models/muse_glimmer/schedule.rs` | 18 | DeepSeek batched-row gathers, key extents, monotone per-chunk key limits, and cache slots; Muse's backward-counted global-layer rule, dense per-kind cache slots, and cached ring chunk key slices that contain every visible key and at most `H + W - 1 + rows` keys. |
+| `experiment.rs` | `src/intervention/selection.rs`, `src/experiment/bounds.rs` | 15 | Activation selections expand to exactly the requested in-bounds ranges; position, label, broadcast, and staged-block bounds are overflow-free; the pairwise loss reduction terminates. |
+| `gemma.rs` | `src/models/gemma/plan.rs` | 5 | The default local/global schedule equals `(l + 1) mod p != 0` for every period; every layer's rotary set index names its layer type's set and is in range. |
+| `generation.rs` | `src/generation/bookkeeping.rs` | 22 | Stop matching and finish precedence, prefill chunking, beam-row group preservation, the beam frontier, position preflights, speculative accepted-prefix arithmetic, and prompt-lookup drafting. |
+| `gpt_oss.rs` | `src/checkpoint/mxfp4.rs`, `src/models/gpt_oss/plan.rs` | 46 | MXFP4 shape validation is sound and complete (`Ok` exactly for valid `[E, R, G, 16]` blocks with `[E, R, G]` scales), offsets are in bounds, nibbles split correctly, and each decoded value's binary64 bits are exact; the sliding/full schedule, cache slots, and interleaved `gate_up` offsets are exact. |
+| `integration.rs` | `src/models/auto/defaults.rs`, `src/models/custom/mamba2_geometry.rs` | 4 | Hugging Face's sampling `top_k` default (an explicit zero disables it; otherwise `min(k or 50, vocabulary)`, always in `1..=vocabulary`); Mamba-2 head grouping exists exactly when the group size divides the heads. |
+| `llama.rs` | `src/models/llama/plan.rs` | 20 | SmolLM3 NoPE and Qwen sliding-layer rules, dense cache-group slots, contiguous-run detection, batched-step cache positions, and the compaction and restoring gathers. |
+| `models.rs` | `src/models/shared/plan.rs` | 24 | Padded-row compaction and scatter plans restore the rectangular layout; logits selection, implicit cached positions, rotary extents, value ranges, and per-row cache appends are exact and bounded. |
+| `moe.rs` | `src/moe/assignment.rs` | 18 | The expert counting sort partitions every routed assignment by expert in stable order; memory-bounded dispatch blocks are maximal runs of whole experts. |
+| `nemotron.rs` | `src/models/shared/plan.rs`, `src/models/nemotron_h/model/plan.rs` | 51 | Nemotron-H compact-batch gather, scatter, pack, unpack, and last-token maps; query positions that keep every padded slot inside its row's keys; the Mamba-2 path choice, transactional staging policy, shifted MTP cursor, and one-pass verification length. |
+| `position.rs` | `src/position/{index_plan,t5,ids}.rs` | 12 | MRoPE axis selection, T5 displacement tables and bucket indices, and batched position IDs are in bounds and exact. `relative_table_index` is a verified specification of the device T5 index, linked to it by a unit test. |
+| `qwen.rs` | `src/models/qwen3_5/plan.rs`, `src/models/qwen3_moe/plan.rs` | 8 | The hybrid DeltaNet/attention schedule rule, dense per-kind cache slots, the compact right-padded row plan, the MTP cursor after truncation, and the Qwen3-MoE sparse-layer predicate. |
+| `t5_gpt.rs` | `src/models/t5/model/packing.rs` | 12 | Batched T5 decoding's left-aligned compaction and scatter gathers stay in bounds, every block slot's causal visibility and bias position equal their formulas, and `groups_preserved` characterizes the beam reorders that may leave encoder state in place. |
+| `tokenization.rs` | `src/tokenization/{layout,calendar}.rs` | 18 | Truncation budgets reserve exactly the template width; padding splits and masks are exact; calendar fields for `strftime_now` are overflow-free and in range. |
 
 Proof code must not use `admit`, `assume`, `assume_specification`,
 `external_body`, or `external_fn_specification`; the `verus_harness`
@@ -90,7 +107,14 @@ done
 ```
 
 `VERUS` is the `verus` binary from the release archive. Verification performs
-no Cargo build, downloads nothing, and writes no target directory.
+no Cargo build, downloads nothing, and writes no target directory. The whole
+loop takes about 15 seconds on an Apple M3 Max.
+
+Without Verus installed, `cargo test --locked --test verus_harness` still
+checks the harness structure: every harness begins with module documentation
+and includes existing sources, no harness or included source uses an escape
+hatch, and every source file carrying Verus specifications is included by some
+harness.
 
 | Item | Version |
 | --- | --- |
