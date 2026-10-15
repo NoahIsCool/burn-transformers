@@ -172,11 +172,20 @@ pub fn install_packed_parameter<B: Backend, const D: usize>(
 
 /// Returns whether this backend's quantized transpose preserves block values.
 ///
-/// The probe runs once per backend type and is cached: a `[2, 64]` Q8 tensor
-/// with group size 32 and rows scaled 100x apart is transposed and dequantized,
-/// and the result is compared exactly with the transpose of its dequantization,
-/// both computed on `device`. A requantizing transpose mixes the two rows'
-/// magnitudes into shared scales and changes the small row's values.
+/// The probe runs once per backend type and is cached. It builds a `[2, 64]` Q8
+/// weight `W` with group size 32 whose rows are scaled 100x apart, then performs
+/// the operation inference actually executes with a transposed packed weight,
+/// `x · Wᵀ`, and compares it with `x · dequantize(W)ᵀ`. A requantizing transpose
+/// (Burn 0.21 Flex) mixes the two rows' magnitudes into shared scales, which
+/// moves the small row's output by tens of percent; a stride-preserving view
+/// (CubeCL backends such as Metal) matches to float rounding. The comparison
+/// allows a relative error of `1e-4`, far above F32 accumulation differences
+/// between quantized and float matmul kernels and far below requantization error.
+///
+/// The reference dequantizes `W` in its original layout. Burn 0.21's CubeCL
+/// `dequantize` ignores the strides of a transposed packed view, so
+/// `dequantize(Wᵀ)` is not a valid reference there even though quantized
+/// matmul through the same view is exact.
 ///
 /// Returns `false` without probing on autodiff backends, which cannot construct
 /// packed tensors in Burn 0.21, and on devices that cannot store the probe's
@@ -228,10 +237,24 @@ fn probe_quantized_transpose<B: Backend>(device: &B::Device) -> bool {
     if !B::dtype_usage(device, packed.dtype).contains(DTypeUsage::Storage) {
         return false;
     }
-    let tensor = Tensor::<B, 2>::from_data(packed, device);
-    let transposed_first = tensor.clone().transpose().dequantize().into_data();
-    let dequantized_first = tensor.dequantize().transpose().into_data();
-    transposed_first == dequantized_first
+    let weight = Tensor::<B, 2>::from_data(packed, device);
+    let inputs = (0..64)
+        .map(|index| (index as f32 * 0.37).cos())
+        .collect::<Vec<_>>();
+    let input = Tensor::<B, 2>::from_data(TensorData::new(inputs, [1, 64]), device);
+    let packed_product = input.clone().matmul(weight.clone().transpose());
+    let float_product = input.matmul(weight.dequantize().transpose());
+    let (Ok(packed_product), Ok(float_product)) = (
+        packed_product.into_data().to_vec::<f32>(),
+        float_product.into_data().to_vec::<f32>(),
+    ) else {
+        return false;
+    };
+    packed_product.len() == float_product.len()
+        && packed_product
+            .iter()
+            .zip(&float_product)
+            .all(|(packed, float)| (packed - float).abs() <= 1e-4 * (float.abs() + 1.0))
 }
 
 /// Classifies the parameter's load mapper by running it on a float probe.
