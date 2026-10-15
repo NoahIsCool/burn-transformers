@@ -1,0 +1,1056 @@
+{
+ "transformers": "5.2.0",
+ "torch": "2.10.0",
+ "cases": [
+  {
+   "name": "llama_default",
+   "reference": "5.2 LlamaRotaryEmbedding",
+   "rope_parameters": {
+    "rope_type": "default",
+    "rope_theta": 10000.0
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 128
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.3162277638912201,
+    0.10000000149011612,
+    0.03162277862429619,
+    0.009999999776482582,
+    0.003162277862429619,
+    0.0010000000474974513,
+    0.0003162277862429619
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "llama_legacy_linear_top_level_theta",
+   "reference": "5.2 LlamaRotaryEmbedding (legacy rope_scaling/type and top-level rope_theta)",
+   "rope_parameters": {
+    "type": "linear",
+    "factor": 4.0
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 128,
+    "rope_theta": 500000.0
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    0.25,
+    0.04848068952560425,
+    0.009401507675647736,
+    0.001823166268877685,
+    0.0003535533614922315,
+    6.856204709038138e-05,
+    1.3295739336172119e-05,
+    2.578346311565838e-06
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "llama_dynamic_within_context",
+   "reference": "5.2 ROPE_INIT_FUNCTIONS['dynamic']",
+   "rope_parameters": {
+    "rope_type": "dynamic",
+    "factor": 2.0,
+    "rope_theta": 10000.0
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 64
+   },
+   "evaluated_context": 64,
+   "inv_freq": [
+    1.0,
+    0.3162277638912201,
+    0.10000000149011612,
+    0.03162277862429619,
+    0.009999999776482582,
+    0.003162277862429619,
+    0.0010000000474974513,
+    0.0003162277862429619
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "llama_dynamic_extended_context",
+   "reference": "5.2 ROPE_INIT_FUNCTIONS['dynamic']",
+   "rope_parameters": {
+    "rope_type": "dynamic",
+    "factor": 2.0,
+    "rope_theta": 10000.0
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 64
+   },
+   "evaluated_context": 150,
+   "inv_freq": [
+    1.0,
+    0.26244500279426575,
+    0.06887736916542053,
+    0.018076520413160324,
+    0.0047440920025110245,
+    0.0012450632639229298,
+    0.0003267606080044061,
+    8.575667743571103e-05
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "llama_dynamic_partial_rotary",
+   "reference": "5.2 ROPE_INIT_FUNCTIONS['dynamic']",
+   "rope_parameters": {
+    "rope_type": "dynamic",
+    "factor": 3.0,
+    "rope_theta": 50000.0,
+    "partial_rotary_factor": 0.5
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 64
+   },
+   "evaluated_context": 200,
+   "inv_freq": [
+    1.0,
+    0.034356072545051575,
+    0.0011803396046161652,
+    4.055182944284752e-05
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "llama_yarn_defaults",
+   "reference": "5.2 ROPE_INIT_FUNCTIONS['yarn']",
+   "rope_parameters": {
+    "rope_type": "yarn",
+    "factor": 4.0,
+    "original_max_position_embeddings": 32,
+    "rope_theta": 10000.0
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 128
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.19764235615730286,
+    0.02500000037252903,
+    0.007905694656074047,
+    0.0024999999441206455,
+    0.0007905694656074047,
+    0.0002500000118743628,
+    7.905694656074047e-05
+   ],
+   "attention_scaling": 1.138629436111989
+  },
+  {
+   "name": "llama_yarn_betas_and_attention_factor",
+   "reference": "5.2 ROPE_INIT_FUNCTIONS['yarn']",
+   "rope_parameters": {
+    "rope_type": "yarn",
+    "factor": 4.0,
+    "original_max_position_embeddings": 32,
+    "rope_theta": 10000.0,
+    "beta_fast": 16.0,
+    "beta_slow": 2.0,
+    "attention_factor": 1.5
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 128
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.07905694097280502,
+    0.02500000037252903,
+    0.007905694656074047,
+    0.0024999999441206455,
+    0.0007905694656074047,
+    0.0002500000118743628,
+    7.905694656074047e-05
+   ],
+   "attention_scaling": 1.5
+  },
+  {
+   "name": "llama_yarn_mscale_ratio",
+   "reference": "5.2 ROPE_INIT_FUNCTIONS['yarn']",
+   "rope_parameters": {
+    "rope_type": "yarn",
+    "factor": 16.0,
+    "original_max_position_embeddings": 32,
+    "rope_theta": 10000.0,
+    "mscale": 1.0,
+    "mscale_all_dim": 0.8
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 512
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.16799600422382355,
+    0.0062500000931322575,
+    0.0019764236640185118,
+    0.0006249999860301614,
+    0.00019764236640185118,
+    6.25000029685907e-05,
+    1.9764236640185118e-05
+   ],
+   "attention_scaling": 1.0453850485445595
+  },
+  {
+   "name": "llama_yarn_untruncated_partial_rotary",
+   "reference": "5.2 ROPE_INIT_FUNCTIONS['yarn']",
+   "rope_parameters": {
+    "rope_type": "yarn",
+    "factor": 8.0,
+    "original_max_position_embeddings": 16,
+    "rope_theta": 500000.0,
+    "truncate": false,
+    "partial_rotary_factor": 0.5
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 128
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.004700753837823868,
+    0.0001767767098499462,
+    6.647869668086059e-06
+   ],
+   "attention_scaling": 1.2079441541679836
+  },
+  {
+   "name": "deepseek_v2_lite_hugging_face",
+   "reference": "5.2 DeepseekV2RotaryEmbedding on tests/fixtures/deepseek_v2_lite.json",
+   "rope_parameters": {
+    "type": "yarn",
+    "factor": 40,
+    "original_max_position_embeddings": 4096,
+    "beta_fast": 32,
+    "beta_slow": 1,
+    "mscale": 0.707,
+    "mscale_all_dim": 0.707
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 64,
+    "max_position_embeddings": 163840,
+    "rope_theta": 10000.0
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.7498942017555237,
+    0.5623413324356079,
+    0.4216965138912201,
+    0.3162277638912201,
+    0.23713736236095428,
+    0.17782793939113617,
+    0.1333521455526352,
+    0.10000000149011612,
+    0.07498941570520401,
+    0.05623412877321243,
+    0.039006926119327545,
+    0.026879360899329185,
+    0.01837814413011074,
+    0.012447956018149853,
+    0.0083345090970397,
+    0.005500000435858965,
+    0.0035619973205029964,
+    0.002249365206807852,
+    0.0013705134624615312,
+    0.0007905694073997438,
+    0.0004149904125370085,
+    0.00017782794020604342,
+    3.333803397254087e-05,
+    2.499999936844688e-05,
+    1.8747354260995053e-05,
+    1.4058532542549074e-05,
+    1.0542412383074407e-05,
+    7.905694474175107e-06,
+    5.928434347879374e-06,
+    4.445698323252145e-06,
+    3.3338035336782923e-06
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "deepseek_hugging_face_mscale_all_dim_only",
+   "reference": "5.2 DeepseekV2RotaryEmbedding without mscale",
+   "rope_parameters": {
+    "type": "yarn",
+    "factor": 40,
+    "original_max_position_embeddings": 4096,
+    "beta_fast": 32,
+    "beta_slow": 1,
+    "mscale_all_dim": 0.707
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 64,
+    "max_position_embeddings": 163840,
+    "rope_theta": 10000.0
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.7498942017555237,
+    0.5623413324356079,
+    0.4216965138912201,
+    0.3162277638912201,
+    0.23713736236095428,
+    0.17782793939113617,
+    0.1333521455526352,
+    0.10000000149011612,
+    0.07498941570520401,
+    0.05623412877321243,
+    0.039006926119327545,
+    0.026879360899329185,
+    0.01837814413011074,
+    0.012447956018149853,
+    0.0083345090970397,
+    0.005500000435858965,
+    0.0035619973205029964,
+    0.002249365206807852,
+    0.0013705134624615312,
+    0.0007905694073997438,
+    0.0004149904125370085,
+    0.00017782794020604342,
+    3.333803397254087e-05,
+    2.499999936844688e-05,
+    1.8747354260995053e-05,
+    1.4058532542549074e-05,
+    1.0542412383074407e-05,
+    7.905694474175107e-06,
+    5.928434347879374e-06,
+    4.445698323252145e-06,
+    3.3338035336782923e-06
+   ],
+   "attention_scaling": 1.3688879454113936
+  },
+  {
+   "name": "deepseek_v2_lite_reference",
+   "reference": "5.2 yarn frequencies with the DeepSeek reference mscale ratio",
+   "rope_parameters": {
+    "type": "yarn",
+    "factor": 40,
+    "original_max_position_embeddings": 4096,
+    "beta_fast": 32,
+    "beta_slow": 1,
+    "mscale": 0.707,
+    "mscale_all_dim": 0.707
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 64,
+    "max_position_embeddings": 163840,
+    "rope_theta": 10000.0,
+    "mscale_convention": "deep_seek_reference"
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.7498942017555237,
+    0.5623413324356079,
+    0.4216965138912201,
+    0.3162277638912201,
+    0.23713736236095428,
+    0.17782793939113617,
+    0.1333521455526352,
+    0.10000000149011612,
+    0.07498941570520401,
+    0.05623412877321243,
+    0.039006926119327545,
+    0.026879360899329185,
+    0.01837814413011074,
+    0.012447956018149853,
+    0.0083345090970397,
+    0.005500000435858965,
+    0.0035619973205029964,
+    0.002249365206807852,
+    0.0013705134624615312,
+    0.0007905694073997438,
+    0.0004149904125370085,
+    0.00017782794020604342,
+    3.333803397254087e-05,
+    2.499999936844688e-05,
+    1.8747354260995053e-05,
+    1.4058532542549074e-05,
+    1.0542412383074407e-05,
+    7.905694474175107e-06,
+    5.928434347879374e-06,
+    4.445698323252145e-06,
+    3.3338035336782923e-06
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "deepseek_reference_mscale_only",
+   "reference": "5.2 yarn frequencies with the DeepSeek reference mscale ratio",
+   "rope_parameters": {
+    "type": "yarn",
+    "factor": 40,
+    "original_max_position_embeddings": 4096,
+    "beta_fast": 32,
+    "beta_slow": 1,
+    "mscale": 0.707
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 64,
+    "max_position_embeddings": 163840,
+    "rope_theta": 10000.0,
+    "mscale_convention": "deep_seek_reference"
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.7498942017555237,
+    0.5623413324356079,
+    0.4216965138912201,
+    0.3162277638912201,
+    0.23713736236095428,
+    0.17782793939113617,
+    0.1333521455526352,
+    0.10000000149011612,
+    0.07498941570520401,
+    0.05623412877321243,
+    0.039006926119327545,
+    0.026879360899329185,
+    0.01837814413011074,
+    0.012447956018149853,
+    0.0083345090970397,
+    0.005500000435858965,
+    0.0035619973205029964,
+    0.002249365206807852,
+    0.0013705134624615312,
+    0.0007905694073997438,
+    0.0004149904125370085,
+    0.00017782794020604342,
+    3.333803397254087e-05,
+    2.499999936844688e-05,
+    1.8747354260995053e-05,
+    1.4058532542549074e-05,
+    1.0542412383074407e-05,
+    7.905694474175107e-06,
+    5.928434347879374e-06,
+    4.445698323252145e-06,
+    3.3338035336782923e-06
+   ],
+   "attention_scaling": 1.2608037774058554
+  },
+  {
+   "name": "deepseek_reference_mscale_all_dim_only",
+   "reference": "5.2 yarn frequencies with the DeepSeek reference mscale ratio",
+   "rope_parameters": {
+    "type": "yarn",
+    "factor": 40,
+    "original_max_position_embeddings": 4096,
+    "beta_fast": 32,
+    "beta_slow": 1,
+    "mscale_all_dim": 0.707
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 64,
+    "max_position_embeddings": 163840,
+    "rope_theta": 10000.0,
+    "mscale_convention": "deep_seek_reference"
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.7498942017555237,
+    0.5623413324356079,
+    0.4216965138912201,
+    0.3162277638912201,
+    0.23713736236095428,
+    0.17782793939113617,
+    0.1333521455526352,
+    0.10000000149011612,
+    0.07498941570520401,
+    0.05623412877321243,
+    0.039006926119327545,
+    0.026879360899329185,
+    0.01837814413011074,
+    0.012447956018149853,
+    0.0083345090970397,
+    0.005500000435858965,
+    0.0035619973205029964,
+    0.002249365206807852,
+    0.0013705134624615312,
+    0.0007905694073997438,
+    0.0004149904125370085,
+    0.00017782794020604342,
+    3.333803397254087e-05,
+    2.499999936844688e-05,
+    1.8747354260995053e-05,
+    1.4058532542549074e-05,
+    1.0542412383074407e-05,
+    7.905694474175107e-06,
+    5.928434347879374e-06,
+    4.445698323252145e-06,
+    3.3338035336782923e-06
+   ],
+   "attention_scaling": 1.0857263992561355
+  },
+  {
+   "name": "llama_longrope_short_table",
+   "reference": "5.2 ROPE_INIT_FUNCTIONS['longrope']",
+   "rope_parameters": {
+    "rope_type": "longrope",
+    "short_factor": [
+     1.0,
+     1.25,
+     1.5,
+     2.0,
+     3.0,
+     4.0,
+     6.0,
+     8.0
+    ],
+    "long_factor": [
+     1.0,
+     1.5,
+     2.5,
+     4.0,
+     6.5,
+     9.0,
+     12.0,
+     16.0
+    ],
+    "original_max_position_embeddings": 32,
+    "factor": 2.0,
+    "attention_factor": 1.1,
+    "rope_theta": 10000.0
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 128
+   },
+   "evaluated_context": 32,
+   "inv_freq": [
+    1.0,
+    0.2529822289943695,
+    0.06666667014360428,
+    0.015811389312148094,
+    0.0033333334140479565,
+    0.0007905694656074047,
+    0.00016666666488163173,
+    3.9528473280370235e-05
+   ],
+   "attention_scaling": 1.1
+  },
+  {
+   "name": "llama_longrope_long_table",
+   "reference": "5.2 ROPE_INIT_FUNCTIONS['longrope']",
+   "rope_parameters": {
+    "rope_type": "longrope",
+    "short_factor": [
+     1.0,
+     1.25,
+     1.5,
+     2.0,
+     3.0,
+     4.0,
+     6.0,
+     8.0
+    ],
+    "long_factor": [
+     1.0,
+     1.5,
+     2.5,
+     4.0,
+     6.5,
+     9.0,
+     12.0,
+     16.0
+    ],
+    "original_max_position_embeddings": 32,
+    "factor": 2.0,
+    "attention_factor": 1.1,
+    "rope_theta": 10000.0
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 128
+   },
+   "evaluated_context": 33,
+   "inv_freq": [
+    1.0,
+    0.21081849932670593,
+    0.03999999910593033,
+    0.007905694656074047,
+    0.0015384615398943424,
+    0.00035136420046910644,
+    8.333333244081587e-05,
+    1.9764236640185118e-05
+   ],
+   "attention_scaling": 1.1
+  },
+  {
+   "name": "phi3_longrope_top_level_original_short",
+   "reference": "5.2 ROPE_INIT_FUNCTIONS['longrope']",
+   "rope_parameters": {
+    "rope_type": "longrope",
+    "short_factor": [
+     1.0,
+     1.25,
+     1.5,
+     2.0,
+     3.0,
+     4.0,
+     6.0,
+     8.0
+    ],
+    "long_factor": [
+     1.0,
+     1.5,
+     2.5,
+     4.0,
+     6.5,
+     9.0,
+     12.0,
+     16.0
+    ]
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 256,
+    "original_max_position_embeddings": 64
+   },
+   "evaluated_context": 64,
+   "inv_freq": [
+    1.0,
+    0.2529822289943695,
+    0.06666667014360428,
+    0.015811389312148094,
+    0.0033333334140479565,
+    0.0007905694656074047,
+    0.00016666666488163173,
+    3.9528473280370235e-05
+   ],
+   "attention_scaling": 1.1547005383792517
+  },
+  {
+   "name": "phi3_longrope_top_level_original_long",
+   "reference": "5.2 ROPE_INIT_FUNCTIONS['longrope']",
+   "rope_parameters": {
+    "rope_type": "longrope",
+    "short_factor": [
+     1.0,
+     1.25,
+     1.5,
+     2.0,
+     3.0,
+     4.0,
+     6.0,
+     8.0
+    ],
+    "long_factor": [
+     1.0,
+     1.5,
+     2.5,
+     4.0,
+     6.5,
+     9.0,
+     12.0,
+     16.0
+    ]
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 256,
+    "original_max_position_embeddings": 64
+   },
+   "evaluated_context": 65,
+   "inv_freq": [
+    1.0,
+    0.21081849932670593,
+    0.03999999910593033,
+    0.007905694656074047,
+    0.0015384615398943424,
+    0.00035136420046910644,
+    8.333333244081587e-05,
+    1.9764236640185118e-05
+   ],
+   "attention_scaling": 1.1547005383792517
+  },
+  {
+   "name": "phi3_default_top_level_partial_rotary",
+   "reference": "5.2 Phi3RotaryEmbedding",
+   "rope_parameters": null,
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 256,
+    "partial_rotary_factor": 0.5
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.10000000149011612,
+    0.009999999776482582,
+    0.0010000000474974513
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "llama_llama3_bands",
+   "reference": "5.2 ROPE_INIT_FUNCTIONS['llama3']",
+   "rope_parameters": {
+    "rope_type": "llama3",
+    "factor": 8.0,
+    "low_freq_factor": 1.0,
+    "high_freq_factor": 4.0,
+    "original_max_position_embeddings": 32,
+    "rope_theta": 500000.0
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 256
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.024240344762802124,
+    0.004700753837823868,
+    0.0009115831344388425,
+    0.00017677668074611574,
+    3.428102354519069e-05,
+    6.647869668086059e-06,
+    1.289173155782919e-06
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "qwen3_5_0_8b_fixture",
+   "reference": "5.2 Qwen3_5TextRotaryEmbedding on tests/fixtures/qwen3_5_0_8b.json",
+   "rope_parameters": {
+    "mrope_interleaved": true,
+    "mrope_section": [
+     11,
+     11,
+     10
+    ],
+    "rope_type": "default",
+    "rope_theta": 10000000,
+    "partial_rotary_factor": 0.25
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 256,
+    "max_position_embeddings": 262144,
+    "mrope": "text_positions"
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.6042963862419128,
+    0.36517414450645447,
+    0.22067339718341827,
+    0.1333521455526352,
+    0.08058421313762665,
+    0.04869675263762474,
+    0.02942727319896221,
+    0.017782794311642647,
+    0.010746078565716743,
+    0.006493816617876291,
+    0.003924189601093531,
+    0.0023713738191872835,
+    0.0014330126577988267,
+    0.0008659643353894353,
+    0.0005232990952208638,
+    0.0003162277862429619,
+    0.00019109529966954142,
+    0.00011547819303814322,
+    6.978305464144796e-05,
+    4.216965317027643e-05,
+    2.5482966520939954e-05,
+    1.5399264157167636e-05,
+    9.305720595875755e-06,
+    5.62341347176698e-06,
+    3.398208264115965e-06,
+    2.0535248950181995e-06,
+    1.2409377632138785e-06,
+    7.498942409256415e-07,
+    4.531583783773385e-07,
+    2.7384197665014653e-07,
+    1.6548170833630138e-07
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "qwen3_30b_a3b_fixture",
+   "reference": "5.2 Qwen3MoeRotaryEmbedding on tests/fixtures/qwen3_30b_a3b.json",
+   "rope_parameters": null,
+   "layer_type": null,
+   "context": {
+    "head_dim": 128,
+    "max_position_embeddings": 40960,
+    "rope_theta": 1000000.0
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.8058422207832336,
+    0.6493816375732422,
+    0.5232991576194763,
+    0.4216965138912201,
+    0.33982083201408386,
+    0.2738419771194458,
+    0.22067339718341827,
+    0.17782793939113617,
+    0.14330126345157623,
+    0.11547820270061493,
+    0.09305720031261444,
+    0.07498941570520401,
+    0.0604296438395977,
+    0.04869675263762474,
+    0.03924189880490303,
+    0.03162277862429619,
+    0.025482967495918274,
+    0.02053525112569332,
+    0.016548171639442444,
+    0.01333521492779255,
+    0.010746078565716743,
+    0.00865964312106371,
+    0.006978305988013744,
+    0.005623413249850273,
+    0.004531583748757839,
+    0.003651741426438093,
+    0.002942727180197835,
+    0.0023713738191872835,
+    0.001910952851176262,
+    0.0015399265103042126,
+    0.0012409378541633487,
+    0.0010000000474974513,
+    0.0008058422245085239,
+    0.0006493816617876291,
+    0.0005232990952208638,
+    0.00042169648804701865,
+    0.0003398208355065435,
+    0.00027384195709601045,
+    0.00022067342069931328,
+    0.00017782794020604342,
+    0.00014330126577988267,
+    0.00011547819303814322,
+    9.305720595875755e-05,
+    7.498942431993783e-05,
+    6.042963650543243e-05,
+    4.869675467489287e-05,
+    3.92418987757992e-05,
+    3.162277425872162e-05,
+    2.5482966520939954e-05,
+    2.0535249859676696e-05,
+    1.6548170606256463e-05,
+    1.333521413471317e-05,
+    1.0746078260126524e-05,
+    8.659643754072022e-06,
+    6.978306373639498e-06,
+    5.62341347176698e-06,
+    4.531583726929966e-06,
+    3.651741280918941e-06,
+    2.9427271783788456e-06,
+    2.3713737391517498e-06,
+    1.910952960315626e-06,
+    1.5399265294036013e-06,
+    1.2409377632138785e-06
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "tiny_golden_llama3",
+   "reference": "5.2 LlamaRotaryEmbedding on tiny_goldens/llama3",
+   "rope_parameters": {
+    "factor": 8.0,
+    "high_freq_factor": 4.0,
+    "low_freq_factor": 1.0,
+    "original_max_position_embeddings": 16,
+    "rope_theta": 10000.0,
+    "rope_type": "llama3"
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 8,
+    "max_position_embeddings": 64
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    0.5760563611984253,
+    0.012500000186264515,
+    0.0012499999720603228,
+    0.0001250000059371814
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "tiny_golden_gemma3_text_full_attention",
+   "reference": "5.2 Gemma3RotaryEmbedding on tiny_goldens/gemma3-text",
+   "rope_parameters": {
+    "full_attention": {
+     "factor": 8.0,
+     "rope_theta": 1000000.0,
+     "rope_type": "linear"
+    },
+    "sliding_attention": {
+     "rope_theta": 10000.0,
+     "rope_type": "default"
+    }
+   },
+   "layer_type": "full_attention",
+   "context": {
+    "head_dim": 8,
+    "max_position_embeddings": 64
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    0.125,
+    0.0039528473280370235,
+    0.0001250000059371814,
+    3.9528467823402025e-06
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "tiny_golden_gemma3_text_sliding_attention",
+   "reference": "5.2 Gemma3RotaryEmbedding on tiny_goldens/gemma3-text",
+   "rope_parameters": {
+    "full_attention": {
+     "factor": 8.0,
+     "rope_theta": 1000000.0,
+     "rope_type": "linear"
+    },
+    "sliding_attention": {
+     "rope_theta": 10000.0,
+     "rope_type": "default"
+    }
+   },
+   "layer_type": "sliding_attention",
+   "context": {
+    "head_dim": 8,
+    "max_position_embeddings": 64
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.10000000149011612,
+    0.009999999776482582,
+    0.0010000000474974513
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "tiny_golden_gpt_oss",
+   "reference": "5.2 GptOssRotaryEmbedding on tiny_goldens/gpt-oss",
+   "rope_parameters": {
+    "beta_fast": 32.0,
+    "beta_slow": 1.0,
+    "factor": 4.0,
+    "original_max_position_embeddings": 16,
+    "rope_theta": 150000.0,
+    "rope_type": "yarn",
+    "truncate": false
+   },
+   "layer_type": null,
+   "context": {
+    "head_dim": 8,
+    "max_position_embeddings": 64
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.012703318148851395,
+    0.0006454972317442298,
+    3.2799827749840915e-05
+   ],
+   "attention_scaling": 1.138629436111989
+  },
+  {
+   "name": "proportional_quarter",
+   "reference": "5.8.0 _compute_proportional_rope_parameters",
+   "rope_parameters": {
+    "sliding_attention": {
+     "rope_type": "default",
+     "rope_theta": 10000.0
+    },
+    "full_attention": {
+     "rope_type": "proportional",
+     "partial_rotary_factor": 0.25,
+     "rope_theta": 1000000.0
+    }
+   },
+   "layer_type": "full_attention",
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 128
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    1.0,
+    0.17782793939113617,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "attention_scaling": 1.0
+  },
+  {
+   "name": "proportional_scaled",
+   "reference": "5.8.0 _compute_proportional_rope_parameters",
+   "rope_parameters": {
+    "full_attention": {
+     "rope_type": "proportional",
+     "partial_rotary_factor": 0.6,
+     "factor": 2.0,
+     "rope_theta": 10000.0
+    }
+   },
+   "layer_type": "full_attention",
+   "context": {
+    "head_dim": 16,
+    "max_position_embeddings": 128
+   },
+   "evaluated_context": 1,
+   "inv_freq": [
+    0.5,
+    0.15811388194561005,
+    0.05000000074505806,
+    0.015811389312148094,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "attention_scaling": 1.0
+  }
+ ]
+}

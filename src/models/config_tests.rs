@@ -346,3 +346,60 @@ fn rope_type_resolution_is_exhaustively_consistent() {
         }
     }
 }
+
+/// Proportional RoPE validates a pair fraction over the whole head, not a prefix width.
+///
+/// Transformers 5.8.0 rotates `floor(fraction * head_dim / 2)` leading pairs
+/// and defaults the optional `factor` to one, so a non-integral product and an
+/// absent factor are valid; an odd head width or an extension factor below one
+/// is not.
+#[test]
+fn proportional_rope_validates_a_whole_head_pair_fraction() {
+    let proportional = |partial_rotary_factor, factor| RopeParameters {
+        rope_type: RopeType::Proportional,
+        partial_rotary_factor,
+        factor,
+        ..RopeParameters::default()
+    };
+    proportional(Some(0.25), None)
+        .validate_for("test", 16, 128, Some(1.0e6))
+        .unwrap();
+    proportional(Some(0.6), Some(2.0))
+        .validate_for("test", 16, 128, None)
+        .unwrap();
+    proportional(None, None)
+        .validate_for("test", 16, 128, None)
+        .unwrap();
+    let odd = proportional(Some(0.5), None)
+        .validate_for("test", 15, 128, None)
+        .unwrap_err();
+    assert_eq!(odd.field, "head_dim");
+    let small = proportional(Some(0.5), Some(0.5))
+        .validate_for("test", 16, 128, None)
+        .unwrap_err();
+    assert_eq!(small.field, "rope.factor");
+    let wide = proportional(Some(1.5), None)
+        .validate_for("test", 16, 128, None)
+        .unwrap_err();
+    assert_eq!(wide.field, "partial_rotary_factor");
+    let sections = RopeParameters {
+        mrope_section: Some(vec![4, 4]),
+        ..proportional(Some(0.25), None)
+    };
+    sections.validate_for("test", 16, 128, None).unwrap();
+}
+
+/// Every validated proportional configuration also translates through the shared path.
+#[test]
+fn validated_proportional_parameters_translate() {
+    let rope = RopeParameters {
+        rope_type: RopeType::Proportional,
+        partial_rotary_factor: Some(0.6),
+        ..RopeParameters::default()
+    };
+    rope.validate_for("test", 16, 128, None).unwrap();
+    let config = rope
+        .to_rope_config(&RopeContext::new("test", 16, 128))
+        .unwrap();
+    assert_eq!(config.rotary_dimension(), 16);
+}
