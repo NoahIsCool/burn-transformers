@@ -672,6 +672,47 @@ fn top_k_is_total_for_non_finite_rows() {
     assert_eq!(flags, [true, true, false, false]);
 }
 
+/// Tokens whose final weights are not finite are flagged even when no score is NaN.
+///
+/// Top-k-then-softmax ranks raw logits, so a `+inf` logit (an overflowed F16
+/// projection) or an all-`-inf` selection only turns into NaN inside the
+/// softmax over the selected logits. A zero renormalization guard divides an
+/// all-zero sigmoid sum by zero. Each case must reach the caller's error path.
+#[test]
+fn non_finite_weights_are_flagged_in_every_order() {
+    let mut gpt_oss = RouterConfig::new(4, 2);
+    gpt_oss.policy.order = ScoringOrder::TopKThenScore;
+    gpt_oss.renormalize_selected = false;
+    let values = [
+        // softmax([+inf, 1]) = [NaN, NaN].
+        f32::INFINITY,
+        1.0,
+        0.0,
+        -1.0,
+        // softmax([-inf, -inf]) = [NaN, NaN].
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+        // Finite logits route normally.
+        0.5,
+        2.0,
+        -0.5,
+        1.0,
+    ];
+    let (ids, weights, flags) = host(gpt_oss.route(logits(&values, 4), None).unwrap());
+    assert_eq!(flags, [true, true, false]);
+    assert!(ids.iter().all(|&id| (0..4).contains(&id)));
+    assert!(weights[4..].iter().all(|weight| weight.is_finite()));
+
+    let mut zero_guard = RouterConfig::new(4, 2);
+    zero_guard.policy.scoring = RouterScoring::Sigmoid;
+    zero_guard.policy.denominator = RenormalizationDenominator::PlusEpsilon(0.0);
+    // sigmoid(-inf) = 0 for every expert, so the selected sum is exactly zero.
+    let (_, _, flags) = host(zero_guard.route(logits(&values[4..], 4), None).unwrap());
+    assert_eq!(flags, [true, false]);
+}
+
 /// Configuration validation names each violated routing constraint.
 #[test]
 fn router_validation_rejects_each_invalid_policy() {

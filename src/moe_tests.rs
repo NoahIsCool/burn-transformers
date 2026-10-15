@@ -8,8 +8,8 @@ use burn::{
 
 use super::{
     ExpertSelection, GroupLimitedSelection, GroupScore, PrunedExpertScore, RoutedExpertPrecision,
-    RoutedWeightingPrecision, RouterScoring, SparseMoe, SparseMoeConfig, group_selected_experts,
-    load_balancing_loss, weighted_expert_contribution,
+    RoutedWeightingPrecision, RouterScoring, ScoringOrder, SparseMoe, SparseMoeConfig,
+    group_selected_experts, load_balancing_loss, weighted_expert_contribution,
 };
 
 /// Installs zero parameters without advancing Burn's process-wide test RNG.
@@ -266,6 +266,77 @@ fn selected_dispatch_retains_input_and_expert_gradients() {
     assert!(module.routed[0].up_proj.weight.grad(&gradients).is_some());
     assert!(module.routed[0].down_proj.weight.grad(&gradients).is_some());
     assert!(module.routed[1].gate_proj.weight.grad(&gradients).is_none());
+}
+
+/// Gradients reach the router bias and shared-expert gate but never the frozen correction bias.
+///
+/// Covers both orders: sigmoid group-limited routing with a selection-only
+/// correction bias and a gated shared expert (DeepSeek-V3/Qwen3.5-MoE style),
+/// and top-k-then-softmax routing with a router bias (gpt-oss style). Every
+/// trainable routing parameter must receive a finite gradient through the
+/// selected mixture weights.
+#[cfg(feature = "autodiff")]
+#[test]
+fn routing_extensions_train_their_parameters_but_not_the_correction_bias() {
+    use burn::backend::Autodiff;
+
+    /// Differentiable CPU backend used to inspect routing-parameter gradients.
+    type AdBackend = Autodiff<Flex>;
+    let device = Default::default();
+    let mut group_limited = SparseMoeConfig::new(4, 3, 4, 2);
+    group_limited.shared_experts = 1;
+    group_limited.shared_expert_gate = true;
+    group_limited.routing.router_bias = true;
+    group_limited.routing.correction_bias = true;
+    group_limited.routing.scoring = RouterScoring::Sigmoid;
+    group_limited.routing.selection = ExpertSelection::GroupLimited(GroupLimitedSelection {
+        groups: 2,
+        top_groups: 1,
+        group_score: GroupScore::TopTwoSum,
+        pruned_score: PrunedExpertScore::NegativeInfinity,
+    });
+    let mut top_k_then_score = SparseMoeConfig::new(4, 3, 4, 2);
+    top_k_then_score.renormalize_selected = false;
+    top_k_then_score.routing.order = ScoringOrder::TopKThenScore;
+    top_k_then_score.routing.router_bias = true;
+
+    let finite = |values: Vec<f32>| values.iter().all(|value| value.is_finite());
+    for config in [group_limited, top_k_then_score] {
+        let module = config.init::<AdBackend>(&device).expect("valid MoE");
+        let input = (Tensor::<AdBackend, 1, Int>::arange(0..24, &device).float() * 0.37)
+            .sin()
+            .reshape([2, 3, 4]);
+        let gradients = module
+            .forward(input)
+            .expect("finite routing")
+            .hidden_state
+            .sum()
+            .backward();
+        let weight = module
+            .router
+            .weight
+            .grad(&gradients)
+            .expect("router weight");
+        assert!(finite(weight.into_data().to_vec::<f32>().unwrap()));
+        let bias = module.router.bias.as_ref().expect("router bias allocated");
+        let bias = bias.grad(&gradients).expect("router bias gradient");
+        assert!(finite(bias.into_data().to_vec::<f32>().unwrap()));
+        if let Some(gate) = &module.shared_expert_gate {
+            let gate = gate.weight.grad(&gradients).expect("shared gate gradient");
+            assert!(finite(gate.into_data().to_vec::<f32>().unwrap()));
+        }
+        if let Some(correction) = &module.correction_bias {
+            assert!(correction.grad(&gradients).is_none());
+        }
+        assert_eq!(
+            module.correction_bias.is_some(),
+            config.routing.correction_bias
+        );
+        assert_eq!(
+            module.shared_expert_gate.is_some(),
+            config.shared_expert_gate
+        );
+    }
 }
 
 /// Load-balancing diagnostics reject mismatched masks before broadcasting.
@@ -752,9 +823,28 @@ fn nan_router_scores_are_reported_with_the_token() {
     );
     let infinite = Tensor::<Flex, 3>::from_floats([[[f32::INFINITY, 0.0]]], &device);
     let error = module
-        .forward(infinite)
+        .forward(infinite.clone())
         .expect_err("softmax of +inf is NaN");
     assert!(matches!(error, crate::Error::Shape { tensor, .. } if tensor == "moe.router_scores"));
+
+    // Top-k-then-softmax ranks raw logits, which hold +inf but no NaN; the
+    // NaN appears only in the selected weights and must still be reported.
+    let mut config = SparseMoeConfig::new(2, 2, 4, 2);
+    config.routing.order = ScoringOrder::TopKThenScore;
+    config.renormalize_selected = false;
+    let mut module = deterministic_module(config, &device);
+    module.router.weight = Param::from_tensor(Tensor::from_floats(
+        [[0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+        &device,
+    ));
+    let error = module
+        .forward(infinite)
+        .expect_err("softmax over a selected +inf logit is NaN");
+    assert!(
+        matches!(&error, crate::Error::Shape { tensor, actual, .. }
+        if tensor == "moe.router_scores" && actual.contains("flattened token 0")),
+        "{error}"
+    );
 }
 
 /// Sigmoid group-limited routing selects with the frozen correction bias but mixes uncorrected scores.

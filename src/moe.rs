@@ -415,8 +415,8 @@ fn read_assignment_plan<B: Backend>(
         if flagged && row[slots].elem::<i64>() != 0 {
             return Err(Error::shape(
                 "moe.router_scores",
-                "finite router scores for every token",
-                format!("NaN router score for flattened token {token}"),
+                "finite router scores and weights for every token",
+                format!("non-finite router score or weight for flattened token {token}"),
             ));
         }
         ids.extend(row[..slots].iter().map(|value| value.elem::<i64>()));

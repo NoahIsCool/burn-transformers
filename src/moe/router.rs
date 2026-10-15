@@ -23,7 +23,8 @@
 //! BF16 and a flipped selection changes an entire expert computation.
 //! Top-k selection breaks ties by the smallest expert ID on every
 //! backend and never emits an out-of-range or repeated ID, even for NaN scores;
-//! [`RouteDecision::non_finite_tokens`] lets callers report such tokens.
+//! [`RouteDecision::non_finite_tokens`] flags tokens with NaN scores or
+//! non-finite weights so callers can report them.
 
 use burn::{
     nn::Linear,
@@ -201,8 +202,9 @@ pub struct RouteDecision<B: Backend> {
     pub experts: Tensor<B, 2, Int>,
     /// F32 mixture weights `[tokens, K]` after renormalization and scaling.
     pub weights: Tensor<B, 2>,
-    /// `[tokens]` flags marking tokens whose scores contained NaN. Their IDs
-    /// are still valid but meaningless; callers should report these tokens.
+    /// `[tokens]` flags marking tokens whose ranked scores contained NaN or
+    /// whose final weights are not finite. Their IDs are still in range and
+    /// distinct but meaningless; callers should report these tokens.
     pub non_finite_tokens: Tensor<B, 1, Bool>,
 }
 
@@ -338,10 +340,20 @@ impl RouterConfig {
             ScoringOrder::ScoreThenTopK => self.score_then_select(logits, correction_bias),
             ScoringOrder::TopKThenScore => self.select_then_score(logits),
         };
+        let weights = self.finish_weights(weights);
+        // NaN anywhere in the ranked scores means the router itself failed.
+        // Non-finite final weights also catch failures that ranking cannot
+        // see: softmax over selected logits containing +inf (top-k-then-score)
+        // or an all-zero sum divided by a zero renormalization guard.
+        let non_finite_tokens = ranked
+            .is_nan()
+            .any_dim(1)
+            .bool_or(weights.clone().is_finite().bool_not().any_dim(1))
+            .reshape([tokens]);
         Ok(RouteDecision {
             experts,
-            weights: self.finish_weights(weights),
-            non_finite_tokens: ranked.is_nan().any_dim(1).reshape([tokens]),
+            weights,
+            non_finite_tokens,
         })
     }
 
