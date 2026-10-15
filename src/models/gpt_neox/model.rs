@@ -49,7 +49,7 @@ use crate::{
         AttentionOutputGate, AttentionPrecisionMode, GroupedQueryAttention,
         GroupedQueryAttentionConfig, padding_attention_mask,
     },
-    feed_forward::{DenseFeedForward, DenseFeedForwardConfig, apply_activation},
+    feed_forward::{DenseFeedForward, DenseFeedForwardConfig},
     intervention::{Hooks, Layer, PointInfo, Stack},
     operations,
     position::{RopeConfig, RopeScaling, RotaryAngles, apply_rotary, rotary_angles},
@@ -225,18 +225,8 @@ impl<B: Backend> GptNeoXLayer<B> {
             layer.mlp_input(),
             self.post_attention_layernorm.forward(mlp_residual),
         )?;
-        let mlp_pre = hooks.apply(
-            layer.mlp_pre_activation(),
-            operations::linear(mlp_input, &self.mlp.up_proj)?,
-        )?;
-        let mlp_activation = hooks.apply(
-            layer.mlp_activation(),
-            apply_activation(mlp_pre, self.mlp.activation),
-        )?;
-        let mlp = hooks.apply(
-            layer.mlp_output(),
-            operations::linear(mlp_activation, &self.mlp.down_proj)?,
-        )?;
+        let mlp = self.mlp.forward_with_hooks(mlp_input, layer, hooks)?;
+        let mlp = hooks.apply(layer.mlp_output(), mlp)?;
         // Preserve the upstream addition order in the parallel case.
         let output = if parallel {
             mlp + attention + hidden

@@ -47,7 +47,7 @@ use crate::{
         AttentionPrecisionMode, GroupedQueryAttention, GroupedQueryAttentionConfig,
         padding_attention_mask,
     },
-    feed_forward::{DenseFeedForward, apply_activation},
+    feed_forward::DenseFeedForward,
     intervention::{Hooks, Layer, PointInfo, Stack},
     operations,
 };
@@ -261,20 +261,9 @@ impl<B: Backend> Gpt2Block<B> {
         let hidden = residual + emit(&mut hooks, layer.attention_output(), mixed)?;
         let residual = hidden.clone();
         let normalized = emit(&mut hooks, layer.mlp_input(), self.mlp_norm.forward(hidden))?;
-        let mixed = if hooks.is_some() {
-            let projected = emit(
-                &mut hooks,
-                layer.mlp_pre_activation(),
-                operations::linear(normalized, &self.mlp.up_proj)?,
-            )?;
-            let activated = emit(
-                &mut hooks,
-                layer.mlp_activation(),
-                apply_activation(projected, self.mlp.activation),
-            )?;
-            operations::linear(activated, &self.mlp.down_proj)?
-        } else {
-            self.mlp.forward(normalized)?
+        let mixed = match hooks.as_deref_mut() {
+            Some(hooks) => self.mlp.forward_with_hooks(normalized, layer, hooks)?,
+            None => self.mlp.forward(normalized)?,
         };
         let hidden = residual + emit(&mut hooks, layer.mlp_output(), mixed)?;
         emit(&mut hooks, layer.residual_post(), hidden)
