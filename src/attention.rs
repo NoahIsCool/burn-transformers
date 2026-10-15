@@ -17,9 +17,10 @@
 //!
 //! [`AttentionExecutionPolicy`] plans query chunks that bound every score-like
 //! plane; it is a storage bound, not a linear-time approximation, because each
-//! chunk still visits its complete key support. [`GroupedQueryAttention`]
-//! itself always evaluates complete planes; the Muse-Glimmer family currently
-//! executes such plans with its synchronized chunk loop.
+//! chunk still visits its complete key support. [`GroupedQueryAttention::attend`]
+//! evaluates complete planes, while [`GroupedQueryAttention::attend_bounded`]
+//! executes a plan in synchronized query chunks (Muse-Glimmer still runs its
+//! own equivalent loop).
 //!
 //! [`AttentionConnectivity`] builds padding-aware causal, sliding-window, and
 //! chunked-local exclusion masks for per-layer local/global schedules, and
@@ -50,6 +51,7 @@ use burn::{
     },
 };
 
+use connectivity::ExclusionPlan;
 pub use connectivity::{AttentionConnectivity, MaskGeometry, valid_token_ordinals};
 use dispatch::{Operands, causal_exclusion, default_scale, grouped_mix, scaled_scores};
 pub(crate) use dispatch::{dispatch_attention, eager_probabilities, zero_excluded};
@@ -849,6 +851,112 @@ impl<B: Backend> GroupedQueryAttention<B> {
             causal,
         )?;
         self.project_heads(context, gate)
+    }
+
+    /// Evaluates attention in synchronized query chunks that bound every score plane.
+    ///
+    /// Each chunk evaluates complete attention rows for at most
+    /// `policy`-limited query rows, so peak score, mask, and probability planes
+    /// follow [`AttentionExecutionPolicy::plan`] instead of `O(query * key)`.
+    /// This is a storage bound, not an approximation: results equal
+    /// [`Self::attend`] with the corresponding full exclusion mask.
+    ///
+    /// Exclusions come from token masks (`true == valid`), `causal`, and
+    /// `connectivity`, as in [`AttentionConnectivity::exclusion_mask`]; queries
+    /// are the bottom-right suffix of the keys. A causal sliding window over
+    /// unpadded keys also narrows every chunk's keys to
+    /// [`sliding_window_key_range`], so local layers need only
+    /// `O(chunk * (chunk + window))` score elements. Additive bias and hooks
+    /// need the full plane and are not supported here; use [`Self::attend`] or
+    /// [`Self::attend_with_hooks`]. The backend is synchronized between chunks
+    /// so dropped workspaces can be reclaimed; multi-chunk execution is
+    /// rejected on autodiff backends, whose tape would retain every chunk.
+    pub fn attend_bounded(
+        &self,
+        projection: AttentionProjection<B>,
+        query_mask: Option<&TokenMask<B>>,
+        key_mask: Option<&TokenMask<B>>,
+        causal: bool,
+        connectivity: AttentionConnectivity,
+        policy: AttentionExecutionPolicy,
+    ) -> Result<Tensor<B, 3>> {
+        validate_projection(self, &projection, None, None)?;
+        let [batch, _, query_sequence, _] = projection.query.dims();
+        let key_sequence = projection.key.dims()[2];
+        let device = projection.query.device();
+        let exclusions = ExclusionPlan::new(
+            connectivity,
+            causal,
+            MaskGeometry::new(batch, self.query_heads, query_sequence, key_sequence),
+            query_mask,
+            key_mask,
+            &device,
+        )?;
+        // Column positions make a causal window's key union narrow and verified.
+        let window = match connectivity {
+            AttentionConnectivity::SlidingWindow { window } if causal && key_mask.is_none() => {
+                Some(window)
+            }
+            _ => None,
+        };
+        let key_bound = window.map_or(key_sequence, |window| {
+            policy
+                .maximum_query_tokens(query_sequence)
+                .saturating_add(window - 1)
+                .min(key_sequence)
+        });
+        let plan = policy.plan(batch, self.query_heads, query_sequence, key_bound)?;
+        let chunked = plan.chunk_count() > 1;
+        if chunked && B::ad_enabled(&device) {
+            return Err(Error::BackendCapability(
+                "multi-chunk bounded attention is inference-only because an autodiff tape retains every chunk workspace; use AttentionExecutionPolicy::Unbounded for provisioned training"
+                    .into(),
+            ));
+        }
+        let AttentionProjection {
+            query,
+            key,
+            value,
+            gate,
+        } = projection;
+        let mut contexts = Vec::with_capacity(plan.chunk_count());
+        for rows in plan.query_ranges() {
+            let keys = match window {
+                Some(window) => {
+                    sliding_window_key_range(query_sequence, key_sequence, rows.clone(), window)
+                        .ok_or_else(|| {
+                            Error::configuration(
+                                "attention.bounded",
+                                "sliding-window chunk has no key range",
+                            )
+                        })?
+                }
+                None => 0..key_sequence,
+            };
+            policy.validate_chunk(batch, self.query_heads, rows.len(), keys.len())?;
+            let context = dispatch::evaluate(
+                Operands {
+                    query: query.clone().narrow(2, rows.start, rows.len()),
+                    key: key.clone().narrow(2, keys.start, keys.len()),
+                    value: value.clone().narrow(2, keys.start, keys.len()),
+                    mask: exclusions.chunk(rows, keys, self.query_heads)?,
+                    bias: None,
+                    sinks: self.sink_logits(),
+                },
+                self.module_options(false),
+                self.precision_mode,
+            )?;
+            if chunked {
+                B::sync(&device).map_err(|error| {
+                    Error::BackendCapability(format!(
+                        "failed to synchronize a bounded attention chunk: {error}"
+                    ))
+                })?;
+                B::memory_cleanup(&device);
+            }
+            contexts.push(context);
+        }
+        self.project_heads(Tensor::cat(contexts, 2), gate)
     }
 
     /// Evaluates attention with selected Q/K/V, score, pattern, or head edits.

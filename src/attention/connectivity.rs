@@ -23,7 +23,7 @@
 //! one Boolean `[batch or 1, 1, Q, K]` tensor expanded (not copied) across
 //! heads; no `[batch, head, Q, K]` integer plane is built.
 
-use core::fmt;
+use core::{fmt, ops::Range};
 
 use burn::tensor::{Bool, Int, Tensor, backend::Backend};
 
@@ -135,24 +135,64 @@ impl AttentionConnectivity {
         key_mask: Option<&TokenMask<B>>,
         device: &B::Device,
     ) -> Result<Option<Tensor<B, 4, Bool>>> {
-        self.validate()?;
+        ExclusionPlan::new(self, causal, geometry, query_mask, key_mask, device)?.chunk(
+            0..geometry.query_sequence,
+            0..geometry.key_sequence,
+            geometry.heads,
+        )
+    }
+}
+
+/// Precomputed positions and validity from which any query/key chunk's mask is sliced.
+///
+/// Building positions once (`O(batch * key)` integers) lets bounded execution
+/// materialize only one chunk's `[batch, 1, rows, keys]` Boolean plane at a time.
+pub(crate) struct ExclusionPlan<B: Backend> {
+    /// Visibility rule.
+    connectivity: AttentionConnectivity,
+    /// Whether keys after the query position are excluded.
+    causal: bool,
+    /// Batch rows.
+    batch: usize,
+    /// Optional `[batch, Q]` query validity (`true == valid`).
+    query_valid: Option<Tensor<B, 2, Bool>>,
+    /// Optional `[batch, K]` key validity (`true == valid`).
+    key_valid: Option<Tensor<B, 2, Bool>>,
+    /// Query `[batch or 1, Q]` and key `[batch or 1, K]` positions, when a rule needs them.
+    positions: Option<(Tensor<B, 2, Int>, Tensor<B, 2, Int>)>,
+}
+
+impl<B: Backend> ExclusionPlan<B> {
+    /// Validates the rule, extents, alignment, and token masks, and derives positions.
+    pub(crate) fn new(
+        connectivity: AttentionConnectivity,
+        causal: bool,
+        geometry: MaskGeometry,
+        query_mask: Option<&TokenMask<B>>,
+        key_mask: Option<&TokenMask<B>>,
+        device: &B::Device,
+    ) -> Result<Self> {
+        connectivity.validate()?;
         geometry.validate()?;
         let MaskGeometry {
             batch,
-            heads,
             query_sequence,
             key_sequence,
+            ..
         } = geometry;
-        let padding = padding_plane(query_mask, key_mask, batch, query_sequence, key_sequence)?;
-        let positional = if causal || self != Self::Global {
-            if key_sequence < query_sequence && (self != Self::Global || key_mask.is_some()) {
+        // Validate both token masks before deriving anything from them.
+        padding_plane(query_mask, key_mask, batch, query_sequence, key_sequence)?;
+        let positions = if causal || connectivity != AttentionConnectivity::Global {
+            if key_sequence < query_sequence
+                && (connectivity != AttentionConnectivity::Global || key_mask.is_some())
+            {
                 return Err(Error::shape(
                     "attention.connectivity",
                     "key sequence at least as long as query sequence",
                     format!("query={query_sequence}, key={key_sequence}"),
                 ));
             }
-            let (queries, keys) = match key_mask {
+            Some(match key_mask {
                 Some(mask) => {
                     let ordinals = valid_token_ordinals(mask);
                     let queries =
@@ -165,13 +205,61 @@ impl AttentionConnectivity {
                     aligned_query_positions::<B>(query_sequence, key_sequence, device)?,
                     key_positions::<B>(key_sequence, device)?,
                 ),
-            };
-            positional_exclusion(self, causal, queries, keys)?
+            })
         } else {
             None
         };
+        Ok(Self {
+            connectivity,
+            causal,
+            batch,
+            query_valid: query_mask.map(|mask| mask.as_tensor().clone()),
+            key_valid: key_mask.map(|mask| mask.as_tensor().clone()),
+            positions,
+        })
+    }
+
+    /// Builds the `[batch, heads, rows, keys]` exclusions of one query/key chunk.
+    ///
+    /// Ranges index the full query and key axes and must lie inside them.
+    pub(crate) fn chunk(
+        &self,
+        query_range: Range<usize>,
+        key_range: Range<usize>,
+        heads: usize,
+    ) -> Result<Option<Tensor<B, 4, Bool>>> {
+        let batch = self.batch;
+        let rows = query_range.len();
+        let keys = key_range.len();
+        let plane = [batch, 1, rows, keys];
+        let query_invalid = self.query_valid.as_ref().map(|valid| {
+            valid
+                .clone()
+                .slice([0..batch, query_range.clone()])
+                .bool_not()
+                .reshape([batch, 1, rows, 1])
+                .expand(plane)
+        });
+        let key_invalid = self.key_valid.as_ref().map(|valid| {
+            valid
+                .clone()
+                .slice([0..batch, key_range.clone()])
+                .bool_not()
+                .reshape([batch, 1, 1, keys])
+                .expand(plane)
+        });
+        let positional = match &self.positions {
+            Some((queries, all_keys)) => positional_exclusion(
+                self.connectivity,
+                self.causal,
+                queries.clone().narrow(1, query_range.start, rows),
+                all_keys.clone().narrow(1, key_range.start, keys),
+            )?,
+            None => None,
+        };
+        let padding = union_exclusions(query_invalid, key_invalid);
         Ok(union_exclusions(padding, positional)
-            .map(|plane| plane.expand([batch, heads, query_sequence, key_sequence])))
+            .map(|exclusion| exclusion.expand([batch, heads, rows, keys])))
     }
 }
 

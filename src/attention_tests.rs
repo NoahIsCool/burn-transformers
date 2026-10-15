@@ -1034,3 +1034,204 @@ fn full_width_query_key_norm_reduces_over_all_heads() {
         );
     }
 }
+
+/// Builds a GQA module and a deterministic self-attention projection of `sequence` tokens.
+fn bounded_fixture(
+    precision: AttentionPrecisionMode,
+    sinks: bool,
+    queries: usize,
+    keys: usize,
+) -> (
+    super::GroupedQueryAttention<Flex>,
+    AttentionProjection<Flex>,
+) {
+    use burn::tensor::TensorData;
+
+    let device = Default::default();
+    let module = GroupedQueryAttentionConfig::new(8, 4, 2, 2)
+        .with_precision_mode(precision)
+        .with_attention_sinks(sinks)
+        .init::<Flex>(&device)
+        .unwrap();
+    let tensor = |shape: [usize; 4], seed: usize| {
+        let count = shape.iter().product::<usize>();
+        let values = (0..count)
+            .map(|index| ((index * 7 + seed) % 13) as f32 * 0.17 - 1.0)
+            .collect::<Vec<_>>();
+        Tensor::<Flex, 4>::from_data(TensorData::new(values, shape), &device)
+    };
+    let projection = AttentionProjection {
+        query: tensor([2, 4, queries, 2], 1),
+        key: tensor([2, 2, keys, 2], 2),
+        value: tensor([2, 2, keys, 2], 3),
+        gate: None,
+    };
+    (module, projection)
+}
+
+/// Query-chunked execution equals full-plane attention for every rule, mask, and graph.
+#[test]
+fn bounded_attention_matches_full_planes() {
+    use super::{AttentionConnectivity, MaskGeometry};
+    use burn::tensor::Tolerance;
+
+    let device = Default::default();
+    let valid = TokenMask::new(Tensor::<Flex, 2, Bool>::from_bool(
+        [
+            [true, true, true, true, true, true, true],
+            [false, true, false, true, true, true, true],
+        ]
+        .into(),
+        &device,
+    ));
+    for precision in [
+        AttentionPrecisionMode::BackendDefault,
+        AttentionPrecisionMode::EagerFp32Softmax,
+    ] {
+        for connectivity in [
+            AttentionConnectivity::Global,
+            AttentionConnectivity::SlidingWindow { window: 3 },
+            AttentionConnectivity::ChunkedLocal { chunk: 2 },
+        ] {
+            for (queries, causal, padded, sinks) in [
+                (7, true, false, false),
+                (7, true, true, true),
+                (4, true, false, true),
+                (7, false, true, false),
+            ] {
+                let (module, projection) = bounded_fixture(precision, sinks, queries, 7);
+                let query_valid =
+                    TokenMask::new(valid.as_tensor().clone().narrow(1, 7 - queries, queries));
+                let (query_mask, key_mask) = if padded {
+                    (Some(&query_valid), Some(&valid))
+                } else {
+                    (None, None)
+                };
+                let full_mask = connectivity
+                    .exclusion_mask(
+                        causal,
+                        MaskGeometry::new(2, 4, queries, 7),
+                        query_mask,
+                        key_mask,
+                        &device,
+                    )
+                    .unwrap();
+                let expected = module
+                    .attend(projection.clone(), full_mask, None, false)
+                    .unwrap();
+                let bounded = module
+                    .attend_bounded(
+                        projection,
+                        query_mask,
+                        key_mask,
+                        causal,
+                        connectivity,
+                        AttentionExecutionPolicy::query_chunked(2, 1 << 20),
+                    )
+                    .unwrap();
+                bounded
+                    .into_data()
+                    .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::rel_abs(1e-5, 1e-5));
+            }
+        }
+    }
+}
+
+/// A causal sliding window narrows chunk keys, so its plan fits where the full key axis cannot.
+#[test]
+fn bounded_sliding_window_needs_only_local_keys() {
+    use super::AttentionConnectivity;
+
+    let (module, projection) =
+        bounded_fixture(AttentionPrecisionMode::EagerFp32Softmax, false, 7, 7);
+    // One row over all 7 keys needs 2 * 4 * 7 = 56 elements; a 2-row chunk with
+    // window 2 needs keys 2 + 2 - 1 = 3, i.e. 2 * 4 * 2 * 3 = 48 elements.
+    let policy = AttentionExecutionPolicy::query_chunked(2, 48);
+    let local = AttentionConnectivity::SlidingWindow { window: 2 };
+    module
+        .attend_bounded(projection.clone(), None, None, true, local, policy)
+        .unwrap();
+    let error = module
+        .attend_bounded(
+            projection,
+            None,
+            None,
+            true,
+            AttentionConnectivity::Global,
+            policy,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("one attention query row"));
+}
+
+/// Bounded execution validates projections and connectivity before any chunk runs.
+#[test]
+fn bounded_attention_rejects_invalid_inputs() {
+    use super::AttentionConnectivity;
+
+    let (module, mut projection) =
+        bounded_fixture(AttentionPrecisionMode::BackendDefault, false, 3, 3);
+    let error = module
+        .attend_bounded(
+            projection.clone(),
+            None,
+            None,
+            true,
+            AttentionConnectivity::SlidingWindow { window: 0 },
+            AttentionExecutionPolicy::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("attention.connectivity.window"));
+    projection.key = projection.key.narrow(1, 0, 1).repeat_dim(1, 3);
+    let error = module
+        .attend_bounded(
+            projection,
+            None,
+            None,
+            true,
+            AttentionConnectivity::Global,
+            AttentionExecutionPolicy::default(),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("attention.key"));
+}
+
+/// Multi-chunk execution is refused on autodiff backends; a single chunk stays differentiable.
+#[cfg(feature = "autodiff")]
+#[test]
+fn bounded_attention_refuses_multi_chunk_autodiff() {
+    use super::AttentionConnectivity;
+    use burn::backend::Autodiff;
+    /// Differentiable CPU backend for the bounded-attention policy check.
+    type Ad = Autodiff<Flex>;
+    let device = Default::default();
+    let module = GroupedQueryAttentionConfig::new(4, 2, 1, 2)
+        .init::<Ad>(&device)
+        .unwrap();
+    let projection = module
+        .project_self(Tensor::<Ad, 3>::ones([1, 4, 4], &device))
+        .unwrap();
+    let error = module
+        .attend_bounded(
+            projection.clone(),
+            None,
+            None,
+            true,
+            AttentionConnectivity::Global,
+            AttentionExecutionPolicy::query_chunked(2, 1 << 20),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("inference-only"));
+    let output = module
+        .attend_bounded(
+            projection,
+            None,
+            None,
+            true,
+            AttentionConnectivity::Global,
+            AttentionExecutionPolicy::Unbounded,
+        )
+        .unwrap();
+    let gradients = output.sum().backward();
+    assert!(module.q_proj.weight.grad(&gradients).is_some());
+}
