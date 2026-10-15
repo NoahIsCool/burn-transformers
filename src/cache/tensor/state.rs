@@ -23,9 +23,13 @@ use super::kv::{
 };
 use super::recurrent::{PreparedRecurrentStateWrite, RecurrentCommitPlan};
 use super::{
-    NativeKvCache, NativeKvCacheSpec, RecurrentStateCache, RecurrentStateSpec, TensorCacheError,
-    TensorCacheResult,
+    KvCacheStorage, NativeKvCache, NativeKvCacheSpec, RecurrentStateCache, RecurrentStateSpec,
+    TensorCacheError, TensorCacheResult,
 };
+
+mod step;
+
+pub use step::{StepBank, TensorStepWrites, TokenAlignment};
 
 // Bank allocation and coordinated tensor writes.
 
@@ -302,9 +306,12 @@ impl<B: Backend> TensorCacheBank<B> {
     }
 
     /// Begins staging after a model-level all-bank preflight succeeds.
-    fn begin_staging(&mut self) -> TensorCacheResult<()> {
+    ///
+    /// `baseline` is this bank's committed lengths, which in-place KV groups
+    /// use as their first proposal slot.
+    fn begin_staging(&mut self, baseline: &[usize]) -> TensorCacheResult<()> {
         for cache in &mut self.native_kv {
-            cache.begin_staging()?;
+            cache.begin_staging_from(baseline)?;
         }
         for cache in &mut self.recurrent {
             cache.begin_staging()?;
@@ -710,9 +717,9 @@ impl<B: Backend> TensorDecodeState<B> {
         if let Some(mtp) = &self.mtp {
             mtp.validate_can_begin_staging()?;
         }
-        self.main.begin_staging()?;
-        if let Some(mtp) = &mut self.mtp {
-            mtp.begin_staging()?;
+        self.main.begin_staging(self.metadata.lengths())?;
+        if let (Some(mtp), Some(metadata)) = (&mut self.mtp, &self.mtp_metadata) {
+            mtp.begin_staging(metadata.lengths())?;
         }
         // Neither ledger is active (checked above), so both marks succeed.
         let main = self.metadata.mark()?;

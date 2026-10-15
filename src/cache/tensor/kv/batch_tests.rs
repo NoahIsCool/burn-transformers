@@ -1,0 +1,802 @@
+//! Batched KV writes and reads against the per-row reference paths.
+//!
+//! Every batched operation is compared with the established per-row API on
+//! the same inputs: committed and staged tensors must be bit-identical, and a
+//! batched slot-order read reordered by its key positions must reproduce the
+//! per-row chronological read exactly. Attention computed from a batched read
+//! and its exclusion mask must match per-row causal attention within F32
+//! rounding (`1e-5`), since only the key summation order differs.
+
+use burn::backend::Flex;
+use burn::tensor::{DType, Int, Tensor, TensorData};
+use core::num::NonZeroUsize;
+use proptest::prelude::*;
+
+use super::*;
+use crate::cache::CacheConfig;
+
+/// Deterministic host backend for exact comparisons.
+type TestBackend = Flex<f32, i32>;
+/// Key/value heads in every fixture.
+const HEADS: usize = 2;
+/// Channels per head in every fixture.
+const DIM: usize = 3;
+
+/// Returns the default Flex device.
+fn device() -> <TestBackend as burn::tensor::backend::BackendTypes>::Device {
+    Default::default()
+}
+
+/// Allocates a one-layer cache with the given storage, window, and staging policy.
+fn cache(
+    rows: usize,
+    capacity: usize,
+    storage: KvCacheStorage,
+    window: usize,
+    staging: usize,
+    in_place: bool,
+) -> NativeKvCache<TestBackend> {
+    let config = CacheConfig::new(rows, capacity).expect("valid config");
+    let mut spec = NativeKvCacheSpec::new(1, HEADS, DIM, storage, DType::F32)
+        .expect("geometry")
+        .with_staging_capacity(staging);
+    if storage != KvCacheStorage::Full {
+        spec = spec.with_sliding_window(NonZeroUsize::new(window).expect("non-zero window"));
+    }
+    if in_place {
+        spec = spec.with_in_place_staging();
+    }
+    NativeKvCache::new(config, rows, spec, &device()).expect("allocation")
+}
+
+/// Builds a `[rows, HEADS, block, DIM]` tensor of distinct values offset by `tag`.
+fn block(rows: usize, block: usize, tag: f32) -> Tensor<TestBackend, 4> {
+    let values = (0..rows * HEADS * block * DIM)
+        .map(|index| tag * 10_000.0 + index as f32)
+        .collect::<Vec<_>>();
+    Tensor::from_data(
+        TensorData::new(values, [rows, HEADS, block, DIM]),
+        &device(),
+    )
+}
+
+/// Slices row `row`, columns `columns` of a block into a per-row `[1, HEADS, n, DIM]` input.
+fn row_input(
+    tensor: &Tensor<TestBackend, 4>,
+    row: usize,
+    columns: core::ops::Range<usize>,
+) -> Tensor<TestBackend, 4> {
+    tensor
+        .clone()
+        .slice([row..row + 1, 0..HEADS, columns, 0..DIM])
+}
+
+/// Transfers a float tensor to the host.
+fn host<const D: usize>(tensor: &Tensor<TestBackend, D>) -> Vec<f32> {
+    tensor.clone().into_data().to_vec().expect("F32 tensor")
+}
+
+/// Transfers an Int tensor to the host.
+fn host_int(tensor: &Tensor<TestBackend, 2, Int>) -> Vec<i32> {
+    tensor.clone().into_data().to_vec().expect("I32 tensor")
+}
+
+/// Transfers a Bool tensor to the host.
+fn host_bool<const D: usize>(tensor: &Tensor<TestBackend, D, Bool>) -> Vec<bool> {
+    tensor.clone().into_data().to_vec().expect("Bool tensor")
+}
+
+/// Writes the same append once per row through the established API.
+fn write_per_row(
+    cache: &mut NativeKvCache<TestBackend>,
+    append: &KvBatchAppend,
+    keys: &Tensor<TestBackend, 4>,
+    values: &Tensor<TestBackend, 4>,
+) {
+    for row in 0..append.rows() {
+        let count = append.counts()[row];
+        if count == 0 {
+            continue;
+        }
+        let columns = append.columns()[row]..append.columns()[row] + count;
+        cache
+            .write_sequence(
+                0,
+                row,
+                append.starts()[row],
+                row_input(keys, row, columns.clone()),
+                row_input(values, row, columns),
+            )
+            .expect("per-row reference write");
+    }
+}
+
+/// Every committed and staged tensor of layer zero.
+fn snapshot(cache: &NativeKvCache<TestBackend>) -> Vec<Vec<f32>> {
+    let layer = &cache.layers[0];
+    let mut tensors = vec![host(&layer.keys), host(&layer.values)];
+    tensors.extend(layer.staged_keys.as_ref().map(host));
+    tensors.extend(layer.staged_values.as_ref().map(host));
+    tensors
+}
+
+/// Reconstructs one row's `(position, key)` pairs in chronological order from a batched read.
+fn chronological_row(read: &KvBatchRead<TestBackend>, row: usize) -> Vec<(i32, Vec<f32>)> {
+    let mut keys = Vec::new();
+    for segment in read.segments() {
+        let [_, _, slots, _] = segment.keys().dims();
+        let positions = host_int(segment.key_positions());
+        let valid = segment
+            .key_valid()
+            .map_or_else(|| vec![true; positions.len()], host_bool);
+        let data = host(
+            &segment
+                .keys()
+                .clone()
+                .slice([row..row + 1, 0..HEADS, 0..slots, 0..DIM]),
+        );
+        for slot in (0..slots).filter(|&slot| valid[row * slots + slot]) {
+            let key = (0..HEADS)
+                .flat_map(|head| {
+                    let base = (head * slots + slot) * DIM;
+                    data[base..base + DIM].to_vec()
+                })
+                .collect();
+            keys.push((positions[row * slots + slot], key));
+        }
+    }
+    keys.sort_by_key(|(position, _)| *position);
+    keys
+}
+
+/// Converts a per-row chronological read into `(position, key)` pairs.
+fn reference_row(read: &crate::cache::KvCacheRead<TestBackend>) -> Vec<(i32, Vec<f32>)> {
+    let Some((keys, _)) = read.materialize() else {
+        return Vec::new();
+    };
+    let [_, _, time, _] = keys.dims();
+    let data = host(&keys);
+    read.retained_positions()
+        .zip(0..time)
+        .map(|(position, slot)| {
+            let key = (0..HEADS)
+                .flat_map(|head| {
+                    let base = (head * time + slot) * DIM;
+                    data[base..base + DIM].to_vec()
+                })
+                .collect();
+            (i32::try_from(position).expect("small position"), key)
+        })
+        .collect()
+}
+
+/// All storage modes exercised by the parity tests, with their window.
+const STORAGES: [(KvCacheStorage, usize); 3] = [
+    (KvCacheStorage::Full, 1),
+    (KvCacheStorage::SlidingRing, 3),
+    (KvCacheStorage::MirroredSlidingRing, 3),
+];
+
+/// Constructors place tokens by padding side and reject impossible layouts.
+#[test]
+fn append_layouts_validate_rows_columns_and_positions() {
+    let right = KvBatchAppend::right_padded(&[4, 7], &[2, 1], 3).expect("right padding");
+    assert_eq!(right.columns(), &[0, 0]);
+    assert_eq!(right.ends(), vec![6, 8]);
+    assert_eq!(right.block(), 3);
+    let left = KvBatchAppend::left_padded(&[4, 7], &[2, 1], 3).expect("left padding");
+    assert_eq!(left.columns(), &[1, 2]);
+    assert_eq!(left.starts(), &[4, 7]);
+    assert_eq!(left.counts(), &[2, 1]);
+    assert!(matches!(
+        KvBatchAppend::left_padded(&[0], &[4], 3),
+        Err(TensorCacheError::AppendOutsideBlock {
+            count: 4,
+            block: 3,
+            ..
+        })
+    ));
+    assert!(matches!(
+        KvBatchAppend::with_columns(&[0, 0], &[2, 0], &[2, 1], 3),
+        Err(TensorCacheError::AppendOutsideBlock {
+            sequence: 0,
+            column: 2,
+            ..
+        })
+    ));
+    assert!(matches!(
+        KvBatchAppend::with_columns(&[0], &[0, 0], &[1, 1], 3),
+        Err(TensorCacheError::Metadata(_))
+    ));
+    assert!(matches!(
+        KvBatchAppend::right_padded(&[usize::MAX], &[1], 1),
+        Err(TensorCacheError::WritePositionOverflow { .. })
+    ));
+    let message = TensorCacheError::AppendOutsideBlock {
+        sequence: 1,
+        column: 2,
+        count: 3,
+        block: 4,
+    }
+    .to_string();
+    assert!(message.contains("column 2"), "{message}");
+}
+
+/// A uniform batch is one run; ragged rows split into per-row runs.
+#[test]
+fn uniform_batches_write_with_one_assignment_per_segment() {
+    let cache = cache(4, 16, KvCacheStorage::Full, 1, 0, false);
+    let uniform = KvBatchAppend::right_padded(&[5; 4], &[2; 4], 2).expect("layout");
+    let write = cache
+        .prepare_batch_write(0, &uniform, block(4, 2, 1.0), block(4, 2, 2.0))
+        .expect("valid write");
+    assert_eq!(write.runs.len(), 1);
+    assert_eq!(write.runs[0].rows, 0..4);
+    let ragged = KvBatchAppend::right_padded(&[5, 5, 6, 0], &[2, 2, 1, 0], 2).expect("layout");
+    let write = cache
+        .prepare_batch_write(0, &ragged, block(4, 2, 1.0), block(4, 2, 2.0))
+        .expect("valid write");
+    assert_eq!(
+        write
+            .runs
+            .iter()
+            .map(|run| run.rows.clone())
+            .collect::<Vec<_>>(),
+        [0..2, 2..3]
+    );
+}
+
+proptest! {
+    /// Batched committed writes equal per-row writes in every storage mode.
+    #[test]
+    fn batched_writes_match_per_row_writes(
+        rows in 1_usize..5,
+        width in 1_usize..5,
+        seed in prop::collection::vec((0_usize..8, 0_usize..5, any::<bool>()), 4),
+        storage in 0_usize..3,
+    ) {
+        let (storage, window) = STORAGES[storage];
+        let starts: Vec<usize> = seed.iter().take(rows).map(|row| row.0).collect();
+        let counts: Vec<usize> = seed.iter().take(rows).map(|row| row.1.min(width)).collect();
+        let append = if seed[0].2 {
+            KvBatchAppend::left_padded(&starts, &counts, width)
+        } else {
+            KvBatchAppend::right_padded(&starts, &counts, width)
+        }
+        .expect("layout");
+        let keys = block(rows, width, 1.0);
+        let values = block(rows, width, 2.0);
+        let mut batched = cache(rows, 16, storage, window, 0, false);
+        let mut reference = cache(rows, 16, storage, window, 0, false);
+        batched.write_batch(0, &append, keys.clone(), values.clone()).expect("batched write");
+        write_per_row(&mut reference, &append, &keys, &values);
+        prop_assert_eq!(snapshot(&batched), snapshot(&reference));
+    }
+
+    /// Batched reads, reordered by key position, equal per-row chronological reads.
+    #[test]
+    fn batched_reads_match_per_row_reads(
+        lengths in prop::collection::vec(0_usize..12, 1..5),
+        storage in 0_usize..3,
+    ) {
+        let (storage, window) = STORAGES[storage];
+        let rows = lengths.len();
+        let mut cache = cache(rows, 12, storage, window, 0, false);
+        let append = KvBatchAppend::right_padded(&vec![0; rows], &lengths, 12).expect("layout");
+        cache
+            .write_batch(0, &append, block(rows, 12, 1.0), block(rows, 12, 2.0))
+            .expect("prefill");
+        let plan = cache.plan_batch_read(&lengths).expect("plan");
+        let read = cache.read_batch(0, &plan).expect("batched read");
+        for (row, &length) in lengths.iter().enumerate() {
+            let reference = cache.read_sequence(0, row, length).expect("per-row read");
+            prop_assert_eq!(&read.retained_positions()[row], &reference.retained_positions());
+            prop_assert_eq!(chronological_row(&read, row), reference_row(&reference));
+        }
+        prop_assert_eq!(plan.retained_positions(), read.retained_positions());
+    }
+
+    /// Working batched reads match per-row working reads for separate and in-place staging.
+    #[test]
+    fn working_batched_reads_match_per_row_reads(
+        committed in prop::collection::vec(0_usize..8, 1..4),
+        proposals in prop::collection::vec(0_usize..4, 3),
+        storage in 0_usize..4,
+    ) {
+        let rows = committed.len();
+        let (storage, window, in_place) = match storage {
+            3 => (KvCacheStorage::Full, 1, true),
+            index => (STORAGES[index].0, STORAGES[index].1, false),
+        };
+        let proposals: Vec<usize> = proposals.into_iter().take(rows).collect();
+        let mut cache = cache(rows, 12, storage, window, 3, in_place);
+        let prefill = KvBatchAppend::right_padded(&vec![0; rows], &committed, 8).expect("layout");
+        cache
+            .write_batch(0, &prefill, block(rows, 8, 1.0), block(rows, 8, 2.0))
+            .expect("prefill");
+        cache.begin_staging_from(&committed).expect("staging");
+        let stage = KvBatchAppend::left_padded(&committed, &proposals, 3).expect("layout");
+        cache
+            .stage_batch(0, &stage, block(rows, 3, 3.0), block(rows, 3, 4.0))
+            .expect("stage");
+        let plan = cache.plan_working_batch_read(&committed).expect("plan");
+        let read = cache.read_batch(0, &plan).expect("batched read");
+        for (row, &length) in committed.iter().enumerate() {
+            let reference = cache.read_working_sequence(0, row, length).expect("per-row read");
+            prop_assert_eq!(&read.retained_positions()[row], &reference.retained_positions());
+            prop_assert_eq!(chronological_row(&read, row), reference_row(&reference));
+        }
+    }
+}
+
+/// Batched staging equals per-row staging, and commits publish identical tensors.
+#[test]
+fn batched_staging_and_commit_match_per_row_staging() {
+    for (storage, window, in_place) in [
+        (KvCacheStorage::Full, 1, false),
+        (KvCacheStorage::Full, 1, true),
+        (KvCacheStorage::SlidingRing, 3, false),
+        (KvCacheStorage::MirroredSlidingRing, 3, false),
+    ] {
+        let committed = [2, 5, 0];
+        let counts = [2, 0, 1];
+        let mut batched = cache(3, 10, storage, window, 3, in_place);
+        let mut reference = cache(3, 10, storage, window, 3, in_place);
+        let prefill = KvBatchAppend::right_padded(&[0; 3], &committed, 5).expect("layout");
+        for cache in [&mut batched, &mut reference] {
+            cache
+                .write_batch(0, &prefill, block(3, 5, 1.0), block(3, 5, 2.0))
+                .expect("prefill");
+            cache.begin_staging_from(&committed).expect("staging");
+        }
+        let append = KvBatchAppend::right_padded(&committed, &counts, 2).expect("layout");
+        let (keys, values) = (block(3, 2, 3.0), block(3, 2, 4.0));
+        batched
+            .stage_batch(0, &append, keys.clone(), values.clone())
+            .expect("batched stage");
+        for (row, &count) in counts.iter().enumerate().filter(|(_, count)| **count > 0) {
+            reference
+                .stage_sequence(
+                    0,
+                    row,
+                    row_input(&keys, row, 0..count),
+                    row_input(&values, row, 0..count),
+                )
+                .expect("per-row stage");
+        }
+        assert_eq!(
+            snapshot(&batched),
+            snapshot(&reference),
+            "{storage:?} {in_place}"
+        );
+        assert_eq!(batched.staged_lengths, reference.staged_lengths);
+        for cache in [&mut batched, &mut reference] {
+            let plan = cache
+                .prepare_staging_commit(&committed, &counts, &[1, 0, 1])
+                .expect("commit plan");
+            cache.apply_staging_commit(plan);
+        }
+        assert_eq!(
+            snapshot(&batched),
+            snapshot(&reference),
+            "{storage:?} {in_place}"
+        );
+    }
+}
+
+/// In-place staging reads proposals from committed storage with no staging buffers.
+#[test]
+fn in_place_staging_reads_one_contiguous_view_and_commits_by_metadata() {
+    let mut cache = cache(2, 8, KvCacheStorage::Full, 1, 2, true);
+    assert!(cache.layers[0].staged_keys.is_none());
+    let prefill = KvBatchAppend::right_padded(&[0, 0], &[3, 1], 3).expect("layout");
+    cache
+        .write_batch(0, &prefill, block(2, 3, 1.0), block(2, 3, 2.0))
+        .expect("prefill");
+    cache.begin_staging_from(&[3, 1]).expect("staging");
+    let append = KvBatchAppend::right_padded(&[3, 1], &[2, 1], 2).expect("layout");
+    cache
+        .stage_batch(0, &append, block(2, 2, 3.0), block(2, 2, 4.0))
+        .expect("stage");
+    let working = cache.read_working_sequence(0, 0, 3).expect("working read");
+    assert_eq!(working.segments().len(), 1);
+    assert_eq!(working.retained_positions(), 0..5);
+    let plan = cache.plan_working_batch_read(&[3, 1]).expect("plan");
+    let read = cache.read_batch(0, &plan).expect("read");
+    assert_eq!(read.segments().len(), 1);
+    assert_eq!(plan.key_slots(), 5);
+    let before = snapshot(&cache);
+    let commit = cache
+        .prepare_staging_commit(&[3, 1], &[2, 1], &[1, 0])
+        .expect("commit");
+    cache.apply_staging_commit(commit);
+    assert_eq!(
+        snapshot(&cache),
+        before,
+        "an in-place commit moves no tensor data"
+    );
+}
+
+/// In-place staging is refused for ring storage, whose proposals would overwrite visible slots.
+#[test]
+fn in_place_staging_requires_full_storage() {
+    let config = CacheConfig::new(1, 8).expect("config");
+    let spec = NativeKvCacheSpec::new(1, 1, 1, KvCacheStorage::SlidingRing, DType::F32)
+        .expect("geometry")
+        .with_sliding_window(NonZeroUsize::new(4).expect("window"))
+        .with_staging_capacity(2)
+        .with_in_place_staging();
+    assert!(spec.in_place_staging());
+    assert!(matches!(
+        NativeKvCache::<TestBackend>::new(config, 1, spec, &device()),
+        Err(TensorCacheError::InPlaceStagingRequiresFullStorage { .. })
+    ));
+    assert!(
+        TensorCacheError::InPlaceStagingRequiresFullStorage {
+            storage: "sliding ring"
+        }
+        .to_string()
+        .contains("full storage")
+    );
+}
+
+/// Invalid batched writes and stages fail before any tensor changes.
+#[test]
+fn invalid_batched_writes_are_rejected_atomically() {
+    let mut cache = cache(2, 6, KvCacheStorage::Full, 1, 2, false);
+    let before = snapshot(&cache);
+    let fits = KvBatchAppend::right_padded(&[0, 0], &[2, 2], 2).expect("layout");
+    let too_long = KvBatchAppend::right_padded(&[0, 5], &[2, 2], 2).expect("layout");
+    assert!(matches!(
+        cache.write_batch(0, &too_long, block(2, 2, 1.0), block(2, 2, 1.0)),
+        Err(TensorCacheError::WriteExceedsCapacity { start: 5, .. })
+    ));
+    assert!(matches!(
+        cache.write_batch(0, &fits, block(2, 3, 1.0), block(2, 3, 1.0)),
+        Err(TensorCacheError::ShapeMismatch { .. })
+    ));
+    assert!(matches!(
+        cache.write_batch(1, &fits, block(2, 2, 1.0), block(2, 2, 1.0)),
+        Err(TensorCacheError::LayerOutOfBounds { .. })
+    ));
+    let three_rows = KvBatchAppend::right_padded(&[0; 3], &[1; 3], 2).expect("layout");
+    assert!(matches!(
+        cache.write_batch(0, &three_rows, block(3, 2, 1.0), block(3, 2, 1.0)),
+        Err(TensorCacheError::BatchSizeMismatch { .. })
+    ));
+    assert!(matches!(
+        cache.stage_batch(0, &fits, block(2, 2, 1.0), block(2, 2, 1.0)),
+        Err(TensorCacheError::TransactionNotActive)
+    ));
+    cache.begin_staging_from(&[0, 0]).expect("staging");
+    assert!(matches!(
+        cache.write_batch(0, &fits, block(2, 2, 1.0), block(2, 2, 1.0)),
+        Err(TensorCacheError::TransactionActive { .. })
+    ));
+    let skipped = KvBatchAppend::right_padded(&[0, 1], &[1, 1], 1).expect("layout");
+    assert!(matches!(
+        cache.stage_batch(0, &skipped, block(2, 1, 1.0), block(2, 1, 1.0)),
+        Err(TensorCacheError::TransactionCursorMismatch {
+            sequence: 1,
+            expected: 0,
+            actual: 1,
+            ..
+        })
+    ));
+    let three = KvBatchAppend::right_padded(&[0, 0], &[3, 0], 3).expect("layout");
+    assert!(matches!(
+        cache.stage_batch(0, &three, block(2, 3, 1.0), block(2, 3, 1.0)),
+        Err(TensorCacheError::StagingCapacityExceeded {
+            requested: 3,
+            capacity: 2
+        })
+    ));
+    assert_eq!(snapshot(&cache), before);
+    assert_eq!(cache.staged_lengths[0], [0, 0]);
+    assert!(matches!(
+        cache.read_working_sequence(0, 0, 1),
+        Err(TensorCacheError::TransactionCursorMismatch {
+            expected: 0,
+            actual: 1,
+            ..
+        })
+    ));
+    assert!(
+        TensorCacheError::TransactionCursorMismatch {
+            sequence: 0,
+            cursor: "committed length",
+            expected: 2,
+            actual: 3
+        }
+        .to_string()
+        .contains("expects 2")
+    );
+}
+
+/// Plans reject other geometries and stale staging.
+#[test]
+fn read_plans_are_bound_to_geometry_and_staging() {
+    let mut ring = cache(2, 8, KvCacheStorage::SlidingRing, 3, 2, false);
+    let full = cache(2, 8, KvCacheStorage::Full, 1, 0, false);
+    let plan = full.plan_batch_read(&[1, 2]).expect("plan");
+    assert!(matches!(
+        ring.read_batch(0, &plan),
+        Err(TensorCacheError::BatchPlanMismatch { .. })
+    ));
+    assert!(matches!(
+        full.plan_batch_read(&[1]),
+        Err(TensorCacheError::Metadata(_))
+    ));
+    assert!(matches!(
+        full.plan_batch_read(&[1, 9]),
+        Err(TensorCacheError::ReadExceedsCapacity { length: 9, .. })
+    ));
+    let empty = full.plan_batch_read(&[0, 0]).expect("empty plan");
+    assert_eq!(empty.key_slots(), 0);
+    assert!(
+        full.read_batch(0, &empty)
+            .expect("read")
+            .materialize()
+            .is_none()
+    );
+    ring.begin_staging_from(&[0, 0]).expect("staging");
+    let stale = ring.plan_working_batch_read(&[0, 0]).expect("plan");
+    let append = KvBatchAppend::right_padded(&[0, 0], &[1, 0], 1).expect("layout");
+    ring.stage_batch(0, &append, block(2, 1, 1.0), block(2, 1, 1.0))
+        .expect("stage");
+    assert!(matches!(
+        ring.read_batch(0, &stale),
+        Err(TensorCacheError::BatchPlanMismatch { reason, .. }) if reason.contains("staged")
+    ));
+    assert!(matches!(
+        ring.plan_working_batch_read(&[1, 0]),
+        Err(TensorCacheError::TransactionCursorMismatch { .. })
+    ));
+    assert!(
+        TensorCacheError::BatchPlanMismatch {
+            layer: 3,
+            reason: "x"
+        }
+        .to_string()
+        .contains("layer 3")
+    );
+}
+
+/// Exclusion masks equal a brute-force causal, window, and padding rule.
+#[test]
+fn exclusion_mask_matches_brute_force_rule() {
+    let mut ring = cache(2, 10, KvCacheStorage::SlidingRing, 4, 0, false);
+    let lengths = [7, 2];
+    let append = KvBatchAppend::right_padded(&[0, 0], &lengths, 7).expect("layout");
+    ring.write_batch(0, &append, block(2, 7, 1.0), block(2, 7, 1.0))
+        .expect("prefill");
+    let plan = ring.plan_batch_read(&lengths).expect("plan");
+    let segment = ring
+        .read_batch(0, &plan)
+        .expect("read")
+        .materialize()
+        .expect("keys");
+    let queries = [[5_i32, 6], [0, 1]];
+    let query_positions = Tensor::<TestBackend, 2, Int>::from_ints(
+        TensorData::new(queries.concat(), [2, 2]),
+        &device(),
+    );
+    let mask = segment
+        .exclusion_mask(&query_positions, 2, NonZeroUsize::new(3))
+        .expect("mask");
+    assert_eq!(mask.dims(), [2, 2, 2, 4]);
+    let mask = host_bool(&mask);
+    let positions = host_int(segment.key_positions());
+    let valid = host_bool(segment.key_valid().expect("row 1 has empty slots"));
+    for (row, row_queries) in queries.iter().enumerate() {
+        for head in 0..2 {
+            for (query, &query_position) in row_queries.iter().enumerate() {
+                for slot in 0..4 {
+                    let key = positions[row * 4 + slot];
+                    let expected =
+                        !valid[row * 4 + slot] || key > query_position || key + 3 <= query_position;
+                    let index = ((row * 2 + head) * 2 + query) * 4 + slot;
+                    assert_eq!(mask[index], expected, "row {row} query {query} slot {slot}");
+                }
+            }
+        }
+    }
+    let wrong = Tensor::<TestBackend, 2, Int>::zeros([3, 1], &device());
+    assert!(matches!(
+        segment.exclusion_mask(&wrong, 2, None),
+        Err(TensorCacheError::ShapeMismatch { .. })
+    ));
+    assert!(matches!(
+        segment.exclusion_mask(&query_positions, 0, None),
+        Err(TensorCacheError::ZeroDimension { .. })
+    ));
+}
+
+/// Naive softmax attention for one query block over keys with an exclusion mask.
+fn attend(
+    query: Tensor<TestBackend, 4>,
+    keys: Tensor<TestBackend, 4>,
+    values: Tensor<TestBackend, 4>,
+    excluded: Tensor<TestBackend, 4, Bool>,
+) -> Tensor<TestBackend, 4> {
+    let scale = 1.0 / (DIM as f32).sqrt();
+    let scores = query
+        .matmul(keys.swap_dims(2, 3))
+        .mul_scalar(scale)
+        .mask_fill(excluded, f32::NEG_INFINITY);
+    burn::tensor::activation::softmax(scores, 3).matmul(values)
+}
+
+/// Batched write-ahead plus a masked slot-order read reproduces per-row attention.
+#[test]
+fn batched_attention_matches_per_row_attention_within_f32_rounding() {
+    for (storage, window) in STORAGES {
+        let lengths = [5, 2, 7];
+        let mut cache = cache(3, 10, storage, window, 0, false);
+        let prefill = KvBatchAppend::right_padded(&[0; 3], &lengths, 7).expect("layout");
+        cache
+            .write_batch(
+                0,
+                &prefill,
+                block(3, 7, 0.0).mul_scalar(1e-3),
+                block(3, 7, 0.0).mul_scalar(2e-3),
+            )
+            .expect("prefill");
+        // One decode token per row, written ahead of attention.
+        let append = KvBatchAppend::right_padded(&lengths, &[1; 3], 1).expect("layout");
+        let new_keys = block(3, 1, 0.0).mul_scalar(3e-3);
+        let new_values = block(3, 1, 0.0).mul_scalar(4e-3);
+        let query = block(3, 1, 0.0).mul_scalar(5e-3);
+        let local = (storage != KvCacheStorage::Full).then_some(window);
+        let mut reference = Vec::new();
+        for (row, &length) in lengths.iter().enumerate() {
+            let history = cache.read_sequence(0, row, length).expect("history");
+            let (past_keys, past_values) = history.materialize().expect("non-empty");
+            // A ring window of W keeps the newest W - 1 history keys plus the new token.
+            let keep = local.map_or(length, |width| length.min(width - 1));
+            let time = past_keys.dims()[2];
+            let past_keys = past_keys.slice([0..1, 0..HEADS, time - keep..time, 0..DIM]);
+            let past_values = past_values.slice([0..1, 0..HEADS, time - keep..time, 0..DIM]);
+            let keys = Tensor::cat(vec![past_keys, row_input(&new_keys, row, 0..1)], 2);
+            let values = Tensor::cat(vec![past_values, row_input(&new_values, row, 0..1)], 2);
+            let excluded = Tensor::<TestBackend, 4, Int>::zeros([1, HEADS, 1, keep + 1], &device())
+                .equal_elem(1);
+            reference.extend(host(&attend(
+                row_input(&query, row, 0..1),
+                keys,
+                values,
+                excluded,
+            )));
+        }
+        cache
+            .write_batch(0, &append, new_keys, new_values)
+            .expect("write ahead");
+        let plan = cache.plan_batch_read(&append.ends()).expect("plan");
+        let segment = cache
+            .read_batch(0, &plan)
+            .expect("read")
+            .materialize()
+            .expect("keys");
+        let query_positions = Tensor::<TestBackend, 2, Int>::from_ints(
+            TensorData::new(
+                lengths
+                    .iter()
+                    .map(|&length| i32::try_from(length).expect("small"))
+                    .collect::<Vec<_>>(),
+                [3, 1],
+            ),
+            &device(),
+        );
+        let excluded = segment
+            .exclusion_mask(&query_positions, HEADS, local.and_then(NonZeroUsize::new))
+            .expect("mask");
+        let batched = host(&attend(
+            query,
+            segment.keys().clone(),
+            segment.values().clone(),
+            excluded,
+        ));
+        assert_eq!(batched.len(), reference.len());
+        for (actual, expected) in batched.iter().zip(&reference) {
+            assert!(
+                (actual - expected).abs() <= 1e-5 * expected.abs().max(1.0),
+                "{storage:?}: {actual} vs {expected}"
+            );
+        }
+    }
+}
+
+/// Times one decode step per layer: batched write-ahead and read versus the per-row loop.
+///
+/// Both paths run the same single-query softmax attention over the history
+/// plus the new token, so the comparison includes realistic consumption of
+/// the read (a strided view for the batched path, a concatenated copy for the
+/// per-row path). Run with
+/// `cargo test --release --lib batched_decode_step_timing -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing measurement; run explicitly in release mode"]
+fn batched_decode_step_timing() {
+    use std::time::Instant;
+    let rows = 8;
+    let heads = 8;
+    let width = 64;
+    let length = 1024;
+    let steps = 32;
+    let config = CacheConfig::new(rows, length + 2 * steps).expect("config");
+    let spec =
+        NativeKvCacheSpec::new(1, heads, width, KvCacheStorage::Full, DType::F32).expect("spec");
+    let mut cache =
+        NativeKvCache::<TestBackend>::new(config, rows, spec, &device()).expect("cache");
+    let fill =
+        Tensor::<TestBackend, 4>::ones([rows, heads, length, width], &device()).mul_scalar(0.01);
+    let prefill = KvBatchAppend::right_padded(&[0; 8], &[length; 8], length).expect("layout");
+    cache
+        .write_batch(0, &prefill, fill.clone(), fill)
+        .expect("prefill");
+    let token = Tensor::<TestBackend, 4>::ones([rows, heads, 1, width], &device()).mul_scalar(0.02);
+    let query = token.clone();
+
+    // Per-row reference: read and materialize history, concatenate the new
+    // token, attend, then publish the token row by row.
+    let started = Instant::now();
+    for step in 0..steps {
+        let mut outputs = Vec::with_capacity(rows);
+        for row in 0..rows {
+            let history = cache.read_sequence(0, row, length + step).expect("read");
+            let (past_keys, past_values) = history.materialize().expect("history");
+            let new = token
+                .clone()
+                .slice([row..row + 1, 0..heads, 0..1, 0..width]);
+            let keys = Tensor::cat(vec![past_keys, new.clone()], 2);
+            let values = Tensor::cat(vec![past_values, new.clone()], 2);
+            let time = keys.dims()[2];
+            let excluded =
+                Tensor::<TestBackend, 4, Int>::zeros([1, heads, 1, time], &device()).equal_elem(1);
+            let row_query = query
+                .clone()
+                .slice([row..row + 1, 0..heads, 0..1, 0..width]);
+            outputs.push(attend(row_query, keys, values, excluded));
+            cache
+                .write_sequence(0, row, length + step, new.clone(), new)
+                .expect("write");
+        }
+        assert!(Tensor::cat(outputs, 0).sum().into_scalar() > 0.0);
+    }
+    let per_row = started.elapsed() / u32::try_from(steps).expect("small");
+
+    // Batched: write ahead once, plan once, attend over one zero-copy view.
+    let started = Instant::now();
+    for step in steps..2 * steps {
+        let append = KvBatchAppend::right_padded(&[length + step; 8], &[1; 8], 1).expect("layout");
+        cache
+            .write_batch(0, &append, token.clone(), token.clone())
+            .expect("write ahead");
+        let plan = cache.plan_batch_read(&append.ends()).expect("plan");
+        let segment = cache
+            .read_batch(0, &plan)
+            .expect("read")
+            .materialize()
+            .expect("keys");
+        let positions = Tensor::<TestBackend, 2, Int>::from_ints(
+            TensorData::new(
+                vec![i32::try_from(length + step).expect("small"); 8],
+                [8, 1],
+            ),
+            &device(),
+        );
+        let excluded = segment
+            .exclusion_mask(&positions, heads, None)
+            .expect("mask");
+        let output = attend(
+            query.clone(),
+            segment.keys().clone(),
+            segment.values().clone(),
+            excluded,
+        );
+        assert!(output.sum().into_scalar() > 0.0);
+    }
+    let batched = started.elapsed() / u32::try_from(steps).expect("small");
+    println!(
+        "decode step with attention, 8 rows x ~1024 tokens x 8 heads x 64: per-row {per_row:?}, batched {batched:?}"
+    );
+}

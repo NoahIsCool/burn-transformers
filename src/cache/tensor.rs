@@ -12,6 +12,26 @@
 //! not promise that `slice_assign` or batch reordering is allocation-free.
 //! "Preallocated" here therefore guarantees stable cache *capacity and shape*,
 //! while physical buffer reuse remains a backend optimization.
+//!
+//! # Model step workflow
+//!
+//! A cached forward pass appends `n_b` tokens to each row `b`:
+//!
+//! 1. [`TensorDecodeState::step`] starts a [`TensorStepWrites`] for the step.
+//! 2. Each attention layer reads its history for the whole batch, either
+//!    through a [`KvBatchReadPlan`] built once per step
+//!    ([`TensorDecodeState::kv_read_plan`]) plus the step's own tokens
+//!    ([`TensorDecodeState::step_token_segment`]), or, for full storage, by
+//!    writing the new tokens ahead ([`TensorDecodeState::write_kv_ahead`]) and
+//!    reading one zero-copy view ([`TensorDecodeState::read_kv_through`]).
+//!    [`KvBatchSegment::exclusion_mask`] turns key positions into the causal,
+//!    sliding-window, and padding mask.
+//! 3. Each layer records its new keys/values and recurrent states in the step.
+//! 4. [`TensorDecodeState::publish_step`] validates the whole write set and
+//!    commits it, or stages it inside a speculative transaction.
+//!
+//! The per-row APIs (`read_sequence`, `prepare_direct_writes`, …) remain for
+//! families that still run one row at a time.
 
 mod allocation;
 mod error;
@@ -21,11 +41,16 @@ mod state;
 
 pub(crate) use allocation::{validate_repeated_allocation, validate_tensor_shape};
 pub use error::{TensorCacheError, TensorCacheResult};
-pub use kv::{KvCacheRead, KvCacheReadSegment, KvCacheStorage, NativeKvCache, NativeKvCacheSpec};
+pub use kv::{
+    KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment, KvCacheRead, KvCacheReadSegment,
+    KvCacheStorage, NativeKvCache, NativeKvCacheSpec,
+};
 pub use recurrent::{
     RecurrentBatchStateRead, RecurrentStateCache, RecurrentStateRead, RecurrentStateSpec,
 };
-pub use state::{TensorCacheBank, TensorCacheMark, TensorDecodeState};
+pub use state::{
+    StepBank, TensorCacheBank, TensorCacheMark, TensorDecodeState, TensorStepWrites, TokenAlignment,
+};
 
 #[cfg(test)]
 #[path = "tensor_tests.rs"]

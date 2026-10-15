@@ -53,6 +53,8 @@ struct Setup {
 enum Operation {
     /// Append (or, inside a transaction, stage) per-row token counts.
     Append(Vec<usize>),
+    /// Publish one step write set, batched or per row, in or out of a transaction.
+    Step(Vec<usize>, bool),
     /// Begin a transaction.
     Begin,
     /// Commit per-row accepted prefixes.
@@ -165,6 +167,7 @@ impl Harness {
         match operation {
             Operation::Append(counts) if self.oracle.proposals.is_some() => self.stage(counts),
             Operation::Append(counts) => self.append(counts),
+            Operation::Step(counts, batched) => self.step(counts, *batched),
             Operation::Begin => self.begin(),
             Operation::Commit(accepted) => self.commit(accepted),
             Operation::Rollback => self.rollback(),
@@ -292,6 +295,68 @@ impl Harness {
             proposal.extend(new);
         }
         true
+    }
+
+    /// Publishes a step through `TensorStepWrites`; rejection must change nothing.
+    fn step(&mut self, counts: &[usize], batched: bool) -> bool {
+        let rows = self.setup.rows;
+        let Ok(mut step) = self.state.step(counts) else {
+            assert_ne!(counts.len(), rows, "step rejected valid counts {counts:?}");
+            return false;
+        };
+        let proposals = self.oracle.proposals.clone();
+        let valid = (0..rows).all(|row| {
+            let working = self.oracle.working(row).len();
+            let staged = proposals
+                .as_ref()
+                .map_or(0, |proposals| proposals[row].len());
+            working + counts[row] <= self.setup.capacity
+                && (proposals.is_none() || staged + counts[row] <= self.setup.staging)
+        });
+        let tokens: Vec<Vec<f32>> = counts
+            .iter()
+            .map(|&count| self.fresh_tokens(count))
+            .collect();
+        let block = counts.iter().copied().max().unwrap_or(0).max(1);
+        for group in [FULL, RING, MIRRORED] {
+            if batched {
+                let (keys, values) = padded_kv(&tokens, block);
+                step.push_kv_batch(group, 0, keys, values);
+            } else {
+                for row in (0..rows).filter(|&row| counts[row] > 0) {
+                    let (keys, values) = kv_tokens(&tokens[row]);
+                    step.push_kv_row(group, 0, row, keys, values);
+                }
+            }
+        }
+        if self.setup.recurrent {
+            let single_tokens = counts.iter().all(|&count| count <= 1);
+            if batched && (proposals.is_none() || single_tokens) {
+                let last: Vec<f32> = tokens
+                    .iter()
+                    .map(|row| row.last().copied().unwrap_or(-1.0))
+                    .collect();
+                let (matrix, convolution) = batch_recurrent_state(&last);
+                step.push_recurrent_batch(0, 0, matrix, convolution);
+            } else {
+                for row in (0..rows).filter(|&row| counts[row] > 0) {
+                    let (matrices, convolutions) = recurrent_snapshots(&tokens[row]);
+                    step.push_recurrent_row_snapshots(0, 0, row, matrices, convolutions);
+                }
+            }
+        }
+        let result = self.state.publish_step(step);
+        assert_eq!(result.is_ok(), valid, "step {counts:?}: {result:?}");
+        if valid {
+            let target = match &mut self.oracle.proposals {
+                Some(proposals) => proposals,
+                None => &mut self.oracle.committed,
+            };
+            for (history, new) in target.iter_mut().zip(tokens) {
+                history.extend(new);
+            }
+        }
+        valid
     }
 
     /// Begins a transaction when none is active.
@@ -478,6 +543,46 @@ fn kv_tokens(tokens: &[f32]) -> (Tensor<TestBackend, 4>, Tensor<TestBackend, 4>)
     (keys, values)
 }
 
+/// Builds right-padded `[rows, 1, block, 1]` keys and negated values; padding holds sentinels.
+fn padded_kv(
+    tokens: &[Vec<f32>],
+    block: usize,
+) -> (Tensor<TestBackend, 4>, Tensor<TestBackend, 4>) {
+    let mut keys = Vec::with_capacity(tokens.len() * block);
+    for row in tokens {
+        keys.extend(
+            row.iter()
+                .copied()
+                .chain(core::iter::repeat_n(-7.0, block - row.len())),
+        );
+    }
+    let values: Vec<f32> = keys.iter().map(|value| -value).collect();
+    let shape = [tokens.len(), 1, block, 1];
+    (
+        Tensor::from_data(TensorData::new(keys, shape), &Default::default()),
+        Tensor::from_data(TensorData::new(values, shape), &Default::default()),
+    )
+}
+
+/// Builds batched terminal recurrent states "last token value"; inactive rows hold `-1`.
+fn batch_recurrent_state(last: &[f32]) -> (Tensor<TestBackend, 4>, Tensor<TestBackend, 3>) {
+    let rows = last.len();
+    let convolution: Vec<f32> = last
+        .iter()
+        .flat_map(|&value| [value; CONVOLUTION_WIDTH])
+        .collect();
+    (
+        Tensor::from_data(
+            TensorData::new(last.to_vec(), [rows, 1, 1, 1]),
+            &Default::default(),
+        ),
+        Tensor::from_data(
+            TensorData::new(convolution, [rows, 1, CONVOLUTION_WIDTH]),
+            &Default::default(),
+        ),
+    )
+}
+
 /// Builds the terminal recurrent state "last token value" for one row.
 fn recurrent_state(value: f32) -> (Tensor<TestBackend, 4>, Tensor<TestBackend, 3>) {
     (
@@ -523,7 +628,9 @@ fn row_vector(rows: usize, maximum: usize) -> impl Strategy<Value = Vec<usize>> 
 fn operation(setup: Setup) -> impl Strategy<Value = Operation> {
     let rows = setup.rows;
     prop_oneof![
-        5 => row_vector(rows, setup.capacity.min(4)).prop_map(Operation::Append),
+        4 => row_vector(rows, setup.capacity.min(4)).prop_map(Operation::Append),
+        4 => (row_vector(rows, setup.capacity.min(4)), any::<bool>())
+            .prop_map(|(counts, batched)| Operation::Step(counts, batched)),
         2 => Just(Operation::Begin),
         2 => row_vector(rows, setup.staging + 1).prop_map(Operation::Commit),
         1 => Just(Operation::Rollback),

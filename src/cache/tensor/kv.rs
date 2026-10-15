@@ -22,6 +22,11 @@ use super::{
     TensorCacheError, TensorCacheResult, validate_repeated_allocation, validate_tensor_shape,
 };
 
+mod batch;
+
+pub(crate) use batch::PreparedNativeKvBatchWrite;
+pub use batch::{KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment};
+
 /// Physical time-axis strategy used by a native key/value cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KvCacheStorage {
@@ -62,6 +67,8 @@ pub struct NativeKvCacheSpec {
     staging_capacity: usize,
     /// Group-specific ring width; `None` falls back to the bank's config window.
     sliding_window: Option<NonZeroUsize>,
+    /// Whether proposals are written straight into committed full storage.
+    in_place_staging: bool,
 }
 
 impl NativeKvCacheSpec {
@@ -90,6 +97,7 @@ impl NativeKvCacheSpec {
             dtype,
             staging_capacity: 0,
             sliding_window: None,
+            in_place_staging: false,
         })
     }
 
@@ -140,6 +148,39 @@ impl NativeKvCacheSpec {
         self.staging_capacity
     }
 
+    /// Stages proposals directly in committed full storage instead of separate buffers.
+    ///
+    /// Full storage never evicts, and every slot at or beyond a row's
+    /// committed length is unreachable by committed reads. Proposal token `j`
+    /// of row `b` can therefore be written straight to slot `C_b + j`:
+    /// accepting a prefix only advances the committed length, rejecting it
+    /// leaves bytes no read can reach (the next write overwrites them), and a
+    /// working read is one contiguous view `[0, C_b + P_b)` with no staging
+    /// concatenation. No staging tensors are allocated; `staging_capacity`
+    /// still bounds the proposal length and must be non-zero for the group to
+    /// join a transaction.
+    ///
+    /// The trade-off is *logical* rather than byte-exact isolation: after a
+    /// rollback, slots beyond the committed length hold rejected proposals.
+    /// Ring storage cannot use this mode because a proposal would overwrite a
+    /// still-visible committed slot; [`NativeKvCache::new`] rejects it.
+    #[must_use]
+    pub const fn with_in_place_staging(mut self) -> Self {
+        self.in_place_staging = true;
+        self
+    }
+
+    /// Returns whether proposals are staged in place in committed storage.
+    #[must_use]
+    pub const fn in_place_staging(self) -> bool {
+        self.in_place_staging
+    }
+
+    /// Returns whether this group allocates separate proposal tensors.
+    const fn allocates_staging(self) -> bool {
+        self.staging_capacity > 0 && !self.in_place_staging
+    }
+
     /// Gives this group its own sliding-window width.
     ///
     /// Ring storage normally uses [`CacheConfig::sliding_window`], which every
@@ -184,8 +225,14 @@ impl NativeKvCacheSpec {
     /// # Errors
     ///
     /// Returns an error for ring storage without any window, a window larger
-    /// than the logical capacity, a window on full storage, or `2W` overflow.
+    /// than the logical capacity, a window on full storage, in-place staging
+    /// on ring storage, or `2W` overflow.
     pub fn committed_time_slots(self, config: CacheConfig) -> TensorCacheResult<usize> {
+        if self.in_place_staging && self.storage != KvCacheStorage::Full {
+            return Err(TensorCacheError::InPlaceStagingRequiresFullStorage {
+                storage: self.storage.as_str(),
+            });
+        }
         if let Some(window) = self.sliding_window {
             if self.storage == KvCacheStorage::Full {
                 return Err(TensorCacheError::InvalidSlidingWindow {
@@ -418,6 +465,12 @@ pub struct NativeKvCache<B: Backend> {
     committed_time_slots: usize,
     /// Resolved ring width (group window, else config window); `None` for full storage.
     window: Option<NonZeroUsize>,
+    /// Committed lengths captured when staging began, when the coordinator supplied them.
+    ///
+    /// In-place staging writes proposal `j` of row `b` to slot
+    /// `baseline[b] + j`, and working reads check that callers pass this same
+    /// committed length.
+    staging_baseline: Option<Vec<usize>>,
 }
 
 impl<B: Backend> NativeKvCache<B> {
@@ -460,7 +513,7 @@ impl<B: Backend> NativeKvCache<B> {
             spec.layers(),
             spec.dtype(),
         )?;
-        if spec.staging_capacity() > 0 {
+        if spec.allocates_staging() {
             let staging_shape = [
                 batch_size,
                 spec.key_value_heads(),
@@ -502,10 +555,10 @@ impl<B: Backend> NativeKvCache<B> {
                     .map(|_| KvLayer {
                         keys: Tensor::zeros(committed_shape, (&allocation_device, spec.dtype())),
                         values: Tensor::zeros(committed_shape, (&allocation_device, spec.dtype())),
-                        staged_keys: (spec.staging_capacity() > 0).then(|| {
+                        staged_keys: spec.allocates_staging().then(|| {
                             Tensor::zeros(staging_shape, (&allocation_device, spec.dtype()))
                         }),
-                        staged_values: (spec.staging_capacity() > 0).then(|| {
+                        staged_values: spec.allocates_staging().then(|| {
                             Tensor::zeros(staging_shape, (&allocation_device, spec.dtype()))
                         }),
                     })
@@ -522,6 +575,7 @@ impl<B: Backend> NativeKvCache<B> {
             staging_active: false,
             committed_time_slots,
             window: spec.effective_window(config),
+            staging_baseline: None,
         })
     }
 
@@ -715,11 +769,18 @@ impl<B: Backend> NativeKvCache<B> {
     ) -> TensorCacheResult<KvCacheRead<B>> {
         let cache_layer = self.layer(layer)?;
         validate_sequence(sequence, self.config.sequence_count())?;
+        if self.staging_active {
+            self.validate_baseline(sequence, committed_length)?;
+        }
         let staged = self.staged_lengths[layer][sequence];
         if !self.staging_active || staged == 0 {
             return self.read_sequence(layer, sequence, committed_length);
         }
         let working_length = validate_write_end(committed_length, staged, self.config.capacity())?;
+        if self.spec.in_place_staging() {
+            // Proposals already sit in committed slots `[C, C + P)`.
+            return self.read_sequence(layer, sequence, working_length);
+        }
         let plan = match self.window {
             Some(window) => ring_working_window(committed_length, staged, window.get()),
             None => WorkingWindow {
@@ -801,12 +862,15 @@ impl<B: Backend> NativeKvCache<B> {
     ///
     /// Staging uses linear proposal offsets independent of ring slots. This is
     /// the central rollback invariant: rejected values never overwrite a
-    /// committed slot, even when the ring was already full.
+    /// committed slot, even when the ring was already full. With
+    /// [in-place staging](NativeKvCacheSpec::with_in_place_staging), full
+    /// storage instead receives proposal `j` at slot `baseline + j`, beyond
+    /// every committed read.
     ///
     /// # Errors
     ///
     /// Returns an error outside an active transaction, or for invalid tensor
-    /// metadata and staging-capacity overflow.
+    /// metadata and staging- or logical-capacity overflow.
     pub fn stage_sequence(
         &mut self,
         layer: usize,
@@ -814,55 +878,8 @@ impl<B: Backend> NativeKvCache<B> {
         keys: Tensor<B, 4>,
         values: Tensor<B, 4>,
     ) -> TensorCacheResult<()> {
-        if !self.staging_active {
-            return Err(TensorCacheError::TransactionNotActive);
-        }
-        let token_count = self.validate_pair(layer, sequence, &keys, &values)?;
-        let start = self.staged_lengths[layer][sequence];
-        let end =
-            start
-                .checked_add(token_count)
-                .ok_or(TensorCacheError::StagingCapacityExceeded {
-                    requested: usize::MAX,
-                    capacity: self.spec.staging_capacity(),
-                })?;
-        if end > self.spec.staging_capacity() {
-            return Err(TensorCacheError::StagingCapacityExceeded {
-                requested: end,
-                capacity: self.spec.staging_capacity(),
-            });
-        }
-        if token_count == 0 {
-            return Ok(());
-        }
-
-        let spec = self.spec;
-        let cache_layer = self.layer_mut(layer)?;
-        let staged_keys = cache_layer
-            .staged_keys
-            .as_mut()
-            .ok_or(TensorCacheError::StagingDisabled)?;
-        let staged_values = cache_layer
-            .staged_values
-            .as_mut()
-            .ok_or(TensorCacheError::StagingDisabled)?;
-        assign_segment(
-            staged_keys,
-            &keys,
-            sequence,
-            0..token_count,
-            start..end,
-            spec,
-        );
-        assign_segment(
-            staged_values,
-            &values,
-            sequence,
-            0..token_count,
-            start..end,
-            spec,
-        );
-        self.staged_lengths[layer][sequence] = end;
+        let stage = self.prepare_row_stage(layer, sequence, keys, values)?;
+        self.apply_batch_writes(vec![stage]);
         Ok(())
     }
 
@@ -921,7 +938,31 @@ impl<B: Backend> NativeKvCache<B> {
     }
 
     /// Enables empty proposal staging for a model-level transaction.
+    ///
+    /// `baseline` holds each row's committed length, which in-place staging
+    /// uses as the first proposal slot and working reads verify.
+    pub(crate) fn begin_staging_from(&mut self, baseline: &[usize]) -> TensorCacheResult<()> {
+        if baseline.len() != self.config.sequence_count() {
+            return Err(DecodeStateError::SequenceCountMismatch {
+                expected: self.config.sequence_count(),
+                actual: baseline.len(),
+            }
+            .into());
+        }
+        self.begin_staging_with(Some(baseline.to_vec()))
+    }
+
+    /// Enables separate-buffer staging without a known baseline (unit tests only).
+    ///
+    /// Working reads then trust the caller's committed length, and in-place
+    /// staging is refused because it needs the baseline as its write offset.
+    #[cfg(test)]
     pub(crate) fn begin_staging(&mut self) -> TensorCacheResult<()> {
+        self.begin_staging_with(None)
+    }
+
+    /// Shared transition into the staging state.
+    fn begin_staging_with(&mut self, baseline: Option<Vec<usize>>) -> TensorCacheResult<()> {
         if self.staging_active {
             return Err(TensorCacheError::TransactionAlreadyActive);
         }
@@ -931,8 +972,24 @@ impl<B: Backend> NativeKvCache<B> {
         for lengths in &mut self.staged_lengths {
             lengths.fill(0);
         }
+        self.staging_baseline = baseline;
         self.staging_active = true;
         Ok(())
+    }
+
+    /// Checks a caller's committed length against the transaction baseline.
+    fn validate_baseline(&self, sequence: usize, committed_length: usize) -> TensorCacheResult<()> {
+        match &self.staging_baseline {
+            Some(baseline) if baseline[sequence] != committed_length => {
+                Err(TensorCacheError::TransactionCursorMismatch {
+                    sequence,
+                    cursor: "committed length",
+                    expected: baseline[sequence],
+                    actual: committed_length,
+                })
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Builds an opaque commit plan after validating every layer and row.
@@ -968,6 +1025,13 @@ impl<B: Backend> NativeKvCache<B> {
             }
         }
 
+        if self.spec.in_place_staging() {
+            // Accepted proposals already occupy their committed slots.
+            return Ok(KvCommitPlan {
+                layers: Vec::new(),
+                sequences: Vec::new(),
+            });
+        }
         let mut sequences = Vec::with_capacity(self.config.sequence_count());
         for sequence in 0..self.config.sequence_count() {
             let count = accepted[sequence];
@@ -1089,6 +1153,7 @@ impl<B: Backend> NativeKvCache<B> {
         for lengths in &mut self.staged_lengths {
             lengths.fill(0);
         }
+        self.staging_baseline = None;
         self.staging_active = false;
     }
 
@@ -1120,14 +1185,6 @@ impl<B: Backend> NativeKvCache<B> {
                 layer,
                 layers: self.layers.len(),
             })
-    }
-
-    /// Returns a checked mutable layer reference.
-    fn layer_mut(&mut self, layer: usize) -> TensorCacheResult<&mut KvLayer<B>> {
-        let layers = self.layers.len();
-        self.layers
-            .get_mut(layer)
-            .ok_or(TensorCacheError::LayerOutOfBounds { layer, layers })
     }
 
     /// Returns the resolved ring width required by either ring representation.
@@ -1243,6 +1300,7 @@ impl<B: Backend> NativeKvCache<B> {
         for lengths in &mut self.staged_lengths {
             lengths.fill(0);
         }
+        self.staging_baseline = None;
         self.staging_active = false;
     }
 }

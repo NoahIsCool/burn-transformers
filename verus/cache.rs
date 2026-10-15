@@ -10,8 +10,12 @@
 //!   capacity`, computes its documented formula without overflow, and is
 //!   rejected exactly when its rule is violated.
 //! * `src/cache/retention.rs`: ring and recurrent rewind predicates, proved
-//!   sound and complete against the ring eviction model, and the working
-//!   window that splits a speculative read into committed and staged parts.
+//!   sound and complete against the ring eviction model, the working window
+//!   that splits a speculative read into committed and staged parts, and the
+//!   absolute position held by each ring slot in a batched slot-order read.
+//! * `src/cache/rows.rs`: grouping of batch rows into runs that share one
+//!   tensor assignment; runs are ordered, disjoint, carry their rows'
+//!   parameters, and cover exactly the rows with new tokens.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 
@@ -24,3 +28,5 @@ pub mod lengths;
 pub mod retention;
 #[path = "../src/cache/ring.rs"]
 pub mod ring;
+#[path = "../src/cache/rows.rs"]
+pub mod rows;

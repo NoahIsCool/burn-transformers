@@ -5,7 +5,7 @@
 //! positions were overwritten by `p + W`, `p + 2W`, …. Attention at the end of
 //! a sequence of length `L` sees the window `[L - min(L, W), L)`.
 //!
-//! This module answers two questions with pure integer functions:
+//! This module answers three questions with pure integer functions:
 //!
 //! * **Rewind safety.** After a ring has received `[0, from)`, rewinding to
 //!   `to <= from` exposes the window `[to - min(to, W), to)`. The rewind is
@@ -18,13 +18,17 @@
 //!   window of the working sequence `[C + P - min(C + P, W), C + P)` keeps the
 //!   newest `min(P, W)` proposals and then the newest committed tokens that
 //!   still fit.
+//! * **Slot positions.** A batched read may return ring slots in physical
+//!   order. Slot `s < W` of a row with length `L` holds the newest position
+//!   `p < L` with `p ≡ s (mod W)`, which exists iff `s < L`.
 //!
 //! # Verified behavior
 //!
 //! `verus/cache.rs` checks these functions in place. The rewind predicates are
-//! proved sound *and* complete against the eviction model above, and the
-//! working window is proved to partition the visible suffix contiguously. All
-//! arithmetic is proved free of overflow and underflow.
+//! proved sound *and* complete against the eviction model above, the working
+//! window is proved to partition the visible suffix contiguously, and slot
+//! positions are proved to lie in the visible window with the right residue.
+//! All arithmetic is proved free of overflow and underflow.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -222,6 +226,48 @@ pub(crate) fn ring_working_window(committed: usize, staged: usize, window: usize
         committed_keep,
         staged_skip: staged - staged_keep,
     }
+}
+
+/// Returns the absolute position held by ring slot `slot` of a length-`length` row.
+///
+/// The slot holds the newest position `p < length` with `p mod window == slot`,
+/// namely `p = slot + window * floor((length - 1 - slot) / window)`. A slot that
+/// was never written (`slot >= length`) returns `None`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(position =>
+    requires
+        window > 0,
+        slot < window,
+    ensures
+        position is Some <==> slot < length,
+        position matches Some(p) ==> {
+            &&& p < length
+            &&& p % window == slot
+            &&& p + window >= length
+        },
+))]
+pub(crate) fn ring_slot_position(length: usize, slot: usize, window: usize) -> Option<usize> {
+    if slot >= length {
+        return None;
+    }
+    let distance = length - 1 - slot;
+    let wraps = distance / window;
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(distance as int, window as int);
+        assert(window * wraps + distance % window == distance);
+        assert(0 <= distance % window < window);
+        assert(wraps * window <= distance) by (nonlinear_arith)
+            requires
+                window * wraps + distance % window == distance,
+                0 <= distance % window,
+        ;
+        vstd::arithmetic::div_mod::lemma_mod_multiples_vanish(wraps as int, slot as int, window as int);
+        vstd::arithmetic::div_mod::lemma_small_mod(slot as nat, window as nat);
+        assert((window * wraps + slot) % (window as int) == slot);
+        assert(wraps * window == window * wraps) by (nonlinear_arith);
+    }
+    Some(slot + wraps * window)
 }
 
 #[cfg(test)]

@@ -68,6 +68,78 @@ pub enum TensorCacheError {
         reason: &'static str,
     },
 
+    /// In-place staging was requested for storage that evicts positions.
+    #[error(
+        "in-place staging requires full storage; {storage} storage would overwrite visible slots"
+    )]
+    InPlaceStagingRequiresFullStorage {
+        /// Human-readable storage mode.
+        storage: &'static str,
+    },
+
+    /// A working read or staged write disagreed with the transaction's cursor.
+    #[error(
+        "sequence {sequence} {cursor} is {actual}, but the active transaction expects {expected}"
+    )]
+    TransactionCursorMismatch {
+        /// Affected sequence index.
+        sequence: usize,
+        /// Which cursor was checked (committed baseline or proposal start).
+        cursor: &'static str,
+        /// Value required by the active transaction.
+        expected: usize,
+        /// Value supplied by the caller.
+        actual: usize,
+    },
+
+    /// A batched append placed a row's tokens outside the input block.
+    #[error(
+        "sequence {sequence} places {count} tokens at column {column}, outside an input block of {block} columns"
+    )]
+    AppendOutsideBlock {
+        /// Affected sequence index.
+        sequence: usize,
+        /// First input column of the row.
+        column: usize,
+        /// Number of tokens of the row.
+        count: usize,
+        /// Token-axis extent of the input block.
+        block: usize,
+    },
+
+    /// A batched read plan does not describe the layer being read.
+    #[error("batched read plan cannot read layer {layer}: {reason}")]
+    BatchPlanMismatch {
+        /// Layer whose read was rejected.
+        layer: usize,
+        /// Violated plan precondition.
+        reason: &'static str,
+    },
+
+    /// A model step's write set does not cover each active row exactly once.
+    #[error("{kind} group {group}, layer {layer}, sequence {sequence}: {problem}")]
+    StepWriteCoverage {
+        /// Cache family.
+        kind: &'static str,
+        /// Cache group index.
+        group: usize,
+        /// Layer within the group.
+        layer: usize,
+        /// Batch row.
+        sequence: usize,
+        /// Violated coverage rule.
+        problem: &'static str,
+    },
+
+    /// A write-ahead was requested where it could expose unpublished tokens.
+    #[error("cannot write ahead into {storage} storage: {reason}")]
+    WriteAheadUnsupported {
+        /// Human-readable storage mode.
+        storage: &'static str,
+        /// Why the write is unsafe.
+        reason: &'static str,
+    },
+
     /// Doubling a mirrored ring width overflowed `usize`.
     #[error("mirrored ring width 2 * {window} overflows usize")]
     MirroredCapacityOverflow {

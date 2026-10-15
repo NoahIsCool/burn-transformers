@@ -347,6 +347,13 @@ impl SequenceLengths {
             .map_err(|violation| length_error(violation, "reset"))
     }
 
+    /// Plans advancing the working cursor (committed outside a transaction).
+    pub(crate) fn plan_advance(&self, counts: &[usize]) -> Result<LengthLedger, DecodeStateError> {
+        self.ledger
+            .advanced(counts)
+            .map_err(|violation| length_error(violation, "advance"))
+    }
+
     /// Publishes a ledger planned from this state outside any transaction.
     ///
     /// Callers pass only ledgers returned by `plan_*` on this same state after
@@ -354,6 +361,12 @@ impl SequenceLengths {
     /// [`finish_transaction`](Self::finish_transaction) instead.
     pub(crate) fn publish(&mut self, ledger: LengthLedger) {
         debug_assert!(!ledger.is_active() && self.transaction.is_none());
+        self.ledger = ledger;
+    }
+
+    /// Publishes a ledger from [`plan_advance`](Self::plan_advance), inside or outside a transaction.
+    pub(crate) fn publish_advance(&mut self, ledger: LengthLedger) {
+        debug_assert_eq!(ledger.is_active(), self.transaction.is_some());
         self.ledger = ledger;
     }
 

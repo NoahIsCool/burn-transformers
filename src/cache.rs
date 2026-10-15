@@ -20,6 +20,7 @@ mod config;
 mod lengths;
 mod retention;
 mod ring;
+mod rows;
 mod state;
 pub mod tensor;
 mod transaction;
@@ -33,8 +34,9 @@ pub use ring::{
 };
 pub use state::{DecodeState, DecodeStateError, LengthTransition, SequenceLengths};
 pub use tensor::{
-    KvCacheRead, KvCacheReadSegment, KvCacheStorage, NativeKvCache, NativeKvCacheSpec,
-    RecurrentBatchStateRead, RecurrentStateCache, RecurrentStateRead, RecurrentStateSpec,
-    TensorCacheBank, TensorCacheError, TensorCacheMark, TensorCacheResult, TensorDecodeState,
+    KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment, KvCacheRead, KvCacheReadSegment,
+    KvCacheStorage, NativeKvCache, NativeKvCacheSpec, RecurrentBatchStateRead, RecurrentStateCache,
+    RecurrentStateRead, RecurrentStateSpec, TensorCacheBank, TensorCacheError, TensorCacheMark,
+    TensorCacheResult, TensorDecodeState,
 };
 pub use transaction::{CacheMark, TransactionError, TransactionalCache};
