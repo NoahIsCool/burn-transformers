@@ -1048,13 +1048,18 @@ fn apply_entry<B: Backend, const D: usize>(
     let shape = tensor.dims();
     let ranges = selection_ranges(&shape, &entry.resolved).map_err(|index| {
         let (axis, range) = &entry.slices[index];
-        Error::intervention(
-            &entry.point.name,
-            format!(
-                "{axis:?} selection {range:?} is outside extent {:?} of the emitted {shape:?} activation",
-                shape.get(entry.resolved[index].dimension)
+        let dimension = entry.resolved[index].dimension;
+        // Preflight resolves every axis to a declared dimension, so the
+        // missing-dimension arm only guards a point emitted at the wrong rank.
+        let reason = match shape.get(dimension) {
+            Some(extent) => format!(
+                "{axis:?} selection {range:?} is outside extent {extent} of the emitted {shape:?} activation"
             ),
-        )
+            None => format!(
+                "{axis:?} selection resolves to dimension {dimension}, which the emitted {shape:?} activation lacks"
+            ),
+        };
+        Error::intervention(&entry.point.name, reason)
     })?;
     let ranges: [Range<usize>; D] = ranges.try_into().map_err(|_| {
         Error::intervention(

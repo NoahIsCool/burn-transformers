@@ -4,8 +4,10 @@
 //!
 //! - `src/intervention/selection.rs`: semantic selection ranges. Length-one
 //!   selections never overflow; accepted selections name distinct, singly
-//!   declared axes with nonempty ranges; and every expanded per-dimension range
-//!   lies inside the emitted tensor's extents, so slicing cannot go out of bounds.
+//!   declared axes with nonempty ranges; and each expanded per-dimension range
+//!   is exactly the requested one (or the whole extent when unselected) and
+//!   lies inside the emitted tensor's extents, so slicing cannot go out of
+//!   bounds or silently select the wrong elements.
 //! - `src/experiment/bounds.rs`: positional extents (`max + 1` without
 //!   overflow), position/label range checks, broadcast compatibility of masks
 //!   and attention planes, staged block cursors, and the pairwise reduction

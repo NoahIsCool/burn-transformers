@@ -15,9 +15,10 @@
 //! - [`first_ill_formed_slice`] returns `None` exactly when every slice names an
 //!   axis that occurs once in the point, no axis is selected twice, and every
 //!   range is nonempty; otherwise it returns the first offending slice.
-//! - [`selection_ranges`] returns, for every dimension `d`, either the
-//!   requested range with `start < end <= extents[d]` or the whole `0..extents[d]`,
-//!   and otherwise names the first slice outside its extent.
+//! - [`selection_ranges`] returns, for every dimension `d`, exactly the range
+//!   of the last slice naming `d` (nonempty, with `end <= extents[d]`), or the
+//!   whole `0..extents[d]` when no slice names `d`; otherwise it names the
+//!   first slice outside its extent.
 
 use core::ops::Range;
 
@@ -115,12 +116,12 @@ pub(crate) fn first_ill_formed_slice(slices: &[ResolvedSlice]) -> Option<usize> 
 
 /// Expands resolved slices to one range per tensor dimension, checked against `extents`.
 ///
-/// Unselected dimensions keep `0..extents[d]`. `Err(i)` names the first slice
-/// whose dimension lies outside `extents` or whose range is empty or extends
-/// past its extent; well-formedness is checked separately by
-/// [`first_ill_formed_slice`]. If two slices named one dimension (rejected
-/// earlier), the last would win; either way every returned range lies inside
-/// its extent.
+/// Each selected dimension receives the range of the last slice naming it,
+/// and unselected dimensions keep `0..extents[d]`. `Err(i)` names the first
+/// slice whose dimension lies outside `extents` or whose range is empty or
+/// extends past its extent; well-formedness is checked separately by
+/// [`first_ill_formed_slice`], so in practice each dimension is named at most
+/// once. Every returned range lies inside its extent.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(ranges =>
     ensures
@@ -134,6 +135,8 @@ pub(crate) fn first_ill_formed_slice(slices: &[ResolvedSlice]) -> Option<usize> 
                 &&& slices_fit(extents@, slices@)
                 &&& ranges.len() == extents.len()
                 &&& forall|d: int| 0 <= d < extents.len() ==> range_inside(ranges@[d], extents@[d])
+                &&& forall|d: int| 0 <= d < extents.len()
+                    ==> range_selected(extents@[d], slices@, d, slices.len() as int, ranges@[d])
             },
         },
 ))]
@@ -166,6 +169,8 @@ pub(crate) fn selection_ranges(
             ranges.len() == dimension,
             slices_fit(extents@, slices@),
             forall|d: int| 0 <= d < dimension ==> range_inside(ranges@[d], extents@[d]),
+            forall|d: int| 0 <= d < dimension
+                ==> range_selected(extents@[d], slices@, d, slices.len() as int, ranges@[d]),
         decreases extents.len() - dimension,
     ))]
     while dimension < extents.len() {
@@ -179,6 +184,7 @@ pub(crate) fn selection_ranges(
                 extent == extents@[dimension as int],
                 slices_fit(extents@, slices@),
                 range_inside(range, extent),
+                range_selected(extent, slices@, dimension as int, candidate as int, range),
             decreases slices.len() - candidate,
         ))]
         while candidate < slices.len() {
@@ -205,6 +211,38 @@ pub(crate) open spec fn slice_fits(extents: Seq<usize>, slice: ResolvedSlice) ->
     &&& slice.dimension < extents.len()
     &&& slice.range.start < slice.range.end
     &&& slice.range.end <= extents[slice.dimension as int]
+}
+
+/// Index of the last of the first `count` slices naming `dimension`, or `-1` if none does.
+pub(crate) open spec fn last_naming(slices: Seq<ResolvedSlice>, dimension: int, count: int) -> int
+    decreases count,
+{
+    if count <= 0 {
+        -1
+    } else if slices[count - 1].dimension as int == dimension {
+        count - 1
+    } else {
+        last_naming(slices, dimension, count - 1)
+    }
+}
+
+/// Whether `range` is what the first `count` slices select along `dimension`.
+///
+/// That is the range of the last slice naming `dimension`, or the whole
+/// `0..extent` when none of them names it.
+pub(crate) open spec fn range_selected(
+    extent: usize,
+    slices: Seq<ResolvedSlice>,
+    dimension: int,
+    count: int,
+    range: Range<usize>,
+) -> bool {
+    let last = last_naming(slices, dimension, count);
+    if last < 0 {
+        range.start == 0 && range.end == extent
+    } else {
+        range.start == slices[last].range.start && range.end == slices[last].range.end
+    }
 }
 
 /// Whether `range` is the whole extent or a nonempty subrange of it.

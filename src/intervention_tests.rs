@@ -507,7 +507,8 @@ fn runtime_failures_are_intervention_errors_with_matchable_causes() {
         })
         .unwrap_err();
     assert!(
-        matches!(&error, crate::Error::Intervention { cause: None, reason, .. } if reason.contains("outside extent")),
+        matches!(&error, crate::Error::Intervention { cause: None, reason, .. }
+            if reason == "Token selection 5..6 is outside extent 2 of the emitted [1, 2, 2] activation"),
         "{error:?}"
     );
 
