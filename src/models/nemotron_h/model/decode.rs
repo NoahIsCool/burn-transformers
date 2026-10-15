@@ -92,7 +92,7 @@ pub(super) const RECURRENT_GROUP: usize = 0;
 
 /// Stateful operation whose empty-row policy differs intentionally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StatefulPhase {
+pub(super) enum StatefulPhase {
     /// Initial prompts require at least one semantic token per row.
     Prefill,
     /// Finished rows may remain in a rectangular batch as no-ops.
@@ -912,7 +912,7 @@ fn cached_attention<B: Backend>(
 /// one transfer against the working cursors (speculative transactions append
 /// beyond committed lengths); this wrapper adds the model-device check and
 /// Nemotron-H's bound of every appended length by `max_position_embeddings`.
-fn prepare_stateful_input<B: Backend>(
+pub(super) fn prepare_stateful_input<B: Backend>(
     model: &NemotronHForCausalLm<B>,
     input: &CausalLmInput<B>,
     state: &NemotronHDecodeState<B>,

@@ -43,6 +43,19 @@
 //! than owning a generation loop: the caller enforces the global
 //! `max_new_tokens` budget, stop sequences, and padding. EOS tokens are
 //! handled within a cycle because they determine the publishable prefix.
+//!
+//! # Usage
+//!
+//! ```text
+//! state   = model.new_speculative_decode_state(cache, 1, K, device)
+//! prefill = model.prefill_speculative(prompt, &mut state)        // target + MTP banks
+//! lead    = decoder.select_lead(prefill.logits, &prompt, P)
+//! hidden  = prefill.hidden_state; history = prompt
+//! loop:
+//!     cycle   = decoder.speculate(&model, lead, hidden, &history, P, &mut state)
+//!     history += cycle.token_ids[..last]   // the lead and accepted drafts
+//!     lead     = cycle.token_ids[last]; hidden = cycle.continuation_hidden_state
+//! ```
 
 use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
 use serde::{Deserialize, Serialize};

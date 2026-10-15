@@ -199,6 +199,99 @@ fn prefill_mtp_cache_projects_only_keys_and_values() {
     );
 }
 
+/// One-call speculative prefill equals target prefill plus MTP alignment.
+///
+/// The logits, the hidden state before the lead, and every readable cache
+/// value agree with the two-call path, and invalid states are rejected
+/// without publishing anything.
+#[test]
+fn prefill_speculative_matches_the_two_call_path() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let mut manual = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+        .unwrap();
+    let options = ForwardOptions {
+        hidden_states: true,
+        ..Default::default()
+    };
+    let prefill = model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[1, 2, 3]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut manual,
+            &options,
+        )
+        .unwrap();
+    let hidden = prefill.final_hidden_state.unwrap();
+    model
+        .prefill_mtp_cache(
+            Tensor::from_ints([[1, 2, 3]], &device),
+            hidden.clone(),
+            &mut manual,
+        )
+        .unwrap();
+
+    let mut fused = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+        .unwrap();
+    let result = model
+        .prefill_speculative(Tensor::from_ints([[1, 2, 3]], &device), &mut fused)
+        .unwrap();
+    assert_eq!(fused.tensor_state().lengths(), &[3]);
+    assert_eq!(fused.tensor_state().mtp_lengths(), Some([2].as_slice()));
+    assert_eq!(
+        result.logits.into_data(),
+        prefill.logits.squeeze_dim::<2>(1).into_data()
+    );
+    assert_eq!(
+        result.hidden_state.into_data(),
+        hidden.narrow(1, 2, 1).into_data()
+    );
+    assert_eq!(
+        logical_cache_snapshot(&fused),
+        logical_cache_snapshot(&manual)
+    );
+
+    // A prefilled state, an open transaction, and a model without MTP are rejected.
+    assert!(
+        model
+            .prefill_speculative(Tensor::from_ints([[4]], &device), &mut fused)
+            .is_err()
+    );
+    let mut transactional = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+        .unwrap();
+    let mark = transactional.mark().unwrap();
+    assert!(
+        model
+            .prefill_speculative(Tensor::from_ints([[4]], &device), &mut transactional)
+            .is_err()
+    );
+    transactional.rollback(mark).unwrap();
+    let single = model
+        .prefill_speculative(Tensor::from_ints([[4]], &device), &mut transactional)
+        .unwrap();
+    assert_eq!(single.hidden_state.dims(), [1, 1, 8]);
+    assert_eq!(
+        transactional.tensor_state().mtp_lengths(),
+        Some([0].as_slice())
+    );
+    let plain = NemotronHForCausalLm::<TestBackend>::init(tiny_config(false), &device).unwrap();
+    let mut plain_state = plain
+        .new_decode_state(CacheConfig::new(1, 16).unwrap(), 1, &device)
+        .unwrap();
+    assert!(
+        plain
+            .prefill_speculative(Tensor::from_ints([[4]], &device), &mut plain_state)
+            .is_err()
+    );
+    assert_eq!(plain_state.tensor_state().lengths(), &[0]);
+}
+
 /// Rollback restores every readable target KV, Mamba, convolution, and MTP KV value.
 #[test]
 fn transaction_rollback_restores_every_readable_bank() {

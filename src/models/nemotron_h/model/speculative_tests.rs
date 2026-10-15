@@ -748,27 +748,12 @@ fn speculative_greedy_with(
         )
         .unwrap();
     let prefill = model
-        .prefill(
-            CausalLmInput {
-                token_ids: token_row(prompt),
-                token_mask: None,
-                position_ids: None,
-            },
-            &mut state,
-            &ForwardOptions {
-                hidden_states: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    let hidden = prefill.final_hidden_state.unwrap();
-    model
-        .prefill_mtp_cache(token_row(prompt), hidden.clone(), &mut state)
+        .prefill_speculative(token_row(prompt), &mut state)
         .unwrap();
     let mut lead = decoder
-        .select_lead(prefill.logits.squeeze_dim::<2>(1), prompt, prompt.len())
+        .select_lead(prefill.logits, prompt, prompt.len())
         .unwrap();
-    let mut hidden = hidden.narrow(1, prompt.len() - 1, 1);
+    let mut hidden = prefill.hidden_state;
     let mut history = prompt.to_vec();
     let mut generated = vec![lead];
     let mut cycles = Vec::new();

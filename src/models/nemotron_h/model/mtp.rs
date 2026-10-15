@@ -37,7 +37,7 @@ use core::num::NonZeroUsize;
 use burn::tensor::{DType, ElementConversion, Int, Tensor, TensorData, backend::Backend};
 
 use crate::{
-    Error, Result,
+    CausalLmInput, Error, Result,
     attention::AttentionProjection,
     cache::{CacheConfig, DecodeStateError, TensorCacheError, TensorStepWrites},
     operations,
@@ -45,7 +45,8 @@ use crate::{
 
 use super::{
     INPUT_NAMES, NemotronHDecodeState, NemotronHForCausalLm, NemotronHNextTokenHead,
-    decode::KV_GROUP,
+    batch::CompactBatch,
+    decode::{KV_GROUP, Retain, StatefulPhase, prepare_stateful_input},
 };
 use crate::models::shared::validate_token_values;
 
@@ -55,6 +56,15 @@ pub struct NemotronHMtpPrediction<B: Backend> {
     /// F32 vocabulary logits `[1, sequence, vocabulary]`.
     pub logits: Tensor<B, 3>,
     /// Final normalized auxiliary state recurrently fed to the next draft step.
+    pub hidden_state: Tensor<B, 3>,
+}
+
+/// What the first speculative cycle needs after a prompt.
+#[derive(Debug)]
+pub struct NemotronHSpeculativePrefill<B: Backend> {
+    /// F32 logits `[1, vocabulary]` after the last prompt token; select the lead from them.
+    pub logits: Tensor<B, 2>,
+    /// Target final hidden state `[1, 1, hidden]` of the last prompt token, the state before the lead.
     pub hidden_state: Tensor<B, 3>,
 }
 
@@ -142,6 +152,94 @@ impl<B: Backend> NemotronHForCausalLm<B> {
             )));
         }
         NemotronHDecodeState::new_with_staging(self, config, batch_size, staging_capacity, device)
+    }
+
+    /// Prefills a fresh speculative state's target and MTP banks from one prompt.
+    ///
+    /// This is [`CausalLanguageModel::prefill`] followed by
+    /// [`Self::prefill_mtp_cache`], without retaining any per-layer hidden
+    /// state: the target pass keeps only its final normalized states, which
+    /// the MTP pairs `(x_{i+1}, h_i)` need, and projects logits only for the
+    /// last token. For long prompts this avoids holding every block's
+    /// `[1, L, hidden]` activations just to recover the final ones.
+    ///
+    /// Both banks are validated and computed before either is published, so
+    /// an error leaves the state unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns shape errors for a batch other than one, an empty prompt, or
+    /// out-of-vocabulary tokens; cache errors for a non-fresh state or an
+    /// active transaction; and the errors of the cached pass.
+    ///
+    /// [`CausalLanguageModel::prefill`]: crate::CausalLanguageModel::prefill
+    pub fn prefill_speculative(
+        &self,
+        prompt_token_ids: Tensor<B, 2, Int>,
+        state: &mut NemotronHDecodeState<B>,
+    ) -> Result<NemotronHSpeculativePrefill<B>> {
+        state.validate_for_model(self)?;
+        let head = self.next_token_head.as_ref().ok_or_else(|| {
+            Error::Generation(
+                "Nemotron-H model has no configured next-token prediction stage".into(),
+            )
+        })?;
+        if state.tensors.has_active_transaction() {
+            return Err(TensorCacheError::TransactionActive {
+                operation: "prefill a Nemotron-H speculative state",
+            }
+            .into());
+        }
+        if state.tensors.lengths() != [0] || state.tensors.mtp_lengths() != Some([0].as_slice()) {
+            return Err(Error::Cache(
+                "Nemotron-H speculative prefill requires a fresh batch-one state".into(),
+            ));
+        }
+        let input = CausalLmInput {
+            token_ids: prompt_token_ids.clone(),
+            token_mask: None,
+            position_ids: None,
+        };
+        let prepared = prepare_stateful_input(self, &input, state, StatefulPhase::Prefill)?;
+        let sequence = prepared.sequence;
+        let batch = CompactBatch::new(&prepared.valid_indices, sequence, state.tensors.device())?;
+        let tokens = batch.compact_tokens(prompt_token_ids.clone())?;
+        let (pass, step) = self.cached_pass(tokens, &batch, state, Retain::default())?;
+        let hidden_state = pass.hidden.clone().narrow(1, sequence - 1, 1);
+        let logits = self
+            .project_logits(hidden_state.clone())?
+            .cast(DType::F32)
+            .squeeze_dim::<2>(1);
+        // Shifted pairs (x_{i+1}, h_i) for i < L - 1, computed before any publication.
+        let pairs = (sequence > 1)
+            .then(|| {
+                let fused = head.fuse(
+                    self.model
+                        .embed_tokens
+                        .forward(prompt_token_ids.narrow(1, 1, sequence - 1)),
+                    pass.hidden.narrow(1, 0, sequence - 1),
+                )?;
+                pair_key_values(head, head.attention_norm.forward(fused))
+            })
+            .transpose()?;
+        let mtp_step = pairs
+            .map(|(keys, values)| {
+                let mut step = state.tensors.mtp_step(&[sequence - 1])?;
+                step.push_kv_batch(KV_GROUP, 0, keys, values);
+                Ok::<_, Error>(step)
+            })
+            .transpose()?;
+        // The MTP step appends L - 1 < L pairs to an empty bank, which the
+        // target step's capacity check already covers; publishing banks in
+        // this order cannot leave a prefilled target with an unaligned MTP.
+        state.tensors.publish_step(step)?;
+        if let Some(step) = mtp_step {
+            state.tensors.publish_step(step)?;
+        }
+        Ok(NemotronHSpeculativePrefill {
+            logits,
+            hidden_state,
+        })
     }
 
     /// Evaluates shifted MTP pairs against the independent incremental KV bank.

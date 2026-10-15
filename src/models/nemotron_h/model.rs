@@ -56,7 +56,7 @@ pub use decode::NemotronHDecodeState;
 use mamba2::{
     NemotronMamba2, NemotronMamba2Config, NemotronMamba2Mode, TimeStepClamp, TimeStepLimits,
 };
-pub use mtp::NemotronHMtpPrediction;
+pub use mtp::{NemotronHMtpPrediction, NemotronHSpeculativePrefill};
 pub use speculative::{
     NemotronHSpeculativeConfig, NemotronHSpeculativeDecoder, NemotronHSpeculativeOutput,
 };

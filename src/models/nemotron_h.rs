@@ -23,7 +23,7 @@ pub use model::mamba2::{
 pub use model::{
     NemotronHBlock, NemotronHDecodeState, NemotronHForCausalLm, NemotronHModel,
     NemotronHMtpPrediction, NemotronHNextTokenHead, NemotronHSpeculativeConfig,
-    NemotronHSpeculativeDecoder, NemotronHSpeculativeOutput,
+    NemotronHSpeculativeDecoder, NemotronHSpeculativeOutput, NemotronHSpeculativePrefill,
 };
 
 use super::config::{
