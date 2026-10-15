@@ -100,6 +100,28 @@ fn rotary_contexts_follow_the_first_active_row() {
     );
 }
 
+/// The cached-rotary preflight reports the first violation, rows before configurations.
+#[test]
+fn uncacheable_context_reports_the_first_violation_in_order() {
+    let limits = [None, Some(8), Some(4)];
+    // Row 0 is fresh, row 1 finished; row 2 exceeds the limit-4 configuration only.
+    assert_eq!(
+        first_uncacheable_context(&[0, 3, 2, 1], &[1, 0, 1, 1], &[20, 20, 6, 9], &limits),
+        Some((6, 4))
+    );
+    // Row 3 exceeds both limits; the first configuration in order wins.
+    assert_eq!(
+        first_uncacheable_context(&[0, 3, 2, 1], &[1, 0, 1, 1], &[20, 20, 4, 9], &limits),
+        Some((9, 8))
+    );
+    assert_eq!(
+        first_uncacheable_context(&[1, 1], &[1, 1], &[4, 3], &limits),
+        None
+    );
+    assert_eq!(first_uncacheable_context(&[1], &[1], &[99], &[None]), None);
+    assert_eq!(first_uncacheable_context(&[1], &[1], &[99], &[]), None);
+}
+
 /// Strategy for one row: valid columns of a mask over `sequence` columns.
 fn row_columns(sequence: usize) -> impl Strategy<Value = Vec<usize>> {
     proptest::collection::vec(any::<bool>(), sequence)
@@ -180,6 +202,33 @@ proptest! {
             };
             prop_assert_eq!(plan.rows[row], expected);
         }
+    }
+
+    /// The cached-rotary preflight equals the nested loop it replaced.
+    #[test]
+    fn uncacheable_context_matches_the_nested_loop(
+        rows in proptest::collection::vec((0usize..3, 0usize..3, 0usize..12), 0..5),
+        limits in proptest::collection::vec(proptest::option::of(0usize..12), 0..4),
+    ) {
+        let lengths = rows.iter().map(|&(length, _, _)| length).collect::<Vec<_>>();
+        let counts = rows.iter().map(|&(_, count, _)| count).collect::<Vec<_>>();
+        let contexts = rows.iter().map(|&(_, _, context)| context).collect::<Vec<_>>();
+        let mut reference = None;
+        'rows: for (row, (&context, &count)) in contexts.iter().zip(&counts).enumerate() {
+            if count == 0 || lengths[row] == 0 {
+                continue;
+            }
+            for limit in limits.iter().flatten() {
+                if context > *limit {
+                    reference = Some((context, *limit));
+                    break 'rows;
+                }
+            }
+        }
+        prop_assert_eq!(
+            first_uncacheable_context(&lengths, &counts, &contexts, &limits),
+            reference
+        );
     }
 
     /// Key limits equal the brute-force prefix maxima, clamped below by one.

@@ -26,6 +26,8 @@
 //!   limits nondecreasing and in `1..=K`;
 //! * `rotary_contexts` returns the first active row's context (at least one),
 //!   whether every active context equals it, and each row's own context;
+//!   `first_uncacheable_context` names the first active row with cached keys
+//!   whose context passes a rotary configuration's cached-context limit;
 //!
 //! the specifications attached to `src/models/deepseek_v2/plan.rs`:
 //!

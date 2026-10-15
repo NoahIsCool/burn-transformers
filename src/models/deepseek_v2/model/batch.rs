@@ -58,6 +58,25 @@ pub open spec fn active(counts: Seq<usize>, b: int) -> bool {
     0 <= b < counts.len() && counts[b] > 0
 }
 
+/// Row `row` appends tokens after cached keys and its context passes rotary limit `rope`.
+pub open spec fn exceeds_cached_limit(
+    lengths: Seq<usize>,
+    counts: Seq<usize>,
+    contexts: Seq<usize>,
+    limits: Seq<Option<usize>>,
+    row: int,
+    rope: int,
+) -> bool {
+    &&& 0 <= row < counts.len()
+    &&& 0 <= rope < limits.len()
+    &&& counts[row] > 0
+    &&& lengths[row] > 0
+    &&& match limits[rope] {
+        Some(limit) => contexts[row] > limit,
+        None => false,
+    }
+}
+
 /// `max(value, 1)`.
 pub open spec fn at_least_one(value: int) -> int {
     if value < 1 {
@@ -736,6 +755,88 @@ pub(crate) fn rotary_contexts(counts: &[usize], contexts: &[usize]) -> RotaryCon
         uniform,
         rows,
     }
+}
+
+/// Returns the first `(context, limit)` that would extend cached rotary keys past a limit.
+///
+/// Context-dependent rotary scalings change their frequencies beyond a
+/// cached-context limit, so a row that already caches rotated keys
+/// (`L_b > 0`) and appends tokens (`n_b > 0`) must keep its evaluated
+/// context within every configuration's limit (`None` never invalidates
+/// keys). Rows are visited in order and, within a row, configurations in
+/// order. Proved: `Some` names the first violating `(row, configuration)`
+/// pair in that order, and `None` means no pair violates.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(found =>
+    requires
+        lengths.len() == counts.len(),
+        contexts.len() == counts.len(),
+    ensures
+        match found {
+            Some((context, limit)) => exists|row: int, rope: int|
+                #[trigger] exceeds_cached_limit(lengths@, counts@, contexts@, limits@, row, rope)
+                && context == contexts@[row] && limits@[rope] == Some(limit)
+                && (forall|r: int, i: int| 0 <= r < row
+                    ==> !#[trigger] exceeds_cached_limit(lengths@, counts@, contexts@, limits@, r, i))
+                && (forall|i: int| 0 <= i < rope
+                    ==> !#[trigger] exceeds_cached_limit(lengths@, counts@, contexts@, limits@, row, i)),
+            None => forall|r: int, i: int|
+                !#[trigger] exceeds_cached_limit(lengths@, counts@, contexts@, limits@, r, i),
+        },
+))]
+#[allow(
+    clippy::collapsible_if,
+    reason = "Verus compiles verified bodies with an older edition that has no let-chains"
+)]
+pub(crate) fn first_uncacheable_context(
+    lengths: &[usize],
+    counts: &[usize],
+    contexts: &[usize],
+    limits: &[Option<usize>],
+) -> Option<(usize, usize)> {
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= counts.len(),
+            lengths.len() == counts.len(),
+            contexts.len() == counts.len(),
+            forall|r: int, i: int| 0 <= r < row
+                ==> !#[trigger] exceeds_cached_limit(lengths@, counts@, contexts@, limits@, r, i),
+        decreases counts.len() - row,
+    ))]
+    while row < counts.len() {
+        if counts[row] > 0 && lengths[row] > 0 {
+            let mut rope: usize = 0;
+            #[cfg_attr(verus_keep_ghost, verus_spec(
+                invariant
+                    row < counts.len(),
+                    rope <= limits.len(),
+                    lengths.len() == counts.len(),
+                    contexts.len() == counts.len(),
+                    counts@[row as int] > 0 && lengths@[row as int] > 0,
+                    forall|r: int, i: int| 0 <= r < row
+                        ==> !#[trigger] exceeds_cached_limit(lengths@, counts@, contexts@, limits@, r, i),
+                    forall|i: int| 0 <= i < rope
+                        ==> !#[trigger] exceeds_cached_limit(lengths@, counts@, contexts@, limits@, row as int, i),
+                decreases limits.len() - rope,
+            ))]
+            while rope < limits.len() {
+                if let Some(limit) = limits[rope] {
+                    if contexts[row] > limit {
+                        #[cfg(verus_keep_ghost)]
+                        proof! {
+                            assert(exceeds_cached_limit(lengths@, counts@, contexts@, limits@,
+                                row as int, rope as int));
+                        }
+                        return Some((contexts[row], limit));
+                    }
+                }
+                rope += 1;
+            }
+        }
+        row += 1;
+    }
+    None
 }
 
 #[cfg(test)]

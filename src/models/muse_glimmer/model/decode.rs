@@ -52,7 +52,10 @@ use crate::{
         TensorDecodeState,
     },
     models::{
-        deepseek_v2::model::{batch::rotary_contexts, block::BlockLayout},
+        deepseek_v2::model::{
+            batch::{first_uncacheable_context, rotary_contexts},
+            block::BlockLayout,
+        },
         shared::{
             EmptyRows, StatefulContract, StatefulRows, ensure_same_device, prepare_stateful_rows,
             select_hidden_with_last_columns, validate_logits_selection,
@@ -628,21 +631,25 @@ fn prepare_stateful_input<B: Backend>(
             empty_rows: phase.empty_rows(),
         },
     )?;
-    for (row, context) in rows.active_contexts() {
-        // A fresh prefill has no rotated keys to invalidate yet.
-        if state.tensors.lengths()[row] == 0 {
-            continue;
-        }
-        for rope in model.model.distinct_ropes() {
-            if let Some(limit) = rope.scaling().cached_context_limit()
-                && context > limit
-            {
-                return Err(Error::BackendCapability(format!(
-                    "Muse cached decoding at context {context} exceeds the {limit}-token limit of \
-                     its context-dependent rotary scaling, which would require re-rotating cached keys"
-                )));
-            }
-        }
+    // A fresh prefill has no rotated keys to invalidate yet. Verified: the
+    // first active row with cached keys whose context passes a rotary
+    // configuration's limit, rows first and configurations second.
+    let limits = model
+        .model
+        .distinct_ropes()
+        .iter()
+        .map(|rope| rope.scaling().cached_context_limit())
+        .collect::<Vec<_>>();
+    if let Some((context, limit)) = first_uncacheable_context(
+        state.tensors.lengths(),
+        &rows.token_counts,
+        &rows.evaluated_contexts,
+        &limits,
+    ) {
+        return Err(Error::BackendCapability(format!(
+            "Muse cached decoding at context {context} exceeds the {limit}-token limit of \
+             its context-dependent rotary scaling, which would require re-rotating cached keys"
+        )));
     }
     Ok(rows)
 }

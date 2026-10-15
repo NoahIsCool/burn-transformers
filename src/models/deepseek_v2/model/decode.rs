@@ -51,11 +51,13 @@ use crate::{
         EmptyRows, StatefulContract, StatefulRows, ensure_same_device, prepare_stateful_rows,
         select_hidden_with_last_columns, validate_logits_selection,
     },
-    position::{RopeScaling, RotaryAngles, RotaryFrequencies, rotary_angles_from_frequencies},
+    position::{RotaryAngles, RotaryFrequencies, rotary_angles_from_frequencies},
 };
 
 use super::{
-    DeepseekV2ForCausalLm, INPUT_NAMES, ROUTER_DTYPE, batch::rotary_contexts, block::BlockLayout,
+    DeepseekV2ForCausalLm, INPUT_NAMES, ROUTER_DTYPE,
+    batch::{first_uncacheable_context, rotary_contexts},
+    block::BlockLayout,
     router_diagnostics,
 };
 use crate::models::deepseek_v2::plan::{LatentFault, latent_cache_bytes};
@@ -672,34 +674,34 @@ fn prepare_stateful_input<B: Backend>(
             empty_rows: phase.empty_rows(),
         },
     )?;
-    // A fresh prefill has no rotated keys to invalidate yet.
-    for (row, context) in rows.active_contexts() {
-        if baselines[row] > 0 {
-            ensure_cached_rotary_context(model.model.rope.scaling(), context)?;
-        }
+    // Cached rotary keys were rotated with the frequencies of the context at
+    // the time they were written. Context-dependent scalings (dynamic NTK,
+    // and LongRoPE's short/long factor switch) change those frequencies
+    // beyond `RopeScaling::cached_context_limit`, so extending a non-empty
+    // cache past it would mix incompatible rotations; static scalings never
+    // invalidate keys, and a fresh prefill has no rotated keys yet. Verified:
+    // the first active row with cached keys whose context passes the limit.
+    let limits = [model.model.rope.scaling().cached_context_limit()];
+    if let Some((context, limit)) = first_uncacheable_context(
+        baselines,
+        &rows.token_counts,
+        &rows.evaluated_contexts,
+        &limits,
+    ) {
+        return Err(uncacheable_rotary_context(context, limit));
     }
     Ok(rows)
 }
 
-/// Rejects a rotary context that would invalidate keys already in the cache.
+/// Reports a rotary context that would invalidate keys already in the cache.
 ///
-/// Cached rotary keys were rotated with the frequencies of the context at
-/// the time they were written. Context-dependent scalings (dynamic NTK, and
-/// LongRoPE's short/long factor switch) change those frequencies beyond
-/// [`RopeScaling::cached_context_limit`], so extending a non-empty cache past
-/// it would mix incompatible rotations; static scalings never invalidate keys.
-///
-/// # Errors
-///
-/// Returns [`Error::BackendCapability`] for a context beyond the limit.
-fn ensure_cached_rotary_context(scaling: RopeScaling, context: usize) -> Result<()> {
-    match scaling.cached_context_limit() {
-        Some(limit) if context > limit => Err(Error::BackendCapability(format!(
-            "DeepSeek cached decoding at context {context} exceeds the {limit}-token limit of its \
-             context-dependent rotary scaling, which would require re-rotating cached keys"
-        ))),
-        _ => Ok(()),
-    }
+/// Extending a non-empty cache from `limit` to `context` would mix the
+/// rotations of two frequency sets; re-rotating cached keys is unsupported.
+fn uncacheable_rotary_context(context: usize, limit: usize) -> Error {
+    Error::BackendCapability(format!(
+        "DeepSeek cached decoding at context {context} exceeds the {limit}-token limit of its \
+         context-dependent rotary scaling, which would require re-rotating cached keys"
+    ))
 }
 
 #[cfg(test)]
