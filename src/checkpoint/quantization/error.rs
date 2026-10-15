@@ -310,6 +310,11 @@ pub enum QuantizationError {
         std::io::Error,
     ),
     /// No backend has a native packed operator for this format yet.
-    #[error("native packed quantized execution is unavailable; dequantize to f32 first")]
+    #[error(
+        "native packed quantized execution is unavailable: a packed matrix's input width is not a \
+         multiple of its quantization group, so it cannot map to Burn block-QFloat; reconvert with \
+         a group size that divides every input width, or with UnalignedMatrixPolicy::Exclude to \
+         keep such matrices in source precision"
+    )]
     PackedExecutionUnavailable,
 }

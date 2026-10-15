@@ -30,8 +30,8 @@ use burn::tensor::TensorData;
 
 use super::{
     BurnpackAppendOutcome, BurnpackArtifactSummary, BurnpackProvenance, BurnpackSessionLimits,
-    BurnpackStagingStats, QuantizationError, QuantizationExclusion, QuantizedBurnpackSession,
-    SymmetricQuantization, WeightQuantizationConfig,
+    BurnpackStagingStats, QuantizationEligibility, QuantizationError, QuantizationExclusion,
+    QuantizedBurnpackSession, WeightQuantizationConfig, classify_weight_for_quantization,
     provenance::{ProvenanceExecutionStats, hash_local_checkpoint_provenance_audited},
 };
 use crate::checkpoint::{
@@ -46,6 +46,50 @@ pub struct QuantizedCheckpointOptions {
     pub weights: WeightQuantizationConfig,
     /// Bounded disk, tensor-count, and metadata resources for the writer.
     pub limits: BurnpackSessionLimits,
+    /// Treatment of eligible matrices whose input width is not group-aligned.
+    pub unaligned: UnalignedMatrixPolicy,
+}
+
+/// Treatment of an eligible `[output, input]` matrix whose `input` width is not a
+/// multiple of the group size `G`.
+///
+/// Packed Burn block-QFloat needs every group to stay within one row, which
+/// holds exactly when `input % G == 0`. A single unaligned matrix marks the
+/// whole sidecar [`super::PackedExecutionSupport::Unavailable`], and every packed
+/// loader then rejects it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum UnalignedMatrixPolicy {
+    /// Quantize it anyway; the artifact is valid reference-only storage.
+    #[default]
+    ReferenceOnly,
+    /// Keep it in source precision, recording
+    /// [`QuantizationExclusion::GroupUnaligned`], so the sidecar stays loadable.
+    Exclude,
+    /// Fail before reading any source payload, naming the first such target.
+    Reject,
+}
+
+/// Returns whether an eligible matrix's groups stay within its rows.
+///
+/// Supported group sizes are multiples of eight, so `input % G == 0` also
+/// aligns rows to whole packed `u32` words for both Q4 and Q8.
+fn group_aligned_matrix(shape: &[usize], config: WeightQuantizationConfig) -> bool {
+    matches!(shape, [_, input] if input.is_multiple_of(config.group_size.get()))
+}
+
+/// Finds the first plan target that `Reject` refuses, before any source read.
+fn first_unaligned_target(plan: &LoadPlan, config: WeightQuantizationConfig) -> Option<&str> {
+    plan.tensors.iter().find_map(|tensor| {
+        let shape = tensor
+            .shape
+            .iter()
+            .map(|&dimension| usize::try_from(dimension).unwrap_or(usize::MAX))
+            .collect::<Vec<_>>();
+        let eligible = classify_weight_for_quantization(&tensor.target, &shape)
+            == QuantizationEligibility::Eligible;
+        (eligible && !group_aligned_matrix(&shape, config)).then_some(tensor.target.as_str())
+    })
 }
 
 /// One load-plan target deliberately retained in source precision.
@@ -201,8 +245,30 @@ pub fn quantize_local_checkpoint_to_burnpack(
     options: QuantizedCheckpointOptions,
 ) -> CheckpointQuantizationResult<CheckpointQuantizationOutcome> {
     let output_path = output_path.as_ref().to_path_buf();
-    let mut report = unstarted_report(plan);
+    let mut report = plan.report.without_progress();
     let mut provenance_stats = ProvenanceExecutionStats::default();
+    if options.unaligned == UnalignedMatrixPolicy::Reject
+        && let Some(target) = first_unaligned_target(plan, options.weights)
+    {
+        let cause = QuantizationError::BurnQFloatIncompatible {
+            reason: format!(
+                "`{target}` has an input width that is not a multiple of group size {}",
+                options.weights.group_size.get()
+            ),
+        };
+        return Err(conversion_failure(
+            output_path,
+            Some(target.to_owned()),
+            CheckpointQuantizationFailureCause::Quantization(cause),
+            CheckpointQuantizationProgress {
+                report,
+                execution: ExecutionStats::default(),
+                staging: BurnpackStagingStats::default(),
+                excluded: Vec::new(),
+                provenance: provenance_stats,
+            },
+        ));
+    }
     let mut session =
         QuantizedBurnpackSession::with_limits(&output_path, options.limits).map_err(|cause| {
             conversion_failure(
@@ -244,7 +310,7 @@ pub fn quantize_local_checkpoint_to_burnpack(
     provenance_stats.pre_execution = Some(initial_hash_stats);
 
     let mut source = LocalShardSource::new(manifest);
-    let mut sink = BurnpackQuantizationSink::new(&mut session, options.weights);
+    let mut sink = BurnpackQuantizationSink::new(&mut session, options.weights, options.unaligned);
     let execution_result = execute_load_plan(plan, &mut source, &mut sink);
     let quantized = std::mem::take(&mut sink.quantized);
     let mut excluded = std::mem::take(&mut sink.excluded);
@@ -256,7 +322,7 @@ pub fn quantize_local_checkpoint_to_burnpack(
         Err(failure) => {
             let failure = *failure;
             report = failure.report;
-            extend_quantized_report(&mut report, quantized);
+            report.extend_quantized(quantized);
             normalize_exclusions(&mut excluded);
             let cause = match failure.cause {
                 ExecutionFailureCause::Checkpoint(cause) => {
@@ -282,7 +348,7 @@ pub fn quantize_local_checkpoint_to_burnpack(
     };
 
     report = execution.report;
-    extend_quantized_report(&mut report, quantized);
+    report.extend_quantized(quantized);
     normalize_exclusions(&mut excluded);
     provenance_stats.post_execution = Some(Default::default());
     let (final_provenance, final_hash_stats) =
@@ -379,6 +445,8 @@ struct BurnpackQuantizationSink<'a> {
     session: &'a mut QuantizedBurnpackSession,
     /// Quantization scheme and group size applied to eligible targets.
     config: WeightQuantizationConfig,
+    /// Whether group-unaligned eligible matrices are quantized or kept unpacked.
+    unaligned: UnalignedMatrixPolicy,
     /// Successful staged target conversions, in execution order.
     quantized: Vec<QuantizationRecord>,
     /// Ineligible targets and their explicit exclusion reasons.
@@ -387,10 +455,15 @@ struct BurnpackQuantizationSink<'a> {
 
 impl<'a> BurnpackQuantizationSink<'a> {
     /// Creates an empty reporting sink over one private write session.
-    fn new(session: &'a mut QuantizedBurnpackSession, config: WeightQuantizationConfig) -> Self {
+    fn new(
+        session: &'a mut QuantizedBurnpackSession,
+        config: WeightQuantizationConfig,
+        unaligned: UnalignedMatrixPolicy,
+    ) -> Self {
         Self {
             session,
             config,
+            unaligned,
             quantized: Vec::new(),
             excluded: Vec::new(),
         }
@@ -407,11 +480,22 @@ impl TensorSink for BurnpackQuantizationSink<'_> {
         target: &str,
         data: TensorData,
     ) -> std::result::Result<(), Self::Error> {
+        let shape = data.shape.as_slice();
+        if self.unaligned == UnalignedMatrixPolicy::Exclude
+            && classify_weight_for_quantization(target, shape) == QuantizationEligibility::Eligible
+            && !group_aligned_matrix(shape, self.config)
+        {
+            self.excluded.push(QuantizationExclusionRecord {
+                target: target.to_owned(),
+                reason: QuantizationExclusion::GroupUnaligned,
+            });
+            return Ok(());
+        }
         match self.session.append(target, &data, self.config)? {
             BurnpackAppendOutcome::Staged(staged) => {
                 self.quantized.push(QuantizationRecord {
                     target: target.to_owned(),
-                    scheme: quantization_scheme_name(self.config),
+                    scheme: self.config.storage_label(),
                     bytes: staged.payload_bytes,
                 });
             }
@@ -433,36 +517,6 @@ impl TensorSink for BurnpackQuantizationSink<'_> {
     ) -> std::result::Result<(), Self::Error> {
         Ok(())
     }
-}
-
-/// Produces the stable scheme spelling stored in [`LoadReport`].
-fn quantization_scheme_name(config: WeightQuantizationConfig) -> String {
-    let precision = match config.scheme {
-        SymmetricQuantization::Q8 => "q8",
-        SymmetricQuantization::Q4 => "q4",
-    };
-    format!(
-        "symmetric-{precision}-g{}-flat-row-major",
-        config.group_size.get()
-    )
-}
-
-/// Resets progress-bearing report categories before the first source read.
-fn unstarted_report(plan: &LoadPlan) -> LoadReport {
-    let mut report = plan.report.clone();
-    report.applied.clear();
-    report.quantized.clear();
-    report.equivalence_verified.clear();
-    report.finalize();
-    report
-}
-
-/// Adds exact sidecar records and restores deterministic report ordering.
-fn extend_quantized_report(report: &mut LoadReport, quantized: Vec<QuantizationRecord>) {
-    for record in quantized {
-        report.record_quantized(record);
-    }
-    report.finalize();
 }
 
 /// Sorts exclusion records and removes exact duplicates defensively.

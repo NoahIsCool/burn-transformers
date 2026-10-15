@@ -466,10 +466,7 @@ where
     H: Fn(&K, &PlannedTensor) -> bool,
     R: FnMut(&mut K, &PlannedTensor) -> Result<Option<TensorData>, K::Error>,
 {
-    let mut report = plan.report.clone();
-    report.applied.clear();
-    report.quantized.clear();
-    report.equivalence_verified.clear();
+    let mut report = plan.report.without_progress();
     let mut stats = ExecutionStats::default();
 
     // Phase 1: preflight, equivalence checks, and every storage-owning write.

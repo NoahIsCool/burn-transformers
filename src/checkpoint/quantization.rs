@@ -39,7 +39,7 @@ pub use burnpack::{
 pub use checkpoint::{
     CheckpointQuantizationFailure, CheckpointQuantizationFailureCause,
     CheckpointQuantizationOutcome, CheckpointQuantizationResult, QuantizationExclusionRecord,
-    QuantizedCheckpointOptions, quantize_local_checkpoint_to_burnpack,
+    QuantizedCheckpointOptions, UnalignedMatrixPolicy, quantize_local_checkpoint_to_burnpack,
 };
 pub use config::{
     PackedValueLayout, QuantizationGroupSize, QuantizedGroupLayout, QuantizedPayloadLayout,

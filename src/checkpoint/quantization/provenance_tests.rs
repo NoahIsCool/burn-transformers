@@ -608,3 +608,117 @@ fn checkpoint_standards_provenance_counter_overflow_retains_precise_progress() {
         }
     }
 }
+
+/// Writes `shards` single-tensor shards plus an index and returns its manifest and plan.
+fn sharded_fixture(
+    shards: usize,
+    elements: usize,
+) -> (tempfile::TempDir, CheckpointManifest, LoadPlan) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut weight_map = serde_json::Map::new();
+    let mut expected = Vec::new();
+    for shard in 0..shards {
+        let name = format!("layer{shard}.weight");
+        let file_name = format!("model-{shard:05}.safetensors");
+        let header = serde_json::to_vec(&serde_json::json!({
+            name.clone(): {"dtype": "F32", "shape": [elements], "data_offsets": [0, elements * 4]}
+        }))
+        .unwrap();
+        let mut file = File::create(directory.path().join(&file_name)).unwrap();
+        file.write_all(&(header.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(&header).unwrap();
+        let bytes = (0..elements)
+            .flat_map(|index| ((index * (shard + 1)) as f32).to_le_bytes())
+            .collect::<Vec<_>>();
+        file.write_all(&bytes).unwrap();
+        weight_map.insert(name.clone(), file_name.into());
+        expected.push(ExpectedTensor::new(name, [elements as u64]));
+    }
+    std::fs::write(
+        directory.path().join("model.safetensors.index.json"),
+        serde_json::to_vec(&serde_json::json!({ "weight_map": weight_map })).unwrap(),
+    )
+    .unwrap();
+    let manifest = discover_checkpoint(directory.path(), &LoadOptions::default()).unwrap();
+    let plan = build_load_plan(
+        &manifest,
+        &expected,
+        &MappingPlan::identity(&expected),
+        &LoadOptions::default(),
+    )
+    .unwrap();
+    (directory, manifest, plan)
+}
+
+/// Concurrent hashing yields the digests of a sequential per-shard pass.
+#[test]
+fn concurrent_shard_hashing_matches_sequential_digests() {
+    let (_directory, manifest, plan) = sharded_fixture(11, 1_000);
+    let (provenance, stats) = hash_local_checkpoint_provenance(&manifest, &plan).unwrap();
+    assert_eq!(stats.passes_completed, 1);
+    assert_eq!(stats.shards_hashed, 11);
+    assert_eq!(stats.bytes_hashed, manifest.artifact_bytes);
+    assert_eq!(stats.peak_buffer_bytes, PROVENANCE_HASH_BUFFER_BYTES);
+    for shard in &manifest.shards {
+        let mut sequential = ProvenanceHashStats::default();
+        let digest = hash_shard(&manifest, shard, &mut sequential).unwrap();
+        assert_eq!(provenance.checkpoint_shards[&shard.relative_path], digest);
+        let bytes = std::fs::read(&shard.path).unwrap();
+        assert_eq!(digest.sha256, packed_payload_sha256(&bytes));
+    }
+}
+
+/// The first failing shard in manifest order is reported; all hashed bytes are counted.
+#[test]
+fn concurrent_hash_failure_reports_the_first_shard_in_order() {
+    let (_directory, mut manifest, plan) = sharded_fixture(5, 64);
+    let removed = manifest.shards[1].path.clone();
+    let length_changed = manifest.shards[3].path.clone();
+    std::fs::remove_file(&removed).unwrap();
+    std::fs::write(&length_changed, b"short").unwrap();
+    let failure = hash_local_checkpoint_provenance_audited(&manifest, &plan).unwrap_err();
+    assert!(matches!(
+        failure.error,
+        QuantizationError::ArtifactIo {
+            operation: "canonicalize checkpoint shard for provenance",
+            path,
+            ..
+        } if path == removed
+    ));
+    let intact = [0, 2, 4]
+        .iter()
+        .map(|&index| manifest.shards[index].file_bytes)
+        .sum::<u64>();
+    assert_eq!(failure.stats.shards_hashed, 3);
+    assert_eq!(failure.stats.bytes_hashed, intact);
+    assert_eq!(failure.stats.passes_completed, 0);
+    manifest.shards.truncate(1);
+    assert!(hash_local_checkpoint_provenance_audited(&manifest, &plan).is_ok());
+}
+
+/// Times concurrent against one-shard-at-a-time hashing of a page-cached checkpoint.
+///
+/// Run with `cargo test --release --lib concurrent_hash_throughput -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing benchmark; run explicitly in release mode"]
+fn concurrent_hash_throughput_against_sequential_hashing() {
+    use std::time::Instant;
+
+    let (_directory, manifest, plan) = sharded_fixture(8, 32 << 20);
+    hash_local_checkpoint_provenance(&manifest, &plan).unwrap();
+    let started = Instant::now();
+    hash_local_checkpoint_provenance(&manifest, &plan).unwrap();
+    let concurrent = started.elapsed().as_secs_f64();
+    let started = Instant::now();
+    for shard in &manifest.shards {
+        hash_shard(&manifest, shard, &mut ProvenanceHashStats::default()).unwrap();
+    }
+    let sequential = started.elapsed().as_secs_f64();
+    let gib = manifest.artifact_bytes as f64 / f64::from(1_u32 << 30);
+    println!(
+        "provenance hashing of {gib:.2} GiB: concurrent {:.2} GiB/s, sequential {:.2} GiB/s",
+        gib / concurrent,
+        gib / sequential
+    );
+}

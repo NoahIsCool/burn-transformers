@@ -163,6 +163,27 @@ impl LoadReport {
         self.missing.is_empty() && self.unexpected.is_empty()
     }
 
+    /// Returns a planned report with every execution-progress category cleared.
+    ///
+    /// Execution starts from this state: `applied`, `quantized`, and
+    /// `equivalence_verified` record only work that actually completes, while the
+    /// planned categories are retained. The result is finalized.
+    #[must_use]
+    pub fn without_progress(&self) -> Self {
+        let mut report = self.clone();
+        report.applied.clear();
+        report.quantized.clear();
+        report.equivalence_verified.clear();
+        report.finalize();
+        report
+    }
+
+    /// Records quantized targets and restores deterministic ordering.
+    pub fn extend_quantized(&mut self, records: impl IntoIterator<Item = QuantizationRecord>) {
+        self.quantized.extend(records);
+        self.finalize();
+    }
+
     /// Records a parameter after the runtime has applied it.
     pub fn record_applied(&mut self, target: impl Into<String>) {
         self.applied.push(target.into());

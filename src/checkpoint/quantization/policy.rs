@@ -35,6 +35,12 @@ pub enum QuantizationExclusion {
     ScalarOrVector,
     /// Rank-three and higher tensors are not projection matrices.
     NonMatrix,
+    /// An eligible matrix whose input width is not a multiple of the group size.
+    ///
+    /// Recorded only when conversion uses
+    /// [`super::UnalignedMatrixPolicy::Exclude`], which keeps such matrices in
+    /// source precision so the rest of the sidecar stays packed-loadable.
+    GroupUnaligned,
 }
 
 /// Eligibility decision for one architecture-owned parameter.

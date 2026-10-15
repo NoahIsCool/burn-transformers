@@ -11,7 +11,9 @@
 //!
 //! Length prefixes make the plan encoding injective without depending on JSON
 //! spelling or Rust's unstable debug representation. Hashing is streamed through
-//! a fixed-size buffer, so checkpoint provenance requires constant host memory.
+//! fixed-size buffers, one per concurrent shard worker, so checkpoint provenance
+//! requires constant host memory while large multi-shard checkpoints hash in
+//! parallel.
 //!
 //! These hashes detect accidental corruption and bind a sidecar to externally
 //! trusted checkpoint and manifest contents. They are not signatures and do not
@@ -127,7 +129,9 @@ pub struct ProvenanceHashStats {
     /// Largest fixed read buffer allocated by any pass.
     ///
     /// This is either zero when no buffer was allocated or exactly
-    /// [`PROVENANCE_HASH_BUFFER_BYTES`]. It is separate from model staging bounds.
+    /// [`PROVENANCE_HASH_BUFFER_BYTES`]. Shards hash concurrently, one buffer
+    /// per worker, so up to eight such buffers (8 MiB) can exist at once. It is
+    /// separate from model staging bounds.
     pub peak_buffer_bytes: usize,
 }
 
@@ -211,29 +215,46 @@ pub fn hash_local_checkpoint_provenance(
 }
 
 /// Hashes local provenance while retaining partial I/O counters on failure.
+///
+/// Shards are hashed concurrently (see [`hash_shards_concurrently`]); results
+/// are then combined in manifest order, so the digests and the reported error
+/// are independent of thread scheduling. Every shard is attempted, and on
+/// failure the counters cover all bytes actually hashed, while the error is the
+/// first failure in manifest order.
 pub(crate) fn hash_local_checkpoint_provenance_audited(
     manifest: &CheckpointManifest,
     plan: &LoadPlan,
 ) -> std::result::Result<(BurnpackProvenance, ProvenanceHashStats), ProvenanceHashFailure> {
     let mut checkpoint_shards = BTreeMap::new();
     let mut stats = ProvenanceHashStats::default();
-    for shard in &manifest.shards {
-        let digest = hash_shard(manifest, shard, &mut stats)
-            .map_err(|error| ProvenanceHashFailure { error, stats })?;
-        if checkpoint_shards
-            .insert(shard.relative_path.clone(), digest)
-            .is_some()
-        {
-            return Err(ProvenanceHashFailure {
-                error: QuantizationError::InvalidProvenance {
-                    reason: format!(
-                        "checkpoint manifest repeats shard `{}`",
-                        shard.relative_path
-                    ),
-                },
-                stats,
-            });
+    let mut first_error = None;
+    let outcomes = hash_shards_concurrently(manifest);
+    for (shard, (digest, shard_stats)) in manifest.shards.iter().zip(outcomes) {
+        if let Err(error) = accumulate_hash_stats(&mut stats, shard_stats) {
+            first_error.get_or_insert(error);
+            continue;
         }
+        match digest {
+            Ok(digest) => {
+                if checkpoint_shards
+                    .insert(shard.relative_path.clone(), digest)
+                    .is_some()
+                {
+                    first_error.get_or_insert(QuantizationError::InvalidProvenance {
+                        reason: format!(
+                            "checkpoint manifest repeats shard `{}`",
+                            shard.relative_path
+                        ),
+                    });
+                }
+            }
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(ProvenanceHashFailure { error, stats });
     }
     stats.passes_completed = 1;
     let provenance = BurnpackProvenance {
@@ -244,6 +265,85 @@ pub(crate) fn hash_local_checkpoint_provenance_audited(
         .validate()
         .map_err(|error| ProvenanceHashFailure { error, stats })?;
     Ok((provenance, stats))
+}
+
+/// Upper bound on concurrent shard-hashing workers, each owning one read buffer.
+const MAX_HASH_WORKERS: usize = 8;
+
+/// One shard's digest (or failure) and the counters of its own hash attempt.
+type ShardHashOutcome = (Result<BurnpackShardProvenance>, ProvenanceHashStats);
+
+/// Hashes every shard, on up to [`MAX_HASH_WORKERS`] threads, in manifest order.
+///
+/// SHA-256 is sequential within a file, so parallelism is across shards: each
+/// worker claims the next unhashed shard from an atomic counter and streams it
+/// through its own [`PROVENANCE_HASH_BUFFER_BYTES`] buffer. Host memory is
+/// therefore bounded by `workers * PROVENANCE_HASH_BUFFER_BYTES` (8 MiB). A
+/// single-shard checkpoint is hashed on the calling thread.
+fn hash_shards_concurrently(manifest: &CheckpointManifest) -> Vec<ShardHashOutcome> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let hash_one = |index: usize| {
+        let mut stats = ProvenanceHashStats::default();
+        let digest = hash_shard(manifest, &manifest.shards[index], &mut stats);
+        (digest, stats)
+    };
+    let shard_count = manifest.shards.len();
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_HASH_WORKERS)
+        .min(shard_count);
+    if workers <= 1 {
+        return (0..shard_count).map(hash_one).collect();
+    }
+
+    let next = AtomicUsize::new(0);
+    let mut outcomes = (0..shard_count).map(|_| None).collect::<Vec<_>>();
+    std::thread::scope(|scope| {
+        let handles = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut claimed = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        if index >= shard_count {
+                            break claimed;
+                        }
+                        claimed.push((index, hash_one(index)));
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            let claimed = handle
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            for (index, outcome) in claimed {
+                outcomes[index] = Some(outcome);
+            }
+        }
+    });
+    // Every index below `shard_count` was claimed exactly once by some worker.
+    outcomes.into_iter().flatten().collect()
+}
+
+/// Adds one shard's counters to a pass total with overflow checks.
+fn accumulate_hash_stats(
+    total: &mut ProvenanceHashStats,
+    shard: ProvenanceHashStats,
+) -> Result<()> {
+    total.bytes_hashed = total.bytes_hashed.checked_add(shard.bytes_hashed).ok_or(
+        QuantizationError::ByteLengthOverflow {
+            context: "provenance checkpoint byte count",
+        },
+    )?;
+    total.shards_hashed = total.shards_hashed.checked_add(shard.shards_hashed).ok_or(
+        QuantizationError::ByteLengthOverflow {
+            context: "provenance shard count",
+        },
+    )?;
+    total.peak_buffer_bytes = total.peak_buffer_bytes.max(shard.peak_buffer_bytes);
+    Ok(())
 }
 
 /// Verifies an artifact's exact plan binding without accessing checkpoint bytes.

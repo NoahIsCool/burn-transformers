@@ -238,6 +238,21 @@ impl QuantizedTensorMetadata {
         })
     }
 
+    /// Stable report label of the installed runtime form, Burn block-QFloat.
+    ///
+    /// Loading records `burn-qfloat-symmetric-{q8|q4}-g{G}-block-1xg`: one scale
+    /// per `[1, G]` block of an `[output, input]` matrix. Conversion records the
+    /// storage form of the same payload with
+    /// [`WeightQuantizationConfig::storage_label`].
+    #[must_use]
+    pub fn runtime_label(&self) -> String {
+        format!(
+            "burn-qfloat-symmetric-{}-g{}-block-1xg",
+            self.scheme.label(),
+            self.group_size.get()
+        )
+    }
+
     /// Validates all redundant counts and fixed layout discriminants.
     pub fn validate(&self) -> Result<()> {
         let expected_elements = checked_num_elements_u64(&self.shape)?;

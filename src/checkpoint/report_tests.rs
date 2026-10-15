@@ -107,3 +107,44 @@ fn strict_validity_ignores_explicit_exceptions() {
     report.missing.push("required.weight".into());
     assert!(!report.is_strictly_valid());
 }
+
+/// Clearing progress keeps planned categories and drops only execution records.
+#[test]
+fn without_progress_clears_only_execution_categories() {
+    let mut planned = LoadReport::new();
+    planned.missing.push("absent".into());
+    planned.record_applied("written");
+    planned.record_quantized(QuantizationRecord {
+        target: "packed".into(),
+        scheme: "label".into(),
+        bytes: 8,
+    });
+    planned.record_equivalence_verified(CheckpointEquivalenceRecord::new("copy", "owner"));
+    let cleared = planned.without_progress();
+    assert_eq!(cleared.missing, ["absent"]);
+    assert!(cleared.applied.is_empty());
+    assert!(cleared.quantized.is_empty());
+    assert!(cleared.equivalence_verified.is_empty());
+
+    let mut extended = cleared.clone();
+    extended.extend_quantized([
+        QuantizationRecord {
+            target: "z".into(),
+            scheme: "label".into(),
+            bytes: 1,
+        },
+        QuantizationRecord {
+            target: "a".into(),
+            scheme: "label".into(),
+            bytes: 2,
+        },
+    ]);
+    assert_eq!(
+        extended
+            .quantized
+            .iter()
+            .map(|record| record.target.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "z"]
+    );
+}

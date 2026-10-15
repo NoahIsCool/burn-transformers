@@ -34,8 +34,7 @@ use burn::tensor::TensorData;
 
 use super::{
     BURNPACK_QUANTIZATION_FORMAT_VERSION_V2, PackedExecutionSupport, QuantizationEligibility,
-    QuantizationError, QuantizedBurnpackArtifact, QuantizedTensorMetadata, SourceFloatDType,
-    SymmetricQuantization,
+    QuantizationError, QuantizedBurnpackArtifact, SourceFloatDType,
     burnpack::BurnpackValidationAudit,
     classify_weight_for_quantization,
     provenance::{
@@ -331,7 +330,7 @@ where
 
     match execution {
         Ok(ExecutionOutcome { mut report, stats }) => {
-            extend_report(&mut report, records);
+            report.extend_quantized(records);
             Ok(QuantizedExecutionOutcome {
                 report,
                 execution: stats,
@@ -342,7 +341,7 @@ where
         Err(failure) => {
             let failure = *failure;
             let mut report = failure.report;
-            extend_report(&mut report, records);
+            report.extend_quantized(records);
             Err(Box::new(QuantizedExecutionFailure {
                 failed_target: failure.failed_target,
                 cause: failure.cause,
@@ -754,7 +753,7 @@ fn local_audited_preflight_failure<E>(
         execution: QuantizedExecutionFailure {
             failed_target: None,
             cause: ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(error)),
-            report: unstarted_report(plan),
+            report: plan.report.without_progress(),
             execution: ExecutionStats::default(),
             packed: PackedLoadStats::default(),
             provenance,
@@ -772,7 +771,7 @@ fn source_preflight_failure<S, E>(
 where
     S: TensorSource,
 {
-    let mut report = unstarted_report(plan);
+    let mut report = plan.report.without_progress();
     let mut execution = ExecutionStats::default();
     let cause = match source.close() {
         Ok(()) => ExecutionFailureCause::Sink(QuantizedSinkError::Quantization(error)),
@@ -871,7 +870,7 @@ impl<K: TensorSink> TensorSink for QuantizedOverlaySink<'_, K> {
         )?;
         let record = QuantizationRecord {
             target: target.into(),
-            scheme: scheme_name(&metadata),
+            scheme: metadata.runtime_label(),
             bytes: payload_bytes,
         };
 
@@ -939,36 +938,6 @@ const fn source_tensor_dtype(dtype: SourceFloatDType) -> Option<TensorDType> {
         SourceFloatDType::F64 => Some(TensorDType::F64),
         SourceFloatDType::Flex32 => None,
     }
-}
-
-/// Stable report spelling for one persisted tensor's actual configuration.
-fn scheme_name(metadata: &QuantizedTensorMetadata) -> String {
-    let precision = match metadata.scheme {
-        SymmetricQuantization::Q8 => "q8",
-        SymmetricQuantization::Q4 => "q4",
-    };
-    format!(
-        "burn-qfloat-symmetric-{precision}-g{}-block-1xg",
-        metadata.group_size.get()
-    )
-}
-
-/// Clears progress categories for a failure that precedes pass-two execution.
-fn unstarted_report(plan: &LoadPlan) -> LoadReport {
-    let mut report = plan.report.clone();
-    report.applied.clear();
-    report.quantized.clear();
-    report.equivalence_verified.clear();
-    report.finalize();
-    report
-}
-
-/// Adds successfully installed packed targets without losing deterministic order.
-fn extend_report(report: &mut LoadReport, records: Vec<QuantizationRecord>) {
-    for record in records {
-        report.record_quantized(record);
-    }
-    report.finalize();
 }
 
 /// Exposes the stable executable discriminator without requiring enum matching.

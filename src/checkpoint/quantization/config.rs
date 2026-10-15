@@ -135,6 +135,36 @@ pub struct WeightQuantizationConfig {
     pub group_size: QuantizationGroupSize,
 }
 
+impl WeightQuantizationConfig {
+    /// Stable report label of the persisted storage format.
+    ///
+    /// Conversion records `symmetric-{q8|q4}-g{G}-flat-row-major`: contiguous
+    /// row-major groups of `G` values in the sidecar. Loading records the
+    /// runtime form of the same payload,
+    /// [`QuantizedTensorMetadata::runtime_label`](super::QuantizedTensorMetadata::runtime_label),
+    /// because the installed tensor is Burn block-QFloat; for aligned matrices
+    /// the two describe identical groups.
+    #[must_use]
+    pub fn storage_label(self) -> String {
+        format!(
+            "symmetric-{}-g{}-flat-row-major",
+            self.scheme.label(),
+            self.group_size.get()
+        )
+    }
+}
+
+impl SymmetricQuantization {
+    /// Lowercase precision spelling used in report labels: `q8` or `q4`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Q8 => "q8",
+            Self::Q4 => "q4",
+        }
+    }
+}
+
 impl Default for WeightQuantizationConfig {
     /// Selects symmetric Q8 with 64-value groups for the default accuracy/storage tradeoff.
     fn default() -> Self {

@@ -234,6 +234,12 @@ pub struct BurnpackArtifactSummary {
     pub artifact_bytes: u64,
     /// Largest payload materialized by a lazy snapshot during finalization.
     pub largest_materialized_tensor_bytes: u64,
+    /// Whether every packed matrix maps exactly to Burn block-QFloat.
+    ///
+    /// [`PackedExecutionSupport::Unavailable`] artifacts are valid reference
+    /// storage but every packed loader rejects them; see
+    /// [`super::UnalignedMatrixPolicy`] to keep unaligned matrices unpacked.
+    pub packed_execution: PackedExecutionSupport,
     /// Whether the platform accepted an output-directory durability sync.
     ///
     /// Publication remains atomic and successful when this is false, but a
@@ -943,6 +949,7 @@ impl QuantizedBurnpackSession {
             manifest_bytes,
             artifact_bytes,
             largest_materialized_tensor_bytes: self.stats.largest_payload_bytes,
+            packed_execution: self.manifest.packed_execution,
             parent_directory_synchronized,
         })
     }

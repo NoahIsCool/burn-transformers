@@ -1324,3 +1324,17 @@ fn unembedding_projections_are_eligible_while_embedding_tables_are_not() {
         );
     }
 }
+
+/// Storage and runtime labels name the same precision and group size.
+#[test]
+fn storage_and_runtime_labels_share_precision_and_group() {
+    let q4 = config(SymmetricQuantization::Q4, 64);
+    assert_eq!(q4.storage_label(), "symmetric-q4-g64-flat-row-major");
+    let metadata = QuantizedTensorMetadata::new(&[2, 64], SourceFloatDType::F32, q4).unwrap();
+    assert_eq!(
+        metadata.runtime_label(),
+        "burn-qfloat-symmetric-q4-g64-block-1xg"
+    );
+    let q8 = config(SymmetricQuantization::Q8, 128);
+    assert_eq!(q8.storage_label(), "symmetric-q8-g128-flat-row-major");
+}
