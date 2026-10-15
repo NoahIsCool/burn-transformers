@@ -94,6 +94,7 @@ use minijinja::{Environment, Error, ErrorKind, UndefinedBehavior, Value};
 use super::{calendar, pycompat};
 
 mod guard;
+mod limits;
 pub(crate) mod sandbox;
 
 use sandbox::{BoundedOutput, RenderBudget, RenderLimits};

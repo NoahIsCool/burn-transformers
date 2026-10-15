@@ -44,6 +44,8 @@ use minijinja::{
     value::{Kwargs, Rest, ValueKind},
 };
 
+use super::limits;
+
 /// Filter that implements `left + right` (see [`bounded_add`]).
 pub(crate) const ADD_FILTER: &str = "__bounded_add";
 /// Filter that implements `left ~ right` (see [`bounded_concat`]).
@@ -51,20 +53,11 @@ pub(crate) const CONCAT_FILTER: &str = "__bounded_concat";
 /// Filter that implements `left * right` (see [`bounded_multiply`]).
 pub(crate) const MULTIPLY_FILTER: &str = "__bounded_mul";
 
-/// Smallest rendered-prompt limit, whatever the context size.
-const OUTPUT_FLOOR_BYTES: usize = 16 * 1024 * 1024;
-/// Rendered prompt bytes allowed per byte of serialized template context.
-///
-/// Templates print each message once or twice (content plus a tool-call or
-/// reasoning echo); four times the context leaves room for markup.
-const OUTPUT_BYTES_PER_CONTEXT_BYTE: usize = 4;
 /// Longest sequence one bounded operation may build.
 ///
 /// A chat has at most a few thousand messages; a million items costs 24 MiB
 /// of `Value`s.
 const SEQUENCE_ITEMS: usize = 1 << 20;
-/// Cumulative production allowed per byte of the rendered-prompt limit.
-const TOTAL_BYTES_PER_OUTPUT_BYTE: usize = 16;
 /// Bytes charged per sequence item: one MiniJinja `Value`.
 const ITEM_BYTES: usize = size_of::<Value>();
 
@@ -93,13 +86,12 @@ impl RenderLimits {
     /// Every product saturates, so even an absurd context size yields valid
     /// (merely huge) limits rather than an overflow.
     pub(crate) fn for_context_bytes(context_bytes: usize) -> Self {
-        let output_bytes = OUTPUT_FLOOR_BYTES
-            .saturating_add(context_bytes.saturating_mul(OUTPUT_BYTES_PER_CONTEXT_BYTE));
+        let output_bytes = limits::output_limit(context_bytes);
         Self {
             output_bytes,
             value_bytes: output_bytes,
             sequence_items: SEQUENCE_ITEMS,
-            total_bytes: output_bytes.saturating_mul(TOTAL_BYTES_PER_OUTPUT_BYTE),
+            total_bytes: limits::total_budget(output_bytes),
         }
     }
 
@@ -193,7 +185,7 @@ impl RenderBudget {
         let total = self.limits.total_bytes;
         self.produced
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |produced| {
-                produced.checked_add(bytes).filter(|sum| *sum <= total)
+                limits::charged_total(produced, bytes, total)
             })
             .map(|_| ())
             .map_err(|produced| {
@@ -463,7 +455,7 @@ pub(crate) fn bounded_multiply(
                 "strings can only be multiplied with integers",
             )
         })?;
-        let bytes = text.len().checked_mul(count).ok_or_else(|| {
+        let bytes = limits::repeated_size(text.len(), count).ok_or_else(|| {
             limit_error(format!(
                 "string repetition `*` of {} bytes {count} times overflows",
                 text.len()
@@ -505,7 +497,7 @@ fn repeat_sequence(budget: &RenderBudget, sequence: &Value, count: &Value) -> Re
             "cannot repeat unsized iterables",
         )
     })?;
-    let items = length.checked_mul(count).ok_or_else(|| {
+    let items = limits::repeated_size(length, count).ok_or_else(|| {
         limit_error(format!(
             "{OPERATION} of {length} items {count} times overflows"
         ))
@@ -629,11 +621,10 @@ fn install_sized_filters(environment: &mut Environment<'_>, budget: &Arc<RenderB
             };
             // Every line gains at most `width` spaces and keeps its newline.
             let lines = text.bytes().filter(|&byte| byte == b'\n').count() + 1;
-            let bytes = lines
-                .checked_mul(resolved.saturating_add(1))
-                .and_then(|padding| padding.checked_add(text.len()))
-                .unwrap_or(usize::MAX);
-            shared.reserve_text(bytes, "indent")?;
+            shared.reserve_text(
+                limits::indentation_bound(text.len(), lines, resolved),
+                "indent",
+            )?;
             filters::indent(text, width, first, blank, kwargs)
         },
     );
@@ -708,21 +699,15 @@ fn install_sized_filters(environment: &mut Environment<'_>, budget: &Arc<RenderB
 
 /// Upper bound of `text.replace(from, to)` (or `replacen` with `count`) in bytes.
 ///
-/// An empty `from` matches before every character and at the end, so it
-/// inserts `to` up to `chars + 1` times; otherwise at most `len / len(from)`
-/// matches each grow the text by `len(to) - len(from)`.
+/// See [`limits::replacement_bound`]; this measures the strings.
 pub(crate) fn replaced_length(text: &str, from: &str, to: &str, count: Option<usize>) -> usize {
-    let matches = if from.is_empty() {
-        text.chars().count().saturating_add(1)
-    } else {
-        text.len() / from.len()
-    };
-    let matches = match count {
-        Some(count) => matches.min(count),
-        None => matches,
-    };
-    let growth = to.len().saturating_sub(from.len());
-    text.len().saturating_add(matches.saturating_mul(growth))
+    limits::replacement_bound(
+        text.len(),
+        text.chars().count(),
+        from.len(),
+        to.len(),
+        count,
+    )
 }
 
 /// Rejects printf field widths or precisions in `format` above the text allowance.
