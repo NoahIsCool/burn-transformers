@@ -12,10 +12,10 @@
 //! Every step is executed for the whole batch at once, whatever the rows' raggedness:
 //!
 //! 1. one device read validates the step's mask, token IDs, and explicit positions;
-//! 2. the host plans the append ([`plan_history_append`], verified per row by Verus): row `r`
-//!    appends its `n_r` valid tokens at slots `L_r..L_r + n_r` in input order;
+//! 2. the host plans the append ([`plan_history`], verified by Verus): row `r` appends its
+//!    `n_r` valid tokens at slots `L_r..L_r + n_r` in input order;
 //! 3. one rectangular window `[min L_r, max(L_r + n_r))` of the token and position histories is
-//!    rewritten with a gather and a masked select ([`plan_history_writes`]), so the number of
+//!    rewritten with a gather and a masked select, from the same verified plan, so the number of
 //!    kernels is independent of the batch size and of each row's padding layout;
 //! 4. the model evaluates the shortest rectangular history prefix in one stateless pass, with
 //!    each row's committed length as its validity mask;
@@ -44,7 +44,7 @@ use super::{
         BackboneOutput, causal_output, gathered_router_diagnostics, mask_hidden, select_hidden,
         token_mask_from_values, validate_forward_options,
     },
-    plan::{HistoryAppendError, plan_history_append, plan_history_writes},
+    plan::{HistoryAppendError, plan_history},
 };
 
 /// Model role encoded into state so equal-looking causal and seq2seq specs cannot be mixed.
@@ -208,7 +208,9 @@ impl<B: Backend> ModularDecodeState<B> {
         let host = HostInput::read(&input, batch, step, "custom decode input")?;
         validate_decode_token_ids(&host.tokens, vocabulary_size)?;
         let validity = host.mask.unwrap_or_else(|| vec![true; batch * step]);
-        let plan = plan_history_append(
+        // The verified planner requires one validity cell per row and column.
+        debug_assert_eq!(validity.len(), self.metadata.lengths().len() * step);
+        let (plan, writes) = plan_history(
             &validity,
             step,
             self.metadata.lengths(),
@@ -224,7 +226,6 @@ impl<B: Backend> ModularDecodeState<B> {
                 self.model_spec.max_position_embeddings,
             )?;
         }
-        let writes = plan_history_writes(&plan, &validity, step);
         let window = writes.start..writes.end;
         let width = window.len();
         let sources = Tensor::<B, 2, Int>::from_data(

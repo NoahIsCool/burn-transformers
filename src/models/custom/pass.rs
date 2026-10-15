@@ -66,7 +66,7 @@ use crate::{
     },
 };
 
-use super::plan::{displacement_table, slot_displacement};
+use super::plan::{portable_displacement_table, slot_displacement};
 
 /// Encoder states read by every decoder cross-attention branch of a pass.
 #[derive(Clone, Debug)]
@@ -335,8 +335,7 @@ impl<'a, B: Backend> StackPass<'a, B> {
         &self,
         buckets: T5RelativePositionBuckets,
     ) -> Result<Tensor<B, 3, Int>> {
-        let table = displacement_table(buckets.max_distance(), self.evaluated_context)
-            .filter(|table| table.length <= PORTABLE_INDEX_LIMIT)
+        let table = portable_displacement_table(buckets.max_distance(), self.evaluated_context)
             .ok_or_else(|| {
                 Error::configuration(
                     "custom.t5_relative_bias",
@@ -375,8 +374,8 @@ impl<'a, B: Backend> StackPass<'a, B> {
         };
         let [rows, tokens] = positions.dims();
         let plane = [rows, tokens, tokens];
-        // `radius < evaluated_context`, which validated positions bound, so it
-        // fits the backend integer dtype.
+        // The verified table bounds `2R + 1 <= i32::MAX`, so the radius fits
+        // `i64` and every slot fits the backend integer dtype.
         let radius = table.radius as i64;
         let keys = positions.clone().reshape([rows, 1, tokens]).expand(plane);
         let queries = positions.reshape([rows, tokens, 1]).expand(plane);
@@ -516,9 +515,6 @@ impl<'a, B: Backend> StackPass<'a, B> {
         plane
     }
 }
-
-/// Largest displacement table, so every slot fits a signed 32-bit integer dtype.
-const PORTABLE_INDEX_LIMIT: usize = i32::MAX as usize;
 
 /// The explicit self-attention override for `layer`: its own policy, else the context default.
 pub(super) fn explicit_self_policy<B: Backend>(

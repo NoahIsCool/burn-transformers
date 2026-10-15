@@ -89,6 +89,23 @@ fn displacement_table_clamps_to_the_shorter_of_distance_and_context() {
     );
 }
 
+/// Portable tables keep the verified table only while its length fits `i32::MAX`.
+#[test]
+fn portable_displacement_tables_stop_at_the_32_bit_index_limit() {
+    let limit = i32::MAX as usize;
+    assert_eq!(portable_displacement_table(128, 0), None);
+    assert_eq!(
+        portable_displacement_table(128, 10),
+        displacement_table(128, 10)
+    );
+    // `R = i32::MAX / 2` gives `2R + 1 = i32::MAX`, the largest portable table.
+    let largest = portable_displacement_table(limit / 2, usize::MAX).unwrap();
+    assert_eq!((largest.radius, largest.length), (limit / 2, limit));
+    assert_eq!(portable_displacement_table(limit / 2 + 1, usize::MAX), None);
+    assert!(displacement_table(limit / 2 + 1, usize::MAX).is_some());
+    assert_eq!(portable_displacement_table(usize::MAX, usize::MAX), None);
+}
+
 /// Slots clamp out-of-range displacements and invert the stored displacement exactly.
 #[test]
 fn displacement_slots_clamp_and_invert() {
@@ -162,6 +179,40 @@ fn history_appends_report_policy_violations_in_order() {
     assert_eq!(plan.slots, vec![2, 0, 0, 0, 1, 2]);
 }
 
+/// The scalar helpers count, locate zeros, and split rows exactly.
+#[test]
+fn history_helpers_count_and_search_rows() {
+    assert_eq!(count_valid_cells(&[]), 0);
+    assert_eq!(count_valid_cells(&[true, false, true, true]), 3);
+    assert_eq!(
+        grid_row_counts(&[true, false, false, false, true, true], 2, 3),
+        vec![1, 0, 2]
+    );
+    assert_eq!(grid_row_counts(&[], 0, 4), vec![0, 0, 0, 0]);
+    assert_eq!(first_zero(&[3, 1, 0, 0]), Some(2));
+    assert_eq!(first_zero(&[3, 1]), None);
+    assert_eq!(first_nonzero(&[0, 0, 4, 1]), Some(2));
+    assert_eq!(first_nonzero(&[0, 0]), None);
+    assert_eq!(first_nonzero(&[]), None);
+}
+
+/// Degenerate grids follow the policy order instead of panicking.
+#[test]
+fn history_appends_without_cells_report_the_first_policy() {
+    assert_eq!(
+        plan_history_append(&[], 3, &[], 4, true),
+        Err(HistoryAppendError::EmptyStep)
+    );
+    assert_eq!(
+        plan_history_append(&[], 0, &[1, 2], 4, true),
+        Err(HistoryAppendError::EmptyRow { row: 0 })
+    );
+    assert_eq!(
+        plan_history_append(&[], 0, &[1, 2], 4, false),
+        Err(HistoryAppendError::EmptyStep)
+    );
+}
+
 /// The window spans the appended slots of every advancing row and nothing else.
 #[test]
 fn history_writes_cover_exactly_the_appended_slots() {
@@ -207,6 +258,18 @@ proptest::proptest! {
             &planned,
             &reference_append(validity, step, lengths, capacity, require_every_row)
         );
+        let combined = plan_history(validity, step, lengths, capacity, require_every_row);
+        match (&planned, &combined) {
+            (Ok(plan), Ok((combined_plan, combined_writes))) => {
+                proptest::prop_assert_eq!(plan, combined_plan);
+                proptest::prop_assert_eq!(
+                    &plan_history_writes(plan, validity, step),
+                    combined_writes
+                );
+            }
+            (Err(error), Err(combined_error)) => proptest::prop_assert_eq!(error, combined_error),
+            _ => proptest::prop_assert!(false, "plan_history disagrees with its parts"),
+        }
         if let Ok(plan) = planned {
             let writes = plan_history_writes(&plan, validity, step);
             let width = writes.end - writes.start;
