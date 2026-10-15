@@ -166,6 +166,19 @@ pub(crate) fn decoded_shape(blocks: &[u64], scales: &[u64]) -> Result<Vec<u64>, 
 #[cfg(verus_keep_ghost)]
 verus! {
 
+/// Specification: the shape pairs [`mxfp4_geometry`] accepts, and no others.
+///
+/// Blocks `[E, R, G, 16]`, scales `[E, R, G]`, nonzero `E`, `R`, `G`, and a
+/// decoded value count `E · R · 32 G` that fits both `usize` and `u64`.
+pub(crate) open spec fn accepts(blocks: Seq<u64>, scales: Seq<u64>) -> bool {
+    &&& blocks.len() == 4 && blocks[3] == 16
+    &&& scales.len() == 3
+    &&& scales[0] == blocks[0] && scales[1] == blocks[1] && scales[2] == blocks[2]
+    &&& blocks[0] > 0 && blocks[1] > 0 && blocks[2] > 0
+    &&& blocks[0] * blocks[1] * (32 * blocks[2]) <= usize::MAX
+    &&& blocks[0] * blocks[1] * (32 * blocks[2]) <= u64::MAX
+}
+
 /// Specification: geometry `g` describes `[e, r, q, 16]` blocks and fits every count in `usize`.
 pub(crate) open spec fn describes(g: Mxfp4Geometry) -> bool {
     &&& g.experts > 0 && g.rows > 0 && g.groups > 0
@@ -214,6 +227,7 @@ pub proof fn lemma_mul3_bounds(a: int, b: int, c: int, i: int, j: int, k: int)
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(geometry =>
     ensures
+        geometry matches Ok(_) <==> accepts(blocks@, scales@),
         geometry matches Ok(g) ==> {
             &&& describes(g)
             &&& blocks@.len() == 4 && scales@.len() == 3
@@ -238,6 +252,15 @@ pub(crate) fn mxfp4_geometry(
     }
     if blocks[0] == 0 || blocks[1] == 0 || blocks[2] == 0 {
         return Err(Mxfp4ShapeError::Empty);
+    }
+    // Completeness: with nonzero axes every partial product divides the value
+    // count, so a count within range overflows none of the checks below.
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert(32 * blocks@[2] <= blocks@[0] * blocks@[1] * (32 * blocks@[2])) by (nonlinear_arith)
+            requires blocks@[0] >= 1, blocks@[1] >= 1, blocks@[2] >= 1;
+        assert(blocks@[0] * blocks@[1] <= blocks@[0] * blocks@[1] * (32 * blocks@[2])) by (nonlinear_arith)
+            requires blocks@[0] >= 1, blocks@[1] >= 1, blocks@[2] >= 1;
     }
     let limit = if (usize::MAX as u64) < u64::MAX {
         usize::MAX as u64

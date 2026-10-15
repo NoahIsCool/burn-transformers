@@ -2,10 +2,11 @@
 //!
 //! Verifies, in place, the specifications attached to `src/checkpoint/mxfp4.rs`:
 //!
-//! - `mxfp4_geometry` accepts exactly `[E, R, G, 16]` blocks with `[E, R, G]`
-//!   scales and nonzero axes, and only when the decoded value count
-//!   `E · R · 32 G` fits both `usize` and `u64`; the returned extents equal
-//!   the shape's axes and `columns == 32 G`;
+//! - `mxfp4_geometry` returns `Ok` if and only if `accepts` holds: `[E, R, G,
+//!   16]` blocks with `[E, R, G]` scales and nonzero axes whose decoded value
+//!   count `E · R · 32 G` fits both `usize` and `u64` (soundness and
+//!   completeness, so it neither admits a bad shape nor refuses a good one);
+//!   the returned extents equal the shape's axes and `columns == 32 G`;
 //! - `values_of` computes that count without overflow;
 //! - `fp4_codes` splits a byte into its low nibble (`byte mod 16`, the even
 //!   decoded column) and high nibble (`byte / 16`, the odd column);
