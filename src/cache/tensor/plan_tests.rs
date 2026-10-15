@@ -65,6 +65,17 @@ fn write_end_checks_overflow_then_capacity() {
     );
 }
 
+/// Checked ends are exact and name the first overflowing row of the zipped inputs.
+#[test]
+fn checked_ends_report_first_overflow() {
+    assert_eq!(checked_ends(&[3, 0], &[1, 2]), Ok(vec![4, 2]));
+    assert_eq!(
+        checked_ends(&[3, usize::MAX, usize::MAX], &[1, 1, 1]),
+        Err(1)
+    );
+    assert_eq!(checked_ends(&[3, 4], &[1]), Ok(vec![4]));
+}
+
 /// Staging ends are exact within capacity and report the saturated request otherwise.
 #[test]
 fn staging_end_reports_saturated_request() {

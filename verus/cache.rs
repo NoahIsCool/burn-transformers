@@ -25,7 +25,8 @@
 //! * `src/cache/tensor/plan.rs`: integer planning shared by the tensor
 //!   caches. Allocation scalar counts are exact running products checked
 //!   against overflow, the portable `i32` element limit, and byte size;
-//!   append ends are exact and within capacity; the staged-commit scan
+//!   append ends (and checked row ends) are exact and within capacity; the
+//!   staged-commit scan
 //!   accepts exactly fully staged, in-proposal prefixes and names the first
 //!   failure; truncation clears exactly the rows reset from history; beam
 //!   sources and host index vectors are checked and converted exactly;
@@ -41,6 +42,14 @@
 //!   reads keep `min(L, W)` positions; working reads check every end and
 //!   split each window exactly as the verified working window does; mirrored
 //!   runs read the slot of each matching position below `2W`.
+//! * `src/cache/tensor/kv/batch/layout.rs`: batched write layouts. Append
+//!   layouts are accepted exactly when every row fits its block and the
+//!   position space; left padding and ends are exact; a staging write is
+//!   accepted exactly when every active row passes its cursor, staging, and
+//!   capacity checks and then updates exactly the active rows; linear
+//!   staging runs partition the active rows and address each row's own
+//!   columns and proposal offsets; a step's token table marks exactly each
+//!   row's columns with their absolute positions.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 
@@ -61,6 +70,8 @@ pub mod tensor_plan;
 pub mod recurrent_plan;
 #[path = "../src/cache/tensor/kv/plan.rs"]
 pub mod kv_plan;
+#[path = "../src/cache/tensor/kv/batch/layout.rs"]
+pub mod kv_batch_layout;
 
 /// Mirrors the crate paths `crate::cache::*` used by the tensor-cache planners.
 pub mod cache {

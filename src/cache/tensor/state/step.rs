@@ -62,9 +62,11 @@ use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 use crate::cache::SequenceLengths;
 use crate::cache::identity::IdentityToken;
 use crate::cache::tensor::kv::{
-    KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment, KvCacheRead,
+    KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment, KvCacheRead, left_padded_columns,
+    token_segment_table,
 };
 use crate::cache::tensor::kv::{PreparedNativeKvBatchWrite, PreparedNativeKvWrite};
+use crate::cache::tensor::plan::{checked_ends, portable_indices};
 use crate::cache::tensor::recurrent::{
     PreparedRecurrentBatchWrite, PreparedRecurrentStage, PreparedRecurrentStateWrite,
     RecurrentStateRead,
@@ -466,21 +468,16 @@ impl<B: Backend> TensorStepWrites<B> {
     fn columns(&self, block: usize) -> TensorCacheResult<Vec<usize>> {
         match &self.alignment {
             TokenAlignment::RightPadded => Ok(vec![0; self.counts.len()]),
-            TokenAlignment::LeftPadded => self
-                .counts
-                .iter()
-                .enumerate()
-                .map(|(sequence, &count)| {
-                    block
-                        .checked_sub(count)
-                        .ok_or(TensorCacheError::AppendOutsideBlock {
-                            sequence,
-                            column: 0,
-                            count,
-                            block,
-                        })
+            TokenAlignment::LeftPadded => {
+                left_padded_columns(&self.counts, block).map_err(|sequence| {
+                    TensorCacheError::AppendOutsideBlock {
+                        sequence,
+                        column: 0,
+                        count: self.counts[sequence],
+                        block,
+                    }
                 })
-                .collect(),
+            }
             TokenAlignment::Columns(columns) => Ok(columns.clone()),
         }
     }
@@ -777,19 +774,13 @@ impl<B: Backend> TensorDecodeState<B> {
             cache.spec().in_place_staging(),
             lengths.has_active_transaction(),
         )?;
-        let ends = lengths
-            .working_lengths()
-            .iter()
-            .zip(&step.counts)
-            .map(|(&length, &count)| {
-                length
-                    .checked_add(count)
-                    .ok_or(TensorCacheError::WritePositionOverflow {
-                        start: length,
-                        tokens: count,
-                    })
-            })
-            .collect::<TensorCacheResult<Vec<_>>>()?;
+        let working = lengths.working_lengths();
+        let ends = checked_ends(working, &step.counts).map_err(|row| {
+            TensorCacheError::WritePositionOverflow {
+                start: working[row],
+                tokens: step.counts[row],
+            }
+        })?;
         cache.plan_batch_read(&ends)
     }
 
@@ -939,27 +930,16 @@ impl<B: Backend> TensorDecodeState<B> {
         let [rows, _, block, _] = keys.dims();
         validate_count(step.counts.len(), rows)?;
         let append = step.append(lengths.working_lengths(), block)?;
-        let mut positions = Vec::with_capacity(rows * block);
-        let mut valid = Vec::with_capacity(rows * block);
-        for row in 0..rows {
-            let column = append.columns()[row];
-            let tokens = column..column + append.counts()[row];
-            for slot in 0..block {
-                let inside = tokens.contains(&slot);
-                let position = if inside {
-                    append.starts()[row] + (slot - column)
-                } else {
-                    0
-                };
-                positions.push(i32::try_from(position).map_err(|_| {
-                    TensorCacheError::TensorIndexOverflow {
-                        axis: "key position",
-                        index: position,
-                    }
-                })?);
-                valid.push(inside);
+        // `append` passed the verified layout validation, so the verified
+        // table builder's precondition holds; `rows == append.rows()` above.
+        let (positions, valid) =
+            token_segment_table(append.starts(), append.columns(), append.counts(), block);
+        let positions = portable_indices(&positions).map_err(|index| {
+            TensorCacheError::TensorIndexOverflow {
+                axis: "key position",
+                index: positions[index],
             }
-        }
+        })?;
         let device = keys.device();
         let all_valid = valid.iter().all(|&inside| inside);
         Ok(KvBatchSegment::from_parts(

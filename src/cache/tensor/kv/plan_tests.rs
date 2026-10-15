@@ -69,7 +69,8 @@ fn working_reads_split_windows_and_reject_first_bad_row() {
     assert_eq!(rows.retained, [5..9, 0..2]);
     assert_eq!(rows.windows[0].staged_skip, 0);
     let full = working_read_rows(&[6], &[3], None, 16).expect("within capacity");
-    assert_eq!(full.retained, [0..9]);
+    assert_eq!(full.retained.len(), 1);
+    assert_eq!(full.retained[0], 0..9);
     assert_eq!(full.keep, [6]);
     assert_eq!(
         working_read_rows(&[1, 15, 20], &[1, 2, 0], Some(4), 16),

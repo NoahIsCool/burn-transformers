@@ -42,8 +42,8 @@ use super::{
 mod batch;
 mod plan;
 
-pub(crate) use batch::PreparedNativeKvBatchWrite;
 pub use batch::{KvBatchAppend, KvBatchRead, KvBatchReadPlan, KvBatchSegment};
+pub(crate) use batch::{PreparedNativeKvBatchWrite, left_padded_columns, token_segment_table};
 pub use plan::KvCacheStorage;
 
 use plan::{TimeSlotViolation, mirrored_window_slots, visible_count, working_window};

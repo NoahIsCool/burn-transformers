@@ -250,6 +250,58 @@ pub(crate) fn write_end(
     }
 }
 
+/// Returns each row's exclusive end `start + count`, rejecting the first overflow.
+///
+/// Rows beyond the shorter input are omitted, matching a zipped scan.
+///
+/// Proved: succeeds exactly when every sum is representable, then returns
+/// every sum exactly; otherwise names the first overflowing row.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        ({
+            let rows = if starts.len() <= counts.len() { starts.len() } else { counts.len() };
+            &&& result is Ok <==> forall|r: int| 0 <= r < rows ==>
+                #[trigger] starts[r] + counts[r] <= usize::MAX
+            &&& result matches Ok(ends) ==> {
+                &&& ends.len() == rows
+                &&& forall|r: int| 0 <= r < rows ==> #[trigger] ends[r] == starts[r] + counts[r]
+            }
+            &&& result matches Err(row) ==> {
+                &&& row < rows
+                &&& starts[row as int] + counts[row as int] > usize::MAX
+                &&& forall|r: int| 0 <= r < row ==> #[trigger] starts[r] + counts[r] <= usize::MAX
+            }
+        }),
+))]
+pub(crate) fn checked_ends(starts: &[usize], counts: &[usize]) -> Result<Vec<usize>, usize> {
+    let rows = if starts.len() <= counts.len() {
+        starts.len()
+    } else {
+        counts.len()
+    };
+    let mut ends: Vec<usize> = Vec::with_capacity(rows);
+    let mut row = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= rows,
+            rows <= starts.len(),
+            rows <= counts.len(),
+            ends.len() == row,
+            forall|r: int| 0 <= r < row ==> #[trigger] starts[r] + counts[r] <= usize::MAX,
+            forall|r: int| 0 <= r < row ==> #[trigger] ends[r] == starts[r] + counts[r],
+        decreases rows - row,
+    ))]
+    while row < rows {
+        match starts[row].checked_add(counts[row]) {
+            Some(end) => ends.push(end),
+            None => return Err(row),
+        }
+        row += 1;
+    }
+    Ok(ends)
+}
+
 /// Returns the staged length `staged + count` after appending to a staging buffer.
 ///
 /// Proved: the new length is exact and accepted exactly when it is

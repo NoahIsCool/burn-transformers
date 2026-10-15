@@ -410,11 +410,7 @@ pub fn sliding_window_range(sequence_length: usize, window: NonZeroUsize) -> Ran
             == if sequence_length <= window { sequence_length } else { window },
 ))]
 fn sliding_window_start(sequence_length: usize, window: usize) -> usize {
-    if sequence_length >= window {
-        sequence_length - window
-    } else {
-        0
-    }
+    sequence_length.saturating_sub(window)
 }
 
 /// Plans physical writes for an appended token chunk in a standard ring.

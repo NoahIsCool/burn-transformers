@@ -74,6 +74,14 @@ use super::{
     validate_plane_count, validate_sequence, validate_tensor, validate_write_end,
 };
 
+mod layout;
+
+use layout::{
+    AppendViolation, StageViolation, append_ends, linear_stage_runs, plan_stage_updates,
+    validate_append_layout,
+};
+pub(crate) use layout::{left_padded_columns, token_segment_table};
+
 // Write layouts.
 
 /// Per-row placement of one step's new tokens in a batched input block.
@@ -123,20 +131,14 @@ impl KvBatchAppend {
         counts: &[usize],
         block: usize,
     ) -> TensorCacheResult<Self> {
-        let columns = counts
-            .iter()
-            .enumerate()
-            .map(|(sequence, &count)| {
-                block
-                    .checked_sub(count)
-                    .ok_or(TensorCacheError::AppendOutsideBlock {
-                        sequence,
-                        column: 0,
-                        count,
-                        block,
-                    })
-            })
-            .collect::<TensorCacheResult<Vec<_>>>()?;
+        let columns = left_padded_columns(counts, block).map_err(|sequence| {
+            TensorCacheError::AppendOutsideBlock {
+                sequence,
+                column: 0,
+                count: counts[sequence],
+                block,
+            }
+        })?;
         Self::with_columns(starts, &columns, counts, block)
     }
 
@@ -152,33 +154,28 @@ impl KvBatchAppend {
         counts: &[usize],
         block: usize,
     ) -> TensorCacheResult<Self> {
-        for actual in [starts.len(), columns.len()] {
-            if actual != counts.len() {
-                return Err(DecodeStateError::SequenceCountMismatch {
-                    expected: counts.len(),
-                    actual,
+        // The verified validator accepts exactly the layouts whose rows fit
+        // the block and the position space; every other method relies on it.
+        validate_append_layout(starts, columns, counts, block).map_err(
+            |violation| match violation {
+                AppendViolation::CountMismatch { expected, actual } => {
+                    DecodeStateError::SequenceCountMismatch { expected, actual }.into()
                 }
-                .into());
-            }
-        }
-        for (sequence, ((&start, &column), &count)) in
-            starts.iter().zip(columns).zip(counts).enumerate()
-        {
-            if column.checked_add(count).is_none_or(|end| end > block) {
-                return Err(TensorCacheError::AppendOutsideBlock {
+                AppendViolation::OutsideBlock {
+                    sequence,
+                    column,
+                    count,
+                } => TensorCacheError::AppendOutsideBlock {
                     sequence,
                     column,
                     count,
                     block,
-                });
-            }
-            start
-                .checked_add(count)
-                .ok_or(TensorCacheError::WritePositionOverflow {
-                    start,
-                    tokens: count,
-                })?;
-        }
+                },
+                AppendViolation::PositionOverflow { start, tokens } => {
+                    TensorCacheError::WritePositionOverflow { start, tokens }
+                }
+            },
+        )?;
         Ok(Self {
             starts: starts.to_vec(),
             columns: columns.to_vec(),
@@ -220,12 +217,8 @@ impl KvBatchAppend {
     /// Returns each row's exclusive absolute end `start + count`.
     #[must_use]
     pub fn ends(&self) -> Vec<usize> {
-        // Construction proved that every sum fits in `usize`.
-        self.starts
-            .iter()
-            .zip(&self.counts)
-            .map(|(&start, &count)| start + count)
-            .collect()
+        // Construction validated that every sum fits in `usize`.
+        append_ends(&self.starts, &self.counts)
     }
 }
 
@@ -472,32 +465,41 @@ impl<B: Backend> NativeKvCache<B> {
         source_offset: usize,
     ) -> TensorCacheResult<StagePlan> {
         let staged = &self.staged_lengths[layer];
-        let mut staged_updates = Vec::new();
-        for (sequence, (&start, &count)) in starts.iter().zip(counts).enumerate() {
-            if count == 0 {
-                continue;
-            }
-            if let Some(baseline) = &self.staging_baseline {
-                let expected = baseline[sequence] + staged[sequence];
-                if start != expected {
-                    return Err(TensorCacheError::TransactionCursorMismatch {
-                        sequence,
-                        cursor: "proposal start",
-                        expected,
-                        actual: start,
-                    });
+        let staging_capacity = self.spec.staging_capacity();
+        let capacity = self.config.capacity();
+        // The verified planner checks each active row's cursor, staging
+        // capacity, and logical capacity and lists exactly the active rows.
+        let staged_updates = plan_stage_updates(
+            starts,
+            counts,
+            staged,
+            self.staging_baseline.as_deref(),
+            staging_capacity,
+            capacity,
+        )
+        .map_err(|violation| match violation {
+            StageViolation::CursorMismatch {
+                sequence,
+                expected,
+                actual,
+            } => TensorCacheError::TransactionCursorMismatch {
+                sequence,
+                cursor: "proposal start",
+                expected,
+                actual,
+            },
+            StageViolation::StagingCapacityExceeded { requested } => {
+                TensorCacheError::StagingCapacityExceeded {
+                    requested,
+                    capacity: staging_capacity,
                 }
             }
-            let end = staged[sequence]
-                .checked_add(count)
-                .filter(|&end| end <= self.spec.staging_capacity())
-                .ok_or(TensorCacheError::StagingCapacityExceeded {
-                    requested: staged[sequence].saturating_add(count),
-                    capacity: self.spec.staging_capacity(),
-                })?;
-            validate_write_end(start, count, self.config.capacity())?;
-            staged_updates.push((sequence, end));
-        }
+            StageViolation::WriteEnd {
+                start,
+                tokens,
+                violation,
+            } => TensorCacheError::write_end(start, tokens, capacity, violation),
+        })?;
         if self.spec.in_place_staging() {
             // In-place proposals land at their absolute positions, which the
             // cursor check above tied to `baseline + staged`.
@@ -515,15 +517,17 @@ impl<B: Backend> NativeKvCache<B> {
             });
         }
         self.staged_planes(self.layer(layer)?)?;
-        // Separate staging is linear: proposal offset `staged_b + j`.
-        let runs = row_runs(staged, columns, counts)
+        // Separate staging is linear: proposal offset `staged_b + j`. The
+        // checks above bound every active row's offsets by the staging
+        // capacity, so the verified run planner's preconditions hold.
+        let runs = linear_stage_runs(staged, columns, counts, source_offset)
             .into_iter()
             .map(|run| PreparedRun {
-                rows: run.first_row..run.end_row,
-                source_rows: run.first_row - source_offset..run.end_row - source_offset,
+                rows: run.rows,
+                source_rows: run.source_rows,
                 segments: vec![PreparedDirectSegment {
-                    input: run.column..run.column + run.count,
-                    destinations: core::iter::once(run.start..run.start + run.count).collect(),
+                    input: run.input,
+                    destinations: core::iter::once(run.destination).collect(),
                 }],
             })
             .collect();
