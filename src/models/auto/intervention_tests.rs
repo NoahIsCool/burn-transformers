@@ -13,9 +13,29 @@ use crate::{
     intervention::{Hooks, Layer, Stack},
     models::{
         deepseek_v2::model::tests_support as deepseek,
+        gemma::{GemmaConfig, GemmaForCausalLm, GemmaVariant},
         llama::{LlamaFamilyConfig, LlamaForCausalLm, LlamaVariant},
     },
 };
+
+/// Tiny Gemma 3 text configuration with one local and one global layer.
+fn tiny_gemma() -> GemmaConfig {
+    GemmaConfig {
+        vocab_size: 32,
+        hidden_size: 16,
+        intermediate_size: 24,
+        num_hidden_layers: 2,
+        num_attention_heads: 4,
+        num_key_value_heads: 2,
+        head_dim: 4,
+        max_position_embeddings: 32,
+        sliding_window: 4,
+        pad_token_id: None,
+        bos_token_id: None,
+        eos_token_id: None,
+        ..GemmaConfig::new(GemmaVariant::Gemma3Text)
+    }
+}
 
 /// Tiny Qwen3 configuration of the Llama family with two layers.
 fn tiny_llama() -> LlamaFamilyConfig {
@@ -61,6 +81,9 @@ fn tiny_family_model(
             .into(),
         AutoCausalConfig::Llama => LlamaForCausalLm::init(tiny_llama(), device)
             .expect("tiny Llama-family model")
+            .into(),
+        AutoCausalConfig::Gemma => GemmaForCausalLm::init(tiny_gemma(), device)
+            .expect("tiny Gemma model")
             .into(),
     }
 }

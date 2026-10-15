@@ -67,6 +67,7 @@ use crate::{
 
 use super::{
     deepseek_v2::{DeepseekV2Config, DeepseekV2DecodeState, DeepseekV2ForCausalLm},
+    gemma::{GemmaConfig, GemmaDecodeState, GemmaForCausalLm},
     llama::{LlamaDecodeState, LlamaFamilyConfig, LlamaForCausalLm},
     muse_glimmer::{MuseGlimmerDecodeState, MuseGlimmerForCausalLm, MuseGlimmerTextConfig},
     nemotron_h::{NemotronHConfig, NemotronHDecodeState, NemotronHForCausalLm},
@@ -601,6 +602,15 @@ causal_registry! {
         model: LlamaForCausalLm,
         config: LlamaFamilyConfig,
         state: LlamaDecodeState,
+        experiments: supported,
+    },
+    /// Gemma 2 and Gemma 3 text decoders, including the text tower of multimodal Gemma 3.
+    Gemma {
+        model_type: "gemma2",
+        aliases: ["gemma3_text"],
+        model: GemmaForCausalLm,
+        config: GemmaConfig,
+        state: GemmaDecodeState,
         experiments: supported,
     },
 }

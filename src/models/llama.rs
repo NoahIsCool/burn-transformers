@@ -41,7 +41,10 @@
 //! * `checkpoint` / `load`: the strict tensor contract (every name listed)
 //!   and the streamed parameter installation;
 //! * [`model`]: the graph, stateless and hooked forward passes, staged
-//!   execution, and genuinely batched cached prefill/decode.
+//!   execution, and genuinely batched cached prefill/decode. These execution
+//!   paths are written once against a crate-private dense-decoder interface
+//!   (`model::graph`), which the Gemma family ([`crate::models::gemma`])
+//!   also implements, so both families share one engine.
 //!
 //! # Support status
 //!
