@@ -35,7 +35,9 @@
 //! `modeling_rope_utils.py`, `masking_utils.py`, and
 //! `utils/output_capturing.py`. The committed tiny goldens
 //! (`tests/fixtures/tiny_goldens/{gemma2,gemma3-text}`) were generated with
-//! that exact pair by `scripts/generate_tiny_goldens.py`.
+//! that exact pair by `scripts/generate_tiny_goldens.py`. The real-checkpoint
+//! gate (`tests/gemma_artifacts.rs`) uses `google/gemma-3-4b-it` at revision
+//! `093f9f388b31de276ce2de164bdc2081324b9767`.
 //!
 //! # Module map
 //!
@@ -54,11 +56,17 @@
 //! # Support status
 //!
 //! Implemented and validated against the pinned reference on tiny
-//! random-weight checkpoints of both types (`tests/tiny_goldens_gemma.rs`:
-//! full-vocabulary logits at every valid position of an unpadded and a
-//! left-padded row, per-layer hidden states, cached/uncached and
-//! batched-ragged agreement, greedy continuations; largest logit gap
-//! `1.5e-6`). Real-checkpoint acceptance is a separate gate.
+//! random-weight checkpoints of both types (full-vocabulary logits at every
+//! valid position of an unpadded and a left-padded row, per-layer hidden
+//! states, cached/uncached and batched-ragged agreement, greedy
+//! continuations; largest logit gap `1.5e-6`) and, on Flex/F32, against a
+//! locally generated Transformers 5.2.0 reference for the
+//! `google/gemma-3-4b-it` text tower (`tests/gemma_artifacts.rs`): strict
+//! loading with exactly the 439 vision-tower tensors ignored, every prompt
+//! position's full-vocabulary logits within `1.7e-4`, a left-padded batched
+//! prefill within `1.1e-4`, and all 32 cached greedy tokens identical.
+//! Real-checkpoint Metal/F16 acceptance and Gemma 2 real weights are
+//! separate gates.
 
 mod architecture;
 mod checkpoint;
