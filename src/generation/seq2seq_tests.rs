@@ -12,7 +12,7 @@ use burn::{
 };
 
 use super::{
-    BeamHypothesis, BeamSearchConfig, Seq2SeqBeamSearchRequest, completed_order,
+    BeamHypothesis, BeamSearchConfig, EarlyStopping, Seq2SeqBeamSearchRequest, completed_order,
     generate_seq2seq_beam_search,
 };
 use crate::generation::metadata;
@@ -552,13 +552,16 @@ fn request(device: &TestDevice, search: BeamSearchConfig) -> Seq2SeqBeamSearchRe
 }
 
 /// Returns standard scripted search controls with no EOS termination.
+///
+/// Uses exhaustive (`"never"`) stopping so scripted traces show every step a
+/// search to the length bound needs; heuristic tests opt in explicitly.
 fn search(max_new_tokens: usize, beams: usize) -> BeamSearchConfig {
     BeamSearchConfig {
         max_new_tokens,
         num_beams: beams,
         num_return_sequences: beams,
         length_penalty: 1.0,
-        early_stopping: false,
+        early_stopping: EarlyStopping::Never,
         eos_token_ids: Vec::new(),
         pad_token_id: 0,
     }
@@ -703,7 +706,7 @@ fn eager_early_stopping_avoids_unnecessary_decode() {
     let trace = Arc::clone(&model.trace);
     let mut config = search(4, 2);
     config.eos_token_ids = vec![1, 2];
-    config.early_stopping = true;
+    config.early_stopping = EarlyStopping::Eager;
     let output =
         generate_seq2seq_beam_search(&model, request(&device, config)).expect("early beam search");
     assert_eq!(output.sequences[0][0].token_ids, vec![1]);
@@ -734,7 +737,7 @@ fn eager_stopping_ignores_eos_below_top_beam_ranks() {
     // and 3. Transformers 5.2 therefore ignores both initial EOS rows;
     // they must not fill the eager completion pool before one decode.
     config.eos_token_ids = vec![3, 4];
-    config.early_stopping = true;
+    config.early_stopping = EarlyStopping::Eager;
     let output = generate_seq2seq_beam_search(&model, request(&device, config))
         .expect("lower-frontier EOS beam search");
     assert_eq!(output.sequences[0].len(), 2);
@@ -787,7 +790,7 @@ fn batched_finished_rows_use_pad_noops_during_peer_decode() {
     let mut config = search(3, 1);
     config.num_return_sequences = 1;
     config.eos_token_ids = vec![1];
-    config.early_stopping = true;
+    config.early_stopping = EarlyStopping::Eager;
     let request = Seq2SeqBeamSearchRequest {
         source: CausalLmInput {
             token_ids: Tensor::<TestBackend, 2, Int>::from_ints([[4, 0], [3, 0]], &device),
@@ -1399,7 +1402,7 @@ fn ragged_positioned_beams_keep_finished_cache_rows_inert() {
     );
     let mut config = search(3, 1);
     config.eos_token_ids = vec![1];
-    config.early_stopping = true;
+    config.early_stopping = EarlyStopping::Eager;
     let request = Seq2SeqBeamSearchRequest {
         source: CausalLmInput {
             token_ids: Tensor::from_ints([[4, 0], [3, 0]], &device),
@@ -1818,11 +1821,19 @@ fn finished_pool_finality_uses_the_length_endpoints() {
     ));
 }
 
+/// Whether every reorder index stays inside its destination's group of `beams` rows.
+fn preserves_groups(parent_indices: &[usize], beams: usize) -> bool {
+    parent_indices
+        .iter()
+        .enumerate()
+        .all(|(destination, &parent)| parent / beams == destination / beams)
+}
+
 /// Destinations and parents built from beam rows never leave their source group.
 #[test]
 fn reorder_group_check_detects_cross_source_parents() {
-    assert!(super::reorder_preserves_groups(&[0, 0, 3, 2], 2));
-    assert!(!super::reorder_preserves_groups(&[0, 2, 2, 3], 2));
+    assert!(preserves_groups(&[0, 0, 3, 2], 2));
+    assert!(!preserves_groups(&[0, 2, 2, 3], 2));
 }
 
 /// Every decode step receives the once-expanded encoder rows, unchanged.
@@ -1859,7 +1870,7 @@ fn encoder_rows_are_expanded_once_and_never_regathered() {
     assert_eq!(trace.decode_tokens.len(), 2);
     // Parent indices always stay inside their two-row source group.
     for reorder in &trace.reorders {
-        assert!(super::reorder_preserves_groups(reorder, 2), "{reorder:?}");
+        assert!(preserves_groups(reorder, 2), "{reorder:?}");
     }
 }
 
@@ -1938,7 +1949,7 @@ proptest::proptest! {
         );
     }
 
-    /// Pruning settled sources never changes any returned hypothesis.
+    /// Pruning settled sources never changes any returned hypothesis, under every stopping rule.
     ///
     /// Every rank up to `num_beams` is compared, and with two sources one
     /// may be pruned while the other keeps decoding through PAD no-op rows.
@@ -1950,6 +1961,11 @@ proptest::proptest! {
         max_new_tokens in 1_usize..6,
         eos_flags in proptest::collection::vec(proptest::bool::ANY, 6),
         penalty in proptest::sample::select(vec![-1.0, 0.0, 0.5, 1.0, 2.0]),
+        early_stopping in proptest::sample::select(vec![
+            EarlyStopping::Eager,
+            EarlyStopping::Heuristic,
+            EarlyStopping::Never,
+        ]),
         logits in proptest::collection::vec(-3.0_f32..3.0, 48),
     ) {
         let beams = beams.min(vocabulary);
@@ -1961,6 +1977,7 @@ proptest::proptest! {
         // `search` returns every hypothesis of each source's finished pool.
         let mut config = search(max_new_tokens, beams);
         config.length_penalty = penalty;
+        config.early_stopping = early_stopping;
         config.eos_token_ids = (0..vocabulary as u32)
             .filter(|&token| eos_flags[token as usize])
             .collect();
@@ -1984,7 +2001,7 @@ proptest::proptest! {
                 <= exhaustive_model.trace.lock().unwrap().decode_tokens.len()
         );
         for reorder in &pruned_trace.reorders {
-            proptest::prop_assert!(super::reorder_preserves_groups(reorder, beams), "{:?}", reorder);
+            proptest::prop_assert!(preserves_groups(reorder, beams), "{:?}", reorder);
         }
     }
 }
@@ -2046,7 +2063,7 @@ fn settled_source_is_pruned_while_its_peer_keeps_decoding() {
         "exhaustive search keeps decoding source 0"
     );
     for reorder in &pruned_trace.reorders {
-        assert!(super::reorder_preserves_groups(reorder, 2), "{reorder:?}");
+        assert!(preserves_groups(reorder, 2), "{reorder:?}");
     }
 }
 
@@ -2109,4 +2126,141 @@ fn beam_frontier_timing() {
             full.as_secs_f64() / bounded.as_secs_f64()
         );
     }
+}
+
+/// `early_stopping` reads and writes exactly Transformers' `true`/`false`/`"never"` forms.
+#[test]
+fn early_stopping_serializes_like_transformers() {
+    for (json, rule) in [
+        ("true", EarlyStopping::Eager),
+        ("false", EarlyStopping::Heuristic),
+        ("\"never\"", EarlyStopping::Never),
+    ] {
+        assert_eq!(serde_json::from_str::<EarlyStopping>(json).unwrap(), rule);
+        assert_eq!(serde_json::to_string(&rule).unwrap(), json);
+    }
+    for invalid in ["\"eager\"", "\"Never\"", "1", "null"] {
+        let error = serde_json::from_str::<EarlyStopping>(invalid).unwrap_err();
+        assert!(!error.to_string().is_empty(), "{invalid}");
+    }
+    let error = serde_json::from_str::<EarlyStopping>("\"always\"").unwrap_err();
+    assert!(
+        error.to_string().contains("true, false, or \"never\""),
+        "{error}"
+    );
+    assert_eq!(EarlyStopping::from(true), EarlyStopping::Eager);
+    assert_eq!(EarlyStopping::from(false), EarlyStopping::Heuristic);
+    // Transformers' default is `early_stopping=False`, the heuristic.
+    assert_eq!(EarlyStopping::default(), EarlyStopping::Heuristic);
+    assert_eq!(
+        BeamSearchConfig::default().early_stopping,
+        EarlyStopping::Heuristic
+    );
+    // Serialized configurations written before the enum keep their meaning.
+    let config: BeamSearchConfig =
+        serde_json::from_str(r#"{"early_stopping": true, "num_beams": 2}"#).unwrap();
+    assert_eq!(config.early_stopping, EarlyStopping::Eager);
+    let config: BeamSearchConfig = serde_json::from_str(r#"{"early_stopping": "never"}"#).unwrap();
+    assert_eq!(config.early_stopping, EarlyStopping::Never);
+    let round_trip: BeamSearchConfig =
+        serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+    assert_eq!(round_trip, config);
+}
+
+/// The heuristic stops where Transformers does; `"never"` finds the better long hypothesis.
+///
+/// With length penalty one, the first step finishes EOS (log p = -0.474,
+/// score -0.474) and keeps token 0 live (cumulative -0.974). Transformers'
+/// default heuristic scores the live beam at its current length one,
+/// `-0.974 <= -0.474`, and stops. Token 0 then continues almost for free,
+/// so the length-four continuation scores `-0.974 / 4 = -0.244`, which the
+/// exhaustive rule finds and the heuristic does not.
+#[test]
+fn heuristic_stopping_follows_transformers_and_never_searches_on() {
+    let table = MarkovTable {
+        first: vec![vec![0.0, -10.0, 0.5]],
+        next: vec![vec![10.0, -10.0, 0.0]; 3],
+    };
+    let run = |early_stopping, prune| {
+        let mut config = search(4, 1);
+        config.num_return_sequences = 1;
+        config.eos_token_ids = vec![2];
+        config.early_stopping = early_stopping;
+        let (model, request) = markov_fixture(table.clone(), config);
+        let output = super::run_beam_search(&model, request, prune).unwrap();
+        let decodes = model.trace.lock().unwrap().decode_tokens.len();
+        (output.sequences[0][0].clone(), decodes)
+    };
+    let (heuristic, decodes) = run(EarlyStopping::Heuristic, true);
+    assert_eq!(heuristic.token_ids, [2]);
+    assert!(matches!(
+        heuristic.finish_reason,
+        FinishReason::EndOfSequence { token_id: 2 }
+    ));
+    assert_eq!(decodes, 0, "the heuristic settles after the first step");
+    // The heuristic is a rule, not an optimization: pruning does not change it.
+    assert_eq!(run(EarlyStopping::Heuristic, false), (heuristic, 0));
+    let (never, decodes) = run(EarlyStopping::Never, true);
+    assert_eq!(never.token_ids, [0, 0, 0, 0]);
+    assert_eq!(never.finish_reason, FinishReason::Length);
+    assert!(
+        never.score > -0.25 && never.score < -0.24,
+        "{}",
+        never.score
+    );
+    assert_eq!(decodes, 3);
+    // Eager stopping returns the first full pool, here the early EOS too.
+    assert_eq!(run(EarlyStopping::Eager, true).0.token_ids, [2]);
+}
+
+/// The heuristic needs a full pool and stops when `c / n^lp <= w`, ties included.
+#[test]
+fn heuristic_finality_scores_the_live_beam_at_its_current_length() {
+    // One finished hypothesis of length 2 with score -1.0 (cumulative -2.0, lp = 1).
+    let pool = [scored_hypothesis(&[1, 2], -2.0, 0)];
+    // c = -3 at length 3 scores -1.0: a tie stops, as Transformers' `>` test does.
+    assert!(super::heuristic_pool_is_final(&pool, 1, -3.0, 3, 1.0));
+    // c = -2.9 at length 3 scores -0.967 > -1.0: the live beam may still win.
+    assert!(!super::heuristic_pool_is_final(&pool, 1, -2.9, 3, 1.0));
+    // A pool that is not full never stops the search.
+    assert!(!super::heuristic_pool_is_final(&pool, 2, -100.0, 3, 1.0));
+    assert!(!super::heuristic_pool_is_final(&[], 1, -100.0, 3, 1.0));
+    // Zero penalty compares raw cumulative scores; the worst score is -2.
+    assert!(super::heuristic_pool_is_final(&pool, 1, -2.0, 7, 0.0));
+    assert!(!super::heuristic_pool_is_final(&pool, 1, -1.5, 7, 0.0));
+    // A negative penalty multiplies by the length: -1 * 3 = -3 <= -2 * 2 = -4 is false.
+    assert!(!super::heuristic_pool_is_final(&pool, 1, -1.0, 3, -1.0));
+    assert!(super::heuristic_pool_is_final(&pool, 1, -2.0, 3, -1.0));
+    // No generated token yet: there is no length to score at.
+    assert!(!super::heuristic_pool_is_final(&pool, 1, -100.0, 0, 1.0));
+}
+
+/// The default group-preserving reorder checks groups before delegating to `reorder`.
+#[test]
+fn default_group_preserving_reorder_validates_groups_atomically() {
+    let device = Default::default();
+    let trace = Arc::new(Mutex::new(ScriptTrace::default()));
+    let mut state = ScriptedState::<TestBackend> {
+        batch: 4,
+        capacity: 4,
+        lengths: vec![1, 2, 3, 4],
+        device,
+        trace: Arc::clone(&trace),
+        fault: None,
+    };
+    state.reorder_within_groups(&[1, 1, 3, 2], 2).unwrap();
+    assert_eq!(state.lengths(), [2, 2, 4, 3]);
+    for (indices, group) in [
+        (vec![2, 0, 3, 2], 2),
+        (vec![0, 1, 2, 3], 3),
+        (vec![0, 1, 2, 3], 0),
+    ] {
+        let error = state.reorder_within_groups(&indices, group).unwrap_err();
+        assert!(matches!(error, Error::Cache(_)), "{error}");
+    }
+    assert_eq!(state.lengths(), [2, 2, 4, 3]);
+    assert_eq!(trace.lock().unwrap().reorders, [vec![1, 1, 3, 2]]);
+    // One group spanning the batch admits every permutation.
+    state.reorder_within_groups(&[3, 2, 1, 0], 4).unwrap();
+    assert_eq!(state.lengths(), [3, 4, 2, 2]);
 }

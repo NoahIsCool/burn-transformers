@@ -10,10 +10,10 @@
 //! decoder positions advance on valid tokens alone, so holes and left padding do
 //! not alter T5's relative-position distances.
 
-use burn::tensor::Bool;
+use burn::tensor::{Bool, Int};
 
 use super::*;
-use crate::intervention::PointValidity;
+use crate::intervention::{PointValidity, Stack};
 
 impl<B: Backend> T5ForConditionalGeneration<B> {
     /// Declares padding invariants without registering extra capture/edit actions.

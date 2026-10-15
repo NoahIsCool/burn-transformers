@@ -11,12 +11,15 @@
 //!
 //! Encoder computation runs once. Its output and the external decoder cache are
 //! expanded to a fixed `[source_batch * beams]` batch, with beam `k` of source
-//! `s` in row `s * beams + k`. At each later step, [`DecodeState::reorder`]
-//! gathers or duplicates parent rows before selected tokens enter
+//! `s` in row `s * beams + k`. At each later step,
+//! [`DecodeState::reorder_within_groups`] gathers or duplicates parent rows
+//! inside each source's group of `beams` rows before selected tokens enter
 //! [`Seq2SeqLanguageModel::decode`]. A reorder never moves a hypothesis to
 //! another source (the row arithmetic is verified with Verus), and the rows of
 //! one source start as identical copies of its encoder output, so the encoder
-//! output is expanded once and never re-gathered. Finished source rows remain
+//! output is expanded once and never re-gathered; a model may likewise keep
+//! per-source state such as projected cross-attention keys and values in
+//! place (T5 does). Finished source rows remain
 //! in the rectangle as false-masked PAD no-ops, preserving other rows'
 //! progress without mutating their cache lengths.
 //!
@@ -28,17 +31,30 @@
 //! token ID), so the result is exactly the prefix a full stable sort would
 //! produce. Log probabilities are computed in at least F32 like Hugging Face.
 //!
-//! Without eager stopping, a source stops once its finished pool is full and
-//! no live beam can still enter it: log probabilities are non-positive, so a
-//! descendant of a live beam with cumulative score `c` scores at most
-//! `max(c / L_min^lp, c / L_max^lp)` over the lengths it can still reach. The
-//! returned hypotheses are identical to searching every source to the length
-//! bound (Hugging Face `early_stopping="never"`); only wasted steps disappear.
+//! # Stopping rules
+//!
+//! [`EarlyStopping`] mirrors Transformers' `early_stopping` setting. Every
+//! rule first needs a full finished pool of `num_beams` hypotheses; let `c` be
+//! the best live beam's cumulative log probability, `lp` the length penalty,
+//! and `w` the worst finished score.
+//!
+//! - [`EarlyStopping::Eager`] (`true`) stops as soon as the pool is full.
+//! - [`EarlyStopping::Heuristic`] (`false`, the Transformers default) stops
+//!   once `c / n^lp <= w`, scoring the live beam at its current generated
+//!   length `n`. With a positive penalty a longer continuation can still
+//!   overtake `w`, so this is a heuristic, kept for parity.
+//! - [`EarlyStopping::Never`] (`"never"`) stops only when no live beam can
+//!   enter the pool at any reachable length: log probabilities are
+//!   non-positive, so a descendant scores at most
+//!   `max(c / L_min^lp, c / L_max^lp)` over the lengths `L_min..=L_max` it can
+//!   still reach. The result is identical to searching every source to the
+//!   length bound; only wasted steps disappear. The same exact bound also
+//!   ends heuristic searches early when it is tighter, without changing them.
 
 use std::collections::BinaryHeap;
 
 use burn::tensor::{Int, Tensor, TensorData, activation::log_softmax, backend::Backend};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     CausalLmInput, DecodeInput, DecodeState, EncoderOutput, Error, FinishReason, ForwardOptions,
@@ -66,16 +82,14 @@ pub struct BeamSearchConfig {
     pub num_return_sequences: usize,
     /// Exponent in `cumulative_log_probability / generated_length^penalty`.
     pub length_penalty: f64,
-    /// Stop a source row as soon as `num_beams` finished hypotheses exist.
+    /// When a source row stops searching (see [`EarlyStopping`]).
     ///
-    /// Following Transformers 5.2 eager semantics, only finished candidates
-    /// ranked within the current top `num_beams` may enter that pool; the rest
-    /// of the wider candidate frontier exists solely to find live successors.
-    /// When false, an unfinished prefix may still overtake an early EOS after
-    /// length normalization: search continues until no live beam can improve
-    /// the full finished pool, which returns exactly what searching to the
-    /// length bound would (Transformers `early_stopping="never"`).
-    pub early_stopping: bool,
+    /// Serialized like Transformers' `early_stopping`: `true`, `false`, or
+    /// `"never"`. Under every rule, following Transformers 5.2, only finished
+    /// candidates ranked within the current top `num_beams` may enter the
+    /// finished pool; the rest of the wider candidate frontier exists solely
+    /// to find live successors.
+    pub early_stopping: EarlyStopping,
     /// Token IDs that finish a hypothesis after being appended.
     pub eos_token_ids: Vec<u32>,
     /// Token supplied with a false mask for inactive slots in rectangular calls.
@@ -90,9 +104,81 @@ impl Default for BeamSearchConfig {
             num_beams: 4,
             num_return_sequences: 1,
             length_penalty: 1.0,
-            early_stopping: false,
+            early_stopping: EarlyStopping::Heuristic,
             eos_token_ids: Vec::new(),
             pad_token_id: 0,
+        }
+    }
+}
+
+/// When beam search stops a source row, mirroring Transformers' `early_stopping`.
+///
+/// All three rules wait for a full finished pool of `num_beams` hypotheses
+/// and differ in how they decide that no live beam can still improve it. With
+/// `c` the best live beam's cumulative log probability, `lp` the length
+/// penalty, `w` the worst finished score, and `n` the live beam's generated
+/// length, the heuristic stops once `c / n^lp <= w`, while "never" stops only
+/// once `c / L^lp < w` for every reachable length `L`. Serializes exactly like
+/// Transformers' `GenerationConfig.early_stopping`: [`Self::Eager`] as `true`,
+/// [`Self::Heuristic`] as `false`, and [`Self::Never`] as `"never"`.
+///
+/// ```
+/// use transformers::generation::EarlyStopping;
+///
+/// let never: EarlyStopping = serde_json::from_str("\"never\"").unwrap();
+/// assert_eq!(never, EarlyStopping::Never);
+/// assert_eq!(EarlyStopping::from(false), EarlyStopping::Heuristic);
+/// assert_eq!(serde_json::to_string(&EarlyStopping::Eager).unwrap(), "true");
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum EarlyStopping {
+    /// `true`: stop as soon as `num_beams` finished hypotheses exist.
+    Eager,
+    /// `false` (the Transformers default): stop once the best live beam, scored
+    /// at its current generated length, cannot beat the worst finished score.
+    #[default]
+    Heuristic,
+    /// `"never"`: stop only when no live beam can beat the worst finished score
+    /// at any reachable length; identical to searching to the length bound.
+    Never,
+}
+
+impl From<bool> for EarlyStopping {
+    /// Maps Transformers' boolean setting: `true` is eager, `false` heuristic.
+    fn from(eager: bool) -> Self {
+        if eager { Self::Eager } else { Self::Heuristic }
+    }
+}
+
+impl Serialize for EarlyStopping {
+    /// Writes `true`, `false`, or `"never"`, as Transformers does.
+    fn serialize<S: Serializer>(&self, serializer: S) -> core::result::Result<S::Ok, S::Error> {
+        match self {
+            Self::Eager => serializer.serialize_bool(true),
+            Self::Heuristic => serializer.serialize_bool(false),
+            Self::Never => serializer.serialize_str("never"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EarlyStopping {
+    /// Reads `true`, `false`, or `"never"`; any other value is an error.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> core::result::Result<Self, D::Error> {
+        /// The two JSON shapes Transformers uses for the setting.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Representation {
+            /// `true` or `false`.
+            Flag(bool),
+            /// The only accepted string, `"never"`.
+            Text(String),
+        }
+        match Representation::deserialize(deserializer)? {
+            Representation::Flag(eager) => Ok(eager.into()),
+            Representation::Text(text) if text == "never" => Ok(Self::Never),
+            Representation::Text(text) => Err(serde::de::Error::custom(format!(
+                "early_stopping must be true, false, or \"never\", found \"{text}\""
+            ))),
         }
     }
 }
@@ -269,11 +355,11 @@ where
             break;
         }
 
-        state.reorder(&plan.parent_indices)?;
         // Parents and destinations both come from `beam_row(source, ..)`, so
         // the reorder stays inside each source group, whose encoder rows are
-        // identical: the encoder output needs no gather.
-        debug_assert!(reorder_preserves_groups(&plan.parent_indices, beams));
+        // identical: neither the encoder output nor any per-source state a
+        // model binds needs a gather.
+        state.reorder_within_groups(&plan.parent_indices, beams)?;
         let token_ids = Tensor::<B, 2, Int>::from_data(
             TensorData::new(plan.tokens, [prepared.expanded_batch, 1]),
             &device,
@@ -617,22 +703,35 @@ impl<'a> BeamSearch<'a> {
         );
 
         let pool_full = self.completed[source].len() >= beams;
+        let best_live = selected.first().map(|best| best.cumulative_log_probability);
+        // Exact: no live descendant can enter the pool at any reachable length.
+        // Every rule may stop here without changing its result.
         let no_live_beam_can_improve = self.prune
-            && selected.first().is_some_and(|best| {
+            && best_live.is_some_and(|best| {
                 finished_pool_is_final(
                     &self.completed[source],
                     beams,
-                    best.cumulative_log_probability,
+                    best,
                     step + 2,
                     self.config.max_new_tokens,
                     self.config.length_penalty,
                 )
             });
-        if at_length_limit
-            || selected.is_empty()
-            || (self.config.early_stopping && pool_full)
-            || no_live_beam_can_improve
-        {
+        let rule_stops = match self.config.early_stopping {
+            EarlyStopping::Eager => pool_full,
+            // Live beams now hold `step + 1` generated tokens.
+            EarlyStopping::Heuristic => best_live.is_some_and(|best| {
+                heuristic_pool_is_final(
+                    &self.completed[source],
+                    beams,
+                    best,
+                    step + 1,
+                    self.config.length_penalty,
+                )
+            }),
+            EarlyStopping::Never => false,
+        };
+        if at_length_limit || selected.is_empty() || rule_stops || no_live_beam_can_improve {
             self.done[source] = true;
             return Ok(());
         }
@@ -686,12 +785,30 @@ fn finished_pool_is_final(
     bound < normalized_score(worst, length_penalty)
 }
 
-/// Whether every reorder index stays inside its destination's source group.
-fn reorder_preserves_groups(parent_indices: &[usize], beams: usize) -> bool {
-    parent_indices
-        .iter()
-        .enumerate()
-        .all(|(destination, &parent)| parent / beams == destination / beams)
+/// Transformers' default stopping heuristic (`early_stopping=False`).
+///
+/// A full pool is final once the best live beam, scored at its *current*
+/// generated length `n`, does not exceed the worst finished score:
+/// `c / n^lp <= w` (Transformers' `_check_early_stop_heuristic` with
+/// `best_hypothetical_length = cur_len - decoder_prompt_len`). With a positive
+/// penalty a longer descendant could still score higher, so unlike
+/// [`finished_pool_is_final`] this may stop before the exhaustive optimum; it
+/// is kept for parity with Transformers' default results.
+fn heuristic_pool_is_final(
+    completed: &[BeamHypothesis],
+    beams: usize,
+    best_live_cumulative: f64,
+    generated: usize,
+    length_penalty: f64,
+) -> bool {
+    if completed.len() < beams || generated == 0 {
+        return false;
+    }
+    let Some(worst) = completed.last() else {
+        return false;
+    };
+    best_live_cumulative / (generated as f64).powf(length_penalty)
+        <= normalized_score(worst, length_penalty)
 }
 
 /// Allocates one empty finished-hypothesis pool per source row.

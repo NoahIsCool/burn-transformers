@@ -31,7 +31,7 @@ use crate::checkpoint::{
     install_float_parameter,
 };
 
-use super::{GptNeoXConfig, GptNeoXLayer, GptNeoXModel};
+use super::{GptNeoXConfig, GptNeoXForCausalLm, GptNeoXLayer};
 
 // Metadata contracts and deterministic shape accounting.
 
@@ -339,7 +339,7 @@ impl GptNeoXCheckpointLoadError {
     }
 }
 
-impl<B: Backend> GptNeoXModel<B> {
+impl<B: Backend> GptNeoXForCausalLm<B> {
     /// Strictly imports a local SafeTensors checkpoint; performs no network access.
     ///
     /// All metadata is validated before parameter writes. Q/K/V installation is
@@ -370,7 +370,7 @@ impl<B: Backend> GptNeoXModel<B> {
 
 // Exact target routing and atomic packed-projection installation.
 
-impl<B: Backend> TensorSink for GptNeoXModel<B> {
+impl<B: Backend> TensorSink for GptNeoXForCausalLm<B> {
     /// Contextual target or packed-component parameter installation failure.
     type Error = GptNeoXLoadError;
 

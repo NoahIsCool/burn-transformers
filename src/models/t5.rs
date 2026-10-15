@@ -181,7 +181,37 @@ impl T5Config {
 
 impl Validate for T5Config {
     /// Checks both stack depths, independent attention width, buckets, FFN, and IDs.
+    ///
+    /// The relative-bias geometry must suit both stacks: the bidirectional
+    /// encoder table needs `relative_attention_max_distance` above
+    /// `relative_attention_num_buckets / 4`, and the causal decoder table
+    /// needs it above `relative_attention_num_buckets / 2`.
     fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_stacks(T5Stacks::EncoderDecoder)
+    }
+}
+
+/// Which T5 stacks a validated configuration must be able to build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum T5Stacks {
+    /// Only the bidirectional encoder (encoder-only recipes and classifiers).
+    EncoderOnly,
+    /// The complete encoder-decoder model, including the causal decoder table.
+    EncoderDecoder,
+}
+
+impl T5Config {
+    /// Validates the configuration for the stacks that will actually be built.
+    ///
+    /// T5 relative-bias tables split their `B` buckets differently per stack.
+    /// The bidirectional encoder uses `B / 2` buckets per direction, of which
+    /// `B / 4` are exact distances; the causal decoder uses all `B` buckets
+    /// for past keys, of which `B / 2` are exact. The logarithmic region needs
+    /// `max_distance > exact`, so the decoder bound `max_distance > B / 2` is
+    /// strictly stronger than the encoder bound `max_distance > B / 4`. A
+    /// full model must satisfy the decoder bound; an encoder-only recipe
+    /// legitimately needs only the encoder bound.
+    pub(crate) fn validate_stacks(&self, stacks: T5Stacks) -> Result<(), ConfigError> {
         /// Family label attached to configuration validation errors.
         const FAMILY: &str = "t5";
         model_type(FAMILY, &self.model_type, &["t5"])?;
@@ -224,6 +254,17 @@ impl Validate for T5Config {
                 FAMILY,
                 "relative_attention_max_distance",
                 "must exceed the encoder's exact-distance bucket region",
+            ));
+        }
+        let decoder_exact_buckets = self.relative_attention_num_buckets / 2;
+        if stacks == T5Stacks::EncoderDecoder
+            && self.relative_attention_max_distance <= decoder_exact_buckets
+        {
+            return Err(ConfigError::new(
+                FAMILY,
+                "relative_attention_max_distance",
+                "must exceed the causal decoder's exact-distance bucket region \
+                 (relative_attention_num_buckets / 2)",
             ));
         }
         if !self.is_encoder_decoder {
