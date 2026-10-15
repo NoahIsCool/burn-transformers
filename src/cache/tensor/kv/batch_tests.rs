@@ -607,6 +607,32 @@ fn working_plans_do_not_cross_staging_modes() {
     );
 }
 
+/// A working plan needs every layer of the group to have staged the same proposal.
+#[test]
+fn working_plans_require_layers_staged_alike() {
+    let config = CacheConfig::new(2, 8).expect("config");
+    let spec = NativeKvCacheSpec::new(2, HEADS, DIM, KvCacheStorage::Full, DType::F32)
+        .expect("geometry")
+        .with_staging_capacity(2);
+    let mut group = NativeKvCache::<TestBackend>::new(config, 2, spec, &device()).expect("group");
+    group.begin_staging_from(&[0, 0]).expect("staging");
+    let proposal = KvBatchAppend::right_padded(&[0, 0], &[1, 1], 1).expect("layout");
+    group
+        .stage_batch(0, &proposal, block(2, 1, 1.0), block(2, 1, 1.0))
+        .expect("layer 0 only");
+    assert!(matches!(
+        group.plan_working_batch_read(&[0, 0]),
+        Err(TensorCacheError::BatchPlanMismatch { layer: 1, reason }) if reason.contains("differ between layers")
+    ));
+    group
+        .stage_batch(1, &proposal, block(2, 1, 2.0), block(2, 1, 2.0))
+        .expect("layer 1");
+    let plan = group
+        .plan_working_batch_read(&[0, 0])
+        .expect("aligned layers");
+    assert_eq!(plan.retained_positions(), &[0..1, 0..1]);
+}
+
 /// A latent group refuses a key/value group's plan, and the reverse.
 #[test]
 fn plans_do_not_cross_kv_and_latent_groups() {
