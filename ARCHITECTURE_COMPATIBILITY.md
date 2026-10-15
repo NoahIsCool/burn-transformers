@@ -1,39 +1,88 @@
-# Transformer architecture compatibility
+# Model status and compatibility
 
-This document separates configuration compatibility, executable Burn runtimes,
-strict checkpoint-loading support, and real-checkpoint acceptance. These are
-different claims. A checked configuration means the crate can deserialize the
-official text topology (including wrapper and legacy aliases) and reject
-contradictory tensor shapes before model allocation. An executable runtime means
-that stateless and cached inference paths run in synthetic/reference tests. A
-strict loader means that the family owns an explicit tensor contract and can load
-local SafeTensors without unexplained keys; it does not prove that the release
-checkpoint has actually completed weight application or inference.
+This page records, for every model family, what is implemented, what has been
+validated against a reference implementation, and what is advertised as
+supported. These are different claims and are kept apart on purpose:
 
+| Claim | What it means | Recorded in |
+| --- | --- | --- |
+| Configuration compatible | The crate deserializes the official text topology, including wrapper and legacy aliases, and rejects contradictory tensor shapes before allocating a model. | [Configuration compatibility](#configuration-compatibility) |
+| Implemented | Stateless and cached inference run and pass synthetic tests, and a strict loader owns an explicit tensor contract that rejects unexplained keys. | Family module documentation and tests |
+| Experimentally validated | A pinned checkpoint, or a tiny checkpoint generated with the reference library, matched the reference implementation within a stated tolerance on a named backend and dtype. | [Real-checkpoint evidence](#real-checkpoint-evidence), [tiny goldens](#tiny-reference-goldens) |
+| Advertised supported | A committed `acceptance/` record sets `advertised_supported: true` for an exact revision, backend, and dtype. | [SUPPORT.md](SUPPORT.md) |
+
+Loading a checkpoint successfully establishes neither of the last two claims.
 Version 0.1 advertises only the bounded Qwen3.5-0.8B Metal/F16 base-text and
 FLAN-T5-small Flex/F32 / Metal/F32 profiles named in
 [the release record](acceptance/measurements/v0_1-release-20260910.json).
-All other checkpoints remain experimental; some records establish only artifact
-authentication and a strict load plan rather than weight application.
+Everything else on this page is experimental.
 
-## Compatibility matrix
+## Status at a glance
 
-| Family | Reference checkpoint/config | Serialized identity | Wrapper and aliases | Topology represented and validated |
-|---|---|---|---|---|
-| Qwen3.5 / Qwen3.8 dense hybrid | [Qwen3.8-27B `config.json`](https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/config.json), [Qwen3.5-27B](https://huggingface.co/Qwen/Qwen3.5-27B/blob/feea018b31f89dc0950e61da42577a7a4ab09169/config.json) | Inner text config remains `qwen3_5_text` for Qwen3.8 | Direct or nested `text_config`; `rope_scaling` alias; `Qwen38TextConfig` Rust alias | Explicit or interval-derived GDN versus full-attention schedule, gated-Q projection, GQA, linear head/state widths, convolution, multimodal RoPE sectioning, and MTP depth/embedding policy |
-| Qwen3 MoE | [Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39/config.json) | `qwen3_moe` | Direct or any supported text wrapper; `num_local_experts` and `rope_scaling` aliases | GQA/head dimensions, dense-versus-MoE cadence, dense overrides, expert width/count/top-k, router normalization, RoPE, and optional sliding window |
-| DeepSeek-V2 / V2-Lite | [DeepSeek-V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/604d5664dddd88a0433dbae533b7fe9472482de0/config.json) | `deepseek_v2` | Direct or `text_config`, `language_config`, or `llm_config`; old/new RoPE key aliases; nullable Q LoRA rank | MLA Q/K content and rotary widths, independent V width, Q/KV latent ranks, dense prefix and MoE cadence, grouped top-k capacity, shared/routed experts, and YaRN constraints |
-| Muse Glimmer text decoder | [Muse-Glimmer-30B](https://huggingface.co/meta-models/Muse-Glimmer-30B/blob/a4e59da52a7bc87ae7251dd5545c0dd437c44b68/config.json), [Transformers attention reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/muse_glimmer/modeling_muse_glimmer.py) | Inner `muse_glimmer_text` | Nested `text_config` or direct text config; `hidden_act` and `rope_scaling` aliases | GQA, explicit or backward-derived sliding/full schedule, per-layer RoPE/NoPE, sliding window, QK scaling, FP32 softmax for half inputs, post norms, and final-logit scaling/softcap |
-| T5 / T5 v1.1 / FLAN-T5 | [FLAN-T5-XL](https://huggingface.co/google/flan-t5-xl/blob/8772db7a7a11f7b08e6be7d7088f7a7fd4813bc5/config.json), [pinned upstream T5 schema](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/t5/configuration_t5.py) | `t5` | Canonical names plus `hidden_size`, `head_dim`, `intermediate_size`, and standard head/depth aliases | Independent residual and attention-inner widths, asymmetric encoder/decoder depth, relative-position buckets/range, dense versus gated FFN layout, output-scaling flag, and decoder start/token IDs |
-| UL2 | [Google UL2](https://huggingface.co/google/ul2/blob/71c34c5c6e3e54c5bf2cee360c3edfaa42acc1b3/config.json) | `t5` | `Ul2Config` Rust alias; accepts historic derived `dense_act_fn` and `is_gated_act` | T5 encoder-decoder topology plus gated-SiLU FFN consistency |
-| Nemotron-H / Nemotron Nano | [Nemotron 3.5 Lightning](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/blob/a9904d24bcc1d289a1950fa9d2b978c47cf903b9/config.json), [Nemotron 3 Nano](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/bf77c3174f68ad409e1c2aa60daeb46e32d1c606/config.json) | `nemotron_h` | Compact `hybrid_override_pattern` or modern `layers_block_type`/`layer_types`; historic `mamba_*` aliases; `attention_head_dim`; bare legacy `Infinity` | Exact heterogeneous Mamba/attention/MLP/MoE sequence, NoPE attention with GQA, Mamba state/head/group/convolution/time-step topology, expert routing, redundant norm consistency, and optional MTP block sequence |
+| Family | `model_type` | Implemented | Experimentally validated | Advertised supported |
+| --- | --- | --- | --- | --- |
+| Qwen3.5 / Qwen3.8 hybrid | `qwen3_5_text` | Gated DeltaNet and gated full attention, partial MRoPE, external recurrent/KV caches, batched cached decoding, batch-one MTP speculation, hooks, staged execution | Qwen3.8-27B official full-vocabulary logits and 32 greedy tokens on Metal/F16; Q8 and Q4 execution smokes | Qwen3.5-0.8B, Metal/F16, base text |
+| Qwen3-MoE | `qwen3_moe` | GQA with Q/K norm, sparse top-k experts, sliding windows, batched cached decoding, router hooks | Qwen3-30B-A3B strict load and Metal smokes (internal consistency only) | — |
+| DeepSeek-V2 | `deepseek_v2` | MLA with absorbed latent decoding, YaRN, softmax or sigmoid (`noaux_tc`) routing, group-limited selection, shared experts | DeepSeek-V2-Lite strict load and internal Metal smoke; tiny Transformers goldens for V2 and V3-style routing | — |
+| Muse Glimmer | `muse_glimmer_text` | Sliding/full hybrid, RoPE/NoPE schedule, sandwich norms, output gates, final soft cap, score-bounded attention | Muse-Glimmer-30B official prompt, cached, and hidden-trace references on Metal/F16 (minimum cosine `0.999943377`, 32/32 greedy) | — |
+| Nemotron-H | `nemotron_h` | Interleaved Mamba-2, GQA, dense and MoE blocks, one-stage MTP speculation | Nemotron 3.5 Lightning strict load and internal Metal smoke | — |
+| T5 / FLAN / UL2 | `t5` (`AutoSeq2SeqLm`) | Encoder–decoder, relative-position bias, cross-attention cache, batched decoding, cache-aware beam search | FLAN-T5-XXL official references on Metal/F32 | FLAN-T5-small, Flex/F32 and Metal/F32 |
+| Llama family | `llama`, `mistral`, `qwen2`, `qwen3`, `smollm3`, `olmo2` | Dense GQA decoder with every Hugging Face RoPE rule, QKV bias, per-head or full-width Q/K norm, post-sublayer norm, NoPE layers, sliding windows | Tiny goldens for all six types; Flex/F32 logits and greedy parity for SmolLM-135M, Qwen3-4B, and SmolLM3-3B; Qwen2-7B misses the logit gate on one prompt | — |
+| Gemma 2 / Gemma 3 text | `gemma2`, `gemma3_text`, and the text tower of `gemma3` | Sandwich `(1 + w)` RMSNorm, `sqrt(d)` embedding scale, soft caps, local/global schedules with ring caches, per-layer-type RoPE | Tiny goldens for both; gemma-3-4b-it on Flex/F32, including a 1,237-token prompt across the 1,024-token window | — |
+| gpt-oss | `gpt_oss` | Attention sinks, alternating sliding/full attention, YaRN, biased top-k-then-softmax router, clamped SwiGLU experts, exact MXFP4 decoding | Tiny golden; gpt-oss-20b truncated to one and four blocks on Flex/F32 (within `1.3e-4`) | — |
+| GPT-2, GPT-NeoX / Pythia | not registered | Stateless forward, hooks, staged execution, strict local import | Published-weight interpretability studies ([Greater-Than](examples/mechanistic/greater_than/README.md), [Tuned Lens](examples/mechanistic/tuned_lens/README.md)) | — |
+| Custom modular models | serializable specs | Every shared mechanism above, composed from `DecoderSpec` or `Seq2SeqSpec` | Synthetic parity against several family graphs | — (experiments, not checkpoints) |
 
-## Runtime and acceptance status
+`AutoCausalLm` dispatches every causal `model_type` in the table and implements
+the `HookedModel` and `StagedModel` experiment traits for all of them;
+`AutoSeq2SeqLm` dispatches `t5` and implements `HookedModel`.
 
-The status below is evidence-based and intentionally narrower than the schema
-matrix. “Strict loader implemented” means that the production local loader,
-family tensor mapping, and synthetic failure tests exist. “Real weights applied”
-means the named pinned artifact was actually streamed into a model and executed.
+## v0.1 release qualification
+
+The recorded [v0.1 source-gate and public-example replay](acceptance/measurements/v0_1-source-gates-20260910.json)
+passes both line-coverage thresholds at that snapshot: 90.005% crate-wide and
+95.011% shared/core. This excludes 79 verified test-only files and was measured
+at `b4d6410` with 1,184 passing tests. Manual review binds every retained native
+region to authored production function items for that exact
+source/configuration; it adds no generated-code exclusions. This is not a
+general macro-closure or branch-coverage proof. All 17 source/MSRV/backend/
+package checks and both unchanged public examples also pass at that snapshot.
+The [refreshed timing and sampled-memory records](acceptance/measurements/small-model-performance-20260910/manifest.json)
+are available, including FLAN's first Flex CPU baseline. The
+[release decision](acceptance/measurements/v0_1-release-20260910.json) records
+the user's explicit approval of the controlled Qwen baseline. Its historical
+slowdown from roughly 36 to 27 tokens/s remains unexplained and documented;
+it has not been fixed or erased. Future comparisons retain the 5% alert and
+confirmed 10% failure thresholds. See [the release gates](RELEASE_GATES.md).
+
+Both public small-model examples, `flan_t5_small` and `qwen35_chat`, passed
+their unchanged entry points on Rust 1.92 with local checkpoints, including a
+[final post-tokenizer-fix replay](acceptance/measurements/v0_1-source-gates-20260910.json)
+with exact previous outputs and before/after source, checkpoint, and binary
+hashes. The [earlier execution record](acceptance/measurements/public-examples-20260909.json)
+is retained separately. These are functional runs, not throughput
+measurements.
+
+These records describe the source snapshots they name. Later work (see
+[CHANGELOG.md](CHANGELOG.md)) changed both profiles' execution paths: batched
+cached decoding, grouped-query attention on native KV heads, DeltaNet chunked
+prefill, and T5's single block graph. FLAN-T5-small's Flex/F32 official-reference
+gate was re-run during that work with byte-identical vector digests; the
+Metal gates of both profiles, and the Qwen3.5-0.8B parity gate in particular,
+must be replayed on the integrated source before the next release.
+
+## Real-checkpoint evidence
+
+The status below is evidence-based and intentionally narrower than the
+[configuration matrix](#configuration-compatibility). “Strict loader
+implemented” means that the production local loader, family tensor mapping,
+and synthetic failure tests exist. “Real weights applied” means the named
+pinned artifact was actually streamed into a model and executed. Rows for the
+Llama, Gemma, and gpt-oss families cite their ignored test gates rather than
+an `acceptance/` record: those runs compare against references generated
+locally by [`scripts/generate_causal_lm_reference.py`](scripts/generate_causal_lm_reference.py)
+(Transformers 5.2.0, PyTorch 2.10.0, CPU, eager attention) and have not yet
+been recorded as acceptance evidence.
 
 | Target | Executable transformer/runtime surface | Checkpoint evidence | Current acceptance state |
 |---|---|---|---|
@@ -46,6 +95,104 @@ means the named pinned artifact was actually streamed into a model and executed.
 | `google/flan-t5-xxl` at `ae7c9136adc7555eeccc78cdd960dfd60fb346ce` | Executable 24-layer encoder/24-layer decoder T5 graph with gated GELU, relative-position bias, cross-attention caches, greedy decode, and beam search | All five official F32 SafeTensors shards were content-verified. Strict loading applied all 558 runtime parameters, verified the physical embedding equivalence, performed 433 checkpoint-layout transposes, and retained the tokenizer. | [Real-weight record](acceptance/flan-t5-xxl-ae7c9136adc7555eeccc78cdd960dfd60fb346ce.json): Metal matched five official Transformers/MPS F32 tensor fixtures at minimum cosine `0.999999999998`, all 32 cached greedy tokens, all teacher-forced top-1 rows, and the exact four-beam continuation. Padded/context-boundary, quantized quality/32K, and standardized performance gates remain open; not advertised. |
 | `google/flan-ul2` at `452d74ce28ac4a7f211d6ba3ef0717027f7a8074` | The executable T5 runtime represents UL2's gated-SiLU topology | Strict T5-family mapping exists. The pinned target still requires the planned verified offline PyTorch-to-SafeTensors conversion at this revision. | No real-weight acceptance record; not advertised. |
 | `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` at `a9904d24bcc1d289a1950fa9d2b978c47cf903b9` | Executable heterogeneous Mamba2/GQA/dense-MLP/MoE graph with ReLU-squared experts, shared expert, recurrent/KV state, and a one-stage next-token head with transactional batch-one speculation | The exact fourteen-shard artifact was authenticated and all 6,513 tensors were strictly streamed into Metal F16, including 270 MTP tensors. The exact MTP body, independent KV bank, partial target/MTP commits, rollback, greedy verification, and lossless stochastic rejection pass tiny Flex tests. The Nano revision `bf77c3174f68ad409e1c2aa60daeb46e32d1c606` is configuration-compatible only. | [Real-weight record](acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json): stateless, cached-prefill, and recurrent base-model smokes passed; recurrent versus teacher-forced logits had cosine `0.999376514` and identical top-1. This is internal consistency, not an official oracle comparison. Official base parity, real-weight MTP parity, 32-token generation, quantization, and 32K remain open; not advertised. |
+| `HuggingFaceTB/SmolLM-135M` at `1d461723eec654e65efdc40cf49301c89c0c92f4` (`llama`) | Llama-family dense decoder: GQA, RoPE, SwiGLU, tied head, batched cached decoding | Strict automatic loading; BF16 weights cast exactly to F32 while streaming. | [Flex/F32 gate](tests/llama_family_artifacts.rs) against an F32 reference: every prompt position's full-vocabulary logits within `9.1e-5`, a left-padded batched prefill within `3.3e-5`, all 32 cached greedy tokens identical (source `65645e0`). Metal and F16 not recorded; not advertised. |
+| `Qwen/Qwen3-4B` at `531c80e289d6cff3a7cd8c0db8110231d23a6f7a` (`qwen3`) | Llama-family graph with per-head Q/K RMSNorm and explicit `head_dim` | Strict automatic loading; BF16 cast to F32. | [Flex/F32 gate](tests/llama_family_artifacts.rs): prompt logits within `1.41e-4`, batched prefill within `1.35e-4`, 32/32 greedy tokens (source `65645e0`). Not advertised. |
+| `HuggingFaceTB/SmolLM3-3B` at `1fa6fa281b5c635c89171a2b53769609cc1199c6` (`smollm3`) | Llama-family graph with periodic NoPE layers | Strict automatic loading; BF16 cast to F32. | [Flex/F32 gate](tests/llama_family_artifacts.rs): prompt logits within `2.2e-4`, `1.5e-4`, and `3.8e-4`, batched prefill within `1.3e-4`, 32/32 greedy tokens (source `dd92f3b`). Not advertised. |
+| `Qwen/Qwen2-7B` at `453ed1575b739b5b03ce3758b23befdb0967f40e` (`qwen2`) | Llama-family graph with bias on the Q/K/V projections only | Strict automatic loading; BF16 cast to F32. | [Flex/F32 gate](tests/llama_family_artifacts.rs): batched prefill within `7.9e-5` and 32/32 greedy tokens pass, but one 8-token prompt deviates by `1.80e-3`, above the gate's `1e-3` default, identically before and after the shared dense-decoder refactor (`8720be1`, `dd92f3b`). The prompt-logit gate **fails** for this checkpoint at the default tolerance. Not advertised. |
+| `google/gemma-3-4b-it` at `093f9f388b31de276ce2de164bdc2081324b9767` (`gemma3` text tower) | Gemma 3 text decoder: sandwich `(1 + w)` RMSNorm, `sqrt(d)` embedding scale, 5:1 local/global attention with a 1,024-token window and ring caches, per-layer-type RoPE | Strict automatic loading of the language model; exactly the 439 vision-tower tensors are reported as intentionally ignored. | [Flex/F32 gate](tests/gemma_artifacts.rs) against `Gemma3ForConditionalGeneration` on text inputs: short-prompt logits within `7.2e-5`, `1.3e-4`, and `1.6e-4`, batched prefill within `1.1e-4`, 32/32 greedy tokens. One 1,237-token prompt crossing the window: within `5.5e-4` before and `1.2e-3` at or beyond the window (tolerance `5e-3`; Transformers' own eager and SDPA graphs differ by `3.2e-3` there), disabling the window moves logits by up to 36, and a cached run whose 29 sliding layers wrap their rings stays within `1.5e-4` with 8/8 greedy tokens (source `c5fd877`; gate code identical at `dd92f3b`). Longer contexts, Metal, and F16 not gated; not advertised. |
+| `openai/gpt-oss-20b` at `6cee5e81ee83917806bbde320786a8fb61efebee` (`gpt_oss`) | gpt-oss sparse decoder: learned sinks, alternating 128-token sliding and full attention, YaRN, biased top-k-then-softmax router, clamped SwiGLU experts | MXFP4 expert tensors are decoded at load, bit for bit equal to Transformers' `convert_moe_packed_tensors` on the checkpoint's own experts; the gate loads truncated stacks strictly, allowlisting the unread blocks. | [Flex/F32 gate](tests/gpt_oss_artifacts.rs) against truncated F32 references: one block within `7.6e-5` (mean `3.4e-6`); four blocks within `1.3e-4` (mean below `5e-6`), a 183-token prompt decoded token by token through a wrapping 128-slot ring within `7.6e-5`, and 32/32 greedy tokens (source `743a578`). Half-precision runs deviate from the F32 reference by 1.4 to 1.9 logits at some position, as Transformers' own BF16 run does (`1.73`). The full 24-block BF16 reference and Metal runs have not been executed; not advertised. |
+
+### Tiny reference goldens
+
+Each family added since v0.1 also has committed tiny random-weight checkpoints
+under `tests/fixtures/tiny_goldens/`, generated with Transformers 5.2.0 and
+PyTorch 2.10.0 by [`scripts/generate_tiny_goldens.py`](scripts/generate_tiny_goldens.py).
+They check full-vocabulary logits at every valid position of an unpadded and a
+left-padded row, every hidden state, stateless-versus-cached agreement with
+ragged rows, and greedy continuations at an F32 tolerance of `1e-5`:
+
+| Test | Cases | Largest observed logit gap |
+| --- | --- | --- |
+| [`tiny_goldens_llama`](tests/tiny_goldens_llama.rs) | `llama3`, `llama-bias-tied`, `qwen2`, `qwen3`, `mistral-sliding`, `smollm3`, `olmo2` | `7.2e-7` |
+| [`tiny_goldens_gemma`](tests/tiny_goldens_gemma.rs) | `gemma2` (soft caps, alternating windows), `gemma3-text` (Q/K norm, per-type RoPE), plus a saturated attention soft cap | `1.5e-6` |
+| [`tiny_goldens_gpt_oss`](tests/tiny_goldens_gpt_oss.rs) | `gpt-oss` (sinks, sliding/full, YaRN, router, clamped SwiGLU), plus the load-balancing loss | about `1e-6` |
+
+Shared components carry their own reference goldens in their unit tests: the
+router against Transformers' Mixtral, Qwen3-MoE, DeepSeek-V2/V3, and gpt-oss
+routing; every RoPE scaling rule against `modeling_rope_utils.py`; learned
+sinks against gpt-oss eager attention; and differential attention against
+DiffLlama. These establish mechanism parity, not checkpoint support.
+
+## Quantized checkpoints
+
+Native Q8/Q4 Burnpack sidecars and automatic packed loading are described in
+the [README](README.md#quantization). Their real-checkpoint evidence:
+
+- Qwen3.5-0.8B Q4 has passed a finite full-model Metal smoke test and exact
+  cached/stateless consistency, but its first token differs from F16 and the
+  quality corpus has not passed. Its
+  [populated Q4 32K stress](acceptance/measurements/qwen3.5-0.8b-q4-32k-stress-20260909.json)
+  passes finite-state, overflow-atomicity, and reset checks; this is execution
+  evidence, not long-context quality.
+- Qwen3.8-27B Q8 and Q4 have each passed strict streaming conversion and a
+  clean single-backend Metal smoke: 497 matrices were packed in groups of 64,
+  369 tensors remained outside each sidecar and loaded as F16, and both mixed
+  graphs exercised stateless, cached, MTP, and recurrent paths. Quantized
+  reference/longer-generation parity, the quality corpus, standardized
+  throughput and output hashing, and 32K stress remain open.
+- Qwen3-30B-A3B Q8 and Q4 have passed provenance-bound streaming conversion and
+  mixed F16/packed Metal stateless, cached-prefill, and recurrent decode
+  smokes. Each sidecar contains 18,625 packed matrices; 242 embeddings, norms,
+  and routers remain F16, and runtime MoE dispatch evaluates only selected
+  experts. The Q4 and Q8 decode audits each observed all 1,345 expected packed
+  matmuls and no whole-weight dequantization. Official-reference and 32-token
+  generation parity, quantized quality, standardized performance, and 32K
+  stress remain open.
+- Muse-Glimmer's exact 627-tensor F16 load plan classifies 417 matrices for
+  Burnpack (all five attention projections, all three SwiGLU projections in
+  each of 52 layers, and the independent LM head) and retains the embedding
+  plus 209 normalization vectors. Every eligible input width aligns to G64. A
+  nonzero two-layer fixture has passed Q8 and Q4 streaming conversion,
+  automatic mixed loading, stateless/prefill/recurrent parity, complete dtype
+  accounting, and a negative gate proving row-unaligned artifacts remain
+  reference-only. The real Q8/G64 conversion revalidated all 417 payloads and
+  published a `28,165,645,337`-byte v2 artifact with SHA-256
+  `91cfd35bfe0a389cbc2eed2189c4e33312bdce1a0ff50d8452acf06d00f0e8eb`; the
+  strict conversion/provenance gate took `1,570.845 s`. A separate traced
+  Metal gate reauthenticated that sidecar and its source provenance, then ran
+  stateless, cached-prefill, and recurrent decode with cached/stateless cosine
+  `1.0`, launching all 417 packed Q8 matmuls with no whole-weight
+  dequantization. The real Q4/G64 conversion published and fully reopened its
+  `14,911,372,485`-byte v2 artifact with SHA-256
+  `05b69f67799b4dc0228b4298e39d466d753fcc5d6484f61c8920c551017daed3`; its
+  traced Metal gate likewise ran all 417 packed Q4 matmuls without
+  whole-weight dequantization and reported cached/stateless cosine `1.0`.
+  Quantized official-reference and quality evaluation plus full-model 32K
+  execution remain pending.
+- gpt-oss MXFP4 experts are decoded exactly to the load dtype; there is no
+  packed MXFP4 execution and no memory saving yet.
+
+Neither Q8 nor Q4 is advertised for production inference.
+
+## Configuration compatibility
+
+A checked configuration means the crate can deserialize the official text
+topology (including wrapper and legacy aliases) and reject contradictory
+tensor shapes before model allocation. It does not prove that a checkpoint
+loads or computes the right logits.
+
+| Family | Reference checkpoint/config | Serialized identity | Wrapper and aliases | Topology represented and validated |
+|---|---|---|---|---|
+| Qwen3.5 / Qwen3.8 dense hybrid | [Qwen3.8-27B `config.json`](https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/config.json), [Qwen3.5-27B](https://huggingface.co/Qwen/Qwen3.5-27B/blob/feea018b31f89dc0950e61da42577a7a4ab09169/config.json) | Inner text config remains `qwen3_5_text` for Qwen3.8 | Direct or nested `text_config`; `rope_scaling` alias; `Qwen38TextConfig` Rust alias | Explicit or interval-derived GDN versus full-attention schedule, gated-Q projection, GQA, linear head/state widths, convolution, multimodal RoPE sectioning, and MTP depth/embedding policy |
+| Qwen3 MoE | [Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39/config.json) | `qwen3_moe` | Direct or any supported text wrapper; `num_local_experts` and `rope_scaling` aliases | GQA/head dimensions, dense-versus-MoE cadence, dense overrides, expert width/count/top-k, router normalization, RoPE, and optional sliding window |
+| DeepSeek-V2 / V2-Lite | [DeepSeek-V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/604d5664dddd88a0433dbae533b7fe9472482de0/config.json) | `deepseek_v2` | Direct or `text_config`, `language_config`, or `llm_config`; old/new RoPE key aliases; nullable Q LoRA rank | MLA Q/K content and rotary widths, independent V width, Q/KV latent ranks, dense prefix and MoE cadence, grouped top-k capacity, shared/routed experts, and YaRN constraints |
+| Muse Glimmer text decoder | [Muse-Glimmer-30B](https://huggingface.co/meta-models/Muse-Glimmer-30B/blob/a4e59da52a7bc87ae7251dd5545c0dd437c44b68/config.json), [Transformers attention reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/muse_glimmer/modeling_muse_glimmer.py) | Inner `muse_glimmer_text` | Nested `text_config` or direct text config; `hidden_act` and `rope_scaling` aliases | GQA, explicit or backward-derived sliding/full schedule, per-layer RoPE/NoPE, sliding window, QK scaling, FP32 softmax for half inputs, post norms, and final-logit scaling/softcap |
+| T5 / T5 v1.1 / FLAN-T5 | [FLAN-T5-XL](https://huggingface.co/google/flan-t5-xl/blob/8772db7a7a11f7b08e6be7d7088f7a7fd4813bc5/config.json), [pinned upstream T5 schema](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/t5/configuration_t5.py) | `t5` | Canonical names plus `hidden_size`, `head_dim`, `intermediate_size`, and standard head/depth aliases | Independent residual and attention-inner widths, asymmetric encoder/decoder depth, relative-position buckets/range, dense versus gated FFN layout, output-scaling flag, and decoder start/token IDs |
+| UL2 | [Google UL2](https://huggingface.co/google/ul2/blob/71c34c5c6e3e54c5bf2cee360c3edfaa42acc1b3/config.json) | `t5` | `Ul2Config` Rust alias; accepts historic derived `dense_act_fn` and `is_gated_act` | T5 encoder-decoder topology plus gated-SiLU FFN consistency |
+| Nemotron-H / Nemotron Nano | [Nemotron 3.5 Lightning](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/blob/a9904d24bcc1d289a1950fa9d2b978c47cf903b9/config.json), [Nemotron 3 Nano](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/bf77c3174f68ad409e1c2aa60daeb46e32d1c606/config.json) | `nemotron_h` | Compact `hybrid_override_pattern` or modern `layers_block_type`/`layer_types`; historic `mamba_*` aliases; `attention_head_dim`; bare legacy `Infinity` | Exact heterogeneous Mamba/attention/MLP/MoE sequence, NoPE attention with GQA, Mamba state/head/group/convolution/time-step topology, expert routing, redundant norm consistency, and optional MTP block sequence |
+| Llama family | [SmolLM-135M](https://huggingface.co/HuggingFaceTB/SmolLM-135M/blob/1d461723eec654e65efdc40cf49301c89c0c92f4/config.json), [Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B/blob/531c80e289d6cff3a7cd8c0db8110231d23a6f7a/config.json), [SmolLM3-3B](https://huggingface.co/HuggingFaceTB/SmolLM3-3B/blob/1fa6fa281b5c635c89171a2b53769609cc1199c6/config.json), [Qwen2-7B](https://huggingface.co/Qwen/Qwen2-7B/blob/453ed1575b739b5b03ce3758b23befdb0967f40e/config.json); Transformers 5.2.0 `configuration_*.py` | `llama`, `mistral`, `qwen2`, `qwen3`, `smollm3`, `olmo2` | One superset schema whose absent fields take the checkpoint's own `model_type` defaults; `rope_scaling` and `rope_parameters` through the shared RoPE translator | GQA and `head_dim`, attention/MLP bias or Q/K/V-only bias, per-head (Qwen3) or full-width (OLMo 2) Q/K RMSNorm, post-sublayer norms, every Hugging Face RoPE type, Mistral and Qwen sliding-window schedules (`sliding_window`, `use_sliding_window`, `max_window_layers`, `layer_types`), SmolLM3 NoPE layers, tied heads; `quantization_config` is rejected |
+| Gemma 2 / Gemma 3 text | [gemma-3-4b-it](https://huggingface.co/google/gemma-3-4b-it/blob/093f9f388b31de276ce2de164bdc2081324b9767/config.json); Transformers 5.2.0 `configuration_gemma2.py` / `configuration_gemma3.py` | `gemma2`, `gemma3_text`; multimodal `gemma3` through `text_config` | Gemma 3 RoPE mappings exactly as Transformers 5.2 `save_pretrained` writes them, including inert `rope_type`/`rope_theta` keys beside per-layer-type objects | Sandwich norms, `query_pre_attn_scalar`, attention and final soft caps (rejected where the reference never applies them), `sliding_window_pattern` or `layer_types` schedules, separate local/global RoPE bases with scaling on global layers, per-head Q/K norm (Gemma 3) |
+| gpt-oss | [gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b/blob/6cee5e81ee83917806bbde320786a8fb61efebee/config.json); Transformers 5.2.0 `configuration_gpt_oss.py` | `gpt_oss` | Dense or MXFP4 (`quantization_config.quant_method = "mxfp4"`) expert weights | GQA with learned sinks and biased projections, `layer_types` sliding/full schedule, YaRN with `truncate` (legacy `rope_scaling` accepted), expert count and top-k, biased router; `swiglu_limit` and `hidden_act` must equal the values the reference hard-codes (`7.0`, `silu`) |
 
 ## Loader behavior
 
@@ -61,13 +208,41 @@ metadata is ignored because this crate milestone covers transformer text backbon
 only. Unknown non-topology metadata is also ignored so harmless Hub metadata does
 not break loading; unknown enum values and contradictory shape fields fail closed.
 
-`AutoCausalLm::load_local` now dispatches executable `deepseek_v2`,
-`muse_glimmer_text`, `nemotron_h`, `qwen3_5_text`, and `qwen3_moe` graphs.
-`AutoSeq2SeqLm::load_local` dispatches `t5`. Both APIs are local-only: they
-discover SafeTensors, validate the architecture-owned mapping before applying
-weights, attach an optional local tokenizer, and return the final strict
-`LoadReport`. Unknown checkpoint tensors fail closed unless an architecture
-explicitly allowlists them, as Qwen and Muse do for their visual towers.
+`AutoCausalLm::load_local` dispatches `deepseek_v2`, `gemma2` (alias
+`gemma3_text`), `gpt_oss`, `llama` (aliases `mistral`, `qwen2`, `qwen3`,
+`smollm3`, `olmo2`), `muse_glimmer_text`, `nemotron_h`, `qwen3_5_text`, and
+`qwen3_moe`. `AutoSeq2SeqLm::load_local` dispatches `t5`. Both APIs are
+local-only: they discover SafeTensors, validate the architecture-owned mapping
+before applying weights, attach an optional local tokenizer, and return the
+final strict `LoadReport`. Unknown checkpoint tensors fail closed unless an
+architecture explicitly allowlists them, as Qwen, Muse, and multimodal Gemma 3
+do for their vision towers. For an alias family, `AutoCausalConfig::model_type`
+returns the primary type (`llama`); the checkpoint's own type is available from
+`LoadedModel::source().model_type()`.
+
+Discovery prefers neither artifact silently: when a directory holds both
+`model.safetensors` and `model.safetensors.index.json`, it loads through the
+index only if the index names exactly that single file, and otherwise reports
+ambiguous artifacts. An index in a subdirectory resolves its shards beside
+itself. Header-entry errors name the shard and tensor, and element counts
+follow SafeTensors' left-to-right overflow rule.
+
+`generation_config.json` is normalized with Hugging Face semantics: sampling
+defaults for `top_k`/`top_p`, and, for causal loads, `min_p` (when sampling),
+`no_repeat_ngram_size`, and `min_new_tokens` (clamped to `max_new_tokens`, with
+the declared value reported). Settings the runtime does not apply are kept in
+`LoadedModel::unsupported_generation_settings()` instead of being dropped
+silently; seq2seq loads report the three processor settings because beam
+search does not apply them.
+
+Chat templates render through a sandboxed MiniJinja environment with Hugging
+Face `apply_chat_template` semantics (Python `str()` conversions in filters,
+`tojson`, `strftime_now`, tool calls, `continue_final_message`, documents).
+On the pinned Qwen3.5, Muse Glimmer, and Nemotron-H templates the rendered
+text matches Transformers 5.2.0 byte for byte when mapping keys are supplied in
+sorted order; templates see mapping keys sorted, which is the main remaining
+difference. This is tokenizer/template parity evidence, not checkpoint
+support.
 
 ## Known gaps and non-claims
 
@@ -116,10 +291,23 @@ explicitly allowlists them, as Qwen and Muse do for their visual towers.
   checkpoint loading is limited to `muse_glimmer_text`, `qwen3_5_text`, and
   `qwen3_moe`; v2 sidecars bind exact checkpoint, load-plan, and payload hashes,
   while legacy v1 artifacts retain full source-payload validation. Qwen3.8 and
-  Qwen3-MoE Q8/Q4 Metal smokes passed, while Muse has traced Q8 Metal evidence;
-  their quantized-reference and quality gates remain open.
-- Qwen MTP speculative generation currently accepts batch size one only and
+  Qwen3-MoE Q8/Q4 Metal smokes passed, while Muse has traced Q8 and Q4 Metal
+  evidence; their quantized-reference and quality gates remain open.
+- Qwen and Nemotron-H MTP speculative generation accepts batch size one only and
   defaults to two draft tokens per cycle. A different positive draft count is
-  configurable; ordinary Qwen inference supports batches.
+  configurable; ordinary inference of both families runs batched.
+- The Llama-family, Gemma, and gpt-oss real-checkpoint gates have run on Flex
+  in F32 only; Metal, F16/BF16 profiles, and acceptance records are pending.
+  Qwen2-7B misses the default prompt-logit tolerance on one prompt (above).
+  Gemma contexts beyond 1,237 tokens and Gemma 2 real weights are not gated.
+  gpt-oss has been compared only on truncated stacks; the full 24-block BF16
+  reference has not been generated.
+- MXFP4 experts are decoded to the load dtype, so gpt-oss-20b needs about
+  39 GiB in F16/BF16; there is no packed MXFP4 execution. On Flex, batched
+  decoding of wide MoE layers is not faster than row-by-row decoding.
+- Llama-family, Gemma, and gpt-oss decode states have no speculative
+  transactions; they roll back with `truncate`, which a sliding ring supports
+  only within its window.
 - Multimodal execution, tensor/expert parallelism, external GGUF/AWQ/GPTQ/FP8
-  formats, server/distributed execution, and training loops remain out of scope.
+  formats, server/distributed execution, and a separate training framework
+  remain out of scope; training uses native Burn (see [TRAINING.md](TRAINING.md)).
