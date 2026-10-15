@@ -57,7 +57,7 @@ use burn::{
 use crate::{
     Error, Result,
     experiment::{
-        bounds::{fold_widths, range_within},
+        bounds::{fold_level, range_within},
         read_int_scalars,
     },
 };
@@ -320,16 +320,17 @@ fn sum_dim<B: Backend, const D: usize>(input: Tensor<B, D>, dim: usize) -> Tenso
 fn pairwise_row_sums<B: Backend>(mut values: Tensor<B, 2>) -> Tensor<B, 2> {
     let mut width = values.dims()[1];
     while width > 1 {
-        let (half, next) = fold_widths(width);
+        let level = fold_level(width);
+        let half = level.pairs;
         let folded =
-            values.clone().narrow(1, 0, half) + values.clone().narrow(1, width - half, half);
-        values = if next == half {
+            values.clone().narrow(1, 0, half) + values.clone().narrow(1, level.partner_start, half);
+        values = if level.next == half {
             folded
         } else {
             // Odd width: the middle column has no partner at this level.
             Tensor::cat(vec![folded, values.narrow(1, half, 1)], 1)
         };
-        width = next;
+        width = level.next;
     }
     values
 }

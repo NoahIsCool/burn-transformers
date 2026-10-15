@@ -44,19 +44,29 @@ fn staged_ranges_resume_at_the_cursor() {
     assert_eq!(cursor, 4);
 }
 
-/// Fold widths halve, carry exactly the odd middle column, and strictly shrink.
+/// Fold levels halve, carry exactly the odd middle column, and strictly shrink.
 #[test]
-fn fold_widths_halve_and_carry_odd_columns() {
-    assert_eq!(fold_widths(2), (1, 1));
-    assert_eq!(fold_widths(3), (1, 2));
-    assert_eq!(fold_widths(151_936), (75_968, 75_968));
+fn fold_levels_halve_and_carry_odd_columns() {
+    let level = |pairs, partner_start, next| FoldLevel {
+        pairs,
+        partner_start,
+        next,
+    };
+    assert_eq!(fold_level(2), level(1, 1, 1));
+    assert_eq!(fold_level(3), level(1, 2, 2));
+    assert_eq!(fold_level(151_936), level(75_968, 75_968, 75_968));
+    assert_eq!(
+        fold_level(usize::MAX),
+        level(usize::MAX / 2, usize::MAX / 2 + 1, usize::MAX / 2 + 1)
+    );
     let mut width = 151_937;
     let mut levels = 0;
     while width > 1 {
-        let (half, next) = fold_widths(width);
-        assert_eq!(2 * half + width % 2, width);
-        assert!(next >= 1 && next < width);
-        width = next;
+        let level = fold_level(width);
+        assert_eq!(2 * level.pairs + width % 2, width);
+        assert_eq!(level.partner_start + level.pairs, width);
+        assert!(level.next >= 1 && level.next < width);
+        width = level.next;
         levels += 1;
     }
     // ceil(log2(151_937)) = 18 levels.
@@ -86,5 +96,27 @@ proptest::proptest! {
     ) {
         let reference = actual.iter().zip(expected).all(|(a, e)| *a == 1 || *a == e);
         proptest::prop_assert_eq!(broadcasts_to(&actual, &expected), reference);
+    }
+
+    /// Every column of a folding level is read by exactly one block, and the depth is ceil(log2 w).
+    #[test]
+    fn fold_levels_partition_columns(width in 2usize..300) {
+        let level = fold_level(width);
+        let mut reads = vec![0usize; width];
+        for j in 0..level.pairs {
+            reads[j] += 1;
+            reads[level.partner_start + j] += 1;
+        }
+        if level.next != level.pairs {
+            reads[level.pairs] += 1;
+        }
+        proptest::prop_assert!(reads.iter().all(|&count| count == 1));
+        let mut depth = 0;
+        let mut current = width;
+        while current > 1 {
+            current = fold_level(current).next;
+            depth += 1;
+        }
+        proptest::prop_assert_eq!(depth, width.next_power_of_two().trailing_zeros());
     }
 }

@@ -10,8 +10,11 @@
 //!   bounds or silently select the wrong elements.
 //! - `src/experiment/bounds.rs`: positional extents (`max + 1` without
 //!   overflow), position/label range checks, broadcast compatibility of masks
-//!   and attention planes, staged block cursors, and the pairwise reduction
-//!   schedule, which strictly shrinks the width and therefore terminates.
+//!   and attention planes, and staged block cursors, whose consecutively
+//!   accepted ranges run every block below the cursor exactly once and in
+//!   order. Each pairwise-reduction level partitions the row into added left
+//!   and right blocks plus the carried odd middle column (every column is read
+//!   exactly once), and the whole reduction takes exactly `ceil(log2 w)` levels.
 //!
 //! See `verus/README.md` for the method, toolchain, and command. Tensor slicing,
 //! edits, device readbacks, the conversion from semantic axes to dimensions,
