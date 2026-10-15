@@ -53,6 +53,7 @@ fn dense_input_uses_physical_columns() {
         vec![0, 1, 2, 0, 1, 2]
     );
     assert_eq!(validated.evaluated_context, 3);
+    assert!(validated.fully_valid);
 }
 
 /// Left padding does not shift valid-token ordinals, and padding maps to zero.
@@ -69,6 +70,18 @@ fn left_padding_uses_valid_token_ordinals() {
         vec![0, 0, 0, 1, 0, 1, 2, 3]
     );
     assert_eq!(validated.evaluated_context, 4);
+    assert!(!validated.fully_valid);
+}
+
+/// A mask without padding still reports a fully valid batch.
+#[test]
+fn all_true_mask_is_fully_valid() {
+    let validated = validate(
+        &input(ints([[1, 2]]), Some(mask([[true, true]])), None),
+        &contract(),
+    )
+    .unwrap();
+    assert!(validated.fully_valid);
 }
 
 /// Explicit positions are validated as given, including padded columns.

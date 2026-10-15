@@ -24,6 +24,7 @@ use burn::tensor::{BasicOps, Int, Tensor, TensorData, TensorKind, backend::Backe
 use crate::{
     CausalLmInput, Error, Result,
     cache::{DecodeStateError, TensorCacheError},
+    position::RopeScaling,
 };
 
 use super::{
@@ -90,6 +91,16 @@ impl StatefulRows {
             return Ok(None);
         }
         CompactRow::new(row, columns, self.sequence, device).map(Some)
+    }
+
+    /// Iterates `(row, evaluated_context)` over rows that append at least one token.
+    pub(crate) fn active_contexts(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.evaluated_contexts
+            .iter()
+            .zip(&self.token_counts)
+            .enumerate()
+            .filter(|(_, (_, count))| **count > 0)
+            .map(|(row, (&context, _))| (row, context))
     }
 
     /// Returns each row's last valid column for [`LogitsSelection::Last`].
@@ -383,8 +394,8 @@ impl<B: Backend> CompactRow<B> {
                 RowLayout::Contiguous { leading, trailing }
             }
             ScatterLayout::Gather { sources } => RowLayout::Gather {
-                columns: index_tensor(columns, device)?,
-                sources: index_tensor(&sources, device)?,
+                columns: index_tensor(columns, device, "stateful.valid_columns")?,
+                sources: index_tensor(&sources, device, "stateful.scatter_sources")?,
             },
         };
         Ok(Self {
@@ -463,14 +474,18 @@ impl<B: Backend> CompactRow<B> {
     }
 }
 
-/// Uploads host column indices as a `[len]` Burn index tensor.
-fn index_tensor<B: Backend>(indices: &[usize], device: &B::Device) -> Result<Tensor<B, 1, Int>> {
-    let values = plan::signed_indices(indices).ok_or_else(|| {
-        Error::configuration(
-            "stateful.valid_columns",
-            "column index exceeds the signed tensor-index range",
-        )
-    })?;
+/// Uploads host indices (columns, rows, or batch permutations) as a `[len]` index tensor.
+///
+/// # Errors
+///
+/// Returns [`Error::Configuration`] naming `name` when an index exceeds `i64::MAX`.
+pub(crate) fn index_tensor<B: Backend>(
+    indices: &[usize],
+    device: &B::Device,
+    name: &str,
+) -> Result<Tensor<B, 1, Int>> {
+    let values = plan::signed_indices(indices)
+        .ok_or_else(|| Error::configuration(name, "index exceeds the signed tensor-index range"))?;
     Ok(Tensor::from_data(
         TensorData::new(values, [indices.len()]),
         device,
@@ -494,6 +509,32 @@ pub(crate) fn implicit_position_ids<B: Backend>(
         TensorData::new(values, [1, count]),
         device,
     ))
+}
+
+/// Rejects a dynamic-NTK rotary context that cached keys cannot follow.
+///
+/// Dynamic NTK rescales the rotary base `θ` once the evaluated context exceeds
+/// the original window `L₀`. Keys cached under the previous base would then
+/// disagree with queries rotated under the new one, so cached decoding supports
+/// only `context <= L₀`; static scalings are always accepted. `family` names
+/// the model in the error.
+///
+/// # Errors
+///
+/// Returns [`Error::BackendCapability`] for a dynamic-NTK context beyond `L₀`.
+pub(crate) fn ensure_static_rotary_context(
+    scaling: RopeScaling,
+    context: usize,
+    family: &str,
+) -> Result<()> {
+    if let RopeScaling::DynamicNtk(dynamic) = scaling
+        && context > dynamic.original_max_position_embeddings()
+    {
+        return Err(Error::BackendCapability(format!(
+            "{family} dynamic-NTK decoding beyond the original context requires re-rotating cached keys"
+        )));
+    }
+    Ok(())
 }
 
 /// Concatenates per-row `[1, S, d]` results into `[B, S, d]`.

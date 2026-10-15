@@ -22,11 +22,11 @@ use crate::{
     cache::{CacheConfig, KvCacheStorage, NativeKvCacheSpec, TensorCacheError, TensorDecodeState},
     models::shared::{
         EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_same_device,
-        implicit_position_ids, prepare_stateful_rows, select_hidden_with_last_columns,
-        validate_logits_selection,
+        ensure_static_rotary_context, implicit_position_ids, prepare_stateful_rows,
+        select_hidden_with_last_columns, validate_logits_selection,
     },
     moe::SparseMoeOutput,
-    position::{RopeScaling, RotaryAngles, apply_rotary, rotary_angles},
+    position::{RotaryAngles, apply_rotary, rotary_angles},
 };
 
 use super::{
@@ -679,25 +679,10 @@ fn prepare_stateful_input<B: Backend>(
             empty_rows: phase.empty_rows(),
         },
     )?;
-    for (&context, &count) in rows.evaluated_contexts.iter().zip(&rows.token_counts) {
-        if count > 0 {
-            validate_cached_rope_context(model.model.rope.scaling(), context)?;
-        }
+    for (_, context) in rows.active_contexts() {
+        ensure_static_rotary_context(model.model.rope.scaling(), context, "Qwen3 MoE")?;
     }
     Ok(rows)
-}
-
-/// Rejects dynamic-NTK transitions that would invalidate cached rotated keys.
-fn validate_cached_rope_context(scaling: RopeScaling, context: usize) -> Result<()> {
-    if let RopeScaling::DynamicNtk(dynamic) = scaling
-        && context > dynamic.original_max_position_embeddings()
-    {
-        return Err(Error::BackendCapability(
-            "dynamic-NTK decode beyond the original context requires re-rotating cached keys"
-                .into(),
-        ));
-    }
-    Ok(())
 }
 
 /// Builds `excluded(q,k) = k > q || (window && k + window <= q)`.

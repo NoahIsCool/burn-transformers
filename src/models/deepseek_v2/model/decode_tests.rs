@@ -7,7 +7,7 @@ use burn::{
 
 use super::*;
 use crate::{
-    DecodeState, LogitsSelection,
+    DecodeState, LogitsSelection, TokenMask,
     models::deepseek_v2::model::tests_support::{initialized_model, tiny_config},
 };
 

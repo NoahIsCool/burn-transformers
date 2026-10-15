@@ -28,9 +28,10 @@ use super::*;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use crate::cache::{CacheConfig, KvCacheStorage, NativeKvCache, NativeKvCacheSpec};
 use crate::{
-    CausalLmInput, ForwardOptions, checkpoint::TensorSink,
+    CausalLmInput, ForwardOptions, LogitsSelection, checkpoint::TensorSink,
     models::muse_glimmer::MuseGlimmerCheckpointOptions,
 };
+use burn::tensor::ElementConversion;
 
 /// Deterministic CPU backend using F32 values and I32 token indices.
 type TestBackend = Flex<f32, i32>;
@@ -663,10 +664,17 @@ fn stress_muse_32k_attention_envelope_on_metal() {
         token_mask: Some(token_mask),
         position_ids: None,
     };
-    let positions = resolve_positions(&position_input, 1, MUSE_32K_STRESS_SEQUENCE)
+    let validated = validate_input(
+        &position_input,
+        &device,
+        &InputContract::new(INPUT_NAMES, PARAMETERS, config.vocab_size)
+            .with_position_limit(MUSE_32K_STRESS_SEQUENCE),
+    )
+    .expect("position 32767 is inside the 32K capacity");
+    assert_eq!(validated.evaluated_context, MUSE_32K_STRESS_SEQUENCE);
+    let positions = validated
+        .require_positions(INPUT_NAMES.position_ids)
         .expect("derive all 32K valid-token positions");
-    validate_position_range(positions.clone(), MUSE_32K_STRESS_SEQUENCE)
-        .expect("position 32767 is inside the 32K capacity");
     let position_edges = Tensor::cat(
         vec![
             positions.clone().slice([0..1, 0..1]),
@@ -1766,14 +1774,14 @@ fn public_forward_rejects_invalid_inputs_without_panicking() {
 /// Stateless device preflight identifies every independently supplied tensor.
 #[test]
 fn stateless_device_affinity_errors_are_contextual() {
-    assert!(ensure_model_device("muse_glimmer.input_ids", &0_u8, &0_u8).is_ok());
+    assert!(ensure_same_device("muse_glimmer.input_ids", &0_u8, &0_u8, PARAMETERS).is_ok());
     for tensor in [
         "muse_glimmer.input_ids",
         "muse_glimmer.token_mask",
         "muse_glimmer.position_ids",
         "muse_glimmer.lm_head",
     ] {
-        let error = ensure_model_device(tensor, &1_u8, &0_u8)
+        let error = ensure_same_device(tensor, &1_u8, &0_u8, PARAMETERS)
             .expect_err("different device identities must fail preflight");
         assert!(error.to_string().contains(tensor));
         assert!(error.to_string().contains("model parameters"));

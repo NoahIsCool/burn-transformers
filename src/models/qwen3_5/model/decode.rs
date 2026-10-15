@@ -26,10 +26,10 @@ use crate::{
     delta_net::{DeltaNetMode, GatedDeltaNetState},
     models::shared::{
         DeferredChecks, EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_same_device,
-        implicit_position_ids, prepare_stateful_rows, select_hidden_with_last_columns,
-        validate_logits_selection,
+        ensure_static_rotary_context, implicit_position_ids, prepare_stateful_rows,
+        select_hidden_with_last_columns, validate_logits_selection,
     },
-    position::{RopeScaling, RotaryAngles, apply_rotary, rotary_angles},
+    position::{RotaryAngles, apply_rotary, rotary_angles},
 };
 
 use super::{
@@ -610,7 +610,7 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
             Some(range) => readout.context(range, INPUT_NAMES.position_ids)?,
             None => end,
         };
-        validate_cached_rope_context(self.model.rope.scaling(), evaluated_context)?;
+        ensure_static_rotary_context(self.model.rope.scaling(), evaluated_context, "Qwen")?;
         let embedding = self.model.embed_tokens.forward(next_token_ids);
         let mut hidden = mtp.fuse(embedding, target_or_mtp_hidden)?;
         let layer_count = mtp.layers.len();
@@ -1434,25 +1434,10 @@ fn prepare_stateful_input<B: Backend>(
             empty_rows: phase.empty_rows(),
         },
     )?;
-    for (&context, &count) in rows.evaluated_contexts.iter().zip(&rows.token_counts) {
-        if count > 0 {
-            validate_cached_rope_context(model.model.rope.scaling(), context)?;
-        }
+    for (_, context) in rows.active_contexts() {
+        ensure_static_rotary_context(model.model.rope.scaling(), context, "Qwen")?;
     }
     Ok(rows)
-}
-
-/// Rejects dynamic-NTK transitions that would invalidate already cached keys.
-fn validate_cached_rope_context(scaling: RopeScaling, evaluated_context: usize) -> Result<()> {
-    if let RopeScaling::DynamicNtk(dynamic) = scaling
-        && evaluated_context > dynamic.original_max_position_embeddings()
-    {
-        return Err(Error::BackendCapability(
-            "dynamic-NTK decoding beyond its original context requires re-rotating cached keys"
-                .into(),
-        ));
-    }
-    Ok(())
 }
 
 /// Builds the explicit cached causal mask `excluded(q, k) = k > baseline + q`.

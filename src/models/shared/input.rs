@@ -93,6 +93,8 @@ pub(crate) struct ValidatedInput<B: Backend> {
     pub(crate) positions: Option<Tensor<B, 2, Int>>,
     /// Rotary extent `1 + max p`, or `0` when no positions were resolved.
     pub(crate) evaluated_context: usize,
+    /// Whether every token is valid (no mask, or a mask without padding).
+    pub(crate) fully_valid: bool,
 }
 
 impl<B: Backend> ValidatedInput<B> {
@@ -136,13 +138,13 @@ pub(crate) fn validate_input<B: Backend>(
         names.token_ids,
         "token",
     );
-    if let Some(mask) = &input.token_mask {
+    let row_counts = input.token_mask.as_ref().map(|mask| {
         checks.row_counts(
             mask,
             names.token_mask,
             contract.empty_rows == EmptyRows::Reject,
-        );
-    }
+        )
+    });
     let position_range = positions
         .as_ref()
         .map(|positions| match contract.position_limit {
@@ -155,9 +157,14 @@ pub(crate) fn validate_input<B: Backend>(
         .map(|range| readout.context(range, names.position_ids))
         .transpose()?
         .unwrap_or(0);
+    // A row is padding-free exactly when its valid count equals the width S.
+    let fully_valid = row_counts.is_none_or(|counts| {
+        usize::try_from(readout.min_row_count(counts)).is_ok_and(|count| count == sequence)
+    });
     Ok(ValidatedInput {
         positions,
         evaluated_context,
+        fully_valid,
     })
 }
 

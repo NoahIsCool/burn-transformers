@@ -7,7 +7,7 @@ use burn::{
 
 use super::*;
 use crate::{
-    DecodeState, attention::AttentionExecutionPolicy, checkpoint::TensorSink,
+    DecodeState, TokenMask, attention::AttentionExecutionPolicy, checkpoint::TensorSink,
     models::muse_glimmer::MuseGlimmerCheckpointOptions,
 };
 
@@ -97,7 +97,7 @@ fn experimental_contract_public_rejections_preserve_muse_history() {
                 ));
                 (
                     "muse_glimmer.position_ids",
-                    "values in 0..32",
+                    "position values in 0..32",
                     if case == 2 {
                         "observed range -1..=-1"
                     } else {

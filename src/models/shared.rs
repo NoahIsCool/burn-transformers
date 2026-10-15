@@ -47,5 +47,6 @@ pub(crate) use logits::{
     select_hidden, select_hidden_with_last_columns, validate_logits_selection,
 };
 pub(crate) use rows::{
-    StatefulContract, StatefulRows, concat_rows, implicit_position_ids, prepare_stateful_rows,
+    StatefulContract, StatefulRows, concat_rows, ensure_static_rotary_context,
+    implicit_position_ids, index_tensor, prepare_stateful_rows,
 };

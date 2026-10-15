@@ -11,15 +11,11 @@
 use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
-    tensor::{
-        Bool, DType, ElementConversion, Int, Tensor, TensorData, activation::softmax,
-        backend::Backend,
-    },
+    tensor::{Bool, DType, Int, Tensor, activation::softmax, backend::Backend},
 };
 
 use crate::{
-    ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, LogitsSelection,
-    Result,
+    ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
     architecture::{RouterDiagnostics, TokenMask},
     attention::padding_attention_mask,
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
@@ -33,7 +29,10 @@ use super::{
     DeepseekScoringFunction, DeepseekTopKMethod, DeepseekV2Config,
     mla::{MlaMixOutput, MultiLatentAttention, MultiLatentAttentionConfig},
 };
-use crate::models::config::RopeType;
+use crate::models::{
+    config::RopeType,
+    shared::{InputContract, InputNames, select_hidden, validate_input},
+};
 
 /// External compressed MLA caches and transactional prefill/decode execution.
 mod decode;
@@ -46,6 +45,16 @@ pub use decode::{DeepseekV2DecodeState, MlaExecutionPath};
 /// router logits are FP32 even in F16/BF16 checkpoints. Placeholders for
 /// inactive decode rows must use the same dtype to be concatenated with them.
 const ROUTER_DTYPE: DType = DType::F32;
+
+/// Tensor names reported by DeepSeek-V2 input errors.
+const INPUT_NAMES: InputNames<'static> = InputNames {
+    token_ids: "deepseek_v2.input_ids",
+    token_mask: "deepseek_v2.token_mask",
+    position_ids: "deepseek_v2.position_ids",
+};
+
+/// Owner named when a stateless tensor is on another device than the weights.
+const PARAMETERS: &str = "DeepSeek model parameters";
 
 /// Routed expert output together with the always-active shared contribution.
 #[derive(Clone, Debug)]
@@ -408,33 +417,14 @@ impl<B: Backend> DeepseekV2Model<B> {
         input: &CausalLmInput<B>,
         options: &ForwardOptions,
     ) -> Result<BackboneOutput<B>> {
-        let [batch, sequence] = input.token_ids.dims();
-        validate_nonempty_input(batch, sequence)?;
-        let model_device = self.embed_tokens.weight.lazy_device();
-        ensure_model_device(
-            "deepseek_v2.input_ids",
-            &input.token_ids.device(),
-            &model_device,
+        let validated = validate_input(
+            input,
+            &self.embed_tokens.weight.lazy_device(),
+            &InputContract::new(INPUT_NAMES, PARAMETERS, self.config.vocab_size)
+                .with_position_limit(self.config.max_position_embeddings),
         )?;
-        if let Some(mask) = &input.token_mask {
-            ensure_model_device(
-                "deepseek_v2.token_mask",
-                &mask.as_tensor().device(),
-                &model_device,
-            )?;
-        }
-        if let Some(positions) = &input.position_ids {
-            ensure_model_device(
-                "deepseek_v2.position_ids",
-                &positions.device(),
-                &model_device,
-            )?;
-        }
-        validate_token_ids(input.token_ids.clone(), self.config.vocab_size)?;
-        validate_mask(input.token_mask.as_ref(), batch, sequence, false)?;
-        let positions = resolve_positions(input, batch, sequence)?;
-        validate_position_range(positions.clone(), self.config.max_position_embeddings)?;
-        let context = evaluated_context(positions.clone())?;
+        let positions = validated.require_positions(INPUT_NAMES.position_ids)?;
+        let context = validated.evaluated_context;
         let mut hidden = self.embed_tokens.forward(input.token_ids.clone());
         let mut hidden_states = Vec::with_capacity(if options.hidden_states {
             self.layers.len() + 2
@@ -770,224 +760,6 @@ fn sequence_auxiliary_loss<B: Backend>(
         .sum_dim(1)
         .mean()
         .reshape([1]))
-}
-
-/// Rejects empty tensor extents before embedding or reduction kernels run.
-fn validate_nonempty_input(batch: usize, sequence: usize) -> Result<()> {
-    if batch == 0 || sequence == 0 {
-        return Err(Error::shape(
-            "deepseek_v2.input_ids",
-            "non-empty [batch, sequence]",
-            format!("[{batch}, {sequence}]"),
-        ));
-    }
-    Ok(())
-}
-
-/// Rejects stateless tensors that do not share the model parameter device.
-///
-/// Device equality is checked before token reductions, mask scans, positional
-/// arithmetic, or embedding lookup so a user error is returned through the
-/// crate taxonomy instead of surfacing as a backend mixed-device panic.
-fn ensure_model_device<D: PartialEq>(tensor: &'static str, actual: &D, expected: &D) -> Result<()> {
-    if actual != expected {
-        return Err(Error::BackendCapability(format!(
-            "{tensor} and DeepSeek model parameters are on different devices"
-        )));
-    }
-    Ok(())
-}
-
-/// Validates token values before the embedding backend receives indices.
-fn validate_token_ids<B: Backend>(token_ids: Tensor<B, 2, Int>, vocabulary: usize) -> Result<()> {
-    let minimum = token_ids
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate token IDs: {error}"))
-        })?
-        .elem::<i64>();
-    let maximum = token_ids
-        .max()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate token IDs: {error}"))
-        })?
-        .elem::<i64>();
-    if minimum < 0 || maximum as usize >= vocabulary {
-        return Err(Error::shape(
-            "deepseek_v2.input_ids",
-            format!("token values in 0..{vocabulary}"),
-            format!("observed range {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Validates semantic-mask shape and optionally permits fully masked rows.
-fn validate_mask<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-    permit_empty_rows: bool,
-) -> Result<()> {
-    let Some(mask) = mask else {
-        return Ok(());
-    };
-    if mask.as_tensor().dims() != [batch, sequence] {
-        return Err(Error::shape(
-            "deepseek_v2.token_mask",
-            format!("[{batch}, {sequence}]"),
-            format!("{:?}", mask.as_tensor().dims()),
-        ));
-    }
-    if !permit_empty_rows {
-        let minimum = mask
-            .as_tensor()
-            .clone()
-            .int()
-            .sum_dim(1)
-            .min()
-            .try_into_scalar()
-            .map_err(|error| Error::BackendCapability(format!("failed to validate mask: {error}")))?
-            .elem::<i64>();
-        if minimum == 0 {
-            return Err(Error::shape(
-                "deepseek_v2.token_mask",
-                "at least one valid token in every prompt row",
-                "a fully masked row",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Resolves explicit positions or derives padding-independent ordinals.
-fn resolve_positions<B: Backend>(
-    input: &CausalLmInput<B>,
-    batch: usize,
-    sequence: usize,
-) -> Result<Tensor<B, 2, Int>> {
-    if let Some(positions) = &input.position_ids {
-        if positions.dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "deepseek_v2.position_ids",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", positions.dims()),
-            ));
-        }
-        return Ok(positions.clone());
-    }
-    let device = input.token_ids.device();
-    match &input.token_mask {
-        Some(mask) => {
-            let valid = mask.as_tensor().clone();
-            Ok((valid.clone().int().cumsum(1) - 1).mask_fill(valid.bool_not(), 0))
-        }
-        None => Ok(Tensor::<B, 1, Int>::arange(0..sequence as i64, &device)
-            .reshape([1, sequence])
-            .expand([batch, sequence])),
-    }
-}
-
-/// Validates absolute positions against the checkpoint's declared limit.
-fn validate_position_range<B: Backend>(
-    positions: Tensor<B, 2, Int>,
-    capacity: usize,
-) -> Result<()> {
-    let minimum = positions
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate positions: {error}"))
-        })?
-        .elem::<i64>();
-    let maximum = positions
-        .max()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate positions: {error}"))
-        })?
-        .elem::<i64>();
-    if minimum < 0 || maximum as usize >= capacity {
-        return Err(Error::shape(
-            "deepseek_v2.position_ids",
-            format!("values in 0..{capacity}"),
-            format!("observed range {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Returns one plus the greatest position used by a batch.
-fn evaluated_context<B: Backend>(positions: Tensor<B, 2, Int>) -> Result<usize> {
-    let maximum = positions
-        .max()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("failed to inspect positions: {error}")))?
-        .elem::<i64>();
-    usize::try_from(maximum)
-        .map_err(|_| Error::configuration("deepseek_v2.position_ids", "must be non-negative"))?
-        .checked_add(1)
-        .ok_or_else(|| Error::configuration("deepseek_v2.position_ids", "context overflows usize"))
-}
-
-/// Selects hidden positions before the expensive vocabulary projection.
-fn select_hidden<B: Backend>(
-    hidden: Tensor<B, 3>,
-    mask: Option<&TokenMask<B>>,
-    selection: &LogitsSelection,
-) -> Result<Tensor<B, 3>> {
-    let [batch, sequence, width] = hidden.dims();
-    validate_logits_selection(selection, sequence)?;
-    match selection {
-        LogitsSelection::All => Ok(hidden),
-        LogitsSelection::Last => match mask {
-            None => Ok(hidden.narrow(1, sequence - 1, 1)),
-            Some(mask) => {
-                let device = hidden.device();
-                let positions = Tensor::<B, 1, Int>::arange(0..sequence as i64, &device)
-                    .reshape([1, sequence])
-                    .expand([batch, sequence]);
-                let last = positions
-                    .mask_fill(mask.as_tensor().clone().bool_not(), -1)
-                    .argmax(1)
-                    .unsqueeze_dim::<3>(2)
-                    .expand([batch, 1, width]);
-                Ok(hidden.gather(1, last))
-            }
-        },
-        LogitsSelection::Positions(positions) => {
-            let indices = positions
-                .iter()
-                .map(|&value| value as i64)
-                .collect::<Vec<_>>();
-            let device = hidden.device();
-            Ok(hidden.select(
-                1,
-                Tensor::<B, 1, Int>::from_data(
-                    TensorData::new(indices, [positions.len()]),
-                    &device,
-                ),
-            ))
-        }
-    }
-}
-
-/// Validates explicit selective-logit indices.
-fn validate_logits_selection(selection: &LogitsSelection, sequence: usize) -> Result<()> {
-    if let LogitsSelection::Positions(positions) = selection
-        && (positions.is_empty() || positions.iter().any(|&position| position >= sequence))
-    {
-        return Err(Error::shape(
-            "forward_options.logits.positions",
-            format!("a non-empty list of indices below {sequence}"),
-            format!("{positions:?}"),
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

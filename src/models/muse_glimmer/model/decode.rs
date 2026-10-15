@@ -16,24 +16,28 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
+use burn::tensor::{Int, Tensor, backend::Backend};
 
 use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, Result,
-    architecture::{DecodeState as ArchitectureDecodeState, TokenMask},
-    cache::{
-        CacheConfig, DecodeStateError, KvCacheStorage, NativeKvCacheSpec, TensorCacheError,
-        TensorDecodeState,
+    architecture::DecodeState as ArchitectureDecodeState,
+    cache::{CacheConfig, KvCacheStorage, NativeKvCacheSpec, TensorCacheError, TensorDecodeState},
+    models::shared::{
+        EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_same_device,
+        ensure_static_rotary_context, implicit_position_ids, prepare_stateful_rows,
+        select_hidden_with_last_columns, validate_logits_selection,
     },
-    position::{RopeScaling, apply_rotary, derive_position_ids, rotary_angles},
+    position::{apply_rotary, rotary_angles},
 };
 
 use super::{
-    MuseGlimmerDecoderLayer, MuseGlimmerForCausalLm, MuseGlimmerModel, evaluated_context,
-    scale_free_rms_norm, select_hidden, validate_logits_selection, validate_position_range,
-    validate_token_ids,
+    INPUT_NAMES, MuseGlimmerDecoderLayer, MuseGlimmerForCausalLm, MuseGlimmerModel,
+    scale_free_rms_norm,
 };
 use crate::models::muse_glimmer::{MuseGlimmerLayerType, MuseGlimmerTextConfig};
+
+/// Owner named when an input tensor is on another device than the cache.
+const DECODE_STATE: &str = "Muse decode state";
 
 /// Stateful operation whose empty-row semantics differ intentionally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,9 +49,12 @@ enum StatefulPhase {
 }
 
 impl StatefulPhase {
-    /// Returns whether a semantic row may contain no valid token.
-    const fn permits_inactive_rows(self) -> bool {
-        matches!(self, Self::Decode)
+    /// Returns the phase's policy for rows without a valid token.
+    const fn empty_rows(self) -> EmptyRows {
+        match self {
+            Self::Prefill => EmptyRows::Reject,
+            Self::Decode => EmptyRows::Permit,
+        }
     }
 }
 
@@ -344,8 +351,7 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
         };
 
         for row in 0..prepared.batch {
-            let valid = &prepared.valid_indices[row];
-            if valid.is_empty() {
+            let Some(plan) = prepared.compact_row::<B>(row, &device)? else {
                 let empty = empty_hidden_row(self, prepared.sequence, &device);
                 final_rows.push(empty.clone());
                 if options.hidden_states {
@@ -354,20 +360,17 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
                     }
                 }
                 continue;
-            }
-            let selector = selection_tensor(valid, &device)?;
-            let tokens = input
-                .token_ids
-                .clone()
-                .slice([row..row + 1, 0..prepared.sequence])
-                .select(1, selector.clone());
+            };
+            let tokens = plan.compact(&input.token_ids);
             let baseline = state.tensors.lengths()[row];
             let positions = match &input.position_ids {
-                Some(position_ids) => position_ids
-                    .clone()
-                    .slice([row..row + 1, 0..prepared.sequence])
-                    .select(1, selector),
-                None => implicit_positions(baseline, valid.len(), &device)?,
+                Some(position_ids) => plan.compact(position_ids),
+                None => implicit_position_ids(
+                    baseline,
+                    plan.count(),
+                    &device,
+                    INPUT_NAMES.position_ids,
+                )?,
             };
             let compact = self.model.forward_compact_row(
                 tokens,
@@ -379,7 +382,7 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
                 &mut pending,
                 options.hidden_states,
             )?;
-            final_rows.push(scatter_compact(compact.hidden, prepared.sequence, valid)?);
+            final_rows.push(plan.scatter(compact.hidden)?);
             if options.hidden_states {
                 if compact.hidden_states.len() != diagnostic_count {
                     return Err(Error::Cache(format!(
@@ -388,17 +391,21 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
                     )));
                 }
                 for (destination, hidden) in hidden_rows.iter_mut().zip(compact.hidden_states) {
-                    destination.push(scatter_compact(hidden, prepared.sequence, valid)?);
+                    destination.push(plan.scatter(hidden)?);
                 }
             }
         }
 
-        let hidden = Tensor::cat(final_rows, 0);
+        let hidden = concat_rows(final_rows, "muse_glimmer.hidden")?;
         let hidden_states = hidden_rows
             .into_iter()
-            .map(|rows| Tensor::cat(rows, 0))
-            .collect();
-        let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
+            .map(|rows| concat_rows(rows, "muse_glimmer.hidden_states"))
+            .collect::<Result<Vec<_>>>()?;
+        let selected = select_hidden_with_last_columns(
+            hidden.clone(),
+            prepared.last_columns(),
+            &options.logits,
+        )?;
         let logits = self.project_logits(selected)?;
         pending.commit(state, &prepared.token_counts)?;
         Ok(CausalLmOutput {
@@ -651,150 +658,41 @@ impl<B: Backend> PendingKvWrites<B> {
     }
 }
 
-/// Host-side metadata prepared before any model layer executes.
-struct PreparedStatefulInput {
-    /// Number of rows in the rectangular input.
-    batch: usize,
-    /// Physical input columns before removing padding.
-    sequence: usize,
-    /// Valid physical token columns retained for each compact row.
-    valid_indices: Vec<Vec<usize>>,
-    /// Number of new semantic tokens contributed by each row.
-    token_counts: Vec<usize>,
-    /// Per-row rotary context lengths derived from validated positions.
-    evaluated_contexts: Vec<usize>,
-}
-
 /// Validates shapes, devices, masks, positions, and capacity transitions.
+///
+/// The shared preparation reads the mask, token IDs, and explicit positions in
+/// one transfer; this wrapper adds the model-device and dynamic-NTK guards.
 fn prepare_stateful_input<B: Backend>(
     model: &MuseGlimmerForCausalLm<B>,
     input: &CausalLmInput<B>,
     state: &MuseGlimmerDecodeState<B>,
     phase: StatefulPhase,
-) -> Result<PreparedStatefulInput> {
-    let [batch, sequence] = input.token_ids.dims();
-    if batch == 0 || sequence == 0 {
-        return Err(Error::shape(
-            "muse_glimmer.input_ids",
-            "non-empty [batch, sequence]",
-            format!("[{batch}, {sequence}]"),
-        ));
-    }
-    if batch != state.tensors.batch_size() {
-        return Err(TensorCacheError::BatchSizeMismatch {
-            configured: state.tensors.batch_size(),
-            requested: batch,
-        }
-        .into());
-    }
-    ensure_device(
-        "muse_glimmer.input_ids",
-        &input.token_ids.device(),
-        state.tensors.device(),
-    )?;
-    ensure_device(
+) -> Result<StatefulRows> {
+    ensure_same_device(
         "muse_glimmer.model",
-        &model.model.embed_tokens.weight.val().device(),
+        &model.model.embed_tokens.weight.lazy_device(),
         state.tensors.device(),
+        DECODE_STATE,
     )?;
-    if let Some(mask) = &input.token_mask {
-        ensure_device(
-            "muse_glimmer.token_mask",
-            &mask.as_tensor().device(),
-            state.tensors.device(),
-        )?;
-        if mask.as_tensor().dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "muse_glimmer.token_mask",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", mask.as_tensor().dims()),
-            ));
+    let rows = prepare_stateful_rows(
+        input,
+        state.tensors.device(),
+        state.tensors.lengths(),
+        state.tensors.capacity(),
+        &StatefulContract {
+            names: INPUT_NAMES,
+            owner: DECODE_STATE,
+            vocabulary: model.config().vocab_size,
+            position_limit: Some(model.config().max_position_embeddings),
+            empty_rows: phase.empty_rows(),
+        },
+    )?;
+    for (_, context) in rows.active_contexts() {
+        for rope in model.model.layers.iter().filter_map(|layer| layer.rope) {
+            ensure_static_rotary_context(rope.scaling(), context, "Muse")?;
         }
     }
-    if let Some(positions) = &input.position_ids {
-        ensure_device(
-            "muse_glimmer.position_ids",
-            &positions.device(),
-            state.tensors.device(),
-        )?;
-        if positions.dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "muse_glimmer.position_ids",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", positions.dims()),
-            ));
-        }
-    }
-    let valid_indices = semantic_indices(input.token_mask.as_ref(), batch, sequence)?;
-    if !phase.permits_inactive_rows() && valid_indices.iter().any(Vec::is_empty) {
-        return Err(Error::shape(
-            "muse_glimmer.token_mask",
-            "at least one valid token in every prefill row",
-            "a fully masked prompt row",
-        ));
-    }
-    let token_counts = valid_indices.iter().map(Vec::len).collect::<Vec<_>>();
-    let mut implicit_contexts = Vec::with_capacity(batch);
-    for (row, (&baseline, &additional)) in state
-        .tensors
-        .lengths()
-        .iter()
-        .zip(&token_counts)
-        .enumerate()
-    {
-        let requested = baseline.checked_add(additional).ok_or({
-            TensorCacheError::Metadata(DecodeStateError::LengthOverflow {
-                sequence: row,
-                length: baseline,
-                additional,
-            })
-        })?;
-        if requested > state.tensors.capacity() {
-            return Err(
-                TensorCacheError::Metadata(DecodeStateError::CapacityExceeded {
-                    sequence: row,
-                    requested,
-                    capacity: state.tensors.capacity(),
-                })
-                .into(),
-            );
-        }
-        implicit_contexts.push(requested);
-    }
-    let mut evaluated_contexts = Vec::with_capacity(batch);
-    for (row, valid) in valid_indices.iter().enumerate() {
-        if valid.is_empty() {
-            evaluated_contexts.push(implicit_contexts[row]);
-            continue;
-        }
-        let selector = selection_tensor(valid, state.tensors.device())?;
-        let tokens = input
-            .token_ids
-            .clone()
-            .slice([row..row + 1, 0..sequence])
-            .select(1, selector.clone());
-        validate_token_ids(tokens, model.config().vocab_size)?;
-        let context = match &input.position_ids {
-            Some(positions) => {
-                let compact = positions
-                    .clone()
-                    .slice([row..row + 1, 0..sequence])
-                    .select(1, selector);
-                validate_position_range(compact.clone(), model.config().max_position_embeddings)?;
-                evaluated_context(compact)?
-            }
-            None => implicit_contexts[row],
-        };
-        validate_cached_rope_context(model, context)?;
-        evaluated_contexts.push(context);
-    }
-    Ok(PreparedStatefulInput {
-        batch,
-        sequence,
-        valid_indices,
-        token_counts,
-        evaluated_contexts,
-    })
+    Ok(rows)
 }
 
 /// Resolves the two homogeneous groups and dense per-layer schedule.
@@ -895,132 +793,6 @@ fn cache_layout<B: Backend>(
     })
 }
 
-/// Reads a semantic mask into stable per-row source-column indices.
-fn semantic_indices<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-) -> Result<Vec<Vec<usize>>> {
-    let Some(mask) = mask else {
-        let dense = (0..sequence).collect::<Vec<_>>();
-        return Ok((0..batch).map(|_| dense.clone()).collect());
-    };
-    let values =
-        crate::architecture::tensor_bool_values(mask.as_tensor().clone(), "Muse token mask")?;
-    Ok(values
-        .chunks_exact(sequence)
-        .map(|row| {
-            row.iter()
-                .enumerate()
-                .filter_map(|(index, &valid)| valid.then_some(index))
-                .collect()
-        })
-        .collect())
-}
-
-/// Builds a checked backend selector from host semantic indices.
-fn selection_tensor<B: Backend>(
-    indices: &[usize],
-    device: &B::Device,
-) -> Result<Tensor<B, 1, Int>> {
-    let values = indices
-        .iter()
-        .map(|&index| {
-            i64::try_from(index).map_err(|_| {
-                Error::configuration(
-                    "muse_glimmer.token_mask",
-                    format!("column index {index} exceeds signed tensor-index range"),
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Tensor::from_data(
-        TensorData::new(values, [indices.len()]),
-        device,
-    ))
-}
-
-/// Creates compact implicit positions `baseline .. baseline + token_count`.
-fn implicit_positions<B: Backend>(
-    baseline: usize,
-    tokens: usize,
-    device: &B::Device,
-) -> Result<Tensor<B, 2, Int>> {
-    let positions = derive_position_ids(&vec![true; tokens], baseline, 0)
-        .map_err(|error| Error::configuration("muse_glimmer.position_ids", error.to_string()))?
-        .into_iter()
-        .map(|position| {
-            i64::try_from(position).map_err(|_| {
-                Error::configuration("muse_glimmer.position_ids", "position exceeds i64")
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Tensor::from_data(
-        TensorData::new(positions, [1, tokens]),
-        device,
-    ))
-}
-
-/// Rejects dynamic-NTK changes that would invalidate already rotated local keys.
-fn validate_cached_rope_context<B: Backend>(
-    model: &MuseGlimmerForCausalLm<B>,
-    context: usize,
-) -> Result<()> {
-    for layer in &model.model.layers {
-        if let Some(rope) = layer.rope
-            && let RopeScaling::DynamicNtk(dynamic) = rope.scaling()
-            && context > dynamic.original_max_position_embeddings()
-        {
-            return Err(Error::BackendCapability(
-                "dynamic-NTK Muse decode beyond the original context requires re-rotating cached keys"
-                    .into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Scatters compact floating states back into rectangular source columns.
-fn scatter_compact<B: Backend>(
-    compact: Tensor<B, 3>,
-    sequence: usize,
-    indices: &[usize],
-) -> Result<Tensor<B, 3>> {
-    let [batch, compact_sequence, width] = compact.dims();
-    if batch != 1
-        || compact_sequence != indices.len()
-        || indices.windows(2).any(|pair| pair[0] >= pair[1])
-        || indices.last().is_some_and(|&index| index >= sequence)
-    {
-        return Err(Error::shape(
-            "muse_glimmer.compact_hidden",
-            "[1, valid_columns, width] with sorted unique indices",
-            format!("shape={:?}, indices={indices:?}", compact.dims()),
-        ));
-    }
-    let device = compact.device();
-    let dtype = compact.dtype();
-    let mut segments = Vec::with_capacity(indices.len().saturating_mul(2).saturating_add(1));
-    let mut cursor = 0;
-    for (compact_index, &output_index) in indices.iter().enumerate() {
-        if output_index > cursor {
-            segments.push(Tensor::zeros(
-                [1, output_index - cursor, width],
-                (&device, dtype),
-            ));
-        }
-        segments.push(compact.clone().narrow(1, compact_index, 1));
-        cursor = output_index + 1;
-    }
-    if cursor < sequence {
-        segments.push(Tensor::zeros(
-            [1, sequence - cursor, width],
-            (&device, dtype),
-        ));
-    }
-    Ok(Tensor::cat(segments, 1))
-}
-
 /// Produces a zero-filled inactive rectangular row in the model activation dtype.
 fn empty_hidden_row<B: Backend>(
     model: &MuseGlimmerForCausalLm<B>,
@@ -1031,20 +803,6 @@ fn empty_hidden_row<B: Backend>(
         [1, sequence, model.config().hidden_size],
         (device, model.model.embed_tokens.weight.val().dtype()),
     )
-}
-
-/// Checks that two model/state devices are identical.
-fn ensure_device<D: PartialEq + core::fmt::Debug>(
-    field: &str,
-    actual: &D,
-    expected: &D,
-) -> Result<()> {
-    if actual != expected {
-        return Err(Error::BackendCapability(format!(
-            "{field} is on {actual:?}, but Muse decode state is on {expected:?}"
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
