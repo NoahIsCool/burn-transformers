@@ -57,3 +57,47 @@ fn optional_query_lora_changes_only_its_projection_contract() {
             ))
     );
 }
+
+/// `noaux_tc` requires exactly one F32-shaped selection bias per sparse layer.
+#[test]
+fn noaux_routing_maps_one_correction_bias_per_sparse_layer() {
+    let mut config = DeepseekV2Config::default();
+    let baseline = config
+        .checkpoint_contract(DeepseekV2CheckpointOptions::default())
+        .unwrap()
+        .expected_tensors()
+        .len();
+    config.scoring_func = super::super::DeepseekScoringFunction::Sigmoid;
+    config.topk_method = DeepseekTopKMethod::NoAuxTc;
+    let contract = config
+        .checkpoint_contract(DeepseekV2CheckpointOptions::default())
+        .unwrap();
+    let sparse_layers = (0..config.num_hidden_layers)
+        .filter(|&layer| config.is_moe_layer(layer))
+        .count();
+    assert_eq!(contract.expected_tensors().len(), baseline + sparse_layers);
+    let bias = contract
+        .expected_tensors()
+        .iter()
+        .find(|tensor| tensor.name == "model.layers.1.sparse_mlp.routed.correction_bias")
+        .unwrap();
+    assert_eq!(bias.shape, vec![64]);
+    assert!(
+        contract
+            .mappings()
+            .operations()
+            .iter()
+            .any(|operation| matches!(
+                operation,
+                TensorOperation::Map { source, target, .. }
+                    if source == "model.layers.1.mlp.gate.e_score_correction_bias"
+                        && target == "model.layers.1.sparse_mlp.routed.correction_bias"
+            ))
+    );
+    assert!(
+        !contract
+            .expected_tensors()
+            .iter()
+            .any(|tensor| tensor.name == "model.layers.0.sparse_mlp.routed.correction_bias")
+    );
+}

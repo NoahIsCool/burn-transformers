@@ -7,7 +7,15 @@ use burn::{
 };
 
 use super::*;
-use crate::{LogitsSelection, architecture::TokenMask, models::shared::ensure_same_device};
+use crate::{
+    LogitsSelection,
+    architecture::TokenMask,
+    models::{
+        config::{RopeType, yarn_mscale},
+        shared::ensure_same_device,
+    },
+    position::RopeScaling,
+};
 
 /// CPU backend with F32 tensor values and I32 token indices for deterministic fixtures.
 type TestBackend = Flex<f32, i32>;
@@ -293,13 +301,13 @@ fn stateless_device_affinity_errors_are_contextual() {
 #[test]
 fn pinned_yarn_scaling_matches_closed_form() {
     let config = DeepseekV2Config::default();
-    let rope = deepseek_rope_config(&config).unwrap();
+    let (rope, scale) = rope_and_softmax_scale(&config).unwrap();
     let RopeScaling::Yarn(yarn) = rope.scaling() else {
         panic!("pinned config must use YaRN")
     };
     assert!((yarn.attention_factor() - 1.0).abs() < 1e-12);
     let expected = (192.0_f64).sqrt().recip() * yarn_mscale(40.0, 0.707).powi(2);
-    assert!((deepseek_attention_scale(&config).unwrap() - expected).abs() < 1e-12);
+    assert!((scale - expected).abs() < 1e-12);
 }
 
 /// One-sided YaRN beta overrides retain the official default for the other bound.
@@ -313,19 +321,62 @@ fn yarn_beta_overrides_are_resolved_independently() {
         beta_fast: Some(24.0),
         ..Default::default()
     });
-    let RopeScaling::Yarn(fast_only) = deepseek_rope_config(&config).unwrap().scaling() else {
-        panic!("expected YaRN")
+    let yarn = |config: &DeepseekV2Config| {
+        let RopeScaling::Yarn(yarn) = rope_and_softmax_scale(config).unwrap().0.scaling() else {
+            panic!("expected YaRN")
+        };
+        yarn
     };
+    let fast_only = yarn(&config);
     assert_eq!(fast_only.beta_fast(), 24.0);
     assert_eq!(fast_only.beta_slow(), 1.0);
 
     config.rope_scaling.as_mut().unwrap().beta_fast = None;
     config.rope_scaling.as_mut().unwrap().beta_slow = Some(2.0);
-    let RopeScaling::Yarn(slow_only) = deepseek_rope_config(&config).unwrap().scaling() else {
-        panic!("expected YaRN")
-    };
+    let slow_only = yarn(&config);
     assert_eq!(slow_only.beta_fast(), 32.0);
     assert_eq!(slow_only.beta_slow(), 2.0);
+}
+
+/// The rotary sub-head always rotates completely (API-2): a partial factor is an error.
+#[test]
+fn partial_rotary_factors_are_rejected_instead_of_ignored() {
+    let mut config = tests_support::tiny_config();
+    // Four rotary channels keep the factor itself valid (two rotated channels).
+    config.qk_rope_head_dim = 4;
+    config.rope_scaling = Some(crate::models::config::RopeParameters {
+        partial_rotary_factor: Some(0.5),
+        ..Default::default()
+    });
+    let error = DeepseekV2ForCausalLm::<TestBackend>::init(config.clone(), &Default::default())
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("deepseek_v2.rope.partial_rotary_factor"),
+        "{error}"
+    );
+    config.rope_scaling.as_mut().unwrap().partial_rotary_factor = Some(1.0);
+    assert!(DeepseekV2ForCausalLm::<TestBackend>::init(config, &Default::default()).is_ok());
+}
+
+/// The softmax correction follows the reference for every scaled `rope_type`.
+///
+/// DeepSeek's reference multiplies the softmax scale by `m(f, mscale_all_dim)^2`
+/// whenever `rope_scaling` is set, not only for YaRN; default RoPE has none.
+#[test]
+fn softmax_correction_applies_to_every_scaled_rope_type() {
+    let mut config = tests_support::tiny_config();
+    let base = (5.0_f64).sqrt().recip();
+    assert!((rope_and_softmax_scale(&config).unwrap().1 - base).abs() < 1e-15);
+    config.rope_scaling = Some(crate::models::config::RopeParameters {
+        rope_type: RopeType::Linear,
+        factor: Some(4.0),
+        mscale_all_dim: Some(1.0),
+        ..Default::default()
+    });
+    let scale = rope_and_softmax_scale(&config).unwrap().1;
+    assert!((scale - base * yarn_mscale(4.0, 1.0).powi(2)).abs() < 1e-15);
 }
 
 /// DeepSeek returns vocabulary logits in FP32 even for reduced-precision modules.
@@ -382,7 +433,7 @@ fn unsupported_runtime_variants_fail_during_initialization() {
     assert!(DeepseekV2ForCausalLm::<TestBackend>::init(config, &device).is_err());
 
     let mut config = tests_support::tiny_config();
-    config.topk_method = DeepseekTopKMethod::GroupLimitedGreedy;
+    config.scoring_func = crate::models::deepseek_v2::DeepseekScoringFunction::Sigmoid;
     assert!(DeepseekV2ForCausalLm::<TestBackend>::init(config, &device).is_err());
 
     let mut config = tests_support::tiny_config();
@@ -419,4 +470,55 @@ fn autodiff_stateless_smoke_reaches_embedding() {
         .sum();
     let gradients = loss.backward();
     assert!(model.model.embed_tokens.weight.grad(&gradients).is_some());
+}
+
+/// Bounded chunking, one full plane, and the probability-retaining path agree.
+///
+/// One-token chunks exercise per-chunk key prefixes in every layer; the
+/// padded row checks that padding visibility survives chunking.
+#[test]
+fn bounded_stateless_prefill_matches_unbounded_execution() {
+    let (model, device) = tiny_model();
+    let input = || CausalLmInput {
+        token_ids: Tensor::<TestBackend, 2, Int>::from_ints(
+            [[1, 2, 3, 4, 5], [0, 0, 6, 7, 8]],
+            &device,
+        ),
+        token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+            [[true; 5], [false, false, true, true, true]].into(),
+            &device,
+        ))),
+        position_ids: None,
+    };
+    let logits = |model: &DeepseekV2ForCausalLm<TestBackend>, attentions: bool| {
+        model
+            .forward(
+                input(),
+                &ForwardOptions {
+                    logits: LogitsSelection::All,
+                    attentions,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .logits
+            .into_data()
+    };
+    let reference = logits(&model, true);
+    for policy in [
+        AttentionExecutionPolicy::Unbounded,
+        AttentionExecutionPolicy::query_chunked(1, 1 << 20),
+        AttentionExecutionPolicy::default(),
+    ] {
+        let model = model
+            .clone()
+            .with_attention_execution_policy(policy)
+            .unwrap();
+        assert_eq!(model.attention_execution_policy(), policy);
+        logits(&model, false).assert_approx_eq::<f32>(&reference, Tolerance::absolute(1e-6));
+    }
+    let error = model
+        .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(0, 1))
+        .unwrap_err();
+    assert!(error.to_string().contains("max_query_tokens"), "{error}");
 }

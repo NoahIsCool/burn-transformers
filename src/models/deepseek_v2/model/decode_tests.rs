@@ -204,7 +204,11 @@ fn ragged_batch_and_inactive_rows_are_supported() {
     );
 }
 
-/// Reorder permits duplication, truncate clears suffixes, and reset zeros all bytes.
+/// Reorder duplicates rows, truncate rewinds logically, and reset zeros all bytes.
+///
+/// Full-history storage keeps a truncated row's later slots: they are
+/// unreachable (reads mask slots at or beyond the length) and the next write
+/// overwrites them. Truncating a row to zero clears it.
 #[test]
 fn lifecycle_operations_update_metadata_and_storage() {
     let (model, device) = tiny_model();
@@ -232,11 +236,22 @@ fn lifecycle_operations_update_metadata_and_storage() {
         storage.clone().slice([0..1, 0..8, 0..7]).into_data(),
         storage.slice([1..2, 0..8, 0..7]).into_data()
     );
+    let kept = state
+        .layer_storage(0)
+        .unwrap()
+        .slice([0..1, 0..1, 0..7])
+        .into_data();
     state.truncate(&[1, 0]).unwrap();
     assert_eq!(state.lengths(), &[1, 0]);
-    let values = state.layer_storage(0).unwrap().into_data();
-    let values = values.as_slice::<f32>().unwrap();
-    assert!(values[7..].iter().all(|&value| value == 0.0));
+    let values = state.layer_storage(0).unwrap();
+    assert_eq!(values.clone().slice([0..1, 0..1, 0..7]).into_data(), kept);
+    assert!(
+        values
+            .slice([1..2, 0..8, 0..7])
+            .into_data()
+            .iter::<f32>()
+            .all(|value| value == 0.0)
+    );
     state.reset().unwrap();
     assert_eq!(state.lengths(), &[0, 0]);
     assert!(
@@ -846,5 +861,702 @@ fn reduced_precision_inactive_rows_keep_f32_router_logits() {
                 options.auxiliary_losses
             );
         }
+    }
+}
+
+/// Context-dependent rotary scalings refuse to extend a non-empty cache past their limit.
+#[test]
+fn context_dependent_rotary_scaling_guards_cached_keys() {
+    let dynamic = crate::position::RopeScaling::from(
+        crate::position::DynamicNtkScaling::new(2.0, 16).unwrap(),
+    );
+    assert!(ensure_cached_rotary_context(dynamic, 16).is_ok());
+    let error = ensure_cached_rotary_context(dynamic, 17).unwrap_err();
+    assert!(
+        matches!(&error, Error::BackendCapability(message) if message.contains("16-token limit")),
+        "{error}"
+    );
+    assert!(ensure_cached_rotary_context(crate::position::RopeScaling::None, usize::MAX).is_ok());
+}
+
+/// One stateful call of a scenario: rectangular tokens and validity per row.
+struct Step {
+    /// Token IDs `[B][S]`.
+    tokens: Vec<Vec<i64>>,
+    /// Validity `[B][S]`, or `None` when every token is valid.
+    mask: Option<Vec<Vec<bool>>>,
+}
+
+/// Builds a rectangular `[B, S]` input from host rows.
+fn step_input(step: &Step) -> CausalLmInput<TestBackend> {
+    let device = Default::default();
+    let [batch, sequence] = [step.tokens.len(), step.tokens[0].len()];
+    CausalLmInput {
+        token_ids: Tensor::from_data(
+            TensorData::new(step.tokens.concat(), [batch, sequence]),
+            &device,
+        ),
+        token_mask: step.mask.as_ref().map(|mask| {
+            TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_data(
+                TensorData::new(mask.concat(), [batch, sequence]),
+                &device,
+            ))
+        }),
+        position_ids: None,
+    }
+}
+
+/// Requests every logit, every hidden state, and router logits.
+fn diagnostics() -> ForwardOptions {
+    ForwardOptions {
+        logits: LogitsSelection::All,
+        hidden_states: true,
+        router_logits: true,
+        ..Default::default()
+    }
+}
+
+/// Runs a scenario in one batched state; returns every step's outputs.
+fn run_batched(
+    model: &DeepseekV2ForCausalLm<TestBackend>,
+    steps: &[Step],
+) -> (Vec<CausalLmOutput<TestBackend>>, Vec<usize>) {
+    let batch = steps[0].tokens.len();
+    let mut state = model
+        .new_decode_state(
+            CacheConfig::new(batch, 16).unwrap(),
+            batch,
+            &Default::default(),
+        )
+        .unwrap();
+    let outputs = steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let input = step_input(step);
+            if index == 0 {
+                model.prefill(input, &mut state, &diagnostics()).unwrap()
+            } else {
+                model
+                    .decode(
+                        DecodeInput {
+                            token_ids: input.token_ids,
+                            token_mask: input.token_mask,
+                            position_ids: None,
+                        },
+                        &mut state,
+                        &diagnostics(),
+                    )
+                    .unwrap()
+            }
+        })
+        .collect();
+    (outputs, state.lengths().to_vec())
+}
+
+/// One row's logits `[n_b * V]` and final hidden states `[n_b * H]`, or `None` when inactive.
+type RowResult = Option<(Vec<f32>, Vec<f32>)>;
+
+/// The previous algorithm's semantics: each row alone, compacted, in a batch-one state.
+///
+/// Returns, per step and row, the logits `[n_b, V]` and final hidden states
+/// `[n_b, H]` of that row's valid tokens (empty when the row is inactive).
+fn run_per_row(model: &DeepseekV2ForCausalLm<TestBackend>, steps: &[Step]) -> Vec<Vec<RowResult>> {
+    let device = Default::default();
+    let batch = steps[0].tokens.len();
+    let mut results = vec![Vec::new(); steps.len()];
+    for row in 0..batch {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 16).unwrap(), 1, &device)
+            .unwrap();
+        for (index, step) in steps.iter().enumerate() {
+            let tokens = step.tokens[row]
+                .iter()
+                .enumerate()
+                .filter(|&(column, _)| step.mask.as_ref().is_none_or(|mask| mask[row][column]))
+                .map(|(_, &token)| token)
+                .collect::<Vec<_>>();
+            if tokens.is_empty() {
+                results[index].push(None);
+                continue;
+            }
+            let count = tokens.len();
+            let input = input(Tensor::from_data(
+                TensorData::new(tokens, [1, count]),
+                &device,
+            ));
+            let output = if state.lengths()[0] == 0 {
+                model.prefill(input, &mut state, &diagnostics())
+            } else {
+                model.decode(
+                    DecodeInput {
+                        token_ids: input.token_ids,
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                    &mut state,
+                    &diagnostics(),
+                )
+            }
+            .unwrap();
+            results[index].push(Some((
+                output.logits.into_data().to_vec::<f32>().unwrap(),
+                output
+                    .final_hidden_state
+                    .unwrap()
+                    .into_data()
+                    .to_vec::<f32>()
+                    .unwrap(),
+            )));
+        }
+    }
+    results
+}
+
+/// Asserts `|actual - expected| <= tolerance` elementwise with context.
+fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32, context: &str) {
+    assert_eq!(actual.len(), expected.len(), "{context}");
+    for (index, (left, right)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (left - right).abs() <= tolerance,
+            "{context}[{index}]: {left} vs {right}"
+        );
+    }
+}
+
+/// Ragged, padded, and inactive rows in one batched pass equal independent rows.
+///
+/// The scenario covers left padding, right padding, an interior hole, a
+/// multi-token reference step with unequal per-row counts, absorbed one-token
+/// decode with ragged cache lengths, and a finished row. Padding columns and
+/// inactive rows must be exact zeros.
+#[test]
+fn batched_rows_match_independent_rows() {
+    let model = initialized_reference();
+    let steps = [
+        Step {
+            tokens: vec![vec![0, 3, 17, 5], vec![9, 30, 0, 0], vec![7, 0, 1, 22]],
+            mask: Some(vec![
+                vec![false, true, true, true],
+                vec![true, true, false, false],
+                vec![true, false, true, true],
+            ]),
+        },
+        Step {
+            tokens: vec![vec![4, 4, 2], vec![19, 0, 0], vec![0, 6, 0]],
+            mask: Some(vec![
+                vec![true, true, true],
+                vec![true, false, false],
+                vec![false, true, false],
+            ]),
+        },
+        Step {
+            tokens: vec![vec![11], vec![12], vec![13]],
+            mask: None,
+        },
+        Step {
+            tokens: vec![vec![14], vec![0], vec![15]],
+            mask: Some(vec![vec![true], vec![false], vec![true]]),
+        },
+    ];
+    let (batched, lengths) = run_batched(&model, &steps);
+    assert_eq!(lengths, [8, 4, 6]);
+    let oracle = run_per_row(&model, &steps);
+    for (index, (step, output)) in steps.iter().zip(&batched).enumerate() {
+        let [_, sequence, vocabulary] = output.logits.dims();
+        let hidden_width = 8;
+        let logits = output.logits.clone().into_data().to_vec::<f32>().unwrap();
+        let hidden = output
+            .final_hidden_state
+            .clone()
+            .unwrap()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        for (row, expected) in oracle[index].iter().enumerate() {
+            let valid = (0..sequence)
+                .filter(|&column| step.mask.as_ref().is_none_or(|mask| mask[row][column]))
+                .collect::<Vec<_>>();
+            for column in 0..sequence {
+                let logit = |values: &[f32], width: usize| {
+                    values[(row * sequence + column) * width..(row * sequence + column + 1) * width]
+                        .to_vec()
+                };
+                match (valid.iter().position(|&c| c == column), expected) {
+                    (Some(k), Some((oracle_logits, oracle_hidden))) => {
+                        let context = format!("step {index} row {row} column {column}");
+                        assert_close(
+                            &logit(&logits, vocabulary),
+                            &oracle_logits[k * vocabulary..(k + 1) * vocabulary],
+                            2e-5,
+                            &context,
+                        );
+                        assert_close(
+                            &logit(&hidden, hidden_width),
+                            &oracle_hidden[k * hidden_width..(k + 1) * hidden_width],
+                            2e-5,
+                            &context,
+                        );
+                    }
+                    _ => {
+                        assert!(logit(&logits, vocabulary).iter().all(|&value| value == 0.0));
+                        assert!(
+                            logit(&hidden, hidden_width)
+                                .iter()
+                                .all(|&value| value == 0.0)
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(output.hidden_states.len(), 4);
+        assert_eq!(output.routers.len(), 1);
+    }
+}
+
+/// Builds the HF reference V2 topology, whose O(1) logits make tolerances meaningful.
+fn initialized_reference() -> DeepseekV2ForCausalLm<TestBackend> {
+    crate::models::deepseek_v2::model::tests_support::reference_model(
+        crate::models::deepseek_v2::model::tests_support::reference_v2_config(),
+        &Default::default(),
+    )
+}
+
+/// Batched cached logits equal the stateless forward of each complete row.
+#[test]
+fn batched_cached_logits_match_stateless_rows() {
+    let model = initialized_reference();
+    let device = Default::default();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 16).unwrap(), 2, &device)
+        .unwrap();
+    model
+        .prefill(
+            CausalLmInput {
+                token_ids: Tensor::from_ints([[3, 17, 5], [0, 9, 30]], &device),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [[true, true, true], [false, true, true]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let decoded = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[2], [4]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap()
+        .logits;
+    assert_eq!(
+        state.last_execution_path(),
+        Some(MlaExecutionPath::AbsorbedDecode)
+    );
+    for (row, tokens) in [vec![3, 17, 5, 2], vec![9, 30, 4]].into_iter().enumerate() {
+        let width = tokens.len();
+        let expected = model
+            .forward(
+                input(Tensor::from_data(
+                    TensorData::new(tokens, [1, width]),
+                    &device,
+                )),
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+        decoded
+            .clone()
+            .slice([row..row + 1, 0..1, 0..32])
+            .into_data()
+            .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(2e-5));
+    }
+}
+
+/// Speculative proposals stage in place; commit keeps a prefix and rollback discards all.
+#[test]
+fn transactions_commit_prefixes_and_roll_back_proposals() {
+    use crate::cache::TransactionalCache;
+
+    let model = initialized_reference();
+    let device = Default::default();
+    let decode = |state: &mut DeepseekV2DecodeState<TestBackend>, tokens: Vec<i64>| {
+        let width = tokens.len();
+        model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_data(TensorData::new(tokens, [1, width]), &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                state,
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits
+    };
+    let fresh = || {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 16).unwrap(), 1, &device)
+            .unwrap();
+        model
+            .prefill(
+                input(Tensor::from_ints([[3, 17, 5]], &device)),
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        state
+    };
+
+    // Reference: commit tokens 9 then 30 without any transaction.
+    let mut reference = fresh();
+    decode(&mut reference, vec![9]);
+    let expected = decode(&mut reference, vec![30]);
+
+    // Speculate [9, 21, 22], accept one, then decode 30 normally.
+    let mut state = fresh();
+    let mark = state.mark().unwrap();
+    decode(&mut state, vec![9, 21]);
+    decode(&mut state, vec![22]);
+    assert_eq!(state.lengths(), &[3]);
+    assert_eq!(state.working_lengths(), &[6]);
+    state.commit_prefix(mark, 1).unwrap();
+    assert_eq!(state.lengths(), &[4]);
+    decode(&mut state, vec![30])
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.clone().into_data(), Tolerance::absolute(1e-6));
+
+    // A rolled-back proposal leaves no trace.
+    let mut state = fresh();
+    let mark = state.mark().unwrap();
+    decode(&mut state, vec![1, 2, 3]);
+    state.rollback(mark).unwrap();
+    assert_eq!(state.lengths(), &[3]);
+    decode(&mut state, vec![9]);
+    decode(&mut state, vec![30])
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(1e-6));
+}
+
+/// A failure after some layers wrote ahead keeps lengths and readable history intact.
+#[test]
+fn mid_step_failures_are_logically_atomic() {
+    use burn::module::Param;
+
+    let mut model = initialized_reference();
+    let device = Default::default();
+    // A NaN embedding row passes layer 0, then makes layer 1's router fail.
+    let mut table = model
+        .model
+        .embed_tokens
+        .weight
+        .val()
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    table[31 * 8..32 * 8].fill(f32::NAN);
+    model.model.embed_tokens.weight =
+        Param::from_tensor(Tensor::from_data(TensorData::new(table, [32, 8]), &device));
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 16).unwrap(), 1, &device)
+        .unwrap();
+    model
+        .prefill(
+            input(Tensor::from_ints([[3, 17, 5]], &device)),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let path = state.last_execution_path();
+    let error = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[31]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Shape { tensor, .. } if tensor == "moe.router_scores"),
+        "{error}"
+    );
+    assert_eq!(state.lengths(), &[3]);
+    assert_eq!(state.last_execution_path(), path);
+    let recovered = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[9]], &device),
+                token_mask: None,
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap()
+        .logits;
+    let expected = model
+        .forward(
+            input(Tensor::from_ints([[3, 17, 5, 9]], &device)),
+            &ForwardOptions::default(),
+        )
+        .unwrap()
+        .logits;
+    recovered
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(2e-5));
+}
+
+/// A step in which every row is finished returns zeros and changes nothing.
+#[test]
+fn all_inactive_decode_is_a_no_op() {
+    let model = initialized_reference();
+    let device = Default::default();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 16).unwrap(), 2, &device)
+        .unwrap();
+    model
+        .prefill(
+            input(Tensor::from_ints([[3, 17], [5, 9]], &device)),
+            &mut state,
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    let before = state.layer_storage(1).unwrap().into_data();
+    let output = model
+        .decode(
+            DecodeInput {
+                token_ids: Tensor::from_ints([[0], [0]], &device),
+                token_mask: Some(TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_bool(
+                    [[false], [false]].into(),
+                    &device,
+                ))),
+                position_ids: None,
+            },
+            &mut state,
+            &ForwardOptions {
+                hidden_states: true,
+                router_logits: true,
+                auxiliary_losses: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(state.lengths(), &[2, 2]);
+    assert_eq!(state.layer_storage(1).unwrap().into_data(), before);
+    assert!(
+        output
+            .logits
+            .into_data()
+            .iter::<f32>()
+            .all(|value| value == 0.0)
+    );
+    assert_eq!(output.hidden_states.len(), 4);
+    assert_eq!(output.routers.len(), 1);
+    assert_eq!(
+        output.routers[0].logits.as_ref().unwrap().dtype(),
+        burn::tensor::DType::F32
+    );
+}
+
+/// Masked sentinels of a finished or padded row never reach the embedding or RoPE.
+///
+/// Masked columns are not validated, so a finished row may carry an
+/// out-of-vocabulary pad ID, `-1`, `i32::MIN`, or `i32::MAX`, with an equally
+/// invalid explicit position. Regression (review DSM-R1): batched packing
+/// gathered a finished row's column 0 into the block and Flex panicked in the
+/// embedding gather (an out-of-bounds read on GPU backends). Every sentinel
+/// must now produce bit-identical logits to padding with the valid token and
+/// position 0, for one-token (absorbed) and two-token (reference) steps, with
+/// implicit and explicit positions, and for finished and left-padded rows.
+#[test]
+fn masked_sentinel_tokens_and_positions_are_inert() {
+    let model = initialized_reference();
+    let device = Default::default();
+    /// Builds row 1's tokens, mask, and positions around a sentinel token `pad` and position `at`.
+    type MaskedRow = fn(i32, i32) -> (Vec<i32>, Vec<bool>, Vec<i32>);
+    let cases: [(usize, MaskedRow); 3] = [
+        (1, |pad, at| (vec![pad], vec![false], vec![at])),
+        (2, |pad, at| {
+            (vec![pad, pad], vec![false, false], vec![at, at])
+        }),
+        (2, |pad, at| (vec![pad, 8], vec![false, true], vec![at, 3])),
+    ];
+    for (width, row) in cases {
+        for explicit in [false, true] {
+            let run = |pad: i32, at: i32| {
+                let (tokens, mask, positions) = row(pad, at);
+                let active_tokens = [7, 9][..width].to_vec();
+                let active_positions = [3, 4][..width].to_vec();
+                let mut state = model
+                    .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+                    .unwrap();
+                model
+                    .prefill(
+                        input(Tensor::from_ints([[1, 2, 3], [4, 5, 6]], &device)),
+                        &mut state,
+                        &ForwardOptions::default(),
+                    )
+                    .unwrap();
+                let output = model
+                    .decode(
+                        DecodeInput {
+                            token_ids: Tensor::from_data(
+                                TensorData::new([active_tokens, tokens].concat(), [2, width]),
+                                &device,
+                            ),
+                            token_mask: Some(TokenMask::new(
+                                Tensor::<TestBackend, 2, Bool>::from_data(
+                                    TensorData::new([vec![true; width], mask].concat(), [2, width]),
+                                    &device,
+                                ),
+                            )),
+                            position_ids: explicit.then(|| {
+                                Tensor::from_data(
+                                    TensorData::new(
+                                        [active_positions, positions].concat(),
+                                        [2, width],
+                                    ),
+                                    &device,
+                                )
+                            }),
+                        },
+                        &mut state,
+                        &ForwardOptions {
+                            logits: LogitsSelection::All,
+                            router_logits: true,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap_or_else(|error| panic!("pad {pad} at {at}: {error}"));
+                (output.logits.into_data(), state.lengths().to_vec())
+            };
+            let baseline = run(0, 0);
+            for (pad, at) in [
+                (32, 32),
+                (-1, -1),
+                (i32::MAX, i32::MAX),
+                (i32::MIN, 1 << 20),
+            ] {
+                assert_eq!(
+                    run(pad, at),
+                    baseline,
+                    "width {width}, explicit {explicit}, pad {pad}, position {at}"
+                );
+            }
+        }
+    }
+}
+
+/// Measures batched prefill/decode against one batch-one call per row (the previous algorithm).
+///
+/// Run with `cargo test --release --lib batched_decode_benchmark -- --ignored --nocapture`.
+/// Each variant runs five times in alternation; the minimum and median wall
+/// times of the prefill and of 16 one-token decode steps are reported.
+#[test]
+#[ignore = "release-mode timing benchmark"]
+fn batched_decode_benchmark() {
+    use std::time::Instant;
+
+    let device = Default::default();
+    let mut config = crate::models::deepseek_v2::model::tests_support::reference_v2_config();
+    config.hidden_size = 256;
+    config.intermediate_size = 512;
+    config.moe_intermediate_size = 128;
+    config.num_attention_heads = 8;
+    config.kv_lora_rank = 64;
+    config.qk_nope_head_dim = 32;
+    config.qk_rope_head_dim = 16;
+    config.v_head_dim = 32;
+    config.num_hidden_layers = 4;
+    config.max_position_embeddings = 1024;
+    let model = initialized_model(config, &device);
+    let (batch, prompt, steps) = (8, 128, 16);
+    let prompts = (0..batch * prompt)
+        .map(|index| ((index * 7) % 31) as i64)
+        .collect::<Vec<_>>();
+    // Runs `rows` rows starting at `first` in one state; returns (prefill, decode) seconds.
+    let run = |first: usize, rows: usize| {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(rows, 512).unwrap(), rows, &device)
+            .unwrap();
+        let tokens = prompts[first * prompt..(first + rows) * prompt].to_vec();
+        let started = Instant::now();
+        let _ = model
+            .prefill(
+                input(Tensor::from_data(
+                    TensorData::new(tokens, [rows, prompt]),
+                    &device,
+                )),
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        let prefill = started.elapsed().as_secs_f64();
+        let started = Instant::now();
+        for step in 0..steps {
+            let _ = model
+                .decode(
+                    DecodeInput {
+                        token_ids: Tensor::from_data(
+                            TensorData::new(vec![(step % 31) as i64; rows], [rows, 1]),
+                            &device,
+                        ),
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                    &mut state,
+                    &ForwardOptions::default(),
+                )
+                .unwrap()
+                .logits
+                .into_data();
+        }
+        (prefill, started.elapsed().as_secs_f64())
+    };
+    let per_row = || {
+        (0..batch)
+            .map(|row| run(row, 1))
+            .fold((0.0, 0.0), |sum, time| (sum.0 + time.0, sum.1 + time.1))
+    };
+    let _ = run(0, batch);
+    let (mut batched, mut separate) = (Vec::new(), Vec::new());
+    for _ in 0..5 {
+        batched.push(run(0, batch));
+        separate.push(per_row());
+    }
+    let summary = |samples: &[(f64, f64)], pick: fn(&(f64, f64)) -> f64| {
+        let mut values = samples.iter().map(pick).collect::<Vec<_>>();
+        values.sort_by(f64::total_cmp);
+        (values[0], values[values.len() / 2])
+    };
+    for (label, pick) in [
+        (
+            "prefill",
+            (|time: &(f64, f64)| time.0) as fn(&(f64, f64)) -> f64,
+        ),
+        ("decode x16", |time: &(f64, f64)| time.1),
+    ] {
+        let (batched_min, batched_median) = summary(&batched, pick);
+        let (separate_min, separate_median) = summary(&separate, pick);
+        println!(
+            "{label}: per-row min {separate_min:.4} s median {separate_median:.4} s; \
+             batched min {batched_min:.4} s median {batched_median:.4} s; \
+             speedup min {:.2}x median {:.2}x",
+            separate_min / batched_min,
+            separate_median / batched_median
+        );
     }
 }

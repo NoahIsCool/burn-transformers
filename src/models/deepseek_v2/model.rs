@@ -5,46 +5,77 @@
 //! `y = x' + FFN(RMSNorm(x'))`. The pinned Lite checkpoint uses one dense
 //! SwiGLU block followed by 26 blocks that add a top-6 routed mixture to one
 //! always-active SwiGLU whose intermediate width is exactly twice an expert's
-//! width. The widened shared network is intentionally not represented as two
-//! independent experts because its checkpoint contains only three matrices.
+//! width (see [`DeepseekV2Moe`](crate::models::deepseek_v2::model::DeepseekV2Moe) for the routing policies and balance losses).
+//!
+//! # Positions and attention scale
+//!
+//! Rotary metadata goes through the shared translator
+//! ([`RopeParameters::to_rope_config`](crate::models::config::RopeParameters::to_rope_config))
+//! with DeepSeek's reference conventions: the YaRN amplitude is
+//! `m(f, mscale) / m(f, mscale_all_dim)` whenever either key is present, and
+//! every scaled `rope_type` multiplies the softmax scale
+//! `1 / sqrt(qk_nope + qk_rope)` by `m(f, mscale_all_dim)^2`, where
+//! `m(s, k) = 1 + 0.1 k ln s`. Only the `qk_rope_head_dim` sub-head rotates
+//! and it always rotates completely, so a `partial_rotary_factor` other than
+//! one is rejected rather than silently ignored. The cosine/sine tables are
+//! built once per forward pass (and cast once to the activation dtype) and
+//! shared by every layer.
+//!
+//! # Bounded prefill
+//!
+//! Reference (unabsorbed) MLA expands keys and values and forms one
+//! `[batch, head, query, key]` score plane per layer. The model's
+//! [`AttentionExecutionPolicy`](crate::attention::AttentionExecutionPolicy) evaluates that plane in synchronized query
+//! chunks, each restricted to its causally visible key prefix, so a long
+//! prompt needs `O(chunk * key)` score workspace instead of `O(query * key)`.
+//! Requesting attention probabilities (`ForwardOptions::attentions`)
+//! materializes the full plane, which that output consists of.
 
 use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
-    tensor::{Bool, DType, Int, Tensor, activation::softmax, backend::Backend},
+    tensor::{Bool, DType, Int, Tensor, backend::Backend},
 };
 
 use crate::{
     ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
-    architecture::{RouterDiagnostics, TokenMask},
-    attention::padding_attention_mask,
+    architecture::RouterDiagnostics,
+    attention::AttentionExecutionPolicy,
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
-    moe::{SparseMoe, SparseMoeConfig, SparseMoeOutput, load_balancing_loss},
+    intervention::{Hooks, Layer, PointInfo, Stack},
+    moe::SparseMoeOutput,
     normalization::{RmsNorm, RmsNormConfig},
     operations,
-    position::{DynamicNtkScaling, LinearRopeScaling, RopeConfig, RopeScaling, YarnConfig},
+    position::{RopeConfig, RotaryAngles, RotaryFrequencies, rotary_angles_from_frequencies},
 };
 
 use super::{
-    DeepseekScoringFunction, DeepseekTopKMethod, DeepseekV2Config,
-    mla::{MlaMixOutput, MultiLatentAttention, MultiLatentAttentionConfig},
+    DeepseekV2Config,
+    mla::{
+        MlaMixOutput, MlaProjection, MultiLatentAttention, MultiLatentAttentionConfig,
+        PositionalVisibility,
+    },
 };
 use crate::models::{
-    config::RopeType,
+    config::{PartialRotary, RopeContext, SoftmaxMscale, YarnMscaleConvention},
     shared::{InputContract, InputNames, select_hidden, validate_input},
 };
 
-/// External compressed MLA caches and transactional prefill/decode execution.
+/// Dependency-free host planning of batched stateful blocks (Verus-verified).
+pub(crate) mod batch;
+/// Device-side packing of ragged stateful rows, shared with Muse-Glimmer.
+pub(crate) mod block;
+/// External compressed MLA caches and batched transactional prefill/decode execution.
 mod decode;
+/// Activation hooks and staged execution (`HookedModel`, `StagedModel`).
+mod hooks;
+/// Routed-plus-shared expert block, router policies, and balance losses.
+mod moe;
 
 pub use decode::{DeepseekV2DecodeState, MlaExecutionPath};
+pub use moe::DeepseekV2Moe;
 
-/// Dtype of every router projection, probability, and diagnostic logit.
-///
-/// The reference router casts both operands to FP32 before the projection, so
-/// router logits are FP32 even in F16/BF16 checkpoints. Placeholders for
-/// inactive decode rows must use the same dtype to be concatenated with them.
-const ROUTER_DTYPE: DType = DType::F32;
+use moe::{ROUTER_DTYPE, router_diagnostics};
 
 /// Tensor names reported by DeepSeek-V2 input errors.
 const INPUT_NAMES: InputNames<'static> = InputNames {
@@ -56,187 +87,65 @@ const INPUT_NAMES: InputNames<'static> = InputNames {
 /// Owner named when a stateless tensor is on another device than the weights.
 const PARAMETERS: &str = "DeepSeek model parameters";
 
-/// Routed expert output together with the always-active shared contribution.
-#[derive(Clone, Debug)]
-struct DeepseekMoeOutput<B: Backend> {
-    /// Sum of selected routed contributions and the widened shared network.
-    hidden_state: Tensor<B, 3>,
-    /// Routing choices and accounting retained for optional diagnostics.
-    routed: SparseMoeOutput<B>,
+/// Builds the rotary-translation context with DeepSeek's reference conventions.
+///
+/// The rotary sub-head is `qk_rope_head_dim` wide and always fully rotated;
+/// the YaRN amplitude and the softmax correction follow DeepSeek's
+/// `modeling_deepseek.py` (module documentation).
+fn rope_context(config: &DeepseekV2Config) -> RopeContext {
+    RopeContext::new(
+        "deepseek_v2",
+        config.qk_rope_head_dim,
+        config.max_position_embeddings,
+    )
+    .with_rope_theta(Some(config.rope_theta))
+    .with_partial_rotary(PartialRotary::FullHeadOnly)
+    .with_yarn_mscale_convention(YarnMscaleConvention::DeepSeekReference)
+    .with_softmax_mscale(SoftmaxMscale::MscaleAllDimSquared)
 }
 
-/// DeepSeek's top-k routed bank plus one widened shared SwiGLU network.
-#[derive(Module, Debug)]
-pub struct DeepseekV2Moe<B: Backend> {
-    /// Selected-only routed expert dispatcher.
-    pub routed: SparseMoe<B>,
-    /// One always-active checkpoint module of width `n_shared * expert_width`.
-    pub shared_experts: GatedFeedForward<B>,
+/// Translates the configuration's rotary metadata and attention score scale.
+///
+/// Returns the executable [`RopeConfig`] and the softmax scale
+/// `m(f, mscale_all_dim)^2 / sqrt(qk_nope_head_dim + qk_rope_head_dim)`.
+///
+/// # Errors
+///
+/// Returns the translator's contextual configuration errors at
+/// `deepseek_v2.rope.<field>`.
+pub(crate) fn rope_and_softmax_scale(config: &DeepseekV2Config) -> Result<(RopeConfig, f64)> {
+    let context = rope_context(config);
+    let parameters = config.rope_scaling.clone().unwrap_or_default();
+    let rope = parameters.to_rope_config(&context)?;
+    let scale = (config.qk_head_dim() as f64).sqrt().recip()
+        * parameters.softmax_scale_multiplier(&context)?;
+    Ok((rope, scale))
 }
 
-impl<B: Backend> DeepseekV2Moe<B> {
-    /// Allocates the exact single-process V2-Lite expert topology.
-    fn init(config: &DeepseekV2Config, device: &B::Device) -> Result<Self> {
-        if config.ep_size != 1 {
-            return Err(Error::BackendCapability(
-                "DeepSeek expert-parallel checkpoints require distributed execution, which is deferred from v1"
-                    .into(),
-            ));
-        }
-        if config.scoring_func != DeepseekScoringFunction::Softmax
-            || config.topk_method != DeepseekTopKMethod::Greedy
-        {
-            return Err(Error::BackendCapability(
-                "the v1 DeepSeek-V2 runtime implements the pinned softmax/greedy router only"
-                    .into(),
-            ));
-        }
-        let mut routed = SparseMoeConfig::new(
-            config.hidden_size,
-            config.moe_intermediate_size,
-            config.n_routed_experts,
-            config.num_experts_per_tok,
-        );
-        // The reference only normalizes a multi-expert mixture. For top-1
-        // routing, normalization would erase the router's confidence and make
-        // every selected route have unit weight.
-        let renormalize_selected = config.num_experts_per_tok > 1 && config.norm_topk_prob;
-        routed.renormalize_selected = renormalize_selected;
-        // The reference applies routed_scaling_factor only on its unnormalized
-        // branch. Lite uses `norm_topk_prob=false`, but retaining this condition
-        // keeps other V2 configs mathematically faithful.
-        routed.routed_scale = if renormalize_selected {
-            1.0
-        } else {
-            config.routed_scaling_factor
-        };
-        let shared_width = config
-            .moe_intermediate_size
-            .checked_mul(config.n_shared_experts)
-            .ok_or_else(|| {
-                Error::configuration(
-                    "deepseek_v2.shared_experts",
-                    "intermediate width product overflows usize",
-                )
-            })?;
-        Ok(Self {
-            routed: routed.init(device)?,
-            shared_experts: GatedFeedForwardConfig::new(config.hidden_size, shared_width)
-                .init(device)?,
-        })
-    }
-
-    /// Evaluates only selected routed experts and always evaluates the shared MLP.
-    fn forward(&self, input: Tensor<B, 3>) -> Result<DeepseekMoeOutput<B>> {
-        let [batch, sequence, hidden] = input.dims();
-        if batch == 0 || sequence == 0 || hidden != self.routed.hidden_size {
-            return Err(Error::shape(
-                "deepseek_v2.moe.input",
-                format!("[batch>0, sequence>0, {}]", self.routed.hidden_size),
-                format!("[{batch}, {sequence}, {hidden}]"),
-            ));
-        }
-        if self.routed.experts_per_token == 0
-            || self.routed.experts_per_token > self.routed.routed.len()
-        {
-            return Err(Error::configuration(
-                "deepseek_v2.moe.experts_per_token",
-                "must fit the instantiated routed expert bank",
-            ));
-        }
-        let tokens = batch.checked_mul(sequence).ok_or_else(|| {
-            Error::shape(
-                "deepseek_v2.moe.input",
-                "a representable batch * sequence product",
-                format!("{batch} * {sequence}"),
-            )
-        })?;
-        let input_dtype = input.dtype();
-        let flat_input = input.clone().reshape([tokens, hidden]);
-        // The official router casts both operands to FP32 before the projection,
-        // not merely before softmax. This avoids an F16 rounding event changing
-        // the selected expert and therefore an entire nonlinear subgraph.
-        let router_logits = burn::tensor::module::linear(
-            input.clone().cast(ROUTER_DTYPE),
-            self.routed.router.weight.val().cast(ROUTER_DTYPE),
-            None,
-        );
-        let probabilities = softmax(router_logits.clone(), 2);
-        let (selected_weights, selected_experts) =
-            deterministic_top_k(probabilities, self.routed.experts_per_token);
-        let mut flat_weights = selected_weights
-            .clone()
-            .reshape([tokens, self.routed.experts_per_token]);
-        if self.routed.renormalize_selected {
-            let denominator = flat_weights.clone().sum_dim(1).clamp_min(f32::MIN_POSITIVE);
-            flat_weights = flat_weights / denominator;
-        }
-        flat_weights = flat_weights * self.routed.routed_scale;
-        let flat_experts = selected_experts
-            .clone()
-            .reshape([tokens, self.routed.experts_per_token]);
-        // The reference keeps probabilities, weighted expert contributions,
-        // and index-add accumulation in FP32. Only the complete routed mixture
-        // is rounded back to the residual dtype, avoiding one rounding event
-        // per expert contribution in reduced precision.
-        let dispatch = self.routed.dispatch_selected_experts(
-            flat_input,
-            flat_weights.clone(),
-            flat_experts,
-            DType::F32,
-        )?;
-        let routed = SparseMoeOutput {
-            hidden_state: dispatch
-                .hidden_state
-                .cast(input_dtype)
-                .reshape([batch, sequence, hidden]),
-            router_logits,
-            selected_experts,
-            selected_weights: flat_weights.reshape([
-                batch,
-                sequence,
-                self.routed.experts_per_token,
-            ]),
-            expert_token_counts: dispatch.expert_token_counts,
-            evaluated_experts: dispatch.evaluated_experts,
-        };
-        Ok(DeepseekMoeOutput {
-            hidden_state: routed.hidden_state.clone() + self.shared_experts.forward(input)?,
-            routed,
-        })
-    }
+/// Layer-invariant attention inputs computed once per stateless forward pass.
+struct AttentionInputs<'a, B: Backend> {
+    /// Cosine/sine tables `[batch, 1, sequence, rotary]`, in the activation dtype.
+    angles: &'a RotaryAngles<B>,
+    /// Causal and padding visibility shared by every layer.
+    visibility: &'a PositionalVisibility<B>,
+    /// Peak score-plane policy for the reference path.
+    policy: AttentionExecutionPolicy,
+    /// Whether to return full attention probabilities (forces one full plane).
+    retain_attention: bool,
 }
 
-/// Selects largest probabilities with a backend-independent smallest-ID tie rule.
-fn deterministic_top_k<B: Backend>(
-    probabilities: Tensor<B, 3>,
-    k: usize,
-) -> (Tensor<B, 3>, Tensor<B, 3, Int>) {
-    let [batch, sequence, experts] = probabilities.dims();
-    let device = probabilities.device();
-    let expert_ids = Tensor::<B, 1, Int>::arange(0..experts as i64, &device)
-        .reshape([1, 1, experts])
-        .expand([batch, sequence, experts]);
-    let mut remaining = probabilities.clone();
-    let mut weights = Vec::with_capacity(k);
-    let mut indices = Vec::with_capacity(k);
-    for _ in 0..k {
-        let maximum = remaining.clone().max_dim(2);
-        let tied = remaining.clone().equal(maximum);
-        let selected = expert_ids
-            .clone()
-            .mask_fill(tied.bool_not(), experts as i64)
-            .min_dim(2);
-        weights.push(probabilities.clone().gather(2, selected.clone()));
-        indices.push(selected.clone());
-        remaining = remaining.mask_fill(
-            expert_ids
-                .clone()
-                .equal(selected.expand([batch, sequence, experts])),
-            f32::NEG_INFINITY,
-        );
-    }
-    (Tensor::cat(weights, 2), Tensor::cat(indices, 2))
+/// An experiment-supplied attention policy for one staged layer.
+///
+/// Custom connectivity replaces the default causal visibility, so it always
+/// evaluates one full `[batch, head, query, key]` plane through the hookable
+/// reference graph.
+struct CustomConnectivity<B: Backend> {
+    /// Whether bottom-right causality applies in addition to `exclusion`.
+    causal: bool,
+    /// Padding and disallowed links, `[batch, head, query, key]`, `true` = excluded.
+    exclusion: Option<Tensor<B, 4, Bool>>,
+    /// Additive score bias broadcastable to `[batch, head, query, key]`.
+    bias: Option<Tensor<B, 4>>,
 }
 
 /// One DeepSeek-V2 decoder layer.
@@ -256,7 +165,15 @@ pub struct DeepseekV2DecoderLayer<B: Backend> {
 
 impl<B: Backend> DeepseekV2DecoderLayer<B> {
     /// Allocates one validated layer at its exact dense/MoE schedule position.
-    fn init(config: &DeepseekV2Config, layer_index: usize, device: &B::Device) -> Result<Self> {
+    ///
+    /// `softmax_scale` is the translated attention score scale shared by
+    /// every layer (see [`rope_and_softmax_scale`]).
+    fn init(
+        config: &DeepseekV2Config,
+        layer_index: usize,
+        softmax_scale: f64,
+        device: &B::Device,
+    ) -> Result<Self> {
         let mut attention = MultiLatentAttentionConfig::new(
             config.hidden_size,
             config.num_attention_heads,
@@ -268,7 +185,7 @@ impl<B: Backend> DeepseekV2DecoderLayer<B> {
         );
         attention.rms_norm_epsilon = config.rms_norm_eps;
         attention.bias = config.attention_bias;
-        attention.softmax_scale = deepseek_attention_scale(config)?;
+        attention.softmax_scale = softmax_scale;
         let norm = || {
             RmsNormConfig::new(config.hidden_size)
                 .with_epsilon(config.rms_norm_eps)
@@ -295,63 +212,186 @@ impl<B: Backend> DeepseekV2DecoderLayer<B> {
         })
     }
 
-    /// Evaluates one stateless layer with reference unabsorbed MLA prefill math.
+    /// Evaluates one stateless layer, optionally emitting the points of `layer`.
+    ///
+    /// Without custom connectivity or attention-internal hooks, attention runs
+    /// in bounded query chunks; probabilities, custom connectivity, and any
+    /// requested MLA point (latents, Q/K/V, scores, pattern, head context)
+    /// evaluate one full `[batch, head, query, key]` plane through the
+    /// reference graph instead.
     fn forward(
         &self,
         hidden: Tensor<B, 3>,
-        positions: Tensor<B, 2, Int>,
-        token_mask: Option<&TokenMask<B>>,
-        rope: RopeConfig,
-        evaluated_context: usize,
-        retain_attention: bool,
+        inputs: &AttentionInputs<'_, B>,
+        custom: Option<&CustomConnectivity<B>>,
+        layer: Layer,
+        mut hooks: Option<&mut Hooks<'_, B>>,
     ) -> Result<LayerOutput<B>> {
+        let mut hidden = hidden;
+        if let Some(hooks) = hooks.as_deref_mut() {
+            hidden = hooks.apply(layer.residual_pre(), hidden)?;
+        }
         let residual = hidden.clone();
-        let projection = self.self_attn.project_rotary(
-            self.input_layernorm.forward(hidden),
-            positions,
-            rope,
-            evaluated_context,
-        )?;
-        let [batch, heads, sequence, _] = projection.query_content.dims();
-        let mask =
-            stateless_attention_mask(token_mask, batch, heads, sequence, &residual.device())?;
-        let mixed = self.self_attn.mix_unabsorbed(
-            &projection,
-            projection.normalized_latent.clone(),
-            projection.rotated_key.clone(),
-            Some(mask),
-            retain_attention,
-        )?;
-        self.finish_block(residual + mixed.hidden_state.clone(), mixed)
+        let mut normalized = self.input_layernorm.forward(hidden);
+        if let Some(hooks) = hooks.as_deref_mut() {
+            normalized = hooks.apply(layer.attention_input(), normalized)?;
+        }
+        let points = layer.self_attention();
+        let internal = hooks.as_deref().is_some_and(|hooks| {
+            self.self_attn
+                .activation_points(points)
+                .into_iter()
+                .any(|point| hooks.needs_point(point))
+        });
+        let (attended, probabilities) = match (hooks.as_deref_mut(), custom) {
+            (Some(hooks), custom) if internal || custom.is_some() => {
+                if inputs.retain_attention {
+                    return Err(Error::BackendCapability(
+                        "DeepSeek attention probabilities cannot be returned together with \
+                         attention-internal hooks; capture the pattern point instead"
+                            .into(),
+                    ));
+                }
+                let projection = self.self_attn.project_with_angles_and_hooks(
+                    normalized,
+                    inputs.angles,
+                    points,
+                    hooks,
+                )?;
+                let (exclusion, bias, causal) = match custom {
+                    Some(custom) => (custom.exclusion.clone(), custom.bias.clone(), custom.causal),
+                    None => (
+                        Some(full_exclusion(&projection, inputs.visibility)),
+                        None,
+                        false,
+                    ),
+                };
+                let attended = self
+                    .self_attn
+                    .attend_with_hooks(projection, exclusion, bias, causal, points, hooks)?;
+                (attended, None)
+            }
+            (None, Some(_)) => {
+                return Err(Error::configuration(
+                    "deepseek_v2.execution.attention",
+                    "custom connectivity is evaluated inside a hook scope",
+                ));
+            }
+            _ => {
+                let projection = self
+                    .self_attn
+                    .project_with_angles(normalized, inputs.angles)?;
+                if inputs.retain_attention {
+                    let exclusion = full_exclusion(&projection, inputs.visibility);
+                    let MlaMixOutput {
+                        hidden_state,
+                        probabilities,
+                    } = self.self_attn.mix_unabsorbed(
+                        &projection,
+                        projection.normalized_latent.clone(),
+                        projection.rotated_key.clone(),
+                        Some(exclusion),
+                        true,
+                    )?;
+                    (hidden_state, probabilities)
+                } else {
+                    let attended = self.self_attn.mix_unabsorbed_bounded(
+                        &projection,
+                        projection.normalized_latent.clone(),
+                        projection.rotated_key.clone(),
+                        inputs.visibility,
+                        inputs.policy,
+                    )?;
+                    (attended, None)
+                }
+            }
+        };
+        self.finish_block(residual, attended, probabilities, layer, hooks)
     }
 
-    /// Applies the post-attention residual and exactly one feed-forward topology.
+    /// Adds the attention residual, then applies exactly one feed-forward topology.
+    ///
+    /// `residual` is the block input and `attended` the attention output
+    /// before its residual addition; `probabilities` are returned unchanged.
     fn finish_block(
         &self,
-        hidden: Tensor<B, 3>,
-        attention: MlaMixOutput<B>,
+        residual: Tensor<B, 3>,
+        attended: Tensor<B, 3>,
+        probabilities: Option<Tensor<B, 4>>,
+        layer: Layer,
+        mut hooks: Option<&mut Hooks<'_, B>>,
     ) -> Result<LayerOutput<B>> {
-        let residual = hidden.clone();
-        let normalized = self.post_attention_layernorm.forward(hidden);
-        match (&self.sparse_mlp, &self.dense_mlp) {
-            (Some(moe), None) => {
-                let output = moe.forward(normalized)?;
-                Ok(LayerOutput {
-                    hidden: residual + output.hidden_state,
-                    attention: attention.probabilities,
-                    routed: Some(output.routed),
-                })
-            }
-            (None, Some(mlp)) => Ok(LayerOutput {
-                hidden: residual + mlp.forward(normalized)?,
-                attention: attention.probabilities,
-                routed: None,
-            }),
-            _ => Err(Error::Checkpoint(
-                "DeepSeek-V2 layer has an invalid dense/MoE topology".into(),
-            )),
+        let mut attended = attended;
+        if let Some(hooks) = hooks.as_deref_mut() {
+            attended = hooks.apply(layer.attention_output(), attended)?;
         }
+        let hidden = residual + attended;
+        let residual = hidden.clone();
+        let mut normalized = self.post_attention_layernorm.forward(hidden);
+        if let Some(hooks) = hooks.as_deref_mut() {
+            normalized = hooks.apply(layer.mlp_input(), normalized)?;
+        }
+        let (mut fed, routed) = match (&self.sparse_mlp, &self.dense_mlp) {
+            (Some(moe), None) => {
+                let output = match hooks.as_deref_mut() {
+                    Some(hooks) => moe.forward_with_hooks(normalized, layer, hooks)?,
+                    None => moe.forward(normalized)?,
+                };
+                (output.hidden_state, Some(output.routed))
+            }
+            (None, Some(mlp)) => (
+                match hooks.as_deref_mut() {
+                    Some(hooks) => mlp.forward_with_hooks(normalized, layer, hooks)?,
+                    None => mlp.forward(normalized)?,
+                },
+                None,
+            ),
+            _ => {
+                return Err(Error::Checkpoint(
+                    "DeepSeek-V2 layer has an invalid dense/MoE topology".into(),
+                ));
+            }
+        };
+        if let Some(hooks) = hooks.as_deref_mut() {
+            fed = hooks.apply(layer.mlp_output(), fed)?;
+        }
+        let mut hidden = residual + fed;
+        if let Some(hooks) = hooks {
+            hidden = hooks.apply(layer.residual_post(), hidden)?;
+        }
+        Ok(LayerOutput {
+            hidden,
+            attention: probabilities,
+            routed,
+        })
     }
+
+    /// Lists this layer's points in emission order (see [`DeepseekV2ForCausalLm::activation_points`]).
+    fn activation_points(&self, layer: Layer) -> Vec<PointInfo> {
+        let mut points = vec![layer.residual_pre().info(), layer.attention_input().info()];
+        points.extend(self.self_attn.activation_points(layer.self_attention()));
+        points.extend([layer.attention_output().info(), layer.mlp_input().info()]);
+        if self.sparse_mlp.is_some() {
+            points.extend(moe::activation_points(layer));
+        } else {
+            points.extend([
+                layer.mlp_pre_activation().info(),
+                layer.mlp_activation().info(),
+            ]);
+        }
+        points.extend([layer.mlp_output().info(), layer.residual_post().info()]);
+        points
+    }
+}
+
+/// Materializes the complete `[batch, head, query, key]` exclusion of one projection.
+fn full_exclusion<B: Backend>(
+    projection: &MlaProjection<B>,
+    visibility: &PositionalVisibility<B>,
+) -> Tensor<B, 4, Bool> {
+    let [batch, heads, queries, _] = projection.query_content.dims();
+    let keys = projection.normalized_latent.dims()[1];
+    visibility.exclusion(batch, heads, 0..queries, 0..keys)
 }
 
 /// Private result of one decoder layer.
@@ -379,6 +419,9 @@ pub struct DeepseekV2Model<B: Backend> {
     /// Validated rotary algorithm shared by every MLA layer.
     #[module(skip)]
     pub rope: RopeConfig,
+    /// Peak score-plane policy of the reference attention path.
+    #[module(skip)]
+    execution_policy: AttentionExecutionPolicy,
 }
 
 impl<B: Backend> DeepseekV2Model<B> {
@@ -395,9 +438,9 @@ impl<B: Backend> DeepseekV2Model<B> {
                 "DeepSeek-V2 inference requires the released zero attention dropout".into(),
             ));
         }
-        let rope = deepseek_rope_config(&config)?;
+        let (rope, softmax_scale) = rope_and_softmax_scale(&config)?;
         let layers = (0..config.num_hidden_layers)
-            .map(|index| DeepseekV2DecoderLayer::init(&config, index, device))
+            .map(|index| DeepseekV2DecoderLayer::init(&config, index, softmax_scale, device))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             embed_tokens: EmbeddingConfig::new(config.vocab_size, config.hidden_size).init(device),
@@ -408,24 +451,74 @@ impl<B: Backend> DeepseekV2Model<B> {
                 .init(device)?,
             config,
             rope,
+            execution_policy: AttentionExecutionPolicy::default(),
         })
     }
 
-    /// Evaluates the stateless backbone while retaining only requested diagnostics.
-    fn forward(
+    /// Builds the per-forward cosine/sine tables in the activation dtype.
+    ///
+    /// Frequencies depend on `evaluated_context` only for context-dependent
+    /// scalings (dynamic NTK, LongRoPE); every other policy yields identical
+    /// tables for any non-zero context.
+    fn rotary_tables(
+        &self,
+        positions: Tensor<B, 2, Int>,
+        evaluated_context: usize,
+    ) -> Result<RotaryAngles<B>> {
+        let frequencies = RotaryFrequencies::new(self.rope, evaluated_context)?;
+        Ok(rotary_angles_from_frequencies(&frequencies, positions)?
+            .to_dtype(self.embed_tokens.weight.val().dtype()))
+    }
+
+    /// Validates a public input once and resolves its positions and rotary extent.
+    ///
+    /// One device-to-host transfer covers token, mask, and position values.
+    fn validate_public_input(
         &self,
         input: &CausalLmInput<B>,
-        options: &ForwardOptions,
-    ) -> Result<BackboneOutput<B>> {
+    ) -> Result<(Tensor<B, 2, Int>, usize)> {
         let validated = validate_input(
             input,
             &self.embed_tokens.weight.lazy_device(),
             &InputContract::new(INPUT_NAMES, PARAMETERS, self.config.vocab_size)
                 .with_position_limit(self.config.max_position_embeddings),
         )?;
-        let positions = validated.require_positions(INPUT_NAMES.position_ids)?;
-        let context = validated.evaluated_context;
+        Ok((
+            validated.require_positions(INPUT_NAMES.position_ids)?,
+            validated.evaluated_context,
+        ))
+    }
+
+    /// Evaluates the stateless backbone while retaining only requested diagnostics.
+    ///
+    /// With `hooks`, the embedding, every layer point, and the final norm are
+    /// emitted; the caller owns the surrounding [`Hooks::run`] scope.
+    fn forward(
+        &self,
+        input: &CausalLmInput<B>,
+        options: &ForwardOptions,
+        mut hooks: Option<&mut Hooks<'_, B>>,
+    ) -> Result<BackboneOutput<B>> {
+        let (positions, context) = self.validate_public_input(input)?;
+        let angles = self.rotary_tables(positions, context)?;
+        let visibility = PositionalVisibility::causal_columns(
+            input.token_ids.dims()[1],
+            input
+                .token_mask
+                .as_ref()
+                .map(|mask| mask.as_tensor().clone()),
+            &input.token_ids.device(),
+        )?;
+        let inputs = AttentionInputs {
+            angles: &angles,
+            visibility: &visibility,
+            policy: self.execution_policy,
+            retain_attention: options.attentions,
+        };
         let mut hidden = self.embed_tokens.forward(input.token_ids.clone());
+        if let Some(hooks) = hooks.as_deref_mut() {
+            hidden = hooks.apply(Stack::Decoder.embedding(), hidden)?;
+        }
         let mut hidden_states = Vec::with_capacity(if options.hidden_states {
             self.layers.len() + 2
         } else {
@@ -436,39 +529,37 @@ impl<B: Backend> DeepseekV2Model<B> {
         } else {
             0
         });
-        let mut routers =
-            Vec::with_capacity(if options.router_logits || options.auxiliary_losses {
-                self.layers
-                    .iter()
-                    .filter(|layer| layer.sparse_mlp.is_some())
-                    .count()
-            } else {
-                0
-            });
+        let retain_routers = options.router_logits || options.auxiliary_losses;
+        let mut routers = Vec::with_capacity(if retain_routers {
+            self.layers
+                .iter()
+                .filter(|layer| layer.sparse_mlp.is_some())
+                .count()
+        } else {
+            0
+        });
         if options.hidden_states {
             hidden_states.push(hidden.clone());
         }
-        for layer in &self.layers {
+        for (index, layer) in self.layers.iter().enumerate() {
             let output = layer.forward(
                 hidden,
-                positions.clone(),
-                input.token_mask.as_ref(),
-                self.rope,
-                context,
-                options.attentions,
+                &inputs,
+                None,
+                Layer::decoder(index),
+                hooks.as_deref_mut(),
             )?;
             hidden = output.hidden;
             if options.hidden_states {
                 hidden_states.push(hidden.clone());
             }
-            if let Some(attention) = output.attention {
-                attentions.push(attention);
-            }
+            attentions.extend(output.attention);
             if let Some(routed) = output.routed
-                && (options.router_logits || options.auxiliary_losses)
+                && retain_routers
             {
                 routers.push(router_diagnostics(
-                    &routed,
+                    routed.router_logits,
+                    routed.selected_experts,
                     input.token_mask.as_ref(),
                     options,
                     &self.config,
@@ -476,6 +567,9 @@ impl<B: Backend> DeepseekV2Model<B> {
             }
         }
         hidden = self.norm.forward(hidden);
+        if let Some(hooks) = hooks {
+            hidden = hooks.apply(Stack::Decoder.final_norm(), hidden)?;
+        }
         if options.hidden_states {
             hidden_states.push(hidden.clone());
         }
@@ -528,13 +622,49 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
         })
     }
 
+    /// Applies one validated reference-attention workspace policy.
+    ///
+    /// The default is synchronized query chunking, which bounds the
+    /// reference path's score planes for long prompts. Selecting
+    /// [`AttentionExecutionPolicy::Unbounded`] evaluates each layer in one
+    /// call. Autodiff backends always evaluate one call, because their tape
+    /// retains every chunk anyway.
+    ///
+    /// # Errors
+    ///
+    /// Returns the policy's validation error.
+    pub fn with_attention_execution_policy(
+        mut self,
+        policy: AttentionExecutionPolicy,
+    ) -> Result<Self> {
+        policy.validate()?;
+        self.model.execution_policy = policy;
+        Ok(self)
+    }
+
+    /// Returns the reference-attention workspace policy.
+    #[must_use]
+    pub const fn attention_execution_policy(&self) -> AttentionExecutionPolicy {
+        self.model.execution_policy
+    }
+
     /// Evaluates differentiable stateless inference or training math.
     pub fn forward(
         &self,
         input: CausalLmInput<B>,
         options: &ForwardOptions,
     ) -> Result<CausalLmOutput<B>> {
-        let backbone = self.model.forward(&input, options)?;
+        let backbone = self.model.forward(&input, options, None)?;
+        self.finish_forward(&input, options, backbone)
+    }
+
+    /// Selects the requested positions and projects them to F32 vocabulary logits.
+    fn finish_forward(
+        &self,
+        input: &CausalLmInput<B>,
+        options: &ForwardOptions,
+        backbone: BackboneOutput<B>,
+    ) -> Result<CausalLmOutput<B>> {
         let hidden = backbone.hidden;
         let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
         let logits = self.project_logits(selected)?;
@@ -568,204 +698,18 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
     }
 }
 
-/// Converts serialized rotary metadata into the shared YaRN implementation.
-fn deepseek_rope_config(config: &DeepseekV2Config) -> Result<RopeConfig> {
-    let parameters = config.rope_scaling.clone().unwrap_or_default();
-    let theta = parameters.rope_theta.unwrap_or(config.rope_theta);
-    let scaling = match parameters.rope_type {
-        RopeType::Default => RopeScaling::None,
-        RopeType::Linear => LinearRopeScaling::new(parameters.factor.unwrap_or(1.0))
-            .map(RopeScaling::from)
-            .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))?,
-        RopeType::Dynamic => DynamicNtkScaling::new(
-            parameters.factor.unwrap_or(1.0),
-            parameters
-                .original_max_position_embeddings
-                .unwrap_or(config.max_position_embeddings),
-        )
-        .map(RopeScaling::from)
-        .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))?,
-        RopeType::Yarn => {
-            let factor = parameters.factor.unwrap_or(1.0);
-            let mut yarn = YarnConfig::new(
-                factor,
-                parameters
-                    .original_max_position_embeddings
-                    .unwrap_or(config.max_position_embeddings),
-            )
-            .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))?;
-            let amplitude = if parameters.mscale.is_some() || parameters.mscale_all_dim.is_some() {
-                yarn_mscale(factor, parameters.mscale.unwrap_or(1.0))
-                    / yarn_mscale(factor, parameters.mscale_all_dim.unwrap_or(0.0))
-            } else {
-                parameters
-                    .attention_factor
-                    .unwrap_or_else(|| yarn.attention_factor())
-            };
-            yarn = yarn
-                .with_attention_factor(amplitude)
-                .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))?;
-            // Hugging Face resolves each optional bound independently. Using
-            // the shared YaRN defaults for only the missing side preserves
-            // one-sided custom checkpoint configurations.
-            yarn = yarn
-                .with_beta_overrides(parameters.beta_fast, parameters.beta_slow)
-                .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))?;
-            RopeScaling::Yarn(yarn)
-        }
-        unsupported => {
-            return Err(Error::configuration(
-                "deepseek_v2.rope_type",
-                format!("{unsupported:?} is not implemented for DeepSeek-V2"),
-            ));
-        }
-    };
-    RopeConfig::new(
-        config.qk_rope_head_dim,
-        config.qk_rope_head_dim,
-        theta,
-        scaling,
-    )
-    .map_err(|error| Error::configuration("deepseek_v2.rope", error.to_string()))
-}
-
-/// Returns DeepSeek's logarithmic YaRN magnitude correction.
-fn yarn_mscale(factor: f64, multiplier: f64) -> f64 {
-    if factor <= 1.0 {
-        1.0
-    } else {
-        1.0 + 0.1 * multiplier * factor.ln()
-    }
-}
-
-/// Computes the checkpoint's scale for the sum of content and rotary logits.
-fn deepseek_attention_scale(config: &DeepseekV2Config) -> Result<f64> {
-    let mut scale = (config.qk_head_dim() as f64).sqrt().recip();
-    if let Some(parameters) = &config.rope_scaling
-        && parameters.rope_type == RopeType::Yarn
-        && let Some(multiplier) = parameters.mscale_all_dim
-        && multiplier != 0.0
-    {
-        let factor = parameters.factor.ok_or_else(|| {
-            Error::configuration("deepseek_v2.rope.factor", "is required for YaRN")
-        })?;
-        scale *= yarn_mscale(factor, multiplier).powi(2);
-    }
-    Ok(scale)
-}
-
-/// Builds `excluded(q,k) = k > q` and combines semantic padding exclusions.
-fn stateless_attention_mask<B: Backend>(
-    token_mask: Option<&TokenMask<B>>,
-    batch: usize,
-    heads: usize,
-    sequence: usize,
-    device: &B::Device,
-) -> Result<Tensor<B, 4, Bool>> {
-    let query = Tensor::<B, 1, Int>::arange(0..sequence as i64, device)
-        .reshape([1, 1, sequence, 1])
-        .expand([batch, heads, sequence, sequence]);
-    let key = Tensor::<B, 1, Int>::arange(0..sequence as i64, device)
-        .reshape([1, 1, 1, sequence])
-        .expand([batch, heads, sequence, sequence]);
-    let causal = key.greater(query);
-    Ok(
-        match padding_attention_mask(token_mask, token_mask, batch, heads, sequence, sequence)? {
-            Some(padding) => causal.bool_or(padding),
-            None => causal,
-        },
-    )
-}
-
-/// Produces optional router diagnostics using DeepSeek's configured aux semantics.
-fn router_diagnostics<B: Backend>(
-    output: &SparseMoeOutput<B>,
-    mask: Option<&TokenMask<B>>,
-    options: &ForwardOptions,
-    config: &DeepseekV2Config,
-) -> Result<RouterDiagnostics<B>> {
-    let auxiliary = if options.auxiliary_losses {
-        let raw = if config.seq_aux {
-            sequence_auxiliary_loss(
-                output.router_logits.clone(),
-                output.selected_experts.clone(),
-                mask,
-            )?
-        } else {
-            load_balancing_loss(
-                output.router_logits.clone(),
-                output.selected_experts.clone(),
-                mask,
-            )?
-        };
-        Some(raw * config.aux_loss_alpha)
-    } else {
-        None
-    };
-    Ok(RouterDiagnostics {
-        logits: options.router_logits.then(|| output.router_logits.clone()),
-        load_balancing_loss: auxiliary,
-        z_loss: None,
-    })
-}
-
-/// Implements DeepSeek's per-sequence expert-balance auxiliary objective.
-fn sequence_auxiliary_loss<B: Backend>(
-    router_logits: Tensor<B, 3>,
-    selected: Tensor<B, 3, Int>,
-    mask: Option<&TokenMask<B>>,
-) -> Result<Tensor<B, 1>> {
-    let [batch, sequence, experts] = router_logits.dims();
-    let [selected_batch, selected_sequence, top_k] = selected.dims();
-    if batch == 0
-        || sequence == 0
-        || experts == 0
-        || top_k == 0
-        || [selected_batch, selected_sequence] != [batch, sequence]
-    {
-        return Err(Error::shape(
-            "deepseek_v2.router_aux",
-            "matching non-empty [batch, sequence, experts/top_k] tensors",
-            format!(
-                "logits={:?}, selected={:?}",
-                router_logits.dims(),
-                selected.dims()
-            ),
-        ));
-    }
-    let probabilities = burn::tensor::activation::softmax(router_logits.cast(DType::F32), 2);
-    let mut assignments = selected.one_hot::<4>(experts).float();
-    let valid = match mask {
-        Some(mask) => {
-            if mask.as_tensor().dims() != [batch, sequence] {
-                return Err(Error::shape(
-                    "deepseek_v2.router_aux.mask",
-                    format!("[{batch}, {sequence}]"),
-                    format!("{:?}", mask.as_tensor().dims()),
-                ));
-            }
-            mask.as_tensor().clone().float().cast(DType::F32)
-        }
-        None => Tensor::ones([batch, sequence], &probabilities.device()),
-    };
-    assignments = assignments * valid.clone().reshape([batch, sequence, 1, 1]);
-    let counts = assignments.sum_dim(1).sum_dim(2).reshape([batch, experts]);
-    let valid_count = valid.clone().sum_dim(1).reshape([batch, 1]).clamp_min(1.0);
-    let normalized_counts = counts * experts as f64 / (valid_count.clone() * top_k as f64);
-    let mean_probability = (probabilities * valid.reshape([batch, sequence, 1]))
-        .sum_dim(1)
-        .reshape([batch, experts])
-        / valid_count;
-    Ok((normalized_counts * mean_probability)
-        .sum_dim(1)
-        .mean()
-        .reshape([1]))
-}
-
 #[cfg(test)]
 #[path = "model_tests_support.rs"]
 /// Deterministic tiny topology and checkpoint weights shared by family tests.
 pub(crate) mod tests_support;
+
+#[cfg(test)]
+/// Hugging Face Transformers 5.2 goldens for the tiny reference topologies.
+mod goldens;
+
+#[cfg(test)]
+/// Tiny-model logit and routing parity with Hugging Face DeepSeek-V2 and V3.
+mod reference_tests;
 
 #[cfg(test)]
 #[path = "model_tests.rs"]

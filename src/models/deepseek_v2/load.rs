@@ -288,6 +288,16 @@ fn install_layer_tensor<B: Backend>(
             let sparse = sparse_mlp(layer, target)?;
             install_linear_weight(target, &mut sparse.routed.router, data)
         }
+        "sparse_mlp.routed.correction_bias" => {
+            let sparse = sparse_mlp(layer, target)?;
+            let bias = sparse.routed.correction_bias.as_mut().ok_or_else(|| {
+                DeepseekV2LoadError::MissingComponent {
+                    target: target.into(),
+                    component: "noaux_tc selection bias",
+                }
+            })?;
+            install(target, bias, data)
+        }
         _ if suffix.starts_with("sparse_mlp.routed.routed.") => {
             let remainder = &suffix["sparse_mlp.routed.routed.".len()..];
             let (expert_index, parameter) = parse_expert_suffix(target, remainder)?;

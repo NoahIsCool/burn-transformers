@@ -2,7 +2,7 @@
 
 use burn::{
     backend::Flex,
-    tensor::{Bool, Tensor, TensorData, Tolerance, backend::BackendTypes},
+    tensor::{Bool, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
 
 use super::*;
@@ -544,6 +544,99 @@ fn bounded_cached_prefill_matches_unbounded_execution() {
     assert_eq!(bounded_state.lengths(), unbounded_state.lengths());
 }
 
+/// Two sliding layers, so every layer reads `[ring history | fresh block]`.
+fn sliding_only_config() -> MuseGlimmerTextConfig {
+    MuseGlimmerTextConfig {
+        num_hidden_layers: 2,
+        layer_types: vec![MuseGlimmerLayerType::SlidingAttention; 2],
+        layer_rope_theta: vec![10_000.0; 2],
+        ..tiny_config()
+    }
+}
+
+/// A long cached prefill over a full ring runs under a window-sized score bound.
+///
+/// Regression (review DSM-R2): cached sliding layers planned and scored all
+/// `H + Q` keys. Here `W = H = 3` and a 16-token cached prefill follows a
+/// 3-token prompt; the policy admits 2-row chunks of at most
+/// `H + W - 1 + 2 = 7` keys (28 score elements over 2 query heads), while
+/// one row against all 19 keys needs 38, so the all-keys plan was rejected.
+/// Logits must match the unbounded model and the stateless forward.
+#[test]
+fn cached_ring_prefill_runs_under_a_window_sized_score_bound() {
+    let device = Default::default();
+    let unbounded = initialized_model::<TestBackend>(sliding_only_config(), &device)
+        .with_attention_execution_policy(AttentionExecutionPolicy::Unbounded)
+        .expect("unbounded fixture");
+    let bounded = unbounded
+        .clone()
+        .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(2, 28))
+        .expect("window-sized chunks");
+    let prompt = vec![3_i32, 17, 5];
+    let suffix = (0..16_i32)
+        .map(|step| (step * 7 + 1) % 32)
+        .collect::<Vec<_>>();
+    let tokens = |values: &[i32]| {
+        Tensor::<TestBackend, 2, Int>::from_data(
+            TensorData::new(values.to_vec(), [1, values.len()]),
+            &device,
+        )
+    };
+    let all = ForwardOptions {
+        logits: crate::LogitsSelection::All,
+        ..Default::default()
+    };
+    let run = |model: &MuseGlimmerForCausalLm<TestBackend>| {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, 19).unwrap(), 1, &device)
+            .unwrap();
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids: tokens(&prompt),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .expect("prompt prefill");
+        let logits = model
+            .decode(
+                DecodeInput {
+                    token_ids: tokens(&suffix),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &all,
+            )
+            .expect("cached prefill within the window-sized bound")
+            .logits;
+        assert_eq!(state.lengths(), &[19]);
+        logits
+    };
+    let expected = run(&unbounded);
+    run(&bounded)
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.clone().into_data(), Tolerance::absolute(2e-6));
+    let stateless = unbounded
+        .forward(
+            CausalLmInput {
+                token_ids: tokens(&[prompt.clone(), suffix.clone()].concat()),
+                token_mask: None,
+                position_ids: None,
+            },
+            &all,
+        )
+        .unwrap()
+        .logits
+        .narrow(1, prompt.len(), suffix.len());
+    expected
+        .into_data()
+        .assert_approx_eq::<f32>(&stateless.into_data(), Tolerance::absolute(2e-5));
+}
+
 /// Interior holes and ordinary padding retain semantic cached/stateless parity.
 #[test]
 fn semantic_padding_patterns_match_stateless_prefill_and_decode() {
@@ -952,21 +1045,599 @@ fn cached_attention_mask<B: Backend>(
             format!("end {key_end}"),
         ));
     }
-    super::super::aligned_attention_mask(
-        1,
-        heads,
-        query_sequence,
-        key_sequence,
-        0..query_sequence,
-        0..key_sequence,
-        true,
-        window,
-        device,
-    )?
-    .ok_or_else(|| {
-        Error::configuration(
-            "muse_glimmer.attention_mask",
-            "cached attention must produce a causal exclusion",
+    let positions = |start: usize, end: usize| {
+        Tensor::<B, 1, Int>::arange(start as i64..end as i64, device).reshape([1, end - start])
+    };
+    Ok(crate::mla::PositionalVisibility::cached(
+        positions(baseline, query_end),
+        None,
+        positions(key_start, key_end),
+        None,
+        vec![key_sequence; query_sequence],
+    )
+    .with_window(window)
+    .exclusion(1, heads, 0..query_sequence, 0..key_sequence))
+}
+
+/// Installs the tiny weights scaled by `scale`, so logits are large enough to compare.
+fn scaled_model(scale: f32) -> MuseGlimmerForCausalLm<TestBackend> {
+    use burn::module::{Module, ModuleMapper, Param};
+
+    /// Multiplies every floating parameter by a constant.
+    struct Scale(
+        /// Factor applied to every floating parameter.
+        f32,
+    );
+
+    impl ModuleMapper<TestBackend> for Scale {
+        /// Scales one parameter, leaving norms (whose scale is `1 + w`) near one.
+        fn map_float<const D: usize>(
+            &mut self,
+            param: Param<Tensor<TestBackend, D>>,
+        ) -> Param<Tensor<TestBackend, D>> {
+            let factor = self.0;
+            param.map(|tensor| tensor * factor)
+        }
+    }
+    let (model, _) = tiny_model();
+    model.map(&mut Scale(scale))
+}
+
+/// One stateful call: rectangular tokens and validity per row.
+struct Step {
+    /// Token IDs `[B][S]`.
+    tokens: Vec<Vec<i64>>,
+    /// Validity `[B][S]`, or `None` when every token is valid.
+    mask: Option<Vec<Vec<bool>>>,
+}
+
+/// Requests every logit and every hidden state.
+fn all_outputs() -> ForwardOptions {
+    ForwardOptions {
+        logits: crate::LogitsSelection::All,
+        hidden_states: true,
+        ..Default::default()
+    }
+}
+
+/// Runs one step on `state`, as prefill when the state is empty.
+fn run_step(
+    model: &MuseGlimmerForCausalLm<TestBackend>,
+    state: &mut MuseGlimmerDecodeState<TestBackend>,
+    tokens: Vec<i64>,
+    mask: Option<Vec<bool>>,
+    shape: [usize; 2],
+) -> CausalLmOutput<TestBackend> {
+    let device = Default::default();
+    let token_ids = Tensor::from_data(TensorData::new(tokens, shape), &device);
+    let token_mask = mask.map(|mask| {
+        TokenMask::new(Tensor::<TestBackend, 2, Bool>::from_data(
+            TensorData::new(mask, shape),
+            &device,
+        ))
+    });
+    if state.lengths().iter().all(|&length| length == 0) {
+        model.prefill(
+            CausalLmInput {
+                token_ids,
+                token_mask,
+                position_ids: None,
+            },
+            state,
+            &all_outputs(),
         )
-    })
+    } else {
+        model.decode(
+            DecodeInput {
+                token_ids,
+                token_mask,
+                position_ids: None,
+            },
+            state,
+            &all_outputs(),
+        )
+    }
+    .unwrap()
+}
+
+/// Ragged batched execution equals independent batch-one rows, across ring wraparound.
+///
+/// The window is 3 and rows grow to 10, 5, and 7 tokens, so every local
+/// layer's ring wraps while rows keep different lengths; the scenario covers
+/// left padding, an interior hole, unequal multi-token steps, and a finished
+/// row. Padding and finished rows must be exact zeros.
+#[test]
+fn batched_rows_match_independent_rows_across_ring_wraparound() {
+    let model = scaled_model(20.0);
+    let device = Default::default();
+    let steps = [
+        Step {
+            tokens: vec![vec![0, 3, 17, 5], vec![9, 30, 0, 0], vec![7, 0, 1, 22]],
+            mask: Some(vec![
+                vec![false, true, true, true],
+                vec![true, true, false, false],
+                vec![true, false, true, true],
+            ]),
+        },
+        Step {
+            tokens: vec![vec![4, 4, 2], vec![19, 0, 0], vec![0, 6, 0]],
+            mask: Some(vec![
+                vec![true, true, true],
+                vec![true, false, false],
+                vec![false, true, false],
+            ]),
+        },
+        Step {
+            tokens: vec![vec![11], vec![12], vec![13]],
+            mask: None,
+        },
+        Step {
+            tokens: vec![vec![14, 8], vec![0, 0], vec![15, 16]],
+            mask: Some(vec![vec![true, true], vec![false, false], vec![true, true]]),
+        },
+        Step {
+            tokens: vec![vec![21], vec![23], vec![0]],
+            mask: Some(vec![vec![true], vec![true], vec![false]]),
+        },
+    ];
+    let mut batched = model
+        .new_decode_state(CacheConfig::new(3, 16).unwrap(), 3, &device)
+        .unwrap();
+    let mut rows = (0..3)
+        .map(|_| {
+            model
+                .new_decode_state(CacheConfig::new(1, 16).unwrap(), 1, &device)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for (index, step) in steps.iter().enumerate() {
+        let sequence = step.tokens[0].len();
+        let output = run_step(
+            &model,
+            &mut batched,
+            step.tokens.concat(),
+            step.mask.as_ref().map(|mask| mask.concat()),
+            [3, sequence],
+        );
+        let logits = output.logits.into_data().to_vec::<f32>().unwrap();
+        let hidden = output
+            .final_hidden_state
+            .unwrap()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        for (row, state) in rows.iter_mut().enumerate() {
+            let valid = (0..sequence)
+                .filter(|&column| step.mask.as_ref().is_none_or(|mask| mask[row][column]))
+                .collect::<Vec<_>>();
+            let at = |values: &[f32], column: usize, width: usize| {
+                values[(row * sequence + column) * width..(row * sequence + column + 1) * width]
+                    .to_vec()
+            };
+            if valid.is_empty() {
+                for column in 0..sequence {
+                    assert!(at(&logits, column, 32).iter().all(|&value| value == 0.0));
+                }
+                continue;
+            }
+            let tokens = valid
+                .iter()
+                .map(|&column| step.tokens[row][column])
+                .collect::<Vec<_>>();
+            let count = tokens.len();
+            let oracle = run_step(&model, state, tokens, None, [1, count]);
+            let oracle_logits = oracle.logits.into_data().to_vec::<f32>().unwrap();
+            let oracle_hidden = oracle
+                .final_hidden_state
+                .unwrap()
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap();
+            for column in 0..sequence {
+                match valid.iter().position(|&c| c == column) {
+                    Some(k) => {
+                        for (width, actual, expected) in
+                            [(32, &logits, &oracle_logits), (8, &hidden, &oracle_hidden)]
+                        {
+                            let actual = at(actual, column, width);
+                            let expected = &expected[k * width..(k + 1) * width];
+                            for (left, right) in actual.iter().zip(expected) {
+                                assert!(
+                                    (left - right).abs() <= 2e-5,
+                                    "step {index} row {row} column {column}: {left} vs {right}"
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        assert!(at(&logits, column, 32).iter().all(|&value| value == 0.0));
+                        assert!(at(&hidden, column, 8).iter().all(|&value| value == 0.0));
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(batched.lengths(), &[10, 5, 7]);
+    for (row, state) in rows.iter().enumerate() {
+        assert_eq!(state.lengths()[0], batched.lengths()[row]);
+    }
+}
+
+/// One-row chunks over ragged rows and wrapped rings match one unchunked call.
+///
+/// With one query row per chunk, every chunk at or past row `W - 1` skips
+/// the ring history and reads only its window of fresh keys, so ragged rows
+/// (different `L_b` and `n_b`), interior holes, a finished row, and wrapped
+/// rings all run through `MuseKeySlicing::RingHistory` slices (and the global
+/// layer through verified prefix limits). Logits must match the unbounded
+/// model at every step.
+#[test]
+fn chunked_ring_slices_match_unbounded_ragged_batches() {
+    let device = Default::default();
+    let unbounded = scaled_model(20.0)
+        .with_attention_execution_policy(AttentionExecutionPolicy::Unbounded)
+        .expect("unbounded fixture");
+    let chunked = scaled_model(20.0)
+        .with_attention_execution_policy(AttentionExecutionPolicy::query_chunked(1, 1 << 20))
+        .expect("one-row chunks");
+    let steps: [(Vec<i64>, Vec<bool>, [usize; 2]); 3] = [
+        (
+            vec![3, 17, 5, 9, 30, 12, 0, 0, 7, 1, 22, 0, 4, 8, 15, 16, 23, 0],
+            [
+                [true; 6],
+                [false, false, true, true, true, false],
+                [true, true, true, true, true, false],
+            ]
+            .concat(),
+            [3, 6],
+        ),
+        (
+            vec![2, 19, 6, 11, 13, 14, 0, 21, 0, 24, 0, 0, 0, 0, 0],
+            [[true; 5], [true, false, true, false, true], [false; 5]].concat(),
+            [3, 5],
+        ),
+        (vec![25, 26, 27], vec![true; 3], [3, 1]),
+    ];
+    let mut expected_state = unbounded
+        .new_decode_state(CacheConfig::new(3, 16).unwrap(), 3, &device)
+        .unwrap();
+    let mut actual_state = chunked
+        .new_decode_state(CacheConfig::new(3, 16).unwrap(), 3, &device)
+        .unwrap();
+    for (index, (tokens, mask, shape)) in steps.into_iter().enumerate() {
+        let expected = run_step(
+            &unbounded,
+            &mut expected_state,
+            tokens.clone(),
+            Some(mask.clone()),
+            shape,
+        );
+        let actual = run_step(&chunked, &mut actual_state, tokens, Some(mask), shape);
+        for (actual, expected) in [
+            (actual.logits, expected.logits),
+            (
+                actual.final_hidden_state.unwrap(),
+                expected.final_hidden_state.unwrap(),
+            ),
+        ] {
+            actual
+                .into_data()
+                .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(2e-6));
+        }
+        assert_eq!(
+            actual_state.lengths(),
+            expected_state.lengths(),
+            "step {index}"
+        );
+    }
+    assert_eq!(actual_state.lengths(), &[12, 7, 6]);
+}
+
+/// Cached decoding after ring wraparound matches the stateless forward of each row.
+#[test]
+fn batched_cached_logits_match_stateless_rows_after_wraparound() {
+    let model = scaled_model(20.0);
+    let device = Default::default();
+    let mut state = model
+        .new_decode_state(CacheConfig::new(2, 16).unwrap(), 2, &device)
+        .unwrap();
+    let prompt = [[3_i64, 17, 5, 9, 30, 12], [0, 0, 7, 1, 22, 4]];
+    run_step(
+        &model,
+        &mut state,
+        prompt.concat(),
+        Some([[true; 6], [false, false, true, true, true, true]].concat()),
+        [2, 6],
+    );
+    let decoded = run_step(&model, &mut state, vec![2, 19], None, [2, 1]).logits;
+    for (row, tokens) in [vec![3, 17, 5, 9, 30, 12, 2], vec![7, 1, 22, 4, 19]]
+        .into_iter()
+        .enumerate()
+    {
+        let width = tokens.len();
+        let expected = model
+            .forward(
+                CausalLmInput {
+                    token_ids: Tensor::from_data(TensorData::new(tokens, [1, width]), &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits;
+        decoded
+            .clone()
+            .narrow(0, row, 1)
+            .into_data()
+            .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(2e-5));
+    }
+}
+
+/// Masked sentinels of a finished or padded row never reach the embedding or RoPE.
+///
+/// Masked columns are not validated, so a finished row may carry an
+/// out-of-vocabulary pad ID, `-1`, `i32::MIN`, or `i32::MAX`, with an equally
+/// invalid explicit position. Regression (review DSM-R1): batched packing
+/// gathered a finished row's column 0 into the block and Flex panicked in the
+/// embedding gather. Every sentinel must produce bit-identical logits to
+/// padding with token and position 0, for one- and two-token steps, implicit
+/// and explicit positions, and finished and left-padded rows.
+#[test]
+fn masked_sentinel_tokens_and_positions_are_inert() {
+    let (model, device) = tiny_model();
+    /// Builds row 1's tokens, mask, and positions around a sentinel token `pad` and position `at`.
+    type MaskedRow = fn(i32, i32) -> (Vec<i32>, Vec<bool>, Vec<i32>);
+    let cases: [(usize, MaskedRow); 3] = [
+        (1, |pad, at| (vec![pad], vec![false], vec![at])),
+        (2, |pad, at| {
+            (vec![pad, pad], vec![false, false], vec![at, at])
+        }),
+        (2, |pad, at| (vec![pad, 8], vec![false, true], vec![at, 3])),
+    ];
+    for (width, row) in cases {
+        for explicit in [false, true] {
+            let run = |pad: i32, at: i32| {
+                let (tokens, mask, positions) = row(pad, at);
+                let active_tokens = [7, 9][..width].to_vec();
+                let active_positions = [3, 4][..width].to_vec();
+                let mut state = model
+                    .new_decode_state(CacheConfig::new(2, 8).unwrap(), 2, &device)
+                    .unwrap();
+                model
+                    .prefill(
+                        CausalLmInput {
+                            token_ids: Tensor::from_ints([[1, 2, 3], [4, 5, 6]], &device),
+                            token_mask: None,
+                            position_ids: None,
+                        },
+                        &mut state,
+                        &ForwardOptions::default(),
+                    )
+                    .unwrap();
+                let output = model
+                    .decode(
+                        DecodeInput {
+                            token_ids: Tensor::from_data(
+                                TensorData::new([active_tokens, tokens].concat(), [2, width]),
+                                &device,
+                            ),
+                            token_mask: Some(TokenMask::new(
+                                Tensor::<TestBackend, 2, Bool>::from_data(
+                                    TensorData::new([vec![true; width], mask].concat(), [2, width]),
+                                    &device,
+                                ),
+                            )),
+                            position_ids: explicit.then(|| {
+                                Tensor::from_data(
+                                    TensorData::new(
+                                        [active_positions, positions].concat(),
+                                        [2, width],
+                                    ),
+                                    &device,
+                                )
+                            }),
+                        },
+                        &mut state,
+                        &ForwardOptions {
+                            logits: crate::LogitsSelection::All,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap_or_else(|error| panic!("pad {pad} at {at}: {error}"));
+                (output.logits.into_data(), state.lengths().to_vec())
+            };
+            let baseline = run(0, 0);
+            for (pad, at) in [
+                (32, 32),
+                (-1, -1),
+                (i32::MAX, i32::MAX),
+                (i32::MIN, 1 << 20),
+            ] {
+                assert_eq!(
+                    run(pad, at),
+                    baseline,
+                    "width {width}, explicit {explicit}, pad {pad}, position {at}"
+                );
+            }
+        }
+    }
+}
+
+/// Measures batched decode against one batch-one call per row (the previous algorithm).
+///
+/// Run with `cargo test --release --lib muse_batched_decode_benchmark -- --ignored --nocapture`.
+/// Five alternating samples per variant; minimum and median wall times of a
+/// 128-token prefill and 16 one-token decode steps at batch 8 are reported.
+#[test]
+#[ignore = "release-mode timing benchmark"]
+fn muse_batched_decode_benchmark() {
+    use std::time::Instant;
+
+    let device = Default::default();
+    let config = MuseGlimmerTextConfig {
+        vocab_size: 64,
+        hidden_size: 256,
+        intermediate_size: 512,
+        num_hidden_layers: 4,
+        num_attention_heads: 8,
+        num_key_value_heads: 2,
+        head_dim: 32,
+        max_position_embeddings: 1024,
+        sliding_window: Some(64),
+        ..tiny_config()
+    };
+    let model = initialized_model::<TestBackend>(config, &device);
+    let (batch, prompt, steps) = (8, 128, 16);
+    let prompts = (0..batch * prompt)
+        .map(|index| ((index * 7) % 61) as i64)
+        .collect::<Vec<_>>();
+    let run = |first: usize, rows: usize| {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(rows, 512).unwrap(), rows, &device)
+            .unwrap();
+        let tokens = prompts[first * prompt..(first + rows) * prompt].to_vec();
+        let started = Instant::now();
+        let _ = model
+            .prefill(
+                CausalLmInput {
+                    token_ids: Tensor::from_data(TensorData::new(tokens, [rows, prompt]), &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        let prefill = started.elapsed().as_secs_f64();
+        let started = Instant::now();
+        for step in 0..steps {
+            let _ = model
+                .decode(
+                    DecodeInput {
+                        token_ids: Tensor::from_data(
+                            TensorData::new(vec![(step % 61) as i64; rows], [rows, 1]),
+                            &device,
+                        ),
+                        token_mask: None,
+                        position_ids: None,
+                    },
+                    &mut state,
+                    &ForwardOptions::default(),
+                )
+                .unwrap()
+                .logits
+                .into_data();
+        }
+        (prefill, started.elapsed().as_secs_f64())
+    };
+    let per_row = || {
+        (0..batch)
+            .map(|row| run(row, 1))
+            .fold((0.0, 0.0), |sum, time| (sum.0 + time.0, sum.1 + time.1))
+    };
+    let _ = run(0, batch);
+    let (mut batched, mut separate) = (Vec::new(), Vec::new());
+    for _ in 0..5 {
+        batched.push(run(0, batch));
+        separate.push(per_row());
+    }
+    let summary = |samples: &[(f64, f64)], pick: fn(&(f64, f64)) -> f64| {
+        let mut values = samples.iter().map(pick).collect::<Vec<_>>();
+        values.sort_by(f64::total_cmp);
+        (values[0], values[values.len() / 2])
+    };
+    for (label, pick) in [
+        (
+            "prefill",
+            (|time: &(f64, f64)| time.0) as fn(&(f64, f64)) -> f64,
+        ),
+        ("decode x16", |time: &(f64, f64)| time.1),
+    ] {
+        let (batched_min, batched_median) = summary(&batched, pick);
+        let (separate_min, separate_median) = summary(&separate, pick);
+        println!(
+            "{label}: per-row min {separate_min:.4} s median {separate_median:.4} s; \
+             batched min {batched_min:.4} s median {batched_median:.4} s; \
+             speedup min {:.2}x median {:.2}x",
+            separate_min / batched_min,
+            separate_median / batched_median
+        );
+    }
+}
+
+/// Measures a long cached prefill over a full ring under the default bounded policy.
+///
+/// Run with `cargo test --release --lib muse_cached_ring_prefill_benchmark -- --ignored --nocapture`.
+/// A 64-token prompt fills the 64-slot rings of three sliding layers, then
+/// one 4096-token cached call runs on top (the global fourth layer is
+/// unchanged by ring slicing). Five samples; minimum and median wall times
+/// are reported. Comparing ring slicing against all-key slicing requires
+/// rebuilding with `MuseKeySlicing::PrefixLimits` for sliding slots.
+#[test]
+#[ignore = "release-mode timing benchmark"]
+fn muse_cached_ring_prefill_benchmark() {
+    use std::time::Instant;
+
+    let device = Default::default();
+    let config = MuseGlimmerTextConfig {
+        vocab_size: 64,
+        hidden_size: 256,
+        intermediate_size: 512,
+        num_hidden_layers: 4,
+        num_attention_heads: 8,
+        num_key_value_heads: 2,
+        head_dim: 32,
+        max_position_embeddings: 8192,
+        sliding_window: Some(64),
+        ..tiny_config()
+    };
+    let model = initialized_model::<TestBackend>(config, &device);
+    let (prompt, suffix) = (64, 4096);
+    let tokens = |first: usize, count: usize| {
+        let values = (first..first + count)
+            .map(|index| ((index * 7) % 61) as i64)
+            .collect::<Vec<_>>();
+        Tensor::<TestBackend, 2, Int>::from_data(TensorData::new(values, [1, count]), &device)
+    };
+    let run = || {
+        let mut state = model
+            .new_decode_state(CacheConfig::new(1, prompt + suffix).unwrap(), 1, &device)
+            .unwrap();
+        model
+            .prefill(
+                CausalLmInput {
+                    token_ids: tokens(0, prompt),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap();
+        let started = Instant::now();
+        let _ = model
+            .decode(
+                DecodeInput {
+                    token_ids: tokens(prompt, suffix),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .unwrap()
+            .logits
+            .into_data();
+        started.elapsed().as_secs_f64()
+    };
+    let _ = run();
+    let mut samples = (0..5).map(|_| run()).collect::<Vec<_>>();
+    samples.sort_by(f64::total_cmp);
+    println!(
+        "cached ring prefill of {suffix} tokens: min {:.4} s median {:.4} s",
+        samples[0], samples[2]
+    );
 }
