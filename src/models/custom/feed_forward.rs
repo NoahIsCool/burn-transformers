@@ -10,7 +10,16 @@
 //! | ungated `down(act(up x))` | `up x` | `act(up x)` |
 //! | clamped SwiGLU | `gate x` | `g * sigmoid(alpha g)`, `g = min(gate x, limit)` |
 //!
-//! Sparse experts expose only the surrounding MLP input and output points.
+//! Sparse experts expose only the surrounding MLP input and output points, and
+//! attention-only blocks have no feed-forward branch at all.
+//!
+//! # Record compatibility
+//!
+//! Burn records store an enum module by variant (by index in binary
+//! recorders), so variants are append-only: `Dense` and `MixtureOfExperts`
+//! keep their original positions and later mechanisms follow them.
+
+use core::marker::PhantomData;
 
 use burn::{
     module::Module,
@@ -68,15 +77,20 @@ impl<B: Backend> ClampedFeedForward<B> {
     }
 }
 
-/// One executable feed-forward implementation.
+/// One executable feed-forward implementation, or its explicit absence.
 #[derive(Module, Debug)]
 // See `ModularMixer`: indirection would make the Burn parameter record non-visitable.
 #[allow(clippy::large_enum_variant)]
 pub(super) enum ModularFeedForward<B: Backend> {
-    /// Gated MLP `down(act(gate x) * up x)`; the variant name is kept for record compatibility.
+    /// Gated MLP `down(act(gate x) * up x)`.
     Dense(
         /// Dense gate, content, and output projection parameters.
         GatedFeedForward<B>,
+    ),
+    /// Top-k routed and optional shared experts.
+    MixtureOfExperts(
+        /// Router and routed/shared expert parameters.
+        SparseMoe<B>,
     ),
     /// Classic MLP `down(act(up x))`.
     Ungated(
@@ -88,21 +102,21 @@ pub(super) enum ModularFeedForward<B: Backend> {
         /// Projections and clamp parameters.
         ClampedFeedForward<B>,
     ),
-    /// Top-k routed and optional shared experts.
-    MixtureOfExperts(
-        /// Router and routed/shared expert parameters.
-        SparseMoe<B>,
+    /// No feed-forward branch (attention-only blocks); it owns no parameters.
+    Absent(
+        /// Parameter-free marker of the backend.
+        PhantomData<B>,
     ),
 }
 
 impl<B: Backend> ModularFeedForward<B> {
-    /// Builds the branch of a validated spec; `None` means the block has no feed-forward branch.
+    /// Builds the branch of a validated spec, [`Self::Absent`] for [`FeedForwardSpec::None`].
     pub(super) fn init(
         spec: &FeedForwardSpec,
         hidden_size: usize,
         device: &B::Device,
-    ) -> Result<Option<Self>> {
-        Ok(Some(match spec {
+    ) -> Result<Self> {
+        Ok(match spec {
             FeedForwardSpec::Dense(dense) => Self::Dense(
                 GatedFeedForwardConfig::new(hidden_size, dense.intermediate_size)
                     .with_activation(dense.activation)
@@ -121,19 +135,26 @@ impl<B: Backend> ModularFeedForward<B> {
             FeedForwardSpec::MixtureOfExperts(moe) => {
                 Self::MixtureOfExperts(moe.sparse_config(hidden_size).init(device)?)
             }
-            FeedForwardSpec::None => return Ok(None),
-        }))
+            FeedForwardSpec::None => Self::Absent(PhantomData),
+        })
     }
 
-    /// Lists the dense pre-activation and activation points; experts expose none.
+    /// Whether the block has no feed-forward branch.
+    pub(super) const fn is_absent(&self) -> bool {
+        matches!(self, Self::Absent(_))
+    }
+
+    /// Lists the dense pre-activation and activation points; experts and absent branches expose none.
     pub(super) fn activation_points(&self, layer: Layer) -> Vec<PointInfo> {
         match self {
             Self::Dense(_) | Self::Ungated(_) | Self::ClampedSwiGlu(_) => mlp_hook_points(layer),
-            Self::MixtureOfExperts(_) => Vec::new(),
+            Self::MixtureOfExperts(_) | Self::Absent(_) => Vec::new(),
         }
     }
 
     /// Evaluates the branch and returns sparse-routing state only for an expert layer.
+    ///
+    /// An absent branch contributes zeros; blocks skip it (and its norms) entirely.
     pub(super) fn forward(
         &self,
         hidden: Tensor<B, 3>,
@@ -150,6 +171,7 @@ impl<B: Backend> ModularFeedForward<B> {
                 let output = moe.forward(hidden)?;
                 Ok((output.hidden_state.clone(), Some(output)))
             }
+            Self::Absent(_) => Ok((hidden.zeros_like(), None)),
         }
     }
 }

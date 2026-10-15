@@ -311,6 +311,10 @@ impl<B: Backend> ModularDifferential<B> {
 }
 
 /// One executable sequence-mixing implementation.
+///
+/// Burn records store an enum module by variant (by index in binary
+/// recorders), so variants are append-only: the original `Attention`, `Mla`,
+/// and `DeltaNet` keep their positions and later mixers follow them.
 #[derive(Module, Debug)]
 // Burn 0.21 does not implement `Module` for `Box<M>`. Keeping modules inline is required so
 // generated records can visit every parameter; the per-layer host metadata cost is negligible
@@ -327,15 +331,15 @@ pub(super) enum ModularMixer<B: Backend> {
         /// Compressed latent attention with independently selected position encoding.
         ModularMla<B>,
     ),
-    /// Differential attention over paired query heads.
-    Differential(
-        /// Paired-head projections, lambda parameters, and optional RoPE.
-        ModularDifferential<B>,
-    ),
     /// Gated DeltaNet linear attention (causal recurrent scan).
     DeltaNet(
         /// Gated recurrent linear-attention module.
         GatedDeltaNet<B>,
+    ),
+    /// Differential attention over paired query heads.
+    Differential(
+        /// Paired-head projections, lambda parameters, and optional RoPE.
+        ModularDifferential<B>,
     ),
 }
 

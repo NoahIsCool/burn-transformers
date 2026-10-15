@@ -55,8 +55,8 @@ pub(super) const ENCODER_SLIDING_WINDOW: &str = "defines a trailing (past-only) 
 pub struct ModularLayer<B: Backend> {
     /// Sequence mixer.
     mixer: ModularMixer<B>,
-    /// Dense or sparse feed-forward operation; absent for attention-only blocks.
-    feed_forward: Option<ModularFeedForward<B>>,
+    /// Dense or sparse feed-forward operation, or its absence in attention-only blocks.
+    feed_forward: ModularFeedForward<B>,
     /// Mixer-side normalization parameters.
     mixer_norm: NormLayout<B>,
     /// Feed-forward-side normalization parameters.
@@ -124,15 +124,15 @@ impl<B: Backend> ModularLayer<B> {
             None => (None, None),
         };
         let feed_forward = ModularFeedForward::init(&spec.feed_forward, hidden_size, device)?;
-        let feed_forward_norm = if feed_forward.is_some() {
+        let feed_forward_norm = if feed_forward.is_absent() {
+            NormLayout::identity()
+        } else {
             NormLayout::init(
                 spec.feed_forward_norm,
                 spec.norm_placement,
                 hidden_size,
                 device,
             )?
-        } else {
-            NormLayout::identity()
         };
         Ok(Self {
             mixer: ModularMixer::init(&spec.mixer, hidden_size, spec.mixer_norm, device)?,
@@ -196,9 +196,9 @@ impl<B: Backend> ModularLayer<B> {
             points.extend(attention.activation_points(layer.cross_attention()));
             points.push(layer.cross_attention_output().info());
         }
-        if let Some(feed_forward) = &self.feed_forward {
+        if !self.feed_forward.is_absent() {
             points.push(layer.mlp_input().info());
-            points.extend(feed_forward.activation_points(layer));
+            points.extend(self.feed_forward.activation_points(layer));
             points.push(layer.mlp_output().info());
         }
         points.push(layer.residual_post().info());
@@ -233,11 +233,11 @@ impl<B: Backend> ModularLayer<B> {
         }
 
         let mut router = None;
-        if let Some(feed_forward) = &self.feed_forward {
+        if !self.feed_forward.is_absent() {
             let residual = hidden.clone();
             let prepared =
                 hooks.apply(layer.mlp_input(), self.feed_forward_norm.prepare(hidden)?)?;
-            let (projected, routing) = feed_forward.forward(prepared, layer, hooks)?;
+            let (projected, routing) = self.feed_forward.forward(prepared, layer, hooks)?;
             router = routing;
             let projected = hooks.apply(layer.mlp_output(), projected)?;
             hidden = self.feed_forward_norm.finish(residual, projected)?;

@@ -246,7 +246,7 @@ fn attention_only_blocks_skip_the_feed_forward_branch() {
     let mut spec = block(attention(PositionEncodingSpec::None));
     spec.feed_forward = FeedForwardSpec::None;
     let layer = built(&spec, &device);
-    assert!(layer.feed_forward.is_none());
+    assert!(layer.feed_forward.is_absent());
     let points = layer.activation_points(Layer::decoder(0));
     assert!(!points.contains(&Layer::decoder(0).mlp_input().info()));
     assert!(points.contains(&Layer::decoder(0).residual_post().info()));
@@ -496,4 +496,128 @@ fn differential_attention_reports_unsupported_connectivity() {
     chunked
         .run(hidden(4, &device), &context, Layer::encoder(0))
         .unwrap();
+}
+
+/// The mixer enum as recorded before differential attention existed.
+#[derive(Module, Debug)]
+#[allow(clippy::large_enum_variant)]
+enum LegacyMixer<B: burn::tensor::backend::Backend> {
+    /// Grouped-query attention.
+    Attention(
+        /// Attention parameters.
+        ModularAttention<B>,
+    ),
+    /// Latent attention.
+    Mla(
+        /// Latent-attention parameters.
+        crate::models::custom::mixer::ModularMla<B>,
+    ),
+    /// Gated DeltaNet.
+    DeltaNet(
+        /// Recurrent parameters.
+        crate::delta_net::GatedDeltaNet<B>,
+    ),
+}
+
+/// The feed-forward enum as recorded before ungated, clamped, and absent branches existed.
+#[derive(Module, Debug)]
+#[allow(clippy::large_enum_variant)]
+enum LegacyFeedForward<B: burn::tensor::backend::Backend> {
+    /// Gated MLP.
+    Dense(
+        /// Gated MLP parameters.
+        crate::feed_forward::GatedFeedForward<B>,
+    ),
+    /// Routed experts.
+    MixtureOfExperts(
+        /// Expert parameters.
+        crate::moe::SparseMoe<B>,
+    ),
+}
+
+/// The block layout recorded by earlier releases.
+#[derive(Module, Debug)]
+struct LegacyLayer<B: burn::tensor::backend::Backend> {
+    /// Sequence mixer.
+    mixer: LegacyMixer<B>,
+    /// Feed-forward branch.
+    feed_forward: LegacyFeedForward<B>,
+    /// Mixer-side norms.
+    mixer_norm: NormLayout<B>,
+    /// Feed-forward-side norms.
+    feed_forward_norm: NormLayout<B>,
+    /// Cross-attention branch.
+    cross_attention: Option<ModularAttention<B>>,
+    /// Cross-attention norms.
+    cross_attention_norm: Option<NormLayout<B>>,
+    /// Residual width.
+    #[module(skip)]
+    hidden_size: usize,
+}
+
+/// Binary records written with the earlier enum layout load into today's blocks.
+///
+/// Binary recorders store enum variants by index, so the DeltaNet mixer and
+/// the expert branch (whose indices would shift if new variants were
+/// inserted before them) are the cases that matter.
+#[test]
+fn legacy_binary_block_records_still_load() {
+    use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
+
+    let device: Device = Default::default();
+    let mut spec = block(MixerSpec::DeltaNet {
+        key_heads: 1,
+        value_heads: 2,
+        key_head_dim: 4,
+        value_head_dim: 4,
+        convolution_kernel: 2,
+    });
+    spec.feed_forward =
+        FeedForwardSpec::MixtureOfExperts(crate::architecture::MixtureOfExpertsSpec {
+            routed_experts: 2,
+            experts_per_token: 1,
+            shared_experts: 1,
+            expert_intermediate_size: 4,
+            activation: crate::architecture::Activation::Silu,
+            renormalize_selected: true,
+            routed_scale: 1.0,
+            routing: crate::moe::RoutingPolicy::default(),
+            shared_expert_gate: false,
+            expert_bias: false,
+        });
+    let source = built(&spec, &device);
+    let context = ExecutionContext::contiguous(1, 3, &device).unwrap();
+    let expected = source
+        .run(hidden(3, &device), &context, Layer::decoder(0))
+        .unwrap();
+    let ModularLayer {
+        mixer: ModularMixer::DeltaNet(delta),
+        feed_forward: ModularFeedForward::MixtureOfExperts(experts),
+        mixer_norm,
+        feed_forward_norm,
+        cross_attention,
+        cross_attention_norm,
+        hidden_size,
+    } = source
+    else {
+        panic!("expected a DeltaNet block with experts");
+    };
+    let legacy = LegacyLayer {
+        mixer: LegacyMixer::DeltaNet(delta),
+        feed_forward: LegacyFeedForward::MixtureOfExperts(experts),
+        mixer_norm,
+        feed_forward_norm,
+        cross_attention,
+        cross_attention_norm,
+        hidden_size,
+    };
+    let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+    let bytes = recorder.record(legacy.into_record(), ()).unwrap();
+    let fresh = ModularLayer::<TestBackend>::init(&spec, 8, None, &device).unwrap();
+    let loaded = fresh.load_record(recorder.load(bytes, &device).unwrap());
+    loaded
+        .run(hidden(3, &device), &context, Layer::decoder(0))
+        .unwrap()
+        .into_data()
+        .assert_approx_eq::<f32>(&expected.into_data(), Tolerance::absolute(0.0));
 }

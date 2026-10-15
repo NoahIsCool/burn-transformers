@@ -27,7 +27,6 @@ fn input(device: &Device) -> Tensor<TestBackend, 3> {
 fn branch(spec: &FeedForwardSpec, device: &Device) -> ModularFeedForward<TestBackend> {
     ModularFeedForward::<TestBackend>::init(spec, 8, device)
         .unwrap()
-        .unwrap()
         .map(&mut DeterministicParameters::default())
 }
 
@@ -130,9 +129,7 @@ fn expert_and_absent_branches_have_the_expected_shape() {
         shared_expert_gate: true,
         expert_bias: true,
     });
-    let branch = ModularFeedForward::<TestBackend>::init(&moe, 8, &device)
-        .unwrap()
-        .unwrap();
+    let branch = ModularFeedForward::<TestBackend>::init(&moe, 8, &device).unwrap();
     assert!(branch.activation_points(Layer::decoder(0)).is_empty());
     let ModularFeedForward::MixtureOfExperts(experts) = &branch else {
         panic!("expected experts");
@@ -140,9 +137,9 @@ fn expert_and_absent_branches_have_the_expected_shape() {
     assert!(experts.router.bias.is_some());
     assert!(experts.shared_expert_gate.is_some());
     assert!(experts.routed[0].down_proj.bias.is_some());
-    assert!(
-        ModularFeedForward::<TestBackend>::init(&FeedForwardSpec::None, 8, &device)
-            .unwrap()
-            .is_none()
-    );
+    let absent =
+        ModularFeedForward::<TestBackend>::init(&FeedForwardSpec::None, 8, &device).unwrap();
+    assert!(absent.is_absent());
+    assert_eq!(absent.num_params(), 0);
+    assert!(absent.activation_points(Layer::decoder(0)).is_empty());
 }
