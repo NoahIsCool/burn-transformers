@@ -162,16 +162,23 @@ pub(crate) fn floats_round_trip(left: f64, right: f64) -> bool {
         || difference <= f64::MIN_POSITIVE
 }
 
-/// Whether two JSON values are equal, with numbers compared by [`floats_round_trip`].
+/// Whether two JSON values are equal, with floats compared by [`floats_round_trip`].
+///
+/// Integers (`u64`/`i64` numbers) must match exactly, and an integer never
+/// equals a float: only when both numbers are floats does the relative
+/// tolerance apply, so a round trip that turned a token ID or context length
+/// into a float, or moved a large integer, is still reported.
 pub(crate) fn json_equal(left: &serde_json::Value, right: &serde_json::Value) -> bool {
     use serde_json::Value;
     match (left, right) {
         (Value::Number(left), Value::Number(right)) => {
             left == right
-                || matches!(
-                    (left.as_f64(), right.as_f64()),
-                    (Some(left), Some(right)) if floats_round_trip(left, right)
-                )
+                || (left.is_f64()
+                    && right.is_f64()
+                    && matches!(
+                        (left.as_f64(), right.as_f64()),
+                        (Some(left), Some(right)) if floats_round_trip(left, right)
+                    ))
         }
         (Value::Array(left), Value::Array(right)) => {
             left.len() == right.len() && left.iter().zip(right).all(|(a, b)| json_equal(a, b))
@@ -205,3 +212,7 @@ pub(crate) fn lcg_inputs(seed: u32, count: usize, length: usize) -> Vec<Vec<u8>>
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;

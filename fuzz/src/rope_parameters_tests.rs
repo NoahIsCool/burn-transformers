@@ -207,6 +207,54 @@ fn arrays_are_not_rope_parameters() {
     }
 }
 
+/// Per-layer-type entries get the same softmax-multiplier and error checks as flat ones.
+///
+/// Translation validates the softmax correction of every entry, so the
+/// harness checks the multiplier of per-layer entries too (it once checked
+/// flat mappings only), and both unused-field policies must fail contextually.
+#[test]
+fn per_layer_softmax_multipliers_and_lenient_errors_are_checked() {
+    let context = default_context().with_softmax_mscale(SoftmaxMscale::MscaleAllDimSquared);
+    let document = json!({
+        "full_attention": {"rope_type": "yarn", "factor": 4.0, "mscale_all_dim": 1.0},
+        "sliding_attention": {"rope_type": "linear", "factor": 2.0, "mscale_all_dim": 0.5},
+    });
+    let set: RopeParameterSet = serde_json::from_value(document.clone()).expect("parses");
+    for layer in ["full_attention", "sliding_attention"] {
+        set.to_rope_config(layer, &context).expect("translates");
+        let parameters = set.parameters_for(layer).expect("entry");
+        let multiplier = parameters.softmax_scale_multiplier(&context).unwrap();
+        assert!(
+            multiplier > 1.0 && multiplier.is_finite(),
+            "{layer}: {multiplier}"
+        );
+        check_softmax_multiplier(parameters, &context);
+    }
+    check_document(
+        &document.to_string(),
+        &context,
+        &["full_attention", "sliding_attention"],
+    );
+    // An entry that fails under both policies (a missing factor) is contextual
+    // either way; the lenient error is now checked as well.
+    let failing = json!({"full_attention": {"rope_type": "linear"}});
+    let set: RopeParameterSet = serde_json::from_value(failing.clone()).expect("parses");
+    let lenient = context.with_unused_fields(UnusedRopeFields::Ignore);
+    let error = set.to_rope_config("full_attention", &lenient).unwrap_err();
+    check_error(&error, "lenient");
+    check_document(&failing.to_string(), &context, &["full_attention"]);
+}
+
+/// A non-configuration or uncontextual error is reported as a harness failure.
+#[test]
+#[should_panic(expected = "uncontextual lenient field other.rope.factor")]
+fn uncontextual_errors_are_rejected() {
+    check_error(
+        &Error::configuration("other.rope.factor", "is required"),
+        "lenient",
+    );
+}
+
 /// Campaign regression `crash-3a306a4f` (minimized): a huge `mscale_all_dim`
 /// translates, and the harness tolerates the open overflow below.
 #[test]

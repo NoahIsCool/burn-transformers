@@ -8,9 +8,9 @@
 //! values, legacy `type` keys, per-layer nesting) or from raw bytes, and an
 //! arbitrary context, the harness checks:
 //!
-//! 1. **Totality.** Parsing and translation never panic. A translation error is
-//!    a contextual [`Error::Configuration`] whose field path starts with the
-//!    context's architecture name.
+//! 1. **Totality.** Parsing and translation never panic. A translation error,
+//!    under either unused-field policy, is a contextual [`Error::Configuration`]
+//!    whose field path starts with the context's architecture name.
 //! 2. **Validity.** A translated configuration spans the context's head width,
 //!    rotates a positive even prefix of it, and evaluates (at contexts `1`,
 //!    `max_position_embeddings`, one past it, and twice it) to `rotary / 2`
@@ -19,11 +19,13 @@
 //!    is at least `2^-64`; beyond that envelope `f32` overflow is a known open
 //!    finding (see the ignored tests in the sibling test module).
 //! 3. **Policy monotonicity.** Whatever [`UnusedRopeFields::Reject`] accepts,
-//!    [`UnusedRopeFields::Ignore`] accepts with the identical configuration, and
-//!    a declared softmax correction is positive, and finite unless
-//!    `|mscale_all_dim| > 1e100` (open finding ROPE-SOFTMAX-1).
-//! 4. **Round trip.** A parsed set serializes and parses back to the same JSON
-//!    (numbers within one ulp, since `serde_json` parses floats approximately).
+//!    [`UnusedRopeFields::Ignore`] accepts with the identical configuration.
+//!    For every translated entry, flat or per layer type, the softmax
+//!    correction is positive, and finite unless `|mscale_all_dim| > 1e100`
+//!    (open finding ROPE-SOFTMAX-1).
+//! 4. **Round trip.** A parsed set serializes and parses back to the same JSON:
+//!    integers exactly, floats within a relative `1e-14` (see
+//!    `crate::floats_round_trip`; `serde_json` parses floats approximately).
 //! 5. **Layer types.** `validate_layer_types` accepts exactly when every used
 //!    layer type has an entry and every entry is used.
 
@@ -34,7 +36,7 @@ use transformers::{
     Error,
     models::config::{
         DynamicNtkContext, MropeHandling, PartialRotary, RopeContext, RopeParameterSet,
-        SoftmaxMscale, UnusedRopeFields, YarnMscaleConvention,
+        RopeParameters, SoftmaxMscale, UnusedRopeFields, YarnMscaleConvention,
     },
     position::{RopeScaling, RotaryFrequencies},
 };
@@ -257,6 +259,39 @@ fn check_config(config: transformers::position::RopeConfig, context: &RopeContex
     }
 }
 
+/// Asserts that a translation error is contextual.
+///
+/// Every error must be [`Error::Configuration`] whose field path starts with
+/// the context's architecture name, under either unused-field policy.
+fn check_error(error: &Error, policy: &str) {
+    match error {
+        Error::Configuration { field, .. } => assert!(
+            field.starts_with(ARCHITECTURE),
+            "uncontextual {policy} field {field}"
+        ),
+        other => panic!("non-configuration {policy} translation error {other:?}"),
+    }
+}
+
+/// Checks the softmax multiplier of an entry whose translation succeeded.
+///
+/// Translation validates the correction for flat and per-layer-type entries
+/// alike, so [`RopeParameters::softmax_scale_multiplier`] must then succeed
+/// with a positive value, finite unless `|mscale_all_dim| > 1e100` (open
+/// finding ROPE-SOFTMAX-1: the square of a validated correction can overflow).
+fn check_softmax_multiplier(parameters: &RopeParameters, context: &RopeContext) {
+    let multiplier = parameters
+        .softmax_scale_multiplier(context)
+        .expect("translation validated the softmax correction");
+    assert!(multiplier > 0.0, "softmax multiplier {multiplier}");
+    if parameters
+        .mscale_all_dim
+        .is_none_or(|value| value.abs() <= 1e100)
+    {
+        assert!(multiplier.is_finite(), "softmax multiplier {multiplier}");
+    }
+}
+
 /// Translates one layer type and checks every property of a result.
 fn check_translation(set: &RopeParameterSet, layer_type: &str, context: &RopeContext) {
     let strict = set.to_rope_config(layer_type, context);
@@ -270,34 +305,22 @@ fn check_translation(set: &RopeParameterSet, layer_type: &str, context: &RopeCon
                 Some(&config),
                 "Ignore must accept what Reject accepts"
             );
-            if let Some(parameters) = set.parameters_for(layer_type)
-                && matches!(set, RopeParameterSet::Uniform(_))
-            {
-                let multiplier = parameters
-                    .softmax_scale_multiplier(context)
-                    .expect("translation validated the softmax correction");
-                assert!(multiplier > 0.0, "softmax multiplier {multiplier}");
-                // ROPE-SOFTMAX-1: the square of a validated correction can overflow.
-                if parameters
-                    .mscale_all_dim
-                    .is_none_or(|value| value.abs() <= 1e100)
-                {
-                    assert!(multiplier.is_finite(), "softmax multiplier {multiplier}");
-                }
-            }
+            let parameters = set
+                .parameters_for(layer_type)
+                .expect("a translated layer type has parameters");
+            check_softmax_multiplier(parameters, context);
         }
-        Err(error) => match error {
-            Error::Configuration { field, .. } => {
-                assert!(
-                    field.starts_with(ARCHITECTURE),
-                    "uncontextual field {field}"
-                );
-            }
-            other => panic!("non-configuration translation error {other:?}"),
-        },
+        Err(error) => check_error(&error, "strict"),
     }
-    if let Ok(config) = lenient {
-        check_config(config, &lenient_context);
+    match lenient {
+        Ok(config) => {
+            check_config(config, &lenient_context);
+            let parameters = set
+                .parameters_for(layer_type)
+                .expect("a translated layer type has parameters");
+            check_softmax_multiplier(parameters, &lenient_context);
+        }
+        Err(error) => check_error(&error, "lenient"),
     }
 }
 
