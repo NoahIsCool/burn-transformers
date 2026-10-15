@@ -15,11 +15,11 @@ library against an independent oracle:
 | `safetensors_headers` | *Generated* SafeTensors headers with every dtype (including `F4`, `F6_*`, `F8_E8M0` and MXFP4-style `*_blocks`/`*_scales` pairs), overflow-boundary shapes, perturbed offsets, metadata, padding and length prefixes, plus shard indexes with dropped, phantom, moved, duplicated, unsafe and aliased entries and odd `total_size` spellings; an independent byte-accounting oracle predicts every accept/reject decision and inventoried field, and the official `safetensors` 0.7 parser must accept every accepted file | One shard of at most four tensors (64 KiB data) or three shards; tight and generous limits |
 | `masks_positions` | Valid-mask to excluded-mask polarity, broadcast axes, fully masked rows, shape rejection and ragged absolute positions against scalar formulas | Flex CPU; batch ≤4, heads ≤4, query/key lengths ≤16; integer offsets include `usize::MAX` |
 | `attention_connectivity` | Global, causal, sliding-window and chunked-local exclusion masks with padded batches and absolute key starts against a scalar position oracle; exact sliding-window key ranges; grouped-query attention under the mask (both precision modes, native KV heads, backend `is_causal`) against an `f64` softmax | Flex CPU; batch ≤3, heads ≤3, query/key lengths ≤8, head width ≤3 |
-| `cache_transactions` | The metadata length machine and ring planners against integer oracles, then the tensor decode state (full, ring, mirrored, latent and recurrent groups and an optional MTP bank with its own cursor; batched and per-row step write sets; write-ahead published, abandoned or invalidated; ragged speculative commits with independent MTP prefixes; reorder, truncate, `truncate_mtp`, reset) against per-bank token-history oracles | Rows ≤3, capacity ≤12, 1–2 layers, 1–2 heads/channels, at most 64 operations |
+| `cache_transactions` | Advance, reset, reorder, truncate, mark, commit, rollback and stale marks against an independent length state machine; ring writes and staged commits against modulo indexing; then the tensor decode state (full, ring, mirrored, latent and recurrent groups and an optional MTP bank with its own cursor; batched and per-row step write sets; write-ahead published, abandoned or invalidated; ragged speculative commits with MTP prefixes drawn independently of the main prefix; reorder, truncate, `truncate_mtp`, reset) against per-bank token-history oracles that compare every key and value of per-row and batched reads | Length machine: batch ≤4, capacity ≤32, at most 128 operations (one per four input bytes), no physical cache. Tensor state: rows ≤3, capacity ≤12, 1–2 layers, 1–2 heads/channels, at most 64 operations (one per six input bytes, so long sequences need `-len_control=0`) |
 | `generation` | Every `GenerationConfig` rule (warpers, penalties, `min_new_tokens`, special and stop IDs, `logit_bias`) for raw JSON and decoded configurations, JSON round trips, and EOS/stop/length precedence with `min_new_tokens` against a scalar token tracker | Vocabulary ≤32, batch ≤4, output length ≤32, four stops of length ≤4, 128 pushes |
 | `logits_processing` | `LogitsProcessor` with `TokenHistory`: ragged and out-of-vocabulary rows, prompt boundaries, bias, EOS suppression, no-repeat n-grams, repetition/presence/frequency penalties, temperature, top-k, top-p and min-p against an `f64` oracle; rebuilt, recorded, stateless and legacy masked histories must agree bit for bit; seeded selection | Vocabulary ≤8, batch ≤3, rows ≤6 tokens |
 | `rope_parameters` | Flat and per-layer-type `rope_parameters` (every algorithm and key, legacy `type`, boundary values, raw JSON) through the shared RoPE translator under arbitrary family contexts: contextual errors, valid frequency tables, `Ignore ⊇ Reject`, softmax corrections, round trips, layer-type validation | Head width and context from fixed tables |
-| `chat_templates` | Untrusted Jinja templates (Hugging Face idioms, sandbox escapes, raw bytes) and messages through `LocalTokenizer::render_chat` on a word-level fixture: no panics, contextual errors for documented preconditions, determinism with a pinned clock, `encode_chat` consistency, and time/output bounds | 24 fragments, three messages; 2 s and 64 MiB per render |
+| `chat_templates` | Untrusted Jinja templates (Hugging Face idioms, sandbox escapes, raw bytes) and messages through `LocalTokenizer::render_chat` on a word-level fixture: no panics, contextual errors for every documented precondition (all six shadowed message fields, all fifteen reserved variables), determinism with a pinned clock, unnamed template selection against Hugging Face's `get_chat_template` rule, `encode_chat` consistency, and time/output bounds | 24 fragments, three messages; 2 s and 64 MiB per render |
 | `modular_specs` | Typed modular `DecoderSpec`/`Seq2SeqSpec` with every mixer, feed-forward, routing, position, connectivity and normalization option: validation totality, JSON round trips, construction exactly for valid specs without documented capability gaps, finite logits, and prefill+decode parity with the stateless forward | Width ≤16, two layers, vocabulary ≤16, four tokens |
 | `experiment_interfaces` | Semantic-axis selection, activation-mask broadcasting, parameter-transfer ties and failure atomicity, stable categorical losses against scalar oracles | 4 KiB input; tensor extents ≤4, at most four parameter owners, five classes; no model initialization |
 
@@ -44,14 +44,25 @@ pass once fixed; run them with `cargo test --manifest-path fuzz/Cargo.toml --lib
 | CHAT-1 | `chat_templates::tests::huge_string_repetition_fails_contextually` | `'ab' * n` with a huge `n` panics ("capacity overflow") inside `render_chat` |
 | CHAT-2 | `chat_templates::tests::rendered_prompts_are_bounded` | One expression renders a prompt of hundreds of megabytes; fuel does not bound memory |
 | CHAT-3 | `chat_templates::tests::concatenated_sequences_finish_quickly` | Lazily concatenated sequences make one instruction take seconds to minutes; fuel does not bound time |
+| CHAT-4 | `chat_templates::tests::tools_select_the_tool_use_template` | With `tools` and no template name, a checkpoint's named `tool_use` template is ignored and `default` renders; Hugging Face 5.2 selects `tool_use` |
+| TOPP-TIE-1 | `logits_processing::tests::top_p_ranks_by_logit_like_hugging_face` | Top-p ranks rounded `f32` probabilities, so it can drop a logit one ulp above a kept one; Hugging Face ranks by logit |
 | ROPE-F32-1/2 | `rope_parameters::tests::{accepted_bases_have_finite_frequencies, accepted_long_rope_factors_have_finite_frequencies}` | A base `theta < 1` or a tiny LongRoPE factor validates but overflows `f32` inverse frequencies |
 | ROPE-SOFTMAX-1 | `rope_parameters::tests::translated_softmax_corrections_are_finite` | Translation validates the `mscale_all_dim` correction `m` but not the multiplier `m^2`, which can be infinite |
 | ROPE-PARSE-1 | `rope_parameters::tests::arrays_are_not_rope_parameters` | A JSON array parses as a positional `RopeParameters` struct |
 
 The harnesses assert finiteness only inside the documented envelopes
 (`within_f32_envelope`, `within_frequency_envelope`, `abs(mscale_all_dim) <=
-1e100`), keep the CHAT-1..3 growth fragments small, and otherwise still require
-the absence of panics.
+1e100`), keep the CHAT-1..3 growth fragments small, also accept `default` where
+CHAT-4 should select `tool_use`, let top-p split near-ties (TOPP-TIE-1, also in
+the `tests/generation_properties.rs` mode property), and otherwise still require
+the absence of panics. Remove each tolerance when its finding is fixed.
+
+One further difference is pinned rather than ignored: `render_chat` rejects an
+unknown template name, while Hugging Face renders the name itself as template
+source (`get_chat_template` falls through to treating `chat_template` as Jinja).
+Rejection is the safer contract; it is a documentation request for the
+tokenization module's list of known differences, checked by
+`chat_templates::tests::documented_preconditions_are_rejected`.
 
 ## Running
 

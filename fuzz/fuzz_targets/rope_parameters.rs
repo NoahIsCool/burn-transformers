@@ -1,9 +1,11 @@
 //! Fuzz Hugging Face `rope_parameters` through the shared RoPE translator.
 //!
 //! Arbitrary flat and per-layer-type mappings and family contexts must either
-//! translate into a configuration with finite, non-negative frequencies or fail
-//! with a contextual configuration error; `Ignore` must accept whatever
-//! `Reject` accepts, identically.
+//! translate into a configuration with non-negative frequencies (finite inside
+//! the envelope `theta >= 1`, LongRoPE factors `>= 2^-64`; beyond it `f32`
+//! overflow is open finding ROPE-F32-1/2) or fail with a contextual
+//! configuration error under either unused-field policy; `Ignore` must accept
+//! whatever `Reject` accepts, identically.
 
 #![no_main]
 

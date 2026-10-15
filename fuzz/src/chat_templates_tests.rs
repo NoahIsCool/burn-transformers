@@ -92,9 +92,10 @@ fn documented_preconditions_are_rejected() {
 
 /// Every named message field and every reserved variable is refused; others are not.
 ///
-/// The library's lists are private, so the harness restates them; this test
-/// fails if either restatement drifts from the library (a missing entry would
-/// render, an extra one would be refused below).
+/// The library's lists are private, so the harness restates them. This test
+/// fails if the library stops refusing any restated name, or starts refusing
+/// the ordinary keys `thinking`, `custom`, and `date_string`. A name the
+/// library adds later is not drawn until the restatement is extended.
 #[test]
 fn every_shadowed_field_and_reserved_variable_is_rejected() {
     for key in MESSAGE_FIELDS {

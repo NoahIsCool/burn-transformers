@@ -110,9 +110,9 @@ below refreshes the target, now with an MTP bank, at `00697a4`.
 
 ## 2026-10-15: wave-3 targets, findings, and an all-target refresh
 
-Seven targets were added or extended for the polish pass (`logits_processing`,
-`chat_templates`, `rope_parameters`, `safetensors_headers`,
-`attention_connectivity`, `modular_specs`, and the `generation` and
+Eight targets were added or extended for the polish pass (six new ones:
+`logits_processing`, `chat_templates`, `rope_parameters`, `safetensors_headers`,
+`attention_connectivity`, `modular_specs`; and the extended `generation` and
 `cache_transactions` harnesses). The runtime source was unchanged throughout:
 `src/` tree `fa40ba91781e6c7b39554385e598d90c5eaa4d9b`, as at integration commit
 `8720be1`. Campaigns used `cargo-fuzz 0.13.2`, `rustc 1.94.0-nightly (4f14395c3
@@ -133,7 +133,7 @@ Four campaigns stopped on a failure. Each crash was minimized with
 
 | Target | Executed inputs | Outcome | Classification |
 | --- | ---: | --- | --- |
-| `logits_processing` | 53,095 | `crash-cfb301be` (32 bytes minimized) | Oracle too strict: top-p ranks rounded `f32` probabilities, so logits one ulp apart (0.8 and 0.79999995) can split; the top-set check now allows near-ties. Regression `campaign_top_p_near_ties_may_split`. |
+| `logits_processing` | 53,095 | `crash-cfb301be` (32 bytes minimized) | **Library deviation TOPP-TIE-1** (first recorded here as an over-strict oracle; reclassified in the review fix phase): top-p ranks rounded `f32` probabilities, so logits one ulp apart (0.8 and 0.79999995) can split, while Hugging Face sorts logits and never drops the larger. The top-set check tolerates near-ties until it is fixed. Regression `campaign_top_p_near_ties_may_split`; ignored reproducer `top_p_ranks_by_logit_like_hugging_face`. |
 | `chat_templates` | 4,847 | `crash-86c5a5ad` | Oracle too strict: an empty rendered prompt encodes to no tokens, which `encode_chat` reports. Regression `empty_prompts_fail_to_encode_contextually`. |
 | `rope_parameters` | 258,317 | `crash-3a306a4f` (19 bytes) | **Library finding ROPE-SOFTMAX-1**: translation validates the correction `m = 1 + 0.1 * mscale_all_dim * ln(factor)` but the softmax multiplier is `m^2`, which overflows to `inf` (e.g. `mscale_all_dim = 1e300`). Ignored reproducer `translated_softmax_corrections_are_finite`; the harness asserts finiteness only for `abs(mscale_all_dim) <= 1e100`. |
 | `generation` | 162,032 | `crash-8872c8a0` (18 bytes) | Oracle too strict: `serde_json` (without `float_roundtrip`) read `3.7997969716361836e-262` back four ulps away; round trips now compare to a relative `1e-14`. Regression `campaign_float_round_trip_is_approximate`. |
@@ -151,7 +151,11 @@ about ten minutes on a 30-step lazily concatenated list that costs about 100
 units of fuel (CHAT-3); a base `theta < 1` or a LongRoPE factor of `1e-45`
 overflows `f32` frequencies (ROPE-F32-1/2); and a JSON array parses as
 positional RoPE parameters (ROPE-PARSE-1). Each has an `#[ignore]`d reproducer
-that fails today (see [README.md](README.md#open-findings)).
+that fails today (see [README.md](README.md#open-findings)). The independent
+review of the package added CHAT-4 (unnamed renders ignore a named `tool_use`
+template when `tools` is set; found by comparing with Hugging Face 5.2
+`get_chat_template`, not by a campaign) and reclassified `crash-cfb301be` as
+TOPP-TIE-1.
 
 ### Round 2: committed harnesses at `00697a4`
 
@@ -161,23 +165,75 @@ All twelve targets were rebuilt from commit `00697a4` (fuzz package tree
 campaign exited with status 0, without crash, timeout, or out-of-memory
 artifacts.
 
-| Target | Seconds | Executed inputs | exec/s | cov | ft | Corpus | Peak RSS |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `logits_processing` | 300 | 815,906 | 2,710 | 2686 | 7547 | 509 | 48 MiB |
-| `chat_templates` | 300 | 176,175 | 585 | 7575 | 21426 | 1579 | 203 MiB |
-| `rope_parameters` | 300 | 1,122,463 | 3,729 | 2030 | 6696 | 1715 | 47 MiB |
-| `safetensors_headers` | 300 | 307,236 | 1,020 | 2889 | 7554 | 580 | 47 MiB |
-| `attention_connectivity` | 300 | 889,579 | 2,955 | 2004 | 5900 | 453 | 46 MiB |
-| `modular_specs` | 300 | 361,150 | 1,199 | 9085 | 31846 | 1820 | 64 MiB |
-| `generation` | 300 | 983,877 | 3,268 | 1903 | 4871 | 1580 | 45 MiB |
-| `cache_transactions` (with the MTP bank) | 300 | 103,053 | 342 | 3579 | 21279 | 1193 | 58 MiB |
-| `configuration` | 120 | 404,729 | 3,344 | 4071 | 8446 | 1041 | 48 MiB |
-| `index_artifacts` | 120 | 117,298 | 969 | 1721 | 2805 | 666 | 44 MiB |
-| `masks_positions` | 120 | 322,289 | 2,663 | 523 | 1010 | 110 | 43 MiB |
-| `experiment_interfaces` | 120 | 392,433 | 3,243 | 2710 | 6880 | 239 | 47 MiB |
+| Target | Seconds | Executed inputs | exec/s | cov | ft | Corpus | `lim` | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `logits_processing` | 300 | 815,906 | 2,710 | 2686 | 7547 | 509 | 4096 | 48 MiB |
+| `chat_templates` | 300 | 176,175 | 585 | 7575 | 21426 | 1579 | 85 | 203 MiB |
+| `rope_parameters` | 300 | 1,122,463 | 3,729 | 2030 | 6696 | 1715 | 1151 | 47 MiB |
+| `safetensors_headers` | 300 | 307,236 | 1,020 | 2889 | 7554 | 580 | 702 | 47 MiB |
+| `attention_connectivity` | 300 | 889,579 | 2,955 | 2004 | 5900 | 453 | 4096 | 46 MiB |
+| `modular_specs` | 300 | 361,150 | 1,199 | 9085 | 31846 | 1820 | 308 | 64 MiB |
+| `generation` | 300 | 983,877 | 3,268 | 1903 | 4871 | 1580 | 887 | 45 MiB |
+| `cache_transactions` (with the MTP bank) | 300 | 103,053 | 342 | 3579 | 21279 | 1193 | 139 | 58 MiB |
+| `configuration` | 120 | 404,729 | 3,344 | 4071 | 8446 | 1041 | 1307 | 48 MiB |
+| `index_artifacts` | 120 | 117,298 | 969 | 1721 | 2805 | 666 | 77 | 44 MiB |
+| `masks_positions` | 120 | 322,289 | 2,663 | 523 | 1010 | 110 | 2805 | 43 MiB |
+| `experiment_interfaces` | 120 | 392,433 | 3,243 | 2710 | 6880 | 239 | 3012 | 47 MiB |
+
+`lim` is libFuzzer's input-length limit when the campaign ended: with its
+default length control, inputs grow gradually, so a short campaign explores
+short inputs only (column added in the review fix phase from the retained
+logs). At 139 bytes `cache_transactions` ran at most 24 tensor-state operations
+per input (one per six bytes), not the harness maximum of 64, so its MTP
+sequences were short; at 85 bytes `chat_templates` rarely combined long
+raw-byte fragments with full templates and three messages; `index_artifacts`
+stopped at 77 bytes. Round 3 reruns the
+two changed long-input targets with `-len_control=0`.
 
 `cache_transactions` reached coverage 3579, up from 3035 in the wave-1 fix-phase
 campaign, mostly from the MTP bank. These are finite smoke campaigns without a
 sanitizer: they show that the executed inputs satisfied every oracle, not that
-every reachable branch was covered, and they do not replace the ASan evidence
-above for the memory safety of the dependency graph.
+every reachable branch was covered. The ASan evidence above covers only the
+older five targets' dependency graph. The wave-3 fuzz graph adds C and Rust code
+that has **never run under any sanitizer**: `tokenizers` with the `onig` regular
+expression library (C, exercised on every `chat_templates` input), `minijinja`,
+and the official `safetensors` 0.7 parser. The sanitizer requirement of
+`RELEASE_GATES.md` therefore remains open for every wave-3 target, in particular
+`chat_templates` and `safetensors_headers`, until ASan campaigns run on a host
+where the nightly runtime works.
+
+### Round 3: review fix phase at `8089167`
+
+An independent review of the package strengthened five harnesses:
+`cache_transactions` (per-row reads of both banks compared by key and value;
+MTP commit prefixes drawn from their own selector bits), `chat_templates`
+(unnamed template selection against Hugging Face's rule; full shadowed-field and
+reserved-variable lists), `rope_parameters` (contextual lenient errors; softmax
+multipliers of per-layer entries), and `generation` and `modular_specs` (JSON
+round trips compare integers exactly). These five were rebuilt from commit
+`8089167` (fuzz package tree `ee8f4f459319a03401394173ad90394924db64e9`, same
+lockfile and `src/` tree as round 2; build flags include `-Cdebug-assertions`)
+and ran for 300 s each with the round-2 settings, reading the round-2 corpus of
+the same target as a second, read-only corpus. `cache_transactions` and
+`chat_templates` also used `-len_control=0`, so long inputs were explored from
+the start. `cache_transactions` and `chat_templates` started at 17:02:13 EDT and the
+other three at 17:03:38 (the first launch of those three failed in the shell
+script before any target started), so the rates are again concurrent rates. All five exited with status 0,
+without crash, timeout, or out-of-memory artifacts.
+
+| Target | Seconds | Executed inputs | exec/s | cov | ft | Corpus | `lim` | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `cache_transactions` | 300 | 86,339 | 286 | 3597 | 23661 | 1310 | 4096 | 56 MiB |
+| `chat_templates` | 300 | 240,052 | 797 | 7710 | 28908 | 2026 | 4096 | 439 MiB |
+| `rope_parameters` | 300 | 1,503,334 | 4,994 | 2066 | 7141 | 1658 | 4096 | 49 MiB |
+| `generation` | 300 | 1,318,410 | 4,380 | 1957 | 5261 | 1630 | 4096 | 46 MiB |
+| `modular_specs` | 300 | 671,699 | 2,231 | 9102 | 32859 | 1604 | 1928 | 64 MiB |
+
+With `-len_control=0`, `cache_transactions` kept inputs of up to 996 bytes (97
+new corpus entries of at least 384 bytes, enough for all 64 tensor-state
+operations), and coverage rose from 3579 to 3597. `chat_templates` kept inputs
+of up to 427 bytes; its peak RSS rose to 439 MiB with the longer inputs (the
+cause was not profiled), below the 2048 MiB limit. The other
+seven targets were not rerun: `logits_processing` changed only in comments and
+tests, and the rest did not change. Round 3 is still sanitizer-free smoke
+evidence with the limitations stated for round 2.
