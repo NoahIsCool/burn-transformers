@@ -163,14 +163,14 @@ impl TransferReport {
     }
 }
 
-/// Runtime metadata for one dense floating parameter.
+/// Runtime metadata for one floating parameter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParameterInfo {
     /// Dot-separated Rust module path; a root `Param` is named `$`.
     pub name: String,
     /// Actual runtime dimensions, after any Burn parameter mapper.
     pub shape: Vec<usize>,
-    /// Runtime floating-point dtype.
+    /// Runtime floating-point dtype; `DType::QFloat` marks a packed checkpoint weight.
     pub dtype: DType,
     /// Whether the target parameter participates in differentiation.
     pub trainable: bool,
@@ -178,9 +178,23 @@ pub struct ParameterInfo {
     pub tied_to: Option<String>,
 }
 
+impl ParameterInfo {
+    /// Whether a [`TransferPlan`] may select this parameter as a source or target.
+    ///
+    /// Only positive-rank dense floating tensors are transferable. Packed
+    /// quantized weights are listed for inspection but must be dequantized by an
+    /// explicit conversion before they can be copied.
+    pub fn is_transferable(&self) -> bool {
+        !self.shape.is_empty() && !matches!(self.dtype, DType::QFloat(_))
+    }
+}
+
 /// Discover parameter paths and ties before writing a transfer plan.
+///
 /// Inspection initializes lazy parameters to obtain their actual runtime layout,
-/// but does not copy data to the host or change parameter values.
+/// but does not copy data to the host or change parameter values. Packed
+/// quantized parameters are listed too, with [`ParameterInfo::is_transferable`]
+/// false, so a loaded quantized checkpoint can be inspected before planning.
 pub fn parameters<B: Backend, M: Module<B>>(module: &M) -> Result<Vec<ParameterInfo>> {
     Ok(collect(module)?
         .into_values()
@@ -387,6 +401,12 @@ impl<'a, B: Backend> TransferPlan<'a, B> {
                 ));
                 continue;
             };
+            let (Some(source_tensor), true) = (&source.tensor, target.info.is_transferable())
+            else {
+                return Err(Error::BackendCapability(format!(
+                    "transfer.{name}: `{source_name}` -> `{name}` selects a packed or rank-zero parameter; only positive-rank dense floating parameters are supported, so dequantize explicitly before transferring"
+                )));
+            };
             let transformed = matches!(self.rules[index], Rule::Transform { .. });
             if !transformed && source.info.shape != target.info.shape {
                 if self.shape_policy == ShapeChangePolicy::Reinitialize {
@@ -403,7 +423,7 @@ impl<'a, B: Backend> TransferPlan<'a, B> {
                 ));
             }
             let mut value = Value {
-                tensor: source.tensor.clone().detach(),
+                tensor: source_tensor.clone().detach(),
                 shape: source.info.shape.clone(),
             };
             if let Rule::Transform {
@@ -639,8 +659,9 @@ struct Parameter<B: Backend> {
     id: ParamId,
     /// Device on which any replacement must already reside.
     device: B::Device,
-    /// Flattened dense value, without a host copy.
-    tensor: Tensor<B, 1>,
+    /// Flattened dense value, without a host copy; absent for packed or rank-zero
+    /// parameters, which are listed but never staged.
+    tensor: Option<Tensor<B, 1>>,
 }
 
 /// Visitor that discovers parameter paths without initializing lazy tensors.
@@ -715,10 +736,11 @@ impl<B: Backend> ModuleVisitor<B> for Collect<'_, B> {
     fn exit_module(&mut self, _: &str, _: &str) {
         self.path.pop();
     }
-    /// Collects selected dense float parameters with their runtime shape, dtype, and trainability.
+    /// Collects selected float parameters with their runtime shape, dtype, and trainability.
     ///
-    /// Positive-rank tensors are flattened on device for rank-independent staging;
-    /// packed quantized tensors are rejected rather than implicitly dequantized.
+    /// Positive-rank dense tensors are flattened on device for rank-independent
+    /// staging. Packed quantized and rank-zero tensors keep only their metadata:
+    /// they are never implicitly dequantized, and selecting one fails at staging.
     fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
         if self.error.is_some() {
             return;
@@ -728,23 +750,20 @@ impl<B: Backend> ModuleVisitor<B> for Collect<'_, B> {
             return;
         }
         let value = param.val();
-        if D == 0 || matches!(value.dtype(), DType::QFloat(_)) {
-            self.error = Some(Error::BackendCapability(format!(
-                "transfer.{name}: only positive-rank dense floating parameters are supported"
-            )));
-            return;
-        }
+        let info = ParameterInfo {
+            name: name.clone(),
+            shape: value.dims().to_vec(),
+            dtype: value.dtype(),
+            trainable: value.is_require_grad(),
+            tied_to: None,
+        };
         let parameter = Parameter {
-            info: ParameterInfo {
-                name: name.clone(),
-                shape: value.dims().to_vec(),
-                dtype: value.dtype(),
-                trainable: value.is_require_grad(),
-                tied_to: None,
-            },
             id: param.id,
             device: value.device(),
-            tensor: value.flatten(0, D - 1),
+            tensor: info
+                .is_transferable()
+                .then(|| value.flatten(0, D.saturating_sub(1))),
+            info,
         };
         if self.parameters.insert(name.clone(), parameter).is_some() {
             self.error = Some(Error::configuration(

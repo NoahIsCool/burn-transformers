@@ -710,37 +710,26 @@ fn an_empty_plan_preserves_initialized_aliases_and_reports_all_dispositions() {
     assert_eq!(report.preserved_ties, [vec!["left", "right"]]);
 }
 
-/// Selected packed tensors are rejected while omitted packed source payloads remain untouched.
+/// Packed sources are listed, rejected when selected, and untouched when omitted.
 #[test]
 fn packed_parameters_require_explicit_conversion_but_unselected_sources_stay_packed() {
-    use crate::checkpoint::quantization::{
-        QuantizationGroupSize, SymmetricQuantization, WeightQuantizationConfig,
-        quantize_tensor_data,
-    };
-    let device = Default::default();
-    let packed_data = quantize_tensor_data(
-        &burn::tensor::TensorData::new(
-            (0..64).map(|i| i as f32 / 8.0 - 4.0).collect::<Vec<_>>(),
-            [2, 32],
-        ),
-        WeightQuantizationConfig {
-            scheme: SymmetricQuantization::Q4,
-            group_size: QuantizationGroupSize::new(32).unwrap(),
-        },
-    )
-    .unwrap()
-    .into_burn_qfloat_data()
-    .unwrap();
     let mut source = block(32, 7.0);
-    source.weight = Param::from_tensor(Tensor::<B, 2>::from_data(packed_data, &device));
+    source.weight = packed_weight();
     let original_packed = source.weight.val().into_data();
     let target = block(32, 2.0);
     let original_target_id = target.weight.id;
+    // Packed weights are listed for inspection but marked non-transferable.
+    let listed = parameters(&source).expect("packed checkpoints remain inspectable");
+    let weight = listed.iter().find(|info| info.name == "weight").unwrap();
+    assert!(matches!(weight.dtype, DType::QFloat(_)));
+    assert_eq!(weight.shape, [2, 32]);
+    assert!(!weight.is_transferable());
     assert!(
-        parameters(&source)
-            .unwrap_err()
-            .to_string()
-            .contains("dense floating parameters")
+        listed
+            .iter()
+            .find(|info| info.name == "bias")
+            .unwrap()
+            .is_transferable()
     );
     let error = TransferPlan::new()
         .copy("weight", "weight")
@@ -1066,4 +1055,52 @@ mod fan_out_training {
             "{second:?}"
         );
     }
+}
+
+/// Builds a Q4-packed `[2, 32]` weight whose dense values are `i / 8 - 4`.
+fn packed_weight() -> Param<Tensor<B, 2>> {
+    use crate::checkpoint::quantization::{
+        QuantizationGroupSize, SymmetricQuantization, WeightQuantizationConfig,
+        quantize_tensor_data,
+    };
+    let packed_data = quantize_tensor_data(
+        &burn::tensor::TensorData::new(
+            (0..64).map(|i| i as f32 / 8.0 - 4.0).collect::<Vec<_>>(),
+            [2, 32],
+        ),
+        WeightQuantizationConfig {
+            scheme: SymmetricQuantization::Q4,
+            group_size: QuantizationGroupSize::new(32).unwrap(),
+        },
+    )
+    .unwrap()
+    .into_burn_qfloat_data()
+    .unwrap();
+    Param::from_tensor(Tensor::<B, 2>::from_data(packed_data, &Default::default()))
+}
+
+/// A target with packed weights still receives float-only transfers into its dense parameters.
+#[test]
+fn packed_targets_accept_transfers_into_their_dense_parameters_only() {
+    let source = block(32, 7.0);
+    let mut target = block(32, 2.0);
+    target.weight = packed_weight();
+    let original_packed = target.weight.val().into_data();
+    let (actual, report) = TransferPlan::new()
+        .copy("bias", "bias")
+        .apply(&source, &target)
+        .expect("an unselected packed target must not block a dense transfer");
+    assert_eq!(values(actual.bias.val()), vec![7.0; 32]);
+    assert_eq!(actual.weight.val().into_data(), original_packed);
+    assert_eq!(actual.weight.id, target.weight.id);
+    assert_eq!(report.newly_initialized[0].name, "weight");
+
+    let error = TransferPlan::new()
+        .copy_matching()
+        .apply(&source, &target)
+        .expect_err("replacing a packed target needs an explicit conversion");
+    let message = error.to_string();
+    assert!(message.contains("`weight` -> `weight`"), "{message}");
+    assert!(message.contains("dequantize explicitly"), "{message}");
+    assert_eq!(target.weight.val().into_data(), original_packed);
 }
