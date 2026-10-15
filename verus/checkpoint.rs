@@ -9,7 +9,8 @@
 //! - `validate_contiguous_tiling` accepts sorted SafeTensors byte intervals only
 //!   when they chain from zero, each beginning where the previous ended, and the
 //!   last ends at the data-section size, so every interval lies inside the
-//!   section, nonempty intervals are disjoint, and every byte is accounted for;
+//!   section, nonempty intervals are disjoint, and their lengths sum exactly to
+//!   the data-section size;
 //! - `tensor_file_offset` computes `8 + header + begin` or reports overflow;
 //! - `slice_block` keeps every slice and concatenation block inside its tensor
 //!   with overflow-free arithmetic, and consecutive target blocks partition the
@@ -24,7 +25,10 @@
 //! in-bounds code reads.
 //!
 //! See `verus/README.md` for the method, toolchain, and command. Tensor copies
-//! driven by these plans, file I/O, and error mapping remain covered by tests.
+//! driven by these plans, file I/O, error mapping, and the floating-point
+//! rounding encoder in `src/checkpoint/runtime/rounding.rs` (checked
+//! exhaustively at every 16-bit midpoint and against independent oracles) remain
+//! covered by tests rather than proofs.
 
 // Loop invariants are attributes on `while` expressions, which rustc accepts
 // only with this feature; it applies solely under Verus.

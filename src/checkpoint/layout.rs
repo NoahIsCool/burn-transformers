@@ -75,6 +75,17 @@ proof fn lemma_product_overflow_persists(shape: Seq<u64>, from: int, to: int)
     }
 }
 
+/// Total bytes accounted for by the first `count` intervals: `sum(end - begin)`.
+pub open spec fn covered_bytes(intervals: Seq<(u64, u64)>, count: int) -> int
+    decreases count,
+{
+    if count <= 0 {
+        0
+    } else {
+        covered_bytes(intervals, count - 1) + intervals[count - 1].1 - intervals[count - 1].0
+    }
+}
+
 /// A zero dimension makes every longer prefix product zero.
 proof fn lemma_product_zero_persists(shape: Seq<u64>, from: int, to: int)
     requires
@@ -227,7 +238,8 @@ pub(crate) enum TilingError {
 /// `intervals` must be sorted by `(begin, end)`; the caller sorts them because
 /// SafeTensors headers list tensors by name. On success, interval `k` begins at
 /// the end of interval `k - 1` (zero for the first), and the last ends at
-/// `data_bytes`, so the intervals are disjoint and cover every data byte. Empty
+/// `data_bytes`, so the intervals are disjoint and cover every data byte: their
+/// lengths sum exactly to `data_bytes` (the byte accounting is exact). Empty
 /// intervals are allowed anywhere inside the section.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(result =>
@@ -240,6 +252,7 @@ pub(crate) enum TilingError {
                 #[trigger] intervals@[k].0 <= intervals@[k].1 && intervals@[k].1 <= data_bytes
             &&& forall|k: int| 0 < k < intervals@.len() ==>
                 #[trigger] intervals@[k].0 == intervals@[k - 1].1
+            &&& covered_bytes(intervals@, intervals@.len() as int) == data_bytes
         }
 ))]
 pub(crate) fn validate_contiguous_tiling(
@@ -258,6 +271,7 @@ pub(crate) fn validate_contiguous_tiling(
                 #[trigger] intervals@[k].0 <= intervals@[k].1 && intervals@[k].1 <= data_bytes,
             forall|k: int| 0 < k < index ==> #[trigger] intervals@[k].0 == intervals@[k - 1].1,
             index > 0 ==> intervals@[0].0 == 0,
+            cursor as int == covered_bytes(intervals@, index as int),
         decreases intervals@.len() - index,
     ))]
     while index < intervals.len() {
