@@ -14,9 +14,10 @@
 //! Consequently decode never materializes historical per-head keys or values.
 //! After absorption every head attends to the *same* cached latents and shared
 //! rotary key (multi-query form), so heads fold into the rows of one GEMM per
-//! step: content logits, rotary logits, and latent aggregation each stream the
-//! `r + d_r` cached scalars per token once per layer, not once per head. Only
-//! the per-head factors `W^K_h` and `W^V_h` remain head-specific. Both paths
+//! step: the content logits and the latent aggregation each read the `r`
+//! cached latent scalars per token once, and the rotary logits read the `d_r`
+//! rotary scalars once, independent of the head count. Only the per-head
+//! factors `W^K_h` and `W^V_h` remain head-specific. Both paths
 //! share the same parameters and are numerically equivalent up to
 //! floating-point reassociation.
 //!
