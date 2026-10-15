@@ -335,13 +335,15 @@ fn eager_attention_matches_fused_attention_and_captures_patterns() {
 
 /// Captured scores are exactly `c · tanh(q·kᵀ · s / c)` of the captured rotated queries and keys.
 ///
-/// With `c = 0.2` over a quarter of the raw scores lie beyond `2c`, where tanh saturates, so
-/// a cap applied with the wrong constant, before the scale, after the mask,
-/// or not at all would miss by far more than F32 rounding. Query head `h`
-/// reads key/value head `h / 2` (four query heads over two KV heads). The
-/// fused and eager graphs must also agree on the saturated logits.
+/// With `c = 0.2` over a quarter of the raw scores lie beyond `2c`, where
+/// tanh saturates, so a cap applied with the wrong constant, before the
+/// scale, after the mask, or not at all would miss by far more than F32
+/// rounding. Query head `h` reads key/value head `h / 2` (four query heads
+/// over two KV heads). The fused and eager graphs must also agree on the
+/// saturated logits.
 #[test]
 fn saturated_attention_scores_are_soft_capped_exactly() {
+    /// The soft-cap `c`, small enough that tanh saturates for many scores.
     const CAP: f32 = 0.2;
     let mut fused = tiny_model(GemmaVariant::Gemma2, 11);
     for layer in &mut fused.model.layers {
