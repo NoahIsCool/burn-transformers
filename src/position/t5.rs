@@ -9,8 +9,20 @@
 //! logarithms use host F64. Bidirectional tables separate past and future halves.
 //! Causal tables map future displacements to zero, but the attention mask remains
 //! responsible for excluding those future keys.
+//!
+//! # Verified bucket assembly
+//!
+//! The floating-point logarithm only proposes a logarithmic offset. The integer
+//! assembly in [`combine_bucket`] is checked in place by Verus through
+//! `verus/position.rs`: for every validated bucket geometry and *any* proposed
+//! offset, the result is a valid table index, bidirectional future keys use the
+//! upper half and past keys the lower half, causal future keys map to bucket
+//! zero, and exact-region distances map to `direction_offset + distance`.
 
 use core::fmt;
+
+#[cfg(verus_keep_ghost)]
+use vstd::prelude::*;
 
 /// Validated T5 relative-position bucketing parameters.
 ///
@@ -131,32 +143,98 @@ impl T5RelativePositionBuckets {
         } else {
             self.num_buckets
         };
-        let direction_offset =
-            usize::from(self.bidirectional && key_is_future) * buckets_per_direction;
-
-        // Causal attention cannot observe future keys. Matching T5's reference
-        // implementation, clamp their relative distance to zero rather than
-        // assigning a past-distance bucket.
-        let distance = if !self.bidirectional && key_is_future {
+        // Causal future keys use distance zero, so they never need a logarithm.
+        let effective_distance = if !self.bidirectional && key_is_future {
             0
         } else {
             distance
         };
-        let max_exact = buckets_per_direction / 2;
-        let within_direction = if distance < max_exact as u64 {
-            distance as usize
-        } else {
-            let distance_ratio = distance as f64 / max_exact as f64;
-            let max_ratio = self.max_distance as f64 / max_exact as f64;
-            let logarithmic_fraction = distance_ratio.ln() / max_ratio.ln();
-            let logarithmic_buckets = buckets_per_direction - max_exact;
-            let candidate =
-                max_exact + (logarithmic_fraction * logarithmic_buckets as f64) as usize;
-            candidate.min(buckets_per_direction - 1)
-        };
-
-        direction_offset + within_direction
+        let logarithmic_offset = self.logarithmic_offset(effective_distance, buckets_per_direction);
+        combine_bucket(
+            self.num_buckets,
+            self.bidirectional,
+            key_is_future,
+            distance,
+            logarithmic_offset,
+        )
     }
+
+    /// Proposes the logarithmic-region offset `floor(log(d/E) / log(M/E) * (B-E))`.
+    ///
+    /// `E = B/2` is the exact-region size, `B` the per-direction bucket count,
+    /// and `M` the saturation distance. Only distances `d >= E` consult this
+    /// value; the cast saturates on overflow and [`combine_bucket`] clips it.
+    fn logarithmic_offset(self, distance: u64, buckets_per_direction: usize) -> usize {
+        let max_exact = buckets_per_direction / 2;
+        if distance < max_exact as u64 {
+            return 0;
+        }
+        let distance_ratio = distance as f64 / max_exact as f64;
+        let max_ratio = self.max_distance as f64 / max_exact as f64;
+        let logarithmic_fraction = distance_ratio.ln() / max_ratio.ln();
+        let logarithmic_buckets = buckets_per_direction - max_exact;
+        (logarithmic_fraction * logarithmic_buckets as f64) as usize
+    }
+}
+
+/// Assembles a table index from direction, distance, and a proposed logarithmic offset.
+///
+/// With `B` buckets per direction and `E = B/2` exact buckets, the
+/// within-direction index is `distance` when `distance < E` and
+/// `min(E + logarithmic_offset, B - 1)` otherwise; bidirectional future keys
+/// add `B`. Causal future keys use distance zero, matching the reference,
+/// because the causal mask—not the bias—excludes them. The minimum is computed
+/// without forming `E + logarithmic_offset`, so arbitrary offsets cannot overflow.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(bucket =>
+    requires
+        bidirectional ==> num_buckets >= 4 && num_buckets % 2 == 0,
+        !bidirectional ==> num_buckets >= 2,
+    ensures
+        bucket < num_buckets,
+        bidirectional && key_is_future ==> bucket >= num_buckets / 2,
+        bidirectional && !key_is_future ==> bucket < num_buckets / 2,
+        !bidirectional && key_is_future ==> bucket == 0,
+        bidirectional && key_is_future && distance < num_buckets / 4
+            ==> bucket == num_buckets / 2 + distance,
+        !key_is_future
+            && distance < (if bidirectional { num_buckets / 4 } else { num_buckets / 2 })
+            ==> bucket == distance,
+))]
+fn combine_bucket(
+    num_buckets: usize,
+    bidirectional: bool,
+    key_is_future: bool,
+    distance: u64,
+    logarithmic_offset: usize,
+) -> usize {
+    let buckets_per_direction = if bidirectional {
+        num_buckets / 2
+    } else {
+        num_buckets
+    };
+    let direction_offset = if bidirectional && key_is_future {
+        buckets_per_direction
+    } else {
+        0
+    };
+    // Causal attention cannot observe future keys. Matching T5's reference
+    // implementation, clamp their relative distance to zero rather than
+    // assigning a past-distance bucket.
+    let distance = if !bidirectional && key_is_future {
+        0
+    } else {
+        distance
+    };
+    let max_exact = buckets_per_direction / 2;
+    let within_direction = if distance < max_exact as u64 {
+        distance as usize
+    } else if logarithmic_offset >= buckets_per_direction - 1 - max_exact {
+        buckets_per_direction - 1
+    } else {
+        max_exact + logarithmic_offset
+    };
+    direction_offset + within_direction
 }
 
 /// Invalid parameters for [`T5RelativePositionBuckets`].
