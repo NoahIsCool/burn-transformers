@@ -62,6 +62,7 @@ use core::ops::Range;
 
 use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
 
+use crate::attention::position_limit;
 use crate::cache::DecodeStateError;
 use crate::cache::identity::IdentityToken;
 use crate::cache::retention::{WorkingWindow, ring_slot_position, ring_working_window};
@@ -968,8 +969,16 @@ impl<B: Backend> KvBatchSegment<B> {
             .expand(shape);
         let mut excluded = key.clone().greater(query.clone());
         if let Some(window) = window {
+            // Compare the distance `query - key` with the window rather than
+            // forming `key + window`: backends convert scalars to their integer
+            // element type without range checks, so a wide window wrapped
+            // negative and excluded every key. Both positions are
+            // non-negative, so the difference cannot overflow, and a window
+            // wider than any representable distance excludes nothing.
             let width = i64::try_from(window.get()).unwrap_or(i64::MAX);
-            excluded = excluded.bool_or(key.add_scalar(width).lower_equal(query));
+            if width <= position_limit(self.positions.dtype()) {
+                excluded = excluded.bool_or(query.sub(key).greater_equal_elem(width));
+            }
         }
         if let Some(valid) = &self.valid {
             excluded = excluded.bool_or(

@@ -45,6 +45,9 @@ mod differential;
 mod dispatch;
 mod execution;
 mod mask;
+
+/// Largest position an integer tensor of a given dtype can hold (shared with cache masks).
+pub(crate) use mask::position_limit;
 mod plan;
 mod widths;
 

@@ -764,6 +764,56 @@ fn masked_values_neutralize_non_finite_invalid_slots() {
     assert_eq!(host(&full.masked_values()), host(full.values()));
 }
 
+/// Windows wider than any representable distance exclude only causal and padding links.
+///
+/// `key + window` used to wrap on the backend's integer dtype for windows near
+/// its range (for example `2^40` on 32-bit integers), excluding every key. The
+/// mask now compares `query - key` with the window, so every width up to
+/// `usize::MAX` matches the brute-force rule.
+#[test]
+fn exclusion_mask_handles_windows_beyond_the_integer_range() {
+    let mut ring = cache(1, 10, KvCacheStorage::Full, 4, 0, false);
+    let append = KvBatchAppend::right_padded(&[0], &[3], 3).expect("layout");
+    ring.write_batch(0, &append, block(1, 3, 1.0), block(1, 3, 1.0))
+        .expect("prefill");
+    let segment = ring
+        .read_batch(0, &ring.plan_batch_read(&[3]).expect("plan"))
+        .expect("read")
+        .materialize()
+        .expect("keys");
+    let query_positions =
+        Tensor::<TestBackend, 2, Int>::from_ints(TensorData::new(vec![0, 1, 2], [1, 3]), &device());
+    let unrestricted = host_bool(
+        &segment
+            .exclusion_mask(&query_positions, 1, None)
+            .expect("mask"),
+    );
+    for width in [
+        3_usize,
+        i32::MAX as usize,
+        i32::MAX as usize + 1,
+        1 << 40,
+        usize::MAX,
+    ] {
+        let mask = segment
+            .exclusion_mask(&query_positions, 1, NonZeroUsize::new(width))
+            .expect("mask");
+        assert_eq!(host_bool(&mask), unrestricted, "window {width}");
+    }
+    let narrow = host_bool(
+        &segment
+            .exclusion_mask(&query_positions, 1, NonZeroUsize::new(1))
+            .expect("mask"),
+    );
+    // A one-token window keeps only the diagonal: query q sees key q.
+    let keys = host_int(segment.key_positions());
+    for (query, query_row) in narrow.chunks(keys.len()).enumerate() {
+        for (&excluded, &key) in query_row.iter().zip(&keys) {
+            assert_eq!(excluded, usize::try_from(key) != Ok(query));
+        }
+    }
+}
+
 /// Exclusion masks equal a brute-force causal, window, and padding rule.
 #[test]
 fn exclusion_mask_matches_brute_force_rule() {
