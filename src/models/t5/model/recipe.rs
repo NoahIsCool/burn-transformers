@@ -11,10 +11,26 @@
 //! and pattern hooks, while the backend-default path retains its own arithmetic.
 //! Staged execution preserves dtype, device, gradients, and a continuation cursor;
 //! final normalization can be applied once to any retained encoder prefix.
+//!
+//! # Cost of one staged range
+//!
+//! A range reads the context's positions once (minimum, maximum, and whether
+//! every row carries the same positions) in a single device-to-host transfer.
+//! Each bias owner used by the range then builds its bias exactly once, on the
+//! device, from that summary (see [`super::bias::positional_bias`]): a
+//! `[1, heads, S, S]` plane when all rows share positions (the default
+//! `0..S`), otherwise `[batch, heads, S, S]`. Blocks run through the same
+//! [`T5Block::run`] graph as the complete model.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map};
+
+use burn::tensor::Int;
 
 use super::*;
+use crate::{
+    experiment::AttentionPolicy, intervention::Stack, models::shared::checks::read_int_tensors,
+};
+use block::diagnostic_buffer;
 
 // Per-block geometry and shared learned relative-position bias.
 
@@ -336,6 +352,9 @@ impl<B: Backend> T5Encoder<B> {
     }
 
     /// Encodes source tokens with selective activation capture and intervention.
+    ///
+    /// The whole stack runs as one staged range, so positions are read once
+    /// and each bias owner builds its bias once for every layer.
     pub fn encode_with_hooks(
         &self,
         source: CausalLmInput<B>,
@@ -351,13 +370,10 @@ impl<B: Backend> T5Encoder<B> {
             if options.hidden_states {
                 hidden_states.push(state.hidden.clone());
             }
-            for index in 0..self.encoder.block.len() {
-                state = self.run_layers_impl(state, index..index + 1, hooks)?;
-                if options.hidden_states {
-                    hidden_states.push(state.hidden.clone());
-                }
-            }
-            state = self.normalize_impl(state, hooks)?;
+            let retained = options.hidden_states.then_some(&mut hidden_states);
+            state = self.run_layers_inner(state, 0..self.encoder.block.len(), hooks, retained)?;
+            // The range just validated this state; only the final norm remains.
+            state = self.apply_final_norm(state, hooks)?;
             if options.hidden_states {
                 hidden_states.push(state.hidden.clone());
             }
@@ -371,8 +387,28 @@ impl<B: Backend> T5Encoder<B> {
     }
 
     /// Checks `[batch, token, d_model]` residuals, dtype/device, cursor, and encoder-only policies.
-    fn validate_state(&self, state: &crate::experiment::HiddenState<B>) -> Result<()> {
-        state.validate(self.recipe.config.d_model)?;
+    ///
+    /// Reads the position summary (one device-to-host transfer) after every
+    /// sync-free check, so invalid layouts fail without synchronizing.
+    fn validate_state(&self, state: &crate::experiment::HiddenState<B>) -> Result<PositionSummary> {
+        self.validate_state_layout(state)?;
+        PositionSummary::read(state)
+    }
+
+    /// Performs every state check that needs no device values.
+    fn validate_state_layout(&self, state: &crate::experiment::HiddenState<B>) -> Result<()> {
+        let [batch, tokens, width] = state.hidden.dims();
+        let d_model = self.recipe.config.d_model;
+        if width != d_model || batch == 0 || tokens == 0 {
+            return Err(Error::shape(
+                "execution.hidden",
+                format!("nonempty [batch, token, {d_model}]"),
+                format!("{:?}", state.hidden.dims()),
+            ));
+        }
+        state
+            .context
+            .validate_layout([batch, tokens], &state.hidden.device())?;
         ensure_same_device(
             "t5.encoder.hidden",
             &state.hidden.device(),
@@ -413,16 +449,31 @@ impl<B: Backend> T5Encoder<B> {
 
     /// Executes a contiguous raw-residual range with a compatible learned bias owner per block.
     ///
-    /// Each score bias has axes `[batch, heads, query, key]` and derives from
-    /// explicit positions. All attention policies are checked before execution;
-    /// relative-bias lookups retain gradients to their single registered owner.
+    /// Each score bias has axes `[1 or batch, heads, query, key]` and derives
+    /// from explicit positions. All attention policies are checked before
+    /// execution; relative-bias lookups retain gradients to their single
+    /// registered owner.
     fn run_layers_impl(
+        &self,
+        state: crate::experiment::HiddenState<B>,
+        range: std::ops::Range<usize>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<crate::experiment::HiddenState<B>> {
+        self.run_layers_inner(state, range, hooks, None)
+    }
+
+    /// Runs `range` once validated, appending each block output to `retained` when given.
+    ///
+    /// Positions are read once for the whole range, and the bias of every
+    /// owner the range uses is built once and shared by its layers.
+    fn run_layers_inner(
         &self,
         mut state: crate::experiment::HiddenState<B>,
         range: std::ops::Range<usize>,
         hooks: &mut Hooks<'_, B>,
+        mut retained: Option<&mut Vec<Tensor<B, 3>>>,
     ) -> Result<crate::experiment::HiddenState<B>> {
-        self.validate_state(&state)?;
+        let positions = self.validate_state(&state)?;
         state.validate_range(range.clone(), self.encoder.block.len())?;
         let [batch, sequence, _] = state.hidden.dims();
         for index in range.clone() {
@@ -451,56 +502,85 @@ impl<B: Backend> T5Encoder<B> {
                 ));
             }
         }
+        let mut owner_biases: BTreeMap<usize, Tensor<B, 4>> = BTreeMap::new();
+        for index in range.clone() {
+            let owner = self.bias_owner(index)?;
+            if let btree_map::Entry::Vacant(slot) = owner_biases.entry(owner) {
+                slot.insert(positions.bias(self.owner_table(owner)?, &state)?);
+            }
+        }
         for index in range {
-            let owner = *self.bias_sources.get(index).ok_or_else(|| {
-                Error::configuration(
-                    "t5.encoder.relative_bias",
-                    "layer list changed without updating the encoder recipe",
-                )
-            })?;
-            let bias = self
-                .encoder
-                .block
-                .get(owner)
-                .and_then(|block| {
-                    block
-                        .self_attention
-                        .self_attention
-                        .relative_attention_bias
-                        .as_ref()
-                })
-                .ok_or_else(|| {
-                    Error::configuration(
-                        "t5.encoder.relative_bias",
-                        "missing compatible learned bias owner",
-                    )
-                })?;
-            let position_bias = relative_bias_for_positions(bias, &state.context.positions)?;
+            let relative = owner_biases[&self.bias_owner(index)?].clone();
             let layer = Layer::encoder(index);
-            let policy = state.context.attention_for(layer, false);
-            state.hidden = self.encoder.block[index].forward_context_with_hooks(
-                state.hidden,
-                T5BlockContext {
-                    token_mask: state.context.token_mask.as_ref(),
-                    position_bias,
-                    encoder: None,
-                    layer,
-                    attention_policy: Some(policy),
-                },
-                hooks,
+            let block = &self.encoder.block[index];
+            let plan = policy_plan(
+                state.context.attention_for(layer, false),
+                state.context.token_mask.as_ref(),
+                relative,
+                [
+                    batch,
+                    block.self_attention.self_attention.attention.query_heads,
+                    sequence,
+                    sequence,
+                ],
+                &state.hidden.device(),
             )?;
+            state.hidden =
+                block.run(state.hidden, plan, &mut FreshKeyValues, None, layer, hooks)?;
             state.next_layer = index + 1;
+            if let Some(retained) = retained.as_deref_mut() {
+                retained.push(state.hidden.clone());
+            }
         }
         Ok(state)
+    }
+
+    /// Returns the index of the block whose learned table biases layer `index`.
+    fn bias_owner(&self, index: usize) -> Result<usize> {
+        self.bias_sources.get(index).copied().ok_or_else(|| {
+            Error::configuration(
+                "t5.encoder.relative_bias",
+                "layer list changed without updating the encoder recipe",
+            )
+        })
+    }
+
+    /// Returns the learned relative-position table registered at block `owner`.
+    fn owner_table(&self, owner: usize) -> Result<&T5RelativePositionBias<B>> {
+        self.encoder
+            .block
+            .get(owner)
+            .and_then(|block| {
+                block
+                    .self_attention
+                    .self_attention
+                    .relative_attention_bias
+                    .as_ref()
+            })
+            .ok_or_else(|| {
+                Error::configuration(
+                    "t5.encoder.relative_bias",
+                    "missing compatible learned bias owner",
+                )
+            })
     }
 
     /// Applies final T5 RMS normalization once and preserves the result for an external task head.
     fn normalize_impl(
         &self,
-        mut state: crate::experiment::HiddenState<B>,
+        state: crate::experiment::HiddenState<B>,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<crate::experiment::HiddenState<B>> {
         self.validate_state(&state)?;
+        self.apply_final_norm(state, hooks)
+    }
+
+    /// Normalizes a state whose layout and positions the caller already validated.
+    fn apply_final_norm(
+        &self,
+        mut state: crate::experiment::HiddenState<B>,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<crate::experiment::HiddenState<B>> {
         if state.normalized {
             return Err(Error::configuration(
                 "t5.encoder.normalize",
@@ -516,68 +596,102 @@ impl<B: Backend> T5Encoder<B> {
     }
 }
 
-// Position-to-bucket lookup keeps the learned bias table inside the gradient graph.
+// Position validation and per-pass bias construction.
 
-/// Builds T5's learned bias from explicit per-token positions, retaining gradients.
-pub(super) fn relative_bias_for_positions<B: Backend>(
-    table: &T5RelativePositionBias<B>,
-    positions: &Tensor<B, 2, Int>,
-) -> Result<Tensor<B, 4>> {
-    let [batch, sequence] = positions.dims();
-    if batch == 0 || sequence == 0 {
-        return Err(Error::configuration(
-            "t5.relative_positions",
-            "positions must be nonempty",
-        ));
-    }
-    let count = batch
-        .checked_mul(sequence)
-        .and_then(|count| count.checked_mul(sequence))
-        .ok_or_else(|| {
-            Error::configuration("t5.relative_positions", "bias dimensions overflow usize")
-        })?;
-    let values = positions
-        .clone()
-        .into_data()
-        .convert::<i64>()
-        .to_vec::<i64>()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to read T5 relative positions: {error}"))
-        })?;
-    if values.iter().any(|position| *position < 0) {
-        return Err(Error::configuration(
-            "t5.relative_positions",
-            "positions must be nonnegative",
-        ));
-    }
-    let mut indices = Vec::new();
-    indices.try_reserve_exact(count).map_err(|_| {
-        Error::BackendCapability(format!(
-            "could not reserve {count} T5 relative-position indices"
-        ))
-    })?;
-    for row in values.chunks_exact(sequence) {
-        for &query in row {
-            for &key in row {
-                let bucket = table
-                    .buckets()
-                    .bucket_for_positions(query as usize, key as usize);
-                indices.push(i64::try_from(bucket).map_err(|_| {
-                    Error::configuration("t5.relative_positions", "bucket does not fit in i64")
-                })?);
-            }
+/// Host summary of a staged state's positions, read in one transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PositionSummary {
+    /// Exclusive bound `E` with every position in `0..E` (the evaluated context).
+    context: usize,
+    /// Whether every batch row carries the same positions as row zero.
+    uniform: bool,
+}
+
+impl PositionSummary {
+    /// Checks positions against the evaluated context and detects batch-uniform rows.
+    ///
+    /// Reads `[min, max, rows_equal]` in one device-to-host transfer. The
+    /// range check reproduces [`ExecutionContext::validate`](crate::experiment::ExecutionContext::validate),
+    /// which a staged range would otherwise pay for with a separate read.
+    fn read<B: Backend>(state: &crate::experiment::HiddenState<B>) -> Result<Self> {
+        let positions = state.context.positions.clone();
+        let [batch, sequence] = positions.dims();
+        let first_row = positions.clone().narrow(0, 0, 1).expand([batch, sequence]);
+        let uniform = positions.clone().equal(first_row).all().int();
+        let values = read_int_tensors(
+            vec![positions.clone().min(), positions.max(), uniform],
+            "execution positions",
+        )?;
+        let (low, high) = (values[0], values[1]);
+        let context = state.context.evaluated_context;
+        if !(low >= 0 && usize::try_from(high).is_ok_and(|high| high < context)) {
+            return Err(Error::configuration(
+                "execution.positions",
+                format!(
+                    "positions must lie within the nonnegative evaluated context 0..{context}, found {low}..={high}"
+                ),
+            ));
         }
+        Ok(Self {
+            context,
+            uniform: values[2] != 0,
+        })
     }
-    let heads = table.weight.val().dims()[1];
-    let selector = Tensor::<B, 2, Int>::from_data(
-        TensorData::new(indices, [batch * sequence, sequence]),
-        &positions.device(),
-    );
-    Ok(
-        burn::tensor::module::embedding(table.weight.val(), selector)
-            .reshape([batch, sequence, sequence, heads])
-            .permute([0, 3, 1, 2]),
-    )
+
+    /// Builds one owner's bias from the validated positions.
+    ///
+    /// Positions lie in `0..E`, so every displacement is bounded by `E - 1`.
+    /// Batch-uniform positions (the default `0..S`) produce a
+    /// `[1, heads, S, S]` plane that broadcasts over the batch.
+    fn bias<B: Backend>(
+        self,
+        table: &T5RelativePositionBias<B>,
+        state: &crate::experiment::HiddenState<B>,
+    ) -> Result<Tensor<B, 4>> {
+        let positions = if self.uniform {
+            state.context.positions.clone().narrow(0, 0, 1)
+        } else {
+            state.context.positions.clone()
+        };
+        bias::positional_bias(
+            table,
+            positions.clone(),
+            positions,
+            self.context.saturating_sub(1),
+        )
+    }
+}
+
+/// Combines an experiment attention policy with padding and the relative bias.
+///
+/// Padding always constrains attention (`true == valid` token mask). Without
+/// a user connectivity plane the padding is passed through as a broadcast
+/// `[batch, 1, 1, key]` view, so no `[batch, heads, query, key]` plane is
+/// materialized; with one, [`AttentionPolicy::exclusion_mask`] unions them.
+/// A policy bias is added to the relative bias.
+fn policy_plan<B: Backend>(
+    policy: AttentionPolicy<B>,
+    token_mask: Option<&TokenMask<B>>,
+    relative: Tensor<B, 4>,
+    shape: [usize; 4],
+    device: &B::Device,
+) -> Result<SelfAttentionPlan<B>> {
+    let padding = SelfAttentionPlan::padded(token_mask, None, policy.causal).excluded;
+    let excluded = if policy.allowed.is_some() {
+        let padding = padding.map(|plane| plane.expand(shape));
+        policy.exclusion_mask(padding, shape, device)?
+    } else {
+        padding
+    };
+    let bias = match policy.expanded_bias(shape, device)? {
+        Some(extra) => relative.expand(shape) + extra,
+        None => relative,
+    };
+    Ok(SelfAttentionPlan {
+        excluded,
+        bias: Some(bias),
+        causal: policy.causal,
+    })
 }
 
 #[cfg(test)]

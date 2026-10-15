@@ -573,6 +573,47 @@ fn t5_recipe_rejects_empty_inputs_and_reports_full_hidden_diagnostics() {
     );
 }
 
+/// Rows with different explicit positions in one batch match each row run alone.
+///
+/// Batch-ragged positions take the per-row `[batch, heads, S, S]` bias; a
+/// single row takes the broadcast `[1, heads, S, S]` bias. Both must agree.
+#[test]
+fn t5_recipe_ragged_batch_positions_match_rows_run_alone() {
+    let device = Default::default();
+    let encoder = T5EncoderRecipe::from_config(config())
+        .unwrap()
+        .init::<TestBackend>(&device)
+        .unwrap();
+    let rows: [[i64; 3]; 3] = [[0, 1, 2], [4, 9, 10], [3, 3, 40]];
+    let tokens: [[i64; 3]; 3] = [[1, 2, 3], [4, 5, 6], [7, 8, 9]];
+    let encode = |tokens: Vec<i64>, positions: Vec<i64>, batch: usize| {
+        let source = CausalLmInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::from_data(
+                burn::tensor::TensorData::new(tokens, [batch, 3]),
+                &device,
+            ),
+            token_mask: None,
+            position_ids: Some(Tensor::<TestBackend, 2, Int>::from_data(
+                burn::tensor::TensorData::new(positions, [batch, 3]),
+                &device,
+            )),
+        };
+        encoder
+            .encode(source, &ForwardOptions::default())
+            .unwrap()
+            .hidden_state
+    };
+    let batched = encode(tokens.concat(), rows.concat(), 3);
+    for row in 0..3 {
+        let alone = encode(tokens[row].to_vec(), rows[row].to_vec(), 1);
+        batched
+            .clone()
+            .narrow(0, row, 1)
+            .into_data()
+            .assert_approx_eq::<f32>(&alone.into_data(), burn::tensor::Tolerance::absolute(1e-6));
+    }
+}
+
 /// An encoder-only recipe needs only the bidirectional bucket bound.
 #[test]
 fn t5_encoder_recipe_accepts_encoder_only_bucket_geometry() {
@@ -583,4 +624,103 @@ fn t5_encoder_recipe_accepts_encoder_only_bucket_geometry() {
     let recipe = T5EncoderRecipe::from_config(config).expect("the encoder bound holds");
     recipe.validate().unwrap();
     recipe.init::<TestBackend>(&Default::default()).unwrap();
+}
+
+/// Without a connectivity plane the padding stays a broadcast `[batch, 1, 1, key]` view.
+#[test]
+fn t5_policy_plan_keeps_padding_as_a_broadcast_plane() {
+    let device = Default::default();
+    let mask = TokenMask::new(Tensor::<TestBackend, 2, burn::tensor::Bool>::from_bool(
+        [[true, false, true]].into(),
+        &device,
+    ));
+    let relative = Tensor::<TestBackend, 4>::zeros([1, 2, 3, 3], &device);
+    let shape = [1, 2, 3, 3];
+    let plan = policy_plan(
+        AttentionPolicy::bidirectional(),
+        Some(&mask),
+        relative.clone(),
+        shape,
+        &device,
+    )
+    .unwrap();
+    assert_eq!(plan.excluded.unwrap().dims(), [1, 1, 1, 3]);
+    assert_eq!(plan.bias.unwrap().dims(), [1, 2, 3, 3]);
+    let allowed = Tensor::<TestBackend, 4, burn::tensor::Bool>::from_bool(
+        [[[[true, true, false], [true, true, true], [false, true, true]]]].into(),
+        &device,
+    );
+    let plan = policy_plan(
+        AttentionPolicy::custom(allowed).with_bias(Tensor::ones([1, 1, 3, 3], &device)),
+        Some(&mask),
+        relative,
+        shape,
+        &device,
+    )
+    .unwrap();
+    let excluded = plan.excluded.unwrap().into_data().to_vec::<bool>().unwrap();
+    // Padded key 1 is always excluded; the connectivity removes (0, 2) and (2, 0).
+    assert_eq!(
+        &excluded[..9],
+        [false, true, true, false, true, false, true, true, false]
+    );
+    assert!(
+        plan.bias
+            .unwrap()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .all(|&value| value == 1.0)
+    );
+}
+
+/// Times a staged encoder pass (release builds only).
+///
+/// Encodes a batch of 32 sequences of 256 tokens through six layers, the
+/// shape of an encoder-classifier training step. The same body runs on
+/// earlier sources, so the printed time compares implementations. Run with
+/// `cargo test --release --lib recipe_encode_benchmark -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing benchmark; run explicitly in release mode"]
+fn recipe_encode_benchmark() {
+    let device = Default::default();
+    let encoder = T5EncoderRecipe::from_config(T5Config {
+        vocab_size: 512,
+        d_model: 128,
+        d_kv: 32,
+        d_ff: 512,
+        num_layers: 6,
+        num_decoder_layers: Some(1),
+        num_heads: 4,
+        relative_attention_num_buckets: 32,
+        relative_attention_max_distance: 128,
+        ..T5Config::default()
+    })
+    .unwrap()
+    .init::<TestBackend>(&device)
+    .unwrap();
+    let (batch, sequence) = (32_usize, 256_usize);
+    let ids: Vec<i64> = (0..batch * sequence)
+        .map(|index| (index * 7 % 500) as i64)
+        .collect();
+    let mut best = f64::INFINITY;
+    for _ in 0..5 {
+        let source = CausalLmInput {
+            token_ids: Tensor::<TestBackend, 2, Int>::from_data(
+                burn::tensor::TensorData::new(ids.clone(), [batch, sequence]),
+                &device,
+            ),
+            token_mask: None,
+            position_ids: None,
+        };
+        let started = std::time::Instant::now();
+        encoder
+            .encode(source, &ForwardOptions::default())
+            .unwrap()
+            .hidden_state
+            .into_data();
+        best = best.min(started.elapsed().as_secs_f64());
+    }
+    eprintln!("T5 recipe encode batch={batch} sequence={sequence}: best={best:.4}s");
 }

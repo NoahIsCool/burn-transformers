@@ -58,6 +58,43 @@ pub trait DecodeState<B: Backend>: Send + core::fmt::Debug {
     /// Reorders or duplicates batch rows according to source indices.
     fn reorder(&mut self, indices: &[usize]) -> Result<()>;
 
+    /// Reorders rows when every index stays inside its own group of rows.
+    ///
+    /// Rows are grouped consecutively, `group_size` at a time: row `d` belongs
+    /// to group `d / group_size`, and every `indices[d]` must lie in the same
+    /// group. Beam search uses this for the beams of one source. Callers also
+    /// promise that the rows of a group share identical *immutable* state,
+    /// such as one source's encoder output and its projected cross-attention
+    /// keys and values, so an implementation may leave such state in place
+    /// instead of gathering it; mutable history is reordered as by
+    /// [`Self::reorder`].
+    ///
+    /// The default checks the grouping and delegates to [`Self::reorder`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::Cache`] when `group_size` is zero or does not
+    /// divide the batch, or when an index leaves its group; otherwise the
+    /// errors of [`Self::reorder`]. Nothing changes on error.
+    fn reorder_within_groups(&mut self, indices: &[usize], group_size: usize) -> Result<()> {
+        let batch = self.batch_size();
+        if group_size == 0 || !batch.is_multiple_of(group_size) {
+            return Err(crate::Error::Cache(format!(
+                "group-preserving reorder needs a group size dividing batch {batch}, found {group_size}"
+            )));
+        }
+        if let Some((row, &source)) = indices
+            .iter()
+            .enumerate()
+            .find(|&(row, &source)| source / group_size != row / group_size)
+        {
+            return Err(crate::Error::Cache(format!(
+                "reorder index {source} for row {row} leaves its group of {group_size} rows"
+            )));
+        }
+        self.reorder(indices)
+    }
+
     /// Rolls each sequence back to a previously computed logical length.
     fn truncate(&mut self, lengths: &[usize]) -> Result<()>;
 

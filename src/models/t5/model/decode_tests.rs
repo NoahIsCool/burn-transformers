@@ -5,7 +5,6 @@ use burn::{
     module::{Initializer, Module, ModuleMapper, Param},
     tensor::{Bool, DType, Int, Tensor, TensorData, Tolerance, backend::BackendTypes},
 };
-use proptest::prelude::*;
 
 use super::super::{
     PARAMETERS, TargetColumns, ValidatedTarget, defer_encoder_output, defer_token_input,
@@ -667,7 +666,12 @@ fn assert_close<const D: usize>(left: Tensor<TestBackend, D>, right: Tensor<Test
         .assert_approx_eq::<f32>(&right.into_data(), Tolerance::absolute(1e-4));
 }
 
-/// Materializes all physical self-KV slots, including uncommitted zero suffixes.
+/// Materializes every row's committed self-KV slots `[0, L_b)` in every layer.
+///
+/// Batched decoding writes each layer's tokens ahead of attention, so a
+/// rejected call may leave bytes in slots beyond the lengths; those slots are
+/// unreachable and excluded here. Atomicity is therefore asserted on the
+/// logical cache contents and lengths, which is what later reads observe.
 fn self_cache_snapshot(state: &T5DecodeState<TestBackend>) -> Vec<Vec<f32>> {
     let cache = state
         .tensors
@@ -677,16 +681,45 @@ fn self_cache_snapshot(state: &T5DecodeState<TestBackend>) -> Vec<Vec<f32>> {
     let mut snapshot = Vec::new();
     for layer in 0..state.self_spec.layers() {
         for row in 0..state.tensors.batch_size() {
-            let (keys, values) = cache
-                .read_sequence(layer, row, state.tensors.capacity())
-                .expect("physical cache read")
+            let length = state.lengths()[row];
+            let (keys, values) = match cache
+                .read_sequence(layer, row, length)
+                .expect("committed cache read")
                 .materialize()
-                .expect("capacity is nonzero");
-            snapshot.push(keys.into_data().to_vec::<f32>().expect("F32 keys"));
-            snapshot.push(values.into_data().to_vec::<f32>().expect("F32 values"));
+            {
+                Some((keys, values)) => (
+                    keys.into_data().to_vec::<f32>().expect("F32 keys"),
+                    values.into_data().to_vec::<f32>().expect("F32 values"),
+                ),
+                None => (Vec::new(), Vec::new()),
+            };
+            snapshot.push(keys);
+            snapshot.push(values);
         }
     }
     snapshot
+}
+
+/// Materializes all physical self-KV slots, including those beyond the lengths.
+fn physical_cache_snapshot(state: &T5DecodeState<TestBackend>) -> Vec<f32> {
+    let cache = state
+        .tensors
+        .main()
+        .native_kv(SELF_KV_GROUP)
+        .expect("self cache");
+    let mut values = Vec::new();
+    for layer in 0..state.self_spec.layers() {
+        for tensor in [cache.keys(layer).unwrap(), cache.values(layer).unwrap()] {
+            values.extend(
+                tensor
+                    .clone()
+                    .into_data()
+                    .to_vec::<f32>()
+                    .expect("F32 cache"),
+            );
+        }
+    }
+    values
 }
 
 /// Includes source tensors and diagnostics because a rejected operation must retain its binding.
@@ -762,34 +795,6 @@ fn contract_fixture(device: &TestDevice, masked: bool) -> ContractFixture {
         )
         .unwrap();
     (model, encoder, state)
-}
-
-/// Builds one nonzero append per active row and layer at the current committed cursor.
-fn contract_pending(
-    state: &T5DecodeState<TestBackend>,
-    counts: &[usize],
-) -> PendingT5SelfWrites<TestBackend> {
-    let cache = state.tensors.main().native_kv(SELF_KV_GROUP).unwrap();
-    let mut pending = PendingT5SelfWrites::new();
-    for (row, &count) in counts.iter().enumerate().filter(|(_, count)| **count > 0) {
-        for layer in 0..state.self_spec.layers() {
-            let keys = cache
-                .keys(layer)
-                .unwrap()
-                .clone()
-                .narrow(0, row, 1)
-                .narrow(2, 0, count)
-                + 1.0;
-            pending.writes.push(PendingT5SelfWrite {
-                layer,
-                sequence: row,
-                start: state.lengths()[row],
-                values: keys.clone() + 1.0,
-                keys,
-            });
-        }
-    }
-    pending
 }
 
 /// Bad target rectangles fail before modifying an already bound encoder or self-KV prefix.
@@ -941,124 +946,6 @@ fn cache_contract_same_shape_encoder_values_do_not_rebind() {
     assert_eq!(state.lengths(), &[3]);
 }
 
-/// Coverage validation rejects absent rows and missing/extra layers before length publication.
-#[test]
-fn cache_contract_pending_cardinality_is_atomic() {
-    let device = Default::default();
-    let (_, _, mut state) = contract_fixture(&device, false);
-    let before = contract_snapshot(&state);
-    for case in 0..3 {
-        let mut pending = contract_pending(&state, &[1]);
-        let counts: &[usize] = if case == 0 { &[] } else { &[1] };
-        if case == 1 {
-            pending.writes.pop();
-        }
-        if case == 2 {
-            pending.writes.extend(contract_pending(&state, &[1]).writes);
-        }
-        let error = pending
-            .commit(&mut state.tensors, state.self_spec.layers(), counts)
-            .unwrap_err();
-        assert!(
-            error.to_string().contains(if case == 0 {
-                "describe 0 rows"
-            } else {
-                "pending self-cache coverage"
-            }),
-            "{error}"
-        );
-        assert_eq!(contract_snapshot(&state), before);
-    }
-}
-
-/// Appends require active unique row/layer pairs, the old cursor, and both matching time axes.
-#[test]
-fn cache_contract_pending_coordinates_are_atomic() {
-    let device = Default::default();
-    let model = T5ForConditionalGeneration::<TestBackend>::init(
-        tiny_config(T5FeedForwardProjection::Relu, true, 2),
-        &device,
-    )
-    .unwrap();
-    let mut state = model
-        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
-        .unwrap();
-    let before = contract_snapshot(&state);
-    for case in 0..7 {
-        let counts = if case == 6 { [1, 0] } else { [1, 1] };
-        let mut pending = contract_pending(&state, &counts);
-        let write = pending.writes.last_mut().unwrap();
-        match case {
-            0 => write.sequence = 2,
-            1 => write.layer = 2,
-            2 => write.start = 1,
-            3 => write.keys = Tensor::zeros([1, 2, 2, 4], &device),
-            4 => write.values = Tensor::zeros([1, 2, 2, 4], &device),
-            5 => write.layer = 0,
-            6 => write.sequence = 1,
-            _ => unreachable!(),
-        }
-        let error = pending
-            .commit(&mut state.tensors, state.self_spec.layers(), &counts)
-            .unwrap_err();
-        assert!(
-            error.to_string().contains(if case == 0 {
-                "outside batch 2"
-            } else {
-                "invalid or duplicate T5 self-cache write"
-            }),
-            "case {case}: {error}"
-        );
-        assert_eq!(contract_snapshot(&state), before, "case {case}");
-    }
-}
-
-/// A late malformed head axis leaves earlier prepared writes and the retained encoder unpublished.
-#[test]
-fn cache_contract_pending_tensor_geometry_is_atomic() {
-    let device = Default::default();
-    let (_, _, mut state) = contract_fixture(&device, false);
-    let before = contract_snapshot(&state);
-    let mut pending = contract_pending(&state, &[1]);
-    pending.writes.last_mut().unwrap().values = Tensor::zeros([1, 1, 1, 4], &device);
-    let error = pending
-        .commit(&mut state.tensors, state.self_spec.layers(), &[1])
-        .unwrap_err();
-    assert!(error.to_string().contains("shape"), "{error}");
-    assert_eq!(contract_snapshot(&state), before);
-    contract_pending(&state, &[1])
-        .commit(&mut state.tensors, state.self_spec.layers(), &[1])
-        .unwrap();
-    assert_eq!(state.lengths(), &[3]);
-    assert_eq!(contract_snapshot(&state).cross, before.cross);
-}
-
-/// Cross-cache lookup bounds remain contextual even when the value vector is incomplete.
-#[test]
-fn cache_contract_cross_lookup_rejects_missing_layers_and_rows() {
-    let device = Default::default();
-    let (_, _, mut state) = contract_fixture(&device, false);
-    let before = contract_snapshot(&state);
-    let cross = state.cross.as_mut().unwrap();
-    let error = cross.layer_row(2, 0).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("layer 2 is outside 2 cached layers")
-    );
-    let error = cross.layer_row(0, 1).unwrap_err();
-    assert!(error.to_string().contains("row 1 is outside batch 1"));
-    let last = cross.values.pop().unwrap();
-    let error = cross.layer_row(1, 0).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("value layer 1 is outside 2 cached layers")
-    );
-    cross.values.push(last);
-    assert_eq!(contract_snapshot(&state), before);
-}
-
 /// A corrupted cross-layer count fails public decode before the valid self cache is changed.
 #[test]
 fn cache_contract_cross_geometry_rejection_is_atomic() {
@@ -1084,50 +971,6 @@ fn cache_contract_cross_geometry_rejection_is_atomic() {
             .contains("cross cache has 1 layers for a 2-layer decoder")
     );
     assert_eq!(contract_snapshot(&state), before);
-}
-
-/// Active-only write sets advance exactly those rows without requiring padding-layer appends.
-#[test]
-fn cache_contract_pending_active_rows_commit_without_touching_peers() {
-    let device = Default::default();
-    let model = T5ForConditionalGeneration::<TestBackend>::init(
-        tiny_config(T5FeedForwardProjection::Relu, true, 2),
-        &device,
-    )
-    .unwrap();
-    let mut state = model
-        .new_decode_state(CacheConfig::new(2, 4).unwrap(), 2, &device)
-        .unwrap();
-    contract_pending(&state, &[0, 2])
-        .commit(&mut state.tensors, state.self_spec.layers(), &[0, 2])
-        .unwrap();
-    assert_eq!(state.lengths(), &[0, 2]);
-    let cache = state.tensors.main().native_kv(SELF_KV_GROUP).unwrap();
-    for layer in 0..state.self_spec.layers() {
-        for tensor in [cache.keys(layer).unwrap(), cache.values(layer).unwrap()] {
-            assert!(
-                tensor
-                    .clone()
-                    .narrow(0, 0, 1)
-                    .into_data()
-                    .to_vec::<f32>()
-                    .unwrap()
-                    .iter()
-                    .all(|&value| value == 0.0)
-            );
-            assert!(
-                tensor
-                    .clone()
-                    .narrow(0, 1, 1)
-                    .narrow(2, 0, 2)
-                    .into_data()
-                    .to_vec::<f32>()
-                    .unwrap()
-                    .iter()
-                    .all(|&value| value > 0.0)
-            );
-        }
-    }
 }
 
 /// Cached prefill exactly reproduces stateless logits and diagnostics.
@@ -1688,9 +1531,8 @@ fn lifecycle_operations_coordinate_self_and_cross_caches() {
     assert_eq!(state.lengths(), [0, 0]);
     assert!(!state.has_encoder_cache());
     assert!(
-        self_cache_snapshot(&state)
+        physical_cache_snapshot(&state)
             .into_iter()
-            .flatten()
             .all(|value| value == 0.0)
     );
 }
@@ -1888,54 +1730,6 @@ fn incompatible_model_and_state_layout_is_rejected() {
         )
         .expect_err("state belongs to another topology");
     assert!(error.to_string().contains("incompatible model layout"));
-}
-
-/// A semantic causal mask exposes history and only the current query prefix.
-#[test]
-fn cached_causal_mask_matches_absolute_query_positions() {
-    let device = Default::default();
-    let mask = cached_causal_mask::<TestBackend>(2, 3, 1, &device)
-        .unwrap()
-        .into_data();
-    assert_eq!(
-        mask.to_vec::<bool>().unwrap(),
-        vec![
-            false, false, false, true, true, false, false, false, false, true, false, false, false,
-            false, false,
-        ]
-    );
-}
-
-proptest! {
-    /// Every cached causal mask agrees with the absolute-position inequality.
-    #[test]
-    fn cached_causal_mask_property(
-        baseline in 0_usize..8,
-        query_sequence in 1_usize..6,
-        heads in 1_usize..4,
-    ) {
-        let device = Default::default();
-        let actual = cached_causal_mask::<TestBackend>(
-            baseline,
-            query_sequence,
-            heads,
-            &device,
-        )
-        .unwrap()
-        .into_data()
-        .to_vec::<bool>()
-        .unwrap();
-        let key_sequence = baseline + query_sequence;
-        let mut expected = Vec::with_capacity(heads * query_sequence * key_sequence);
-        for _head in 0..heads {
-            for query in 0..query_sequence {
-                for key in 0..key_sequence {
-                    expected.push(key > baseline + query);
-                }
-            }
-        }
-        prop_assert_eq!(actual, expected);
-    }
 }
 
 /// Test-only construction ensures a decoder block without cross attention errors cleanly.
@@ -2283,4 +2077,48 @@ fn supplied_source_mask_is_checked_after_target_values() {
             if tensor == "t5.encoder_output.token_mask" && actual == "a fully masked row"),
         "{error}"
     );
+}
+
+/// Cached cross projections follow the crate's linear contract instead of panicking.
+///
+/// A cross-attention key projection stored in another dtype than the encoder
+/// states is reported as a contextual capability error, exactly as the
+/// stateless cross-attention projection reports it.
+#[test]
+fn cross_projection_rejects_mismatched_weight_dtypes_contextually() {
+    let device = Default::default();
+    let mut model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::Relu, true, 1),
+        &device,
+    )
+    .unwrap();
+    let encoder = encoded_source(&model, &device);
+    let attention = &mut model.decoder.block[0]
+        .cross_attention
+        .as_mut()
+        .unwrap()
+        .enc_dec_attention
+        .attention;
+    attention.k_proj.weight = attention
+        .k_proj
+        .weight
+        .clone()
+        .map(|weight| weight.cast(DType::F64));
+    let error = T5CrossAttentionCache::project(&model, &encoder).unwrap_err();
+    assert!(matches!(error, Error::BackendCapability(_)), "{error}");
+    assert!(error.to_string().contains("linear.weight dtype"), "{error}");
+    let mut state = model
+        .new_decode_state(CacheConfig::new(1, 4).unwrap(), 1, &device)
+        .unwrap();
+    assert!(
+        model
+            .prefill_decoder(
+                &encoder,
+                target(&[0], &device),
+                &mut state,
+                &ForwardOptions::default(),
+            )
+            .is_err()
+    );
+    assert!(!state.has_encoder_cache());
 }

@@ -44,6 +44,39 @@ fn make_attention_identity(attention: &mut T5Attention<TestBackend>) {
     attention.attention.o_proj.weight = Param::from_tensor(identity);
 }
 
+/// Runs one self-attention residual sublayer through the shared block graph.
+///
+/// Padded keys are excluded and `bias` is added; causality follows the sublayer.
+fn self_attend(
+    layer: &T5LayerSelfAttention<TestBackend>,
+    hidden: Tensor<TestBackend, 3>,
+    mask: Option<&TokenMask<TestBackend>>,
+    bias: Tensor<TestBackend, 4>,
+) -> Result<Tensor<TestBackend, 3>> {
+    layer.forward_with(
+        hidden,
+        block::SelfAttentionPlan::padded(mask, Some(bias), layer.causal),
+        &mut block::FreshKeyValues,
+        Layer::encoder(0),
+        &mut Hooks::new(),
+    )
+}
+
+/// Runs one cross-attention residual sublayer over fresh encoder states.
+fn cross_attend(
+    layer: &T5LayerCrossAttention<TestBackend>,
+    query: Tensor<TestBackend, 3>,
+    encoder: Tensor<TestBackend, 3>,
+    mask: Option<&TokenMask<TestBackend>>,
+) -> Result<Tensor<TestBackend, 3>> {
+    layer.forward_with(
+        query,
+        &block::CrossAttentionPlan::new(block::CrossSource::Encoder(&encoder), mask),
+        Layer::decoder(0),
+        &mut Hooks::new(),
+    )
+}
+
 /// Reads the first position from a `[1, sequence, width]` tensor.
 fn first_position(tensor: Tensor<TestBackend, 3>) -> Vec<f32> {
     let width = tensor.dims()[2];
@@ -83,13 +116,10 @@ fn encoder_is_bidirectional_and_decoder_self_attention_is_causal() {
     let zero_bias = Tensor::zeros([1, 1, 2, 2], &device);
 
     let encoder_first = first_position(
-        encoder
-            .forward(first.clone(), None, zero_bias.clone())
-            .expect("encoder forward"),
+        self_attend(&encoder, first.clone(), None, zero_bias.clone()).expect("encoder forward"),
     );
     let encoder_changed = first_position(
-        encoder
-            .forward(changed.clone(), None, zero_bias.clone())
+        self_attend(&encoder, changed.clone(), None, zero_bias.clone())
             .expect("encoder changed forward"),
     );
     assert!(
@@ -100,14 +130,10 @@ fn encoder_is_bidirectional_and_decoder_self_attention_is_causal() {
     );
 
     let decoder_first = first_position(
-        decoder
-            .forward(first, None, zero_bias.clone())
-            .expect("decoder forward"),
+        self_attend(&decoder, first, None, zero_bias.clone()).expect("decoder forward"),
     );
     let decoder_changed = first_position(
-        decoder
-            .forward(changed, None, zero_bias)
-            .expect("decoder changed forward"),
+        self_attend(&decoder, changed, None, zero_bias).expect("decoder changed forward"),
     );
     assert_eq!(decoder_first, decoder_changed);
 }
@@ -162,14 +188,10 @@ fn semantic_padding_mask_excludes_encoder_keys() {
     let changed = Tensor::from_floats([[[1.0, 0.0], [1.0, 1.0]]], &device);
     let bias = Tensor::zeros([1, 1, 2, 2], &device);
     let first = first_position(
-        layer
-            .forward(first, Some(&mask), bias.clone())
-            .expect("masked forward"),
+        self_attend(&layer, first, Some(&mask), bias.clone()).expect("masked forward"),
     );
     let changed = first_position(
-        layer
-            .forward(changed, Some(&mask), bias)
-            .expect("masked changed forward"),
+        self_attend(&layer, changed, Some(&mask), bias).expect("masked changed forward"),
     );
     assert_eq!(first, changed);
 }
@@ -196,12 +218,10 @@ fn cross_attention_changes_with_encoder_content() {
     let query = Tensor::from_floats([[[1.0, 0.0]]], &device);
     let first_encoder = Tensor::from_floats([[[1.0, 0.0], [0.0, 1.0]]], &device);
     let changed_encoder = Tensor::from_floats([[[0.0, 1.0], [0.0, 1.0]]], &device);
-    let first = layer
-        .forward(query.clone(), first_encoder, None)
+    let first = cross_attend(&layer, query.clone(), first_encoder, None)
         .expect("first cross attention")
         .into_data();
-    let changed = layer
-        .forward(query, changed_encoder, None)
+    let changed = cross_attend(&layer, query, changed_encoder, None)
         .expect("changed cross attention")
         .into_data();
     assert_ne!(first, changed);
@@ -525,4 +545,293 @@ fn attention_uses_unscaled_dot_products() {
         T5Attention::<TestBackend>::init(&config, None, &device).expect("valid attention");
     assert_eq!(attention.attention.scale, Some(1.0));
     assert_eq!(config.attention_inner_dim(), 4);
+}
+
+/// Builds a `[rows, columns]` token input with an optional validity mask.
+fn masked_input(ids: &[&[i64]], mask: Option<&[&[bool]]>) -> CausalLmInput<TestBackend> {
+    let device = Default::default();
+    let (rows, columns) = (ids.len(), ids[0].len());
+    CausalLmInput {
+        token_ids: Tensor::from_data(TensorData::new(ids.concat(), [rows, columns]), &device),
+        token_mask: mask.map(|mask| {
+            TokenMask::new(Tensor::from_data(
+                TensorData::new(mask.concat(), [rows, columns]),
+                &device,
+            ))
+        }),
+        position_ids: None,
+    }
+}
+
+/// Padded targets run as one batch whose valid positions equal each row's unpadded forward.
+///
+/// Right, left, and interior padding (plus an all-valid row) are combined in
+/// one batch, against a padded source. Padded positions of logits and every
+/// diagnostic are exact zeros.
+#[test]
+fn padded_targets_match_each_rows_unpadded_forward() {
+    let device = Default::default();
+    let ids: [&[i64]; 4] = [&[0, 3, 4, 9], &[9, 0, 5, 6], &[0, 9, 7, 8], &[0, 1, 2, 3]];
+    let mask: [&[bool]; 4] = [
+        &[true, true, true, false],
+        &[false, true, true, true],
+        &[true, false, true, true],
+        &[true, true, true, true],
+    ];
+    let source_ids: [&[i64]; 4] = [&[8, 9, 10], &[11, 12, 0], &[13, 14, 15], &[1, 2, 3]];
+    let source_mask: [&[bool]; 4] = [
+        &[true, true, true],
+        &[true, true, false],
+        &[true, true, true],
+        &[true, true, true],
+    ];
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        hidden_states: true,
+        ..ForwardOptions::default()
+    };
+    for projection in [
+        T5FeedForwardProjection::Relu,
+        T5FeedForwardProjection::GatedGelu,
+    ] {
+        let model =
+            T5ForConditionalGeneration::<TestBackend>::init(tiny_config(projection), &device)
+                .unwrap();
+        let batched = model
+            .forward(
+                Seq2SeqInput {
+                    encoder: masked_input(&source_ids, Some(&source_mask)),
+                    decoder: masked_input(&ids, Some(&mask)),
+                },
+                &options,
+            )
+            .unwrap();
+        for row in 0..ids.len() {
+            let valid: Vec<usize> = (0..4).filter(|&column| mask[row][column]).collect();
+            let compact: Vec<i64> = valid.iter().map(|&column| ids[row][column]).collect();
+            let source_valid: Vec<i64> = (0..3)
+                .filter(|&column| source_mask[row][column])
+                .map(|column| source_ids[row][column])
+                .collect();
+            let alone = model
+                .forward(
+                    Seq2SeqInput {
+                        encoder: masked_input(&[&source_valid], None),
+                        decoder: masked_input(&[&compact], None),
+                    },
+                    &options,
+                )
+                .unwrap();
+            let pairs =
+                std::iter::once((batched.decoder.logits.clone(), alone.decoder.logits.clone()))
+                    .chain(
+                        batched
+                            .decoder
+                            .hidden_states
+                            .iter()
+                            .cloned()
+                            .zip(alone.decoder.hidden_states.iter().cloned()),
+                    );
+            for (padded, unpadded) in pairs {
+                let width = padded.dims()[2];
+                for (slot, &column) in valid.iter().enumerate() {
+                    padded
+                        .clone()
+                        .slice([row..row + 1, column..column + 1, 0..width])
+                        .into_data()
+                        .assert_approx_eq::<f32>(
+                            &unpadded
+                                .clone()
+                                .slice([0..1, slot..slot + 1, 0..width])
+                                .into_data(),
+                            Tolerance::absolute(2e-5),
+                        );
+                }
+                for column in (0..4).filter(|&column| !mask[row][column]) {
+                    let values = padded
+                        .clone()
+                        .slice([row..row + 1, column..column + 1, 0..width])
+                        .into_data()
+                        .to_vec::<f32>()
+                        .unwrap();
+                    assert!(values.iter().all(|&value| value == 0.0));
+                }
+            }
+        }
+    }
+}
+
+/// A fully valid mask takes the unpadded path and reproduces the unmasked outputs bit for bit.
+#[test]
+fn all_valid_target_masks_equal_unmasked_targets() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        tiny_config(T5FeedForwardProjection::GatedGelu),
+        &device,
+    )
+    .unwrap();
+    let ids: [&[i64]; 2] = [&[0, 3, 4], &[0, 5, 6]];
+    let run = |mask: Option<&[&[bool]]>| {
+        model
+            .forward(
+                Seq2SeqInput {
+                    encoder: masked_input(&ids, None),
+                    decoder: masked_input(&ids, mask),
+                },
+                &ForwardOptions {
+                    logits: LogitsSelection::All,
+                    ..ForwardOptions::default()
+                },
+            )
+            .unwrap()
+            .decoder
+            .logits
+            .into_data()
+    };
+    assert_eq!(run(Some(&[&[true; 3], &[true; 3]])), run(None));
+}
+
+/// Left padding (fully masked leading queries) keeps every parameter gradient finite.
+#[cfg(feature = "autodiff")]
+#[test]
+fn left_padded_targets_have_finite_gradients() {
+    use burn::backend::Autodiff;
+    use burn::module::{ModuleVisitor, ParamId};
+
+    /// Autodiff wrapper used to differentiate the batched padded decoder.
+    type AdBackend = Autodiff<TestBackend>;
+
+    /// Collects every floating parameter ID of a module.
+    struct Ids(Vec<(ParamId, usize)>);
+
+    impl ModuleVisitor<AdBackend> for Ids {
+        /// Records the parameter ID and rank of each floating tensor.
+        fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<AdBackend, D>>) {
+            self.0.push((param.id, D));
+        }
+    }
+
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<AdBackend>::init(
+        tiny_config(T5FeedForwardProjection::GatedGelu),
+        &device,
+    )
+    .unwrap();
+    let ids = Tensor::<AdBackend, 2, Int>::from_ints([[9, 9, 0, 3], [0, 4, 5, 9]], &device);
+    let mask = Tensor::<AdBackend, 2, Bool>::from_bool(
+        [[false, false, true, true], [true, true, true, false]].into(),
+        &device,
+    );
+    let output = model
+        .forward(
+            Seq2SeqInput {
+                encoder: CausalLmInput {
+                    token_ids: Tensor::from_ints([[8, 9, 10], [11, 12, 13]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                decoder: CausalLmInput {
+                    token_ids: ids,
+                    token_mask: Some(TokenMask::new(mask)),
+                    position_ids: None,
+                },
+            },
+            &ForwardOptions {
+                logits: LogitsSelection::All,
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap();
+    let gradients =
+        burn::optim::GradientsParams::from_grads(output.decoder.logits.sum().backward(), &model);
+    let mut ids = Ids(Vec::new());
+    model.visit(&mut ids);
+    let mut checked = 0;
+    for (id, rank) in ids.0 {
+        let values = match rank {
+            1 => gradients
+                .get::<TestBackend, 1>(id)
+                .map(|tensor| tensor.into_data().to_vec::<f32>().unwrap()),
+            2 => gradients
+                .get::<TestBackend, 2>(id)
+                .map(|tensor| tensor.into_data().to_vec::<f32>().unwrap()),
+            _ => None,
+        };
+        if let Some(values) = values {
+            assert!(
+                values.iter().all(|value| value.is_finite()),
+                "parameter {id}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 10, "gradients reach most parameters");
+}
+
+/// Times a padded stateless forward (release builds only).
+///
+/// A right-padded batch of 16 targets with lengths 33..=64 against 64-token
+/// sources, as in seq2seq training. The same test body runs unchanged on
+/// earlier sources, so the printed time compares implementations. Run with
+/// `cargo test --release --lib padded_forward_benchmark -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing benchmark; run explicitly in release mode"]
+fn padded_forward_benchmark() {
+    let device = Default::default();
+    let model = T5ForConditionalGeneration::<TestBackend>::init(
+        T5Config {
+            vocab_size: 512,
+            d_model: 256,
+            d_kv: 64,
+            d_ff: 1024,
+            num_layers: 4,
+            num_decoder_layers: Some(4),
+            num_heads: 4,
+            relative_attention_num_buckets: 32,
+            relative_attention_max_distance: 128,
+            feed_forward_proj: T5FeedForwardProjection::GatedGelu,
+            tie_word_embeddings: false,
+            ..T5Config::default()
+        },
+        &device,
+    )
+    .unwrap();
+    let (batch, sequence) = (16_usize, 64_usize);
+    let ids: Vec<i64> = (0..batch * sequence)
+        .map(|index| (index * 7 % 500) as i64)
+        .collect();
+    let valid: Vec<bool> = (0..batch * sequence)
+        .map(|index| index % sequence < sequence - 2 * (index / sequence))
+        .collect();
+    let input = || Seq2SeqInput {
+        encoder: CausalLmInput {
+            token_ids: Tensor::from_data(TensorData::new(ids.clone(), [batch, sequence]), &device),
+            token_mask: None,
+            position_ids: None,
+        },
+        decoder: CausalLmInput {
+            token_ids: Tensor::from_data(TensorData::new(ids.clone(), [batch, sequence]), &device),
+            token_mask: Some(TokenMask::new(Tensor::from_data(
+                TensorData::new(valid.clone(), [batch, sequence]),
+                &device,
+            ))),
+            position_ids: None,
+        },
+    };
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..ForwardOptions::default()
+    };
+    let mut best = f64::INFINITY;
+    for _ in 0..5 {
+        let started = std::time::Instant::now();
+        model
+            .forward(input(), &options)
+            .unwrap()
+            .decoder
+            .logits
+            .into_data();
+        best = best.min(started.elapsed().as_secs_f64());
+    }
+    eprintln!("T5 padded forward batch={batch} sequence={sequence}: best={best:.4}s");
 }
