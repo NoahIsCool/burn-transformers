@@ -51,6 +51,19 @@
 //! Python `TypeError` at model construction; this schema rejects such a
 //! `null` at parse time instead.
 //!
+//! # Per-layer-type RoPE mappings written by Transformers 5.2
+//!
+//! When `layer_types` uses only one attention kind (all global, or all
+//! sliding, as in a Gemma 3 config with fewer layers than its pattern), 5.2's
+//! `standardize_rope_params` finds mapping keys outside `layer_types`,
+//! treats the mapping as flat, and `save_pretrained` writes
+//! `"rope_type": "default"` and `"rope_theta": null` beside the
+//! `sliding_attention`/`full_attention` objects. The rotary embedding reads
+//! only the per-type objects, so these two inert artifacts are dropped
+//! before the mapping is classified. Any other flat key beside per-type
+//! objects (a non-default `rope_type`, a numeric `rope_theta`, a `factor`)
+//! is ambiguous and still rejected.
+//!
 //! # Fields outside the schema
 //!
 //! Keys the references never read for text inference (`architectures`,
@@ -343,7 +356,8 @@ struct SerializedGemmaConfig {
     /// See [`GemmaConfig::final_logit_softcapping`]; `null` disables it.
     #[serde(deserialize_with = "present")]
     final_logit_softcapping: Option<Option<f64>>,
-    /// See [`GemmaConfig::rope_parameters`].
+    /// See [`GemmaConfig::rope_parameters`]; 5.2's inert flat artifacts are dropped.
+    #[serde(deserialize_with = "rope_parameters")]
     rope_parameters: Option<RopeParameterSet>,
     /// See [`GemmaConfig::rope_scaling`].
     rope_scaling: Option<RopeParameters>,
@@ -377,6 +391,47 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer).map(Some)
+}
+
+/// Reads `rope_parameters`, dropping the inert keys Transformers 5.2 adds beside per-type objects.
+///
+/// See the module documentation: with per-layer-type objects present,
+/// exactly `"rope_type": "default"` and `"rope_theta": null` are removed
+/// before [`RopeParameterSet`] classifies the mapping, so every other flat
+/// key still makes it a rejected mix. A JSON `null` means absent.
+fn rope_parameters<'de, D>(deserializer: D) -> Result<Option<RopeParameterSet>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(mut value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    drop_inert_rope_artifacts(&mut value);
+    RopeParameterSet::deserialize(value)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
+/// Removes 5.2's `"rope_type": "default"` and `"rope_theta": null` from a mapping with per-type objects.
+///
+/// A mapping without object values is flat and keeps every key; values
+/// other than exactly these two are kept so classification rejects them.
+fn drop_inert_rope_artifacts(value: &mut serde_json::Value) {
+    let serde_json::Value::Object(map) = value else {
+        return;
+    };
+    if !map.values().any(serde_json::Value::is_object) {
+        return;
+    }
+    if map.get("rope_type").and_then(serde_json::Value::as_str) == Some("default") {
+        map.remove("rope_type");
+    }
+    if map
+        .get("rope_theta")
+        .is_some_and(serde_json::Value::is_null)
+    {
+        map.remove("rope_theta");
+    }
 }
 
 impl SerializedGemmaConfig {

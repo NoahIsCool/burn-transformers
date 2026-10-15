@@ -116,6 +116,95 @@ fn the_multimodal_wrapper_is_read_through_its_text_config() {
     assert!(config.rope_parameters.is_none() && config.layer_types.is_none());
 }
 
+/// A Transformers 5.2 `save_pretrained` mapping of one used layer type.
+///
+/// When `layer_types` uses a single attention kind, 5.2's
+/// `standardize_rope_params` sees mapping keys outside `layer_types`, treats
+/// the mapping as flat, and adds `"rope_type": "default"` and
+/// `"rope_theta": null` beside the per-type objects. This is the literal
+/// output of `Gemma3TextConfig(num_hidden_layers=4, sliding_window=4,
+/// rope_parameters={...}).save_pretrained(...)` for four sliding layers;
+/// reloading it computes logits identical to the clean mapping.
+const MIXED_5_2_ROPE: &str = r#"{
+    "full_attention": {"factor": 8.0, "rope_theta": 1000000.0, "rope_type": "linear"},
+    "rope_theta": null,
+    "rope_type": "default",
+    "sliding_attention": {"rope_theta": 10000.0, "rope_type": "default"}
+}"#;
+
+/// A four-layer Gemma 3 text config with `layer_types` and `rope_parameters` spliced in.
+fn single_kind_config(layer_type: &str, rope_parameters: &str) -> String {
+    format!(
+        r#"{{"model_type": "gemma3_text", "vocab_size": 96, "hidden_size": 32,
+            "intermediate_size": 64, "num_hidden_layers": 4, "num_attention_heads": 4,
+            "num_key_value_heads": 2, "head_dim": 8, "max_position_embeddings": 64,
+            "sliding_window": 4, "layer_types": ["{layer_type}", "{layer_type}",
+            "{layer_type}", "{layer_type}"], "rope_parameters": {rope_parameters}}}"#
+    )
+}
+
+/// The inert flat keys Transformers 5.2 writes beside per-type objects are dropped.
+///
+/// Regression: the mixed mapping used to be rejected as mixing per-layer-type
+/// objects with flat RoPE fields, although Transformers reads only the
+/// per-type objects and computes identical logits.
+#[test]
+fn transformers_5_2_mixed_rope_mappings_are_read_per_layer_type() {
+    let clean = r#"{
+        "full_attention": {"factor": 8.0, "rope_theta": 1000000.0, "rope_type": "linear"},
+        "sliding_attention": {"rope_theta": 10000.0, "rope_type": "default"}
+    }"#;
+    for layer_type in ["sliding_attention", "full_attention"] {
+        let mixed = parse(&single_kind_config(layer_type, MIXED_5_2_ROPE)).unwrap();
+        let expected = parse(&single_kind_config(layer_type, clean)).unwrap();
+        assert_eq!(mixed, expected, "{layer_type}");
+        assert!(matches!(
+            mixed.rope_parameters,
+            Some(RopeParameterSet::ByLayerType(_))
+        ));
+        assert_eq!(mixed.architecture(), expected.architecture());
+        // The dropped keys never come back on serialization.
+        let written = serde_json::to_string(&mixed).unwrap();
+        assert!(!written.contains("\"rope_theta\":null"), "{written}");
+        assert_eq!(parse(&written).unwrap(), mixed);
+    }
+    // Only one of the two artifacts may be present.
+    let partial = r#"{"rope_type": "default",
+        "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0}}"#;
+    assert!(parse(&single_kind_config("sliding_attention", partial)).is_ok());
+}
+
+/// Any meaningful flat key beside per-type objects is still ambiguous and rejected.
+#[test]
+fn meaningful_flat_keys_beside_per_type_objects_are_rejected() {
+    let per_type = r#""sliding_attention": {"rope_type": "default", "rope_theta": 10000.0}"#;
+    for flat in [
+        r#""rope_type": "linear""#,
+        r#""rope_theta": 10000.0"#,
+        r#""factor": 8.0"#,
+        r#""rope_type": "default", "rope_theta": null, "factor": 8.0"#,
+        r#""type": "default""#,
+    ] {
+        let rope = format!("{{{flat}, {per_type}}}");
+        let error = parse(&single_kind_config("sliding_attention", &rope)).unwrap_err();
+        assert!(matches!(error, ConfigLoadError::Json(_)), "{flat}: {error}");
+        assert!(
+            error.to_string().contains("rope_parameters"),
+            "{flat}: {error}"
+        );
+    }
+    // A flat mapping without per-type objects keeps its own semantics.
+    let flat = parse(&single_kind_config(
+        "sliding_attention",
+        r#"{"rope_type": "default", "rope_theta": null}"#,
+    ))
+    .unwrap();
+    assert!(matches!(
+        flat.rope_parameters,
+        Some(RopeParameterSet::Uniform(_))
+    ));
+}
+
 /// Serialization writes every resolved value and parses back to the same config.
 #[test]
 fn configs_round_trip_through_json() {
@@ -194,7 +283,8 @@ fn quantization_directives_are_kept_for_validation() {
 
 proptest! {
     /// Adversarial documents never panic: parsing, validation, and the
-    /// checkpoint contract either succeed together or report an error.
+    /// checkpoint contract either succeed together or report an error, for
+    /// absurd extents, schedules, and clean, mixed, or malformed RoPE mappings.
     #[test]
     fn adversarial_documents_never_panic(
         model_type in prop::sample::select(vec!["gemma2", "gemma3_text", "gemma3", ""]),
@@ -214,6 +304,16 @@ proptest! {
             prop::sample::select(vec!["sliding_attention", "full_attention", "chunked_attention"]),
             0..6,
         )),
+        rope in prop::option::of(prop::sample::select(vec![
+            MIXED_5_2_ROPE,
+            r#"{"sliding_attention": {"rope_type": "default", "rope_theta": 10000.0}}"#,
+            r#"{"rope_type": "linear", "factor": 8.0}"#,
+            r#"{"rope_type": "default", "rope_theta": null}"#,
+            r#"{"rope_type": "yarn", "full_attention": {"rope_type": "default"}}"#,
+            r#"{"rope_theta": null, "full_attention": {"rope_type": "linear"}}"#,
+            r#"{}"#,
+            "null",
+        ])),
     ) {
         let mut document = serde_json::json!({ "model_type": model_type });
         let names = [
@@ -241,6 +341,9 @@ proptest! {
         }
         if let Some(layer_types) = layer_types {
             document["layer_types"] = serde_json::json!(layer_types);
+        }
+        if let Some(rope) = rope {
+            document["rope_parameters"] = serde_json::from_str(rope).unwrap();
         }
         if let Ok(config) = parse(&document.to_string()) {
             let architecture = config.architecture().expect("parsing validated the config");

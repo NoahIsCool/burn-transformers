@@ -49,9 +49,12 @@
 //!   per-layer-type mapping: `rope_scaling` updates the global set only,
 //!   `rope_theta` seeds the global theta, `rope_local_base_freq` the local
 //!   one. A per-layer-type `rope_parameters` is used directly, with a
-//!   missing entry defaulted. A *flat* `rope_parameters` is rejected: 5.2
-//!   would silently replace it by unscaled defaults. Combining
-//!   `rope_parameters` with `rope_scaling` is rejected as ambiguous.
+//!   missing entry defaulted; the inert `"rope_type": "default"` and
+//!   `"rope_theta": null` that 5.2 writes beside per-type objects for
+//!   single-kind `layer_types` are dropped at parse time. A *flat*
+//!   `rope_parameters` is rejected: 5.2 would silently replace it by
+//!   unscaled defaults. Combining `rope_parameters` with `rope_scaling` is
+//!   rejected as ambiguous.
 //!   Per-layer-type translation follows
 //!   [`RopeParametersByLayerType::to_rope_config`].
 //! * **Gemma 3 attention soft-cap.** `Gemma3Attention` stores
