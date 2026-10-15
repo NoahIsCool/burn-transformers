@@ -892,9 +892,10 @@ fn incompatible_states_and_requests_are_refused() {
 /// experts (2 selected), of width 256 and 1024, decode 8 rows for 32 steps
 /// after a 16-token prefill, once as one batched pass per step and once row
 /// by row. Only agreement is asserted: the printed ratio (row-by-row time
-/// over batched time) is a measurement, not a guarantee. On Flex it has been
-/// 1.1–1.2x at width 256 but 0.83–0.85x at width 1024, where expert compute
-/// that grows with the token count dominates on a CPU.
+/// over batched time) is a measurement, not a guarantee. On a shared Flex
+/// host (load average 5–24) it has ranged over 0.91–1.23x at width 256 and
+/// 0.81–0.85x at width 1024, where expert compute that grows with the token
+/// count dominates on a CPU.
 #[test]
 #[ignore = "timing measurement; run with --release --ignored --nocapture"]
 fn batched_and_row_by_row_decoding_agree_and_are_timed() {
