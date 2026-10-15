@@ -102,23 +102,40 @@ fn query_key_product_overflow_is_contextual_before_allocation() {
     ));
 }
 
-/// A representable element count can still exceed Vec<i64>'s byte capacity.
+/// Displacement tables beyond the signed device index range are rejected before allocation.
 #[test]
-fn host_index_capacity_overflow_is_contextual_before_iteration() {
+fn displacement_table_index_range_is_contextual_before_allocation() {
     let device = Default::default();
     let bias = T5RelativePositionBiasConfig::new(1, 8, 32, false)
         .init::<Flex>(&device)
         .expect("valid bias");
     let error = bias
         .forward(1, usize::MAX, 0, &device)
+        .expect_err("an index past i64::MAX cannot address the device table");
+    assert!(matches!(
+        error,
+        Error::Configuration { field, reason }
+            if field == "t5_relative_bias.shape"
+                && reason == "query length plus key length exceeds the i64 index range"
+    ));
+}
+
+/// A representable displacement count can still exceed Vec<i64>'s byte capacity.
+#[test]
+fn host_bucket_capacity_overflow_is_contextual_before_iteration() {
+    let device = Default::default();
+    let bias = T5RelativePositionBiasConfig::new(1, 8, 32, false)
+        .init::<Flex>(&device)
+        .expect("valid bias");
+    // 2^61 eight-byte buckets need 2^64 bytes, which no allocation can provide.
+    let keys = 1_usize << (usize::BITS - 3);
+    let error = bias
+        .forward(1, keys, 0, &device)
         .expect_err("unrepresentable Vec<i64> capacity must not allocate or iterate");
     assert!(matches!(
         error,
         Error::BackendCapability(reason)
-            if reason == format!(
-                "could not reserve {} host indices for T5 relative bias",
-                usize::MAX,
-            )
+            if reason == format!("could not reserve {keys} host buckets for T5 relative bias")
     ));
 }
 
@@ -156,4 +173,189 @@ fn bucket_count_signed_index_bound_is_checked_before_initialization() {
         output.into_data().to_vec::<f32>().expect("F32 table"),
         vec![0.0; 6]
     );
+}
+
+/// Builds the bias the straightforward way: one bucket per `(query, key)` pair.
+fn pairwise_reference(
+    bias: &T5RelativePositionBias<Flex>,
+    query_length: usize,
+    key_length: usize,
+    query_offset: usize,
+) -> TensorData {
+    let weight = bias
+        .weight
+        .val()
+        .into_data()
+        .to_vec::<f32>()
+        .expect("F32 table");
+    let heads = bias.weight.dims()[1];
+    let mut expected = vec![0.0_f32; heads * query_length * key_length];
+    for head in 0..heads {
+        for query in 0..query_length {
+            for key in 0..key_length {
+                let bucket = bias
+                    .buckets()
+                    .bucket_for_positions(query_offset + query, key);
+                expected[(head * query_length + query) * key_length + key] =
+                    weight[bucket * heads + head];
+            }
+        }
+    }
+    TensorData::new(expected, [1, heads, query_length, key_length])
+}
+
+/// The displacement table holds exactly the anchor-row buckets in displacement order.
+#[test]
+fn bucket_table_lists_anchor_displacements() {
+    let device = Default::default();
+    let bias = T5RelativePositionBiasConfig::new(1, 8, 32, true)
+        .init::<Flex>(&device)
+        .expect("valid bias");
+    let table = bias.bucket_table(3, 4, 5).expect("valid table");
+    assert_eq!((table.query_length(), table.key_length()), (3, 4));
+    assert_eq!(table.mapping(), bias.buckets());
+    assert_eq!(table.bucket_ids().len(), 6);
+    for (entry, &bucket) in table.bucket_ids().iter().enumerate() {
+        // Anchor query position = offset + query_length - 1 = 7.
+        let expected = bias.buckets().bucket_for_positions(7, entry);
+        assert_eq!(bucket, expected as i64);
+    }
+    let reused = bias
+        .forward_with_table(&table, &device)
+        .expect("table from this bias");
+    assert_eq!(
+        reused.into_data(),
+        bias.forward(3, 4, 5, &device).expect("forward").into_data()
+    );
+}
+
+/// A table built by a bias with another bucket mapping is rejected, not misread.
+///
+/// More buckets would index the embedding out of range and the other
+/// direction mode would silently select the wrong learned scalars, so every
+/// mapping difference is a contextual configuration error.
+#[test]
+fn table_from_a_different_bucket_mapping_is_rejected() {
+    let device = Default::default();
+    let bias = T5RelativePositionBiasConfig::new(2, 8, 32, true)
+        .init::<Flex>(&device)
+        .expect("valid bias");
+    for (buckets, max_distance, bidirectional) in [(16, 32, true), (8, 64, true), (8, 32, false)] {
+        let other = T5RelativePositionBiasConfig::new(2, buckets, max_distance, bidirectional)
+            .init::<Flex>(&device)
+            .expect("valid bias");
+        let table = other.bucket_table(3, 5, 0).expect("valid table");
+        let error = bias
+            .forward_with_table(&table, &device)
+            .expect_err("mismatched mapping");
+        assert!(
+            matches!(&error, crate::Error::Configuration { field, .. }
+                if field == "t5_relative_bias.table"),
+            "{error}"
+        );
+    }
+}
+
+/// The device table index equals the Verus-verified host index at every pair.
+///
+/// [`super::super::relative_table_index`] is the proved specification of the
+/// device formula; this links the two for square, wide, tall, and single-axis
+/// geometries.
+#[test]
+fn device_table_index_matches_verified_host_index() {
+    let device = Default::default();
+    for (query_length, key_length) in [(1, 1), (1, 7), (6, 1), (4, 4), (3, 9), (9, 3)] {
+        let entries = super::table_entries::<Flex>(query_length, key_length, &device)
+            .into_data()
+            .to_vec::<i32>()
+            .expect("I32 indices");
+        for query in 0..query_length {
+            for key in 0..key_length {
+                assert_eq!(
+                    entries[query * key_length + key] as usize,
+                    super::super::relative_table_index(query, key, query_length),
+                    "query={query}, key={key}, shape=[{query_length}, {key_length}]"
+                );
+            }
+        }
+    }
+}
+
+/// The reference initializer scale is `factor / sqrt(d_model)` and invalid inputs fail validation.
+#[test]
+fn reference_initialization_matches_t5_scale() {
+    let config =
+        T5RelativePositionBiasConfig::new(8, 32, 128, true).with_reference_initialization(512, 1.0);
+    assert!((config.initializer_std - 512.0_f64.powf(-0.5)).abs() < 1e-15);
+    assert!(config.validate().is_ok());
+    for (d_model, factor) in [(0, 1.0), (512, -1.0), (512, f64::NAN)] {
+        let invalid = T5RelativePositionBiasConfig::new(8, 32, 128, true)
+            .with_reference_initialization(d_model, factor);
+        assert!(
+            invalid.validate().is_err(),
+            "d_model={d_model}, factor={factor}"
+        );
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(48))]
+
+    /// The linear-size table reproduces the quadratic pairwise lookup exactly.
+    #[test]
+    fn displacement_table_matches_pairwise_lookup(
+        query_length in 1usize..12,
+        key_length in 1usize..24,
+        query_offset in 0usize..40,
+        bidirectional in proptest::bool::ANY,
+        buckets in 2usize..10,
+        max_distance in 6usize..64,
+    ) {
+        let num_buckets = if bidirectional { 2 * buckets.max(2) } else { buckets };
+        let device = Default::default();
+        let mut bias = T5RelativePositionBiasConfig::new(2, num_buckets, max_distance, bidirectional)
+            .init::<Flex>(&device)
+            .expect("valid bias");
+        let values = (0..num_buckets * 2).map(|index| index as f32 * 0.5 - 3.0).collect::<Vec<_>>();
+        bias.weight = Param::from_tensor(Tensor::from_data(
+            TensorData::new(values, [num_buckets, 2]),
+            &device,
+        ));
+        let actual = bias
+            .forward(query_length, key_length, query_offset, &device)
+            .expect("valid geometry");
+        proptest::prop_assert_eq!(
+            actual.into_data(),
+            pairwise_reference(&bias, query_length, key_length, query_offset)
+        );
+    }
+}
+
+/// Gradients reach exactly the learned buckets that the bias reads.
+#[cfg(feature = "autodiff")]
+#[test]
+fn bias_table_receives_gradients_per_used_bucket() {
+    type Autodiff = burn::backend::Autodiff<Flex>;
+    let device = Default::default();
+    let bias = T5RelativePositionBiasConfig::new(1, 8, 32, false)
+        .init::<Autodiff>(&device)
+        .expect("valid bias");
+    let output = bias.forward(2, 3, 0, &device).expect("bias");
+    let gradients = output.sum().backward();
+    let gradient = bias
+        .weight
+        .grad(&gradients)
+        .expect("weight gradient")
+        .into_data()
+        .to_vec::<f32>()
+        .expect("F32 gradient");
+    // Causal buckets: query 0 reads keys (0, 1, 2) -> buckets (0, 0, 0); query 1 reads
+    // (1, 0, 0) -> past distance one, then the future keys clamp to bucket zero.
+    let mut counts = [0.0_f32; 8];
+    for query in 0..2 {
+        for key in 0..3 {
+            counts[bias.buckets().bucket_for_positions(query, key)] += 1.0;
+        }
+    }
+    assert_eq!(gradient, counts.to_vec());
 }

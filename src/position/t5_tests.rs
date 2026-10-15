@@ -202,3 +202,45 @@ fn validation_errors_explain_invalid_geometry() {
     assert!(messages[2].contains("must be even"));
     assert!(messages[3].contains("must exceed exact-region boundary"));
 }
+
+/// Integer assembly clips any proposed logarithmic offset, including `usize::MAX`.
+#[test]
+fn bucket_assembly_clips_arbitrary_logarithmic_offsets() {
+    // Causal, 32 buckets: exact region 0..16, logarithmic region 16..32.
+    assert_eq!(combine_bucket(32, false, false, 20, usize::MAX), 31);
+    assert_eq!(combine_bucket(32, false, false, 20, 15), 31);
+    assert_eq!(combine_bucket(32, false, false, 20, 14), 30);
+    assert_eq!(combine_bucket(32, false, false, 7, usize::MAX), 7);
+    assert_eq!(combine_bucket(32, false, true, 1_000, usize::MAX), 0);
+    // Bidirectional, 32 buckets: 16 per direction, exact region 0..8 in each half.
+    assert_eq!(combine_bucket(32, true, true, 3, 0), 19);
+    assert_eq!(combine_bucket(32, true, false, 3, 0), 3);
+    assert_eq!(combine_bucket(32, true, true, 9, usize::MAX), 31);
+    assert_eq!(combine_bucket(32, true, false, 9, usize::MAX), 15);
+    // Smallest geometries: two causal buckets, four bidirectional buckets.
+    assert_eq!(combine_bucket(2, false, false, u64::MAX, usize::MAX), 1);
+    assert_eq!(combine_bucket(4, true, true, u64::MAX, usize::MAX), 3);
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(128))]
+
+    /// Every proposed offset yields an in-range index on the correct side of the table.
+    #[test]
+    fn bucket_assembly_stays_in_range_for_any_offset(
+        per_direction in 2usize..64,
+        bidirectional in proptest::bool::ANY,
+        key_is_future in proptest::bool::ANY,
+        distance in proptest::num::u64::ANY,
+        offset in proptest::num::usize::ANY,
+    ) {
+        let num_buckets = if bidirectional { 2 * per_direction } else { per_direction };
+        let bucket = combine_bucket(num_buckets, bidirectional, key_is_future, distance, offset);
+        proptest::prop_assert!(bucket < num_buckets);
+        if bidirectional {
+            proptest::prop_assert_eq!(bucket >= num_buckets / 2, key_is_future);
+        } else if key_is_future {
+            proptest::prop_assert_eq!(bucket, 0);
+        }
+    }
+}

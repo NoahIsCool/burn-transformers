@@ -2,11 +2,17 @@
 
 use burn::{
     backend::Flex,
-    tensor::{Int, Tensor, TensorData, Tolerance},
+    tensor::{DType, Int, Tensor, TensorData, Tolerance},
 };
 
-use super::{apply_rotary, inverse_frequencies, mrope_angles, rotary_angles};
-use crate::position::{DynamicNtkScaling, LinearRopeScaling, RopeConfig, RopeScaling, YarnConfig};
+use super::{
+    RotaryAngles, apply_rotary, apply_rotary_to, interleaved_to_split_half, mrope_angles,
+    rotary_angles, rotary_angles_from_frequencies, split_half_to_interleaved,
+};
+use crate::position::{
+    DynamicNtkScaling, LinearRopeScaling, LongRopeScaling, ProportionalRopeScaling, RopeConfig,
+    RopeScaling, RotaryFrequencies, YarnConfig, inverse_frequencies,
+};
 
 /// Deterministic CPU tensors with F32 values and I32 indices.
 type TestBackend = Flex<f32, i32>;
@@ -239,4 +245,281 @@ fn distinct_mrope_axes_match_a_scalar_complex_phase_oracle() {
         }
     }
     assert!((cosine[0] - cosine[6]).abs() > 0.5);
+}
+
+/// Deterministic `[batch, heads, sequence, width]` activations with distinct entries.
+fn activations(shape: [usize; 4]) -> Tensor<TestBackend, 4> {
+    let count = shape.iter().product::<usize>();
+    let device = Default::default();
+    (Tensor::<TestBackend, 1, Int>::arange(0..count as i64, &device)
+        .float()
+        .reshape(shape)
+        / 7.0)
+        .sin()
+}
+
+/// The single-tensor primitive equals pair rotation and accepts independent lengths.
+#[test]
+fn single_tensor_rotation_matches_pair_rotation_and_supports_cross_lengths() {
+    let device = Default::default();
+    let config = RopeConfig::new(6, 4, 10_000.0, RopeScaling::None).expect("partial rope");
+    let positions = Tensor::<TestBackend, 2, Int>::from_ints([[3, 4, 5]], &device);
+    let angles = rotary_angles(config, positions, 6).expect("angles");
+    let query = activations([1, 2, 3, 6]);
+    let key = activations([1, 2, 3, 6]) * 0.5;
+    let (pair_query, pair_key) = apply_rotary(query.clone(), key.clone(), &angles).expect("pair");
+    assert_eq!(
+        apply_rotary_to(query, &angles).expect("query").into_data(),
+        pair_query.into_data()
+    );
+    assert_eq!(
+        apply_rotary_to(key, &angles).expect("key").into_data(),
+        pair_key.into_data()
+    );
+
+    // A single cached key position rotates independently of a three-token query.
+    let single = rotary_angles(
+        config,
+        Tensor::<TestBackend, 2, Int>::from_ints([[5]], &device),
+        6,
+    )
+    .expect("single angle");
+    let rotated = apply_rotary_to(activations([1, 2, 1, 6]), &single).expect("one key");
+    assert_eq!(rotated.dims(), [1, 2, 1, 6]);
+    let error = apply_rotary_to(activations([1, 2, 2, 6]), &single).expect_err("length mismatch");
+    assert!(matches!(error, crate::Error::Shape { tensor, .. } if tensor == "rope.input_angles"));
+    let error = apply_rotary_to(activations([1, 2, 1, 2]), &single).expect_err("too narrow");
+    assert!(matches!(error, crate::Error::Shape { tensor, .. } if tensor == "rope.input_angles"));
+}
+
+/// Tables are created in F32, convert once with `to_dtype`, and rotate F16 operands in F16.
+#[test]
+fn tables_are_f32_and_convert_to_the_operand_dtype() {
+    let device = Default::default();
+    let config = RopeConfig::new(4, 4, 10_000.0, RopeScaling::None).expect("rope");
+    let angles = rotary_angles(
+        config,
+        Tensor::<TestBackend, 2, Int>::from_ints([[1, 2049]], &device),
+        2050,
+    )
+    .expect("angles");
+    assert_eq!(angles.cosine.dtype(), DType::F32);
+    assert_eq!(angles.sine.dtype(), DType::F32);
+    let half = angles.clone().to_dtype(DType::F16);
+    assert_eq!(half.cosine.dtype(), DType::F16);
+    assert_eq!(half.sine.dtype(), DType::F16);
+    let unchanged = angles.clone().to_dtype(DType::F32);
+    assert_eq!(
+        unchanged.cosine.into_data(),
+        angles.cosine.clone().into_data()
+    );
+
+    let query = activations([1, 1, 2, 4]).cast(DType::F16);
+    let lazily = apply_rotary_to(query.clone(), &angles).expect("lazy cast");
+    // `eagerly` uses tables cast once up front; the results must be identical.
+    let eagerly = apply_rotary_to(query.clone(), &half).expect("pre-cast tables");
+    assert_eq!(lazily.dtype(), DType::F16);
+    assert_eq!(lazily.into_data(), eagerly.into_data());
+
+    // Mixed-dtype Q/K each rotate in their own precision.
+    let key = activations([1, 1, 2, 4]);
+    let (rotated_query, rotated_key) =
+        apply_rotary(query, key, &angles).expect("Q and K may use different dtypes");
+    assert_eq!(rotated_query.dtype(), DType::F16);
+    assert_eq!(rotated_key.dtype(), DType::F32);
+}
+
+/// Precomputed frequencies reproduce per-call tables exactly.
+#[test]
+fn precomputed_frequencies_reproduce_rotary_angles() {
+    let device = Default::default();
+    let yarn = YarnConfig::new(4.0, 64)
+        .expect("yarn")
+        .with_attention_factor(1.2)
+        .expect("amplitude");
+    let config = RopeConfig::new(8, 8, 10_000.0, yarn.into()).expect("rope");
+    let positions = Tensor::<TestBackend, 2, Int>::from_ints([[0, 7, 300], [1, 2, 3]], &device);
+    let direct = rotary_angles(config, positions.clone(), 301).expect("direct");
+    let frequencies = RotaryFrequencies::new(config, 301).expect("frequencies");
+    let shared = rotary_angles_from_frequencies(&frequencies, positions).expect("shared");
+    assert_eq!(direct.cosine.into_data(), shared.cosine.into_data());
+    assert_eq!(direct.sine.into_data(), shared.sine.into_data());
+    assert_eq!(direct.rotary_dimension, shared.rotary_dimension);
+}
+
+/// LongRoPE tables carry their amplitude and switch factor tables with the evaluated context.
+#[test]
+fn long_rope_tables_scale_amplitude_and_switch_with_context() {
+    let device = Default::default();
+    let long = LongRopeScaling::new(&[1.0, 2.0], &[1.0, 8.0], 16, 4.0)
+        .expect("longrope")
+        .with_attention_factor(1.5)
+        .expect("amplitude");
+    let config = RopeConfig::new(4, 4, 10_000.0, long.into()).expect("rope");
+    let positions = Tensor::<TestBackend, 2, Int>::from_ints([[0, 10]], &device);
+    let short = rotary_angles(config, positions.clone(), 16).expect("short");
+    let long = rotary_angles(config, positions, 17).expect("long");
+    let short_cosine = short.cosine.into_data().to_vec::<f32>().expect("f32");
+    let long_cosine = long.cosine.into_data().to_vec::<f32>().expect("f32");
+    // Position zero has cosine 1 scaled by the amplitude in every channel.
+    assert!(short_cosine[..4].iter().all(|&value| value == 1.5));
+    // Pair 1 at position 10: frequency 0.01 / 2 (short) versus 0.01 / 8 (long).
+    let expected_short = 1.5 * (10.0_f64 * 0.01 / 2.0).cos();
+    let expected_long = 1.5 * (10.0_f64 * 0.01 / 8.0).cos();
+    assert!((f64::from(short_cosine[5]) - expected_short).abs() < 1e-6);
+    assert!((f64::from(long_cosine[5]) - expected_long).abs() < 1e-6);
+}
+
+/// Proportional RoPE leaves its zero-frequency pairs, which interleave the head, unrotated.
+#[test]
+fn proportional_tail_pairs_are_not_rotated() {
+    let device = Default::default();
+    let proportional = ProportionalRopeScaling::new(0.5, 1.0).expect("proportional");
+    let config = RopeConfig::new(8, 8, 10_000.0, proportional.into()).expect("rope");
+    let angles = rotary_angles(
+        config,
+        Tensor::<TestBackend, 2, Int>::from_ints([[9]], &device),
+        10,
+    )
+    .expect("angles");
+    let input = activations([1, 1, 1, 8]);
+    let rotated = apply_rotary_to(input.clone(), &angles).expect("rotated");
+    let input = input.into_data().to_vec::<f32>().expect("input");
+    let rotated = rotated.into_data().to_vec::<f32>().expect("rotated");
+    // Pairs (2, 6) and (3, 7) have frequency zero.
+    for channel in [2, 3, 6, 7] {
+        assert_eq!(rotated[channel], input[channel], "channel {channel}");
+    }
+    for channel in [0, 4] {
+        assert_ne!(rotated[channel], input[channel], "channel {channel}");
+    }
+}
+
+/// Interleaved pairs round-trip and rotate exactly as adjacent complex numbers.
+#[test]
+fn interleaved_layout_round_trips_and_matches_complex_rotation() {
+    let device = Default::default();
+    let config = RopeConfig::new(6, 6, 100.0, RopeScaling::None).expect("rope");
+    let angles = rotary_angles(
+        config,
+        Tensor::<TestBackend, 2, Int>::from_ints([[3]], &device),
+        4,
+    )
+    .expect("angles");
+    let interleaved = activations([1, 1, 1, 6]);
+    let split = interleaved_to_split_half(interleaved.clone()).expect("split");
+    assert_eq!(
+        split_half_to_interleaved(split.clone())
+            .expect("interleave")
+            .into_data(),
+        interleaved.clone().into_data()
+    );
+    let rotated = split_half_to_interleaved(apply_rotary_to(split, &angles).expect("rotate"))
+        .expect("interleave")
+        .into_data()
+        .to_vec::<f32>()
+        .expect("f32");
+    let input = interleaved.into_data().to_vec::<f32>().expect("f32");
+    for pair in 0..3 {
+        let phase = 3.0_f64 * 100.0_f64.powf(-2.0 * pair as f64 / 6.0);
+        let (real, imaginary) = (f64::from(input[2 * pair]), f64::from(input[2 * pair + 1]));
+        let expected_real = real * phase.cos() - imaginary * phase.sin();
+        let expected_imaginary = real * phase.sin() + imaginary * phase.cos();
+        assert!((f64::from(rotated[2 * pair]) - expected_real).abs() < 1e-5);
+        assert!((f64::from(rotated[2 * pair + 1]) - expected_imaginary).abs() < 1e-5);
+    }
+    for (function, name) in [
+        (
+            interleaved_to_split_half::<TestBackend> as fn(_) -> _,
+            "rope.interleaved_input",
+        ),
+        (
+            split_half_to_interleaved::<TestBackend>,
+            "rope.split_half_input",
+        ),
+    ] {
+        let error = function(activations([1, 1, 1, 3])).expect_err("odd width");
+        assert!(matches!(error, crate::Error::Shape { tensor, .. } if tensor == name));
+    }
+}
+
+/// Hand-assembled tables with an odd rotary width are rejected before slicing.
+#[test]
+fn odd_rotary_tables_are_rejected() {
+    let device = Default::default();
+    let angles = RotaryAngles::<TestBackend> {
+        cosine: Tensor::ones([1, 1, 1, 3], &device),
+        sine: Tensor::zeros([1, 1, 1, 3], &device),
+        rotary_dimension: 3,
+    };
+    let error = apply_rotary_to(activations([1, 1, 1, 4]), &angles).expect_err("odd width");
+    assert!(matches!(error, crate::Error::Shape { tensor, .. } if tensor == "rope.input_angles"));
+}
+
+/// Marks the re-executed test binary that runs the half-precision child.
+const HALF_DEFAULT_CHILD: &str = "TRANSFORMERS_ROPE_HALF_DEFAULT_CHILD";
+
+/// RoPE tables remain exact F32 when the device's default float dtype is F16.
+///
+/// Burn's default dtype is per device and process-global, so the check runs in
+/// a fresh child process of this test binary that sets F16 before creating any
+/// tensor. Previously, positions converted through the default dtype rounded
+/// 2049 to 2048 in F16, and F16 frequencies were multiplied with F32 angles.
+#[test]
+fn rope_tables_stay_f32_under_half_precision_default_dtype() {
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "position::tensor::tests::half_precision_default_child",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env(HALF_DEFAULT_CHILD, "1")
+        .output()
+        .expect("spawn child test process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "child failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Child half of [`rope_tables_stay_f32_under_half_precision_default_dtype`].
+#[test]
+#[ignore = "runs in a fresh process spawned by rope_tables_stay_f32_under_half_precision_default_dtype"]
+fn half_precision_default_child() {
+    if std::env::var_os(HALF_DEFAULT_CHILD).is_none() {
+        return;
+    }
+    let device = Default::default();
+    burn::tensor::set_default_dtypes::<TestBackend>(
+        &device,
+        DType::F16,
+        burn::tensor::IntDType::I32,
+    )
+    .expect("fresh process has no tensors yet");
+    assert_eq!(
+        Tensor::<TestBackend, 1>::zeros([1], &device).dtype(),
+        DType::F16
+    );
+    let config = RopeConfig::new(2, 2, 10_000.0, RopeScaling::None).expect("rope");
+    let positions = Tensor::<TestBackend, 2, Int>::from_ints([[2049]], &device);
+    let angles = rotary_angles(config, positions, 2050).expect("angles");
+    assert_eq!(angles.cosine.dtype(), DType::F32);
+    let cosine = angles
+        .cosine
+        .into_data()
+        .to_vec::<f32>()
+        .expect("f32 table");
+    assert!((f64::from(cosine[0]) - 2049.0_f64.cos()).abs() < 1e-4);
+    let mrope = mrope_angles(
+        config,
+        Tensor::<TestBackend, 3, Int>::from_ints([[[2049]], [[2049]], [[2049]]], &device),
+        [1, 0, 0],
+        2050,
+    )
+    .expect("mrope angles");
+    let cosine = mrope.cosine.into_data().to_vec::<f32>().expect("f32 table");
+    assert!((f64::from(cosine[0]) - 2049.0_f64.cos()).abs() < 1e-4);
 }
