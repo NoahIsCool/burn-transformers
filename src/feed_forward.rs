@@ -9,6 +9,18 @@
 //! operate independently at every batch/token location. Intermediate width is an
 //! explicit architecture choice. Tensor dtype follows the projections and chosen
 //! activation; no implicit masking, cache state, or training-mode dropout is added.
+//!
+//! `forward_with_hooks` emits the two canonical MLP intervention points in one
+//! order shared by every family: `mlp_pre_activation` (the dense projection, or
+//! the gate branch of a gated MLP) and then `mlp_activation` (after the
+//! nonlinearity, before gating and the output projection). Input, output, and
+//! residual points remain family wiring.
+//!
+//! [`ClampedSwiGlu`] is the clamped gated unit of gpt-oss and DeepSeek V4
+//! experts: `(clamp(u, -L, L) + c) * g * sigmoid(alpha * g)` with
+//! `g = min(gate, L)`. Clamping bounds activation outliers in reduced
+//! precision; the `alpha`-scaled sigmoid and the `+c` offset are learned
+//! conventions of those checkpoints.
 
 use burn::{
     module::Module,
@@ -16,6 +28,7 @@ use burn::{
     tensor::{Tensor, activation, backend::Backend},
 };
 
+use crate::intervention::{Hooks, Layer, PointInfo};
 use crate::{Error, Result, architecture::Activation, operations};
 
 /// Configuration for an ordinary two-projection transformer feed-forward block.
@@ -96,6 +109,28 @@ impl<B: Backend> DenseFeedForward<B> {
     pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Result<Tensor<B, D>> {
         let hidden = operations::linear(input, &self.up_proj)?;
         operations::linear(apply_activation(hidden, self.activation), &self.down_proj)
+    }
+
+    /// Evaluates the block while emitting the canonical MLP points of `layer`.
+    ///
+    /// `mlp_pre_activation` is `up(input)` and `mlp_activation` is its
+    /// nonlinearity, both `[batch, token, intermediate]`. Call inside the
+    /// caller's [`Hooks::run`] scope; with empty hooks this equals [`Self::forward`].
+    pub fn forward_with_hooks(
+        &self,
+        input: Tensor<B, 3>,
+        layer: Layer,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<Tensor<B, 3>> {
+        let pre_activation = hooks.apply(
+            layer.mlp_pre_activation(),
+            operations::linear(input, &self.up_proj)?,
+        )?;
+        let activated = hooks.apply(
+            layer.mlp_activation(),
+            apply_activation(pre_activation, self.activation),
+        )?;
+        operations::linear(activated, &self.down_proj)
     }
 }
 
@@ -181,9 +216,139 @@ impl<B: Backend> GatedFeedForward<B> {
         let content = operations::linear(input, &self.up_proj)?;
         operations::linear(gate * content, &self.down_proj)
     }
+
+    /// Evaluates the block while emitting the canonical MLP points of `layer`.
+    ///
+    /// `mlp_pre_activation` is the gate branch `gate(input)` and
+    /// `mlp_activation` its nonlinearity before multiplication by `up(input)`,
+    /// both `[batch, token, intermediate]`. Call inside the caller's
+    /// [`Hooks::run`] scope; with empty hooks this equals [`Self::forward`].
+    pub fn forward_with_hooks(
+        &self,
+        input: Tensor<B, 3>,
+        layer: Layer,
+        hooks: &mut Hooks<'_, B>,
+    ) -> Result<Tensor<B, 3>> {
+        let pre_activation = hooks.apply(
+            layer.mlp_pre_activation(),
+            operations::linear(input.clone(), &self.gate_proj)?,
+        )?;
+        let gate = hooks.apply(
+            layer.mlp_activation(),
+            apply_activation(pre_activation, self.activation),
+        )?;
+        let content = operations::linear(input, &self.up_proj)?;
+        operations::linear(gate * content, &self.down_proj)
+    }
+
+    /// Evaluates `down(glu(gate(x), up(x)))` with a clamped gated unit.
+    ///
+    /// The block's `activation` field is not used: [`ClampedSwiGlu`] defines
+    /// the complete gate nonlinearity. Interleaved checkpoint `gate_up`
+    /// layouts must be split into `gate_proj`/`up_proj` when loading.
+    pub fn forward_clamped<const D: usize>(
+        &self,
+        input: Tensor<B, D>,
+        glu: &ClampedSwiGlu,
+    ) -> Result<Tensor<B, D>> {
+        glu.validate()?;
+        let gate = operations::linear(input.clone(), &self.gate_proj)?;
+        let content = operations::linear(input, &self.up_proj)?;
+        operations::linear(glu.combine(gate, content), &self.down_proj)
+    }
+}
+
+/// Lists the points emitted by `forward_with_hooks`, in emission order.
+#[must_use]
+pub fn mlp_hook_points(layer: Layer) -> Vec<PointInfo> {
+    vec![
+        layer.mlp_pre_activation().info(),
+        layer.mlp_activation().info(),
+    ]
+}
+
+/// Clamped gated linear unit of gpt-oss and DeepSeek V4 experts.
+///
+/// Computes `(clamp(up, -limit, limit) + up_offset) * g * sigmoid(alpha * g)`
+/// with `g = min(gate, limit)`. gpt-oss uses `limit = 7`, `alpha = 1.702`, and
+/// `up_offset = 1`; DeepSeek V4's clamped SwiGLU is `alpha = 1`, `up_offset = 0`
+/// (then `g * sigmoid(g)` is SiLU). The gate is clamped only from above.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ClampedSwiGlu {
+    /// Upper clamp of the gate and symmetric clamp of the up projection.
+    pub limit: f64,
+    /// Sigmoid sharpness: `sigmoid(alpha * g)`; one gives SiLU.
+    pub alpha: f64,
+    /// Constant added to the clamped up projection.
+    pub up_offset: f64,
+}
+
+impl ClampedSwiGlu {
+    /// Creates a clamped SiLU-gated unit (`alpha = 1`, no offset).
+    #[must_use]
+    pub const fn new(limit: f64) -> Self {
+        Self {
+            limit,
+            alpha: 1.0,
+            up_offset: 0.0,
+        }
+    }
+
+    /// Selects the sigmoid sharpness `alpha`.
+    #[must_use]
+    pub const fn with_alpha(mut self, alpha: f64) -> Self {
+        self.alpha = alpha;
+        self
+    }
+
+    /// Selects the constant added to the clamped up projection.
+    #[must_use]
+    pub const fn with_up_offset(mut self, up_offset: f64) -> Self {
+        self.up_offset = up_offset;
+        self
+    }
+
+    /// Requires a finite positive limit and alpha and a finite offset.
+    pub fn validate(&self) -> Result<()> {
+        if !self.limit.is_finite() || self.limit <= 0.0 {
+            return Err(Error::configuration(
+                "feed_forward.glu.limit",
+                "must be finite and greater than zero",
+            ));
+        }
+        if !self.alpha.is_finite() || self.alpha <= 0.0 {
+            return Err(Error::configuration(
+                "feed_forward.glu.alpha",
+                "must be finite and greater than zero",
+            ));
+        }
+        if !self.up_offset.is_finite() {
+            return Err(Error::configuration(
+                "feed_forward.glu.up_offset",
+                "must be finite",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Combines gate and up projections of equal shape into the gated activation.
+    pub fn combine<B: Backend, const D: usize>(
+        &self,
+        gate: Tensor<B, D>,
+        up: Tensor<B, D>,
+    ) -> Tensor<B, D> {
+        let gate = gate.clamp_max(self.limit);
+        let up = up.clamp(-self.limit, self.limit) + self.up_offset;
+        let gated = gate.clone() * activation::sigmoid(gate * self.alpha);
+        up * gated
+    }
 }
 
 /// Applies a supported transformer activation without changing tensor shape.
+///
+/// `Gelu` is the exact `x * Phi(x)`; `GeluTanh` is PyTorch's
+/// `0.5 x (1 + tanh(sqrt(2 / pi) (x + 0.044715 x^3)))` via Burn's
+/// `gelu_approximate`, which is the T5 `gelu_new` function.
 pub fn apply_activation<B: Backend, const D: usize>(
     input: Tensor<B, D>,
     activation_kind: Activation,
@@ -192,11 +357,7 @@ pub fn apply_activation<B: Backend, const D: usize>(
         Activation::Relu => activation::relu(input),
         Activation::Silu => activation::silu(input),
         Activation::Gelu => activation::gelu(input),
-        Activation::GeluTanh => {
-            let cubic = input.clone().powf_scalar(3.0);
-            let inner = (input.clone() + cubic * 0.044_715) * 0.797_884_560_802_865_4;
-            input * (inner.tanh() + 1.0) * 0.5
-        }
+        Activation::GeluTanh => activation::gelu_approximate(input),
         Activation::ReluSquared => activation::relu(input).square(),
     }
 }
