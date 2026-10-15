@@ -3,8 +3,9 @@
 //! Independent logical-length and `slot = position mod capacity` oracles check
 //! append, truncate, reorder, reset, commit, rollback, and rejected mutations.
 //! The same input then drives the tensor-backed decode state (KV, ring,
-//! mirrored, latent, and recurrent groups through step write sets) against a
-//! per-row token-history oracle.
+//! mirrored, latent, and recurrent groups through step write sets, plus an
+//! optional MTP bank with independent accepted prefixes) against per-bank,
+//! per-row token-history oracles that compare every key and value.
 
 #![no_main]
 

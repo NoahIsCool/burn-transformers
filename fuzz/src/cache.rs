@@ -7,20 +7,25 @@
 //! channels plus an optional recurrent group, written through atomic step
 //! write sets (batched or per row) and write-ahead (published, abandoned, or
 //! invalidated by an interfering lifecycle operation), speculative
-//! transactions with ragged acceptance, reorder, truncate, and reset. Its
-//! oracle keeps each row's token history as a `Vec<f32>` of unique values and
-//! compares every visible entry of every layer after every operation, through
-//! both the checked per-row read and the batched slot-order read; rejected
-//! operations must change nothing.
+//! transactions with ragged acceptance, reorder, truncate, and reset. An
+//! optional multi-token-prediction (MTP) bank with its own cursor receives
+//! MTP-bank steps, joins every transaction with an accepted prefix drawn
+//! independently of the main prefix (from its own selector bits), follows
+//! reorder and reset, and rewinds through `truncate_mtp`. The oracle keeps each
+//! row's token history (one per bank) as a `Vec<f32>` of unique values and
+//! compares every visible key and value of every layer after every operation,
+//! through both the checked per-row read and the batched slot-order read;
+//! rejected operations must change nothing.
 
 use std::num::NonZeroUsize;
 
 use burn::backend::Flex;
 use burn::tensor::{DType, Tensor, TensorData};
 use transformers::cache::{
-    CacheConfig, CacheMark, KvBatchRead, KvCacheStorage, NativeKvCacheSpec, RecurrentStateSpec,
-    SequenceLengths, StepBank, TensorCacheError, TensorCacheMark, TensorDecodeState,
-    TensorStepWrites, TransactionalCache, plan_ring_write, plan_staged_ring_transaction,
+    CacheConfig, CacheMark, KvBatchRead, KvCacheRead, KvCacheStorage, NativeKvCacheSpec,
+    RecurrentStateSpec, SequenceLengths, StepBank, TensorCacheError, TensorCacheMark,
+    TensorDecodeState, TensorStepWrites, TransactionalCache, plan_ring_write,
+    plan_staged_ring_transaction,
 };
 
 /// Host backend used by the tensor-state harness.
@@ -228,6 +233,8 @@ struct Geometry {
     staging: usize,
     /// Whether a recurrent group participates.
     recurrent: bool,
+    /// Whether an MTP bank (one scalar full-storage KV group) participates.
+    mtp: bool,
     /// Layers of every KV and latent group (1..=2).
     layers: usize,
     /// KV heads and channels per head (1..=2); the latent width is one more.
@@ -325,8 +332,10 @@ struct TensorHarness {
     geometry: Geometry,
     /// System under test.
     state: TensorDecodeState<Backend>,
-    /// Reference model.
+    /// Reference model of the main bank.
     history: History,
+    /// Reference model of the MTP bank, when enabled.
+    mtp: Option<History>,
     /// Mark of the active transaction.
     mark: Option<TensorCacheMark>,
     /// Last token value handed out; values start at 2.
@@ -335,6 +344,14 @@ struct TensorHarness {
 
 /// Runs at most 64 tensor-state operations decoded from `input`.
 ///
+/// Byte layout: an eight-byte header (rows, capacity, two windows, staging, a
+/// bank byte whose bit 0 clear adds the recurrent group and bit 1 the MTP
+/// bank, layers, width), then per operation `[operation % 9, one count per
+/// row, selector]`. The selector's bit 0 picks batched or per-row writes (or,
+/// for a commit, whether an MTP prefix is passed); for a commit its bits
+/// 1..=7 encode the MTP prefix (see [`TensorHarness::mtp_prefix`]); for
+/// write-ahead and operation 8 its low two bits pick the ending or MTP action.
+///
 /// # Panics
 ///
 /// Panics when the tensor state disagrees with the oracle, which is a bug.
@@ -342,29 +359,36 @@ pub fn exercise_tensor_state(input: &[u8]) {
     let mut bytes = crate::Bytes::new(input);
     let rows = usize::from(bytes.byte() % 3) + 1;
     let capacity = usize::from(bytes.byte() % 11) + 2;
+    let windows = [
+        usize::from(bytes.byte()) % capacity + 1,
+        usize::from(bytes.byte()) % capacity + 1,
+    ];
+    let staging = usize::from(bytes.byte() % 3) + 1;
+    // Bit 0 (clear) selects the recurrent group and bit 1 the MTP bank, so
+    // seeds written before the MTP bank existed keep their meaning.
+    let banks = bytes.byte();
     let geometry = Geometry {
         rows,
         capacity,
-        windows: [
-            usize::from(bytes.byte()) % capacity + 1,
-            usize::from(bytes.byte()) % capacity + 1,
-        ],
-        staging: usize::from(bytes.byte() % 3) + 1,
-        recurrent: bytes.byte().is_multiple_of(2),
+        windows,
+        staging,
+        recurrent: banks.is_multiple_of(2),
+        mtp: banks & 2 != 0,
         layers: usize::from(bytes.byte() % 2) + 1,
         width: usize::from(bytes.byte() % 2) + 1,
     };
     let mut harness = TensorHarness::new(geometry);
     harness.check();
     for _ in 0..input.len().min(512).div_ceil(6).min(64) {
-        let operation = bytes.byte() % 8;
+        let operation = bytes.byte() % 9;
         let counts: Vec<usize> = (0..rows).map(|_| usize::from(bytes.byte() % 4)).collect();
         let selector = bytes.byte();
-        let before = harness.history.clone();
+        let before = (harness.history.clone(), harness.mtp.clone());
         let accepted = harness.apply(operation, &counts, selector);
         if !accepted {
             assert_eq!(
-                harness.history, before,
+                (harness.history.clone(), harness.mtp.clone()),
+                before,
                 "rejected operation {operation} changed the oracle"
             );
         }
@@ -426,13 +450,25 @@ impl TensorHarness {
                 .add_recurrent(spec)
                 .expect("recurrent group");
         }
+        let empty = History {
+            committed: vec![Vec::new(); geometry.rows],
+            proposals: None,
+        };
+        if geometry.mtp {
+            let spec = NativeKvCacheSpec::new(1, 1, 1, KvCacheStorage::Full, DType::F32)
+                .expect("scalar MTP geometry")
+                .with_staging_capacity(geometry.staging);
+            state
+                .enable_mtp()
+                .expect("MTP bank")
+                .add_native_kv(spec)
+                .expect("MTP group");
+        }
         Self {
             geometry,
             state,
-            history: History {
-                committed: vec![Vec::new(); geometry.rows],
-                proposals: None,
-            },
+            mtp: geometry.mtp.then(|| empty.clone()),
+            history: empty,
             mark: None,
             next_value: 1.0,
         }
@@ -445,7 +481,13 @@ impl TensorHarness {
         match operation {
             0 => self.publish(counts, flag),
             1 => self.begin(),
-            2 => self.commit(counts),
+            2 => {
+                // Selector 254 also passes a prefix without an MTP bank, which
+                // must be refused; otherwise only an MTP bank gets one.
+                let with_prefix = flag && (self.mtp.is_some() || selector == 254);
+                let mtp_accepted = with_prefix.then(|| self.mtp_prefix(selector));
+                self.commit(counts, mtp_accepted.as_deref())
+            }
             3 => self.rollback(),
             4 => {
                 let indices: Vec<usize> = counts.iter().map(|&index| index % (rows + 1)).collect();
@@ -466,13 +508,20 @@ impl TensorHarness {
                 self.truncate(&requested)
             }
             6 => self.reset(),
-            _ => {
+            7 => {
                 let finish = match selector % 4 {
                     0 | 1 => Finish::Publish,
                     2 => Finish::Abandon,
                     _ => Finish::Interfere(selector / 4),
                 };
                 self.write_ahead(counts, finish)
+            }
+            _ => {
+                if selector % 4 == 3 {
+                    self.truncate_mtp(counts)
+                } else {
+                    self.publish_mtp(counts, flag)
+                }
             }
         }
     }
@@ -694,38 +743,97 @@ impl TensorHarness {
             Ok(mark) => {
                 self.mark = Some(mark);
                 self.history.proposals = Some(vec![Vec::new(); self.geometry.rows]);
+                if let Some(mtp) = &mut self.mtp {
+                    mtp.proposals = Some(vec![Vec::new(); self.geometry.rows]);
+                }
                 true
             }
             Err(_) => false,
         }
     }
 
+    /// Decodes an MTP accepted prefix independent of the main prefix.
+    ///
+    /// Bits `1 + 2 * row` and `2 + 2 * row` of `selector` give row `row`'s
+    /// count in `0..=3` (rows are at most three, so bits 1..=6 suffice; bit 0
+    /// already chose whether a prefix is passed). With bit 7 set, each count
+    /// is clamped to the row's staged MTP length so that most such commits
+    /// are valid; with it clear, counts beyond the proposals test rejection.
+    fn mtp_prefix(&self, selector: u8) -> Vec<usize> {
+        let staged = self
+            .mtp
+            .as_ref()
+            .and_then(|mtp| mtp.proposals.as_ref())
+            .map_or_else(
+                || vec![0; self.geometry.rows],
+                |rows| rows.iter().map(Vec::len).collect(),
+            );
+        staged
+            .iter()
+            .enumerate()
+            .map(|(row, &length)| {
+                let raw = usize::from((selector >> (1 + 2 * row)) & 3);
+                if selector & 0x80 == 0 {
+                    raw
+                } else {
+                    raw.min(length)
+                }
+            })
+            .collect()
+    }
+
     /// Commits per-row accepted prefixes when they fit the proposals.
-    fn commit(&mut self, accepted: &[usize]) -> bool {
+    ///
+    /// With an MTP bank, `mtp_accepted` is the bank's own accepted prefix
+    /// (see [`Self::mtp_prefix`]); without one (`None`), the MTP proposals
+    /// must be empty for the commit to succeed.
+    fn commit(&mut self, accepted: &[usize], mtp_accepted: Option<&[usize]>) -> bool {
         let Some(active) = self.mark.clone() else {
             return false;
         };
-        let proposals = self.history.proposals.clone().unwrap_or_default();
-        let valid = accepted
-            .iter()
-            .zip(&proposals)
-            .all(|(&count, row)| count <= row.len());
-        let result = self.state.commit_prefix(active, accepted);
-        assert_eq!(result.is_ok(), valid, "commit {accepted:?}: {result:?}");
+        let fits = |history: &History, accepted: &[usize]| {
+            let proposals = history.proposals.clone().unwrap_or_default();
+            accepted.len() == proposals.len()
+                && accepted
+                    .iter()
+                    .zip(&proposals)
+                    .all(|(&count, row)| count <= row.len())
+        };
+        let mtp_valid = match (&self.mtp, mtp_accepted) {
+            (None, prefix) => prefix.is_none(),
+            (Some(mtp), Some(prefix)) => fits(mtp, prefix),
+            (Some(mtp), None) => mtp
+                .proposals
+                .as_ref()
+                .is_none_or(|proposals| proposals.iter().all(Vec::is_empty)),
+        };
+        let valid = fits(&self.history, accepted) && mtp_valid;
+        let result = match mtp_accepted {
+            None => self.state.commit_prefix(active, accepted),
+            Some(_) => self.state.commit_prefixes(active, accepted, mtp_accepted),
+        };
+        assert_eq!(
+            result.is_ok(),
+            valid,
+            "commit {accepted:?} with MTP {mtp_accepted:?}: {result:?}"
+        );
         if valid {
-            for ((row, proposal), &count) in self
-                .history
-                .committed
-                .iter_mut()
-                .zip(proposals)
-                .zip(accepted)
-            {
-                row.extend(&proposal[..count]);
+            Self::accept(&mut self.history, accepted);
+            if let Some(mtp) = &mut self.mtp {
+                let zeros = vec![0; accepted.len()];
+                Self::accept(mtp, mtp_accepted.unwrap_or(&zeros));
             }
-            self.history.proposals = None;
             self.mark = None;
         }
         valid
+    }
+
+    /// Moves each row's accepted proposal prefix into its committed history.
+    fn accept(history: &mut History, accepted: &[usize]) {
+        let proposals = history.proposals.take().unwrap_or_default();
+        for ((row, proposal), &count) in history.committed.iter_mut().zip(proposals).zip(accepted) {
+            row.extend(&proposal[..count]);
+        }
     }
 
     /// Rolls the active transaction back.
@@ -734,6 +842,9 @@ impl TensorHarness {
             Some(active) => {
                 self.state.rollback(active).expect("active rollback");
                 self.history.proposals = None;
+                if let Some(mtp) = &mut self.mtp {
+                    mtp.proposals = None;
+                }
                 true
             }
             None => false,
@@ -746,8 +857,10 @@ impl TensorHarness {
         let valid = self.mark.is_none() && indices.iter().all(|&index| index < rows);
         assert_eq!(self.state.reorder(indices).is_ok(), valid);
         if valid {
-            let before = self.history.committed.clone();
-            self.history.committed = indices.iter().map(|&index| before[index].clone()).collect();
+            for history in std::iter::once(&mut self.history).chain(self.mtp.as_mut()) {
+                let before = history.committed.clone();
+                history.committed = indices.iter().map(|&index| before[index].clone()).collect();
+            }
         }
         valid
     }
@@ -781,7 +894,79 @@ impl TensorHarness {
         let valid = self.mark.is_none();
         assert_eq!(self.state.reset().is_ok(), valid);
         if valid {
-            self.history.committed.iter_mut().for_each(Vec::clear);
+            for history in std::iter::once(&mut self.history).chain(self.mtp.as_mut()) {
+                history.committed.iter_mut().for_each(Vec::clear);
+            }
+        }
+        valid
+    }
+
+    /// Publishes one MTP-bank step, batched or per row, when the bank exists.
+    fn publish_mtp(&mut self, counts: &[usize], batched: bool) -> bool {
+        let Some(mtp) = &self.mtp else {
+            assert!(matches!(
+                self.state.mtp_step(counts),
+                Err(TensorCacheError::MtpNotEnabled)
+            ));
+            return false;
+        };
+        let geometry = self.geometry;
+        let valid = (0..geometry.rows).all(|row| {
+            let staged = mtp.proposals.as_ref().map_or(0, |rows| rows[row].len());
+            mtp.working(row).len() + counts[row] <= geometry.capacity
+                && (mtp.proposals.is_none() || staged + counts[row] <= geometry.staging)
+        });
+        let tokens = self.fresh_tokens(counts);
+        let mut step = self.state.mtp_step(counts).expect("one count per row");
+        if batched {
+            let block = counts.iter().copied().max().unwrap_or(0).max(1);
+            let (keys, values) = kv((1, 1), &tokens, block, 0);
+            step.push_kv_batch(0, 0, keys, values);
+        } else {
+            for (row, row_tokens) in tokens.iter().enumerate() {
+                if !row_tokens.is_empty() {
+                    let (keys, values) = kv(
+                        (1, 1),
+                        std::slice::from_ref(row_tokens),
+                        row_tokens.len(),
+                        0,
+                    );
+                    step.push_kv_row(0, 0, row, keys, values);
+                }
+            }
+        }
+        let result = self.state.publish_step(step);
+        assert_eq!(result.is_ok(), valid, "MTP step {counts:?}: {result:?}");
+        if valid {
+            let mtp = self.mtp.as_mut().expect("checked above");
+            let target = mtp.proposals.as_mut().unwrap_or(&mut mtp.committed);
+            for (row, new) in target.iter_mut().zip(tokens) {
+                row.extend(new);
+            }
+        }
+        valid
+    }
+
+    /// Rewinds the MTP bank by `counts` tokens per row outside a transaction.
+    fn truncate_mtp(&mut self, counts: &[usize]) -> bool {
+        let Some(mtp) = &self.mtp else {
+            assert!(self.state.truncate_mtp(counts).is_err());
+            return false;
+        };
+        let requested: Vec<usize> = mtp
+            .committed
+            .iter()
+            .zip(counts)
+            .map(|(row, &count)| row.len().saturating_sub(count))
+            .collect();
+        // The single MTP group has full storage, so any shorter prefix is valid.
+        let valid = self.mark.is_none();
+        assert_eq!(self.state.truncate_mtp(&requested).is_ok(), valid);
+        if valid {
+            let mtp = self.mtp.as_mut().expect("checked above");
+            for (row, &length) in mtp.committed.iter_mut().zip(&requested) {
+                row.truncate(length);
+            }
         }
         valid
     }
@@ -824,16 +1009,12 @@ impl TensorHarness {
                         .state
                         .read_kv(StepBank::Main, group, layer, row)
                         .expect("checked read");
-                    assert_eq!(read.retained_positions(), first..tokens.len());
-                    let keys = read.materialize().map_or_else(Vec::new, |(keys, _)| {
-                        keys.into_data().to_vec::<f32>().expect("F32")
-                    });
-                    let expected =
-                        plane_data(&[visible.to_vec()], visible.len(), shape, layer, 1.0);
-                    assert_eq!(keys, expected, "group {group} layer {layer} row {row}");
+                    let label = format!("main row {row}");
+                    check_row_read(&read, visible, first, shape, layer, group, &label);
                 }
             }
         }
+        self.check_mtp();
         if geometry.recurrent {
             for row in 0..geometry.rows {
                 let read = self
@@ -851,6 +1032,83 @@ impl TensorHarness {
             }
         }
     }
+
+    /// Compares the MTP bank's cursors and reads with its history, or its absence.
+    fn check_mtp(&self) {
+        let Some(mtp) = &self.mtp else {
+            assert!(self.state.mtp_lengths().is_none());
+            return;
+        };
+        let rows = self.geometry.rows;
+        let committed: Vec<usize> = mtp.committed.iter().map(Vec::len).collect();
+        assert_eq!(self.state.mtp_lengths(), Some(committed.as_slice()));
+        let working: Vec<usize> = (0..rows).map(|row| mtp.working(row).len()).collect();
+        assert_eq!(self.state.mtp_working_lengths(), Some(working.as_slice()));
+        let plan = self
+            .state
+            .kv_read_plan(StepBank::Mtp, 0)
+            .expect("MTP batched plan");
+        let batched = self
+            .state
+            .mtp()
+            .expect("MTP bank")
+            .native_kv(0)
+            .expect("MTP group")
+            .read_batch(0, &plan)
+            .expect("MTP batched read");
+        for row in 0..rows {
+            let tokens = mtp.working(row);
+            check_batched_row(&batched, row, &tokens, 0, (1, 1), 0, 0);
+            let read = self
+                .state
+                .read_kv(StepBank::Mtp, 0, 0, row)
+                .expect("checked MTP read");
+            check_row_read(&read, &tokens, 0, (1, 1), 0, 0, &format!("MTP row {row}"));
+        }
+    }
+}
+
+/// Checks one row's checked per-row read against the oracle's visible tokens.
+///
+/// The read must cover positions `first..first + visible.len()`, and its
+/// materialized keys and values must be exactly the tokens' codes in
+/// chronological order: keys positive, values negated for key/value groups
+/// and identical to the keys for the latent group (one shared plane). The MTP
+/// bank's only group has index 0, a key/value group. `row_label` names the
+/// bank and row in failure messages.
+fn check_row_read(
+    read: &KvCacheRead<Backend>,
+    visible: &[f32],
+    first: usize,
+    shape: (usize, usize),
+    layer: usize,
+    group: usize,
+    row_label: &str,
+) {
+    let label = format!("{row_label} group {group} layer {layer}");
+    assert_eq!(
+        read.retained_positions(),
+        first..first + visible.len(),
+        "{label} positions"
+    );
+    let host =
+        |tensor: Tensor<Backend, 4>| -> Vec<f32> { tensor.into_data().to_vec().expect("F32") };
+    let (keys, values) = read.materialize().map_or_else(
+        || (Vec::new(), Vec::new()),
+        |(keys, values)| (host(keys), host(values)),
+    );
+    let rows = [visible.to_vec()];
+    assert_eq!(
+        keys,
+        plane_data(&rows, visible.len(), shape, layer, 1.0),
+        "{label} keys"
+    );
+    let value_sign = if group == LATENT_GROUP { 1.0 } else { -1.0 };
+    assert_eq!(
+        values,
+        plane_data(&rows, visible.len(), shape, layer, value_sign),
+        "{label} values"
+    );
 }
 
 /// Checks one row of a batched slot-order read against the oracle's visible tokens.
