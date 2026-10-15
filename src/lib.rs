@@ -28,6 +28,7 @@ pub mod generation;
 pub mod initialization;
 pub mod intervention;
 pub mod loaded;
+pub mod mamba2;
 pub mod mla;
 pub mod models;
 pub mod moe;

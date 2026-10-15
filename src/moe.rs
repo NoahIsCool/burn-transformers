@@ -340,6 +340,7 @@ pub(crate) struct ExpertAssignmentGroup {
 /// making grouping deterministic across backends even when router scores tie.
 /// [`dispatch_routed_experts`] uses the same plan without materializing one
 /// vector pair per expert.
+#[cfg_attr(not(test), allow(dead_code))] // Production callers moved to dispatch_routed_experts.
 pub(crate) fn group_selected_experts<B: Backend>(
     selected_experts: Tensor<B, 2, Int>,
     routed_experts: usize,
