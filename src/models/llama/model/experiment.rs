@@ -36,7 +36,7 @@ use crate::{
     attention::AttentionPrecisionMode,
     experiment::{ExecutionContext, HiddenState},
     intervention::{AttentionPoints, Hooks, Layer, PointInfo, PointValidity, Stack},
-    models::shared::{validate_input, validate_position_values},
+    models::shared::validate_input,
 };
 
 use super::{INPUT_NAMES, LlamaForCausalLm, sequence::SequenceKeys};
@@ -271,8 +271,11 @@ impl<B: Backend> LlamaForCausalLm<B> {
 
     /// Checks a staged state's width, dtype, device, positions, and decoder-only context.
     ///
-    /// Positions are read once to check `0 <= p < evaluated_context <=
-    /// max_position_embeddings`, because callers may have edited them.
+    /// [`HiddenState::validate`] reads positions back once and checks
+    /// `0 <= p < evaluated_context`, because callers may have edited them;
+    /// the host check `evaluated_context <= max_position_embeddings` then
+    /// bounds both the positions and the context that context-dependent RoPE
+    /// is evaluated at, exactly as the stateless pass's input contract does.
     fn validate_staged_state(&self, state: &HiddenState<B>) -> Result<()> {
         let architecture = self.architecture();
         state.validate(architecture.hidden_size)?;
@@ -301,12 +304,16 @@ impl<B: Backend> LlamaForCausalLm<B> {
                 "attention overrides must address existing decoder layers",
             ));
         }
-        validate_position_values(
-            &state.context.positions,
-            architecture.max_position_embeddings,
-            INPUT_NAMES.position_ids,
-        )
-        .map(drop)
+        if state.context.evaluated_context > architecture.max_position_embeddings {
+            return Err(Error::configuration(
+                "llama.execution.evaluated_context",
+                format!(
+                    "{} exceeds max_position_embeddings {}",
+                    state.context.evaluated_context, architecture.max_position_embeddings
+                ),
+            ));
+        }
+        Ok(())
     }
 }
 

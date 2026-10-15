@@ -396,10 +396,21 @@ fn staged_misuse_is_rejected() {
     let normalized = StagedModel::normalize(&model, state.clone()).unwrap();
     assert!(StagedModel::normalize(&model, normalized.clone()).is_err());
     assert!(StagedModel::run_layers(&model, normalized, 0..1).is_err());
-    let mut far = state;
+    let mut far = state.clone();
     far.context.positions = ints([[0, 64]]);
     far.context.evaluated_context = 65;
     assert!(StagedModel::run_layers(&model, far, 0..1).is_err());
+    // In-range positions under an evaluated context beyond the trained one
+    // would silently change context-dependent RoPE frequencies.
+    let mut stretched = state;
+    stretched.context.evaluated_context = 65;
+    let error = StagedModel::run_layers(&model, stretched, 0..1).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("llama.execution.evaluated_context"),
+        "{error}"
+    );
     assert_eq!(StagedModel::num_layers(&model), 3);
     assert_eq!(model.layer(2), Layer::decoder(2));
 }
