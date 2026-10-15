@@ -57,10 +57,10 @@ use crate::models::config::{
     ConfigError, ConfigLoadError, ModelConfig, Validate, parse_text_config,
 };
 
-/// Family-specific steps of strict automatic causal loading.
-mod family;
-/// Local artifact loading and generation-default normalization for registry models.
-mod load;
+// Submodules document themselves with `//!`; an outer `///` here would make
+// rustdoc resolve their intra-doc links from this module's scope.
+mod family; // Family-specific steps of strict automatic causal loading.
+mod load; // Local artifact loading and generation-default normalization.
 
 pub use load::AutoLoadOptions;
 

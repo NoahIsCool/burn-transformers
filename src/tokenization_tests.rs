@@ -1600,6 +1600,48 @@ fn nemotron_typed_tool_schema_and_arguments_match_hugging_face() {
     );
 }
 
+/// Map key order is Python's insertion order once both crates preserve it, sorted until then.
+///
+/// With the crate's current `serde_json` and `minijinja` features, objects are
+/// sorted maps, which is the documented difference from Hugging Face. This test
+/// pins both states: enabling `preserve_order` on both crates (a Cargo.toml
+/// change) switches it to the transformers 5.2.0 golden without editing it.
+#[cfg(feature = "chat-templates")]
+#[test]
+fn chat_map_key_order_is_sorted_until_order_is_preserved() {
+    let (_directory, tokenizer) = chat_fixture(
+        "{{ messages[0] }}|{% for k, v in messages[0].items() %}{{ k }};{% endfor %}|{{ tools[0] | tojson }}",
+    );
+    // Parsed from text so an order-preserving `serde_json` keeps "type" first.
+    let tools: Value = serde_json::from_str(
+        r#"[{"type": "function", "function": {"name": "f", "description": "d"}}]"#,
+    )
+    .unwrap();
+    let options = ChatTemplateOptions {
+        tools: Some(tools),
+        ..ChatTemplateOptions::default()
+    };
+    let rendered = tokenizer
+        .render_chat(&[ChatMessage::text("user", "hi")], &options)
+        .unwrap();
+    let probe: Value = serde_json::from_str(r#"{"b": 0, "a": 0}"#).unwrap();
+    let json_preserves = probe.as_object().unwrap().keys().next().map(String::as_str) == Some("b");
+    let template_preserves = minijinja::Value::from_serialize(&probe)
+        .try_iter()
+        .unwrap()
+        .next()
+        .and_then(|key| key.as_str().map(str::to_owned))
+        .as_deref()
+        == Some("b");
+    let expected = if json_preserves && template_preserves {
+        // Golden from transformers 5.2.0 `render_jinja_template`.
+        "{'role': 'user', 'content': 'hi'}|role;content;|{\"type\": \"function\", \"function\": {\"name\": \"f\", \"description\": \"d\"}}"
+    } else {
+        "{'content': 'hi', 'role': 'user'}|content;role;|{\"function\": {\"description\": \"d\", \"name\": \"f\"}, \"type\": \"function\"}"
+    };
+    assert_eq!(rendered, expected);
+}
+
 /// Writes a byte-level BPE tokenizer with one token per byte and no merges.
 ///
 /// Every multi-byte UTF-8 character therefore spans several tokens, the

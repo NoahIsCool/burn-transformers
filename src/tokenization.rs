@@ -28,6 +28,22 @@
 //! like the plain dictionaries Python callers pass, so optional keys are
 //! absent rather than `null`.
 //!
+//! Known differences from Hugging Face, each of which changes prompt text:
+//!
+//! - **Dictionary keys reach templates sorted.** Python preserves insertion
+//!   order; this crate's `serde_json` and `minijinja` builds store objects as
+//!   sorted maps. A tool schema written `{"type": ..., "function": ...}`
+//!   therefore renders as `{"function": ..., "type": ...}`, and a message
+//!   prints as `{'content': ..., 'role': ...}`. Prompts match Hugging Face
+//!   byte for byte only when every object in `messages`, `tools`, and
+//!   `documents` is already key-sorted.
+//! - **`strftime_now` formats UTC**, not host local time (see
+//!   [`ChatTemplateOptions::current_time_unix_seconds`]).
+//! - **`'text' ~ value` prints booleans and null as `true`/`none`**, where
+//!   Python prints `True`/`None`. Official templates convert values with
+//!   `| string` first, which matches Python exactly.
+//! - **`'%s' % value` string formatting is unsupported** and fails rendering.
+//!
 //! Chat templates are data supplied by a checkpoint and therefore are treated
 //! as untrusted programs. The MiniJinja environment has no filesystem loader,
 //! limits recursion, bounds printed nesting, and meters execution with fuel.
@@ -56,17 +72,15 @@ use crate::{
     architecture::{TokenMask, bool_tensor_from_values},
 };
 
-/// Proleptic-Gregorian calendar arithmetic for `strftime_now`, verified by Verus.
+// Submodules document themselves with `//!`; an outer `///` here would make
+// rustdoc resolve their intra-doc links from this module's scope.
 #[cfg(feature = "chat-templates")]
-mod calendar;
-/// Hugging Face-compatible chat-template environment and `strftime`.
+mod calendar; // Proleptic-Gregorian civil time for `strftime_now` (Verus-verified).
 #[cfg(feature = "chat-templates")]
-mod chat_template;
-/// Dependency-free truncation-budget and padding arithmetic, verified by Verus.
-mod layout;
-/// Python `str`/`dict` methods, printing, and `json.dumps` for templates.
+mod chat_template; // Hugging Face-compatible template environment and `strftime`.
+mod layout; // Truncation-budget and padding arithmetic (Verus-verified).
 #[cfg(feature = "chat-templates")]
-mod pycompat;
+mod pycompat; // Python `str`/`dict` semantics, printing, and filters for templates.
 
 use layout::{content_token_budget, pad_token_row, padding_split, validity_mask};
 
@@ -300,6 +314,8 @@ pub struct ChatMessage {
     ///
     /// Hugging Face's convention is a list of
     /// `{"type": "function", "function": {"name": ..., "arguments": {...}}}`.
+    /// Object keys, including argument names, reach the template sorted; see
+    /// the [module documentation](self) for this difference from Python.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Value>,
     /// Optional participant or tool name.
@@ -309,6 +325,8 @@ pub struct ChatMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     /// Additional template-visible keys; they must not repeat a named field.
+    ///
+    /// Like every message key, they reach the template in sorted order.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -387,9 +405,14 @@ pub struct ChatTemplateOptions {
     /// end-of-turn markup. Incompatible with [`Self::add_generation_prompt`].
     pub continue_final_message: bool,
     /// Optional tool schemas exposed as `tools` to templates that support tool use.
+    ///
+    /// Schema keys reach the template sorted, so a template that prints a
+    /// schema with `tojson` emits `{"function": ..., "type": "function"}`
+    /// where Python keeps the caller's order; see the
+    /// [module documentation](self).
     pub tools: Option<Value>,
     /// Optional retrieval documents exposed as `documents`: a list of objects,
-    /// conventionally with `title` and `text` keys.
+    /// conventionally with `title` and `text` keys (which also arrive sorted).
     pub documents: Option<Value>,
     /// Whether multimodal templates should number image and video placeholders.
     pub add_vision_id: bool,
@@ -804,6 +827,11 @@ impl LocalTokenizer {
     /// `add_generation_prompt`, every declared special token (`bos_token`,
     /// `eos_token`, ...), the optional switches in `options`, the globals
     /// `raise_exception` and `strftime_now`, and `options.extra_context`.
+    ///
+    /// The output equals Hugging Face's `apply_chat_template(...,
+    /// tokenize=False)` except for the differences listed in the
+    /// [module documentation](self); most importantly, dictionary keys reach
+    /// the template sorted rather than in insertion order.
     #[cfg(feature = "chat-templates")]
     pub fn render_chat(
         &self,
