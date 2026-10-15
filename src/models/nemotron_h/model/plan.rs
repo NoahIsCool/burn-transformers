@@ -36,10 +36,90 @@
 //! keeps the shifted MTP cursor at most one position behind the target, and
 //! [`verification_tokens`] sizes the one-pass target verification of a draft.
 //!
-//! Every function is pure integer logic with checked arithmetic, so tensor
-//! programs built from these plans cannot index out of range.
+//! # Verified planning
+//!
+//! Every function here is dependency-free integer logic, checked in place by
+//! Verus through `verus/nemotron.rs` (see `verus/README.md`). For all
+//! admissible inputs the proofs establish freedom from overflow and that every
+//! compact-batch map has its stated length and addresses only valid entries
+//! of its source (a flat index below `B * S`, `B * N`, or the appended zero
+//! row), so tensor programs built from these plans cannot index out of range.
+//! They also prove the policies' exact decision rules and the MTP cursor
+//! invariant. Tensor programs driven by the plans remain covered by Rust tests.
+
+#[cfg(verus_keep_ghost)]
+use vstd::prelude::*;
+
+use crate::models::shared::plan::is_sorted_unique_below;
+#[cfg(verus_keep_ghost)]
+use crate::models::shared::plan::sorted_unique_below;
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Total number of valid tokens in the first `rows` rows.
+pub open spec fn total_tokens(columns: Seq<Vec<usize>>, rows: int) -> int
+    decreases rows,
+{
+    if rows <= 0 {
+        0
+    } else {
+        total_tokens(columns, rows - 1) + columns[rows - 1]@.len()
+    }
+}
+
+/// Every entry of `values` is strictly below `bound`.
+pub open spec fn all_below(values: Seq<usize>, bound: int) -> bool {
+    forall|i: int| 0 <= i < values.len() ==> values[i] < bound
+}
+
+/// Every entry of `values` is at most `bound`.
+pub open spec fn all_at_most(values: Seq<usize>, bound: int) -> bool {
+    forall|i: int| 0 <= i < values.len() ==> values[i] <= bound
+}
+
+/// Row `r`'s slot range `[r * width, (r + 1) * width)` lies inside `batch * width`.
+proof fn lemma_row_block(row: int, batch: int, width: int)
+    requires
+        0 <= row < batch,
+        width >= 0,
+    ensures
+        row * width + width <= batch * width,
+        row * width >= 0,
+{
+    assert(row * width + width <= batch * width) by (nonlinear_arith)
+        requires 0 <= row < batch, width >= 0;
+    assert(row * width >= 0) by (nonlinear_arith)
+        requires row >= 0, width >= 0;
+}
+
+/// Adding one row's tokens keeps the running total within one more row block.
+proof fn lemma_total_step(columns: Seq<Vec<usize>>, row: int)
+    requires
+        0 <= row < columns.len(),
+    ensures
+        total_tokens(columns, row + 1) == total_tokens(columns, row) + columns[row]@.len(),
+{
+}
+
+/// Running totals never decrease: `total(rows) <= total(more)` for `rows <= more`.
+proof fn lemma_total_monotone(columns: Seq<Vec<usize>>, rows: int, more: int)
+    requires
+        0 <= rows <= more <= columns.len(),
+    ensures
+        total_tokens(columns, rows) <= total_tokens(columns, more),
+    decreases more - rows,
+{
+    if rows < more {
+        lemma_total_monotone(columns, rows, more - 1);
+    }
+}
+
+} // verus!
 
 /// Right-padded compact layout of one ragged batch (see the module documentation).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verifier::allow(autoderive_clone_without_spec))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompactPlan {
     /// Rectangular width `S`.
@@ -85,38 +165,157 @@ impl CompactPlan {
 /// Plans the compact layout of rows whose valid columns are `columns[b]`.
 ///
 /// Returns `None` when a row's columns are not strictly increasing below
-/// `sequence`, or when a flat index would overflow `usize`.
+/// `sequence`, or when a flat index would overflow `usize`. On success every
+/// map has its documented length and stays inside its source: `gather` below
+/// `B * S`, `scatter` and `last` at most `B * N` (the zero row), `packed`
+/// below `B * N`, and `unpack` at most `T` (the zero row).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(planned =>
+    ensures
+        match planned {
+            Some(plan) => {
+                let batch = columns.len() as int;
+                &&& plan.sequence == sequence
+                &&& plan.counts.len() == batch
+                &&& forall|b: int| 0 <= b < batch ==> {
+                    &&& #[trigger] plan.counts@[b] == columns@[b]@.len()
+                    &&& plan.counts@[b] <= plan.width
+                    &&& sorted_unique_below(columns@[b]@, sequence as int)
+                }
+                &&& plan.gather.len() == batch * plan.width
+                &&& plan.scatter.len() == batch * sequence
+                &&& plan.unpack.len() == batch * plan.width
+                &&& plan.packed.len() == total_tokens(columns@, batch)
+                &&& plan.last.len() == batch
+                &&& all_below(plan.gather@, batch * sequence)
+                &&& all_at_most(plan.scatter@, batch * plan.width)
+                &&& all_below(plan.packed@, batch * plan.width)
+                &&& all_at_most(plan.unpack@, plan.packed.len() as int)
+                &&& all_at_most(plan.last@, batch * plan.width)
+            },
+            None => true,
+        },
+))]
 pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option<CompactPlan> {
     let batch = columns.len();
-    let mut width = 0;
+    let mut width: usize = 0;
     let mut tokens: usize = 0;
-    let mut row = 0;
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            batch == columns.len(),
+            row <= batch,
+            tokens == total_tokens(columns@, row as int),
+            width > 0 ==> sequence > 0,
+            forall|b: int| 0 <= b < row ==> {
+                &&& #[trigger] columns@[b]@.len() <= width
+                &&& sorted_unique_below(columns@[b]@, sequence as int)
+            },
+        decreases batch - row,
+    ))]
     while row < batch {
-        if !strictly_increasing_below(&columns[row], sequence) {
+        if !is_sorted_unique_below(columns[row].as_slice(), sequence) {
             return None;
         }
-        width = width.max(columns[row].len());
-        tokens = tokens.checked_add(columns[row].len())?;
+        let count = columns[row].len();
+        // A non-empty row has a column below `sequence`, so `sequence > 0`.
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            if count > 0 {
+                assert(columns@[row as int]@[0] < sequence);
+            }
+        }
+        if count > width {
+            width = count;
+        }
+        tokens = tokens.checked_add(count)?;
         row += 1;
     }
     let compact_slots = batch.checked_mul(width)?;
     let rectangular_slots = batch.checked_mul(sequence)?;
-    let mut counts = Vec::with_capacity(batch);
-    let mut gather = Vec::with_capacity(compact_slots);
-    let mut scatter = Vec::with_capacity(rectangular_slots);
-    let mut packed = Vec::with_capacity(tokens);
-    let mut unpack = Vec::with_capacity(compact_slots);
-    let mut last = Vec::with_capacity(batch);
+    let mut counts: Vec<usize> = Vec::with_capacity(batch);
+    let mut gather: Vec<usize> = Vec::with_capacity(compact_slots);
+    let mut scatter: Vec<usize> = Vec::with_capacity(rectangular_slots);
+    let mut packed: Vec<usize> = Vec::with_capacity(tokens);
+    let mut unpack: Vec<usize> = Vec::with_capacity(compact_slots);
+    let mut last: Vec<usize> = Vec::with_capacity(batch);
+    // `compact_start = row * width` and `rectangular_start = row * sequence`
+    // advance by addition, so no product is formed inside the loop.
+    let mut compact_start: usize = 0;
+    let mut rectangular_start: usize = 0;
     row = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            batch == columns.len(),
+            row <= batch,
+            compact_slots == batch * width,
+            rectangular_slots == batch * sequence,
+            compact_start == row * width,
+            rectangular_start == row * sequence,
+            tokens == total_tokens(columns@, batch as int),
+            width > 0 ==> sequence > 0,
+            forall|b: int| 0 <= b < batch ==> {
+                &&& #[trigger] columns@[b]@.len() <= width
+                &&& sorted_unique_below(columns@[b]@, sequence as int)
+            },
+            counts.len() == row,
+            forall|b: int| 0 <= b < row ==> #[trigger] counts@[b] == columns@[b]@.len(),
+            gather.len() == row * width,
+            unpack.len() == row * width,
+            scatter.len() == row * sequence,
+            last.len() == row,
+            packed.len() == total_tokens(columns@, row as int),
+            all_below(gather@, batch * sequence),
+            all_at_most(scatter@, batch * width),
+            all_below(packed@, batch * width),
+            all_at_most(unpack@, tokens as int),
+            all_at_most(last@, batch * width),
+        decreases batch - row,
+    ))]
     while row < batch {
         let valid = &columns[row];
         let count = valid.len();
-        // `row < batch`, so every product below is at most `batch * width`
-        // or `batch * sequence`, both already proven representable.
-        let compact_start = row * width;
-        let rectangular_start = row * sequence;
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_row_block(row as int, batch as int, width as int);
+            lemma_row_block(row as int, batch as int, sequence as int);
+            lemma_total_step(columns@, row as int);
+            assert(total_tokens(columns@, row as int + 1) <= total_tokens(columns@, batch as int))
+                by {
+                    lemma_total_monotone(columns@, row as int + 1, batch as int);
+                };
+        }
         counts.push(count);
-        let mut slot = 0;
+        let mut slot: usize = 0;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                batch == columns.len(),
+                row < batch,
+                valid@ == columns@[row as int]@,
+                count == columns@[row as int]@.len(),
+                count <= width,
+                sorted_unique_below(columns@[row as int]@, sequence as int),
+                rectangular_slots == batch * sequence,
+                width > 0 ==> sequence > 0,
+                compact_start == row * width,
+                rectangular_start == row * sequence,
+                compact_start + width <= batch * width,
+                rectangular_start + sequence <= batch * sequence,
+                compact_slots == batch * width,
+                tokens == total_tokens(columns@, batch as int),
+                total_tokens(columns@, row as int + 1) <= tokens,
+                total_tokens(columns@, row as int + 1)
+                    == total_tokens(columns@, row as int) + count,
+                slot <= width,
+                gather.len() == row * width + slot,
+                unpack.len() == row * width + slot,
+                packed.len() == total_tokens(columns@, row as int)
+                    + if slot < count { slot as int } else { count as int },
+                all_below(gather@, batch * sequence),
+                all_below(packed@, batch * width),
+                all_at_most(unpack@, tokens as int),
+            decreases width - slot,
+        ))]
         while slot < width {
             if slot < count {
                 gather.push(rectangular_start + valid[slot]);
@@ -131,8 +330,23 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
         }
         // Valid columns increase, so one merge pass places compact slot `k`
         // at column `c_k` and the zero row everywhere else.
-        let mut next = 0;
-        let mut column = 0;
+        let mut next: usize = 0;
+        let mut column: usize = 0;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                batch == columns.len(),
+                row < batch,
+                valid@ == columns@[row as int]@,
+                count == columns@[row as int]@.len(),
+                count <= width,
+                compact_start + width <= batch * width,
+                compact_slots == batch * width,
+                column <= sequence,
+                next <= count,
+                scatter.len() == row * sequence + column,
+                all_at_most(scatter@, batch * width),
+            decreases sequence - column,
+        ))]
         while column < sequence {
             if next < count && valid[next] == column {
                 scatter.push(compact_start + next);
@@ -147,6 +361,15 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
         } else {
             compact_start + count - 1
         });
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert((row as int + 1) * width as int == row as int * width as int + width as int)
+                by (nonlinear_arith);
+            assert((row as int + 1) * sequence as int == row as int * sequence as int + sequence as int)
+                by (nonlinear_arith);
+        }
+        compact_start += width;
+        rectangular_start += sequence;
         row += 1;
     }
     Some(CompactPlan {
@@ -161,36 +384,63 @@ pub(crate) fn plan_compaction(columns: &[Vec<usize>], sequence: usize) -> Option
     })
 }
 
-/// Returns whether `values` is strictly increasing with every entry below `bound`.
-fn strictly_increasing_below(values: &[usize], bound: usize) -> bool {
-    let mut index = 0;
-    while index < values.len() {
-        if values[index] >= bound || (index > 0 && values[index - 1] >= values[index]) {
-            return false;
-        }
-        index += 1;
-    }
-    true
-}
-
 /// Absolute positions `W_b + j` of every compact slot `(b, j)`, `[B * N]`.
 ///
 /// Padded slots continue the row's numbering, so a padded query sees every
 /// valid key of its row and attention rows are never fully excluded for an
 /// active row. Returns `None` when a position exceeds `usize` or `i64`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(positions =>
+    ensures
+        match positions {
+            Some(positions) => {
+                &&& positions.len() == baselines.len() * width
+                &&& forall|i: int| 0 <= i < positions.len() ==> #[trigger] positions@[i] >= 0
+            },
+            None => true,
+        },
+))]
 pub(crate) fn query_positions(baselines: &[usize], width: usize) -> Option<Vec<i64>> {
-    let mut positions = Vec::with_capacity(baselines.len().checked_mul(width)?);
-    for &baseline in baselines {
-        let mut slot = 0;
+    let total = baselines.len().checked_mul(width)?;
+    let mut positions: Vec<i64> = Vec::with_capacity(total);
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= baselines.len(),
+            positions.len() == row * width,
+            forall|i: int| 0 <= i < positions.len() ==> #[trigger] positions@[i] >= 0,
+        decreases baselines.len() - row,
+    ))]
+    while row < baselines.len() {
+        let mut slot: usize = 0;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                row < baselines.len(),
+                slot <= width,
+                positions.len() == row * width + slot,
+                forall|i: int| 0 <= i < positions.len() ==> #[trigger] positions@[i] >= 0,
+            decreases width - slot,
+        ))]
         while slot < width {
-            positions.push(i64::try_from(baseline.checked_add(slot)?).ok()?);
+            let position = baselines[row].checked_add(slot)?;
+            if position > i64::MAX as usize {
+                return None;
+            }
+            positions.push(position as i64);
             slot += 1;
         }
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert((row as int + 1) * width as int == row as int * width as int + width as int)
+                by (nonlinear_arith);
+        }
+        row += 1;
     }
     Some(positions)
 }
 
 /// Mamba-2 execution path of one stateful row.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MambaStep {
     /// The reference single-step selective-state update.
@@ -204,6 +454,11 @@ pub(crate) enum MambaStep {
 /// The pinned reference takes its single-step update only when
 /// `use_precomputed_states and seq_len == 1`; a first prompt token, and every
 /// multi-token segment, runs the chunk scan.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(step =>
+    ensures
+        (step == MambaStep::Recurrent) == (tokens == 1 && baseline > 0),
+))]
 pub(crate) const fn mamba_step(tokens: usize, baseline: usize) -> MambaStep {
     if tokens == 1 && baseline > 0 {
         MambaStep::Recurrent
@@ -213,6 +468,7 @@ pub(crate) const fn mamba_step(tokens: usize, baseline: usize) -> MambaStep {
 }
 
 /// How a transactional step records Mamba-2 state.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransactionalMamba {
     /// Every active row appends one token: its terminal state is its only snapshot.
@@ -229,12 +485,37 @@ pub(crate) enum TransactionalMamba {
 /// produces per-token states, and the reference uses it only for rows that
 /// already have state; a row that would start its prompt inside a
 /// transaction is therefore reported as `Err(row)`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(policy =>
+    ensures
+        match policy {
+            Ok(TransactionalMamba::Terminal) =>
+                forall|r: int| 0 <= r < counts.len() ==> #[trigger] counts@[r] <= 1,
+            Ok(TransactionalMamba::Snapshots) => {
+                &&& exists|r: int| 0 <= r < counts.len() && #[trigger] counts@[r] > 1
+                &&& forall|r: int| 0 <= r < counts.len() && #[trigger] counts@[r] > 0
+                    ==> r < baselines.len() && baselines@[r] > 0
+            },
+            Err(row) => {
+                &&& exists|r: int| 0 <= r < counts.len() && #[trigger] counts@[r] > 1
+                &&& row < counts.len()
+                &&& counts@[row as int] > 0
+                &&& (row >= baselines.len() || baselines@[row as int] == 0)
+            },
+        },
+))]
 pub(crate) fn transactional_mamba(
     counts: &[usize],
     baselines: &[usize],
 ) -> Result<TransactionalMamba, usize> {
-    let mut row = 0;
+    let mut row: usize = 0;
     let mut multi_token = false;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= counts.len(),
+            multi_token == exists|r: int| 0 <= r < row && #[trigger] counts@[r] > 1,
+        decreases counts.len() - row,
+    ))]
     while row < counts.len() {
         if counts[row] > 1 {
             multi_token = true;
@@ -245,6 +526,14 @@ pub(crate) fn transactional_mamba(
         return Ok(TransactionalMamba::Terminal);
     }
     row = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= counts.len(),
+            exists|r: int| 0 <= r < counts.len() && #[trigger] counts@[r] > 1,
+            forall|r: int| 0 <= r < row && #[trigger] counts@[r] > 0
+                ==> r < baselines.len() && baselines@[r] > 0,
+        decreases counts.len() - row,
+    ))]
     while row < counts.len() {
         if counts[row] > 0 && (row >= baselines.len() || baselines[row] == 0) {
             return Err(row);
@@ -259,6 +548,13 @@ pub(crate) fn transactional_mamba(
 /// MTP position `i` consumes `(x_{i+1}, h_i)`, so it can never be ahead of
 /// `target - 1`. The result only rewinds (`<= mtp`) and keeps
 /// `result + 1 <= max(target, 1)`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(length =>
+    ensures
+        length <= mtp,
+        length + 1 <= if target > 0 { target as int } else { 1 },
+        length == mtp || length + 1 == target || (target == 0 && length == 0),
+))]
 pub(crate) const fn mtp_length_after_truncate(target: usize, mtp: usize) -> usize {
     let limit = target.saturating_sub(1);
     if mtp < limit { mtp } else { limit }
@@ -270,6 +566,18 @@ pub(crate) const fn mtp_length_after_truncate(target: usize, mtp: usize) -> usiz
 /// draft is end-of-sequence its successor distribution is never needed: an
 /// accepted EOS ends the cycle and a rejection stops earlier, so `y_d` itself
 /// is not evaluated. Returns `None` on overflow.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(tokens =>
+    ensures
+        match tokens {
+            Some(tokens) => {
+                &&& last_draft_is_eos && drafted > 0 ==> tokens == drafted
+                &&& !(last_draft_is_eos && drafted > 0) ==> tokens == drafted + 1
+                &&& tokens >= 1
+            },
+            None => !(last_draft_is_eos && drafted > 0) && drafted == usize::MAX,
+        },
+))]
 pub(crate) const fn verification_tokens(drafted: usize, last_draft_is_eos: bool) -> Option<usize> {
     if last_draft_is_eos && drafted > 0 {
         Some(drafted)
