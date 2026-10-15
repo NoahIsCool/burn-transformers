@@ -281,8 +281,7 @@ fn discretization_rounds_before_fp32_scan_math() {
     let device = Default::default();
     let raw = Tensor::<TestBackend, 3>::from_floats([[[-9.726_562_5]]], &device).cast(DType::F16);
     let bias = Tensor::<TestBackend, 1>::from_floats([0.501_464_84], &device).cast(DType::F16);
-    let valid = Tensor::<TestBackend, 2, Bool>::from_bool([[true]].into(), &device);
-    let actual = discretization_steps(raw.clone(), bias.clone(), None, Some(valid));
+    let actual = discretization_steps(raw.clone(), bias.clone(), None);
     assert_eq!(actual.dtype(), DType::F16);
     let actual_bits = actual
         .into_data()
@@ -307,7 +306,6 @@ fn discretization_rounds_before_fp32_scan_math() {
         .collect::<Vec<_>>();
     assert_eq!(promoted_bits, [0x0675]);
 
-    let all_valid = || Tensor::<TestBackend, 2, Bool>::from_bool([[true]].into(), &device);
     let clamp = TimeStepClamp::chunked_only(TimeStepLimits {
         lower: 0.001,
         upper: Some(0.01),
@@ -316,14 +314,8 @@ fn discretization_rounds_before_fp32_scan_math() {
         raw.clone(),
         bias.clone(),
         clamp.for_mode(Mamba2Mode::Recurrent),
-        Some(all_valid()),
     );
-    let chunked = discretization_steps(
-        raw,
-        bias,
-        clamp.for_mode(Mamba2Mode::ChunkedPrefill),
-        Some(all_valid()),
-    );
+    let chunked = discretization_steps(raw, bias, clamp.for_mode(Mamba2Mode::ChunkedPrefill));
     assert_eq!(
         recurrent
             .into_data()
@@ -343,7 +335,6 @@ fn discretization_rounds_before_fp32_scan_math() {
         Tensor::<TestBackend, 3>::from_floats([[[-9.726_562_5]]], &device).cast(DType::BF16),
         Tensor::<TestBackend, 1>::from_floats([0.501_464_84], &device).cast(DType::BF16),
         None,
-        Some(all_valid()),
     );
     let bf16_bits = bf16_dt
         .into_data()
@@ -531,14 +522,22 @@ fn f16_recurrent_cache_matches_repeated_single_token_updates() {
 #[test]
 fn semantic_mask_prevents_padding_decay() {
     let device = Default::default();
-    let valid = Tensor::<TestBackend, 2, Bool>::from_bool([[false]].into(), &device);
-    let dt = discretization_steps(
-        Tensor::zeros([1, 1, 1], &device),
-        Tensor::ones([1], &device),
-        Some(TimeStepLimits::at_least(0.001)),
-        Some(valid),
+    let invalid = Tensor::<TestBackend, 2, Bool>::from_bool([[true]].into(), &device);
+    let dt = zero_invalid(
+        discretization_steps(
+            Tensor::zeros([1, 1, 1], &device),
+            Tensor::ones([1], &device),
+            Some(TimeStepLimits::at_least(0.001)),
+        ),
+        Some(&invalid),
     );
     assert_eq!(dt.to_data(), TensorData::zeros::<f32, _>([1, 1, 1]));
+    // Replacement, not multiplication: non-finite padding is cleared too.
+    let cleared = zero_invalid(
+        Tensor::<TestBackend, 3>::from_floats([[[f32::NAN, f32::INFINITY]]], &device),
+        Some(&invalid),
+    );
+    assert_eq!(cleared.to_data(), TensorData::zeros::<f32, _>([1, 1, 2]));
 
     let initial = Tensor::<TestBackend, 4>::from_floats([[[[3.25]]]], &device);
     let (_, terminal, _) = recurrent_scan(
@@ -668,8 +667,7 @@ fn discretization_softplus_matches_the_reference_graph() {
         TensorData::new(inputs.clone(), [1, count, 1]),
         &device,
     );
-    let valid = Tensor::<TestBackend, 2, Bool>::ones([1, count], &device);
-    let actual = discretization_steps(raw.clone(), Tensor::zeros([1], &device), None, Some(valid))
+    let actual = discretization_steps(raw.clone(), Tensor::zeros([1], &device), None)
         .into_data()
         .to_vec::<f32>()
         .unwrap();
@@ -700,7 +698,6 @@ fn discretization_softplus_matches_the_reference_graph() {
         Tensor::<TestBackend, 3>::from_floats([[[100.0], [1.0e30]]], &device),
         Tensor::zeros([1], &device),
         None,
-        Some(Tensor::ones([1, 2], &device)),
     )
     .into_data()
     .to_vec::<f32>()
@@ -713,11 +710,16 @@ fn discretization_softplus_matches_the_reference_graph() {
 /// With `dt_bias = -12`, `softplus` gives about `6e-6`; chunked prefill raises
 /// it to `time_step_min = 1e-3`, the recurrent update keeps it, so the
 /// terminal states differ by roughly that ratio. Callers must therefore pick
-/// the chunk scan for a first prompt token, as the reference does.
+/// the chunk scan for a first prompt token, as the reference does. The input
+/// projection is fixed and small so every head's step stays near `6e-6`
+/// (randomly initialized projections could move a head above the clamp).
 #[test]
 fn one_token_clamp_differs_between_modes() {
     let device = Default::default();
     let mut mixer = config().init::<TestBackend>(&device).unwrap();
+    let [inputs, outputs] = mixer.in_proj.weight.dims();
+    mixer.in_proj.weight =
+        Param::from_tensor(waves([1, inputs, outputs], 3.0, 0.01).reshape([inputs, outputs]));
     mixer.dt_bias = mixer.dt_bias.clone().map(|bias| bias.ones_like() * -12.0);
     let input = Tensor::<TestBackend, 3>::from_floats(
         [[[0.1, 0.2, -0.3, 0.4, 0.5, -0.6, 0.7, 0.8]]],

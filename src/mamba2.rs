@@ -776,19 +776,12 @@ impl<B: Backend> Mamba2<B> {
         let device = hidden.device();
         let recurrent_dtype = state.recurrent.dtype();
         self.validate_state(state, batch, hidden_dtype, &device)?;
-        // A `[batch, sequence, 1]` multiplier in the activation dtype, or none.
-        let validity = valid.as_ref().map(|valid| {
-            valid
-                .clone()
-                .float()
-                .unsqueeze_dim::<3>(2)
-                .cast(hidden_dtype)
-        });
-
-        let masked = match &validity {
-            Some(validity) => hidden * validity.clone(),
-            None => hidden,
-        };
+        // Invalid tokens are *replaced* by zeros rather than multiplied by a
+        // zero mask, so a non-finite value in a padded slot (for example the
+        // output of a fully masked attention row upstream) can never become
+        // `0 * inf = NaN` and leak into the state.
+        let invalid = valid.as_ref().map(|valid| valid.clone().bool_not());
+        let masked = zero_invalid(hidden, invalid.as_ref());
         let projected = operations::linear(masked, &self.in_proj)?;
         let intermediate = self.num_heads * self.head_dim;
         let gate = projected.clone().narrow(2, 0, intermediate);
@@ -807,11 +800,10 @@ impl<B: Backend> Mamba2<B> {
             self.conv1d.bias.as_ref().map(|bias| bias.val()),
             ConvOptions::new([1], [0], [1], self.conv1d.groups),
         );
-        let convolved = activation::silu(convolved).swap_dims(1, 2);
-        let convolved = match &validity {
-            Some(validity) => convolved * validity.clone(),
-            None => convolved,
-        };
+        let convolved = zero_invalid(
+            activation::silu(convolved).swap_dims(1, 2),
+            invalid.as_ref(),
+        );
         let group_state_width = self.groups * self.state_size;
         let x = convolved.clone().narrow(2, 0, intermediate).reshape([
             batch,
@@ -827,11 +819,9 @@ impl<B: Backend> Mamba2<B> {
             .narrow(2, intermediate + group_state_width, group_state_width)
             .reshape([batch, sequence, self.groups, self.state_size]);
 
-        let dt = discretization_steps(
-            dt,
-            self.dt_bias.val(),
-            self.time_step_clamp.for_mode(mode),
-            valid,
+        let dt = zero_invalid(
+            discretization_steps(dt, self.dt_bias.val(), self.time_step_clamp.for_mode(mode)),
+            invalid.as_ref(),
         );
         let a = -self.a_log.val().cast(DType::F32).exp();
         let (scan, recurrent, matrices) = match mode {
@@ -1103,13 +1093,12 @@ fn mode_groups(rows: &[Mamba2Row]) -> Vec<(Mamba2Mode, Vec<usize>)> {
 /// runs in F32, and the result returns to the projection dtype immediately.
 /// Burn's own `softplus`, `log(exp(x) + 1)`, would overflow above `x = 88.7`
 /// and round small F16 results to zero. Only the scan promotes the stored
-/// result to F32. Multiplying by the validity mask in the same dtype gives
-/// invalid semantic tokens `dt = 0`, an identity transition.
+/// result to F32. Callers give invalid semantic tokens `dt = 0`, an identity
+/// transition, with [`zero_invalid`].
 fn discretization_steps<B: Backend>(
     dt: Tensor<B, 3>,
     bias: Tensor<B, 1>,
     limits: Option<TimeStepLimits>,
-    valid: Option<Tensor<B, 2, Bool>>,
 ) -> Tensor<B, 3> {
     let dtype = dt.dtype();
     let heads = dt.dims()[2];
@@ -1121,9 +1110,23 @@ fn discretization_steps<B: Backend>(
             dt = dt.clamp_max(upper);
         }
     }
-    match valid {
-        Some(valid) => dt * valid.float().unsqueeze_dim::<3>(2).cast(dtype),
-        None => dt,
+    dt
+}
+
+/// Replaces every channel of invalid tokens (`invalid` is `[batch, sequence]`) with zero.
+///
+/// Valid entries are returned bit for bit, so this equals multiplying by a
+/// `{0, 1}` mask for finite inputs while also clearing non-finite padding.
+fn zero_invalid<B: Backend>(
+    values: Tensor<B, 3>,
+    invalid: Option<&Tensor<B, 2, Bool>>,
+) -> Tensor<B, 3> {
+    match invalid {
+        Some(invalid) => {
+            let shape = values.dims();
+            values.mask_fill(invalid.clone().unsqueeze_dim::<3>(2).expand(shape), 0.0)
+        }
+        None => values,
     }
 }
 
