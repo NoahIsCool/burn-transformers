@@ -27,6 +27,22 @@ type TestBackend = Flex<f32, i32>;
 /// Device type associated with the beam-search fixture backend.
 type TestDevice = <TestBackend as BackendTypes>::Device;
 
+/// Reads an optional `[batch, sequence]` mask to host flags; absent means all valid.
+fn mask_flags<B: burn::tensor::backend::Backend>(
+    mask: Option<&TokenMask<B>>,
+    batch: usize,
+    sequence: usize,
+) -> Result<Vec<bool>> {
+    metadata::read_grid(
+        mask.map(|mask| mask.as_tensor().clone()),
+        None,
+        batch,
+        sequence,
+        "test mask",
+    )
+    .map(|grid| grid.valid)
+}
+
 /// Half-precision beam probabilities retain masking and match the F32 reference.
 #[test]
 fn beam_host_probabilities_respect_runtime_float_dtype() {
@@ -447,12 +463,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ScriptedModel<B> {
             return Err(Error::Checkpoint("scripted decoder prefill failed".into()));
         }
         let [batch, sequence] = decoder.token_ids.dims();
-        let valid = metadata::mask_values(
-            decoder.token_mask.as_ref(),
-            batch,
-            sequence,
-            "scripted prefill mask",
-        )?;
+        let valid = mask_flags(decoder.token_mask.as_ref(), batch, sequence)?;
         state.lengths =
             metadata::nonempty_row_lengths(&valid, batch, sequence, "scripted prefill")?;
         let logits = self.prefill_logits(encoder)?;
@@ -492,12 +503,7 @@ impl<B: Backend> Seq2SeqLanguageModel<B> for ScriptedModel<B> {
             return Err(Error::Cache("scripted decode shape mismatch".into()));
         }
         let tokens = metadata::tensor_i64_values(input.token_ids.clone(), "scripted tokens")?;
-        let valid = metadata::mask_values(
-            input.token_mask.as_ref(),
-            batch,
-            sequence,
-            "scripted decode mask",
-        )?;
+        let valid = mask_flags(input.token_mask.as_ref(), batch, sequence)?;
         for (length, &is_valid) in state.lengths.iter_mut().zip(&valid) {
             if is_valid {
                 *length += 1;
@@ -1207,7 +1213,7 @@ fn beam_gathers_preserve_masks_positions_and_optional_diagnostics() {
         [4.0, 5.0, 6.0, 7.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
     );
     assert_eq!(
-        metadata::mask_values(gathered.token_mask.as_ref(), 3, 2, "gathered mask").unwrap(),
+        mask_flags(gathered.token_mask.as_ref(), 3, 2).unwrap(),
         [false, true, true, false, false, true]
     );
     let input = CausalLmInput {
@@ -1225,7 +1231,7 @@ fn beam_gathers_preserve_masks_positions_and_optional_diagnostics() {
         [9, 10, 7, 8, 9, 10]
     );
     assert_eq!(
-        metadata::mask_values(gathered.token_mask.as_ref(), 3, 2, "mask").unwrap(),
+        mask_flags(gathered.token_mask.as_ref(), 3, 2).unwrap(),
         [false, true, true, false, false, true]
     );
 }
@@ -1363,7 +1369,7 @@ fn position_mask_and_expansion_boundaries_are_checked() {
     assert!(metadata::nonempty_row_lengths(&[true], 1, 2, "mask").is_err());
     assert!(metadata::nonempty_row_lengths(&[true, false, false, false], 2, 2, "mask").is_err());
     assert!(metadata::nonempty_row_lengths(&[], usize::MAX, 2, "mask").is_err());
-    assert!(metadata::mask_values::<TestBackend>(None, usize::MAX, 2, "mask").is_err());
+    assert!(mask_flags::<TestBackend>(None, usize::MAX, 2).is_err());
     assert_eq!(
         super::beam_expansion_indices(2, 3).unwrap(),
         [0, 0, 0, 1, 1, 1]
@@ -1371,7 +1377,14 @@ fn position_mask_and_expansion_boundaries_are_checked() {
     assert!(super::beam_expansion_indices(usize::MAX, 2).is_err());
     assert!(super::beam_expansion_indices(1, usize::MAX).is_err());
     #[cfg(target_pointer_width = "64")]
-    assert!(super::batch_selector::<TestBackend>(&[usize::MAX], &device).is_err());
+    assert!(matches!(
+        crate::models::shared::rows::index_tensor::<TestBackend>(
+            &[usize::MAX],
+            &device,
+            super::BEAM_ROWS
+        ),
+        Err(Error::Configuration { field, .. }) if field == super::BEAM_ROWS
+    ));
     assert!(super::empty_completed(usize::MAX).is_err());
     #[cfg(target_pointer_width = "64")]
     assert!(
