@@ -361,10 +361,88 @@ to its model.
 Other complete programs: [`flan_t5_small`](examples/flan_t5_small.rs) runs
 cache-aware four-beam T5 translation, [`qwen35_chat`](examples/qwen35_chat.rs)
 renders a checkpoint chat template, and [`gemma_generate`](examples/gemma_generate.rs)
-loads Gemma 2 or Gemma 3 text towers. Applications that need resumable
-sessions call `prefill` and `decode` directly with the family's external decode
-state; `prefill_chunk_size: Some(256)` bounds long causal prompts while keeping
-each ragged row's last valid logits.
+loads Gemma 2 or Gemma 3 text towers.
+
+## Inference API
+
+Every family that `AutoCausalLm` or `AutoSeq2SeqLm` dispatches, and every
+modular model, implements one of two contracts from `architecture`, so a
+generation loop written against them runs on any of these models (GPT-2 and
+GPT-NeoX are stateless study modules without decode state):
+
+- `CausalLanguageModel`: a stateless, differentiable `forward`, plus
+  `new_decode_state`, `prefill` (a prompt), and `decode` (one or more new
+  tokens) over external decode state.
+- `Seq2SeqLanguageModel` (T5): `encode`, a stateless `forward`,
+  `new_decode_state`, `prefill_decoder`, and `decode`.
+
+Inputs are `[batch, sequence]` token IDs with optional explicit positions and
+an optional `TokenMask` in which `true` marks a valid token, so ragged rows can
+be left- or right-padded. Cached prefill and decode run the whole batch in one
+model pass per step. Decode state lives outside the parameters, and the
+`DecodeState` trait exposes its capacity and per-row lengths, `reset`,
+`reorder` (gather or duplicate rows, for example beams), and `truncate` (roll
+back to earlier lengths). A failed call leaves the lengths and every readable
+cache slot unchanged.
+
+```rust
+use burn::tensor::{Int, Tensor, backend::Backend};
+use transformers::{
+    CausalLanguageModel, CausalLmInput, DecodeInput, Error, ForwardOptions, Result,
+    cache::CacheConfig,
+};
+
+/// Greedily appends `steps >= 1` tokens to every row, keeping the cache external.
+fn greedy<B: Backend, M: CausalLanguageModel<B>>(
+    model: &M,
+    prompt: CausalLmInput<B>,
+    steps: usize,
+) -> Result<Tensor<B, 2, Int>> {
+    let device = prompt.token_ids.device();
+    let [batch, prompt_tokens] = prompt.token_ids.dims();
+    // The last sampled token is never fed back, so it needs no cache slot.
+    let cache = CacheConfig::new(batch, prompt_tokens + steps.saturating_sub(1))
+        .map_err(|error| Error::Cache(error.to_string()))?;
+    let mut state = model.new_decode_state(cache, batch, &device)?;
+    // The defaults project only each row's last valid position: [batch, 1, vocabulary].
+    let options = ForwardOptions::default();
+    let mut logits = model.prefill(prompt, &mut state, &options)?.logits;
+    let mut tokens: Vec<Tensor<B, 2, Int>> = Vec::with_capacity(steps);
+    for _ in 0..steps {
+        if let Some(previous) = tokens.last() {
+            let input = DecodeInput { token_ids: previous.clone(), position_ids: None, token_mask: None };
+            logits = model.decode(input, &mut state, &options)?.logits;
+        }
+        tokens.push(logits.clone().argmax(2).squeeze_dim::<2>(2)); // [batch, 1]
+    }
+    Ok(Tensor::cat(tokens, 1))
+}
+```
+
+`ForwardOptions` selects logits with `LogitsSelection` (`Last` by default,
+`All`, or explicit `Positions`) and makes hidden states, router logits, and
+auxiliary losses opt-in. Its `attentions` flag materializes probabilities only
+in stateless passes of DeepSeek-V2, and of the Llama, Gemma, and gpt-oss
+families when every block uses `AttentionPrecisionMode::EagerFp32Softmax`;
+other families and every cached path return an error. Attention-pattern hook
+points are the general route
+([EXPERIMENTS.md](EXPERIMENTS.md#attention-scores-patterns-and-sinks)).
+
+`generate_causal` (and `generate_causal_streaming`) wrap this loop with
+sampling, penalties, stop sequences, and per-token log probabilities;
+`prefill_chunk_size: Some(256)` bounds long prompts while keeping each ragged
+row's last valid logits. For T5,
+`generate_t5_beam_search` reads the decoder-start, EOS, and PAD IDs from the
+configuration, encodes once, and decodes `source_batch * num_beams` rows; each
+step reorders the decoder cache within each source's beams while the encoder
+output and projected cross-attention keys and values stay in place.
+`num_beams = 1` gives deterministic greedy decoding through the same path, and
+`generation::generate_seq2seq_beam_search` accepts a longer decoder prompt and
+an explicit `BeamSearchConfig`. An `EncoderOutput` passed to T5 must have the
+dtype of the model's parameters (states are never cast silently). The first
+successful `prefill_decoder` binds it to the state; later calls must pass an
+output of the same shape, device, dtype, and mask layout, and the state keeps
+using its bound copy.
 
 ## Quantization
 
