@@ -374,6 +374,49 @@ fn clamped_swiglu_matches_gpt_oss_closed_form() {
     }
 }
 
+/// The clamped unit reproduces Hugging Face's gpt-oss `GptOssExperts._apply_gate`.
+///
+/// Pinned with transformers 5.2.0 and torch 2.10.0 (F32, CPU) on the
+/// interleaved `gate_up` row below, whose even columns are gates and odd
+/// columns up projections; values beyond `+-7` exercise both clamps.
+#[test]
+fn clamped_swiglu_matches_pinned_gpt_oss_reference() {
+    let device = Default::default();
+    let gate_up = [
+        -9.0_f32, 8.0, -1.0, -8.0, 0.5, 2.0, 9.0, 7.5, 3.0, -0.25, 6.9, -7.1,
+    ];
+    let reference = [
+        -1.602_542_76e-5_f64,
+        0.925_225_377,
+        1.051_165_34,
+        55.999_626_2,
+        2.236_446_62,
+        -41.399_669_6,
+    ];
+    let gate = Tensor::<Flex, 1>::from_floats(
+        core::array::from_fn::<f32, 6, _>(|index| gate_up[2 * index]),
+        &device,
+    );
+    let up = Tensor::<Flex, 1>::from_floats(
+        core::array::from_fn::<f32, 6, _>(|index| gate_up[2 * index + 1]),
+        &device,
+    );
+    let actual = ClampedSwiGlu::new(7.0)
+        .with_alpha(1.702)
+        .with_up_offset(1.0)
+        .combine(gate, up)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    for (actual, expected) in actual.into_iter().zip(reference) {
+        let actual = f64::from(actual);
+        assert!(
+            (actual - expected).abs() <= 1e-6 + 1e-6 * expected.abs(),
+            "{actual} vs {expected}"
+        );
+    }
+}
+
 /// With alpha one and no offset, a non-binding limit reproduces ordinary SwiGLU.
 #[test]
 fn unclamped_unit_equals_standard_swiglu_block() {

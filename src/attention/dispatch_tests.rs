@@ -476,6 +476,85 @@ fn attention_sinks_match_extra_column_oracle_in_both_graphs() {
     }
 }
 
+/// Output of Hugging Face's gpt-oss `eager_attention_forward` for the sink fixture.
+///
+/// Pinned with transformers 5.2.0 and torch 2.10.0 (F32, CPU): queries, keys,
+/// and values are this module's `values(n, 1 | 2 | 3)` fixtures in
+/// `[2, 4, 3, 3]`, `[2, 2, 5, 3]`, and `[2, 2, 5, 2]`; sinks are
+/// `[0.4, -1.3, 0.9, 2.2]`; `scaling = 0.61`; and the additive mask is `-inf`
+/// on the `Problem::with_padding` pattern plus bottom-right causal links. The
+/// reference output `[batch, query, head, value]` is listed here transposed to
+/// `[batch, head, query, value]`.
+const GPT_OSS_SINK_REFERENCE: [f64; 48] = [
+    0.0,
+    0.0,
+    0.068_462_461,
+    -0.209_003_896,
+    -0.087_072_886_5,
+    0.163_870_886,
+    0.0,
+    0.0,
+    0.111_773_424,
+    -0.489_854_485,
+    0.023_477_122_2,
+    0.057_496_853_2,
+    0.0,
+    0.0,
+    0.153_382_54,
+    -0.162_919_626,
+    0.087_014_392,
+    -0.306_541_92,
+    0.0,
+    0.0,
+    0.146_412_939,
+    0.084_311_373_5,
+    0.063_471_913_3,
+    -0.060_960_695_1,
+    -0.042_540_907_9,
+    0.074_061_967_4,
+    0.077_267_386,
+    0.149_545_819,
+    0.153_732_3,
+    -0.011_979_484,
+    -0.558_887_064,
+    0.268_511_772,
+    -0.397_918_999,
+    0.612_480_164,
+    -0.215_120_971,
+    0.037_361_770_9,
+    0.117_741_667,
+    0.179_854_989,
+    0.009_546_427_99,
+    0.313_024_312,
+    -0.046_354_945_7,
+    0.283_165_902,
+    0.010_084_477_3,
+    0.053_996_451_2,
+    -0.000_787_153_898,
+    0.106_649_496,
+    0.014_614_789_7,
+    0.010_276_235_6,
+];
+
+/// Both graphs reproduce the pinned gpt-oss sink attention, including a fully excluded row.
+#[test]
+fn attention_sinks_match_pinned_gpt_oss_reference() {
+    let mut problem = Problem::new(2, 4, 2, 3, 5).with_padding();
+    problem.causal = true;
+    problem.scale = Some(0.61);
+    problem.sinks = Some(vec![0.4, -1.3, 0.9, 2.2]);
+    for precision in [
+        AttentionPrecisionMode::BackendDefault,
+        AttentionPrecisionMode::EagerFp32Softmax,
+    ] {
+        assert_close(
+            &problem.evaluate(precision).unwrap(),
+            &GPT_OSS_SINK_REFERENCE.map(|value| value as f32),
+            &format!("{precision:?} gpt-oss reference"),
+        );
+    }
+}
+
 /// A row whose keys are all excluded attends only to the zero-value sink.
 #[test]
 fn sink_absorbs_fully_excluded_rows_and_default_scale_is_supported() {
