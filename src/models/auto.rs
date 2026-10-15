@@ -68,6 +68,7 @@ use crate::{
 use super::{
     deepseek_v2::{DeepseekV2Config, DeepseekV2DecodeState, DeepseekV2ForCausalLm},
     gemma::{GemmaConfig, GemmaDecodeState, GemmaForCausalLm},
+    gpt_oss::{GptOssConfig, GptOssDecodeState, GptOssForCausalLm},
     llama::{LlamaDecodeState, LlamaFamilyConfig, LlamaForCausalLm},
     muse_glimmer::{MuseGlimmerDecodeState, MuseGlimmerForCausalLm, MuseGlimmerTextConfig},
     nemotron_h::{NemotronHConfig, NemotronHDecodeState, NemotronHForCausalLm},
@@ -593,6 +594,14 @@ causal_registry! {
         model: Qwen3MoeForCausalLm,
         config: Qwen3MoeConfig,
         state: Qwen3MoeDecodeState,
+        experiments: supported,
+    },
+    /// OpenAI gpt-oss sparse decoder with attention sinks and MXFP4 experts.
+    GptOss {
+        model_type: "gpt_oss",
+        model: GptOssForCausalLm,
+        config: GptOssConfig,
+        state: GptOssDecodeState,
         experiments: supported,
     },
     /// Llama-family dense decoder: Llama 2/3.x, Mistral, Qwen2/2.5, Qwen3, SmolLM3, and OLMo 2.

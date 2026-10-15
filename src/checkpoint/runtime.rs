@@ -39,6 +39,8 @@ pub use packed_install::{
     PackedInstall, PackedLayoutPolicy, install_packed_parameter, packed_layout_is_exact,
 };
 pub use source::{LocalShardSource, SourceStats, SourceTensor, TensorSource};
+#[cfg(test)]
+pub(super) use transform::dequantize_mxfp4;
 
 use super::{
     CheckpointEquivalenceRecord, CheckpointError, CheckpointManifest, LoadPlan, LoadReport,

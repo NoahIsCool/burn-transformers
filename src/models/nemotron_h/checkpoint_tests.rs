@@ -225,6 +225,9 @@ fn lightning_shape_contract_matches_pinned_inventory_count() {
             TensorOperation::Concatenate { sources, .. } => {
                 source_names.extend(sources.iter().map(String::as_str));
             }
+            TensorOperation::DequantizeMxfp4 { blocks, scales, .. } => {
+                source_names.extend([blocks.as_str(), scales.as_str()]);
+            }
             TensorOperation::Alias { .. } => {}
         }
     }

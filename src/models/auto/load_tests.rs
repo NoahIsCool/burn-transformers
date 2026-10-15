@@ -78,7 +78,9 @@ fn write_contract_checkpoint(root: &Path, expected: &[ExpectedTensor], mappings:
                 tensors.push((source.clone(), source_shape));
             }
             TensorOperation::Alias { .. } => {}
-            TensorOperation::Split { .. } | TensorOperation::Concatenate { .. } => {
+            TensorOperation::Split { .. }
+            | TensorOperation::Concatenate { .. }
+            | TensorOperation::DequantizeMxfp4 { .. } => {
                 panic!("automatic family fixture supports map and alias contracts only")
             }
         }

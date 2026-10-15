@@ -6,7 +6,8 @@ implementation computes for a local checkpoint, so the Rust crate can be
 compared against it without Python at test time. It
 
 * loads ``AutoModelForCausalLM`` from a local directory only (no Hub access),
-  in F32 on the CPU with eager attention and deterministic kernels;
+  in F32 (or, with ``--dtype bfloat16``, BF16) on the CPU with eager
+  attention and deterministic kernels;
 * tokenizes a few fixed prompts with the checkpoint's own tokenizer and
   records their token IDs, so consumers need no tokenizer;
 * writes every prompt position's full-vocabulary logits as raw little-endian
@@ -27,6 +28,14 @@ Usage::
     python3 scripts/generate_causal_lm_reference.py \\
         --model-dir /path/to/checkpoint --output /path/to/references/name \\
         --repository HuggingFaceTB/SmolLM-135M --revision <commit>
+
+Checkpoints too large to evaluate in F32 can be evaluated in BF16 with
+``--dtype bfloat16``; logits are still written as F32. ``--num-hidden-layers N``
+keeps only the first ``N`` blocks (with the real embedding, final norm, and
+head), a real-weight smoke reference that fits in memory at F32. gpt-oss is the
+motivating case: without CUDA kernels Transformers decodes its MXFP4
+experts to BF16, and the F32 model (about 78 GiB for gpt-oss-20b) does not
+fit a 96 GiB host, while the BF16 one needs about 55 GiB while loading.
 """
 
 from __future__ import annotations
@@ -65,6 +74,8 @@ DEFAULT_PROMPTS = (
 DEFAULT_GREEDY_TOKENS = 32
 #: Name of the bundle's manifest.
 MANIFEST = "reference.json"
+#: Evaluation dtypes accepted by ``--dtype``; logits are always written as F32.
+DTYPES = ("float32", "bfloat16")
 
 
 def sha256_file(path: Path) -> str:
@@ -138,30 +149,99 @@ def provenance(model_dir: Path, arguments: argparse.Namespace) -> dict[str, Any]
         "model_dir": str(model_dir),
         "config_sha256": sha256_file(model_dir / "config.json"),
         "weights_sha256": {path.name: sha256_file(path) for path in weight_files(model_dir)},
-        "dtype": "float32",
+        "dtype": arguments.dtype,
+        "num_hidden_layers": arguments.num_hidden_layers,
         "device": "cpu",
         "attention_implementation": "eager",
     }
 
 
-def load_model(model_dir: Path) -> tuple[Any, Any]:
-    """Loads the tokenizer and the F32 eager model from local files only."""
+def truncate_config(config: Any, layers: int) -> None:
+    """Keeps only the first `layers` decoder blocks of a configuration, in place.
 
+    `num_hidden_layers` and, when present, the per-layer `layer_types`
+    schedule are cut; every other field is unchanged, so the truncated model
+    loads the checkpoint's first blocks, embedding, final norm, and head.
+    """
+
+    if layers < 1 or layers > config.num_hidden_layers:
+        raise ValueError(f"cannot keep {layers} of {config.num_hidden_layers} layers")
+    config.num_hidden_layers = layers
+    if getattr(config, "layer_types", None):
+        config.layer_types = list(config.layer_types[:layers])
+
+
+def cast_floating_parameters(model: Any, dtype: Any) -> int:
+    """Casts every floating parameter of `model` to the torch `dtype` in place; returns how many changed.
+
+    Buffers are deliberately left alone. Transformers keeps some of them in
+    F32 whatever the model dtype, most importantly the rotary ``inv_freq``
+    tables: rounding those to BF16 moves every rotary angle (by up to 0.28 rad
+    at position 183 for gpt-oss-20b's YaRN frequencies), so a BF16 reference
+    would no longer be ordinary BF16 inference. ``torch.nn.Module.to`` casts
+    buffers too and is therefore not used. Integer parameters and those
+    already in `dtype` are untouched; tied parameters are visited once.
+    """
+
+    import torch
+
+    changed = 0
+    with torch.no_grad():
+        for parameter in model.parameters():
+            if parameter.is_floating_point() and parameter.dtype != dtype:
+                parameter.data = parameter.data.to(dtype)
+                changed += 1
+    return changed
+
+
+def load_causal_lm(model_dir: Path, dtype: str = "float32", layers: int | None = None) -> Any:
+    """Loads the eager model, in `dtype` (one of `DTYPES`), from local files only.
+
+    With `layers`, only the first `layers` decoder blocks are built and
+    loaded (see `truncate_config`); the checkpoint's other blocks are ignored.
+
+    Quantized checkpoints can leave dequantized parameters in another dtype:
+    without CUDA kernels Transformers decodes MXFP4 experts to BF16 whatever
+    `dtype` says, and its grouped expert kernels then cast F32 activations
+    down to BF16, so an "F32" reference would not be F32. Every floating
+    parameter is therefore cast to `dtype` after loading (exact for the BF16
+    decodings; nothing changes for an ordinary checkpoint or for
+    ``bfloat16``), while buffers keep the dtype Transformers chose (see
+    `cast_floating_parameters`).
+    """
+
+    if dtype not in DTYPES:
+        raise ValueError(f"dtype must be one of {DTYPES}, not {dtype!r}")
     import torch
     import transformers
 
     torch.use_deterministic_algorithms(True)
     torch.manual_seed(0)
     transformers.utils.logging.disable_progress_bar()
-    tokenizer = transformers.AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+    config = transformers.AutoConfig.from_pretrained(model_dir, local_files_only=True)
+    if layers is not None:
+        truncate_config(config, layers)
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_dir,
+        config=config,
         local_files_only=True,
-        dtype=torch.float32,
+        dtype=getattr(torch, dtype),
         attn_implementation="eager",
     )
+    cast_floating_parameters(model, getattr(torch, dtype))
     model.eval()
-    return tokenizer, model
+    return model
+
+
+def load_model(model_dir: Path, dtype: str = "float32", layers: int | None = None) -> tuple[Any, Any]:
+    """Loads the checkpoint's own tokenizer and its eager model (see `load_causal_lm`)."""
+
+    if dtype not in DTYPES:
+        raise ValueError(f"dtype must be one of {DTYPES}, not {dtype!r}")
+    import transformers
+
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+    return tokenizer, load_causal_lm(model_dir, dtype, layers)
 
 
 def prompt_logits(model: Any, token_ids: list[int]) -> Any:
@@ -203,7 +283,7 @@ def build_bundle(arguments: argparse.Namespace, staging: Path) -> dict[str, Any]
     """Evaluates the prompts and writes the logits files into `staging`."""
 
     model_dir = arguments.model_dir.resolve(strict=True)
-    tokenizer, model = load_model(model_dir)
+    tokenizer, model = load_model(model_dir, arguments.dtype, arguments.num_hidden_layers)
     prompts = []
     for index, text in enumerate(arguments.prompts):
         token_ids = tokenizer(text, add_special_tokens=arguments.add_special_tokens)["input_ids"]
@@ -250,6 +330,17 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--greedy-tokens", type=int, default=DEFAULT_GREEDY_TOKENS)
     parser.add_argument(
+        "--dtype",
+        choices=DTYPES,
+        default="float32",
+        help="evaluation dtype; logits are written as F32 either way",
+    )
+    parser.add_argument(
+        "--num-hidden-layers",
+        type=int,
+        help="keep only the first N decoder blocks (a real-weight smoke reference)",
+    )
+    parser.add_argument(
         "--no-special-tokens",
         dest="add_special_tokens",
         action="store_false",
@@ -260,6 +351,8 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         arguments.prompts = list(DEFAULT_PROMPTS)
     if arguments.greedy_tokens < 1:
         parser.error("--greedy-tokens must be at least one")
+    if arguments.num_hidden_layers is not None and arguments.num_hidden_layers < 1:
+        parser.error("--num-hidden-layers must be at least one")
     return arguments
 
 

@@ -24,11 +24,14 @@ use burn::tensor::{BoolStore, DType, TensorData};
 use super::{
     ExecutionStats, TensorSource,
     convert::{
-        ConvertInPlace, GatherIntervals, ScatterIntervals, TransposeInto, validate_cast,
-        with_scalar_conversion,
+        ConvertInPlace, GatherIntervals, ScalarKernel, ScatterIntervals, TransposeInto,
+        validate_cast, with_scalar_conversion,
     },
 };
 use crate::checkpoint::layout::{element_count, slice_block};
+use crate::checkpoint::mxfp4::{
+    Mxfp4Geometry, Mxfp4Table, decode_transposed, decoded_shape, mxfp4_geometry,
+};
 use crate::checkpoint::{
     CheckpointEquivalenceRecord, CheckpointError, LoadPlan, PlannedSource, PlannedTensor,
     PlannedTensorEquivalence, PlannedTransform, Result, SourceTensor, TensorDType,
@@ -105,6 +108,7 @@ pub(super) fn materialize<S: TensorSource>(
         PlannedTransform::Concatenate { axis } => {
             materialize_concatenate(tensor, *axis, source, stats)
         }
+        PlannedTransform::DequantizeMxfp4 => materialize_mxfp4(tensor, source, stats),
         PlannedTransform::Alias { .. } => invalid_plan(format!(
             "alias `{}` occurred in the primary tensor list",
             tensor.target
@@ -116,9 +120,12 @@ pub(super) fn materialize<S: TensorSource>(
 fn validate_primary(tensor: &PlannedTensor) -> Result<()> {
     let _ = burn_dtype(tensor.dtype)?;
     let _ = byte_len(&tensor.shape, tensor.dtype, &tensor.target)?;
+    let decoded = matches!(tensor.transform, PlannedTransform::DequantizeMxfp4);
     for source in &tensor.sources {
         validate_source_descriptor(source)?;
-        validate_cast(source.dtype, tensor.dtype)?;
+        if !decoded {
+            validate_cast(source.dtype, tensor.dtype)?;
+        }
     }
 
     match &tensor.transform {
@@ -181,6 +188,7 @@ fn validate_primary(tensor: &PlannedTensor) -> Result<()> {
         PlannedTransform::Concatenate { axis } => {
             validate_concatenation(tensor, *axis)?;
         }
+        PlannedTransform::DequantizeMxfp4 => validate_mxfp4(tensor)?,
         PlannedTransform::Alias { .. } => {
             return invalid_plan(format!(
                 "alias `{}` occurred in the primary tensor list",
@@ -189,6 +197,172 @@ fn validate_primary(tensor: &PlannedTensor) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Validates an MXFP4 work item: dtypes, the shape pair, and the decoded target.
+fn validate_mxfp4(tensor: &PlannedTensor) -> Result<()> {
+    let [blocks, scales] = tensor.sources.as_slice() else {
+        return invalid_plan(format!(
+            "MXFP4 target `{}` requires blocks and scales sources, found {}",
+            tensor.target,
+            tensor.sources.len()
+        ));
+    };
+    if blocks.dtype != TensorDType::U8
+        || !matches!(scales.dtype, TensorDType::U8 | TensorDType::F8_E8M0)
+        || !matches!(
+            tensor.dtype,
+            TensorDType::F16 | TensorDType::BF16 | TensorDType::F32 | TensorDType::F64
+        )
+    {
+        return invalid_plan(format!(
+            "MXFP4 target `{}` decodes U8 blocks and U8/F8_E8M0 scales into F16, BF16, F32, or F64",
+            tensor.target
+        ));
+    }
+    let shape = decoded_shape(&blocks.shape, &scales.shape).map_err(|reason| {
+        CheckpointError::InvalidMapping {
+            message: format!("MXFP4 target `{}` sources {reason}", tensor.target),
+        }
+    })?;
+    if tensor.shape != shape {
+        return invalid_plan(format!(
+            "MXFP4 target `{}` shape {:?} should be {shape:?}",
+            tensor.target, tensor.shape
+        ));
+    }
+    Ok(())
+}
+
+/// Reads an MXFP4 blocks/scales pair and decodes it into the planned dtype.
+///
+/// Both payloads and the output are resident together, which is the
+/// operation's planned staging bound ([`PlannedTensor::staging_bytes`]).
+fn materialize_mxfp4<S: TensorSource>(
+    tensor: &PlannedTensor,
+    source: &mut S,
+    stats: &mut ExecutionStats,
+) -> Result<TensorData> {
+    let [blocks_source, scales_source] = tensor.sources.as_slice() else {
+        return invalid_plan(format!(
+            "MXFP4 target `{}` requires blocks and scales sources",
+            tensor.target
+        ));
+    };
+    let blocks = read_verified(source, blocks_source, stats)?;
+    let scales = read_verified(source, scales_source, stats)?;
+    let output = dequantize_mxfp4(
+        &tensor.target,
+        (blocks.bytes(), blocks.shape()),
+        (scales.bytes(), scales.shape()),
+        tensor.dtype,
+    )?;
+    let sources = blocks
+        .byte_len()
+        .checked_add(scales.byte_len())
+        .ok_or_else(|| payload_bounds(&tensor.target))?;
+    observe_peak(stats, sources, output.len(), &tensor.target)?;
+    make_tensor_data(&tensor.target, tensor.dtype, &tensor.shape, output)
+}
+
+/// Decodes MXFP4 `(bytes, shape)` blocks and scales into native `dtype` bytes.
+///
+/// The result is `[experts, 32 · groups, rows]` in Transformers' layout (see
+/// the `mxfp4` module). The exact binary64 value of each of the 4096
+/// `(scale, code)` pairs is converted once to `dtype` with the loader's own
+/// correctly rounded F64 conversion, then the blocks decode by table lookup.
+///
+/// # Errors
+///
+/// Returns [`CheckpointError::InvalidMapping`] for a malformed shape pair or
+/// payload length, an unsupported target dtype, or an allocation failure.
+pub(crate) fn dequantize_mxfp4(
+    target: &str,
+    blocks: (&[u8], &[u64]),
+    scales: (&[u8], &[u64]),
+    dtype: TensorDType,
+) -> Result<Vec<u8>> {
+    let geometry =
+        mxfp4_geometry(blocks.1, scales.1).map_err(|reason| CheckpointError::InvalidMapping {
+            message: format!("MXFP4 target `{target}` sources {reason}"),
+        })?;
+    if !matches!(
+        dtype,
+        TensorDType::F16 | TensorDType::BF16 | TensorDType::F32 | TensorDType::F64
+    ) {
+        return Err(CheckpointError::UnsupportedDTypeConversion {
+            source_dtype: TensorDType::F64,
+            target_dtype: dtype,
+        });
+    }
+    with_scalar_conversion(
+        TensorDType::F64,
+        dtype,
+        Mxfp4Kernel {
+            target,
+            blocks: blocks.0,
+            scales: scales.0,
+            geometry,
+        },
+    )?
+}
+
+/// Builds one dtype's decode table and runs the MXFP4 kernel with it.
+struct Mxfp4Kernel<'a> {
+    /// Target name for diagnostics.
+    target: &'a str,
+    /// Packed block bytes.
+    blocks: &'a [u8],
+    /// E8M0 scale codes.
+    scales: &'a [u8],
+    /// Validated extents.
+    geometry: Mxfp4Geometry,
+}
+
+impl ScalarKernel for Mxfp4Kernel<'_> {
+    /// Native target bytes of the decoded tensor.
+    type Output = Result<Vec<u8>>;
+
+    /// Encodes the 4096 exact values with `convert`, then decodes by lookup.
+    ///
+    /// `convert` maps little-endian binary64 scalars (`SOURCE = 8`) to the
+    /// target dtype's native bytes.
+    fn run<const SOURCE: usize, const TARGET: usize>(
+        self,
+        convert: impl Fn([u8; SOURCE]) -> [u8; TARGET] + Copy,
+    ) -> Self::Output {
+        let mut scalar = [0_u8; SOURCE];
+        if SOURCE != core::mem::size_of::<u64>() {
+            return invalid_plan(format!(
+                "MXFP4 target `{}` encodes binary64 values, not {SOURCE}-byte scalars",
+                self.target
+            ));
+        }
+        let table = Mxfp4Table::new(|bits| {
+            scalar.copy_from_slice(&bits.to_le_bytes());
+            convert(scalar)
+        });
+        let bytes = self
+            .geometry
+            .values()
+            .checked_mul(TARGET)
+            .ok_or_else(|| payload_bounds(self.target))?;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(bytes)
+            .map_err(|_| CheckpointError::AllocationFailed {
+                bytes: bytes as u64,
+                context: "allocating a decoded MXFP4 tensor",
+            })?;
+        output.resize(bytes, 0);
+        decode_transposed(self.blocks, self.scales, self.geometry, &table, &mut output).map_err(
+            |reason| CheckpointError::InvalidTensorPayload {
+                tensor: self.target.to_owned(),
+                reason: format!("MXFP4 payloads {reason}"),
+            },
+        )?;
+        Ok(output)
+    }
 }
 
 /// Validates exact physical-equivalence work and its report/memory accounting.

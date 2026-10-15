@@ -29,6 +29,7 @@ use crate::{
         config::{ModelConfig, TokenIds},
         deepseek_v2::{DeepseekV2CheckpointOptions, DeepseekV2Config, DeepseekV2ForCausalLm},
         gemma::{GemmaCheckpointOptions, GemmaCheckpointSource, GemmaConfig, GemmaForCausalLm},
+        gpt_oss::{GptOssCheckpointOptions, GptOssConfig, GptOssForCausalLm},
         llama::{LlamaCheckpointOptions, LlamaFamilyConfig, LlamaForCausalLm},
         muse_glimmer::{
             MuseGlimmerCheckpointOptions, MuseGlimmerCheckpointSource, MuseGlimmerForCausalLm,
@@ -437,6 +438,43 @@ impl<B: Backend> CausalFamily<B> for GemmaForCausalLm<B> {
     /// Initializes the graph from the unchanged configuration.
     fn init_for_load(
         config: GemmaConfig,
+        _options: &AutoLoadOptions,
+        device: &B::Device,
+    ) -> Result<Self> {
+        Self::init(config, device)
+    }
+}
+
+impl<B: Backend> CausalFamily<B> for GptOssForCausalLm<B> {
+    /// The parsed `gpt_oss` configuration.
+    type Config = GptOssConfig;
+
+    /// Reads gpt-oss's vocabulary and token fields.
+    fn token_metadata(config: &GptOssConfig) -> TokenMetadata<'_> {
+        TokenMetadata::of(
+            config.vocab_size,
+            &config.eos_token_id,
+            &config.pad_token_id,
+        )
+    }
+
+    /// Plans the single published namespace; MXFP4 experts decode when the config declares them.
+    fn plan_checkpoint(
+        config: &GptOssConfig,
+        root: &Path,
+        options: &AutoLoadOptions,
+    ) -> Result<PlannedCheckpoint> {
+        let manifest = discover(root, options)?;
+        let contract = config.checkpoint_contract(GptOssCheckpointOptions::default())?;
+        let plan = contract
+            .build_load_plan(&manifest, &options.checkpoint)
+            .map_err(checkpoint_error)?;
+        Ok(PlannedCheckpoint { manifest, plan })
+    }
+
+    /// Initializes the graph from the unchanged configuration.
+    fn init_for_load(
+        config: GptOssConfig,
         _options: &AutoLoadOptions,
         device: &B::Device,
     ) -> Result<Self> {

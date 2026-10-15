@@ -155,6 +155,24 @@ pub enum TensorOperation {
         /// New model parameter alias.
         target: String,
     },
+    /// Decode an MXFP4 blocks/scales pair into one floating-point target.
+    ///
+    /// `blocks` is `u8 [experts, rows, groups, 16]` (two FP4 E2M1 codes per
+    /// byte) and `scales` is `[experts, rows, groups]` E8M0 exponents (`U8` or
+    /// `F8_E8M0`). The target is `[experts, 32 · groups, rows]`, exactly the
+    /// tensor Transformers' `convert_moe_packed_tensors` returns; see
+    /// [`crate::checkpoint`]'s `mxfp4` module for the decoding rules. The
+    /// decoded values are nominally BF16 (Transformers' dequantized dtype),
+    /// so the load plan's [`DTypePolicy`] selects the stored dtype, and each
+    /// value is rounded once from its exact decoded value.
+    DequantizeMxfp4 {
+        /// Packed `*_blocks` checkpoint tensor name.
+        blocks: String,
+        /// Shared `*_scales` checkpoint tensor name.
+        scales: String,
+        /// Model parameter name.
+        target: String,
+    },
 }
 
 /// Architecture-owned sequence of explicit mapping operations.
@@ -240,6 +258,23 @@ impl MappingPlan {
         self
     }
 
+    /// Adds an MXFP4 dequantization of a blocks/scales pair into one target.
+    ///
+    /// See [`TensorOperation::DequantizeMxfp4`] for the shapes and decoding.
+    pub fn dequantize_mxfp4(
+        &mut self,
+        blocks: impl Into<String>,
+        scales: impl Into<String>,
+        target: impl Into<String>,
+    ) -> &mut Self {
+        self.operations.push(TensorOperation::DequantizeMxfp4 {
+            blocks: blocks.into(),
+            scales: scales.into(),
+            target: target.into(),
+        });
+        self
+    }
+
     /// Adds a tied target alias.
     pub fn alias(
         &mut self,
@@ -319,6 +354,8 @@ pub enum PlannedTransform {
         /// Ultimate non-aliased target that owns storage.
         source_target: String,
     },
+    /// MXFP4 decoding of `sources = [blocks, scales]` into the target dtype.
+    DequantizeMxfp4,
 }
 
 /// Fully validated work item for pass-two parameter loading.
@@ -395,12 +432,25 @@ impl PlannedTensor {
     /// Returns the host bytes the executor stages while materializing this target.
     ///
     /// The executor holds one source payload at a time plus the output buffer:
-    /// `largest source + output`. An identity transfer that converts in place
+    /// `largest source + output`. MXFP4 decoding holds both of its sources and
+    /// the output: `blocks + scales + output`. An identity transfer that converts in place
     /// ([`TensorDType::converts_in_place_to`]) reuses its source buffer, so it
     /// needs only the source. The runtime enforces this same figure against
     /// [`MemoryEstimate::peak_host_staging_bytes`] before any source read.
     pub fn staging_bytes(&self) -> Result<u64> {
         let output = self.dtype.tensor_storage_bytes(&self.shape)?;
+        if matches!(self.transform, PlannedTransform::DequantizeMxfp4) {
+            // Blocks, scales, and the decoded output are resident together.
+            let mut total = output;
+            for source in &self.sources {
+                total = total
+                    .checked_add(source.dtype.tensor_storage_bytes(&source.shape)?)
+                    .ok_or(CheckpointError::ArithmeticOverflow {
+                        context: "computing MXFP4 decoding staging bound",
+                    })?;
+            }
+            return Ok(total);
+        }
         let mut largest_source = 0_u64;
         for source in &self.sources {
             largest_source = largest_source.max(source.dtype.tensor_storage_bytes(&source.shape)?);
@@ -586,6 +636,11 @@ impl PlanBuilder<'_> {
                 source_target,
                 target,
             } => self.declare_alias(source_target, target),
+            TensorOperation::DequantizeMxfp4 {
+                blocks,
+                scales,
+                target,
+            } => self.plan_mxfp4(blocks, scales, target),
         }
     }
 
@@ -734,6 +789,43 @@ impl PlanBuilder<'_> {
             PlannedTransform::Concatenate { axis },
             shape,
             first.dtype,
+        )
+    }
+
+    /// Plans an MXFP4 dequantization of `blocks` and `scales` into `target`.
+    ///
+    /// Blocks must be `U8` and scales `U8` or `F8_E8M0` (the same byte
+    /// encoding); their shapes must pass [`super::mxfp4::mxfp4_geometry`]. The
+    /// target is `[experts, 32 · groups, rows]` with the nominal source dtype
+    /// BF16, so the dtype policy chooses the stored float dtype.
+    fn plan_mxfp4(&mut self, blocks: &str, scales: &str, target: &str) -> Result<()> {
+        consume(&mut self.consumed, blocks)?;
+        consume(&mut self.consumed, scales)?;
+        let blocks_tensor = source_tensor(self.manifest, blocks)?;
+        let scales_tensor = source_tensor(self.manifest, scales)?;
+        if blocks_tensor.dtype != TensorDType::U8
+            || !matches!(scales_tensor.dtype, TensorDType::U8 | TensorDType::F8_E8M0)
+        {
+            return Err(CheckpointError::InvalidMapping {
+                message: format!(
+                    "MXFP4 target `{target}` needs U8 blocks and U8/F8_E8M0 scales, found {} and {}",
+                    blocks_tensor.dtype, scales_tensor.dtype
+                ),
+            });
+        }
+        let shape = super::mxfp4::decoded_shape(&blocks_tensor.shape, &scales_tensor.shape)
+            .map_err(|reason| CheckpointError::InvalidMapping {
+                message: format!(
+                    "MXFP4 target `{target}`: blocks {:?} and scales {:?} {reason}",
+                    blocks_tensor.shape, scales_tensor.shape
+                ),
+            })?;
+        self.claim_primary(
+            target,
+            vec![blocks_tensor.into(), scales_tensor.into()],
+            PlannedTransform::DequantizeMxfp4,
+            shape,
+            TensorDType::BF16,
         )
     }
 
@@ -1228,7 +1320,10 @@ fn create_report(primary: &[PlannedTensor], aliases: &[PlannedTensor]) -> LoadRe
     let mut report = LoadReport::new();
     for tensor in primary {
         let source_dtype = tensor.sources[0].dtype;
-        if source_dtype != tensor.dtype {
+        // MXFP4 decoding writes the target dtype directly; it is a transform,
+        // not a cast of its integer sources.
+        let decoded = matches!(tensor.transform, PlannedTransform::DequantizeMxfp4);
+        if source_dtype != tensor.dtype && !decoded {
             report.dtype_converted.push(DTypeConversion {
                 target: tensor.target.clone(),
                 source: source_dtype,
@@ -1246,6 +1341,7 @@ fn create_report(primary: &[PlannedTensor], aliases: &[PlannedTensor]) -> LoadRe
                 length,
             } => Some(format!("slice(axis={axis},start={start},length={length})")),
             PlannedTransform::Concatenate { axis } => Some(format!("concatenate(axis={axis})")),
+            PlannedTransform::DequantizeMxfp4 => Some("dequantize_mxfp4".to_owned()),
             PlannedTransform::Alias { .. } => None,
         };
         if let Some(operation) = operation {
@@ -1352,7 +1448,17 @@ fn estimate_memory(
         .ok_or(CheckpointError::ArithmeticOverflow {
             context: "estimating peak host staging bytes",
         })?;
-    let peak_host_staging_bytes = transform_staging_bytes.max(largest_equivalence_pair_bytes);
+    // MXFP4 decoding holds two sources, which may live in different shards.
+    let mut decoding_staging_bytes = 0_u64;
+    for tensor in primary
+        .iter()
+        .filter(|tensor| matches!(tensor.transform, PlannedTransform::DequantizeMxfp4))
+    {
+        decoding_staging_bytes = decoding_staging_bytes.max(tensor.staging_bytes()?);
+    }
+    let peak_host_staging_bytes = transform_staging_bytes
+        .max(largest_equivalence_pair_bytes)
+        .max(decoding_staging_bytes);
     Ok(MemoryEstimate {
         artifact_bytes: manifest.artifact_bytes,
         checkpoint_tensor_bytes: manifest.tensor_bytes,

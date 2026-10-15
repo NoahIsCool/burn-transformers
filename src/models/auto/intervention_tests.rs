@@ -12,8 +12,10 @@ use crate::{
     architecture::{HookedModel, StagedModel},
     intervention::{Hooks, Layer, Stack},
     models::{
+        config::RopeParameters,
         deepseek_v2::model::tests_support as deepseek,
         gemma::{GemmaConfig, GemmaForCausalLm, GemmaVariant},
+        gpt_oss::{GptOssConfig, GptOssForCausalLm},
         llama::{LlamaFamilyConfig, LlamaForCausalLm, LlamaVariant},
     },
 };
@@ -34,6 +36,30 @@ fn tiny_gemma() -> GemmaConfig {
         bos_token_id: None,
         eos_token_id: None,
         ..GemmaConfig::new(GemmaVariant::Gemma3Text)
+    }
+}
+
+/// Tiny gpt-oss configuration: two alternating sliding/full layers, four experts, top-2.
+fn tiny_gpt_oss() -> GptOssConfig {
+    GptOssConfig {
+        vocab_size: 32,
+        hidden_size: 16,
+        intermediate_size: 12,
+        num_hidden_layers: 2,
+        num_attention_heads: 4,
+        num_key_value_heads: 2,
+        head_dim: 4,
+        num_local_experts: 4,
+        num_experts_per_tok: 2,
+        sliding_window: Some(2),
+        layer_types: GptOssConfig::default_layer_types(2),
+        max_position_embeddings: 32,
+        rope_parameters: RopeParameters {
+            factor: Some(4.0),
+            original_max_position_embeddings: Some(8),
+            ..GptOssConfig::default_rope_parameters()
+        },
+        ..GptOssConfig::default()
     }
 }
 
@@ -84,6 +110,9 @@ fn tiny_family_model(
             .into(),
         AutoCausalConfig::Gemma => GemmaForCausalLm::init(tiny_gemma(), device)
             .expect("tiny Gemma model")
+            .into(),
+        AutoCausalConfig::GptOss => GptOssForCausalLm::init(tiny_gpt_oss(), device)
+            .expect("tiny gpt-oss model")
             .into(),
     }
 }
@@ -363,4 +392,50 @@ fn automatic_t5_exposes_both_stacks_and_preserves_identity_outputs() {
         .forward_with_hooks(input, &options, &mut ablate)
         .unwrap();
     assert!(max_difference(ablated.decoder.logits, expected.decoder.logits) > 1e-6);
+}
+
+/// gpt-oss registry hooks expose the router points, preserve identity outputs, and apply real edits.
+///
+/// Zeroing one layer's router weights removes that block's routed experts
+/// from the residual stream, so the logits must move: the edit reaches the
+/// family's hooked pass rather than an unsupported or ordinary forward.
+#[test]
+fn automatic_gpt_oss_exposes_router_points_and_applies_edits() {
+    use crate::models::qwen3_moe::{router_logits_point, router_weights_point};
+    let device = Default::default();
+    let config = tiny_gpt_oss();
+    let model =
+        AutoCausalLm::from(GptOssForCausalLm::<TestBackend>::init(config, &device).unwrap());
+    let layer = Layer::decoder(1);
+    let points = model.activation_points().unwrap();
+    for point in [
+        router_logits_point(layer).info(),
+        router_weights_point(layer).info(),
+        layer.mlp_output().info(),
+    ] {
+        assert!(points.contains(&point), "missing {}", point.name);
+    }
+    let input = registry_tokens([[1, 2, 3], [4, 5, 6]], &device);
+    let options = ForwardOptions::default();
+    let expected = model.forward(input.clone(), &options).unwrap();
+
+    let mut hooks = Hooks::new();
+    let logits = hooks.capture(router_logits_point(layer));
+    hooks.edit(router_weights_point(layer), |tensor| tensor);
+    let identity = model
+        .forward_with_hooks(input.clone(), &options, &mut hooks)
+        .unwrap();
+    assert_registry_logits(identity.logits, expected.logits.clone());
+    assert_eq!(hooks.get(&logits).unwrap().dims(), [2, 3, 4]);
+
+    let mut hooks = Hooks::new();
+    hooks.edit(router_weights_point(layer), |tensor| tensor.zeros_like());
+    let edited = model
+        .forward_with_hooks(input, &options, &mut hooks)
+        .unwrap();
+    let moved = (edited.logits - expected.logits).abs().max().into_scalar();
+    assert!(
+        moved > 1e-4,
+        "zeroed router weights left the logits unchanged"
+    );
 }
