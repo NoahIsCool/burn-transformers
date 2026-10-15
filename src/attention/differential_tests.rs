@@ -124,7 +124,8 @@ fn reference_layer(
 ) -> DifferentialAttention<TestBackend> {
     let device = Default::default();
     let mut config = DifferentialAttentionConfig::new(8, 4, key_value_heads, 2, 1);
-    config.norm_epsilon = 1e-5;
+    // DiffLlama's default `rms_norm_eps` is the constructor default.
+    assert!((config.norm_epsilon - 1e-5).abs() < f64::EPSILON);
     config.precision_mode = precision;
     let mut layer = config.init::<TestBackend>(&device).unwrap();
     for (seed, linear) in [
@@ -288,6 +289,7 @@ fn invalid_differential_layers_fail_with_context() {
     let mut projection = layer
         .project_self(Tensor::zeros([1, 2, 8], &device))
         .unwrap();
+    let valid = projection.clone();
     projection.key = projection.key.narrow(1, 0, 1);
     let error = layer.attend(projection, None, true).unwrap_err();
     assert!(
@@ -295,6 +297,125 @@ fn invalid_differential_layers_fail_with_context() {
             .to_string()
             .contains("differential_attention.projection")
     );
+    // Values must be `head_dim` wide; a wider value used to panic in the final reshape.
+    let mut wide = valid.clone();
+    wide.value = Tensor::cat(vec![wide.value.clone(), wide.value], 3);
+    let error = layer.attend(wide, None, true).unwrap_err().to_string();
+    assert!(
+        error.contains("differential_attention.projection"),
+        "{error}"
+    );
+    assert!(error.contains("[batch, 2, key, 2]"), "{error}");
+    // An output gate would be silently dropped, so it is rejected.
+    let mut gated = valid;
+    gated.gate = Some(Tensor::zeros([1, 2, 8], &device));
+    let error = layer.attend(gated, None, true).unwrap_err().to_string();
+    assert!(
+        error.contains("differential_attention.projection.gate"),
+        "{error}"
+    );
+}
+
+/// Reduced-precision lambdas stay in the requested dtype, within one BF16 step of DiffLlama's order.
+#[test]
+fn reduced_precision_lambda_follows_the_reference_order() {
+    use burn::tensor::bf16;
+
+    let mut layer = reference_layer(2, AttentionPrecisionMode::BackendDefault);
+    let to_bf16 = |parameter: &Param<Tensor<TestBackend, 1>>| {
+        Param::from_tensor(parameter.val().cast(DType::BF16))
+    };
+    layer.lambda_q1 = to_bf16(&layer.lambda_q1);
+    layer.lambda_k1 = to_bf16(&layer.lambda_k1);
+    layer.lambda_q2 = to_bf16(&layer.lambda_q2);
+    layer.lambda_k2 = to_bf16(&layer.lambda_k2);
+    let lambda = layer.lambda(DType::BF16);
+    assert_eq!(lambda.dtype(), DType::BF16);
+    let actual = lambda.cast(DType::F32).into_data().to_vec::<f32>().unwrap()[0];
+    // Host reference: round inputs and products to BF16, then sum and exponentiate in F32.
+    let round = |value: f32| bf16::from_f32(value).to_f32();
+    let term = |query: [f32; 2], key: [f32; 2]| {
+        let sum: f32 = (0..2)
+            .map(|index| round(round(query[index]) * round(key[index])))
+            .sum();
+        round(sum.exp())
+    };
+    let expected = round(
+        term([0.3, -0.2], [0.5, 0.4]) - term([-0.1, 0.6], [0.2, -0.3])
+            + round(depth_lambda_init(1) as f32),
+    );
+    assert!((actual - expected).abs() <= 8e-3, "{actual} vs {expected}");
+}
+
+/// Differential attention runs in F16 and BF16 within documented tolerances of F32.
+///
+/// Tolerances are two units in the last place of each dtype at unit scale
+/// (`2^-9` for F16, `2^-6` for BF16); the output is O(0.1), so these bound the
+/// accumulated rounding of projections, both maps, and the pair norm.
+#[test]
+fn differential_attention_tracks_f32_in_reduced_precision() {
+    let device = Default::default();
+    let hidden = Tensor::<TestBackend, 3>::from_data(
+        TensorData::new(values(24, 9, 0.1), [1, 3, 8]),
+        &device,
+    );
+    for precision in [
+        AttentionPrecisionMode::BackendDefault,
+        AttentionPrecisionMode::EagerFp32Softmax,
+    ] {
+        let layer = reference_layer(2, precision);
+        let expected = layer
+            .attend(layer.project_self(hidden.clone()).unwrap(), None, true)
+            .unwrap()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        for (dtype, tolerance) in [
+            (DType::F16, 2.0_f32.powi(-9)),
+            (DType::BF16, 2.0_f32.powi(-6)),
+        ] {
+            let reduced = cast_layer(reference_layer(2, precision), dtype);
+            let output = reduced
+                .attend(
+                    reduced.project_self(hidden.clone().cast(dtype)).unwrap(),
+                    None,
+                    true,
+                )
+                .unwrap();
+            assert_eq!(output.dtype(), dtype);
+            let output = output.cast(DType::F32).into_data().to_vec::<f32>().unwrap();
+            for (actual, expected) in output.iter().zip(&expected) {
+                assert!(
+                    (actual - expected).abs() <= tolerance,
+                    "{precision:?} {dtype:?}: {actual} vs {expected}"
+                );
+            }
+        }
+    }
+}
+
+/// Casts every floating parameter of a differential layer to `dtype`.
+fn cast_layer(
+    mut layer: DifferentialAttention<TestBackend>,
+    dtype: DType,
+) -> DifferentialAttention<TestBackend> {
+    for linear in [
+        &mut layer.q_proj,
+        &mut layer.k_proj,
+        &mut layer.v_proj,
+        &mut layer.o_proj,
+    ] {
+        linear.weight = Param::from_tensor(linear.weight.val().cast(dtype));
+    }
+    for lambda in [
+        &mut layer.lambda_q1,
+        &mut layer.lambda_k1,
+        &mut layer.lambda_q2,
+        &mut layer.lambda_k2,
+    ] {
+        *lambda = Param::from_tensor(lambda.val().cast(dtype));
+    }
+    layer
 }
 
 /// All four lambda vectors and the projections receive gradients.

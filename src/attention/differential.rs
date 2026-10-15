@@ -63,6 +63,9 @@ pub struct DifferentialAttentionConfig {
     /// Constant `lambda_init` added to the learned lambda and used as `1 - lambda_init` scale.
     pub lambda_init: f64,
     /// Stabilizer of the weightless RMS norm over each `2 * head_dim` pair.
+    ///
+    /// DiffLlama uses the model's `rms_norm_eps` (default `1e-5`); set it from
+    /// the checkpoint configuration.
     pub norm_epsilon: f64,
     /// Whether all four projections carry additive biases.
     pub bias: bool,
@@ -72,7 +75,10 @@ pub struct DifferentialAttentionConfig {
 }
 
 impl DifferentialAttentionConfig {
-    /// Creates a bias-free layer with the depth schedule's `lambda_init` and epsilon `1e-6`.
+    /// Creates a bias-free layer with the depth schedule's `lambda_init` and epsilon `1e-5`.
+    ///
+    /// The epsilon matches DiffLlama's default `rms_norm_eps`; checkpoints that
+    /// configure another value must override [`Self::norm_epsilon`].
     #[must_use]
     pub fn new(
         hidden_size: usize,
@@ -87,7 +93,7 @@ impl DifferentialAttentionConfig {
             key_value_heads,
             head_dim,
             lambda_init: depth_lambda_init(layer_index),
-            norm_epsilon: 1e-6,
+            norm_epsilon: 1e-5,
             bias: false,
             precision_mode: AttentionPrecisionMode::BackendDefault,
         }
@@ -248,11 +254,14 @@ impl<B: Backend> DifferentialAttention<B> {
 
     /// Returns `lambda = exp(lq1 . lk1) - exp(lq2 . lk2) + lambda_init` as `[1]` in `dtype`.
     ///
-    /// Dot products and exponentials run in F32 and are cast to `dtype` before
-    /// combination, matching the reference.
+    /// Follows DiffLlama's operation order exactly: elementwise products in the
+    /// parameter dtype, then an F32 sum and exponential, cast to `dtype` before
+    /// the two terms combine. (For reduced-precision parameters the products
+    /// round once in that dtype, as in the reference.)
     pub fn lambda(&self, dtype: DType) -> Tensor<B, 1> {
         let term = |query: &Param<Tensor<B, 1>>, key: &Param<Tensor<B, 1>>| {
-            (query.val().cast(DType::F32) * key.val().cast(DType::F32))
+            (query.val() * key.val())
+                .cast(DType::F32)
                 .sum()
                 .exp()
                 .cast(dtype)
@@ -264,7 +273,9 @@ impl<B: Backend> DifferentialAttention<B> {
     /// Evaluates differential attention after the caller applies positional transforms.
     ///
     /// `mask` uses `true == excluded` with shape `[batch, query_head, query, key]`;
-    /// causality is bottom-right aligned. Keys and values keep native KV heads.
+    /// causality is bottom-right aligned. Keys and values keep native KV heads
+    /// and `head_dim` channels. Differential attention has no output gate, so
+    /// a projection carrying one is rejected rather than silently ignored.
     pub fn attend(
         &self,
         projection: AttentionProjection<B>,
@@ -272,19 +283,29 @@ impl<B: Backend> DifferentialAttention<B> {
         causal: bool,
     ) -> Result<Tensor<B, 3>> {
         let AttentionProjection {
-            query, key, value, ..
+            query,
+            key,
+            value,
+            gate,
         } = projection;
+        if gate.is_some() {
+            return Err(Error::configuration(
+                "differential_attention.projection.gate",
+                "differential attention has no output gate",
+            ));
+        }
         let [batch, query_heads, query_sequence, head_dim] = query.dims();
         if query_heads != self.query_heads
             || head_dim != self.head_dim
             || key.dims()[1] != self.key_value_heads
             || value.dims()[1] != self.key_value_heads
+            || value.dims()[3] != self.head_dim
         {
             return Err(Error::shape(
                 "differential_attention.projection",
                 format!(
-                    "query [batch, {}, query, {}] and K/V with {} heads",
-                    self.query_heads, self.head_dim, self.key_value_heads
+                    "query [batch, {}, query, {}] and K/V [batch, {}, key, {}]",
+                    self.query_heads, self.head_dim, self.key_value_heads, self.head_dim
                 ),
                 format!(
                     "query={:?}, key={:?}, value={:?}",
