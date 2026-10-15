@@ -1,7 +1,8 @@
 //! Public architecture contracts and reusable model specifications.
 //!
 //! Contracts separate stateless parameterized computation from mutable decode
-//! sessions. Shared specifications describe mixer, normalization, and residual
+//! sessions. [`HookedModel`] and [`StagedModel`] give experiments one interface
+//! for activation hooks and staged execution across families. Shared specifications describe mixer, normalization, and residual
 //! choices without selecting a checkpoint family. Input/output types make tensor
 //! axes and token-validity semantics explicit; family implementations validate the
 //! requested capabilities before applying their numerical graph.
@@ -16,7 +17,10 @@ pub use spec::{
     NormalizationSpec, PositionEncodingSpec, ResidualTopology, RopeScaling, Seq2SeqSpec,
     SlidingWindowSpec,
 };
-pub use traits::{ArchitectureConfig, CausalLanguageModel, DecodeState, Seq2SeqLanguageModel};
+pub use traits::{
+    ArchitectureConfig, CausalLanguageModel, DecodeState, HookedModel, Seq2SeqLanguageModel,
+    StagedModel,
+};
 pub use types::{
     CausalLmInput, CausalLmOutput, DecodeInput, EncoderOutput, ForwardOptions, LogitsSelection,
     RouterDiagnostics, Seq2SeqInput, Seq2SeqOutput, TokenMask,

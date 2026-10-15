@@ -281,6 +281,11 @@ impl Stack {
     pub fn final_norm(self) -> Point<3> {
         hidden_point(format!("{}.final_norm", self.name()))
     }
+
+    /// Address layer `index` of this stack; `Stack::Decoder.layer(i) == Layer::decoder(i)`.
+    pub const fn layer(self, index: usize) -> Layer {
+        Layer::new(self, index)
+    }
 }
 
 // Built-in layer and attention point catalogs.
@@ -312,6 +317,11 @@ impl Layer {
     /// Return this layer's zero-based index.
     pub const fn index(self) -> usize {
         self.index
+    }
+
+    /// Address layer `index` of `stack`, for code generic over encoder and decoder stacks.
+    pub const fn new(stack: Stack, index: usize) -> Self {
+        Self { stack, index }
     }
 
     /// Address an encoder layer.
