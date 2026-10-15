@@ -1,4 +1,4 @@
-//! Pure integer planning for bounded attention execution.
+//! Pure integer planning for bounded and local attention execution.
 //!
 //! A score plane holds one element per `[batch, head, query, key]` link, so
 //! one query row costs `batch * heads * key_bound` elements. Query chunking
@@ -15,6 +15,18 @@
 //! `W` lets it see keys `(t + K - Q - W, t + K - Q]`, so the rows `[s, e)`
 //! jointly need only keys `[max(0, s + K - Q + 1 - W), e + K - Q)`.
 //!
+//! # Chunk frames
+//!
+//! Chunked-local attention compares absolute chunk indices
+//! `floor((key_start + p) / C)` of local positions `p in [0, span)`, where
+//! `key_start` is the absolute position of the first key (non-zero when a
+//! cache dropped earlier tokens). Writing `key_start = q * C + r`, the index is
+//! `q + floor((p + r) / C)`, so only the phase `r` matters. When `C >= span`,
+//! at most one boundary (local position `C - r`) falls inside the span, and
+//! the frame `(width = span, phase = span - (C - r))` reproduces it. Either way
+//! `phase < width <= span`, so tensor arithmetic stays below `2 * span` even
+//! for chunk widths far beyond a 32-bit backend integer.
+//!
 //! # Verified planning
 //!
 //! Every function here is checked in place by Verus through
@@ -25,8 +37,9 @@
 //! `(n - 1) * c < Q <= n * c`; that each error variant states exactly why
 //! planning failed; that chunk ranges are consecutive and partition `[0, Q)`;
 //! and that a sliding-window key range is non-empty, inside `[0, K)`, and
-//! contains every key visible to every query row of its chunk. Tensor slicing
-//! driven by these plans remains covered by the Rust test suite.
+//! contains every key visible to every query row of its chunk; and that a
+//! chunk frame preserves every position's absolute chunk index. Tensor
+//! slicing driven by these plans remains covered by the Rust test suite.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -144,6 +157,68 @@ proof fn lemma_chunk_bounds(size: int, count: int, rows: int, index: int)
     if index + 1 == count {
         assert(index * size + size == count * size) by (nonlinear_arith)
             requires index + 1 == count;
+    }
+}
+
+/// Absolute chunk index of `position` for chunks of `chunk` positions.
+pub open spec fn chunk_of(position: int, chunk: int) -> int {
+    position / chunk
+}
+
+/// A local position below the first boundary keeps the start's chunk index.
+proof fn lemma_same_chunk(start: int, chunk: int, local: int)
+    requires
+        chunk >= 1,
+        start >= 0,
+        local >= 0,
+        start % chunk + local < chunk,
+    ensures
+        chunk_of(start + local, chunk) == start / chunk,
+{
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(start, chunk);
+    vstd::arithmetic::div_mod::lemma_mod_pos_bound(start, chunk);
+    vstd::arithmetic::div_mod::lemma_basic_div(start % chunk + local, chunk);
+    vstd::arithmetic::div_mod::lemma_hoist_over_denominator(
+        start % chunk + local,
+        start / chunk,
+        chunk as nat,
+    );
+    assert(start % chunk + local + (start / chunk) * chunk == start + local) by (nonlinear_arith)
+        requires start == chunk * (start / chunk) + start % chunk;
+}
+
+/// Chunk indices of `start + local` follow the phase-shifted local index.
+proof fn lemma_phase_shift(start: int, chunk: int, local: int)
+    requires
+        chunk >= 1,
+        start >= 0,
+        local >= 0,
+    ensures
+        chunk_of(start + local, chunk) == start / chunk + (local + start % chunk) / chunk,
+{
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(start, chunk);
+    vstd::arithmetic::div_mod::lemma_hoist_over_denominator(
+        local + start % chunk,
+        start / chunk,
+        chunk as nat,
+    );
+    assert(local + start % chunk + (start / chunk) * chunk == start + local) by (nonlinear_arith)
+        requires start == chunk * (start / chunk) + start % chunk;
+}
+
+/// A value in `[0, 2 * divisor)` divides to one exactly when it reaches `divisor`.
+proof fn lemma_binary_quotient(value: int, divisor: int)
+    requires
+        divisor >= 1,
+        0 <= value < 2 * divisor,
+    ensures
+        value / divisor == if value < divisor { 0int } else { 1int },
+{
+    if value < divisor {
+        vstd::arithmetic::div_mod::lemma_basic_div(value, divisor);
+    } else {
+        vstd::arithmetic::div_mod::lemma_basic_div(value - divisor, divisor);
+        vstd::arithmetic::div_mod::lemma_hoist_over_denominator(value - divisor, 1, divisor as nat);
     }
 }
 
@@ -424,6 +499,79 @@ pub fn sliding_window_key_range(
     let key_start = first_position - first_position.min(window - 1);
     let key_end = query_end + offset;
     Some((key_start, key_end))
+}
+
+/// Re-expresses chunk membership of positions `key_start + p`, `p in [0, span)`, locally.
+///
+/// Returns `None` when the whole span lies inside one chunk (the rule then
+/// excludes nothing); otherwise `(width, phase)` with `phase < width <= span`
+/// and `floor((key_start + p) / chunk) = floor(key_start / chunk) +
+/// floor((p + phase) / width)` for every `p` in the span. Two local positions
+/// therefore share an absolute chunk exactly when their
+/// `floor((p + phase) / width)` agree. See the module documentation.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    requires
+        chunk >= 1,
+        span >= 1,
+    ensures
+        match result {
+            Some(frame) => {
+                &&& 1 <= frame.0 <= span
+                &&& frame.1 < frame.0
+                &&& forall|local: int| 0 <= local < span ==> #[trigger] chunk_of(
+                    key_start + local,
+                    chunk as int,
+                ) == key_start / chunk + (local + frame.1) / (frame.0 as int)
+            },
+            None => forall|local: int| 0 <= local < span ==> #[trigger] chunk_of(
+                key_start + local,
+                chunk as int,
+            ) == key_start / chunk,
+        }
+))]
+pub fn chunk_frame(chunk: usize, key_start: usize, span: usize) -> Option<(usize, usize)> {
+    let phase = key_start % chunk;
+    if chunk < span {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert forall|local: int| 0 <= local < span implies #[trigger] chunk_of(
+                key_start + local,
+                chunk as int,
+            ) == key_start / chunk + (local + phase) / (chunk as int) by {
+                lemma_phase_shift(key_start as int, chunk as int, local);
+            }
+        }
+        return Some((chunk, phase));
+    }
+    // Wider chunks cross at most one boundary, at local position `chunk - phase`.
+    let boundary = chunk - phase;
+    if boundary >= span {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert forall|local: int| 0 <= local < span implies #[trigger] chunk_of(
+                key_start + local,
+                chunk as int,
+            ) == key_start / chunk by {
+                lemma_same_chunk(key_start as int, chunk as int, local);
+            }
+        }
+        return None;
+    }
+    let shifted_phase = span - boundary;
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert forall|local: int| 0 <= local < span implies #[trigger] chunk_of(
+            key_start + local,
+            chunk as int,
+        ) == key_start / chunk + (local + shifted_phase) / (span as int) by {
+            vstd::arithmetic::div_mod::lemma_mod_pos_bound(key_start as int, chunk as int);
+            lemma_phase_shift(key_start as int, chunk as int, local);
+            lemma_binary_quotient(local + phase, chunk as int);
+            lemma_binary_quotient(local + shifted_phase, span as int);
+        }
+    }
+    Some((span, shifted_phase))
 }
 
 #[cfg(test)]

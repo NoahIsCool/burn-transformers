@@ -158,8 +158,74 @@ fn sliding_window_ranges_reject_invalid_requests() {
     }
 }
 
+/// Checks a chunk frame against absolute chunk indices for every local position.
+fn assert_frame_preserves_chunks(chunk: usize, key_start: usize, span: usize) {
+    let frame = chunk_frame(chunk, key_start, span);
+    for local in 0..span {
+        let absolute = (key_start + local) / chunk;
+        match frame {
+            Some((width, phase)) => {
+                assert!(phase < width && width <= span, "frame {frame:?}");
+                assert_eq!(
+                    absolute,
+                    key_start / chunk + (local + phase) / width,
+                    "C={chunk} start={key_start} span={span} p={local}"
+                );
+            }
+            None => assert_eq!(
+                absolute,
+                key_start / chunk,
+                "C={chunk} start={key_start} span={span}"
+            ),
+        }
+    }
+}
+
+/// Chunk frames keep every local position in its absolute chunk.
+#[test]
+fn chunk_frames_preserve_absolute_chunks() {
+    for chunk in 1..=9 {
+        for key_start in 0..=20 {
+            for span in 1..=12 {
+                assert_frame_preserves_chunks(chunk, key_start, span);
+            }
+        }
+    }
+    // Chunks starting at the first key with a phase of zero keep their width.
+    assert_eq!(chunk_frame(4, 8, 10), Some((4, 0)));
+    // A wide chunk with one interior boundary becomes a span-wide frame.
+    assert_eq!(chunk_frame(10, 7, 5), Some((5, 2)));
+    // A span inside one chunk needs no frame at all.
+    assert_eq!(chunk_frame(10, 0, 10), None);
+    assert_eq!(chunk_frame(usize::MAX, 3, 1 << 20), None);
+}
+
+/// Chunk widths beyond 32-bit integers still yield small, exact frames.
+#[test]
+fn huge_chunk_frames_stay_within_the_span() {
+    let span = 1000;
+    let chunk = (1usize << 32) + 2;
+    // The span straddles the boundary at absolute position `chunk`.
+    let key_start = chunk - 300;
+    assert_eq!(
+        chunk_frame(chunk, key_start, span),
+        Some((span, span - 300))
+    );
+    assert_frame_preserves_chunks(chunk, key_start, span);
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(256))]
+
+    /// Random frames agree with absolute chunk indices.
+    #[test]
+    fn random_chunk_frames_preserve_absolute_chunks(
+        chunk in proptest::prop_oneof![1usize..=16, 17usize..=1 << 40],
+        key_start in proptest::prop_oneof![0usize..=64, 65usize..=1 << 40],
+        span in 1usize..=64,
+    ) {
+        assert_frame_preserves_chunks(chunk, key_start, span);
+    }
 
     /// Successful plans partition the queries, respect both limits, and report the exact peak.
     #[test]

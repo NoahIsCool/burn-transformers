@@ -10,8 +10,13 @@
 //! `i` sits at key position `i + K - Q`, so it may see keys `j <= i + K - Q`.
 //! This is the only alignment that is correct when the queries follow a cached
 //! prefix. With `Q > K`, the leading `Q - K` rows see no key at all.
+//!
+//! Position vectors use the device's default integer dtype, which is often
+//! `i32` (Flex, typical CubeCL setups). Every builder therefore checks the
+//! largest value it forms against that dtype ([`ensure_positions_fit`]) before
+//! allocating, instead of letting a backend wrap it silently.
 
-use burn::tensor::{Bool, Int, Tensor, backend::Backend};
+use burn::tensor::{Bool, DType, Int, Tensor, backend::Backend, get_device_settings};
 
 use crate::{Error, Result, architecture::TokenMask};
 
@@ -27,6 +32,7 @@ pub(crate) fn bottom_right_causal_plane<B: Backend>(
     let queries = aligned_query_positions::<B>(query_sequence, key_sequence, device)?;
     let keys = key_positions::<B>(key_sequence, device)?;
     // [1, 1, 1, K] against [1, 1, Q, 1] broadcasts to one [1, 1, Q, K] plane.
+    audit_plane([1, 1, query_sequence, key_sequence]);
     Ok(keys
         .reshape([1, 1, 1, key_sequence])
         .greater(queries.reshape([1, 1, query_sequence, 1])))
@@ -63,6 +69,8 @@ pub(crate) fn union_exclusions<B: Backend>(
     match (first, second) {
         (Some(first), Some(second)) => {
             let shape = broadcast_shape(first.dims(), second.dims());
+            // The OR writes every element of the broadcast shape.
+            audit_plane(shape);
             Some(expand_to(first, shape).bool_or(expand_to(second, shape)))
         }
         (first, None) => first,
@@ -105,6 +113,8 @@ pub(crate) fn aligned_query_positions<B: Backend>(
     let queries = signed_length(query_sequence, "query length exceeds i64")?;
     let keys = signed_length(key_sequence, "key length exceeds i64")?;
     let offset = keys - queries;
+    // Values span `K - Q ..= K - 1`; arange itself forms `0 ..= Q - 1`.
+    ensure_positions_fit::<B>(device, queries.max(keys) - 1)?;
     Ok((Tensor::<B, 1, Int>::arange(0..queries, device) + offset).reshape([1, query_sequence]))
 }
 
@@ -114,6 +124,7 @@ pub(crate) fn key_positions<B: Backend>(
     device: &B::Device,
 ) -> Result<Tensor<B, 2, Int>> {
     let keys = signed_length(key_sequence, "key length exceeds i64")?;
+    ensure_positions_fit::<B>(device, keys - 1)?;
     Ok(Tensor::<B, 1, Int>::arange(0..keys, device).reshape([1, key_sequence]))
 }
 
@@ -134,13 +145,53 @@ pub(crate) fn signed_length(length: usize, reason: &'static str) -> Result<i64> 
     i64::try_from(length).map_err(|_| Error::configuration("attention.causal_mask", reason))
 }
 
-/// Checks one token mask's extent and returns its `true == invalid` complement.
-fn invalid_tokens<B: Backend>(
+/// Returns the largest value an integer tensor of `dtype` can hold, as `i64`.
+///
+/// Non-integer dtypes never hold positions; they report the conservative
+/// `i32` limit so a misconfigured backend is rejected rather than wrapped.
+pub(crate) const fn position_limit(dtype: DType) -> i64 {
+    match dtype {
+        DType::I64 | DType::U64 => i64::MAX,
+        DType::U32 => u32::MAX as i64,
+        DType::I16 => i16::MAX as i64,
+        DType::U16 => u16::MAX as i64,
+        DType::I8 => i8::MAX as i64,
+        DType::U8 => u8::MAX as i64,
+        _ => i32::MAX as i64,
+    }
+}
+
+/// Rejects position arithmetic whose largest value `peak` would wrap on `device`.
+///
+/// Backends convert scalars and results to their integer element type without
+/// range checks (`as i32` on Flex), so an oversized position would silently
+/// produce a wrong mask instead of failing. The check reads the device's
+/// default integer dtype, which every position tensor here is created with,
+/// so it runs before anything is allocated.
+pub(crate) fn ensure_positions_fit<B: Backend>(device: &B::Device, peak: i64) -> Result<()> {
+    let dtype = DType::from(get_device_settings::<B>(device).int_dtype);
+    let limit = position_limit(dtype);
+    if peak > limit {
+        return Err(Error::configuration(
+            "attention.positions",
+            format!(
+                "position arithmetic reaches {peak}, beyond the backend integer dtype {dtype:?} (max {limit})"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Checks that a `true == valid` token mask is `[batch, sequence]`.
+///
+/// This reads only metadata, so callers can validate masks without building
+/// any `[query, key]` plane from them.
+pub(crate) fn check_token_mask<B: Backend>(
     mask: &TokenMask<B>,
     name: &str,
     batch: usize,
     sequence: usize,
-) -> Result<Tensor<B, 2, Bool>> {
+) -> Result<()> {
     let [mask_batch, mask_sequence] = mask.as_tensor().dims();
     if [mask_batch, mask_sequence] != [batch, sequence] {
         return Err(Error::shape(
@@ -149,12 +200,62 @@ fn invalid_tokens<B: Backend>(
             format!("[{mask_batch}, {mask_sequence}]"),
         ));
     }
+    Ok(())
+}
+
+/// Checks one token mask's extent and returns its `true == invalid` complement.
+fn invalid_tokens<B: Backend>(
+    mask: &TokenMask<B>,
+    name: &str,
+    batch: usize,
+    sequence: usize,
+) -> Result<Tensor<B, 2, Bool>> {
+    check_token_mask(mask, name, batch, sequence)?;
     Ok(mask.as_tensor().clone().bool_not())
 }
 
 /// Returns the elementwise broadcast of two rank-4 shapes (size-one axes stretch).
 fn broadcast_shape(first: [usize; 4], second: [usize; 4]) -> [usize; 4] {
     core::array::from_fn(|axis| first[axis].max(second[axis]))
+}
+
+/// Notes that a Boolean plane of `shape` is about to be materialized.
+///
+/// Test builds record the largest such plane per thread so tests can assert
+/// that bounded execution never builds a full `[query, key]` plane; ordinary
+/// builds compile this to nothing.
+#[inline]
+pub(crate) fn audit_plane(shape: [usize; 4]) {
+    #[cfg(test)]
+    plane_audit::record(shape.iter().product());
+    #[cfg(not(test))]
+    let _ = shape;
+}
+
+/// Test-only per-thread record of the largest materialized exclusion plane.
+#[cfg(test)]
+pub(crate) mod plane_audit {
+    use core::cell::Cell;
+
+    std::thread_local! {
+        /// Elements in the largest plane recorded on this thread since the last reset.
+        static LARGEST: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Records one materialized plane of `elements` elements.
+    pub(crate) fn record(elements: usize) {
+        LARGEST.with(|largest| largest.set(largest.get().max(elements)));
+    }
+
+    /// Clears the record before a measured operation.
+    pub(crate) fn reset() {
+        LARGEST.with(|largest| largest.set(0));
+    }
+
+    /// Elements in the largest plane recorded since the last reset.
+    pub(crate) fn largest() -> usize {
+        LARGEST.with(Cell::get)
+    }
 }
 
 #[cfg(test)]

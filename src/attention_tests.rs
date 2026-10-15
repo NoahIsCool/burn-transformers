@@ -1164,6 +1164,37 @@ fn bounded_sliding_window_needs_only_local_keys() {
     assert!(error.to_string().contains("one attention query row"));
 }
 
+/// Bounded execution with both token masks builds mask planes only one chunk at a time.
+///
+/// Regression: validating the masks used to OR the full `[batch, 1, Q, K]`
+/// padding plane before chunking (256 MiB at `Q = K = 16384`).
+#[test]
+fn bounded_attention_with_both_masks_builds_no_full_plane() {
+    use super::{AttentionConnectivity, mask::plane_audit};
+
+    let device = Default::default();
+    let (module, projection) =
+        bounded_fixture(AttentionPrecisionMode::BackendDefault, false, 64, 64);
+    let rows = [vec![true; 64], [vec![false; 5], vec![true; 59]].concat()];
+    let valid = TokenMask::new(Tensor::<Flex, 2, Bool>::from_data(
+        burn::tensor::TensorData::new(rows.concat(), [2, 64]),
+        &device,
+    ));
+    plane_audit::reset();
+    module
+        .attend_bounded(
+            projection,
+            Some(&valid),
+            Some(&valid),
+            true,
+            AttentionConnectivity::Global,
+            AttentionExecutionPolicy::query_chunked(8, 1 << 20),
+        )
+        .unwrap();
+    // Every plane is one chunk: batch 2 x 8 query rows x 64 keys.
+    assert_eq!(plane_audit::largest(), 2 * 8 * 64);
+}
+
 /// Bounded execution validates projections and connectivity before any chunk runs.
 #[test]
 fn bounded_attention_rejects_invalid_inputs() {

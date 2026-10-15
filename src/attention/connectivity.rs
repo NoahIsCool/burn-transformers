@@ -22,14 +22,30 @@
 //! vectors that broadcast in comparisons, so the only materialized plane is
 //! one Boolean `[batch or 1, 1, Q, K]` tensor expanded (not copied) across
 //! heads; no `[batch, head, Q, K]` integer plane is built.
+//!
+//! # Absolute positions and integer range
+//!
+//! Causality and sliding windows depend only on position *differences*, so
+//! they are unaffected by where the key timeline starts. Chunk boundaries are
+//! absolute: when a cache has dropped earlier keys, [`MaskGeometry::key_start`]
+//! gives the absolute position of the first key, and [`chunk_frame`] turns
+//! `(chunk, key_start)` into an equivalent local frame. Tensor arithmetic uses
+//! only local positions below `K`: windows of at least `K` positions and
+//! chunks covering the whole span exclude nothing and are dropped, and the
+//! remaining parameters are below `K`. Every value therefore stays below
+//! `2 * K` and is checked against the backend's integer dtype (often `i32`)
+//! instead of wrapping silently.
 
 use core::{fmt, ops::Range};
 
 use burn::tensor::{Bool, Int, Tensor, backend::Backend};
 
-use super::mask::{
-    aligned_query_positions, expand_to, key_positions, padding_plane, signed_length,
-    union_exclusions,
+use super::{
+    mask::{
+        aligned_query_positions, audit_plane, check_token_mask, ensure_positions_fit, expand_to,
+        key_positions, signed_length, union_exclusions,
+    },
+    plan::chunk_frame,
 };
 use crate::{Error, Result, architecture::TokenMask};
 
@@ -71,6 +87,9 @@ pub enum AttentionConnectivity {
     /// Positions attend only within their aligned chunk of `chunk` tokens.
     ///
     /// Query position `p` sees keys `[C * floor(p / C), C * floor(p / C) + C)`.
+    /// Positions are absolute: chunks align to position zero of the whole
+    /// sequence, so a cache that dropped earlier keys must report their count
+    /// through [`MaskGeometry::key_start`].
     ChunkedLocal {
         /// Width of each independent attention chunk.
         chunk: usize,
@@ -121,12 +140,15 @@ impl AttentionConnectivity {
     /// `[batch or 1, 1, query, key]` Boolean plane), or `None` when nothing is
     /// excluded. Queries are the bottom-right-aligned suffix of the key
     /// timeline. With a `key_mask`, positions are each row's valid-token
-    /// ordinals; otherwise they are column indices. `query_mask` and `key_mask`
-    /// use `true == valid` and exclude invalid query rows and key columns.
+    /// ordinals; otherwise they are column indices. Both are offset by
+    /// [`MaskGeometry::key_start`], which only chunked-local rules observe.
+    /// `query_mask` and `key_mask` use `true == valid`, must live on `device`,
+    /// and exclude invalid query rows and key columns.
     ///
     /// Local rules and ordinal positions require `key >= query`; only unpadded
     /// global causal attention may have more queries than keys (its leading
-    /// rows then see nothing).
+    /// rows then see nothing). Lengths whose position arithmetic exceeds the
+    /// backend integer dtype are rejected rather than wrapped.
     pub fn exclusion_mask<B: Backend>(
         self,
         causal: bool,
@@ -148,8 +170,8 @@ impl AttentionConnectivity {
 /// Building positions once (`O(batch * key)` integers) lets bounded execution
 /// materialize only one chunk's `[batch, 1, rows, keys]` Boolean plane at a time.
 pub(crate) struct ExclusionPlan<B: Backend> {
-    /// Visibility rule.
-    connectivity: AttentionConnectivity,
+    /// Visibility rule over local positions.
+    rule: PositionRule,
     /// Whether keys after the query position are excluded.
     causal: bool,
     /// Batch rows.
@@ -164,6 +186,9 @@ pub(crate) struct ExclusionPlan<B: Backend> {
 
 impl<B: Backend> ExclusionPlan<B> {
     /// Validates the rule, extents, alignment, and token masks, and derives positions.
+    ///
+    /// Token masks are validated from metadata only; no `[query, key]` plane
+    /// is built until [`Self::chunk`] requests one chunk.
     pub(crate) fn new(
         connectivity: AttentionConnectivity,
         causal: bool,
@@ -180,18 +205,25 @@ impl<B: Backend> ExclusionPlan<B> {
             key_sequence,
             ..
         } = geometry;
-        // Validate both token masks before deriving anything from them.
-        padding_plane(query_mask, key_mask, batch, query_sequence, key_sequence)?;
-        let positions = if causal || connectivity != AttentionConnectivity::Global {
-            if key_sequence < query_sequence
-                && (connectivity != AttentionConnectivity::Global || key_mask.is_some())
-            {
-                return Err(Error::shape(
-                    "attention.connectivity",
-                    "key sequence at least as long as query sequence",
-                    format!("query={query_sequence}, key={key_sequence}"),
-                ));
-            }
+        check_token_masks(
+            [
+                (query_mask, "query_mask", query_sequence),
+                (key_mask, "key_mask", key_sequence),
+            ],
+            batch,
+            device,
+        )?;
+        let global = connectivity == AttentionConnectivity::Global;
+        if key_sequence < query_sequence && (!global || (causal && key_mask.is_some())) {
+            return Err(Error::shape(
+                "attention.connectivity",
+                "key sequence at least as long as query sequence",
+                format!("query={query_sequence}, key={key_sequence}"),
+            ));
+        }
+        let rule = PositionRule::new(connectivity, geometry)?;
+        let positions = if causal || rule != PositionRule::Unrestricted {
+            ensure_positions_fit::<B>(device, rule.peak(key_sequence)?)?;
             Some(match key_mask {
                 Some(mask) => {
                     let ordinals = valid_token_ordinals(mask);
@@ -210,7 +242,7 @@ impl<B: Backend> ExclusionPlan<B> {
             None
         };
         Ok(Self {
-            connectivity,
+            rule,
             causal,
             batch,
             query_valid: query_mask.map(|mask| mask.as_tensor().clone()),
@@ -248,15 +280,14 @@ impl<B: Backend> ExclusionPlan<B> {
                 .reshape([batch, 1, 1, keys])
                 .expand(plane)
         });
-        let positional = match &self.positions {
-            Some((queries, all_keys)) => positional_exclusion(
-                self.connectivity,
+        let positional = self.positions.as_ref().and_then(|(queries, all_keys)| {
+            positional_exclusion(
+                self.rule,
                 self.causal,
                 queries.clone().narrow(1, query_range.start, rows),
                 all_keys.clone().narrow(1, key_range.start, keys),
-            )?,
-            None => None,
-        };
+            )
+        });
         let padding = union_exclusions(query_invalid, key_invalid);
         Ok(union_exclusions(padding, positional)
             .map(|exclusion| exclusion.expand([batch, heads, rows, keys])))
@@ -285,10 +316,16 @@ pub struct MaskGeometry {
     pub query_sequence: usize,
     /// Key tokens, including any cached prefix.
     pub key_sequence: usize,
+    /// Absolute position of the first key (zero unless a cache dropped earlier keys).
+    ///
+    /// Only chunked-local rules depend on it. With a key mask it counts the
+    /// valid tokens dropped before the first key and must be the same for
+    /// every row.
+    pub key_start: usize,
 }
 
 impl MaskGeometry {
-    /// Describes one attention call's score-plane extents.
+    /// Describes one attention call's score-plane extents, with keys starting at position zero.
     #[must_use]
     pub const fn new(
         batch: usize,
@@ -301,10 +338,18 @@ impl MaskGeometry {
             heads,
             query_sequence,
             key_sequence,
+            key_start: 0,
         }
     }
 
-    /// Rejects empty axes and lengths that do not fit signed position arithmetic.
+    /// Sets the absolute position of the first key, e.g. the tokens a ring cache evicted.
+    #[must_use]
+    pub const fn with_key_start(mut self, key_start: usize) -> Self {
+        self.key_start = key_start;
+        self
+    }
+
+    /// Rejects empty axes and lengths that do not fit position arithmetic.
     fn validate(self) -> Result<()> {
         if self.batch == 0 || self.heads == 0 || self.query_sequence == 0 || self.key_sequence == 0
         {
@@ -315,8 +360,92 @@ impl MaskGeometry {
         }
         signed_length(self.query_sequence, "query length exceeds i64")?;
         signed_length(self.key_sequence, "key length exceeds i64")?;
+        if self.key_start.checked_add(self.key_sequence).is_none() {
+            return Err(Error::configuration(
+                "attention.mask_shape.key_start",
+                "absolute key positions must fit usize",
+            ));
+        }
         Ok(())
     }
+}
+
+/// Connectivity rewritten for local positions in `[0, K)` with small, exact parameters.
+///
+/// Windows of at least `K` positions, and chunks whose span holds no boundary,
+/// exclude nothing and become [`Self::Unrestricted`]; every remaining parameter
+/// is below `K` (see the module documentation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PositionRule {
+    /// No connectivity exclusion.
+    Unrestricted,
+    /// Exclude `key + window <= query`, with `1 <= window < K`.
+    Window(i64),
+    /// Exclude links whose `floor((position + phase) / width)` differ.
+    Chunk {
+        /// Frame width, `1 <= width <= K`.
+        width: i64,
+        /// Frame phase, `0 <= phase < width`.
+        phase: i64,
+    },
+}
+
+impl PositionRule {
+    /// Reduces a validated rule over a validated geometry (so `K` fits `i64`).
+    fn new(connectivity: AttentionConnectivity, geometry: MaskGeometry) -> Result<Self> {
+        let span = geometry.key_sequence;
+        Ok(match connectivity {
+            AttentionConnectivity::Global => Self::Unrestricted,
+            // No local gap reaches `K`, so a window that wide excludes nothing.
+            AttentionConnectivity::SlidingWindow { window } if window >= span => Self::Unrestricted,
+            AttentionConnectivity::SlidingWindow { window } => {
+                Self::Window(signed_length(window, "sliding window exceeds i64")?)
+            }
+            AttentionConnectivity::ChunkedLocal { chunk } => {
+                match chunk_frame(chunk, geometry.key_start, span) {
+                    None => Self::Unrestricted,
+                    Some((width, phase)) => Self::Chunk {
+                        width: signed_length(width, "chunk frame exceeds i64")?,
+                        phase: signed_length(phase, "chunk frame exceeds i64")?,
+                    },
+                }
+            }
+        })
+    }
+
+    /// Largest integer the rule's tensor arithmetic forms from positions below `span`.
+    fn peak(self, span: usize) -> Result<i64> {
+        let last = signed_length(span, "key length exceeds i64")? - 1;
+        // Both addends are below `span`, so the sum is below `2 * span`;
+        // `checked_add` still guards spans beyond `i64::MAX / 2`.
+        let extent = match self {
+            Self::Unrestricted => 0,
+            Self::Window(window) => window,
+            Self::Chunk { phase, .. } => phase,
+        };
+        last.checked_add(extent).ok_or_else(|| {
+            Error::configuration("attention.positions", "position arithmetic exceeds i64")
+        })
+    }
+}
+
+/// Validates optional `[batch, length]` token masks from metadata, including their device.
+fn check_token_masks<B: Backend, const N: usize>(
+    masks: [(Option<&TokenMask<B>>, &str, usize); N],
+    batch: usize,
+    device: &B::Device,
+) -> Result<()> {
+    for (mask, name, length) in masks {
+        let Some(mask) = mask else { continue };
+        check_token_mask(mask, name, batch, length)?;
+        if mask.as_tensor().device() != *device {
+            return Err(Error::configuration(
+                name,
+                "token mask must share the attention device",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Returns valid-token ordinals `cumsum(valid) - 1` per row, with padding set to zero.
@@ -328,38 +457,48 @@ pub fn valid_token_ordinals<B: Backend>(mask: &TokenMask<B>) -> Tensor<B, 2, Int
     (valid.clone().int().cumsum(1) - 1).mask_fill(valid.bool_not(), 0)
 }
 
-/// Compares query and key positions under one connectivity rule.
+/// Compares local query and key positions under causality and one reduced rule.
 ///
 /// `query_positions` is `[batch or 1, Q]` and `key_positions` is
 /// `[batch or 1, K]`; the result is one `[batch or 1, 1, Q, K]` plane, or `None`
-/// when neither causality nor connectivity excludes anything.
+/// when neither causality nor the rule excludes anything.
 fn positional_exclusion<B: Backend>(
-    connectivity: AttentionConnectivity,
+    rule: PositionRule,
     causal: bool,
     query_positions: Tensor<B, 2, Int>,
     key_positions: Tensor<B, 2, Int>,
-) -> Result<Option<Tensor<B, 4, Bool>>> {
+) -> Option<Tensor<B, 4, Bool>> {
     let [query_batch, query_sequence] = query_positions.dims();
     let [key_batch, key_sequence] = key_positions.dims();
+    let plane = [query_batch.max(key_batch), 1, query_sequence, key_sequence];
     // A position column against a position row: each comparison broadcasts to
     // one Boolean plane without materializing integer planes.
     let query = query_positions.reshape([query_batch, 1, query_sequence, 1]);
     let key = key_positions.reshape([key_batch, 1, 1, key_sequence]);
-    let causal_exclusion = causal.then(|| key.clone().greater(query.clone()));
-    let rule_exclusion = match connectivity {
-        AttentionConnectivity::Global => None,
-        AttentionConnectivity::SlidingWindow { window } => {
-            let window = signed_length(window, "sliding window exceeds i64")?;
+    let causal_exclusion = causal.then(|| {
+        audit_plane(plane);
+        key.clone().greater(query.clone())
+    });
+    let rule_exclusion = match rule {
+        PositionRule::Unrestricted => None,
+        PositionRule::Window(window) => {
+            audit_plane(plane);
             Some((key + window).lower_equal(query))
         }
-        AttentionConnectivity::ChunkedLocal { chunk } => {
-            let chunk = signed_length(chunk, "chunk width exceeds i64")?;
-            // Positions are non-negative, so truncating division is floor division.
-            Some(key.div_scalar(chunk).not_equal(query.div_scalar(chunk)))
+        PositionRule::Chunk { width, phase } => {
+            // Positions and phase are non-negative, so truncating division is floor division.
+            let chunk_index = |positions: Tensor<B, 4, Int>| {
+                if phase == 0 {
+                    positions.div_scalar(width)
+                } else {
+                    (positions + phase).div_scalar(width)
+                }
+            };
+            audit_plane(plane);
+            Some(chunk_index(key).not_equal(chunk_index(query)))
         }
     };
-    let plane = [query_batch.max(key_batch), 1, query_sequence, key_sequence];
-    Ok(union_exclusions(causal_exclusion, rule_exclusion).map(|mask| expand_to(mask, plane)))
+    union_exclusions(causal_exclusion, rule_exclusion).map(|mask| expand_to(mask, plane))
 }
 
 #[cfg(test)]

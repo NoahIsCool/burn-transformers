@@ -40,6 +40,27 @@ fn oracle(
     key_rows: &[Vec<bool>],
     with_masks: bool,
 ) -> Vec<bool> {
+    oracle_from(
+        connectivity,
+        causal,
+        heads,
+        queries,
+        key_rows,
+        with_masks,
+        0,
+    )
+}
+
+/// Scalar-oracle exclusions whose positions start at absolute `key_start`.
+fn oracle_from(
+    connectivity: AttentionConnectivity,
+    causal: bool,
+    heads: usize,
+    queries: usize,
+    key_rows: &[Vec<bool>],
+    with_masks: bool,
+    key_start: usize,
+) -> Vec<bool> {
     let keys = key_rows[0].len();
     let offset = keys - queries;
     let mut expected = Vec::new();
@@ -47,8 +68,11 @@ fn oracle(
         let positions = if with_masks {
             ordinals(row)
         } else {
-            (0..keys).collect()
-        };
+            (0..keys).collect::<Vec<_>>()
+        }
+        .into_iter()
+        .map(|position| position + key_start)
+        .collect::<Vec<_>>();
         let mut plane = Vec::new();
         for query in 0..queries {
             let aligned = query + offset;
@@ -255,15 +279,172 @@ fn invalid_requests_fail_with_context() {
         .exclusion_mask(true, geometry, Some(&three), None, &device)
         .unwrap_err();
     assert!(error.to_string().contains("query_mask"));
-    #[cfg(target_pointer_width = "64")]
-    {
-        let error = AttentionConnectivity::SlidingWindow {
-            window: i64::MAX as usize + 1,
-        }
-        .exclusion_mask::<TestBackend>(true, geometry, None, None, &device)
+    let error = AttentionConnectivity::Global
+        .exclusion_mask::<TestBackend>(
+            true,
+            geometry.with_key_start(usize::MAX - 1),
+            None,
+            None,
+            &device,
+        )
         .unwrap_err();
-        assert!(error.to_string().contains("sliding window exceeds i64"));
+    assert!(error.to_string().contains("attention.mask_shape.key_start"));
+}
+
+/// Huge windows and chunks are exact on 32-bit integer backends instead of wrapping.
+///
+/// Flex converts integer scalars with `as i32`; before reduction, a window of
+/// `2^31` excluded every link and `2^32 + 2` behaved like a window of two.
+#[test]
+fn huge_windows_and_chunks_do_not_wrap_on_32_bit_backends() {
+    let device = Default::default();
+    let geometry = MaskGeometry::new(1, 1, 4, 6);
+    let causal_only = AttentionConnectivity::Global
+        .exclusion_mask::<TestBackend>(true, geometry, None, None, &device)
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .to_vec::<bool>()
+        .unwrap();
+    for connectivity in [
+        AttentionConnectivity::SlidingWindow { window: 1 << 31 },
+        AttentionConnectivity::SlidingWindow {
+            window: (1 << 32) + 2,
+        },
+        AttentionConnectivity::SlidingWindow { window: usize::MAX },
+        AttentionConnectivity::ChunkedLocal {
+            chunk: (1 << 32) + 2,
+        },
+        AttentionConnectivity::ChunkedLocal { chunk: usize::MAX },
+    ] {
+        let mask = connectivity
+            .exclusion_mask::<TestBackend>(true, geometry, None, None, &device)
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .to_vec::<bool>()
+            .unwrap();
+        assert_eq!(mask, causal_only, "{connectivity}");
+        // Without causality the rule alone excludes nothing.
+        assert!(
+            connectivity
+                .exclusion_mask::<TestBackend>(false, geometry, None, None, &device)
+                .unwrap()
+                .is_none(),
+            "{connectivity}"
+        );
     }
+    // A huge chunk whose boundary falls inside the keys still splits them exactly.
+    let chunk = (1usize << 32) + 2;
+    let straddling = geometry.with_key_start(chunk - 3);
+    let mask = AttentionConnectivity::ChunkedLocal { chunk }
+        .exclusion_mask::<TestBackend>(false, straddling, None, None, &device)
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .to_vec::<bool>()
+        .unwrap();
+    let rows = [
+        [false, false, false, true, true, true],
+        [true, true, true, false, false, false],
+    ];
+    // Query rows 0..4 sit at local key positions 2..6: row 0 is before the boundary.
+    let expected = [rows[0], rows[1], rows[1], rows[1]].concat();
+    assert_eq!(mask, expected);
+}
+
+/// Position arithmetic beyond the device's `i32` range is rejected before allocation.
+#[test]
+fn positions_beyond_the_integer_dtype_are_rejected() {
+    let device = Default::default();
+    let too_long = MaskGeometry::new(1, 1, 1, (1 << 31) + 1);
+    let error = AttentionConnectivity::Global
+        .exclusion_mask::<TestBackend>(true, too_long, None, None, &device)
+        .unwrap_err();
+    assert!(error.to_string().contains("attention.positions"), "{error}");
+    // `key + window` reaches `K - 1 + window`, which must also fit.
+    let wide = MaskGeometry::new(1, 1, 1, (1 << 30) + 2);
+    let error = AttentionConnectivity::SlidingWindow {
+        window: (1 << 30) + 1,
+    }
+    .exclusion_mask::<TestBackend>(true, wide, None, None, &device)
+    .unwrap_err();
+    assert!(error.to_string().contains("I32"), "{error}");
+}
+
+/// Chunk boundaries follow absolute positions when keys start after evicted tokens.
+#[test]
+fn chunked_local_honors_absolute_key_start() {
+    let device = Default::default();
+    let key_rows = vec![
+        vec![true, true, true, true, true, true, true],
+        vec![false, true, true, false, true, true, true],
+    ];
+    for chunk in [2, 3, 4, 9] {
+        for key_start in [0, 1, 2, 5, 11] {
+            for causal in [false, true] {
+                for with_masks in [false, true] {
+                    let connectivity = AttentionConnectivity::ChunkedLocal { chunk };
+                    let queries = 3;
+                    let query_rows = key_rows
+                        .iter()
+                        .map(|row| row[4..].to_vec())
+                        .collect::<Vec<_>>();
+                    let key_mask = token_mask(&key_rows);
+                    let query_mask = token_mask(&query_rows);
+                    let actual = connectivity
+                        .exclusion_mask(
+                            causal,
+                            MaskGeometry::new(2, 1, queries, 7).with_key_start(key_start),
+                            with_masks.then_some(&query_mask),
+                            with_masks.then_some(&key_mask),
+                            &device,
+                        )
+                        .unwrap()
+                        .map_or_else(
+                            || vec![false; 2 * queries * 7],
+                            |mask| mask.into_data().to_vec::<bool>().unwrap(),
+                        );
+                    let expected = oracle_from(
+                        connectivity,
+                        causal,
+                        1,
+                        queries,
+                        &key_rows,
+                        with_masks,
+                        key_start,
+                    );
+                    assert_eq!(
+                        actual, expected,
+                        "C={chunk} start={key_start} causal={causal} masks={with_masks}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Validating token masks builds no `[query, key]` plane; chunks build only their own.
+#[test]
+fn exclusion_plans_build_planes_only_per_chunk() {
+    use super::super::mask::plane_audit;
+
+    let device = Default::default();
+    let rows = vec![vec![true; 64], [vec![false; 3], vec![true; 61]].concat()];
+    let mask = token_mask(&rows);
+    plane_audit::reset();
+    let plan = ExclusionPlan::new(
+        AttentionConnectivity::SlidingWindow { window: 8 },
+        true,
+        MaskGeometry::new(2, 4, 64, 64),
+        Some(&mask),
+        Some(&mask),
+        &device,
+    )
+    .unwrap();
+    assert_eq!(plane_audit::largest(), 0, "validation built a plane");
+    plan.chunk(8..16, 0..64, 4).unwrap().unwrap();
+    assert_eq!(plane_audit::largest(), 2 * 8 * 64);
 }
 
 /// Rules render compactly and round-trip through serde with snake-case tags.
@@ -299,7 +480,7 @@ fn connectivity_displays_and_serializes() {
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(64))]
 
-    /// Random padding patterns and lengths agree with the scalar oracle.
+    /// Random padding patterns, lengths, and key offsets agree with the scalar oracle.
     #[test]
     fn random_masks_match_the_oracle(
         rule in 0usize..3,
@@ -308,6 +489,7 @@ proptest::proptest! {
         queries in 1usize..=5,
         extra_keys in 0usize..=3,
         valid_bits in proptest::collection::vec(proptest::bool::ANY, 16),
+        key_start in 0usize..=9,
     ) {
         let connectivity = match rule {
             0 => AttentionConnectivity::Global,
@@ -319,12 +501,12 @@ proptest::proptest! {
         let query_rows = vec![key_rows[0][keys - queries..].to_vec()];
         let mask = connectivity.exclusion_mask(
             causal,
-            MaskGeometry::new(1, 1, queries, keys),
+            MaskGeometry::new(1, 1, queries, keys).with_key_start(key_start),
             Some(&token_mask(&query_rows)),
             Some(&token_mask(&key_rows)),
             &Default::default(),
         ).unwrap();
-        let expected = oracle(connectivity, causal, 1, queries, &key_rows, true);
+        let expected = oracle_from(connectivity, causal, 1, queries, &key_rows, true, key_start);
         let actual = mask.map_or_else(|| vec![false; expected.len()], |mask| mask.into_data().to_vec::<bool>().unwrap());
         proptest::prop_assert_eq!(actual, expected);
     }

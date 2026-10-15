@@ -571,7 +571,12 @@ impl<B: Backend> GroupedQueryAttention<B> {
     ///
     /// Exclusions come from token masks (`true == valid`), `causal`, and
     /// `connectivity`, as in [`AttentionConnectivity::exclusion_mask`]; queries
-    /// are the bottom-right suffix of the keys. A causal sliding window over
+    /// are the bottom-right suffix of the keys, and token masks are validated
+    /// without building any full plane. Keys start at absolute position zero
+    /// ([`MaskGeometry::new`]); a chunked-local layer over a cache that evicted
+    /// earlier keys needs [`MaskGeometry::with_key_start`], so build its mask
+    /// with [`AttentionConnectivity::exclusion_mask`] and call [`Self::attend`].
+    /// A causal sliding window over
     /// unpadded keys also narrows every chunk's keys to
     /// [`sliding_window_key_range`], so local layers need only
     /// `O(chunk * (chunk + window))` score elements. Additive bias and hooks
