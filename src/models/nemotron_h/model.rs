@@ -25,7 +25,9 @@ use crate::{
     ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
     architecture::{Activation, RouterDiagnostics, TokenMask},
     attention::{GroupedQueryAttention, GroupedQueryAttentionConfig, padding_attention_mask},
+    experiment::AttentionPolicy,
     feed_forward::{DenseFeedForward, DenseFeedForwardConfig},
+    intervention::{Hooks, Layer, Point, Stack},
     moe::{
         ExpertSelection, GroupLimitedSelection, GroupScore, PrunedExpertScore,
         RenormalizationDenominator, RoutedExpertPrecision, RouterConfig, RouterProjectionPrecision,
@@ -44,6 +46,7 @@ use crate::models::shared::{
 
 mod batch;
 mod decode;
+mod hooks;
 pub mod mamba2;
 mod mtp;
 mod plan;
@@ -569,43 +572,117 @@ impl<B: Backend> NemotronHBlock<B> {
         })
     }
 
-    /// Evaluates one stateless residual block and optional router output.
+    /// Evaluates one stateless residual block and its optional router output.
+    ///
+    /// With `hooks`, the block emits its activation points (see
+    /// [`NemotronHForCausalLm::activation_points`]) exactly where they occur
+    /// in the graph, and an edit replaces the activation for every later
+    /// operation. `context.policy` changes attention connectivity for staged
+    /// experiments; the plain forward pass uses causal attention.
     fn forward(
         &self,
         hidden: Tensor<B, 3>,
-        token_mask: Option<&TokenMask<B>>,
-        sliding_window: Option<usize>,
+        context: &BlockContext<'_, B>,
+        mut hooks: Option<&mut Hooks<'_, B>>,
     ) -> Result<(Tensor<B, 3>, Option<NemotronHMoeOutput<B>>)> {
+        let layer = Layer::decoder(context.index);
+        let hidden = emit(hooks.as_deref_mut(), layer.residual_pre(), hidden)?;
         let residual = hidden.clone();
         let normalized = self.norm.forward(hidden);
-        match self.mixer()? {
-            BlockMixer::Mamba2(mamba) => Ok((
-                residual
-                    + mamba.forward(normalized, token_mask, NemotronMamba2Mode::ChunkedPrefill)?,
-                None,
-            )),
+        let (mixed, routed) = match self.mixer()? {
+            BlockMixer::Mamba2(mamba) => {
+                let normalized = emit(hooks.as_deref_mut(), layer.mixer_input(), normalized)?;
+                let mixed = mamba.forward(
+                    normalized,
+                    context.token_mask,
+                    NemotronMamba2Mode::ChunkedPrefill,
+                )?;
+                (
+                    emit(hooks.as_deref_mut(), layer.mixer_output(), mixed)?,
+                    None,
+                )
+            }
             BlockMixer::Attention(attention) => {
+                let normalized = emit(hooks.as_deref_mut(), layer.mixer_input(), normalized)?;
                 let projection = attention.project_self(normalized)?;
                 let [batch, _, sequence, _] = projection.query.dims();
-                let mask = stateless_attention_mask(
-                    token_mask,
+                let device = projection.query.device();
+                let mut mask = stateless_attention_mask(
+                    context.token_mask,
                     batch,
                     attention.query_heads,
                     sequence,
-                    sliding_window,
-                    &projection.query.device(),
+                    context.sliding_window,
+                    &device,
                 )?;
-                Ok((
-                    residual + attention.attend(projection, mask, None, true)?,
+                let (mut bias, mut causal) = (None, true);
+                if let Some(policy) = context.policy {
+                    let shape = [batch, attention.query_heads, sequence, sequence];
+                    mask = policy.exclusion_mask(mask, shape, &device)?;
+                    bias = policy.expanded_bias(shape, &device)?;
+                    causal = policy.causal;
+                }
+                let mixed = match hooks.as_deref_mut() {
+                    Some(hooks) => attention.attend_with_hooks(
+                        projection,
+                        mask,
+                        bias,
+                        causal,
+                        layer.self_attention(),
+                        hooks,
+                    )?,
+                    None => attention.attend(projection, mask, bias, causal)?,
+                };
+                (
+                    emit(hooks.as_deref_mut(), layer.mixer_output(), mixed)?,
                     None,
-                ))
+                )
             }
-            BlockMixer::Mlp(mlp) => Ok((residual + mlp.forward(normalized)?, None)),
+            BlockMixer::Mlp(mlp) => {
+                let normalized = emit(hooks.as_deref_mut(), layer.mlp_input(), normalized)?;
+                let mixed = match hooks.as_deref_mut() {
+                    Some(hooks) => mlp.forward_with_hooks(normalized, layer, hooks)?,
+                    None => mlp.forward(normalized)?,
+                };
+                (emit(hooks.as_deref_mut(), layer.mlp_output(), mixed)?, None)
+            }
             BlockMixer::Moe(moe) => {
+                let normalized = emit(hooks.as_deref_mut(), layer.mlp_input(), normalized)?;
                 let output = moe.forward(normalized)?;
-                Ok((residual + output.hidden_state.clone(), Some(output)))
+                let mixed = emit(
+                    hooks.as_deref_mut(),
+                    layer.mlp_output(),
+                    output.hidden_state.clone(),
+                )?;
+                (mixed, Some(output))
             }
-        }
+        };
+        let hidden = emit(hooks, layer.residual_post(), residual + mixed)?;
+        Ok((hidden, routed))
+    }
+}
+
+/// Per-block inputs of one stateless pass.
+pub(super) struct BlockContext<'a, B: Backend> {
+    /// Zero-based block index, which addresses the block's activation points.
+    pub(super) index: usize,
+    /// Optional `[batch, sequence]` token validity (`true == valid`).
+    pub(super) token_mask: Option<&'a TokenMask<B>>,
+    /// Optional causal attention window.
+    pub(super) sliding_window: Option<usize>,
+    /// Attention connectivity override for staged experiments.
+    pub(super) policy: Option<&'a AttentionPolicy<B>>,
+}
+
+/// Emits `tensor` at `point` when hooks are active; otherwise returns it unchanged.
+pub(super) fn emit<B: Backend, const D: usize>(
+    hooks: Option<&mut Hooks<'_, B>>,
+    point: Point<D>,
+    tensor: Tensor<B, D>,
+) -> Result<Tensor<B, D>> {
+    match hooks {
+        Some(hooks) => hooks.apply(point, tensor),
+        None => Ok(tensor),
     }
 }
 
@@ -660,10 +737,14 @@ impl<B: Backend> NemotronHModel<B> {
     }
 
     /// Evaluates the stateless backbone and retains requested diagnostics.
+    ///
+    /// With `hooks`, the embedding, every block's points, and the final norm
+    /// are emitted in graph order; the caller owns the hook scope.
     fn forward(
         &self,
         input: &CausalLmInput<B>,
         options: &ForwardOptions,
+        mut hooks: Option<&mut Hooks<'_, B>>,
     ) -> Result<NemotronHBackboneOutput<B>> {
         // Mamba and attention mixers are position-free; explicit positions
         // are still range-checked so callers get the shared input contract.
@@ -674,7 +755,11 @@ impl<B: Backend> NemotronHModel<B> {
                 .with_position_limit(self.config.max_position_embeddings)
                 .with_implicit_positions(ImplicitPositions::Unused),
         )?;
-        let mut hidden = self.embed_tokens.forward(input.token_ids.clone());
+        let mut hidden = emit(
+            hooks.as_deref_mut(),
+            Stack::Decoder.embedding(),
+            self.embed_tokens.forward(input.token_ids.clone()),
+        )?;
         let mut hidden_states = Vec::with_capacity(if options.hidden_states {
             self.layers.len() + 2
         } else {
@@ -684,12 +769,14 @@ impl<B: Backend> NemotronHModel<B> {
         if options.hidden_states {
             hidden_states.push(hidden.clone());
         }
-        for layer in &self.layers {
-            let (next, routed) = layer.forward(
-                hidden,
-                input.token_mask.as_ref(),
-                self.config.sliding_window,
-            )?;
+        for (index, layer) in self.layers.iter().enumerate() {
+            let context = BlockContext {
+                index,
+                token_mask: input.token_mask.as_ref(),
+                sliding_window: self.config.sliding_window,
+                policy: None,
+            };
+            let (next, routed) = layer.forward(hidden, &context, hooks.as_deref_mut())?;
             hidden = next;
             if options.hidden_states {
                 hidden_states.push(hidden.clone());
@@ -707,7 +794,11 @@ impl<B: Backend> NemotronHModel<B> {
                 });
             }
         }
-        hidden = self.norm.forward(hidden);
+        hidden = emit(
+            hooks,
+            Stack::Decoder.final_norm(),
+            self.norm.forward(hidden),
+        )?;
         if options.hidden_states {
             hidden_states.push(hidden.clone());
         }
@@ -928,7 +1019,17 @@ impl<B: Backend> NemotronHForCausalLm<B> {
                 "Nemotron-H attention probability capture is not yet exposed".into(),
             ));
         }
-        let backbone = self.model.forward(&input, options)?;
+        let backbone = self.model.forward(&input, options, None)?;
+        self.finish_forward(&input, options, backbone)
+    }
+
+    /// Projects the requested positions of a completed backbone pass.
+    fn finish_forward(
+        &self,
+        input: &CausalLmInput<B>,
+        options: &ForwardOptions,
+        backbone: NemotronHBackboneOutput<B>,
+    ) -> Result<CausalLmOutput<B>> {
         let hidden = backbone.hidden;
         let selected = select_hidden(hidden.clone(), input.token_mask.as_ref(), &options.logits)?;
         let logits = self.project_logits(selected)?.cast(DType::F32);
