@@ -72,7 +72,9 @@ impl<B: Backend, M: HiddenTransform<B> + ModuleDisplay, F: HiddenTransform<B> + 
     /// Executes this composition in a scope containing its declared inner points.
     ///
     /// This entry point validates position values once (one device
-    /// synchronization); nested blocks then check only tensor layouts.
+    /// synchronization) inside the hook scope, so a rejected context fails the
+    /// run like any other error and leaves no stale captures; nested blocks then
+    /// check only tensor layouts.
     pub fn run_with_hooks(
         &self,
         hidden: Tensor<B, 3>,
@@ -80,9 +82,11 @@ impl<B: Backend, M: HiddenTransform<B> + ModuleDisplay, F: HiddenTransform<B> + 
         layer: Layer,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Tensor<B, 3>> {
-        validate_width(&hidden, self.hidden_size, "residual_block.input")?;
-        context.validate([hidden.dims()[0], hidden.dims()[1]], &hidden.device())?;
+        // Validating inside the scope keeps the scope contract: a failed run
+        // still clears the previous run's captures.
         hooks.run(self.activation_points(layer), |hooks| {
+            validate_width(&hidden, self.hidden_size, "residual_block.input")?;
+            context.validate([hidden.dims()[0], hidden.dims()[1]], &hidden.device())?;
             self.forward(hidden, context, layer, hooks)
         })
     }
@@ -218,7 +222,9 @@ impl<B: Backend, T: HiddenTransform<B> + ModuleDisplay> WidthAdapter<B, T> {
     /// Executes this composition in a scope containing its declared inner points.
     ///
     /// This entry point validates position values once (one device
-    /// synchronization); nested blocks then check only tensor layouts.
+    /// synchronization) inside the hook scope, so a rejected context fails the
+    /// run like any other error and leaves no stale captures; nested blocks then
+    /// check only tensor layouts.
     pub fn run_with_hooks(
         &self,
         hidden: Tensor<B, 3>,
@@ -226,9 +232,11 @@ impl<B: Backend, T: HiddenTransform<B> + ModuleDisplay> WidthAdapter<B, T> {
         layer: Layer,
         hooks: &mut Hooks<'_, B>,
     ) -> Result<Tensor<B, 3>> {
-        validate_width(&hidden, self.input_size, "width_adapter.input")?;
-        context.validate([hidden.dims()[0], hidden.dims()[1]], &hidden.device())?;
+        // Validating inside the scope keeps the scope contract: a failed run
+        // still clears the previous run's captures.
         hooks.run(self.activation_points(layer), |hooks| {
+            validate_width(&hidden, self.input_size, "width_adapter.input")?;
+            context.validate([hidden.dims()[0], hidden.dims()[1]], &hidden.device())?;
             self.forward(hidden, context, layer, hooks)
         })
     }

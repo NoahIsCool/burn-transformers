@@ -676,6 +676,64 @@ fn layout_validation_is_value_free_while_full_validation_rejects_edited_position
     assert!(error.to_string().contains("execution.positions"), "{error}");
 }
 
+/// A run rejected by context validation clears the previous run's captures.
+///
+/// Validation happens inside the hook scope, so `get` cannot return
+/// activations from an earlier successful run after a failed one.
+#[test]
+fn rejected_contexts_fail_inside_the_hook_scope_and_clear_old_captures() {
+    let device = Default::default();
+    let input = Tensor::<B, 3>::ones([1, 3, 2], &device);
+    let identity = || matrix(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+    let mut edited = context();
+    edited.positions = Tensor::from_ints([[0, -1, 2]], &device);
+
+    let block = ResidualBlock::without_normalization(2, identity(), identity()).unwrap();
+    let mut hooks = Hooks::new();
+    let output = hooks.capture(Layer::decoder(0).residual_post());
+    block
+        .run_with_hooks(input.clone(), &context(), Layer::decoder(0), &mut hooks)
+        .unwrap();
+    assert!(hooks.get(&output).is_ok());
+    let error = block
+        .run_with_hooks(input.clone(), &edited, Layer::decoder(0), &mut hooks)
+        .unwrap_err();
+    assert!(error.to_string().contains("execution.positions"), "{error}");
+    assert!(
+        hooks.get(&output).is_err(),
+        "stale capture survived a failed run"
+    );
+    // A width error is also raised inside the scope.
+    block
+        .run_with_hooks(input.clone(), &context(), Layer::decoder(0), &mut hooks)
+        .unwrap();
+    let narrow = Tensor::<B, 3>::ones([1, 3, 1], &device);
+    assert!(
+        block
+            .run_with_hooks(narrow, &context(), Layer::decoder(0), &mut hooks)
+            .is_err()
+    );
+    assert!(hooks.get(&output).is_err());
+
+    // The adapter exposes its inner block's points.
+    let adapter = WidthAdapter::new(block, 2, 2, 2, &device).unwrap();
+    let mut hooks = Hooks::new();
+    let output = hooks.capture(Layer::decoder(0).residual_post());
+    adapter
+        .run_with_hooks(input.clone(), &context(), Layer::decoder(0), &mut hooks)
+        .unwrap();
+    assert!(hooks.get(&output).is_ok());
+    assert!(
+        adapter
+            .run_with_hooks(input, &edited, Layer::decoder(0), &mut hooks)
+            .is_err()
+    );
+    assert!(
+        hooks.get(&output).is_err(),
+        "stale capture survived a failed run"
+    );
+}
+
 /// Attaching an encoder checks its layout and nonnegative source positions together.
 #[test]
 fn with_encoder_validates_source_layout_and_positions() {
