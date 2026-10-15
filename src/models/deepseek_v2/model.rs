@@ -61,7 +61,9 @@ use crate::models::{
     shared::{InputContract, InputNames, select_hidden, validate_input},
 };
 
-/// External compressed MLA caches and transactional prefill/decode execution.
+/// Dependency-free host planning of batched stateful blocks (Verus-verified).
+pub(crate) mod batch;
+/// External compressed MLA caches and batched transactional prefill/decode execution.
 mod decode;
 /// Activation hooks and staged execution (`HookedModel`, `StagedModel`).
 mod hooks;
