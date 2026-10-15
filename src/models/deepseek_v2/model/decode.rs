@@ -55,7 +55,8 @@ use crate::{
 };
 
 use super::{
-    DeepseekV2ForCausalLm, INPUT_NAMES, ROUTER_DTYPE, block::BlockLayout, router_diagnostics,
+    DeepseekV2ForCausalLm, INPUT_NAMES, ROUTER_DTYPE, batch::rotary_contexts, block::BlockLayout,
+    router_diagnostics,
 };
 
 /// Owner named when an input tensor is on another device than the cache.
@@ -601,15 +602,11 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
         positions: Tensor<B, 2, Int>,
         prepared: &StatefulRows,
     ) -> Result<RotaryAngles<B>> {
-        let contexts = prepared
-            .active_contexts()
-            .map(|(_, context)| context)
-            .collect::<Vec<_>>();
-        let first = contexts.first().copied().unwrap_or(1).max(1);
-        if !self.model.rope.scaling().is_context_dependent()
-            || contexts.iter().all(|&context| context == first)
-        {
-            return self.model.rotary_tables(positions, first);
+        // Verified: the first active context (at least one), whether every
+        // active row shares it, and each row's own context.
+        let contexts = rotary_contexts(&prepared.token_counts, &prepared.evaluated_contexts);
+        if !self.model.rope.scaling().is_context_dependent() || contexts.uniform {
+            return self.model.rotary_tables(positions, contexts.first);
         }
         let dtype = self.model.embed_tokens.weight.val().dtype();
         let [batch, block] = positions.dims();
@@ -617,10 +614,7 @@ impl<B: Backend> DeepseekV2ForCausalLm<B> {
         let mut sine = Vec::with_capacity(batch);
         let mut rotary_dimension = 0;
         for row in 0..batch {
-            let context = match prepared.token_counts[row] {
-                0 => first,
-                _ => prepared.evaluated_contexts[row].max(1),
-            };
+            let context = contexts.rows[row];
             let frequencies = RotaryFrequencies::new(self.model.rope, context)?;
             let angles = rotary_angles_from_frequencies(
                 &frequencies,

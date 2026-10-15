@@ -46,6 +46,60 @@ fn query_slots_follow_each_row_cursor() {
     );
 }
 
+/// Identity detection, validity, implicit positions, and index conversion are exact.
+#[test]
+fn block_helpers_match_their_definitions() {
+    assert!(identity_layout(&[3, 3], 3, 3));
+    assert!(!identity_layout(&[3, 2], 3, 3));
+    assert!(!identity_layout(&[2, 2], 2, 3));
+    assert_eq!(query_validity(&[2, 2], 2), None);
+    assert_eq!(
+        query_validity(&[2, 0], 2),
+        Some(vec![vec![true, true], vec![false, false]])
+    );
+    assert_eq!(
+        implicit_positions(&[4, 0, 9], &[2, 1, 0], 2),
+        [vec![4, 5], vec![0, 0], vec![0, 0]]
+    );
+    assert_eq!(signed_indices(&[0, 7]), Some(vec![0, 7]));
+    assert_eq!(signed_indices(&[]), Some(Vec::new()));
+    assert_eq!(signed_indices(&[1, usize::MAX]), None);
+    assert_eq!(clamp_limits(&[1, 3, 9], 4), [1, 3, 4]);
+    assert_eq!(clamp_limits(&[], 4), Vec::<usize>::new());
+}
+
+/// Rotary contexts take the first active row, raised to one, and per-row fallbacks.
+#[test]
+fn rotary_contexts_follow_the_first_active_row() {
+    let plan = rotary_contexts(&[0, 2, 1], &[9, 5, 5]);
+    assert_eq!(
+        plan,
+        RotaryContexts {
+            first: 5,
+            uniform: true,
+            rows: vec![5, 5, 5]
+        }
+    );
+    let plan = rotary_contexts(&[1, 0, 1], &[0, 9, 4]);
+    assert_eq!(
+        plan,
+        RotaryContexts {
+            first: 1,
+            uniform: false,
+            rows: vec![1, 1, 4]
+        }
+    );
+    let plan = rotary_contexts(&[0, 0], &[3, 4]);
+    assert_eq!(
+        plan,
+        RotaryContexts {
+            first: 1,
+            uniform: true,
+            rows: vec![1, 1]
+        }
+    );
+}
+
 /// Strategy for one row: valid columns of a mask over `sequence` columns.
 fn row_columns(sequence: usize) -> impl Strategy<Value = Vec<usize>> {
     proptest::collection::vec(any::<bool>(), sequence)
@@ -77,6 +131,55 @@ proptest! {
             }
         }
         prop_assert!(maps.gather.iter().all(|&column| column < sequence));
+    }
+
+    /// Block helpers equal the iterator definitions they replaced.
+    #[test]
+    fn block_helpers_match_iterator_definitions(
+        rows in proptest::collection::vec((0usize..20, 0usize..6), 1..5),
+        sequence in 1usize..7,
+        contexts in proptest::collection::vec(0usize..9, 4),
+    ) {
+        let baselines = rows.iter().map(|&(length, _)| length).collect::<Vec<_>>();
+        let counts = rows.iter().map(|&(_, count)| count).collect::<Vec<_>>();
+        let (block, extent) = batch_extents(&baselines, &counts).unwrap();
+        prop_assert_eq!(
+            identity_layout(&counts, block, sequence),
+            block == sequence && counts.iter().all(|&count| count == sequence)
+        );
+        prop_assume!(block > 0);
+        let slots = query_slots(&baselines, &counts, block, extent).concat();
+        let valid = |entry: usize| entry % block < counts[entry / block];
+        let implicit = slots
+            .iter()
+            .enumerate()
+            .map(|(entry, &slot)| if valid(entry) { slot } else { 0 })
+            .collect::<Vec<_>>();
+        prop_assert_eq!(implicit_positions(&baselines, &counts, block).concat(), implicit);
+        let flags = counts
+            .iter()
+            .any(|&count| count != block)
+            .then(|| (0..counts.len() * block).map(valid).collect::<Vec<_>>());
+        prop_assert_eq!(query_validity(&counts, block).map(|rows| rows.concat()), flags);
+
+        let contexts = &contexts[..counts.len()];
+        let active = contexts
+            .iter()
+            .zip(&counts)
+            .filter(|(_, count)| **count > 0)
+            .map(|(&context, _)| context)
+            .collect::<Vec<_>>();
+        let first = active.first().copied().unwrap_or(1).max(1);
+        let plan = rotary_contexts(&counts, contexts);
+        prop_assert_eq!(plan.first, first);
+        prop_assert_eq!(plan.uniform, active.iter().all(|&context| context == first));
+        for (row, &count) in counts.iter().enumerate() {
+            let expected = match count {
+                0 => first,
+                _ => contexts[row].max(1),
+            };
+            prop_assert_eq!(plan.rows[row], expected);
+        }
     }
 
     /// Key limits equal the brute-force prefix maxima, clamped below by one.

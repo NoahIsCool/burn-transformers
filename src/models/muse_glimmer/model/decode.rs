@@ -52,7 +52,7 @@ use crate::{
         TensorDecodeState,
     },
     models::{
-        deepseek_v2::model::block::BlockLayout,
+        deepseek_v2::model::{batch::rotary_contexts, block::BlockLayout},
         shared::{
             EmptyRows, StatefulContract, StatefulRows, ensure_same_device, prepare_stateful_rows,
             select_hidden_with_last_columns, validate_logits_selection,
@@ -503,19 +503,16 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
         positions: Tensor<B, 2, Int>,
         prepared: &StatefulRows,
     ) -> Result<RotaryTables<B>> {
-        let contexts = prepared
-            .active_contexts()
-            .map(|(_, context)| context)
-            .collect::<Vec<_>>();
-        let first = contexts.first().copied().unwrap_or(1).max(1);
+        // Verified: the first active context (at least one), whether every
+        // active row shares it, and each row's own context.
+        let contexts = rotary_contexts(&prepared.token_counts, &prepared.evaluated_contexts);
         let ropes = self.model.distinct_ropes();
-        let uniform = contexts.iter().all(|&context| context == first);
-        if uniform
+        if contexts.uniform
             || ropes
                 .iter()
                 .all(|rope| !rope.scaling().is_context_dependent())
         {
-            return self.model.rotary_tables(positions, first);
+            return self.model.rotary_tables(positions, contexts.first);
         }
         let dtype = self.model.embed_tokens.weight.val().dtype();
         let [batch, block] = positions.dims();
@@ -526,10 +523,7 @@ impl<B: Backend> MuseGlimmerForCausalLm<B> {
                 let mut sine = Vec::with_capacity(batch);
                 let mut rotary_dimension = 0;
                 for row in 0..batch {
-                    let context = match prepared.token_counts[row] {
-                        0 => first,
-                        _ => prepared.evaluated_contexts[row].max(1),
-                    };
+                    let context = contexts.rows[row];
                     let angles = rotary_angles_from_frequencies(
                         &RotaryFrequencies::new(rope, context)?,
                         positions.clone().slice([row..row + 1, 0..block]),

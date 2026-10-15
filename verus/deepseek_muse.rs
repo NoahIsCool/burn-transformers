@@ -2,19 +2,30 @@
 //!
 //! Verifies, in place, the specifications attached to
 //! `src/models/deepseek_v2/model/batch.rs`: the host planning of batched
-//! stateful execution. For all admissible inputs the proofs establish
-//! freedom from integer overflow and that
+//! stateful execution shared by DeepSeek-V2 and Muse-Glimmer. For all
+//! admissible inputs the proofs establish freedom from integer overflow and
+//! that
 //!
 //! * `row_maps` gathers exactly the valid columns into the first `n` block
-//!   entries and scatters each valid column back to its entry, every other
-//!   column to the zero row `T`;
-//! * `batch_extents` returns the widest row `T = max_b n_b` (attained) and a
-//!   key extent covering every row's cache end `L_b + n_b`;
-//! * `key_limits` returns nondecreasing limits in `1..=E` that cover every
-//!   active row's causal key prefix `L_b + i + 1`, the bound that lets
-//!   bounded attention skip keys a query chunk cannot see;
+//!   entries (padding entries gather `c_0`, or `0` for an empty row) and
+//!   scatters each valid column back to its entry, every other column to the
+//!   zero row `T`;
+//! * `batch_extents` returns exactly the widest row `T = max_b n_b` and the
+//!   furthest cache end `E = max_b (L_b + n_b)` (both attained, zero for no
+//!   rows), failing only on a length mismatch or an overflowing end;
+//! * `key_limits` returns nondecreasing limits in `1..=E` that are exactly
+//!   `max(1, max_{j <= i, n_b > j} (L_b + j + 1))`: they cover every active
+//!   row's causal key prefix and are attained by one, so bounded attention
+//!   reads no key a query prefix cannot see;
 //! * `query_slots` places entry `k < n_b` of row `b` at cache slot `L_b + k`
-//!   and keeps padding placeholders within the key extent;
+//!   and padding entries at `L_b`, within the key extent;
+//! * `identity_layout`, `query_validity`, and `implicit_positions` decide the
+//!   identity packing, the validity `k < n_b`, and the implicit positions
+//!   `L_b + k` (zero at padding) exactly; `signed_indices` converts to `i64`
+//!   exactly or reports an unrepresentable index; `clamp_limits` keeps
+//!   limits nondecreasing and in `1..=K`;
+//! * `rotary_contexts` returns the first active row's context (at least one),
+//!   whether every active context equals it, and each row's own context;
 //!
 //! and the specifications attached to `src/models/muse_glimmer/schedule.rs`:
 //!

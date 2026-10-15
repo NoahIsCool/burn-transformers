@@ -23,7 +23,10 @@ use crate::{
     Error, Result, cache::KvBatchSegment, mla::PositionalVisibility, models::shared::StatefulRows,
 };
 
-use super::batch::{RowMaps, batch_extents, key_limits, query_slots, row_maps};
+use super::batch::{
+    RowMaps, batch_extents, clamp_limits, identity_layout, implicit_positions, key_limits,
+    query_slots, query_validity, row_maps, signed_indices,
+};
 
 /// Device-side packing of one call's rows into a `[B, T]` block.
 ///
@@ -66,15 +69,11 @@ impl<B: Backend> BlockLayout<B> {
             return Ok(None);
         }
         let (batch, sequence) = (prepared.batch, prepared.sequence);
-        let identity = block == sequence && counts.iter().all(|&count| count == sequence);
+        // Every host plan below is verified in `verus/deepseek_muse.rs`.
+        let identity = identity_layout(counts, block, sequence);
         let upload = |values: Vec<usize>, shape: [usize; 2]| -> Result<Tensor<B, 2, Int>> {
-            let signed = values
-                .into_iter()
-                .map(|value| {
-                    i64::try_from(value)
-                        .map_err(|_| Error::configuration("stateful.batch", "index exceeds i64"))
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let signed = signed_indices(&values)
+                .ok_or_else(|| Error::configuration("stateful.batch", "index exceeds i64"))?;
             Ok(Tensor::from_data(TensorData::new(signed, shape), device))
         };
         let (gather, scatter) = if identity {
@@ -97,16 +96,9 @@ impl<B: Backend> BlockLayout<B> {
             )
         };
         let slots = query_slots(baselines, counts, block, extent).concat();
-        let valid = |entry: usize| entry % block < counts[entry / block];
-        let implicit = slots
-            .iter()
-            .enumerate()
-            .map(|(entry, &slot)| if valid(entry) { slot } else { 0 })
-            .collect();
-        let query_valid = counts.iter().any(|&count| count != block).then(|| {
-            let flags = (0..batch * block).map(valid).collect::<Vec<_>>();
-            Tensor::from_data(TensorData::new(flags, [batch, block]), device)
-        });
+        let implicit = implicit_positions(baselines, counts, block).concat();
+        let query_valid = query_validity(counts, block)
+            .map(|rows| Tensor::from_data(TensorData::new(rows.concat(), [batch, block]), device));
         Ok(Some(Self {
             sequence,
             block,
@@ -196,10 +188,7 @@ impl<B: Backend> BlockLayout<B> {
     ) -> PositionalVisibility<B> {
         let keys = segment.key_positions().dims()[1];
         let limits = if positional {
-            self.key_limits
-                .iter()
-                .map(|&limit| limit.min(keys))
-                .collect()
+            clamp_limits(&self.key_limits, keys)
         } else {
             vec![keys; self.block]
         };
