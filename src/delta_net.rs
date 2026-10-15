@@ -16,13 +16,18 @@
 //! learned exponential forgetting factor.
 //!
 //! [`recurrent_gated_delta_rule`] is the transparent token-by-token reference
-//! used for decode and parity tests. [`chunked_gated_delta_rule`] algebraically
-//! resolves all within-chunk delta updates as a triangular system, then performs
-//! dense batched matrix products. It preserves the recurrent result while
-//! exposing substantially more parallelism during prompt prefill: every
-//! chunk's triangular solve and intra-chunk products run batched across up to
+//! used for decode and parity tests; [`recurrent_gated_delta_rule_with_snapshots`]
+//! additionally keeps the state after every token, which speculative
+//! verification needs to commit an accepted prefix. [`chunked_gated_delta_rule`]
+//! algebraically resolves all within-chunk delta updates as a triangular
+//! system, then performs dense batched matrix products. It preserves the
+//! recurrent result while exposing substantially more parallelism during
+//! prompt prefill: every chunk's triangular inverse (by recursive block
+//! doubling) and intra-chunk products run batched across up to
 //! [`CHUNKS_PER_BLOCK`] chunks, and only the three-product state carry between
-//! chunks remains sequential.
+//! chunks remains sequential. The projected mixer's prefill mode picks the
+//! recurrence instead for a single token or a very short segment with a tiny
+//! state, where it is cheaper.
 //!
 //! The projected [`GatedDeltaNet`] mixer adds a depthwise causal convolution
 //! before the rule and a gated RMS normalization after it. Padding (a `false`
@@ -1036,8 +1041,8 @@ pub fn recurrent_gated_delta_rule_with_snapshots<B: Backend>(
 /// Tokens are split into chunks of `C = min(chunk_size, L)`. Inside a chunk
 /// with cumulative log decays `G_i`, decay matrix `D_ij = exp(G_i - G_j)`
 /// (`i >= j`), and `L = strict_lower((beta k) k^T * D)`, all delta writes are
-/// resolved at once by `T = (I + L)^-1`, computed by forward substitution.
-/// With the incoming state `S`, a chunk then emits
+/// resolved at once by `T = (I + L)^-1`, computed by recursive block
+/// doubling. With the incoming state `S`, a chunk then emits
 ///
 /// ```text
 /// U   = T (beta v) - T (beta k * exp(G)) S        corrected values
@@ -1046,26 +1051,26 @@ pub fn recurrent_gated_delta_rule_with_snapshots<B: Backend>(
 /// ```
 ///
 /// Everything except the last three lines is independent of `S`, so it runs
-/// batched over blocks of up to [`CHUNKS_PER_BLOCK`] chunks: one
-/// `C - 1`-step substitution per block instead of per chunk. The sequential
-/// dependency is `ceil(L / C)` short state updates.
+/// batched over blocks of up to [`CHUNKS_PER_BLOCK`] chunks: one triangular
+/// inverse per block instead of per chunk. The sequential dependency is
+/// `ceil(L / C)` short state updates.
 ///
 /// # Layout
 ///
 /// The operands are rearranged once into dense chunk-major tensors
-/// `[chunks, batch, C, heads, ·]` (see [`ChunkOperands`]). Every block is then
+/// `[chunks, batch, C, heads, ·]`. Every block is then
 /// a zero-copy narrow of the outermost axis, every elementwise product runs
 /// on dense memory (vectorized CPU kernels need dense operands; strided views
 /// fall back to scalar index walks), and chunk `i` of the scan is again a
 /// dense slice. The intra-chunk inverse uses recursive block doubling
-/// ([`unit_lower_inverse`]), `log2 C` batched levels instead of `C - 1` row
-/// updates. A trailing partial chunk is zero-padded once, which is
+/// (`log2 C` batched levels instead of `C - 1` row
+/// updates). A trailing partial chunk is zero-padded once, which is
 /// exact because padded tokens have `k = v = beta = 0` and `log_decay = 0`,
 /// so they neither change `S` nor the valid rows of `T`. A prompt of
-/// `L < chunk_size` tokens is one unpadded chunk of width `L`, costing an
-/// `L - 1`-step substitution on `L x L` tiles. Blocks are balanced
-/// ([`block_chunk_ranges`]) so a lone partial tail never needs a block, and
-/// thus a full substitution, of its own.
+/// `L < chunk_size` tokens is one unpadded chunk of width `L`, whose
+/// inverse runs on `L x L` tiles (padded to the next power of two). Blocks
+/// are balanced (sizes differing by at most one), so a lone partial tail
+/// never needs a block, and thus a full set of inverse levels, of its own.
 ///
 /// # Errors
 ///
@@ -1105,8 +1110,8 @@ pub fn chunked_gated_delta_rule<B: Backend>(
 ///
 /// Uses `ceil(chunks / limit)` blocks whose sizes differ by at most one, the
 /// larger blocks first. Compared with greedy blocks of exactly `limit`, this
-/// never leaves a short final block: its substitution would cost as many
-/// sequential steps as a full one while batching less work. `limit` must be
+/// never leaves a short final block: its inverse would cost as many
+/// sequential levels as a full one while batching less work. `limit` must be
 /// non-zero; zero chunks produce no block.
 fn block_chunk_ranges(chunks: usize, limit: usize) -> Vec<Range<usize>> {
     let limit = limit.max(1);

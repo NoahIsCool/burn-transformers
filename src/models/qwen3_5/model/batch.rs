@@ -79,8 +79,9 @@ impl<B: Backend> CompactBatch<B> {
     /// # Errors
     ///
     /// Returns [`Error::Shape`] for mismatched row counts, columns outside the
-    /// rectangle, or a call in which no row appends a token, and
-    /// [`Error::Configuration`] for a cache position beyond `i64`.
+    /// rectangle or not strictly increasing, or a call in which no row
+    /// appends a token, and [`Error::Configuration`] for a cache position
+    /// beyond `i64`.
     pub(crate) fn new(
         valid_columns: &[Vec<usize>],
         sequence: usize,
