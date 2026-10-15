@@ -49,6 +49,9 @@ The experiment interfaces are implemented and documented in
   clean-run replacement, validation, and custom typed computation points.
 - Stateless hooks on custom causal/seq2seq, Qwen3.5/3.8, T5, and shared attention;
   discoverable catalogs identify the points each execution path supports.
+  Every family now implements the generic `HookedModel` trait, and every
+  causal family also implements `StagedModel` (see
+  [after v0.3](#progress-after-v03)).
 - Attention Q/K/V and head contexts retain native dispatch. An explicit eager
   precision choice enables score/pattern edits while preserving exclusions.
 - Ordinary Burn modules can be borrowed by edits and registered in an owning
@@ -317,6 +320,34 @@ short smoke runs do not establish grokking or reproduce population-level claims.
 Measured training evidence and final source checks are recorded separately from
 the historical v0.2 gates. Coverage, package, and hardware qualification remain
 release work; this implementation does not promote checkpoint support.
+
+## Progress after v0.3
+
+A polish cycle broadened and hardened the implementation without changing the
+milestones above or the advertised checkpoint support:
+
+- **One experiment interface for every model.** `HookedModel` is implemented
+  by every family and `StagedModel` by every causal family (including
+  DeepSeek-V2, Muse Glimmer, Nemotron-H, Qwen3-MoE, GPT-2, GPT-NeoX, and the
+  modular models); T5 and modular seq2seq models stage through their encoder
+  and decoder views. Both are dispatched by `AutoCausalLm` (`AutoSeq2SeqLm`
+  dispatches hooks) and forwarded by `LoadedModel`. The workbench runs one generic experiment on three families.
+- **New families.** The dense-decoder Llama family (`llama`, `mistral`,
+  `qwen2`, `qwen3`, `smollm3`, `olmo2`), Gemma 2/3 text, and gpt-oss, each with
+  tiny Transformers goldens and Flex/F32 real-checkpoint gates. Their
+  Metal and F16 acceptance remains open.
+- **Shared mechanisms.** Connectivity masks, sinks, soft caps, differential
+  attention, every RoPE scaling rule, one router for softmax/sigmoid and
+  grouped routing, clamped SwiGLU, a shared Mamba-2 mixer, MXFP4 decoding, and
+  explicit initialization policies, all usable from modular specs.
+- **Batched cached execution.** Every family decodes ragged batches in one
+  pass per step through atomic cache step writes.
+- **Verification.** 18 Verus harnesses and twelve fuzz targets.
+
+Open work carried forward: cached-state interventions, T5 staged views on the
+full encoder-decoder model, registering GPT-2 and GPT-NeoX in `AutoCausalLm`
+(they need external decode state), Metal and half-precision acceptance of the
+new families, and the release gates in [RELEASE_GATES.md](RELEASE_GATES.md).
 
 ## Scope boundaries
 

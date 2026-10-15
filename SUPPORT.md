@@ -1,8 +1,8 @@
 # Support policy
 
 This document defines what a support claim means for the `transformers` crate.
-It does not broaden the checkpoint matrix in `README.md` or any committed
-acceptance record.
+It does not broaden the [model status page](ARCHITECTURE_COMPATIBILITY.md) or
+any committed acceptance record.
 
 ## Version compatibility
 
@@ -26,7 +26,11 @@ generation behavior, and any documented limitations.
 
 Revisions, repacks, quantization formats, and third-party conversions not named
 by such a record are experimental even when their tensor names happen to load.
-Quantized support is tracked independently from full-precision support.
+Quantized support is tracked independently from full-precision support. The
+same holds for families whose real-checkpoint parity has been measured but not
+recorded as accepted, such as the Llama, Gemma, and gpt-oss checkpoints listed
+on the [model status page](ARCHITECTURE_COMPATIBILITY.md#real-checkpoint-evidence):
+they are experimentally validated, not supported.
 
 Version 0.1 promotes exactly three profiles on the validated Apple M3 Max host:
 

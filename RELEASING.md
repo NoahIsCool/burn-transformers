@@ -25,9 +25,9 @@ an unsupported checkpoint claim.
 - Check that every advertised record names an immutable revision, backend,
   dtype, tokenizer evidence, cache behavior, generation evidence, and known
   limits.
-- Reconcile the README support matrix and architecture documentation with those
-  records. An acceptance result must never be inferred from successful loading
-  alone.
+- Reconcile the [model status page](ARCHITECTURE_COMPATIBILITY.md), the README
+  family table, and the architecture documentation with those records. An
+  acceptance result must never be inferred from successful loading alone.
 - Re-run every non-CI hardware or large-artifact gate whose recorded inputs or
   execution code changed since its evidence was captured.
 

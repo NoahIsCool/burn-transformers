@@ -5,9 +5,8 @@ checkpoint revisions targeted by this crate. It was assembled from the pinned
 configuration, the model author's or framework's reference implementation, and
 the corresponding Burn implementation. The matrix describes architecture, not
 release support: a check mark does **not** mean that all real-weight acceptance
-gates have passed. See [the runtime status table](README.md) and
-[the compatibility evidence matrix](ARCHITECTURE_COMPATIBILITY.md) for that
-separate question.
+gates have passed. See [the model status page](ARCHITECTURE_COMPATIBILITY.md)
+for that separate question.
 
 For v0.1, only the pinned Q3.5-0.8 Metal/F16 base-text and FLAN-S Flex/F32 /
 Metal/F32 profiles are promoted. This does not promote every checked mechanism
@@ -15,6 +14,12 @@ in their columns: quantized quality, real-weight MTP and multimodal paths remain
 experimental. The [release record](acceptance/measurements/v0_1-release-20260910.json)
 retains Qwen's user-accepted historical performance limitation. No architectural
 feature was changed to adopt the new timing baseline.
+
+The first matrix covers the checkpoints targeted for v0.1; a
+[second matrix](#families-added-after-v01) covers the Llama, Gemma, and gpt-oss
+families added since, at the pinned checkpoints their real-weight gates use.
+[Shared mechanisms beyond the pinned graphs](#shared-mechanisms-beyond-the-pinned-graphs)
+lists implemented components that no pinned checkpoint column exercises.
 
 Only the executable text graph is counted. Vision towers, tokenizer behavior,
 quantization formats, serving systems, and broad training recipes such as FLAN
@@ -39,6 +44,9 @@ complete consumer workflows.
 | Editable T5/Qwen recipes and parameter transfer | Change block geometry, extract prefixes, and transfer compatible tensors with explicit transformations and tie reports. Tiny synthetic tests and bounded real-prefix comparisons do not promote arbitrary modified graphs to checkpoint support. |
 | Reusable mixers and residual blocks | Compose shared MLA, GQA, feed-forward modules, optional norms, and width adapters. The MLA encoder-decoder example trains a custom graph without DeepSeek family wiring. |
 | Native Burn training compatibility | Full-precision graphs use Burn autodiff, optimizers, records, and optional Learner integration. Single parameter ownership, freezing, differentiable captures, dropout in inserted modules, and optimizer resume have explicit tests. Packed quantized inference remains separate from training support. |
+| Family-generic experiment traits | `HookedModel` is implemented by every built-in family and `StagedModel` by every causal family (T5 stages through `T5Encoder`, modular seq2seq models through their encoder and decoder stage views); `AutoCausalLm` implements both, `AutoSeq2SeqLm` hooks, and `LoadedModel` forwards both. The workbench runs one activation-cache, ablation, and staged-patching function on three families, and staged stacks recompose the full stack exactly. |
+| Explicit initialization | `InitPolicy` assigns initializers by parameter role with depth-scaled residual projections, path overrides, constants, and lazy application. Hugging Face `initializer_range` normal initialization and GPT-2 residual scaling are implemented and tested on synthetic models; this makes no checkpoint claim. |
+| Positional composition | `RotaryAttention` adds RoPE with any shared scaling rule (including YaRN and dynamic NTK, selected by the evaluated context) to composed residual blocks; `GroupedQueryAttention` used directly as a block mixer is position-free. |
 
 The [v0.3 training record](acceptance/measurements/v0_3-training-validation-20260910/README.md)
 retains exact source identities and executed experiments. Grokking actually
@@ -72,6 +80,17 @@ description below.
 | **FLAN-UL2** | [google/flan-ul2 @ `452d74…`](https://huggingface.co/google/flan-ul2/blob/452d74ce28ac4a7f211d6ba3ef0717027f7a8074/config.json) | [Pinned T5 reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/t5/modeling_t5.py), [UL2 paper](https://arxiv.org/abs/2205.05131) | [`t5`](src/models/t5/model.rs) |
 | **Nem-3.5** | [NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 @ `a9904d…`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/blob/a9904d24bcc1d289a1950fa9d2b978c47cf903b9/config.json) | [NVIDIA architecture/recipe](https://docs.nvidia.com/nemotron/nightly/nemotron/lightning35/pretrain.html), [Nemotron-H base reference @ `cfa309…`](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/nemotron_h/modeling_nemotron_h.py), [vLLM MTP graph @ `6e448d…`](https://github.com/vllm-project/vllm/blob/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/vllm/model_executor/models/nemotron_h_mtp.py) | [`nemotron_h`](src/models/nemotron_h/model.rs) |
 | **Nem-Nano** | [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 @ `bf77c3…`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/bf77c3174f68ad409e1c2aa60daeb46e32d1c606/config.json) | [Pinned NVIDIA reference](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/bf77c3174f68ad409e1c2aa60daeb46e32d1c606/modeling_nemotron_h.py), [technical report](https://research.nvidia.com/labs/nemotron/files/NVIDIA-Nemotron-3-Nano-Technical-Report.pdf) | [`nemotron_h`](src/models/nemotron_h/model.rs) |
+| **SmolLM-135** | [HuggingFaceTB/SmolLM-135M @ `1d4617…`](https://huggingface.co/HuggingFaceTB/SmolLM-135M/blob/1d461723eec654e65efdc40cf49301c89c0c92f4/config.json) | [Llama reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/llama/modeling_llama.py) | [`llama`](src/models/llama/model.rs) |
+| **Q3-4** | [Qwen/Qwen3-4B @ `531c80…`](https://huggingface.co/Qwen/Qwen3-4B/blob/531c80e289d6cff3a7cd8c0db8110231d23a6f7a/config.json) | [Qwen3 reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/qwen3/modeling_qwen3.py) | [`llama`](src/models/llama/model.rs) |
+| **SmolLM3-3** | [HuggingFaceTB/SmolLM3-3B @ `1fa6fa…`](https://huggingface.co/HuggingFaceTB/SmolLM3-3B/blob/1fa6fa281b5c635c89171a2b53769609cc1199c6/config.json) | [SmolLM3 reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/smollm3/modeling_smollm3.py) | [`llama`](src/models/llama/model.rs) |
+| **Q2-7** | [Qwen/Qwen2-7B @ `453ed1…`](https://huggingface.co/Qwen/Qwen2-7B/blob/453ed1575b739b5b03ce3758b23befdb0967f40e/config.json) | [Qwen2 reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/qwen2/modeling_qwen2.py) | [`llama`](src/models/llama/model.rs) |
+| **Gemma3-4** | [google/gemma-3-4b-it @ `093f9f…`](https://huggingface.co/google/gemma-3-4b-it/blob/093f9f388b31de276ce2de164bdc2081324b9767/config.json), text tower | [Gemma 3 reference, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/gemma3/modeling_gemma3.py) | [`gemma`](src/models/gemma/model.rs) |
+| **gpt-oss-20** | [openai/gpt-oss-20b @ `6cee5e…`](https://huggingface.co/openai/gpt-oss-20b/blob/6cee5e81ee83917806bbde320786a8fb61efebee/config.json) | [gpt-oss reference](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/gpt_oss/modeling_gpt_oss.py) and [MXFP4 integration](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/integrations/mxfp4.py), Transformers 5.2.0 | [`gpt_oss`](src/models/gpt_oss/model.rs) |
+
+The last six checkpoints were added after v0.1. Their columns appear in the
+[second matrix](#families-added-after-v01); Mistral, OLMo 2, Llama 3 RoPE
+scaling, and Gemma 2 are covered by tiny Transformers 5.2.0 goldens only and
+have no pinned-checkpoint column.
 
 Qwen3.8's inner text model is officially serialized as `qwen3_5_text`, not
 `qwen3_8_text`. Nemotron Nano is included because the crate validates its
@@ -142,6 +161,58 @@ mathematical and implementation description.
 | [Transactional speculative cache](#innovation-transactional-cache) | target + MTP | target + MTP | — | — | — | — | — | — | target + MTP | — |
 | [Lossless speculative decoding](#innovation-speculative-decoding) | MTP, batch 1 | MTP, batch 1 | — | — | — | — | — | — | MTP, batch 1 | — |
 | [Cache-aware beam search](#innovation-beam-search) | — | — | — | — | — | ✓ | ✓ | ✓ | — | — |
+
+
+<a id="families-added-after-v01"></a>
+### Families added after v0.1
+
+Same legend. Every column is a Flex/F32 real-weight gate subject; see the
+[status page](ARCHITECTURE_COMPATIBILITY.md#real-checkpoint-evidence) for its
+measured parity.
+
+| Transformer innovation | SmolLM-135 | Q3-4 | SmolLM3-3 | Q2-7 | Gemma3-4 | gpt-oss-20 |
+|---|---:|---:|---:|---:|---:|---:|
+| [Decoder-only causal stack](#innovation-decoder-only) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| [Pre-normalized residual path](#innovation-pre-norm) | ✓ | ✓ | ✓ | ✓ | ✓ + post-norms | ✓ |
+| [Grouped-query attention (GQA)](#innovation-gqa) | 9 q / 3 kv | 32 / 8 | 16 / 4 | 28 / 4 | 8 / 4 | 64 / 8 |
+| [Sliding-window attention](#innovation-sliding-attention) | — | — | — | — | 29/34, window 1024 | 12/24, window 128 |
+| [NoPE attention](#innovation-nope) | — | — | 9/36 | — | — | — |
+| [Per-head Q/K normalization](#innovation-qk-norm) | — | 36/36 | — | — | 34/34 | — |
+| [Attention projection biases](#innovation-projection-bias) | — | — | — | Q/K/V | — | Q/K/V/O |
+| [Learned attention sinks](#innovation-attention-sinks) | — | — | — | — | — | 24/24 |
+| [Rotary position embedding (RoPE)](#innovation-rope) | θ 1e4 | θ 1e6 | θ 5e6, 27/36 | θ 1e6 | local θ 1e4; global θ 1e6, linear ×8 | YaRN |
+| [YaRN context scaling](#innovation-yarn) | — | — | — | — | — | factor 32, untruncated |
+| [SwiGLU / gated-SiLU feed-forward](#innovation-swiglu) | ✓ | ✓ | ✓ | ✓ | — | — |
+| [Gated-GELU feed-forward](#innovation-gated-gelu) | — | — | — | — | ✓ (tanh GELU) | — |
+| [Clamped SwiGLU](#innovation-clamped-swiglu) | — | — | — | — | — | experts |
+| [Sparse top-k mixture of experts](#innovation-sparse-moe) | — | — | — | — | — | 4/32 |
+| [Shared router policies](#innovation-router-policies) | — | — | — | — | — | biased, top-k then softmax |
+| [MXFP4 expert weights](#innovation-mxfp4) | — | — | — | — | — | ✓ |
+| [RMS normalization](#innovation-rmsnorm) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| [Zero-centered RMSNorm parameters](#innovation-zero-centered-rmsnorm) | — | — | — | — | ✓ | — |
+| [Sandwich normalization](#innovation-sandwich-norm) | — | — | — | — | ✓ | — |
+| [Scaled token embedding](#innovation-embedding-scale) | — | — | — | — | `sqrt(d)` | — |
+| [Tied input embedding and LM head](#innovation-tied-lm-head) | ✓ | ✓ | ✓ | — | ✓ | — |
+| [Preallocated projected-KV cache](#innovation-kv-cache) | ✓ | ✓ | ✓ | ✓ | 5 global layers | 12 full layers |
+| [Sliding ring KV cache](#innovation-ring-cache) | — | — | — | — | 29 rings | 12 rings |
+| [Batched cached decoding](#innovation-batched-decoding) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+<a id="shared-mechanisms-beyond-the-pinned-graphs"></a>
+### Shared mechanisms beyond the pinned graphs
+
+These components are implemented in shared code and validated against
+reference implementations on synthetic or tiny checkpoints, but no pinned
+checkpoint column above uses them. They make no checkpoint claim.
+
+| Mechanism | Validation | Where it is available |
+| --- | --- | --- |
+| [Llama 3, LongRoPE, dynamic-NTK, and proportional RoPE scaling](#innovation-rope-scaling) | Inverse-frequency goldens from Transformers' `modeling_rope_utils.py` (5.2.0; 5.8.0 for proportional); a Llama 3.1-style tiny golden | Every RoPE family through the shared translator; custom specs; `RotaryAttention` |
+| [Attention logit soft cap](#innovation-attention-softcap) | Gemma 2 tiny golden, including a saturated cap | Gemma 2; custom specs |
+| [Post-sublayer norms and full-width Q/K norm](#innovation-post-norm) | OLMo 2 tiny golden | Llama family (`olmo2`); custom specs |
+| [Chunked-local connectivity](#innovation-sliding-attention) | Scalar mask oracle, property tests, fuzzing | Custom specs and shared attention |
+| [Differential attention](#innovation-differential-attention) | Transformers DiffLlama | Custom specs and shared attention |
+| [Sigmoid, group-limited, and correction-biased routing](#innovation-router-policies) | Transformers Mixtral, Qwen3-MoE, DeepSeek-V2/V3, and gpt-oss routing goldens | DeepSeek-V2 (`noaux_tc`, `group_limited_greedy`); custom specs |
+| [Mamba-2 in modular specs](#innovation-mamba2) | Bit-exact against the shared kernel; stateless versus cached and padded rows | Custom causal stacks and seq2seq decoders |
 
 ## Mathematical and technical descriptions
 
@@ -283,11 +354,19 @@ GQA keeps $H_q$ independently projected query heads but only $H_{kv}$ key/value
 heads, with $H_q$ divisible by $H_{kv}$. Query head $h$ consumes KV head
 $\lfloor h/(H_q/H_{kv})\rfloor$. It approaches MHA expressivity while shrinking
 the decode cache and K/V projection bandwidth by $H_q/H_{kv}$. The cache stores
-native KV heads; repetition happens only for the attention operation.
+native KV heads, and attention folds query groups instead of repeating K/V: the
+$g=H_q/H_{kv}$ query heads of a group become extra query rows of one call over
+their shared KV head, $[B,H_q,Q,d]\to[B,H_{kv},gQ,d]$, which is mathematically
+identical because softmax is row-wise. Only square causal prefill on the
+backend-native path keeps the backend's fused `is_causal` kernel and repeats
+K/V there; cached decoding and suffixes always fold.
+Causality is bottom-right aligned on every backend: query row $i$ of $Q$ sits
+at key position $i+K-Q$, which also fixes CubeCL flash kernels that align
+top-left.
 
-**Implementation:** [`attention.rs`](src/attention.rs) and the native-head cache
-in [`cache/tensor/kv.rs`](src/cache/tensor/kv.rs). **Reference:**
-[Grouped-Query Attention](https://arxiv.org/abs/2305.13245).
+**Implementation:** [`attention/dispatch.rs`](src/attention/dispatch.rs) and the
+native-head cache in [`cache/tensor/kv.rs`](src/cache/tensor/kv.rs).
+**Reference:** [Grouped-Query Attention](https://arxiv.org/abs/2305.13245).
 
 <a id="innovation-mla"></a>
 ### Multi-head latent attention (MLA)
@@ -342,7 +421,18 @@ right padding, and interior holes. Explicit positional-encoding IDs may contain
 offsets or gaps; they do not change this valid-token window distance. Custom full attention also
 preserves key padding when no sliding window is requested.
 
-**Implementation:** masking and layer selection in
+The Llama family, Gemma, gpt-oss, and custom models draw these masks from
+one shared rule, `AttentionConnectivity`: global, a trailing sliding window of $W$ positions,
+or chunked-local attention in which position $p$ sees only its aligned chunk
+$[C\lfloor p/C\rfloor, C\lfloor p/C\rfloor + C)$. Masks are padding-aware,
+use absolute positions (a cache that dropped its first keys passes their count
+as the key start), and act exactly as unrestricted when a window exceeds the
+key span. Gemma 2/3, gpt-oss, and the Llama family's Mistral and Qwen
+sliding schedules use window-sized ring caches per layer group; Muse's cached
+sliding layers slice each query chunk to the union of its rows' windows.
+
+**Implementation:** the shared rule in
+[`attention/connectivity.rs`](src/attention/connectivity.rs); masking and layer selection in
 [`muse_glimmer/model.rs`](src/models/muse_glimmer/model.rs), cached execution in
 [`muse_glimmer/model/decode.rs`](src/models/muse_glimmer/model/decode.rs), and
 ring planning in [`cache/ring.rs`](src/cache/ring.rs). The custom reference path
@@ -375,7 +465,9 @@ Before position transforms and dot products, each head is rescaled as
 $\hat q=q/\sqrt{\operatorname{mean}(q^2)+\epsilon}\odot\gamma_q$ and likewise
 for $k$. This controls score magnitudes independently of residual-stream scale.
 Qwen learns per-channel scales; Qwen3.5/3.8 stores those scales zero-centered.
-Muse instead uses parameter-free (“scale-free”) head normalization.
+Qwen3 dense and Gemma 3 use the same per-head form. Muse instead uses
+parameter-free (“scale-free”) head normalization. OLMo 2 normalizes the whole
+projected width before splitting heads (`QueryKeyNormScope::FullWidth`).
 
 **Implementation:** learned normalization in [`attention.rs`](src/attention.rs)
 and Muse's variant in [`muse_glimmer/model.rs`](src/models/muse_glimmer/model.rs).
@@ -478,6 +570,46 @@ stress_muse_32k_attention_envelope_on_metal -- --ignored --exact --nocapture`.
 **Implementation:** [`MuseGlimmerAttention`](src/models/muse_glimmer/model.rs).
 **Reference:** the [pinned Muse-Glimmer reference](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/muse_glimmer/modular_muse_glimmer.py).
 
+<a id="innovation-attention-sinks"></a>
+### Learned attention sinks
+
+Each gpt-oss head learns one sink logit $s_h$ that joins the softmax as an
+extra column and is then dropped:
+$p_j=e^{z_j}/(e^{s_h}+\sum_k e^{z_k})$. A row can therefore place mass
+$p_{sink}=1-\sum_jp_j$ on nothing, instead of being forced onto real keys
+(the StreamingLLM attention-sink effect), and a row whose keys are all
+excluded yields zero context. The eager path appends the column explicitly;
+the fused path keeps one backend call by appending one zero-value sink key per
+KV head with selector channels, which is exact up to rounding of $s_h$ by the
+score scale. Sinks work in full and ring caches.
+
+**Implementation:** [`attention/dispatch.rs`](src/attention/dispatch.rs);
+the derived read-only point `AttentionPoints::sink_probability` exposes
+$p_{sink}$ to custom attention. **Reference:** validated against Transformers'
+gpt-oss eager attention.
+
+<a id="innovation-projection-bias"></a>
+### Attention projection biases
+
+A bias may be attached to any of the Q, K, V, and O projections
+independently: Qwen2 biases Q/K/V only, gpt-oss all four.
+
+**Implementation:** `ProjectionBias` in [`attention.rs`](src/attention.rs).
+
+<a id="innovation-differential-attention"></a>
+### Differential attention
+
+The DIFF Transformer pairs query heads $i$ and $i+H/2$ and subtracts their
+softmax maps, $A_i-\lambda A_{i+H/2}$, to cancel attention noise common to
+both, with a learned $\lambda=e^{\lambda_{q1}\cdot\lambda_{k1}}-e^{\lambda_{q2}\cdot\lambda_{k2}}+\lambda_{init}$.
+Each pair's output is RMS-normalized and scaled by $1-\lambda_{init}$. The
+crate runs it over native KV heads with RoPE or no positions.
+
+**Implementation:** [`attention/differential.rs`](src/attention/differential.rs),
+available in custom specs. **Reference:**
+[Differential Transformer](https://arxiv.org/abs/2410.05258), validated against
+Transformers' DiffLlama; no checkpoint support.
+
 <a id="innovation-unscaled-attention"></a>
 ### Unscaled dot-product attention
 
@@ -502,10 +634,39 @@ $(R_pq)^\mathsf{T}(R_jk)=q^\mathsf{T}R_{j-p}k$, making the score depend on
 relative displacement without an additive embedding. RoPE is applied to Q/K,
 never V.
 
+Every RoPE family obtains its configuration from one translator of Hugging
+Face `rope_scaling`/`rope_parameters` (including per-layer-type sets such as
+Gemma 3's local and global tables), and builds its cosine/sine tables once per
+forward pass rather than once per layer.
+
 **Implementation:** validated frequencies in
-[`position/rope.rs`](src/position/rope.rs) and tensor rotation in
-[`position/tensor.rs`](src/position/tensor.rs). **Reference:**
-[RoFormer](https://arxiv.org/abs/2104.09864).
+[`position/rope.rs`](src/position/rope.rs), tensor rotation in
+[`position/tensor.rs`](src/position/tensor.rs), and the configuration
+translator in [`models/config/rope.rs`](src/models/config/rope.rs).
+**Reference:** [RoFormer](https://arxiv.org/abs/2104.09864).
+
+<a id="innovation-rope-scaling"></a>
+### RoPE context-extension rules
+
+Each rule rescales the base frequencies $\omega_i=\theta^{-2i/d}$ per complex
+pair, following Transformers' `modeling_rope_utils.py`:
+
+- **Linear** divides positions by a factor (Gemma 3's global layers use 8).
+- **Dynamic NTK** grows the base $\theta$ once the evaluated context exceeds the
+  original one, so the table depends on the longest position in the pass.
+- **Llama 3** keeps short wavelengths, divides long wavelengths by `factor`,
+  and blends linearly between `original / high_freq_factor` and
+  `original / low_freq_factor`.
+- **LongRoPE** divides each pair by a searched factor, using the short table
+  up to the original context and the long table beyond, and scales the tables
+  by an attention factor.
+- **Proportional** rotates only a leading fraction of pairs over the whole
+  head; the remaining pairs have frequency zero.
+
+**Implementation:** [`position/rope_scaling.rs`](src/position/rope_scaling.rs)
+and [`position/frequencies.rs`](src/position/frequencies.rs). Each rule is
+checked against inverse frequencies generated by the reference; no pinned
+checkpoint above uses Llama 3, LongRoPE, or proportional scaling.
 
 <a id="innovation-partial-rope"></a>
 ### Partial RoPE
@@ -566,9 +727,16 @@ $\operatorname{mscale}(40,0.707)^2/\sqrt{192}$. The official Lite release
 advertises 32K use; the larger config ceiling is not by itself an acceptance
 claim.
 
-**Implementation:** [`YarnConfig`](src/position/rope.rs) and tensor frequencies
-in [`position/tensor.rs`](src/position/tensor.rs). **Reference:**
-[YaRN](https://arxiv.org/abs/2309.00071) and the pinned DeepSeek config.
+gpt-oss uses factor 32 from 4,096 original positions with `truncate: false`,
+which keeps the fractional correction range instead of flooring and ceiling
+it. As in the reference, the correction range is clamped to $[0, d-1]$, where
+$d$ is the full rotary width rather than the pair count.
+
+**Implementation:** [`YarnConfig`](src/position/rope.rs), the correction range
+in [`position/frequencies.rs`](src/position/frequencies.rs), and tensor
+angles in [`position/tensor.rs`](src/position/tensor.rs). **Reference:**
+[YaRN](https://arxiv.org/abs/2309.00071), the pinned DeepSeek config, and the
+pinned gpt-oss config.
 
 <a id="innovation-t5-relative-bias"></a>
 ### Bucketed relative-position bias
@@ -582,7 +750,9 @@ self-attention clamps future-key displacement to bucket zero, after which the
 causal mask excludes those scores. Decoder cross-attention has no relative-
 position table. All pinned variants use 32 buckets and maximum distance 128;
 only block zero of each stack owns the table, and later blocks reuse its
-computed bias.
+computed bias. Each pass builds one bucket table over the $O(q+k)$ distinct
+displacements and gathers the bias from it, instead of bucketing all $q\times k$
+pairs on the host per layer.
 
 **Implementation:** bucketing in [`position/t5.rs`](src/position/t5.rs), learned
 lookup in [`position/t5_bias.rs`](src/position/t5_bias.rs), and reuse in
@@ -608,6 +778,15 @@ the same key, while $e^{g_t}$ provides learned forgetting. Qwen precedes this
 recurrence with a causal depthwise convolution and follows it with gated RMS
 normalization and an output projection. Qwen3.8 genuinely uses asymmetric head
 counts: 16 key/query heads and 48 value/decay heads.
+
+Chunked prefill lays chunks out densely, inverts each chunk's unit
+lower-triangular system by recursive block doubling rather than forward
+substitution, and forms the decay differences $G_i-G_j$ by exact subtraction
+(not a matrix product, so TF32 cannot perturb $e^{G_i-G_j}$). One-token or
+very small prefills fall back to the recurrence, and a snapshot recurrence
+records the state after every token so speculative verification can commit any
+accepted prefix. Padding is removed from convolution taps and history, and
+softplus uses PyTorch's threshold.
 
 **Implementation:** recurrent and triangular chunk forms in
 [`delta_net.rs`](src/delta_net.rs), state in
@@ -646,16 +825,30 @@ when publishing to such a reduced-precision cache. Lightning instead declares
 physically retained every `[1, 64, 64, 128]` recurrent tensor in FP32 while its
 `[1, 6144, 4]` convolution tails remained F16.
 
-Bias addition and softplus also belong to the activation-dtype boundary. The
-Burn implementation evaluates the stable identity
-$\max(u,0)+\log(1+e^{-|u|})$ in FP32 between an activation-dtype bias addition
-and immediate cast back. Its semantic token mask additionally sets $\Delta=0$
-for invalid tokens, so they cannot decay state. This intentionally differs from
-the pinned fallback, which masks $x,B,C$ but leaves $\Delta$ active. Stateful
-model entry points compact valid tokens first; a direct masked mixer call still
-advances the convolution through physical columns.
+Bias addition and softplus follow the reference $\Delta$ graph, with
+PyTorch's thresholded softplus. Its semantic token mask sets $\Delta=0$ (and
+replaces, rather than multiplies, padded inputs), so invalid tokens are exact
+identity transitions. This intentionally differs from the pinned fallback,
+which masks $x,B,C$ but leaves $\Delta$ active. Stateful model entry points
+compact valid tokens first; a direct masked mixer call still advances the
+convolution through physical columns.
 
-**Implementation:** [`nemotron_h/model/mamba2.rs`](src/models/nemotron_h/model/mamba2.rs).
+The $\Delta$ clamp is path-specific in the references. At `cfa309…`,
+Nemotron-H and Zamba2 clamp the chunk scan to $[\Delta_{min},\infty)$, while
+Mamba2, Bamba, GraniteMoeHybrid, and Falcon-H1 clamp it to `time_step_limit`;
+the single-step update is unclamped for all of them, and NVIDIA's Nano remote
+code clamps both. `TimeStepClamp` states the choice per family.
+
+The mixer is shared and model-independent: Nemotron-H and modular
+specifications use the same kernel. The chunk scan processes many chunks per
+block with $C\cdot B^\mathsf{T}$ formed once per group (1.40× faster than the
+former per-head scan on a 2,048-token Flex workload), ragged rows advance in
+one pass, and a snapshot mode returns the state after every token for
+speculative verification.
+
+**Implementation:** [`mamba2.rs`](src/mamba2.rs), wired by
+[`nemotron_h/model.rs`](src/models/nemotron_h/model.rs) and the modular
+[`custom/mixer.rs`](src/models/custom/mixer.rs).
 **Reference:** [Transformers are SSMs / Mamba-2](https://arxiv.org/abs/2405.21060),
 [pinned Nemotron-H fallback @ `cfa309…`](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/nemotron_h/modeling_nemotron_h.py),
 and [its pinned Zamba2 gated normalization @ `cfa309…`](https://github.com/huggingface/transformers/blob/cfa309cfa34b5497a32fd50af49aa97aac94c054/src/transformers/models/zamba2/modeling_zamba2.py).
@@ -671,8 +864,7 @@ only $K-1$ historical values per channel during decode. Both pinned families use
 $K=4$.
 
 **Implementation:** convolution setup and state handling in
-[`delta_net.rs`](src/delta_net.rs) and
-[`nemotron_h/model/mamba2.rs`](src/models/nemotron_h/model/mamba2.rs).
+[`delta_net.rs`](src/delta_net.rs) and [`mamba2.rs`](src/mamba2.rs).
 
 <a id="innovation-recurrent-decode"></a>
 ### Fixed-state recurrent decoding
@@ -684,7 +876,7 @@ This contrasts with attention, which must retain or revisit an increasing KV
 history (or a bounded sliding window).
 
 **Implementation:** reference recurrences in [`delta_net.rs`](src/delta_net.rs)
-and [`nemotron_h/model/mamba2.rs`](src/models/nemotron_h/model/mamba2.rs), with
+and [`mamba2.rs`](src/mamba2.rs), with
 external storage in [`cache/tensor/recurrent.rs`](src/cache/tensor/recurrent.rs).
 
 <a id="innovation-chunked-prefill"></a>
@@ -709,7 +901,7 @@ selections. Corresponding-path Burn comparisons therefore keep the 0.999 gate,
 while the two official paths remain separate reference streams.
 
 **Implementation:** [`chunked_gated_delta_rule`](src/delta_net.rs) and the
-chunked mode in [`nemotron_h/model/mamba2.rs`](src/models/nemotron_h/model/mamba2.rs).
+chunked mode in [`mamba2.rs`](src/mamba2.rs).
 The ignored real-weight gate binds each Burn stream to its matching official
 stream in
 [`tests/support/nemotron_h_parity.rs`](tests/support/nemotron_h_parity.rs).
@@ -731,6 +923,20 @@ variant.
 **Implementation:** [`GatedFeedForward`](src/feed_forward.rs), instantiated by
 the relevant family model files. **Reference:**
 [GLU Variants Improve Transformer](https://arxiv.org/abs/2002.05202).
+
+<a id="innovation-clamped-swiglu"></a>
+### Clamped SwiGLU
+
+gpt-oss bounds both GLU branches before combining them: with $g=\min(W_gx,\ell)$
+and $u=\operatorname{clamp}(W_ux,-\ell,\ell)$, the unit computes
+$(u+1)\,g\,\sigma(\alpha g)$ with $\ell=7$ and $\alpha=1.702$, and the stacked
+checkpoint tensor interleaves gate and up columns (gate on even, up on odd).
+The clamp keeps rare large activations from dominating the expert output.
+
+**Implementation:** `ClampedSwiGlu` and `GatedFeedForward::forward_clamped` in
+[`feed_forward.rs`](src/feed_forward.rs); the de-interleaving loader in
+[`gpt_oss/load.rs`](src/models/gpt_oss/load.rs). **Reference:** the pinned
+gpt-oss implementation linked above.
 
 <a id="innovation-gated-gelu"></a>
 ### Gated-GELU feed-forward
@@ -767,10 +973,44 @@ therefore grow with $E$ while per-token expert FLOPs grow with $K$. Exact pairs
 are Qwen 8/128, DeepSeek 6/64, and Nemotron 6/128. Qwen and DeepSeek experts are
 SwiGLU; Nemotron experts are ReLU².
 
-**Implementation:** shared softmax MoE in [`moe.rs`](src/moe.rs), DeepSeek
-specialization in [`deepseek_v2/model.rs`](src/models/deepseek_v2/model.rs), and
-Nemotron's sigmoid router in [`nemotron_h/model.rs`](src/models/nemotron_h/model.rs).
-**Reference:** [DeepSeek-V2](https://arxiv.org/abs/2405.04434).
+**Implementation:** shared MoE and router in [`moe.rs`](src/moe.rs) and
+[`moe/router.rs`](src/moe/router.rs), used by Qwen3-MoE, DeepSeek, Nemotron-H,
+gpt-oss, and custom specs. **Reference:** [DeepSeek-V2](https://arxiv.org/abs/2405.04434).
+
+<a id="innovation-router-policies"></a>
+### Shared router policies
+
+Published routers differ along independent axes, each expressed as data in one
+shared router rather than as family code: scoring by softmax or sigmoid;
+selecting the top $K$ of the scores, or the top $K$ logits and then scoring only
+those (gpt-oss: $w=\operatorname{softmax}(z_S)$, no renormalization); greedy or
+group-limited selection (DeepSeek); a correction bias used for selection only
+(DeepSeek-V3 `noaux_tc`, Nemotron-H); renormalization; a routed scale; and a
+learned shared-expert gate. Routing runs in F32, ties resolve to the smallest
+expert ID on every backend, and a token with non-finite router scores is an
+error rather than a silent NaN. Dispatch evaluates experts in memory-bounded
+blocks of whole experts.
+
+**Implementation:** [`moe/router.rs`](src/moe/router.rs) and
+[`moe/assignment.rs`](src/moe/assignment.rs) (Verus-verified block planning).
+**Reference:** goldens generated from Transformers' Mixtral, Qwen3-MoE,
+DeepSeek-V2/V3, and gpt-oss routing.
+
+<a id="innovation-mxfp4"></a>
+### MXFP4 expert weights
+
+gpt-oss stores routed-expert projections in the OCP microscaling FP4 format:
+each block of 32 values shares one E8M0 scale $2^{s-127}$, and each value is a
+4-bit E2M1 code (two per byte, low nibble first). The loader decodes every
+value exactly, $\operatorname{fp4}(c)\cdot2^{s-127}$, to the requested dtype
+while streaming one tensor at a time, bit for bit equal to Transformers'
+`convert_moe_packed_tensors`. There is no packed MXFP4 execution, so decoded
+experts occupy full load-dtype memory.
+
+**Implementation:** [`checkpoint/mxfp4.rs`](src/checkpoint/mxfp4.rs), whose
+integer core (shape acceptance, offsets, nibble split, and the exact binary64
+encoding of each value) is Verus-verified. **Reference:** the pinned
+Transformers MXFP4 integration linked above.
 
 <a id="innovation-selected-dispatch"></a>
 ### Selected-expert-only dispatch
@@ -831,7 +1071,12 @@ loss. Lightning sets both group counts to one. Its group-pruning stage is
 therefore the identity, not a one-class one-hot operation: every expert remains
 eligible before the final top-six selection.
 
-**Implementation:** [`NemotronHMoe`](src/models/nemotron_h/model.rs).
+DeepSeek-V3-style routing uses the same mechanism (`scoring_func: sigmoid`,
+`topk_method: noaux_tc`) and is executable through the DeepSeek family and the
+shared router, validated on tiny Transformers goldens only.
+
+**Implementation:** the shared router in [`moe/router.rs`](src/moe/router.rs),
+configured by [`NemotronHMoe`](src/models/nemotron_h/model.rs).
 **Reference:** [NVIDIA's Lightning recipe](https://docs.nvidia.com/nemotron/nightly/nemotron/lightning35/pretrain.html).
 
 <a id="innovation-router-aux-loss"></a>
@@ -861,8 +1106,10 @@ local Qwen scalar remains raw, so a training caller must apply
 Lightning-derived recipe use sequence-level balancing with coefficient 0.0001
 alongside correction-biased routing. The local Nemotron path likewise returns
 the raw diagnostic; the 0.0001 shown in the matrix is recipe provenance, not a
-multiplier silently applied at inference. None of these losses changes inference
-logits internally.
+multiplier silently applied at inference. The Nemotron-H value is Megatron's
+normalized sigmoid switch loss, which equals one under perfect balance. gpt-oss
+reproduces Transformers' unscaled `aux_loss`. None of these losses changes
+inference logits internally.
 
 Cached diagnostics describe only the newly valid tokens, not the complete
 retained prefix. Tiny Nemotron regressions independently evaluate its sigmoid
@@ -960,8 +1207,34 @@ the embedding table's norm. The pinned implementation spells the inverse root
 as `pow(mean_square, -0.5)` to preserve Torch/JAX compiler parity; the same
 operation graph is used by Muse's scale-free per-head Q/K norms.
 
-**Implementation:** `scale_free_rms_norm` in
+**Implementation:** the shared `scale_free_rms_norm` in
+[`normalization.rs`](src/normalization.rs), used by
 [`muse_glimmer/model.rs`](src/models/muse_glimmer/model.rs).
+
+<a id="innovation-embedding-scale"></a>
+### Scaled token embedding
+
+Gemma multiplies the embedding by $\sqrt{d}$ before the first block,
+$h_0=E[x]\cdot\operatorname{round}_{dtype}(\sqrt{d})$, with the scalar rounded to
+the activation dtype first as the reference does. Tied embeddings with
+$N(0,\sigma^2)$ rows otherwise start the residual stream far below unit RMS.
+
+**Implementation:** [`gemma/model.rs`](src/models/gemma/model.rs).
+**Reference:** the pinned Gemma 3 implementation.
+
+<a id="innovation-post-norm"></a>
+### Post-sublayer normalization and full-width Q/K norm
+
+OLMo 2 normalizes each sublayer's *output* instead of its input:
+$x'=x+N(A(x))$, $y=x'+N(F(x'))$, with RMSNorm computed in F32. It also
+RMS-normalizes the full query and key projections before splitting them into
+heads. Gemma's sandwich normalization combines both placements.
+
+**Implementation:** the Llama-family block in
+[`llama/model.rs`](src/models/llama/model.rs) and `QueryKeyNormScope` in
+[`attention.rs`](src/attention.rs). **Reference:**
+[OLMo 2, Transformers 5.2.0](https://github.com/huggingface/transformers/blob/7d9754a05193eb79b1d86aa744b622b8068008cd/src/transformers/models/olmo2/modeling_olmo2.py).
+Validated on a tiny golden only.
 
 <a id="innovation-shared-stack-embedding"></a>
 ### Shared encoder/decoder token embedding
@@ -1001,8 +1274,17 @@ $m=0.19611613513818404$. Near zero this is approximately $mz$; at large
 magnitude it smoothly saturates at $\pm20$. The map bounds extreme confidence
 while remaining differentiable.
 
-**Implementation:** [`MuseGlimmerForCausalLm::forward`](src/models/muse_glimmer/model.rs).
-**Reference:** the pinned Muse configuration.
+Gemma 2 applies the same map to the final logits with $T=30$ and $m=1$, and
+to the attention scores before masking, $s'=c\tanh(s/c)$ with $c=50$
+(<a id="innovation-attention-softcap"></a>attention logit soft cap). Gemma 3
+configs set both caps to null: its attention never applies a score cap and its
+multimodal wrapper never applies the final cap, so the crate refuses non-null
+values there rather than computing a different graph.
+
+**Implementation:** [`MuseGlimmerForCausalLm::forward`](src/models/muse_glimmer/model.rs),
+the Gemma graph in [`gemma/model.rs`](src/models/gemma/model.rs), and the
+attention soft cap in [`attention.rs`](src/attention.rs).
+**Reference:** the pinned Muse configuration and Gemma 2 implementation.
 
 <a id="innovation-mtp"></a>
 ### Multi-token/next-token prediction head
@@ -1039,6 +1321,27 @@ cache instead of projected K/V; recurrent layers use their own state form.
 by [`cache/tensor/state.rs`](src/cache/tensor/state.rs) and each family's
 `model/decode.rs`.
 
+<a id="innovation-batched-decoding"></a>
+### Batched cached decoding
+
+Every family advances all rows of a ragged batch in one model pass per step:
+each row's new tokens are written into its own cache slots (written ahead
+into full storage, so attention reads one zero-copy view of the history),
+rows with different lengths are reconciled by exclusion masks and cache
+segments, finished rows are no-op padding, and all layers' writes are
+published atomically through one step write set, so a failed step changes no
+readable state. Earlier versions looped over rows one at a time. Equivalence is
+tested against the stateless forward and against the former row-by-row path on
+tiny models (left and right padding, fully masked rows, ring wraparound,
+rollback, reorder, and truncation). On Flex CPU with eight rows the batched
+path decoded 1.7× to 3.6× faster for dense and hybrid families and 1.3× to
+2.7× for sparse-expert families; gpt-oss's wide experts are not faster on CPU.
+
+**Implementation:** the step API in
+[`cache/tensor/state/step.rs`](src/cache/tensor/state/step.rs), batched KV
+I/O in [`cache/tensor/kv/batch.rs`](src/cache/tensor/kv/batch.rs), and each
+family's `model/decode.rs`.
+
 <a id="innovation-ring-cache"></a>
 ### Sliding ring KV cache
 
@@ -1050,18 +1353,24 @@ proposal could overwrite a still-committed slot, proposal tensors must be
 staged until acceptance; changing only the logical length cannot restore
 destroyed K/V values.
 
+Each sliding cache group has its own window, so Gemma's 1,024-token local
+layers and gpt-oss's 128-token layers keep rings while global layers keep full
+storage. A ring can roll back only within its window; speculative proposals in
+a ring are staged.
+
 **Implementation:** safe plans in [`cache/ring.rs`](src/cache/ring.rs), tensor
-storage in [`cache/tensor/kv.rs`](src/cache/tensor/kv.rs), and Muse integration
-in [`muse_glimmer/model/decode.rs`](src/models/muse_glimmer/model/decode.rs).
+storage in [`cache/tensor/kv.rs`](src/cache/tensor/kv.rs), and the Muse,
+Llama-family, Gemma, and gpt-oss decode states.
 
 <a id="innovation-cross-kv-cache"></a>
 ### Immutable cross-attention KV cache
 
 Encoder states are fixed during target generation, so each decoder layer can
 compute $K_e=H_eW_K$ and $V_e=H_eW_V$ once. Every subsequent step projects only
-its target query. Unlike self-KV, these tensors never append; beam search only
-reorders or shares their batch rows together with the corresponding encoder
-output.
+its target query. Unlike self-KV, these tensors never append. Beam search
+keeps every reorder inside a source's group of beam rows, whose encoder output
+and cross-attention K/V are identical copies, so T5 leaves both in place
+instead of gathering them on every step.
 
 **Implementation:** [`T5CrossAttentionCache`](src/models/t5/model/decode.rs).
 T5 validates caller-supplied encoder dtype before these matrix products, using
@@ -1137,7 +1446,10 @@ $a_i=\min(1,p_i(y_i)/q_i(y_i))$; on rejection it samples from normalized
 $(p_i-q_i)_+$. This rejection rule preserves the target model's marginal
 distribution exactly. If all drafts pass, the target emits one bonus token.
 The current Qwen and Nemotron coordinators are intentionally batch-one and
-default to two drafts. Nemotron follows vLLM's shifted pair convention:
+default to two drafts. Both now verify all drafts in one target pass and
+rebuild the MTP history from target hidden states, as vLLM does. The shared
+rule (`generation::speculative`) also provides deterministic verification and
+prompt-lookup drafting for models without an MTP head. Nemotron follows vLLM's shifted pair convention:
 auxiliary cache position `i` consumes the next-token embedding `E[x_(i+1)]`
 with the preceding target or auxiliary hidden state. Explicit positions must be
 contiguous because vLLM delegates those KV slots to its scheduler, whereas the
@@ -1149,7 +1461,9 @@ the full vocabulary on the backend and compares only selected argmax IDs;
 stochastic rejection still materializes normalized distributions until a
 backend-native verification kernel is justified.
 
-**Implementation:** [`qwen3_5/model/speculative.rs`](src/models/qwen3_5/model/speculative.rs)
+**Implementation:** [`generation/speculative.rs`](src/generation/speculative.rs)
+(the acceptance rule, with Verus-verified commit arithmetic),
+[`qwen3_5/model/speculative.rs`](src/models/qwen3_5/model/speculative.rs),
 and [`nemotron_h/model/speculative.rs`](src/models/nemotron_h/model/speculative.rs).
 **Reference:** [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/abs/2211.17192)
 and the [pinned vLLM autoregressive speculator](https://github.com/vllm-project/vllm/blob/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/vllm/v1/worker/gpu/spec_decode/autoregressive/speculator.py).
@@ -1160,8 +1474,13 @@ and the [pinned vLLM autoregressive speculator](https://github.com/vllm-project/
 Beam search retains the $B$ highest-scoring target prefixes. Each expansion adds
 token log probability to cumulative score, then prunes globally within a source
 row; finalized hypotheses can be ranked with a length penalty. Stateful search
-must reorder decoder self-KV, encoder rows, and immutable cross-KV by the same
-parent-beam indices, otherwise scores and hidden histories silently diverge.
+must reorder decoder self-KV by the parent-beam indices, otherwise scores and
+hidden histories silently diverge. Because a reorder never leaves a source's
+group of rows (a Verus-verified property), the encoder output is expanded once
+and never re-gathered. Candidates come from a bounded heap rather than a full
+sort, log probabilities are computed in at least F32, the cache needs capacity
+`prompt + max_new_tokens - 1`, and `EarlyStopping` mirrors Transformers'
+`true`, `false` (heuristic, the default), and `"never"` settings.
 
 **Implementation:** the generic coordinator in
 [`generation/seq2seq.rs`](src/generation/seq2seq.rs) and T5 defaults in
@@ -1176,7 +1495,7 @@ tests cover both outcomes and the exact reorder/token/mask history.
 
 - **Architecture is not acceptance.** The matrix records graph features even
   where the crate currently has only schema, synthetic, or checkpoint-contract
-  evidence. Consult the two status documents linked at the top before claiming
+  evidence. Consult the status page linked at the top before claiming
   support for a checkpoint.
 - **Nemotron is NoPE.** The exact Nano and 3.5 attention implementations do not
   apply RoPE. Serialized RoPE-shaped fields are compatibility metadata, not an
@@ -1401,9 +1720,14 @@ tests cover both outcomes and the exact reorder/token/mask history.
   The later integrated `df3bea5` snapshot runs 814 unit tests plus ordinary
   integrations and improves measured line coverage to 88.7276% crate-wide and
   92.4763% shared/core. Both gates still fail and remain release requirements.
-  Five independent bounded sanitizer fuzz targets now cover configuration,
-  artifacts, masks/positions, cache transactions, and generation. Each completed
-  10,000 inputs without a crash; this finite campaign is not exhaustive coverage.
+  Five independent bounded sanitizer fuzz targets then covered configuration,
+  artifacts, masks/positions, cache transactions, and generation; each completed
+  10,000 inputs without a crash. The fuzz package now has twelve targets, adding
+  experiment interfaces, logits processing with token history, chat templates,
+  the RoPE translator, generated SafeTensors and MXFP4 headers with an
+  official-parser differential, attention connectivity with masked attention,
+  and modular specs with cache parity ([campaign record](fuzz/CAMPAIGNS.md)).
+  Finite campaigns are not exhaustive coverage.
 - **Performance evidence is separate from architecture correctness.** FLAN's
   first [repeated Metal/F32 series](acceptance/measurements/flan-t5-small-metal-benchmark-20260909-run.json)
   validates official vectors before three warmups and ten measured runs per
@@ -1581,6 +1905,25 @@ tests cover both outcomes and the exact reorder/token/mask history.
   two JSON map-type tests, the combined suite now passes 1,107 tests; all-feature
   Clippy is warning-free. These are test-only safeguards, not a new coverage
   measurement or hardware acceptance claim.
+- **Gemma's multimodal wrapper differs from its text model.** In Transformers
+  5.2, `Gemma3ForCausalLM` applies `final_logit_softcapping` but
+  `Gemma3ForConditionalGeneration` and PaliGemma never do, and Gemma 3
+  attention never applies `attn_logit_softcapping`. The crate rejects those
+  settings where the reference ignores them instead of computing a different
+  graph. Transformers 5.2's `save_pretrained` also writes inert
+  `rope_type`/`rope_theta` keys beside Gemma 3's per-layer-type RoPE mapping;
+  they are accepted and dropped.
+- **Qwen3-MoE windows follow Transformers 5.2.** At the pinned `7d9754…`
+  reference, an enabled sliding window applies to every block and
+  `max_window_layers` is ignored (Transformers 4.51 kept blocks below it on
+  full attention). The crate follows 5.2 and has a windowed golden test; the
+  released Qwen3-30B-A3B disables its window, so it is unaffected.
+- **Half-precision gpt-oss comparisons are loose by construction.**
+  Transformers' BF16 eager path rounds its attention and router softmaxes to
+  BF16, while this crate normalizes in F32. On four real blocks the crate's BF16
+  run is no closer to the BF16 reference than to the F32 one, and the BF16
+  reference itself is 1.73 logits from F32; half-precision runs are best
+  qualified against a truncated F32 reference.
 - **MLA compression is an optimized local decode path.** DeepSeek's published
   Python reference expands K/V for a generic cache, whereas algebraic absorption
   lets this crate retain only the latent and rotary key.
