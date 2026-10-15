@@ -314,7 +314,7 @@ fn huge_string_repetition_fails_contextually() {
 /// milliseconds, and string doubling in a loop grew memory exponentially per
 /// unit of fuel. Every `+`, `~`, `*`, and print is now checked against a
 /// per-value limit (and a cumulative budget) before it allocates, and the
-/// prompt streams into a writer bounded by `16 MiB + 4x` the context size.
+/// prompt streams into a writer bounded by `4 MiB + 4x` the context size.
 #[test]
 fn rendered_prompts_are_bounded() {
     for template in [

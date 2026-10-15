@@ -51,7 +51,7 @@
 //! Chat templates are data supplied by a checkpoint and therefore are treated
 //! as untrusted programs. The MiniJinja environment has no filesystem loader,
 //! meters execution with fuel, caps recursion and nesting, bounds the rendered
-//! prompt (16 MiB plus four times the serialized context), checks every value
+//! prompt (4 MiB plus four times the serialized context), checks every value
 //! built by `+`, `~`, `*`, printing, and the size-controlled filters before it
 //! is allocated, and turns engine panics into errors. Two costs remain
 //! unbounded because MiniJinja offers no hook for them: comparing containers

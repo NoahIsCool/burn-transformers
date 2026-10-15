@@ -46,7 +46,7 @@
 //!   overflow MiniJinja's recursive parser, code generator, or syntax-tree
 //!   destructor (a native stack overflow aborts the process).
 //! - **Output.** The rendered prompt streams into a buffer of at most
-//!   `16 MiB + 4c` bytes, where `c` is the size of the template context
+//!   `4 MiB + 4c` bytes, where `c` is the size of the template context
 //!   (`messages`, `tools`, ...) serialized as JSON; the write that crosses it
 //!   fails the render.
 //! - **Values.** Every value the following produce is checked *before* it is

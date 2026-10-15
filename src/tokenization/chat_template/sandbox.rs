@@ -65,7 +65,7 @@ const ITEM_BYTES: usize = size_of::<Value>();
 /// Size limits of one render, derived from the size of its template context.
 ///
 /// With `c` the serialized context bytes, the rendered prompt may hold
-/// `16 MiB + 4c` bytes ([`Self::output_bytes`]), and so may any single string
+/// `4 MiB + 4c` bytes ([`Self::output_bytes`]), and so may any single string
 /// ([`Self::value_bytes`]); a sequence may hold `2^20` items; and every
 /// bounded operation together may produce `16` times the prompt limit
 /// ([`Self::total_bytes`]), counting sequence items as 24 bytes each.

@@ -38,7 +38,7 @@ fn assert_limited(source: &str, limits: RenderLimits) {
 #[test]
 fn limits_follow_the_context_size() {
     let empty = RenderLimits::for_context_bytes(0);
-    assert_eq!(empty.output_bytes, 16 * 1024 * 1024);
+    assert_eq!(empty.output_bytes, 4 * 1024 * 1024);
     assert_eq!(empty.value_bytes, empty.output_bytes);
     assert_eq!(empty.sequence_items, 1 << 20);
     assert_eq!(empty.total_bytes, 16 * empty.output_bytes);

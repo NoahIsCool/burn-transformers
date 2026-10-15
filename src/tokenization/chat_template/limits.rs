@@ -22,9 +22,16 @@
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
 
-/// Smallest rendered-prompt limit, whatever the context size: 16 MiB.
+/// Smallest rendered-prompt limit, whatever the context size: 4 MiB.
+///
+/// Encoding is the costliest consumer of a rendered prompt: the Hugging Face
+/// tokenizer keeps per-token strings, offsets, and masks, about 120 bytes of
+/// memory per prompt byte for short words (a 16 MiB prompt of `hello ` took
+/// 1.9 GB to encode). Four MiB, about a million tokens, holds any template's
+/// own text; longer prompts come from the context, which the second term
+/// scales with.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
-pub(crate) const OUTPUT_FLOOR_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const OUTPUT_FLOOR_BYTES: usize = 4 * 1024 * 1024;
 /// Rendered prompt bytes allowed per byte of serialized template context.
 ///
 /// Templates print each message once or twice (content plus a tool-call or
@@ -35,7 +42,7 @@ pub(crate) const OUTPUT_BYTES_PER_CONTEXT_BYTE: usize = 4;
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 pub(crate) const TOTAL_BYTES_PER_OUTPUT_BYTE: usize = 16;
 
-/// The rendered-prompt limit for a context of `context_bytes`: `16 MiB + 4 * context_bytes`.
+/// The rendered-prompt limit for a context of `context_bytes`: `4 MiB + 4 * context_bytes`.
 ///
 /// Saturates at `usize::MAX` instead of overflowing.
 #[cfg_attr(verus_keep_ghost, verus_verify)]
