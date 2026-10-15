@@ -204,7 +204,7 @@ fn malformed_parameter_sets_name_the_offending_keys() {
     .to_string();
     assert!(conflicting.contains("conflicts"), "{conflicting}");
 
-    for json in ["null", "3", r#"{"factor": "two"}"#] {
+    for json in ["null", "3", "{", r#"{"factor": "two"}"#] {
         assert!(
             serde_json::from_str::<RopeParameterSet>(json).is_err(),
             "{json} must not parse"
@@ -517,6 +517,18 @@ fn dynamic_ntk_selects_its_trained_context() {
         &params(r#"{"rope_type": "dynamic"}"#),
         &context(),
         "test.rope.factor",
+    );
+    rejects(
+        &params(r#"{"rope_type": "dynamic", "factor": 0.5}"#),
+        &context(),
+        "test.rope.factor",
+    );
+    rejects(
+        &params(
+            r#"{"rope_type": "dynamic", "factor": 2.0, "original_max_position_embeddings": 0}"#,
+        ),
+        &legacy,
+        "test.rope.original_max_position_embeddings",
     );
     rejects(
         &plain,
@@ -874,6 +886,11 @@ fn longrope_resolves_tables_factor_and_amplitude() {
     ] {
         rejects(&rope, &context(), expected);
     }
+    rejects(
+        &long_rope(r#", "original_max_position_embeddings": 0"#),
+        &context(),
+        "test.rope.original_max_position_embeddings",
+    );
     let error = rejects(
         &long_rope(r#", "original_max_position_embeddings": 256"#),
         &context(),

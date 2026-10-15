@@ -403,3 +403,112 @@ fn validated_proportional_parameters_translate() {
         .unwrap();
     assert_eq!(config.rotary_dimension(), 16);
 }
+
+/// Every `validate_for` rejection names the field that violates its invariant.
+#[test]
+fn rope_validation_rejections_name_their_fields() {
+    let field_of = |rope: RopeParameters, head_dim: usize| {
+        rope.validate_for("test", head_dim, 128, None)
+            .expect_err("validation must fail")
+            .field
+    };
+    // An integral but odd prefix cannot be split into channel pairs.
+    let odd = RopeParameters {
+        partial_rotary_factor: Some(0.5),
+        ..RopeParameters::default()
+    };
+    assert_eq!(field_of(odd, 6), "partial_rotary_factor");
+    for sections in [vec![], vec![2, 0, 2], vec![1, 1, 1]] {
+        let rope = RopeParameters {
+            mrope_section: Some(sections),
+            ..RopeParameters::default()
+        };
+        assert_eq!(field_of(rope, 8), "mrope_section");
+    }
+    let longrope = RopeParameters {
+        rope_type: RopeType::LongRope,
+        original_max_position_embeddings: Some(64),
+        long_factor: Some(vec![1.0; 4]),
+        ..RopeParameters::default()
+    };
+    assert_eq!(field_of(longrope, 8), "short_factor");
+    let llama3 = RopeParameters {
+        rope_type: RopeType::Llama3,
+        factor: Some(8.0),
+        original_max_position_embeddings: Some(64),
+        ..RopeParameters::default()
+    };
+    assert_eq!(field_of(llama3.clone(), 8), "low_freq_factor");
+    let low_only = RopeParameters {
+        low_freq_factor: Some(1.0),
+        ..llama3.clone()
+    };
+    assert_eq!(field_of(low_only, 8), "high_freq_factor");
+    let inverted = RopeParameters {
+        low_freq_factor: Some(4.0),
+        high_freq_factor: Some(1.0),
+        ..llama3.clone()
+    };
+    assert_eq!(field_of(inverted, 8), "high_freq_factor");
+    let missing_original = RopeParameters {
+        original_max_position_embeddings: None,
+        ..llama3.clone()
+    };
+    assert_eq!(
+        field_of(missing_original, 8),
+        "rope.original_max_position_embeddings"
+    );
+    let too_long = RopeParameters {
+        original_max_position_embeddings: Some(256),
+        ..llama3
+    };
+    assert_eq!(
+        field_of(too_long, 8),
+        "rope.original_max_position_embeddings"
+    );
+}
+
+/// Shared scalar validators reject out-of-range values with field-specific messages.
+#[test]
+fn scalar_validators_reject_out_of_range_values() {
+    assert_eq!(
+        probability("test", "dropout", 1.5).unwrap_err().reason,
+        "must be finite and in [0, 1]"
+    );
+    probability("test", "dropout", 0.0).unwrap();
+    let error = divisible("test", "heads", 6, "groups", 4).unwrap_err();
+    assert_eq!(
+        (error.field, error.reason.as_str()),
+        ("heads", "must be divisible by groups")
+    );
+    divisible("test", "heads", 8, "groups", 4).unwrap();
+    let error = model_type("test", "llama", &["qwen3"]).unwrap_err();
+    assert_eq!(error.field, "model_type");
+    assert!(error.reason.contains("\"llama\""), "{}", error.reason);
+    assert!(positive_finite("test", "theta", f64::INFINITY).is_err());
+}
+
+/// Loader errors expose their source and format; topology checks back the runtime trait.
+#[test]
+fn load_errors_display_sources_and_back_architecture_validation() {
+    let topology = ConfigError::new("tiny", "width", "must be nonzero");
+    assert_eq!(topology.to_string(), "tiny.width: must be nonzero");
+    let validation = ConfigLoadError::from(topology.clone());
+    assert_eq!(validation.to_string(), "tiny.width: must be nonzero");
+    assert_eq!(
+        validation.source().map(ToString::to_string),
+        Some(topology.to_string())
+    );
+    let json = ConfigLoadError::from(serde_json::from_str::<serde_json::Value>("{").unwrap_err());
+    assert!(json.to_string().starts_with("invalid model config JSON"));
+    assert!(json.source().is_some());
+
+    use crate::ArchitectureConfig;
+    let invalid = crate::models::qwen3_moe::Qwen3MoeConfig {
+        head_dim: 0,
+        ..crate::models::qwen3_moe::Qwen3MoeConfig::default()
+    };
+    let error = ArchitectureConfig::validate(&invalid).unwrap_err();
+    assert!(error.to_string().contains("qwen3_moe.head_dim"), "{error}");
+    ArchitectureConfig::validate(&crate::models::qwen3_moe::Qwen3MoeConfig::default()).unwrap();
+}
