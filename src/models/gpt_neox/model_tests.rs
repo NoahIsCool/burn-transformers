@@ -318,6 +318,44 @@ fn initialization_follows_the_policy_and_hugging_face() {
     }
 }
 
+/// Applying [`GptNeoXConfig::init_policy`] re-samples projections but keeps LayerNorm parameters.
+///
+/// Pins the documented limit of the policy: it cannot express LayerNorm's
+/// ones, so re-initializing an edited model leaves its norms untouched.
+#[test]
+fn applying_the_initialization_policy_keeps_layer_norm_parameters() {
+    use burn::module::Param;
+
+    let device = Default::default();
+    let mut model = model();
+    let width = model.config.hidden_size;
+    model.final_layer_norm.gamma = Param::from_tensor(Tensor::full([width], 2.0, &device));
+    model.final_layer_norm.beta = Some(Param::from_tensor(Tensor::full([width], 0.5, &device)));
+    let projection_before = model.layers[0].attention.q_proj.weight.val();
+    let policy = model.config.init_policy();
+    let (model, _) = policy.apply(model).unwrap();
+
+    let values = |tensor: Tensor<B, 1>| tensor.into_data().to_vec::<f32>().unwrap();
+    let norm = &model.final_layer_norm;
+    assert!(values(norm.gamma.val()).iter().all(|&value| value == 2.0));
+    assert!(
+        values(norm.beta.as_ref().unwrap().val())
+            .iter()
+            .all(|&value| value == 0.5)
+    );
+    assert_ne!(
+        projection_before.into_data().to_vec::<f32>().unwrap(),
+        model.layers[0]
+            .attention
+            .q_proj
+            .weight
+            .val()
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+    );
+}
+
 /// GPT-NeoX configurations load through the shared `ModelConfig` API with field-level errors.
 #[test]
 fn configurations_load_through_the_shared_model_config_api() {

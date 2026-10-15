@@ -1094,6 +1094,55 @@ fn initialization_policy_matches_the_constructed_parameters() {
     );
 }
 
+/// Applying [`Gpt2Config::init_policy`] re-samples projections but keeps LayerNorm parameters.
+///
+/// Pins the documented limit of the policy: it cannot express LayerNorm's
+/// ones, so re-initializing an edited model leaves its norms untouched.
+#[test]
+fn applying_the_initialization_policy_keeps_layer_norm_parameters() {
+    use crate::initialization::{ParameterInit, ParameterRole};
+    use burn::module::Param;
+
+    let config = Gpt2Config {
+        vocab_size: 32,
+        n_embd: 8,
+        n_layer: 2,
+        n_head: 2,
+        n_positions: 8,
+        ..Gpt2Config::default()
+    };
+    let device = Default::default();
+    let mut model = Gpt2ForCausalLm::<B>::init(config.clone(), &device).unwrap();
+    model.model.final_norm.gamma = Param::from_tensor(Tensor::full([8], 2.0, &device));
+    model.model.final_norm.beta = Some(Param::from_tensor(Tensor::full([8], 0.5, &device)));
+    let projection_before = model.model.layers[0].attention.o_proj.weight.val();
+    let (model, report) = config.init_policy().apply(model).unwrap();
+
+    let values = |tensor: Tensor<B, 1>| tensor.into_data().to_vec::<f32>().unwrap();
+    let norm = &model.model.final_norm;
+    assert!(values(norm.gamma.val()).iter().all(|&value| value == 2.0));
+    assert!(
+        values(norm.beta.as_ref().unwrap().val())
+            .iter()
+            .all(|&value| value == 0.5)
+    );
+    let projection_after = model.model.layers[0].attention.o_proj.weight.val();
+    assert_ne!(
+        projection_before.into_data().to_vec::<f32>().unwrap(),
+        projection_after.into_data().to_vec::<f32>().unwrap()
+    );
+    let norm_entries: Vec<_> = report
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.path.contains("norm"))
+        .collect();
+    assert_eq!(norm_entries.len(), 2 * (2 * config.n_layer + 1));
+    for parameter in norm_entries {
+        assert_eq!(parameter.role, ParameterRole::Other, "{}", parameter.path);
+        assert_eq!(parameter.init, ParameterInit::Keep, "{}", parameter.path);
+    }
+}
+
 /// Backend-default attention matches the eager graph and drops only score and pattern points.
 #[test]
 fn backend_default_attention_matches_eager_and_drops_score_points() {

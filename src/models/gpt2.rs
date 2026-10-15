@@ -186,10 +186,10 @@ impl Gpt2Config {
     ///
     /// Following Hugging Face `GPT2PreTrainedModel._init_weights`: token and
     /// position embeddings and every Conv1D projection draw
-    /// `N(0, initializer_range^2)`, biases are zero, and LayerNorm scales are
-    /// one and shifts zero. Following the GPT-2 paper (and Transformers 4.x),
-    /// the two projections that write into the residual stream (attention
-    /// `o_proj`, HF `attn.c_proj`, and MLP `down_proj`, HF `mlp.c_proj`) use
+    /// `N(0, initializer_range^2)` and projection biases are zero. Following
+    /// the GPT-2 paper (and Transformers 4.x), the two projections that write
+    /// into the residual stream (attention `o_proj`, HF `attn.c_proj`, and MLP
+    /// `down_proj`, HF `mlp.c_proj`) use
     /// `initializer_range / sqrt(2 * n_layer)`, so the residual variance at
     /// initialization does not grow with depth. (The pinned Transformers 5
     /// revision compares full parameter paths with `"c_proj.weight"`, which
@@ -199,7 +199,19 @@ impl Gpt2Config {
     /// of `sqrt(n_embd)` (about 28) for Burn's `N(0, 1)` default.
     ///
     /// [`Gpt2ForCausalLm::init`] constructs parameters lazily with exactly
-    /// these distributions; apply the policy to re-initialize an edited model.
+    /// these distributions, and builds every LayerNorm with scale one and
+    /// shift zero as Hugging Face does.
+    ///
+    /// The policy itself covers embeddings, projections, and projection biases
+    /// only: LayerNorm scales and shifts have the role
+    /// [`ParameterRole::Other`](crate::initialization::ParameterRole::Other),
+    /// which the policy keeps, because [`ParameterInit`](crate::initialization::ParameterInit)
+    /// cannot express "ones". Applying it to a trained or edited model
+    /// therefore re-samples the embeddings and projections and zeroes the
+    /// biases but leaves the LayerNorm parameters as they are; reset those
+    /// separately (for example by rebuilding each norm with
+    /// `LayerNormConfig::new(n_embd).with_epsilon(layer_norm_epsilon)`) for a
+    /// complete Hugging Face-style re-initialization.
     #[must_use]
     pub fn init_policy(&self) -> InitPolicy {
         InitPolicy::normal(self.initializer_range)

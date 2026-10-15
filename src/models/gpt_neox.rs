@@ -110,11 +110,22 @@ impl GptNeoXConfig {
     ///
     /// Following Hugging Face `GPTNeoXPreTrainedModel._init_weights`: the
     /// input embedding and every linear weight (including the untied
-    /// vocabulary projection) draw `N(0, initializer_range^2)`, biases are
-    /// zero, and LayerNorm scales are one and shifts zero. GPT-NeoX applies no
-    /// depth scaling. [`GptNeoXForCausalLm::init`] constructs parameters lazily
-    /// with exactly these distributions; apply the policy to re-initialize an
-    /// edited model.
+    /// vocabulary projection) draw `N(0, initializer_range^2)` and projection
+    /// biases are zero. GPT-NeoX applies no depth scaling.
+    /// [`GptNeoXForCausalLm::init`] constructs parameters lazily with exactly
+    /// these distributions, and builds every LayerNorm with scale one and
+    /// shift zero as Hugging Face does.
+    ///
+    /// The policy itself covers embeddings, projections, and projection biases
+    /// only: LayerNorm scales and shifts have the role
+    /// [`ParameterRole::Other`](crate::initialization::ParameterRole::Other),
+    /// which the policy keeps, because [`ParameterInit`](crate::initialization::ParameterInit)
+    /// cannot express "ones". Applying it to a trained or edited model
+    /// therefore re-samples the embeddings and projections and zeroes the
+    /// biases but leaves the LayerNorm parameters as they are; reset those
+    /// separately (for example by rebuilding each norm with
+    /// `LayerNormConfig::new(hidden_size).with_epsilon(layer_norm_eps)`) for
+    /// a complete Hugging Face-style re-initialization.
     #[must_use]
     pub fn init_policy(&self) -> InitPolicy {
         InitPolicy::normal(self.initializer_range)
