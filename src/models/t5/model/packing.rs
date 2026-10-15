@@ -19,7 +19,10 @@
 //! extension — and no index tensor is uploaded. [`compaction_sources`] and
 //! [`scatter_sources`] are verified in place by Verus (`verus/t5_gpt.rs`):
 //! for all inputs they never overflow, and every index they return addresses
-//! the flattened source tensor.
+//! the flattened source tensor. [`row_positions`], which plans every slot's
+//! causal visibility and relative-bias position, is verified to compute
+//! exactly its documented formulas, never letting a slot see past its row's
+//! appended history.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -285,6 +288,98 @@ pub(super) fn scatter_sources(
         row += 1;
     }
     Some(sources)
+}
+
+/// Query positions of one row's block slots: `(visible, query)`.
+///
+/// Row `b` has committed length `L = length` and `n = count` new tokens in a
+/// block of `Q = block` slots. Slot `i` is the row's `i`-th new token when
+/// `i < n` and padding otherwise. Two positions are planned per slot:
+///
+/// - `query[i] = L + i`, the absolute position whose relative bias the slot
+///   uses (padding slots continue the sequence; their outputs are discarded);
+/// - `visible[i]`, the last key position the slot may attend to under the
+///   causal rule `key <= visible[i]`: `L + i` for a new token, the row's last
+///   new position `L + n - 1` for a padding slot (so no padded query row is
+///   ever empty), and `L - 1` (only the committed history) when the row is
+///   inactive (`n = 0`).
+///
+/// Consequently no slot of an active row sees a key beyond `L + n - 1`, the
+/// row's own appended history. Returns `None` when `count > block` or a
+/// position would not fit `i64` or `usize` (`length + block` overflows).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(positions =>
+    ensures
+        match positions {
+            Some((visible, query)) => {
+                &&& count <= block
+                &&& visible.len() == block
+                &&& query.len() == block
+                &&& forall|i: int| 0 <= i < block ==> #[trigger] query[i] == length + i
+                &&& forall|i: int| 0 <= i < block ==> #[trigger] visible[i] == (
+                    if count == 0 {
+                        length - 1
+                    } else if i < count {
+                        length + i
+                    } else {
+                        length + count - 1
+                    })
+                &&& count > 0 ==> forall|i: int| 0 <= i < block
+                    ==> #[trigger] visible[i] <= length + count - 1
+            },
+            None => count > block || length + block > usize::MAX || length + block > i64::MAX,
+        },
+))]
+pub(super) fn row_positions(
+    length: usize,
+    count: usize,
+    block: usize,
+) -> Option<(Vec<i64>, Vec<i64>)> {
+    if count > block {
+        return None;
+    }
+    let end = length.checked_add(block)?;
+    // `usize` has at most 64 bits, so widening to `u64` is lossless.
+    if end as u64 > i64::MAX as u64 {
+        return None;
+    }
+    let start = length as i64;
+    let mut visible: Vec<i64> = Vec::with_capacity(block);
+    let mut query: Vec<i64> = Vec::with_capacity(block);
+    let mut slot: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            slot <= block,
+            count <= block,
+            length + block <= i64::MAX,
+            start == length,
+            visible.len() == slot,
+            query.len() == slot,
+            forall|i: int| 0 <= i < slot ==> #[trigger] query[i] == length + i,
+            forall|i: int| 0 <= i < slot ==> #[trigger] visible[i] == (
+                if count == 0 {
+                    length - 1
+                } else if i < count {
+                    length + i
+                } else {
+                    length + count - 1
+                }),
+        decreases block - slot,
+    ))]
+    while slot < block {
+        let offset = slot as i64;
+        query.push(start + offset);
+        let shown = if count == 0 {
+            start - 1
+        } else if slot < count {
+            start + offset
+        } else {
+            start + count as i64 - 1
+        };
+        visible.push(shown);
+        slot += 1;
+    }
+    Some((visible, query))
 }
 
 /// Whether `indices` keeps every row inside its group of `group_size` consecutive rows.

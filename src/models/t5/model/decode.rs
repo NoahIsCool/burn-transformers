@@ -63,7 +63,7 @@ use crate::{
 use super::{
     DECODER_INPUT, T5ForConditionalGeneration, bias,
     block::{CrossAttentionPlan, CrossSource, SelfAttentionPlan, SelfKeyValues, StackPlan},
-    packing::{BatchedRows, Packing, groups_preserved},
+    packing::{BatchedRows, Packing, groups_preserved, row_positions},
     validate_encoder_layout, validate_encoder_output, validate_options,
 };
 use crate::models::shared::{
@@ -746,18 +746,13 @@ impl StepGeometry {
                     Some(_) => {}
                 }
             }
-            let start = i64::try_from(length).map_err(|_| overflow())?;
-            for slot in 0..block {
-                let visible = match count.checked_sub(1) {
-                    None => start - 1,
-                    Some(last) => start
-                        .checked_add(i64::try_from(slot.min(last)).map_err(|_| overflow())?)
-                        .ok_or_else(overflow)?,
-                };
-                mask_positions.push(visible);
-                let position = length.checked_add(slot).ok_or_else(overflow)?;
-                max_position = max_position.max(position);
-                bias_positions.push(i64::try_from(position).map_err(|_| overflow())?);
+            // Verified per-row plan; `None` means a position beyond i64.
+            let (visible, query) = row_positions(length, count, block).ok_or_else(overflow)?;
+            mask_positions.extend(visible);
+            bias_positions.extend(query);
+            if let Some(last) = block.checked_sub(1) {
+                // `row_positions` checked `length + block <= i64::MAX`.
+                max_position = max_position.max(length + last);
             }
         }
         Ok(Self {

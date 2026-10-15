@@ -145,3 +145,21 @@ proptest! {
         prop_assert_eq!(groups_preserved(&indices, group_size), expected);
     }
 }
+
+/// Row positions follow their formulas for new, padding, and inactive slots.
+#[test]
+fn row_positions_plan_causal_visibility_and_bias_positions() {
+    // Length 4, two new tokens in a block of three: the padding slot reuses
+    // the last new position 5 for visibility and continues the bias at 6.
+    assert_eq!(row_positions(4, 2, 3), Some((vec![4, 5, 5], vec![4, 5, 6])));
+    // An inactive row sees only its committed history.
+    assert_eq!(row_positions(4, 0, 2), Some((vec![3, 3], vec![4, 5])));
+    // An inactive empty row sees nothing; its outputs are discarded.
+    assert_eq!(row_positions(0, 0, 1), Some((vec![-1], vec![0])));
+    assert_eq!(row_positions(7, 0, 0), Some((Vec::new(), Vec::new())));
+    // Malformed counts and positions beyond i64 or usize produce no plan.
+    assert_eq!(row_positions(0, 3, 2), None);
+    assert_eq!(row_positions(i64::MAX as usize, 1, 1), None);
+    assert_eq!(row_positions(usize::MAX, 0, 1), None);
+    assert!(row_positions(i64::MAX as usize - 2, 1, 2).is_some());
+}

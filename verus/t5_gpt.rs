@@ -11,6 +11,11 @@
 //! - `scatter_sources`: the flat gather that restores the `[batch, S]` layout
 //!   never overflows, has exactly `batch * S` entries, and (for a nonempty
 //!   block) addresses only elements of the `[batch, Q]` block.
+//! - `row_positions`: every block slot's causal visibility and relative-bias
+//!   query position equal their documented formulas (`L + i` for new tokens,
+//!   the row's last new position for padding, `L - 1` for inactive rows), so
+//!   no slot of an active row sees a key past `L + n - 1`, and no position
+//!   overflows `i64`.
 //! - `groups_preserved`: exactly characterizes reorders that keep every row
 //!   inside its group of `group_size` consecutive rows, which is what lets
 //!   beam search leave T5's encoder binding and cross-attention keys in place.
