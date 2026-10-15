@@ -32,10 +32,11 @@
 //! The small loss functions below use differentiable pairwise reductions built
 //! from elementwise additions. This avoids sequential F32 summation losing
 //! probability mass over large vocabularies, including Flex's scalar reduction
-//! path, at about a third of the cost of reducing adjacent pairs. They accept finite F32/F64 logits; explicitly cast lower
-//! precision logits to F32 before computing loss. Logits remain on their device;
-//! cross-entropy label validation reads the label range in one synchronization. No
-//! implicit dtype promotion, gradient detachment, padding policy, or trainer is applied.
+//! path, at about a third of the cost of reducing adjacent pairs. They accept
+//! finite F32/F64 logits; explicitly cast lower precision logits to F32 before
+//! computing loss. Logits remain on their device; cross-entropy label
+//! validation reads the label range in one synchronization. No implicit dtype
+//! promotion, gradient detachment, padding policy, or trainer is applied.
 //!
 //! For class logits `z`, `log_softmax(z)_i = z_i - m - log(sum_j exp(z_j-m))`,
 //! where `m = max(z)` is detached only as a stabilization constant. Cross entropy

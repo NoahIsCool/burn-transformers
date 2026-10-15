@@ -248,6 +248,225 @@ fn equal_positions_reduce_rotary_attention_to_position_free_attention() {
     }
 }
 
+/// One head of `width` channels whose Q/K/V/output projections are all the identity.
+fn identity_attention_of_width(width: usize) -> GroupedQueryAttention<B> {
+    let identity = || {
+        let values = (0..width * width)
+            .map(|index| if index % (width + 1) == 0 { 1.0 } else { 0.0 })
+            .collect::<Vec<_>>();
+        matrix(width, width, &values)
+    };
+    let mut attention = GroupedQueryAttentionConfig::new(width, 1, 1, width)
+        .init::<B>(&Default::default())
+        .unwrap();
+    attention.q_proj = identity();
+    attention.k_proj = identity();
+    attention.v_proj = identity();
+    attention.o_proj = identity();
+    attention
+}
+
+/// Rotates the leading `2 * frequencies.len()` channels of `x` HF-style at `position`.
+///
+/// Pair `k` couples channels `k` and `k + r/2`; both cosine and sine carry the
+/// table `amplitude`, while channels past `r` pass through unscaled.
+fn rotate_prefix(x: &[f64], position: f64, frequencies: &[f64], amplitude: f64) -> Vec<f64> {
+    let half = frequencies.len();
+    let mut rotated = x.to_vec();
+    for (k, frequency) in frequencies.iter().enumerate() {
+        let (sin, cos) = (position * frequency).sin_cos();
+        rotated[k] = amplitude * (x[k] * cos - x[k + half] * sin);
+        rotated[k + half] = amplitude * (x[k + half] * cos + x[k] * sin);
+    }
+    rotated
+}
+
+/// Causal single-head attention with identity projections and explicit RoPE tables, in F64.
+///
+/// Scores are `<rot(q_m), rot(k_n)> / sqrt(width)` for `n <= m`, so the YaRN
+/// amplitude scales the rotated channels' score contribution by its square.
+fn general_reference(
+    tokens: &[Vec<f64>],
+    positions: &[i32],
+    frequencies: &[f64],
+    amplitude: f64,
+) -> Vec<f32> {
+    let width = tokens[0].len();
+    let rotated = tokens
+        .iter()
+        .zip(positions)
+        .map(|(token, &position)| rotate_prefix(token, f64::from(position), frequencies, amplitude))
+        .collect::<Vec<_>>();
+    let mut output = Vec::new();
+    for query in 0..tokens.len() {
+        let scores = (0..=query)
+            .map(|key| {
+                rotated[query]
+                    .iter()
+                    .zip(&rotated[key])
+                    .map(|(left, right)| left * right)
+                    .sum::<f64>()
+                    / (width as f64).sqrt()
+            })
+            .collect::<Vec<_>>();
+        let maximum = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let weights = scores
+            .iter()
+            .map(|score| (score - maximum).exp())
+            .collect::<Vec<_>>();
+        let total = weights.iter().sum::<f64>();
+        for channel in 0..width {
+            let value = weights
+                .iter()
+                .zip(tokens)
+                .map(|(weight, token)| weight / total * token[channel])
+                .sum::<f64>();
+            output.push(value as f32);
+        }
+    }
+    output
+}
+
+/// YaRN inverse frequencies written out from the Hugging Face reference.
+///
+/// `low = max(floor(c(beta_fast)), 0)` and `high = min(ceil(c(beta_slow)), r - 1)`
+/// with `c(n) = r ln(L / (2 pi n)) / (2 ln theta)`; pair `k` blends
+/// `theta^(-2k/r)` (extrapolated) with the same divided by `factor`
+/// (interpolated) by `ramp_k = clamp((k - low) / (high - low), 0, 1)`.
+/// Also returns the ramp so callers can check the blend is exercised.
+fn hf_yarn_frequencies(
+    rotary: usize,
+    theta: f64,
+    factor: f64,
+    original: usize,
+    (beta_fast, beta_slow): (f64, f64),
+) -> (Vec<f64>, Vec<f64>) {
+    let correction = |rotations: f64| {
+        rotary as f64 * (original as f64 / (rotations * core::f64::consts::TAU)).ln()
+            / (2.0 * theta.ln())
+    };
+    let low = correction(beta_fast).floor().max(0.0);
+    let mut high = correction(beta_slow).ceil().min(rotary as f64 - 1.0);
+    if low == high {
+        high += 0.001;
+    }
+    (0..rotary / 2)
+        .map(|k| {
+            let extrapolated = theta.powf(-2.0 * k as f64 / rotary as f64);
+            let ramp = ((k as f64 - low) / (high - low)).clamp(0.0, 1.0);
+            (
+                extrapolated / factor * ramp + extrapolated * (1.0 - ramp),
+                ramp,
+            )
+        })
+        .unzip()
+}
+
+/// Deterministic, non-degenerate `[tokens, width]` activations.
+fn wave_tokens(tokens: usize, width: usize) -> Vec<Vec<f64>> {
+    (0..tokens)
+        .map(|token| {
+            (0..width)
+                .map(|channel| (1.3 * token as f64 + 0.7 * channel as f64 + 0.2).sin())
+                .collect()
+        })
+        .collect()
+}
+
+/// Packs reference activations into a `[1, tokens, width]` F32 tensor.
+fn hidden_from(tokens: &[Vec<f64>]) -> Tensor<B, 3> {
+    let width = tokens[0].len();
+    Tensor::from_data(
+        TensorData::new(
+            tokens.iter().flatten().map(|value| *value as f32).collect(),
+            [1, tokens.len(), width],
+        ),
+        &Default::default(),
+    )
+}
+
+/// Partial-rotary YaRN attention matches an explicit F64 YaRN computation.
+///
+/// Head width 10 rotates its first 8 channels with theta 10000, factor 4, and
+/// an original context of 1024, which puts the ramp bounds at 0 and 3 so pairs
+/// 1 and 2 are genuine interpolation/extrapolation blends. The default table
+/// amplitude `1 + 0.1 ln 4` multiplies the rotated channels' scores by its
+/// square, and the two unrotated channels pass through unscaled.
+#[test]
+fn rotary_attention_matches_a_scalar_yarn_reference() {
+    let (width, rotary, theta, factor, original) = (10, 8, 10_000.0, 4.0, 1024);
+    let yarn = crate::position::YarnConfig::new(factor, original).unwrap();
+    let config = RopeConfig::new(width, rotary, theta, RopeScaling::Yarn(yarn)).unwrap();
+    let (frequencies, ramp) = hf_yarn_frequencies(rotary, theta, factor, original, (32.0, 1.0));
+    assert!(
+        ramp.iter().any(|value| *value > 0.0 && *value < 1.0),
+        "fixture must blend regimes: {ramp:?}"
+    );
+    let amplitude = 1.0 + 0.1 * factor.ln();
+    let tokens = wave_tokens(4, width);
+    let positions = [0, 5, 17, 40];
+    let expected = general_reference(&tokens, &positions, &frequencies, amplitude);
+    for mode in [
+        AttentionPrecisionMode::BackendDefault,
+        AttentionPrecisionMode::EagerFp32Softmax,
+    ] {
+        let mut attention = identity_attention_of_width(width);
+        attention.precision_mode = mode;
+        let attention = RotaryAttention::new(attention, config).unwrap();
+        let actual = run(
+            &attention,
+            hidden_from(&tokens),
+            &context_at(&positions, None),
+        );
+        assert!(
+            max_difference(&actual, &expected) < 1e-4,
+            "{mode:?}: {actual:?} != {expected:?}"
+        );
+    }
+    // Without the amplitude the reference differs, so the check above is sensitive to it.
+    let unscaled = general_reference(&tokens, &positions, &frequencies, 1.0);
+    assert!(max_difference(&unscaled, &expected) > 1e-3);
+}
+
+/// Dynamic scaling reads `evaluated_context`: same positions, longer context, new output.
+///
+/// Dynamic NTK keeps the base frequencies up to the original context of 8 and
+/// stretches the base to `theta (f L / L0 - (f - 1))^(r / (r - 2))` beyond it.
+/// Both cases match the explicit F64 computation.
+#[test]
+fn dynamic_rope_follows_the_context_evaluated_context() {
+    let (width, theta, factor, original) = (6, 10_000.0, 2.0, 8);
+    let dynamic = crate::position::DynamicNtkScaling::new(factor, original).unwrap();
+    let config = RopeConfig::new(width, width, theta, RopeScaling::DynamicNtk(dynamic)).unwrap();
+    let attention = RotaryAttention::new(identity_attention_of_width(width), config).unwrap();
+    let tokens = wave_tokens(4, width);
+    let positions = [0, 1, 2, 3];
+    let frequencies = |base: f64| {
+        (0..width / 2)
+            .map(|k| base.powf(-2.0 * k as f64 / width as f64))
+            .collect::<Vec<_>>()
+    };
+
+    let short = context_at(&positions, None);
+    assert_eq!(short.evaluated_context, 4);
+    let at_short = run(&attention, hidden_from(&tokens), &short);
+    let expected_short = general_reference(&tokens, &positions, &frequencies(theta), 1.0);
+    assert!(max_difference(&at_short, &expected_short) < 1e-4);
+
+    let mut long = context_at(&positions, None);
+    long.evaluated_context = 64;
+    long.validate([1, 4], &Default::default()).unwrap();
+    let at_long = run(&attention, hidden_from(&tokens), &long);
+    let stretch = factor * (64.0 / original as f64) - (factor - 1.0);
+    let base = theta * stretch.powf(width as f64 / (width as f64 - 2.0));
+    let expected_long = general_reference(&tokens, &positions, &frequencies(base), 1.0);
+    assert!(max_difference(&at_long, &expected_long) < 1e-4);
+    assert!(
+        max_difference(&at_short, &at_long) > 1e-3,
+        "evaluated_context must reach the rotary tables"
+    );
+}
+
 /// Construction rejects a RoPE policy built for a different head width.
 #[test]
 fn rotary_policy_must_match_the_attention_head_width() {

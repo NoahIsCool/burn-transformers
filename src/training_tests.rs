@@ -786,21 +786,39 @@ proptest::proptest! {
     ///
     /// For depth `k = ceil(log2 w)`, each input passes through at most `k`
     /// additions, so `|error| <= k * 2^-24 * sum |x|` up to second-order terms.
+    /// Several rows of one width are reduced together and each row is checked
+    /// against its own sum, so a fold along the wrong axis (mixing rows) fails.
     #[test]
     fn folded_row_sums_obey_the_pairwise_error_bound(
-        rows in proptest::collection::vec(
-            proptest::collection::vec(0.0f32..1e3, 1..300),
-            1..2,
-        ),
+        (width, rows) in proptest::strategy::Strategy::prop_flat_map(1usize..300, |width| {
+            (
+                proptest::strategy::Just(width),
+                proptest::collection::vec(
+                    proptest::collection::vec(0.0f32..1e3, width),
+                    1..5,
+                ),
+            )
+        }),
     ) {
-        let row = &rows[0];
-        let width = row.len();
-        let tensor = Tensor::<Cpu, 2>::from_data(TensorData::new(row.clone(), [1, width]), &Default::default());
-        let actual = f64::from(pairwise_row_sums(tensor).into_scalar());
-        let exact = row.iter().map(|value| f64::from(*value)).sum::<f64>();
+        let count = rows.len();
+        let flat = rows.iter().flatten().copied().collect::<Vec<_>>();
+        let tensor = Tensor::<Cpu, 2>::from_data(
+            TensorData::new(flat, [count, width]),
+            &Default::default(),
+        );
+        let sums = pairwise_row_sums(tensor);
+        proptest::prop_assert_eq!(sums.dims(), [count, 1]);
+        let sums = sums.into_data().to_vec::<f32>().unwrap();
         let depth = (usize::BITS - (width - 1).leading_zeros()) as f64;
-        let bound = (depth + 1.0) * f64::from(f32::EPSILON) / 2.0 * exact + 1e-30;
-        proptest::prop_assert!((actual - exact).abs() <= bound, "{actual} vs {exact} (bound {bound})");
+        for (row, actual) in rows.iter().zip(sums) {
+            let actual = f64::from(actual);
+            let exact = row.iter().map(|value| f64::from(*value)).sum::<f64>();
+            let bound = (depth + 1.0) * f64::from(f32::EPSILON) / 2.0 * exact + 1e-30;
+            proptest::prop_assert!(
+                (actual - exact).abs() <= bound,
+                "{actual} vs {exact} (bound {bound})"
+            );
+        }
     }
 }
 

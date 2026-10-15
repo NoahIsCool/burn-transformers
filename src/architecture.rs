@@ -2,9 +2,10 @@
 //!
 //! Contracts separate stateless parameterized computation from mutable decode
 //! sessions. [`HookedModel`] and [`StagedModel`] give experiments one interface
-//! for activation hooks and staged execution across families. Shared specifications describe mixer, normalization, and residual
-//! choices without selecting a checkpoint family. Input/output types make tensor
-//! axes and token-validity semantics explicit; family implementations validate the
+//! for activation hooks and staged execution across families. Shared
+//! specifications describe mixer, normalization, and residual choices without
+//! selecting a checkpoint family. Input/output types make tensor axes and
+//! token-validity semantics explicit; family implementations validate the
 //! requested capabilities before applying their numerical graph.
 
 mod spec;
