@@ -24,6 +24,7 @@ use super::{
     ArtifactSelection, CheckpointError, IndexAliasSizeAccounting, IndexTensorAlias, LoadOptions,
     Result, TensorDType,
     accounting::{IndexTotalSizeEvidence, PinnedControlFile, PinnedIndexTotalSizePolicy},
+    layout::{TilingError, element_count, tensor_file_offset, validate_contiguous_tiling},
 };
 
 /// Preferred Hugging Face index filename during automatic discovery.
@@ -128,12 +129,11 @@ pub struct ShardInventory {
 impl ShardInventory {
     /// Returns the absolute byte offset at which one tensor begins.
     pub fn tensor_file_offset(&self, tensor: &TensorInventory) -> Result<u64> {
-        8_u64
-            .checked_add(self.header_bytes)
-            .and_then(|offset| offset.checked_add(tensor.data_offsets[0]))
-            .ok_or(CheckpointError::ArithmeticOverflow {
+        tensor_file_offset(self.header_bytes, tensor.data_offsets[0]).ok_or(
+            CheckpointError::ArithmeticOverflow {
                 context: "computing tensor file offset",
-            })
+            },
+        )
     }
 }
 
@@ -872,22 +872,39 @@ fn inspect_shard(
         );
     }
     ranges.sort_by(|left, right| (left.0, left.1, &left.2).cmp(&(right.0, right.1, &right.2)));
-    let mut cursor = 0_u64;
-    for (start, end, name) in ranges {
-        if start != cursor {
-            return Err(CheckpointError::InvalidDataOffsets {
-                tensor: name,
-                shard: relative_path.to_owned(),
-                reason: format!("range starts at {start}, next contiguous byte is {cursor}"),
-            });
-        }
-        cursor = end;
-    }
-    if cursor != data_bytes {
+    let intervals = ranges
+        .iter()
+        .map(|(start, end, _)| (*start, *end))
+        .collect::<Vec<_>>();
+    if let Err(error) = validate_contiguous_tiling(&intervals, data_bytes) {
+        let (tensor, reason) = match error {
+            TilingError::Reversed { index } => (
+                ranges[index].2.clone(),
+                format!("end {} precedes start {}", ranges[index].1, ranges[index].0),
+            ),
+            TilingError::Discontiguous { index, expected } => (
+                ranges[index].2.clone(),
+                format!(
+                    "range starts at {}, next contiguous byte is {expected}",
+                    ranges[index].0
+                ),
+            ),
+            TilingError::OutOfBounds { index } => (
+                ranges[index].2.clone(),
+                format!(
+                    "end {} exceeds data section size {data_bytes}",
+                    ranges[index].1
+                ),
+            ),
+            TilingError::Uncovered { covered } => (
+                "<end-of-data>".to_owned(),
+                format!("tensor ranges cover {covered} bytes, data section has {data_bytes}"),
+            ),
+        };
         return Err(CheckpointError::InvalidDataOffsets {
-            tensor: "<end-of-data>".to_owned(),
+            tensor,
             shard: relative_path.to_owned(),
-            reason: format!("tensor ranges cover {cursor} bytes, data section has {data_bytes}"),
+            reason,
         });
     }
 
@@ -923,12 +940,8 @@ fn inspect_shard(
 
 /// Multiplies dimensions with checked arithmetic; a rank-zero tensor has one scalar.
 fn checked_elements(shape: &[u64]) -> Result<u64> {
-    shape.iter().try_fold(1_u64, |elements, dimension| {
-        elements
-            .checked_mul(*dimension)
-            .ok_or(CheckpointError::ArithmeticOverflow {
-                context: "computing tensor element count",
-            })
+    element_count(shape).ok_or(CheckpointError::ArithmeticOverflow {
+        context: "computing tensor element count",
     })
 }
 

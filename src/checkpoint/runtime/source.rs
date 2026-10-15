@@ -23,6 +23,7 @@ use std::os::unix::fs::MetadataExt;
 
 use super::super::{
     CheckpointError, CheckpointManifest, PlannedSource, Result, TensorDType, TensorInventory,
+    layout::{element_count, tensor_file_offset},
 };
 
 /// Resource and I/O counters reported by a [`TensorSource`].
@@ -286,12 +287,11 @@ impl<'a> LocalShardSource<'a> {
                 ),
             });
         }
-        let data_start =
-            8_u64
-                .checked_add(current_header_bytes)
-                .ok_or(CheckpointError::ArithmeticOverflow {
-                    context: "computing runtime shard data offset",
-                })?;
+        let data_start = tensor_file_offset(current_header_bytes, 0).ok_or(
+            CheckpointError::ArithmeticOverflow {
+                context: "computing runtime shard data offset",
+            },
+        )?;
         let described_end = data_start.checked_add(shard.data_bytes).ok_or(
             CheckpointError::ArithmeticOverflow {
                 context: "computing runtime shard data end",
@@ -369,7 +369,6 @@ impl TensorSource for LocalShardSource<'_> {
                 bytes: byte_len,
                 context: "allocating one checkpoint tensor payload",
             })?;
-        bytes.resize(byte_len_usize, 0);
 
         let open = self
             .open
@@ -388,9 +387,27 @@ impl TensorSource for LocalShardSource<'_> {
             .map_err(|error| {
                 CheckpointError::io("seek to checkpoint tensor", &source.shard, error)
             })?;
-        open.file
-            .read_exact(&mut bytes)
+        // Reading through `take` fills the reserved capacity directly: unlike
+        // `resize` followed by `read_exact`, the payload is never zero-filled
+        // first, which saves one full memory pass per tensor.
+        (&mut open.file)
+            .take(byte_len)
+            .read_to_end(&mut bytes)
             .map_err(|error| CheckpointError::io("read checkpoint tensor", &source.shard, error))?;
+        if bytes.len() != byte_len_usize {
+            return Err(CheckpointError::io(
+                "read checkpoint tensor",
+                &source.shard,
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "read {} of {byte_len} payload bytes for `{}`",
+                        bytes.len(),
+                        source.name
+                    ),
+                ),
+            ));
+        }
 
         let payload = SourceTensor::new(
             source.name.clone(),
@@ -461,13 +478,9 @@ fn validate_descriptor(source: &PlannedSource, observed: &TensorInventory) -> Re
 
 /// Computes a scalar count without trusting shape multiplication.
 fn checked_elements(shape: &[u64], tensor: &str) -> Result<u64> {
-    shape.iter().try_fold(1_u64, |elements, dimension| {
-        elements
-            .checked_mul(*dimension)
-            .ok_or_else(|| CheckpointError::InvalidTensorPayload {
-                tensor: tensor.to_owned(),
-                reason: "shape element count overflows u64".into(),
-            })
+    element_count(shape).ok_or_else(|| CheckpointError::InvalidTensorPayload {
+        tensor: tensor.to_owned(),
+        reason: "shape element count overflows u64".into(),
     })
 }
 

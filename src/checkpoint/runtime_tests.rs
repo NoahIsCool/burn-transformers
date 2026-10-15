@@ -1473,7 +1473,8 @@ fn every_f16_bit_pattern_casts_to_bf16_with_half_semantics() {
         }
     }
     assert_eq!(outcome.report.dtype_converted.len(), 1);
-    assert_eq!(outcome.stats.peak_host_staging_bytes, 262_144);
+    // Equal-width F16 -> BF16 converts the 131,072-byte source in place.
+    assert_eq!(outcome.stats.peak_host_staging_bytes, 131_072);
 }
 
 /// An unchanged F32 payload records one live buffer rather than source-plus-output storage.

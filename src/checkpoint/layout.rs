@@ -1,0 +1,421 @@
+//! Pure integer arithmetic for checkpoint tensor layouts.
+//!
+//! A tensor with dimensions `d[0..rank]` holds `N = product(d)` scalars (one for
+//! rank zero) and occupies `N * bits / 8` bytes, which must be a whole number.
+//! A SafeTensors data section of `D` bytes is valid only when the tensors' byte
+//! intervals `[begin, end)`, sorted by `(begin, end)`, tile it exactly: the first
+//! begins at zero, each begins where the previous ended, and the last ends at
+//! `D`. Tiling implies the intervals are pairwise disjoint (apart from empty
+//! ones), lie inside `[0, D)`, and account for every data byte.
+//!
+//! Row-major slicing and concatenation along an axis view a tensor as
+//! `[outer, axis, inner]`, where `outer` and `inner` are the products of the
+//! dimensions before and after that axis. Outer row `o` of a slice
+//! `[start, start + length)` reads source elements
+//! `[(o * axis + start) * inner, (o * axis + start + length) * inner)` and writes
+//! target elements `[o * length * inner, (o + 1) * length * inner)`.
+//!
+//! The module has no crate, Burn, or allocator dependencies so that Verus can
+//! check its arithmetic in place through `verus/checkpoint.rs`. Callers map the
+//! small error enums below to contextual [`super::CheckpointError`] values.
+
+#[cfg(verus_keep_ghost)]
+use vstd::prelude::*;
+
+use core::ops::Range;
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Mathematical product of `shape[0..len]`, the scalar count of that prefix.
+pub open spec fn shape_product(shape: Seq<u64>, len: int) -> int
+    decreases len,
+{
+    if len <= 0 {
+        1
+    } else {
+        shape_product(shape, len - 1) * shape[len - 1] as int
+    }
+}
+
+/// Every prefix product of nonnegative dimensions is nonnegative.
+proof fn lemma_shape_product_nonnegative(shape: Seq<u64>, len: int)
+    requires
+        0 <= len <= shape.len(),
+    ensures
+        shape_product(shape, len) >= 0,
+    decreases len,
+{
+    if len > 0 {
+        lemma_shape_product_nonnegative(shape, len - 1);
+        assert(shape_product(shape, len - 1) * shape[len - 1] as int >= 0) by (nonlinear_arith)
+            requires
+                shape_product(shape, len - 1) >= 0,
+        ;
+    }
+}
+
+/// A product that exceeds a bound stays above it after multiplying by a positive factor.
+proof fn lemma_product_overflow_persists(shape: Seq<u64>, from: int, to: int)
+    requires
+        0 <= from <= to <= shape.len(),
+        shape_product(shape, from) > u64::MAX,
+        forall|k: int| from <= k < to ==> shape[k] > 0,
+    ensures
+        shape_product(shape, to) > u64::MAX,
+    decreases to - from,
+{
+    if to > from {
+        lemma_product_overflow_persists(shape, from, to - 1);
+        assert(shape_product(shape, to - 1) * shape[to - 1] as int > u64::MAX) by (nonlinear_arith)
+            requires
+                shape_product(shape, to - 1) > u64::MAX,
+                shape[to - 1] > 0,
+        ;
+    }
+}
+
+/// A zero dimension makes every longer prefix product zero.
+proof fn lemma_product_zero_persists(shape: Seq<u64>, from: int, to: int)
+    requires
+        0 <= from <= to <= shape.len(),
+        shape_product(shape, from) == 0,
+    ensures
+        shape_product(shape, to) == 0,
+    decreases to - from,
+{
+    if to > from {
+        lemma_product_zero_persists(shape, from, to - 1);
+    }
+}
+
+} // verus!
+
+/// Computes the scalar count of a shape, or `None` when it exceeds `u64`.
+///
+/// Rank zero is one scalar. A zero dimension yields zero even when the other
+/// dimensions alone would overflow, matching SafeTensors' empty tensors.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(count =>
+    ensures
+        match count {
+            Some(n) => n as int == shape_product(shape@, shape@.len() as int),
+            None => shape_product(shape@, shape@.len() as int) > u64::MAX,
+        }
+))]
+pub(crate) fn element_count(shape: &[u64]) -> Option<u64> {
+    // A zero dimension anywhere makes the product zero, so check it first:
+    // the running product below then only ever grows.
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= shape@.len(),
+            forall|k: int| 0 <= k < index ==> shape@[k] > 0,
+        decreases shape@.len() - index,
+    ))]
+    while index < shape.len() {
+        if shape[index] == 0 {
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                lemma_shape_product_nonnegative(shape@, index as int);
+                assert(shape_product(shape@, index as int + 1) == 0) by (nonlinear_arith)
+                    requires
+                        shape_product(shape@, index as int + 1)
+                            == shape_product(shape@, index as int) * shape@[index as int] as int,
+                        shape@[index as int] == 0,
+                ;
+                lemma_product_zero_persists(shape@, index as int + 1, shape@.len() as int);
+            }
+            return Some(0);
+        }
+        index += 1;
+    }
+
+    let mut product: u64 = 1;
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= shape@.len(),
+            forall|k: int| 0 <= k < shape@.len() ==> shape@[k] > 0,
+            product as int == shape_product(shape@, index as int),
+        decreases shape@.len() - index,
+    ))]
+    while index < shape.len() {
+        let dimension = shape[index];
+        match product.checked_mul(dimension) {
+            Some(next) => product = next,
+            None => {
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    lemma_product_overflow_persists(
+                        shape@,
+                        index as int + 1,
+                        shape@.len() as int,
+                    );
+                }
+                return None;
+            }
+        }
+        index += 1;
+    }
+    Some(product)
+}
+
+/// Why a scalar count cannot be stored as a whole number of bytes.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StorageSizeError {
+    /// `elements * bits` exceeds `u64::MAX`.
+    Overflow,
+    /// `elements * bits` is not a multiple of eight.
+    PartialByte,
+}
+
+/// Computes `elements * bits / 8`, rejecting overflow and a trailing partial byte.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(bytes =>
+    ensures
+        match bytes {
+            Ok(n) => elements * bits <= u64::MAX
+                && (elements * bits) % 8 == 0
+                && 8 * n == elements * bits,
+            Err(StorageSizeError::Overflow) => elements * bits > u64::MAX,
+            Err(StorageSizeError::PartialByte) => elements * bits <= u64::MAX
+                && (elements * bits) % 8 != 0,
+        }
+))]
+pub(crate) fn storage_bytes(elements: u64, bits: u64) -> Result<u64, StorageSizeError> {
+    let Some(total_bits) = elements.checked_mul(bits) else {
+        return Err(StorageSizeError::Overflow);
+    };
+    if total_bits % 8 != 0 {
+        return Err(StorageSizeError::PartialByte);
+    }
+    Ok(total_bits / 8)
+}
+
+/// First violation of an exact contiguous tiling of a data section.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TilingError {
+    /// Interval `index` ends before it begins.
+    Reversed {
+        /// Position of the interval in the sorted input.
+        index: usize,
+    },
+    /// Interval `index` begins away from the next uncovered byte (a gap or overlap).
+    Discontiguous {
+        /// Position of the interval in the sorted input.
+        index: usize,
+        /// First uncovered byte when the interval was reached.
+        expected: u64,
+    },
+    /// Interval `index` ends beyond the data section.
+    OutOfBounds {
+        /// Position of the interval in the sorted input.
+        index: usize,
+    },
+    /// The intervals stop before the end of the data section.
+    Uncovered {
+        /// Number of bytes covered by the complete tiling.
+        covered: u64,
+    },
+}
+
+/// Checks that sorted byte intervals tile `[0, data_bytes)` exactly.
+///
+/// `intervals` must be sorted by `(begin, end)`; the caller sorts them because
+/// SafeTensors headers list tensors by name. On success, interval `k` begins at
+/// the end of interval `k - 1` (zero for the first), and the last ends at
+/// `data_bytes`, so the intervals are disjoint and cover every data byte. Empty
+/// intervals are allowed anywhere inside the section.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(result =>
+    ensures
+        result is Ok ==> {
+            &&& intervals@.len() == 0 ==> data_bytes == 0
+            &&& intervals@.len() > 0 ==> intervals@[0].0 == 0
+            &&& intervals@.len() > 0 ==> intervals@[intervals@.len() - 1].1 == data_bytes
+            &&& forall|k: int| 0 <= k < intervals@.len() ==>
+                #[trigger] intervals@[k].0 <= intervals@[k].1 && intervals@[k].1 <= data_bytes
+            &&& forall|k: int| 0 < k < intervals@.len() ==>
+                #[trigger] intervals@[k].0 == intervals@[k - 1].1
+        }
+))]
+pub(crate) fn validate_contiguous_tiling(
+    intervals: &[(u64, u64)],
+    data_bytes: u64,
+) -> Result<(), TilingError> {
+    let mut cursor: u64 = 0;
+    let mut index = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= intervals@.len(),
+            cursor <= data_bytes,
+            index == 0 ==> cursor == 0,
+            index > 0 ==> cursor == intervals@[index - 1].1,
+            forall|k: int| 0 <= k < index ==>
+                #[trigger] intervals@[k].0 <= intervals@[k].1 && intervals@[k].1 <= data_bytes,
+            forall|k: int| 0 < k < index ==> #[trigger] intervals@[k].0 == intervals@[k - 1].1,
+            index > 0 ==> intervals@[0].0 == 0,
+        decreases intervals@.len() - index,
+    ))]
+    while index < intervals.len() {
+        let (begin, end) = intervals[index];
+        if end < begin {
+            return Err(TilingError::Reversed { index });
+        }
+        if begin != cursor {
+            return Err(TilingError::Discontiguous {
+                index,
+                expected: cursor,
+            });
+        }
+        if end > data_bytes {
+            return Err(TilingError::OutOfBounds { index });
+        }
+        cursor = end;
+        index += 1;
+    }
+    if cursor != data_bytes {
+        return Err(TilingError::Uncovered { covered: cursor });
+    }
+    Ok(())
+}
+
+/// Returns the absolute file offset `8 + header_bytes + begin` of a tensor payload.
+///
+/// SafeTensors files start with an eight-byte little-endian header length, then
+/// the JSON header, then the data section addressed by tensor `data_offsets`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(offset =>
+    ensures
+        match offset {
+            Some(n) => n == 8 + header_bytes + begin,
+            None => 8 + header_bytes + begin > u64::MAX,
+        }
+))]
+pub(crate) fn tensor_file_offset(header_bytes: u64, begin: u64) -> Option<u64> {
+    match 8_u64.checked_add(header_bytes) {
+        Some(data_start) => data_start.checked_add(begin),
+        None => None,
+    }
+}
+
+/// Element intervals for one outer row of an axis slice.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BlockCopy {
+    /// Source element interval read for this outer row.
+    pub(crate) source: Range<usize>,
+    /// Target element interval written for this outer row.
+    pub(crate) target: Range<usize>,
+}
+
+/// Locates outer row `outer_index` of `[outer, axis, inner]` sliced to `[start, start + length)`.
+///
+/// The caller proves `start + length <= axis` and that `outer * axis` and the
+/// whole source, `outer * axis * inner` elements, are addressable; every
+/// intermediate value is then bounded by those totals, so none of the products
+/// below can overflow. The rows' target intervals are consecutive and partition
+/// `[0, outer * length * inner)`, which lets a gather write the output strictly
+/// in order.
+///
+/// Concatenation is the same map with roles exchanged: a source with `length`
+/// rows along the axis, placed at `start` in a target of `axis` rows, reads the
+/// returned `target` interval and writes the returned `source` interval.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(copy =>
+    requires
+        outer_index < outer,
+        start + length <= axis,
+        outer * axis <= usize::MAX,
+        outer * axis * inner <= usize::MAX,
+    ensures
+        copy.source.start == (outer_index * axis + start) * inner,
+        copy.source.end == copy.source.start + length * inner,
+        copy.source.end <= outer * axis * inner,
+        copy.target.start == outer_index * length * inner,
+        copy.target.end == (outer_index + 1) * length * inner,
+        copy.target.end <= outer * length * inner,
+))]
+// `outer` appears only in the verified precondition.
+#[cfg_attr(not(verus_keep_ghost), allow(unused_variables))]
+pub(crate) fn slice_block(
+    outer_index: usize,
+    outer: usize,
+    axis: usize,
+    inner: usize,
+    start: usize,
+    length: usize,
+) -> BlockCopy {
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        slice_block_bounds(outer_index, outer, axis, inner, start, length);
+    }
+    let source_start = (outer_index * axis + start) * inner;
+    let block = length * inner;
+    let target_start = outer_index * block;
+    BlockCopy {
+        source: source_start..source_start + block,
+        target: target_start..target_start + block,
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// Bounds every intermediate product of [`slice_block`] by the source size.
+proof fn slice_block_bounds(
+    outer_index: usize,
+    outer: usize,
+    axis: usize,
+    inner: usize,
+    start: usize,
+    length: usize,
+)
+    requires
+        outer_index < outer,
+        start + length <= axis,
+        outer * axis <= usize::MAX,
+        outer * axis * inner <= usize::MAX,
+    ensures
+        outer_index * axis + start + length <= outer * axis,
+        (outer_index * axis + start) * inner + length * inner <= outer * axis * inner,
+        outer_index * length * inner + length * inner <= outer * length * inner,
+        outer * length * inner <= outer * axis * inner,
+        (outer_index * axis + start) * inner == outer_index * axis * inner + start * inner,
+        outer_index * (length * inner) == outer_index * length * inner,
+        (outer_index + 1) * length * inner == outer_index * length * inner + length * inner,
+{
+    assert(outer_index * axis + start + length <= outer * axis) by (nonlinear_arith)
+        requires
+            outer_index < outer,
+            start + length <= axis,
+    ;
+    assert((outer_index * axis + start) * inner + length * inner <= outer * axis * inner)
+        by (nonlinear_arith)
+        requires
+            outer_index * axis + start + length <= outer * axis,
+    ;
+    assert(outer_index * length * inner + length * inner <= outer * length * inner)
+        by (nonlinear_arith)
+        requires
+            outer_index < outer,
+    ;
+    assert(outer * length * inner <= outer * axis * inner) by (nonlinear_arith)
+        requires
+            length <= axis,
+    ;
+    assert((outer_index * axis + start) * inner == outer_index * axis * inner + start * inner)
+        by (nonlinear_arith);
+    assert(outer_index * (length * inner) == outer_index * length * inner) by (nonlinear_arith);
+    assert((outer_index + 1) * length * inner == outer_index * length * inner + length * inner)
+        by (nonlinear_arith);
+}
+
+} // verus!
+
+#[cfg(test)]
+#[path = "layout_tests.rs"]
+mod tests;

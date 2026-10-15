@@ -554,11 +554,7 @@ fn packed_layout(scheme: SymmetricQuantization) -> PackedValueLayout {
 
 /// Computes the logical element product, allowing reference scalars and empty axes.
 fn checked_num_elements_u64(shape: &[u64]) -> Result<u64> {
-    shape.iter().try_fold(1_u64, |elements, &dimension| {
-        elements
-            .checked_mul(dimension)
-            .ok_or(QuantizationError::ShapeElementOverflow)
-    })
+    crate::checkpoint::layout::element_count(shape).ok_or(QuantizationError::ShapeElementOverflow)
 }
 
 /// Divides by a nonzero validated group/packing width without addition overflow.

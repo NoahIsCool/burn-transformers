@@ -1259,12 +1259,8 @@ fn tensor_bytes(shape: &[u64], dtype: TensorDType) -> Result<u64> {
 
 /// Multiplies target dimensions without overflow, treating rank zero as one scalar.
 fn checked_elements(shape: &[u64]) -> Result<u64> {
-    shape.iter().try_fold(1_u64, |count, dimension| {
-        count
-            .checked_mul(*dimension)
-            .ok_or(CheckpointError::ArithmeticOverflow {
-                context: "computing mapped tensor element count",
-            })
+    super::layout::element_count(shape).ok_or(CheckpointError::ArithmeticOverflow {
+        context: "computing mapped tensor element count",
     })
 }
 

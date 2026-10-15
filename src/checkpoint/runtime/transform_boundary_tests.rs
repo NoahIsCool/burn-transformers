@@ -1,5 +1,8 @@
 //! Checks load-plan contracts, tensor conversion, and staging arithmetic boundaries.
 
+use burn::tensor::{bf16, f16};
+
+use super::super::convert::{ConvertInPlace, TransposeInto};
 use super::*;
 use crate::checkpoint::{LoadReport, MemoryEstimate};
 
@@ -435,81 +438,49 @@ fn shared_slices_require_matching_payload_descriptors_and_slice_operations() {
     assert_eq!(read_stats.peak_host_staging_bytes, 40);
 }
 
-/// Rejects truncated contiguous spans before any destination byte is changed.
+/// Shared cast validation rejects reinterpretation and casts outside the IEEE formats.
 #[test]
-fn copy_ranges_fail_contextually_for_equal_dtype_and_cast_paths() {
-    for target_dtype in [TensorDType::F32, TensorDType::F16] {
-        for source_short in [false, true] {
-            let source = if source_short { vec![0; 3] } else { vec![0; 4] };
-            let width = scalar_bytes(target_dtype).unwrap() as usize;
-            let mut target = vec![0xa5; if source_short { width } else { width - 1 }];
-            let before = target.clone();
-            assert!(
-                matches!(copy_elements("bounded", &source, TensorDType::F32, 0,
-                &mut target, target_dtype, 0, 1), Err(CheckpointError::InvalidTensorPayload { tensor, reason })
-                if tensor == "bounded" && reason.contains("outside the payload"))
-            );
-            assert_eq!(target, before);
-        }
-    }
-    let mut target = [0xa5; 4];
-    copy_elements(
-        "empty",
-        &[],
-        TensorDType::F32,
-        0,
-        &mut target,
-        TensorDType::F32,
-        1,
-        0,
-    )
-    .unwrap();
-    assert_eq!(target, [0xa5; 4]);
-}
-
-/// Proves each fixed-width decoder and target encoder checks exact slot sizes.
-#[test]
-fn scalar_conversion_rejects_truncated_slots_and_non_real_dtypes() {
-    for (dtype, bytes) in [
-        (TensorDType::F16, 1),
-        (TensorDType::BF16, 3),
-        (TensorDType::F32, 3),
-        (TensorDType::F64, 7),
-    ] {
-        assert!(
-            matches!(convert_float_scalar("scalar", dtype, &vec![0; bytes],
-            TensorDType::F32, &mut [0; 4]), Err(CheckpointError::InvalidTensorPayload { tensor, .. }) if tensor == "scalar")
-        );
-    }
-    assert!(matches!(
-        convert_float_scalar(
-            "scalar",
-            TensorDType::F32,
-            &1.0_f32.to_le_bytes(),
-            TensorDType::F64,
-            &mut [0; 7]
-        ),
-        Err(CheckpointError::InvalidTensorPayload { .. })
-    ));
+fn cast_validation_rejects_integer_reinterpretation_and_non_castable_floats() {
     for (source_dtype, target_dtype) in [
         (TensorDType::I32, TensorDType::F32),
         (TensorDType::F32, TensorDType::I32),
         (TensorDType::U32, TensorDType::I32),
         (TensorDType::BOOL, TensorDType::U8),
+        (TensorDType::F8_E4M3, TensorDType::BF16),
+        (TensorDType::BF16, TensorDType::F8_E5M2),
     ] {
-        assert!(matches!(validate_conversion(source_dtype, target_dtype),
+        assert!(matches!(validate_cast(source_dtype, target_dtype),
             Err(CheckpointError::UnsupportedDTypeConversion { source_dtype: source, target_dtype: target })
             if source == source_dtype && target == target_dtype));
     }
-    for (source_dtype, target_dtype) in [
-        (TensorDType::I32, TensorDType::F32),
-        (TensorDType::F32, TensorDType::I32),
-    ] {
-        assert!(matches!(
-            convert_float_scalar("scalar", source_dtype, &[0; 4], target_dtype, &mut [0; 4]),
-            Err(CheckpointError::UnsupportedDTypeConversion { .. })
-        ));
+    for dtype in [TensorDType::I32, TensorDType::F8_E4M3, TensorDType::F64] {
+        validate_cast(dtype, dtype).unwrap();
     }
+}
+
+/// Equal-width in-place conversion rejects partial scalars and width changes.
+#[test]
+fn in_place_conversion_rejects_partial_scalars_and_width_changes() {
+    let mut odd = [0_u8; 3];
+    assert!(matches!(
+        convert_in_place("odd", &mut odd, TensorDType::BF16, TensorDType::F16),
+        Err(CheckpointError::InvalidTensorPayload { tensor, reason })
+        if tensor == "odd" && reason.contains("outside the payload")
+    ));
+    let mut bytes = [0_u8; 4];
+    assert!(matches!(
+        with_scalar_conversion(
+            TensorDType::F32,
+            TensorDType::F16,
+            ConvertInPlace { tensor: "narrow", bytes: &mut bytes },
+        ),
+        Ok(Err(CheckpointError::InvalidTensorPayload { tensor, reason }))
+        if tensor == "narrow" && reason.contains("cannot change scalar width from 4 to 2")
+    ));
+    // Equal dtypes are already native storage on little-endian hosts.
+    let mut native = 1.5_f32.to_le_bytes();
+    convert_in_place("same", &mut native, TensorDType::F32, TensorDType::F32).unwrap();
+    assert_eq!(f32::from_ne_bytes(native), 1.5);
 }
 
 /// Rejects incomplete scalar storage before Burn receives a byte-backed tensor.
@@ -531,11 +502,6 @@ fn final_data_and_endian_boundaries_reject_malformed_storage() {
             .to_vec::<u8>()
             .unwrap(),
         vec![0, 1, 255]
-    );
-    assert!(
-        matches!(normalize_little_endian(&mut [0; 3], TensorDType::F16),
-        Err(CheckpointError::InvalidTensorPayload { tensor, reason })
-        if tensor == "<native-endian conversion>" && reason.contains("whole number of scalars"))
     );
     assert_eq!(
         make_tensor_data(
@@ -560,15 +526,6 @@ fn final_data_and_endian_boundaries_reject_malformed_storage() {
 /// Exercises offset, extent, and end addition without allocating large buffers.
 #[test]
 fn checked_byte_ranges_and_staging_counters_reject_wraparound() {
-    for (start, elements, width, context) in [
-        (u64::MAX, 0, 2, "computing scalar byte offset"),
-        (0, u64::MAX, 2, "computing scalar byte length"),
-        (u64::MAX, 1, 1, "computing scalar byte range"),
-    ] {
-        assert!(matches!(byte_range(start, elements, width, "range"),
-            Err(CheckpointError::ArithmeticOverflow { context: actual }) if actual == context));
-    }
-    assert_eq!(byte_range(2, 3, 4, "range").unwrap(), 8..20);
     assert_eq!(checked_elements(&[], "scalar").unwrap(), 1);
     assert_eq!(checked_elements(&[0, u64::MAX], "empty").unwrap(), 0);
     assert!(matches!(
@@ -594,25 +551,37 @@ fn checked_byte_ranges_and_staging_counters_reject_wraparound() {
     }
 }
 
-/// Rejects tiled transpose layouts before fixed-width workers index buffers.
-#[cfg(target_endian = "little")]
+/// Rejects tiled transpose layouts before the kernel indexes either buffer.
 #[test]
 fn tiled_transpose_rejects_wrong_buffer_lengths_and_dimension_overflow() {
     for source_short in [false, true] {
-        let source = vec![0; if source_short { 23 } else { 24 }];
-        let mut target = vec![0xa5; if source_short { 24 } else { 23 }];
+        let source = vec![0; if source_short { 20 } else { 24 }];
+        let mut target = vec![0xa5; if source_short { 24 } else { 20 }];
         let before = target.clone();
-        assert!(
-            matches!(transpose_little_endian_bytes("matrix", &source, &mut target, 2, 3, TensorDType::F32),
-            Err(CheckpointError::InvalidTensorPayload { tensor, .. }) if tensor == "matrix")
-        );
+        let kernel = TransposeInto {
+            tensor: "matrix",
+            source: &source,
+            target: &mut target,
+            rows: 2,
+            columns: 3,
+        };
+        assert!(matches!(
+            with_scalar_conversion(TensorDType::F32, TensorDType::F32, kernel),
+            Ok(Err(CheckpointError::InvalidTensorPayload { tensor, .. })) if tensor == "matrix"
+        ));
         assert_eq!(target, before);
     }
-    #[cfg(target_pointer_width = "64")]
+    let kernel = TransposeInto {
+        tensor: "matrix",
+        source: &[],
+        target: &mut [],
+        rows: usize::MAX,
+        columns: 2,
+    };
     assert!(matches!(
-        transpose_little_endian_bytes("matrix", &[], &mut [], u64::MAX, 2, TensorDType::U8),
-        Err(CheckpointError::ArithmeticOverflow {
-            context: "computing tiled transpose byte length"
-        })
+        with_scalar_conversion(TensorDType::U8, TensorDType::U8, kernel),
+        Ok(Err(CheckpointError::ArithmeticOverflow {
+            context: "computing tiled transpose element count"
+        }))
     ));
 }

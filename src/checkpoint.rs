@@ -19,6 +19,7 @@ pub(crate) mod accounting;
 mod artifact;
 mod dtype;
 mod error;
+mod layout;
 mod mapping;
 mod options;
 pub mod quantization;

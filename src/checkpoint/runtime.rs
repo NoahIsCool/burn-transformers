@@ -14,6 +14,8 @@
 //! succeeds. These boundaries ensure a mismatched redundant payload cannot leak a
 //! partially initialized model and no model alias can reference a missing owner.
 
+mod convert;
+mod rounding;
 mod source;
 mod transform;
 
