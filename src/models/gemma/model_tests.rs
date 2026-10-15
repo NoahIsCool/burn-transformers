@@ -333,6 +333,76 @@ fn eager_attention_matches_fused_attention_and_captures_patterns() {
     }
 }
 
+/// Captured scores are exactly `c · tanh(q·kᵀ · s / c)` of the captured rotated queries and keys.
+///
+/// With `c = 0.2` over a quarter of the raw scores lie beyond `2c`, where tanh saturates, so
+/// a cap applied with the wrong constant, before the scale, after the mask,
+/// or not at all would miss by far more than F32 rounding. Query head `h`
+/// reads key/value head `h / 2` (four query heads over two KV heads). The
+/// fused and eager graphs must also agree on the saturated logits.
+#[test]
+fn saturated_attention_scores_are_soft_capped_exactly() {
+    const CAP: f32 = 0.2;
+    let mut fused = tiny_model(GemmaVariant::Gemma2, 11);
+    for layer in &mut fused.model.layers {
+        layer.self_attn.softcap = Some(f64::from(CAP));
+    }
+    let eager = fused
+        .clone()
+        .with_attention_precision(AttentionPrecisionMode::EagerFp32Softmax);
+    let tokens = ints([[1, 2, 3, 4, 5, 6]]);
+    let attention = Layer::decoder(1).self_attention();
+    let mut hooks = Hooks::new();
+    let query = hooks.capture(attention.query());
+    let key = hooks.capture(attention.key());
+    let scores = hooks.capture(attention.scores());
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..ForwardOptions::default()
+    };
+    let eager_logits = eager
+        .forward_with_hooks(input(tokens.clone(), None, None), &options, &mut hooks)
+        .unwrap()
+        .logits;
+    let [query, key, scores] = [query, key, scores].map(|capture| hooks.get(&capture).unwrap());
+    assert_eq!(query.dims(), [1, 4, 6, 4]);
+    assert_eq!(key.dims(), [1, 2, 6, 4]);
+    assert_eq!(scores.dims(), [1, 4, 6, 6]);
+    let (query, key, scores) = (host(query), host(key), host(scores));
+    let scale = 8.0_f32.powf(-0.5);
+    let mut saturated = 0;
+    for head in 0..4 {
+        for row in 0..6 {
+            for column in 0..6 {
+                let dot: f32 = (0..4)
+                    .map(|channel| {
+                        query[(head * 6 + row) * 4 + channel]
+                            * key[((head / 2) * 6 + column) * 4 + channel]
+                    })
+                    .sum();
+                let raw = dot * scale;
+                saturated += usize::from(raw.abs() > 2.0 * CAP);
+                let expected = CAP * (raw / CAP).tanh();
+                let actual = scores[(head * 6 + row) * 6 + column];
+                assert!(
+                    (actual - expected).abs() < 1e-6,
+                    "head {head} query {row} key {column}: {actual} vs {expected}"
+                );
+                assert!(actual.abs() <= CAP, "a capped score is bounded by c");
+            }
+        }
+    }
+    assert!(
+        saturated > 4 * 6 * 6 / 4,
+        "only {saturated} saturated scores"
+    );
+    let fused_logits = fused
+        .forward(input(tokens, None, None), &options)
+        .unwrap()
+        .logits;
+    assert_close(fused_logits, eager_logits, TOLERANCE, "fused vs eager");
+}
+
 /// The catalog lists every point in emission order, with scores only under eager attention.
 #[test]
 fn activation_points_follow_emission_order() {
