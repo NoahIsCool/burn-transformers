@@ -113,8 +113,8 @@ pub(crate) fn aligned_query_positions<B: Backend>(
     let queries = signed_length(query_sequence, "query length exceeds i64")?;
     let keys = signed_length(key_sequence, "key length exceeds i64")?;
     let offset = keys - queries;
-    // Values span `K - Q ..= K - 1`; arange itself forms `0 ..= Q - 1`.
-    ensure_positions_fit::<B>(device, queries.max(keys) - 1)?;
+    // Values span `K - Q ..= K - 1`; arange itself forms `0 ..= Q - 1` (verified peak).
+    ensure_positions_fit::<B>(device, super::rules::aligned_position_peak(queries, keys))?;
     Ok((Tensor::<B, 1, Int>::arange(0..queries, device) + offset).reshape([1, query_sequence]))
 }
 

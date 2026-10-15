@@ -11,6 +11,13 @@
 //!   (with a lemma that every planned chunk re-plans as one call), and chunk
 //!   frames that preserve every position's absolute chunk index with small,
 //!   overflow-free parameters;
+//! - `src/attention/rules.rs`: the window and chunk exclusion oracles equal
+//!   their mathematical definitions; reducing a sliding window or a chunked
+//!   rule to local positions of a span excludes exactly the links the
+//!   absolute rule excludes on every local pair, with parameters below the
+//!   span (so `Unrestricted` collapse is exact); mask extents are validated in
+//!   a fixed order; and the ordinal query offset `K - Q` cannot underflow
+//!   once the alignment check passes;
 //! - `src/attention/widths.rs`: grouped-query projection widths, whose
 //!   success implies exact widths, head grouping, and representable element
 //!   counts for every projection matrix.
@@ -21,6 +28,9 @@
 
 #[path = "../src/attention/plan.rs"]
 pub mod plan;
+
+#[path = "../src/attention/rules.rs"]
+pub mod rules;
 
 #[path = "../src/attention/widths.rs"]
 pub mod widths;

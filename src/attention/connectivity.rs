@@ -28,13 +28,23 @@
 //! Causality and sliding windows depend only on position *differences*, so
 //! they are unaffected by where the key timeline starts. Chunk boundaries are
 //! absolute: when a cache has dropped earlier keys, [`MaskGeometry::key_start`]
-//! gives the absolute position of the first key, and [`chunk_frame`] turns
-//! `(chunk, key_start)` into an equivalent local frame. Tensor arithmetic uses
-//! only local positions below `K`: windows of at least `K` positions and
-//! chunks covering the whole span exclude nothing and are dropped, and the
-//! remaining parameters are below `K`. Every value therefore stays below
-//! `2 * K` and is checked against the backend's integer dtype (often `i32`)
-//! instead of wrapping silently.
+//! gives the absolute position of the first key, and the chunk frame of the
+//! `plan` module turns `(chunk, key_start)` into an equivalent local frame.
+//! Tensor arithmetic uses only local positions below `K`: windows of at least
+//! `K` positions and chunks covering the whole span exclude nothing and are
+//! dropped, and the remaining parameters are below `K`. Every value therefore
+//! stays below `2 * K` and is checked against the backend's integer dtype
+//! (often `i32`) instead of wrapping silently.
+//!
+//! # Verified integer rules
+//!
+//! The integer decisions live in the dependency-free `rules` module and are
+//! checked with Verus (`verus/attention.rs`): the scalar oracle
+//! [`AttentionConnectivity::excludes`] equals the table above, the local rule
+//! excludes exactly the absolute rule's links on every pair of local
+//! positions (with parameters below `K`), mask extents are validated in a
+//! fixed order, and the ordinal query offset `K - Q` never underflows. The
+//! Boolean tensor comparisons that apply these rules remain covered by tests.
 
 use core::{fmt, ops::Range};
 
@@ -45,7 +55,7 @@ use super::{
         aligned_query_positions, audit_plane, check_token_mask, ensure_positions_fit, expand_to,
         key_positions, signed_length, union_exclusions,
     },
-    plan::chunk_frame,
+    rules::{self, LocalRule, MaskGeometryFault, PositionSource},
 };
 use crate::{Error, Result, architecture::TokenMask};
 
@@ -123,13 +133,12 @@ impl AttentionConnectivity {
         }
         match self {
             Self::Global => false,
-            // `key + window <= query`, compared as a gap to avoid overflow.
+            // `key + window <= query`, compared as a gap to avoid overflow (verified).
             Self::SlidingWindow { window } => {
-                window == 0
-                    || (query_position >= key_position && query_position - key_position >= window)
+                rules::window_excludes(query_position, key_position, window)
             }
             Self::ChunkedLocal { chunk } => {
-                chunk == 0 || query_position / chunk != key_position / chunk
+                rules::chunk_excludes(query_position, key_position, chunk)
             }
         }
     }
@@ -214,7 +223,8 @@ impl<B: Backend> ExclusionPlan<B> {
             device,
         )?;
         let global = connectivity == AttentionConnectivity::Global;
-        if key_sequence < query_sequence && (!global || (causal && key_mask.is_some())) {
+        let key_masked = key_mask.is_some();
+        if rules::rejects_short_keys(global, causal, key_masked, query_sequence, key_sequence) {
             return Err(Error::shape(
                 "attention.connectivity",
                 "key sequence at least as long as query sequence",
@@ -222,24 +232,32 @@ impl<B: Backend> ExclusionPlan<B> {
             ));
         }
         let rule = PositionRule::new(connectivity, geometry)?;
-        let positions = if causal || rule != PositionRule::Unrestricted {
-            ensure_positions_fit::<B>(device, rule.peak(key_sequence)?)?;
-            Some(match key_mask {
-                Some(mask) => {
-                    let ordinals = valid_token_ordinals(mask);
-                    let queries =
-                        ordinals
-                            .clone()
-                            .narrow(1, key_sequence - query_sequence, query_sequence);
-                    (queries, ordinals)
-                }
-                None => (
-                    aligned_query_positions::<B>(query_sequence, key_sequence, device)?,
-                    key_positions::<B>(key_sequence, device)?,
-                ),
-            })
-        } else {
-            None
+        // Global connectivity reduces to `Unrestricted`, so after the check
+        // above the ordinal offset `K - Q` cannot underflow
+        // (`rules::lemma_alignment_admits_ordinals`).
+        let source = rules::position_source(
+            rule == PositionRule::Unrestricted,
+            causal,
+            key_masked,
+            query_sequence,
+            key_sequence,
+        );
+        let positions = match source {
+            PositionSource::Unneeded => None,
+            PositionSource::Columns | PositionSource::Ordinals { .. } => {
+                ensure_positions_fit::<B>(device, rule.peak(key_sequence)?)?;
+                Some(match (key_mask, source) {
+                    (Some(mask), PositionSource::Ordinals { query_offset }) => {
+                        let ordinals = valid_token_ordinals(mask);
+                        let queries = ordinals.clone().narrow(1, query_offset, query_sequence);
+                        (queries, ordinals)
+                    }
+                    _ => (
+                        aligned_query_positions::<B>(query_sequence, key_sequence, device)?,
+                        key_positions::<B>(key_sequence, device)?,
+                    ),
+                })
+            }
         };
         Ok(Self {
             rule,
@@ -350,23 +368,36 @@ impl MaskGeometry {
     }
 
     /// Rejects empty axes and lengths that do not fit position arithmetic.
+    ///
+    /// The checks run in a fixed, verified order (`rules::mask_geometry_fault`):
+    /// non-empty axes, sequences within `i64`, then `key_start + K` within `usize`.
     fn validate(self) -> Result<()> {
-        if self.batch == 0 || self.heads == 0 || self.query_sequence == 0 || self.key_sequence == 0
-        {
-            return Err(Error::configuration(
+        let fault = rules::mask_geometry_fault(
+            self.batch,
+            self.heads,
+            self.query_sequence,
+            self.key_sequence,
+            self.key_start,
+        );
+        match fault {
+            None => Ok(()),
+            Some(MaskGeometryFault::EmptyAxis) => Err(Error::configuration(
                 "attention.mask_shape",
                 "batch, heads, query sequence, and key sequence must be non-zero",
-            ));
-        }
-        signed_length(self.query_sequence, "query length exceeds i64")?;
-        signed_length(self.key_sequence, "key length exceeds i64")?;
-        if self.key_start.checked_add(self.key_sequence).is_none() {
-            return Err(Error::configuration(
+            )),
+            Some(MaskGeometryFault::QueryTooLong) => Err(Error::configuration(
+                "attention.causal_mask",
+                "query length exceeds i64",
+            )),
+            Some(MaskGeometryFault::KeyTooLong) => Err(Error::configuration(
+                "attention.causal_mask",
+                "key length exceeds i64",
+            )),
+            Some(MaskGeometryFault::KeyStartOverflow) => Err(Error::configuration(
                 "attention.mask_shape.key_start",
                 "absolute key positions must fit usize",
-            ));
+            )),
         }
-        Ok(())
     }
 }
 
@@ -374,7 +405,8 @@ impl MaskGeometry {
 ///
 /// Windows of at least `K` positions, and chunks whose span holds no boundary,
 /// exclude nothing and become [`Self::Unrestricted`]; every remaining parameter
-/// is below `K` (see the module documentation).
+/// is below `K` (see the module documentation). This is the `i64` form of the
+/// verified `rules::LocalRule`, which excludes exactly the absolute rule's links.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PositionRule {
     /// No connectivity exclusion.
@@ -395,24 +427,27 @@ enum PositionRule {
 
 impl PositionRule {
     /// Reduces a validated rule over a validated geometry (so `K` fits `i64`).
+    ///
+    /// The verified reductions keep windows below `K` and frames within it, so
+    /// the `i64` conversions cannot fail after [`MaskGeometry::validate`].
     fn new(connectivity: AttentionConnectivity, geometry: MaskGeometry) -> Result<Self> {
         let span = geometry.key_sequence;
-        Ok(match connectivity {
-            AttentionConnectivity::Global => Self::Unrestricted,
-            // No local gap reaches `K`, so a window that wide excludes nothing.
-            AttentionConnectivity::SlidingWindow { window } if window >= span => Self::Unrestricted,
-            AttentionConnectivity::SlidingWindow { window } => {
+        let local = match connectivity {
+            AttentionConnectivity::Global => LocalRule::Unrestricted,
+            AttentionConnectivity::SlidingWindow { window } => rules::reduce_window(window, span),
+            AttentionConnectivity::ChunkedLocal { chunk } => {
+                rules::reduce_chunk(chunk, geometry.key_start, span)
+            }
+        };
+        Ok(match local {
+            LocalRule::Unrestricted => Self::Unrestricted,
+            LocalRule::Window(window) => {
                 Self::Window(signed_length(window, "sliding window exceeds i64")?)
             }
-            AttentionConnectivity::ChunkedLocal { chunk } => {
-                match chunk_frame(chunk, geometry.key_start, span) {
-                    None => Self::Unrestricted,
-                    Some((width, phase)) => Self::Chunk {
-                        width: signed_length(width, "chunk frame exceeds i64")?,
-                        phase: signed_length(phase, "chunk frame exceeds i64")?,
-                    },
-                }
-            }
+            LocalRule::Chunk { width, phase } => Self::Chunk {
+                width: signed_length(width, "chunk frame exceeds i64")?,
+                phase: signed_length(phase, "chunk frame exceeds i64")?,
+            },
         })
     }
 
