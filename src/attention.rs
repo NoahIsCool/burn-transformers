@@ -44,6 +44,7 @@ mod connectivity;
 mod differential;
 mod dispatch;
 mod execution;
+mod grouping;
 mod mask;
 
 /// Largest position an integer tensor of a given dtype can hold (shared with cache masks).

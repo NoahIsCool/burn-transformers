@@ -81,7 +81,7 @@ use burn::tensor::{
 };
 
 use super::{
-    AttentionPrecisionMode,
+    AttentionPrecisionMode, grouping,
     mask::{bottom_right_causal_mask, union_exclusions},
 };
 use crate::{Error, Result};
@@ -299,15 +299,14 @@ pub fn repeat_key_value<B: Backend>(
     query_heads: usize,
 ) -> Result<Tensor<B, 4>> {
     let [batch, key_value_heads, sequence, head_dim] = tensor.dims();
-    if key_value_heads == 0 || query_heads == 0 || !query_heads.is_multiple_of(key_value_heads) {
+    let Some(groups) = grouping::head_groups(query_heads, key_value_heads) else {
         return Err(Error::configuration(
             "attention.head_grouping",
             format!(
                 "query_heads ({query_heads}) must be non-zero and divisible by key_value_heads ({key_value_heads})"
             ),
         ));
-    }
-    let groups = query_heads / key_value_heads;
+    };
     if groups == 1 {
         return Ok(tensor);
     }
@@ -557,19 +556,16 @@ fn native_with_sinks<B: Backend>(
         head_dim,
     } = geometry;
     let groups = geometry.groups();
-    let folded_rows = groups * query_sequence;
+    // Verified: `groups * query_sequence`, with folded row `j * Q + t` holding member `j`.
+    let folded_rows = grouping::folded_rows(query_heads, key_value_heads, query_sequence);
     let device = query.device();
     let dtype = query.dtype();
     let scale = options.scale.unwrap_or_else(|| default_scale(head_dim));
     let exclusion = union_exclusions(mask, causal_exclusion(causal, geometry, &device)?);
 
     // Queries: [b, kvh, g*q, d] plus a one-hot group selector [.., .., g*q, g].
-    let selector = group_selector::<B>(groups, query_sequence, dtype, &device).expand([
-        batch,
-        key_value_heads,
-        folded_rows,
-        groups,
-    ]);
+    let selector = group_selector::<B>(groups, query_sequence, folded_rows, dtype, &device)
+        .expand([batch, key_value_heads, folded_rows, groups]);
     let query = Tensor::cat(vec![fold_groups(query, key_value_heads), selector], 3);
 
     // Keys: real keys gain g zero channels; each KV head gains one sink key
@@ -646,20 +642,23 @@ fn native_with_sinks<B: Backend>(
 }
 
 /// One-hot `[1, 1, g * q, g]` selector: folded row `j * q + t` selects channel `j`.
+///
+/// `folded_rows` is `g * q` from [`grouping::folded_rows`], which proves that
+/// the member `floor(r / q)` of every folded row `r` is a channel below `g`.
 fn group_selector<B: Backend>(
     groups: usize,
     query_sequence: usize,
+    folded_rows: usize,
     dtype: DType,
     device: &B::Device,
 ) -> Tensor<B, 4> {
-    let rows = (groups * query_sequence) as i64;
-    let member = Tensor::<B, 1, Int>::arange(0..rows, device)
+    let member = Tensor::<B, 1, Int>::arange(0..folded_rows as i64, device)
         .div_scalar(query_sequence as i64)
-        .reshape([groups * query_sequence, 1]);
+        .reshape([folded_rows, 1]);
     let channel = Tensor::<B, 1, Int>::arange(0..groups as i64, device).reshape([1, groups]);
-    Tensor::<B, 2>::zeros([groups * query_sequence, groups], (device, dtype))
+    Tensor::<B, 2>::zeros([folded_rows, groups], (device, dtype))
         .mask_fill(member.equal(channel), 1.0)
-        .reshape([1, 1, groups * query_sequence, groups])
+        .reshape([1, 1, folded_rows, groups])
 }
 
 // ---------------------------------------------------------------------------
@@ -669,7 +668,9 @@ fn group_selector<B: Backend>(
 /// Folds `[b, kvh * g, rows, x]` into `[b, kvh, g * rows, x]` (row `j * rows + t`).
 ///
 /// Query heads of one group are contiguous, so this is a view of a contiguous
-/// tensor. It is the identity when every query head has its own KV head.
+/// tensor: [`grouping::folded_rows`] proves that the reshape keeps every flat
+/// index and maps `(head, token)` bijectively onto `(kv head, folded row)`.
+/// It is the identity when every query head has its own KV head.
 pub(crate) fn fold_groups<B: Backend, K: BasicOps<B>>(
     tensor: Tensor<B, 4, K>,
     key_value_heads: usize,
@@ -678,8 +679,8 @@ pub(crate) fn fold_groups<B: Backend, K: BasicOps<B>>(
     if query_heads == key_value_heads {
         return tensor;
     }
-    let groups = query_heads / key_value_heads;
-    tensor.reshape([batch, key_value_heads, groups * rows, width])
+    let folded_rows = grouping::folded_rows(query_heads, key_value_heads, rows);
+    tensor.reshape([batch, key_value_heads, folded_rows, width])
 }
 
 /// Inverts [`fold_groups`]: `[b, kvh, g * rows, x]` to `[b, query_heads, rows, x]`.
@@ -691,8 +692,8 @@ pub(crate) fn unfold_groups<B: Backend, K: BasicOps<B>>(
     if query_heads == key_value_heads {
         return tensor;
     }
-    let groups = query_heads / key_value_heads;
-    tensor.reshape([batch, query_heads, folded_rows / groups, width])
+    let rows = grouping::unfolded_rows(query_heads, key_value_heads, folded_rows);
+    tensor.reshape([batch, query_heads, rows, width])
 }
 
 #[cfg(test)]

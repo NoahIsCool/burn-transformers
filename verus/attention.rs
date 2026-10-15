@@ -2,6 +2,13 @@
 //!
 //! Verifies, in place, the specifications attached to:
 //!
+//! - `src/attention/grouping.rs`: grouped-query head counts are exact;
+//!   folding `[b, H, rows, x]` to `[b, G, g * rows, x]` keeps every flat index
+//!   and maps `(head, token)` bijectively onto `(kv head, folded row)`, with
+//!   unfolding as its inverse and the sink selector's member index in range;
+//!   differential attention's value pairing gives every query head its
+//!   reference pair `[V_kv(i) ; V_kv(i + H/2)]` natively, after repetition,
+//!   or for one shared head;
 //! - `src/attention/plan.rs`: query-chunk planning against score-element
 //!   limits (exact peak size, both limits respected, the largest chunk they
 //!   admit, `ceil(Q / c)` chunks with no overflow, and each error exactly when
@@ -20,11 +27,16 @@
 //!   once the alignment check passes;
 //! - `src/attention/widths.rs`: grouped-query projection widths, whose
 //!   success implies exact widths, head grouping, and representable element
-//!   counts for every projection matrix.
+//!   counts for every projection matrix, with each error exactly when every
+//!   earlier check passed, and differential widths that add the even
+//!   query-head requirement last.
 //!
 //! See `verus/README.md` for the method, toolchain, and command.
 
 #![allow(unused)]
+
+#[path = "../src/attention/grouping.rs"]
+pub mod grouping;
 
 #[path = "../src/attention/plan.rs"]
 pub mod plan;

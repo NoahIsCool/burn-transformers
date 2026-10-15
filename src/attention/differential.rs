@@ -33,7 +33,8 @@ use burn::{
 use super::{
     AttentionPrecisionMode, AttentionProjection,
     dispatch::{Operands, evaluate, repeat_key_value},
-    widths::projection_widths,
+    grouping::{ValuePairing, value_pairing},
+    widths::{PairedWidthError, paired_projection_widths},
 };
 use crate::{
     Error, Result,
@@ -100,26 +101,27 @@ impl DifferentialAttentionConfig {
     }
 
     /// Validates widths, head pairing, and numerical constants.
+    ///
+    /// The integer checks are verified with Verus (`paired_projection_widths`):
+    /// success implies representable projections, grouped heads, and an even
+    /// query-head count, which the pairing plan of [`Self::init`]'s layer needs.
     pub fn validate(&self) -> Result<()> {
-        projection_widths(
+        paired_projection_widths(
             self.hidden_size,
             self.query_heads,
             self.key_value_heads,
             self.head_dim,
-            false,
         )
-        .map_err(|_| {
-            Error::configuration(
+        .map_err(|error| match error {
+            PairedWidthError::Widths(_) => Error::configuration(
                 "differential_attention",
                 "widths must be non-zero, key_value_heads must divide query_heads, and projections must fit usize",
-            )
-        })?;
-        if !self.query_heads.is_multiple_of(2) {
-            return Err(Error::configuration(
+            ),
+            PairedWidthError::OddQueryHeads => Error::configuration(
                 "differential_attention.query_heads",
                 "must be even because heads are used in pairs",
-            ));
-        }
+            ),
+        })?;
         if !self.lambda_init.is_finite() {
             return Err(Error::configuration(
                 "differential_attention.lambda_init",
@@ -357,26 +359,25 @@ impl<B: Backend> DifferentialAttention<B> {
 ///
 /// Returns the keys and paired values to attend with: native heads when the
 /// pairing is a property of each KV head, otherwise K/V repeated to query heads.
+/// The verified plan ([`value_pairing`]) proves that every query head then
+/// reads its reference pair `[V_kv(i) ; V_kv(i + H/2)]`.
 fn paired_values<B: Backend>(
     key: Tensor<B, 4>,
     value: Tensor<B, 4>,
     query_heads: usize,
 ) -> Result<(Tensor<B, 4>, Tensor<B, 4>)> {
     let key_value_heads = value.dims()[1];
-    if key_value_heads == 1 {
-        return Ok((key, Tensor::cat(vec![value.clone(), value], 3)));
-    }
-    let (key, value) = if key_value_heads.is_multiple_of(2) {
-        (key, value)
-    } else {
+    let (key, value, half) = match value_pairing(query_heads, key_value_heads) {
+        ValuePairing::Shared => return Ok((key, Tensor::cat(vec![value.clone(), value], 3))),
+        ValuePairing::Native { half } => (key, value, half),
         // An odd head count above one pairs different partners within one
         // KV group, so pairing must happen per query head.
-        (
+        ValuePairing::Repeated { half } => (
             repeat_key_value(key, query_heads)?,
             repeat_key_value(value, query_heads)?,
-        )
+            half,
+        ),
     };
-    let half = value.dims()[1] / 2;
     let low = Tensor::cat(
         vec![
             value.clone().narrow(1, 0, half),
