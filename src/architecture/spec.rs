@@ -233,14 +233,22 @@ fn rope_error_field(error: &RopeConfigError) -> &'static str {
         | RopeConfigError::OddRotaryDimension { .. }
         | RopeConfigError::InvalidPartialRotaryFactor { .. }
         | RopeConfigError::NonIntegralPartialRotaryDimension { .. }
-        | RopeConfigError::DynamicNtkDimensionTooSmall { .. } => "rotary_dim",
+        | RopeConfigError::DynamicNtkDimensionTooSmall { .. }
+        | RopeConfigError::ProportionalRequiresFullRotation { .. } => "rotary_dim",
         RopeConfigError::InvalidTheta { .. } | RopeConfigError::YarnThetaTooSmall { .. } => "theta",
         RopeConfigError::InvalidScalingFactor { .. } => "scaling.factor",
         RopeConfigError::ZeroOriginalContext { .. } => "scaling.original_max_positions",
-        RopeConfigError::InvalidYarnAttentionFactor { .. } => "scaling.attention_factor",
+        RopeConfigError::InvalidYarnAttentionFactor { .. }
+        | RopeConfigError::InvalidLongRopeAttentionFactor { .. } => "scaling.attention_factor",
         RopeConfigError::InvalidYarnBeta { .. } | RopeConfigError::InvalidYarnBetaOrder { .. } => {
             "scaling.beta"
         }
+        RopeConfigError::InvalidLlama3FrequencyFactors { .. } => "scaling.frequency_factors",
+        RopeConfigError::LongRopeFactorLengthMismatch { .. }
+        | RopeConfigError::LongRopeFactorCountOutOfRange { .. }
+        | RopeConfigError::InvalidLongRopeFactor { .. }
+        | RopeConfigError::LongRopeFactorCount { .. } => "scaling.factors",
+        RopeConfigError::InvalidProportionalFraction { .. } => "scaling.fraction",
     }
 }
 
