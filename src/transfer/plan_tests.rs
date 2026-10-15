@@ -76,7 +76,24 @@ fn fanned_out_paths_are_found_in_path_order() {
     );
 }
 
+/// Every entry is led by the first member of its class.
+#[test]
+fn class_leaders_name_the_first_member() {
+    assert_eq!(class_leaders(&[]), Vec::<usize>::new());
+    assert_eq!(class_leaders(&[5, 6, 5, 7, 6]), vec![0, 1, 0, 3, 1]);
+}
+
 proptest::proptest! {
+    /// Leaders agree with `position` and induce exactly the class partition.
+    #[test]
+    fn class_leaders_partition_by_class(classes in proptest::collection::vec(0u64..4, 0..10)) {
+        let leaders = class_leaders(&classes);
+        for (index, leader) in leaders.iter().enumerate() {
+            let first = classes.iter().position(|class| *class == classes[index]);
+            proptest::prop_assert_eq!(Some(*leader), first);
+        }
+    }
+
     /// Precedence matches the direct definition of the original iterator implementation.
     #[test]
     fn select_rule_matches_its_definition(

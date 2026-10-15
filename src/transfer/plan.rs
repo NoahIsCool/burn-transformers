@@ -19,6 +19,9 @@
 //! - [`first_fanned_out_path`] returns exactly the smallest source path that
 //!   reaches two different target tie classes, so `None` means the map from
 //!   source path to target class is a function.
+//! - [`class_leaders`] assigns every entry the first entry of its target tie
+//!   class; two entries share a leader exactly when they share a class, so
+//!   shared identities join each class and never merge two classes.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -326,8 +329,74 @@ pub(crate) fn first_fanned_out_path(
     None
 }
 
+/// Assigns every entry the first entry of its target tie class.
+///
+/// Entry `i` of a fan-out group copies into the target tie class
+/// `classes[i]`; members of one class must share one parameter identity.
+/// `leaders[i]` is the first entry with the same class, so two entries
+/// share a leader exactly when they share a class: classes are joined, and
+/// distinct classes are never merged. A singleton class leads itself.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(leaders =>
+    ensures
+        leaders.len() == classes.len(),
+        forall|i: int| 0 <= i < classes.len() ==> is_class_leader(classes@, i, leaders@[i] as int),
+        forall|i: int, j: int| #![trigger leaders@[i], leaders@[j]]
+            0 <= i < classes.len() && 0 <= j < classes.len()
+            ==> ((classes@[i] == classes@[j]) <==> (leaders@[i] == leaders@[j])),
+))]
+pub(crate) fn class_leaders(classes: &[u64]) -> Vec<usize> {
+    let mut leaders: Vec<usize> = Vec::new();
+    let mut entry = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            0 <= entry <= classes.len(),
+            leaders.len() == entry,
+            forall|i: int| 0 <= i < entry ==> is_class_leader(classes@, i, leaders@[i] as int),
+        decreases classes.len() - entry,
+    ))]
+    while entry < classes.len() {
+        let mut leader = 0;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                0 <= leader <= entry,
+                entry < classes.len(),
+                forall|j: int| 0 <= j < leader ==> classes@[j] != classes@[entry as int],
+            decreases entry - leader,
+        ))]
+        while leader < entry && classes[leader] != classes[entry] {
+            leader += 1;
+        }
+        leaders.push(leader);
+        entry += 1;
+    }
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert forall|i: int, j: int| #![trigger leaders@[i], leaders@[j]]
+            0 <= i < classes.len() && 0 <= j < classes.len()
+            implies ((classes@[i] == classes@[j]) <==> (leaders@[i] == leaders@[j])) by {
+            assert(is_class_leader(classes@, i, leaders@[i] as int));
+            assert(is_class_leader(classes@, j, leaders@[j] as int));
+            if classes@[i] == classes@[j] && leaders@[i] < leaders@[j] {
+                assert(classes@[leaders@[i] as int] == classes@[j]);
+            }
+            if classes@[i] == classes@[j] && leaders@[j] < leaders@[i] {
+                assert(classes@[leaders@[j] as int] == classes@[i]);
+            }
+        }
+    }
+    leaders
+}
+
 #[cfg(verus_keep_ghost)]
 verus! {
+
+/// Whether `leader` is the first entry whose class equals entry `entry`'s class.
+pub(crate) open spec fn is_class_leader(classes: Seq<u64>, entry: int, leader: int) -> bool {
+    &&& 0 <= leader <= entry
+    &&& classes[leader] == classes[entry]
+    &&& forall|earlier: int| 0 <= earlier < leader ==> classes[earlier] != classes[entry]
+}
 
 /// Whether some rule names the target exactly.
 pub(crate) open spec fn has_exact(matches: Seq<RuleMatch>) -> bool {

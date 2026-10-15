@@ -44,7 +44,8 @@ use crate::{Error, Result};
 
 mod plan;
 use plan::{
-    RuleMatch, RuleSelection, StagedKey, TargetTie, first_fanned_out_path, select_rule, target_tie,
+    RuleMatch, RuleSelection, StagedKey, TargetTie, class_leaders, first_fanned_out_path,
+    select_rule, target_tie,
 };
 
 /// Explicit handling of a selected source whose dimensions differ from its target.
@@ -953,28 +954,29 @@ fn validate_target_ties<B: Backend>(
 ///
 /// All entries come from one source path. [`validate_target_ties`] already
 /// required each target tie to use one transformation, so members of a class
-/// hold identical values and need no equality reduction.
+/// hold identical values and need no equality reduction. The verified
+/// [`class_leaders`] gives each entry the first member of its target class:
+/// every member takes that leader's fresh identity, so each class is joined
+/// and distinct classes stay independent; a singleton keeps its own identity.
 fn share_target_tie_classes<B: Backend>(
     targets: &BTreeMap<String, Parameter<B>>,
     group: Vec<StagedEntry<'_, B>>,
     report: &mut TransferReport,
 ) {
-    let mut classes = BTreeMap::<ParamId, Vec<StagedEntry<'_, B>>>::new();
-    for (name, value) in group {
-        classes
-            .entry(targets[name].id)
-            .or_default()
-            .push((name, value));
+    let classes = group
+        .iter()
+        .map(|(name, _)| targets[*name].id.val())
+        .collect::<Vec<_>>();
+    let leaders = class_leaders(&classes);
+    let identities = group.iter().map(|(_, value)| value.id).collect::<Vec<_>>();
+    let mut members = BTreeMap::<usize, Vec<String>>::new();
+    for ((name, value), leader) in group.into_iter().zip(leaders) {
+        value.id = identities[leader];
+        members.entry(leader).or_default().push(name.clone());
     }
-    for mut class in classes.into_values().filter(|class| class.len() > 1) {
-        let shared_id = class[0].1.id;
-        for (_, value) in &mut class {
-            value.id = shared_id;
-        }
-        report
-            .preserved_ties
-            .push(class.iter().map(|(name, _)| (*name).clone()).collect());
-    }
+    report
+        .preserved_ties
+        .extend(members.into_values().filter(|names| names.len() > 1));
 }
 
 /// Rejects a source tie whose member path is also copied to independent targets.
