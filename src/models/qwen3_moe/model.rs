@@ -27,15 +27,11 @@
 use burn::{
     module::Module,
     nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout},
-    tensor::{
-        Bool, DType, ElementConversion, Int, Tensor, TensorData, activation::softmax,
-        backend::Backend,
-    },
+    tensor::{Bool, DType, Int, Tensor, activation::softmax, backend::Backend},
 };
 
 use crate::{
-    ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, LogitsSelection,
-    Result,
+    ArchitectureConfig, CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
     architecture::{RouterDiagnostics, TokenMask},
     attention::{GroupedQueryAttention, GroupedQueryAttentionConfig, padding_attention_mask},
     feed_forward::{GatedFeedForward, GatedFeedForwardConfig},
@@ -52,11 +48,24 @@ use crate::{
 };
 
 use super::Qwen3MoeConfig;
-use crate::models::config::RopeType;
+use crate::models::{
+    config::RopeType,
+    shared::{InputContract, InputNames, ensure_same_device, select_hidden, validate_input},
+};
 
 mod decode;
 
 pub use decode::Qwen3MoeDecodeState;
+
+/// Tensor names reported by Qwen3 MoE input errors.
+const INPUT_NAMES: InputNames<'static> = InputNames {
+    token_ids: "qwen3_moe.input_ids",
+    token_mask: "qwen3_moe.token_mask",
+    position_ids: "qwen3_moe.position_ids",
+};
+
+/// Owner named when a stateless tensor is on another device than the weights.
+const PARAMETERS: &str = "Qwen3 MoE model parameters";
 
 /// One decoder block with GQA and either a routed or dense SwiGLU branch.
 #[derive(Module, Debug)]
@@ -217,14 +226,14 @@ impl<B: Backend> Qwen3MoeModel<B> {
         input: &CausalLmInput<B>,
         options: &ForwardOptions,
     ) -> Result<Qwen3MoeBackboneOutput<B>> {
-        let [batch, sequence] = input.token_ids.dims();
-        validate_nonempty_input(batch, sequence)?;
-        validate_input_devices(input, &self.embed_tokens.weight.lazy_device())?;
-        validate_token_ids(input.token_ids.clone(), self.config.vocab_size)?;
-        validate_mask(input.token_mask.as_ref(), batch, sequence, false)?;
-        let positions = resolve_positions(input, batch, sequence)?;
-        validate_position_range(positions.clone(), self.config.max_position_embeddings)?;
-        let evaluated_context = evaluated_context(positions.clone())?;
+        let validated = validate_input(
+            input,
+            &self.embed_tokens.weight.lazy_device(),
+            &InputContract::new(INPUT_NAMES, PARAMETERS, self.config.vocab_size)
+                .with_position_limit(self.config.max_position_embeddings),
+        )?;
+        let positions = validated.require_positions(INPUT_NAMES.position_ids)?;
+        let evaluated_context = validated.evaluated_context;
         let mut hidden = self.embed_tokens.forward(input.token_ids.clone());
         let mut hidden_states = Vec::with_capacity(if options.hidden_states {
             self.layers.len() + 2
@@ -373,18 +382,20 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
         let hidden_device = hidden.device();
         match &self.lm_head {
             Some(head) => {
-                ensure_model_device(
+                ensure_same_device(
                     "qwen3_moe.lm_head",
                     &head.weight.lazy_device(),
                     &hidden_device,
+                    PARAMETERS,
                 )?;
                 operations::linear(hidden, head)
             }
             None => {
-                ensure_model_device(
+                ensure_same_device(
                     "qwen3_moe.model.embed_tokens",
                     &self.model.embed_tokens.weight.lazy_device(),
                     &hidden_device,
+                    PARAMETERS,
                 )?;
                 Ok(burn::tensor::module::linear(
                     hidden,
@@ -611,247 +622,6 @@ fn stateless_attention_mask<B: Backend>(
         Some(padding) => padding.bool_or(too_old),
         None => too_old,
     }))
-}
-
-/// Rejects empty tensor extents before embedding or reduction kernels run.
-fn validate_nonempty_input(batch: usize, sequence: usize) -> Result<()> {
-    if batch == 0 || sequence == 0 {
-        return Err(Error::shape(
-            "qwen3_moe.input_ids",
-            "non-empty [batch, sequence]",
-            format!("[{batch}, {sequence}]"),
-        ));
-    }
-    Ok(())
-}
-
-/// Rejects stateless input tensors that do not share the model parameter device.
-///
-/// Checking device identity before reductions, mask scans, position math, and
-/// embedding lookup keeps backend mixed-device failures inside this crate's
-/// recoverable error taxonomy.
-fn validate_input_devices<B: Backend>(
-    input: &CausalLmInput<B>,
-    model_device: &B::Device,
-) -> Result<()> {
-    ensure_model_device(
-        "qwen3_moe.input_ids",
-        &input.token_ids.device(),
-        model_device,
-    )?;
-    if let Some(mask) = &input.token_mask {
-        ensure_model_device(
-            "qwen3_moe.token_mask",
-            &mask.as_tensor().device(),
-            model_device,
-        )?;
-    }
-    if let Some(positions) = &input.position_ids {
-        ensure_model_device("qwen3_moe.position_ids", &positions.device(), model_device)?;
-    }
-    Ok(())
-}
-
-/// Reports one stateless tensor/parameter device mismatch contextually.
-fn ensure_model_device<D: PartialEq>(tensor: &str, actual: &D, expected: &D) -> Result<()> {
-    if actual != expected {
-        return Err(Error::BackendCapability(format!(
-            "{tensor} and Qwen3 MoE model parameters are on different devices"
-        )));
-    }
-    Ok(())
-}
-
-/// Validates token values before the embedding backend receives indices.
-fn validate_token_ids<B: Backend>(token_ids: Tensor<B, 2, Int>, vocabulary: usize) -> Result<()> {
-    let minimum = token_ids
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate token IDs: {error}"))
-        })?
-        .elem::<i64>();
-    let maximum = token_ids
-        .max()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate token IDs: {error}"))
-        })?
-        .elem::<i64>();
-    if minimum < 0 || maximum as usize >= vocabulary {
-        return Err(Error::shape(
-            "qwen3_moe.input_ids",
-            format!("token values in 0..{vocabulary}"),
-            format!("observed range {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Validates semantic-mask shape and optionally permits fully masked rows.
-fn validate_mask<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-    permit_empty_rows: bool,
-) -> Result<()> {
-    let Some(mask) = mask else {
-        return Ok(());
-    };
-    if mask.as_tensor().dims() != [batch, sequence] {
-        return Err(Error::shape(
-            "qwen3_moe.token_mask",
-            format!("[{batch}, {sequence}]"),
-            format!("{:?}", mask.as_tensor().dims()),
-        ));
-    }
-    if !permit_empty_rows {
-        let minimum = mask
-            .as_tensor()
-            .clone()
-            .int()
-            .sum_dim(1)
-            .min()
-            .try_into_scalar()
-            .map_err(|error| Error::BackendCapability(format!("failed to validate mask: {error}")))?
-            .elem::<i64>();
-        if minimum == 0 {
-            return Err(Error::shape(
-                "qwen3_moe.token_mask",
-                "at least one valid token in every prompt row",
-                "a fully masked row",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Resolves explicit position IDs or derives padding-independent ordinals.
-fn resolve_positions<B: Backend>(
-    input: &CausalLmInput<B>,
-    batch: usize,
-    sequence: usize,
-) -> Result<Tensor<B, 2, Int>> {
-    if let Some(positions) = &input.position_ids {
-        if positions.dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "qwen3_moe.position_ids",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", positions.dims()),
-            ));
-        }
-        return Ok(positions.clone());
-    }
-    let device = input.token_ids.device();
-    match &input.token_mask {
-        Some(mask) => {
-            let valid = mask.as_tensor().clone();
-            Ok((valid.clone().int().cumsum(1) - 1).mask_fill(valid.bool_not(), 0))
-        }
-        None => Ok(Tensor::<B, 1, Int>::arange(0..sequence as i64, &device)
-            .reshape([1, sequence])
-            .expand([batch, sequence])),
-    }
-}
-
-/// Validates position IDs before RoPE constructs angle tables.
-fn validate_position_range<B: Backend>(
-    positions: Tensor<B, 2, Int>,
-    capacity: usize,
-) -> Result<()> {
-    let minimum = positions
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate positions: {error}"))
-        })?
-        .elem::<i64>();
-    let maximum = positions
-        .max()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to validate positions: {error}"))
-        })?
-        .elem::<i64>();
-    if minimum < 0 || maximum as usize >= capacity {
-        return Err(Error::shape(
-            "qwen3_moe.position_ids",
-            format!("values in 0..{capacity}"),
-            format!("observed range {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Returns one plus the greatest position used by a stateless batch.
-fn evaluated_context<B: Backend>(positions: Tensor<B, 2, Int>) -> Result<usize> {
-    let maximum = positions
-        .max()
-        .try_into_scalar()
-        .map_err(|error| {
-            Error::BackendCapability(format!("failed to inspect Qwen3 MoE positions: {error}"))
-        })?
-        .elem::<i64>();
-    usize::try_from(maximum)
-        .map_err(|_| Error::configuration("qwen3_moe.position_ids", "must be non-negative"))?
-        .checked_add(1)
-        .ok_or_else(|| Error::configuration("qwen3_moe.position_ids", "context overflows usize"))
-}
-
-/// Selects hidden positions before the expensive vocabulary projection.
-fn select_hidden<B: Backend>(
-    hidden: Tensor<B, 3>,
-    mask: Option<&TokenMask<B>>,
-    selection: &LogitsSelection,
-) -> Result<Tensor<B, 3>> {
-    let [batch, sequence, width] = hidden.dims();
-    validate_logits_selection(selection, sequence)?;
-    match selection {
-        LogitsSelection::All => Ok(hidden),
-        LogitsSelection::Last => match mask {
-            None => Ok(hidden.narrow(1, sequence - 1, 1)),
-            Some(mask) => {
-                let device = hidden.device();
-                let positions = Tensor::<B, 1, Int>::arange(0..sequence as i64, &device)
-                    .reshape([1, sequence])
-                    .expand([batch, sequence]);
-                let last = positions
-                    .mask_fill(mask.as_tensor().clone().bool_not(), -1)
-                    .argmax(1)
-                    .unsqueeze_dim::<3>(2)
-                    .expand([batch, 1, width]);
-                Ok(hidden.gather(1, last))
-            }
-        },
-        LogitsSelection::Positions(positions) => {
-            let indices = positions
-                .iter()
-                .map(|&value| value as i64)
-                .collect::<Vec<_>>();
-            let count = indices.len();
-            let device = hidden.device();
-            Ok(hidden.select(
-                1,
-                Tensor::<B, 1, Int>::from_data(TensorData::new(indices, [count]), &device),
-            ))
-        }
-    }
-}
-
-/// Validates explicit selective-logit indices.
-fn validate_logits_selection(selection: &LogitsSelection, sequence: usize) -> Result<()> {
-    if let LogitsSelection::Positions(positions) = selection
-        && (positions.is_empty() || positions.iter().any(|&position| position >= sequence))
-    {
-        return Err(Error::shape(
-            "forward_options.logits.positions",
-            format!("a non-empty list of indices below {sequence}"),
-            format!("{positions:?}"),
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

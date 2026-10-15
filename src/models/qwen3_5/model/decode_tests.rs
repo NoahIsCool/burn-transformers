@@ -928,9 +928,11 @@ fn compact_scatter_restores_rectangular_positions() {
         TensorData::new(vec![1.0_f32, 2.0, 3.0, 4.0], [1, 2, 2]),
         &device,
     );
-    let actual = scatter_compact(compact, 4, &[0, 2])
-        .expect("valid scatter")
-        .into_data();
+    let actual =
+        crate::models::shared::rows::CompactRow::<TestBackend>::new(0, &[0, 2], 4, &device)
+            .and_then(|row| row.scatter(compact))
+            .expect("valid scatter")
+            .into_data();
     assert_eq!(
         actual.as_slice::<f32>().expect("f32 output"),
         &[1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0]
