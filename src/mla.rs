@@ -11,10 +11,19 @@
 //!
 //! `sum_t p_t (W^V_h c_t) = W^V_h (sum_t p_t c_t)`.
 //!
-//! Consequently decode reads only `r + d_r` cached scalars per layer/token and
-//! never materializes historical per-head keys or values. Both paths share the
-//! same parameters and are numerically equivalent up to floating-point
-//! reassociation.
+//! Consequently decode never materializes historical per-head keys or values.
+//! After absorption every head attends to the *same* cached latents and shared
+//! rotary key (multi-query form), so heads fold into the rows of one GEMM per
+//! step: content logits, rotary logits, and latent aggregation each stream the
+//! `r + d_r` cached scalars per token once per layer, not once per head. Only
+//! the per-head factors `W^K_h` and `W^V_h` remain head-specific. Both paths
+//! share the same parameters and are numerically equivalent up to
+//! floating-point reassociation.
+//!
+//! Configuration fields keep the checkpoint vocabulary: `num_heads` is the
+//! query-head count, `qk_nope_head_dim`/`qk_rope_head_dim` are the content and
+//! rotary widths, `kv_lora_rank`/`q_lora_rank` the latent ranks `r`, and
+//! `softmax_scale` the explicit score scale.
 //!
 //! Latents use `[batch, token, rank]`; content queries use
 //! `[batch, head, query_token, content_channel]`, and the shared rotary key has one
@@ -34,7 +43,7 @@ use crate::{
     intervention::{AttentionPoints, Hooks, PointInfo},
     normalization::{RmsNorm, RmsNormConfig},
     operations,
-    position::{RopeConfig, apply_rotary, rotary_angles},
+    position::{RopeConfig, RotaryAngles, apply_rotary, rotary_angles},
 };
 
 /// Shape-bearing configuration for one multi-head latent-attention layer.
@@ -272,11 +281,17 @@ impl MultiLatentAttentionConfig {
 pub struct MlaProjection<B: Backend> {
     /// Per-head query channels whose dot products use compressed content keys.
     pub query_content: Tensor<B, 4>,
-    /// Per-head positional query channels in split-half layout, optionally rotated.
+    /// Per-head positional query channels `[batch, head, query, rotary]` in
+    /// split-half layout. Unrotated after [`MultiLatentAttention::project`];
+    /// rotated once [`MlaProjection::with_rotary`] has been applied.
     pub query_rotary: Tensor<B, 4>,
-    /// Normalized token latent that is persisted in the decode cache.
+    /// Normalized token latent `[batch, key, rank]` persisted in the decode cache.
     pub normalized_latent: Tensor<B, 3>,
-    /// Single shared positional key in split-half layout, optionally rotated.
+    /// Single shared positional key `[batch, 1, key, rotary]` in split-half layout.
+    ///
+    /// Despite its historical name, this key is *unrotated* after
+    /// [`MultiLatentAttention::project`] and rotated only once
+    /// [`MlaProjection::with_rotary`] has been applied.
     pub rotated_key: Tensor<B, 4>,
 }
 
@@ -296,9 +311,8 @@ impl<B: Backend> MlaProjection<B> {
     ) -> Result<Self> {
         let query_angles = rotary_angles(rope, query_positions, evaluated_context)?;
         let key_angles = rotary_angles(rope, key_positions, evaluated_context)?;
-        self.query_rotary =
-            apply_rotary(self.query_rotary.clone(), self.query_rotary, &query_angles)?.0;
-        self.rotated_key = apply_rotary(self.rotated_key.clone(), self.rotated_key, &key_angles)?.0;
+        self.query_rotary = rotate(self.query_rotary, &query_angles)?;
+        self.rotated_key = rotate(self.rotated_key, &key_angles)?;
         Ok(self)
     }
 }
@@ -662,7 +676,10 @@ impl<B: Backend> MultiLatentAttention<B> {
         Ok(())
     }
 
-    /// Projects one segment and applies the interleaved rotary convention.
+    /// Projects one self-attention segment and rotates its positional channels.
+    ///
+    /// Equivalent to [`Self::project`] followed by [`MlaProjection::with_rotary`]
+    /// with identical query and key positions, but rotates both in one pass.
     pub(crate) fn project_rotary(
         &self,
         hidden: Tensor<B, 3>,
@@ -685,51 +702,16 @@ impl<B: Backend> MultiLatentAttention<B> {
                 format!("{:?}", positions.dims()),
             ));
         }
-        let query = match (
-            &self.q_proj,
-            &self.q_a_proj,
-            &self.q_a_layernorm,
-            &self.q_b_proj,
-        ) {
-            (Some(direct), None, None, None) => operations::linear(hidden.clone(), direct)?,
-            (None, Some(down), Some(norm), Some(up)) => {
-                operations::linear(norm.forward(operations::linear(hidden.clone(), down)?), up)?
-            }
-            _ => {
-                return Err(Error::Checkpoint(
-                    "MLA query projection topology disagrees with q_lora_rank".into(),
-                ));
-            }
-        };
-        let qk_width = self.config.qk_head_dim()?;
-        let query = query
-            .reshape([batch, sequence, self.config.num_heads, qk_width])
-            .swap_dims(1, 2);
-        let query_content = query.clone().narrow(3, 0, self.config.qk_nope_head_dim);
-        let query_rotary = interleaved_to_split(
-            query.narrow(
-                3,
-                self.config.qk_nope_head_dim,
-                self.config.qk_rope_head_dim,
-            ),
-            "mla.query_rotary",
-        )?;
-
-        let compressed = operations::linear(hidden, &self.kv_a_proj_with_mqa)?;
-        let latent = compressed.clone().narrow(2, 0, self.config.kv_lora_rank);
-        let normalized_latent = self.kv_a_layernorm.forward(latent);
-        let raw_key = compressed
-            .narrow(2, self.config.kv_lora_rank, self.config.qk_rope_head_dim)
-            .reshape([batch, sequence, 1, self.config.qk_rope_head_dim])
-            .swap_dims(1, 2);
-        let raw_key = interleaved_to_split(raw_key, "mla.rotary_key")?;
+        // Self-attention projection shares `project`'s code; one joint rotation
+        // then applies the same positions to the queries and the shared key.
+        let projection = self.project(hidden.clone(), hidden)?;
         let angles = rotary_angles(rope, positions, evaluated_context)?;
-        let (query_rotary, rotated_key) = apply_rotary(query_rotary, raw_key, &angles)?;
+        let (query_rotary, rotated_key) =
+            apply_rotary(projection.query_rotary, projection.rotated_key, &angles)?;
         Ok(MlaProjection {
-            query_content,
             query_rotary,
-            normalized_latent,
             rotated_key,
+            ..projection
         })
     }
 
@@ -786,6 +768,10 @@ impl<B: Backend> MultiLatentAttention<B> {
     }
 
     /// Runs the absorbed path over compressed history without expanded K/V tensors.
+    ///
+    /// `all_latents` is `[batch, key, rank]` and `all_rotary_keys` is
+    /// `[batch, 1, key, rotary]`. Heads fold into GEMM rows, so each cached
+    /// scalar is read once per call regardless of the head count.
     pub(crate) fn mix_absorbed(
         &self,
         projection: &MlaProjection<B>,
@@ -822,52 +808,57 @@ impl<B: Backend> MultiLatentAttention<B> {
                 format!("{:?}", weight.dims()),
             ));
         }
-        let per_head_weight = weight
-            .reshape([self.config.kv_lora_rank, heads, per_head])
-            .swap_dims(0, 1);
+        let rank = self.config.kv_lora_rank;
+        let content = self.config.qk_nope_head_dim;
+        let rotary = self.config.qk_rope_head_dim;
+        let value_width = self.config.value_head_dim;
+        // Per-head factors of the KV-B expansion, as zero-copy views of its
+        // weight: W^K_h is [content, rank] and W^V_h is [rank, value].
+        let per_head_weight = weight.reshape([rank, heads, per_head]).swap_dims(0, 1);
         let key_weight = per_head_weight
             .clone()
-            .narrow(2, 0, self.config.qk_nope_head_dim)
+            .narrow(2, 0, content)
             .swap_dims(1, 2)
             .unsqueeze_dim::<4>(0)
-            .expand([
-                batch,
-                heads,
-                self.config.qk_nope_head_dim,
-                self.config.kv_lora_rank,
-            ]);
+            .expand([batch, heads, content, rank]);
         let value_weight = per_head_weight
-            .narrow(2, self.config.qk_nope_head_dim, self.config.value_head_dim)
+            .narrow(2, content, value_width)
             .unsqueeze_dim::<4>(0)
-            .expand([
-                batch,
-                heads,
-                self.config.kv_lora_rank,
-                self.config.value_head_dim,
-            ]);
-        let latent_heads = all_latents.unsqueeze_dim::<4>(1).expand([
-            batch,
-            heads,
-            key_sequence,
-            self.config.kv_lora_rank,
-        ]);
+            .expand([batch, heads, rank, value_width]);
+        // Absorb W^K into the content queries: q^C_h W^K_h is [b, h, q, rank].
         let absorbed_query = projection.query_content.clone().matmul(key_weight);
-        let content_logits = absorbed_query.matmul(latent_heads.clone().swap_dims(2, 3));
-        let rotary_keys =
-            all_rotary_keys.expand([batch, heads, key_sequence, self.config.qk_rope_head_dim]);
+        // All heads now read the same cached latents and shared rotary key, so
+        // heads fold into the rows of one GEMM: [b, h*q, rank] x [b, rank, key].
+        let rows = heads * query_sequence;
+        let content_logits = absorbed_query
+            .reshape([batch, rows, rank])
+            .matmul(all_latents.clone().swap_dims(1, 2));
         let rotary_logits = projection
             .query_rotary
             .clone()
-            .matmul(rotary_keys.swap_dims(2, 3));
-        let probabilities = attention_probabilities(
-            (content_logits + rotary_logits) * self.config.softmax_scale,
-            mask,
-        )?;
-        let aggregated_latent = probabilities.clone().matmul(latent_heads);
+            .reshape([batch, rows, rotary])
+            .matmul(
+                all_rotary_keys
+                    .reshape([batch, key_sequence, rotary])
+                    .swap_dims(1, 2),
+            );
+        let logits = ((content_logits + rotary_logits) * self.config.softmax_scale).reshape([
+            batch,
+            heads,
+            query_sequence,
+            key_sequence,
+        ]);
+        let probabilities = attention_probabilities(logits, mask)?;
+        // sum_t p_t c_t for every head, again as one folded GEMM over the cache.
+        let aggregated_latent = probabilities
+            .clone()
+            .reshape([batch, rows, key_sequence])
+            .matmul(all_latents)
+            .reshape([batch, heads, query_sequence, rank]);
         let mixed = aggregated_latent
             .matmul(value_weight)
             .swap_dims(1, 2)
-            .reshape([batch, query_sequence, heads * self.config.value_head_dim]);
+            .reshape([batch, query_sequence, heads * value_width]);
         Ok(MlaMixOutput {
             hidden_state: operations::linear(mixed, &self.o_proj)?,
             probabilities: retain_probabilities.then_some(probabilities),
@@ -893,6 +884,17 @@ impl<B: Backend> MultiLatentAttention<B> {
             expanded.narrow(3, self.config.qk_nope_head_dim, self.config.value_head_dim),
         ))
     }
+}
+
+/// Rotates one split-half tensor `[batch, heads, sequence, rotary]` by `angles`.
+///
+/// The shared [`apply_rotary`] rotates an equal-length query/key pair. Its
+/// companion here is a one-head slice of the same tensor whose rotation is
+/// discarded, so the redundant work is at most one head instead of a second
+/// full rotation.
+fn rotate<B: Backend>(tensor: Tensor<B, 4>, angles: &RotaryAngles<B>) -> Result<Tensor<B, 4>> {
+    let companion = tensor.clone().narrow(1, 0, 1);
+    Ok(apply_rotary(tensor, companion, angles)?.0)
 }
 
 /// Converts `[real_0, imag_0, real_1, imag_1, ...]` to split-half layout.
