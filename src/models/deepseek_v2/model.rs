@@ -5,7 +5,7 @@
 //! `y = x' + FFN(RMSNorm(x'))`. The pinned Lite checkpoint uses one dense
 //! SwiGLU block followed by 26 blocks that add a top-6 routed mixture to one
 //! always-active SwiGLU whose intermediate width is exactly twice an expert's
-//! width (see [`DeepseekV2Moe`] for the routing policies and balance losses).
+//! width (see [`DeepseekV2Moe`](crate::models::deepseek_v2::model::DeepseekV2Moe) for the routing policies and balance losses).
 //!
 //! # Positions and attention scale
 //!
@@ -25,7 +25,7 @@
 //!
 //! Reference (unabsorbed) MLA expands keys and values and forms one
 //! `[batch, head, query, key]` score plane per layer. The model's
-//! [`AttentionExecutionPolicy`] evaluates that plane in synchronized query
+//! [`AttentionExecutionPolicy`](crate::attention::AttentionExecutionPolicy) evaluates that plane in synchronized query
 //! chunks, each restricted to its causally visible key prefix, so a long
 //! prompt needs `O(chunk * key)` score workspace instead of `O(query * key)`.
 //! Requesting attention probabilities (`ForwardOptions::attentions`)

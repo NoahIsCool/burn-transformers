@@ -20,7 +20,10 @@ use crate::{
 type TestBackend = Flex<f32, i32>;
 
 /// Multiplies every floating parameter by a constant so activations are O(1).
-struct Scale(f32);
+struct Scale(
+    /// Factor applied to every floating parameter.
+    f32,
+);
 
 impl ModuleMapper<TestBackend> for Scale {
     /// Scales one parameter.

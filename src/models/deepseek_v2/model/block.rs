@@ -2,10 +2,10 @@
 //!
 //! The host plan comes from the Verus-verified `batch` module (see its
 //! documentation for the equations); this module uploads it once per call and
-//! applies it to tensors: [`BlockLayout::compact`] gathers each row's valid
-//! tokens to the left of the block, [`BlockLayout::scatter`] restores
+//! applies it to tensors: [`BlockLayout::compact`](crate::models::deepseek_v2::model::block::BlockLayout::compact) gathers each row's valid
+//! tokens to the left of the block, [`BlockLayout::scatter`](crate::models::deepseek_v2::model::block::BlockLayout::scatter) restores
 //! `[B, S, X]` results with exact zeros at padding (one gather from the block
-//! with an appended zero row), and [`BlockLayout::visibility`] describes the
+//! with an appended zero row), and [`BlockLayout::visibility`](crate::models::deepseek_v2::model::block::BlockLayout::visibility) describes the
 //! block's queries against one batched cache read. Fully valid calls (every
 //! row has all `S` columns) upload no maps and run no gather or scatter.
 //!

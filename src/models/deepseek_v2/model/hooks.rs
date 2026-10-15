@@ -23,11 +23,11 @@
 //!
 //! # Staged execution
 //!
-//! [`StagedModel`] runs the stack in resumable stages: `embed` validates the
-//! input and builds an [`ExecutionContext`] with its positions, padding, and
+//! [`StagedModel`](crate::architecture::StagedModel) runs the stack in resumable stages: `embed` validates the
+//! input and builds an [`ExecutionContext`](crate::experiment::ExecutionContext) with its positions, padding, and
 //! rotary extent; `run_layers` advances any contiguous block range; and
 //! `normalize` applies the final norm once. A context's attention overrides
-//! ([`ExecutionContext::attention_for`]) replace causal visibility for a
+//! ([`ExecutionContext::attention_for`](crate::experiment::ExecutionContext::attention_for)) replace causal visibility for a
 //! layer: `causal` adds bottom-right causality, `allowed` restricts links,
 //! and `bias` adds to the scaled scores, always together with padding. Such
 //! layers evaluate one full score plane. Cached decoding is not hookable.

@@ -2,8 +2,8 @@
 //!
 //! # Storage
 //!
-//! The decode state is a shared [`TensorDecodeState`] with one single-plane
-//! latent group ([`NativeKvCacheSpec::latent`]): every layer stores
+//! The decode state is a shared [`TensorDecodeState`](crate::cache::TensorDecodeState) with one single-plane
+//! latent group ([`NativeKvCacheSpec::latent`](crate::cache::NativeKvCacheSpec::latent)): every layer stores
 //! `[batch, 1, capacity, kv_rank + rope_width]`, the normalized KV latent
 //! followed by the already rotated single-head positional key. A token
 //! therefore costs `kv_rank + rope_width` scalars per layer instead of
@@ -29,7 +29,7 @@
 //!
 //! Every input, capacity, and cursor check runs before any model work. The
 //! step's cache writes are published together, after logits and requested
-//! diagnostics succeed, with [`TensorDecodeState::publish_step`]. A later
+//! diagnostics succeed, with [`TensorDecodeState::publish_step`](crate::cache::TensorDecodeState::publish_step). A later
 //! failure leaves every length and every readable cache position unchanged;
 //! only slots beyond a row's length may hold the abandoned latents, which no
 //! read can reach and the next write overwrites (logical atomicity).

@@ -971,7 +971,10 @@ fn scaled_model(scale: f32) -> MuseGlimmerForCausalLm<TestBackend> {
     use burn::module::{Module, ModuleMapper, Param};
 
     /// Multiplies every floating parameter by a constant.
-    struct Scale(f32);
+    struct Scale(
+        /// Factor applied to every floating parameter.
+        f32,
+    );
 
     impl ModuleMapper<TestBackend> for Scale {
         /// Scales one parameter, leaving norms (whose scale is `1 + w`) near one.

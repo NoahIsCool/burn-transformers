@@ -1923,6 +1923,7 @@ impl<B: Backend> MuseGlimmerAttention<B> {
 /// unbounded-equal values.
 #[test]
 fn single_chunk_local_attention_respects_the_score_bound() {
+    /// Sliding window `W`, smaller than the four-token prompt.
     const WINDOW: usize = 3;
     let device = Default::default();
     let (model, _) = tiny_model();

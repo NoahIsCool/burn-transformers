@@ -12,7 +12,7 @@
 //!
 //! The router projects `z = x W` in F32 (activations and weight are cast
 //! first, so an F16 rounding event cannot flip a discrete choice) and then
-//! follows the shared [`RouterConfig`]. The configuration fields map onto it
+//! follows the shared [`RouterConfig`](crate::moe::RouterConfig). The configuration fields map onto it
 //! exactly as the pinned references compute them:
 //!
 //! | `scoring_func` | `topk_method` | scores `s` | eligible experts | weights | reference |

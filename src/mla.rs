@@ -35,7 +35,7 @@
 //! # Bounded reference attention
 //!
 //! The reference path materializes one `[batch, head, query, key]` score plane,
-//! so a single long prefill grows quadratically. [`PositionalVisibility`] describes
+//! so a single long prefill grows quadratically. `PositionalVisibility` (crate-private) describes
 //! causal and padding visibility from token positions instead of a materialized
 //! mask, which lets the reference path evaluate synchronized query chunks under
 //! an [`AttentionExecutionPolicy`]: every chunk still sees its complete causal

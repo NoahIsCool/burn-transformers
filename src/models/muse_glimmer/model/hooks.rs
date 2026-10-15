@@ -24,9 +24,9 @@
 //!
 //! # Staged execution
 //!
-//! [`StagedModel`] runs the stack in resumable stages. A layer without an
+//! [`StagedModel`](crate::architecture::StagedModel) runs the stack in resumable stages. A layer without an
 //! attention override uses its own connectivity (causal, plus the window on
-//! sliding layers). An override from [`ExecutionContext::attention_for`]
+//! sliding layers). An override from [`ExecutionContext::attention_for`](crate::experiment::ExecutionContext::attention_for)
 //! replaces both: `causal` selects bottom-right causality, `allowed`
 //! restricts links, and `bias` adds to the scaled scores; padding always
 //! applies, and the layer evaluates one full score plane. Cached decoding is
