@@ -12,33 +12,9 @@
 //! F32 graph arithmetic and global gradient clipping are paired with F64 host
 //! evaluation. This small protocol is an adaptation of the paper's training scale.
 
-#[cfg(not(all(
-    feature = "std",
-    feature = "flex",
-    feature = "autodiff",
-    feature = "tokenizers"
-)))]
-/// Explain the required Cargo features and exit before accessing local artifacts.
-fn main() {
-    eprintln!("enable std,flex,autodiff,tokenizers to run this example");
-    std::process::exit(1);
-}
-
-#[cfg(all(
-    feature = "std",
-    feature = "flex",
-    feature = "autodiff",
-    feature = "tokenizers"
-))]
 #[path = "mechanistic/tuned_lens_training/study.rs"]
 mod study;
 
-#[cfg(all(
-    feature = "std",
-    feature = "flex",
-    feature = "autodiff",
-    feature = "tokenizers"
-))]
 /// Fit each registered affine correction with native Burn SGD, then evaluate held-out data.
 ///
 /// The frozen backbone supplies detached residuals and teacher logits. A midpoint

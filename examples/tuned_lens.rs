@@ -13,18 +13,9 @@
 //! `KL(final || lens)` and shifted next-token CE measure predictive quality;
 //! changing this decoder alone does not establish a causal effect on the model.
 
-#[cfg(not(all(feature = "flex", feature = "tokenizers")))]
-/// Explain the required Cargo features and exit before accessing local artifacts.
-fn main() {
-    eprintln!("enable the `flex` and `tokenizers` features to run this example");
-    std::process::exit(1);
-}
-
-#[cfg(all(feature = "flex", feature = "tokenizers"))]
 #[path = "mechanistic/tuned_lens/study.rs"]
 mod study;
 
-#[cfg(all(feature = "flex", feature = "tokenizers"))]
 /// Run the fixed local experiment, retaining measurements and numerical controls.
 fn main() -> study::Result<()> {
     use burn::{module::Initializer, nn::LinearConfig};

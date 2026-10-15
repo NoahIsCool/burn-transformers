@@ -75,9 +75,8 @@ proptest = "1.9.0"
 tempfile = "3.27.0"
 tracing = "=0.1.44"
 
-# Each example names the crate features it needs. Cargo skips it in builds
+# Every example names the crate features it needs. Cargo skips it in builds
 # without them, and `cargo run --example NAME` prints the missing `--features`.
-# Examples not listed here need only the default features.
 
 [[example]]
 name = "activation_patching"
@@ -96,6 +95,10 @@ name = "burn_training"
 required-features = ["train", "flex"]
 
 [[example]]
+name = "clock_and_pizza"
+required-features = ["std", "flex"]
+
+[[example]]
 name = "clock_and_pizza_train"
 required-features = ["std", "flex", "autodiff"]
 
@@ -112,8 +115,16 @@ name = "gemma_generate"
 required-features = ["std", "flex", "tokenizers"]
 
 [[example]]
+name = "greater_than"
+required-features = ["std", "flex"]
+
+[[example]]
 name = "greater_than_train"
 required-features = ["std", "flex", "autodiff"]
+
+[[example]]
+name = "grokking_fourier"
+required-features = ["std", "flex"]
 
 [[example]]
 name = "grokking_train"
@@ -142,6 +153,10 @@ required-features = ["std", "flex"]
 [[example]]
 name = "train_qwen_adapter"
 required-features = ["std", "flex", "autodiff"]
+
+[[example]]
+name = "tuned_lens"
+required-features = ["std", "flex", "tokenizers"]
 
 [[example]]
 name = "tuned_lens_train"

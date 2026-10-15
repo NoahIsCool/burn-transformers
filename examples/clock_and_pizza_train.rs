@@ -6,15 +6,12 @@
 //! `[batch, 59]`. Training uses F32 cross entropy and full-batch AdamW with ten
 //! warmup updates; the first update has zero learning rate. Held-out accuracy and
 //! activation geometry are separate outcomes, as described in the study manifest.
-#[cfg(feature = "autodiff")]
 #[allow(dead_code)]
 #[path = "mechanistic/clock_and_pizza/model.rs"]
 mod model;
-#[cfg(feature = "autodiff")]
 #[path = "mechanistic/clock_and_pizza_training/study.rs"]
 mod study;
 
-#[cfg(feature = "autodiff")]
 /// Parse the run settings and choose a supported native Burn autodiff backend.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use burn::{
@@ -76,12 +73,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "metal" => train::<Autodiff<burn::backend::Metal>>(options),
         _ => Err("backend requires its Cargo feature: flex or metal (macOS)".into()),
     }
-}
-
-#[cfg(not(feature = "autodiff"))]
-/// Print the feature flag required to enable this example’s differentiable graph.
-fn main() {
-    eprintln!(
-        "Enable autodiff: cargo run --release --features autodiff --example clock_and_pizza_train -- --smoke"
-    );
 }

@@ -11,18 +11,9 @@
 //! probabilities retain their full-vocabulary mass. The fixed 194 prompt pairs
 //! provide a bounded adaptation, with clean-disjoint splits and reused corruptions.
 
-#[cfg(not(feature = "flex"))]
-/// Explain the required Cargo features and exit before accessing local artifacts.
-fn main() {
-    eprintln!("enable the flex feature to run this CPU example");
-    std::process::exit(1);
-}
-
-#[cfg(feature = "flex")]
 #[path = "mechanistic/greater_than/study.rs"]
 mod study;
 
-#[cfg(feature = "flex")]
 /// Execute the pinned clean/corrupt node interventions and separate direct-path controls.
 ///
 /// All metrics keep the original clean year cutoff; each mini-batch is released
