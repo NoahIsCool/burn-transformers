@@ -17,7 +17,7 @@ use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
 
 use crate::{Error, LogitsSelection, Result, architecture::TokenMask};
 
-use super::plan;
+use super::plan::{self, LastSelection};
 
 /// Name used in errors for invalid explicit selections.
 const SELECTION_NAME: &str = "forward_options.logits.positions";
@@ -101,27 +101,24 @@ pub(crate) fn select_hidden_with_last_columns<B: Backend>(
     match selection {
         LogitsSelection::All => Ok(hidden),
         LogitsSelection::Positions(positions) => select_columns(hidden, positions),
-        LogitsSelection::Last => {
-            if last_columns.len() != batch || last_columns.iter().any(|&column| column >= sequence)
-            {
-                return Err(Error::shape(
-                    "logits.last_columns",
-                    format!("{batch} columns below {sequence}"),
-                    format!("{last_columns:?}"),
-                ));
+        LogitsSelection::Last => match plan::plan_last_selection(last_columns, batch, sequence) {
+            LastSelection::Invalid => Err(Error::shape(
+                "logits.last_columns",
+                format!("{batch} columns below {sequence}"),
+                format!("{last_columns:?}"),
+            )),
+            LastSelection::FinalColumn => Ok(hidden.narrow(1, sequence - 1, 1)),
+            LastSelection::Gather => {
+                let values = signed(last_columns, "logits.last_columns")?;
+                let last = Tensor::<B, 2, Int>::from_data(
+                    TensorData::new(values, [batch, 1]),
+                    &hidden.device(),
+                )
+                .unsqueeze_dim::<3>(2)
+                .expand([batch, 1, width]);
+                Ok(hidden.gather(1, last))
             }
-            if last_columns.iter().all(|&column| column + 1 == sequence) {
-                return Ok(hidden.narrow(1, sequence - 1, 1));
-            }
-            let values = signed(last_columns, "logits.last_columns")?;
-            let last = Tensor::<B, 2, Int>::from_data(
-                TensorData::new(values, [batch, 1]),
-                &hidden.device(),
-            )
-            .unsqueeze_dim::<3>(2)
-            .expand([batch, 1, width]);
-            Ok(hidden.gather(1, last))
-        }
+        },
     }
 }
 

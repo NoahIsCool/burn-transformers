@@ -213,7 +213,7 @@ impl<B: Backend> DeferredInput<'_, B> {
             .unwrap_or(0);
         // A row is padding-free exactly when its valid count equals the width S.
         let fully_valid = self.row_counts.is_none_or(|counts| {
-            usize::try_from(readout.min_row_count(counts)).is_ok_and(|count| count == self.sequence)
+            super::plan::count_fills_width(readout.min_row_count(counts), self.sequence)
         });
         Ok(ValidatedInput {
             positions: self.positions,

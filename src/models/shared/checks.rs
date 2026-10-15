@@ -198,17 +198,11 @@ impl Readout {
     ///
     /// A zero-width mask yields `B` empty rows.
     pub(crate) fn valid_columns(&self, id: MaskId) -> Vec<Vec<usize>> {
-        if id.sequence == 0 {
-            return vec![Vec::new(); id.batch];
-        }
         let flags = self.values[id.slot..id.slot + id.batch * id.sequence]
             .iter()
             .map(|&flag| flag != 0)
             .collect::<Vec<_>>();
-        flags
-            .chunks_exact(id.sequence)
-            .map(plan::valid_columns)
-            .collect()
+        plan::row_valid_columns(Some(&flags), id.batch, id.sequence)
     }
 
     /// Converts the maximum recorded under `id` into the context extent `max + 1`.

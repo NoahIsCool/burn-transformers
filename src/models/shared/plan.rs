@@ -24,6 +24,11 @@
 //! appends against a capacity, and compute exact value ranges over the valid
 //! columns of a row.
 //!
+//! [`plan_host_rows`] composes them into the whole host side of a stateful
+//! call after its single readback ([`split_readback`]): every row's valid and
+//! last columns, the empty-row policy, the cache appends, and validation of
+//! valid token and position values with each row's rotary extent.
+//!
 //! # Verified planning
 //!
 //! Every function in this file is dependency-free and checked in place by
@@ -32,8 +37,10 @@
 //! postconditions: compaction lists exactly the valid columns in increasing
 //! order; scatter plans place compact entry `k` at column `c_k` and zeros
 //! elsewhere; append plans either return `length + count <= capacity` for every
-//! row or report the first failing row; and value ranges are attained bounds.
-//! Tensor programs driven by these plans remain covered by the Rust tests.
+//! row or report the first failing row; value ranges are attained bounds; and
+//! host row planning returns exactly the specified plan or the first error in
+//! precedence order. Tensor programs driven by these plans remain covered by
+//! the Rust tests.
 
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
@@ -70,6 +77,360 @@ pub open spec fn is_run_from(indices: Seq<usize>, start: int) -> bool {
     forall|k: int| 0 <= k < indices.len() ==> indices[k] == start + k
 }
 
+/// The valid (`true`) columns of `row` in increasing order, defined by recursion on the width.
+pub open spec fn spec_valid_columns(row: Seq<bool>) -> Seq<usize>
+    decreases row.len(),
+{
+    if row.len() == 0 {
+        Seq::empty()
+    } else {
+        let earlier = spec_valid_columns(row.drop_last());
+        if row.last() {
+            earlier.push((row.len() - 1) as usize)
+        } else {
+            earlier
+        }
+    }
+}
+
+/// `columns` lists exactly the valid columns of `row`, strictly increasing.
+pub open spec fn lists_valid_columns(row: Seq<bool>, columns: Seq<usize>) -> bool {
+    &&& sorted_unique_below(columns, row.len() as int)
+    &&& forall|i: int| 0 <= i < columns.len() ==> row[#[trigger] columns[i] as int]
+    &&& forall|c: int| 0 <= c < row.len() && #[trigger] row[c] ==> columns.contains(c as usize)
+}
+
+/// Row `row` of a row-major grid with `width` columns: `cells[row·width .. row·width + width)`.
+pub open spec fn grid_row<T>(cells: Seq<T>, width: int, row: int) -> Seq<T> {
+    cells.subrange(row * width, row * width + width)
+}
+
+/// Validity of row `row` of an optional row-major `[batch, sequence]` mask.
+///
+/// An absent mask marks every column valid.
+pub open spec fn mask_row(mask: Option<&[bool]>, sequence: int, row: int) -> Seq<bool> {
+    match mask {
+        Some(flags) => grid_row(flags@, sequence, row),
+        None => Seq::new(sequence as nat, |column: int| true),
+    }
+}
+
+/// The valid columns of row `row` of an optional mask.
+pub open spec fn row_columns(mask: Option<&[bool]>, sequence: int, row: int) -> Seq<usize> {
+    spec_valid_columns(mask_row(mask, sequence, row))
+}
+
+/// `column` is the last valid column of `row`, or the final column when none is valid.
+pub open spec fn last_valid_or_final(row: Seq<bool>, column: int) -> bool {
+    if exists|c: int| 0 <= c < row.len() && #[trigger] row[c] {
+        &&& 0 <= column < row.len()
+        &&& row[column]
+        &&& forall|c: int| column < c < row.len() ==> !#[trigger] row[c]
+    } else {
+        column == row.len() - 1
+    }
+}
+
+/// Every listed value lies in `0..limit`.
+pub open spec fn values_within(values: Seq<i64>, columns: Seq<usize>, limit: int) -> bool {
+    forall|k: int| 0 <= k < columns.len() ==> 0 <= #[trigger] values[columns[k] as int] < limit
+}
+
+/// `minimum` is attained by a listed value and bounds every listed value from below.
+pub open spec fn is_minimum_at(values: Seq<i64>, columns: Seq<usize>, minimum: int) -> bool {
+    &&& forall|k: int| 0 <= k < columns.len() ==> minimum <= #[trigger] values[columns[k] as int]
+    &&& exists|k: int| 0 <= k < columns.len() && values[columns[k] as int] == minimum
+}
+
+/// `maximum` is attained by a listed value and bounds every listed value from above.
+pub open spec fn is_maximum_at(values: Seq<i64>, columns: Seq<usize>, maximum: int) -> bool {
+    &&& forall|k: int| 0 <= k < columns.len() ==> #[trigger] values[columns[k] as int] <= maximum
+    &&& exists|k: int| 0 <= k < columns.len() && values[columns[k] as int] == maximum
+}
+
+/// The listed positions of a row whose explicit positions exist, or `None`.
+///
+/// Rows without explicit positions, or without valid columns, use their
+/// implicit cursor instead.
+pub open spec fn explicit_row(
+    positions: Option<&[i64]>,
+    columns: Seq<usize>,
+    sequence: int,
+    row: int,
+) -> Option<Seq<i64>> {
+    match positions {
+        Some(values) => if columns.len() > 0 {
+            Some(grid_row(values@, sequence, row))
+        } else {
+            None
+        },
+        None => None,
+    }
+}
+
+/// Row `row` passes value validation and has rotary extent `context`.
+///
+/// Valid tokens lie in `0..vocabulary`; explicit valid positions lie in
+/// `0..limit` when a limit is given and the extent is `1 + max p`; without
+/// explicit positions the extent is the row's implicit cursor `end`.
+pub open spec fn row_context_ok(
+    tokens: Seq<i64>,
+    positions: Option<&[i64]>,
+    columns: Seq<usize>,
+    sequence: int,
+    row: int,
+    vocabulary: int,
+    position_limit: Option<usize>,
+    end: int,
+    context: int,
+) -> bool {
+    &&& values_within(grid_row(tokens, sequence, row), columns, vocabulary)
+    &&& match explicit_row(positions, columns, sequence, row) {
+        Some(values) => {
+            &&& (position_limit matches Some(limit)
+                ==> values_within(values, columns, limit as int))
+            &&& is_maximum_at(values, columns, context - 1)
+        },
+        None => context == end,
+    }
+}
+
+/// Row `row` passes value validation with some rotary extent.
+pub open spec fn row_succeeds(
+    tokens: Seq<i64>,
+    positions: Option<&[i64]>,
+    columns: Seq<usize>,
+    sequence: int,
+    row: int,
+    vocabulary: int,
+    position_limit: Option<usize>,
+    end: int,
+) -> bool {
+    exists|context: int| #[trigger] row_context_ok(
+        tokens,
+        positions,
+        columns,
+        sequence,
+        row,
+        vocabulary,
+        position_limit,
+        end,
+        context,
+    )
+}
+
+/// Row `row` fails value validation with `error`, checked tokens first.
+pub(crate) open spec fn row_value_error(
+    tokens: Seq<i64>,
+    positions: Option<&[i64]>,
+    columns: Seq<usize>,
+    sequence: int,
+    row: int,
+    vocabulary: int,
+    position_limit: Option<usize>,
+    error: RowValueError,
+) -> bool {
+    let token_row = grid_row(tokens, sequence, row);
+    match error {
+        RowValueError::Tokens { minimum, maximum } => {
+            &&& !values_within(token_row, columns, vocabulary)
+            &&& is_minimum_at(token_row, columns, minimum as int)
+            &&& is_maximum_at(token_row, columns, maximum as int)
+        },
+        RowValueError::Positions { minimum, maximum, limit } => {
+            &&& values_within(token_row, columns, vocabulary)
+            &&& position_limit == Some(limit)
+            &&& match explicit_row(positions, columns, sequence, row) {
+                Some(values) => {
+                    &&& !values_within(values, columns, limit as int)
+                    &&& is_minimum_at(values, columns, minimum as int)
+                    &&& is_maximum_at(values, columns, maximum as int)
+                },
+                None => false,
+            }
+        },
+        RowValueError::Unrepresentable => {
+            &&& values_within(token_row, columns, vocabulary)
+            &&& match explicit_row(positions, columns, sequence, row) {
+                Some(values) => {
+                    &&& (position_limit matches Some(limit)
+                        ==> values_within(values, columns, limit as int))
+                    &&& exists|maximum: int| #[trigger] is_maximum_at(values, columns, maximum)
+                        && (maximum < 0 || maximum + 1 > usize::MAX)
+                },
+                None => false,
+            }
+        },
+    }
+}
+
+/// Exact outcome of planning the host side of one stateful call.
+///
+/// Errors follow the documented precedence: a rejected empty row, then the
+/// first impossible cache append, then the first row whose valid token or
+/// position values are invalid.
+pub(crate) open spec fn host_rows_outcome(
+    mask: Option<&[bool]>,
+    tokens: Seq<i64>,
+    positions: Option<&[i64]>,
+    batch: int,
+    sequence: int,
+    lengths: Seq<usize>,
+    capacity: int,
+    reject_empty_rows: bool,
+    vocabulary: int,
+    position_limit: Option<usize>,
+    planned: Result<HostRows, HostRowsError>,
+) -> bool {
+    let nonempty = forall|r: int| 0 <= r < batch
+        ==> #[trigger] row_columns(mask, sequence, r).len() > 0;
+    let fits = forall|r: int| 0 <= r < batch
+        ==> lengths[r] + #[trigger] row_columns(mask, sequence, r).len() <= capacity;
+    match planned {
+        Err(HostRowsError::EmptyRow) => reject_empty_rows && !nonempty,
+        Err(HostRowsError::Append(AppendError::Overflow { row, length, additional })) => {
+            &&& (reject_empty_rows ==> nonempty)
+            &&& row < batch
+            &&& length == lengths[row as int]
+            &&& additional == row_columns(mask, sequence, row as int).len()
+            &&& length + additional > usize::MAX
+            &&& forall|r: int| 0 <= r < row
+                ==> lengths[r] + #[trigger] row_columns(mask, sequence, r).len() <= capacity
+        },
+        Err(HostRowsError::Append(AppendError::Capacity { row, requested })) => {
+            &&& (reject_empty_rows ==> nonempty)
+            &&& row < batch
+            &&& requested == lengths[row as int] + row_columns(mask, sequence, row as int).len()
+            &&& requested > capacity
+            &&& forall|r: int| 0 <= r < row
+                ==> lengths[r] + #[trigger] row_columns(mask, sequence, r).len() <= capacity
+        },
+        Err(HostRowsError::Values(error)) => {
+            &&& (reject_empty_rows ==> nonempty)
+            &&& fits
+            &&& exists|row: int| 0 <= row < batch && {
+                &&& forall|r: int| 0 <= r < row ==> #[trigger] row_succeeds(
+                    tokens,
+                    positions,
+                    row_columns(mask, sequence, r),
+                    sequence,
+                    r,
+                    vocabulary,
+                    position_limit,
+                    lengths[r] + row_columns(mask, sequence, r).len(),
+                )
+                &&& row_value_error(
+                    tokens,
+                    positions,
+                    row_columns(mask, sequence, row),
+                    sequence,
+                    row,
+                    vocabulary,
+                    position_limit,
+                    error,
+                )
+            }
+        },
+        Ok(rows) => {
+            &&& (reject_empty_rows ==> nonempty)
+            &&& fits
+            &&& rows.valid_indices.len() == batch
+            &&& rows.token_counts.len() == batch
+            &&& rows.evaluated_contexts.len() == batch
+            &&& rows.last_columns.len() == batch
+            &&& forall|r: int| 0 <= r < batch ==> {
+                &&& #[trigger] rows.valid_indices@[r]@ == row_columns(mask, sequence, r)
+                &&& rows.token_counts@[r] == row_columns(mask, sequence, r).len()
+                &&& row_context_ok(
+                    tokens,
+                    positions,
+                    row_columns(mask, sequence, r),
+                    sequence,
+                    r,
+                    vocabulary,
+                    position_limit,
+                    lengths[r] + rows.token_counts@[r],
+                    rows.evaluated_contexts@[r] as int,
+                )
+                &&& rows.last_columns@[r] < sequence
+                &&& last_valid_or_final(mask_row(mask, sequence, r), rows.last_columns@[r] as int)
+            }
+        },
+    }
+}
+
+/// Row `row` of a `[rows, width]` grid lies inside it, so its offsets are representable.
+pub proof fn lemma_grid_row_in_bounds(row: int, rows: int, width: int)
+    requires
+        0 <= row < rows,
+        0 <= width,
+    ensures
+        0 <= row * width,
+        row * width + width <= rows * width,
+{
+    assert(0 <= row * width) by (nonlinear_arith)
+        requires
+            0 <= row,
+            0 <= width,
+    ;
+    assert(row * width + width <= rows * width) by (nonlinear_arith)
+        requires
+            row < rows,
+            0 <= width,
+    ;
+}
+
+/// The recursive column list is exactly the strictly increasing list of valid columns.
+pub proof fn lemma_spec_valid_columns(row: Seq<bool>)
+    requires
+        row.len() <= usize::MAX,
+    ensures
+        lists_valid_columns(row, spec_valid_columns(row)),
+    decreases row.len(),
+{
+    if row.len() > 0 {
+        let prefix = row.drop_last();
+        lemma_spec_valid_columns(prefix);
+        let earlier = spec_valid_columns(prefix);
+        let columns = spec_valid_columns(row);
+        let last = (row.len() - 1) as usize;
+        assert(last as int == row.len() - 1);
+        if row.last() {
+            assert(columns == earlier.push(last));
+        } else {
+            assert(columns == earlier);
+        }
+        assert forall|a: int, b: int| 0 <= a < b < columns.len()
+            implies columns[a] < columns[b] by {
+            if b < earlier.len() {
+                assert(earlier[a] < earlier[b]);
+            } else {
+                assert(earlier[a] < prefix.len());
+            }
+        }
+        assert forall|a: int| 0 <= a < columns.len() implies columns[a] < row.len() by {
+            if a < earlier.len() {
+                assert(earlier[a] < prefix.len());
+            }
+        }
+        assert forall|a: int| 0 <= a < columns.len() implies row[#[trigger] columns[a] as int] by {
+            if a < earlier.len() {
+                assert(prefix[earlier[a] as int]);
+            }
+        }
+        assert forall|c: int| 0 <= c < row.len() && #[trigger] row[c]
+            implies columns.contains(c as usize) by {
+            if c < row.len() - 1 {
+                assert(prefix[c]);
+                let a = choose|a: int| 0 <= a < earlier.len() && earlier[a] == c as usize;
+                assert(columns[a] == c as usize);
+            } else {
+                assert(columns[columns.len() - 1] == c as usize);
+            }
+        }
+    }
+}
+
 } // verus!
 
 /// Rectangular reconstruction strategy for one compact row.
@@ -104,6 +465,8 @@ pub(crate) enum ScatterLayout {
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 #[cfg_attr(verus_keep_ghost, verus_spec(columns =>
     ensures
+        columns@ == spec_valid_columns(row@),
+        lists_valid_columns(row@, columns@),
         sorted_unique_below(columns@, row.len() as int),
         forall|i: int| 0 <= i < columns.len() ==> row[#[trigger] columns[i] as int],
         forall|c: int| 0 <= c < row.len() && #[trigger] row[c] ==> columns@.contains(c as usize),
@@ -114,12 +477,19 @@ pub(crate) fn valid_columns(row: &[bool]) -> Vec<usize> {
     #[cfg_attr(verus_keep_ghost, verus_spec(
         invariant
             column <= row.len(),
+            columns@ == spec_valid_columns(row@.subrange(0, column as int)),
             sorted_unique_below(columns@, column as int),
             forall|i: int| 0 <= i < columns.len() ==> row[#[trigger] columns[i] as int],
             forall|c: int| 0 <= c < column && #[trigger] row[c] ==> columns@.contains(c as usize),
         decreases row.len() - column,
     ))]
     while column < row.len() {
+        // The recursive specification peels the last column of the longer prefix.
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(row@.subrange(0, column as int + 1).drop_last()
+                =~= row@.subrange(0, column as int));
+        }
         if row[column] {
             #[cfg(verus_keep_ghost)]
             proof_decl! { let ghost before = columns@; }
@@ -136,6 +506,10 @@ pub(crate) fn valid_columns(row: &[bool]) -> Vec<usize> {
             }
         }
         column += 1;
+    }
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert(row@.subrange(0, row.len() as int) =~= row@);
     }
     columns
 }
@@ -218,9 +592,15 @@ pub(crate) fn is_sorted_unique_below(indices: &[usize], bound: usize) -> bool {
             ScatterLayout::Contiguous { leading, trailing } => {
                 &&& leading + indices.len() + trailing == sequence
                 &&& is_run_from(indices@, leading as int)
+                // The identity is preferred whenever it applies.
+                &&& (indices.len() == 0 || leading > 0 || trailing > 0)
             },
-            ScatterLayout::Gather { sources } =>
-                gathers_into_columns(indices@, sequence as int, sources@),
+            ScatterLayout::Gather { sources } => {
+                &&& gathers_into_columns(indices@, sequence as int, sources@)
+                // A gather is used only when no single run exists.
+                &&& indices.len() > 0
+                &&& !is_run_from(indices@, indices[0] as int)
+            },
         },
 ))]
 pub(crate) fn plan_scatter(indices: &[usize], sequence: usize) -> ScatterLayout {
@@ -537,10 +917,8 @@ pub(crate) fn range_within(minimum: i64, maximum: i64, limit: usize) -> bool {
         match range {
             Some((minimum, maximum)) => {
                 &&& columns.len() > 0
-                &&& forall|k: int| 0 <= k < columns.len()
-                    ==> minimum <= #[trigger] values[columns[k] as int] <= maximum
-                &&& exists|k: int| 0 <= k < columns.len() && values[columns[k] as int] == minimum
-                &&& exists|k: int| 0 <= k < columns.len() && values[columns[k] as int] == maximum
+                &&& is_minimum_at(values@, columns@, minimum as int)
+                &&& is_maximum_at(values@, columns@, maximum as int)
             },
             None => columns.len() == 0,
         },
@@ -666,6 +1044,878 @@ pub(crate) fn plan_appends(
         row += 1;
     }
     Ok(ends)
+}
+
+/// How [`LogitsSelection::Last`] gathers each row's last valid column.
+///
+/// [`LogitsSelection::Last`]: crate::LogitsSelection::Last
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LastSelection {
+    /// The column list does not have one in-range entry per row.
+    Invalid,
+    /// Every row's last column is `sequence - 1`, so one slice suffices.
+    FinalColumn,
+    /// Rows end at different columns, so one gather is needed.
+    Gather,
+}
+
+/// Classifies host-known last columns for [`LogitsSelection::Last`].
+///
+/// The list is [`LastSelection::Invalid`] exactly when its length differs
+/// from `batch` or some entry is not below `sequence`; otherwise it is
+/// [`LastSelection::FinalColumn`] exactly when every entry is `sequence - 1`.
+///
+/// [`LogitsSelection::Last`]: crate::LogitsSelection::Last
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(selection =>
+    ensures
+        (selection is Invalid) == (last_columns.len() != batch
+            || exists|b: int|
+                0 <= b < last_columns.len() && #[trigger] last_columns[b] >= sequence),
+        selection is FinalColumn ==> forall|b: int| 0 <= b < last_columns.len()
+            ==> #[trigger] last_columns[b] + 1 == sequence,
+        selection is Gather ==> exists|b: int| 0 <= b < last_columns.len()
+            && #[trigger] last_columns[b] + 1 != sequence,
+))]
+pub(crate) fn plan_last_selection(
+    last_columns: &[usize],
+    batch: usize,
+    sequence: usize,
+) -> LastSelection {
+    if last_columns.len() != batch {
+        return LastSelection::Invalid;
+    }
+    let mut final_only = true;
+    let mut index: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= last_columns.len(),
+            forall|b: int| 0 <= b < index ==> #[trigger] last_columns[b] < sequence,
+            final_only == forall|b: int|
+                0 <= b < index ==> #[trigger] last_columns[b] + 1 == sequence,
+        decreases last_columns.len() - index,
+    ))]
+    while index < last_columns.len() {
+        if last_columns[index] >= sequence {
+            return LastSelection::Invalid;
+        }
+        if last_columns[index] + 1 != sequence {
+            final_only = false;
+        }
+        index += 1;
+    }
+    if final_only {
+        LastSelection::FinalColumn
+    } else {
+        LastSelection::Gather
+    }
+}
+
+/// Returns whether the smallest per-row valid count fills the width, i.e. no row is padded.
+///
+/// The count comes from a signed device reduction; the result is `true`
+/// exactly when it is non-negative and equals `sequence`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(fills =>
+    ensures
+        fills == (minimum_count >= 0 && minimum_count == sequence),
+))]
+pub(crate) fn count_fills_width(minimum_count: i64, sequence: usize) -> bool {
+    minimum_count >= 0 && minimum_count as u64 == sequence as u64
+}
+
+/// Splits one fused readback into its mask flags, token IDs, and explicit positions.
+///
+/// The readback concatenates `[mask?, tokens, positions?]`, each of
+/// `elements` values. Tokens are the segment after the optional mask,
+/// positions the final segment when present, and mask flags are the nonzero
+/// tests of the leading segment.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(split =>
+    requires
+        values.len() == elements * ((if has_mask { 1int } else { 0int }) + 1
+            + (if has_positions { 1int } else { 0int })),
+    ensures
+        ({
+            let (mask, tokens, positions) = split;
+            let offset = if has_mask { elements as int } else { 0int };
+            &&& tokens@ == values@.subrange(offset, offset + elements)
+            &&& match positions {
+                Some(positions) => {
+                    &&& has_positions
+                    &&& positions@ == values@.subrange(offset + elements, offset + 2 * elements)
+                },
+                None => !has_positions,
+            }
+            &&& match mask {
+                Some(mask) => {
+                    &&& has_mask
+                    &&& mask.len() == elements
+                    &&& forall|i: int|
+                        0 <= i < elements ==> #[trigger] mask@[i] == (values@[i] != 0)
+                },
+                None => !has_mask,
+            }
+        }),
+))]
+pub(crate) fn split_readback(
+    values: Vec<i64>,
+    elements: usize,
+    has_mask: bool,
+    has_positions: bool,
+) -> (Option<Vec<bool>>, Vec<i64>, Option<Vec<i64>>) {
+    let mut values = values;
+    #[cfg(verus_keep_ghost)]
+    proof_decl! {
+        let ghost all = values@;
+        let ghost offset: int = if has_mask { elements as int } else { 0int };
+    }
+    // The readback holds one `elements`-long segment per registered tensor.
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        let masks: int = if has_mask { 1int } else { 0int };
+        let tails: int = if has_positions { 1int } else { 0int };
+        assert(elements * (masks + 1 + tails) == elements * masks + elements + elements * tails)
+            by (nonlinear_arith);
+        assert(elements * masks == offset) by (nonlinear_arith)
+            requires
+                masks == 0 || masks == 1,
+                offset == if masks == 1 { elements as int } else { 0int },
+        ;
+        assert(elements * tails == if has_positions { elements as int } else { 0int })
+            by (nonlinear_arith)
+            requires
+                tails == 0 || tails == 1,
+                tails == 1 <==> has_positions,
+        ;
+    }
+    // Split in reverse registration order: positions, tokens, then mask.
+    let positions = if has_positions {
+        Some(values.split_off(values.len() - elements))
+    } else {
+        None
+    };
+    let tokens = values.split_off(values.len() - elements);
+    let mask = if has_mask {
+        let mut flags: Vec<bool> = Vec::with_capacity(values.len());
+        let mut index: usize = 0;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                index <= values.len(),
+                values.len() == elements,
+                all.len() >= elements,
+                values@ == all.subrange(0, elements as int),
+                flags.len() == index,
+                forall|i: int| 0 <= i < index ==> #[trigger] flags@[i] == (all[i] != 0),
+            decreases values.len() - index,
+        ))]
+        while index < values.len() {
+            flags.push(values[index] != 0);
+            index += 1;
+        }
+        Some(flags)
+    } else {
+        None
+    };
+    (mask, tokens, positions)
+}
+
+// ---------------------------------------------------------------------------
+// Host planning of stateful rows
+// ---------------------------------------------------------------------------
+
+/// Lists every row's valid columns of a row-major `[batch, sequence]` mask.
+///
+/// An absent mask marks every column valid. Row `r` of the result is exactly
+/// the strictly increasing list of valid columns of mask row `r`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(rows =>
+    requires
+        mask matches Some(flags) ==> flags.len() == batch * sequence,
+    ensures
+        rows.len() == batch,
+        forall|r: int| 0 <= r < batch ==> {
+            &&& #[trigger] rows@[r]@ == row_columns(mask, sequence as int, r)
+            &&& lists_valid_columns(mask_row(mask, sequence as int, r), rows@[r]@)
+        },
+))]
+pub(crate) fn row_valid_columns(
+    mask: Option<&[bool]>,
+    batch: usize,
+    sequence: usize,
+) -> Vec<Vec<usize>> {
+    let mut rows: Vec<Vec<usize>> = Vec::with_capacity(batch);
+    // Every dense row lists `0..sequence`; plan it once and copy it per row.
+    let dense = match mask {
+        Some(_) => Vec::new(),
+        None => {
+            let flags = vec![true; sequence];
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert(flags@ =~= mask_row(mask, sequence as int, 0));
+            }
+            valid_columns(&flags)
+        }
+    };
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= batch,
+            mask matches Some(flags) ==> flags.len() == batch * sequence,
+            mask is None ==> dense@ == row_columns(mask, sequence as int, 0),
+            rows.len() == row,
+            forall|r: int| 0 <= r < row ==> {
+                &&& #[trigger] rows@[r]@ == row_columns(mask, sequence as int, r)
+                &&& lists_valid_columns(mask_row(mask, sequence as int, r), rows@[r]@)
+            },
+        decreases batch - row,
+    ))]
+    while row < batch {
+        let columns = match mask {
+            Some(flags) => {
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    lemma_grid_row_in_bounds(row as int, batch as int, sequence as int);
+                }
+                let offset = row * sequence;
+                valid_columns(&flags[offset..offset + sequence])
+            }
+            None => dense.clone(),
+        };
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            if mask is None {
+                assert(columns@ =~= dense@);
+                assert(mask_row(mask, sequence as int, row as int)
+                    =~= mask_row(mask, sequence as int, 0));
+            }
+            lemma_spec_valid_columns(mask_row(mask, sequence as int, row as int));
+        }
+        rows.push(columns);
+        row += 1;
+    }
+    rows
+}
+
+/// Returns every row's last valid column, or the final column `sequence - 1` for an empty row.
+///
+/// An absent mask marks every column valid, so every row reports
+/// `sequence - 1`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(columns =>
+    requires
+        sequence > 0,
+        mask matches Some(flags) ==> flags.len() == batch * sequence,
+    ensures
+        columns.len() == batch,
+        forall|r: int| 0 <= r < batch ==> {
+            &&& #[trigger] columns@[r] < sequence
+            &&& last_valid_or_final(mask_row(mask, sequence as int, r), columns@[r] as int)
+        },
+))]
+pub(crate) fn row_last_columns(mask: Option<&[bool]>, batch: usize, sequence: usize) -> Vec<usize> {
+    let mut columns: Vec<usize> = Vec::with_capacity(batch);
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= batch,
+            sequence > 0,
+            mask matches Some(flags) ==> flags.len() == batch * sequence,
+            columns.len() == row,
+            forall|r: int| 0 <= r < row ==> {
+                &&& #[trigger] columns@[r] < sequence
+                &&& last_valid_or_final(mask_row(mask, sequence as int, r), columns@[r] as int)
+            },
+        decreases batch - row,
+    ))]
+    while row < batch {
+        let column = match mask {
+            Some(flags) => {
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    lemma_grid_row_in_bounds(row as int, batch as int, sequence as int);
+                }
+                let offset = row * sequence;
+                match last_valid_column(&flags[offset..offset + sequence]) {
+                    Some(column) => column,
+                    None => sequence - 1,
+                }
+            }
+            None => sequence - 1,
+        };
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            let flags = mask_row(mask, sequence as int, row as int);
+            if mask is None {
+                assert(flags[sequence - 1]);
+            }
+        }
+        columns.push(column);
+        row += 1;
+    }
+    columns
+}
+
+/// Why a row's valid token or position values are rejected.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowValueError {
+    /// A valid token lies outside `0..vocabulary`; the observed range follows.
+    Tokens {
+        /// Smallest valid token ID of the row.
+        minimum: i64,
+        /// Largest valid token ID of the row.
+        maximum: i64,
+    },
+    /// A valid explicit position lies outside `0..limit`.
+    Positions {
+        /// Smallest valid position of the row.
+        minimum: i64,
+        /// Largest valid position of the row.
+        maximum: i64,
+        /// Exclusive position bound.
+        limit: usize,
+    },
+    /// The greatest valid position has no context extent `max + 1` in `usize`.
+    Unrepresentable,
+}
+
+/// Validates every row's valid values and resolves its rotary extent.
+///
+/// Row `r` reads `tokens[r·S .. r·S + S)` and, when supplied, the matching
+/// positions, at its valid columns only, so padding sentinels are inert.
+/// Tokens must lie in `0..vocabulary`; explicit positions in `0..limit` when
+/// a limit is given. The extent is `1 + max p` for explicit positions and the
+/// implicit cursor `ends[r]` otherwise. The first failing row's error is
+/// returned, tokens before positions.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(contexts =>
+    requires
+        tokens.len() == valid_indices.len() * sequence,
+        positions matches Some(values) ==> values.len() == tokens.len(),
+        ends.len() == valid_indices.len(),
+        forall|r: int, k: int| 0 <= r < valid_indices.len() && 0 <= k < valid_indices@[r].len()
+            ==> #[trigger] valid_indices@[r]@[k] < sequence,
+    ensures
+        match contexts {
+            Ok(contexts) => {
+                &&& contexts.len() == valid_indices.len()
+                &&& forall|r: int| 0 <= r < valid_indices.len() ==> #[trigger] row_context_ok(
+                    tokens@,
+                    positions,
+                    valid_indices@[r]@,
+                    sequence as int,
+                    r,
+                    vocabulary as int,
+                    position_limit,
+                    ends[r] as int,
+                    contexts@[r] as int,
+                )
+            },
+            Err(error) => exists|row: int| 0 <= row < valid_indices.len() && {
+                &&& forall|r: int| 0 <= r < row ==> #[trigger] row_succeeds(
+                    tokens@,
+                    positions,
+                    valid_indices@[r]@,
+                    sequence as int,
+                    r,
+                    vocabulary as int,
+                    position_limit,
+                    ends[r] as int,
+                )
+                &&& row_value_error(
+                    tokens@,
+                    positions,
+                    valid_indices@[row]@,
+                    sequence as int,
+                    row,
+                    vocabulary as int,
+                    position_limit,
+                    error,
+                )
+            },
+        },
+))]
+// Verus compiles verified bodies as Rust 2021, which has no `let` chains, and
+// proof blocks separate the nested conditions in Verus builds.
+#[allow(clippy::collapsible_if)]
+pub(crate) fn row_contexts(
+    tokens: &[i64],
+    positions: Option<&[i64]>,
+    valid_indices: &[Vec<usize>],
+    ends: &[usize],
+    sequence: usize,
+    vocabulary: usize,
+    position_limit: Option<usize>,
+) -> Result<Vec<usize>, RowValueError> {
+    let rows = valid_indices.len();
+    let mut contexts: Vec<usize> = Vec::with_capacity(rows);
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= rows,
+            rows == valid_indices.len(),
+            tokens.len() == rows * sequence,
+            positions matches Some(values) ==> values.len() == tokens.len(),
+            ends.len() == rows,
+            forall|r: int, k: int| 0 <= r < rows && 0 <= k < valid_indices@[r].len()
+                ==> #[trigger] valid_indices@[r]@[k] < sequence,
+            contexts.len() == row,
+            forall|r: int| 0 <= r < row ==> #[trigger] row_context_ok(
+                tokens@,
+                positions,
+                valid_indices@[r]@,
+                sequence as int,
+                r,
+                vocabulary as int,
+                position_limit,
+                ends[r] as int,
+                contexts@[r] as int,
+            ),
+        decreases rows - row,
+    ))]
+    while row < rows {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            lemma_grid_row_in_bounds(row as int, rows as int, sequence as int);
+        }
+        let offset = row * sequence;
+        let columns = valid_indices[row].as_slice();
+        let token_row = &tokens[offset..offset + sequence];
+        if let Some((minimum, maximum)) = value_range(token_row, columns) {
+            if !range_within(minimum, maximum, vocabulary) {
+                #[cfg(verus_keep_ghost)]
+                proof! {
+                    lemma_range_within(token_row@, columns@, minimum, maximum, vocabulary as int);
+                    lemma_rows_before_succeed(
+                        tokens@, positions, valid_indices@, ends@, sequence as int, row as int,
+                        vocabulary as int, position_limit, contexts@,
+                    );
+                }
+                return Err(RowValueError::Tokens { minimum, maximum });
+            }
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                lemma_range_within(token_row@, columns@, minimum, maximum, vocabulary as int);
+            }
+        }
+        let explicit = match positions {
+            Some(values) => value_range(&values[offset..offset + sequence], columns),
+            None => None,
+        };
+        let context = match explicit {
+            Some((minimum, maximum)) => {
+                if let Some(limit) = position_limit {
+                    if !range_within(minimum, maximum, limit) {
+                        #[cfg(verus_keep_ghost)]
+                        proof! {
+                            let values = grid_row(positions.unwrap()@, sequence as int, row as int);
+                            lemma_range_within(values, columns@, minimum, maximum, limit as int);
+                            lemma_rows_before_succeed(
+                                tokens@, positions, valid_indices@, ends@, sequence as int,
+                                row as int, vocabulary as int, position_limit, contexts@,
+                            );
+                        }
+                        return Err(RowValueError::Positions {
+                            minimum,
+                            maximum,
+                            limit,
+                        });
+                    }
+                    #[cfg(verus_keep_ghost)]
+                    proof! {
+                        let values = grid_row(positions.unwrap()@, sequence as int, row as int);
+                        lemma_range_within(values, columns@, minimum, maximum, limit as int);
+                    }
+                }
+                match context_from_maximum(maximum) {
+                    Some(context) => context,
+                    None => {
+                        #[cfg(verus_keep_ghost)]
+                        proof! {
+                            let values = grid_row(positions.unwrap()@, sequence as int, row as int);
+                            assert(is_maximum_at(values, columns@, maximum as int));
+                            lemma_rows_before_succeed(
+                                tokens@, positions, valid_indices@, ends@, sequence as int,
+                                row as int, vocabulary as int, position_limit, contexts@,
+                            );
+                        }
+                        return Err(RowValueError::Unrepresentable);
+                    }
+                }
+            }
+            None => ends[row],
+        };
+        contexts.push(context);
+        row += 1;
+    }
+    Ok(contexts)
+}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+
+/// For a nonempty list with attained bounds, `range_within` is the per-value range check.
+pub proof fn lemma_range_within(
+    values: Seq<i64>,
+    columns: Seq<usize>,
+    minimum: i64,
+    maximum: i64,
+    limit: int,
+)
+    requires
+        columns.len() > 0,
+        is_minimum_at(values, columns, minimum as int),
+        is_maximum_at(values, columns, maximum as int),
+    ensures
+        values_within(values, columns, limit)
+            == (0 <= minimum && 0 <= maximum && maximum < limit),
+{
+    if values_within(values, columns, limit) {
+        let low = choose|k: int| 0 <= k < columns.len() && values[columns[k] as int] == minimum;
+        let high = choose|k: int| 0 <= k < columns.len() && values[columns[k] as int] == maximum;
+        assert(0 <= values[columns[low] as int] < limit);
+        assert(0 <= values[columns[high] as int] < limit);
+    }
+}
+
+/// Rows already planned keep a witness context, as error postconditions require.
+pub proof fn lemma_rows_before_succeed(
+    tokens: Seq<i64>,
+    positions: Option<&[i64]>,
+    valid_indices: Seq<Vec<usize>>,
+    ends: Seq<usize>,
+    sequence: int,
+    row: int,
+    vocabulary: int,
+    position_limit: Option<usize>,
+    contexts: Seq<usize>,
+)
+    requires
+        contexts.len() == row,
+        forall|r: int| 0 <= r < row ==> #[trigger] row_context_ok(
+            tokens,
+            positions,
+            valid_indices[r]@,
+            sequence,
+            r,
+            vocabulary,
+            position_limit,
+            ends[r] as int,
+            contexts[r] as int,
+        ),
+    ensures
+        forall|r: int| 0 <= r < row ==> #[trigger] row_succeeds(
+            tokens,
+            positions,
+            valid_indices[r]@,
+            sequence,
+            r,
+            vocabulary,
+            position_limit,
+            ends[r] as int,
+        ),
+{
+    assert forall|r: int| 0 <= r < row implies #[trigger] row_succeeds(
+        tokens,
+        positions,
+        valid_indices[r]@,
+        sequence,
+        r,
+        vocabulary,
+        position_limit,
+        ends[r] as int,
+    ) by {
+        assert(row_context_ok(
+            tokens,
+            positions,
+            valid_indices[r]@,
+            sequence,
+            r,
+            vocabulary,
+            position_limit,
+            ends[r] as int,
+            contexts[r] as int,
+        ));
+    }
+}
+
+} // verus!
+
+/// Host plan of one validated rectangular stateful call.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct HostRows {
+    /// Valid source columns of each row in increasing order.
+    pub(crate) valid_indices: Vec<Vec<usize>>,
+    /// Number of tokens appended to each row; zero marks an inactive row.
+    pub(crate) token_counts: Vec<usize>,
+    /// Per-row rotary extent: `1 + max p_b` (explicit) or `L_b + n_b` (implicit).
+    pub(crate) evaluated_contexts: Vec<usize>,
+    /// Each row's last valid column, or `S - 1` for an inactive row.
+    pub(crate) last_columns: Vec<usize>,
+}
+
+/// Why the host side of a stateful call is rejected, in precedence order.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostRowsError {
+    /// A row has no valid token although empty rows are rejected.
+    EmptyRow,
+    /// A row's cache append overflows `usize` or the capacity.
+    Append(
+        /// The first impossible append.
+        AppendError,
+    ),
+    /// A row's valid token or position values are invalid.
+    Values(
+        /// The first failing row's value error.
+        RowValueError,
+    ),
+}
+
+/// Returns each list's length.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(counts =>
+    ensures
+        counts.len() == rows.len(),
+        forall|r: int| 0 <= r < rows.len() ==> #[trigger] counts@[r] == rows@[r].len(),
+))]
+fn list_lengths(rows: &[Vec<usize>]) -> Vec<usize> {
+    let mut counts: Vec<usize> = Vec::with_capacity(rows.len());
+    let mut row: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            row <= rows.len(),
+            counts.len() == row,
+            forall|r: int| 0 <= r < row ==> #[trigger] counts@[r] == rows@[r].len(),
+        decreases rows.len() - row,
+    ))]
+    while row < rows.len() {
+        counts.push(rows[row].len());
+        row += 1;
+    }
+    counts
+}
+
+/// Returns whether any entry of `values` is zero.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(found =>
+    ensures
+        found == exists|j: int| 0 <= j < values.len() && #[trigger] values[j] == 0,
+))]
+fn contains_zero(values: &[usize]) -> bool {
+    let mut index: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            index <= values.len(),
+            forall|j: int| 0 <= j < index ==> #[trigger] values[j] != 0,
+        decreases values.len() - index,
+    ))]
+    while index < values.len() {
+        if values[index] == 0 {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Plans the host side of one stateful call after its single readback.
+///
+/// The mask, token IDs, and optional explicit positions are row-major
+/// `[batch, sequence]`; `lengths` are the per-row cursors the call appends
+/// to. The plan lists every row's valid columns and last valid column,
+/// rejects empty rows when `reject_empty_rows`, plans every append against
+/// `capacity`, and validates valid values only, so padding is inert. The
+/// proof shows the result is exactly `host_rows_outcome`, including the
+/// precedence of its errors.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+#[cfg_attr(verus_keep_ghost, verus_spec(planned =>
+    requires
+        sequence > 0,
+        mask matches Some(flags) ==> flags.len() == batch * sequence,
+        tokens.len() == batch * sequence,
+        positions matches Some(values) ==> values.len() == batch * sequence,
+        lengths.len() == batch,
+    ensures
+        host_rows_outcome(
+            mask,
+            tokens@,
+            positions,
+            batch as int,
+            sequence as int,
+            lengths@,
+            capacity as int,
+            reject_empty_rows,
+            vocabulary as int,
+            position_limit,
+            planned,
+        ),
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn plan_host_rows(
+    mask: Option<&[bool]>,
+    tokens: &[i64],
+    positions: Option<&[i64]>,
+    batch: usize,
+    sequence: usize,
+    lengths: &[usize],
+    capacity: usize,
+    reject_empty_rows: bool,
+    vocabulary: usize,
+    position_limit: Option<usize>,
+) -> Result<HostRows, HostRowsError> {
+    let valid_indices = row_valid_columns(mask, batch, sequence);
+    let last_columns = row_last_columns(mask, batch, sequence);
+    let token_counts = list_lengths(valid_indices.as_slice());
+    // Each planned list is the row's specified column list, and its length the count.
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert forall|r: int| 0 <= r < batch implies {
+            &&& valid_indices@[r]@ == #[trigger] row_columns(mask, sequence as int, r)
+            &&& token_counts@[r] == row_columns(mask, sequence as int, r).len()
+        } by {
+            assert(valid_indices@[r]@ == row_columns(mask, sequence as int, r));
+            assert(token_counts@[r] == valid_indices@[r].len());
+        }
+    }
+    // Verus compiles verified bodies as Rust 2021, so this avoids a `let` chain.
+    let empty_row = if reject_empty_rows {
+        contains_zero(token_counts.as_slice())
+    } else {
+        false
+    };
+    if empty_row {
+        return Err(HostRowsError::EmptyRow);
+    }
+    let ends = match plan_appends(lengths, token_counts.as_slice(), capacity) {
+        Ok(ends) => ends,
+        Err(error) => return Err(HostRowsError::Append(error)),
+    };
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert forall|r: int, k: int| 0 <= r < batch && 0 <= k < valid_indices@[r].len()
+            implies #[trigger] valid_indices@[r]@[k] < sequence by {
+            lemma_grid_row_in_bounds(r, batch as int, sequence as int);
+            assert(lists_valid_columns(mask_row(mask, sequence as int, r), valid_indices@[r]@));
+            assert(mask_row(mask, sequence as int, r).len() == sequence);
+        }
+        assert forall|r: int| 0 <= r < batch implies #[trigger] ends@[r]
+            == lengths[r] + row_columns(mask, sequence as int, r).len() by {
+            assert(token_counts@[r] == row_columns(mask, sequence as int, r).len());
+        }
+        assert forall|r: int| 0 <= r < batch
+            implies lengths[r] + #[trigger] row_columns(mask, sequence as int, r).len()
+            <= capacity by {
+            assert(ends@[r] <= capacity);
+            assert(ends@[r] == lengths[r] + row_columns(mask, sequence as int, r).len());
+        }
+        if reject_empty_rows {
+            assert forall|r: int| 0 <= r < batch
+                implies #[trigger] row_columns(mask, sequence as int, r).len() > 0 by {
+                assert(token_counts@[r] != 0);
+            }
+        }
+    }
+    let evaluated_contexts = match row_contexts(
+        tokens,
+        positions,
+        valid_indices.as_slice(),
+        ends.as_slice(),
+        sequence,
+        vocabulary,
+        position_limit,
+    ) {
+        Ok(contexts) => contexts,
+        Err(error) => {
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                let row = choose|row: int| 0 <= row < batch && {
+                    &&& forall|r: int| 0 <= r < row ==> #[trigger] row_succeeds(
+                        tokens@,
+                        positions,
+                        valid_indices@[r]@,
+                        sequence as int,
+                        r,
+                        vocabulary as int,
+                        position_limit,
+                        ends@[r] as int,
+                    )
+                    &&& row_value_error(
+                        tokens@,
+                        positions,
+                        valid_indices@[row]@,
+                        sequence as int,
+                        row,
+                        vocabulary as int,
+                        position_limit,
+                        error,
+                    )
+                };
+                assert forall|r: int| 0 <= r < row implies #[trigger] row_succeeds(
+                    tokens@,
+                    positions,
+                    row_columns(mask, sequence as int, r),
+                    sequence as int,
+                    r,
+                    vocabulary as int,
+                    position_limit,
+                    lengths[r] + row_columns(mask, sequence as int, r).len(),
+                ) by {
+                    assert(row_succeeds(
+                        tokens@,
+                        positions,
+                        valid_indices@[r]@,
+                        sequence as int,
+                        r,
+                        vocabulary as int,
+                        position_limit,
+                        ends@[r] as int,
+                    ));
+                    assert(valid_indices@[r]@ == row_columns(mask, sequence as int, r));
+                    assert(ends@[r] == lengths[r] + row_columns(mask, sequence as int, r).len());
+                }
+                assert(valid_indices@[row]@ == row_columns(mask, sequence as int, row));
+            }
+            return Err(HostRowsError::Values(error));
+        }
+    };
+    #[cfg(verus_keep_ghost)]
+    proof! {
+        assert forall|r: int| 0 <= r < batch implies #[trigger] row_context_ok(
+            tokens@,
+            positions,
+            row_columns(mask, sequence as int, r),
+            sequence as int,
+            r,
+            vocabulary as int,
+            position_limit,
+            lengths[r] + token_counts@[r],
+            evaluated_contexts@[r] as int,
+        ) by {
+            assert(row_context_ok(
+                tokens@,
+                positions,
+                valid_indices@[r]@,
+                sequence as int,
+                r,
+                vocabulary as int,
+                position_limit,
+                ends@[r] as int,
+                evaluated_contexts@[r] as int,
+            ));
+            assert(valid_indices@[r]@ == row_columns(mask, sequence as int, r));
+            assert(ends@[r] == lengths[r] + token_counts@[r]);
+        }
+    }
+    Ok(HostRows {
+        valid_indices,
+        token_counts,
+        evaluated_contexts,
+        last_columns,
+    })
 }
 
 #[cfg(test)]

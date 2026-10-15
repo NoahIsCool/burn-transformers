@@ -33,7 +33,7 @@ use super::plan::ScatterLayout;
 use super::{
     checks::{ensure_grid, ensure_nonempty, ensure_same_device, range_error, read_int_tensors},
     input::InputNames,
-    plan::{self, AppendError},
+    plan::{self, AppendError, HostRowsError, RowValueError},
 };
 
 /// Policy for rows that contain no valid token in a stateful call.
@@ -184,66 +184,61 @@ pub(crate) fn prepare_stateful_rows<B: Backend>(
     }
 
     let host = HostInput::read(input, batch, sequence, names.token_ids)?;
-    let valid_indices = host.valid_indices(batch, sequence);
-    let last_columns = host.last_columns(batch, sequence);
-    if contract.empty_rows == EmptyRows::Reject && valid_indices.iter().any(Vec::is_empty) {
-        return Err(Error::shape(
-            names.token_mask,
-            "at least one valid token in every prefill row",
-            "a fully masked prompt row",
-        ));
-    }
-    let token_counts = valid_indices.iter().map(Vec::len).collect::<Vec<_>>();
-    let ends = plan::plan_appends(lengths, &token_counts, capacity)
-        .map_err(|error| append_error(error, capacity))?;
-
-    let mut evaluated_contexts = Vec::with_capacity(batch);
-    for (row, columns) in valid_indices.iter().enumerate() {
-        let window = row * sequence..(row + 1) * sequence;
-        if let Some((minimum, maximum)) = plan::value_range(&host.tokens[window.clone()], columns)
-            && !plan::range_within(minimum, maximum, contract.vocabulary)
-        {
-            return Err(range_error(
-                names.token_ids,
-                "token",
-                contract.vocabulary,
-                minimum,
-                maximum,
-            ));
-        }
-        let explicit = host
-            .positions
-            .as_ref()
-            .and_then(|positions| plan::value_range(&positions[window], columns));
-        evaluated_contexts.push(match explicit {
-            Some((minimum, maximum)) => {
-                if let Some(limit) = contract.position_limit
-                    && !plan::range_within(minimum, maximum, limit)
-                {
-                    return Err(range_error(
-                        names.position_ids,
-                        "position",
-                        limit,
-                        minimum,
-                        maximum,
-                    ));
-                }
-                plan::context_from_maximum(maximum).ok_or_else(|| {
-                    Error::configuration(names.position_ids, "positions must be non-negative")
-                })?
-            }
-            // Implicit positions L_b..L_b + n_b, or an inactive row's unchanged cursor.
-            None => ends[row],
-        });
-    }
+    // The verified planner lists valid columns, plans appends, and validates
+    // valid values; implicit positions L_b..L_b + n_b give the extent L_b + n_b.
+    let planned = plan::plan_host_rows(
+        host.mask.as_deref(),
+        &host.tokens,
+        host.positions.as_deref(),
+        batch,
+        sequence,
+        lengths,
+        capacity,
+        contract.empty_rows == EmptyRows::Reject,
+        contract.vocabulary,
+        contract.position_limit,
+    )
+    .map_err(|error| host_rows_error(error, capacity, contract))?;
     Ok(StatefulRows {
         batch,
         sequence,
-        valid_indices,
-        token_counts,
-        evaluated_contexts,
-        last_columns,
+        valid_indices: planned.valid_indices,
+        token_counts: planned.token_counts,
+        evaluated_contexts: planned.evaluated_contexts,
+        last_columns: planned.last_columns,
     })
+}
+
+/// Converts a host-planning failure into the shared error for its tensor.
+fn host_rows_error(
+    error: HostRowsError,
+    capacity: usize,
+    contract: &StatefulContract<'_>,
+) -> Error {
+    let names = contract.names;
+    match error {
+        HostRowsError::EmptyRow => Error::shape(
+            names.token_mask,
+            "at least one valid token in every prefill row",
+            "a fully masked prompt row",
+        ),
+        HostRowsError::Append(error) => append_error(error, capacity),
+        HostRowsError::Values(RowValueError::Tokens { minimum, maximum }) => range_error(
+            names.token_ids,
+            "token",
+            contract.vocabulary,
+            minimum,
+            maximum,
+        ),
+        HostRowsError::Values(RowValueError::Positions {
+            minimum,
+            maximum,
+            limit,
+        }) => range_error(names.position_ids, "position", limit, minimum, maximum),
+        HostRowsError::Values(RowValueError::Unrepresentable) => {
+            Error::configuration(names.position_ids, "positions must be non-negative")
+        }
+    }
 }
 
 /// Host copies of the mask, token IDs, and explicit positions of one call.
@@ -285,17 +280,14 @@ impl HostInput {
         if let Some(positions) = &input.position_ids {
             tensors.push(flat(positions.clone()));
         }
-        let mut values = read_int_tensors(tensors, label)?;
-        // Split in reverse registration order: positions, tokens, then mask.
-        let positions = input
-            .position_ids
-            .is_some()
-            .then(|| values.split_off(values.len() - elements));
-        let tokens = values.split_off(values.len() - elements);
-        let mask = input
-            .token_mask
-            .is_some()
-            .then(|| values.into_iter().map(|value| value != 0).collect());
+        // The readback holds exactly one `elements`-long segment per tensor.
+        let values = read_int_tensors(tensors, label)?;
+        let (mask, tokens, positions) = plan::split_readback(
+            values,
+            elements,
+            input.token_mask.is_some(),
+            input.position_ids.is_some(),
+        );
         Ok(Self {
             mask,
             tokens,
@@ -303,31 +295,13 @@ impl HostInput {
         })
     }
 
-    /// Returns every row's last valid column, using `S - 1` for inactive rows.
-    fn last_columns(&self, batch: usize, sequence: usize) -> Vec<usize> {
-        match &self.mask {
-            Some(mask) => mask
-                .chunks_exact(sequence)
-                .map(|row| plan::last_valid_column(row).unwrap_or(sequence - 1))
-                .collect(),
-            None => vec![sequence - 1; batch],
-        }
-    }
-
     /// Lists every row's valid columns, treating an absent mask as all valid.
+    ///
+    /// The mask must hold `batch * sequence` flags, as [`Self::read`] produces.
+    /// Production planning uses [`plan::plan_host_rows`]; tests use this view.
+    #[cfg(test)]
     pub(crate) fn valid_indices(&self, batch: usize, sequence: usize) -> Vec<Vec<usize>> {
-        valid_rows(self.mask.as_deref(), batch, sequence)
-    }
-}
-
-/// Lists each row's valid columns from row-major flags; `None` means all valid.
-fn valid_rows(mask: Option<&[bool]>, batch: usize, sequence: usize) -> Vec<Vec<usize>> {
-    match mask {
-        Some(mask) => mask
-            .chunks_exact(sequence)
-            .map(plan::valid_columns)
-            .collect(),
-        None => vec![(0..sequence).collect::<Vec<_>>(); batch],
+        plan::row_valid_columns(self.mask.as_deref(), batch, sequence)
     }
 }
 
