@@ -169,6 +169,15 @@ fn mtp_truncation_keeps_the_lag() {
     assert_eq!(mtp_length_after_truncate(1, 0), 0);
 }
 
+/// An EOS draft is never evaluated by the target.
+#[test]
+fn verification_skips_a_terminal_draft() {
+    assert_eq!(verification_tokens(3, false), Some(4));
+    assert_eq!(verification_tokens(3, true), Some(3));
+    assert_eq!(verification_tokens(0, true), Some(1));
+    assert_eq!(verification_tokens(usize::MAX, false), None);
+}
+
 proptest! {
     /// Every random mask produces maps satisfying their defining equations.
     #[test]

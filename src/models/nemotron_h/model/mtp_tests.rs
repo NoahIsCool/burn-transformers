@@ -158,6 +158,47 @@ fn prefill_mtp_cache_establishes_one_token_lag() {
     assert_eq!(history.materialize().unwrap().0.dims()[2], 2);
 }
 
+/// Prompt alignment projects keys and values only (NEM-2).
+///
+/// No vocabulary projection runs, and the cached pairs are bit-identical to
+/// those of the full MTP forward over the same shifted pairs.
+#[test]
+fn prefill_mtp_cache_projects_only_keys_and_values() {
+    let device = Default::default();
+    let model = NemotronHForCausalLm::<TestBackend>::init(tiny_config(true), &device).unwrap();
+    let mut aligned = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+        .unwrap();
+    let target = prefill_target(&model, &mut aligned, &device);
+    let projections = || super::super::LOGIT_PROJECTIONS.with(std::cell::Cell::get);
+    let before = projections();
+    model
+        .prefill_mtp_cache(
+            Tensor::from_ints([[1, 2, 3]], &device),
+            target.clone(),
+            &mut aligned,
+        )
+        .unwrap();
+    assert_eq!(projections(), before);
+
+    let mut full = model
+        .new_speculative_decode_state(CacheConfig::new(1, 16).unwrap(), 1, 2, &device)
+        .unwrap();
+    prefill_target(&model, &mut full, &device);
+    model
+        .forward_mtp_cached(
+            Tensor::from_ints([[2, 3]], &device),
+            target.narrow(1, 0, 2),
+            None,
+            &mut full,
+        )
+        .unwrap();
+    assert_eq!(
+        logical_cache_snapshot(&aligned),
+        logical_cache_snapshot(&full)
+    );
+}
+
 /// Rollback restores every readable target KV, Mamba, convolution, and MTP KV value.
 #[test]
 fn transaction_rollback_restores_every_readable_bank() {

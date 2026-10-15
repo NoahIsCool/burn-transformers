@@ -54,7 +54,7 @@
 
 use core::num::NonZeroUsize;
 
-use burn::tensor::{DType, Int, Tensor, backend::Backend};
+use burn::tensor::{DType, Int, Tensor, TensorData, backend::Backend};
 
 use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions,
@@ -414,6 +414,15 @@ impl<B: Backend> CausalLanguageModel<B> for NemotronHForCausalLm<B> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Number of cached backbone passes run on this thread (test instrumentation).
+    ///
+    /// Speculative tests read it to prove that verification costs exactly
+    /// one target pass per cycle.
+    pub(super) static CACHED_PASSES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
 /// Activations a cached pass keeps besides the final normalized states.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Retain {
@@ -485,6 +494,59 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         Ok(output)
     }
 
+    /// Evaluates batch-one `tokens` after the working cursor in one pass and records them.
+    ///
+    /// This is the speculative verifier's target pass: inside a transaction
+    /// the tokens are staged with per-token recurrent snapshots, so any
+    /// accepted prefix can be committed. Returns F32 logits `[n, vocabulary]`
+    /// after every token and the final normalized hidden states `[1, n, hidden]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns shape errors for an empty or out-of-vocabulary token list or a
+    /// batch other than one, a configuration error beyond
+    /// `max_position_embeddings`, and the cache errors of the pass.
+    pub(super) fn verify_tokens(
+        &self,
+        tokens: &[u32],
+        state: &mut NemotronHDecodeState<B>,
+    ) -> Result<(Tensor<B, 2>, Tensor<B, 3>)> {
+        state.validate_for_model(self)?;
+        let vocabulary = self.config().vocab_size;
+        if state.tensors.batch_size() != 1
+            || tokens.is_empty()
+            || tokens.iter().any(|&token| token as usize >= vocabulary)
+        {
+            return Err(Error::shape(
+                INPUT_NAMES.token_ids,
+                format!("a non-empty batch-one row of token values in 0..{vocabulary}"),
+                format!(
+                    "{} tokens for batch {}",
+                    tokens.len(),
+                    state.tensors.batch_size()
+                ),
+            ));
+        }
+        let end = state.tensors.working_lengths()[0].checked_add(tokens.len());
+        if end.is_none_or(|end| end > self.config().max_position_embeddings) {
+            return Err(Error::configuration(
+                "nemotron_h.position",
+                "cached length exceeds max_position_embeddings",
+            ));
+        }
+        let device = state.tensors.device().clone();
+        let batch = CompactBatch::new(&[(0..tokens.len()).collect()], tokens.len(), &device)?;
+        let values = tokens.iter().map(|&token| i64::from(token)).collect();
+        let token_ids = Tensor::from_data(TensorData::new(values, [1, tokens.len()]), &device);
+        let (pass, step) = self.cached_pass(token_ids, &batch, state, Retain::default())?;
+        let logits = self
+            .project_logits(pass.hidden.clone())?
+            .cast(DType::F32)
+            .squeeze_dim::<2>(0);
+        state.tensors.publish_step(step)?;
+        Ok((logits, pass.hidden))
+    }
+
     /// Runs the backbone over a compact batch and records its cache writes in one step.
     ///
     /// The returned step is not yet published: callers publish it once every
@@ -497,6 +559,8 @@ impl<B: Backend> NemotronHForCausalLm<B> {
         state: &mut NemotronHDecodeState<B>,
         retain: Retain,
     ) -> Result<(CachedPass<B>, TensorStepWrites<B>)> {
+        #[cfg(test)]
+        CACHED_PASSES.with(|passes| passes.set(passes.get() + 1));
         let counts = batch.counts().to_vec();
         let baselines = state.tensors.working_lengths().to_vec();
         let transactional = if state.tensors.has_active_transaction() {
@@ -891,9 +955,9 @@ fn prepare_stateful_input<B: Backend>(
 
 /// Derives compact cache geometry from model weights and schedule counts.
 ///
-/// Speculative states stage attention proposals in place: full storage never
-/// evicts, so proposals can live at their final slots and attention keeps its
-/// zero-copy write-ahead view inside transactions.
+/// Speculative states stage attention proposals (target and MTP) in place:
+/// full storage never evicts, so proposals can live at their final slots and
+/// attention keeps its zero-copy write-ahead view inside transactions.
 fn cache_specs<B: Backend>(
     model: &NemotronHForCausalLm<B>,
     staging_capacity: usize,
@@ -972,7 +1036,7 @@ fn cache_specs<B: Backend>(
                 KvCacheStorage::Full,
                 dtype,
             )
-            .map(|spec| spec.with_staging_capacity(staging_capacity))
+            .map(staged)
         })
         .transpose()?;
     Ok((kv, recurrent, mtp))

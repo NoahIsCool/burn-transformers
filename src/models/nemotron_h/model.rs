@@ -977,6 +977,8 @@ impl<B: Backend> NemotronHForCausalLm<B> {
 
     /// Applies the independent or tied vocabulary projection.
     fn project_logits(&self, hidden: Tensor<B, 3>) -> Result<Tensor<B, 3>> {
+        #[cfg(test)]
+        LOGIT_PROJECTIONS.with(|projections| projections.set(projections.get() + 1));
         let weight_device = self.lm_head.as_ref().map_or_else(
             || self.model.embed_tokens.weight.val().device(),
             |head| head.weight.val().device(),
@@ -995,6 +997,15 @@ impl<B: Backend> NemotronHForCausalLm<B> {
             )),
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Number of vocabulary projections run on this thread (test instrumentation).
+    ///
+    /// MTP tests read it to prove that prompt alignment never projects logits.
+    pub(super) static LOGIT_PROJECTIONS: core::cell::Cell<usize> =
+        const { core::cell::Cell::new(0) };
 }
 
 /// Converts family activation metadata into the shared mathematical enum.

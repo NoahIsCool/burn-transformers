@@ -33,7 +33,8 @@
 //! how a speculative step records recurrent state: one terminal state when
 //! every row appends at most one token, per-token snapshots otherwise (which
 //! requires existing state in every active row). [`mtp_length_after_truncate`]
-//! keeps the shifted MTP cursor at most one position behind the target.
+//! keeps the shifted MTP cursor at most one position behind the target, and
+//! [`verification_tokens`] sizes the one-pass target verification of a draft.
 //!
 //! Every function is pure integer logic with checked arithmetic, so tensor
 //! programs built from these plans cannot index out of range.
@@ -261,6 +262,20 @@ pub(crate) fn transactional_mamba(
 pub(crate) const fn mtp_length_after_truncate(target: usize, mtp: usize) -> usize {
     let limit = target.saturating_sub(1);
     if mtp < limit { mtp } else { limit }
+}
+
+/// Number of target tokens one verification pass must evaluate.
+///
+/// The pass consumes the lead token and the drafts `y_1..y_d`. When the last
+/// draft is end-of-sequence its successor distribution is never needed: an
+/// accepted EOS ends the cycle and a rejection stops earlier, so `y_d` itself
+/// is not evaluated. Returns `None` on overflow.
+pub(crate) const fn verification_tokens(drafted: usize, last_draft_is_eos: bool) -> Option<usize> {
+    if last_draft_is_eos && drafted > 0 {
+        Some(drafted)
+    } else {
+        drafted.checked_add(1)
+    }
 }
 
 #[cfg(test)]
