@@ -7,6 +7,7 @@ use burn::{
 use serde::Deserialize;
 
 use super::*;
+use crate::LogitsSelection;
 use crate::checkpoint::LoadOptions;
 use crate::models::gpt2::{Gpt2Activation, Gpt2Config};
 

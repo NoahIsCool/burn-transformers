@@ -138,6 +138,20 @@ fn unbounded_positions_are_not_inspected() {
     assert_eq!(validated.evaluated_context, 0);
 }
 
+/// Physical numbering ignores the mask, as GPT-2 and GPT-NeoX require.
+#[test]
+fn physical_numbering_keeps_padded_columns() {
+    let contract = contract().with_implicit_positions(ImplicitPositions::PhysicalColumns);
+    let validated = validate(
+        &input(ints([[0, 5, 6]]), Some(mask([[false, true, true]])), None),
+        &contract,
+    )
+    .unwrap();
+    assert_eq!(int_values(validated.positions.unwrap()), vec![0, 1, 2]);
+    assert_eq!(validated.evaluated_context, 3);
+    assert!(!validated.fully_valid);
+}
+
 /// Position-free contracts materialize nothing unless positions are explicit.
 #[test]
 fn unused_numbering_resolves_only_explicit_positions() {

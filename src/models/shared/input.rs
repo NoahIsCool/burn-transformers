@@ -22,6 +22,8 @@
 //!
 //! * valid-token ordinals `p[b, t] = Σ_{u <= t} m[b, u] - 1`, zero at padding,
 //!   so left padding does not shift RoPE phases (Qwen, DeepSeek, Muse);
+//! * physical columns `p[b, t] = t`, including padding, as the reference GPT-2
+//!   and GPT-NeoX implementations number learned or rotary positions;
 //! * no positions at all for relative or position-free mixers (T5, Nemotron-H),
 //!   which still validate explicit positions when they accept them.
 //!
@@ -52,6 +54,8 @@ pub(crate) struct InputNames<'a> {
 pub(crate) enum ImplicitPositions {
     /// `p[b, t] = Σ_{u <= t} m[b, u] - 1` at valid tokens and `0` at padding.
     ValidTokenOrdinals,
+    /// `p[b, t] = t` for every column, including padding.
+    PhysicalColumns,
     /// No positions are materialized; explicit positions are still validated.
     Unused,
 }
@@ -235,11 +239,13 @@ pub(crate) fn resolve_positions<B: Backend>(
     }
     Ok(match (implicit, &input.token_mask) {
         (ImplicitPositions::ValidTokenOrdinals, Some(mask)) => Some(valid_token_ordinals(mask)),
-        (ImplicitPositions::ValidTokenOrdinals, None) => Some(physical_columns(
-            batch,
-            sequence,
-            &input.token_ids.device(),
-        )?),
+        (ImplicitPositions::ValidTokenOrdinals, None) | (ImplicitPositions::PhysicalColumns, _) => {
+            Some(physical_columns(
+                batch,
+                sequence,
+                &input.token_ids.device(),
+            )?)
+        }
         (ImplicitPositions::Unused, _) => None,
     })
 }

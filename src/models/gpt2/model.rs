@@ -24,11 +24,11 @@ use burn::{
     nn::{
         Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, LinearLayout,
     },
-    tensor::{ElementConversion, Int, Tensor, backend::Backend},
+    tensor::{Tensor, backend::Backend},
 };
 
 use crate::{
-    CausalLmInput, CausalLmOutput, Error, ForwardOptions, LogitsSelection, Result,
+    CausalLmInput, CausalLmOutput, Error, ForwardOptions, Result,
     architecture::TokenMask,
     attention::{
         AttentionPrecisionMode, GroupedQueryAttention, GroupedQueryAttentionConfig,
@@ -40,6 +40,20 @@ use crate::{
 };
 
 use super::Gpt2Config;
+use crate::models::shared::{
+    ImplicitPositions, InputContract, InputNames, ensure_same_device, select_hidden,
+    validate_input, validate_nonempty_mask,
+};
+
+/// Tensor names reported by GPT-2 input errors.
+const INPUT_NAMES: InputNames<'static> = InputNames {
+    token_ids: "gpt2.token_ids",
+    token_mask: "gpt2.token_mask",
+    position_ids: "gpt2.position_ids",
+};
+
+/// Owner named when a tensor is on another device than the weights.
+const PARAMETERS: &str = "GPT-2 parameters";
 
 // Editable block equations and intermediate activation boundaries.
 
@@ -126,7 +140,16 @@ impl<B: Backend> Gpt2Block<B> {
         hidden: Tensor<B, 3>,
         mask: Option<&TokenMask<B>>,
     ) -> Result<Tensor<B, 3>> {
-        validate_mask(mask, hidden.dims()[0], hidden.dims()[1], &hidden.device())?;
+        let [batch, sequence, _] = hidden.dims();
+        if let Some(mask) = mask {
+            ensure_same_device(
+                INPUT_NAMES.token_mask,
+                &mask.as_tensor().device(),
+                &hidden.device(),
+                "the GPT-2 hidden states",
+            )?;
+        }
+        validate_nonempty_mask(mask, batch, sequence, INPUT_NAMES.token_mask)?;
         self.forward_inner(hidden, mask, 0, None)
     }
 
@@ -317,34 +340,15 @@ impl<B: Backend> Gpt2Model<B> {
                 format!("{:?}", input.token_ids.dims()),
             ));
         }
-        ensure_device("gpt2.token_ids", &input.token_ids.device(), &device)?;
-        validate_indices(
-            "gpt2.token_ids",
-            input.token_ids.clone(),
-            self.config.vocab_size,
-        )?;
-        validate_mask(input.token_mask.as_ref(), batch, sequence, &device)?;
-        let positions = match &input.position_ids {
-            Some(positions) => {
-                if positions.dims() != [batch, sequence] {
-                    return Err(Error::shape(
-                        "gpt2.position_ids",
-                        format!("[{batch}, {sequence}]"),
-                        format!("{:?}", positions.dims()),
-                    ));
-                }
-                ensure_device("gpt2.position_ids", &positions.device(), &device)?;
-                validate_indices(
-                    "gpt2.position_ids",
-                    positions.clone(),
-                    self.config.n_positions,
-                )?;
-                positions.clone()
-            }
-            None => Tensor::<B, 1, Int>::arange(0..sequence as i64, &device)
-                .unsqueeze_dim(0)
-                .repeat_dim(0, batch),
-        };
+        // Learned absolute positions number physical columns, including padding.
+        let positions = validate_input(
+            input,
+            &device,
+            &InputContract::new(INPUT_NAMES, PARAMETERS, self.config.vocab_size)
+                .with_position_limit(self.config.n_positions)
+                .with_implicit_positions(ImplicitPositions::PhysicalColumns),
+        )?
+        .require_positions(INPUT_NAMES.position_ids)?;
         let mut hidden = self.token_embedding.forward(input.token_ids.clone())
             + self.position_embedding.forward(positions);
         hidden = emit(&mut hooks, Stack::Decoder.embedding(), hidden)?;
@@ -511,17 +515,6 @@ fn validate_options(options: &ForwardOptions) -> Result<()> {
     Ok(())
 }
 
-/// Returns a contextual error before combining tensors from different devices.
-fn ensure_device<D: PartialEq>(name: &str, actual: &D, expected: &D) -> Result<()> {
-    if actual != expected {
-        return Err(Error::configuration(
-            name,
-            "tensor and parameters must share a device",
-        ));
-    }
-    Ok(())
-}
-
 /// Checks a nonempty `[batch, token, width]` residual and its parameter device.
 fn validate_hidden<B: Backend>(
     hidden: &Tensor<B, 3>,
@@ -536,7 +529,7 @@ fn validate_hidden<B: Backend>(
             format!("{:?}", hidden.dims()),
         ));
     }
-    ensure_device("gpt2.hidden", &hidden.device(), device)
+    ensure_same_device("gpt2.hidden", &hidden.device(), device, PARAMETERS)
 }
 
 /// Checks affine LayerNorm vector widths, floating dtypes, and devices against the residual.
@@ -552,7 +545,7 @@ fn validate_norm<B: Backend>(hidden: &Tensor<B, 3>, norm: &LayerNorm<B>, name: &
                 format!("{:?}", parameter.dims()),
             ));
         }
-        ensure_device(name, &parameter.device(), &hidden.device())?;
+        ensure_same_device(name, &parameter.device(), &hidden.device(), PARAMETERS)?;
         if parameter.dtype() != hidden.dtype() {
             return Err(Error::configuration(
                 name,
@@ -561,112 +554,6 @@ fn validate_norm<B: Backend>(hidden: &Tensor<B, 3>, norm: &LayerNorm<B>, name: &
         }
     }
     Ok(())
-}
-
-/// Reads extrema to reject negative or out-of-range embedding indices before backend lookup.
-fn validate_indices<B: Backend>(name: &str, ids: Tensor<B, 2, Int>, limit: usize) -> Result<()> {
-    let minimum = ids
-        .clone()
-        .min()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("{name} range read: {error}")))?
-        .elem::<i64>();
-    let maximum = ids
-        .max()
-        .try_into_scalar()
-        .map_err(|error| Error::BackendCapability(format!("{name} range read: {error}")))?
-        .elem::<i64>();
-    if minimum < 0 || maximum >= limit as i64 {
-        return Err(Error::configuration(
-            name,
-            format!("expected indices in 0..{limit}, observed {minimum}..={maximum}"),
-        ));
-    }
-    Ok(())
-}
-
-/// Checks `[batch, token]` mask shape and device and rejects rows without any valid token.
-///
-/// Valid entries mark visible keys; padded query positions remain part of the stateless graph.
-fn validate_mask<B: Backend>(
-    mask: Option<&TokenMask<B>>,
-    batch: usize,
-    sequence: usize,
-    device: &B::Device,
-) -> Result<()> {
-    if let Some(mask) = mask {
-        if mask.as_tensor().dims() != [batch, sequence] {
-            return Err(Error::shape(
-                "gpt2.token_mask",
-                format!("[{batch}, {sequence}]"),
-                format!("{:?}", mask.as_tensor().dims()),
-            ));
-        }
-        ensure_device("gpt2.token_mask", &mask.as_tensor().device(), device)?;
-        let least = mask
-            .as_tensor()
-            .clone()
-            .int()
-            .sum_dim(1)
-            .min()
-            .try_into_scalar()
-            .map_err(|error| Error::BackendCapability(format!("gpt2 mask read: {error}")))?
-            .elem::<i64>();
-        if least == 0 {
-            return Err(Error::configuration(
-                "gpt2.token_mask",
-                "each batch row needs a valid token",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Selects all, explicit, or per-row last valid token states while preserving rank three.
-///
-/// Explicit positions retain caller order; last-token selection accounts for padding holes.
-fn select_hidden<B: Backend>(
-    hidden: Tensor<B, 3>,
-    mask: Option<&TokenMask<B>>,
-    selection: &LogitsSelection,
-) -> Result<Tensor<B, 3>> {
-    let [batch, sequence, _] = hidden.dims();
-    match selection {
-        LogitsSelection::All => Ok(hidden),
-        LogitsSelection::Positions(indices) => {
-            if indices.is_empty() || indices.iter().any(|index| *index >= sequence) {
-                return Err(Error::configuration(
-                    "gpt2.logits",
-                    "positions must be nonempty and within the sequence",
-                ));
-            }
-            Ok(Tensor::cat(
-                indices
-                    .iter()
-                    .map(|index| hidden.clone().narrow(1, *index, 1))
-                    .collect(),
-                1,
-            ))
-        }
-        LogitsSelection::Last => match mask {
-            None => Ok(hidden.narrow(1, sequence - 1, 1)),
-            Some(mask) => {
-                let mask = crate::architecture::tensor_bool_values(
-                    mask.as_tensor().clone(),
-                    "gpt2 token mask",
-                )?;
-                let mut rows = Vec::with_capacity(batch);
-                for (row, valid) in mask.chunks(sequence).enumerate() {
-                    let last = valid
-                        .iter()
-                        .rposition(|value| *value)
-                        .ok_or_else(|| Error::configuration("gpt2.token_mask", "empty row"))?;
-                    rows.push(hidden.clone().narrow(0, row, 1).narrow(1, last, 1));
-                }
-                Ok(Tensor::cat(rows, 0))
-            }
-        },
-    }
 }
 
 #[cfg(test)]
