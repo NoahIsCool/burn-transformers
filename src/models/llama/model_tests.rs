@@ -9,9 +9,10 @@ use super::test_support::{
 };
 use super::*;
 use crate::{
-    LogitsSelection,
+    Error, LogitsSelection,
     architecture::{HookedModel, StagedModel},
     experiment::AttentionPolicy,
+    intervention::Stack,
     models::llama::{LlamaFamilyConfig, LlamaVariant},
 };
 

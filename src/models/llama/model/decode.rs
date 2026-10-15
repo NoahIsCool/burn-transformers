@@ -71,6 +71,15 @@
 //! RoPE). Context-dependent RoPE (dynamic NTK, LongRoPE) is accepted only
 //! while every row stays within the original context, because cached keys
 //! cannot be re-rotated.
+//!
+//! # Shared by every dense decoder
+//!
+//! The state, the cache layout, and the step are generic over the
+//! crate-private `DecoderGraph` interface: [`forward_cached`] runs any
+//! graph's blocks against a [`LlamaDecodeState`], which another family can
+//! wrap in its own state type. Every layer's rule must be global or a
+//! sliding window, and all sliding layers below the capacity must share one
+//! window, because they share one ring group.
 
 use core::num::NonZeroUsize;
 
@@ -80,7 +89,7 @@ use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions,
     LogitsSelection, Result,
     architecture::DecodeState as ArchitectureDecodeState,
-    attention::{AttentionProjection, GroupedQueryAttention},
+    attention::{AttentionConnectivity, AttentionProjection, GroupedQueryAttention},
     cache::{
         CacheConfig, KvBatchReadPlan, KvBatchSegment, KvCacheStorage, NativeKvCacheSpec, StepBank,
         TensorDecodeState, TensorStepWrites, TokenAlignment,
@@ -93,11 +102,12 @@ use crate::{
     position::RotaryAngles,
 };
 
-use super::super::{LlamaArchitecture, LlamaFamilyConfig, plan::cache_slots};
-use super::{INPUT_NAMES, LayerKeys, LlamaForCausalLm, step::StepLayout};
-
-/// Owner named when an input lives on another device than the cache.
-const DECODE_STATE: &str = "Llama-family decode state";
+use super::super::{LlamaFamilyConfig, plan::cache_slots};
+use super::{
+    LlamaForCausalLm,
+    graph::{DecoderBlock, DecoderGraph, GraphLabels, LayerKeys, RotaryTables},
+    step::StepLayout,
+};
 
 // Cache layout.
 
@@ -139,23 +149,58 @@ struct CacheLayout {
 }
 
 impl CacheLayout {
-    /// Derives the layout of `architecture` for `capacity` tokens stored in `dtype`.
-    fn plan(architecture: &LlamaArchitecture, capacity: usize, dtype: DType) -> Result<Self> {
-        let ring_window = architecture
-            .sliding_window()
-            .filter(|&window| window < capacity)
-            .and_then(NonZeroUsize::new);
-        let in_ring: Vec<bool> = architecture
-            .layers
-            .iter()
-            .map(|layer| ring_window.is_some() && layer.sliding_window().is_some())
-            .collect();
+    /// Derives the layout of `graph` for `capacity` tokens in its activation dtype.
+    ///
+    /// Sliding layers whose window is below the capacity share one ring
+    /// group; a wider window can never exclude a cached key, so such layers
+    /// live in full storage like global layers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Configuration`] for chunked-local layers and for two
+    /// different sliding windows below the capacity, which one ring group
+    /// cannot hold, and cache specification errors.
+    fn plan<B: Backend, G: DecoderGraph<B>>(graph: &G, capacity: usize) -> Result<Self> {
+        let labels = G::LABELS;
+        let geometry = graph.geometry();
+        let mut ring_window: Option<NonZeroUsize> = None;
+        let mut in_ring = Vec::with_capacity(graph.blocks().len());
+        for (index, block) in graph.blocks().iter().enumerate() {
+            let window = match block.connectivity() {
+                AttentionConnectivity::Global => None,
+                AttentionConnectivity::SlidingWindow { window } => {
+                    NonZeroUsize::new(window).filter(|window| window.get() < capacity)
+                }
+                AttentionConnectivity::ChunkedLocal { .. } => {
+                    return Err(Error::configuration(
+                        labels.field("decode_state.layers"),
+                        format!(
+                            "layer {index} uses chunked-local attention, which this cache cannot store"
+                        ),
+                    ));
+                }
+            };
+            if let Some(window) = window {
+                if ring_window.is_some_and(|ring| ring != window) {
+                    return Err(Error::configuration(
+                        labels.field("decode_state.layers"),
+                        format!(
+                            "layer {index} slides over {window} keys, but an earlier layer over {}; one ring group holds one window",
+                            ring_window.map_or(0, NonZeroUsize::get)
+                        ),
+                    ));
+                }
+                ring_window = Some(window);
+            }
+            in_ring.push(window.is_some());
+        }
         let numbering = cache_slots(&in_ring);
+        let dtype = graph.activation_dtype();
         let spec = |layers, storage| {
             NativeKvCacheSpec::new(
                 layers,
-                architecture.key_value_heads,
-                architecture.head_dim,
+                geometry.key_value_heads,
+                geometry.head_dim,
                 storage,
                 dtype,
             )
@@ -197,14 +242,15 @@ impl CacheLayout {
         config: CacheConfig,
         batch_size: usize,
         device: &B::Device,
+        labels: &GraphLabels,
     ) -> Result<TensorDecodeState<B>> {
         let mut tensors = TensorDecodeState::new(config, batch_size, device)?;
         for group in [self.full, self.ring].into_iter().flatten() {
             let index = tensors.main_mut().add_native_kv(group.spec)?;
             if index != group.index {
                 return Err(Error::Cache(format!(
-                    "Llama-family KV group must be {}, found {index}",
-                    group.index
+                    "{} KV group must be {}, found {index}",
+                    labels.family, group.index
                 )));
             }
         }
@@ -226,26 +272,32 @@ pub struct LlamaDecodeState<B: Backend> {
 }
 
 impl<B: Backend> LlamaDecodeState<B> {
-    /// Allocates the cache groups of `model` for `batch_size` rows.
-    fn new(
-        model: &LlamaForCausalLm<B>,
+    /// Allocates the cache groups of `graph` for `batch_size` rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Configuration`] when the capacity exceeds the trained
+    /// context or Burn's portable `i32` index range, layout errors (see
+    /// `CacheLayout::plan`), and allocation errors.
+    pub(crate) fn for_graph<G: DecoderGraph<B>>(
+        graph: &G,
         config: CacheConfig,
         batch_size: usize,
         device: &B::Device,
     ) -> Result<Self> {
-        let architecture = model.architecture();
+        let labels = G::LABELS;
+        let limit = graph.geometry().max_position_embeddings;
         let capacity = config.capacity();
-        if capacity > architecture.max_position_embeddings || capacity > i32::MAX as usize {
+        if capacity > limit || capacity > i32::MAX as usize {
             return Err(Error::configuration(
-                "llama.decode_state.capacity",
+                labels.field("decode_state.capacity"),
                 format!(
-                    "{capacity} exceeds max_position_embeddings {} or Burn's portable i32 index range",
-                    architecture.max_position_embeddings
+                    "{capacity} exceeds max_position_embeddings {limit} or Burn's portable i32 index range"
                 ),
             ));
         }
-        let layout = CacheLayout::plan(architecture, capacity, model.model.activation_dtype())?;
-        let tensors = layout.allocate(config, batch_size, device)?;
+        let layout = CacheLayout::plan(graph, capacity)?;
+        let tensors = layout.allocate(config, batch_size, device, &labels)?;
         Ok(Self {
             tensors,
             layout,
@@ -269,13 +321,9 @@ impl<B: Backend> LlamaDecodeState<B> {
             .count()
     }
 
-    /// Checks that this state was allocated for `model` and is unchanged.
-    fn validate_for(&self, model: &LlamaForCausalLm<B>) -> Result<()> {
-        let expected = CacheLayout::plan(
-            model.architecture(),
-            self.tensors.capacity(),
-            model.model.activation_dtype(),
-        )?;
+    /// Checks that this state was allocated for `graph` and is unchanged.
+    fn validate_for<G: DecoderGraph<B>>(&self, graph: &G) -> Result<()> {
+        let expected = CacheLayout::plan(graph, self.tensors.capacity())?;
         let groups = [expected.full, expected.ring].into_iter().flatten();
         let intact = groups.clone().count() == self.tensors.main().native_kv_count()
             && groups.into_iter().all(|group| {
@@ -285,9 +333,10 @@ impl<B: Backend> LlamaDecodeState<B> {
                     .is_ok_and(|cache| cache.spec() == group.spec)
             });
         if expected != self.layout || !intact {
-            return Err(Error::Cache(
-                "Llama-family decode state was allocated for a different model".into(),
-            ));
+            return Err(Error::Cache(format!(
+                "{} decode state was allocated for a different model",
+                G::LABELS.family
+            )));
         }
         Ok(())
     }
@@ -353,8 +402,8 @@ struct CachedKeys<'s, B: Backend> {
     step: TensorStepWrites<B>,
     /// Layer-to-group assignment.
     layout: &'s CacheLayout,
-    /// Rotary tables of the block, when any layer rotates.
-    angles: Option<RotaryAngles<B>>,
+    /// Rotary tables of the block's rotary layers.
+    angles: RotaryTables<B>,
     /// `[batch, Q]` cache position of every block slot.
     query_positions: Tensor<B, 2, Int>,
     /// Query heads `H`, the exclusion plane's head extent.
@@ -371,6 +420,8 @@ struct CachedKeys<'s, B: Backend> {
     full_mask: Option<Tensor<B, 4, Bool>>,
     /// Exclusions of the ring group, built by its first layer.
     ring_mask: Option<Tensor<B, 4, Bool>>,
+    /// Display name of the owning family, for cache errors.
+    family: &'static str,
 }
 
 impl<'s, B: Backend> CachedKeys<'s, B> {
@@ -382,9 +433,10 @@ impl<'s, B: Backend> CachedKeys<'s, B> {
     fn new(
         state: &'s mut LlamaDecodeState<B>,
         block: &StepLayout,
-        angles: Option<RotaryAngles<B>>,
+        angles: RotaryTables<B>,
         query_positions: Tensor<B, 2, Int>,
         heads: usize,
+        family: &'static str,
     ) -> Result<Self> {
         let clean_tail = core::mem::replace(&mut state.clean_tail, false);
         let LlamaDecodeState {
@@ -414,6 +466,7 @@ impl<'s, B: Backend> CachedKeys<'s, B> {
             ring_plan,
             full_mask: None,
             ring_mask: None,
+            family,
         })
     }
 
@@ -423,11 +476,12 @@ impl<'s, B: Backend> CachedKeys<'s, B> {
         slot: usize,
         projection: &AttentionProjection<B>,
     ) -> Result<KvBatchSegment<B>> {
+        let family = self.family;
         let (group, plan) = self
             .layout
             .full
             .zip(self.full_plan.as_ref())
-            .ok_or_else(|| Error::Cache("Llama-family full KV group is missing".into()))?;
+            .ok_or_else(|| Error::Cache(format!("{family} full KV group is missing")))?;
         self.state.write_kv_ahead(
             &mut self.step,
             group.index,
@@ -439,7 +493,7 @@ impl<'s, B: Backend> CachedKeys<'s, B> {
             .state
             .read_kv_through(&self.step, group.index, slot, plan)?;
         read.materialize()
-            .ok_or_else(|| Error::Cache("Llama-family full KV read returned no keys".into()))
+            .ok_or_else(|| Error::Cache(format!("{family} full KV read returned no keys")))
     }
 
     /// Returns a ring layer's history followed by the step's keys, recording them.
@@ -448,11 +502,12 @@ impl<'s, B: Backend> CachedKeys<'s, B> {
         slot: usize,
         projection: &AttentionProjection<B>,
     ) -> Result<KvBatchSegment<B>> {
+        let family = self.family;
         let (group, plan) = self
             .layout
             .ring
             .zip(self.ring_plan.as_ref())
-            .ok_or_else(|| Error::Cache("Llama-family sliding KV group is missing".into()))?;
+            .ok_or_else(|| Error::Cache(format!("{family} sliding KV group is missing")))?;
         let history = self
             .state
             .main()
@@ -472,7 +527,7 @@ impl<'s, B: Backend> CachedKeys<'s, B> {
         history
             .with_segment(fresh)?
             .materialize()
-            .ok_or_else(|| Error::Cache("Llama-family sliding KV read returned no keys".into()))
+            .ok_or_else(|| Error::Cache(format!("{family} sliding KV read returned no keys")))
     }
 
     /// Returns the group's exclusions and whether the attention call adds causality.
@@ -508,9 +563,9 @@ impl<'s, B: Backend> CachedKeys<'s, B> {
 }
 
 impl<B: Backend> LayerKeys<B> for CachedKeys<'_, B> {
-    /// Returns the block's rotary tables.
-    fn angles(&self) -> Option<&RotaryAngles<B>> {
-        self.angles.as_ref()
+    /// Returns layer `layer`'s rotary tables for the block.
+    fn angles(&self, layer: usize) -> Option<&RotaryAngles<B>> {
+        self.angles.for_layer(layer)
     }
 
     /// Attends over the layer's cached history plus the step's own keys.
@@ -524,7 +579,8 @@ impl<B: Backend> LayerKeys<B> for CachedKeys<'_, B> {
     ) -> Result<Tensor<B, 3>> {
         let slot = self.layout.slots.get(layer).copied().ok_or_else(|| {
             Error::Cache(format!(
-                "Llama-family decode state has no slot for layer {layer}"
+                "{} decode state has no slot for layer {layer}",
+                self.family
             ))
         })?;
         let (segment, ring) = match slot {
@@ -546,158 +602,178 @@ impl<B: Backend> LayerKeys<B> for CachedKeys<'_, B> {
 
 /// A stateful call: prefill rejects empty rows, decode accepts them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
+pub(crate) enum Phase {
     /// Prompt processing.
     Prefill,
     /// Continuation tokens; fully masked rows are finished sequences.
     Decode,
 }
 
-impl<B: Backend> LlamaForCausalLm<B> {
-    /// Runs one batched step of `input` against `state` and publishes it.
-    fn forward_cached(
-        &self,
-        input: CausalLmInput<B>,
-        state: &mut LlamaDecodeState<B>,
-        options: &ForwardOptions,
-        phase: Phase,
-    ) -> Result<CausalLmOutput<B>> {
-        if options.attentions {
-            return Err(Error::BackendCapability(
-                "Llama-family cached passes do not capture attention probabilities; use the stateless forward with eager attention".into(),
-            ));
-        }
-        state.validate_for(self)?;
-        let rows = self.prepare_rows(&input, state, phase)?;
-        validate_logits_selection(&options.logits, rows.sequence)?;
-        let context = self.cached_rotary_context(&rows)?;
-        if rows.token_counts.iter().all(|&count| count == 0) {
-            return self.inactive_output(&rows, options);
-        }
-        let layout = StepLayout::plan(&rows, state.tensors.lengths())?;
-        let device = input.token_ids.device();
-        let query_positions = layout.slot_positions::<B>(&device)?;
-        let rotary_positions =
-            layout.rotary_positions(input.position_ids.as_ref(), &query_positions)?;
-        let angles = self.model.rotary_tables(rotary_positions, context)?;
-        let tokens = layout.tokens(&input.token_ids)?;
-        let heads = self.architecture().query_heads;
-        let mut keys = CachedKeys::new(state, &layout, angles, query_positions, heads)?;
-        let mut hidden = self.model.embed_tokens.forward(tokens);
-        let mut block_states = Vec::new();
-        for (index, layer) in self.model.layers.iter().enumerate() {
-            if options.hidden_states {
-                block_states.push(hidden.clone());
-            }
-            hidden = layer.forward(hidden, index, &mut keys, &mut Hooks::new())?;
-        }
-        let (step, clean_tail) = keys.finish();
+/// Runs one batched step of `input` through `graph` against `state` and publishes it.
+///
+/// See the module documentation for the step. Prefill rejects rows without
+/// valid tokens; decode treats them as no-ops with exact zero outputs.
+///
+/// # Errors
+///
+/// Returns a capability error for attention capture, foreign-state and
+/// input errors, context-dependent RoPE beyond its original context, and
+/// cache errors; a failed call leaves the committed state untouched.
+pub(crate) fn forward_cached<B: Backend, G: DecoderGraph<B>>(
+    graph: &G,
+    input: CausalLmInput<B>,
+    state: &mut LlamaDecodeState<B>,
+    options: &ForwardOptions,
+    phase: Phase,
+) -> Result<CausalLmOutput<B>> {
+    let labels = G::LABELS;
+    if options.attentions {
+        return Err(Error::BackendCapability(format!(
+            "{} cached passes do not capture attention probabilities; use the stateless forward with eager attention",
+            labels.family
+        )));
+    }
+    state.validate_for(graph)?;
+    let rows = prepare_rows(graph, &input, state, phase)?;
+    validate_logits_selection(&options.logits, rows.sequence)?;
+    let context = cached_rotary_context(graph, &rows)?;
+    if rows.token_counts.iter().all(|&count| count == 0) {
+        return inactive_output(graph, &rows, options);
+    }
+    let layout = StepLayout::plan(&rows, state.tensors.lengths())?;
+    let device = input.token_ids.device();
+    let query_positions = layout.slot_positions::<B>(&device)?;
+    let rotary_positions =
+        layout.rotary_positions(input.position_ids.as_ref(), &query_positions)?;
+    let angles = graph.rotary_tables(rotary_positions, context)?;
+    let tokens = layout.tokens(&input.token_ids)?;
+    let heads = graph.geometry().query_heads;
+    let mut keys = CachedKeys::new(
+        state,
+        &layout,
+        angles,
+        query_positions,
+        heads,
+        labels.family,
+    )?;
+    let mut hidden = graph.embed(tokens);
+    let mut block_states = Vec::new();
+    for (index, block) in graph.blocks().iter().enumerate() {
         if options.hidden_states {
             block_states.push(hidden.clone());
         }
-        let hidden = self.model.norm.forward(hidden);
-        let output = self.cached_output(&layout, &rows, options, hidden, block_states)?;
-        state.tensors.publish_step(step)?;
-        state.clean_tail = clean_tail;
-        Ok(output)
+        hidden = block.forward(hidden, index, &mut keys, &mut Hooks::new())?;
     }
+    let (step, clean_tail) = keys.finish();
+    if options.hidden_states {
+        block_states.push(hidden.clone());
+    }
+    let hidden = graph.final_norm(hidden);
+    let output = cached_output(graph, &layout, &rows, options, hidden, block_states)?;
+    state.tensors.publish_step(step)?;
+    state.clean_tail = clean_tail;
+    Ok(output)
+}
 
-    /// Validates the call against the state's cursors with one device read.
-    fn prepare_rows(
-        &self,
-        input: &CausalLmInput<B>,
-        state: &LlamaDecodeState<B>,
-        phase: Phase,
-    ) -> Result<StatefulRows> {
-        let architecture = self.architecture();
-        prepare_stateful_rows(
-            input,
-            state.tensors.device(),
-            state.tensors.lengths(),
-            state.tensors.capacity(),
-            &StatefulContract {
-                names: INPUT_NAMES,
-                owner: DECODE_STATE,
-                vocabulary: architecture.vocab_size,
-                position_limit: Some(architecture.max_position_embeddings),
-                empty_rows: match phase {
-                    Phase::Prefill => EmptyRows::Reject,
-                    Phase::Decode => EmptyRows::Permit,
-                },
+/// Validates the call against the state's cursors with one device read.
+fn prepare_rows<B: Backend, G: DecoderGraph<B>>(
+    graph: &G,
+    input: &CausalLmInput<B>,
+    state: &LlamaDecodeState<B>,
+    phase: Phase,
+) -> Result<StatefulRows> {
+    let labels = G::LABELS;
+    let geometry = graph.geometry();
+    prepare_stateful_rows(
+        input,
+        state.tensors.device(),
+        state.tensors.lengths(),
+        state.tensors.capacity(),
+        &StatefulContract {
+            names: labels.inputs,
+            owner: labels.state,
+            vocabulary: geometry.vocab_size,
+            position_limit: Some(geometry.max_position_embeddings),
+            empty_rows: match phase {
+                Phase::Prefill => EmptyRows::Reject,
+                Phase::Decode => EmptyRows::Permit,
             },
-        )
-    }
+        },
+    )
+}
 
-    /// Returns the step's rotary context, rejecting one cached keys cannot follow.
-    fn cached_rotary_context(&self, rows: &StatefulRows) -> Result<usize> {
-        let context = rows
-            .active_contexts()
-            .map(|(_, context)| context)
-            .max()
-            .unwrap_or(1);
-        let scaling = self.architecture().rope.scaling();
-        match scaling.cached_context_limit() {
-            Some(limit) if context > limit => Err(Error::BackendCapability(format!(
-                "Llama-family cached decoding with context-dependent RoPE ({scaling:?}) is limited to the original context {limit}; this call reaches {context}"
-            ))),
-            _ => Ok(context),
-        }
+/// Returns the step's rotary context, rejecting one cached keys cannot follow.
+fn cached_rotary_context<B: Backend, G: DecoderGraph<B>>(
+    graph: &G,
+    rows: &StatefulRows,
+) -> Result<usize> {
+    let context = rows
+        .active_contexts()
+        .map(|(_, context)| context)
+        .max()
+        .unwrap_or(1);
+    match graph.rotary_schedule().cached_context_limit() {
+        Some((limit, scaling)) if context > limit => Err(Error::BackendCapability(format!(
+            "{} cached decoding with context-dependent RoPE ({scaling:?}) is limited to the original context {limit}; this call reaches {context}",
+            G::LABELS.family
+        ))),
+        _ => Ok(context),
     }
+}
 
-    /// Returns exact zeros for a call in which no row appends a token.
-    fn inactive_output(
-        &self,
-        rows: &StatefulRows,
-        options: &ForwardOptions,
-    ) -> Result<CausalLmOutput<B>> {
-        let architecture = self.architecture();
-        let selected = match &options.logits {
-            LogitsSelection::All => rows.sequence,
-            LogitsSelection::Last => 1,
-            LogitsSelection::Positions(positions) => positions.len(),
-        };
-        let device = self.model.embed_tokens.weight.lazy_device();
-        let dtype = self.model.activation_dtype();
-        let zeros = |tokens, width| Tensor::zeros([rows.batch, tokens, width], (&device, dtype));
-        let mut output = CausalLmOutput::from_logits(zeros(selected, architecture.vocab_size));
-        if options.hidden_states {
-            let states = zeros(rows.sequence, architecture.hidden_size);
-            output.final_hidden_state = Some(states.clone());
-            output.hidden_states = vec![states; architecture.num_layers() + 2];
-        }
-        Ok(output)
+/// Returns exact zeros for a call in which no row appends a token.
+fn inactive_output<B: Backend, G: DecoderGraph<B>>(
+    graph: &G,
+    rows: &StatefulRows,
+    options: &ForwardOptions,
+) -> Result<CausalLmOutput<B>> {
+    let geometry = graph.geometry();
+    let selected = match &options.logits {
+        LogitsSelection::All => rows.sequence,
+        LogitsSelection::Last => 1,
+        LogitsSelection::Positions(positions) => positions.len(),
+    };
+    let device = graph.parameter_device();
+    let dtype: DType = graph.activation_dtype();
+    let zeros = |tokens, width| Tensor::zeros([rows.batch, tokens, width], (&device, dtype));
+    let mut output = CausalLmOutput::from_logits(zeros(selected, geometry.vocab_size));
+    if options.hidden_states {
+        let states = zeros(rows.sequence, geometry.hidden_size);
+        output.final_hidden_state = Some(states.clone());
+        output.hidden_states = vec![states; graph.blocks().len() + 2];
     }
+    Ok(output)
+}
 
-    /// Restores requested states to the caller's columns and projects logits.
-    fn cached_output(
-        &self,
-        layout: &StepLayout,
-        rows: &StatefulRows,
-        options: &ForwardOptions,
-        hidden: Tensor<B, 3>,
-        block_states: Vec<Tensor<B, 3>>,
-    ) -> Result<CausalLmOutput<B>> {
-        let selected = match &options.logits {
-            LogitsSelection::Last => layout.last_states(hidden.clone())?,
-            selection => select_hidden_with_last_columns(
-                layout.restore(hidden.clone())?,
-                rows.last_columns(),
-                selection,
-            )?,
-        };
-        let mut output = CausalLmOutput::from_logits(self.project_logits(selected)?);
-        if options.hidden_states {
-            let mut states = block_states
-                .into_iter()
-                .map(|states| layout.restore(states))
-                .collect::<Result<Vec<_>>>()?;
-            let final_states = layout.restore(hidden)?;
-            states.push(final_states.clone());
-            output.final_hidden_state = Some(final_states);
-            output.hidden_states = states;
-        }
-        Ok(output)
+/// Restores requested states to the caller's columns and projects logits.
+fn cached_output<B: Backend, G: DecoderGraph<B>>(
+    graph: &G,
+    layout: &StepLayout,
+    rows: &StatefulRows,
+    options: &ForwardOptions,
+    hidden: Tensor<B, 3>,
+    block_states: Vec<Tensor<B, 3>>,
+) -> Result<CausalLmOutput<B>> {
+    let selected = match &options.logits {
+        LogitsSelection::Last => layout.last_states(hidden.clone())?,
+        selection => select_hidden_with_last_columns(
+            layout.restore(hidden.clone())?,
+            rows.last_columns(),
+            selection,
+        )?,
+    };
+    let mut output = CausalLmOutput::from_logits(graph.project_logits(selected)?);
+    if options.hidden_states {
+        let mut states = block_states
+            .into_iter()
+            .map(|states| layout.restore(states))
+            .collect::<Result<Vec<_>>>()?;
+        let final_states = layout.restore(hidden)?;
+        states.push(final_states.clone());
+        output.final_hidden_state = Some(final_states);
+        output.hidden_states = states;
     }
+    Ok(output)
 }
 
 impl<B: Backend> CausalLanguageModel<B> for LlamaForCausalLm<B> {
@@ -722,7 +798,7 @@ impl<B: Backend> CausalLanguageModel<B> for LlamaForCausalLm<B> {
         batch_size: usize,
         device: &B::Device,
     ) -> Result<Self::State> {
-        LlamaDecodeState::new(self, config, batch_size, device)
+        LlamaDecodeState::for_graph(self, config, batch_size, device)
     }
 
     /// Appends prompt rows (each with at least one valid token) in one batched step.
@@ -732,7 +808,7 @@ impl<B: Backend> CausalLanguageModel<B> for LlamaForCausalLm<B> {
         state: &mut Self::State,
         options: &ForwardOptions,
     ) -> Result<CausalLmOutput<B>> {
-        self.forward_cached(input, state, options, Phase::Prefill)
+        forward_cached(self, input, state, options, Phase::Prefill)
     }
 
     /// Appends continuation tokens in one batched step; fully masked rows are no-ops.
@@ -747,7 +823,7 @@ impl<B: Backend> CausalLanguageModel<B> for LlamaForCausalLm<B> {
             token_mask: input.token_mask,
             position_ids: input.position_ids,
         };
-        self.forward_cached(input, state, options, Phase::Decode)
+        forward_cached(self, input, state, options, Phase::Decode)
     }
 }
 

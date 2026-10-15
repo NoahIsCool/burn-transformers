@@ -84,7 +84,7 @@ impl StepLayout {
         });
         if hi == 0 {
             return Err(Error::shape(
-                "llama.step",
+                "decoder.step",
                 "at least one row with a new token",
                 "only inactive rows",
             ));
@@ -128,11 +128,11 @@ impl StepLayout {
     fn plan_row(&mut self, row: usize, start: usize, valid_columns: &[usize]) -> Result<()> {
         let (column, count) = (self.columns[row], self.counts[row]);
         let positions = slot_positions(start, column, count, self.block).ok_or_else(|| {
-            Error::configuration("llama.step.positions", "a cache position overflows usize")
+            Error::configuration("decoder.step.positions", "a cache position overflows usize")
         })?;
         for position in positions {
             self.positions.push(i64::try_from(position).map_err(|_| {
-                Error::configuration("llama.step.positions", "a cache position exceeds i64")
+                Error::configuration("decoder.step.positions", "a cache position exceeds i64")
             })?);
         }
         self.valid
@@ -255,7 +255,7 @@ impl StepLayout {
         let [batch, block, width] = block_states.dims();
         if batch != self.batch || block != self.block {
             return Err(Error::shape(
-                "llama.step.block_states",
+                "decoder.step.block_states",
                 format!("[{}, {}, width]", self.batch, self.block),
                 format!("{:?}", block_states.dims()),
             ));
@@ -310,7 +310,7 @@ fn int_tensor<B: Backend, const D: usize>(
         .iter()
         .map(|&value| i64::try_from(value))
         .collect::<core::result::Result<Vec<_>, _>>()
-        .map_err(|_| Error::configuration("llama.step.index", "an index exceeds i64"))?;
+        .map_err(|_| Error::configuration("decoder.step.index", "an index exceeds i64"))?;
     Ok(Tensor::from_data(TensorData::new(values, shape), device))
 }
 
