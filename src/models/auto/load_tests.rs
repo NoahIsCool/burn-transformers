@@ -1804,11 +1804,9 @@ fn automatic_nemotron_h_loads_complete_strict_fixture() {
     assert_finite_forward(&loaded, config.vocab_size);
 }
 
-/// The encoder-decoder registry retains the same pass-two audit as causal loads.
-#[test]
-fn automatic_t5_load_retains_execution_stats() {
-    let root = tempfile::tempdir().expect("temporary model root");
-    let config = T5Config {
+/// A two-encoder-layer, one-decoder-layer gated-GELU T5 with untied embeddings.
+fn tiny_automatic_t5_config() -> T5Config {
+    T5Config {
         vocab_size: 13,
         d_model: 4,
         d_kv: 2,
@@ -1823,7 +1821,14 @@ fn automatic_t5_load_retains_execution_stats() {
         is_gated_act: None,
         tie_word_embeddings: false,
         ..T5Config::default()
-    };
+    }
+}
+
+/// The encoder-decoder registry retains the same pass-two audit as causal loads.
+#[test]
+fn automatic_t5_load_retains_execution_stats() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let config = tiny_automatic_t5_config();
     let contract = config
         .checkpoint_contract()
         .expect("valid tiny T5 contract");
@@ -2015,7 +2020,7 @@ fn nan_top_p_is_rejected_instead_of_disabling_nucleus_sampling() {
             ..LocalGenerationConfig::default()
         };
         let mut config = GenerationConfig::default();
-        apply_local_generation_config(&mut config, &local, 64).unwrap();
+        apply_local_generation_config(&mut config, &local, 64, GenerationConsumer::Causal).unwrap();
         config
     };
     let config = applied(f64::NAN);
@@ -2064,7 +2069,15 @@ fn unsupported_generation_settings_are_reported_not_dropped() {
         .unwrap(),
     )
     .unwrap();
-    let resolved = resolve_generation_defaults(root.path(), None, None, 64, None).unwrap();
+    let resolved = resolve_generation_defaults(
+        GenerationConsumer::Causal,
+        root.path(),
+        None,
+        None,
+        64,
+        None,
+    )
+    .unwrap();
     assert_eq!(
         resolved.unsupported,
         BTreeMap::from([
@@ -2082,7 +2095,15 @@ fn unsupported_generation_settings_are_reported_not_dropped() {
         br#"{"do_sample": true, "min_p": 0.1, "typical_p": 1.0, "epsilon_cutoff": 0.0003}"#,
     )
     .unwrap();
-    let resolved = resolve_generation_defaults(root.path(), None, None, 64, None).unwrap();
+    let resolved = resolve_generation_defaults(
+        GenerationConsumer::Causal,
+        root.path(),
+        None,
+        None,
+        64,
+        None,
+    )
+    .unwrap();
     assert_eq!(
         resolved.unsupported.keys().collect::<Vec<_>>(),
         ["epsilon_cutoff"]
@@ -2090,8 +2111,15 @@ fn unsupported_generation_settings_are_reported_not_dropped() {
     assert_eq!(resolved.config.min_p, Some(0.1));
     // Explicit defaults bypass the file and report nothing.
     let explicit = GenerationConfig::default();
-    let resolved =
-        resolve_generation_defaults(root.path(), None, None, 64, Some(&explicit)).unwrap();
+    let resolved = resolve_generation_defaults(
+        GenerationConsumer::Causal,
+        root.path(),
+        None,
+        None,
+        64,
+        Some(&explicit),
+    )
+    .unwrap();
     assert!(resolved.unsupported.is_empty());
 }
 
@@ -2099,15 +2127,23 @@ fn unsupported_generation_settings_are_reported_not_dropped() {
 ///
 /// Min-p is a sampling warper (ignored by greedy decoding); the n-gram and
 /// minimum-length constraints apply under every strategy, and zero or `null`
-/// disables them. Out-of-range values fail validation instead of being
-/// clamped, and negative counts are not valid JSON for the typed fields.
+/// disables them. A `min_new_tokens` above the length bound is clamped and
+/// reported (Hugging Face only warns); an out-of-range `min_p` fails
+/// validation, and negative counts are not valid JSON for the typed fields.
 #[test]
 fn generation_constraints_follow_hugging_face_processors() {
     let root = tempfile::tempdir().expect("temporary model root");
     let path = root.path().join("generation_config.json");
     let resolve = |json: serde_json::Value| {
         std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
-        resolve_generation_defaults(root.path(), None, None, 64, None)
+        resolve_generation_defaults(
+            GenerationConsumer::Causal,
+            root.path(),
+            None,
+            None,
+            64,
+            None,
+        )
     };
     for (json, min_p, ngram, min_new) in [
         (json!({"do_sample": true, "min_p": 0.05}), Some(0.05), 0, 0),
@@ -2133,6 +2169,13 @@ fn generation_constraints_follow_hugging_face_processors() {
             0,
             0,
         ),
+        // A minimum equal to the bound is reachable and applied as declared.
+        (
+            json!({"min_new_tokens": 8, "max_new_tokens": 8}),
+            None,
+            0,
+            8,
+        ),
     ] {
         let resolved = resolve(json.clone()).unwrap_or_else(|error| panic!("{json}: {error}"));
         let config = &resolved.config;
@@ -2149,22 +2192,27 @@ fn generation_constraints_follow_hugging_face_processors() {
         crate::LogitsProcessor::<TestBackend>::new(config.clone(), 64, &Default::default())
             .expect("resolved defaults build a logits processor");
     }
-    for (json, expected) in [
-        (
-            json!({"do_sample": true, "min_p": 1.5}),
-            "min_p must be in [0, 1], found 1.5",
-        ),
-        (
-            json!({"min_new_tokens": 300}),
-            "min_new_tokens 300 exceeds max_new_tokens 256",
-        ),
+    // Hugging Face only warns about an unreachable minimum and suppresses EOS
+    // for the whole run; the clamped minimum generates the same tokens, and
+    // the declared value is reported because a larger bound would not restore it.
+    for (json, max_new_tokens) in [
+        (json!({"min_new_tokens": 300}), 256),
+        (json!({"min_new_tokens": 9, "max_new_tokens": 8}), 8),
     ] {
-        let error = resolve(json.clone()).unwrap_err();
-        assert!(
-            matches!(&error, Error::Generation(reason) if reason == expected),
-            "{json}: {error}"
+        let resolved = resolve(json.clone()).unwrap_or_else(|error| panic!("{json}: {error}"));
+        assert_eq!(resolved.config.max_new_tokens, max_new_tokens, "{json}");
+        assert_eq!(resolved.config.min_new_tokens, max_new_tokens, "{json}");
+        assert_eq!(
+            resolved.unsupported,
+            BTreeMap::from([("min_new_tokens".to_owned(), json["min_new_tokens"].clone())]),
+            "{json}"
         );
     }
+    let error = resolve(json!({"do_sample": true, "min_p": 1.5})).unwrap_err();
+    assert!(
+        matches!(&error, Error::Generation(reason) if reason == "min_p must be in [0, 1], found 1.5"),
+        "{error}"
+    );
     for json in [
         json!({"no_repeat_ngram_size": -1}),
         json!({"min_new_tokens": -2}),
@@ -2174,6 +2222,110 @@ fn generation_constraints_follow_hugging_face_processors() {
             "{json}"
         );
     }
+}
+
+/// Seq2seq beam search reads none of the processor constraints, so they are reported, not applied.
+///
+/// Regression: these settings were once applied to the defaults of every
+/// automatic load, which hid them from a T5 bundle's unsupported report even
+/// though its beam search never reads [`GenerationConfig`]. Hugging Face beam
+/// search applies all three, so dropping them silently would diverge.
+#[test]
+fn seq2seq_defaults_report_processor_constraints_that_beam_search_ignores() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let path = root.path().join("generation_config.json");
+    let resolve = |consumer, json: serde_json::Value| {
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        resolve_generation_defaults(consumer, root.path(), None, None, 64, None)
+            .unwrap_or_else(|error| panic!("{json}: {error}"))
+    };
+    let declared = json!({
+        "do_sample": true,
+        "min_p": 0.05,
+        "no_repeat_ngram_size": 3,
+        "min_new_tokens": 300,
+        "num_beams": 4
+    });
+    let seq2seq = resolve(GenerationConsumer::Seq2SeqBeamSearch, declared.clone());
+    assert_eq!(
+        (
+            seq2seq.config.min_p,
+            seq2seq.config.no_repeat_ngram_size,
+            seq2seq.config.min_new_tokens
+        ),
+        (None, 0, 0)
+    );
+    assert_eq!(
+        seq2seq.unsupported,
+        BTreeMap::from([
+            ("min_new_tokens".to_owned(), json!(300)),
+            ("min_p".to_owned(), json!(0.05)),
+            ("no_repeat_ngram_size".to_owned(), json!(3)),
+            ("num_beams".to_owned(), json!(4)),
+        ])
+    );
+    // The same file applies every constraint to causal generation.
+    let causal = resolve(GenerationConsumer::Causal, declared);
+    assert_eq!(
+        (
+            causal.config.min_p,
+            causal.config.no_repeat_ngram_size,
+            causal.config.min_new_tokens
+        ),
+        (Some(0.05), 3, 256)
+    );
+    assert_eq!(
+        causal.unsupported.keys().collect::<Vec<_>>(),
+        ["min_new_tokens", "num_beams"]
+    );
+    // Neutral values (zero, null, and min-p under greedy decoding) are not reported.
+    for neutral in [
+        json!({"min_new_tokens": 0, "no_repeat_ngram_size": 0, "do_sample": true, "min_p": 0.0}),
+        json!({"min_new_tokens": null, "no_repeat_ngram_size": null, "min_p": null}),
+        json!({"do_sample": false, "min_p": 0.3}),
+    ] {
+        let resolved = resolve(GenerationConsumer::Seq2SeqBeamSearch, neutral.clone());
+        assert!(resolved.unsupported.is_empty(), "{neutral}");
+    }
+}
+
+/// An automatic T5 load reports the n-gram and minimum-length constraints its beam search ignores.
+#[test]
+fn automatic_t5_load_reports_processor_constraints() {
+    let root = tempfile::tempdir().expect("temporary model root");
+    let config = tiny_automatic_t5_config();
+    let contract = config
+        .checkpoint_contract()
+        .expect("valid tiny T5 contract");
+    write_auto_metadata(root.path(), &config);
+    write_contract_checkpoint(
+        root.path(),
+        contract.expected_tensors(),
+        contract.mappings(),
+    );
+    std::fs::write(
+        root.path().join("generation_config.json"),
+        br#"{"no_repeat_ngram_size": 3, "min_new_tokens": 300}"#,
+    )
+    .unwrap();
+    let loaded = AutoSeq2SeqLm::<TestBackend>::load_local(
+        root.path(),
+        &fixture_options("google/tiny-flan-fixture", "constraints"),
+        &Default::default(),
+    )
+    .expect("an unreachable minimum does not fail a seq2seq load");
+    assert_eq!(
+        loaded.unsupported_generation_settings(),
+        &BTreeMap::from([
+            ("min_new_tokens".to_owned(), json!(300)),
+            ("no_repeat_ngram_size".to_owned(), json!(3)),
+        ])
+    );
+    let defaults = loaded.generation_defaults();
+    assert_eq!(
+        (defaults.no_repeat_ngram_size, defaults.min_new_tokens),
+        (0, 0)
+    );
 }
 
 /// Automatic loads attach the unsupported-settings report to the bundle.

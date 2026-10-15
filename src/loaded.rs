@@ -377,9 +377,12 @@ impl<M> LoadedModel<M> {
     /// Records checkpoint generation settings that this crate could not apply.
     ///
     /// Automatic loaders call this with the behavior-changing keys of
-    /// `generation_config.json` (beam search, `min_p`, `max_length`, ...) whose
-    /// values differ from Hugging Face's neutral defaults, so callers can see
-    /// where generation may diverge from the reference implementation.
+    /// `generation_config.json` (beam search, `typical_p`, `max_length`, ...)
+    /// whose values differ from Hugging Face's neutral defaults, so callers can
+    /// see where generation may diverge from the reference implementation.
+    /// Seq2seq loads also report the logits-processor constraints (`min_p`,
+    /// `no_repeat_ngram_size`, `min_new_tokens`) that their beam search does
+    /// not read.
     #[must_use]
     pub fn with_unsupported_generation_settings(
         mut self,
@@ -439,7 +442,7 @@ impl<M> LoadedModel<M> {
     /// Returns checkpoint generation settings that were present but not applied.
     ///
     /// Keys are `generation_config.json` field names such as `num_beams` or
-    /// `min_p`; an empty map means every behavior-changing setting the
+    /// `typical_p`; an empty map means every behavior-changing setting the
     /// checkpoint declared is honored by [`Self::generation_defaults`].
     pub fn unsupported_generation_settings(&self) -> &BTreeMap<String, Value> {
         &self.unsupported_generation_settings

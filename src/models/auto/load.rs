@@ -19,10 +19,20 @@
 //! warper does), `top_k: 0` disables top-k, `top_p >= 1` disables nucleus
 //! filtering, and `min_p` adds the min-p warper (Hugging Face applies every
 //! warper only when sampling). `no_repeat_ngram_size` and `min_new_tokens`
-//! apply under every strategy, with zero meaning disabled. Behavior-changing
-//! settings without an equivalent here (beam search, `typical_p`,
-//! `max_length`, ...) are recorded on the [`LoadedModel`] rather than silently
-//! dropped.
+//! apply under every strategy, with zero meaning disabled. Hugging Face only
+//! warns when `min_new_tokens` exceeds the length bound and then suppresses
+//! EOS for the whole run, so such a value is clamped to `max_new_tokens`
+//! (the same tokens) and its declared value is reported, because raising
+//! `max_new_tokens` later would not restore it.
+//!
+//! Behavior-changing settings without an equivalent here (beam search,
+//! `typical_p`, `max_length`, ...) are recorded on the [`LoadedModel`] rather
+//! than silently dropped. What counts as applied depends on the
+//! [`GenerationConsumer`]: causal generation applies every
+//! [`GenerationConfig`] logits processor, whereas encoder-decoder beam search
+//! reads only its own `BeamSearchConfig`, so seq2seq loads leave the
+//! `min_p`, `no_repeat_ngram_size`, and `min_new_tokens` constraints unset and
+//! report them instead.
 //! Floating casts, packed layouts, aliases, and tensor shapes remain the responsibility
 //! of the selected architecture contract and shared checkpoint planner.
 
@@ -164,6 +174,7 @@ where
     let tokens = F::token_metadata(&config);
     let vocabulary_size = tokens.vocabulary_size;
     let generation = resolve_generation_defaults(
+        GenerationConsumer::Causal,
         root,
         tokens.eos,
         tokens.pad,
@@ -282,6 +293,7 @@ impl<B: Backend> AutoSeq2SeqLm<B> {
         let config = T5Config::from_json_str(&json)?;
         let vocabulary_size = config.vocab_size;
         let generation = resolve_generation_defaults(
+            GenerationConsumer::Seq2SeqBeamSearch,
             &root,
             config.eos_token_id.as_ref(),
             config.pad_token_id.as_ref(),
@@ -368,6 +380,30 @@ fn load_optional_tokenizer(_root: &Path, _enabled: bool) -> Result<Option<ModelT
     Ok(None)
 }
 
+/// Generation loop that consumes the defaults resolved for one load.
+///
+/// The loop decides which `generation_config.json` settings are applied and
+/// which are reported as unsupported: a setting stored in [`GenerationConfig`]
+/// that the consuming loop never reads would otherwise be dropped silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenerationConsumer {
+    /// [`crate::generate_causal`], which applies every [`GenerationConfig`] logits processor.
+    Causal,
+    /// Encoder-decoder beam search, which reads only its own [`crate::generation::BeamSearchConfig`].
+    ///
+    /// The `min_p`, `no_repeat_ngram_size`, and `min_new_tokens` constraints
+    /// (all applied by Hugging Face beam search) are therefore left unset on
+    /// the defaults and reported instead.
+    Seq2SeqBeamSearch,
+}
+
+impl GenerationConsumer {
+    /// Whether the loop applies the `min_p`, n-gram, and minimum-length constraints.
+    const fn applies_processor_constraints(self) -> bool {
+        matches!(self, Self::Causal)
+    }
+}
+
 /// Generation defaults resolved for one load, plus checkpoint settings left unapplied.
 #[derive(Debug, Clone, PartialEq)]
 struct ResolvedGenerationDefaults {
@@ -377,7 +413,7 @@ struct ResolvedGenerationDefaults {
     unsupported: BTreeMap<String, Value>,
 }
 
-/// Resolves generation defaults, discarding the unsupported-settings report (tests only).
+/// Resolves causal generation defaults, discarding the unsupported-settings report (tests only).
 #[cfg(test)]
 fn normalize_generation_defaults(
     root: &Path,
@@ -386,15 +422,23 @@ fn normalize_generation_defaults(
     vocabulary_size: usize,
     explicit: Option<&GenerationConfig>,
 ) -> Result<GenerationConfig> {
-    resolve_generation_defaults(root, model_eos, model_pad, vocabulary_size, explicit)
-        .map(|resolved| resolved.config)
+    resolve_generation_defaults(
+        GenerationConsumer::Causal,
+        root,
+        model_eos,
+        model_pad,
+        vocabulary_size,
+        explicit,
+    )
+    .map(|resolved| resolved.config)
 }
 
-/// Resolves generation defaults and reports the checkpoint settings left unapplied.
+/// Resolves generation defaults for `consumer` and reports the checkpoint settings left unapplied.
 ///
 /// Precedence: an explicit configuration wins outright (and reads no file);
 /// otherwise `generation_config.json` overrides the model config's token IDs.
 fn resolve_generation_defaults(
+    consumer: GenerationConsumer,
     root: &Path,
     model_eos: Option<&TokenIds>,
     model_pad: Option<&TokenIds>,
@@ -416,8 +460,8 @@ fn resolve_generation_defaults(
     };
     let mut unsupported = BTreeMap::new();
     if let Some(local) = read_generation_config(root)? {
-        apply_local_generation_config(&mut config, &local, vocabulary_size)?;
-        unsupported = local.unsupported_settings();
+        apply_local_generation_config(&mut config, &local, vocabulary_size, consumer)?;
+        unsupported = local.unsupported_settings(consumer, &config);
     }
     config.validate(vocabulary_size)?;
     Ok(ResolvedGenerationDefaults {
@@ -427,18 +471,26 @@ fn resolve_generation_defaults(
 }
 
 /// Applies one parsed `generation_config.json` with Hugging Face semantics.
+///
+/// The `min_p`, n-gram, and minimum-length constraints are applied only when
+/// `consumer` reads them (see [`GenerationConsumer`]).
 fn apply_local_generation_config(
     config: &mut GenerationConfig,
     local: &LocalGenerationConfig,
     vocabulary_size: usize,
+    consumer: GenerationConsumer,
 ) -> Result<()> {
+    let constraints = consumer.applies_processor_constraints();
     if let Some(max_new_tokens) = local.max_new_tokens {
         config.max_new_tokens = max_new_tokens;
     }
-    if let Some(min_new_tokens) = local.min_new_tokens {
-        config.min_new_tokens = min_new_tokens;
+    if let Some(min_new_tokens) = local.min_new_tokens.filter(|_| constraints) {
+        // Hugging Face only warns about an unreachable minimum and suppresses
+        // EOS for the whole run, which the clamped value does too.
+        // `unsupported_settings` reports the declared value when this clamps.
+        config.min_new_tokens = min_new_tokens.min(config.max_new_tokens);
     }
-    if let Some(size) = local.no_repeat_ngram_size {
+    if let Some(size) = local.no_repeat_ngram_size.filter(|_| constraints) {
         config.no_repeat_ngram_size = size;
     }
     if local.do_sample.unwrap_or(false) {
@@ -452,7 +504,7 @@ fn apply_local_generation_config(
         config.top_p = local.top_p.filter(|top_p| top_p.is_nan() || *top_p < 1.0);
         // Hugging Face adds `MinPLogitsWarper` whenever `min_p` is set; validation
         // rejects values outside `[0, 1]`, as its warper does.
-        config.min_p = local.min_p;
+        config.min_p = local.min_p.filter(|_| constraints);
     }
     if let Some(penalty) = local.repetition_penalty {
         config.repetition_penalty = penalty;
@@ -592,17 +644,43 @@ impl LocalGenerationConfig {
     /// Lists declared settings that would change Hugging Face generation but are not applied.
     ///
     /// Sampling-only warpers are reported only when `do_sample` is set,
-    /// because Hugging Face ignores them under greedy decoding too.
-    fn unsupported_settings(&self) -> BTreeMap<String, Value> {
+    /// because Hugging Face ignores them under greedy decoding too. `applied`
+    /// is the resolved configuration: for a consumer that does not read the
+    /// processor constraints, every active `min_p`, `no_repeat_ngram_size`,
+    /// and `min_new_tokens` is reported, and otherwise a `min_new_tokens`
+    /// that was clamped to `max_new_tokens` is reported with its declared value.
+    fn unsupported_settings(
+        &self,
+        consumer: GenerationConsumer,
+        applied: &GenerationConfig,
+    ) -> BTreeMap<String, Value> {
         let sampling = self.do_sample.unwrap_or(false);
-        UNSUPPORTED_GENERATION_SETTINGS
+        let mut report = UNSUPPORTED_GENERATION_SETTINGS
             .iter()
             .filter(|(_, _, sampling_only)| sampling || !sampling_only)
             .filter_map(|(key, neutral, _)| {
                 let value = self.other.get(*key)?;
                 (!neutral.matches(value)).then(|| ((*key).to_owned(), value.clone()))
             })
-            .collect()
+            .collect::<BTreeMap<_, _>>();
+        // Zero (and, for `min_p`, greedy decoding) leaves Hugging Face unchanged.
+        let min_new_tokens = self.min_new_tokens.filter(|&count| count > 0);
+        if consumer.applies_processor_constraints() {
+            if let Some(count) = min_new_tokens.filter(|&count| count > applied.min_new_tokens) {
+                report.insert("min_new_tokens".to_owned(), Value::from(count));
+            }
+            return report;
+        }
+        if let Some(count) = min_new_tokens {
+            report.insert("min_new_tokens".to_owned(), Value::from(count));
+        }
+        if let Some(size) = self.no_repeat_ngram_size.filter(|&size| size > 0) {
+            report.insert("no_repeat_ngram_size".to_owned(), Value::from(size));
+        }
+        if let Some(min_p) = self.min_p.filter(|&min_p| sampling && min_p != 0.0) {
+            report.insert("min_p".to_owned(), Value::from(min_p));
+        }
+        report
     }
 }
 
