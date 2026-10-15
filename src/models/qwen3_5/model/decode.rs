@@ -38,15 +38,14 @@
 //!
 //! [`GatedDeltaNet::forward_with_snapshots`]: crate::delta_net::GatedDeltaNet::forward_with_snapshots
 
-use burn::tensor::{Bool, DType, Int, Tensor, backend::Backend};
+use burn::tensor::{DType, Int, Tensor, backend::Backend};
 
 use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, Result,
     architecture::DecodeState as ArchitectureDecodeState,
-    attention::GroupedQueryAttention,
     cache::{
-        CacheConfig, DecodeStateError, KvBatchReadPlan, KvCacheStorage, NativeKvCacheSpec,
-        RecurrentStateSpec, TensorCacheError, TensorCacheMark, TensorDecodeState, TensorStepWrites,
+        CacheConfig, DecodeStateError, KvCacheStorage, NativeKvCacheSpec, RecurrentStateSpec,
+        TensorCacheError, TensorCacheMark, TensorDecodeState, TensorStepWrites,
     },
     delta_net::{DeltaNetMode, GatedDeltaNetState},
     models::shared::{
@@ -54,14 +53,11 @@ use crate::{
         implicit_position_ids, prepare_stateful_rows, select_hidden_with_last_columns,
         validate_logits_selection,
     },
-    position::{
-        RopeConfig, RotaryAngles, RotaryFrequencies, apply_rotary, rotary_angles_from_frequencies,
-    },
 };
 
 use super::{
     INPUT_NAMES, Qwen3_5DecoderLayer, Qwen3_5ForCausalLm, Qwen3_5MtpPrediction, Qwen3_5TextModel,
-    batch::CompactBatch,
+    batch::{CachedAttention, CompactBatch, ensure_cacheable_rotary_context},
 };
 use crate::models::qwen3_5::{Qwen3_5LayerType, Qwen3_5TextConfig};
 
@@ -619,13 +615,14 @@ impl<B: Backend> Qwen3_5ForCausalLm<B> {
         let embedding = self.model.embed_tokens.forward(next_token_ids);
         let hidden = mtp.fuse(embedding, target_or_mtp_hidden)?;
         let mut writes = state.tensors.mtp_step(&[sequence])?;
-        let mut attention = AttentionStep::new(
+        let mut attention = CachedAttention::new(
             self.model.rope,
             evaluated_context,
             positions,
             hidden.dtype(),
             &state.tensors,
             &writes,
+            NATIVE_KV_GROUP,
         )?;
         let hidden = mtp.layers[layer_index].cached_step(
             hidden,
@@ -875,13 +872,14 @@ impl<B: Backend> Qwen3_5TextModel<B> {
             .iter()
             .any(|slot| matches!(slot, Qwen3_5LayerCache::FullAttention(_)))
             .then(|| {
-                AttentionStep::new(
+                CachedAttention::new(
                     self.rope,
                     context,
                     positions,
                     hidden.dtype(),
                     tensors,
                     &writes,
+                    NATIVE_KV_GROUP,
                 )
             })
             .transpose()?;
@@ -928,92 +926,10 @@ enum DeltaStep {
     Snapshots,
 }
 
-/// Per-step state shared by every full-attention layer of one bank.
-///
-/// Rotary tables, the read plan through the step's own tokens, and the
-/// exclusion mask depend only on the step's positions and lengths, not on the
-/// layer, so they are built once and reused.
-struct AttentionStep<B: Backend> {
-    /// Cosine/sine tables `[B, 1, N, rotary]` in the activation dtype.
-    rotary: RotaryAngles<B>,
-    /// Batched read of `[0, W_b + n_b)` after each layer's write-ahead.
-    plan: KvBatchReadPlan<B>,
-    /// Exclusion mask `[B, heads, N, K]`, built by the first layer that needs it.
-    mask: Option<Tensor<B, 4, Bool>>,
-}
-
-impl<B: Backend> AttentionStep<B> {
-    /// Builds the step's rotary tables (frequencies computed once) and read plan.
-    fn new(
-        rope: RopeConfig,
-        context: usize,
-        positions: Tensor<B, 2, Int>,
-        dtype: DType,
-        tensors: &TensorDecodeState<B>,
-        writes: &TensorStepWrites<B>,
-    ) -> Result<Self> {
-        let frequencies = RotaryFrequencies::new(rope, context)?;
-        Ok(Self {
-            rotary: rotary_angles_from_frequencies(&frequencies, positions)?.to_dtype(dtype),
-            plan: tensors.kv_read_plan_through(writes, NATIVE_KV_GROUP)?,
-            mask: None,
-        })
-    }
-
-    /// Projects, rotates, writes ahead, and attends one full-attention layer.
-    ///
-    /// The new keys and values land in their cache slots before attention,
-    /// which then reads keys and values `[B, kv_heads, K, d]` through one
-    /// view. Invalid slots (beyond a row's `W_b + n_b`) have their values
-    /// zeroed so that stale non-finite bytes cannot poison a row. Outputs at
-    /// padding slots are zeroed for the same reason.
-    fn attend(
-        &mut self,
-        module: &GroupedQueryAttention<B>,
-        normalized: Tensor<B, 3>,
-        cache_layer: usize,
-        layout: &CompactBatch<B>,
-        tensors: &mut TensorDecodeState<B>,
-        writes: &mut TensorStepWrites<B>,
-    ) -> Result<Tensor<B, 3>> {
-        let mut projection = module.project_self(normalized)?;
-        (projection.query, projection.key) =
-            apply_rotary(projection.query, projection.key, &self.rotary)?;
-        tensors.write_kv_ahead(
-            writes,
-            NATIVE_KV_GROUP,
-            cache_layer,
-            projection.key.clone(),
-            projection.value.clone(),
-        )?;
-        let segment = tensors
-            .read_kv_through(writes, NATIVE_KV_GROUP, cache_layer, &self.plan)?
-            .materialize()
-            .ok_or_else(|| Error::Cache("Qwen attention step read no key".into()))?;
-        let uniform = layout.is_uniform();
-        let mask = if uniform {
-            None
-        } else if let Some(mask) = &self.mask {
-            Some(mask.clone())
-        } else {
-            let mask =
-                segment.exclusion_mask(layout.cache_positions(), module.query_heads, None)?;
-            self.mask = Some(mask.clone());
-            Some(mask)
-        };
-        projection.key = segment.keys().clone();
-        projection.value = segment.masked_values();
-        // With every row sharing one cursor and width, causality is the
-        // bottom-right rule over `[0, W + N)` and needs no mask.
-        let mixed = module.attend(projection, mask, None, uniform)?;
-        Ok(layout.zero_padding(mixed))
-    }
-}
-
 impl<B: Backend> Qwen3_5DecoderLayer<B> {
     /// Evaluates one residual block over the compact batch against its cache slot.
     ///
-    /// Full attention needs the step's [`AttentionStep`]; DeltaNet reads every
+    /// Full attention needs the step's [`CachedAttention`]; DeltaNet reads every
     /// row's working state and records the update as `delta` prescribes.
     #[allow(clippy::too_many_arguments)]
     fn cached_step(
@@ -1023,7 +939,7 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
         layout: &CompactBatch<B>,
         tensors: &mut TensorDecodeState<B>,
         writes: &mut TensorStepWrites<B>,
-        attention: Option<&mut AttentionStep<B>>,
+        attention: Option<&mut CachedAttention<B>>,
         delta: DeltaStep,
     ) -> Result<Tensor<B, 3>> {
         if slot.layer_type() != self.layer_type {
@@ -1040,9 +956,17 @@ impl<B: Backend> Qwen3_5DecoderLayer<B> {
                     Error::Checkpoint("Qwen full-attention layer has no attention module".into())
                 })?;
                 let attention = attention.ok_or_else(|| {
-                    Error::Cache("Qwen full-attention layer has no attention step".into())
+                    Error::Cache("Qwen full-attention layer has no cached attention step".into())
                 })?;
-                attention.attend(module, normalized, cache_layer, layout, tensors, writes)?
+                attention.attend(
+                    module,
+                    normalized,
+                    cache_layer,
+                    None,
+                    layout,
+                    tensors,
+                    writes,
+                )?
             }
             Qwen3_5LayerCache::DeltaNet(cache_layer) => {
                 self.delta_step(normalized, cache_layer, layout, tensors, writes, delta)?
@@ -1287,29 +1211,6 @@ fn prepare_stateful_input<B: Backend>(
         ensure_cacheable_rotary_context(model.model.rope, context, "Qwen")?;
     }
     Ok(rows)
-}
-
-/// Rejects an evaluated rotary context that keys already in the cache cannot follow.
-///
-/// Context-dependent policies (dynamic NTK and LongRoPE) change their
-/// frequencies once the evaluated context passes
-/// [`RopeScaling::cached_context_limit`](crate::position::RopeScaling::cached_context_limit).
-/// Cached keys were rotated with the earlier frequencies, so extending the
-/// cache past that limit would silently mix two rotary bases; re-rotating the
-/// history is not implemented. Static policies have no limit. Below the
-/// limit the frequencies do not depend on the context, which lets one call
-/// rotate every row with the tables of its largest context.
-pub(crate) fn ensure_cacheable_rotary_context(
-    rope: RopeConfig,
-    context: usize,
-    family: &str,
-) -> Result<()> {
-    match rope.scaling().cached_context_limit() {
-        Some(limit) if context > limit => Err(Error::BackendCapability(format!(
-            "{family} cached decoding with a context-dependent RoPE policy cannot extend the evaluated context to {context} beyond {limit} without re-rotating cached keys"
-        ))),
-        _ => Ok(()),
-    }
 }
 
 #[cfg(test)]

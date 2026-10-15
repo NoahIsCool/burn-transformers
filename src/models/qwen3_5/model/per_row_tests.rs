@@ -20,7 +20,7 @@ use crate::{
     architecture::TokenMask,
     models::qwen3_5::{Qwen3_5LayerType, Qwen3_5TextConfig},
     models::shared::concat_rows,
-    position::rotary_angles,
+    position::{apply_rotary, rotary_angles},
 };
 
 /// CPU Flex backend with F32 activations and portable I32 indices.

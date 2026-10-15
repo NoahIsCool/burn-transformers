@@ -1,38 +1,46 @@
-//! External native-KV state for Qwen3 MoE prefill and decoding.
+//! External native-KV state for Qwen3 MoE prefill and decoding, one batched pass per call.
 //!
 //! All attention layers share one preallocated cache group laid out as
-//! `[batch, kv_heads, capacity, head_dim]` per key/value tensor. A public call
-//! first computes every row and layer into operation-local tensor handles. Only
-//! after all fallible model work succeeds does a two-phase cache commit validate
-//! every append, advance logical lengths atomically, and publish the opaque
-//! prepared assignments. Thus a returned `Err` never poisons a retry baseline.
+//! `[batch, kv_heads, capacity, head_dim]` per key/value tensor. Every call
+//! arranges the batch in the compact right-padded layout of
+//! [`CompactBatch`] (row `b`'s valid tokens first; slot `i` is cache
+//! position `L_b + i`) and runs each layer once over all rows: attention
+//! writes the new rotated keys and values into their slots ahead of time and
+//! attends over one view of `[0, L_b + n_b)`, with sliding-window layers
+//! excluding keys older than their window, and the routed experts dispatch
+//! all rows' tokens together (one routing readback per sparse layer, not one
+//! per row). Every layer's write is recorded in one step and published only
+//! after the vocabulary projection, so a returned `Err` leaves every length
+//! and readable cache position unchanged.
 //!
 //! Rectangular masks are semantic: invalid columns neither consume RoPE
-//! positions nor enter the cache. Decode permits a fully masked row, defining it
-//! as an exact zero-output/no-state-change operation so finished sequences can
-//! remain in a heterogeneous batch. Prefill rejects empty prompt rows.
+//! positions nor enter the cache, and their outputs and router logits are
+//! zero. Decode permits a fully masked row, defining it as an exact
+//! zero-output/no-state-change operation so finished sequences can remain in
+//! a heterogeneous batch. Prefill rejects empty prompt rows.
 
-use std::collections::BTreeSet;
+use core::num::NonZeroUsize;
 
-use burn::tensor::{Bool, Int, Tensor, backend::Backend};
+use burn::tensor::{Int, Tensor, backend::Backend};
 
 use crate::{
     CausalLanguageModel, CausalLmInput, CausalLmOutput, DecodeInput, Error, ForwardOptions, Result,
-    architecture::{DecodeState as ArchitectureDecodeState, RouterDiagnostics},
-    cache::{CacheConfig, KvCacheStorage, NativeKvCacheSpec, TensorCacheError, TensorDecodeState},
-    models::shared::{
-        EmptyRows, StatefulContract, StatefulRows, concat_rows, ensure_same_device,
-        implicit_position_ids, prepare_stateful_rows, select_hidden_with_last_columns,
-        validate_logits_selection,
+    architecture::DecodeState as ArchitectureDecodeState,
+    cache::{
+        CacheConfig, KvCacheStorage, NativeKvCacheSpec, TensorCacheError, TensorDecodeState,
+        TensorStepWrites,
     },
-    moe::SparseMoeOutput,
-    position::{RopeConfig, RotaryAngles, apply_rotary, rotary_angles},
+    intervention::Layer,
+    models::{
+        qwen3_5::model::batch::{CachedAttention, CompactBatch, ensure_cacheable_rotary_context},
+        shared::{
+            EmptyRows, StatefulContract, StatefulRows, ensure_same_device, prepare_stateful_rows,
+            select_hidden_with_last_columns, validate_logits_selection,
+        },
+    },
 };
 
-use super::{
-    INPUT_NAMES, Qwen3MoeDecoderLayer, Qwen3MoeForCausalLm, Qwen3MoeModel,
-    qwen3_moe_load_balancing_loss,
-};
+use super::{INPUT_NAMES, Qwen3MoeBackboneOutput, Qwen3MoeForCausalLm, Qwen3MoeModel};
 
 /// Single homogeneous native-KV cache group used by all decoder layers.
 const NATIVE_KV_GROUP: usize = 0;
@@ -224,6 +232,10 @@ impl<B: Backend> CausalLanguageModel<B> for Qwen3MoeForCausalLm<B> {
 
 impl<B: Backend> Qwen3MoeForCausalLm<B> {
     /// Evaluates a masked rectangular segment against external committed state.
+    ///
+    /// If row `b` has committed length `L_b`, its `i`th valid implicit
+    /// position is `L_b + i` and its queries see keys `j <= L_b + i` (and, on
+    /// a sliding-window layer, `j > L_b + i - window`).
     fn forward_with_decode_state(
         &self,
         input: CausalLmInput<B>,
@@ -243,161 +255,156 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
             }
             .into());
         }
-        let prepared = prepare_stateful_input(self, &input, state, phase)?;
-        validate_logits_selection(&options.logits, prepared.sequence)?;
-        let device = input.token_ids.device();
-        let diagnostic_count = self.model.layers.len() + 2;
-        let sparse_count = self
-            .model
-            .layers
-            .iter()
-            .filter(|layer| layer.sparse_mlp.is_some())
-            .count();
-        let retain_router_logits = options.router_logits || self.config().output_router_logits;
-        let retain_routers = retain_router_logits || options.auxiliary_losses;
-        let mut pending = PendingKvWrites::new();
-        let mut final_rows = Vec::with_capacity(prepared.batch);
-        let mut hidden_rows: Vec<Vec<Tensor<B, 3>>> = if options.hidden_states {
-            (0..diagnostic_count)
-                .map(|_| Vec::with_capacity(prepared.batch))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let mut router_rows: Vec<Vec<RowRouter<B>>> = if retain_routers {
-            (0..sparse_count)
-                .map(|_| Vec::with_capacity(prepared.batch))
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        for row in 0..prepared.batch {
-            let Some(plan) = prepared.compact_row::<B>(row, &device)? else {
-                let empty = empty_hidden_row(self, prepared.sequence, &device);
-                final_rows.push(empty.clone());
-                if options.hidden_states {
-                    for destination in &mut hidden_rows {
-                        destination.push(empty.clone());
-                    }
-                }
-                if retain_routers {
-                    for destination in &mut router_rows {
-                        destination.push(RowRouter {
-                            logits: Tensor::zeros(
-                                [1, prepared.sequence, self.config().num_experts],
-                                (&device, self.model.embed_tokens.weight.val().dtype()),
-                            ),
-                        });
-                    }
-                }
-                continue;
+        let rows = prepare_stateful_input(self, &input, state, phase)?;
+        validate_logits_selection(&options.logits, rows.sequence)?;
+        let retain_router_logits = self.retains_router_logits(options);
+        let device = state.tensors.device().clone();
+        if rows.token_counts.iter().all(|&count| count == 0) {
+            // Every row is finished: an exact no-op with zero outputs.
+            let zeros = |width: usize| {
+                Tensor::<B, 3>::zeros(
+                    [rows.batch, rows.sequence, width],
+                    (&device, self.model.embed_tokens.weight.val().dtype()),
+                )
             };
-            let tokens = plan.compact(&input.token_ids);
-            let baseline = state.tensors.lengths()[row];
-            let positions = match &input.position_ids {
-                Some(position_ids) => plan.compact(position_ids),
-                None => implicit_position_ids(
-                    baseline,
-                    plan.count(),
-                    &device,
-                    INPUT_NAMES.position_ids,
-                )?,
+            let sparse_layers = self
+                .model
+                .layers
+                .iter()
+                .filter(|layer| layer.sparse_mlp.is_some())
+                .count();
+            let backbone = Qwen3MoeBackboneOutput {
+                hidden: zeros(self.config().hidden_size),
+                hidden_states: if options.hidden_states {
+                    vec![zeros(self.config().hidden_size); self.model.layers.len() + 2]
+                } else {
+                    Vec::new()
+                },
+                router_logits: if retain_router_logits {
+                    vec![zeros(self.config().num_experts); sparse_layers]
+                } else {
+                    Vec::new()
+                },
             };
-            let compact = self.model.forward_compact_row(
-                tokens,
-                positions,
-                row,
-                baseline,
-                prepared.evaluated_contexts[row],
-                state.tensors.main(),
-                &mut pending,
-                options.hidden_states,
-                retain_routers,
-            )?;
-            final_rows.push(plan.scatter(compact.hidden)?);
-            if options.hidden_states {
-                if compact.hidden_states.len() != diagnostic_count {
-                    return Err(Error::Cache(format!(
-                        "Qwen3 MoE hidden-state count must be {diagnostic_count}, found {}",
-                        compact.hidden_states.len()
-                    )));
-                }
-                for (destination, state) in hidden_rows.iter_mut().zip(compact.hidden_states) {
-                    destination.push(plan.scatter(state)?);
-                }
-            }
-            if retain_routers {
-                if compact.routers.len() != sparse_count {
-                    return Err(Error::Cache(format!(
-                        "Qwen3 MoE router count must be {sparse_count}, found {}",
-                        compact.routers.len()
-                    )));
-                }
-                for (destination, routed) in router_rows.iter_mut().zip(compact.routers) {
-                    destination.push(RowRouter {
-                        logits: plan.scatter(routed.router_logits)?,
-                    });
-                }
-            }
+            return self.finish_cached(&input, &rows, options, backbone);
         }
+        let layout = CompactBatch::new(
+            &rows.valid_indices,
+            rows.sequence,
+            state.tensors.lengths(),
+            &device,
+        )?;
+        // Padding slots are evaluated (and discarded), so they carry token 0
+        // and position 0 instead of the caller's arbitrary sentinels.
+        let tokens = layout.compact(&input.token_ids, 0);
+        let positions = match &input.position_ids {
+            Some(positions) => layout.compact(positions, 0),
+            None => layout.cache_positions().clone(),
+        };
+        let context = rows
+            .active_contexts()
+            .map(|(_, context)| context)
+            .max()
+            .unwrap_or(1);
+        let (compact, writes) = self.model.run_cached(
+            tokens,
+            positions,
+            context,
+            &layout,
+            &mut state.tensors,
+            options.hidden_states,
+            retain_router_logits,
+        )?;
+        let backbone = Qwen3MoeBackboneOutput {
+            hidden: compact.hidden,
+            hidden_states: compact
+                .hidden_states
+                .into_iter()
+                .map(|hidden| layout.restore(hidden))
+                .collect(),
+            router_logits: compact
+                .router_logits
+                .into_iter()
+                .map(|logits| layout.restore(logits))
+                .collect(),
+        };
+        // `Last` reads the compact block directly; other selections restore.
+        let (selected, hidden) = match &options.logits {
+            crate::LogitsSelection::Last => (
+                layout.last(backbone.hidden.clone()),
+                options
+                    .hidden_states
+                    .then(|| layout.restore(backbone.hidden.clone())),
+            ),
+            selection => {
+                let hidden = layout.restore(backbone.hidden.clone());
+                (
+                    select_hidden_with_last_columns(
+                        hidden.clone(),
+                        rows.last_columns(),
+                        selection,
+                    )?,
+                    options.hidden_states.then_some(hidden),
+                )
+            }
+        };
+        let output = self.finish_selected(&input, options, selected, hidden, backbone)?;
+        state.tensors.publish_step(writes)?;
+        Ok(output)
+    }
 
-        let hidden = concat_rows(final_rows, "qwen3_moe.hidden")?;
-        let hidden_states = hidden_rows
-            .into_iter()
-            .map(|rows| concat_rows(rows, "qwen3_moe.hidden_states"))
-            .collect::<Result<Vec<_>>>()?;
-        let mut routers = Vec::with_capacity(if retain_router_logits {
-            sparse_count
-        } else {
-            0
-        });
-        let mut auxiliary_router_logits = Vec::with_capacity(if options.auxiliary_losses {
-            sparse_count
-        } else {
-            0
-        });
-        for rows in router_rows {
-            let logits = concat_rows(
-                rows.into_iter().map(|row| row.logits).collect(),
-                "qwen3_moe.router_logits",
-            )?;
-            if options.auxiliary_losses {
-                auxiliary_router_logits.push(logits.clone());
-            }
-            if retain_router_logits {
-                routers.push(RouterDiagnostics {
-                    logits: Some(logits),
-                    load_balancing_loss: None,
-                    z_loss: None,
-                });
-            }
-        }
+    /// Finishes an all-inactive call from rectangular zero states.
+    fn finish_cached(
+        &self,
+        input: &CausalLmInput<B>,
+        rows: &StatefulRows,
+        options: &ForwardOptions,
+        backbone: Qwen3MoeBackboneOutput<B>,
+    ) -> Result<CausalLmOutput<B>> {
+        let selected = select_hidden_with_last_columns(
+            backbone.hidden.clone(),
+            rows.last_columns(),
+            &options.logits,
+        )?;
+        let hidden = options.hidden_states.then(|| backbone.hidden.clone());
+        self.finish_selected(input, options, selected, hidden, backbone)
+    }
+
+    /// Projects selected states and assembles router diagnostics and the auxiliary loss.
+    ///
+    /// Router logits are rectangular with zeros at padding; the stack-wide
+    /// loss masks padding with the caller's token mask.
+    fn finish_selected(
+        &self,
+        input: &CausalLmInput<B>,
+        options: &ForwardOptions,
+        selected: Tensor<B, 3>,
+        final_hidden_state: Option<Tensor<B, 3>>,
+        backbone: Qwen3MoeBackboneOutput<B>,
+    ) -> Result<CausalLmOutput<B>> {
         let load_balancing_loss = options
             .auxiliary_losses
             .then(|| {
-                qwen3_moe_load_balancing_loss(
-                    &auxiliary_router_logits,
+                super::qwen3_moe_load_balancing_loss(
+                    &backbone.router_logits,
                     self.config().num_experts_per_tok,
                     input.token_mask.as_ref(),
                 )
             })
             .transpose()?;
-        let selected = select_hidden_with_last_columns(
-            hidden.clone(),
-            prepared.last_columns(),
-            &options.logits,
-        )?;
-        let logits = self.project_logits(selected)?;
-        pending.commit(
-            &mut state.tensors,
-            self.model.layers.len(),
-            &prepared.token_counts,
-        )?;
+        let routers = if options.router_logits || self.config().output_router_logits {
+            backbone
+                .router_logits
+                .into_iter()
+                .map(super::router_diagnostics)
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(CausalLmOutput {
-            logits,
-            final_hidden_state: options.hidden_states.then_some(hidden),
-            hidden_states,
+            logits: self.project_logits(selected)?,
+            final_hidden_state,
+            hidden_states: backbone.hidden_states,
             attentions: Vec::new(),
             routers,
             load_balancing_loss,
@@ -406,254 +413,95 @@ impl<B: Backend> Qwen3MoeForCausalLm<B> {
 }
 
 impl<B: Backend> Qwen3MoeModel<B> {
-    /// Runs one compact semantic row and retains cache writes in scratch storage.
+    /// Runs every layer once over the compact batch and records its cache writes.
+    ///
+    /// Returns compact `[B, N, ·]` states and router logits with the
+    /// unpublished step.
     #[allow(clippy::too_many_arguments)]
-    fn forward_compact_row(
+    fn run_cached(
         &self,
-        token_ids: Tensor<B, 2, Int>,
+        tokens: Tensor<B, 2, Int>,
         positions: Tensor<B, 2, Int>,
-        row: usize,
-        baseline: usize,
-        evaluated_context: usize,
-        bank: &crate::cache::TensorCacheBank<B>,
-        pending: &mut PendingKvWrites<B>,
+        context: usize,
+        layout: &CompactBatch<B>,
+        tensors: &mut TensorDecodeState<B>,
         retain_hidden_states: bool,
-        retain_routers: bool,
-    ) -> Result<CompactRowOutput<B>> {
-        let mut hidden = self.embed_tokens.forward(token_ids);
+        retain_router_logits: bool,
+    ) -> Result<(Qwen3MoeBackboneOutput<B>, TensorStepWrites<B>)> {
+        let mut writes = tensors.step(layout.counts())?;
+        let mut hidden = self.embed_tokens.forward(tokens);
+        let mut attention = CachedAttention::new(
+            self.rope,
+            context,
+            positions,
+            hidden.dtype(),
+            tensors,
+            &writes,
+            NATIVE_KV_GROUP,
+        )?;
         let mut hidden_states = Vec::with_capacity(if retain_hidden_states {
             self.layers.len() + 2
         } else {
             0
         });
-        let mut routers = Vec::new();
         if retain_hidden_states {
             hidden_states.push(hidden.clone());
         }
-        let rotary = rotary_angles(self.rope, positions, evaluated_context)?;
-        for (layer_index, layer) in self.layers.iter().enumerate() {
-            let (next, routed) = layer.forward_cached(
-                hidden,
-                &rotary,
-                row,
-                baseline,
-                bank,
-                layer_index,
-                self.config.layer_sliding_window(layer_index),
-                pending,
+        let mut router_logits = Vec::new();
+        for (index, layer) in self.layers.iter().enumerate() {
+            let window = self
+                .config
+                .layer_sliding_window(index)
+                .map(|window| {
+                    NonZeroUsize::new(window).ok_or_else(|| {
+                        Error::configuration("qwen3_moe.sliding_window", "must be non-zero")
+                    })
+                })
+                .transpose()?;
+            let residual = hidden.clone();
+            let normalized = layer.input_layernorm.forward(hidden);
+            let mixed = attention.attend(
+                &layer.self_attn,
+                normalized,
+                index,
+                window,
+                layout,
+                tensors,
+                &mut writes,
             )?;
-            hidden = next;
+            let hidden_after_attention = residual + mixed;
+            let normalized = layer
+                .post_attention_layernorm
+                .forward(hidden_after_attention.clone());
+            let (mlp, logits) = layer.feed_forward(normalized, Layer::decoder(index), None)?;
+            hidden = hidden_after_attention + mlp;
             if retain_hidden_states {
                 hidden_states.push(hidden.clone());
             }
-            if retain_routers && let Some(routed) = routed {
-                routers.push(routed);
+            if retain_router_logits && let Some(logits) = logits {
+                router_logits.push(logits);
             }
         }
         hidden = self.norm.forward(hidden);
         if retain_hidden_states {
             hidden_states.push(hidden.clone());
         }
-        Ok(CompactRowOutput {
-            hidden,
-            hidden_states,
-            routers,
-        })
+        Ok((
+            Qwen3MoeBackboneOutput {
+                hidden,
+                hidden_states,
+                router_logits,
+            },
+            writes,
+        ))
     }
-}
-
-/// Result of evaluating one compact semantic batch row.
-struct CompactRowOutput<B: Backend> {
-    /// Final-normalized compact states shaped `[1, valid_tokens, hidden]`.
-    hidden: Tensor<B, 3>,
-    /// Optional compact embedding, post-block, and normalized snapshots.
-    hidden_states: Vec<Tensor<B, 3>>,
-    /// Compact sparse-layer results awaiting rectangular diagnostic assembly.
-    routers: Vec<SparseMoeOutput<B>>,
-}
-
-impl<B: Backend> Qwen3MoeDecoderLayer<B> {
-    /// Evaluates one cached GQA/MoE block without publishing its new keys.
-    #[allow(clippy::too_many_arguments)]
-    fn forward_cached(
-        &self,
-        hidden: Tensor<B, 3>,
-        rotary: &RotaryAngles<B>,
-        row: usize,
-        baseline: usize,
-        bank: &crate::cache::TensorCacheBank<B>,
-        layer_index: usize,
-        sliding_window: Option<usize>,
-        pending: &mut PendingKvWrites<B>,
-    ) -> Result<(Tensor<B, 3>, Option<SparseMoeOutput<B>>)> {
-        let residual = hidden.clone();
-        let normalized = self.input_layernorm.forward(hidden);
-        let mut projection = self.self_attn.project_self(normalized)?;
-        (projection.query, projection.key) =
-            apply_rotary(projection.query, projection.key, rotary)?;
-        let keys = projection.key.clone();
-        let values = projection.value.clone();
-        let query_sequence = projection.query.dims()[2];
-        let cache = bank.native_kv(NATIVE_KV_GROUP)?;
-        let history = cache.read_sequence(layer_index, row, baseline)?;
-        if history.retained_positions() != (0..baseline) {
-            return Err(Error::Cache(
-                "Qwen3 MoE full cache unexpectedly evicted history".into(),
-            ));
-        }
-        if let Some((past_keys, past_values)) = history.materialize() {
-            projection.key = Tensor::cat(vec![past_keys, projection.key], 2);
-            projection.value = Tensor::cat(vec![past_values, projection.value], 2);
-        }
-        let mask = cached_attention_mask::<B>(
-            baseline,
-            query_sequence,
-            self.self_attn.query_heads,
-            sliding_window,
-            &projection.query.device(),
-        )?;
-        let mixed = self.self_attn.attend(projection, Some(mask), None, false)?;
-        let hidden = residual + mixed;
-        let residual = hidden.clone();
-        let normalized = self.post_attention_layernorm.forward(hidden);
-        let (hidden, routed) = match (&self.sparse_mlp, &self.dense_mlp) {
-            (Some(moe), None) => {
-                let output = moe.forward(normalized)?;
-                (residual + output.hidden_state.clone(), Some(output))
-            }
-            (None, Some(mlp)) => (residual + mlp.forward(normalized)?, None),
-            _ => {
-                return Err(Error::Checkpoint(
-                    "Qwen3 MoE layer has an invalid feed-forward topology".into(),
-                ));
-            }
-        };
-        pending.writes.push(PendingKvWrite {
-            layer: layer_index,
-            row,
-            start: baseline,
-            keys,
-            values,
-        });
-        Ok((hidden, routed))
-    }
-}
-
-/// One deferred native-KV append.
-struct PendingKvWrite<B: Backend> {
-    /// Decoder-layer index within the homogeneous native-KV cache group.
-    layer: usize,
-    /// Independent batch row receiving this append.
-    row: usize,
-    /// Absolute logical cursor at which this suffix begins.
-    start: usize,
-    /// New rotated keys shaped `[1, kv_heads, suffix, head_dim]`.
-    keys: Tensor<B, 4>,
-    /// New values with the same native-head axes as the keys.
-    values: Tensor<B, 4>,
-}
-
-/// Complete operation-local write set used for atomic publication.
-struct PendingKvWrites<B: Backend> {
-    /// Unpublished per-layer, per-row appends for the complete operation.
-    writes: Vec<PendingKvWrite<B>>,
-}
-
-impl<B: Backend> PendingKvWrites<B> {
-    /// Creates an empty scratch write set.
-    fn new() -> Self {
-        Self { writes: Vec::new() }
-    }
-
-    /// Validates exact layer/row coverage, then atomically publishes the call.
-    fn commit(
-        self,
-        state: &mut TensorDecodeState<B>,
-        layers: usize,
-        token_counts: &[usize],
-    ) -> Result<()> {
-        self.validate_coverage(state, layers, token_counts)?;
-        let cache = state.main().native_kv(NATIVE_KV_GROUP)?;
-        let writes = self
-            .writes
-            .into_iter()
-            .map(|write| {
-                cache.prepare_sequence_write(
-                    write.layer,
-                    write.row,
-                    write.start,
-                    write.keys,
-                    write.values,
-                )
-            })
-            .collect::<core::result::Result<Vec<_>, _>>()?;
-        let prepared = state
-            .main()
-            .prepare_direct_writes(Some((NATIVE_KV_GROUP, writes)), None)?;
-        state.advance(token_counts)?;
-        state.main_mut().apply_prepared_direct_writes(prepared);
-        Ok(())
-    }
-
-    /// Proves that every active row has exactly one append for every layer.
-    fn validate_coverage(
-        &self,
-        state: &TensorDecodeState<B>,
-        layers: usize,
-        token_counts: &[usize],
-    ) -> Result<()> {
-        if token_counts.len() != state.batch_size() {
-            return Err(Error::Cache(format!(
-                "Qwen3 MoE pending counts describe {} rows for batch {}",
-                token_counts.len(),
-                state.batch_size()
-            )));
-        }
-        let active = token_counts.iter().filter(|&&count| count > 0).count();
-        let expected = layers.checked_mul(active).ok_or_else(|| {
-            Error::configuration("qwen3_moe.cache_commit", "write count overflows usize")
-        })?;
-        if self.writes.len() != expected {
-            return Err(Error::Cache(format!(
-                "Qwen3 MoE pending cache coverage is {}/{expected}",
-                self.writes.len()
-            )));
-        }
-        let mut seen = BTreeSet::new();
-        for write in &self.writes {
-            let count = token_counts.get(write.row).copied().ok_or_else(|| {
-                Error::Cache(format!(
-                    "Qwen3 MoE cache write row {} is invalid",
-                    write.row
-                ))
-            })?;
-            if count == 0
-                || write.layer >= layers
-                || write.start != state.lengths()[write.row]
-                || write.keys.dims()[2] != count
-                || write.values.dims()[2] != count
-                || !seen.insert((write.layer, write.row))
-            {
-                return Err(Error::Cache(format!(
-                    "invalid or duplicate Qwen3 MoE write for layer {}, row {}",
-                    write.layer, write.row
-                )));
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Rectangular router tensors reconstructed from one compact row.
-struct RowRouter<B: Backend> {
-    /// Router logits restored to `[1, rectangular_sequence, experts]`.
-    logits: Tensor<B, 3>,
 }
 
 /// Validates devices, shapes, semantic rows, positions, and capacity transitions.
 ///
 /// The shared preparation reads the mask, token IDs, and explicit positions in
-/// one transfer; this wrapper adds the model-device and dynamic-NTK guards.
+/// one transfer; this wrapper adds the model-device and context-dependent RoPE
+/// guards.
 fn prepare_stateful_input<B: Backend>(
     model: &Qwen3MoeForCausalLm<B>,
     input: &CausalLmInput<B>,
@@ -685,63 +533,6 @@ fn prepare_stateful_input<B: Backend>(
     Ok(rows)
 }
 
-/// Builds `excluded(q,k) = k > q || (window && k + window <= q)`.
-fn cached_attention_mask<B: Backend>(
-    baseline: usize,
-    query_sequence: usize,
-    heads: usize,
-    window: Option<usize>,
-    device: &B::Device,
-) -> Result<Tensor<B, 4, Bool>> {
-    let key_sequence = baseline.checked_add(query_sequence).ok_or_else(|| {
-        Error::configuration("qwen3_moe.attention_mask", "key length overflows usize")
-    })?;
-    let query_start = i64::try_from(baseline)
-        .map_err(|_| Error::configuration("qwen3_moe.attention_mask", "offset exceeds i64"))?;
-    let end = i64::try_from(key_sequence)
-        .map_err(|_| Error::configuration("qwen3_moe.attention_mask", "length exceeds i64"))?;
-    let query = Tensor::<B, 1, Int>::arange(query_start..end, device)
-        .reshape([1, 1, query_sequence, 1])
-        .expand([1, heads, query_sequence, key_sequence]);
-    let key = Tensor::<B, 1, Int>::arange(0..end, device)
-        .reshape([1, 1, 1, key_sequence])
-        .expand([1, heads, query_sequence, key_sequence]);
-    let causal = key.clone().greater(query.clone());
-    Ok(match window {
-        Some(window) => causal.bool_or((key + window as i64).lower_equal(query)),
-        None => causal,
-    })
-}
-
-/// Returns exact zero hidden states for an inactive decode row.
-fn empty_hidden_row<B: Backend>(
-    model: &Qwen3MoeForCausalLm<B>,
-    sequence: usize,
-    device: &B::Device,
-) -> Tensor<B, 3> {
-    Tensor::zeros(
-        [1, sequence, model.config().hidden_size],
-        (device, model.model.embed_tokens.weight.val().dtype()),
-    )
-}
-
-/// Rejects an evaluated rotary context that keys already in the cache cannot follow.
-///
-/// Context-dependent policies (dynamic NTK and LongRoPE) change their
-/// frequencies once the evaluated context passes
-/// [`RopeScaling::cached_context_limit`](crate::position::RopeScaling::cached_context_limit).
-/// Cached keys were rotated with the earlier frequencies, so extending the
-/// cache past that limit would silently mix two rotary bases; re-rotating the
-/// history is not implemented. Static policies have no limit.
-fn ensure_cacheable_rotary_context(rope: RopeConfig, context: usize, family: &str) -> Result<()> {
-    match rope.scaling().cached_context_limit() {
-        Some(limit) if context > limit => Err(Error::BackendCapability(format!(
-            "{family} cached decoding with a context-dependent RoPE policy cannot extend the evaluated context to {context} beyond {limit} without re-rotating cached keys"
-        ))),
-        _ => Ok(()),
-    }
-}
-
 /// Derives the homogeneous native-KV cache specification from model weights.
 fn cache_spec<B: Backend>(model: &Qwen3MoeForCausalLm<B>) -> Result<NativeKvCacheSpec> {
     NativeKvCacheSpec::new(
@@ -753,3 +544,7 @@ fn cache_spec<B: Backend>(model: &Qwen3MoeForCausalLm<B>) -> Result<NativeKvCach
     )
     .map_err(Into::into)
 }
+
+#[cfg(test)]
+#[path = "decode_tests.rs"]
+mod tests;

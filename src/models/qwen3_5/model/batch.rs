@@ -22,12 +22,27 @@
 //! `n_b = 0` (a finished sequence during decoding) is pure padding; it writes
 //! no cache entry and its outputs are exact zeros.
 //!
-//! The layout is family-independent; the Qwen3.5 and Qwen3-MoE decoders share
-//! it.
+//! [`CachedAttention`] runs one full-attention layer of such a batch against
+//! a native-KV cache group: it writes the step's rotated keys and values into
+//! their slots ahead of attention and attends over one zero-copy view of each
+//! row's `[0, W_b + n_b)` keys.
+//!
+//! Both pieces are family-independent; the Qwen3.5 and Qwen3-MoE decoders
+//! share them.
 
-use burn::tensor::{Bool, Int, Tensor, TensorData, backend::Backend};
+use core::num::NonZeroUsize;
 
-use crate::{Error, LogitsSelection, Result, architecture::TokenMask};
+use burn::tensor::{Bool, DType, Int, Tensor, TensorData, backend::Backend};
+
+use crate::{
+    Error, LogitsSelection, Result,
+    architecture::TokenMask,
+    attention::GroupedQueryAttention,
+    cache::{KvBatchReadPlan, TensorDecodeState, TensorStepWrites},
+    position::{
+        RopeConfig, RotaryAngles, RotaryFrequencies, apply_rotary, rotary_angles_from_frequencies,
+    },
+};
 
 use crate::models::shared::select_hidden_with_last_columns;
 
@@ -294,6 +309,139 @@ impl<B: Backend> CompactBatch<B> {
             LogitsSelection::Last => Ok(self.last(compact)),
             other => select_hidden_with_last_columns(self.restore(compact), last_columns, other),
         }
+    }
+}
+
+/// Per-step state shared by every full-attention layer of one native-KV group.
+///
+/// Rotary tables, the read plan through the step's own tokens, and the
+/// exclusion masks depend only on the step's positions and lengths, not on
+/// the layer, so they are built once and reused: the tables when the step
+/// starts, each mask (one per distinct sliding window) by the first layer
+/// that needs it.
+pub(crate) struct CachedAttention<B: Backend> {
+    /// Cosine/sine tables `[B, 1, N, rotary]` in the activation dtype.
+    rotary: RotaryAngles<B>,
+    /// Batched read of `[0, W_b + n_b)` after each layer's write-ahead.
+    plan: KvBatchReadPlan<B>,
+    /// Native-KV group the layers read and write.
+    group: usize,
+    /// Exclusion masks `[B, heads, N, K]` per sliding window (`None` = global).
+    masks: Vec<(Option<NonZeroUsize>, Tensor<B, 4, Bool>)>,
+}
+
+impl<B: Backend> CachedAttention<B> {
+    /// Builds the step's rotary tables (frequencies computed once) and read plan.
+    ///
+    /// `context` must be the call's largest evaluated rotary context; callers
+    /// guarantee it lies where the RoPE policy's frequencies are
+    /// context-independent, so one table serves every row.
+    ///
+    /// # Errors
+    ///
+    /// Returns rotary or cache planning errors.
+    pub(crate) fn new(
+        rope: RopeConfig,
+        context: usize,
+        positions: Tensor<B, 2, Int>,
+        dtype: DType,
+        tensors: &TensorDecodeState<B>,
+        writes: &TensorStepWrites<B>,
+        group: usize,
+    ) -> Result<Self> {
+        let frequencies = RotaryFrequencies::new(rope, context)?;
+        Ok(Self {
+            rotary: rotary_angles_from_frequencies(&frequencies, positions)?.to_dtype(dtype),
+            plan: tensors.kv_read_plan_through(writes, group)?,
+            group,
+            masks: Vec::new(),
+        })
+    }
+
+    /// Projects, rotates, writes ahead, and attends one full-attention layer.
+    ///
+    /// The new keys and values land in their cache slots before attention,
+    /// which then reads keys and values `[B, kv_heads, K, d]` through one view.
+    /// A query at cache position `q` sees keys `k <= q` and, with a sliding
+    /// `window`, only `k > q - window`. A uniform batch without a window uses
+    /// the backend's bottom-right causal path and no mask. Invalid slots
+    /// (beyond a row's `W_b + n_b`) have their values zeroed so stale
+    /// non-finite bytes cannot poison a row; padding outputs are zeroed for
+    /// the same reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns projection, rotary, cache, or attention errors.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn attend(
+        &mut self,
+        module: &GroupedQueryAttention<B>,
+        normalized: Tensor<B, 3>,
+        cache_layer: usize,
+        window: Option<NonZeroUsize>,
+        layout: &CompactBatch<B>,
+        tensors: &mut TensorDecodeState<B>,
+        writes: &mut TensorStepWrites<B>,
+    ) -> Result<Tensor<B, 3>> {
+        let mut projection = module.project_self(normalized)?;
+        (projection.query, projection.key) =
+            apply_rotary(projection.query, projection.key, &self.rotary)?;
+        tensors.write_kv_ahead(
+            writes,
+            self.group,
+            cache_layer,
+            projection.key.clone(),
+            projection.value.clone(),
+        )?;
+        let segment = tensors
+            .read_kv_through(writes, self.group, cache_layer, &self.plan)?
+            .materialize()
+            .ok_or_else(|| Error::Cache("cached attention step read no key".into()))?;
+        // With every row sharing one cursor and width and no window,
+        // causality is the bottom-right rule over `[0, W + N)`.
+        let causal = window.is_none() && layout.is_uniform();
+        let mask = if causal {
+            None
+        } else if let Some((_, mask)) = self.masks.iter().find(|(known, _)| *known == window) {
+            Some(mask.clone())
+        } else {
+            let mask =
+                segment.exclusion_mask(layout.cache_positions(), module.query_heads, window)?;
+            self.masks.push((window, mask.clone()));
+            Some(mask)
+        };
+        projection.key = segment.keys().clone();
+        projection.value = segment.masked_values();
+        let mixed = module.attend(projection, mask, None, causal)?;
+        Ok(layout.zero_padding(mixed))
+    }
+}
+
+/// Rejects an evaluated rotary context that keys already in the cache cannot follow.
+///
+/// Context-dependent policies (dynamic NTK and LongRoPE) change their
+/// frequencies once the evaluated context passes
+/// [`RopeScaling::cached_context_limit`](crate::position::RopeScaling::cached_context_limit).
+/// Cached keys were rotated with the earlier frequencies, so extending the
+/// cache past that limit would silently mix two rotary bases; re-rotating the
+/// history is not implemented. Static policies have no limit. Below the
+/// limit the frequencies do not depend on the context, which lets one call
+/// rotate every row with the tables of its largest context. `family` names
+/// the model in the error.
+///
+/// # Errors
+///
+/// Returns [`Error::BackendCapability`] for a context beyond the limit.
+pub(crate) fn ensure_cacheable_rotary_context(
+    rope: RopeConfig,
+    context: usize,
+    family: &str,
+) -> Result<()> {
+    match rope.scaling().cached_context_limit() {
+        Some(limit) if context > limit => Err(Error::BackendCapability(format!(
+            "{family} cached decoding with a context-dependent RoPE policy cannot extend the evaluated context to {context} beyond {limit} without re-rotating cached keys"
+        ))),
+        _ => Ok(()),
     }
 }
 

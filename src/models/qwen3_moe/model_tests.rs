@@ -640,48 +640,55 @@ fn all_inactive_decode_is_exact_noop() {
     );
 }
 
-/// A later-layer recoverable error leaves earlier pending cache writes unpublished.
+/// A later-layer recoverable error publishes nothing, and a retry equals a fresh call.
+///
+/// Earlier layers may already have written their keys ahead into slots beyond
+/// the committed lengths; those slots are unreadable, so the failed call is
+/// logically atomic: lengths are unchanged and the retry sees no trace of it.
 #[test]
 fn later_layer_failure_is_cache_atomic() {
     let (mut model, device) = tiny_model();
+    let prompt = || CausalLmInput {
+        token_ids: Tensor::from_ints([[1, 2]], &device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        ..Default::default()
+    };
     let mut state = model
         .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
         .unwrap();
-    let before = state
-        .tensor_state()
-        .main()
-        .native_kv(0)
-        .unwrap()
-        .keys(0)
-        .unwrap()
-        .clone()
-        .into_data();
-    model.model.layers[1].sparse_mlp = None;
+    let sparse = model.model.layers[1].sparse_mlp.take();
     let error = model
-        .prefill(
-            CausalLmInput {
-                token_ids: Tensor::from_ints([[1, 2]], &device),
-                token_mask: None,
-                position_ids: None,
-            },
-            &mut state,
-            &ForwardOptions::default(),
-        )
+        .prefill(prompt(), &mut state, &options)
         .expect_err("invalid later layer must fail");
     assert!(error.to_string().contains("feed-forward topology"));
     assert_eq!(state.lengths(), &[0]);
-    assert_eq!(
-        before,
-        state
-            .tensor_state()
-            .main()
-            .native_kv(0)
+    model.model.layers[1].sparse_mlp = sparse;
+    let retry = model.prefill(prompt(), &mut state, &options).unwrap();
+    let mut fresh_state = model
+        .new_decode_state(CacheConfig::new(1, 8).unwrap(), 1, &device)
+        .unwrap();
+    let fresh = model.prefill(prompt(), &mut fresh_state, &options).unwrap();
+    assert_eq!(retry.logits.to_data(), fresh.logits.to_data());
+    let next = |state: &mut Qwen3MoeDecodeState<TestBackend>| {
+        model
+            .decode(
+                DecodeInput {
+                    token_ids: Tensor::from_ints([[3]], &device),
+                    token_mask: None,
+                    position_ids: None,
+                },
+                state,
+                &options,
+            )
             .unwrap()
-            .keys(0)
-            .unwrap()
-            .clone()
-            .into_data()
-    );
+            .logits
+            .to_data()
+    };
+    assert_eq!(next(&mut state), next(&mut fresh_state));
 }
 
 /// Reorder/duplicate, safe truncate, reset, and capacity errors use common lifecycle rules.
