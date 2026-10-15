@@ -34,6 +34,12 @@
 //! token mask) is removed from both: padded tokens neither update the matrix
 //! state nor occupy convolution taps or history, so a padded row produces the
 //! same valid outputs and state as its compacted, unpadded form.
+//!
+//! The integer planning behind both paths (chunk width and count, padding,
+//! balanced chunk blocks, the doubling-inverse schedule, projection widths,
+//! geometry checks, and the recurrence-versus-chunked choice) lives in the
+//! dependency-free `plan` submodule, whose functions Verus proves exact
+//! through `verus/mixers.rs`.
 
 use core::ops::Range;
 
@@ -51,6 +57,13 @@ use burn::{
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result, architecture::TokenMask, normalization::RmsNormConfig, operations};
+
+mod plan;
+
+use plan::{
+    ChunkPlan, DeltaGeometryViolation, block_chunk_ranges, check_delta_geometry, chunk_plan,
+    inverse_block_sizes, prefers_recurrence,
+};
 
 /// Number of prefill chunks whose intra-chunk algebra is batched together.
 ///
@@ -186,17 +199,13 @@ impl GatedDeltaNetConfig {
 
     /// Returns the concatenated Q/K/V convolution channel count.
     pub fn convolution_channels(&self) -> Result<usize> {
-        self.key_heads
-            .checked_mul(self.key_head_dim)
-            .and_then(|key_width| key_width.checked_mul(2))
-            .and_then(|query_key_width| {
-                self.value_heads
-                    .checked_mul(self.value_head_dim)
-                    .and_then(|value_width| query_key_width.checked_add(value_width))
-            })
-            .ok_or_else(|| {
-                Error::configuration("delta_net", "projection dimensions overflow usize")
-            })
+        plan::convolution_channels(
+            self.key_heads,
+            self.key_head_dim,
+            self.value_heads,
+            self.value_head_dim,
+        )
+        .ok_or_else(|| Error::configuration("delta_net", "projection dimensions overflow usize"))
     }
 
     /// Validates every projection, grouping, convolution, and numerical invariant.
@@ -208,23 +217,27 @@ impl GatedDeltaNetConfig {
     /// non-positive output-norm or query/key epsilon, a zero chunk size, or
     /// projection widths that overflow `usize`.
     pub fn validate(&self) -> Result<()> {
-        if self.hidden_size == 0
-            || self.key_heads == 0
-            || self.value_heads == 0
-            || self.key_head_dim == 0
-            || self.value_head_dim == 0
-            || self.convolution_kernel == 0
-        {
-            return Err(Error::configuration(
-                "delta_net",
-                "all model and convolution dimensions must be non-zero",
-            ));
-        }
-        if !self.value_heads.is_multiple_of(self.key_heads) {
-            return Err(Error::configuration(
-                "delta_net.value_heads",
-                "must be an integer multiple of key_heads",
-            ));
+        match check_delta_geometry(
+            self.hidden_size,
+            self.key_heads,
+            self.value_heads,
+            self.key_head_dim,
+            self.value_head_dim,
+            self.convolution_kernel,
+        ) {
+            Ok(()) => {}
+            Err(DeltaGeometryViolation::ZeroWidth) => {
+                return Err(Error::configuration(
+                    "delta_net",
+                    "all model and convolution dimensions must be non-zero",
+                ));
+            }
+            Err(DeltaGeometryViolation::ValueHeads) => {
+                return Err(Error::configuration(
+                    "delta_net.value_heads",
+                    "must be an integer multiple of key_heads",
+                ));
+            }
         }
         for (field, epsilon) in [
             (
@@ -330,35 +343,6 @@ pub enum DeltaNetMode {
     /// state; never for Qwen3.5-sized states beyond one token). Both compute
     /// the same function up to floating-point reassociation.
     ChunkedPrefill,
-}
-
-/// Recurrence cost of one token beyond its state work, in state-element units.
-///
-/// Calibrated on the Flex CPU backend: a recurrent token issues about eight
-/// small kernels (~4.5 µs), and a state element costs ~0.4 ns more in the
-/// recurrence than in the batched chunk algebra, so one token's fixed cost is
-/// worth about 6 000 state elements.
-const RECURRENCE_TOKEN_OVERHEAD: usize = 6_144;
-
-/// Fixed cost of a chunked prefill call in the same units (~30 µs of kernels).
-const CHUNKED_FIXED_OVERHEAD: usize = 12 * RECURRENCE_TOKEN_OVERHEAD;
-
-/// Returns whether the recurrence is expected to beat the chunked algorithm.
-///
-/// A single token always takes the recurrence, which is then one exact step.
-/// Otherwise the recurrence is modelled as `L * (token overhead + state)` and
-/// the chunked algorithm as a fixed launch overhead plus cheaper batched
-/// per-token work, with `state_elements = heads * key_width * value_width`.
-/// With Qwen3.5's `16 * 128 * 128` states the chunked algorithm wins from two
-/// tokens on; tiny experimental states (for example `2 * 4 * 3`) use the
-/// recurrence up to about a dozen tokens, where the chunked algorithm's ~100
-/// kernel launches dominate.
-#[must_use]
-fn prefers_recurrence(sequence: usize, state_elements: usize) -> bool {
-    sequence == 1
-        || sequence
-            .checked_mul(RECURRENCE_TOKEN_OVERHEAD.saturating_add(state_elements))
-            .is_some_and(|cost| cost <= CHUNKED_FIXED_OVERHEAD)
 }
 
 /// External convolution and matrix state for one Gated DeltaNet layer.
@@ -1093,7 +1077,7 @@ pub fn chunked_gated_delta_rule<B: Backend>(
         state = ChunkBlock::new(&operands, chunks).scan(state, &mut outputs);
     }
     let [_, _, _, key_width, _] = state.dims();
-    let padded = operands.chunks * operands.chunk;
+    let padded = operands.padded;
     // [chunks, batch, heads, C, value] -> [batch, chunks * C, heads, value].
     let values = Tensor::cat(outputs, 0)
         .permute([1, 0, 3, 2, 4])
@@ -1104,27 +1088,6 @@ pub fn chunked_gated_delta_rule<B: Backend>(
         values,
         final_state: state.reshape([batch, heads, key_width, value_width]),
     })
-}
-
-/// Splits `chunks` chunks into balanced consecutive blocks of at most `limit` chunks.
-///
-/// Uses `ceil(chunks / limit)` blocks whose sizes differ by at most one, the
-/// larger blocks first. Compared with greedy blocks of exactly `limit`, this
-/// never leaves a short final block: its inverse would cost as many
-/// sequential levels as a full one while batching less work. `limit` must be
-/// non-zero; zero chunks produce no block.
-fn block_chunk_ranges(chunks: usize, limit: usize) -> Vec<Range<usize>> {
-    let limit = limit.max(1);
-    let blocks = chunks.div_ceil(limit);
-    let mut ranges = Vec::with_capacity(blocks);
-    let mut start = 0;
-    for index in 0..blocks {
-        // The first `chunks % blocks` blocks hold one extra chunk.
-        let size = chunks / blocks + usize::from(index < chunks % blocks);
-        ranges.push(start..start + size);
-        start += size;
-    }
-    ranges
 }
 
 /// Chunk-major FP32 operands of one prefill call.
@@ -1154,23 +1117,29 @@ struct ChunkOperands<B: Backend> {
     chunk: usize,
     /// Number of chunks `ceil(sequence / C)`.
     chunks: usize,
+    /// Zero-padded token count `chunks * C`, less than one chunk above the sequence.
+    padded: usize,
 }
 
 impl<B: Backend> ChunkOperands<B> {
     /// Rearranges prepared token-major operands into chunk-major blocks of width `chunk_size`.
+    ///
+    /// The verified [`chunk_plan`] fixes `C`, the chunk count, and the padded
+    /// length; prepared operands are non-empty and `chunk_size` is validated
+    /// non-zero, which are its preconditions.
     fn new(prepared: &PreparedDeltaRule<B>, chunk_size: usize) -> Self {
         let sequence = prepared.query.dims()[1];
-        let chunk = chunk_size.min(sequence);
-        let chunks = sequence.div_ceil(chunk);
-        let arrange = |tensor: Tensor<B, 4>| chunk_major(tensor, chunk, chunks);
+        let plan = chunk_plan(sequence, chunk_size);
+        let arrange = |tensor: Tensor<B, 4>| chunk_major(tensor, plan);
         Self {
             query: arrange(prepared.query.clone()),
             key: arrange(prepared.key.clone()),
             value: arrange(prepared.value.clone()),
             beta: arrange(prepared.beta.clone().unsqueeze_dim(3)),
             log_decay: arrange(prepared.log_decay.clone().unsqueeze_dim(3)),
-            chunk,
-            chunks,
+            chunk: plan.chunk,
+            chunks: plan.chunks,
+            padded: plan.padded,
         }
     }
 }
@@ -1182,9 +1151,13 @@ impl<B: Backend> ChunkOperands<B> {
 /// `batch` is the identity for one row; otherwise the final reshape, which
 /// merges the swapped axes and therefore cannot be a view, materializes it as
 /// one 2-D transpose of `[batch, chunks]` blocks.
-fn chunk_major<B: Backend>(tokens: Tensor<B, 4>, chunk: usize, chunks: usize) -> Tensor<B, 5> {
+fn chunk_major<B: Backend>(tokens: Tensor<B, 4>, plan: ChunkPlan) -> Tensor<B, 5> {
     let [batch, sequence, heads, depth] = tokens.dims();
-    let padded = chunk * chunks;
+    let ChunkPlan {
+        chunk,
+        chunks,
+        padded,
+    } = plan;
     let tokens = if padded == sequence {
         tokens
     } else {
@@ -1371,7 +1344,9 @@ fn unit_lower_inverse<B: Backend>(strict_lower: Tensor<B, 5>) -> Tensor<B, 5> {
         return Tensor::ones([chunks, batch, heads, 1, 1], (&device, DType::F32));
     }
     let items = chunks * batch * heads;
-    let size = width.next_power_of_two();
+    // Verified schedule `[P, P / 2, …, 2]` with `P` the least power of two `>= width`.
+    let sizes = inverse_block_sizes(width);
+    let size = sizes[0];
     let mut lower = strict_lower.reshape([items, 1, width, width]);
     if size != width {
         let pad = size - width;
@@ -1382,9 +1357,9 @@ fn unit_lower_inverse<B: Backend>(strict_lower: Tensor<B, 5>) -> Tensor<B, 5> {
     // Diagonal blocks of L by size: `diagonal[k]` holds the blocks of size
     // `size >> k` as `[items, 2^k, size >> k, size >> k]`, finest last.
     let mut diagonal = vec![lower];
-    let mut block = size;
-    while block > 2 {
-        let half = block / 2;
+    for level in sizes.windows(2) {
+        // `block == 2 * half`, and `size / block` blocks of size `block` tile the tile.
+        let (block, half) = (level[0], level[1]);
         let parent = diagonal.last().expect("starts non-empty").clone();
         let count = size / block;
         // Rows 0..half of the concatenation are the upper-left quadrant and
@@ -1398,7 +1373,6 @@ fn unit_lower_inverse<B: Backend>(strict_lower: Tensor<B, 5>) -> Tensor<B, 5> {
             2,
         );
         diagonal.push(children.reshape([items, count * 2, half, half]));
-        block = half;
     }
     // `inverse` holds the inverted diagonal blocks of size `half`.
     let mut inverse: Option<Tensor<B, 4>> = None;
