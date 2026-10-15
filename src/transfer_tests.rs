@@ -710,37 +710,26 @@ fn an_empty_plan_preserves_initialized_aliases_and_reports_all_dispositions() {
     assert_eq!(report.preserved_ties, [vec!["left", "right"]]);
 }
 
-/// Selected packed tensors are rejected while omitted packed source payloads remain untouched.
+/// Packed sources are listed, rejected when selected, and untouched when omitted.
 #[test]
 fn packed_parameters_require_explicit_conversion_but_unselected_sources_stay_packed() {
-    use crate::checkpoint::quantization::{
-        QuantizationGroupSize, SymmetricQuantization, WeightQuantizationConfig,
-        quantize_tensor_data,
-    };
-    let device = Default::default();
-    let packed_data = quantize_tensor_data(
-        &burn::tensor::TensorData::new(
-            (0..64).map(|i| i as f32 / 8.0 - 4.0).collect::<Vec<_>>(),
-            [2, 32],
-        ),
-        WeightQuantizationConfig {
-            scheme: SymmetricQuantization::Q4,
-            group_size: QuantizationGroupSize::new(32).unwrap(),
-        },
-    )
-    .unwrap()
-    .into_burn_qfloat_data()
-    .unwrap();
     let mut source = block(32, 7.0);
-    source.weight = Param::from_tensor(Tensor::<B, 2>::from_data(packed_data, &device));
+    source.weight = packed_weight();
     let original_packed = source.weight.val().into_data();
     let target = block(32, 2.0);
     let original_target_id = target.weight.id;
+    // Packed weights are listed for inspection but marked non-transferable.
+    let listed = parameters(&source).expect("packed checkpoints remain inspectable");
+    let weight = listed.iter().find(|info| info.name == "weight").unwrap();
+    assert!(matches!(weight.dtype, DType::QFloat(_)));
+    assert_eq!(weight.shape, [2, 32]);
+    assert!(!weight.is_transferable());
     assert!(
-        parameters(&source)
-            .unwrap_err()
-            .to_string()
-            .contains("dense floating parameters")
+        listed
+            .iter()
+            .find(|info| info.name == "bias")
+            .unwrap()
+            .is_transferable()
     );
     let error = TransferPlan::new()
         .copy("weight", "weight")
@@ -761,4 +750,357 @@ fn packed_parameters_require_explicit_conversion_but_unselected_sources_stay_pac
     assert_eq!(report.omitted[0].name, "weight");
     assert!(matches!(source.weight.val().dtype(), DType::QFloat(_)));
     assert_eq!(source.weight.val().into_data(), original_packed);
+}
+
+// Fan-out copies versus existing parameter sharing.
+
+/// One source path copied to two targets yields independent identities under either policy.
+#[test]
+fn fan_out_copies_receive_independent_identities_and_report_no_ties() {
+    let source = pair(false, 7.);
+    let target = pair(false, 2.);
+    for policy in [TiePolicy::Preserve, TiePolicy::Untie] {
+        let (actual, report) = TransferPlan::new()
+            .copy("left", "left")
+            .copy("left", "right")
+            .with_ties(policy)
+            .apply(&source, &target)
+            .expect("copying one untied source twice is ordinary fan-out");
+        assert_ne!(actual.left.id, actual.right.id, "{policy:?}");
+        assert_ne!(actual.left.id, source.left.id);
+        assert_eq!(values(actual.left.val()), vec![7.; 4]);
+        assert_eq!(values(actual.right.val()), vec![7.; 4]);
+        assert!(report.preserved_ties.is_empty(), "{policy:?}");
+        assert!(report.untied.is_empty(), "{policy:?}");
+        assert_eq!(report.reused.len(), 2);
+        assert_eq!(report.omitted.len(), 1);
+        assert_eq!(report.omitted[0].name, "right");
+        assert!(
+            parameters(&actual)
+                .unwrap()
+                .iter()
+                .all(|p| p.tied_to.is_none())
+        );
+    }
+}
+
+/// Depth up-scaling by duplicating a prefix creates separately owned layers.
+#[test]
+fn duplicated_prefixes_build_independent_deeper_stacks() {
+    let source = experiment(&[2], 7.);
+    let target = experiment(&[2, 2], 2.);
+    let (actual, report) = TransferPlan::new()
+        .copy_prefix("encoder.0", "encoder.0")
+        .copy_prefix("encoder.0", "encoder.1")
+        .apply(&source, &target)
+        .expect("layer duplication must not require an explicit tie policy");
+    assert_ne!(actual.encoder[0].weight.id, actual.encoder[1].weight.id);
+    assert_ne!(actual.encoder[0].bias.id, actual.encoder[1].bias.id);
+    for block in &actual.encoder {
+        assert_eq!(values(block.weight.val()), vec![7.; 4]);
+        assert_eq!(values(block.bias.val()), vec![7.; 2]);
+    }
+    assert!(report.preserved_ties.is_empty());
+    assert_eq!(report.reused.len(), 4);
+    assert_eq!(
+        report
+            .newly_initialized
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["head.bias", "head.weight"]
+    );
+}
+
+/// Different transforms of one untied source, as in perturbed expert upcycling, both apply.
+#[test]
+fn several_transforms_of_one_untied_source_are_independent() {
+    let source = pair(false, 7.);
+    let target = pair(false, 2.);
+    let (actual, report) = TransferPlan::new()
+        .transform("left", "left", "scale by two", |x: Tensor<B, 2>| Ok(x * 2.))
+        .transform("left", "right", "negate", |x: Tensor<B, 2>| Ok(-x))
+        .apply(&source, &target)
+        .expect("independent transforms of one source must not be treated as aliases");
+    assert_ne!(actual.left.id, actual.right.id);
+    assert_eq!(values(actual.left.val()), vec![14.; 4]);
+    assert_eq!(values(actual.right.val()), vec![-7.; 4]);
+    assert_eq!(report.transformed.len(), 2);
+    assert!(report.preserved_ties.is_empty());
+}
+
+/// Fan-out into a target that is already tied keeps that target tie unless explicitly untied.
+#[test]
+fn fan_out_into_a_tied_target_preserves_the_target_tie() {
+    let source = pair(false, 7.);
+    let target = pair(true, 2.);
+    let plan = || {
+        TransferPlan::new()
+            .copy("left", "left")
+            .copy("left", "right")
+    };
+    let (tied, report) = plan().apply(&source, &target).unwrap();
+    assert_eq!(tied.left.id, tied.right.id);
+    assert_ne!(tied.left.id, target.left.id);
+    assert_eq!(values(tied.right.val()), vec![7.; 4]);
+    assert_eq!(report.preserved_ties, [vec!["left", "right"]]);
+
+    let (untied, report) = plan()
+        .with_ties(TiePolicy::Untie)
+        .apply(&source, &target)
+        .unwrap();
+    assert_ne!(untied.left.id, untied.right.id);
+    assert_eq!(report.untied, [vec!["left", "right"]]);
+    assert!(report.preserved_ties.is_empty());
+
+    let error = TransferPlan::new()
+        .copy("left", "left")
+        .transform("left", "right", "negate", |x: Tensor<B, 2>| Ok(-x))
+        .apply(&source, &target)
+        .expect_err("a tied target cannot receive two different values");
+    assert!(error.to_string().contains("target aliases"));
+}
+
+/// Copying one member of a source tie to extra targets is ambiguous unless explicitly untied.
+#[test]
+fn fanning_out_a_tied_source_requires_an_explicit_policy() {
+    let source = alias_groups(&[(true, 7.)], 3.);
+    let target = alias_groups(&[(false, 2.)], 2.);
+    let original = parameters(&target).unwrap();
+    let plan = || {
+        TransferPlan::new()
+            .copy_prefix("groups.0", "groups.0")
+            .copy("groups.0.left", "singleton")
+    };
+    let error = plan()
+        .apply(&source, &target)
+        .expect_err("joining the copied singleton to the tied pair would be implicit");
+    let message = error.to_string();
+    assert!(message.contains("groups.0.left"), "{message}");
+    assert!(message.contains("TiePolicy::Untie"), "{message}");
+    assert_eq!(parameters(&target).unwrap(), original);
+
+    let (actual, report) = plan()
+        .with_ties(TiePolicy::Untie)
+        .apply(&source, &target)
+        .unwrap();
+    let ids = [
+        actual.groups[0].left.id,
+        actual.groups[0].right.id,
+        actual.singleton.id,
+    ];
+    assert!(ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2]);
+    assert_eq!(values(actual.singleton.val()), vec![7.; 4]);
+    assert_eq!(
+        report.untied,
+        [vec!["groups.0.left", "groups.0.right", "singleton"]]
+    );
+}
+
+/// A flat bank of vectors whose entries may share parameter identities.
+#[derive(Module, Debug)]
+struct Bank<B: Backend> {
+    /// Rank-one parameters addressed as `weights.<index>`.
+    weights: Vec<Param<Tensor<B, 1>>>,
+}
+
+/// Builds a bank whose entries share one parameter per equal group label.
+///
+/// Entry `i` holds the constant `offset + group[i]`, so tied entries also hold
+/// equal values, as genuine aliases must.
+fn bank(groups: &[usize], offset: f32) -> Bank<B> {
+    let device = Default::default();
+    let mut owners = BTreeMap::<usize, Param<Tensor<B, 1>>>::new();
+    Bank {
+        weights: groups
+            .iter()
+            .map(|&group| {
+                owners
+                    .entry(group)
+                    .or_insert_with(|| {
+                        Param::from_tensor(Tensor::full([2], offset + group as f32, &device))
+                    })
+                    .clone()
+            })
+            .collect(),
+    }
+}
+
+proptest::proptest! {
+    /// Arbitrary copy maps reproduce the fan-out/tie oracle exactly.
+    ///
+    /// For a source alias group `g`, let `P(g)` be the distinct source paths of `g`
+    /// that some target copies. The group is a preserved tie when `|P(g)| >= 2`;
+    /// it is ambiguous (rejected) when it is a tie and one of its paths feeds
+    /// two targets. Otherwise targets share an identity exactly when they copy
+    /// from one tied group, and every untied copy is independent.
+    #[test]
+    fn copy_maps_share_identities_exactly_for_used_source_ties(
+        source_groups in proptest::collection::vec(0usize..3, 1..5),
+        sources_for_targets in proptest::collection::vec(0usize..5, 1..6),
+        untie in proptest::bool::ANY,
+    ) {
+        let source = bank(&source_groups, 10.0);
+        let target = bank(&(0..sources_for_targets.len()).collect::<Vec<_>>(), -10.0);
+        let chosen = sources_for_targets
+            .iter()
+            .map(|index| index % source_groups.len())
+            .collect::<Vec<_>>();
+        let mut plan = TransferPlan::new();
+        for (target_index, source_index) in chosen.iter().enumerate() {
+            plan = plan.copy(format!("weights.{source_index}"), format!("weights.{target_index}"));
+        }
+        if untie {
+            plan = plan.with_ties(TiePolicy::Untie);
+        }
+
+        let mut used_paths = BTreeMap::<usize, BTreeSet<usize>>::new();
+        let mut uses = BTreeMap::<usize, usize>::new();
+        for &source_index in &chosen {
+            used_paths.entry(source_groups[source_index]).or_default().insert(source_index);
+            *uses.entry(source_index).or_default() += 1;
+        }
+        let tied = |group: usize| used_paths[&group].len() >= 2;
+        let ambiguous = chosen.iter().any(|&source_index| {
+            tied(source_groups[source_index]) && uses[&source_index] >= 2
+        });
+
+        let result = plan.apply(&source, &target);
+        if ambiguous && !untie {
+            proptest::prop_assert!(result.is_err());
+            return Ok(());
+        }
+        let (actual, _) = result.unwrap();
+        for (left, &left_source) in chosen.iter().enumerate() {
+            proptest::prop_assert_eq!(
+                values(actual.weights[left].val()),
+                vec![10.0 + source_groups[left_source] as f32; 2]
+            );
+            for (right, &right_source) in chosen.iter().enumerate() {
+                let group = source_groups[left_source];
+                let shared = left == right
+                    || (!untie && group == source_groups[right_source] && tied(group));
+                proptest::prop_assert_eq!(
+                    actual.weights[left].id == actual.weights[right].id,
+                    shared
+                );
+            }
+        }
+    }
+}
+
+/// Fan-out copies used as separate layers receive separate optimizer updates.
+#[cfg(feature = "autodiff")]
+mod fan_out_training {
+    use burn::{
+        backend::Autodiff,
+        optim::{GradientsParams, Optimizer, SgdConfig},
+    };
+
+    use super::*;
+
+    /// Differentiable CPU backend for optimizer-ownership checks.
+    type Ad = Autodiff<B>;
+
+    /// A two-layer stack of vectors, each scaled differently by the loss.
+    #[derive(Module, Debug)]
+    struct Stack<B: Backend> {
+        /// Layer parameters addressed as `layers.<index>`.
+        layers: Vec<Param<Tensor<B, 1>>>,
+    }
+
+    /// Builds independent constant layers on the differentiable backend.
+    fn stack(count: usize, value: f32) -> Stack<Ad> {
+        let device = Default::default();
+        Stack {
+            layers: (0..count)
+                .map(|_| Param::from_tensor(Tensor::full([2], value, &device)))
+                .collect(),
+        }
+    }
+
+    /// Duplicated layers pass the optimizer-ownership preflight and both train.
+    ///
+    /// With loss `sum(l0) + 2 sum(l1)` and SGD at rate 0.1, the copies must move
+    /// from 1.0 to 0.9 and 0.8. A shared identity would leave one copy stale.
+    #[test]
+    fn duplicated_layers_each_receive_their_own_gradient_step() {
+        let source = stack(1, 1.0);
+        let target = stack(2, 0.0);
+        let (model, _) = TransferPlan::new()
+            .copy("layers.0", "layers.0")
+            .copy("layers.0", "layers.1")
+            .apply(&source, &target)
+            .unwrap();
+        crate::training::validate_trainable_module(&model)
+            .expect("fan-out copies must be separately owned trainable parameters");
+        let loss = model.layers[0].val().sum() + model.layers[1].val().sum() * 2.0;
+        let grads = GradientsParams::from_grads(loss.backward(), &model);
+        let model = SgdConfig::new().init().step(0.1, model, grads);
+        let read = |param: &Param<Tensor<Ad, 1>>| {
+            param
+                .val()
+                .into_data()
+                .to_vec::<f32>()
+                .expect("dense F32 layer")
+        };
+        let first = read(&model.layers[0]);
+        let second = read(&model.layers[1]);
+        assert!(
+            first.iter().all(|value| (value - 0.9).abs() < 1e-6),
+            "{first:?}"
+        );
+        assert!(
+            second.iter().all(|value| (value - 0.8).abs() < 1e-6),
+            "{second:?}"
+        );
+    }
+}
+
+/// Builds a Q4-packed `[2, 32]` weight whose dense values are `i / 8 - 4`.
+fn packed_weight() -> Param<Tensor<B, 2>> {
+    use crate::checkpoint::quantization::{
+        QuantizationGroupSize, SymmetricQuantization, WeightQuantizationConfig,
+        quantize_tensor_data,
+    };
+    let packed_data = quantize_tensor_data(
+        &burn::tensor::TensorData::new(
+            (0..64).map(|i| i as f32 / 8.0 - 4.0).collect::<Vec<_>>(),
+            [2, 32],
+        ),
+        WeightQuantizationConfig {
+            scheme: SymmetricQuantization::Q4,
+            group_size: QuantizationGroupSize::new(32).unwrap(),
+        },
+    )
+    .unwrap()
+    .into_burn_qfloat_data()
+    .unwrap();
+    Param::from_tensor(Tensor::<B, 2>::from_data(packed_data, &Default::default()))
+}
+
+/// A target with packed weights still receives float-only transfers into its dense parameters.
+#[test]
+fn packed_targets_accept_transfers_into_their_dense_parameters_only() {
+    let source = block(32, 7.0);
+    let mut target = block(32, 2.0);
+    target.weight = packed_weight();
+    let original_packed = target.weight.val().into_data();
+    let (actual, report) = TransferPlan::new()
+        .copy("bias", "bias")
+        .apply(&source, &target)
+        .expect("an unselected packed target must not block a dense transfer");
+    assert_eq!(values(actual.bias.val()), vec![7.0; 32]);
+    assert_eq!(actual.weight.val().into_data(), original_packed);
+    assert_eq!(actual.weight.id, target.weight.id);
+    assert_eq!(report.newly_initialized[0].name, "weight");
+
+    let error = TransferPlan::new()
+        .copy_matching()
+        .apply(&source, &target)
+        .expect_err("replacing a packed target needs an explicit conversion");
+    let message = error.to_string();
+    assert!(message.contains("`weight` -> `weight`"), "{message}");
+    assert!(message.contains("dequantize explicitly"), "{message}");
+    assert_eq!(target.weight.val().into_data(), original_packed);
 }

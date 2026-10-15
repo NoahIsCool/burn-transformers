@@ -59,11 +59,7 @@ impl<B: Backend> PointValidity<B> {
             )
         })?;
         let actual = tensor.dims();
-        if shape
-            .iter()
-            .zip(actual)
-            .any(|(extent, actual)| *extent != 1 && *extent != actual)
-        {
+        if !crate::experiment::bounds::broadcasts_to(&shape, &actual) {
             return Err(Error::shape(
                 &self.point.name,
                 format!("validity broadcastable to {actual:?}"),

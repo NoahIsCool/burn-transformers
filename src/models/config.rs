@@ -97,6 +97,34 @@ impl From<ConfigError> for ConfigLoadError {
     }
 }
 
+impl From<ConfigError> for crate::Error {
+    /// Maps a topology failure to a configuration error at `architecture.field`.
+    ///
+    /// This is the same mapping used by [`crate::ArchitectureConfig::validate`].
+    fn from(error: ConfigError) -> Self {
+        crate::Error::configuration(
+            format!("{}.{}", error.architecture, error.field),
+            error.reason,
+        )
+    }
+}
+
+impl From<ConfigLoadError> for crate::Error {
+    /// Converts a configuration loading failure so loaders can use `?`.
+    ///
+    /// Topology failures keep their `architecture.field` path. JSON failures
+    /// keep their parser diagnostic, including line and column, under the
+    /// field `config`.
+    fn from(error: ConfigLoadError) -> Self {
+        match error {
+            ConfigLoadError::Validation(error) => error.into(),
+            ConfigLoadError::Json(error) => {
+                crate::Error::configuration("config", format!("invalid model config JSON: {error}"))
+            }
+        }
+    }
+}
+
 /// Validation implemented by every model topology schema.
 pub trait Validate {
     /// Checks all relationships needed to construct matrices and caches safely.
@@ -125,12 +153,7 @@ where
 
     /// Reuses the family schema's field-level validation in the runtime API.
     fn validate(&self) -> crate::Result<()> {
-        Validate::validate(self).map_err(|error| {
-            crate::Error::configuration(
-                format!("{}.{}", error.architecture, error.field),
-                error.reason,
-            )
-        })
+        Validate::validate(self).map_err(crate::Error::from)
     }
 }
 
@@ -257,10 +280,16 @@ pub enum RopeType {
 }
 
 /// Superset of RoPE fields used by the supported model families.
+///
+/// Deserialization accepts the current `rope_type` key, the legacy `type` key,
+/// or both: Hugging Face config constructors copy `type` into `rope_type` and
+/// `save_pretrained` then writes both. When both are present they must agree.
+/// Serialization writes only `rope_type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(try_from = "RopeParametersRepr")]
 pub struct RopeParameters {
     /// RoPE scaling algorithm; legacy configs serialize this key as `type`.
-    #[serde(default, alias = "type")]
+    #[serde(default)]
     pub rope_type: RopeType,
     /// Geometric base theta controlling the longest base wavelength.
     #[serde(default)]
@@ -307,6 +336,145 @@ pub struct RopeParameters {
     /// Whether Qwen interleaves rather than concatenates multimodal frequencies.
     #[serde(default)]
     pub mrope_interleaved: Option<bool>,
+}
+
+impl RopeType {
+    /// Returns the serialized Hugging Face name, such as `"yarn"`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Linear => "linear",
+            Self::Dynamic => "dynamic",
+            Self::Yarn => "yarn",
+            Self::LongRope => "longrope",
+            Self::Llama3 => "llama3",
+            Self::Proportional => "proportional",
+        }
+    }
+}
+
+/// Serialized form of [`RopeParameters`] with separate current and legacy type keys.
+///
+/// Serde aliases map both keys to one field slot and reject a map containing
+/// both as a duplicate field, so the two keys are read independently here and
+/// reconciled by [`resolve_rope_type`]. Destructuring every field in the
+/// conversion makes adding a field to one struct but not the other a compile error.
+#[derive(Deserialize)]
+struct RopeParametersRepr {
+    /// Current scaling-algorithm key.
+    #[serde(default)]
+    rope_type: Option<RopeType>,
+    /// Legacy scaling-algorithm key retained by older and re-saved checkpoints.
+    #[serde(default, rename = "type")]
+    legacy_type: Option<RopeType>,
+    /// See [`RopeParameters::rope_theta`].
+    #[serde(default)]
+    rope_theta: Option<f64>,
+    /// See [`RopeParameters::partial_rotary_factor`].
+    #[serde(default)]
+    partial_rotary_factor: Option<f64>,
+    /// See [`RopeParameters::factor`].
+    #[serde(default)]
+    factor: Option<f64>,
+    /// See [`RopeParameters::original_max_position_embeddings`].
+    #[serde(default)]
+    original_max_position_embeddings: Option<usize>,
+    /// See [`RopeParameters::attention_factor`].
+    #[serde(default)]
+    attention_factor: Option<f64>,
+    /// See [`RopeParameters::beta_fast`].
+    #[serde(default)]
+    beta_fast: Option<f64>,
+    /// See [`RopeParameters::beta_slow`].
+    #[serde(default)]
+    beta_slow: Option<f64>,
+    /// See [`RopeParameters::mscale`].
+    #[serde(default)]
+    mscale: Option<f64>,
+    /// See [`RopeParameters::mscale_all_dim`].
+    #[serde(default)]
+    mscale_all_dim: Option<f64>,
+    /// See [`RopeParameters::short_factor`].
+    #[serde(default)]
+    short_factor: Option<Vec<f64>>,
+    /// See [`RopeParameters::long_factor`].
+    #[serde(default)]
+    long_factor: Option<Vec<f64>>,
+    /// See [`RopeParameters::low_freq_factor`].
+    #[serde(default)]
+    low_freq_factor: Option<f64>,
+    /// See [`RopeParameters::high_freq_factor`].
+    #[serde(default)]
+    high_freq_factor: Option<f64>,
+    /// See [`RopeParameters::mrope_section`].
+    #[serde(default)]
+    mrope_section: Option<Vec<usize>>,
+    /// See [`RopeParameters::mrope_interleaved`].
+    #[serde(default)]
+    mrope_interleaved: Option<bool>,
+}
+
+impl TryFrom<RopeParametersRepr> for RopeParameters {
+    type Error = String;
+
+    /// Reconciles the type keys and moves every other field unchanged.
+    fn try_from(repr: RopeParametersRepr) -> Result<Self, Self::Error> {
+        let RopeParametersRepr {
+            rope_type,
+            legacy_type,
+            rope_theta,
+            partial_rotary_factor,
+            factor,
+            original_max_position_embeddings,
+            attention_factor,
+            beta_fast,
+            beta_slow,
+            mscale,
+            mscale_all_dim,
+            short_factor,
+            long_factor,
+            low_freq_factor,
+            high_freq_factor,
+            mrope_section,
+            mrope_interleaved,
+        } = repr;
+        Ok(Self {
+            rope_type: resolve_rope_type(rope_type, legacy_type)?,
+            rope_theta,
+            partial_rotary_factor,
+            factor,
+            original_max_position_embeddings,
+            attention_factor,
+            beta_fast,
+            beta_slow,
+            mscale,
+            mscale_all_dim,
+            short_factor,
+            long_factor,
+            low_freq_factor,
+            high_freq_factor,
+            mrope_section,
+            mrope_interleaved,
+        })
+    }
+}
+
+/// Chooses the RoPE algorithm from the current and legacy keys.
+///
+/// Either key alone is authoritative, equal keys are accepted, absent keys mean
+/// [`RopeType::Default`], and disagreeing keys are an error naming both values.
+fn resolve_rope_type(
+    current: Option<RopeType>,
+    legacy: Option<RopeType>,
+) -> Result<RopeType, String> {
+    match (current, legacy) {
+        (Some(current), Some(legacy)) if current != legacy => Err(format!(
+            "rope_type \"{}\" conflicts with legacy type \"{}\"; a re-saved config must carry one algorithm",
+            current.as_str(),
+            legacy.as_str()
+        )),
+        (current, legacy) => Ok(current.or(legacy).unwrap_or_default()),
+    }
 }
 
 impl RopeParameters {

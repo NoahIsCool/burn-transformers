@@ -20,9 +20,12 @@
 //! `.copy_prefix("encoder", "encoder")` instead of copying every matching name.
 //! The source and target are borrowed. Validation and explicit transforms finish
 //! before a cloned target receives any replacement. Tensor payloads stay on device;
-//! validating a tied group synchronizes a Boolean equality reduction.
+//! validating a tied source group synchronizes one Boolean equality reduction.
 //! Copying neither casts dtype nor moves devices. Copied parameters start a new
-//! gradient graph, preserve the target's trainability, and retain ties by default.
+//! gradient graph, preserve the target's trainability, and retain existing ties
+//! by default (see [`TiePolicy`]). Copying one source path to several targets,
+//! for example `.copy_prefix("layers.0", "layers.1")` next to
+//! `.copy_prefix("layers.0", "layers.0")`, creates independent parameters.
 //! This API transfers dense floating parameters of already constructed modules.
 //! Checkpoint subset loaders use the same [`TransferReport`] while streaming files.
 
@@ -51,9 +54,20 @@ pub enum ShapeChangePolicy {
 }
 
 /// Whether selected parameter aliases remain tied in the resulting module.
+///
+/// A *tie* is sharing that already exists: two module paths holding one Burn
+/// [`ParamId`]. Copying one source path to several targets, as in depth
+/// up-scaling, layer duplication, or expert upcycling, is not a tie. Those copies
+/// always receive independent identities, under either policy, so each can train.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TiePolicy {
-    /// Preserve source sharing and existing target ties; reject conflicting mappings.
+    /// Keep existing sharing and reject mappings that would silently break it.
+    ///
+    /// Distinct source paths sharing one identity (for example tied embedding and
+    /// output weights) map to targets that share one fresh identity, and existing
+    /// target ties stay tied. A preserved tie is a set of duplicate module fields:
+    /// Burn 0.21 optimizers update only one of them, so freeze such groups or check
+    /// the trained module with [`crate::training::validate_trainable_module`].
     #[default]
     Preserve,
     /// Give each transferred target an independent parameter identity and gradient leaf.
@@ -149,14 +163,14 @@ impl TransferReport {
     }
 }
 
-/// Runtime metadata for one dense floating parameter.
+/// Runtime metadata for one floating parameter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParameterInfo {
     /// Dot-separated Rust module path; a root `Param` is named `$`.
     pub name: String,
     /// Actual runtime dimensions, after any Burn parameter mapper.
     pub shape: Vec<usize>,
-    /// Runtime floating-point dtype.
+    /// Runtime floating-point dtype; `DType::QFloat` marks a packed checkpoint weight.
     pub dtype: DType,
     /// Whether the target parameter participates in differentiation.
     pub trainable: bool,
@@ -164,9 +178,23 @@ pub struct ParameterInfo {
     pub tied_to: Option<String>,
 }
 
+impl ParameterInfo {
+    /// Whether a [`TransferPlan`] may select this parameter as a source or target.
+    ///
+    /// Only positive-rank dense floating tensors are transferable. Packed
+    /// quantized weights are listed for inspection but must be dequantized by an
+    /// explicit conversion before they can be copied.
+    pub fn is_transferable(&self) -> bool {
+        !self.shape.is_empty() && !matches!(self.dtype, DType::QFloat(_))
+    }
+}
+
 /// Discover parameter paths and ties before writing a transfer plan.
+///
 /// Inspection initializes lazy parameters to obtain their actual runtime layout,
-/// but does not copy data to the host or change parameter values.
+/// but does not copy data to the host or change parameter values. Packed
+/// quantized parameters are listed too, with [`ParameterInfo::is_transferable`]
+/// false, so a loaded quantized checkpoint can be inspected before planning.
 pub fn parameters<B: Backend, M: Module<B>>(module: &M) -> Result<Vec<ParameterInfo>> {
     Ok(collect(module)?
         .into_values()
@@ -373,6 +401,12 @@ impl<'a, B: Backend> TransferPlan<'a, B> {
                 ));
                 continue;
             };
+            let (Some(source_tensor), true) = (&source.tensor, target.info.is_transferable())
+            else {
+                return Err(Error::BackendCapability(format!(
+                    "transfer.{name}: `{source_name}` -> `{name}` selects a packed or rank-zero parameter; only positive-rank dense floating parameters are supported, so dequantize explicitly before transferring"
+                )));
+            };
             let transformed = matches!(self.rules[index], Rule::Transform { .. });
             if !transformed && source.info.shape != target.info.shape {
                 if self.shape_policy == ShapeChangePolicy::Reinitialize {
@@ -389,7 +423,7 @@ impl<'a, B: Backend> TransferPlan<'a, B> {
                 ));
             }
             let mut value = Value {
-                tensor: source.tensor.clone().detach(),
+                tensor: source_tensor.clone().detach(),
                 shape: source.info.shape.clone(),
             };
             if let Rule::Transform {
@@ -440,6 +474,7 @@ impl<'a, B: Backend> TransferPlan<'a, B> {
                 Staged {
                     value,
                     origin: source.id,
+                    source: source_name,
                     transform: transformed.then_some(index),
                     id: ParamId::new(),
                     trainable: target.info.trainable,
@@ -624,8 +659,9 @@ struct Parameter<B: Backend> {
     id: ParamId,
     /// Device on which any replacement must already reside.
     device: B::Device,
-    /// Flattened dense value, without a host copy.
-    tensor: Tensor<B, 1>,
+    /// Flattened dense value, without a host copy; absent for packed or rank-zero
+    /// parameters, which are listed but never staged.
+    tensor: Option<Tensor<B, 1>>,
 }
 
 /// Visitor that discovers parameter paths without initializing lazy tensors.
@@ -700,10 +736,11 @@ impl<B: Backend> ModuleVisitor<B> for Collect<'_, B> {
     fn exit_module(&mut self, _: &str, _: &str) {
         self.path.pop();
     }
-    /// Collects selected dense float parameters with their runtime shape, dtype, and trainability.
+    /// Collects selected float parameters with their runtime shape, dtype, and trainability.
     ///
-    /// Positive-rank tensors are flattened on device for rank-independent staging;
-    /// packed quantized tensors are rejected rather than implicitly dequantized.
+    /// Positive-rank dense tensors are flattened on device for rank-independent
+    /// staging. Packed quantized and rank-zero tensors keep only their metadata:
+    /// they are never implicitly dequantized, and selecting one fails at staging.
     fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
         if self.error.is_some() {
             return;
@@ -713,23 +750,20 @@ impl<B: Backend> ModuleVisitor<B> for Collect<'_, B> {
             return;
         }
         let value = param.val();
-        if D == 0 || matches!(value.dtype(), DType::QFloat(_)) {
-            self.error = Some(Error::BackendCapability(format!(
-                "transfer.{name}: only positive-rank dense floating parameters are supported"
-            )));
-            return;
-        }
+        let info = ParameterInfo {
+            name: name.clone(),
+            shape: value.dims().to_vec(),
+            dtype: value.dtype(),
+            trainable: value.is_require_grad(),
+            tied_to: None,
+        };
         let parameter = Parameter {
-            info: ParameterInfo {
-                name: name.clone(),
-                shape: value.dims().to_vec(),
-                dtype: value.dtype(),
-                trainable: value.is_require_grad(),
-                tied_to: None,
-            },
             id: param.id,
             device: value.device(),
-            tensor: value.flatten(0, D - 1),
+            tensor: info
+                .is_transferable()
+                .then(|| value.flatten(0, D.saturating_sub(1))),
+            info,
         };
         if self.parameters.insert(name.clone(), parameter).is_some() {
             self.error = Some(Error::configuration(
@@ -780,6 +814,8 @@ struct Staged<B: Backend> {
     value: Value<B>,
     /// Source parameter identity, retained to detect shared origins.
     origin: ParamId,
+    /// Source parameter path; one path copied to several targets is fan-out, not a tie.
+    source: String,
     /// Transform rule index, or `None` for a direct copy.
     transform: Option<usize>,
     /// Fresh output identity, unified only when tie validation succeeds.
@@ -790,12 +826,74 @@ struct Staged<B: Backend> {
 
 /// Validates alias groups and assigns a common staged identity when preserving ties.
 ///
-/// Aliased targets must receive the same source and transformation; aliased sources
-/// must agree in shape, dtype, device, values, and trainability. Equality checking
-/// synchronizes a scalar, while explicit untying retains independently staged owners.
+/// Two kinds of existing sharing are preserved under [`TiePolicy::Preserve`]:
+///
+/// 1. *Target ties*: target paths that already share one identity must all be
+///    selected from the same source with the same transformation.
+/// 2. *Source ties*: distinct source paths sharing one identity map to targets
+///    that share one fresh identity. Their values must agree in shape, dtype,
+///    device, trainability, and every element.
+///
+/// One source path copied to several targets is *fan-out*: each copy keeps its
+/// independent fresh identity, may use its own transformation, and is never
+/// reported as a tie. Fan-out of a path that is also source-tied is ambiguous
+/// (joining the copies would contradict the request for several copies) and
+/// is rejected unless the plan explicitly unties. Each preserved source tie
+/// synchronizes one Boolean equality reduction; explicit untying synchronizes nothing.
 fn resolve_ties<B: Backend>(
     targets: &BTreeMap<String, Parameter<B>>,
     staged: &mut BTreeMap<String, Staged<B>>,
+    policy: TiePolicy,
+    report: &mut TransferReport,
+) -> Result<()> {
+    validate_target_ties(targets, staged, policy, report)?;
+    // Mutable map iteration yields disjoint entries. Keep those references in
+    // each group through validation and identity assignment, avoiding a second
+    // lookup whose success would otherwise have to be asserted.
+    let mut source_groups = BTreeMap::<ParamId, Vec<StagedEntry<'_, B>>>::new();
+    for (name, value) in staged.iter_mut() {
+        source_groups
+            .entry(value.origin)
+            .or_default()
+            .push((name, value));
+    }
+    for group in source_groups.into_values() {
+        let paths = group
+            .iter()
+            .map(|(_, value)| value.source.as_str())
+            .collect::<BTreeSet<_>>();
+        if paths.len() == 1 {
+            // Fan-out copies stay independent; only pre-existing target ties are shared.
+            if policy == TiePolicy::Preserve {
+                share_target_tie_classes(targets, group, report);
+            }
+            continue;
+        }
+        let names = group
+            .iter()
+            .map(|(name, _)| (*name).clone())
+            .collect::<Vec<_>>();
+        if policy == TiePolicy::Untie {
+            report.untied.push(names);
+            continue;
+        }
+        reject_fanned_out_source_tie(targets, &group, &names)?;
+        share_source_tie(group, names, report)?;
+    }
+    Ok(())
+}
+
+/// One staged replacement together with its target path, borrowed disjointly.
+type StagedEntry<'a, B> = (&'a String, &'a mut Staged<B>);
+
+/// Requires every selected target alias to receive the same source and transformation.
+///
+/// A target tie group with no selected member keeps its identity and is reported
+/// as preserved. Under [`TiePolicy::Untie`], partially or fully selected groups are
+/// reported as untied; otherwise every member must be selected consistently.
+fn validate_target_ties<B: Backend>(
+    targets: &BTreeMap<String, Parameter<B>>,
+    staged: &BTreeMap<String, Staged<B>>,
     policy: TiePolicy,
     report: &mut TransferReport,
 ) -> Result<()> {
@@ -839,70 +937,135 @@ fn resolve_ties<B: Backend>(
             ));
         }
     }
-    // Mutable map iteration yields disjoint entries. Keep those references in
-    // each group through validation and identity assignment, avoiding a second
-    // lookup whose success would otherwise have to be asserted.
-    let mut source_groups = BTreeMap::<ParamId, Vec<_>>::new();
-    for (name, value) in staged.iter_mut() {
-        source_groups
-            .entry(value.origin)
+    Ok(())
+}
+
+/// Shares one identity inside each pre-existing target tie of a fan-out group.
+///
+/// All entries come from one source path. [`validate_target_ties`] already
+/// required each target tie to use one transformation, so members of a class
+/// hold identical values and need no equality reduction.
+fn share_target_tie_classes<B: Backend>(
+    targets: &BTreeMap<String, Parameter<B>>,
+    group: Vec<StagedEntry<'_, B>>,
+    report: &mut TransferReport,
+) {
+    let mut classes = BTreeMap::<ParamId, Vec<StagedEntry<'_, B>>>::new();
+    for (name, value) in group {
+        classes
+            .entry(targets[name].id)
             .or_default()
             .push((name, value));
     }
-    for mut group in source_groups.into_values() {
-        let Some(((first_name, first), aliases)) = group.split_first_mut() else {
-            continue;
-        };
-        if aliases.is_empty() {
-            continue;
+    for mut class in classes.into_values().filter(|class| class.len() > 1) {
+        let shared_id = class[0].1.id;
+        for (_, value) in &mut class {
+            value.id = shared_id;
         }
-        let names = std::iter::once((*first_name).clone())
-            .chain(aliases.iter().map(|(name, _)| (*name).clone()))
-            .collect::<Vec<_>>();
-        if policy == TiePolicy::Untie {
-            report.untied.push(names);
-            continue;
-        }
-        if aliases.iter().any(|(_, value)| {
-            value.transform != first.transform
-                || value.value.shape != first.value.shape
-                || value.value.tensor.dtype() != first.value.tensor.dtype()
-                || value.value.tensor.device() != first.value.tensor.device()
-                || value.trainable != first.trainable
-        }) {
-            return Err(Error::configuration(
-                "transfer.ties",
-                format!(
-                    "source aliases mapped to {names:?} have conflicting transforms, shapes, or trainability; select TiePolicy::Untie"
-                ),
-            ));
-        }
-        for (_, value) in aliases.iter() {
-            let equal = first
+        report
+            .preserved_ties
+            .push(class.iter().map(|(name, _)| (*name).clone()).collect());
+    }
+}
+
+/// Rejects a source tie whose member path is also copied to independent targets.
+///
+/// Preserving the source tie would join every target in the group, including
+/// copies the plan requested as separate parameters. Each source path must
+/// therefore reach exactly one target tie class (one target, or one existing
+/// target tie group).
+fn reject_fanned_out_source_tie<B: Backend>(
+    targets: &BTreeMap<String, Parameter<B>>,
+    group: &[StagedEntry<'_, B>],
+    names: &[String],
+) -> Result<()> {
+    let mut classes_per_path = BTreeMap::<&str, BTreeSet<ParamId>>::new();
+    for (name, value) in group {
+        classes_per_path
+            .entry(value.source.as_str())
+            .or_default()
+            .insert(targets[*name].id);
+    }
+    match classes_per_path
+        .into_iter()
+        .find(|(_, classes)| classes.len() > 1)
+    {
+        Some((path, _)) => Err(Error::configuration(
+            "transfer.ties",
+            format!(
+                "source `{path}` is copied to several independent targets but also shares its parameter identity with another source path; preserving that tie would join the copies in {names:?}. Select TiePolicy::Untie, or copy from one source alias only"
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Validates a genuine source tie and assigns its targets one shared identity.
+///
+/// Members must agree in transformation, runtime layout, and trainability before
+/// their values are compared. One fallible readback checks every element of
+/// every distinct source path against the first member.
+fn share_source_tie<B: Backend>(
+    mut group: Vec<StagedEntry<'_, B>>,
+    names: Vec<String>,
+    report: &mut TransferReport,
+) -> Result<()> {
+    let Some(((_, first), aliases)) = group.split_first_mut() else {
+        return Ok(());
+    };
+    if aliases.iter().any(|(_, value)| {
+        value.transform != first.transform
+            || value.value.shape != first.value.shape
+            || value.value.tensor.dtype() != first.value.tensor.dtype()
+            || value.value.tensor.device() != first.value.tensor.device()
+            || value.trainable != first.trainable
+    }) {
+        return Err(Error::configuration(
+            "transfer.ties",
+            format!(
+                "source aliases mapped to {names:?} have conflicting transforms, shapes, or trainability; select TiePolicy::Untie"
+            ),
+        ));
+    }
+    // Entries copied from the first member's own path are the same tensor; only
+    // other source paths can hold diverged values.
+    let all_equal = aliases
+        .iter()
+        .filter(|(_, value)| value.source != first.source)
+        .map(|(_, value)| {
+            first
                 .value
                 .tensor
                 .clone()
                 .equal(value.value.tensor.clone())
                 .all()
-                .int()
-                .into_scalar()
-                .elem::<i64>()
-                != 0;
-            if !equal {
-                return Err(Error::configuration(
-                    "transfer.ties",
-                    format!(
-                        "source parameters mapped to {names:?} share a parameter identity but have unequal values; select TiePolicy::Untie to retain both values"
-                    ),
-                ));
-            }
+        })
+        .reduce(|left, right| left.bool_and(right));
+    if let Some(all_equal) = all_equal {
+        let equal = all_equal
+            .int()
+            .try_into_scalar()
+            .map_err(|error| {
+                Error::BackendCapability(format!(
+                    "cannot compare tied source values for {names:?}: {error}"
+                ))
+            })?
+            .elem::<i64>()
+            != 0;
+        if !equal {
+            return Err(Error::configuration(
+                "transfer.ties",
+                format!(
+                    "source parameters mapped to {names:?} share a parameter identity but have unequal values; select TiePolicy::Untie to retain both values"
+                ),
+            ));
         }
-        let shared_id = first.id;
-        for (_, value) in aliases {
-            value.id = shared_id;
-        }
-        report.preserved_ties.push(names);
     }
+    let shared_id = first.id;
+    for (_, value) in aliases {
+        value.id = shared_id;
+    }
+    report.preserved_ties.push(names);
     Ok(())
 }
 

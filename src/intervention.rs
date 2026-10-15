@@ -23,6 +23,18 @@
 //! original; capture after it records the edited value. Captures stay on device
 //! and detach by default; [`Hooks::capture_with_grad`] explicitly retains the
 //! gradient graph. Edits never detach implicitly. A new run clears old captures.
+//! Observers ([`Hooks::observe`]) see a detached view and never rewrite the
+//! activation, so they add no edit or constraint work to the forward pass.
+//!
+//! Registration mistakes (unknown points, impossible axes, empty or duplicate
+//! selections) fail before any computation as [`Error::Configuration`].
+//! Failures while the model runs (an out-of-range selection, a callback error,
+//! a shape-changing edit, a violated constraint) are [`Error::Intervention`],
+//! which names the point and keeps a callback's original error.
+//!
+//! Generic tools can turn a discovered [`PointInfo`] back into a typed point
+//! with `Point::<D>::try_from(info)`, or capture any point regardless of rank
+//! with [`Hooks::capture_dynamic`].
 //! Closures may borrow ordinary Burn modules; their owner must register trainable
 //! parameters in its `Module` tree. Hooks themselves are temporary execution state.
 //! Custom models declare [`Point::custom`] and emit tensors with [`Hooks::apply`]
@@ -37,7 +49,9 @@ use burn::tensor::{Tensor, backend::Backend};
 
 use crate::{Error, Result};
 
+mod selection;
 mod validity;
+use selection::{ResolvedSlice, first_ill_formed_slice, selection_ranges, unit_range};
 pub use validity::PointValidity;
 
 // Semantic tensor coordinates and rank-preserving selections.
@@ -71,6 +85,42 @@ pub struct PointInfo {
     pub name: String,
     /// Dimension meanings in their actual tensor order.
     pub axes: Vec<Axis>,
+}
+
+impl PointInfo {
+    /// Tensor rank of activations emitted at this point.
+    pub fn rank(&self) -> usize {
+        self.axes.len()
+    }
+}
+
+impl<const D: usize> TryFrom<PointInfo> for Point<D> {
+    type Error = Error;
+
+    /// Recovers a typed point from a discovered catalog entry of rank `D`.
+    ///
+    /// ```
+    /// use transformers::intervention::{Layer, Point, PointInfo};
+    ///
+    /// let info: PointInfo = Layer::decoder(0).mlp_activation().info();
+    /// let point = Point::<3>::try_from(info.clone())?;
+    /// assert_eq!(point, Layer::decoder(0).mlp_activation());
+    /// assert!(Point::<4>::try_from(info).is_err());
+    /// # Ok::<(), transformers::Error>(())
+    /// ```
+    fn try_from(info: PointInfo) -> Result<Self> {
+        if info.rank() != D {
+            return Err(Error::configuration(
+                &info.name,
+                format!(
+                    "point has rank {} with axes {:?}; it cannot be used as a rank-{D} point",
+                    info.rank(),
+                    info.axes
+                ),
+            ));
+        }
+        Ok(Self { info })
+    }
 }
 
 /// A computation point with a statically known rank.
@@ -199,10 +249,10 @@ impl<const D: usize> Selection<D> {
     }
     /// Selects a length-one semantic axis without overflowing the upper bound.
     ///
-    /// A saturated endpoint becomes an invalid empty range and is rejected during
-    /// scope validation rather than panicking during registration.
+    /// At `usize::MAX` the range is empty and is rejected during scope
+    /// validation rather than panicking during registration.
     fn one(self, axis: Axis, index: usize) -> Self {
-        self.slice(axis, index..index.saturating_add(1))
+        self.slice(axis, unit_range(index))
     }
 }
 
@@ -230,6 +280,11 @@ impl Stack {
     /// Final normalized states, before any task head, `[batch, token, channel]`.
     pub fn final_norm(self) -> Point<3> {
         hidden_point(format!("{}.final_norm", self.name()))
+    }
+
+    /// Address layer `index` of this stack; `Stack::Decoder.layer(i) == Layer::decoder(i)`.
+    pub const fn layer(self, index: usize) -> Layer {
+        Layer::new(self, index)
     }
 }
 
@@ -264,6 +319,11 @@ impl Layer {
         self.index
     }
 
+    /// Address layer `index` of `stack`, for code generic over encoder and decoder stacks.
+    pub const fn new(stack: Stack, index: usize) -> Self {
+        Self { stack, index }
+    }
+
     /// Address an encoder layer.
     pub const fn encoder(index: usize) -> Self {
         Self {
@@ -290,6 +350,23 @@ impl Layer {
         mlp_output => ("mlp.output", "Feed-forward output before residual addition."),
         residual_post => ("residual.post", "Residual after the complete block, before the next block or final normalization."),
     }
+    /// Input to this layer's sequence mixer; the same point as [`Self::attention_input`].
+    ///
+    /// Open compositions call this branch the *mixer* ([`crate::experiment::ResidualBlock`]'s
+    /// `mixer` field); checkpoint families call it *attention* even for recurrent mixers
+    /// such as DeltaNet. Both methods address the one emitted point
+    /// `<stack>.layers.<index>.attention.input`, `[batch, token, channel]`.
+    pub fn mixer_input(self) -> Point<3> {
+        self.attention_input()
+    }
+
+    /// Output of this layer's sequence mixer; the same point as [`Self::attention_output`].
+    ///
+    /// Emitted before the residual addition as `<stack>.layers.<index>.attention.output`.
+    pub fn mixer_output(self) -> Point<3> {
+        self.attention_output()
+    }
+
     /// Address projected self-attention tensors in this layer.
     pub const fn self_attention(self) -> AttentionPoints {
         AttentionPoints {
@@ -411,6 +488,50 @@ pub struct Capture<const D: usize> {
     entry: usize,
 }
 
+/// Handle to a capture whose rank is known only at run time.
+///
+/// Created by [`Hooks::capture_dynamic`] for catalog-driven tools that capture
+/// every point a model lists without knowing ranks at compile time.
+#[derive(Clone, Debug)]
+pub struct DynamicCapture {
+    /// Unique hook-collection identity that prevents cross-collection handle reuse.
+    owner: u64,
+    /// Index of the capture action in its owning collection.
+    entry: usize,
+    /// Captured point, retained so results can be labeled.
+    point: PointInfo,
+}
+
+impl DynamicCapture {
+    /// The captured point's name and axes.
+    pub fn point(&self) -> &PointInfo {
+        &self.point
+    }
+}
+
+/// A captured activation of run-time rank: row-major values plus their shape.
+#[derive(Clone, Debug)]
+pub struct DynamicActivation<B: Backend> {
+    /// Flattened row-major values, on the device that produced them.
+    pub values: Tensor<B, 1>,
+    /// Original dimensions; `values` holds their product of elements.
+    pub shape: Vec<usize>,
+}
+
+impl<B: Backend> DynamicActivation<B> {
+    /// Restores the original rank-`D` tensor; fails if the activation has another rank.
+    pub fn into_tensor<const D: usize>(self) -> Result<Tensor<B, D>> {
+        let shape: [usize; D] = self.shape.clone().try_into().map_err(|_| {
+            Error::shape(
+                "hooks.dynamic_activation",
+                format!("rank {D}"),
+                format!("{:?}", self.shape),
+            )
+        })?;
+        Ok(self.values.reshape(shape))
+    }
+}
+
 /// Rank-independent captured activation retained with its original shape.
 struct Saved<B: Backend> {
     /// Flattened activation, detached only when requested by the capture policy.
@@ -420,6 +541,8 @@ struct Saved<B: Backend> {
 }
 /// Borrowed mutable callback receiving a flattened activation and its runtime shape.
 type Edit<'a, B> = Box<dyn FnMut(Tensor<B, 1>, Vec<usize>) -> Result<Saved<B>> + 'a>;
+/// Borrowed observer receiving a detached, flattened selection and its runtime shape.
+type Observer<'a, B> = Box<dyn FnMut(Tensor<B, 1>, Vec<usize>) -> Result<()> + 'a>;
 /// One ordered observer or mutation registered at a computation point.
 enum Action<'a, B: Backend> {
     /// Retain the selected activation when its point is emitted.
@@ -434,17 +557,75 @@ enum Action<'a, B: Backend> {
         /// Rank-erased edit callback invoked in registration order.
         Edit<'a, B>,
     ),
+    /// Inspect a detached selection without changing the activation.
+    Observe(
+        /// Rank-erased observer invoked in registration order.
+        Observer<'a, B>,
+    ),
 }
 /// Registered point selection and action together with run-local visit accounting.
 struct Entry<'a, B: Backend> {
     /// Point name and semantic axes used during preflight and execution.
     point: PointInfo,
-    /// Optional rank-preserving ranges to capture or replace.
+    /// Optional rank-preserving ranges to capture or replace, by semantic axis.
     slices: Vec<(Axis, Range<usize>)>,
-    /// Observer or edit to perform when the selected point is reached.
+    /// The same ranges resolved to tensor dimensions for the verified selection core.
+    resolved: Vec<ResolvedSlice>,
+    /// Capture, observer, or edit to perform when the selected point is reached.
     action: Action<'a, B>,
     /// Number of emissions seen during the current scoped execution.
     visits: usize,
+}
+
+impl<'a, B: Backend> Entry<'a, B> {
+    /// Registers an action, resolving each semantic axis to its tensor dimension once.
+    ///
+    /// An axis absent from the point resolves to zero occurrences and is
+    /// rejected by preflight; its placeholder dimension is never used.
+    fn new(point: PointInfo, slices: Vec<(Axis, Range<usize>)>, action: Action<'a, B>) -> Self {
+        let resolved = slices
+            .iter()
+            .map(|(axis, range)| ResolvedSlice {
+                dimension: point
+                    .axes
+                    .iter()
+                    .position(|candidate| candidate == axis)
+                    .unwrap_or(point.axes.len()),
+                occurrences: point
+                    .axes
+                    .iter()
+                    .filter(|candidate| *candidate == axis)
+                    .count(),
+                range: range.clone(),
+            })
+            .collect();
+        Self {
+            point,
+            slices,
+            resolved,
+            action,
+            visits: 0,
+        }
+    }
+
+    /// Rejects ambiguous, missing, duplicate, or empty axis selections before execution.
+    fn validate_selection(&self) -> Result<()> {
+        let Some(index) = first_ill_formed_slice(&self.resolved) else {
+            return Ok(());
+        };
+        let (axis, range) = &self.slices[index];
+        let reason = if self.resolved[index].occurrences != 1 {
+            format!(
+                "selection needs exactly one {axis:?} axis; found {:?}",
+                self.point.axes
+            )
+        } else if range.start >= range.end {
+            format!("empty {axis:?} selection {range:?}")
+        } else {
+            format!("duplicate {axis:?} selection; select each axis at most once")
+        };
+        Err(Error::configuration(&self.point.name, reason))
+    }
 }
 /// Next hook-collection identity used to reject captures belonging to another owner.
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
@@ -534,15 +715,54 @@ impl<'a, B: Backend> Hooks<'a, B> {
             owner: self.owner,
             entry: self.entries.len(),
         };
-        self.entries.push(Entry {
-            point: selection.point.info,
-            slices: selection.slices,
-            action: Action::Capture {
+        self.entries.push(Entry::new(
+            selection.point.info,
+            selection.slices,
+            Action::Capture {
                 detach,
                 saved: None,
             },
-            visits: 0,
-        });
+        ));
+        handle
+    }
+
+    /// Capture a complete point of any rank, detached, for catalog-driven tools.
+    ///
+    /// Read the result with [`Self::get_dynamic`]. For example, capturing every
+    /// point a model lists reproduces a full activation cache:
+    ///
+    /// ```
+    /// use burn::{backend::Flex, tensor::Tensor};
+    /// use transformers::intervention::{Hooks, Layer};
+    ///
+    /// let points = vec![Layer::decoder(0).mlp_output().info()];
+    /// let mut hooks = Hooks::<Flex>::new();
+    /// let handles = points
+    ///     .iter()
+    ///     .map(|point| hooks.capture_dynamic(point.clone()))
+    ///     .collect::<Vec<_>>();
+    /// hooks.run(points, |hooks| {
+    ///     let device = Default::default();
+    ///     hooks.apply(Layer::decoder(0).mlp_output(), Tensor::ones([1, 2, 4], &device))
+    /// })?;
+    /// let activation = hooks.get_dynamic(&handles[0])?;
+    /// assert_eq!(activation.shape, [1, 2, 4]);
+    /// # Ok::<(), transformers::Error>(())
+    /// ```
+    pub fn capture_dynamic(&mut self, point: PointInfo) -> DynamicCapture {
+        let handle = DynamicCapture {
+            owner: self.owner,
+            entry: self.entries.len(),
+            point: point.clone(),
+        };
+        self.entries.push(Entry::new(
+            point,
+            Vec::new(),
+            Action::Capture {
+                detach: true,
+                saved: None,
+            },
+        ));
         handle
     }
 
@@ -556,17 +776,29 @@ impl<'a, B: Backend> Hooks<'a, B> {
     }
 
     /// Inspect a detached on-device selection without retaining it in this collection.
+    ///
     /// Compute a reduction or record your own small result in the callback. The
-    /// original forward tensor and its gradient connectivity remain unchanged.
+    /// forward tensor and its gradient connectivity remain unchanged, and no
+    /// slice assignment, validity re-application, or point constraint runs for
+    /// an observer, so observing an attention pattern adds no quadratic work.
     pub fn observe<const D: usize>(
         &mut self,
         selection: impl Into<Selection<D>>,
         mut observe: impl FnMut(Tensor<B, D>) + 'a,
     ) {
-        self.edit(selection, move |tensor| {
-            observe(tensor.clone().detach());
-            tensor
-        });
+        let selection = selection.into();
+        let callback = move |tensor: Tensor<B, 1>, shape: Vec<usize>| {
+            let shape: [usize; D] = shape.try_into().map_err(|_| {
+                Error::configuration("hooks.rank", "observer rank does not match point")
+            })?;
+            observe(tensor.reshape(shape));
+            Ok(())
+        };
+        self.entries.push(Entry::new(
+            selection.point.info,
+            selection.slices,
+            Action::Observe(Box::new(callback)),
+        ));
     }
 
     /// Transform a selected activation with an application-defined fallible callback.
@@ -586,12 +818,11 @@ impl<'a, B: Backend> Hooks<'a, B> {
                 tensor: result.flatten(0, D - 1),
             })
         };
-        self.entries.push(Entry {
-            point: selection.point.info,
-            slices: selection.slices,
-            action: Action::Edit(Box::new(callback)),
-            visits: 0,
-        });
+        self.entries.push(Entry::new(
+            selection.point.info,
+            selection.slices,
+            Action::Edit(Box::new(callback)),
+        ));
     }
 
     /// Replace a selected activation, for example with a saved clean-run tensor.
@@ -605,7 +836,27 @@ impl<'a, B: Backend> Hooks<'a, B> {
 
     /// Read a capture from the latest successful run. No implicit host transfer occurs.
     pub fn get<const D: usize>(&self, capture: &Capture<D>) -> Result<Tensor<B, D>> {
-        if capture.owner != self.owner {
+        let (point, saved) = self.saved(capture.owner, capture.entry)?;
+        let shape: [usize; D] = saved
+            .shape
+            .clone()
+            .try_into()
+            .map_err(|_| Error::configuration(&point.name, "capture rank mismatch"))?;
+        Ok(saved.tensor.clone().reshape(shape))
+    }
+
+    /// Read a run-time-rank capture from the latest successful run, still on device.
+    pub fn get_dynamic(&self, capture: &DynamicCapture) -> Result<DynamicActivation<B>> {
+        let (_, saved) = self.saved(capture.owner, capture.entry)?;
+        Ok(DynamicActivation {
+            values: saved.tensor.clone(),
+            shape: saved.shape.clone(),
+        })
+    }
+
+    /// Looks up a saved capture by owner and entry, rejecting foreign or unrun handles.
+    fn saved(&self, owner: u64, entry: usize) -> Result<(&PointInfo, &Saved<B>)> {
+        if owner != self.owner {
             return Err(Error::configuration(
                 "hooks.capture",
                 "capture belongs to another Hooks collection",
@@ -613,17 +864,12 @@ impl<'a, B: Backend> Hooks<'a, B> {
         }
         let entry = self
             .entries
-            .get(capture.entry)
+            .get(entry)
             .ok_or_else(|| Error::configuration("hooks.capture", "unknown capture"))?;
         match &entry.action {
             Action::Capture {
                 saved: Some(saved), ..
-            } => {
-                let shape: [usize; D] = saved.shape.clone().try_into().map_err(|_| {
-                    Error::configuration(&entry.point.name, "capture rank mismatch")
-                })?;
-                Ok(saved.tensor.clone().reshape(shape))
-            }
+            } => Ok((&entry.point, saved)),
             _ => Err(Error::configuration(
                 &entry.point.name,
                 "capture is unavailable; complete a successful forward pass first",
@@ -695,7 +941,7 @@ impl<'a, B: Backend> Hooks<'a, B> {
                     "activation rank must be positive",
                 ));
             }
-            validate_slices(&entry.point, &entry.slices)?;
+            entry.validate_selection()?;
         }
         self.validity = validity;
         self.running = true;
@@ -781,128 +1027,119 @@ impl<'a, B: Backend> Hooks<'a, B> {
             if entry.point != point.info {
                 continue;
             }
-            let shape = tensor.dims();
-            let mut ranges: [Range<usize>; D] = std::array::from_fn(|axis| 0..shape[axis]);
-            for (axis, range) in &entry.slices {
-                let index = entry
-                    .point
-                    .axes
-                    .iter()
-                    .position(|candidate| candidate == axis)
-                    .ok_or_else(|| {
-                        Error::configuration(
-                            &entry.point.name,
-                            format!("point has no {axis:?} axis"),
-                        )
-                    })?;
-                if range.start >= range.end || range.end > shape[index] {
-                    return Err(Error::configuration(
-                        &entry.point.name,
-                        format!(
-                            "{axis:?} selection {range:?} is outside extent {}",
-                            shape[index]
-                        ),
-                    ));
-                }
-                ranges[index] = range.clone();
-            }
-            let selected = if entry.slices.is_empty() {
-                tensor.clone()
-            } else {
-                tensor.clone().slice(ranges.clone())
-            };
-            let selected_shape = selected.dims();
-            let dtype = selected.dtype();
-            let device = selected.device();
-            match &mut entry.action {
-                Action::Capture { detach, saved } => {
-                    let selected = if *detach { selected.detach() } else { selected };
-                    *saved = Some(Saved {
-                        tensor: selected.flatten(0, D - 1),
-                        shape: selected_shape.to_vec(),
-                    });
-                }
-                Action::Edit(edit) => {
-                    let changed = edit(selected.flatten(0, D - 1), selected_shape.to_vec())
-                        .map_err(|error| {
-                            Error::configuration(
-                                &entry.point.name,
-                                format!("intervention failed: {error}"),
-                            )
-                        })?;
-                    if changed.shape != selected_shape
-                        || changed.tensor.dtype() != dtype
-                        || changed.tensor.device() != device
-                    {
-                        return Err(Error::configuration(
-                            &entry.point.name,
-                            format!(
-                                "replacement must preserve selected shape {selected_shape:?}, dtype {dtype:?}, and device; use an explicit module boundary for dimension changes"
-                            ),
-                        ));
-                    }
-                    let changed = changed.tensor.reshape(selected_shape);
-                    tensor = if entry.slices.is_empty() {
-                        changed
-                    } else {
-                        tensor.slice_assign(ranges, changed)
-                    };
-                    if let Some(validity) = validity {
-                        tensor = validity.apply(tensor)?;
-                    }
-                    tensor = constraint(tensor).map_err(|error| {
-                        Error::configuration(
-                            &entry.point.name,
-                            format!("activation constraint failed: {error}"),
-                        )
-                    })?;
-                    if tensor.dims() != shape
-                        || tensor.dtype() != dtype
-                        || tensor.device() != device
-                    {
-                        return Err(Error::configuration(
-                            &entry.point.name,
-                            "activation constraint must preserve full shape, dtype, and device",
-                        ));
-                    }
-                    if let Some(validity) = validity {
-                        tensor = validity.apply(tensor)?;
-                    }
-                }
-            }
+            tensor = apply_entry(entry, tensor, validity, &mut constraint)?;
             entry.visits += 1;
         }
         Ok(tensor)
     }
 }
 
-/// Checks that selected axes exist exactly once and have unique, nonempty ranges.
-fn validate_slices(point: &PointInfo, slices: &[(Axis, Range<usize>)]) -> Result<()> {
-    for (index, (axis, range)) in slices.iter().enumerate() {
-        if point
-            .axes
-            .iter()
-            .filter(|candidate| *candidate == axis)
-            .count()
-            != 1
-        {
-            return Err(Error::configuration(
-                &point.name,
-                format!(
-                    "selection needs exactly one {axis:?} axis; found {:?}",
-                    point.axes
-                ),
-            ));
+/// Applies one registered action to an emitted activation and returns the result.
+///
+/// Captures and observers read the selection and return the activation
+/// unchanged. Edits replace the selection, then re-apply validity and the
+/// point's constraint; every failure names the point as an intervention error.
+fn apply_entry<B: Backend, const D: usize>(
+    entry: &mut Entry<'_, B>,
+    tensor: Tensor<B, D>,
+    validity: Option<&PointValidity<B>>,
+    constraint: &mut impl FnMut(Tensor<B, D>) -> Result<Tensor<B, D>>,
+) -> Result<Tensor<B, D>> {
+    let shape = tensor.dims();
+    let ranges = selection_ranges(&shape, &entry.resolved).map_err(|index| {
+        let (axis, range) = &entry.slices[index];
+        let dimension = entry.resolved[index].dimension;
+        // Preflight resolves every axis to a declared dimension, so the
+        // missing-dimension arm only guards a point emitted at the wrong rank.
+        let reason = match shape.get(dimension) {
+            Some(extent) => format!(
+                "{axis:?} selection {range:?} is outside extent {extent} of the emitted {shape:?} activation"
+            ),
+            None => format!(
+                "{axis:?} selection resolves to dimension {dimension}, which the emitted {shape:?} activation lacks"
+            ),
+        };
+        Error::intervention(&entry.point.name, reason)
+    })?;
+    let ranges: [Range<usize>; D] = ranges.try_into().map_err(|_| {
+        Error::intervention(
+            &entry.point.name,
+            "selection rank differs from the activation",
+        )
+    })?;
+    let selected = if entry.slices.is_empty() {
+        tensor.clone()
+    } else {
+        tensor.clone().slice(ranges.clone())
+    };
+    let selected_shape = selected.dims();
+    match &mut entry.action {
+        Action::Capture { detach, saved } => {
+            let selected = if *detach { selected.detach() } else { selected };
+            *saved = Some(Saved {
+                tensor: selected.flatten(0, D - 1),
+                shape: selected_shape.to_vec(),
+            });
+            Ok(tensor)
         }
-        if slices[..index].iter().any(|(previous, _)| previous == axis) || range.start >= range.end
-        {
-            return Err(Error::configuration(
-                &point.name,
-                format!("duplicate or empty {axis:?} selection"),
-            ));
+        Action::Observe(observe) => {
+            observe(selected.detach().flatten(0, D - 1), selected_shape.to_vec()).map_err(
+                |error| Error::intervention_caused_by(&entry.point.name, "observer failed", error),
+            )?;
+            Ok(tensor)
+        }
+        Action::Edit(edit) => {
+            let dtype = selected.dtype();
+            let device = selected.device();
+            let changed =
+                edit(selected.flatten(0, D - 1), selected_shape.to_vec()).map_err(|error| {
+                    Error::intervention_caused_by(
+                        &entry.point.name,
+                        "edit callback returned an error",
+                        error,
+                    )
+                })?;
+            if changed.shape != selected_shape
+                || changed.tensor.dtype() != dtype
+                || changed.tensor.device() != device
+            {
+                return Err(Error::intervention(
+                    &entry.point.name,
+                    format!(
+                        "replacement must preserve selected shape {selected_shape:?}, dtype {dtype:?}, and device; found shape {:?}, dtype {:?}. Use an explicit module boundary for dimension changes",
+                        changed.shape,
+                        changed.tensor.dtype()
+                    ),
+                ));
+            }
+            let changed = changed.tensor.reshape(selected_shape);
+            let mut tensor = if entry.slices.is_empty() {
+                changed
+            } else {
+                tensor.slice_assign(ranges, changed)
+            };
+            if let Some(validity) = validity {
+                tensor = validity.apply(tensor)?;
+            }
+            tensor = constraint(tensor).map_err(|error| {
+                Error::intervention_caused_by(
+                    &entry.point.name,
+                    "activation constraint failed",
+                    error,
+                )
+            })?;
+            if tensor.dims() != shape || tensor.dtype() != dtype || tensor.device() != device {
+                return Err(Error::intervention(
+                    &entry.point.name,
+                    "activation constraint must preserve full shape, dtype, and device",
+                ));
+            }
+            match validity {
+                Some(validity) => validity.apply(tensor),
+                None => Ok(tensor),
+            }
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
