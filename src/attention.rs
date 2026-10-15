@@ -6,7 +6,11 @@
 //! heads. Caches and every K/V intervention point keep the native KV heads.
 //! Attention evaluation also keeps them: a group's queries are folded into
 //! extra query rows of one call instead of repeating the KV history per query
-//! head (see [`grouped_query_attention`]).
+//! head (see [`grouped_query_attention`]). One exception remains: square
+//! causal prefill under [`AttentionPrecisionMode::BackendDefault`] (without
+//! sinks) repeats K/V so the backend's fused `is_causal` kernel can skip
+//! masked tiles. Every other call folds, including decode, cached suffixes,
+//! explicit masks, sinks, and the eager graph.
 //!
 //! Rotary and relative-position transformations are deliberately separate from
 //! projection and attention dispatch. This lets one architecture rotate only a

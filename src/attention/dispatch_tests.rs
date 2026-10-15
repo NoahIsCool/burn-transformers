@@ -125,10 +125,11 @@ impl Problem {
         self
     }
 
-    /// Builds Burn tensors for the problem.
+    /// Builds Burn tensors for the problem with every float operand cast to `dtype`.
     #[allow(clippy::type_complexity)]
-    fn tensors(
+    fn tensors_in(
         &self,
+        dtype: DType,
     ) -> (
         Tensor<TestBackend, 4>,
         Tensor<TestBackend, 4>,
@@ -139,7 +140,7 @@ impl Problem {
     ) {
         let device = Default::default();
         let float = |data: Vec<f32>, shape: [usize; 4]| {
-            Tensor::<TestBackend, 4>::from_data(TensorData::new(data, shape), &device)
+            Tensor::<TestBackend, 4>::from_data(TensorData::new(data, shape), &device).cast(dtype)
         };
         (
             float(
@@ -167,7 +168,11 @@ impl Problem {
                 .clone()
                 .map(|bias| float(bias, [1, self.query_heads, self.queries, self.keys])),
             self.sinks.clone().map(|sinks| {
-                Tensor::from_data(TensorData::new(sinks, [self.query_heads]), &device)
+                Tensor::<TestBackend, 1>::from_data(
+                    TensorData::new(sinks, [self.query_heads]),
+                    &device,
+                )
+                .cast(dtype)
             }),
         )
     }
@@ -183,8 +188,13 @@ impl Problem {
 
     /// Evaluates the problem through the crate's grouped dispatch.
     fn evaluate(&self, precision: AttentionPrecisionMode) -> Result<Vec<f32>> {
-        let (query, key, value, mask, bias, sinks) = self.tensors();
-        Ok(evaluate(
+        self.evaluate_in(precision, DType::F32)
+    }
+
+    /// Evaluates the problem in `dtype` and returns the output widened to F32.
+    fn evaluate_in(&self, precision: AttentionPrecisionMode, dtype: DType) -> Result<Vec<f32>> {
+        let (query, key, value, mask, bias, sinks) = self.tensors_in(dtype);
+        let output = evaluate(
             Operands {
                 query,
                 key,
@@ -195,10 +205,13 @@ impl Problem {
             },
             self.options(),
             precision,
-        )?
-        .into_data()
-        .to_vec::<f32>()
-        .unwrap())
+        )?;
+        assert_eq!(
+            output.dtype(),
+            dtype,
+            "attention must keep the operand dtype"
+        );
+        Ok(output.cast(DType::F32).into_data().to_vec::<f32>().unwrap())
     }
 
     /// Straightforward scalar reference in F64, with zero output for rows without support.
@@ -276,7 +289,12 @@ impl Problem {
 
     /// Evaluates the previous implementation: repeated K/V and an explicit causal mask.
     fn repeated_reference(&self, precision: AttentionPrecisionMode) -> Vec<f32> {
-        let (query, key, value, mask, bias, _) = self.tensors();
+        self.repeated_reference_in(precision, DType::F32)
+    }
+
+    /// Evaluates the previous repeated-K/V implementation in `dtype`, widened to F32.
+    fn repeated_reference_in(&self, precision: AttentionPrecisionMode, dtype: DType) -> Vec<f32> {
+        let (query, key, value, mask, bias, _) = self.tensors_in(dtype);
         let key = repeat_key_value(key, self.query_heads).unwrap();
         let value = repeat_key_value(value, self.query_heads).unwrap();
         let causal = (self.causal && self.queries > 1).then(|| {
@@ -307,7 +325,7 @@ impl Problem {
                 )
             }
         };
-        output.into_data().to_vec::<f32>().unwrap()
+        output.cast(DType::F32).into_data().to_vec::<f32>().unwrap()
     }
 }
 
@@ -375,6 +393,100 @@ fn folded_groups_match_previous_repeated_key_value_path() {
                 );
             }
         }
+    }
+}
+
+/// Asserts elementwise closeness within an absolute reduced-precision tolerance.
+fn assert_within(actual: &[f32], expected: &[f32], tolerance: f32, context: &str) {
+    assert_eq!(actual.len(), expected.len(), "{context}: length");
+    for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "{context}: element {index}: {actual} != {expected} (tolerance {tolerance})"
+        );
+    }
+}
+
+/// Reduced-precision tolerances calibrated on Flex: `(dtype, between graphs, against F64)`.
+///
+/// Fixture outputs are convex combinations of values in `[-1.1, 1.1]` with
+/// scaled scores up to about 5 at head width 128. The eager graph rounds those
+/// scores to the operand dtype before its F32 softmax (relative `2^-11` in F16,
+/// `2^-8` in BF16), which alone moves outputs by a few `1e-3`; Flex's F16
+/// matmul also accumulates in F16. Observed maxima: F16 `2.4e-3` between
+/// graphs and `8.6e-3` against F64; BF16 `3.9e-3` and `9.8e-3`. The bounds
+/// below leave at least 1.4x headroom and match common F16/BF16 attention
+/// parity tolerances.
+const REDUCED_PRECISION: [(DType, f32, f32); 2] =
+    [(DType::F16, 4e-3, 1.25e-2), (DType::BF16, 1.6e-2, 1.6e-2)];
+
+/// Folding stays equivalent to repeated K/V in F16 and BF16 at production head widths.
+///
+/// Both graphs see identical rounded operands; folding changes only matmul
+/// shapes. On Flex they are bit-identical except eager F16 decode, where a
+/// folded `g`-row GEMM and a per-head GEMV accumulate scores differently.
+/// Both stay within the same distance of the F64 oracle.
+#[test]
+fn folded_groups_match_repeated_key_value_in_reduced_precision() {
+    for head_dim in [64, 128] {
+        for (queries, keys, causal) in [(1, 9, true), (3, 9, true), (4, 4, true)] {
+            let mut problem = Problem::new(2, 8, 2, queries, keys).with_padding();
+            problem.head_dim = head_dim;
+            problem.value_dim = head_dim;
+            problem.causal = causal;
+            let oracle = problem.oracle();
+            for (dtype, between, against_oracle) in REDUCED_PRECISION {
+                for precision in [
+                    AttentionPrecisionMode::BackendDefault,
+                    AttentionPrecisionMode::EagerFp32Softmax,
+                ] {
+                    let context =
+                        format!("{precision:?} {dtype:?} d={head_dim} q={queries} k={keys}");
+                    let folded = problem.evaluate_in(precision, dtype).unwrap();
+                    let repeated = problem.repeated_reference_in(precision, dtype);
+                    assert_within(&folded, &repeated, between, &context);
+                    assert_within(&folded, &oracle, against_oracle, &context);
+                    assert_within(&repeated, &oracle, against_oracle, &context);
+                }
+            }
+        }
+    }
+}
+
+/// Native sinks in F16 and BF16 track eager sinks and the F64 oracle at head width 128.
+///
+/// With `scale = 1 / sqrt(128)` (not a power of two) the native sink key holds
+/// `round(s_h / scale)`, so its logit carries one extra rounding in the operand
+/// dtype. It stays within the eager graph's own reduced-precision error (on
+/// Flex the native graph is the more accurate one: `7.2e-4` versus `2.7e-3`
+/// against F64 in F16).
+#[test]
+fn native_sinks_track_eager_and_oracle_in_reduced_precision() {
+    let mut problem = Problem::new(2, 8, 2, 3, 9).with_padding();
+    problem.head_dim = 128;
+    problem.causal = true;
+    problem.sinks = Some(values(8, 7).iter().map(|value| value * 4.0).collect());
+    let oracle = problem.oracle();
+    for (dtype, between, against_oracle) in REDUCED_PRECISION {
+        let native = problem
+            .evaluate_in(AttentionPrecisionMode::BackendDefault, dtype)
+            .unwrap();
+        let eager = problem
+            .evaluate_in(AttentionPrecisionMode::EagerFp32Softmax, dtype)
+            .unwrap();
+        assert_within(
+            &native,
+            &oracle,
+            against_oracle,
+            &format!("{dtype:?} native"),
+        );
+        assert_within(&eager, &oracle, against_oracle, &format!("{dtype:?} eager"));
+        assert_within(
+            &native,
+            &eager,
+            between,
+            &format!("{dtype:?} native vs eager"),
+        );
     }
 }
 

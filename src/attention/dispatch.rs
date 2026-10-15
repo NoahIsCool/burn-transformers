@@ -22,9 +22,10 @@
 //! token while the folded call reads the cache once.
 //!
 //! Folding needs an explicit row mask whenever causality applies, because a
-//! folded row index is not a token position. Square causal planes therefore
-//! keep the backend's native `is_causal` flag (fused kernels then skip fully
-//! masked tiles) and repeat K/V; every other call folds.
+//! folded row index is not a token position. Square causal planes on the
+//! backend-native graph without sinks (every prefill) therefore keep the
+//! backend's `is_causal` flag (fused kernels then skip fully masked tiles) and
+//! repeat K/V; every other call folds, including decode and cached suffixes.
 //!
 //! # Causal alignment
 //!
@@ -55,10 +56,24 @@
 //! native path stays a single backend attention call by appending one zero-value
 //! *sink key* per KV head and `g` selector channels: folded row `j * Q + t`
 //! carries a one-hot `e_j`, real keys carry zeros, and the sink key carries
-//! `s_(kv*g+j) / scale` in channel `j`, so its score is exactly `s_h`. This
-//! copies K/V once per call (`O(key * (d + g))`) instead of materializing the
-//! score plane; it requires an explicit scale and rejects softcapping, which
-//! would otherwise also cap the sink logit.
+//! `s_(kv*g+j) / scale` in channel `j`, so its score is `s_h` up to rounding.
+//! The stored channel is `round(s_h / scale)` in the operand dtype, so the
+//! effective sink logit equals `s_h` exactly when `scale` is a power of two
+//! (head width 64 or 256, as in gpt-oss) and otherwise differs by one rounding
+//! of `s_h / scale` (relative `2^-24` in F32, `2^-11` in F16, `2^-8` in BF16;
+//! at head width 128 about `3e-3` in F16 for `|s_h| = 6`), comparable to the
+//! eager graph's own score rounding. This copies K/V once per call
+//! (`O(key * (d + g))`) instead of materializing the score plane; it requires
+//! an explicit scale and rejects softcapping, which would otherwise also cap
+//! the sink logit.
+//!
+//! # Reduced precision
+//!
+//! Folding changes only matmul shapes, never operand rounding. In F16 and
+//! BF16 on Flex the folded and repeated graphs are bit-identical except eager
+//! F16 decode, where a folded `g`-row GEMM and per-head GEMVs accumulate
+//! scores in a different order; both stay within the same distance of an F64
+//! reference (see the reduced-precision tests for calibrated tolerances).
 
 use burn::tensor::{
     BasicOps, Bool, DType, Int, Tensor, activation::softmax, backend::Backend, module::attention,
@@ -510,7 +525,8 @@ fn native<B: Backend>(
 /// Evaluates native attention with one appended zero-value sink key per KV head.
 ///
 /// See the module documentation for the selector-channel construction that
-/// makes the sink score exactly `s_h` for every folded query row.
+/// gives every folded query row the sink score `s_h` (exactly for
+/// power-of-two scales, otherwise up to one rounding of `s_h / scale`).
 fn native_with_sinks<B: Backend>(
     operands: Operands<B>,
     options: AttentionModuleOptions,
