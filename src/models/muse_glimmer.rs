@@ -29,6 +29,8 @@
 mod checkpoint;
 mod load;
 pub mod model;
+/// Dependency-free hybrid layer schedule and cache-slot planning (Verus-verified).
+pub(crate) mod schedule;
 
 pub use checkpoint::{
     MuseGlimmerCheckpointContract, MuseGlimmerCheckpointOptions, MuseGlimmerCheckpointSource,
@@ -165,7 +167,7 @@ impl MuseGlimmerTextConfig {
         }
         (0..self.num_hidden_layers)
             .map(|index| {
-                if (self.num_hidden_layers - 1 - index).is_multiple_of(4) {
+                if schedule::is_global_layer(self.num_hidden_layers, index) {
                     MuseGlimmerLayerType::FullAttention
                 } else {
                     MuseGlimmerLayerType::SlidingAttention

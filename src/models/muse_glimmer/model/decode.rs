@@ -57,7 +57,9 @@ use crate::{
 use super::{
     INPUT_NAMES, MuseAttentionChunk, MuseAttentionProjection, MuseGlimmerForCausalLm, RotaryTables,
 };
-use crate::models::muse_glimmer::{MuseGlimmerLayerType, MuseGlimmerTextConfig};
+use crate::models::muse_glimmer::{
+    MuseGlimmerLayerType, MuseGlimmerTextConfig, schedule::group_slots,
+};
 
 /// Owner named when an input tensor is on another device than the cache.
 const DECODE_STATE: &str = "Muse decode state";
@@ -696,39 +698,31 @@ fn cache_layout<B: Backend>(
     } else {
         None
     };
-    let mut next_sliding = 0;
-    let mut next_full = 0;
-    let schedule = schedule_types
-        .into_iter()
-        .map(|kind| -> Result<MuseGlimmerLayerCache> {
-            match kind {
-                MuseGlimmerLayerType::SlidingAttention => {
-                    let group = sliding_group.ok_or_else(|| {
-                        Error::Cache(
-                            "Muse schedule contains a sliding layer without a sliding cache group"
-                                .into(),
-                        )
-                    })?;
-                    let slot = MuseGlimmerLayerCache::Sliding {
-                        group,
-                        layer: next_sliding,
-                    };
-                    next_sliding += 1;
-                    Ok(slot)
-                }
-                MuseGlimmerLayerType::FullAttention => {
-                    let group = full_group.ok_or_else(|| {
-                        Error::Cache(
-                            "Muse schedule contains a full layer without a full cache group".into(),
-                        )
-                    })?;
-                    let slot = MuseGlimmerLayerCache::Full {
-                        group,
-                        layer: next_full,
-                    };
-                    next_full += 1;
-                    Ok(slot)
-                }
+    let global = schedule_types
+        .iter()
+        .map(|&kind| kind == MuseGlimmerLayerType::FullAttention)
+        .collect::<Vec<_>>();
+    // Verified dense slots: each group's layers occupy slots 0, 1, … in order.
+    let slots = group_slots(&global);
+    let schedule = global
+        .iter()
+        .zip(slots)
+        .map(|(&is_global, layer)| -> Result<MuseGlimmerLayerCache> {
+            if is_global {
+                let group = full_group.ok_or_else(|| {
+                    Error::Cache(
+                        "Muse schedule contains a full layer without a full cache group".into(),
+                    )
+                })?;
+                Ok(MuseGlimmerLayerCache::Full { group, layer })
+            } else {
+                let group = sliding_group.ok_or_else(|| {
+                    Error::Cache(
+                        "Muse schedule contains a sliding layer without a sliding cache group"
+                            .into(),
+                    )
+                })?;
+                Ok(MuseGlimmerLayerCache::Sliding { group, layer })
             }
         })
         .collect::<Result<Vec<_>>>()?;

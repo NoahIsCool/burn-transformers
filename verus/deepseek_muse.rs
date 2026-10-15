@@ -14,7 +14,15 @@
 //!   active row's causal key prefix `L_b + i + 1`, the bound that lets
 //!   bounded attention skip keys a query chunk cannot see;
 //! * `query_slots` places entry `k < n_b` of row `b` at cache slot `L_b + k`
-//!   and keeps padding placeholders within the key extent.
+//!   and keeps padding placeholders within the key extent;
+//!
+//! and the specifications attached to `src/models/muse_glimmer/schedule.rs`:
+//!
+//! * `is_global_layer` is the backward-counted `(n - 1 - i) mod 4 = 0` rule
+//!   without underflow, and the last layer is always global;
+//! * `group_slots` gives every layer the number of earlier layers of its kind,
+//!   so each cache group's slots are dense and strictly increasing in layer
+//!   order (an injective schedule).
 //!
 //! See `verus/README.md` for the method, toolchain, and command. Burn tensor
 //! programs driven by these plans (gathers, scatters, cache writes, and
@@ -28,3 +36,6 @@
 
 #[path = "../src/models/deepseek_v2/model/batch.rs"]
 pub mod batch;
+
+#[path = "../src/models/muse_glimmer/schedule.rs"]
+pub mod schedule;
